@@ -19,6 +19,11 @@ endif()
 
 add_library(pgaccel_kernels SHARED
     src/device_manager.cpp
+    src/platform_caps.cpp
+    src/bbox_ops.cpp
+    src/mem_pool.cpp
+    src/sort.cpp
+    src/reduce.cpp
 )
 
 target_include_directories(pgaccel_kernels PUBLIC
@@ -37,6 +42,9 @@ endif()
 # Standalone test binary
 add_executable(test_device test/test_device.cpp)
 target_link_libraries(test_device PRIVATE pgaccel_kernels)
+
+add_executable(test_bbox test/test_bbox.cpp)
+target_link_libraries(test_bbox PRIVATE pgaccel_kernels)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h DESTINATION include)
