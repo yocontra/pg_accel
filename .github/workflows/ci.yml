@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   lint:
     name: Lint
@@ -21,16 +25,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt -- --check
       - run: cargo clippy -- -D warnings
-      - run: cargo install cargo-deny --locked
-      - run: cargo deny check
+
+  deny:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
 
   test-unit:
-    name: Test (PG ${{ matrix.pg }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, PG ${{ matrix.pg }})
     needs: [lint]
     strategy:
       matrix:
-        pg: [17]  # Start with 17, expand in Phase 9
+        os: [ubuntu-latest, macos-14]
+        pg: [17]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -54,6 +64,17 @@ jobs:
       - run: docker/scripts/run_integration_tests.sh
       - run: docker compose -f docker/docker-compose.test.yml down -v
         if: always()
+
+  gpu-kernels:
+    name: GPU Kernels (CPU emulation)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cd pgaccel-kernels
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+          ctest --test-dir build --output-on-failure
 
   conventional-commits:
     name: Conventional Commits
