@@ -11,6 +11,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::engine::function_matcher::{self, FunctionPattern};
+
 /// Global singleton registry, populated on first use via [`lazy_init`].
 static GLOBAL_REGISTRY: OnceLock<AdapterRegistry> = OnceLock::new();
 
@@ -104,6 +106,9 @@ impl AdapterRegistry {
                 );
             }
         }
+
+        // Resolve function names → OIDs via pg_proc queries.
+        self.resolve_oids();
     }
 
     /// Register an adapter and its function entries.
@@ -117,6 +122,52 @@ impl AdapterRegistry {
     /// Register a single function entry with a known OID.
     pub fn register_function(&mut self, oid: pgrx::pg_sys::Oid, entry: FunctionAccelEntry) {
         self.by_oid.insert(oid, entry);
+    }
+
+    /// Resolve OIDs for all registered adapters by querying `pg_proc`.
+    ///
+    /// For each function declared by each adapter, builds a
+    /// [`FunctionPattern`] and calls [`function_matcher::discover_functions`]
+    /// via SPI. Discovered OIDs are inserted into the `by_oid` map.
+    ///
+    /// Must be called within a transactional context (SPI available).
+    pub fn resolve_oids(&mut self) {
+        for adapter in &self.adapters {
+            for func in &adapter.functions {
+                let pattern = FunctionPattern {
+                    schema: Some(func.schema.to_string()),
+                    name: func.name.to_string(),
+                    arg_types: None,
+                    return_type: None,
+                };
+
+                let matches = function_matcher::discover_functions(&pattern);
+
+                for matched in matches {
+                    pgrx::debug1!(
+                        "pg_accel: resolved {}.{} → OID {} (strategy {:?})",
+                        matched.schema,
+                        matched.name,
+                        matched.oid.to_u32(),
+                        func.strategy,
+                    );
+                    self.by_oid.insert(
+                        matched.oid,
+                        FunctionAccelEntry {
+                            schema: func.schema,
+                            name: func.name,
+                            strategy: func.strategy,
+                        },
+                    );
+                }
+            }
+        }
+
+        pgrx::log!(
+            "pg_accel: resolved {} function OIDs across {} adapters",
+            self.by_oid.len(),
+            self.adapters.len(),
+        );
     }
 
     /// O(1) lookup by function OID.
