@@ -120,7 +120,13 @@ pub fn request_threads(n: i32) -> i32 {
     }
 
     let mut exclusive = BUDGET.exclusive();
-    let remaining = max.saturating_sub(exclusive.total_allocated);
+    let mut remaining = max.saturating_sub(exclusive.total_allocated);
+
+    // If budget is exhausted, try to reclaim slots from dead backends.
+    if remaining <= 0 {
+        reclaim_dead_backends(&mut exclusive);
+        remaining = max.saturating_sub(exclusive.total_allocated);
+    }
 
     if remaining <= 0 {
         return 0;
@@ -183,10 +189,53 @@ pub fn cleanup_backend() {
 /// Return the current backend's PID.
 #[inline]
 fn current_pid() -> i32 {
-    // SAFETY: `MyProcPid` is a global i32 set by PostgreSQL at backend startup.
-    // Reading it is safe from the main backend thread (which is the only place
-    // we ever call this module).
-    unsafe { pgrx::pg_sys::MyProcPid }
+    #[cfg(not(test))]
+    {
+        // SAFETY: `MyProcPid` is a global i32 set by PostgreSQL at backend startup.
+        // Reading it is safe from the main backend thread (which is the only place
+        // we ever call this module).
+        unsafe { pgrx::pg_sys::MyProcPid }
+    }
+    #[cfg(test)]
+    {
+        std::process::id() as i32
+    }
+}
+
+/// Scan for backend slots whose owning process has exited (e.g. after
+/// `kill -9`) and reclaim their thread budget.
+///
+/// Uses `kill(pid, 0)` to probe whether each tracked PID is still alive.
+/// Dead slots (ESRCH) have their allocation freed. This makes the budget
+/// self-healing after abnormal backend termination.
+///
+/// Caller must hold the exclusive lock.
+fn reclaim_dead_backends(data: &mut ThreadBudgetData) {
+    let my_pid = current_pid();
+
+    for slot in &mut data.backends {
+        if slot.pid == 0 || slot.pid == my_pid {
+            continue;
+        }
+
+        // SAFETY: kill(pid, 0) is a POSIX signal probe — it does not send
+        // a signal, only checks whether the process exists. Returns -1 with
+        // errno == ESRCH when the process does not exist.
+        let alive = unsafe { libc::kill(slot.pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
+
+        if !alive {
+            #[cfg(not(test))]
+            pgrx::warning!(
+                "pg_accel: reclaiming {} threads from dead backend PID {}",
+                slot.allocated,
+                slot.pid,
+            );
+            data.total_allocated -= slot.allocated;
+            slot.allocated = 0;
+            slot.pid = 0;
+        }
+    }
 }
 
 /// Record an allocation of `granted` threads for the current backend.
@@ -368,5 +417,51 @@ mod tests {
         let s = BackendSlot::default();
         assert_eq!(s.pid, 0);
         assert_eq!(s.allocated, 0);
+    }
+
+    #[test]
+    fn reclaim_dead_backends_frees_dead_pids() {
+        let mut b = empty_budget();
+        // Use a PID that definitely does not exist (max i32).
+        let dead_pid: i32 = i32::MAX;
+        b.backends[0] = BackendSlot {
+            pid: dead_pid,
+            allocated: 4,
+        };
+        b.total_allocated = 4;
+
+        reclaim_dead_backends(&mut b);
+
+        // Dead PID should have been reclaimed.
+        assert_eq!(b.backends[0].pid, 0);
+        assert_eq!(b.backends[0].allocated, 0);
+        assert_eq!(b.total_allocated, 0);
+    }
+
+    #[test]
+    fn reclaim_dead_backends_skips_own_pid() {
+        let mut b = empty_budget();
+        // Use our own PID — should NOT be reclaimed.
+        let my_pid = std::process::id() as i32;
+        b.backends[0] = BackendSlot {
+            pid: my_pid,
+            allocated: 2,
+        };
+        b.total_allocated = 2;
+
+        reclaim_dead_backends(&mut b);
+
+        // Our own PID slot should be untouched.
+        assert_eq!(b.backends[0].pid, my_pid);
+        assert_eq!(b.backends[0].allocated, 2);
+        assert_eq!(b.total_allocated, 2);
+    }
+
+    #[test]
+    fn reclaim_dead_backends_skips_empty_slots() {
+        let mut b = empty_budget();
+        // All slots empty — should not panic or change anything.
+        reclaim_dead_backends(&mut b);
+        assert_eq!(b.total_allocated, 0);
     }
 }

@@ -21,6 +21,7 @@
 //! geometry deserialization entirely.
 
 use crate::adapters::extractors::geometry::extract_geometry;
+use crate::engine::gucs;
 use crate::engine::registry::AccelStrategy;
 use crate::gpu::three_layer;
 
@@ -71,8 +72,13 @@ pub unsafe fn dispatch(
             DispatchResult::Accelerated(results)
         }
         AccelStrategy::GpuSpatial => {
-            // SAFETY: Caller guarantees main backend thread. Stub delegates
-            // to batched eval until GPU kernels land in Phase 4.
+            // If GPU dispatch is disabled via GUC, fall back to batched eval.
+            if !gucs::gpu_enabled() {
+                // SAFETY: Caller guarantees main backend thread.
+                let results = unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+                return DispatchResult::Accelerated(results);
+            }
+            // SAFETY: Caller guarantees main backend thread.
             let results = unsafe { dispatch_gpu_spatial(batch, fn_info, is_strict) };
             DispatchResult::Accelerated(results)
         }
@@ -227,7 +233,21 @@ pub unsafe fn dispatch_gpu_spatial(
     //
     // This exercises the full GPU pipeline path without producing
     // incorrect results — scalar eval is the authoritative path.
+    let timeout_ms = gucs::kernel_timeout_ms();
+    let start = std::time::Instant::now();
     let _spatial_result = three_layer::spatial_intersects(&geoms, &geoms);
+    let elapsed_ms = start.elapsed().as_millis() as i32;
+
+    // If the pipeline exceeded the kernel timeout, log a warning.
+    // In production with real GPU kernels, this timeout would cancel the
+    // kernel and trigger the CPU fallback path.
+    if timeout_ms > 0 && elapsed_ms > timeout_ms {
+        pgrx::warning!(
+            "pg_accel: spatial pipeline took {}ms (timeout {}ms), falling back to CPU",
+            elapsed_ms,
+            timeout_ms,
+        );
+    }
 
     // SAFETY: Caller guarantees main backend thread.
     unsafe { dispatch_batched_eval(batch, fn_info, is_strict) }
