@@ -57,6 +57,32 @@ pub struct PgaccelPlatformCaps {
 }
 
 // ---------------------------------------------------------------------------
+// Geometry types (mirror bridge.rs for API parity)
+// ---------------------------------------------------------------------------
+
+/// Geometry type tag (fallback mirror of bridge::PgaccelGeomType).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgaccelGeomType {
+    Point = 0,
+    LineString = 1,
+    Polygon = 2,
+    Unknown = 99,
+}
+
+/// Geometry descriptor (fallback mirror of bridge::PgaccelGeometry).
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct PgaccelGeometry {
+    pub geom_type: PgaccelGeomType,
+    pub bbox: *const f32,
+    pub coords: *const f32,
+    pub coord_count: usize,
+    pub ring_offsets: *const u32,
+    pub ring_count: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Stub implementations — no C dependency, no unsafe.
 // ---------------------------------------------------------------------------
 
@@ -99,4 +125,77 @@ pub const fn pgaccel_get_caps() -> PgaccelPlatformCaps {
         compute_units: 0,
         backend_name: [0; 64],
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spatial kernel stubs
+// ---------------------------------------------------------------------------
+
+/// Stub: returns `ErrorNoDevice`.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn pgaccel_spatial_intersects(
+    _geoms_a: *const PgaccelGeometry,
+    _count_a: usize,
+    _geoms_b: *const PgaccelGeometry,
+    _count_b: usize,
+    _definite_true_pairs: *mut u32,
+    _definite_true_count: *mut usize,
+    _definite_false_pairs: *mut u32,
+    _definite_false_count: *mut usize,
+    _uncertain_pairs: *mut u32,
+    _uncertain_count: *mut usize,
+) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
+}
+
+/// Stub: returns `ErrorNoDevice`.
+#[must_use]
+pub fn pgaccel_bbox_intersects_bulk_f32(
+    _boxes_a: *const f32,
+    _count_a: usize,
+    _boxes_b: *const f32,
+    _count_b: usize,
+    _result: *mut u8,
+    _hit_count: *mut usize,
+) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
+}
+
+/// Stub: returns `ErrorNoDevice`.
+#[must_use]
+pub fn pgaccel_point_in_ring_bulk(
+    _points_xy: *const f32,
+    _point_count: usize,
+    _ring_xy: *const f32,
+    _vertex_count: usize,
+    _use_fp64: bool,
+    _results: *mut i8,
+) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
+}
+
+/// Stub: returns `ErrorNoDevice`.
+#[must_use]
+pub fn pgaccel_sphere_distance_bulk(
+    _points_a: *const f32,
+    _points_b: *const f32,
+    _count: usize,
+    _use_fp64: bool,
+    _distances: *mut f32,
+    _uncertain: *mut u8,
+) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
+}
+
+/// Stub: returns `ErrorNoDevice`.
+#[must_use]
+pub fn pgaccel_segment_intersects_bulk(
+    _segs_a: *const f32,
+    _segs_b: *const f32,
+    _count: usize,
+    _use_fp64: bool,
+    _results: *mut i8,
+) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
 }

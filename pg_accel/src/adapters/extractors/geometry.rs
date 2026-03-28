@@ -17,6 +17,8 @@
 
 use pgrx::pg_sys::Datum;
 
+use crate::gpu::three_layer::{ExtractedGeometry, GeomType};
+
 /// Minimum byte length for srid_flags to be readable (after varlena header).
 const MIN_HEADER_LEN: usize = 8;
 
@@ -31,6 +33,12 @@ const BOX2DF_SIZE: usize = 16;
 
 /// WKB type value for POINT geometry.
 const WKB_POINT_TYPE: u32 = 1;
+
+/// WKB type value for LINESTRING geometry.
+const WKB_LINESTRING_TYPE: u32 = 2;
+
+/// WKB type value for POLYGON geometry.
+const WKB_POLYGON_TYPE: u32 = 3;
 
 /// Check whether the `HasBBox` flag is set in a raw `GSERIALIZED` byte slice.
 ///
@@ -170,6 +178,233 @@ pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
     ]);
 
     Some((x, y))
+}
+
+/// Extract a full [`ExtractedGeometry`] from a `GSERIALIZED` datum.
+///
+/// Handles POINT, LINESTRING, and POLYGON types. All other WKB types
+/// return `GeomType::Unknown` with empty coordinates, signalling that
+/// the three-layer pipeline should route them to CPU recheck.
+///
+/// Coordinates are converted from f64 (PostGIS native) to f32 (GPU kernel
+/// format). The bbox is extracted from the embedded BOX2DF if present,
+/// otherwise computed from the coordinate data.
+///
+/// # Safety
+///
+/// The caller must ensure `datum` points to a valid, detoasted `GSERIALIZED`
+/// varlena on the main backend thread.
+#[must_use]
+pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
+    let bytes = datum_to_gserialized_bytes(datum)?;
+
+    if bytes.len() < MIN_HEADER_LEN {
+        return None;
+    }
+
+    // Extract bbox from embedded BOX2DF, or compute later.
+    let embedded_bbox = if has_bbox_flag(bytes) {
+        let bbox_start = MIN_HEADER_LEN;
+        let bbox_end = bbox_start + BOX2DF_SIZE;
+        if bytes.len() >= bbox_end {
+            Some([
+                f32::from_le_bytes([
+                    bytes[bbox_start],
+                    bytes[bbox_start + 1],
+                    bytes[bbox_start + 2],
+                    bytes[bbox_start + 3],
+                ]),
+                f32::from_le_bytes([
+                    bytes[bbox_start + 4],
+                    bytes[bbox_start + 5],
+                    bytes[bbox_start + 6],
+                    bytes[bbox_start + 7],
+                ]),
+                f32::from_le_bytes([
+                    bytes[bbox_start + 8],
+                    bytes[bbox_start + 9],
+                    bytes[bbox_start + 10],
+                    bytes[bbox_start + 11],
+                ]),
+                f32::from_le_bytes([
+                    bytes[bbox_start + 12],
+                    bytes[bbox_start + 13],
+                    bytes[bbox_start + 14],
+                    bytes[bbox_start + 15],
+                ]),
+            ])
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Geometry data starts after header + optional bbox.
+    let geom_start = if has_bbox_flag(bytes) {
+        MIN_HEADER_LEN + BOX2DF_SIZE
+    } else {
+        MIN_HEADER_LEN
+    };
+
+    if bytes.len() < geom_start + 4 {
+        return None;
+    }
+
+    let wkb_type = u32::from_le_bytes([
+        bytes[geom_start],
+        bytes[geom_start + 1],
+        bytes[geom_start + 2],
+        bytes[geom_start + 3],
+    ]);
+
+    match wkb_type {
+        WKB_POINT_TYPE => extract_point_geom(bytes, geom_start, embedded_bbox),
+        WKB_LINESTRING_TYPE => extract_linestring_geom(bytes, geom_start, embedded_bbox),
+        WKB_POLYGON_TYPE => extract_polygon_geom(bytes, geom_start, embedded_bbox),
+        _ => Some(ExtractedGeometry {
+            bbox: embedded_bbox.unwrap_or([0.0, 0.0, 0.0, 0.0]),
+            coords: Vec::new(),
+            coord_count: 0,
+            geom_type: GeomType::Unknown,
+        }),
+    }
+}
+
+/// Extract a POINT geometry: type(4) + x(f64) + y(f64).
+fn extract_point_geom(
+    bytes: &[u8],
+    geom_start: usize,
+    embedded_bbox: Option<[f32; 4]>,
+) -> Option<ExtractedGeometry> {
+    let needed = geom_start + 4 + 16;
+    if bytes.len() < needed {
+        return None;
+    }
+
+    let x_off = geom_start + 4;
+    let y_off = x_off + 8;
+    let x = f64::from_le_bytes(bytes[x_off..x_off + 8].try_into().ok()?);
+    let y = f64::from_le_bytes(bytes[y_off..y_off + 8].try_into().ok()?);
+
+    #[allow(clippy::cast_possible_truncation)]
+    let (xf, yf) = (x as f32, y as f32);
+    let bbox = embedded_bbox.unwrap_or([xf, yf, xf, yf]);
+
+    Some(ExtractedGeometry {
+        bbox,
+        coords: vec![xf, yf],
+        coord_count: 1,
+        geom_type: GeomType::Point,
+    })
+}
+
+/// Extract a LINESTRING: type(4) + npoints(4) + npoints*(x f64, y f64).
+fn extract_linestring_geom(
+    bytes: &[u8],
+    geom_start: usize,
+    embedded_bbox: Option<[f32; 4]>,
+) -> Option<ExtractedGeometry> {
+    let npoints_off = geom_start + 4;
+    if bytes.len() < npoints_off + 4 {
+        return None;
+    }
+    let npoints = u32::from_le_bytes(bytes[npoints_off..npoints_off + 4].try_into().ok()?) as usize;
+
+    let coords_off = npoints_off + 4;
+    let needed = coords_off + npoints * 16;
+    if bytes.len() < needed {
+        return None;
+    }
+
+    let mut coords = Vec::with_capacity(npoints * 2);
+    let mut xmin = f32::INFINITY;
+    let mut ymin = f32::INFINITY;
+    let mut xmax = f32::NEG_INFINITY;
+    let mut ymax = f32::NEG_INFINITY;
+
+    for i in 0..npoints {
+        let off = coords_off + i * 16;
+        let x = f64::from_le_bytes(bytes[off..off + 8].try_into().ok()?);
+        let y = f64::from_le_bytes(bytes[off + 8..off + 16].try_into().ok()?);
+        #[allow(clippy::cast_possible_truncation)]
+        let (xf, yf) = (x as f32, y as f32);
+        coords.push(xf);
+        coords.push(yf);
+        xmin = xmin.min(xf);
+        ymin = ymin.min(yf);
+        xmax = xmax.max(xf);
+        ymax = ymax.max(yf);
+    }
+
+    let bbox = embedded_bbox.unwrap_or([xmin, ymin, xmax, ymax]);
+
+    Some(ExtractedGeometry {
+        bbox,
+        coords,
+        coord_count: npoints,
+        geom_type: GeomType::LineString,
+    })
+}
+
+/// Extract a POLYGON: type(4) + nrings(4) + for each ring: npoints(4) + coords.
+fn extract_polygon_geom(
+    bytes: &[u8],
+    geom_start: usize,
+    embedded_bbox: Option<[f32; 4]>,
+) -> Option<ExtractedGeometry> {
+    let nrings_off = geom_start + 4;
+    if bytes.len() < nrings_off + 4 {
+        return None;
+    }
+    let nrings = u32::from_le_bytes(bytes[nrings_off..nrings_off + 4].try_into().ok()?) as usize;
+
+    let mut offset = nrings_off + 4;
+    let mut coords = Vec::new();
+    let mut total_points: usize = 0;
+    let mut xmin = f32::INFINITY;
+    let mut ymin = f32::INFINITY;
+    let mut xmax = f32::NEG_INFINITY;
+    let mut ymax = f32::NEG_INFINITY;
+
+    for _ in 0..nrings {
+        if bytes.len() < offset + 4 {
+            return None;
+        }
+        let npoints = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+        offset += 4;
+
+        let needed = offset + npoints * 16;
+        if bytes.len() < needed {
+            return None;
+        }
+
+        for i in 0..npoints {
+            let off = offset + i * 16;
+            let x = f64::from_le_bytes(bytes[off..off + 8].try_into().ok()?);
+            let y = f64::from_le_bytes(bytes[off + 8..off + 16].try_into().ok()?);
+            #[allow(clippy::cast_possible_truncation)]
+            let (xf, yf) = (x as f32, y as f32);
+            coords.push(xf);
+            coords.push(yf);
+            xmin = xmin.min(xf);
+            ymin = ymin.min(yf);
+            xmax = xmax.max(xf);
+            ymax = ymax.max(yf);
+        }
+
+        total_points += npoints;
+        offset += npoints * 16;
+    }
+
+    let bbox = embedded_bbox.unwrap_or([xmin, ymin, xmax, ymax]);
+
+    Some(ExtractedGeometry {
+        bbox,
+        coords,
+        coord_count: total_points,
+        geom_type: GeomType::Polygon,
+    })
 }
 
 /// Convert a `Datum` to a byte slice over the detoasted `GSERIALIZED` varlena.
@@ -319,5 +554,115 @@ mod tests {
         let (x, y) = pt.unwrap();
         assert!((x - (-73.985_f64)).abs() < f64::EPSILON);
         assert!((y - 40.748_f64).abs() < f64::EPSILON);
+    }
+
+    // -- extract_geometry tests ------------------------------------------------
+
+    #[test]
+    fn extract_geometry_point_no_bbox() {
+        let buf = make_gserialized_no_bbox(4326, WKB_POINT_TYPE, 10.0, 20.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let geom = extract_geometry(datum);
+        assert!(geom.is_some());
+        let g = geom.unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+        assert_eq!(g.coord_count, 1);
+        assert_eq!(g.coords.len(), 2);
+        assert!((g.coords[0] - 10.0_f32).abs() < f32::EPSILON);
+        assert!((g.coords[1] - 20.0_f32).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_geometry_point_with_bbox() {
+        let buf = make_gserialized_with_bbox((-1.0, -1.0, 1.0, 1.0), WKB_POINT_TYPE, 0.5, 0.5);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+        // Should use embedded bbox, not computed.
+        assert!((g.bbox[0] - (-1.0_f32)).abs() < f32::EPSILON);
+        assert!((g.bbox[2] - 1.0_f32).abs() < f32::EPSILON);
+    }
+
+    /// Build a GSERIALIZED LINESTRING without bbox.
+    fn make_linestring_no_bbox(points: &[(f64, f64)]) -> Vec<u8> {
+        let npoints = points.len() as u32;
+        let total_size: u32 = 8 + 4 + 4 + npoints * 16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(total_size << 2).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // srid_flags
+        buf.extend_from_slice(&WKB_LINESTRING_TYPE.to_le_bytes());
+        buf.extend_from_slice(&npoints.to_le_bytes());
+        for &(x, y) in points {
+            buf.extend_from_slice(&x.to_le_bytes());
+            buf.extend_from_slice(&y.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn extract_geometry_linestring() {
+        let buf = make_linestring_no_bbox(&[(0.0, 0.0), (10.0, 10.0), (20.0, 0.0)]);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::LineString);
+        assert_eq!(g.coord_count, 3);
+        assert_eq!(g.coords.len(), 6);
+        // Computed bbox
+        assert!((g.bbox[0] - 0.0_f32).abs() < f32::EPSILON);
+        assert!((g.bbox[2] - 20.0_f32).abs() < f32::EPSILON);
+    }
+
+    /// Build a GSERIALIZED POLYGON without bbox (single ring).
+    fn make_polygon_no_bbox(ring: &[(f64, f64)]) -> Vec<u8> {
+        let npoints = ring.len() as u32;
+        // header(8) + type(4) + nrings(4) + npoints(4) + coords
+        let total_size: u32 = 8 + 4 + 4 + 4 + npoints * 16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(total_size << 2).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // srid_flags
+        buf.extend_from_slice(&WKB_POLYGON_TYPE.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // nrings = 1
+        buf.extend_from_slice(&npoints.to_le_bytes());
+        for &(x, y) in ring {
+            buf.extend_from_slice(&x.to_le_bytes());
+            buf.extend_from_slice(&y.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn extract_geometry_polygon() {
+        let ring = vec![
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ];
+        let buf = make_polygon_no_bbox(&ring);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Polygon);
+        assert_eq!(g.coord_count, 5);
+        assert_eq!(g.coords.len(), 10);
+        // Computed bbox
+        assert!((g.bbox[0] - 0.0_f32).abs() < f32::EPSILON);
+        assert!((g.bbox[2] - 10.0_f32).abs() < f32::EPSILON);
+        assert!((g.bbox[3] - 10.0_f32).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_geometry_unknown_type() {
+        // wkb_type = 7 (GEOMETRYCOLLECTION) should return Unknown
+        let buf = make_gserialized_no_bbox(4326, 7, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Unknown);
+        assert!(g.coords.is_empty());
+    }
+
+    #[test]
+    fn extract_geometry_null_datum() {
+        assert!(extract_geometry(Datum::from(0usize)).is_none());
     }
 }

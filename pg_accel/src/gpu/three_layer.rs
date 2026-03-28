@@ -60,8 +60,9 @@ pub struct SpatialResult {
 
 /// Execute spatial intersection predicate on geometry pairs.
 ///
-/// Calls the C++ GPU kernel library for layers 1+2, then returns results
-/// partitioned into `definite_true`, `definite_false`, and `uncertain`.
+/// Tries the GPU kernel library first (layers 1+2 via
+/// `pgaccel_spatial_intersects`). If the GPU is unavailable or the call
+/// fails, falls back to the CPU implementation.
 ///
 /// Layer 3 (CPU recheck of uncertain pairs) is left to the caller.
 ///
@@ -74,10 +75,77 @@ pub fn spatial_intersects(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
 ) -> SpatialResult {
-    // For now: CPU fallback implementation.
-    // Future: call pgaccel_spatial_intersects via FFI when `gpu` feature is
-    // enabled.
+    // Try GPU dispatch first.
+    if let Some(result) = try_gpu_dispatch(geoms_a, geoms_b) {
+        return result;
+    }
+
+    // Fallback: CPU-only three-layer pipeline.
     cpu_fallback(geoms_a, geoms_b)
+}
+
+/// Attempt GPU dispatch by converting `ExtractedGeometry` to FFI structs.
+///
+/// Returns `None` if GPU is unavailable or the call fails.
+fn try_gpu_dispatch(
+    geoms_a: &[ExtractedGeometry],
+    geoms_b: &[ExtractedGeometry],
+) -> Option<SpatialResult> {
+    use super::{PgaccelGeomType, PgaccelGeometry};
+
+    let len = geoms_a.len().min(geoms_b.len());
+    if len == 0 {
+        return Some(SpatialResult {
+            definite_true: Vec::new(),
+            definite_false: Vec::new(),
+            uncertain: Vec::new(),
+        });
+    }
+
+    // Convert ExtractedGeometry to PgaccelGeometry FFI structs.
+    // The FFI structs borrow pointers into the ExtractedGeometry vecs,
+    // so the ExtractedGeometry slices must outlive the FFI call.
+    let ffi_a: Vec<PgaccelGeometry> = geoms_a
+        .iter()
+        .map(|g| PgaccelGeometry {
+            geom_type: match g.geom_type {
+                GeomType::Point => PgaccelGeomType::Point,
+                GeomType::LineString => PgaccelGeomType::LineString,
+                GeomType::Polygon => PgaccelGeomType::Polygon,
+                GeomType::Unknown => PgaccelGeomType::Unknown,
+            },
+            bbox: g.bbox.as_ptr(),
+            coords: g.coords.as_ptr(),
+            coord_count: g.coord_count,
+            ring_offsets: std::ptr::null(),
+            ring_count: 0,
+        })
+        .collect();
+
+    let ffi_b: Vec<PgaccelGeometry> = geoms_b
+        .iter()
+        .map(|g| PgaccelGeometry {
+            geom_type: match g.geom_type {
+                GeomType::Point => PgaccelGeomType::Point,
+                GeomType::LineString => PgaccelGeomType::LineString,
+                GeomType::Polygon => PgaccelGeomType::Polygon,
+                GeomType::Unknown => PgaccelGeomType::Unknown,
+            },
+            bbox: g.bbox.as_ptr(),
+            coords: g.coords.as_ptr(),
+            coord_count: g.coord_count,
+            ring_offsets: std::ptr::null(),
+            ring_count: 0,
+        })
+        .collect();
+
+    let (dt, df, uc) = super::spatial_intersects_gpu(&ffi_a, &ffi_b)?;
+
+    Some(SpatialResult {
+        definite_true: dt.into_iter().map(|i| i as usize).collect(),
+        definite_false: df.into_iter().map(|i| i as usize).collect(),
+        uncertain: uc.into_iter().map(|i| i as usize).collect(),
+    })
 }
 
 /// CPU-only implementation of the three-layer pipeline.

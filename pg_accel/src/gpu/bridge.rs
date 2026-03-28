@@ -67,6 +67,37 @@ pub struct PgaccelPlatformCaps {
 // Extern declarations — linked at load time against libpgaccel_kernels.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Geometry types for the three-layer spatial pipeline.
+// ---------------------------------------------------------------------------
+
+/// Geometry type tag (mirrors `pgaccel_geom_type` in `pgaccel_ffi.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgaccelGeomType {
+    Point = 0,
+    LineString = 1,
+    Polygon = 2,
+    Unknown = 99,
+}
+
+/// Geometry descriptor for the spatial dispatch pipeline
+/// (mirrors `pgaccel_geometry` in `pgaccel_ffi.h`).
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct PgaccelGeometry {
+    pub geom_type: PgaccelGeomType,
+    pub bbox: *const f32,
+    pub coords: *const f32,
+    pub coord_count: usize,
+    pub ring_offsets: *const u32,
+    pub ring_count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Extern declarations — linked at load time against libpgaccel_kernels.
+// ---------------------------------------------------------------------------
+
 // SAFETY: These are the C FFI bindings to libpgaccel_kernels. The functions
 // are implemented in C++ and linked at load time. Caller must ensure
 // pgaccel_init() is called before other functions.
@@ -83,4 +114,69 @@ unsafe extern "C" {
 
     /// Return platform-level capability flags.
     pub fn pgaccel_get_caps() -> PgaccelPlatformCaps;
+
+    // -- Spatial predicate kernels --
+
+    /// Bulk point-in-ring test.
+    ///
+    /// Results: 1 = inside, -1 = outside, 0 = uncertain.
+    pub fn pgaccel_point_in_ring_bulk(
+        points_xy: *const f32,
+        point_count: usize,
+        ring_xy: *const f32,
+        vertex_count: usize,
+        use_fp64: bool,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// Bulk sphere distance computation (Haversine).
+    ///
+    /// Outputs distances in metres. `uncertain[i] = 1` if the result
+    /// needs CPU recheck.
+    pub fn pgaccel_sphere_distance_bulk(
+        points_a: *const f32,
+        points_b: *const f32,
+        count: usize,
+        use_fp64: bool,
+        distances: *mut f32,
+        uncertain: *mut u8,
+    ) -> PgaccelStatus;
+
+    /// Bulk segment intersection test.
+    ///
+    /// Results: 1 = intersects, -1 = no, 0 = uncertain.
+    pub fn pgaccel_segment_intersects_bulk(
+        segs_a: *const f32,
+        segs_b: *const f32,
+        count: usize,
+        use_fp64: bool,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// Three-layer spatial intersection pipeline.
+    ///
+    /// Takes arrays of geometry descriptors and partitions pairs into
+    /// definite-true, definite-false, and uncertain buckets.
+    pub fn pgaccel_spatial_intersects(
+        geoms_a: *const PgaccelGeometry,
+        count_a: usize,
+        geoms_b: *const PgaccelGeometry,
+        count_b: usize,
+        definite_true_pairs: *mut u32,
+        definite_true_count: *mut usize,
+        definite_false_pairs: *mut u32,
+        definite_false_count: *mut usize,
+        uncertain_pairs: *mut u32,
+        uncertain_count: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// Bulk bbox intersection test (fp32).
+    pub fn pgaccel_bbox_intersects_bulk_f32(
+        boxes_a: *const f32,
+        count_a: usize,
+        boxes_b: *const f32,
+        count_b: usize,
+        result: *mut u8,
+        hit_count: *mut usize,
+    ) -> PgaccelStatus;
 }
