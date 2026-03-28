@@ -7,12 +7,16 @@ use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntr
 
 /// Build the `PostGIS` vector adapter with all supported function entries.
 ///
-/// Functions returning boolean spatial predicates (e.g. `ST_Contains`,
-/// `ST_Intersects`) are classified as [`AccelStrategy::GpuSpatial`].
-/// Scalar property accessors (e.g. `ST_Area`, `ST_X`) are classified as
-/// [`AccelStrategy::BatchedEval`].
+/// Functions that evaluate spatial predicates (e.g. `ST_Contains`,
+/// `ST_Intersects`) are classified as [`AccelStrategy::GpuSpatial`] for GPU
+/// offload through the three-layer pipeline (bbox filter, GPU kernel, CPU
+/// recheck).
+///
+/// Scalar property accessors, transforms, and constructors (e.g. `ST_Area`,
+/// `ST_Buffer`, `ST_X`) are classified as [`AccelStrategy::BatchedEval`] for
+/// tight main-thread batched evaluation.
 #[must_use]
-pub fn postgis_adapter() -> ExtensionAdapter {
+pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "postgis",
         version_query: "SELECT postgis_version()",
@@ -26,21 +30,11 @@ pub fn postgis_adapter() -> ExtensionAdapter {
 /// GPU-accelerated spatial predicate functions.
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
     const NAMES: &[&str] = &[
-        "st_contains",
         "st_intersects",
+        "st_contains",
         "st_within",
-        "st_crosses",
-        "st_overlaps",
-        "st_touches",
-        "st_covers",
-        "st_coveredby",
-        "st_equals",
-        "st_disjoint",
         "st_dwithin",
         "st_distance",
-        "st_3ddistance",
-        "st_3dintersects",
-        "st_containsproperly",
     ];
     NAMES
         .iter()
@@ -52,19 +46,29 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         .collect()
 }
 
-/// Batched-eval scalar property accessors.
+/// Batched-eval scalar property accessors, transforms, and predicates that
+/// are not yet GPU-accelerated.
 fn batched_eval_entries() -> Vec<FunctionAccelEntry> {
     const NAMES: &[&str] = &[
+        // Geometry constructors / transforms
+        "st_buffer",
+        "st_transform",
+        "st_simplify",
+        "st_union",
+        "st_centroid",
+        "st_asmvtgeom",
+        // Scalar measurements
         "st_area",
         "st_length",
-        "st_perimeter",
+        // Predicates (main-thread batched, not yet on GPU)
+        "st_crosses",
+        "st_overlaps",
+        "st_touches",
+        // Property accessors
         "st_x",
         "st_y",
         "st_srid",
         "st_geometrytype",
-        "st_numpoints",
-        "st_isvalid",
-        "st_astext",
     ];
     NAMES
         .iter()
@@ -82,20 +86,43 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        let adapter = postgis_adapter();
-        assert_eq!(adapter.name, "postgis");
-        // 15 GPU spatial + 10 batched eval = 25
-        assert_eq!(adapter.functions.len(), 25);
+        let a = adapter();
+        assert_eq!(a.name, "postgis");
+        // 5 GPU spatial + 15 batched eval = 20
+        assert_eq!(a.functions.len(), 20);
     }
 
     #[test]
     fn gpu_spatial_functions_use_correct_strategy() {
-        let adapter = postgis_adapter();
-        let gpu_count = adapter
+        let a = adapter();
+        let gpu_fns: Vec<_> = a
             .functions
             .iter()
             .filter(|f| f.strategy == AccelStrategy::GpuSpatial)
+            .collect();
+        assert_eq!(gpu_fns.len(), 5);
+        let names: Vec<&str> = gpu_fns.iter().map(|f| f.name).collect();
+        assert!(names.contains(&"st_intersects"));
+        assert!(names.contains(&"st_contains"));
+        assert!(names.contains(&"st_within"));
+        assert!(names.contains(&"st_dwithin"));
+        assert!(names.contains(&"st_distance"));
+    }
+
+    #[test]
+    fn batched_eval_functions_use_correct_strategy() {
+        let a = adapter();
+        let batched_count = a
+            .functions
+            .iter()
+            .filter(|f| f.strategy == AccelStrategy::BatchedEval)
             .count();
-        assert_eq!(gpu_count, 15);
+        assert_eq!(batched_count, 15);
+    }
+
+    #[test]
+    fn all_functions_in_public_schema() {
+        let a = adapter();
+        assert!(a.functions.iter().all(|f| f.schema == "public"));
     }
 }

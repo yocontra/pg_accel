@@ -4,6 +4,8 @@
 //! they will be wired in when the registry scanner is complete.
 
 #[allow(dead_code)]
+pub mod extractors;
+#[allow(dead_code)]
 pub mod h3;
 #[allow(dead_code)]
 pub mod pg_builtins;
