@@ -157,27 +157,30 @@ pub unsafe fn dispatch_batched_eval(
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 2: GpuSpatial (stub)
+// Strategy 2: GpuSpatial
 // ---------------------------------------------------------------------------
 
-/// GPU spatial dispatch — **stub implementation**.
+/// GPU spatial dispatch via the three-layer pipeline.
 ///
-/// In Phase 4 this will implement the three-layer GPU pipeline:
+/// The pipeline (implemented in `gpu::three_layer`) evaluates spatial
+/// predicates in three layers:
 ///
-/// 1. **Bbox filter** — Coarse bounding-box overlap test executed on the GPU
-///    as a parallel integer/float comparison kernel. Rejects the majority of
-///    non-intersecting pairs with minimal memory traffic.
+/// 1. **Bbox filter** — Coarse bounding-box overlap test. Rejects the
+///    majority of non-intersecting pairs with minimal memory traffic.
 ///
 /// 2. **Geometric fast-path** — Exact spatial predicate for common simple
-///    geometries (point-in-ring winding-number, great-circle distance, segment
-///    intersection) evaluated on the GPU in fp32 with an fp64 refinement band.
+///    geometries (point-in-ring winding-number, great-circle distance,
+///    segment intersection) evaluated in fp32 with an fp64 refinement band.
 ///
-/// 3. **CPU recheck** — Rows that the GPU cannot conclusively decide (geometry
-///    collections, curves, numerical edge cases near the fp32 tolerance band)
-///    are rechecked on the CPU via the original PostGIS function.
+/// 3. **CPU recheck** — Rows that the pipeline cannot conclusively decide
+///    (geometry collections, curves, numerical edge cases) are rechecked
+///    via the original PostGIS function on the main backend thread.
 ///
-/// Until the GPU kernels are implemented, this delegates to
-/// [`dispatch_batched_eval`] so that the executor node code-path is exercised.
+/// For v0.1.0: the three-layer pipeline is tested and ready (see
+/// `gpu::three_layer`), but the datum-to-`ExtractedGeometry` conversion
+/// is not yet wired. Until geometry extraction from PostGIS datums is
+/// complete, this delegates to [`dispatch_batched_eval`] for correct
+/// predicate evaluation.
 ///
 /// # Safety
 ///
@@ -188,7 +191,10 @@ pub unsafe fn dispatch_gpu_spatial(
     fn_info: &pgrx::pg_sys::FmgrInfo,
     is_strict: bool,
 ) -> Vec<(pgrx::pg_sys::Datum, bool)> {
-    // TODO(phase-4): Replace with actual GPU dispatch pipeline.
+    // v0.1.0: use CPU path via BatchedEval.
+    // GPU path will be enabled when geometry extraction is complete.
+    // The three_layer pipeline is tested and ready (see gpu/three_layer.rs).
+    //
     // SAFETY: Caller guarantees main backend thread.
     unsafe { dispatch_batched_eval(batch, fn_info, is_strict) }
 }

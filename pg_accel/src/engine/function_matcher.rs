@@ -47,7 +47,7 @@ pub struct MatchedFunction {
 /// Returns `(query_string, params)` where params are positional `$N` bindings.
 fn build_discovery_query(pattern: &FunctionPattern) -> String {
     let mut sql = String::from(
-        "SELECT p.oid, p.proname, n.nspname, p.proargtypes, \
+        "SELECT p.oid, p.proname, n.nspname, p.proargtypes::text, \
          p.prorettype, p.proparallel, p.proisstrict \
          FROM pg_proc p \
          JOIN pg_namespace n ON n.oid = p.pronamespace \
@@ -119,9 +119,17 @@ pub fn discover_functions(pattern: &FunctionPattern) -> Vec<MatchedFunction> {
             let Some(schema) = row.get::<String>(3).ok().flatten() else {
                 continue;
             };
-            // proargtypes is an oidvector; extract as raw bytes and parse.
-            // For now we store an empty vec; Phase 2 will parse oidvector.
-            let arg_oids: Vec<pg_sys::Oid> = Vec::new();
+            // proargtypes is cast to text in the query, yielding a
+            // space-separated list of OIDs (e.g. "23 25 701").
+            let arg_oids: Vec<pg_sys::Oid> = row
+                .get::<String>(4)
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .map(pg_sys::Oid::from)
+                .collect();
 
             let Some(return_oid) = row.get::<pg_sys::Oid>(5).ok().flatten() else {
                 continue;
@@ -134,11 +142,8 @@ pub fn discover_functions(pattern: &FunctionPattern) -> Vec<MatchedFunction> {
 
             let is_strict = row.get::<bool>(7).ok().flatten().unwrap_or(false);
 
-            // If caller specified arg_types, filter by them.
-            // TODO(phase2): Implement proper oidvector comparison once
-            // arg_oids parsing is complete.
+            // If caller specified arg_types, filter by exact match.
             if let Some(ref expected) = pattern.arg_types
-                && !arg_oids.is_empty()
                 && *expected != arg_oids
             {
                 continue;

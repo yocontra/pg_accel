@@ -1,15 +1,13 @@
 //! Extension adapters that declare which SQL functions `pg_accel` can accelerate.
 //!
-//! Adapter constructor functions are not yet called from the main code path;
-//! they will be wired in when the registry scanner is complete.
+//! Each sub-module exposes an `adapter()` constructor returning an
+//! [`ExtensionAdapter`](crate::engine::registry::ExtensionAdapter). The
+//! registry calls these during [`lazy_init`](crate::engine::registry::lazy_init)
+//! and probes each adapter's `version_query` to decide whether to activate it.
 
 #[allow(dead_code)]
 pub mod extractors;
-#[allow(dead_code)]
 pub mod h3;
-#[allow(dead_code)]
 pub mod pg_builtins;
-#[allow(dead_code)]
 pub mod postgis;
-#[allow(dead_code)]
 pub mod postgis_raster;

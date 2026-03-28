@@ -256,10 +256,91 @@ impl TypeExtractor for TimestampExtractor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Varlena helpers (used by Text and Bytea extractors)
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL varlena header size (4 bytes for standard header).
+const VARHDRSZ: usize = 4;
+
+/// Detoast a varlena datum and copy its data bytes into an owned `Vec<u8>`.
+///
+/// # Safety
+///
+/// `datum` must be a valid pointer to a varlena value. Must be called on the
+/// main backend thread (calls `pg_detoast_datum` and potentially `pfree`).
+unsafe fn detoast_to_vec(datum: pg_sys::Datum) -> Vec<u8> {
+    let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+    // SAFETY: pg_detoast_datum handles compressed, external, and short varlena.
+    let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
+    let ptr = detoasted as *const u8;
+
+    // SAFETY: ptr points to a valid detoasted varlena.
+    let (data_ptr, data_len) = unsafe { varlena_data_and_len(ptr) };
+    // SAFETY: data_ptr..data_ptr+data_len is within the detoasted varlena.
+    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len) }.to_vec();
+
+    // Free the detoasted copy if pg_detoast_datum allocated a new one.
+    if detoasted != original {
+        // SAFETY: detoasted was allocated by pg_detoast_datum via palloc.
+        unsafe { pg_sys::pfree(detoasted.cast()) };
+    }
+
+    bytes
+}
+
+/// Create a new varlena datum from a byte slice, allocated via `palloc`.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread (calls `palloc`).
+unsafe fn vec_to_varlena_datum(data: &[u8]) -> pg_sys::Datum {
+    let total_size = VARHDRSZ + data.len();
+    // SAFETY: palloc allocates in the current PG memory context.
+    let ptr = unsafe { pg_sys::palloc(total_size) }.cast::<u8>();
+    // SET_VARSIZE: store (total_size << 2) in the 4-byte header.
+    let header = (total_size as u32) << 2;
+    // SAFETY: ptr is freshly allocated with at least total_size bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(header.to_ne_bytes().as_ptr(), ptr, 4);
+        if !data.is_empty() {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(VARHDRSZ), data.len());
+        }
+    }
+    pg_sys::Datum::from(ptr as usize)
+}
+
+/// Extract the data pointer and length from a flat (detoasted) varlena.
+///
+/// Handles both 4-byte (standard) and 1-byte (short) varlena headers.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid, detoasted (flat) varlena.
+unsafe fn varlena_data_and_len(ptr: *const u8) -> (*const u8, usize) {
+    // SAFETY: Caller guarantees ptr points to a valid flat varlena.
+    let first_byte = unsafe { *ptr };
+    if first_byte & 0x01 != 0 {
+        // Short varlena: 1-byte header. Total size in bits 1-7.
+        let total_size = (first_byte >> 1) as usize;
+        let data_len = total_size.saturating_sub(1);
+        // SAFETY: data starts 1 byte after the header.
+        (unsafe { ptr.add(1) }, data_len)
+    } else {
+        // Standard 4-byte header. Total size in bits 2-31.
+        // SAFETY: ptr points to at least 4 bytes (standard varlena header).
+        let header = unsafe { u32::from_ne_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]) };
+        let total_size = (header >> 2) as usize;
+        let data_len = total_size.saturating_sub(VARHDRSZ);
+        // SAFETY: data starts VARHDRSZ bytes after the header.
+        (unsafe { ptr.add(VARHDRSZ) }, data_len)
+    }
+}
+
 /// Extracts `text` values.
 ///
-/// Text is a varlena type in PostgreSQL. Full varlena deserialization
-/// is deferred to Phase 2; this extractor stores the raw pointer bytes.
+/// Text is a varlena type in PostgreSQL. This extractor detoasts the
+/// datum and copies the UTF-8 bytes into an owned `Vec<u8>`.
 pub struct TextExtractor;
 
 impl TypeExtractor for TextExtractor {
@@ -271,26 +352,17 @@ impl TypeExtractor for TextExtractor {
         if is_null {
             return GpuRepr::Null;
         }
-        // TODO(phase2): Proper varlena detoasting via pg_detoast_datum.
-        // For now, store the raw pointer address as opaque bytes so the
-        // type system round-trips without dereferencing invalid memory.
-        let addr = datum.value();
-        GpuRepr::Text(addr.to_ne_bytes().to_vec())
+        // SAFETY: Caller guarantees datum is a valid text varlena pointer.
+        // detoast_to_vec handles compressed, external, and short varlena.
+        GpuRepr::Text(unsafe { detoast_to_vec(datum) })
     }
 
     unsafe fn pack(&self, repr: &GpuRepr) -> Option<pg_sys::Datum> {
         match repr {
             GpuRepr::Text(bytes) => {
-                // TODO(phase2): Proper varlena allocation via pg_sys::palloc.
-                // For now, reconstruct the pointer address from stored bytes.
-                if bytes.len() == size_of::<usize>() {
-                    let mut buf = [0u8; size_of::<usize>()];
-                    buf.copy_from_slice(bytes);
-                    let addr = usize::from_ne_bytes(buf);
-                    Some(pg_sys::Datum::from(addr))
-                } else {
-                    None
-                }
+                // SAFETY: Allocate a new text varlena in the current memory
+                // context via palloc.
+                Some(unsafe { vec_to_varlena_datum(bytes) })
             }
             _ => None,
         }
@@ -299,8 +371,8 @@ impl TypeExtractor for TextExtractor {
 
 /// Extracts `bytea` values.
 ///
-/// Bytea is a varlena type in PostgreSQL. Full varlena deserialization
-/// is deferred to Phase 2; this extractor stores the raw pointer bytes.
+/// Bytea is a varlena type in PostgreSQL. This extractor detoasts the
+/// datum and copies the raw bytes into an owned `Vec<u8>`.
 pub struct ByteaExtractor;
 
 impl TypeExtractor for ByteaExtractor {
@@ -312,24 +384,16 @@ impl TypeExtractor for ByteaExtractor {
         if is_null {
             return GpuRepr::Null;
         }
-        // TODO(phase2): Proper varlena detoasting via pg_detoast_datum.
-        // Store raw pointer address as opaque bytes for now.
-        let addr = datum.value();
-        GpuRepr::Bytes(addr.to_ne_bytes().to_vec())
+        // SAFETY: Caller guarantees datum is a valid bytea varlena pointer.
+        GpuRepr::Bytes(unsafe { detoast_to_vec(datum) })
     }
 
     unsafe fn pack(&self, repr: &GpuRepr) -> Option<pg_sys::Datum> {
         match repr {
             GpuRepr::Bytes(bytes) => {
-                // TODO(phase2): Proper varlena allocation via pg_sys::palloc.
-                if bytes.len() == size_of::<usize>() {
-                    let mut buf = [0u8; size_of::<usize>()];
-                    buf.copy_from_slice(bytes);
-                    let addr = usize::from_ne_bytes(buf);
-                    Some(pg_sys::Datum::from(addr))
-                } else {
-                    None
-                }
+                // SAFETY: Allocate a new bytea varlena in the current memory
+                // context via palloc.
+                Some(unsafe { vec_to_varlena_datum(bytes) })
             }
             _ => None,
         }

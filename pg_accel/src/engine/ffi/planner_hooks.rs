@@ -10,6 +10,7 @@ use pgrx::pg_sys::{
 
 use super::custom_scan;
 use crate::engine::gucs;
+use crate::engine::registry;
 
 // ---------------------------------------------------------------------------
 // Previous hook storage
@@ -75,6 +76,9 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
+    // Ensure the adapter registry is populated (first call does SPI probing).
+    registry::lazy_init();
+
     // SAFETY: rel and rte are valid pointers provided by the planner.
     let rel_ref = unsafe { &*rel };
     let rte_ref = unsafe { &*rte };
@@ -100,8 +104,7 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
-    // Gate 5: Check if restriction clauses contain a top-level FuncExpr.
-    // Deep predicate analysis (OID registry lookup) deferred to Phase 5.
+    // Gate 5: Check if restriction clauses contain a registered function.
     if !has_accelerable_restriction(rel_ref.baserestrictinfo) {
         return;
     }
@@ -157,6 +160,9 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     if !gucs::enabled() {
         return;
     }
+
+    // Ensure the adapter registry is populated (first call does SPI probing).
+    registry::lazy_init();
 
     // SAFETY: pointers provided by the planner are valid.
     let joinrel_ref = unsafe { &*joinrel };
@@ -244,14 +250,17 @@ unsafe fn find_cheapest_path(pathlist: *mut List) -> *mut Path {
     best
 }
 
-/// Check if a `List` of `RestrictInfo` contains any top-level `FuncExpr`.
+/// Check if a `List` of `RestrictInfo` contains a function registered in the
+/// acceleration registry.
 ///
-/// Shallow check — nested expressions are not walked. Full predicate
-/// analysis is deferred to Phase 5.
+/// Extracts `funcid` from `FuncExpr` nodes and `opfuncid` from `OpExpr`
+/// nodes, then looks them up in the global adapter registry.
 fn has_accelerable_restriction(restrictinfo_list: *mut List) -> bool {
     if restrictinfo_list.is_null() {
         return false;
     }
+
+    let reg = registry::global_registry();
 
     // SAFETY: restrictinfo_list is a valid List pointer from the planner.
     let len = unsafe { pg_sys::list_length(restrictinfo_list) };
@@ -268,7 +277,26 @@ fn has_accelerable_restriction(restrictinfo_list: *mut List) -> bool {
         }
         // SAFETY: clause is an Expr*; we check its NodeTag.
         let tag = unsafe { (*clause).type_ };
-        if tag == NodeTag::T_FuncExpr || tag == NodeTag::T_OpExpr {
+
+        // Extract function OID from the clause node, if applicable.
+        // SAFETY: PG nodes are palloc'd (always >=8-byte aligned), and we
+        // confirmed the NodeTag before casting.
+        #[allow(clippy::cast_ptr_alignment)]
+        let func_oid = if tag == NodeTag::T_FuncExpr {
+            // SAFETY: tag confirmed this is a FuncExpr.
+            Some(unsafe { (*clause.cast::<pg_sys::FuncExpr>()).funcid })
+        } else if tag == NodeTag::T_OpExpr {
+            // SAFETY: tag confirmed this is an OpExpr.
+            let oid = unsafe { (*clause.cast::<pg_sys::OpExpr>()).opfuncid };
+            // opfuncid may be invalid if not yet resolved by the planner.
+            (oid != pg_sys::Oid::INVALID).then_some(oid)
+        } else {
+            None
+        };
+
+        if let Some(oid) = func_oid
+            && reg.lookup(oid).is_some()
+        {
             return true;
         }
     }

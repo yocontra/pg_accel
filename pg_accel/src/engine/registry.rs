@@ -3,8 +3,16 @@
 //! Defines the types used by extension adapters to declare which SQL functions
 //! can be accelerated and what strategy should be used, plus the
 //! [`AdapterRegistry`] that maps function OIDs to their entries at runtime.
+//!
+//! The global registry is lazily initialised on first planner hook invocation
+//! (SPI is unavailable during `_PG_init`). See [`lazy_init`] and
+//! [`global_registry`].
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+/// Global singleton registry, populated on first use via [`lazy_init`].
+static GLOBAL_REGISTRY: OnceLock<AdapterRegistry> = OnceLock::new();
 
 /// Strategy that `pg_accel` applies when accelerating a function call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,17 +82,28 @@ impl AdapterRegistry {
 
     /// Initialise adapters by probing which extensions are installed.
     ///
-    /// This queries `pg_extension` via SPI to discover installed extensions
-    /// and registers the corresponding acceleration entries.
-    ///
-    /// # Note
-    ///
-    /// Actual SPI lookup is deferred to Phase 2. Currently this is a no-op
-    /// placeholder that records the adapter templates.
+    /// Iterates over all known adapter constructors, runs each adapter's
+    /// `version_query` via SPI to determine whether the backing extension is
+    /// present, and registers those that are.
     pub fn init_adapters(&mut self) {
-        // TODO(phase-2): Use SPI to query pg_extension for installed
-        // extensions and resolve function OIDs via pg_proc lookup.
-        let _ = &mut self.adapters; // silence unused-self until Phase 2
+        let all_adapters = vec![
+            crate::adapters::postgis::adapter(),
+            crate::adapters::postgis_raster::adapter(),
+            crate::adapters::h3::adapter(),
+            crate::adapters::pg_builtins::adapter(),
+        ];
+
+        for adapter in all_adapters {
+            if check_extension_installed(&adapter) {
+                pgrx::log!("pg_accel: activated adapter '{}'", adapter.name);
+                self.register_adapter(adapter);
+            } else {
+                pgrx::debug1!(
+                    "pg_accel: skipping adapter '{}' (extension not found)",
+                    adapter.name
+                );
+            }
+        }
     }
 
     /// Register an adapter and its function entries.
@@ -123,6 +142,55 @@ impl AdapterRegistry {
     pub fn adapters(&self) -> &[ExtensionAdapter] {
         &self.adapters
     }
+}
+
+// ---------------------------------------------------------------------------
+// Extension detection
+// ---------------------------------------------------------------------------
+
+/// Run an adapter's `version_query` via SPI to check whether its backing
+/// extension is installed.
+///
+/// Returns `true` if the query executes without error. Errors (e.g. unknown
+/// function) are caught and treated as "extension not installed".
+fn check_extension_installed(adapter: &ExtensionAdapter) -> bool {
+    // SPI::connect executes within the current transaction context.
+    pgrx::Spi::connect(|client| {
+        client
+            .select(adapter.version_query, None, &[])
+            .map(|_table| true)
+            .unwrap_or(false)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Global registry access
+// ---------------------------------------------------------------------------
+
+/// Ensure the global registry is initialised exactly once.
+///
+/// Must be called from a transactional context (e.g. a planner hook) so
+/// that SPI is available for extension detection queries.
+pub fn lazy_init() {
+    GLOBAL_REGISTRY.get_or_init(|| {
+        let mut registry = AdapterRegistry::new();
+        registry.init_adapters();
+        registry
+    });
+}
+
+/// Return a reference to the global adapter registry.
+///
+/// # Panics
+///
+/// Panics if called before [`lazy_init`]. In normal operation the planner
+/// hook guarantees initialisation before any lookup.
+#[must_use]
+#[allow(clippy::expect_used)] // Intentional panic: programming error if _PG_init path skipped.
+pub fn global_registry() -> &'static AdapterRegistry {
+    GLOBAL_REGISTRY
+        .get()
+        .expect("pg_accel: global registry not initialised — lazy_init was not called")
 }
 
 #[cfg(test)]
