@@ -1,7 +1,8 @@
 # Phase 3: Planner Hook FFI (Custom Scan Provider)
 
 **Depends on:** Phase 2
-**Parallelism:** Sequential — spike first, then parallelize within phase.
+**Parallelism:** Spike-first — single agent builds no-op Custom Scan, then fan out
+5 agents in parallel once spike works. Max 5–6 concurrent agents.
 **Note:** This is the riskiest phase — hardest novel work.
 
 This is the riskiest phase. pgrx has NO safe wrappers for Custom Scan Provider.

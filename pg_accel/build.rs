@@ -61,19 +61,54 @@ mod gpu_build {
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {
-        let status = Command::new("cmake")
-            .arg("-S")
+        let acpp_prefix = home_dir().join("local");
+
+        let mut cmd = Command::new("cmake");
+        cmd.arg("-S")
             .arg(source_dir)
             .arg("-B")
             .arg(build_dir)
             .arg("-DCMAKE_BUILD_TYPE=Release")
             // SYCL is optional — CMake will warn and fall back to CPU-only if
             // AdaptiveCpp is not installed.
-            .arg("-DPGACCEL_USE_SYCL=ON")
+            .arg("-DPGACCEL_USE_SYCL=ON");
+
+        // AdaptiveCpp installs to ~/local via `just setup-gpu`.
+        if acpp_prefix.join("lib/cmake/AdaptiveCpp").exists() {
+            cmd.arg(format!("-DCMAKE_PREFIX_PATH={}", acpp_prefix.display()));
+            // Target OMP (CPU) by default; Metal/CUDA selected at runtime.
+            // Explicit target avoids concatenated default "ompmetal" bug.
+            cmd.arg("-DACPP_TARGETS=omp");
+
+            // On macOS, LLVM's clang needs the Homebrew libomp path.
+            if cfg!(target_os = "macos") {
+                if let Some(libomp) = find_brew_prefix("libomp") {
+                    let lib_flag = format!("-L{libomp}/lib");
+                    cmd.arg(format!("-DCMAKE_SHARED_LINKER_FLAGS={lib_flag}"));
+                    cmd.arg(format!("-DCMAKE_EXE_LINKER_FLAGS={lib_flag}"));
+                }
+            }
+        }
+
+        let status = cmd
             .status()
             .expect("failed to execute cmake — is cmake installed?");
 
         assert!(status.success(), "cmake configure step failed");
+    }
+
+    fn home_dir() -> PathBuf {
+        PathBuf::from(std::env::var("HOME").expect("HOME not set"))
+    }
+
+    fn find_brew_prefix(pkg: &str) -> Option<String> {
+        Command::new("brew")
+            .arg("--prefix")
+            .arg(pkg)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     }
 
     fn cmake_build(build_dir: &Path) {

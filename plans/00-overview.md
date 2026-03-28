@@ -114,13 +114,14 @@ Phase 11: Packaging + Docs
 Phase 12: Launch
 ```
 
-**Revised execution order (March 2026 session):**
-Phases run sequentially (spike-first for Phase 3). Agents parallelized within
-each phase. AdaptiveCpp install runs in background during Phase 3.
-Order: 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11.
+**Execution order:**
+Max 5–6 concurrent agents per phase.
+AdaptiveCpp is installed (Metal backend ready on Apple Silicon).
+Order: 3 → 4 → 5+6 → 7 → 8 → 9 → 10 → 11.
 
-Original plan had 3+4 parallel and 5+6 parallel, but spike-first strategy
-for Phase 3 means we serialize to reduce risk.
+Phase 3 uses spike-first strategy: single agent builds minimal no-op Custom
+Scan end-to-end, then remaining agents fan out in parallel once spike works.
+Phases 3→4 run sequentially. Phases 5+6 run in parallel (5 depends on 3, 6 on 4).
 
 **Testing at every phase:** Phase 0 establishes a Docker-based integration test
 harness (PG 17 + PostGIS + h3-pg + pg_accel, real data fixtures). Each subsequent

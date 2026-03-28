@@ -1,7 +1,8 @@
 # Phase 6: GPU Spatial, Raster, and H3 Kernels
 
 **Depends on:** Phase 4 (GPU foundation — device manager, mem pool, bbox, sort, reduce)
-**Parallelism:** 5 agents (A5–A9). Runs concurrently with Phase 5 (Executor Nodes).
+**Parallelism:** Runs in parallel with Phase 5 (both start after Phases 3+4 complete).
+6 agents (A5–A9b). Max 5–6 concurrent agents across Phases 5+6 combined.
 
 This phase implements GPU kernels for three domains:
 1. **Spatial predicates** (PostGIS) — three-layer model, DEFINITE/UNCERTAIN

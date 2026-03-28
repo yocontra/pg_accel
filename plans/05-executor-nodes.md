@@ -1,7 +1,8 @@
 # Phase 5: Executor Nodes
 
 **Depends on:** Phase 3 (planner FFI working)
-**Parallelism:** Sequential after Phase 4. Agents within phase.
+**Parallelism:** Runs in parallel with Phase 6 (both start after Phases 3+4 complete).
+6 agents (A0–A4b). Max 5–6 concurrent agents across Phases 5+6 combined.
 
 This phase implements the actual execution logic behind the Custom Scan nodes.
 After Phase 3 gave us the planner hooks to inject our nodes into query plans,

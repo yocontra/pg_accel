@@ -4,7 +4,6 @@ use pgrx::prelude::*;
 
 use super::cost::PlatformProfile;
 use super::gucs;
-use crate::gpu::fallback;
 
 /// Helper to extract a printable string from a fixed-size `c_char` buffer.
 fn cchar_buf_to_string(buf: &[std::ffi::c_char]) -> String {
@@ -36,7 +35,7 @@ fn pg_accel_device_info() -> TableIterator<
 > {
     let profile = PlatformProfile::detect();
     let configured_workers = gucs::workers();
-    let device = fallback::pgaccel_get_device_info();
+    let device = crate::gpu::get_device_info();
 
     let gpu_device_name = cchar_buf_to_string(&device.device_name);
     let gpu_available = !gpu_device_name.is_empty() || device.compute_units > 0;

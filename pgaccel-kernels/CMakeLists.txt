@@ -7,10 +7,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(PGACCEL_USE_SYCL "Build with AdaptiveCpp/SYCL support" OFF)
 
 if(PGACCEL_USE_SYCL)
+    # AdaptiveCpp installs to ~/local by default (see: just setup-gpu).
+    # Pass -DCMAKE_PREFIX_PATH=$HOME/local when configuring, or use: just gpu-build
     find_package(AdaptiveCpp QUIET)
     if(NOT AdaptiveCpp_FOUND)
         message(WARNING "AdaptiveCpp not found. Building without GPU support. "
-                        "Install AdaptiveCpp and set AdaptiveCpp_DIR.")
+                        "Install via 'just setup-gpu' and build with 'just gpu-build'.")
         set(PGACCEL_USE_SYCL OFF)
     endif()
 endif()

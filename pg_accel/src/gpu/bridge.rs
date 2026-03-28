@@ -67,7 +67,10 @@ pub struct PgaccelPlatformCaps {
 // Extern declarations — linked at load time against libpgaccel_kernels.
 // ---------------------------------------------------------------------------
 
-extern "C" {
+// SAFETY: These are the C FFI bindings to libpgaccel_kernels. The functions
+// are implemented in C++ and linked at load time. Caller must ensure
+// pgaccel_init() is called before other functions.
+unsafe extern "C" {
     /// Initialise the GPU runtime.  Must be called once before any other
     /// `pgaccel_*` function.
     pub fn pgaccel_init() -> PgaccelStatus;
