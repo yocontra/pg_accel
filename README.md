@@ -1,111 +1,137 @@
 # pg_accel
 
-GPU-accelerated PostgreSQL. One extension, every platform.
+GPU-accelerated query processing for PostgreSQL.
 
-pg_accel makes PostgreSQL measurably faster by intercepting queries at the planner level and executing them through batched executor nodes and GPU-accelerated kernels. No SQL changes required — install the extension and your existing queries get faster automatically.
+[![License: PostgreSQL](https://img.shields.io/badge/license-PostgreSQL-blue.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/yocontra/pg_accel/ci.yml?label=CI)](https://github.com/yocontra/pg_accel/actions)
+[![crates.io](https://img.shields.io/crates/v/pg_accel.svg)](https://crates.io/crates/pg_accel)
 
 ## Quickstart
 
 ```bash
-brew tap pg-accel/tap && brew install pg_accel
+brew install pg_accel
 ```
 
 Add to `postgresql.conf`:
+
 ```
 shared_preload_libraries = 'pg_accel'
 ```
 
 Restart PostgreSQL, then:
+
 ```sql
 CREATE EXTENSION pg_accel;
-SELECT * FROM pg_accel_device_info();
 ```
 
-## What It Does
+## What it does
 
-pg_accel installs a Custom Scan Provider that intercepts qualifying queries during planning. Instead of evaluating predicates row-by-row, it batches rows and evaluates them using the optimal strategy for each function:
+pg_accel intercepts queries that use supported SQL functions (spatial predicates,
+H3 cell operations, raster algebra, and common aggregates) and re-executes them
+in batches rather than one row at a time. When a GPU is available, it offloads
+the heavy compute to GPU kernels. When no GPU is present, it uses CPU-side
+batched evaluation with rayon. The extension installs as a standard PostgreSQL
+Custom Scan Provider -- it does not replace the planner or executor, it extends
+them. Queries that do not benefit from batching are left untouched.
 
-- **Spatial predicates** (PostGIS `ST_Contains`, `ST_Intersects`, `ST_DWithin`, etc.) run through a three-layer GPU pipeline: bbox filtering kills 90-95% of candidates, geometric fast-path resolves most survivors, CPU recheck handles the remainder.
-- **H3 cell operations** (`h3_lat_lng_to_cell`, `h3_grid_distance`, etc.) run as GPU kernels — millions of coordinate-to-cell conversions in a single kernel launch.
-- **Raster operations** (`ST_MapAlgebra`, `ST_Clip`, `ST_Reclass`) evaluate per-pixel on GPU.
-- **Everything else** benefits from late materialization and predicate reordering in the batched scan node — skip expensive column deserialization for rows that fail cheap filters.
-- **GiST/SP-GiST index recheck** is batched: accumulate index candidates, recheck in bulk via GPU instead of one-at-a-time.
+## How it works
 
-Works without GPU too. CPU-only mode still wins via batched evaluation and late materialization.
+- **Batch-parallel evaluation.** Instead of evaluating expensive predicates row
+  by row, pg_accel accumulates rows into batches and evaluates them in a tight
+  loop (CPU) or a single kernel launch (GPU), amortizing per-row overhead.
 
-## Supported Extensions
+- **Custom Scan Provider.** pg_accel hooks into the PostgreSQL planner via the
+  Custom Scan interface. It injects alternative scan, join, aggregate, and sort
+  paths when the cost model predicts a net speedup. The standard executor path
+  is always available as a fallback.
 
-| Extension | Strategy | What Gets Accelerated |
-|-----------|----------|----------------------|
-| **PostGIS** (vector) | GPU spatial + BatchedEval | ST_Contains, ST_Intersects, ST_DWithin, ST_Distance + 15 more |
-| **PostGIS** (raster) | GPU raster | ST_MapAlgebra, ST_Clip, ST_Reclass |
-| **h3-pg** | GPU h3 + BatchedEval | h3_lat_lng_to_cell, h3_grid_distance, h3_cell_to_parent + 5 more |
-| **Stock PostgreSQL** | BatchedEval | abs, sqrt, lower, date_trunc, and other common builtins |
-
-## Platform Support
-
-| Platform | GPU Backend | Precision | Status |
-|----------|------------|-----------|--------|
-| Apple Silicon (M1+) | Metal | fp32 + CPU recheck | Primary target |
-| NVIDIA | CUDA | fp64 (exact) | Supported |
-| AMD | ROCm | fp64 (exact) | Supported |
-| Intel | Level Zero | fp64 (varies) | Supported |
-| Any CPU | — | fp64 (exact) | Always available |
-
-GPU kernels are written once in SYCL (via AdaptiveCpp) and compile to all backends.
+- **Three-result GPU model.** GPU kernels return `true`, `false`, or `uncertain`
+  for each row. Rows marked `uncertain` (due to floating-point edge cases or
+  precision limits) are rechecked on the CPU using the original PostgreSQL
+  function, ensuring correctness without sacrificing throughput.
 
 ## Configuration
 
-| GUC | Default | Description |
-|-----|---------|-------------|
-| `pg_accel.enabled` | `on` | Master switch. Set to `off` to disable completely. |
-| `pg_accel.workers` | `0` (auto) | Threads per backend. 0 = auto-detect based on cores. |
-| `pg_accel.max_workers_total` | `0` (unlimited) | Global thread cap across all backends. |
-| `pg_accel.min_batch_size` | `256` | Minimum rows to trigger acceleration. |
-| `pg_accel.gpu_enabled` | `on` | GPU switch. `off` = CPU-only mode. |
-| `pg_accel.kernel_timeout_ms` | `5000` | GPU kernel timeout. Falls back to CPU on timeout. |
+All parameters live under the `pg_accel.*` namespace.
 
-## How It Works
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `pg_accel.enabled` | bool | `on` | Master switch. Set to `off` to disable all acceleration. |
+| `pg_accel.workers` | int | `0` | Per-session worker threads. `0` = auto-detect from available cores. |
+| `pg_accel.max_workers_total` | int | `0` | Cluster-wide cap on worker threads (shared memory LWLock). `0` = unlimited. Requires SIGHUP. |
+| `pg_accel.min_batch_size` | int | `256` | Minimum estimated rows before batched execution is considered. |
+| `pg_accel.gpu_enabled` | bool | `on` | Enable GPU kernel dispatch. Set to `off` for CPU-only batching. |
+| `pg_accel.kernel_timeout_ms` | int | `5000` | Timeout (ms) for a single GPU kernel. Exceeded kernels fall back to CPU. |
+| `pg_accel.log_level` | enum | `notice` | Verbosity: `debug`, `info`, `notice`, `warning`, `error`. |
 
-```
-SELECT * FROM points p, polygons g WHERE ST_Contains(g.geom, p.geom);
+## Diagnostics
 
-                    Standard PG                          pg_accel
-                    ───────────                          ────────
-Planning:           NestLoop + IndexScan                 Custom Scan (GpuAccelJoin)
-Execution:          Per-row ST_Contains                  Batch 4096 rows →
-                    (C function, full geometry             Layer 1: GPU bbox (kills 93%)
-                     deser every time)                     Layer 2: GPU geometric (resolves 99%)
-                                                           Layer 3: CPU recheck (< 1%)
-```
+```sql
+-- Device and configuration info
+SELECT * FROM pg_accel_device_info();
 
-## Docker
+-- Per-backend acceleration statistics
+SELECT * FROM pg_accel_stats();
 
-```bash
-docker run -p 5432:5432 pg-accel:latest
+-- Reset counters
+SELECT pg_accel_reset_stats();
 ```
 
-CPU-only in Docker (Metal doesn't work in containers). Includes PostGIS and h3-pg.
-Auto-tunes PostgreSQL settings based on container memory and CPU.
+## Supported extensions
 
-## PostgreSQL Version Support
+pg_accel detects installed extensions at load time and registers acceleration
+entries for their functions.
 
-PG 15, 16, 17, 18.
+| Extension | Strategies | Example functions |
+|---|---|---|
+| **PostGIS** | GpuSpatial, BatchedEval | `ST_Contains`, `ST_Intersects`, `ST_DWithin`, `ST_Distance` |
+| **h3-pg** | GpuH3, BatchedEval | `h3_cell_to_parent`, `h3_grid_disk`, `h3_cell_to_boundary` |
+| **PostgreSQL builtins** | GpuSort, GpuReduce, BatchedEval | `sum`, `avg`, `min`, `max`, `count` |
+
+Raster operations (GpuRaster strategy) are planned for extensions that provide
+map-algebra functions.
 
 ## FAQ
 
-**Does this work without a GPU?**
-Yes. CPU-only mode still benefits from batched evaluation, late materialization, and predicate reordering. GPU adds an extra boost for spatial, h3, and raster workloads.
+### Does this work without a GPU?
 
-**Does this slow down OLTP?**
-No. Small queries (below `min_batch_size`) use the standard PostgreSQL path with zero overhead. The cost model only injects our nodes when batching is beneficial.
+Yes. When no GPU is detected (or `pg_accel.gpu_enabled = off`), the extension
+falls back to CPU-side batched evaluation using rayon. You still get the benefit
+of amortized per-row overhead and reduced executor transitions. The cost model
+adjusts its estimates accordingly.
 
-**How is this different from PG-Strom?**
-PG-Strom is CUDA-only and requires NVIDIA GPUs. pg_accel targets every platform (Metal, CUDA, ROCm, Level Zero, CPU) via AdaptiveCpp/SYCL. pg_accel also focuses on spatial and h3 workloads rather than general columnar execution.
+### Does this slow down OLTP workloads?
 
-**How do I turn it off?**
-`SET pg_accel.enabled = off;` per session, or remove from `shared_preload_libraries` globally.
+No. The cost model only injects Custom Scan paths when the estimated row count
+exceeds `pg_accel.min_batch_size` (default 256). Small point lookups, index
+scans, and short transactions go through the stock executor untouched. You can
+also disable the extension per-session or globally.
+
+### How is this different from PG-Strom?
+
+Different architecture. PG-Strom uses a Foreign Data Wrapper approach and
+focuses on columnar scan offload. pg_accel uses the Custom Scan Provider
+interface with a three-result model (true/false/uncertain) that preserves
+correctness via CPU recheck. pg_accel targets spatial predicates, H3 cell
+operations, and raster algebra rather than general columnar analytics.
+
+### Which PostgreSQL versions are supported?
+
+PostgreSQL 15, 16, 17, and 18. The extension is built with pgrx 0.17, which
+handles version-specific FFI differences.
+
+### How do I turn it off?
+
+```sql
+-- Per-session
+SET pg_accel.enabled = off;
+
+-- Globally (requires reload)
+ALTER SYSTEM SET pg_accel.enabled = off;
+SELECT pg_reload_conf();
+```
 
 ## License
 
-MIT - Eric Schoffstall 2026
+Released under the [PostgreSQL License](LICENSE), the same license used by
+PostgreSQL itself.
