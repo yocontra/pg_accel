@@ -16,9 +16,11 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::super::gucs;
+use crate::engine::executor::scan::ScanExecState;
+use crate::engine::registry::AccelStrategy;
 
 // ---------------------------------------------------------------------------
-// Strategy constants
+// Strategy constants (used in custom_private serialization + EXPLAIN)
 // ---------------------------------------------------------------------------
 
 /// Strategy enum values stored in `custom_private`.
@@ -71,7 +73,7 @@ struct GpuAccelScanState {
     accel: GpuAccelState,
 }
 
-/// Per-node execution counters and config.
+/// Per-node execution counters, config, and batch executor pointer.
 #[repr(C)]
 struct GpuAccelState {
     strategy: i32,
@@ -80,6 +82,9 @@ struct GpuAccelState {
     rows_dispatched: u64,
     batches_executed: u64,
     dispatch_time_us: u64,
+    /// Pointer to heap-allocated Rust `ScanExecState`.
+    /// Set in `begin_custom_scan`, freed in `end_custom_scan`.
+    executor: *mut ScanExecState,
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +226,7 @@ unsafe fn make_custom_scan_plan(
     _rel: *mut pg_sys::RelOptInfo,
     best_path: *mut pg_sys::CustomPath,
     tlist: *mut pg_sys::List,
-    clauses: *mut pg_sys::List,
+    _clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
     is_scan: bool,
 ) -> *mut pg_sys::Plan {
@@ -295,6 +300,7 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
         (*state).css.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
         (*state).css.flags = (*cscan).flags;
         (*state).css.methods = &raw const EXEC_METHODS.0;
+        (*state).accel.executor = std::ptr::null_mut();
     }
 
     state.cast()
@@ -308,7 +314,7 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
 ///
 /// PG's `ExecInitCustomScan` already initialized child plan states in
 /// `css.custom_ps` before calling this. We read `custom_private` from the
-/// plan node to populate our accel state.
+/// plan node to populate our accel state, then allocate a `ScanExecState`.
 ///
 /// # Safety
 ///
@@ -323,6 +329,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     let state = node.cast::<GpuAccelScanState>();
     let cscan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
 
+    // Read strategy metadata from custom_private.
     unsafe {
         let priv_list = (*cscan).custom_private;
         if !priv_list.is_null() && pg_sys::list_length(priv_list) >= 3 {
@@ -335,11 +342,25 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             (*state).accel.expected_threads = 1;
         }
     }
+
+    // Allocate the Rust-side batch executor state.
+    let batch_size = unsafe {
+        let bs = (*state).accel.batch_size;
+        if bs > 0 { bs as usize } else { 256 }
+    };
+    let exec_state = Box::new(ScanExecState::new(AccelStrategy::BatchedEval, batch_size));
+    unsafe {
+        (*state).accel.executor = Box::into_raw(exec_state);
+        (*state).accel.rows_dispatched = 0;
+        (*state).accel.batches_executed = 0;
+        (*state).accel.dispatch_time_us = 0;
+    }
 }
 
-/// `ExecCustomScan`: fetch the next tuple (passthrough to child).
+/// `ExecCustomScan`: fetch the next tuple via batch dispatch.
 ///
-/// Increments execution counters for EXPLAIN ANALYZE.
+/// Delegates to `ScanExecState::next` which handles batch accumulation,
+/// dispatch, and one-at-a-time result draining.
 ///
 /// # Safety
 ///
@@ -347,44 +368,69 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 unsafe extern "C-unwind" fn exec_custom_scan(
     node: *mut pg_sys::CustomScanState,
 ) -> *mut pg_sys::TupleTableSlot {
-    let start = std::time::Instant::now();
+    let state = node.cast::<GpuAccelScanState>();
 
-    // SAFETY: PG's ExecInitCustomScan stored child plan states in custom_ps.
-    // We read the first child and delegate via ExecProcNode.
-    let slot = unsafe {
+    // If the extension is disabled, fall through to passthrough.
+    if !gucs::enabled() {
+        return unsafe { passthrough_exec(node) };
+    }
+
+    // SAFETY: executor was allocated in begin_custom_scan.
+    let executor = unsafe { (*state).accel.executor };
+    if executor.is_null() {
+        return unsafe { passthrough_exec(node) };
+    }
+
+    // SAFETY: executor is a valid pointer allocated in begin_custom_scan.
+    let exec_state = unsafe { &mut *executor };
+
+    // Get the child plan state from custom_ps.
+    // SAFETY: custom_ps was populated by ExecInitCustomScan.
+    let child_ps = unsafe {
         let custom_ps = (*node).custom_ps;
         if custom_ps.is_null() || pg_sys::list_length(custom_ps) == 0 {
             return std::ptr::null_mut();
         }
-        let child_state = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
-        if child_state.is_null() {
-            return std::ptr::null_mut();
-        }
-        pg_sys::ExecProcNode(child_state)
+        pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>()
     };
-
-    // Update EXPLAIN ANALYZE counters.
-    let state = node.cast::<GpuAccelScanState>();
-    let elapsed_us = start.elapsed().as_micros() as u64;
-
-    // SAFETY: state points to our extended struct allocated in create_custom_scan_state.
-    unsafe {
-        (*state).accel.dispatch_time_us = (*state).accel.dispatch_time_us.wrapping_add(elapsed_us);
-
-        if !slot.is_null() && ((*slot).tts_flags & pg_sys::TTS_FLAG_EMPTY as u16 == 0) {
-            (*state).accel.rows_dispatched = (*state).accel.rows_dispatched.wrapping_add(1);
-        }
+    if child_ps.is_null() {
+        return std::ptr::null_mut();
     }
 
-    slot
+    // Our scan slot — where we put the result tuple.
+    // SAFETY: ss.ps.ps_ResultTupleSlot is initialised by PG.
+    let scan_slot = unsafe { (*node).ss.ps.ps_ResultTupleSlot };
+
+    // SAFETY: We are on the main backend thread. All pointers are valid.
+    let result = unsafe { exec_state.next(child_ps, scan_slot) };
+
+    // Sync counters back for EXPLAIN ANALYZE.
+    unsafe {
+        (*state).accel.rows_dispatched = exec_state.rows_dispatched;
+        (*state).accel.batches_executed = exec_state.batches_executed;
+        (*state).accel.dispatch_time_us = exec_state.dispatch_time_us;
+    }
+
+    result
 }
 
-/// `EndCustomScan`: clean up child plan states.
+/// `EndCustomScan`: clean up child plan states and free executor.
 ///
 /// # Safety
 ///
 /// Called by the executor on the main backend thread.
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
+    let state = node.cast::<GpuAccelScanState>();
+
+    // Reclaim the Rust executor state to prevent leaks.
+    unsafe {
+        if !(*state).accel.executor.is_null() {
+            // SAFETY: executor was allocated via Box::into_raw in begin_custom_scan.
+            let _ = Box::from_raw((*state).accel.executor);
+            (*state).accel.executor = std::ptr::null_mut();
+        }
+    }
+
     // SAFETY: Walk custom_ps and call ExecEndNode on each child.
     unsafe {
         let custom_ps = (*node).custom_ps;
@@ -406,10 +452,23 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
 ///
 /// Called by the executor on the main backend thread.
 unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
-    // Reset counters.
     let state = node.cast::<GpuAccelScanState>();
-    // SAFETY: state is our extended struct.
+
+    // Drop the old executor state and create a fresh one.
     unsafe {
+        if !(*state).accel.executor.is_null() {
+            // SAFETY: executor was allocated via Box::into_raw.
+            let _ = Box::from_raw((*state).accel.executor);
+        }
+
+        let batch_size = if (*state).accel.batch_size > 0 {
+            (*state).accel.batch_size as usize
+        } else {
+            256
+        };
+        let exec_state = Box::new(ScanExecState::new(AccelStrategy::BatchedEval, batch_size));
+        (*state).accel.executor = Box::into_raw(exec_state);
+
         (*state).accel.rows_dispatched = 0;
         (*state).accel.batches_executed = 0;
         (*state).accel.dispatch_time_us = 0;
@@ -500,6 +559,27 @@ fn resolve_thread_count() -> c_int {
         .map(|n| n.get() as c_int)
         .unwrap_or(2);
     (cores / 2).max(1)
+}
+
+/// Passthrough execution: pull one tuple from the child and return it
+/// directly, bypassing batch dispatch.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread.
+unsafe fn passthrough_exec(node: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
+    // SAFETY: PG's ExecInitCustomScan stored child plan states in custom_ps.
+    unsafe {
+        let custom_ps = (*node).custom_ps;
+        if custom_ps.is_null() || pg_sys::list_length(custom_ps) == 0 {
+            return std::ptr::null_mut();
+        }
+        let child_state = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
+        if child_state.is_null() {
+            return std::ptr::null_mut();
+        }
+        pg_sys::ExecProcNode(child_state)
+    }
 }
 
 // ---------------------------------------------------------------------------

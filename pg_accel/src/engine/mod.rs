@@ -4,6 +4,7 @@ pub mod batch;
 pub mod cost;
 pub mod device_info;
 pub mod dispatch;
+pub mod executor;
 pub mod dispatch_fallback;
 pub mod ffi;
 pub mod function_matcher;
