@@ -24,6 +24,10 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         rows: usize,
 
+        /// Seed for deterministic random data generation (0 = random).
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+
         /// PostgreSQL connection string.
         #[arg(long, default_value = DEFAULT_CONNECTION)]
         connection: String,
@@ -43,6 +47,10 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         iterations: usize,
 
+        /// Number of warmup iterations (excluded from statistics).
+        #[arg(long, default_value_t = 2)]
+        warmup: usize,
+
         /// Number of rows for setup (used if tables don't exist yet).
         #[arg(long, default_value_t = 100_000)]
         rows: usize,
@@ -51,7 +59,7 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CONNECTION)]
         connection: String,
 
-        /// Output format: `markdown` or `json`.
+        /// Output format: `markdown`, `json`, or `csv`.
         #[arg(long, default_value = "markdown")]
         format: ReportFormat,
     },
@@ -68,6 +76,7 @@ enum Command {
 enum ReportFormat {
     Markdown,
     Json,
+    Csv,
 }
 
 impl std::fmt::Display for ReportFormat {
@@ -75,6 +84,7 @@ impl std::fmt::Display for ReportFormat {
         match self {
             Self::Markdown => write!(f, "markdown"),
             Self::Json => write!(f, "json"),
+            Self::Csv => write!(f, "csv"),
         }
     }
 }
@@ -86,6 +96,7 @@ impl std::str::FromStr for ReportFormat {
         match s.to_lowercase().as_str() {
             "markdown" | "md" => Ok(Self::Markdown),
             "json" => Ok(Self::Json),
+            "csv" => Ok(Self::Csv),
             other => Err(format!("unknown format: {other}")),
         }
     }
@@ -104,16 +115,25 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Setup {
             rows,
+            seed,
             connection,
             workload,
-        } => cmd_setup(&connection, rows, workload.as_deref()),
+        } => cmd_setup(&connection, rows, seed, workload.as_deref()),
         Command::Run {
             workload,
             iterations,
+            warmup,
             rows,
             connection,
             format,
-        } => cmd_run(&connection, workload.as_deref(), iterations, rows, &format),
+        } => cmd_run(
+            &connection,
+            workload.as_deref(),
+            iterations,
+            warmup,
+            rows,
+            &format,
+        ),
         Command::Report { format } => cmd_report(&format),
     }
 }
@@ -121,11 +141,12 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_setup(
     connection: &str,
     rows: usize,
+    seed: u64,
     workload_name: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workloads = resolve_workloads(workload_name)?;
     for w in &workloads {
-        runner::setup(connection, w.as_ref(), rows)?;
+        runner::setup(connection, w.as_ref(), rows, seed)?;
     }
     Ok(())
 }
@@ -134,11 +155,12 @@ fn cmd_run(
     connection: &str,
     workload_name: Option<&str>,
     iterations: usize,
+    warmup: usize,
     rows: usize,
     format: &ReportFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workloads = resolve_workloads(workload_name)?;
-    let report = runner::run_all(connection, &workloads, rows, iterations)?;
+    let report = runner::run_all(connection, &workloads, rows, iterations, warmup)?;
     print_report(&report, format)?;
     Ok(())
 }
@@ -169,6 +191,7 @@ fn print_report(
     match format {
         ReportFormat::Markdown => print!("{}", report.to_markdown()),
         ReportFormat::Json => println!("{}", report.to_json()?),
+        ReportFormat::Csv => print!("{}", report.to_csv()),
     }
     Ok(())
 }

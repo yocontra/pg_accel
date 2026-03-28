@@ -1,5 +1,8 @@
 mod aggregate;
+mod fts_rank;
 mod h3_bulk;
+mod index_recheck;
+mod join_residual;
 mod large_sort;
 mod proximity;
 mod simple_agg;
@@ -7,7 +10,10 @@ mod spatial_join;
 mod topk_sort;
 
 pub use aggregate::Aggregate;
+pub use fts_rank::FtsRank;
 pub use h3_bulk::H3Bulk;
+pub use index_recheck::IndexRecheck;
+pub use join_residual::JoinResidual;
 pub use large_sort::LargeSort;
 pub use proximity::Proximity;
 pub use simple_agg::SimpleAgg;
@@ -42,6 +48,9 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(LargeSort),
         Box::new(TopkSort),
         Box::new(H3Bulk),
+        Box::new(JoinResidual),
+        Box::new(IndexRecheck),
+        Box::new(FtsRank),
     ]
 }
 

@@ -285,6 +285,41 @@ impl BenchReport {
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
+
+    /// Render the report as CSV (one row per workload).
+    #[must_use]
+    pub fn to_csv(&self) -> String {
+        let mut out = String::new();
+        out.push_str(
+            "workload,accel_mean_ms,accel_stddev_ms,accel_median_ms,\
+             baseline_mean_ms,baseline_stddev_ms,baseline_median_ms,\
+             speedup,p_value,significant\n",
+        );
+        for w in &self.workloads {
+            let sig = if w.p_value < 0.01 {
+                "yes"
+            } else if w.p_value < 0.05 {
+                "marginal"
+            } else {
+                "no"
+            };
+            let _ = writeln!(
+                out,
+                "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{}",
+                w.name,
+                w.accel_mean_ms,
+                w.accel_stddev_ms,
+                w.accel_median_ms,
+                w.baseline_mean_ms,
+                w.baseline_stddev_ms,
+                w.baseline_median_ms,
+                w.speedup,
+                w.p_value,
+                sig,
+            );
+        }
+        out
+    }
 }
 
 /// Generate a full report from workload results, with hardware and GUC info.

@@ -5,6 +5,9 @@ use crate::workloads::Workload;
 
 /// Execute setup SQL for a workload against the given connection string.
 ///
+/// If `seed > 0`, sets `setseed(seed)` before data generation for
+/// deterministic, reproducible benchmarks.
+///
 /// # Errors
 ///
 /// Returns an error if the connection or any SQL statement fails.
@@ -12,8 +15,16 @@ pub fn setup(
     connection: &str,
     workload: &dyn Workload,
     rows: usize,
+    seed: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
+    if seed > 0 {
+        // setseed takes a float in [-1, 1]. Map u64 seed to [0, 1).
+        #[allow(clippy::cast_precision_loss)]
+        let seed_val = (seed % 1_000_000) as f64 / 1_000_000.0;
+        client.batch_execute(&format!("SELECT setseed({seed_val})"))?;
+        eprintln!("[setup] {} -- using seed {seed} (setseed={seed_val})", workload.name());
+    }
     for sql in workload.setup_sql(rows) {
         client.batch_execute(&sql)?;
     }
@@ -23,6 +34,8 @@ pub fn setup(
 
 /// Run a workload benchmark for the given number of iterations and return results.
 ///
+/// `warmup` iterations are run first and excluded from the statistics.
+///
 /// # Errors
 ///
 /// Returns an error if the connection or any query fails.
@@ -30,12 +43,16 @@ pub fn run(
     connection: &str,
     workload: &dyn Workload,
     iterations: usize,
+    warmup: usize,
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
     let query = workload.query_sql();
+    let total_runs = warmup + iterations;
     let mut results = Vec::with_capacity(iterations);
 
-    for i in 0..iterations {
+    for i in 0..total_runs {
+        let is_warmup = i < warmup;
+
         // --- pg_accel ON ---
         client.batch_execute("SET pg_accel.enabled = on")?;
         let accel_ms = run_explain_analyze(&mut client, &query)?;
@@ -44,18 +61,21 @@ pub fn run(
         client.batch_execute("SET pg_accel.enabled = off")?;
         let baseline_ms = run_explain_analyze(&mut client, &query)?;
 
+        let phase = if is_warmup { "warmup" } else { "bench" };
+        let iter_num = if is_warmup { i + 1 } else { i - warmup + 1 };
+        let iter_total = if is_warmup { warmup } else { iterations };
         eprintln!(
-            "[{name}] iteration {iter}/{total}: accel={accel_ms:.2}ms  \
+            "[{name}] {phase} {iter_num}/{iter_total}: accel={accel_ms:.2}ms  \
              baseline={baseline_ms:.2}ms",
             name = workload.name(),
-            iter = i + 1,
-            total = iterations,
         );
 
-        results.push(IterationResult {
-            accel_ms,
-            baseline_ms,
-        });
+        if !is_warmup {
+            results.push(IterationResult {
+                accel_ms,
+                baseline_ms,
+            });
+        }
     }
 
     Ok(WorkloadResult::from_iterations(
@@ -94,11 +114,12 @@ pub fn run_all(
     workloads: &[Box<dyn Workload>],
     rows: usize,
     iterations: usize,
+    warmup: usize,
 ) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
     let mut results = Vec::with_capacity(workloads.len());
     for w in workloads {
-        setup(connection, w.as_ref(), rows)?;
-        let result = run(connection, w.as_ref(), iterations)?;
+        setup(connection, w.as_ref(), rows, 0)?;
+        let result = run(connection, w.as_ref(), iterations, warmup)?;
         cleanup(connection, w.as_ref())?;
         results.push(result);
     }
