@@ -1,0 +1,40 @@
+cmake_minimum_required(VERSION 3.21)
+project(pgaccel_kernels LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(PGACCEL_USE_SYCL "Build with AdaptiveCpp/SYCL support" OFF)
+
+if(PGACCEL_USE_SYCL)
+    find_package(AdaptiveCpp QUIET)
+    if(NOT AdaptiveCpp_FOUND)
+        message(WARNING "AdaptiveCpp not found. Building without GPU support. "
+                        "Install AdaptiveCpp and set AdaptiveCpp_DIR.")
+        set(PGACCEL_USE_SYCL OFF)
+    endif()
+endif()
+
+add_library(pgaccel_kernels SHARED
+    src/device_manager.cpp
+)
+
+target_include_directories(pgaccel_kernels PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+if(PGACCEL_USE_SYCL AND AdaptiveCpp_FOUND)
+    add_sycl_to_target(TARGET pgaccel_kernels)
+    target_compile_definitions(pgaccel_kernels PRIVATE PGACCEL_HAS_SYCL=1)
+    message(STATUS "pgaccel: Building with AdaptiveCpp SYCL support")
+else()
+    target_compile_definitions(pgaccel_kernels PRIVATE PGACCEL_HAS_SYCL=0)
+    message(STATUS "pgaccel: Building CPU-only (no SYCL)")
+endif()
+
+# Standalone test binary
+add_executable(test_device test/test_device.cpp)
+target_link_libraries(test_device PRIVATE pgaccel_kernels)
+
+install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
+install(FILES include/pgaccel_ffi.h DESTINATION include)

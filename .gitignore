@@ -1,0 +1,44 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# pgrx
+.pgrx/
+pg_accel/pg_data/
+
+# C++ / CMake
+build/
+cmake-build-*/
+*.o
+*.so
+*.dylib
+*.a
+compile_commands.json
+
+# GPU
+*.ptx
+*.cubin
+*.fatbin
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker/data/
+
+# Environment
+.env
+.env.local
+
+# Test artifacts
+/tmp/.pgaccel_*
+pgaccel-kernels/build/

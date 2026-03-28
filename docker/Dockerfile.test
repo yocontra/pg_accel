@@ -1,0 +1,41 @@
+# pg_accel test environment: PostGIS + H3 + pg_accel
+FROM imresamu/postgis:17-3.5-alpine
+
+# Install build dependencies
+RUN apk add --no-cache --virtual .build-deps \
+    cmake \
+    make \
+    gcc \
+    g++ \
+    git
+
+# Build and install h3 C library v4.2.1
+RUN git clone --branch v4.2.1 --depth 1 https://github.com/uber/h3.git /tmp/h3 && \
+    cd /tmp/h3 && \
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF && \
+    cmake --build build --target install && \
+    rm -rf /tmp/h3
+
+# Build and install h3-pg (PostgreSQL extension for H3)
+RUN git clone https://github.com/zachasme/h3-pg.git /tmp/h3-pg && \
+    cd /tmp/h3-pg && \
+    make && \
+    make install && \
+    rm -rf /tmp/h3-pg
+
+# Cleanup build dependencies
+RUN apk del .build-deps
+
+# pg_accel extension files (placeholder — will be volume-mounted in dev)
+# COPY pg_accel/target/release/pg_accel-pg17/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
+# COPY pg_accel/target/release/pg_accel-pg17/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+
+# Auto-tune entrypoint
+COPY docker/autotune.sh /usr/local/bin/autotune.sh
+RUN chmod +x /usr/local/bin/autotune.sh
+
+# Copy fixtures and init scripts
+COPY docker/fixtures/ /docker-entrypoint-initdb.d/fixtures/
+COPY docker/init/ /docker-entrypoint-initdb.d/init/
+
+ENTRYPOINT ["autotune.sh"]

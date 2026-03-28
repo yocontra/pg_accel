@@ -1,0 +1,10 @@
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "PostgreSQL", "Zlib", "Unicode-3.0", "Unicode-DFS-2016", "BSL-1.0", "OpenSSL"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+# serde_cbor is unmaintained but pulled in transitively by pgrx.
+ignore = ["RUSTSEC-2021-0127"]

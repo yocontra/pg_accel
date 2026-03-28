@@ -1,0 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS h3;
+CREATE EXTENSION IF NOT EXISTS h3_postgis;
+-- pg_accel loaded via shared_preload_libraries, just CREATE EXTENSION
+CREATE EXTENSION IF NOT EXISTS pg_accel;
