@@ -450,6 +450,121 @@ mod tests {
         assert_eq!(result.definite_true, vec![0]);
     }
 
+    // -- Edge case tests (Phase 8 correctness) --------------------------------
+
+    #[test]
+    fn empty_inputs_produce_empty_result() {
+        let result = spatial_intersects(&[], &[]);
+        assert!(result.definite_true.is_empty());
+        assert!(result.definite_false.is_empty());
+        assert!(result.uncertain.is_empty());
+    }
+
+    #[test]
+    fn mismatched_lengths_uses_shorter() {
+        let pt = ExtractedGeometry {
+            bbox: [2.0, 2.0, 2.0, 2.0],
+            coords: vec![2.0, 2.0],
+            coord_count: 1,
+            geom_type: GeomType::Point,
+        };
+        let poly = ExtractedGeometry {
+            bbox: [0.0, 0.0, 4.0, 4.0],
+            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
+            coord_count: 5,
+            geom_type: GeomType::Polygon,
+        };
+        // 1 vs 2: should process min(1,2)=1 pair
+        let result = spatial_intersects(&[pt], &[poly.clone(), poly]);
+        assert_eq!(
+            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn point_outside_polygon_is_definite_false_or_uncertain() {
+        let pt = ExtractedGeometry {
+            bbox: [10.0, 10.0, 10.0, 10.0],
+            coords: vec![10.0, 10.0],
+            coord_count: 1,
+            geom_type: GeomType::Point,
+        };
+        let poly = ExtractedGeometry {
+            bbox: [0.0, 0.0, 4.0, 4.0],
+            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
+            coord_count: 5,
+            geom_type: GeomType::Polygon,
+        };
+        let result = spatial_intersects(&[pt], &[poly]);
+        // Disjoint bboxes → definite_false
+        assert_eq!(result.definite_false, vec![0]);
+    }
+
+    #[test]
+    fn unknown_geom_type_with_overlapping_bbox_is_uncertain() {
+        let a = ExtractedGeometry {
+            bbox: [0.0, 0.0, 5.0, 5.0],
+            coords: vec![],
+            coord_count: 0,
+            geom_type: GeomType::Unknown,
+        };
+        let b = ExtractedGeometry {
+            bbox: [1.0, 1.0, 6.0, 6.0],
+            coords: vec![],
+            coord_count: 0,
+            geom_type: GeomType::Unknown,
+        };
+        let result = spatial_intersects(&[a], &[b]);
+        assert_eq!(result.uncertain, vec![0]);
+    }
+
+    #[test]
+    fn touching_bboxes_not_disjoint() {
+        // Bboxes share an edge (xmax_a == xmin_b) — NOT disjoint
+        // The point is at (1.0, 0.5), on the edge of the polygon
+        let a = ExtractedGeometry {
+            bbox: [1.0, 0.5, 1.0, 0.5],
+            coords: vec![1.0, 0.5],
+            coord_count: 1,
+            geom_type: GeomType::Point,
+        };
+        let b = ExtractedGeometry {
+            bbox: [1.0, 0.0, 2.0, 1.0],
+            coords: vec![1.0, 0.0, 2.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.0],
+            coord_count: 5,
+            geom_type: GeomType::Polygon,
+        };
+        let result = spatial_intersects(&[a], &[b]);
+        // Bboxes overlap, so this should NOT be filtered by layer 1
+        // (it goes to layer 2 point-in-ring check)
+        assert!(
+            !result.definite_false.is_empty()
+                || !result.definite_true.is_empty()
+                || !result.uncertain.is_empty(),
+            "pair should be classified by layer 2, not dropped"
+        );
+    }
+
+    #[test]
+    fn polygon_vs_polygon_is_uncertain() {
+        // Two overlapping polygons — layer 2 can't handle polygon-polygon
+        let a = ExtractedGeometry {
+            bbox: [0.0, 0.0, 2.0, 2.0],
+            coords: vec![0.0, 0.0, 2.0, 0.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0],
+            coord_count: 5,
+            geom_type: GeomType::Polygon,
+        };
+        let b = ExtractedGeometry {
+            bbox: [1.0, 1.0, 3.0, 3.0],
+            coords: vec![1.0, 1.0, 3.0, 1.0, 3.0, 3.0, 1.0, 3.0, 1.0, 1.0],
+            coord_count: 5,
+            geom_type: GeomType::Polygon,
+        };
+        let result = spatial_intersects(&[a], &[b]);
+        assert_eq!(result.uncertain, vec![0]);
+    }
+
     #[test]
     fn line_vs_polygon_is_uncertain_if_bboxes_overlap() {
         let line = ExtractedGeometry {

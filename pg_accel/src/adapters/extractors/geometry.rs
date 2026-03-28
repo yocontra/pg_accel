@@ -665,4 +665,142 @@ mod tests {
     fn extract_geometry_null_datum() {
         assert!(extract_geometry(Datum::from(0usize)).is_none());
     }
+
+    // -- Edge case tests (Phase 8 correctness) --------------------------------
+
+    #[test]
+    fn extract_geometry_point_negative_coords() {
+        let buf = make_gserialized_no_bbox(4326, WKB_POINT_TYPE, -179.999, -89.999);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+        assert!(g.coords[0] < 0.0);
+        assert!(g.coords[1] < 0.0);
+    }
+
+    #[test]
+    fn extract_geometry_point_zero_coords() {
+        let buf = make_gserialized_no_bbox(4326, WKB_POINT_TYPE, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+        assert!((g.coords[0]).abs() < f32::EPSILON);
+        assert!((g.coords[1]).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_geometry_point_large_coords() {
+        let buf = make_gserialized_no_bbox(4326, WKB_POINT_TYPE, 1e7, -1e7);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+        assert!(g.coords[0] > 0.0);
+        assert!(g.coords[1] < 0.0);
+    }
+
+    #[test]
+    fn extract_geometry_linestring_two_points() {
+        // Minimal linestring: just two points
+        let buf = make_linestring_no_bbox(&[(0.0, 0.0), (1.0, 1.0)]);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::LineString);
+        assert_eq!(g.coord_count, 2);
+    }
+
+    #[test]
+    fn extract_geometry_linestring_zero_length() {
+        // Degenerate: start == end
+        let buf = make_linestring_no_bbox(&[(5.0, 5.0), (5.0, 5.0)]);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::LineString);
+        // Bbox should be a point
+        assert!((g.bbox[0] - g.bbox[2]).abs() < f32::EPSILON);
+        assert!((g.bbox[1] - g.bbox[3]).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_geometry_polygon_triangle() {
+        let ring = vec![(0.0, 0.0), (1.0, 0.0), (0.5, 1.0), (0.0, 0.0)];
+        let buf = make_polygon_no_bbox(&ring);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Polygon);
+        assert_eq!(g.coord_count, 4);
+    }
+
+    #[test]
+    fn extract_geometry_polygon_collinear_vertices() {
+        // Zero-area polygon: all vertices on same line
+        let ring = vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (1.0, 0.0), (0.0, 0.0)];
+        let buf = make_polygon_no_bbox(&ring);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Polygon);
+        // Degenerate but should not crash
+        assert_eq!(g.coord_count, 5);
+    }
+
+    #[test]
+    fn extract_geometry_truncated_buffer() {
+        // Buffer too short for the declared content
+        let mut buf = make_gserialized_no_bbox(4326, WKB_POINT_TYPE, 1.0, 2.0);
+        buf.truncate(12); // Cut off coords
+        // Update varlena header to match truncated size
+        let new_size = (buf.len() as u32) << 2;
+        buf[0..4].copy_from_slice(&new_size.to_le_bytes());
+        let datum = Datum::from(buf.as_ptr() as usize);
+        assert!(extract_geometry(datum).is_none());
+    }
+
+    #[test]
+    fn extract_geometry_multipoint_is_unknown() {
+        // WKB type 4 = MULTIPOINT
+        let buf = make_gserialized_no_bbox(4326, 4, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Unknown);
+    }
+
+    #[test]
+    fn extract_geometry_multilinestring_is_unknown() {
+        // WKB type 5 = MULTILINESTRING
+        let buf = make_gserialized_no_bbox(4326, 5, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Unknown);
+    }
+
+    #[test]
+    fn extract_geometry_multipolygon_is_unknown() {
+        // WKB type 6 = MULTIPOLYGON
+        let buf = make_gserialized_no_bbox(4326, 6, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Unknown);
+    }
+
+    #[test]
+    fn extract_geometry_bbox_used_over_computed() {
+        // Embedded bbox should take priority over computed
+        let buf =
+            make_gserialized_with_bbox((-100.0, -100.0, 100.0, 100.0), WKB_POINT_TYPE, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        // The point is at (0,0) but bbox says (-100,-100,100,100)
+        assert!((g.bbox[0] - (-100.0_f32)).abs() < f32::EPSILON);
+        assert!((g.bbox[2] - 100.0_f32).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_geometry_linestring_negative_coords() {
+        let buf = make_linestring_no_bbox(&[(-10.0, -20.0), (-30.0, -40.0)]);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert!((g.bbox[0] - (-30.0_f32)).abs() < f32::EPSILON);
+        assert!((g.bbox[1] - (-40.0_f32)).abs() < f32::EPSILON);
+        assert!((g.bbox[2] - (-10.0_f32)).abs() < f32::EPSILON);
+        assert!((g.bbox[3] - (-20.0_f32)).abs() < f32::EPSILON);
+    }
 }
