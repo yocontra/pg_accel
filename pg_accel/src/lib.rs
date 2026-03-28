@@ -30,10 +30,16 @@ pub unsafe extern "C-unwind" fn _PG_init() {
         }
     }
 
-    // 4. Detect platform capabilities (CPU cores, GPU availability).
+    // 4. Register Custom Scan Provider and install planner hooks.
+    engine::ffi::custom_scan::register();
+    // SAFETY: Called once on the main backend thread during extension load,
+    // before any queries. Saves previous hooks and installs ours.
+    unsafe { engine::ffi::planner_hooks::install() };
+
+    // 5. Detect platform capabilities (CPU cores, GPU availability).
     let profile = engine::cost::PlatformProfile::detect();
 
-    // 5. Log startup summary.
+    // 6. Log startup summary.
     let gpu_status = if profile.has_gpu {
         "available"
     } else {
