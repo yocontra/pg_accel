@@ -6,5 +6,5 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 
 [advisories]
-# serde_cbor is unmaintained but pulled in transitively by pgrx.
-ignore = ["RUSTSEC-2021-0127"]
+# Unmaintained crates pulled in transitively by pgrx.
+ignore = ["RUSTSEC-2021-0127", "RUSTSEC-2024-0436"]

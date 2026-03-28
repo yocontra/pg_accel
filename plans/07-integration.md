@@ -276,7 +276,7 @@ _(no deviations)_
 
 ### A7 — Cost Model Tuning
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/cost.rs` (updates)
+**Owns:** `pg_accel/src/engine/cost.rs` (updates)
 
 **Tasks:**
 - [ ] Run 20+ query patterns with EXPLAIN ANALYZE now that all nodes work

@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn float8_round_trip() {
         let ext = Float8Extractor;
-        let original = 3.14_f64;
+        let original = 3.140_001_f64;
         let datum = pg_sys::Datum::from(original.to_bits() as usize);
         // SAFETY: Test datum constructed from known f64 bits.
         let packed = unsafe { round_trip(&ext, datum) };
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn float4_round_trip() {
         let ext = Float4Extractor;
-        let original = 2.718_f32;
+        let original = 2.718_5_f32;
         let datum = pg_sys::Datum::from(original.to_bits() as usize);
         // SAFETY: Test datum constructed from known f32 bits.
         let packed = unsafe { round_trip(&ext, datum) };

@@ -8,8 +8,11 @@
 //! reclaim any threads leaked by a crashing backend.
 
 use pgrx::lwlock::PgLwLock;
+#[cfg(not(test))]
+use pgrx::pg_shmem_init;
+#[cfg(not(test))]
 use pgrx::prelude::*;
-use pgrx::{pg_shmem_init, PgSharedMem, PgSharedMemoryInitialization};
+use pgrx::shmem::PGRXSharedMemory;
 
 use super::gucs;
 
@@ -25,21 +28,12 @@ const MAX_BACKENDS: usize = 256;
 // ---------------------------------------------------------------------------
 
 /// Per-backend allocation record stored in shared memory.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct BackendSlot {
     /// `pg_sys::MyProcPid` of the owning backend, or 0 if unused.
     pid: i32,
     /// Number of threads currently allocated to this backend.
     allocated: i32,
-}
-
-impl Default for BackendSlot {
-    fn default() -> Self {
-        Self {
-            pid: 0,
-            allocated: 0,
-        }
-    }
 }
 
 /// Shared-memory state for the cluster-wide thread budget.
@@ -62,30 +56,43 @@ impl Default for ThreadBudgetData {
     }
 }
 
-// SAFETY: `ThreadBudgetData` is only accessed while holding the PgLwLock,
-// which serialises all reads and writes. The struct contains no pointers or
-// non-Send types.
-unsafe impl PgSharedMemoryInitialization for ThreadBudgetData {
-    fn pg_init(&'static self) {
-        // No additional initialisation required beyond Default.
-    }
-
-    fn shmem_init(&'static self) {
-        // No additional initialisation required beyond Default.
-    }
-}
+// SAFETY: `ThreadBudgetData` contains only `Copy` primitives (i32) and fixed-size
+// arrays thereof. It has no heap allocations, pointers, or non-Send types.
+// All access is serialised by the enclosing `PgLwLock`.
+unsafe impl PGRXSharedMemory for ThreadBudgetData {}
 
 /// Global LwLock-protected thread budget in shared memory.
-pub static BUDGET: PgLwLock<ThreadBudgetData> = PgLwLock::new();
+///
+/// # Safety
+///
+/// `PgLwLock::new` is `const unsafe` because the caller must ensure the lock is
+/// initialised via `pg_shmem_init!` before any access.  We guarantee this by
+/// calling `init_shmem()` from `_PG_init`.
+pub static BUDGET: PgLwLock<ThreadBudgetData> =
+    // SAFETY: Initialised in `init_shmem()` which is called from `_PG_init`.
+    unsafe { PgLwLock::new(c"pg_accel_thread_budget") };
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Register the shared-memory segment. **Must be called from `_PG_init`.**
+/// Register the shared-memory segment. **Must be called from `_PG_init`.**
+///
+/// Gated behind `#[cfg(not(test))]` because the test binary links as a
+/// standalone executable where PG server symbols (`shmem_request_hook`, etc.)
+/// are unavailable. The actual extension `.so` loaded by PG is built as
+/// `cdylib` without the `test` cfg and includes this code.
+#[cfg(not(test))]
+#[allow(unexpected_cfgs)]
 pub fn init_shmem() {
     pg_shmem_init!(BUDGET);
 }
+
+/// No-op stub used by the test binary so that `_PG_init` compiles without
+/// referencing PG server-internal shared-memory symbols.
+#[cfg(test)]
+pub fn init_shmem() {}
 
 /// Request `n` worker threads from the cluster-wide budget.
 ///
@@ -136,14 +143,14 @@ pub fn release_threads(n: i32) {
     let mut exclusive = BUDGET.exclusive();
     let pid = current_pid();
 
-    for slot in &mut exclusive.backends {
-        if slot.pid == pid {
-            let actual = n.min(slot.allocated);
-            slot.allocated -= actual;
+    for i in 0..MAX_BACKENDS {
+        if exclusive.backends[i].pid == pid {
+            let actual = n.min(exclusive.backends[i].allocated);
+            exclusive.backends[i].allocated -= actual;
             exclusive.total_allocated -= actual;
 
-            if slot.allocated == 0 {
-                slot.pid = 0; // free the slot
+            if exclusive.backends[i].allocated == 0 {
+                exclusive.backends[i].pid = 0; // free the slot
             }
             return;
         }
@@ -159,11 +166,11 @@ pub fn cleanup_backend() {
     let mut exclusive = BUDGET.exclusive();
     let pid = current_pid();
 
-    for slot in &mut exclusive.backends {
-        if slot.pid == pid {
-            exclusive.total_allocated -= slot.allocated;
-            slot.allocated = 0;
-            slot.pid = 0;
+    for i in 0..MAX_BACKENDS {
+        if exclusive.backends[i].pid == pid {
+            exclusive.total_allocated -= exclusive.backends[i].allocated;
+            exclusive.backends[i].allocated = 0;
+            exclusive.backends[i].pid = 0;
             return;
         }
     }
@@ -270,7 +277,7 @@ mod tests {
 
     #[test]
     fn budget_exhausted_returns_zero() {
-        let max_total = 8;
+        let max_total: i32 = 8;
         let mut b = empty_budget();
         b.total_allocated = 8;
 
@@ -348,7 +355,11 @@ mod tests {
         // When max == 0, the full request should be granted.
         let max: i32 = 0;
         let requested = 64;
-        let granted = if max == 0 { requested } else { requested.min(max) };
+        let granted = if max == 0 {
+            requested
+        } else {
+            requested.min(max)
+        };
         assert_eq!(granted, 64);
     }
 

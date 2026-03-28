@@ -1,11 +1,18 @@
 # Phase 4: GPU Foundation
 
-**Depends on:** Phase 0 (kernel lib scaffold)
-**Parallelism:** 5 agents (A5–A9). Runs concurrently with Phase 3 (Planner FFI).
+**Depends on:** Phase 0 (kernel lib scaffold) + AdaptiveCpp installed
+**Parallelism:** Sequential after Phase 3 (spike-first strategy). Agents within phase.
 
 Build the AdaptiveCpp GPU kernel library. After this phase, we have working
 GPU primitives (bbox, sort, reduce, memory pool) tested standalone on multiple
 platforms, ready to wire into the Rust extension in Phase 7.
+
+**Build environment (March 2026 session):**
+- Apple Silicon Mac with Metal GPU
+- AdaptiveCpp installed from develop branch (background install during Phase 3)
+- Metal backend: fp32 only, in-order queues, shared USM (zero-copy)
+- Existing stub: `pgaccel-kernels/src/device_manager.cpp` (42 lines, CPU fallback only)
+- Existing Rust FFI: `pg_accel/src/gpu/bridge.rs` (declarations) + `fallback.rs` (CPU stubs)
 
 **Multi-platform strategy:** All kernels written in standard SYCL, compiled by
 AdaptiveCpp to all backends. Platform differences handled at runtime via

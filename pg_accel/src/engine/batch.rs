@@ -159,11 +159,11 @@ mod tests {
         let batch = acc.finish();
         assert_eq!(batch.len(), 4);
 
-        let nulls: Vec<_> = batch.iter().filter(|(_, is_null)| *is_null).collect();
-        assert_eq!(nulls.len(), 2);
+        let null_count = batch.iter().filter(|(_, is_null)| *is_null).count();
+        assert_eq!(null_count, 2);
 
-        let non_nulls: Vec<_> = batch.iter().filter(|(_, is_null)| !is_null).collect();
-        assert_eq!(non_nulls.len(), 2);
+        let non_null_count = batch.iter().filter(|(_, is_null)| !is_null).count();
+        assert_eq!(non_null_count, 2);
     }
 
     #[test]

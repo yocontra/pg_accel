@@ -114,8 +114,13 @@ Phase 11: Packaging + Docs
 Phase 12: Launch
 ```
 
-Phases 3+4 run in parallel. Phases 5+6 run in parallel.
-All other phases are sequential with all 10 agents working within each.
+**Revised execution order (March 2026 session):**
+Phases run sequentially (spike-first for Phase 3). Agents parallelized within
+each phase. AdaptiveCpp install runs in background during Phase 3.
+Order: 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11.
+
+Original plan had 3+4 parallel and 5+6 parallel, but spike-first strategy
+for Phase 3 means we serialize to reduce risk.
 
 **Testing at every phase:** Phase 0 establishes a Docker-based integration test
 harness (PG 17 + PostGIS + h3-pg + pg_accel, real data fixtures). Each subsequent
@@ -139,18 +144,23 @@ rebuilds Docker or restarts PG directly.
 
 ```
 pg_accel.so (Rust, pgrx 0.17, PG 15–18)
-├── core/
+├── engine/                     (renamed from core/ — edition 2024 std::core shadowing)
 │   ├── ffi/
 │   │   ├── custom_scan.rs      unsafe Custom Scan Provider bindings
 │   │   ├── planner_hooks.rs    set_rel_pathlist_hook, set_join_pathlist_hook
 │   │   └── pg_compat.rs        PG 15/16/17/18 version shims
-│   ├── type_extractor.rs       per PG type: datum → flat repr
-│   ├── function_matcher.rs     runtime pg_proc discovery
-│   ├── dispatch.rs             batch accumulator + strategy dispatch:
-│   │                           BatchedEval (main thread), GpuSpatial (GPU + recheck)
-│   ├── cost.rs                 platform-aware cost model
-│   ├── thread_budget.rs        shared memory LWLock thread counter
-│   ├── gucs.rs                 all GUCs
+│   ├── type_extractor.rs       per PG type: datum → flat repr     [DONE]
+│   ├── function_matcher.rs     runtime pg_proc discovery          [DONE]
+│   ├── dispatch.rs             strategy dispatch (BatchedEval done, GPU stub)
+│   ├── dispatch_fallback.rs    fallback decision logic            [DONE]
+│   ├── batch.rs                batch accumulator                  [DONE]
+│   ├── cost.rs                 platform-aware cost model          [DONE]
+│   ├── thread_budget.rs        shared memory LWLock thread counter [DONE]
+│   ├── thread_pool.rs          per-backend rayon pool             [DONE]
+│   ├── gucs.rs                 all GUCs                           [DONE]
+│   ├── stats.rs                per-backend perf counters          [DONE]
+│   ├── device_info.rs          pg_accel_device_info() SQL fn      [DONE]
+│   ├── registry.rs             OID->strategy HashMap              [PARTIAL]
 │   ├── executor/
 │   │   ├── scan.rs             GpuAccelScan — batched scan + vectorized WHERE
 │   │   ├── join.rs             GpuAccelJoin — batched probe + residual

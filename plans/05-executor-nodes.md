@@ -1,11 +1,18 @@
 # Phase 5: Executor Nodes
 
 **Depends on:** Phase 3 (planner FFI working)
-**Parallelism:** 5 agents (A0–A4, with A4 split into Agg + Sort sub-tasks). Agents A5–A9 work on Phase 6 (GPU Kernels) concurrently.
+**Parallelism:** Sequential after Phase 4. Agents within phase.
 
 This phase implements the actual execution logic behind the Custom Scan nodes.
 After Phase 3 gave us the planner hooks to inject our nodes into query plans,
 this phase makes those nodes actually DO something.
+
+**Implementation note:** The Phase 3 spike gives us a passthrough Custom Scan.
+This phase replaces the passthrough with real batch dispatch. The key callback
+is `ExecCustomScan` — instead of calling `ExecProcNode(child)` for each tuple,
+we accumulate tuples into `BatchAccumulator` (from Phase 2) and dispatch them
+through the engine. The existing `dispatch.rs` and `dispatch_fallback.rs` are
+already functional for BatchedEval strategy.
 
 ---
 
@@ -13,7 +20,7 @@ this phase makes those nodes actually DO something.
 
 ### A0 — GpuAccelScan: Core Execution
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/executor/scan.rs`
+**Owns:** `pg_accel/src/engine/executor/scan.rs`
 
 **Tasks:**
 - [ ] Implement `BeginCustomScan` callback:
@@ -58,7 +65,7 @@ _(no deviations)_
 
 ### A1 — GpuAccelScan: Vectorized Deserialization
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/executor/deser.rs`
+**Owns:** `pg_accel/src/engine/executor/deser.rs`
 
 **Tasks:**
 - [ ] Implement column-at-a-time deserialization for batches instead of per-tuple all-column deserialization:
@@ -86,7 +93,7 @@ _(no deviations)_
 
 ### A2 — GpuAccelJoin: Nested Loop Batched
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/executor/join.rs` (nested loop portion)
+**Owns:** `pg_accel/src/engine/executor/join.rs` (nested loop portion)
 
 **Tasks:**
 - [ ] Implement batched nested loop join:
@@ -117,7 +124,7 @@ _(no deviations)_
 
 ### A3 — GpuAccelJoin: Hash Join Batched Probe
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/executor/join.rs` (hash join portion, same file distinct section)
+**Owns:** `pg_accel/src/engine/executor/join.rs` (hash join portion, same file distinct section)
 
 **Tasks:**
 - [ ] Implement batched hash join probe:
@@ -142,7 +149,7 @@ _(no deviations)_
 
 ### A4 — GpuAccelAgg
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/executor/agg.rs`
+**Owns:** `pg_accel/src/engine/executor/agg.rs`
 
 **Tasks:**
 - [ ] Replace Agg node when transition functions are in our registry and rows > threshold
@@ -161,7 +168,7 @@ _(no deviations)_
 
 ### A4b — GpuAccelSort
 **Status:** Not Started
-**Owns:** `pg_accel/src/core/executor/sort.rs`
+**Owns:** `pg_accel/src/engine/executor/sort.rs`
 
 **NOTE:** This agent assignment shares the A4 slot. In practice, assign to a 6th
 agent or have A4 complete Agg first, then Sort, or split across Phase 5 and 7.

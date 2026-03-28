@@ -119,8 +119,9 @@ mod tests {
             .start_handler(|_| mask_signals())
             .thread_name(|i| format!("pgaccel-test-w{i}"))
             .build();
-        assert!(pool.is_ok(), "pool creation should succeed");
-        let pool = pool.expect("tested above");
+        let Ok(pool) = pool else {
+            panic!("pool creation should succeed");
+        };
         assert_eq!(pool.current_num_threads(), 2);
     }
 }
