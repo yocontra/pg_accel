@@ -346,11 +346,32 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     }
 
     // Allocate the Rust-side batch executor state.
-    let batch_size = unsafe {
+    //
+    // Steal the qual from the plan state so we evaluate it ourselves in
+    // batches, rather than letting ExecScan do it one tuple at a time.
+    // SAFETY: node points to our extended GpuAccelScanState whose first
+    // field is CustomScanState. ss.ps.qual and ss.ps.ps_ExprContext are
+    // initialised by ExecInitCustomScan before calling BeginCustomScan.
+    let (batch_size, qual, econtext) = unsafe {
         let bs = (*state).accel.batch_size;
-        if bs > 0 { bs as usize } else { 256 }
+        let batch_size = if bs > 0 { bs as usize } else { 256 };
+
+        // Steal the qual: take it from the plan state and NULL it out so
+        // PG's ExecScan won't double-evaluate it.
+        let qual = (*node).ss.ps.qual;
+        (*node).ss.ps.qual = std::ptr::null_mut();
+
+        let econtext = (*node).ss.ps.ps_ExprContext;
+
+        (batch_size, qual, econtext)
     };
-    let exec_state = Box::new(ScanExecState::new(AccelStrategy::BatchedEval, batch_size));
+
+    let exec_state = Box::new(ScanExecState::new(
+        AccelStrategy::BatchedEval,
+        batch_size,
+        qual,
+        econtext,
+    ));
     unsafe {
         (*state).accel.executor = Box::into_raw(exec_state);
         (*state).accel.rows_dispatched = 0;
@@ -456,19 +477,28 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
 unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
     let state = node.cast::<GpuAccelScanState>();
 
-    // Drop the old executor state and create a fresh one.
+    // Drop the old executor state and create a fresh one, preserving the
+    // qual and econtext pointers (they are owned by PG, not us).
     unsafe {
-        if !(*state).accel.executor.is_null() {
+        let (qual, econtext) = if (*state).accel.executor.is_null() {
+            (std::ptr::null_mut(), std::ptr::null_mut())
+        } else {
             // SAFETY: executor was allocated via Box::into_raw.
-            let _ = Box::from_raw((*state).accel.executor);
-        }
+            let old = Box::from_raw((*state).accel.executor);
+            (old.qual_ptr(), old.econtext_ptr())
+        };
 
         let batch_size = if (*state).accel.batch_size > 0 {
             (*state).accel.batch_size as usize
         } else {
             256
         };
-        let exec_state = Box::new(ScanExecState::new(AccelStrategy::BatchedEval, batch_size));
+        let exec_state = Box::new(ScanExecState::new(
+            AccelStrategy::BatchedEval,
+            batch_size,
+            qual,
+            econtext,
+        ));
         (*state).accel.executor = Box::into_raw(exec_state);
 
         (*state).accel.rows_dispatched = 0;

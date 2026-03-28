@@ -48,6 +48,16 @@ pub struct ScanExecState {
     /// indicating no more tuples.
     child_exhausted: bool,
 
+    /// Qual expression state stolen from the CustomScanState. We evaluate
+    /// this ourselves per-batch instead of letting ExecScan do it per-tuple.
+    /// NULL means no qual (all rows pass).
+    qual: *mut pg_sys::ExprState,
+
+    /// Expression context for qual evaluation. Borrowed from the plan
+    /// state — NOT owned by us. We set `ecxt_scantuple` before each
+    /// qual evaluation call.
+    econtext: *mut pg_sys::ExprContext,
+
     // -- Counters for EXPLAIN ANALYZE --
     /// Total rows pulled from child and dispatched.
     pub rows_dispatched: u64,
@@ -61,8 +71,16 @@ pub struct ScanExecState {
 
 impl ScanExecState {
     /// Create a new executor state for a Custom Scan node.
+    ///
+    /// `qual` and `econtext` are stolen from the `CustomScanState` at
+    /// `begin_custom_scan` time. If `qual` is null, all rows pass.
     #[must_use]
-    pub fn new(strategy: AccelStrategy, batch_size: usize) -> Self {
+    pub fn new(
+        strategy: AccelStrategy,
+        batch_size: usize,
+        qual: *mut pg_sys::ExprState,
+        econtext: *mut pg_sys::ExprContext,
+    ) -> Self {
         Self {
             strategy,
             batch_size,
@@ -70,6 +88,8 @@ impl ScanExecState {
             result_mask: Vec::new(),
             result_pos: 0,
             child_exhausted: false,
+            qual,
+            econtext,
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
@@ -167,9 +187,15 @@ impl ScanExecState {
 
     /// Run the accumulated batch through the dispatch layer.
     ///
-    /// For now, since we lack real predicate analysis, all rows pass.
-    /// The dispatch infrastructure is exercised but every row in the batch
-    /// is marked as passing.
+    /// Evaluates the stolen qual expression against each buffered tuple.
+    /// If no qual is set, all rows pass (pure passthrough). When a qual
+    /// is present, each tuple is set as `ecxt_scantuple` and evaluated
+    /// via `ExecEvalExpr`. The per-tuple memory context is reset between
+    /// evaluations to prevent leaks.
+    ///
+    /// Future: for `GpuSpatial` / `GpuRaster` / `GpuH3` strategies,
+    /// this will extract Datum batches and dispatch to GPU kernels instead
+    /// of scalar qual evaluation.
     ///
     /// # Safety
     ///
@@ -182,34 +208,50 @@ impl ScanExecState {
 
         let start = std::time::Instant::now();
 
-        // Until we have real predicate extraction from the plan tree, we
-        // treat every scan as a passthrough: all rows pass. This exercises
-        // the full batch-accumulate-and-drain code path while remaining
-        // correct.
-        //
-        // Future phases will:
-        // 1. Extract qual expressions from the CustomScan node
-        // 2. Build FmgrInfo for the target function
-        // 3. Call dispatch() with real (Datum, is_null) batches
-        // 4. Use the result to populate result_mask
-        match self.strategy {
-            AccelStrategy::BatchedEval | AccelStrategy::GpuSpatial => {
-                // Mark all rows as passing (passthrough mode).
-                self.result_mask = vec![true; batch_len];
-            }
-            // Unsupported strategies also passthrough to avoid data loss.
-            AccelStrategy::GpuRaster
-            | AccelStrategy::GpuH3
-            | AccelStrategy::GpuSort
-            | AccelStrategy::GpuReduce => {
-                self.result_mask = vec![true; batch_len];
+        self.result_mask.clear();
+        self.result_mask.reserve(batch_len);
+        self.result_pos = 0;
+
+        if self.qual.is_null() || self.econtext.is_null() {
+            // No qual — all rows pass.
+            self.result_mask.resize(batch_len, true);
+        } else {
+            // Evaluate qual for each buffered tuple.
+            for i in 0..batch_len {
+                let slot = self.slot_buffer[i];
+                if slot.is_null() {
+                    self.result_mask.push(false);
+                    continue;
+                }
+
+                // SAFETY: econtext is valid (borrowed from PlanState).
+                // Set the scan tuple so qual expressions can reference it.
+                unsafe {
+                    (*self.econtext).ecxt_scantuple = slot;
+                }
+
+                // SAFETY: ExecEvalExpr is the pgrx C-shim for PG's
+                // static-inline ExecEvalExpr. qual and econtext are valid.
+                let mut is_null = false;
+                let result = unsafe {
+                    pg_sys::ExecEvalExpr(self.qual, self.econtext, std::ptr::addr_of_mut!(is_null))
+                };
+
+                // A qual passes when result is TRUE and not NULL.
+                let passed = !is_null && result.value() != 0;
+                self.result_mask.push(passed);
+
+                // SAFETY: Reset per-tuple memory to prevent leaks across
+                // batch evaluation.
+                unsafe {
+                    pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
+                }
             }
         }
 
-        let elapsed = start.elapsed();
         self.rows_dispatched += batch_len as u64;
         self.batches_executed += 1;
-        self.dispatch_time_us += elapsed.as_micros() as u64;
+        self.dispatch_time_us += start.elapsed().as_micros() as u64;
     }
 
     /// Try to return the next passing slot from the current batch.
@@ -256,15 +298,37 @@ impl ScanExecState {
     pub fn strategy(&self) -> AccelStrategy {
         self.strategy
     }
+
+    /// Returns the qual pointer (for transfer during rescan).
+    #[must_use]
+    pub fn qual_ptr(&self) -> *mut pg_sys::ExprState {
+        self.qual
+    }
+
+    /// Returns the econtext pointer (for transfer during rescan).
+    #[must_use]
+    pub fn econtext_ptr(&self) -> *mut pg_sys::ExprContext {
+        self.econtext
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Helper: create a ScanExecState with null qual/econtext (passthrough).
+    fn make_state(strategy: AccelStrategy, batch_size: usize) -> ScanExecState {
+        ScanExecState::new(
+            strategy,
+            batch_size,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+
     #[test]
     fn new_state_is_not_exhausted() {
-        let state = ScanExecState::new(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::BatchedEval, 256);
         assert!(!state.child_exhausted);
         assert_eq!(state.rows_dispatched, 0);
         assert_eq!(state.batches_executed, 0);
@@ -274,14 +338,14 @@ mod tests {
 
     #[test]
     fn new_state_with_gpu_spatial() {
-        let state = ScanExecState::new(AccelStrategy::GpuSpatial, 1024);
+        let state = make_state(AccelStrategy::GpuSpatial, 1024);
         assert_eq!(state.strategy(), AccelStrategy::GpuSpatial);
         assert_eq!(state.batch_size, 1024);
     }
 
     #[test]
     fn drain_empty_returns_none() {
-        let mut state = ScanExecState::new(AccelStrategy::BatchedEval, 256);
+        let mut state = make_state(AccelStrategy::BatchedEval, 256);
         // No slots buffered, drain should return None.
         let result = state.drain_next(std::ptr::null_mut());
         assert!(result.is_none());
@@ -289,7 +353,7 @@ mod tests {
 
     #[test]
     fn result_pos_advances() {
-        let mut state = ScanExecState::new(AccelStrategy::BatchedEval, 256);
+        let mut state = make_state(AccelStrategy::BatchedEval, 256);
         // Simulate a batch where all rows are filtered out.
         state.slot_buffer = vec![std::ptr::null_mut(); 3];
         state.result_mask = vec![false, false, false];
@@ -299,5 +363,12 @@ mod tests {
         assert!(result.is_none());
         // Should have advanced past all three.
         assert_eq!(state.result_pos, 3);
+    }
+
+    #[test]
+    fn null_qual_means_passthrough() {
+        let state = make_state(AccelStrategy::BatchedEval, 256);
+        assert!(state.qual.is_null());
+        assert!(state.econtext.is_null());
     }
 }
