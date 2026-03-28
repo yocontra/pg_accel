@@ -1,10 +1,18 @@
+mod aggregate;
+mod h3_bulk;
 mod large_sort;
+mod proximity;
 mod simple_agg;
 mod spatial_join;
+mod topk_sort;
 
+pub use aggregate::Aggregate;
+pub use h3_bulk::H3Bulk;
 pub use large_sort::LargeSort;
+pub use proximity::Proximity;
 pub use simple_agg::SimpleAgg;
 pub use spatial_join::SpatialJoin;
+pub use topk_sort::TopkSort;
 
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
@@ -28,8 +36,12 @@ pub trait Workload: Send + Sync {
 pub fn all_workloads() -> Vec<Box<dyn Workload>> {
     vec![
         Box::new(SimpleAgg),
+        Box::new(Aggregate),
         Box::new(SpatialJoin),
+        Box::new(Proximity),
         Box::new(LargeSort),
+        Box::new(TopkSort),
+        Box::new(H3Bulk),
     ]
 }
 

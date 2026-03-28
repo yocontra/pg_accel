@@ -1,6 +1,6 @@
 use postgres::{Client, NoTls};
 
-use crate::report::{BenchReport, IterationResult, WorkloadResult};
+use crate::report::{self, IterationResult, WorkloadResult};
 use crate::workloads::Workload;
 
 /// Execute setup SQL for a workload against the given connection string.
@@ -17,7 +17,7 @@ pub fn setup(
     for sql in workload.setup_sql(rows) {
         client.batch_execute(&sql)?;
     }
-    eprintln!("[setup] {} — created {rows} rows", workload.name());
+    eprintln!("[setup] {} -- created {rows} rows", workload.name());
     Ok(())
 }
 
@@ -78,11 +78,13 @@ pub fn cleanup(
     for sql in workload.cleanup_sql() {
         client.batch_execute(&sql)?;
     }
-    eprintln!("[cleanup] {} — tables dropped", workload.name());
+    eprintln!("[cleanup] {} -- tables dropped", workload.name());
     Ok(())
 }
 
 /// Build a full report by running every workload in the given list.
+///
+/// Includes hardware profile auto-detection and GUC settings capture.
 ///
 /// # Errors
 ///
@@ -92,7 +94,7 @@ pub fn run_all(
     workloads: &[Box<dyn Workload>],
     rows: usize,
     iterations: usize,
-) -> Result<BenchReport, Box<dyn std::error::Error>> {
+) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
     let mut results = Vec::with_capacity(workloads.len());
     for w in workloads {
         setup(connection, w.as_ref(), rows)?;
@@ -100,7 +102,8 @@ pub fn run_all(
         cleanup(connection, w.as_ref())?;
         results.push(result);
     }
-    Ok(BenchReport { workloads: results })
+
+    Ok(report::generate_report(results, Some(connection)))
 }
 
 /// Run `EXPLAIN ANALYZE` on a query and parse the execution time from output.

@@ -1,0 +1,582 @@
+//! Statistical analysis utilities for benchmark results.
+//!
+//! Public API consumed by `report` module and available for external callers.
+
+use serde::{Deserialize, Serialize};
+
+/// A self-contained benchmark result suitable for statistical analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct BenchmarkResult {
+    /// Human-readable name of the benchmark.
+    pub name: String,
+    /// Which mode produced these timings (e.g. "accel", "baseline").
+    pub mode: String,
+    /// Number of iterations actually recorded.
+    pub iterations: usize,
+    /// Raw timing values in milliseconds.
+    pub timings_ms: Vec<f64>,
+}
+
+impl BenchmarkResult {
+    /// Create a new result, computing `iterations` from the timings length.
+    #[must_use]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn new(name: String, mode: String, timings_ms: Vec<f64>) -> Self {
+        let iterations = timings_ms.len();
+        Self {
+            name,
+            mode,
+            iterations,
+            timings_ms,
+        }
+    }
+}
+
+/// Arithmetic mean of a slice. Returns 0.0 for empty input.
+#[must_use]
+pub fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let count = values.len() as f64;
+    values.iter().sum::<f64>() / count
+}
+
+/// Median of a slice (sorts a copy). Returns 0.0 for empty input.
+#[must_use]
+pub fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        f64::midpoint(sorted[mid - 1], sorted[mid])
+    } else {
+        sorted[mid]
+    }
+}
+
+/// Sample standard deviation (Bessel-corrected, n-1 denominator).
+/// Returns 0.0 for fewer than 2 values.
+#[must_use]
+pub fn stddev(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let avg = mean(values);
+    #[allow(clippy::cast_precision_loss)]
+    let count = values.len() as f64;
+    let variance = values.iter().map(|v| (v - avg).powi(2)).sum::<f64>() / (count - 1.0);
+    variance.sqrt()
+}
+
+/// Minimum value. Returns `f64::NAN` for empty input.
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn min(values: &[f64]) -> f64 {
+    values.iter().copied().reduce(f64::min).unwrap_or(f64::NAN)
+}
+
+/// Maximum value. Returns `f64::NAN` for empty input.
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn max(values: &[f64]) -> f64 {
+    values.iter().copied().reduce(f64::max).unwrap_or(f64::NAN)
+}
+
+/// 95% confidence interval for the mean, using a t-distribution approximation.
+///
+/// Returns `(lower, upper)`. For fewer than 2 values, returns `(NaN, NaN)`.
+#[must_use]
+pub fn confidence_interval_95(values: &[f64]) -> (f64, f64) {
+    if values.len() < 2 {
+        return (f64::NAN, f64::NAN);
+    }
+    let avg = mean(values);
+    let sd = stddev(values);
+    #[allow(clippy::cast_precision_loss)]
+    let count = values.len() as f64;
+    let standard_error = sd / count.sqrt();
+    // Use t-critical values for common sample sizes, fall back to 1.96 for large n.
+    let t_crit = t_critical_95(values.len() - 1);
+    let margin = t_crit * standard_error;
+    (avg - margin, avg + margin)
+}
+
+/// Speedup ratio: `baseline_mean / experiment_mean`.
+/// Values > 1 mean the experiment is faster than baseline.
+/// Returns `NaN` if experiment mean is zero or either has no data.
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn speedup(baseline: &BenchmarkResult, experiment: &BenchmarkResult) -> f64 {
+    if baseline.timings_ms.is_empty() || experiment.timings_ms.is_empty() {
+        return f64::NAN;
+    }
+    let base_avg = mean(&baseline.timings_ms);
+    let exp_avg = mean(&experiment.timings_ms);
+    if exp_avg.abs() < f64::EPSILON {
+        return f64::NAN;
+    }
+    base_avg / exp_avg
+}
+
+/// Two-sample Welch's t-test p-value (two-tailed, approximate).
+///
+/// Returns a p-value. Values < 0.05 suggest statistically significant difference.
+/// Returns `NaN` if either sample has fewer than 2 values.
+#[must_use]
+#[allow(clippy::similar_names)]
+pub fn welch_t_test_p(sample_a: &[f64], sample_b: &[f64]) -> f64 {
+    if sample_a.len() < 2 || sample_b.len() < 2 {
+        return f64::NAN;
+    }
+    let mean_a = mean(sample_a);
+    let mean_b = mean(sample_b);
+    let sd_a = stddev(sample_a);
+    let sd_b = stddev(sample_b);
+    #[allow(clippy::cast_precision_loss)]
+    let count_a = sample_a.len() as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let count_b = sample_b.len() as f64;
+
+    let var_over_n_a = sd_a.powi(2) / count_a;
+    let var_over_n_b = sd_b.powi(2) / count_b;
+    let pooled_se = (var_over_n_a + var_over_n_b).sqrt();
+
+    if pooled_se.abs() < f64::EPSILON {
+        return if (mean_a - mean_b).abs() < f64::EPSILON {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    let t_stat = (mean_a - mean_b).abs() / pooled_se;
+
+    // Welch-Satterthwaite degrees of freedom
+    let degrees_of_freedom = (var_over_n_a + var_over_n_b).powi(2)
+        / (var_over_n_a.powi(2) / (count_a - 1.0) + var_over_n_b.powi(2) / (count_b - 1.0));
+
+    // Approximate two-tailed p-value from t and df.
+    approx_t_p_value(t_stat, degrees_of_freedom)
+}
+
+/// Detect outliers: returns indices of values more than `sigma_threshold` standard
+/// deviations from the mean.
+#[must_use]
+pub fn detect_outliers(values: &[f64], sigma_threshold: f64) -> Vec<usize> {
+    if values.len() < 2 {
+        return Vec::new();
+    }
+    let avg = mean(values);
+    let sd = stddev(values);
+    if sd.abs() < f64::EPSILON {
+        return Vec::new();
+    }
+    values
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| ((*v - avg) / sd).abs() > sigma_threshold)
+        .map(|(idx, _)| idx)
+        .collect()
+}
+
+/// Format a set of `BenchmarkResult`s as a markdown comparison table.
+#[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn format_markdown_table(results: &[BenchmarkResult]) -> String {
+    use std::fmt::Write as _;
+
+    if results.is_empty() {
+        return String::from("_(no results)_\n");
+    }
+
+    let mut out = String::new();
+    out.push_str(
+        "| Benchmark | Mode | Iterations | Mean (ms) | Median (ms) \
+         | Stddev (ms) | 95% CI (ms) |\n",
+    );
+    out.push_str(
+        "|-----------|------|------------|-----------|------------- \
+         |-------------|-------------|\n",
+    );
+    for r in results {
+        let avg = mean(&r.timings_ms);
+        let med = median(&r.timings_ms);
+        let sd = stddev(&r.timings_ms);
+        let (ci_lo, ci_hi) = confidence_interval_95(&r.timings_ms);
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {:.2} | {:.2} | {:.2} | {:.2}..{:.2} |",
+            r.name, r.mode, r.iterations, avg, med, sd, ci_lo, ci_hi,
+        );
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Look up t-critical value for 95% two-tailed test given degrees of freedom.
+/// Uses a small table for common df, falls back to 1.96 for large df.
+fn t_critical_95(df: usize) -> f64 {
+    // Two-tailed 95% (alpha=0.05) t-critical values
+    match df {
+        1 => 12.706,
+        2 => 4.303,
+        3 => 3.182,
+        4 => 2.776,
+        5 => 2.571,
+        6 => 2.447,
+        7 => 2.365,
+        8 => 2.306,
+        9 => 2.262,
+        10 => 2.228,
+        11 => 2.201,
+        12 => 2.179,
+        13 => 2.160,
+        14 => 2.145,
+        15 => 2.131,
+        16..=20 => 2.086,
+        21..=30 => 2.042,
+        31..=60 => 2.000,
+        61..=120 => 1.980,
+        _ => 1.960,
+    }
+}
+
+/// Approximate two-tailed p-value for Student's t distribution.
+///
+/// Uses the relationship between the t-distribution CDF and the regularized
+/// incomplete beta function.
+#[allow(clippy::suboptimal_flops)]
+fn approx_t_p_value(t_stat: f64, df: f64) -> f64 {
+    if df <= 0.0 || t_stat.is_nan() || df.is_nan() {
+        return f64::NAN;
+    }
+    // For large df, t-distribution converges to normal.
+    if df > 200.0 {
+        return 2.0 * normal_sf(t_stat);
+    }
+    // Approximation via the regularized incomplete beta function:
+    // p = I_x(a, b) where x = df/(df + t^2), a = df/2, b = 0.5
+    let x_val = df / (df + t_stat * t_stat);
+    let alpha = df / 2.0;
+    let beta = 0.5;
+    regularized_incomplete_beta(x_val, alpha, beta)
+}
+
+/// Survival function of the standard normal distribution: P(Z > z).
+/// Uses an approximation of erfc.
+fn normal_sf(z_score: f64) -> f64 {
+    0.5 * erfc_approx(z_score / std::f64::consts::SQRT_2)
+}
+
+/// Approximate erfc using Horner form of Abramowitz & Stegun 7.1.26.
+#[allow(clippy::suboptimal_flops)]
+fn erfc_approx(x_val: f64) -> f64 {
+    if x_val < 0.0 {
+        return 2.0 - erfc_approx(-x_val);
+    }
+    let t_val = 1.0 / (1.0 + 0.327_591_1 * x_val);
+    let poly = t_val
+        * (0.254_829_592
+            + t_val
+                * ((-0.284_496_736)
+                    + t_val
+                        * (1.421_413_741 + t_val * ((-1.453_152_027) + t_val * 1.061_405_429))));
+    poly * (-x_val * x_val).exp()
+}
+
+/// Regularized incomplete beta function I_x(a, b) via continued fraction
+/// (Lentz's method). Good enough for our t-test p-values.
+#[allow(clippy::many_single_char_names, clippy::suboptimal_flops)]
+fn regularized_incomplete_beta(x_val: f64, alpha: f64, beta: f64) -> f64 {
+    if x_val <= 0.0 {
+        return 0.0;
+    }
+    if x_val >= 1.0 {
+        return 1.0;
+    }
+
+    // Use the symmetry relation if x > (a+1)/(a+b+2) for better convergence.
+    if x_val > (alpha + 1.0) / (alpha + beta + 2.0) {
+        return 1.0 - regularized_incomplete_beta(1.0 - x_val, beta, alpha);
+    }
+
+    let ln_prefix =
+        alpha * x_val.ln() + beta * (1.0 - x_val).ln() - ln_beta(alpha, beta) - alpha.ln();
+    let prefix = ln_prefix.exp();
+
+    // Lentz continued fraction for I_x(a,b)
+    let mut cf_c = 1.0;
+    let mut cf_d = 1.0 - (alpha + beta) * x_val / (alpha + 1.0);
+    if cf_d.abs() < 1e-30 {
+        cf_d = 1e-30;
+    }
+    cf_d = 1.0 / cf_d;
+    let mut cf_f = cf_d;
+
+    for step in 1..=200 {
+        #[allow(clippy::cast_precision_loss)]
+        let mf = step as f64;
+
+        // Even step
+        let two_m = 2.0 * mf;
+        let numer_even = mf * (beta - mf) * x_val / ((alpha + two_m - 1.0) * (alpha + two_m));
+        cf_d = 1.0 + numer_even * cf_d;
+        if cf_d.abs() < 1e-30 {
+            cf_d = 1e-30;
+        }
+        cf_c = 1.0 + numer_even / cf_c;
+        if cf_c.abs() < 1e-30 {
+            cf_c = 1e-30;
+        }
+        cf_d = 1.0 / cf_d;
+        cf_f *= cf_c * cf_d;
+
+        // Odd step
+        let numer_odd =
+            -(alpha + mf) * (alpha + beta + mf) * x_val / ((alpha + two_m) * (alpha + two_m + 1.0));
+        cf_d = 1.0 + numer_odd * cf_d;
+        if cf_d.abs() < 1e-30 {
+            cf_d = 1e-30;
+        }
+        cf_c = 1.0 + numer_odd / cf_c;
+        if cf_c.abs() < 1e-30 {
+            cf_c = 1e-30;
+        }
+        cf_d = 1.0 / cf_d;
+        let delta = cf_c * cf_d;
+        cf_f *= delta;
+
+        if (delta - 1.0).abs() < 1e-10 {
+            break;
+        }
+    }
+
+    prefix * cf_f
+}
+
+/// Natural log of the beta function: ln(B(a,b)) = ln(Gamma(a)) + ln(Gamma(b)) - ln(Gamma(a+b)).
+fn ln_beta(alpha: f64, beta: f64) -> f64 {
+    ln_gamma(alpha) + ln_gamma(beta) - ln_gamma(alpha + beta)
+}
+
+/// Lanczos approximation of ln(Gamma(x)) for x > 0.
+#[allow(clippy::excessive_precision, clippy::suboptimal_flops)]
+fn ln_gamma(x_val: f64) -> f64 {
+    // Lanczos coefficients (g=7, n=9)
+    const COEFFS: [f64; 9] = [
+        0.999_999_999_999_809_93,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_403,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_572e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+    const LG: f64 = 7.0;
+
+    if x_val < 0.5 {
+        // Reflection formula
+        let pi = std::f64::consts::PI;
+        return pi.ln() - (pi * x_val).sin().ln() - ln_gamma(1.0 - x_val);
+    }
+
+    let shifted = x_val - 1.0;
+    let mut sum = COEFFS[0];
+    for (idx, &coeff) in COEFFS.iter().enumerate().skip(1) {
+        #[allow(clippy::cast_precision_loss)]
+        let idx_f = idx as f64;
+        sum += coeff / (shifted + idx_f);
+    }
+    let t_val = shifted + LG + 0.5;
+    (shifted + 0.5).mul_add(t_val.ln(), -t_val) + 0.5 * (2.0 * std::f64::consts::PI).ln() + sum.ln()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f64 = 1e-6;
+
+    #[test]
+    fn test_mean_empty() {
+        assert!((mean(&[]) - 0.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_mean_values() {
+        assert!((mean(&[1.0, 2.0, 3.0, 4.0, 5.0]) - 3.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_mean_single() {
+        assert!((mean(&[42.0]) - 42.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_median_odd() {
+        assert!((median(&[3.0, 1.0, 2.0]) - 2.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_median_even() {
+        assert!((median(&[4.0, 1.0, 3.0, 2.0]) - 2.5).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_median_empty() {
+        assert!((median(&[]) - 0.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_median_single() {
+        assert!((median(&[7.0]) - 7.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_stddev_empty() {
+        assert!((stddev(&[]) - 0.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_stddev_single() {
+        assert!((stddev(&[5.0]) - 0.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_stddev_known() {
+        // Sample stddev of [2, 4, 4, 4, 5, 5, 7, 9] = 2.13809
+        let vals = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let sd = stddev(&vals);
+        assert!((sd - 2.138_089_935_299_395).abs() < 1e-4, "got {sd}");
+    }
+
+    #[test]
+    fn test_confidence_interval_95_few_values() {
+        let (lo, hi) = confidence_interval_95(&[1.0]);
+        assert!(lo.is_nan());
+        assert!(hi.is_nan());
+    }
+
+    #[test]
+    fn test_confidence_interval_95_known() {
+        // 10 identical values -> stddev=0, CI collapses to mean
+        let vals = vec![5.0; 10];
+        let (lo, hi) = confidence_interval_95(&vals);
+        assert!((lo - 5.0).abs() < EPSILON);
+        assert!((hi - 5.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_confidence_interval_95_range() {
+        let vals = [10.0, 12.0, 11.0, 13.0, 9.0, 11.0, 10.0, 12.0, 11.0, 10.0];
+        let (lo, hi) = confidence_interval_95(&vals);
+        let avg = mean(&vals);
+        // CI should be centered around mean and lo < mean < hi
+        assert!(lo < avg, "lo={lo} should be < mean={avg}");
+        assert!(hi > avg, "hi={hi} should be > mean={avg}");
+        // CI should be reasonable (within a few ms of mean for this data)
+        assert!(avg - lo < 3.0, "margin too wide: {}", avg - lo);
+    }
+
+    #[test]
+    fn test_speedup_basic() {
+        let baseline =
+            BenchmarkResult::new("test".to_owned(), "baseline".to_owned(), vec![100.0, 100.0]);
+        let experiment =
+            BenchmarkResult::new("test".to_owned(), "accel".to_owned(), vec![50.0, 50.0]);
+        let ratio = speedup(&baseline, &experiment);
+        assert!(
+            (ratio - 2.0).abs() < EPSILON,
+            "expected 2x speedup, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn test_speedup_empty() {
+        let baseline = BenchmarkResult::new("a".to_owned(), "b".to_owned(), vec![]);
+        let experiment = BenchmarkResult::new("a".to_owned(), "e".to_owned(), vec![1.0]);
+        assert!(speedup(&baseline, &experiment).is_nan());
+    }
+
+    #[test]
+    fn test_welch_identical() {
+        // Identical samples -> p should be close to 1.0
+        let sample_a = [10.0, 10.0, 10.0, 10.0, 10.0];
+        let sample_b = [10.0, 10.0, 10.0, 10.0, 10.0];
+        let p_val = welch_t_test_p(&sample_a, &sample_b);
+        assert!(
+            (p_val - 1.0).abs() < 0.01,
+            "identical samples should have p~1.0, got {p_val}"
+        );
+    }
+
+    #[test]
+    fn test_welch_very_different() {
+        // Very different samples -> p should be very small
+        let sample_a = [1.0, 1.1, 0.9, 1.0, 1.05, 0.95, 1.0, 1.0, 1.02, 0.98];
+        let sample_b = [
+            100.0, 100.1, 99.9, 100.0, 100.05, 99.95, 100.0, 100.0, 100.02, 99.98,
+        ];
+        let p_val = welch_t_test_p(&sample_a, &sample_b);
+        assert!(
+            p_val < 0.001,
+            "very different samples should have p<<0.01, got {p_val}"
+        );
+    }
+
+    #[test]
+    fn test_detect_outliers_none() {
+        let vals = [10.0, 10.1, 9.9, 10.0, 10.05];
+        assert!(detect_outliers(&vals, 3.0).is_empty());
+    }
+
+    #[test]
+    fn test_detect_outliers_present() {
+        // Use 2-sigma threshold with a clear outlier.
+        let vals = [10.0, 10.1, 9.9, 10.0, 10.05, 9.95, 10.0, 10.0, 10.1, 100.0];
+        let outliers = detect_outliers(&vals, 2.0);
+        assert_eq!(outliers, vec![9]);
+    }
+
+    #[test]
+    fn test_min_max() {
+        let vals = [3.0, 1.0, 4.0, 1.5, 9.0, 2.6];
+        assert!((min(&vals) - 1.0).abs() < EPSILON);
+        assert!((max(&vals) - 9.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_min_max_empty() {
+        assert!(min(&[]).is_nan());
+        assert!(max(&[]).is_nan());
+    }
+
+    #[test]
+    fn test_format_markdown_table_empty() {
+        assert_eq!(format_markdown_table(&[]), "_(no results)_\n");
+    }
+
+    #[test]
+    fn test_format_markdown_table_content() {
+        let results = vec![BenchmarkResult::new(
+            "test_wl".to_owned(),
+            "accel".to_owned(),
+            vec![10.0, 12.0, 11.0],
+        )];
+        let table = format_markdown_table(&results);
+        assert!(table.contains("test_wl"));
+        assert!(table.contains("accel"));
+        assert!(table.contains("| 3 |")); // iterations
+    }
+}

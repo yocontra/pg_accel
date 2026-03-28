@@ -1,5 +1,6 @@
 mod report;
 mod runner;
+mod stats;
 mod workloads;
 
 use clap::{Parser, Subcommand};
