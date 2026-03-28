@@ -119,6 +119,7 @@ impl AdapterRegistry {
     }
 
     /// Iterate over registered adapters.
+    #[must_use]
     pub fn adapters(&self) -> &[ExtensionAdapter] {
         &self.adapters
     }

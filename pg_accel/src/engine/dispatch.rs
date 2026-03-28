@@ -55,6 +55,7 @@ pub enum DispatchResult {
 /// Must be called on the **main backend thread** only. The underlying
 /// `FunctionCallInvoke` and `CHECK_FOR_INTERRUPTS` macros are not safe to
 /// call from worker threads.
+#[must_use]
 pub unsafe fn dispatch(
     strategy: AccelStrategy,
     batch: &[(pgrx::pg_sys::Datum, bool)],
@@ -96,6 +97,7 @@ pub unsafe fn dispatch(
 ///
 /// Must be called on the **main backend thread**. Accesses PG `FmgrInfo` and
 /// invokes `FunctionCallInvoke`.
+#[must_use]
 pub unsafe fn dispatch_batched_eval(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     fn_info: &pgrx::pg_sys::FmgrInfo,
@@ -180,6 +182,7 @@ pub unsafe fn dispatch_batched_eval(
 /// # Safety
 ///
 /// Must be called on the **main backend thread**.
+#[must_use]
 pub unsafe fn dispatch_gpu_spatial(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     fn_info: &pgrx::pg_sys::FmgrInfo,

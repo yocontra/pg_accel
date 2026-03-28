@@ -10,6 +10,9 @@ mod fallback;
 
 pub mod three_layer;
 
+#[cfg(test)]
+mod three_layer_tests;
+
 // Re-export types from whichever module is active.
 #[cfg(feature = "gpu")]
 pub use bridge::{PgaccelDeviceInfo, PgaccelPlatformCaps, PgaccelStatus};

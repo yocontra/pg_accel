@@ -72,8 +72,8 @@ fn pg_accel_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-mod adapters;
-mod engine;
+pub mod adapters;
+pub mod engine;
 mod gpu;
 
 #[cfg(feature = "pg_test")]

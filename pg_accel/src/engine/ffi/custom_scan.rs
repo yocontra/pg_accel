@@ -154,12 +154,14 @@ static EXEC_METHODS: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods
 
 /// Pointer to scan `CustomPathMethods` vtable.
 #[inline]
+#[must_use]
 pub fn scan_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const SCAN_PATH_METHODS.0
 }
 
 /// Pointer to join `CustomPathMethods` vtable.
 #[inline]
+#[must_use]
 pub fn join_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const JOIN_PATH_METHODS.0
 }

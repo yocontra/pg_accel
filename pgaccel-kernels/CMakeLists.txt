@@ -62,5 +62,8 @@ target_link_libraries(test_h3 PRIVATE pgaccel_kernels)
 add_executable(test_raster test/test_raster.cpp)
 target_link_libraries(test_raster PRIVATE pgaccel_kernels)
 
+add_executable(test_correctness test/test_correctness.cpp)
+target_link_libraries(test_correctness PRIVATE pgaccel_kernels)
+
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h DESTINATION include)

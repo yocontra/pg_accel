@@ -60,6 +60,7 @@ pub fn has_bbox_flag(gserialized: &[u8]) -> bool {
 /// The caller must ensure `datum` points to a valid, detoasted `GSERIALIZED`
 /// varlena. This function is intended to be called on the main backend thread
 /// only, where the datum is guaranteed live.
+#[must_use]
 pub fn extract_bbox(datum: Datum) -> Option<(f32, f32, f32, f32)> {
     let bytes = datum_to_gserialized_bytes(datum)?;
 
@@ -112,6 +113,7 @@ pub fn extract_bbox(datum: Datum) -> Option<(f32, f32, f32, f32)> {
 /// The caller must ensure `datum` points to a valid, detoasted `GSERIALIZED`
 /// varlena. This function is intended to be called on the main backend thread
 /// only.
+#[must_use]
 pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
     let bytes = datum_to_gserialized_bytes(datum)?;
 
