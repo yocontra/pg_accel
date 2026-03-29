@@ -1,7 +1,46 @@
 # pg_accel test environment: PostGIS + H3 + pg_accel
+# Stage 1: Build pg_accel extension from source
+FROM imresamu/postgis:17-3.5-alpine AS builder
+
+# Install Rust and build dependencies
+RUN apk add --no-cache \
+    curl \
+    bash \
+    cmake \
+    make \
+    gcc \
+    g++ \
+    musl-dev \
+    openssl-dev \
+    openssl-libs-static \
+    clang-dev \
+    git \
+    pkgconf
+
+# Install Rust via rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install cargo-pgrx matching the version in Cargo.toml (0.17.x)
+RUN cargo install cargo-pgrx@0.17.0 --locked
+
+# Initialize pgrx with system pg_config
+RUN cargo pgrx init --pg17 "$(which pg_config)"
+
+# Copy workspace source
+COPY Cargo.toml Cargo.lock /build/
+COPY pg_accel/ /build/pg_accel/
+COPY pg_accel_bench/ /build/pg_accel_bench/
+
+WORKDIR /build
+
+# Build the extension package
+RUN cargo pgrx package --pg-config "$(which pg_config)" --features pg17
+
+# Stage 2: Final image with all extensions installed
 FROM imresamu/postgis:17-3.5-alpine
 
-# Install build dependencies
+# Install build dependencies for h3/h3-pg
 RUN apk add --no-cache --virtual .build-deps \
     cmake \
     make \
@@ -26,9 +65,8 @@ RUN git clone https://github.com/zachasme/h3-pg.git /tmp/h3-pg && \
 # Cleanup build dependencies
 RUN apk del .build-deps
 
-# pg_accel extension files (placeholder — will be volume-mounted in dev)
-# COPY pg_accel/target/release/pg_accel-pg17/usr/lib/postgresql/17/lib/ /usr/lib/postgresql/17/lib/
-# COPY pg_accel/target/release/pg_accel-pg17/usr/share/postgresql/17/extension/ /usr/share/postgresql/17/extension/
+# Install pg_accel extension from builder stage
+COPY --from=builder /build/target/release/pg_accel-pg17/usr/ /usr/
 
 # Auto-tune entrypoint
 COPY docker/autotune.sh /usr/local/bin/autotune.sh

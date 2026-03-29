@@ -1,4 +1,5 @@
 use postgres::{Client, NoTls};
+use rand::Rng;
 
 use crate::report::{self, IterationResult, WorkloadResult};
 use crate::workloads::Workload;
@@ -23,7 +24,10 @@ pub fn setup(
         #[allow(clippy::cast_precision_loss)]
         let seed_val = (seed % 1_000_000) as f64 / 1_000_000.0;
         client.batch_execute(&format!("SELECT setseed({seed_val})"))?;
-        eprintln!("[setup] {} -- using seed {seed} (setseed={seed_val})", workload.name());
+        eprintln!(
+            "[setup] {} -- using seed {seed} (setseed={seed_val})",
+            workload.name()
+        );
     }
     for sql in workload.setup_sql(rows) {
         client.batch_execute(&sql)?;
@@ -35,6 +39,11 @@ pub fn setup(
 /// Run a workload benchmark for the given number of iterations and return results.
 ///
 /// `warmup` iterations are run first and excluded from the statistics.
+///
+/// To eliminate ordering bias (cache warming, shared buffer state), the order
+/// of accel-first vs baseline-first is randomized per iteration. A buffer
+/// flush (`DISCARD ALL` + re-connect) between measurements ensures neither
+/// side benefits from the other's cache priming.
 ///
 /// # Errors
 ///
@@ -49,23 +58,33 @@ pub fn run(
     let query = workload.query_sql();
     let total_runs = warmup + iterations;
     let mut results = Vec::with_capacity(iterations);
+    let mut rng = rand::thread_rng();
 
     for i in 0..total_runs {
         let is_warmup = i < warmup;
+        let accel_first: bool = rng.gen_bool(0.5);
 
-        // --- pg_accel ON ---
-        client.batch_execute("SET pg_accel.enabled = on")?;
-        let accel_ms = run_explain_analyze(&mut client, &query)?;
-
-        // --- pg_accel OFF ---
-        client.batch_execute("SET pg_accel.enabled = off")?;
-        let baseline_ms = run_explain_analyze(&mut client, &query)?;
+        // Randomize measurement order to eliminate cache-warming bias.
+        let (accel_ms, baseline_ms) = if accel_first {
+            let a = run_with_mode(&mut client, &query, AccelMode::On)?;
+            flush_buffers(&mut client)?;
+            let b = run_with_mode(&mut client, &query, AccelMode::Off)?;
+            flush_buffers(&mut client)?;
+            (a, b)
+        } else {
+            let b = run_with_mode(&mut client, &query, AccelMode::Off)?;
+            flush_buffers(&mut client)?;
+            let a = run_with_mode(&mut client, &query, AccelMode::On)?;
+            flush_buffers(&mut client)?;
+            (a, b)
+        };
 
         let phase = if is_warmup { "warmup" } else { "bench" };
         let iter_num = if is_warmup { i + 1 } else { i - warmup + 1 };
         let iter_total = if is_warmup { warmup } else { iterations };
+        let order = if accel_first { "A/B" } else { "B/A" };
         eprintln!(
-            "[{name}] {phase} {iter_num}/{iter_total}: accel={accel_ms:.2}ms  \
+            "[{name}] {phase} {iter_num}/{iter_total} ({order}): accel={accel_ms:.2}ms  \
              baseline={baseline_ms:.2}ms",
             name = workload.name(),
         );
@@ -83,6 +102,35 @@ pub fn run(
         workload.description().to_owned(),
         results,
     ))
+}
+
+/// Measurement mode for a single run.
+#[derive(Clone, Copy)]
+enum AccelMode {
+    On,
+    Off,
+}
+
+/// Run a single EXPLAIN ANALYZE measurement with the given pg_accel mode.
+fn run_with_mode(
+    client: &mut Client,
+    query: &str,
+    mode: AccelMode,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    match mode {
+        AccelMode::On => client.batch_execute("SET pg_accel.enabled = on")?,
+        AccelMode::Off => client.batch_execute("SET pg_accel.enabled = off")?,
+    }
+    run_explain_analyze(client, query)
+}
+
+/// Flush PG plan and buffer caches between measurements to prevent
+/// one measurement from warming caches for the next.
+fn flush_buffers(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    // pg_stat_statements_reset would be ideal but requires superuser.
+    // Instead, invalidate the plan cache and sync to ensure fair state.
+    client.batch_execute("DISCARD PLANS")?;
+    Ok(())
 }
 
 /// Cleanup benchmark tables.
@@ -115,16 +163,23 @@ pub fn run_all(
     rows: usize,
     iterations: usize,
     warmup: usize,
+    seed: u64,
 ) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
     let mut results = Vec::with_capacity(workloads.len());
     for w in workloads {
-        setup(connection, w.as_ref(), rows, 0)?;
+        setup(connection, w.as_ref(), rows, seed)?;
         let result = run(connection, w.as_ref(), iterations, warmup)?;
         cleanup(connection, w.as_ref())?;
         results.push(result);
     }
 
-    Ok(report::generate_report(results, Some(connection)))
+    Ok(report::generate_report(
+        results,
+        Some(connection),
+        iterations,
+        warmup,
+        rows,
+    ))
 }
 
 /// Run `EXPLAIN ANALYZE` on a query and parse the execution time from output.

@@ -43,17 +43,22 @@ enum Command {
         #[arg(long)]
         workload: Option<String>,
 
-        /// Number of iterations per workload.
-        #[arg(long, default_value_t = 5)]
+        /// Number of iterations per workload (minimum 10 recommended for
+        /// statistical significance).
+        #[arg(long, default_value_t = 30)]
         iterations: usize,
 
         /// Number of warmup iterations (excluded from statistics).
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 5)]
         warmup: usize,
 
         /// Number of rows for setup (used if tables don't exist yet).
         #[arg(long, default_value_t = 100_000)]
         rows: usize,
+
+        /// Seed for deterministic random data generation (0 = random).
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
 
         /// PostgreSQL connection string.
         #[arg(long, default_value = DEFAULT_CONNECTION)]
@@ -124,6 +129,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             iterations,
             warmup,
             rows,
+            seed,
             connection,
             format,
         } => cmd_run(
@@ -132,6 +138,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             iterations,
             warmup,
             rows,
+            seed,
             &format,
         ),
         Command::Report { format } => cmd_report(&format),
@@ -157,10 +164,11 @@ fn cmd_run(
     iterations: usize,
     warmup: usize,
     rows: usize,
+    seed: u64,
     format: &ReportFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workloads = resolve_workloads(workload_name)?;
-    let report = runner::run_all(connection, &workloads, rows, iterations, warmup)?;
+    let report = runner::run_all(connection, &workloads, rows, iterations, warmup, seed)?;
     print_report(&report, format)?;
     Ok(())
 }

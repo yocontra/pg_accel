@@ -4,8 +4,10 @@ mod h3_bulk;
 mod index_recheck;
 mod join_residual;
 mod large_sort;
+mod oltp_point;
 mod proximity;
 mod simple_agg;
+mod small_table;
 mod spatial_join;
 mod topk_sort;
 
@@ -15,8 +17,10 @@ pub use h3_bulk::H3Bulk;
 pub use index_recheck::IndexRecheck;
 pub use join_residual::JoinResidual;
 pub use large_sort::LargeSort;
+pub use oltp_point::OltpPoint;
 pub use proximity::Proximity;
 pub use simple_agg::SimpleAgg;
+pub use small_table::SmallTable;
 pub use spatial_join::SpatialJoin;
 pub use topk_sort::TopkSort;
 
@@ -41,6 +45,7 @@ pub trait Workload: Send + Sync {
 /// Return all registered workloads.
 pub fn all_workloads() -> Vec<Box<dyn Workload>> {
     vec![
+        // --- Acceleration workloads (expect speedup) ---
         Box::new(SimpleAgg),
         Box::new(Aggregate),
         Box::new(SpatialJoin),
@@ -51,6 +56,9 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(JoinResidual),
         Box::new(IndexRecheck),
         Box::new(FtsRank),
+        // --- Regression workloads (expect ~1.00x, proving no overhead) ---
+        Box::new(OltpPoint),
+        Box::new(SmallTable),
     ]
 }
 

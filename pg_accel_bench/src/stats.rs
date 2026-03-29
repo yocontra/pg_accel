@@ -130,6 +130,7 @@ pub fn speedup(baseline: &BenchmarkResult, experiment: &BenchmarkResult) -> f64 
 /// Returns `NaN` if either sample has fewer than 2 values.
 #[must_use]
 #[allow(clippy::similar_names)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn welch_t_test_p(sample_a: &[f64], sample_b: &[f64]) -> f64 {
     if sample_a.len() < 2 || sample_b.len() < 2 {
         return f64::NAN;
@@ -163,6 +164,80 @@ pub fn welch_t_test_p(sample_a: &[f64], sample_b: &[f64]) -> f64 {
 
     // Approximate two-tailed p-value from t and df.
     approx_t_p_value(t_stat, degrees_of_freedom)
+}
+
+/// Paired t-test p-value (two-tailed, approximate).
+///
+/// Computes differences `d_i = sample_a[i] - sample_b[i]`, then tests whether
+/// the mean difference is significantly different from zero.
+///
+/// Returns `NaN` if samples have different lengths or fewer than 2 values.
+#[must_use]
+pub fn paired_t_test_p(sample_a: &[f64], sample_b: &[f64]) -> f64 {
+    if sample_a.len() != sample_b.len() || sample_a.len() < 2 {
+        return f64::NAN;
+    }
+    let diffs: Vec<f64> = sample_a
+        .iter()
+        .zip(sample_b.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    let mean_d = mean(&diffs);
+    let sd_d = stddev(&diffs);
+
+    if sd_d.abs() < f64::EPSILON {
+        return if mean_d.abs() < f64::EPSILON {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let n = diffs.len() as f64;
+    let t_stat = (mean_d / (sd_d / n.sqrt())).abs();
+    let df = n - 1.0;
+    approx_t_p_value(t_stat, df)
+}
+
+/// Cohen's d effect size between two samples.
+///
+/// Uses the pooled standard deviation. Interpretation:
+/// - |d| < 0.2: negligible
+/// - 0.2 <= |d| < 0.5: small
+/// - 0.5 <= |d| < 0.8: medium
+/// - |d| >= 0.8: large
+///
+/// Positive d means sample_a > sample_b.
+/// Returns `NaN` if either sample has fewer than 2 values.
+#[must_use]
+pub fn cohens_d(sample_a: &[f64], sample_b: &[f64]) -> f64 {
+    if sample_a.len() < 2 || sample_b.len() < 2 {
+        return f64::NAN;
+    }
+    let mean_a = mean(sample_a);
+    let mean_b = mean(sample_b);
+    let sd_a = stddev(sample_a);
+    let sd_b = stddev(sample_b);
+    #[allow(clippy::cast_precision_loss)]
+    let n_a = sample_a.len() as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let n_b = sample_b.len() as f64;
+
+    // Pooled standard deviation
+    #[allow(clippy::suboptimal_flops)]
+    let pooled_sd =
+        (((n_a - 1.0) * sd_a.powi(2) + (n_b - 1.0) * sd_b.powi(2)) / (n_a + n_b - 2.0)).sqrt();
+
+    if pooled_sd.abs() < f64::EPSILON {
+        return if (mean_a - mean_b).abs() < f64::EPSILON {
+            0.0
+        } else {
+            f64::INFINITY.copysign(mean_a - mean_b)
+        };
+    }
+
+    (mean_a - mean_b) / pooled_sd
 }
 
 /// Detect outliers: returns indices of values more than `sigma_threshold` standard
@@ -550,6 +625,32 @@ mod tests {
     }
 
     #[test]
+    fn test_cohens_d_identical() {
+        let a = [10.0, 10.0, 10.0, 10.0, 10.0];
+        let b = [10.0, 10.0, 10.0, 10.0, 10.0];
+        assert!((cohens_d(&a, &b) - 0.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_cohens_d_large_effect() {
+        // Very different samples should produce large |d|
+        let a = [100.0, 101.0, 99.0, 100.0, 100.5];
+        let b = [10.0, 11.0, 9.0, 10.0, 10.5];
+        let d = cohens_d(&a, &b);
+        assert!(d > 10.0, "expected large positive d, got {d}");
+    }
+
+    #[test]
+    fn test_cohens_d_direction() {
+        let a = [50.0, 51.0, 49.0];
+        let b = [10.0, 11.0, 9.0];
+        let d = cohens_d(&a, &b);
+        assert!(d > 0.0, "a > b should give positive d, got {d}");
+        let d_rev = cohens_d(&b, &a);
+        assert!(d_rev < 0.0, "b < a should give negative d, got {d_rev}");
+    }
+
+    #[test]
     fn test_min_max() {
         let vals = [3.0, 1.0, 4.0, 1.5, 9.0, 2.6];
         assert!((min(&vals) - 1.0).abs() < EPSILON);
@@ -565,6 +666,54 @@ mod tests {
     #[test]
     fn test_format_markdown_table_empty() {
         assert_eq!(format_markdown_table(&[]), "_(no results)_\n");
+    }
+
+    #[test]
+    fn test_paired_t_identical() {
+        let a = [10.0, 10.0, 10.0, 10.0, 10.0];
+        let b = [10.0, 10.0, 10.0, 10.0, 10.0];
+        let p = paired_t_test_p(&a, &b);
+        assert!(
+            (p - 1.0).abs() < 0.01,
+            "identical paired samples should have p~1.0, got {p}"
+        );
+    }
+
+    #[test]
+    fn test_paired_t_consistently_different() {
+        // Every a[i] is much larger than b[i] -> very small p
+        let a = [
+            100.0, 101.0, 99.5, 100.5, 100.2, 99.8, 100.1, 100.3, 99.9, 100.4,
+        ];
+        let b = [10.0, 11.0, 9.5, 10.5, 10.2, 9.8, 10.1, 10.3, 9.9, 10.4];
+        let p = paired_t_test_p(&a, &b);
+        assert!(
+            p < 0.001,
+            "consistently different pairs should have p<<0.01, got {p}"
+        );
+    }
+
+    #[test]
+    fn test_paired_t_mixed_differences() {
+        // Some a[i] > b[i], some a[i] < b[i] -> moderate p
+        let a = [10.0, 12.0, 9.0, 11.0, 10.5];
+        let b = [11.0, 10.0, 12.0, 9.0, 10.5];
+        let p = paired_t_test_p(&a, &b);
+        assert!(p > 0.1, "mixed differences should have moderate p, got {p}");
+    }
+
+    #[test]
+    fn test_paired_t_different_lengths() {
+        let a = [1.0, 2.0];
+        let b = [1.0, 2.0, 3.0];
+        assert!(paired_t_test_p(&a, &b).is_nan());
+    }
+
+    #[test]
+    fn test_paired_t_too_few() {
+        let a = [1.0];
+        let b = [2.0];
+        assert!(paired_t_test_p(&a, &b).is_nan());
     }
 
     #[test]

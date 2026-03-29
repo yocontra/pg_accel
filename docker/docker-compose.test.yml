@@ -1,5 +1,5 @@
 services:
-  postgres:
+  pgaccel-test:
     build:
       context: ..
       dockerfile: docker/Dockerfile.test

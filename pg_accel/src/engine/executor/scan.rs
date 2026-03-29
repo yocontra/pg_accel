@@ -30,10 +30,12 @@ pub struct ScanExecState {
     /// Batch size (from GUC at plan time).
     batch_size: usize,
 
-    /// Buffered slot pointers from the child plan. Each entry is a raw
-    /// pointer to a `TupleTableSlot` that we pulled from the child but
-    /// have not yet returned to our parent.
-    slot_buffer: Vec<*mut pg_sys::TupleTableSlot>,
+    /// Buffered tuples from the child plan. Each entry is an owned
+    /// `MinimalTuple` copied from the child slot. We must copy because
+    /// the child plan reuses the same `TupleTableSlot` for every
+    /// `ExecProcNode` call — storing slot pointers would give N copies
+    /// of the last tuple.
+    tuple_buffer: Vec<pg_sys::MinimalTuple>,
 
     /// Per-slot result: `true` means the row passed dispatch filtering
     /// and should be returned to the parent.
@@ -84,7 +86,7 @@ impl ScanExecState {
         Self {
             strategy,
             batch_size,
-            slot_buffer: Vec::with_capacity(batch_size),
+            tuple_buffer: Vec::with_capacity(batch_size),
             result_mask: Vec::new(),
             result_pos: 0,
             child_exhausted: false,
@@ -133,7 +135,7 @@ impl ScanExecState {
             // 4. Dispatch the batch.
             // SAFETY: We are on the main backend thread.
             unsafe {
-                self.dispatch_batch();
+                self.dispatch_batch(scan_slot);
             }
 
             // 5. CHECK_FOR_INTERRUPTS between batches.
@@ -148,13 +150,13 @@ impl ScanExecState {
     ///
     /// Must be called on the main backend thread. `child_ps` must be valid.
     unsafe fn fill_batch(&mut self, child_ps: *mut pg_sys::PlanState) {
-        self.slot_buffer.clear();
+        self.tuple_buffer.clear();
         self.result_mask.clear();
         self.result_pos = 0;
 
         let target = self.batch_size.max(gucs::min_batch_size().max(1) as usize);
 
-        while self.slot_buffer.len() < target {
+        while self.tuple_buffer.len() < target {
             // SAFETY: ExecProcNode is the standard PG API for pulling a
             // tuple from a plan node. We are on the main backend thread.
             let child_slot = unsafe { pg_sys::ExecProcNode(child_ps) };
@@ -173,15 +175,17 @@ impl ScanExecState {
                 break;
             }
 
-            // Materialise the slot so we can hold onto it across
-            // iterations. ExecMaterializeSlot ensures the tuple is
-            // physically copied into the slot's own memory context.
+            // Copy the tuple into our own storage. The child plan reuses
+            // the same TupleTableSlot for every ExecProcNode call, so
+            // storing slot pointers would give N copies of the last tuple.
+            // ExecCopySlotMinimalTuple returns a palloc'd copy we own.
             // SAFETY: child_slot is valid and non-empty.
-            unsafe {
+            let mt = unsafe {
                 pg_sys::ExecMaterializeSlot(child_slot);
-            }
+                pg_sys::ExecCopySlotMinimalTuple(child_slot)
+            };
 
-            self.slot_buffer.push(child_slot);
+            self.tuple_buffer.push(mt);
         }
     }
 
@@ -200,8 +204,8 @@ impl ScanExecState {
     /// # Safety
     ///
     /// Must be called on the main backend thread.
-    unsafe fn dispatch_batch(&mut self) {
-        let batch_len = self.slot_buffer.len();
+    unsafe fn dispatch_batch(&mut self, scan_slot: *mut pg_sys::TupleTableSlot) {
+        let batch_len = self.tuple_buffer.len();
         if batch_len == 0 {
             return;
         }
@@ -218,16 +222,18 @@ impl ScanExecState {
         } else {
             // Evaluate qual for each buffered tuple.
             for i in 0..batch_len {
-                let slot = self.slot_buffer[i];
-                if slot.is_null() {
+                let mt = self.tuple_buffer[i];
+                if mt.is_null() {
                     self.result_mask.push(false);
                     continue;
                 }
 
-                // SAFETY: econtext is valid (borrowed from PlanState).
-                // Set the scan tuple so qual expressions can reference it.
+                // Restore the MinimalTuple into scan_slot for qual eval.
+                // SAFETY: mt is a valid MinimalTuple from ExecCopySlotMinimalTuple.
+                // `false` means the slot does NOT own the tuple (we manage it).
                 unsafe {
-                    (*self.econtext).ecxt_scantuple = slot;
+                    pg_sys::ExecStoreMinimalTuple(mt, scan_slot, false);
+                    (*self.econtext).ecxt_scantuple = scan_slot;
                 }
 
                 // SAFETY: ExecEvalExpr is the pgrx C-shim for PG's
@@ -254,7 +260,7 @@ impl ScanExecState {
         self.dispatch_time_us += start.elapsed().as_micros() as u64;
     }
 
-    /// Try to return the next passing slot from the current batch.
+    /// Try to return the next passing tuple from the current batch.
     ///
     /// Returns `Some(slot_ptr)` for the next passing row, or `None` when
     /// the result buffer is exhausted.
@@ -262,7 +268,7 @@ impl ScanExecState {
         &mut self,
         scan_slot: *mut pg_sys::TupleTableSlot,
     ) -> Option<*mut pg_sys::TupleTableSlot> {
-        while self.result_pos < self.slot_buffer.len() {
+        while self.result_pos < self.tuple_buffer.len() {
             let idx = self.result_pos;
             self.result_pos += 1;
 
@@ -273,18 +279,16 @@ impl ScanExecState {
                 continue;
             }
 
-            let child_slot = self.slot_buffer[idx];
-            if child_slot.is_null() {
+            let mt = self.tuple_buffer[idx];
+            if mt.is_null() {
                 continue;
             }
 
-            // Copy the child slot's minimal tuple into the scan slot so
-            // the parent node sees it. ExecCopySlot handles the details.
-            // SAFETY: Both pointers are valid TupleTableSlot pointers.
-            // scan_slot is our node's result slot, child_slot was
-            // materialised in fill_batch.
+            // Restore the MinimalTuple into scan_slot for return to parent.
+            // SAFETY: mt is a valid MinimalTuple. `false` = slot does not
+            // own the tuple (we pfree it when the buffer is cleared).
             unsafe {
-                pg_sys::ExecCopySlot(scan_slot, child_slot);
+                pg_sys::ExecStoreMinimalTuple(mt, scan_slot, false);
             }
 
             return Some(scan_slot);

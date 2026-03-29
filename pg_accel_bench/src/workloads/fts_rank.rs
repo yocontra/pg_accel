@@ -25,18 +25,14 @@ impl Workload for FtsRank {
             .to_owned(),
             format!(
                 "INSERT INTO bench_docs (body, tsv) \
-                 SELECT \
-                   CASE WHEN random() < 0.1 \
+                 SELECT body, to_tsvector('english', body) \
+                 FROM ( \
+                   SELECT CASE WHEN random() < 0.1 \
                      THEN 'data analysis report with metrics and data points' \
                      ELSE 'generic document about various unrelated topics number ' || gs \
-                   END, \
-                   to_tsvector('english', \
-                     CASE WHEN random() < 0.1 \
-                       THEN 'data analysis report with metrics and data points' \
-                       ELSE 'generic document about various unrelated topics number ' || gs \
-                     END\
-                   ) \
-                 FROM generate_series(1, {rows}) gs"
+                   END AS body \
+                   FROM generate_series(1, {rows}) gs \
+                 ) sub"
             ),
             "CREATE INDEX ON bench_docs USING gin (tsv)".to_owned(),
             "ANALYZE bench_docs".to_owned(),

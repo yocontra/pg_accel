@@ -149,7 +149,7 @@ ExecCustomScan called by parent
 amortizes PG function-call setup across hundreds of rows and enables GPU kernel
 launches that need thousands of items to saturate hardware.
 
-The batch size is controlled by the GUC `pg_accel.batch_size` (default 256,
+The batch size is controlled by the GUC `pg_accel.min_batch_size` (default 256,
 range 256-8192) and is chosen at plan time by the cost model based on estimated
 row count.
 
@@ -163,19 +163,19 @@ Input: N geometry pairs (a[i], b[i])
               |
               v
   +---------------------------+
-  | Layer 1: Bbox Filter      |   Cost: ~1 ns/pair
-  | AABB overlap test         |   Rejects ~60-80% of pairs
-  | (integer/float compare)   |   on typical spatial data
+  | Layer 1: Bbox Filter      |   Estimated cost: ~1 ns/pair
+  | AABB overlap test         |   Estimated rejection: ~60-80%
+  | (integer/float compare)   |   of pairs (not yet measured)
   +---------------------------+
       |              |
    disjoint       overlap
       |              |
       v              v
   DEFINITE       +---------------------------+
-  FALSE          | Layer 2: GPU Kernel        |   Cost: ~50 ns/pair
-                 | Exact predicate for simple |   Resolves ~90% of
-                 | geometries (point-in-ring, |   remaining pairs
-                 | segment intersection,      |
+  FALSE          | Layer 2: GPU Kernel        |   Estimated cost: ~50 ns/pair
+                 | Exact predicate for simple |   Estimated: resolves ~90%
+                 | geometries (point-in-ring, |   of remaining pairs
+                 | segment intersection,      |   (not yet measured)
                  | sphere distance)           |
                  +---------------------------+
                      |              |
@@ -183,9 +183,10 @@ Input: N geometry pairs (a[i], b[i])
                      |              |
                      v              v
                  DEFINITE    +---------------------------+
-                 TRUE/FALSE  | Layer 3: CPU Recheck      |   Cost: ~500 ns/pair
-                             | Full PostGIS function for  |   Only 1-5% of original
-                             | curves, collections,       |   input reaches here
+                 TRUE/FALSE  | Layer 3: CPU Recheck      |   Estimated cost: ~500 ns/pair
+                             | Full PostGIS function for  |   Estimated: only 1-5% of
+                             | curves, collections,       |   original input reaches here
+                             |                            |   (not yet measured)
                              | fp32 edge cases            |
                              +---------------------------+
                                     |
@@ -277,8 +278,8 @@ a `HashMap<Oid, FunctionAccelEntry>` for O(1) lookup during planning.
 | `GpuSpatial` | `ST_Intersects`, `ST_Contains`, etc. | Three-layer GPU pipeline |
 | `GpuRaster` | `ST_MapAlgebra`, raster clip | GPU map-algebra expression evaluator |
 | `GpuH3` | `h3_lat_lng_to_cell`, grid distance | GPU H3 cell computation |
-| `GpuSort` | `ORDER BY` on numeric columns | GPU radix sort |
-| `GpuReduce` | `SUM`, `AVG`, `MIN`, `MAX`, `COUNT` | GPU parallel reduction |
+| `GpuSort` | `ORDER BY` on numeric columns | GPU radix sort (planned, not yet implemented) |
+| `GpuReduce` | `SUM`, `AVG`, `MIN`, `MAX`, `COUNT` | GPU parallel reduction (planned, not yet implemented) |
 
 ## Type Extractors
 

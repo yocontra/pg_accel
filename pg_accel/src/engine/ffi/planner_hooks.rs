@@ -9,6 +9,7 @@ use pgrx::pg_sys::{
 };
 
 use super::custom_scan;
+use crate::engine::cost;
 use crate::engine::gucs;
 use crate::engine::registry;
 
@@ -79,6 +80,12 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // Ensure the adapter registry is populated (first call does SPI probing).
     registry::lazy_init();
 
+    // If registry initialisation is in progress (re-entrant SPI call),
+    // skip acceleration to avoid deadlock.
+    if !registry::is_ready() {
+        return;
+    }
+
     // SAFETY: rel and rte are valid pointers provided by the planner.
     let rel_ref = unsafe { &*rel };
     let rte_ref = unsafe { &*rte };
@@ -91,9 +98,10 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
-    // Gate 3: Skip small relations.
-    let min_rows = f64::from(gucs::min_batch_size());
-    if rel_ref.rows < min_rows {
+    // Gate 3: Cost model gating — skip if batching is not worthwhile.
+    let rows = rel_ref.rows as usize;
+    let min_batch = gucs::min_batch_size().max(1) as usize;
+    if !cost::should_batch(rows, 0.01, min_batch) {
         return;
     }
 
@@ -109,11 +117,16 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
-    // Build cost from cheapest path.
+    // Build cost estimate using the cost model instead of a fixed multiplier.
     // SAFETY: cheapest is non-null, checked above.
     let base = unsafe { &*cheapest };
+    #[allow(clippy::cast_precision_loss)]
+    let batch_size = cost::optimal_batch_size(rows) as f64;
+    let num_batches = (base.rows / batch_size).ceil();
+    let batch_overhead = num_batches * 0.5; // per-batch dispatch cost estimate
+    let per_row_saving = base.rows * 0.001; // amortised per-row overhead reduction
     let startup_cost = base.startup_cost + 1.0;
-    let total_cost = base.total_cost * 0.8;
+    let total_cost = base.total_cost + batch_overhead - per_row_saving;
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -163,6 +176,9 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
 
     // Ensure the adapter registry is populated (first call does SPI probing).
     registry::lazy_init();
+    if !registry::is_ready() {
+        return;
+    }
 
     // SAFETY: pointers provided by the planner are valid.
     let joinrel_ref = unsafe { &*joinrel };
@@ -170,9 +186,10 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     let innerrel_ref = unsafe { &*innerrel };
     let extra_ref = unsafe { &*extra };
 
-    // Gate 2: Enough rows.
-    let min_rows = f64::from(gucs::min_batch_size());
-    if joinrel_ref.rows < min_rows {
+    // Gate 2: Cost model gating — skip if batching is not worthwhile.
+    let join_rows_gate = joinrel_ref.rows as usize;
+    let min_batch = gucs::min_batch_size().max(1) as usize;
+    if !cost::should_batch(join_rows_gate, 0.01, min_batch) {
         return;
     }
 
@@ -188,12 +205,18 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Cost: combine outer + inner total, apply 20% reduction estimate.
+    // Cost estimate using cost model.
     // SAFETY: paths are non-null, verified above.
     let outer_cost = unsafe { (*outer_path).total_cost };
     let inner_cost = unsafe { (*inner_path).total_cost };
+    let join_rows = joinrel_ref.rows as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let batch_size = cost::optimal_batch_size(join_rows) as f64;
+    let num_batches = (joinrel_ref.rows / batch_size).ceil();
+    let batch_overhead = num_batches * 0.5;
+    let per_row_saving = joinrel_ref.rows * 0.001;
     let startup_cost = unsafe { (*outer_path).startup_cost } + 1.0;
-    let total_cost = (outer_cost + inner_cost) * 0.8;
+    let total_cost = (outer_cost + inner_cost) + batch_overhead - per_row_saving;
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -253,8 +276,8 @@ unsafe fn find_cheapest_path(pathlist: *mut List) -> *mut Path {
 /// Check if a `List` of `RestrictInfo` contains a function registered in the
 /// acceleration registry.
 ///
-/// Extracts `funcid` from `FuncExpr` nodes and `opfuncid` from `OpExpr`
-/// nodes, then looks them up in the global adapter registry.
+/// Walks clause trees recursively to find `FuncExpr` and `OpExpr` nodes
+/// inside `BoolExpr` (AND/OR/NOT) nodes.
 fn has_accelerable_restriction(restrictinfo_list: *mut List) -> bool {
     if restrictinfo_list.is_null() {
         return false;
@@ -275,33 +298,64 @@ fn has_accelerable_restriction(restrictinfo_list: *mut List) -> bool {
         if clause.is_null() {
             continue;
         }
-        // SAFETY: clause is an Expr*; we check its NodeTag.
-        let tag = unsafe { (*clause).type_ };
 
-        // Extract function OID from the clause node, if applicable.
-        // SAFETY: PG nodes are palloc'd (always >=8-byte aligned), and we
-        // confirmed the NodeTag before casting.
-        #[allow(clippy::cast_ptr_alignment)]
-        let func_oid = if tag == NodeTag::T_FuncExpr {
-            // SAFETY: tag confirmed this is a FuncExpr.
-            Some(unsafe { (*clause.cast::<pg_sys::FuncExpr>()).funcid })
-        } else if tag == NodeTag::T_OpExpr {
-            // SAFETY: tag confirmed this is an OpExpr.
-            let oid = unsafe { (*clause.cast::<pg_sys::OpExpr>()).opfuncid };
-            // opfuncid may be invalid if not yet resolved by the planner.
-            (oid != pg_sys::Oid::INVALID).then_some(oid)
-        } else {
-            None
-        };
-
-        if let Some(oid) = func_oid
-            && reg.lookup(oid).is_some()
-        {
+        if node_has_accel_func(clause.cast(), reg) {
             return true;
         }
     }
 
     false
+}
+
+/// Recursively check if a node tree contains a function registered in
+/// the acceleration registry.
+///
+/// Handles `FuncExpr`, `OpExpr` (with forced `opfuncid` resolution),
+/// and `BoolExpr` (recurses into AND/OR/NOT args).
+fn node_has_accel_func(node: *mut pg_sys::Node, reg: &registry::AdapterRegistry) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: node is a valid PG Node pointer; we read its tag.
+    let tag = unsafe { (*node).type_ };
+
+    // SAFETY: PG nodes are palloc'd (always >=8-byte aligned), and we
+    // confirmed the NodeTag before casting.
+    #[allow(clippy::cast_ptr_alignment)]
+    match tag {
+        NodeTag::T_FuncExpr => {
+            // SAFETY: tag confirmed this is a FuncExpr.
+            let oid = unsafe { (*node.cast::<pg_sys::FuncExpr>()).funcid };
+            reg.lookup(oid).is_some()
+        }
+        NodeTag::T_OpExpr => {
+            // SAFETY: tag confirmed this is an OpExpr. Force-resolve
+            // opfuncid which may be InvalidOid if the planner hasn't
+            // looked it up yet.
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            unsafe { pg_sys::set_opfuncid(opexpr) };
+            let oid = unsafe { (*opexpr).opfuncid };
+            reg.lookup(oid).is_some()
+        }
+        NodeTag::T_BoolExpr => {
+            // SAFETY: tag confirmed this is a BoolExpr. Recurse into
+            // all child args (AND/OR/NOT).
+            let args = unsafe { (*node.cast::<pg_sys::BoolExpr>()).args };
+            if args.is_null() {
+                return false;
+            }
+            let len = unsafe { pg_sys::list_length(args) };
+            for j in 0..len {
+                let child = unsafe { pg_sys::list_nth(args, j).cast::<pg_sys::Node>() };
+                if node_has_accel_func(child, reg) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Allocate and initialize a `CustomPath` node via `palloc0`.
@@ -327,11 +381,10 @@ unsafe fn create_custom_path(
     let cpath = unsafe { pg_sys::palloc0(std::mem::size_of::<CustomPath>()).cast::<CustomPath>() };
 
     // Copy child path to avoid dangling pointer after add_path pfrees.
-    let child_copy = unsafe {
-        let p = pg_sys::palloc0(std::mem::size_of::<Path>()).cast::<Path>();
-        std::ptr::copy_nonoverlapping(base_path, p, 1);
-        p
-    };
+    // SAFETY: copyObjectImpl reads the node's type_ tag to determine the
+    // actual struct size (e.g. IndexPath > Path), so we get a full copy
+    // rather than truncating to sizeof(Path).
+    let child_copy = unsafe { pg_sys::copyObjectImpl(base_path.cast()).cast::<Path>() };
 
     // SAFETY: cpath is freshly allocated and zeroed; all fields set below.
     unsafe {

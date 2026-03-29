@@ -31,12 +31,22 @@ pub struct WorkloadResult {
     pub accel_ci_95: (f64, f64),
     /// 95% confidence interval for baseline timings: (lower, upper).
     pub baseline_ci_95: (f64, f64),
-    /// Welch's t-test p-value comparing accel vs baseline.
+    /// Paired t-test p-value comparing accel vs baseline.
     pub p_value: f64,
     /// Indices of accel outlier iterations (> 3 sigma).
     pub accel_outliers: Vec<usize>,
     /// Indices of baseline outlier iterations (> 3 sigma).
     pub baseline_outliers: Vec<usize>,
+    /// Cohen's d effect size (positive = baseline slower than accel).
+    pub cohens_d: f64,
+    /// Minimum accel timing.
+    pub accel_min_ms: f64,
+    /// Maximum accel timing.
+    pub accel_max_ms: f64,
+    /// Minimum baseline timing.
+    pub baseline_min_ms: f64,
+    /// Maximum baseline timing.
+    pub baseline_max_ms: f64,
 }
 
 /// Hardware and software profile for reproducibility.
@@ -61,7 +71,18 @@ pub struct GucSettings {
 pub struct BenchReport {
     pub hardware: Option<HardwareProfile>,
     pub gucs: Option<GucSettings>,
+    pub methodology: Methodology,
     pub workloads: Vec<WorkloadResult>,
+}
+
+/// Methodology metadata for reproducibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Methodology {
+    pub iterations: usize,
+    pub warmup: usize,
+    pub rows: usize,
+    pub ordering: String,
+    pub statistical_tests: Vec<String>,
 }
 
 impl WorkloadResult {
@@ -82,9 +103,14 @@ impl WorkloadResult {
         let baseline_median = stats::median(&baseline_times);
         let accel_ci_95 = stats::confidence_interval_95(&accel_times);
         let baseline_ci_95 = stats::confidence_interval_95(&baseline_times);
-        let p_value = stats::welch_t_test_p(&accel_times, &baseline_times);
+        let p_value = stats::paired_t_test_p(&accel_times, &baseline_times);
         let accel_outliers = stats::detect_outliers(&accel_times, 3.0);
         let baseline_outliers = stats::detect_outliers(&baseline_times, 3.0);
+        let cohens_d = stats::cohens_d(&baseline_times, &accel_times);
+        let accel_min = stats::min(&accel_times);
+        let accel_max = stats::max(&accel_times);
+        let baseline_min = stats::min(&baseline_times);
+        let baseline_max = stats::max(&baseline_times);
 
         let speedup = if accel_mean > 0.0 {
             baseline_mean / accel_mean
@@ -108,6 +134,11 @@ impl WorkloadResult {
             p_value,
             accel_outliers,
             baseline_outliers,
+            cohens_d,
+            accel_min_ms: accel_min,
+            accel_max_ms: accel_max,
+            baseline_min_ms: baseline_min,
+            baseline_max_ms: baseline_max,
         }
     }
 }
@@ -139,8 +170,8 @@ impl GucSettings {
             "pg_accel.enabled",
             "pg_accel.gpu_enabled",
             "pg_accel.workers",
-            "pg_accel.batch_size",
-            "pg_accel.cost_threshold",
+            "pg_accel.min_batch_size",
+            "pg_accel.kernel_timeout_ms",
             "max_parallel_workers_per_gather",
             "max_parallel_workers",
             "parallel_setup_cost",
@@ -166,6 +197,7 @@ impl GucSettings {
 impl BenchReport {
     /// Render the report as a Markdown document.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
         out.push_str("# pg_accel Benchmark Report\n\n");
@@ -196,13 +228,32 @@ impl BenchReport {
             out.push('\n');
         }
 
+        // Methodology
+        out.push_str("## Methodology\n\n");
+        let _ = writeln!(out, "| Parameter | Value |");
+        let _ = writeln!(out, "|-----------|-------|");
+        let _ = writeln!(out, "| Iterations | {} |", self.methodology.iterations);
+        let _ = writeln!(out, "| Warmup iterations | {} |", self.methodology.warmup);
+        let _ = writeln!(out, "| Rows per table | {} |", self.methodology.rows);
+        let _ = writeln!(
+            out,
+            "| Measurement ordering | {} |",
+            self.methodology.ordering
+        );
+        for test in &self.methodology.statistical_tests {
+            let _ = writeln!(out, "| Statistical test | {test} |");
+        }
+        out.push_str("\n**Ordering note:** Measurement order (accel-first vs baseline-first) ");
+        out.push_str("is randomized per iteration to eliminate cache-warming bias. ");
+        out.push_str("Plan caches are flushed between measurements via `DISCARD PLANS`.\n\n");
+
         // Results summary table
         out.push_str("## Results\n\n");
         out.push_str(
-            "| Workload | Accel (ms) | Baseline (ms) | Speedup | p-value | Significant |\n",
+            "| Workload | Accel (ms) | Baseline (ms) | Speedup | p-value | Cohen's d | Sig? |\n",
         );
         out.push_str(
-            "|----------|------------|---------------|---------|---------|-------------|\n",
+            "|----------|------------|---------------|---------|---------|-----------|------|\n",
         );
         for w in &self.workloads {
             let sig = if w.p_value < 0.01 {
@@ -212,9 +263,18 @@ impl BenchReport {
             } else {
                 "no"
             };
+            let effect = if w.cohens_d.abs() >= 0.8 {
+                "large"
+            } else if w.cohens_d.abs() >= 0.5 {
+                "medium"
+            } else if w.cohens_d.abs() >= 0.2 {
+                "small"
+            } else {
+                "negligible"
+            };
             let _ = writeln!(
                 out,
-                "| {} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | {:.2}x | {:.4} | {} |",
+                "| {} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | {:.2}x | {:.4} | {:.2} ({}) | {} |",
                 w.name,
                 w.accel_mean_ms,
                 w.accel_stddev_ms,
@@ -222,6 +282,8 @@ impl BenchReport {
                 w.baseline_stddev_ms,
                 w.speedup,
                 w.p_value,
+                w.cohens_d,
+                effect,
                 sig,
             );
         }
@@ -254,8 +316,19 @@ impl BenchReport {
                 "| 95% CI (ms) | {:.2}..{:.2} | {:.2}..{:.2} |",
                 w.accel_ci_95.0, w.accel_ci_95.1, w.baseline_ci_95.0, w.baseline_ci_95.1,
             );
+            let _ = writeln!(
+                out,
+                "| Min (ms) | {:.2} | {:.2} |",
+                w.accel_min_ms, w.baseline_min_ms
+            );
+            let _ = writeln!(
+                out,
+                "| Max (ms) | {:.2} | {:.2} |",
+                w.accel_max_ms, w.baseline_max_ms
+            );
             let _ = writeln!(out, "| Speedup | {:.2}x | |", w.speedup);
             let _ = writeln!(out, "| p-value | {:.6} | |", w.p_value);
+            let _ = writeln!(out, "| Cohen's d | {:.4} | |", w.cohens_d);
 
             if !w.accel_outliers.is_empty() {
                 let _ = writeln!(
@@ -292,8 +365,10 @@ impl BenchReport {
         let mut out = String::new();
         out.push_str(
             "workload,accel_mean_ms,accel_stddev_ms,accel_median_ms,\
+             accel_min_ms,accel_max_ms,\
              baseline_mean_ms,baseline_stddev_ms,baseline_median_ms,\
-             speedup,p_value,significant\n",
+             baseline_min_ms,baseline_max_ms,\
+             speedup,p_value,cohens_d,significant\n",
         );
         for w in &self.workloads {
             let sig = if w.p_value < 0.01 {
@@ -305,16 +380,21 @@ impl BenchReport {
             };
             let _ = writeln!(
                 out,
-                "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{}",
+                "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.4},{}",
                 w.name,
                 w.accel_mean_ms,
                 w.accel_stddev_ms,
                 w.accel_median_ms,
+                w.accel_min_ms,
+                w.accel_max_ms,
                 w.baseline_mean_ms,
                 w.baseline_stddev_ms,
                 w.baseline_median_ms,
+                w.baseline_min_ms,
+                w.baseline_max_ms,
                 w.speedup,
                 w.p_value,
+                w.cohens_d,
                 sig,
             );
         }
@@ -328,12 +408,31 @@ impl BenchReport {
 ///
 /// Returns an error if GUC detection fails (non-fatal: report still generated
 /// without GUCs).
-pub fn generate_report(workloads: Vec<WorkloadResult>, connection: Option<&str>) -> BenchReport {
+pub fn generate_report(
+    workloads: Vec<WorkloadResult>,
+    connection: Option<&str>,
+    iterations: usize,
+    warmup: usize,
+    rows: usize,
+) -> BenchReport {
     let hardware = Some(HardwareProfile::detect());
     let gucs = connection.and_then(|c| GucSettings::from_connection(c).ok());
+    let methodology = Methodology {
+        iterations,
+        warmup,
+        rows,
+        ordering: "randomized per iteration (accel-first vs baseline-first)".to_owned(),
+        statistical_tests: vec![
+            "Paired t-test (two-tailed, p < 0.05)".to_owned(),
+            "Cohen's d effect size".to_owned(),
+            "95% CI via t-distribution".to_owned(),
+            "Outlier detection (> 3 sigma)".to_owned(),
+        ],
+    };
     BenchReport {
         hardware,
         gucs,
+        methodology,
         workloads,
     }
 }

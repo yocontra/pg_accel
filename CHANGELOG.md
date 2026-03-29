@@ -14,7 +14,7 @@
 - PostGIS raster WKB format parser
 - Thread budget management via shared memory LWLock
 - CPU-only fallback mode (no GPU required)
-- GUC configuration: pg_accel.enabled, pg_accel.workers, pg_accel.batch_size
+- GUC configuration: pg_accel.enabled, pg_accel.workers, pg_accel.min_batch_size
 - pg_accel_device_info() and pg_accel_stats() monitoring functions
 - Support for PostgreSQL 15, 16, 17, 18
 - Support for PostGIS 3.3+, h3-pg 4.0+

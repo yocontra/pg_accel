@@ -71,6 +71,7 @@ pub fn has_bbox_flag(gserialized: &[u8]) -> bool {
 #[must_use]
 pub fn extract_bbox(datum: Datum) -> Option<(f32, f32, f32, f32)> {
     let bytes = datum_to_gserialized_bytes(datum)?;
+    let bytes = bytes.as_slice();
 
     if !has_bbox_flag(bytes) {
         return None;
@@ -124,6 +125,7 @@ pub fn extract_bbox(datum: Datum) -> Option<(f32, f32, f32, f32)> {
 #[must_use]
 pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
     let bytes = datum_to_gserialized_bytes(datum)?;
+    let bytes = bytes.as_slice();
 
     if bytes.len() < MIN_HEADER_LEN {
         return None;
@@ -197,6 +199,7 @@ pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
 #[must_use]
 pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
     let bytes = datum_to_gserialized_bytes(datum)?;
+    let bytes = bytes.as_slice();
 
     if bytes.len() < MIN_HEADER_LEN {
         return None;
@@ -410,7 +413,7 @@ fn extract_polygon_geom(
 /// Convert a `Datum` to a byte slice over the detoasted `GSERIALIZED` varlena.
 ///
 /// Returns `None` if the datum is null (zero).
-fn datum_to_gserialized_bytes(datum: Datum) -> Option<&'static [u8]> {
+fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
     let ptr = datum.value() as *const u8;
     if ptr.is_null() {
         return None;
@@ -434,8 +437,11 @@ fn datum_to_gserialized_bytes(datum: Datum) -> Option<&'static [u8]> {
     // SAFETY: `total_size` bytes starting at `ptr` are the detoasted
     // varlena payload owned by the current memory context. Valid for the
     // duration of this tuple's processing on the main backend thread.
+    // SAFETY: `total_size` bytes starting at `ptr` are the detoasted
+    // varlena payload. Copy into owned Vec to avoid lifetime issues —
+    // the underlying PG memory may be freed after tuple processing.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, total_size) };
-    Some(bytes)
+    Some(bytes.to_vec())
 }
 
 #[cfg(test)]

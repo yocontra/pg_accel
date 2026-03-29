@@ -8,7 +8,7 @@
 ## Agent Assignments
 
 ### A0 — Blog Post
-**Status:** Not Started
+**Status:** Complete (docs/launch/blog_draft.md)
 **Owns:** blog post draft
 
 **Tasks:**
@@ -35,7 +35,7 @@
 _(no deviations)_
 
 ### A1 — Benchmark Charts
-**Status:** Not Started
+**Status:** Deferred (requires live benchmark data from hardware runs)
 **Owns:** charts/visualizations for blog + README
 
 **Tasks:**
@@ -54,7 +54,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A2 — Demo Recording
-**Status:** Not Started
+**Status:** Deferred (requires live terminal recording with running PG instance)
 **Owns:** demo GIF/video
 
 **Tasks:**
@@ -76,7 +76,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A3 — HN Submission Draft
-**Status:** Not Started
+**Status:** Complete (docs/launch/hn_draft.md)
 **Owns:** HN title + first comment
 
 **Tasks:**
@@ -98,7 +98,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A4 — GitHub Release v0.1.0
-**Status:** Not Started
+**Status:** Deferred (requires actual tag creation and binary builds)
 **Owns:** GitHub release
 
 **Tasks:**
@@ -118,7 +118,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A5 — Social Media Post Drafts (Human Posts)
-**Status:** Not Started
+**Status:** Complete (docs/launch/social_media_drafts.md)
 **Owns:** draft text for each platform
 
 **NOTE:** Agents draft the text. A human must review and actually post.
@@ -141,7 +141,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A6 — Issue Templates + Community Setup
-**Status:** Not Started
+**Status:** Complete (.github/ISSUE_TEMPLATE/, .github/CODEOWNERS)
 **Owns:** GitHub community infrastructure
 
 **Tasks:**
@@ -161,7 +161,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A7 — Final Spot-Check
-**Status:** Not Started
+**Status:** Deferred (requires live macOS + Linux hardware testing)
 **Owns:** release verification
 
 **Tasks:**
@@ -183,7 +183,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A8 — Conference Abstracts
-**Status:** Not Started
+**Status:** Complete (docs/launch/conference_abstracts.md)
 **Owns:** conference submission drafts
 
 **Tasks:**
@@ -201,7 +201,7 @@ _(no deviations)_
 _(no deviations)_
 
 ### A9 — Security Audit (Final)
-**Status:** Not Started
+**Status:** Complete (SECURITY.md covers all items; audit done in Phase 9)
 **Owns:** final security review
 
 **Tasks:**

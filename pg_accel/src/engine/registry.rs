@@ -218,16 +218,44 @@ fn check_extension_installed(adapter: &ExtensionAdapter) -> bool {
 // Global registry access
 // ---------------------------------------------------------------------------
 
+// Guard against re-entrant calls to `lazy_init`.
+// lazy_init → SPI → planner → hook → lazy_init would deadlock or
+// panic on the OnceLock. The thread-local flag breaks the cycle by
+// making the recursive call a no-op.
+thread_local! {
+    static INITIALIZING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Ensure the global registry is initialised exactly once.
 ///
 /// Must be called from a transactional context (e.g. a planner hook) so
 /// that SPI is available for extension detection queries.
+///
+/// Re-entrant calls (via SPI triggering the planner hook again) are
+/// detected and short-circuited to avoid deadlock.
 pub fn lazy_init() {
+    if GLOBAL_REGISTRY.get().is_some() {
+        return;
+    }
+    if INITIALIZING.with(std::cell::Cell::get) {
+        return;
+    }
+    INITIALIZING.with(|f| f.set(true));
     GLOBAL_REGISTRY.get_or_init(|| {
         let mut registry = AdapterRegistry::new();
         registry.init_adapters();
         registry
     });
+    INITIALIZING.with(|f| f.set(false));
+}
+
+/// Whether the global registry has been successfully initialised.
+///
+/// Use this in planner hooks to early-return if `lazy_init` was called
+/// but could not complete (e.g. during re-entrant SPI initialisation).
+#[must_use]
+pub fn is_ready() -> bool {
+    GLOBAL_REGISTRY.get().is_some()
 }
 
 /// Return a reference to the global adapter registry.

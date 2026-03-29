@@ -180,7 +180,13 @@ gpu-build:
 
 # Run GPU kernel tests
 gpu-test: gpu-build
-    ./pgaccel-kernels/build/test_device
+    ./pgaccel-kernels/build/test_device \
+    && ./pgaccel-kernels/build/test_bbox \
+    && ./pgaccel-kernels/build/test_spatial \
+    && ./pgaccel-kernels/build/test_spatial_dispatch \
+    && ./pgaccel-kernels/build/test_h3 \
+    && ./pgaccel-kernels/build/test_raster \
+    && ./pgaccel-kernels/build/test_correctness
 
 # === CI ===
 

@@ -218,9 +218,12 @@ fn reclaim_dead_backends(data: &mut ThreadBudgetData) {
             continue;
         }
 
-        // SAFETY: kill(pid, 0) is a POSIX signal probe — it does not send
-        // a signal, only checks whether the process exists. Returns -1 with
-        // errno == ESRCH when the process does not exist.
+        // Check if the backend process is still alive using PG's own
+        // process table. This avoids TOCTOU races from PID recycling
+        // that affect the kill(pid, 0) approach.
+        #[cfg(not(test))]
+        let alive = unsafe { !pg_sys::BackendPidGetProc(slot.pid).is_null() };
+        #[cfg(test)]
         let alive = unsafe { libc::kill(slot.pid, 0) } == 0
             || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);
 
@@ -263,10 +266,10 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
         }
     }
 
-    // No free slots — log a warning. The caller still "gets" the threads
-    // logically (we updated total_allocated nowhere), but we cannot track
-    // them per-backend, so cleanup_backend won't reclaim them. This should
-    // be exceedingly rare (>256 concurrent backends using pg_accel).
+    // No free slots — still update the global total so the budget stays
+    // correct, but per-backend tracking is degraded (cleanup_backend
+    // won't reclaim these). Exceedingly rare (>256 concurrent backends).
+    data.total_allocated += granted;
     pgrx::warning!("pg_accel: no free backend slot for PID {pid}, thread tracking degraded");
 }
 

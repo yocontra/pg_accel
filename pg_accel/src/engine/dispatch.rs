@@ -29,6 +29,21 @@ use crate::gpu::three_layer;
 /// evaluation on the main backend thread.
 const INTERRUPT_CHECK_INTERVAL: usize = 1000;
 
+/// Stack-allocated wrapper for `FunctionCallInfoBaseData` that provides
+/// backing storage for one argument via the flexible array member `args`.
+///
+/// `FunctionCallInfoBaseData` ends with `args: [NullableDatum; 0]` (a C
+/// flexible array member). A plain `std::mem::zeroed::<FunctionCallInfoBaseData>()`
+/// allocates zero bytes for `args`, so writing to `args[0]` is a stack
+/// buffer overflow. This `#[repr(C)]` wrapper places a `NullableDatum`
+/// immediately after the base struct, which — per C layout rules — is
+/// exactly where `args[0]` lives.
+#[repr(C)]
+struct FcinfoWith1Arg {
+    base: pgrx::pg_sys::FunctionCallInfoBaseData,
+    _arg_space: pgrx::pg_sys::NullableDatum,
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch result
 // ---------------------------------------------------------------------------
@@ -120,21 +135,22 @@ pub unsafe fn dispatch_batched_eval(
             continue;
         }
 
-        // Build a minimal FunctionCallInfoBaseData on the stack.
+        // Build a FunctionCallInfoBaseData on the stack with space for 1 arg.
         //
-        // SAFETY: We zero-init the struct and populate the required fields.
-        // `fn_info` is a valid pointer to an initialised FmgrInfo provided by
-        // the caller. We only read from it; PG owns the memory.
-        let mut fcinfo: pgrx::pg_sys::FunctionCallInfoBaseData = unsafe { std::mem::zeroed() };
-        fcinfo.flinfo = std::ptr::from_ref::<pgrx::pg_sys::FmgrInfo>(fn_info).cast_mut();
-        fcinfo.nargs = 1;
-        fcinfo.isnull = false;
+        // SAFETY: FunctionCallInfoBaseData has a flexible array member `args`
+        // with zero allocated space. We use a #[repr(C)] wrapper that appends
+        // storage for one NullableDatum, ensuring writes to args[0] are backed
+        // by real memory. `fn_info` is a valid FmgrInfo provided by the caller.
+        let mut fcinfo_buf: FcinfoWith1Arg = unsafe { std::mem::zeroed() };
+        fcinfo_buf.base.flinfo = std::ptr::from_ref::<pgrx::pg_sys::FmgrInfo>(fn_info).cast_mut();
+        fcinfo_buf.base.nargs = 1;
+        fcinfo_buf.base.isnull = false;
 
-        // SAFETY: NullableDatum is repr(C) and we are writing a single arg at
-        // index 0. The args flexible array member has space for at least 1
-        // element in practice (PG always allocates with FUNC_MAX_ARGS).
+        // SAFETY: The _arg_space field in FcinfoWith1Arg provides backing
+        // storage at exactly the offset where args[0] lives (immediately
+        // after the base struct, per C flexible array member layout).
         unsafe {
-            let arg_ptr = fcinfo.args.as_mut_ptr();
+            let arg_ptr = fcinfo_buf.base.args.as_mut_ptr();
             (*arg_ptr).value = datum;
             (*arg_ptr).isnull = is_null;
         }
@@ -143,16 +159,16 @@ pub unsafe fn dispatch_batched_eval(
         // in flinfo. This is the Rust equivalent of the C FunctionCallInvoke
         // macro. We are on the main backend thread.
         let result_datum = unsafe {
-            let Some(func) = (*fcinfo.flinfo).fn_addr else {
+            let Some(func) = (*fcinfo_buf.base.flinfo).fn_addr else {
                 // fn_addr should always be set after fmgr_info(). If it is
                 // not, return NULL to avoid UB.
                 results.push((pgrx::pg_sys::Datum::from(0), true));
                 continue;
             };
-            func(&raw mut fcinfo)
+            func(&raw mut fcinfo_buf.base)
         };
 
-        results.push((result_datum, fcinfo.isnull));
+        results.push((result_datum, fcinfo_buf.base.isnull));
 
         // Periodically check for interrupts so that SIGINT / statement_timeout
         // are honoured even in long batches.

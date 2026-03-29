@@ -23,8 +23,10 @@ pub struct SortExecState {
     /// Batch size for input accumulation.
     batch_size: usize,
 
-    /// All materialized input slots, stored after sorting.
-    sorted_slots: Vec<*mut pg_sys::TupleTableSlot>,
+    /// All materialized input tuples, stored after sorting. Owned
+    /// `MinimalTuple` copies — we must copy because the child plan
+    /// reuses the same `TupleTableSlot` for every `ExecProcNode` call.
+    sorted_tuples: Vec<pg_sys::MinimalTuple>,
 
     /// Current emit position in `sorted_slots`.
     emit_pos: usize,
@@ -51,7 +53,7 @@ impl SortExecState {
         Self {
             strategy,
             batch_size,
-            sorted_slots: Vec::new(),
+            sorted_tuples: Vec::new(),
             emit_pos: 0,
             sort_done: false,
             child_exhausted: false,
@@ -84,20 +86,21 @@ impl SortExecState {
         }
 
         // Phase 2: Emit sorted tuples one at a time.
-        if self.emit_pos >= self.sorted_slots.len() {
+        if self.emit_pos >= self.sorted_tuples.len() {
             return std::ptr::null_mut();
         }
 
-        let slot = self.sorted_slots[self.emit_pos];
+        let mt = self.sorted_tuples[self.emit_pos];
         self.emit_pos += 1;
 
-        if slot.is_null() {
+        if mt.is_null() {
             return std::ptr::null_mut();
         }
 
-        // SAFETY: Both slots are valid TupleTableSlot pointers.
+        // SAFETY: mt is a valid MinimalTuple. Restore into result_slot.
+        // `false` = slot does not own the tuple.
         unsafe {
-            pg_sys::ExecCopySlot(result_slot, slot);
+            pg_sys::ExecStoreMinimalTuple(mt, result_slot, false);
         }
         result_slot
     }
@@ -133,11 +136,14 @@ impl SortExecState {
                     break;
                 }
 
-                // SAFETY: Materialize to persist across iterations.
-                unsafe {
+                // Copy tuple into owned storage. The child plan reuses
+                // the same slot, so we must copy the tuple data.
+                // SAFETY: child_slot is valid and non-empty.
+                let mt = unsafe {
                     pg_sys::ExecMaterializeSlot(child_slot);
-                }
-                self.sorted_slots.push(child_slot);
+                    pg_sys::ExecCopySlotMinimalTuple(child_slot)
+                };
+                self.sorted_tuples.push(mt);
                 self.rows_dispatched += 1;
             }
 

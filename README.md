@@ -9,7 +9,10 @@ GPU-accelerated query processing for PostgreSQL.
 ## Quickstart
 
 ```bash
-brew install pg_accel
+# Requires Rust nightly + pgrx 0.17
+cargo install cargo-pgrx
+cargo pgrx init        # one-time setup
+cargo pgrx install     # builds and installs the extension into your PG
 ```
 
 Add to `postgresql.conf`:
@@ -86,7 +89,7 @@ entries for their functions.
 |---|---|---|
 | **PostGIS** | GpuSpatial, BatchedEval | `ST_Contains`, `ST_Intersects`, `ST_DWithin`, `ST_Distance` |
 | **h3-pg** | GpuH3, BatchedEval | `h3_cell_to_parent`, `h3_grid_disk`, `h3_cell_to_boundary` |
-| **PostgreSQL builtins** | GpuSort, GpuReduce, BatchedEval | `sum`, `avg`, `min`, `max`, `count` |
+| **PostgreSQL builtins** | BatchedEval | `abs`, `sqrt`, `log`, `length`, `lower`, `upper`, `btrim`, `date_part`, `age`, `date_trunc`, `jsonb_extract_path_text`, `jsonb_typeof` |
 
 Raster operations (GpuRaster strategy) are planned for extensions that provide
 map-algebra functions.
@@ -109,11 +112,15 @@ also disable the extension per-session or globally.
 
 ### How is this different from PG-Strom?
 
-Different architecture. PG-Strom uses a Foreign Data Wrapper approach and
-focuses on columnar scan offload. pg_accel uses the Custom Scan Provider
-interface with a three-result model (true/false/uncertain) that preserves
-correctness via CPU recheck. pg_accel targets spatial predicates, H3 cell
-operations, and raster algebra rather than general columnar analytics.
+Different approach and scope. PG-Strom is a more mature project that uses the
+Custom Scan Provider interface with deep CUDA integration for general-purpose
+analytics acceleration -- it handles joins, aggregates, projections, and much
+more. pg_accel is narrower in scope, focused specifically on spatial predicates
+with a cross-platform GPU backend (Metal, CUDA, ROCm, Level Zero via
+AdaptiveCpp). The three-result model (true/false/uncertain) with CPU recheck
+is designed around the specific challenge of fp32 precision in geometric
+operations. If you need broad analytics acceleration on NVIDIA hardware,
+PG-Strom is a great choice.
 
 ### Which PostgreSQL versions are supported?
 

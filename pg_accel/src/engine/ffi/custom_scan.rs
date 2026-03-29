@@ -228,7 +228,7 @@ unsafe fn make_custom_scan_plan(
     _rel: *mut pg_sys::RelOptInfo,
     best_path: *mut pg_sys::CustomPath,
     tlist: *mut pg_sys::List,
-    _clauses: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
     is_scan: bool,
 ) -> *mut pg_sys::Plan {
@@ -241,8 +241,10 @@ unsafe fn make_custom_scan_plan(
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
         (*cscan).scan.plan.targetlist = tlist;
-        // Quals handled by child plan; pass NULL to avoid double-filtering.
-        (*cscan).scan.plan.qual = std::ptr::null_mut();
+        // SAFETY: extract_actual_clauses strips RestrictInfo wrappers,
+        // returning the actual qual expressions for ExecInitCustomScan
+        // to compile into ExprState for per-tuple evaluation.
+        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
         (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
         (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
@@ -421,8 +423,11 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     }
 
     // Our scan slot — where we put the result tuple.
-    // SAFETY: ss.ps.ps_ResultTupleSlot is initialised by PG.
-    let scan_slot = unsafe { (*node).ss.ps.ps_ResultTupleSlot };
+    // SAFETY: ss.ss_ScanTupleSlot is initialised by ExecInitCustomScan and
+    // is a MinimalTupleTableSlot when scanrelid > 0 (base relation scan).
+    // We must NOT use ps_ResultTupleSlot here because ExecStoreMinimalTuple
+    // requires a MinimalTupleTableSlot — using a virtual slot would crash.
+    let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
 
     // SAFETY: We are on the main backend thread. All pointers are valid.
     let result = unsafe { exec_state.next(child_ps, scan_slot) };
