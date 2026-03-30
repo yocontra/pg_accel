@@ -677,7 +677,7 @@ fn adapter_no_duplicate_names_within_each() {
 fn adapter_h3_gpu_strategy_for_gpu_functions() {
     let a = h3::adapter();
     let gpu_names = [
-        "h3_lat_lng_to_cell",
+        "h3_latlng_to_cell",
         "h3_grid_distance",
         "h3_cell_to_parent",
         "h3_get_resolution",
