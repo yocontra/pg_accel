@@ -386,7 +386,91 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         return PGACCEL_ERROR_INIT;
     }
 
-    // CPU path (SYCL clip uses same algorithm, embarrassingly parallel)
+#if PGACCEL_HAS_SYCL
+    try {
+        auto& q = get_queue();
+        size_t total = width * height;
+        size_t psz = pixel_type_size(pixel_type);
+        if (psz == 0) return PGACCEL_ERROR_UNSUPPORTED;
+
+        // SAFETY: USM device allocations freed at end of scope
+        char* d_rast = static_cast<char*>(sycl::malloc_device(total * psz, q));
+        char* d_out = static_cast<char*>(sycl::malloc_device(total * psz, q));
+        uint8_t* d_mask = sycl::malloc_device<uint8_t>(total, q);
+        float* d_ring = sycl::malloc_device<float>(vertex_count * 2, q);
+
+        if (!d_rast || !d_out || !d_mask || !d_ring) {
+            sycl::free(d_rast, q); sycl::free(d_out, q);
+            sycl::free(d_mask, q); sycl::free(d_ring, q);
+            return raster_clip_cpu(
+                rast_pixels, width, height,
+                origin_x, origin_y, scale_x, scale_y,
+                pixel_type, clip_ring_xy, vertex_count,
+                output_pixels, nodata_mask);
+        }
+
+        q.memcpy(d_rast, rast_pixels, total * psz);
+        q.memcpy(d_ring, clip_ring_xy, vertex_count * 2 * sizeof(float));
+        if (nodata_mask) {
+            q.memcpy(d_mask, nodata_mask, total * sizeof(uint8_t));
+        } else {
+            q.memset(d_mask, 0, total * sizeof(uint8_t));
+        }
+        q.wait();
+
+        // Copy raster pixels to output buffer on device
+        q.memcpy(d_out, d_rast, total * psz).wait();
+
+        const size_t w = width;
+        const size_t vc = vertex_count;
+        const float ox = static_cast<float>(origin_x);
+        const float oy = static_cast<float>(origin_y);
+        const float sx = static_cast<float>(scale_x);
+        const float sy = static_cast<float>(scale_y);
+
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(total), [=](sycl::id<1> id) {
+                const size_t idx = id[0];
+                const size_t row = idx / w;
+                const size_t col = idx % w;
+
+                // Pixel center in world coordinates (fp32 for Metal)
+                float px = ox + (static_cast<float>(col) + 0.5f) * sx;
+                float py = oy + (static_cast<float>(row) + 0.5f) * sy;
+
+                // Ray-casting point-in-ring test
+                bool inside = false;
+                size_t j = vc - 1;
+                for (size_t vi = 0; vi < vc; vi++) {
+                    float xi = d_ring[vi * 2];
+                    float yi = d_ring[vi * 2 + 1];
+                    float xj = d_ring[j * 2];
+                    float yj = d_ring[j * 2 + 1];
+
+                    if (((yi > py) != (yj > py)) &&
+                        (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+                        inside = !inside;
+                    }
+                    j = vi;
+                }
+
+                d_mask[idx] = inside ? 0 : 1;
+            });
+        }).wait();
+
+        q.memcpy(output_pixels, d_out, total * psz);
+        q.memcpy(nodata_mask, d_mask, total * sizeof(uint8_t));
+        q.wait();
+
+        sycl::free(d_rast, q);
+        sycl::free(d_out, q);
+        sycl::free(d_mask, q);
+        sycl::free(d_ring, q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception&) {
+        // SYCL unavailable at runtime, fall through to CPU
+    }
+#endif
     return raster_clip_cpu(
         rast_pixels, width, height,
         origin_x, origin_y, scale_x, scale_y,
@@ -410,6 +494,103 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         return PGACCEL_ERROR_INIT;
     }
 
+#if PGACCEL_HAS_SYCL
+    try {
+        auto& q = get_queue();
+        size_t in_psz = pixel_type_size(input_type);
+        size_t out_psz = pixel_type_size(output_type);
+        if (in_psz == 0 || out_psz == 0) return PGACCEL_ERROR_UNSUPPORTED;
+
+        // Convert input pixels to fp32 on host, apply rules on GPU, write back
+        auto* h_in = new (std::nothrow) float[pixel_count];
+        if (!h_in) {
+            return raster_reclass_cpu(
+                input_pixels, pixel_count, input_type,
+                rules, rule_count, output_type, output_pixels);
+        }
+        for (size_t i = 0; i < pixel_count; i++) {
+            h_in[i] = static_cast<float>(read_pixel(input_pixels, i, input_type));
+        }
+
+        // SAFETY: USM device allocations freed at end of scope
+        float* d_in = sycl::malloc_device<float>(pixel_count, q);
+        float* d_out = sycl::malloc_device<float>(pixel_count, q);
+
+        // Copy rules to device — flatten to 3 floats per rule (min, max, new)
+        float* h_rules_flat = new (std::nothrow) float[rule_count * 3];
+        float* d_rules = sycl::malloc_device<float>(rule_count * 3, q);
+
+        if (!d_in || !d_out || !h_rules_flat || !d_rules) {
+            delete[] h_in;
+            delete[] h_rules_flat;
+            sycl::free(d_in, q); sycl::free(d_out, q);
+            sycl::free(d_rules, q);
+            return raster_reclass_cpu(
+                input_pixels, pixel_count, input_type,
+                rules, rule_count, output_type, output_pixels);
+        }
+
+        for (size_t r = 0; r < rule_count; r++) {
+            h_rules_flat[r * 3 + 0] = static_cast<float>(rules[r].min_val);
+            h_rules_flat[r * 3 + 1] = static_cast<float>(rules[r].max_val);
+            h_rules_flat[r * 3 + 2] = static_cast<float>(rules[r].new_val);
+        }
+
+        q.memcpy(d_in, h_in, pixel_count * sizeof(float));
+        q.memcpy(d_rules, h_rules_flat, rule_count * 3 * sizeof(float));
+        q.wait();
+
+        delete[] h_in;
+        delete[] h_rules_flat;
+
+        const size_t rc = rule_count;
+
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(pixel_count), [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                float val = d_in[i];
+                float out_val = val; // passthrough by default
+
+                for (size_t r = 0; r < rc; r++) {
+                    float rmin = d_rules[r * 3 + 0];
+                    float rmax = d_rules[r * 3 + 1];
+                    float rnew = d_rules[r * 3 + 2];
+                    if (val >= rmin && val < rmax) {
+                        out_val = rnew;
+                        break;
+                    }
+                }
+
+                d_out[i] = out_val;
+            });
+        }).wait();
+
+        // Read back and convert to output pixel type
+        auto* h_out = new (std::nothrow) float[pixel_count];
+        if (!h_out) {
+            sycl::free(d_in, q); sycl::free(d_out, q);
+            sycl::free(d_rules, q);
+            return raster_reclass_cpu(
+                input_pixels, pixel_count, input_type,
+                rules, rule_count, output_type, output_pixels);
+        }
+
+        q.memcpy(h_out, d_out, pixel_count * sizeof(float)).wait();
+
+        for (size_t i = 0; i < pixel_count; i++) {
+            write_pixel(output_pixels, i, output_type,
+                        static_cast<double>(h_out[i]));
+        }
+
+        delete[] h_out;
+        sycl::free(d_in, q);
+        sycl::free(d_out, q);
+        sycl::free(d_rules, q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception&) {
+        // SYCL unavailable at runtime, fall through to CPU
+    }
+#endif
     return raster_reclass_cpu(
         input_pixels, pixel_count, input_type,
         rules, rule_count, output_type, output_pixels);

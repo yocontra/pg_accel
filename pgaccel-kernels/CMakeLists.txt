@@ -17,7 +17,7 @@ if(PGACCEL_USE_SYCL)
     endif()
 endif()
 
-add_library(pgaccel_kernels SHARED
+set(KERNEL_SOURCES
     src/device_manager.cpp
     src/platform_caps.cpp
     src/bbox_ops.cpp
@@ -28,42 +28,60 @@ add_library(pgaccel_kernels SHARED
     src/spatial_dispatch.cpp
     src/h3_ops.cpp
     src/raster_ops.cpp
+    src/expr_eval.cpp
+    src/expr_templates.cpp
+    src/hash_join.cpp
+    src/hash_agg.cpp
+    src/window.cpp
 )
 
+# Static library for embedding into the Rust extension.
+add_library(pgaccel_kernels STATIC ${KERNEL_SOURCES})
+
 target_include_directories(pgaccel_kernels PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+# Shared library for standalone test executables.
+add_library(pgaccel_kernels_shared SHARED ${KERNEL_SOURCES})
+
+target_include_directories(pgaccel_kernels_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 if(PGACCEL_USE_SYCL AND AdaptiveCpp_FOUND)
     add_sycl_to_target(TARGET pgaccel_kernels)
     target_compile_definitions(pgaccel_kernels PRIVATE PGACCEL_HAS_SYCL=1)
+    add_sycl_to_target(TARGET pgaccel_kernels_shared)
+    target_compile_definitions(pgaccel_kernels_shared PRIVATE PGACCEL_HAS_SYCL=1)
     message(STATUS "pgaccel: Building with AdaptiveCpp SYCL support")
 else()
     target_compile_definitions(pgaccel_kernels PRIVATE PGACCEL_HAS_SYCL=0)
+    target_compile_definitions(pgaccel_kernels_shared PRIVATE PGACCEL_HAS_SYCL=0)
     message(STATUS "pgaccel: Building CPU-only (no SYCL)")
 endif()
 
 # Standalone test binary
 add_executable(test_device test/test_device.cpp)
-target_link_libraries(test_device PRIVATE pgaccel_kernels)
+target_link_libraries(test_device PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_bbox test/test_bbox.cpp)
-target_link_libraries(test_bbox PRIVATE pgaccel_kernels)
+target_link_libraries(test_bbox PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_spatial test/test_spatial.cpp)
-target_link_libraries(test_spatial PRIVATE pgaccel_kernels)
+target_link_libraries(test_spatial PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_spatial_dispatch test/test_spatial_dispatch.cpp)
-target_link_libraries(test_spatial_dispatch PRIVATE pgaccel_kernels)
+target_link_libraries(test_spatial_dispatch PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_h3 test/test_h3.cpp)
-target_link_libraries(test_h3 PRIVATE pgaccel_kernels)
+target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_raster test/test_raster.cpp)
-target_link_libraries(test_raster PRIVATE pgaccel_kernels)
+target_link_libraries(test_raster PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_correctness test/test_correctness.cpp)
-target_link_libraries(test_correctness PRIVATE pgaccel_kernels)
+target_link_libraries(test_correctness PRIVATE pgaccel_kernels_shared)
 
 enable_testing()
 add_test(NAME test_device COMMAND test_device)
@@ -75,4 +93,4 @@ add_test(NAME test_raster COMMAND test_raster)
 add_test(NAME test_correctness COMMAND test_correctness)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
-install(FILES include/pgaccel_ffi.h DESTINATION include)
+install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h DESTINATION include)

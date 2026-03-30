@@ -2,6 +2,10 @@
 #include <cmath>
 #include <cstring>
 
+#if PGACCEL_HAS_SYCL
+#include <sycl/sycl.hpp>
+#endif
+
 // ---------------------------------------------------------------------------
 // H3 bit-layout constants
 // ---------------------------------------------------------------------------
@@ -418,10 +422,41 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
     if (cells == nullptr || resolutions == nullptr) return PGACCEL_ERROR_INIT;
 
 #if PGACCEL_HAS_SYCL
-    // SYCL path — trivial bit extraction is memory-bound, but included for
-    // completeness and for batching with other GPU work.
-    // For now, fall through to CPU — the kernel is too simple to benefit
-    // from GPU launch overhead.
+    try {
+        sycl::queue q{sycl::default_selector_v};
+
+        // SAFETY: USM device allocations freed at end of scope
+        uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+        int32_t* d_res = sycl::malloc_device<int32_t>(count, q);
+
+        if (!d_cells || !d_res) {
+            sycl::free(d_cells, q);
+            sycl::free(d_res, q);
+            return h3_get_resolution_bulk_cpu(cells, count, resolutions);
+        }
+
+        q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait();
+
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                if (d_cells[i] == 0) {
+                    d_res[i] = -1;
+                } else {
+                    // Inline resolution extraction: bits [55:52]
+                    d_res[i] = static_cast<int32_t>((d_cells[i] >> 52) & 0xF);
+                }
+            });
+        }).wait();
+
+        q.memcpy(resolutions, d_res, count * sizeof(int32_t)).wait();
+
+        sycl::free(d_cells, q);
+        sycl::free(d_res, q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception&) {
+        // SYCL unavailable at runtime, fall through to CPU
+    }
 #endif
     return h3_get_resolution_bulk_cpu(cells, count, resolutions);
 }
@@ -438,7 +473,66 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
     }
 
 #if PGACCEL_HAS_SYCL
-    // SYCL path placeholder — same rationale as get_resolution.
+    try {
+        sycl::queue q{sycl::default_selector_v};
+
+        // SAFETY: USM device allocations freed at end of scope
+        uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+        uint64_t* d_parents = sycl::malloc_device<uint64_t>(count, q);
+
+        if (!d_cells || !d_parents) {
+            sycl::free(d_cells, q);
+            sycl::free(d_parents, q);
+            return h3_cell_to_parent_bulk_cpu(cells, count, parent_res, parents);
+        }
+
+        q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait();
+
+        const int p_res = parent_res;
+        const uint64_t unused_digit = H3_UNUSED_DIGIT;
+        const int max_res = H3_MAX_RESOLUTION;
+        const uint64_t res_mask = H3_RES_MASK;
+
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                uint64_t cell = d_cells[i];
+
+                if (cell == 0) {
+                    d_parents[i] = 0;
+                    return;
+                }
+
+                int res = static_cast<int>((cell >> 52) & 0xF);
+                if (p_res > res) {
+                    d_parents[i] = 0;
+                    return;
+                }
+                if (p_res == res) {
+                    d_parents[i] = cell;
+                    return;
+                }
+
+                // Set resolution field
+                uint64_t result = (cell & ~res_mask) |
+                    (static_cast<uint64_t>(p_res) << 52);
+                // Clear child digits — set to 7 (unused)
+                for (int r = p_res + 1; r <= max_res; r++) {
+                    int shift = (max_res - r) * 3 + 1;
+                    result |= (unused_digit << shift);
+                }
+                d_parents[i] = result;
+            });
+        }).wait();
+
+        q.memcpy(parents, d_parents, count * sizeof(uint64_t)).wait();
+
+        sycl::free(d_cells, q);
+        sycl::free(d_parents, q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception&) {
+        // SYCL unavailable at runtime, fall through to CPU
+    }
 #endif
     return h3_cell_to_parent_bulk_cpu(cells, count, parent_res, parents);
 }
@@ -454,7 +548,86 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
     }
 
 #if PGACCEL_HAS_SYCL
-    // SYCL path placeholder — IJK math is compute-bound, good GPU candidate.
+    try {
+        sycl::queue q{sycl::default_selector_v};
+
+        // SAFETY: USM device allocations freed at end of scope
+        uint64_t* d_a = sycl::malloc_device<uint64_t>(count, q);
+        uint64_t* d_b = sycl::malloc_device<uint64_t>(count, q);
+        int32_t* d_dist = sycl::malloc_device<int32_t>(count, q);
+
+        if (!d_a || !d_b || !d_dist) {
+            sycl::free(d_a, q);
+            sycl::free(d_b, q);
+            sycl::free(d_dist, q);
+            return h3_grid_distance_bulk_cpu(cells_a, cells_b, count, distances);
+        }
+
+        q.memcpy(d_a, cells_a, count * sizeof(uint64_t));
+        q.memcpy(d_b, cells_b, count * sizeof(uint64_t));
+        q.wait();
+
+        const int max_res = H3_MAX_RESOLUTION;
+        const uint64_t digit_mask = H3_DIGIT_MASK;
+
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                uint64_t a = d_a[i];
+                uint64_t b = d_b[i];
+
+                if (a == 0 || b == 0) { d_dist[i] = -1; return; }
+
+                int res_a = static_cast<int>((a >> 52) & 0xF);
+                int res_b = static_cast<int>((b >> 52) & 0xF);
+                if (res_a != res_b) { d_dist[i] = -1; return; }
+
+                int base_a = static_cast<int>((a >> 45) & 0x7F);
+                int base_b = static_cast<int>((b >> 45) & 0x7F);
+                if (base_a != base_b) { d_dist[i] = -1; return; }
+
+                if (a == b) { d_dist[i] = 0; return; }
+
+                // Inline cell_to_ijk for both cells
+                // Direction vectors in IJK space for digits 0-6
+                const int dir_i[7] = { 0,  1,  0, -1, -1,  0,  1 };
+                const int dir_j[7] = { 0,  0,  1,  1,  0, -1, -1 };
+                const int dir_k[7] = { 0,  0,  0,  0,  1,  1,  0 };
+
+                int ia = 0, ja = 0, ka = 0;
+                int ib = 0, jb = 0, kb = 0;
+                for (int r = 1; r <= res_a; r++) {
+                    int shift = (max_res - r) * 3 + 1;
+                    int da = static_cast<int>((a >> shift) & digit_mask);
+                    int db = static_cast<int>((b >> shift) & digit_mask);
+                    if (da > 6) { ia = ja = ka = 0; }
+                    else { ia = ia * 3 + dir_i[da]; ja = ja * 3 + dir_j[da]; ka = ka * 3 + dir_k[da]; }
+                    if (db > 6) { ib = jb = kb = 0; }
+                    else { ib = ib * 3 + dir_i[db]; jb = jb * 3 + dir_j[db]; kb = kb * 3 + dir_k[db]; }
+                }
+
+                // IJK distance: max(|di|, |dj|, |dk|) after normalisation
+                int di = ia - ib, dj = ja - jb, dk = ka - kb;
+                int m = di;
+                if (dj < m) m = dj;
+                if (dk < m) m = dk;
+                di -= m; dj -= m; dk -= m;
+                int d = di;
+                if (dj > d) d = dj;
+                if (dk > d) d = dk;
+                d_dist[i] = static_cast<int32_t>(d);
+            });
+        }).wait();
+
+        q.memcpy(distances, d_dist, count * sizeof(int32_t)).wait();
+
+        sycl::free(d_a, q);
+        sycl::free(d_b, q);
+        sycl::free(d_dist, q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception&) {
+        // SYCL unavailable at runtime, fall through to CPU
+    }
 #endif
     return h3_grid_distance_bulk_cpu(cells_a, cells_b, count, distances);
 }
@@ -483,7 +656,197 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
     const auto *lngs = static_cast<const double *>(lng_array);
 
 #if PGACCEL_HAS_SYCL
-    // SYCL path placeholder — trig-heavy, excellent GPU candidate.
+    // Trig-heavy — excellent GPU candidate. Use fp32 on device (Metal constraint).
+    try {
+        sycl::queue q{sycl::default_selector_v};
+
+        float* d_lats = sycl::malloc_device<float>(count, q);
+        float* d_lngs = sycl::malloc_device<float>(count, q);
+        uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+        uint8_t* d_valid = sycl::malloc_device<uint8_t>(count, q);
+
+        if (!d_lats || !d_lngs || !d_cells || !d_valid) {
+            sycl::free(d_lats, q);
+            sycl::free(d_lngs, q);
+            sycl::free(d_cells, q);
+            sycl::free(d_valid, q);
+            return h3_lat_lng_to_cell_bulk_cpu(
+                lats, lngs, count, resolution, use_fp64, cell_ids, valid);
+        }
+
+        // Convert double inputs to fp32 for GPU (Metal: no fp64)
+        auto* h_lats_f32 = new (std::nothrow) float[count];
+        auto* h_lngs_f32 = new (std::nothrow) float[count];
+        if (!h_lats_f32 || !h_lngs_f32) {
+            delete[] h_lats_f32;
+            delete[] h_lngs_f32;
+            sycl::free(d_lats, q); sycl::free(d_lngs, q);
+            sycl::free(d_cells, q); sycl::free(d_valid, q);
+            return h3_lat_lng_to_cell_bulk_cpu(
+                lats, lngs, count, resolution, use_fp64, cell_ids, valid);
+        }
+        for (size_t i = 0; i < count; i++) {
+            h_lats_f32[i] = static_cast<float>(lats[i]);
+            h_lngs_f32[i] = static_cast<float>(lngs[i]);
+        }
+
+        q.memcpy(d_lats, h_lats_f32, count * sizeof(float));
+        q.memcpy(d_lngs, h_lngs_f32, count * sizeof(float));
+        q.wait();
+
+        delete[] h_lats_f32;
+        delete[] h_lngs_f32;
+
+        const int res = resolution;
+        const float deg2rad = static_cast<float>(DEG_TO_RAD);
+
+        // Copy face centers to device-accessible arrays
+        float h_fc_lat[20], h_fc_lng[20];
+        for (int f = 0; f < 20; f++) {
+            h_fc_lat[f] = static_cast<float>(FACE_CENTER_LAT[f]);
+            h_fc_lng[f] = static_cast<float>(FACE_CENTER_LNG[f]);
+        }
+        float* d_fc_lat = sycl::malloc_device<float>(20, q);
+        float* d_fc_lng = sycl::malloc_device<float>(20, q);
+        if (!d_fc_lat || !d_fc_lng) {
+            sycl::free(d_lats, q); sycl::free(d_lngs, q);
+            sycl::free(d_cells, q); sycl::free(d_valid, q);
+            sycl::free(d_fc_lat, q); sycl::free(d_fc_lng, q);
+            return h3_lat_lng_to_cell_bulk_cpu(
+                lats, lngs, count, resolution, use_fp64, cell_ids, valid);
+        }
+        q.memcpy(d_fc_lat, h_fc_lat, 20 * sizeof(float));
+        q.memcpy(d_fc_lng, h_fc_lng, 20 * sizeof(float));
+        q.wait();
+
+        // Face-to-base-cell mapping
+        const int f2bc[20] = {
+            1,  2,  3,  4,  5,  6,  7,  8,  9, 10,
+            11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+        };
+
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                const size_t i = id[0];
+                float lat_deg = d_lats[i];
+                float lng_deg = d_lngs[i];
+
+                // fp32 precision insufficient for res >= 12
+                if (res >= 12 || res < 0 || res > 15) {
+                    d_valid[i] = 0;
+                    d_cells[i] = 0;
+                    return;
+                }
+                if (lat_deg < -90.0f || lat_deg > 90.0f ||
+                    lng_deg < -180.0f || lng_deg > 180.0f) {
+                    d_valid[i] = 0;
+                    d_cells[i] = 0;
+                    return;
+                }
+
+                float lat_rad = lat_deg * deg2rad;
+                float lng_rad = lng_deg * deg2rad;
+
+                // Find closest face
+                float best_dist = -2.0f;
+                int best_face = 0;
+                float cos_lat = sycl::cos(lat_rad);
+                float sin_lat = sycl::sin(lat_rad);
+                for (int f = 0; f < 20; f++) {
+                    float cos_fc = sycl::cos(d_fc_lat[f]);
+                    float sin_fc = sycl::sin(d_fc_lat[f]);
+                    float dlng = lng_rad - d_fc_lng[f];
+                    float cos_d = sin_lat * sin_fc +
+                                  cos_lat * cos_fc * sycl::cos(dlng);
+                    if (cos_d > best_dist) {
+                        best_dist = cos_d;
+                        best_face = f;
+                    }
+                }
+
+                // Gnomonic projection
+                float clat = d_fc_lat[best_face];
+                float clng = d_fc_lng[best_face];
+                float cos_clat = sycl::cos(clat);
+                float sin_clat = sycl::sin(clat);
+                float dlng = lng_rad - clng;
+                float cos_dlng = sycl::cos(dlng);
+                float cos_c = sin_clat * sin_lat + cos_clat * cos_lat * cos_dlng;
+                float x, y;
+                if (cos_c < 1e-5f) {
+                    d_valid[i] = 0;
+                    d_cells[i] = 0;
+                    return;
+                }
+                x = (cos_lat * sycl::sin(dlng)) / cos_c;
+                y = (cos_clat * sin_lat - sin_clat * cos_lat * cos_dlng) / cos_c;
+
+                if (x * x + y * y > 1.5f) {
+                    d_valid[i] = 0;
+                    d_cells[i] = 0;
+                    return;
+                }
+
+                int base_cell = f2bc[best_face];
+
+                // Hex child center offsets (aperture-7)
+                const float CX[7] = { 0.0f, 1.0f, 0.5f, -0.5f, -1.0f, -0.5f, 0.5f };
+                const float CY[7] = { 0.0f, 0.0f, 0.866025f, 0.866025f,
+                                       0.0f, -0.866025f, -0.866025f };
+
+                int digits[15];
+                float scale = 1.0f;
+                for (int r = 0; r < res; r++) {
+                    scale /= 2.6457513f; // sqrt(7)
+                    float best = 1e30f;
+                    int best_d = 0;
+                    for (int d = 0; d < 7; d++) {
+                        float dx = x - CX[d] * scale;
+                        float dy = y - CY[d] * scale;
+                        float dist2 = dx * dx + dy * dy;
+                        if (dist2 < best) {
+                            best = dist2;
+                            best_d = d;
+                        }
+                    }
+                    x -= CX[best_d] * scale;
+                    y -= CY[best_d] * scale;
+                    digits[r] = best_d;
+                }
+
+                // Build cell ID
+                uint64_t cell = (1ULL << 63);           // high bit
+                cell |= (1ULL << 59);                   // mode = cell
+                cell |= (static_cast<uint64_t>(res) << 52);
+                cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
+                for (int r = 1; r <= 15; r++) {
+                    int shift = (15 - r) * 3 + 1;
+                    if (r <= res) {
+                        cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
+                    } else {
+                        cell |= (7ULL << shift);
+                    }
+                }
+
+                d_valid[i] = 1;
+                d_cells[i] = cell;
+            });
+        }).wait();
+
+        q.memcpy(cell_ids, d_cells, count * sizeof(uint64_t));
+        q.memcpy(valid, d_valid, count * sizeof(uint8_t));
+        q.wait();
+
+        sycl::free(d_lats, q);
+        sycl::free(d_lngs, q);
+        sycl::free(d_cells, q);
+        sycl::free(d_valid, q);
+        sycl::free(d_fc_lat, q);
+        sycl::free(d_fc_lng, q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception&) {
+        // SYCL unavailable at runtime, fall through to CPU
+    }
 #endif
     return h3_lat_lng_to_cell_bulk_cpu(lats, lngs, count, resolution,
                                         use_fp64, cell_ids, valid);

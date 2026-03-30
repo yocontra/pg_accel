@@ -16,6 +16,18 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// PG-compatible float comparison: NaN is treated as the largest value.
+/// NaN == NaN is true (equal), NaN > everything else.
+template <typename T>
+static inline bool pg_float_less(T a, T b) {
+    // NaN != NaN under IEEE 754, so (x != x) detects NaN.
+    const bool a_nan = (a != a);
+    const bool b_nan = (b != b);
+    if (a_nan) return false;   // NaN is not less than anything
+    if (b_nan) return true;    // everything is less than NaN
+    return a < b;
+}
+
 /// Round up to the next power of two. Returns n if already a power of two.
 static size_t next_power_of_two(size_t n) {
     if (n <= 1) return 1;
@@ -39,7 +51,8 @@ static constexpr size_t GPU_SORT_THRESHOLD = 4096;
 template <typename T>
 static pgaccel_status cpu_sort(T* data, size_t count) {
     if (count <= 1) return PGACCEL_OK;
-    std::sort(data, data + count);
+    std::sort(data, data + count,
+              [](const T& a, const T& b) { return pg_float_less(a, b); });
     return PGACCEL_OK;
 }
 
@@ -58,7 +71,7 @@ static pgaccel_status cpu_sort_kv(K* keys, uint32_t* indices, size_t count) {
     }
     std::stable_sort(pairs.begin(), pairs.end(),
                      [](const auto& a, const auto& b) {
-                         return a.first < b.first;
+                         return pg_float_less(a.first, b.first);
                      });
     for (size_t i = 0; i < count; ++i) {
         keys[i] = pairs[i].first;
@@ -140,8 +153,8 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
                             const bool ascending = ((i & k) == 0);
                             const T vi = d_buf[i];
                             const T vp = d_buf[partner];
-                            if ((ascending && vi > vp) ||
-                                (!ascending && vi < vp)) {
+                            if ((ascending && pg_float_less(vp, vi)) ||
+                                (!ascending && pg_float_less(vi, vp))) {
                                 d_buf[i] = vp;
                                 d_buf[partner] = vi;
                             }
@@ -216,15 +229,24 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
                             const uint32_t ii = d_idx[i];
                             const uint32_t ip = d_idx[partner];
 
-                            // Compare keys; break ties by original index
-                            // for stability.
+                            // Compare keys with NaN-aware PG semantics;
+                            // break ties by original index for stability.
+                            const bool ki_nan = (ki != ki);
+                            const bool kp_nan = (kp != kp);
+                            // NaN-aware equality: both NaN, or both
+                            // non-NaN and IEEE-equal.
+                            const bool eq = (ki_nan && kp_nan) ||
+                                            (!ki_nan && !kp_nan &&
+                                             ki == kp);
                             bool should_swap = false;
                             if (ascending) {
-                                should_swap = (ki > kp) ||
-                                              (ki == kp && ii > ip);
+                                should_swap =
+                                    pg_float_less(kp, ki) ||
+                                    (eq && ii > ip);
                             } else {
-                                should_swap = (ki < kp) ||
-                                              (ki == kp && ii < ip);
+                                should_swap =
+                                    pg_float_less(ki, kp) ||
+                                    (eq && ii < ip);
                             }
                             if (should_swap) {
                                 d_keys[i] = kp;
