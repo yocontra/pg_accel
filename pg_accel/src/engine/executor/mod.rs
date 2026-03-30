@@ -15,3 +15,4 @@ pub mod deser;
 pub mod join;
 pub mod scan;
 pub mod sort;
+pub mod window;

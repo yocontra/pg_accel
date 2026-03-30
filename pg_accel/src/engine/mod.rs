@@ -1,11 +1,13 @@
 //! Core engine: FFI shims, registry types, dispatch, and executor nodes.
 
 pub mod batch;
+pub mod columnar;
 pub mod cost;
 pub mod device_info;
 pub mod dispatch;
 pub mod dispatch_fallback;
 pub mod executor;
+pub mod expr_compiler;
 pub mod ffi;
 pub mod function_matcher;
 pub mod gucs;

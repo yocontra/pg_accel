@@ -17,21 +17,46 @@ use crate::engine::function_matcher::{self, FunctionPattern};
 static GLOBAL_REGISTRY: OnceLock<AdapterRegistry> = OnceLock::new();
 
 /// Strategy that `pg_accel` applies when accelerating a function call.
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccelStrategy {
     /// Evaluate multiple rows in a tight loop on the main backend thread,
     /// avoiding repeated executor overhead.
-    BatchedEval,
+    BatchedEval = 0,
     /// Offload spatial predicate evaluation to the GPU.
-    GpuSpatial,
+    GpuSpatial = 1,
     /// Offload raster map-algebra and similar operations to the GPU.
-    GpuRaster,
+    GpuRaster = 2,
     /// Offload H3 cell computation to the GPU.
-    GpuH3,
+    GpuH3 = 3,
     /// GPU-accelerated sorting (e.g. radix sort on numeric keys).
-    GpuSort,
+    GpuSort = 4,
     /// GPU-accelerated reduction / aggregate (sum, avg, min, max, count).
-    GpuReduce,
+    GpuReduce = 5,
+    /// GPU expression evaluator — general WHERE clauses and projections.
+    GpuExpr = 6,
+    /// GPU hash join — equi-join via hash build + probe.
+    GpuHashJoin = 7,
+    /// GPU window functions — ROW_NUMBER, RANK, SUM OVER, LAG/LEAD, etc.
+    GpuWindow = 8,
+}
+
+impl AccelStrategy {
+    /// Convert from raw integer, defaulting to `BatchedEval` for unknown values.
+    #[must_use]
+    pub const fn from_i32(v: i32) -> Self {
+        match v {
+            1 => Self::GpuSpatial,
+            2 => Self::GpuRaster,
+            3 => Self::GpuH3,
+            4 => Self::GpuSort,
+            5 => Self::GpuReduce,
+            6 => Self::GpuExpr,
+            7 => Self::GpuHashJoin,
+            8 => Self::GpuWindow,
+            _ => Self::BatchedEval,
+        }
+    }
 }
 
 /// A single SQL function that `pg_accel` knows how to accelerate.
@@ -176,6 +201,14 @@ impl AdapterRegistry {
         self.by_oid.get(&oid)
     }
 
+    /// Whether the registry has any resolved function entries.
+    /// Used as a fast-reject in planner hooks: if no extensions are
+    /// installed, we can skip clause walking entirely.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_oid.is_empty()
+    }
+
     /// Number of OID-resolved function entries.
     #[must_use]
     pub fn resolved_count(&self) -> usize {
@@ -199,17 +232,30 @@ impl AdapterRegistry {
 // Extension detection
 // ---------------------------------------------------------------------------
 
-/// Run an adapter's `version_query` via SPI to check whether its backing
-/// extension is installed.
+/// Check whether an adapter's backing extension is installed by querying
+/// the `pg_extension` system catalog.
 ///
-/// Returns `true` if the query executes without error. Errors (e.g. unknown
-/// function) are caught and treated as "extension not installed".
+/// This avoids calling version functions (e.g. `postgis_version()`) that
+/// would raise a PostgreSQL ERROR if the extension is not installed —
+/// pgrx converts those errors to panics which abort the server when
+/// they occur inside a planner hook.
+///
+/// The `pg_builtins` adapter always returns `true` (no extension needed).
 fn check_extension_installed(adapter: &ExtensionAdapter) -> bool {
-    // SPI::connect executes within the current transaction context.
+    // pg_builtins doesn't require any extension.
+    if adapter.name == "pg_builtins" {
+        return true;
+    }
+
+    // Adapter name matches extension name in pg_extension.
+    let ext_name = adapter.name;
+
+    let query = format!("SELECT 1 FROM pg_extension WHERE extname = '{ext_name}'");
+
     pgrx::Spi::connect(|client| {
         client
-            .select(adapter.version_query, None, &[])
-            .map(|_table| true)
+            .select(&query, None, &[])
+            .map(|table| !table.is_empty())
             .unwrap_or(false)
     })
 }
@@ -241,11 +287,31 @@ pub fn lazy_init() {
         return;
     }
     INITIALIZING.with(|f| f.set(true));
-    GLOBAL_REGISTRY.get_or_init(|| {
-        let mut registry = AdapterRegistry::new();
-        registry.init_adapters();
-        registry
-    });
+
+    // Wrap in catch_unwind because init_adapters() uses SPI queries
+    // (e.g. `SELECT postgis_version()`) that can trigger PostgreSQL
+    // ERRORs. pgrx converts those to panics, and if the panic
+    // propagates through the C planner hook frame, PG aborts with
+    // "failed to initiate panic". Catching here keeps PG alive —
+    // the registry will be empty (no acceleration) but queries work.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        GLOBAL_REGISTRY.get_or_init(|| {
+            let mut registry = AdapterRegistry::new();
+            registry.init_adapters();
+            registry
+        });
+    }));
+
+    if result.is_err() {
+        // Initialization panicked (SPI error, missing extension, etc.).
+        // Install an empty registry so is_ready() returns true and we
+        // don't retry on every query.
+        GLOBAL_REGISTRY.get_or_init(|| {
+            pgrx::warning!("pg_accel: adapter initialisation failed, running with no acceleration");
+            AdapterRegistry::new()
+        });
+    }
+
     INITIALIZING.with(|f| f.set(false));
 }
 
@@ -325,5 +391,179 @@ mod tests {
         let reg = AdapterRegistry::default();
         assert_eq!(reg.resolved_count(), 0);
         assert_eq!(reg.adapter_count(), 0);
+    }
+
+    #[test]
+    fn register_function_overwrites_duplicate_oid() {
+        let mut reg = AdapterRegistry::new();
+        let oid = pgrx::pg_sys::Oid::from(100_u32);
+
+        reg.register_function(
+            oid,
+            FunctionAccelEntry {
+                schema: "public",
+                name: "func_a",
+                strategy: AccelStrategy::BatchedEval,
+            },
+        );
+        assert_eq!(reg.resolved_count(), 1);
+        assert_eq!(
+            reg.lookup(oid).unwrap().strategy,
+            AccelStrategy::BatchedEval
+        );
+
+        // Re-register same OID with different entry
+        reg.register_function(
+            oid,
+            FunctionAccelEntry {
+                schema: "public",
+                name: "func_b",
+                strategy: AccelStrategy::GpuH3,
+            },
+        );
+        // Count stays at 1 (overwrite, not duplicate)
+        assert_eq!(reg.resolved_count(), 1);
+        assert_eq!(reg.lookup(oid).unwrap().name, "func_b");
+        assert_eq!(reg.lookup(oid).unwrap().strategy, AccelStrategy::GpuH3);
+    }
+
+    #[test]
+    fn multiple_functions_independent_lookup() {
+        let mut reg = AdapterRegistry::new();
+        let oid1 = pgrx::pg_sys::Oid::from(10_u32);
+        let oid2 = pgrx::pg_sys::Oid::from(20_u32);
+        let oid3 = pgrx::pg_sys::Oid::from(30_u32);
+
+        reg.register_function(
+            oid1,
+            FunctionAccelEntry {
+                schema: "public",
+                name: "f1",
+                strategy: AccelStrategy::GpuSpatial,
+            },
+        );
+        reg.register_function(
+            oid2,
+            FunctionAccelEntry {
+                schema: "public",
+                name: "f2",
+                strategy: AccelStrategy::GpuRaster,
+            },
+        );
+        reg.register_function(
+            oid3,
+            FunctionAccelEntry {
+                schema: "pg_catalog",
+                name: "f3",
+                strategy: AccelStrategy::GpuSort,
+            },
+        );
+
+        assert_eq!(reg.resolved_count(), 3);
+        assert_eq!(reg.lookup(oid1).unwrap().name, "f1");
+        assert_eq!(reg.lookup(oid2).unwrap().name, "f2");
+        assert_eq!(reg.lookup(oid3).unwrap().name, "f3");
+        assert!(reg.lookup(pgrx::pg_sys::Oid::from(999_u32)).is_none());
+    }
+
+    #[test]
+    fn adapters_returns_registered_adapters() {
+        let mut reg = AdapterRegistry::new();
+        assert!(reg.adapters().is_empty());
+
+        reg.register_adapter(ExtensionAdapter {
+            name: "test_ext",
+            version_query: "SELECT 1",
+            functions: vec![],
+        });
+        reg.register_adapter(ExtensionAdapter {
+            name: "another_ext",
+            version_query: "SELECT 2",
+            functions: vec![
+                FunctionAccelEntry {
+                    schema: "public",
+                    name: "fn1",
+                    strategy: AccelStrategy::GpuReduce,
+                },
+                FunctionAccelEntry {
+                    schema: "public",
+                    name: "fn2",
+                    strategy: AccelStrategy::BatchedEval,
+                },
+            ],
+        });
+
+        assert_eq!(reg.adapter_count(), 2);
+        assert_eq!(reg.adapters().len(), 2);
+        assert_eq!(reg.adapters()[0].name, "test_ext");
+        assert_eq!(reg.adapters()[1].name, "another_ext");
+        assert_eq!(reg.adapters()[1].functions.len(), 2);
+    }
+
+    #[test]
+    fn adapter_with_empty_functions_list() {
+        let mut reg = AdapterRegistry::new();
+        reg.register_adapter(ExtensionAdapter {
+            name: "empty_adapter",
+            version_query: "SELECT version()",
+            functions: vec![],
+        });
+        assert_eq!(reg.adapter_count(), 1);
+        // No OIDs resolved since no functions declared
+        assert_eq!(reg.resolved_count(), 0);
+    }
+
+    #[test]
+    fn accel_strategy_equality() {
+        assert_eq!(AccelStrategy::BatchedEval, AccelStrategy::BatchedEval);
+        assert_eq!(AccelStrategy::GpuSpatial, AccelStrategy::GpuSpatial);
+        assert_ne!(AccelStrategy::BatchedEval, AccelStrategy::GpuSpatial);
+        assert_ne!(AccelStrategy::GpuRaster, AccelStrategy::GpuH3);
+        assert_ne!(AccelStrategy::GpuSort, AccelStrategy::GpuReduce);
+    }
+
+    #[test]
+    fn accel_strategy_debug() {
+        assert_eq!(format!("{:?}", AccelStrategy::BatchedEval), "BatchedEval");
+        assert_eq!(format!("{:?}", AccelStrategy::GpuSpatial), "GpuSpatial");
+        assert_eq!(format!("{:?}", AccelStrategy::GpuRaster), "GpuRaster");
+        assert_eq!(format!("{:?}", AccelStrategy::GpuH3), "GpuH3");
+        assert_eq!(format!("{:?}", AccelStrategy::GpuSort), "GpuSort");
+        assert_eq!(format!("{:?}", AccelStrategy::GpuReduce), "GpuReduce");
+    }
+
+    #[test]
+    fn accel_strategy_clone_copy() {
+        let original = AccelStrategy::GpuSpatial;
+        let cloned = original.clone();
+        let copied = original;
+        assert_eq!(original, cloned);
+        assert_eq!(original, copied);
+    }
+
+    #[test]
+    fn accel_strategy_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AccelStrategy::BatchedEval);
+        set.insert(AccelStrategy::GpuSpatial);
+        set.insert(AccelStrategy::BatchedEval); // duplicate
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn function_accel_entry_debug_and_clone() {
+        let entry = FunctionAccelEntry {
+            schema: "public",
+            name: "st_intersects",
+            strategy: AccelStrategy::GpuSpatial,
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.schema, "public");
+        assert_eq!(cloned.name, "st_intersects");
+        assert_eq!(cloned.strategy, AccelStrategy::GpuSpatial);
+
+        let debug = format!("{entry:?}");
+        assert!(debug.contains("st_intersects"));
     }
 }

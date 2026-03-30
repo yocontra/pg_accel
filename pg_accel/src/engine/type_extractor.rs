@@ -533,4 +533,344 @@ mod tests {
         // OID 0 (InvalidOid) should not match any extractor.
         assert!(extractor_for_oid(pg_sys::Oid::from(0_u32)).is_none());
     }
+
+    #[test]
+    fn extractor_for_oid_all_supported_types() {
+        let supported = [
+            pg_sys::FLOAT8OID,
+            pg_sys::FLOAT4OID,
+            pg_sys::INT8OID,
+            pg_sys::INT4OID,
+            pg_sys::BOOLOID,
+            pg_sys::TIMESTAMPOID,
+            pg_sys::TEXTOID,
+            pg_sys::BYTEAOID,
+        ];
+        for oid in &supported {
+            assert!(
+                extractor_for_oid(*oid).is_some(),
+                "Expected extractor for OID {oid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn extractor_for_oid_returns_correct_oid() {
+        let pairs: Vec<(pg_sys::Oid, pg_sys::Oid)> = vec![
+            (pg_sys::FLOAT8OID, pg_sys::FLOAT8OID),
+            (pg_sys::FLOAT4OID, pg_sys::FLOAT4OID),
+            (pg_sys::INT8OID, pg_sys::INT8OID),
+            (pg_sys::INT4OID, pg_sys::INT4OID),
+            (pg_sys::BOOLOID, pg_sys::BOOLOID),
+            (pg_sys::TIMESTAMPOID, pg_sys::TIMESTAMPOID),
+            (pg_sys::TEXTOID, pg_sys::TEXTOID),
+            (pg_sys::BYTEAOID, pg_sys::BYTEAOID),
+        ];
+        for (lookup_oid, expected_oid) in pairs {
+            let ext = extractor_for_oid(lookup_oid).unwrap();
+            assert_eq!(ext.oid(), expected_oid);
+        }
+    }
+
+    #[test]
+    fn extractor_for_unknown_oids() {
+        // Various OIDs that are not in the supported set
+        let unsupported = [
+            pg_sys::Oid::from(0_u32),
+            pg_sys::Oid::from(1_u32),
+            pg_sys::Oid::from(99999_u32),
+        ];
+        for oid in &unsupported {
+            assert!(extractor_for_oid(*oid).is_none());
+        }
+    }
+
+    #[test]
+    fn null_extract_all_extractors() {
+        let extractors: Vec<Box<dyn TypeExtractor>> = vec![
+            Box::new(Float8Extractor),
+            Box::new(Float4Extractor),
+            Box::new(Int8Extractor),
+            Box::new(Int4Extractor),
+            Box::new(BoolExtractor),
+            Box::new(TimestampExtractor),
+            Box::new(TextExtractor),
+            Box::new(ByteaExtractor),
+        ];
+        for ext in &extractors {
+            // SAFETY: Datum value is irrelevant when is_null is true.
+            let repr = unsafe { ext.extract(pg_sys::Datum::from(0_usize), true) };
+            assert_eq!(
+                repr,
+                GpuRepr::Null,
+                "Null extract failed for {:?}",
+                ext.oid()
+            );
+        }
+    }
+
+    #[test]
+    fn pack_wrong_variant_returns_none() {
+        // Each extractor should return None when given a mismatched GpuRepr variant.
+        let ext_f8 = Float8Extractor;
+        // SAFETY: Packing mismatched repr; no real datum access occurs
+        // because pack returns None for wrong variants.
+        assert!(unsafe { ext_f8.pack(&GpuRepr::Int4(42)) }.is_none());
+        assert!(unsafe { ext_f8.pack(&GpuRepr::Bool(true)) }.is_none());
+        assert!(unsafe { ext_f8.pack(&GpuRepr::Null) }.is_none());
+
+        // SAFETY: Packing mismatched repr returns None without datum access.
+        let ext_f4 = Float4Extractor;
+        assert!(unsafe { ext_f4.pack(&GpuRepr::Float8(1.0)) }.is_none());
+        assert!(unsafe { ext_f4.pack(&GpuRepr::Int8(1)) }.is_none());
+
+        // SAFETY: Packing mismatched repr returns None without datum access.
+        let ext_i8 = Int8Extractor;
+        assert!(unsafe { ext_i8.pack(&GpuRepr::Int4(1)) }.is_none());
+        assert!(unsafe { ext_i8.pack(&GpuRepr::Float8(1.0)) }.is_none());
+
+        // SAFETY: Packing mismatched repr returns None without datum access.
+        let ext_i4 = Int4Extractor;
+        assert!(unsafe { ext_i4.pack(&GpuRepr::Int8(1)) }.is_none());
+        assert!(unsafe { ext_i4.pack(&GpuRepr::Bool(false)) }.is_none());
+
+        // SAFETY: Packing mismatched repr returns None without datum access.
+        let ext_bool = BoolExtractor;
+        assert!(unsafe { ext_bool.pack(&GpuRepr::Int4(1)) }.is_none());
+        assert!(unsafe { ext_bool.pack(&GpuRepr::Float8(1.0)) }.is_none());
+
+        // SAFETY: Packing mismatched repr returns None without datum access.
+        let ext_ts = TimestampExtractor;
+        assert!(unsafe { ext_ts.pack(&GpuRepr::Int4(1)) }.is_none());
+        assert!(unsafe { ext_ts.pack(&GpuRepr::Bool(true)) }.is_none());
+    }
+
+    #[test]
+    fn float8_special_values() {
+        let ext = Float8Extractor;
+        // Zero
+        let datum = pg_sys::Datum::from(0.0_f64.to_bits() as usize);
+        // SAFETY: Test datum from known f64.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Float8(0.0));
+
+        // Infinity
+        let datum = pg_sys::Datum::from(f64::INFINITY.to_bits() as usize);
+        // SAFETY: Test datum constructed from known f64 bits.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Float8(f64::INFINITY));
+
+        // Negative infinity
+        let datum = pg_sys::Datum::from(f64::NEG_INFINITY.to_bits() as usize);
+        // SAFETY: Test datum constructed from known f64 bits.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Float8(f64::NEG_INFINITY));
+
+        // NaN
+        let datum = pg_sys::Datum::from(f64::NAN.to_bits() as usize);
+        // SAFETY: Test datum constructed from known f64 bits.
+        let repr = unsafe { ext.extract(datum, false) };
+        match repr {
+            GpuRepr::Float8(v) => assert!(v.is_nan()),
+            _ => panic!("Expected Float8"),
+        }
+    }
+
+    #[test]
+    fn float4_special_values() {
+        let ext = Float4Extractor;
+        let datum = pg_sys::Datum::from(f32::INFINITY.to_bits() as usize);
+        // SAFETY: Test datum from known f32.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Float4(f32::INFINITY));
+
+        let datum = pg_sys::Datum::from(f32::NAN.to_bits() as usize);
+        // SAFETY: Test datum constructed from known f32 bits.
+        let repr = unsafe { ext.extract(datum, false) };
+        match repr {
+            GpuRepr::Float4(v) => assert!(v.is_nan()),
+            _ => panic!("Expected Float4"),
+        }
+    }
+
+    #[test]
+    fn int4_boundary_values() {
+        let ext = Int4Extractor;
+
+        // i32::MAX
+        let datum = pg_sys::Datum::from(i32::MAX as usize);
+        // SAFETY: Test datum from known i32.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Int4(i32::MAX));
+
+        // i32::MIN
+        let datum = pg_sys::Datum::from(i32::MIN as usize);
+        // SAFETY: Test datum constructed from known i32 value.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Int4(i32::MIN));
+
+        // Zero
+        let datum = pg_sys::Datum::from(0_usize);
+        // SAFETY: Test datum constructed from known i32 value.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Int4(0));
+    }
+
+    #[test]
+    fn int8_boundary_values() {
+        let ext = Int8Extractor;
+
+        let datum = pg_sys::Datum::from(i64::MAX as usize);
+        // SAFETY: Test datum from known i64.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Int8(i64::MAX));
+
+        let datum = pg_sys::Datum::from(i64::MIN as usize);
+        // SAFETY: Test datum constructed from known i64 value.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Int8(i64::MIN));
+    }
+
+    #[test]
+    fn timestamp_round_trip() {
+        let ext = TimestampExtractor;
+        // Microseconds since J2000 epoch
+        let original: i64 = 788_918_400_000_000; // some timestamp
+        let datum = pg_sys::Datum::from(original as usize);
+        // SAFETY: Test datum from known i64 timestamp.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(original));
+    }
+
+    #[test]
+    fn timestamp_negative_value() {
+        let ext = TimestampExtractor;
+        // Negative = before J2000
+        let original: i64 = -100_000_000;
+        let datum = pg_sys::Datum::from(original as usize);
+        // SAFETY: Test datum from known i64.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(original));
+    }
+
+    #[test]
+    fn timestamp_zero() {
+        let ext = TimestampExtractor;
+        let datum = pg_sys::Datum::from(0_usize);
+        // SAFETY: Test datum from known value.
+        let repr = unsafe { ext.extract(datum, false) };
+        assert_eq!(repr, GpuRepr::Timestamp(0));
+    }
+
+    #[test]
+    fn gpu_repr_partial_eq() {
+        assert_eq!(GpuRepr::Float8(1.0), GpuRepr::Float8(1.0));
+        assert_ne!(GpuRepr::Float8(1.0), GpuRepr::Float8(2.0));
+        assert_ne!(GpuRepr::Float8(1.0), GpuRepr::Float4(1.0));
+        assert_ne!(GpuRepr::Int4(1), GpuRepr::Int8(1));
+        assert_eq!(GpuRepr::Null, GpuRepr::Null);
+        assert_ne!(GpuRepr::Null, GpuRepr::Bool(false));
+        assert_eq!(GpuRepr::Text(vec![1, 2, 3]), GpuRepr::Text(vec![1, 2, 3]));
+        assert_ne!(GpuRepr::Text(vec![1, 2, 3]), GpuRepr::Bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn gpu_repr_clone() {
+        let original = GpuRepr::Float8(42.0);
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+
+        let original = GpuRepr::Text(vec![104, 105]);
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+
+        let original = GpuRepr::Null;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn gpu_repr_debug() {
+        assert!(format!("{:?}", GpuRepr::Float8(1.0)).contains("Float8"));
+        assert!(format!("{:?}", GpuRepr::Float4(1.0)).contains("Float4"));
+        assert!(format!("{:?}", GpuRepr::Int8(1)).contains("Int8"));
+        assert!(format!("{:?}", GpuRepr::Int4(1)).contains("Int4"));
+        assert!(format!("{:?}", GpuRepr::Bool(true)).contains("Bool"));
+        assert!(format!("{:?}", GpuRepr::Timestamp(0)).contains("Timestamp"));
+        assert!(format!("{:?}", GpuRepr::Text(vec![])).contains("Text"));
+        assert!(format!("{:?}", GpuRepr::Bytes(vec![])).contains("Bytes"));
+        assert!(format!("{:?}", GpuRepr::Null).contains("Null"));
+    }
+
+    #[test]
+    fn varlena_data_and_len_standard_header() {
+        // Standard 4-byte header: total_size = 12 (4 header + 8 data)
+        // Header value = total_size << 2 = 12 << 2 = 48
+        let total_size: u32 = 12;
+        let header = total_size << 2;
+        let header_bytes = header.to_ne_bytes();
+        let mut buf = vec![0u8; 12];
+        buf[0] = header_bytes[0];
+        buf[1] = header_bytes[1];
+        buf[2] = header_bytes[2];
+        buf[3] = header_bytes[3];
+        // Fill data portion with known bytes
+        for (i, byte) in buf[4..].iter_mut().enumerate() {
+            *byte = (i + 1) as u8;
+        }
+
+        // SAFETY: buf is a valid flat varlena with standard header.
+        let (data_ptr, data_len) = unsafe { varlena_data_and_len(buf.as_ptr()) };
+        assert_eq!(data_len, 8);
+        // SAFETY: data_ptr points into buf.
+        let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+        assert_eq!(data, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn varlena_data_and_len_short_header() {
+        // Short varlena: 1-byte header where bit 0 is set.
+        // total_size in bits 1-7. E.g. total_size=5 (1 header + 4 data)
+        // header byte = (5 << 1) | 1 = 11
+        let total_size: u8 = 5;
+        let header_byte = (total_size << 1) | 1;
+        let mut buf = vec![0u8; 5];
+        buf[0] = header_byte;
+        buf[1] = b'A';
+        buf[2] = b'B';
+        buf[3] = b'C';
+        buf[4] = b'D';
+
+        // SAFETY: buf is a valid flat short varlena.
+        let (data_ptr, data_len) = unsafe { varlena_data_and_len(buf.as_ptr()) };
+        assert_eq!(data_len, 4);
+        // SAFETY: data_ptr points into buf which is still alive.
+        let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+        assert_eq!(data, b"ABCD");
+    }
+
+    #[test]
+    fn varlena_data_and_len_short_header_minimal() {
+        // Minimal short varlena: total_size=1 (header only, no data)
+        let header_byte: u8 = (1 << 1) | 1; // = 3
+        let buf = [header_byte];
+
+        // SAFETY: buf is a valid minimal short varlena.
+        let (_data_ptr, data_len) = unsafe { varlena_data_and_len(buf.as_ptr()) };
+        assert_eq!(data_len, 0);
+    }
+
+    #[test]
+    fn varlena_data_and_len_standard_header_minimal() {
+        // Standard header with total_size = VARHDRSZ (4), meaning 0 data bytes.
+        let total_size: u32 = 4;
+        let header = total_size << 2;
+        let buf = header.to_ne_bytes();
+
+        // SAFETY: buf is a valid standard varlena with no data.
+        let (_data_ptr, data_len) = unsafe { varlena_data_and_len(buf.as_ptr()) };
+        assert_eq!(data_len, 0);
+    }
 }

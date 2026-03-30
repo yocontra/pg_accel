@@ -160,4 +160,204 @@ mod tests {
         let plan = plan_column_order(&[]);
         assert!(plan.is_empty());
     }
+
+    #[test]
+    fn all_cheap_types() {
+        // Every fixed-width pass-by-value type should be Cheap.
+        let cheap_oids: &[u32] = &[16, 21, 23, 20, 700, 701, 26, 1082, 1114, 1184, 1083, 1266];
+        for &oid_val in cheap_oids {
+            let tier = classify_type_cost(pg_sys::Oid::from(oid_val));
+            assert_eq!(tier, ColumnCostTier::Cheap, "OID {oid_val} should be Cheap");
+        }
+    }
+
+    #[test]
+    fn all_medium_types() {
+        let medium_oids: &[u32] = &[25, 1042, 1043, 17, 19, 1700, 2950];
+        for &oid_val in medium_oids {
+            let tier = classify_type_cost(pg_sys::Oid::from(oid_val));
+            assert_eq!(
+                tier,
+                ColumnCostTier::Medium,
+                "OID {oid_val} should be Medium"
+            );
+        }
+    }
+
+    #[test]
+    fn oid_type_is_cheap() {
+        // OIDOID = 26
+        let tier = classify_type_cost(pg_sys::Oid::from(26_u32));
+        assert_eq!(tier, ColumnCostTier::Cheap);
+    }
+
+    #[test]
+    fn date_is_cheap() {
+        // DATEOID = 1082
+        let tier = classify_type_cost(pg_sys::Oid::from(1082_u32));
+        assert_eq!(tier, ColumnCostTier::Cheap);
+    }
+
+    #[test]
+    fn timestamp_is_cheap() {
+        // TIMESTAMPOID = 1114
+        let tier = classify_type_cost(pg_sys::Oid::from(1114_u32));
+        assert_eq!(tier, ColumnCostTier::Cheap);
+    }
+
+    #[test]
+    fn timestamptz_is_cheap() {
+        // TIMESTAMPTZOID = 1184
+        let tier = classify_type_cost(pg_sys::Oid::from(1184_u32));
+        assert_eq!(tier, ColumnCostTier::Cheap);
+    }
+
+    #[test]
+    fn uuid_is_medium() {
+        // UUIDOID = 2950
+        let tier = classify_type_cost(pg_sys::Oid::from(2950_u32));
+        assert_eq!(tier, ColumnCostTier::Medium);
+    }
+
+    #[test]
+    fn bytea_is_medium() {
+        // BYTEAOID = 17
+        let tier = classify_type_cost(pg_sys::Oid::from(17_u32));
+        assert_eq!(tier, ColumnCostTier::Medium);
+    }
+
+    #[test]
+    fn jsonb_is_expensive() {
+        // JSONBOID = 3802
+        let tier = classify_type_cost(pg_sys::Oid::from(3802_u32));
+        assert_eq!(tier, ColumnCostTier::Expensive);
+    }
+
+    #[test]
+    fn array_type_is_expensive() {
+        // INT4ARRAYOID = 1007
+        let tier = classify_type_cost(pg_sys::Oid::from(1007_u32));
+        assert_eq!(tier, ColumnCostTier::Expensive);
+    }
+
+    #[test]
+    fn zero_oid_is_expensive() {
+        // OID 0 (InvalidOid) should fall through to Expensive.
+        let tier = classify_type_cost(pg_sys::Oid::from(0_u32));
+        assert_eq!(tier, ColumnCostTier::Expensive);
+    }
+
+    #[test]
+    fn plan_column_order_single_column() {
+        let columns = vec![(0, pg_sys::Oid::from(23_u32))];
+        let plan = plan_column_order(&columns);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].attnum, 0);
+        assert_eq!(plan[0].cost_tier, ColumnCostTier::Cheap);
+    }
+
+    #[test]
+    fn plan_column_order_all_same_tier() {
+        // All cheap — ordering should preserve relative order (stable sort).
+        let columns = vec![
+            (0, pg_sys::Oid::from(23_u32)),  // int4
+            (1, pg_sys::Oid::from(20_u32)),  // int8
+            (2, pg_sys::Oid::from(700_u32)), // float4
+        ];
+        let plan = plan_column_order(&columns);
+        assert_eq!(plan.len(), 3);
+        // All same tier, stable sort preserves input order.
+        assert_eq!(plan[0].attnum, 0);
+        assert_eq!(plan[1].attnum, 1);
+        assert_eq!(plan[2].attnum, 2);
+        for e in &plan {
+            assert_eq!(e.cost_tier, ColumnCostTier::Cheap);
+        }
+    }
+
+    #[test]
+    fn plan_column_order_reverse_input() {
+        // Input in reverse cost order — should be reordered.
+        let columns = vec![
+            (0, pg_sys::Oid::from(99999_u32)), // expensive
+            (1, pg_sys::Oid::from(25_u32)),    // medium
+            (2, pg_sys::Oid::from(23_u32)),    // cheap
+        ];
+        let plan = plan_column_order(&columns);
+        assert_eq!(plan[0].cost_tier, ColumnCostTier::Cheap);
+        assert_eq!(plan[1].cost_tier, ColumnCostTier::Medium);
+        assert_eq!(plan[2].cost_tier, ColumnCostTier::Expensive);
+    }
+
+    #[test]
+    fn plan_column_order_duplicates() {
+        // Multiple columns with the same type.
+        let columns = vec![
+            (0, pg_sys::Oid::from(23_u32)),
+            (1, pg_sys::Oid::from(23_u32)),
+            (2, pg_sys::Oid::from(23_u32)),
+        ];
+        let plan = plan_column_order(&columns);
+        assert_eq!(plan.len(), 3);
+        for e in &plan {
+            assert_eq!(e.cost_tier, ColumnCostTier::Cheap);
+        }
+    }
+
+    #[test]
+    fn plan_column_order_many_columns() {
+        let columns: Vec<(usize, pg_sys::Oid)> = (0..100)
+            .map(|i| {
+                (
+                    i,
+                    pg_sys::Oid::from(if i % 3 == 0 {
+                        23_u32
+                    } else if i % 3 == 1 {
+                        25_u32
+                    } else {
+                        99999_u32
+                    }),
+                )
+            })
+            .collect();
+        let plan = plan_column_order(&columns);
+        assert_eq!(plan.len(), 100);
+        // Verify sorted: each tier >= previous tier.
+        for w in plan.windows(2) {
+            assert!(w[0].cost_tier <= w[1].cost_tier);
+        }
+    }
+
+    #[test]
+    fn column_cost_estimate_fields() {
+        let est = ColumnCostEstimate {
+            attnum: 42,
+            type_oid: pg_sys::Oid::from(23_u32),
+            cost_tier: ColumnCostTier::Cheap,
+        };
+        assert_eq!(est.attnum, 42);
+        assert_eq!(est.cost_tier, ColumnCostTier::Cheap);
+    }
+
+    #[test]
+    fn cost_tier_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ColumnCostTier::Cheap);
+        set.insert(ColumnCostTier::Medium);
+        set.insert(ColumnCostTier::Expensive);
+        assert_eq!(set.len(), 3);
+        // Inserting duplicate should not increase size.
+        set.insert(ColumnCostTier::Cheap);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn cost_tier_clone_and_debug() {
+        let tier = ColumnCostTier::Medium;
+        let cloned = tier;
+        assert_eq!(tier, cloned);
+        let debug = format!("{tier:?}");
+        assert_eq!(debug, "Medium");
+    }
 }

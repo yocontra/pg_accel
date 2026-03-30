@@ -6,7 +6,8 @@ use super::cost::PlatformProfile;
 use super::gucs;
 
 /// Helper to extract a printable string from a fixed-size `c_char` buffer.
-fn cchar_buf_to_string(buf: &[std::ffi::c_char]) -> String {
+#[must_use]
+pub fn cchar_buf_to_string(buf: &[std::ffi::c_char]) -> String {
     // SAFETY: the buffer is a fixed-size C string from our own fallback/bridge
     // layer, always null-terminated or fully zero-filled.
     let bytes: Vec<u8> = buf
@@ -64,4 +65,78 @@ fn pg_accel_device_info() -> TableIterator<
         pg_version,
         env!("CARGO_PKG_VERSION").to_owned(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_buffer_returns_empty_string() {
+        let buf: [std::ffi::c_char; 8] = [0; 8];
+        assert_eq!(cchar_buf_to_string(&buf), "");
+    }
+
+    #[test]
+    fn valid_ascii_string() {
+        let buf: [std::ffi::c_char; 8] = [
+            b'H' as std::ffi::c_char,
+            b'e' as std::ffi::c_char,
+            b'l' as std::ffi::c_char,
+            b'l' as std::ffi::c_char,
+            b'o' as std::ffi::c_char,
+            0,
+            0,
+            0,
+        ];
+        assert_eq!(cchar_buf_to_string(&buf), "Hello");
+    }
+
+    #[test]
+    fn no_null_terminator_returns_full_string() {
+        let buf: [std::ffi::c_char; 4] = [
+            b'A' as std::ffi::c_char,
+            b'B' as std::ffi::c_char,
+            b'C' as std::ffi::c_char,
+            b'D' as std::ffi::c_char,
+        ];
+        assert_eq!(cchar_buf_to_string(&buf), "ABCD");
+    }
+
+    #[test]
+    fn null_in_middle_truncates() {
+        let buf: [std::ffi::c_char; 6] = [
+            b'H' as std::ffi::c_char,
+            b'i' as std::ffi::c_char,
+            0,
+            b'X' as std::ffi::c_char,
+            b'Y' as std::ffi::c_char,
+            0,
+        ];
+        assert_eq!(cchar_buf_to_string(&buf), "Hi");
+    }
+
+    #[test]
+    fn single_char_buffer() {
+        let buf: [std::ffi::c_char; 1] = [b'Z' as std::ffi::c_char];
+        assert_eq!(cchar_buf_to_string(&buf), "Z");
+    }
+
+    #[test]
+    fn single_null_byte() {
+        let buf: [std::ffi::c_char; 1] = [0];
+        assert_eq!(cchar_buf_to_string(&buf), "");
+    }
+
+    #[test]
+    fn empty_slice() {
+        let buf: [std::ffi::c_char; 0] = [];
+        assert_eq!(cchar_buf_to_string(&buf), "");
+    }
+
+    #[test]
+    fn leading_null_returns_empty() {
+        let buf: [std::ffi::c_char; 4] = [0, b'A' as std::ffi::c_char, b'B' as std::ffi::c_char, 0];
+        assert_eq!(cchar_buf_to_string(&buf), "");
+    }
 }

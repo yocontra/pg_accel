@@ -221,8 +221,14 @@ fn reclaim_dead_backends(data: &mut ThreadBudgetData) {
         // Check if the backend process is still alive using PG's own
         // process table. This avoids TOCTOU races from PID recycling
         // that affect the kill(pid, 0) approach.
+        // SAFETY: `BackendPidGetProc` is a PG server function that looks up
+        // a PGPROC entry by PID. We hold the exclusive LwLock so the slot's
+        // PID is stable. Returns NULL if no backend with that PID exists.
         #[cfg(not(test))]
         let alive = unsafe { !pg_sys::BackendPidGetProc(slot.pid).is_null() };
+        // SAFETY: `kill(pid, 0)` with signal 0 is a POSIX-defined existence
+        // check that does not deliver a signal. The PID is a valid i32 read
+        // from a slot we hold under exclusive lock.
         #[cfg(test)]
         let alive = unsafe { libc::kill(slot.pid, 0) } == 0
             || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH);

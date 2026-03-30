@@ -19,13 +19,18 @@ static WORKERS: GucSetting<i32> = GucSetting::<i32>::new(0);
 static MAX_WORKERS_TOTAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 
 /// Minimum number of rows before batching kicks in.
-static MIN_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(256);
+static MIN_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1000);
 
 /// Whether GPU acceleration is enabled.
 static GPU_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 /// Timeout in milliseconds for a single GPU kernel invocation.
 static KERNEL_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(5000);
+
+/// Global multiplier for pg_accel cost estimates (1.0 = default).
+/// Values >1.0 make pg_accel more conservative (less likely to be chosen),
+/// values <1.0 make it more aggressive (more likely to be chosen).
+static COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 
 /// Log verbosity level for pg_accel messages.
 static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
@@ -120,6 +125,17 @@ pub fn init_gucs() {
         GucFlags::UNIT_MS,
     );
 
+    GucRegistry::define_float_guc(
+        c"pg_accel.cost_multiplier",
+        c"Global multiplier for pg_accel cost estimates.",
+        c"Values >1.0 make pg_accel more conservative, <1.0 more aggressive. Default 1.0.",
+        &COST_MULTIPLIER,
+        0.1,
+        10.0,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_enum_guc(
         c"pg_accel.log_level",
         c"Verbosity of pg_accel log messages.",
@@ -176,9 +192,97 @@ pub fn kernel_timeout_ms() -> i32 {
     KERNEL_TIMEOUT_MS.get()
 }
 
+/// Global cost estimate multiplier.
+#[inline]
+#[must_use]
+pub fn cost_multiplier() -> f64 {
+    COST_MULTIPLIER.get()
+}
+
 /// Current log level.
 #[inline]
 #[must_use]
 pub fn log_level() -> PgAccelLogLevel {
     LOG_LEVEL.get()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_debug_eq() {
+        let a = PgAccelLogLevel::Debug;
+        let b = PgAccelLogLevel::Debug;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn log_level_variants_not_equal() {
+        assert_ne!(PgAccelLogLevel::Debug, PgAccelLogLevel::Info);
+        assert_ne!(PgAccelLogLevel::Info, PgAccelLogLevel::Notice);
+        assert_ne!(PgAccelLogLevel::Notice, PgAccelLogLevel::Warning);
+        assert_ne!(PgAccelLogLevel::Warning, PgAccelLogLevel::Error);
+        assert_ne!(PgAccelLogLevel::Debug, PgAccelLogLevel::Error);
+    }
+
+    #[test]
+    fn log_level_clone() {
+        let original = PgAccelLogLevel::Warning;
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn log_level_copy() {
+        let original = PgAccelLogLevel::Info;
+        let copied = original; // Copy
+        // original is still valid because PgAccelLogLevel is Copy
+        assert_eq!(original, copied);
+    }
+
+    #[test]
+    fn log_level_debug_format() {
+        let level = PgAccelLogLevel::Debug;
+        let debug_str = format!("{level:?}");
+        assert_eq!(debug_str, "Debug");
+
+        assert_eq!(format!("{:?}", PgAccelLogLevel::Info), "Info");
+        assert_eq!(format!("{:?}", PgAccelLogLevel::Notice), "Notice");
+        assert_eq!(format!("{:?}", PgAccelLogLevel::Warning), "Warning");
+        assert_eq!(format!("{:?}", PgAccelLogLevel::Error), "Error");
+    }
+
+    #[test]
+    fn log_level_all_variants_are_distinct() {
+        let all = [
+            PgAccelLogLevel::Debug,
+            PgAccelLogLevel::Info,
+            PgAccelLogLevel::Notice,
+            PgAccelLogLevel::Warning,
+            PgAccelLogLevel::Error,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn log_level_eq_is_reflexive() {
+        for level in [
+            PgAccelLogLevel::Debug,
+            PgAccelLogLevel::Info,
+            PgAccelLogLevel::Notice,
+            PgAccelLogLevel::Warning,
+            PgAccelLogLevel::Error,
+        ] {
+            assert_eq!(level, level);
+        }
+    }
 }
