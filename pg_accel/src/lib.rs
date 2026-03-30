@@ -36,20 +36,19 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // before any queries. Saves previous hooks and installs ours.
     unsafe { engine::ffi::planner_hooks::install() };
 
-    // 5. Detect platform capabilities (CPU cores, GPU availability).
-    let profile = engine::cost::PlatformProfile::detect();
+    // 5. GPU runtime is NOT initialised here because the SYCL runtime
+    //    spawns threads and PG's postmaster is strictly single-threaded
+    //    during shared_preload_libraries. Instead, gpu::ensure_init() is
+    //    called lazily on the first query in a forked backend process.
 
-    // 6. Log startup summary.
-    let gpu_status = if profile.has_gpu {
-        "available"
-    } else {
-        "unavailable"
-    };
+    // 6. Log startup summary (GPU status deferred to first query).
+    let cpu_cores = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(1);
     pgrx::log!(
-        "pg_accel loaded: version {}, {} CPU cores, GPU: {}",
+        "pg_accel loaded: version {}, {} CPU cores, GPU: deferred",
         env!("CARGO_PKG_VERSION"),
-        profile.cpu_cores,
-        gpu_status,
+        cpu_cores,
     );
 }
 

@@ -438,7 +438,7 @@ fn bbox_identical_bboxes() {
     // Identical bboxes overlap — goes to Layer 2.
     let a = make_point(2.0, 2.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
-    let result = spatial_intersects(&[a], &[poly]);
+    let result = spatial_intersects(&[a], &[poly], false);
     assert!(
         result.definite_false.is_empty(),
         "overlapping bboxes should not be definite_false"
@@ -456,7 +456,7 @@ fn bbox_sharing_edge() {
         coord_count: 5,
         geom_type: GeomType::Polygon,
     };
-    let result = spatial_intersects(&[a], &[b]);
+    let result = spatial_intersects(&[a], &[b], false);
     // Point at (3,2) is outside bbox [4,0,8,4] via point_in_ring, so
     // it should be definite_false (point outside polygon).
     assert_eq!(result.definite_false, vec![0]);
@@ -477,7 +477,7 @@ fn bbox_sharing_corner() {
         coord_count: 5,
         geom_type: GeomType::Polygon,
     };
-    let result = spatial_intersects(&[a], &[b]);
+    let result = spatial_intersects(&[a], &[b], false);
     // Bboxes share corner (not disjoint), but point (2,2) outside polygon.
     assert_eq!(result.definite_false, vec![0]);
 }
@@ -487,7 +487,7 @@ fn bbox_zero_area_point_bbox() {
     // Point has a zero-area bbox: [x, y, x, y].
     let pt = make_point(2.0, 2.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
-    let result = spatial_intersects(&[pt], &[poly]);
+    let result = spatial_intersects(&[pt], &[poly], false);
     assert_eq!(result.definite_true, vec![0]);
 }
 
@@ -508,7 +508,7 @@ fn bbox_inverted_xmin_gt_xmax() {
         (0.0, 20.0),
         (0.0, 0.0),
     ]);
-    let result = spatial_intersects(&[bad], &[poly]);
+    let result = spatial_intersects(&[bad], &[poly], false);
     // With inverted bbox: bad[2]=5 < poly[0]=0? No.
     // poly[2]=20 < bad[0]=10? No.
     // bad[3]=5 < poly[1]=0? No.
@@ -529,7 +529,7 @@ fn bbox_world_covering() {
         geom_type: GeomType::Polygon,
     };
     let pt = make_point(42.0, 17.0);
-    let result = spatial_intersects(&[pt], &[big_poly]);
+    let result = spatial_intersects(&[pt], &[big_poly], false);
     assert_eq!(result.definite_true, vec![0]);
 }
 
@@ -543,7 +543,7 @@ fn bbox_clearly_disjoint_far_apart() {
         (50.0, 60.0),
         (50.0, 50.0),
     ]);
-    let result = spatial_intersects(&[a], &[b]);
+    let result = spatial_intersects(&[a], &[b], false);
     assert_eq!(result.definite_false, vec![0]);
 }
 
@@ -553,7 +553,7 @@ fn bbox_clearly_disjoint_far_apart() {
 
 #[test]
 fn pipeline_empty_inputs() {
-    let result = spatial_intersects(&[], &[]);
+    let result = spatial_intersects(&[], &[], false);
     assert!(result.definite_true.is_empty());
     assert!(result.definite_false.is_empty());
     assert!(result.uncertain.is_empty());
@@ -563,7 +563,7 @@ fn pipeline_empty_inputs() {
 fn pipeline_single_pair_inside() {
     let pt = make_point(2.0, 2.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
-    let result = spatial_intersects(&[pt], &[poly]);
+    let result = spatial_intersects(&[pt], &[poly], false);
     assert_eq!(result.definite_true, vec![0]);
     assert!(result.definite_false.is_empty());
     assert!(result.uncertain.is_empty());
@@ -573,7 +573,7 @@ fn pipeline_single_pair_inside() {
 fn pipeline_single_pair_outside() {
     let pt = make_point(10.0, 10.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
-    let result = spatial_intersects(&[pt], &[poly]);
+    let result = spatial_intersects(&[pt], &[poly], false);
     assert!(result.definite_true.is_empty());
     assert_eq!(result.definite_false, vec![0]);
     assert!(result.uncertain.is_empty());
@@ -590,7 +590,7 @@ fn pipeline_multiple_pairs_mixed_results() {
     ];
     let polys = vec![poly.clone(), poly.clone(), poly];
 
-    let result = spatial_intersects(&pts, &polys);
+    let result = spatial_intersects(&pts, &polys, false);
     assert_eq!(result.definite_true, vec![0, 2]);
     assert_eq!(result.definite_false, vec![1]);
     assert!(result.uncertain.is_empty());
@@ -605,7 +605,7 @@ fn pipeline_all_disjoint() {
         .collect();
     let polys = vec![poly.clone(), poly.clone(), poly.clone(), poly.clone(), poly];
 
-    let result = spatial_intersects(&pts, &polys);
+    let result = spatial_intersects(&pts, &polys, false);
     assert!(result.definite_true.is_empty());
     assert_eq!(result.definite_false, vec![0, 1, 2, 3, 4]);
     assert!(result.uncertain.is_empty());
@@ -624,7 +624,7 @@ fn pipeline_all_inside() {
     let pts: Vec<_> = (1..6).map(|i| make_point(i as f32, i as f32)).collect();
     let polys = vec![poly.clone(), poly.clone(), poly.clone(), poly.clone(), poly];
 
-    let result = spatial_intersects(&pts, &polys);
+    let result = spatial_intersects(&pts, &polys, false);
     assert_eq!(result.definite_true, vec![0, 1, 2, 3, 4]);
     assert!(result.definite_false.is_empty());
     assert!(result.uncertain.is_empty());
@@ -639,7 +639,7 @@ fn pipeline_line_vs_polygon_uncertain() {
         geom_type: GeomType::LineString,
     };
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
-    let result = spatial_intersects(&[line], &[poly]);
+    let result = spatial_intersects(&[line], &[poly], false);
     assert_eq!(result.uncertain, vec![0]);
 }
 
@@ -648,7 +648,7 @@ fn pipeline_polygon_vs_point_order_reversed() {
     // Polygon first, point second — classify_pair should handle both orders.
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     let pt = make_point(2.0, 2.0);
-    let result = spatial_intersects(&[poly], &[pt]);
+    let result = spatial_intersects(&[poly], &[pt], false);
     assert_eq!(result.definite_true, vec![0]);
 }
 
@@ -657,7 +657,7 @@ fn pipeline_mismatched_lengths_uses_shorter() {
     let pt = make_point(2.0, 2.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     // 1 point, 3 polygons — should process only 1 pair.
-    let result = spatial_intersects(&[pt], &[poly.clone(), poly.clone(), poly]);
+    let result = spatial_intersects(&[pt], &[poly.clone(), poly.clone(), poly], false);
     assert_eq!(
         result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
         1
@@ -678,7 +678,7 @@ fn pipeline_unknown_geom_types_uncertain() {
         coord_count: 5,
         geom_type: GeomType::Unknown,
     };
-    let result = spatial_intersects(&[a], &[b]);
+    let result = spatial_intersects(&[a], &[b], false);
     assert_eq!(result.uncertain, vec![0]);
 }
 
@@ -692,7 +692,7 @@ fn pipeline_point_in_degenerate_polygon_too_few_coords() {
         coord_count: 2,
         geom_type: GeomType::Polygon,
     };
-    let result = spatial_intersects(&[pt], &[bad_poly]);
+    let result = spatial_intersects(&[pt], &[bad_poly], false);
     // Too few coords -> Uncertain.
     assert_eq!(result.uncertain, vec![0]);
 }
@@ -708,7 +708,7 @@ fn pipeline_point_with_no_coords() {
     };
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     // Bboxes overlap (both contain origin), but point has no coords.
-    let result = spatial_intersects(&[bad_pt], &[poly]);
+    let result = spatial_intersects(&[bad_pt], &[poly], false);
     assert_eq!(result.uncertain, vec![0]);
 }
 
@@ -724,7 +724,7 @@ fn pipeline_point_with_no_coords() {
 fn pipeline_point_outside_outer_ring() {
     let pt = make_point(10.0, 10.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
-    let result = spatial_intersects(&[pt], &[poly]);
+    let result = spatial_intersects(&[pt], &[poly], false);
     assert_eq!(result.definite_false, vec![0]);
 }
 
@@ -790,7 +790,7 @@ fn pipeline_large_batch() {
         .collect();
     let polys = vec![poly; 100];
 
-    let result = spatial_intersects(&pts, &polys);
+    let result = spatial_intersects(&pts, &polys, false);
 
     let expected_true: Vec<usize> = (0..100).filter(|i| i % 2 == 0).collect();
     let expected_false: Vec<usize> = (0..100).filter(|i| i % 2 != 0).collect();

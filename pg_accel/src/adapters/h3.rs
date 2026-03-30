@@ -15,7 +15,7 @@ use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntr
 pub fn adapter() -> ExtensionAdapter {
     // GPU-acceleratable: pure integer/trig math, scalar results.
     const GPU_NAMES: &[&str] = &[
-        "h3_lat_lng_to_cell", // bulk lat/lng -> cell index
+        "h3_latlng_to_cell",  // bulk lat/lng -> cell index
         "h3_grid_distance",   // pairwise integer distance
         "h3_cell_to_parent",  // bit shift
         "h3_get_resolution",  // bit mask
@@ -23,7 +23,7 @@ pub fn adapter() -> ExtensionAdapter {
 
     // BatchedEval: returns complex types requiring palloc on main thread.
     const BATCHED_NAMES: &[&str] = &[
-        "h3_cell_to_lat_lng",  // returns point
+        "h3_cell_to_latlng",   // returns point
         "h3_cell_to_boundary", // returns polygon geometry
         "h3_grid_disk",        // returns array of cells
         "h3_compact_cells",    // returns array

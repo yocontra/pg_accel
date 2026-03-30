@@ -15,13 +15,21 @@ mod three_layer_tests;
 
 // Re-export types from whichever module is active.
 #[cfg(feature = "gpu")]
+#[allow(unused_imports)]
 pub use bridge::{
-    PgaccelDeviceInfo, PgaccelGeomType, PgaccelGeometry, PgaccelPlatformCaps, PgaccelStatus,
+    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
+    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
+    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
+    PgaccelReclassRule, PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
 
 #[cfg(not(feature = "gpu"))]
+#[allow(unused_imports)]
 pub use fallback::{
-    PgaccelDeviceInfo, PgaccelGeomType, PgaccelGeometry, PgaccelPlatformCaps, PgaccelStatus,
+    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
+    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
+    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
+    PgaccelReclassRule, PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,7 +37,7 @@ pub use fallback::{
 // ---------------------------------------------------------------------------
 
 /// Initialise the GPU runtime.
-pub fn init() -> PgaccelStatus {
+fn init() -> PgaccelStatus {
     #[cfg(feature = "gpu")]
     {
         // SAFETY: pgaccel_init is safe to call once at startup.
@@ -39,6 +47,24 @@ pub fn init() -> PgaccelStatus {
     {
         fallback::pgaccel_init()
     }
+}
+
+/// Lazily initialise the GPU runtime on first call. Safe to call from
+/// forked backend processes (where SYCL thread creation is allowed).
+/// Subsequent calls are no-ops.
+pub fn ensure_init() {
+    use std::sync::Once;
+    static GPU_INIT: Once = Once::new();
+    GPU_INIT.call_once(|| {
+        let status = init();
+        let device = get_device_info();
+        if device.compute_units > 0 {
+            let name = super::engine::device_info::cchar_buf_to_string(&device.device_name);
+            pgrx::log!("pg_accel GPU: {} ({} CUs)", name, device.compute_units);
+        } else {
+            pgrx::log!("pg_accel GPU: not available (status={status:?})");
+        }
+    });
 }
 
 /// Tear down the GPU runtime.
@@ -82,42 +108,52 @@ pub fn get_caps() -> PgaccelPlatformCaps {
 
 /// Run the GPU three-layer spatial intersection pipeline.
 ///
-/// Returns `(definite_true, definite_false, uncertain)` index vectors,
-/// or `None` if no GPU device is available (caller should use CPU fallback).
-#[allow(clippy::similar_names)]
+/// Returns `(definite_true, definite_false, uncertain)` as vectors of
+/// `(idx_a, idx_b)` pair indices, or `None` if no GPU device is available
+/// (caller should use CPU fallback).
+///
+/// The C++ kernel evaluates all `count_a × count_b` pairs and partitions
+/// them into the three buckets.  Each output pair is two consecutive `u32`
+/// values `(i, j)` written by the C side.
+#[allow(clippy::similar_names, clippy::type_complexity)]
 pub fn spatial_intersects_gpu(
     geoms_a: &[PgaccelGeometry],
     geoms_b: &[PgaccelGeometry],
-) -> Option<(Vec<u32>, Vec<u32>, Vec<u32>)> {
-    let count = geoms_a.len().min(geoms_b.len());
-    if count == 0 {
+) -> Option<(Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>)> {
+    let count_a = geoms_a.len();
+    let count_b = geoms_b.len();
+    if count_a == 0 || count_b == 0 {
         return Some((Vec::new(), Vec::new(), Vec::new()));
     }
 
-    // Allocate output buffers sized for worst case (all pairs in one bucket).
-    let mut dt_pairs = vec![0u32; count];
-    let mut df_pairs = vec![0u32; count];
-    let mut uc_pairs = vec![0u32; count];
+    // The C++ kernel writes (i, j) pair indices — 2 u32 values per pair.
+    // Worst case: all pairs land in one bucket = count_a * count_b pairs.
+    let total_pairs = count_a * count_b;
+    let buf_len = total_pairs * 2;
+    let mut dt_buf = vec![0u32; buf_len];
+    let mut df_buf = vec![0u32; buf_len];
+    let mut uc_buf = vec![0u32; buf_len];
     let mut dt_count: usize = 0;
     let mut df_count: usize = 0;
     let mut uc_count: usize = 0;
 
     #[cfg(feature = "gpu")]
     {
-        // SAFETY: geoms arrays are valid slices, output buffers are
-        // pre-allocated to `count` elements. The C function writes at
-        // most `count` entries into each output buffer.
+        // SAFETY: geoms arrays are valid slices.  Output buffers are
+        // pre-allocated to `total_pairs * 2` u32 elements each.  The C
+        // function writes at most `total_pairs` pairs (2 u32 each) into
+        // each buffer and sets the count to the number of pairs written.
         let status = unsafe {
             bridge::pgaccel_spatial_intersects(
                 geoms_a.as_ptr(),
-                geoms_a.len(),
+                count_a,
                 geoms_b.as_ptr(),
-                geoms_b.len(),
-                dt_pairs.as_mut_ptr(),
+                count_b,
+                dt_buf.as_mut_ptr(),
                 std::ptr::addr_of_mut!(dt_count),
-                df_pairs.as_mut_ptr(),
+                df_buf.as_mut_ptr(),
                 std::ptr::addr_of_mut!(df_count),
-                uc_pairs.as_mut_ptr(),
+                uc_buf.as_mut_ptr(),
                 std::ptr::addr_of_mut!(uc_count),
             )
         };
@@ -130,14 +166,14 @@ pub fn spatial_intersects_gpu(
     {
         let status = fallback::pgaccel_spatial_intersects(
             geoms_a.as_ptr(),
-            geoms_a.len(),
+            count_a,
             geoms_b.as_ptr(),
-            geoms_b.len(),
-            dt_pairs.as_mut_ptr(),
+            count_b,
+            dt_buf.as_mut_ptr(),
             std::ptr::addr_of_mut!(dt_count),
-            df_pairs.as_mut_ptr(),
+            df_buf.as_mut_ptr(),
             std::ptr::addr_of_mut!(df_count),
-            uc_pairs.as_mut_ptr(),
+            uc_buf.as_mut_ptr(),
             std::ptr::addr_of_mut!(uc_count),
         );
         if !status.is_ok() {
@@ -145,9 +181,1426 @@ pub fn spatial_intersects_gpu(
         }
     }
 
-    dt_pairs.truncate(dt_count);
-    df_pairs.truncate(df_count);
-    uc_pairs.truncate(uc_count);
+    // Each count is the number of PAIRS; each pair is 2 consecutive u32s.
+    let parse_pairs = |buf: &[u32], pair_count: usize| -> Vec<(u32, u32)> {
+        buf[..pair_count * 2]
+            .chunks_exact(2)
+            .map(|c| (c[0], c[1]))
+            .collect()
+    };
 
-    Some((dt_pairs, df_pairs, uc_pairs))
+    Some((
+        parse_pairs(&dt_buf, dt_count),
+        parse_pairs(&df_buf, df_count),
+        parse_pairs(&uc_buf, uc_count),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Sort wrappers
+// ---------------------------------------------------------------------------
+
+/// GPU-accelerated in-place sort for f32 data.
+/// Returns `None` if GPU is unavailable.
+pub fn sort_f32(data: &mut [f32]) -> Option<()> {
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid mutable slice.
+        let status = unsafe { bridge::pgaccel_sort_f32(data.as_mut_ptr(), data.len()) };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_sort_f32(data.as_mut_ptr(), data.len());
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated in-place sort for f64 data.
+pub fn sort_f64(data: &mut [f64]) -> Option<()> {
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid mutable slice.
+        let status = unsafe { bridge::pgaccel_sort_f64(data.as_mut_ptr(), data.len()) };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_sort_f64(data.as_mut_ptr(), data.len());
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated in-place sort for i32 data.
+pub fn sort_i32(data: &mut [i32]) -> Option<()> {
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid mutable slice.
+        let status = unsafe { bridge::pgaccel_sort_i32(data.as_mut_ptr(), data.len()) };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_sort_i32(data.as_mut_ptr(), data.len());
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated in-place sort for i64 data.
+pub fn sort_i64(data: &mut [i64]) -> Option<()> {
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid mutable slice.
+        let status = unsafe { bridge::pgaccel_sort_i64(data.as_mut_ptr(), data.len()) };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_sort_i64(data.as_mut_ptr(), data.len());
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated key-value sort for f32 keys.
+/// Sorts `keys` in place and permutes `indices` to match.
+/// Returns `None` if GPU is unavailable.
+pub fn sort_kv_f32(keys: &mut [f32], indices: &mut [u32]) -> Option<()> {
+    let count = keys.len().min(indices.len());
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: keys and indices are valid mutable slices.
+        let status =
+            unsafe { bridge::pgaccel_sort_kv_f32(keys.as_mut_ptr(), indices.as_mut_ptr(), count) };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_sort_kv_f32(keys.as_mut_ptr(), indices.as_mut_ptr(), count);
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated key-value sort for f64 keys.
+/// Sorts `keys` in place and permutes `indices` to match.
+/// Returns `None` if GPU is unavailable.
+pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
+    let count = keys.len().min(indices.len());
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: keys and indices are valid mutable slices.
+        let status =
+            unsafe { bridge::pgaccel_sort_kv_f64(keys.as_mut_ptr(), indices.as_mut_ptr(), count) };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_sort_kv_f64(keys.as_mut_ptr(), indices.as_mut_ptr(), count);
+        status.is_ok().then_some(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reduce wrappers
+// ---------------------------------------------------------------------------
+
+/// GPU-accelerated f32 sum reduction. Returns `None` if GPU unavailable.
+pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
+    let mut result: f32 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_sum_f32(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_sum_f32(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated f32 min reduction. Returns `None` if GPU unavailable.
+pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
+    let mut result: f32 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_min_f32(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_min_f32(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated f32 max reduction. Returns `None` if GPU unavailable.
+pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
+    let mut result: f32 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_max_f32(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_max_f32(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated f64 sum reduction.
+pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
+    let mut result: f64 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated i64 sum reduction.
+pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
+    let mut result: i64 = 0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_sum_i64(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_sum_i64(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated f64 min reduction.
+pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
+    let mut result: f64 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated f64 max reduction.
+pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
+    let mut result: f64 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+/// GPU-accelerated mask popcount.
+pub fn reduce_count(mask: &[u8]) -> Option<usize> {
+    let mut result: usize = 0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: mask is a valid slice, result is a valid pointer.
+        let status =
+            unsafe { bridge::pgaccel_reduce_count(mask.as_ptr(), mask.len(), &raw mut result) };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_reduce_count(mask.as_ptr(), mask.len(), &mut result);
+        status.is_ok().then_some(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H3 wrappers
+// ---------------------------------------------------------------------------
+
+/// GPU-accelerated bulk H3 resolution extraction.
+pub fn h3_get_resolution_bulk(cells: &[u64]) -> Option<Vec<i32>> {
+    let mut resolutions = vec![0i32; cells.len()];
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: cells and resolutions are valid slices of matching length.
+        let status = unsafe {
+            bridge::pgaccel_h3_get_resolution_bulk(
+                cells.as_ptr(),
+                cells.len(),
+                resolutions.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(resolutions)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_h3_get_resolution_bulk(
+            cells.as_ptr(),
+            cells.len(),
+            resolutions.as_mut_ptr(),
+        );
+        status.is_ok().then_some(resolutions)
+    }
+}
+
+/// GPU-accelerated bulk H3 cell-to-parent.
+pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>> {
+    let mut parents = vec![0u64; cells.len()];
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: cells and parents are valid slices of matching length.
+        let status = unsafe {
+            bridge::pgaccel_h3_cell_to_parent_bulk(
+                cells.as_ptr(),
+                cells.len(),
+                parent_res,
+                parents.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(parents)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_h3_cell_to_parent_bulk(
+            cells.as_ptr(),
+            cells.len(),
+            parent_res,
+            parents.as_mut_ptr(),
+        );
+        status.is_ok().then_some(parents)
+    }
+}
+
+/// GPU-accelerated bulk H3 grid distance.
+pub fn h3_grid_distance_bulk(cells_a: &[u64], cells_b: &[u64]) -> Option<Vec<i32>> {
+    let count = cells_a.len().min(cells_b.len());
+    let mut distances = vec![0i32; count];
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: input slices and output buffer are valid and correctly sized.
+        let status = unsafe {
+            bridge::pgaccel_h3_grid_distance_bulk(
+                cells_a.as_ptr(),
+                cells_b.as_ptr(),
+                count,
+                distances.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(distances)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_h3_grid_distance_bulk(
+            cells_a.as_ptr(),
+            cells_b.as_ptr(),
+            count,
+            distances.as_mut_ptr(),
+        );
+        status.is_ok().then_some(distances)
+    }
+}
+
+/// GPU-accelerated bulk H3 lat/lng to cell index conversion.
+///
+/// Converts arrays of latitude/longitude (in degrees) at the given H3
+/// `resolution` into H3 cell indices. Returns `None` on GPU failure.
+/// Invalid coordinates produce `cell_id = 0` (caller should treat as NULL).
+pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> Option<Vec<u64>> {
+    let count = lats.len().min(lngs.len());
+    let mut cell_ids = vec![0u64; count];
+    let mut valid = vec![0u8; count];
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: input slices and output buffers are valid and correctly sized.
+        let status = unsafe {
+            bridge::pgaccel_h3_lat_lng_to_cell_bulk(
+                lats.as_ptr().cast(),
+                lngs.as_ptr().cast(),
+                count,
+                resolution,
+                1, // use_fp64 = true for precision
+                cell_ids.as_mut_ptr(),
+                valid.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_h3_lat_lng_to_cell_bulk(
+            lats.as_ptr().cast(),
+            lngs.as_ptr().cast(),
+            count,
+            resolution,
+            1,
+            cell_ids.as_mut_ptr(),
+            valid.as_mut_ptr(),
+        );
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    // Zero out invalid entries so callers can treat 0 as NULL.
+    for i in 0..count {
+        if valid[i] == 0 {
+            cell_ids[i] = 0;
+        }
+    }
+    Some(cell_ids)
+}
+
+// ---------------------------------------------------------------------------
+// Raster wrappers
+// ---------------------------------------------------------------------------
+
+/// GPU-accelerated map algebra.
+///
+/// Evaluates a bytecode expression per pixel across one or more bands.
+/// `band_pixels` is a slice of per-band pixel buffers (each as raw bytes),
+/// `pixel_count` is the number of pixels per band, and `pixel_type` is the
+/// FFI pixel type code (`PgaccelPixelType as i32`).
+///
+/// Returns the output pixel buffer and updated nodata mask, or `None` if
+/// the GPU is unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn map_algebra(
+    band_pixels: &[*const std::ffi::c_void],
+    pixel_count: usize,
+    pixel_type: i32,
+    expr: &PgaccelExpr,
+    output_pixels: &mut [u8],
+    nodata_mask: &mut [u8],
+) -> Option<()> {
+    if pixel_count == 0 {
+        return Some(());
+    }
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: band_pixels contains valid pointers to pixel data.
+        // output_pixels and nodata_mask are pre-allocated by the caller.
+        // expr is a valid PgaccelExpr with correct inst_count/band_count.
+        let status = unsafe {
+            bridge::pgaccel_map_algebra(
+                band_pixels.as_ptr(),
+                pixel_count,
+                pixel_type,
+                std::ptr::from_ref(expr),
+                output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+                nodata_mask.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_map_algebra(
+            band_pixels.as_ptr(),
+            pixel_count,
+            pixel_type,
+            std::ptr::from_ref(expr),
+            output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+            nodata_mask.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated raster clip.
+///
+/// Clips a raster band to a polygon ring.  Pixels outside the ring are
+/// marked as NODATA in the output mask.  Pixel data is copied to
+/// `output_pixels`; the nodata mask is updated in place.
+///
+/// Returns `None` if the GPU is unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn raster_clip(
+    rast_pixels: *const std::ffi::c_void,
+    width: usize,
+    height: usize,
+    origin_x: f64,
+    origin_y: f64,
+    scale_x: f64,
+    scale_y: f64,
+    pixel_type: i32,
+    clip_ring_xy: &[f32],
+    output_pixels: &mut [u8],
+    nodata_mask: &mut [u8],
+) -> Option<()> {
+    let vertex_count = clip_ring_xy.len() / 2;
+    if width == 0 || height == 0 || vertex_count < 3 {
+        return Some(());
+    }
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: rast_pixels is a valid pointer to pixel data.
+        // clip_ring_xy is a valid flat f32 slice of (x,y) pairs.
+        // output_pixels and nodata_mask are pre-allocated by the caller.
+        let status = unsafe {
+            bridge::pgaccel_raster_clip(
+                rast_pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+                scale_x,
+                scale_y,
+                pixel_type,
+                clip_ring_xy.as_ptr(),
+                vertex_count,
+                output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+                nodata_mask.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_raster_clip(
+            rast_pixels,
+            width,
+            height,
+            origin_x,
+            origin_y,
+            scale_x,
+            scale_y,
+            pixel_type,
+            clip_ring_xy.as_ptr(),
+            vertex_count,
+            output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+            nodata_mask.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated raster reclassification.
+///
+/// Applies a set of value-range rules to reclassify pixel values.
+/// Returns `None` if the GPU is unavailable.
+pub fn raster_reclass(
+    input_pixels: *const std::ffi::c_void,
+    pixel_count: usize,
+    input_type: i32,
+    rules: &[PgaccelReclassRule],
+    output_type: i32,
+    output_pixels: &mut [u8],
+) -> Option<()> {
+    if pixel_count == 0 {
+        return Some(());
+    }
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: input_pixels is a valid pointer to pixel data.
+        // rules is a valid slice. output_pixels is pre-allocated.
+        let status = unsafe {
+            bridge::pgaccel_raster_reclass(
+                input_pixels,
+                pixel_count,
+                input_type,
+                rules.as_ptr(),
+                rules.len(),
+                output_type,
+                output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_raster_reclass(
+            input_pixels,
+            pixel_count,
+            input_type,
+            rules.as_ptr(),
+            rules.len(),
+            output_type,
+            output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Expression evaluator wrappers
+// ---------------------------------------------------------------------------
+
+/// Evaluate a predicate expression on a columnar batch via GPU.
+///
+/// Returns a vector of three-result values per row:
+/// +1 = TRUE, -1 = FALSE, 0 = UNCERTAIN (CPU recheck needed).
+/// Returns `None` if the GPU is unavailable.
+pub fn expr_eval_predicate(
+    program: &PgaccelExprProgram,
+    batch: &PgaccelBatch,
+    num_rows: usize,
+) -> Option<Vec<i8>> {
+    let mut results = vec![0i8; num_rows];
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: program and batch are valid references. results is pre-allocated.
+        let status = unsafe {
+            bridge::pgaccel_expr_eval_predicate(
+                std::ptr::from_ref(program),
+                std::ptr::from_ref(batch),
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(results)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_expr_eval_predicate(
+            std::ptr::from_ref(program),
+            std::ptr::from_ref(batch),
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(results)
+    }
+}
+
+/// Evaluate a projection expression on a columnar batch via GPU.
+///
+/// Returns `(output_values, uncertain_mask)` or `None` if GPU unavailable.
+pub fn expr_eval_project(
+    program: &PgaccelExprProgram,
+    batch: &PgaccelBatch,
+    num_rows: usize,
+) -> Option<(Vec<PgaccelVal>, Vec<u8>)> {
+    let mut output = vec![PgaccelVal::null(); num_rows];
+    let mut uncertain = vec![0u8; num_rows];
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: program and batch are valid references. output/uncertain pre-allocated.
+        let status = unsafe {
+            bridge::pgaccel_expr_eval_project(
+                std::ptr::from_ref(program),
+                std::ptr::from_ref(batch),
+                output.as_mut_ptr(),
+                uncertain.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some((output, uncertain))
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_expr_eval_project(
+            std::ptr::from_ref(program),
+            std::ptr::from_ref(batch),
+            output.as_mut_ptr(),
+            uncertain.as_mut_ptr(),
+        );
+        status.is_ok().then_some((output, uncertain))
+    }
+}
+
+/// Template: evaluate `col <cmp> const` on a batch.
+///
+/// Returns three-result vector or `None` if GPU unavailable.
+pub fn expr_template_cmp_const(
+    batch: &PgaccelBatch,
+    col_idx: u32,
+    cmp_opcode: u16,
+    const_val: f64,
+    num_rows: usize,
+) -> Option<Vec<i8>> {
+    let mut results = vec![0i8; num_rows];
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: batch is a valid reference. results is pre-allocated.
+        let status = unsafe {
+            bridge::pgaccel_expr_template_cmp_const(
+                std::ptr::from_ref(batch),
+                col_idx,
+                cmp_opcode,
+                const_val,
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(results)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_expr_template_cmp_const(
+            std::ptr::from_ref(batch),
+            col_idx,
+            cmp_opcode,
+            const_val,
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(results)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hash aggregation wrappers
+// ---------------------------------------------------------------------------
+
+/// Opaque wrapper around GPU hash aggregation state.
+///
+/// Owns the underlying C++ allocation and frees it on drop.
+pub struct HashAggResult {
+    state: *mut PgaccelAggState,
+}
+
+impl Drop for HashAggResult {
+    fn drop(&mut self) {
+        if !self.state.is_null() {
+            #[cfg(feature = "gpu")]
+            {
+                // SAFETY: state was returned by pgaccel_hash_agg_execute and is non-null.
+                unsafe { bridge::pgaccel_agg_free(self.state) };
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                fallback::pgaccel_agg_free(self.state);
+            }
+        }
+    }
+}
+
+impl HashAggResult {
+    /// Number of distinct groups.
+    #[must_use]
+    pub fn group_count(&self) -> usize {
+        #[cfg(feature = "gpu")]
+        {
+            // SAFETY: state is a valid PgaccelAggState pointer (or null, handled by C).
+            unsafe { bridge::pgaccel_agg_group_count(self.state) }
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            fallback::pgaccel_agg_group_count(self.state)
+        }
+    }
+
+    /// Raw pointer to the contiguous group key buffer.
+    ///
+    /// The buffer contains `group_count` keys packed according to `key_type`.
+    #[must_use]
+    pub fn group_keys_ptr(&self) -> *const std::ffi::c_void {
+        #[cfg(feature = "gpu")]
+        {
+            // SAFETY: state is a valid PgaccelAggState pointer.
+            unsafe { bridge::pgaccel_agg_get_group_keys(self.state) }
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            fallback::pgaccel_agg_get_group_keys(self.state)
+        }
+    }
+
+    /// Get aggregate results for one aggregate column as a slice.
+    ///
+    /// Returns `None` if the pointer is null.
+    #[must_use]
+    pub fn results(&self, agg_idx: usize) -> Option<&[f64]> {
+        let count = self.group_count();
+        if count == 0 {
+            return Some(&[]);
+        }
+        #[cfg(feature = "gpu")]
+        let ptr = unsafe {
+            // SAFETY: state is valid; agg_idx bounds are checked by C side.
+            bridge::pgaccel_agg_get_results(self.state, agg_idx)
+        };
+        #[cfg(not(feature = "gpu"))]
+        let ptr = fallback::pgaccel_agg_get_results(self.state, agg_idx);
+
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: ptr points to count f64 values owned by state (valid until drop).
+        Some(unsafe { std::slice::from_raw_parts(ptr, count) })
+    }
+
+    /// Get per-group row counts as a slice.
+    ///
+    /// Returns `None` if the pointer is null.
+    #[must_use]
+    pub fn counts(&self) -> Option<&[i64]> {
+        let count = self.group_count();
+        if count == 0 {
+            return Some(&[]);
+        }
+        #[cfg(feature = "gpu")]
+        let ptr = unsafe {
+            // SAFETY: state is valid.
+            bridge::pgaccel_agg_get_counts(self.state)
+        };
+        #[cfg(not(feature = "gpu"))]
+        let ptr = fallback::pgaccel_agg_get_counts(self.state);
+
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: ptr points to count i64 values owned by state (valid until drop).
+        Some(unsafe { std::slice::from_raw_parts(ptr, count) })
+    }
+}
+
+/// Execute GPU hash aggregation on columnar data.
+///
+/// # Arguments
+///
+/// * `group_keys` — raw pointer to contiguous group key values
+/// * `group_null_mask` — null mask for group keys (1 = null)
+/// * `row_count` — number of rows
+/// * `key_type` — key type tag (0=i32, 1=i64, 2=f64)
+/// * `value_cols` — per-aggregate column data pointers
+/// * `value_nulls` — per-aggregate null masks
+/// * `value_types` — per-aggregate value type tags
+/// * `agg_cols` — aggregate column descriptors
+///
+/// Returns `None` if the GPU is unavailable or the call fails.
+#[allow(clippy::too_many_arguments)]
+pub fn hash_agg_execute(
+    group_keys: *const std::ffi::c_void,
+    group_null_mask: *const u8,
+    row_count: usize,
+    key_type: i32,
+    value_cols: &[*const std::ffi::c_void],
+    value_nulls: &[*const u8],
+    value_types: &[i32],
+    agg_cols: &[PgaccelAggCol],
+) -> Option<HashAggResult> {
+    if row_count == 0 || agg_cols.is_empty() {
+        return None;
+    }
+
+    #[cfg(feature = "gpu")]
+    let state = unsafe {
+        // SAFETY: All pointers are caller-provided and valid for row_count elements.
+        // value_cols, value_nulls, value_types have num_aggs elements each.
+        bridge::pgaccel_hash_agg_execute(
+            group_keys,
+            group_null_mask,
+            row_count,
+            key_type,
+            value_cols.as_ptr(),
+            value_nulls.as_ptr(),
+            value_types.as_ptr(),
+            agg_cols.as_ptr(),
+            agg_cols.len(),
+        )
+    };
+
+    #[cfg(not(feature = "gpu"))]
+    let state = fallback::pgaccel_hash_agg_execute(
+        group_keys,
+        group_null_mask,
+        row_count,
+        key_type,
+        value_cols.as_ptr(),
+        value_nulls.as_ptr(),
+        value_types.as_ptr(),
+        agg_cols.as_ptr(),
+        agg_cols.len(),
+    );
+
+    if state.is_null() {
+        return None;
+    }
+    Some(HashAggResult { state })
+}
+
+// ---------------------------------------------------------------------------
+// Hash join wrappers
+// ---------------------------------------------------------------------------
+
+/// RAII wrapper around a GPU-side hash table.
+pub struct GpuHashTable {
+    ht: *mut PgaccelHashTable,
+}
+
+// SAFETY: The hash table handle is only accessed from the main backend thread
+// via the safe wrapper methods. No concurrent access occurs.
+unsafe impl Send for GpuHashTable {}
+
+impl Drop for GpuHashTable {
+    fn drop(&mut self) {
+        if !self.ht.is_null() {
+            #[cfg(feature = "gpu")]
+            {
+                // SAFETY: ht was returned by pgaccel_hash_join_build and is non-null.
+                unsafe { bridge::pgaccel_hash_join_free(self.ht) };
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                fallback::pgaccel_hash_join_free(self.ht);
+            }
+        }
+    }
+}
+
+impl GpuHashTable {
+    /// Build a hash table from inner relation keys.
+    ///
+    /// * `keys` — pointer to typed key array (int32/int64/float64)
+    /// * `null_mask` — per-row null mask (1 = null, excluded from table)
+    /// * `indices` — original row indices for mapping probe results back
+    /// * `key_type` — the key type tag
+    ///
+    /// Returns `None` if the GPU is unavailable or the build fails.
+    pub fn build(
+        keys: *const std::ffi::c_void,
+        null_mask: &[u8],
+        indices: &[u32],
+        key_type: PgaccelKeyType,
+    ) -> Option<Self> {
+        let count = null_mask.len().min(indices.len());
+        if count == 0 {
+            return None;
+        }
+
+        #[cfg(feature = "gpu")]
+        let ht = unsafe {
+            // SAFETY: keys points to `count` elements of the specified type.
+            // null_mask and indices are valid slices with at least `count` elements.
+            bridge::pgaccel_hash_join_build(
+                keys,
+                null_mask.as_ptr(),
+                indices.as_ptr(),
+                count,
+                key_type,
+            )
+        };
+
+        #[cfg(not(feature = "gpu"))]
+        let ht = fallback::pgaccel_hash_join_build(
+            keys,
+            null_mask.as_ptr(),
+            indices.as_ptr(),
+            count,
+            key_type,
+        );
+
+        if ht.is_null() {
+            None
+        } else {
+            Some(Self { ht })
+        }
+    }
+
+    /// Probe the hash table with outer relation keys.
+    ///
+    /// Returns matched `(outer_idx, inner_idx)` pairs, or `None` on failure.
+    pub fn probe(
+        &self,
+        outer_keys: *const std::ffi::c_void,
+        outer_null_mask: &[u8],
+        max_matches: usize,
+    ) -> Option<Vec<(u32, u32)>> {
+        if self.ht.is_null() || outer_null_mask.is_empty() {
+            return None;
+        }
+        let outer_count = outer_null_mask.len();
+        let buf_len = max_matches * 2;
+        let mut match_pairs = vec![0u32; buf_len];
+        let mut match_count: usize = 0;
+
+        #[cfg(feature = "gpu")]
+        let status = unsafe {
+            // SAFETY: ht is non-null (checked above). outer_keys points to
+            // outer_count elements. match_pairs has capacity for max_matches*2.
+            bridge::pgaccel_hash_join_probe(
+                self.ht,
+                outer_keys,
+                outer_null_mask.as_ptr(),
+                outer_count,
+                match_pairs.as_mut_ptr(),
+                max_matches,
+                std::ptr::addr_of_mut!(match_count),
+            )
+        };
+
+        #[cfg(not(feature = "gpu"))]
+        let status = fallback::pgaccel_hash_join_probe(
+            self.ht,
+            outer_keys,
+            outer_null_mask.as_ptr(),
+            outer_count,
+            match_pairs.as_mut_ptr(),
+            max_matches,
+            std::ptr::addr_of_mut!(match_count),
+        );
+
+        if !status.is_ok() {
+            return None;
+        }
+
+        let pairs = match_pairs[..match_count * 2]
+            .chunks_exact(2)
+            .map(|c| (c[0], c[1]))
+            .collect();
+        Some(pairs)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Window function wrappers
+// ---------------------------------------------------------------------------
+
+/// GPU-accelerated ROW_NUMBER within partitions.
+/// Returns `None` if GPU is unavailable.
+pub fn window_row_number(partition_starts: &[u8], results: &mut [i64]) -> Option<()> {
+    let count = partition_starts.len().min(results.len());
+    if count == 0 {
+        return Some(());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid and count is within bounds.
+        let status = unsafe {
+            bridge::pgaccel_window_row_number(
+                partition_starts.as_ptr(),
+                count,
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_row_number(
+            partition_starts.as_ptr(),
+            count,
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated RANK within partitions.
+/// Returns `None` if GPU is unavailable.
+pub fn window_rank(partition_starts: &[u8], sort_keys: &[f64], results: &mut [i64]) -> Option<()> {
+    let count = partition_starts
+        .len()
+        .min(sort_keys.len())
+        .min(results.len());
+    if count == 0 {
+        return Some(());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid and count is within bounds.
+        let status = unsafe {
+            bridge::pgaccel_window_rank(
+                partition_starts.as_ptr(),
+                sort_keys.as_ptr(),
+                count,
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_rank(
+            partition_starts.as_ptr(),
+            sort_keys.as_ptr(),
+            count,
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated DENSE_RANK within partitions.
+/// Returns `None` if GPU is unavailable.
+pub fn window_dense_rank(
+    partition_starts: &[u8],
+    sort_keys: &[f64],
+    results: &mut [i64],
+) -> Option<()> {
+    let count = partition_starts
+        .len()
+        .min(sort_keys.len())
+        .min(results.len());
+    if count == 0 {
+        return Some(());
+    }
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid and count is within bounds.
+        let status = unsafe {
+            bridge::pgaccel_window_dense_rank(
+                partition_starts.as_ptr(),
+                sort_keys.as_ptr(),
+                count,
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_dense_rank(
+            partition_starts.as_ptr(),
+            sort_keys.as_ptr(),
+            count,
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated running SUM within partitions.
+/// `null_mask` may be empty (no nulls). Returns `None` if GPU unavailable.
+pub fn window_sum(
+    partition_starts: &[u8],
+    values: &[f64],
+    null_mask: &[u8],
+    results: &mut [f64],
+) -> Option<()> {
+    let count = partition_starts.len().min(values.len()).min(results.len());
+    if count == 0 {
+        return Some(());
+    }
+    let nm_ptr = if null_mask.is_empty() {
+        std::ptr::null()
+    } else {
+        null_mask.as_ptr()
+    };
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid; nm_ptr is null or valid.
+        let status = unsafe {
+            bridge::pgaccel_window_sum(
+                partition_starts.as_ptr(),
+                values.as_ptr(),
+                nm_ptr,
+                count,
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_sum(
+            partition_starts.as_ptr(),
+            values.as_ptr(),
+            nm_ptr,
+            count,
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated running COUNT within partitions.
+/// `null_mask` may be empty (no nulls). Returns `None` if GPU unavailable.
+pub fn window_count(partition_starts: &[u8], null_mask: &[u8], results: &mut [i64]) -> Option<()> {
+    let count = partition_starts.len().min(results.len());
+    if count == 0 {
+        return Some(());
+    }
+    let nm_ptr = if null_mask.is_empty() {
+        std::ptr::null()
+    } else {
+        null_mask.as_ptr()
+    };
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid; nm_ptr is null or valid.
+        let status = unsafe {
+            bridge::pgaccel_window_count(
+                partition_starts.as_ptr(),
+                nm_ptr,
+                count,
+                results.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_count(
+            partition_starts.as_ptr(),
+            nm_ptr,
+            count,
+            results.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated LAG within partitions.
+/// Returns `None` if GPU is unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn window_lag(
+    partition_starts: &[u8],
+    values: &[f64],
+    null_mask: &[u8],
+    offset: i32,
+    default_val: f64,
+    results: &mut [f64],
+    result_nulls: &mut [u8],
+) -> Option<()> {
+    let count = partition_starts
+        .len()
+        .min(values.len())
+        .min(results.len())
+        .min(result_nulls.len());
+    if count == 0 {
+        return Some(());
+    }
+    let nm_ptr = if null_mask.is_empty() {
+        std::ptr::null()
+    } else {
+        null_mask.as_ptr()
+    };
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid; nm_ptr is null or valid.
+        let status = unsafe {
+            bridge::pgaccel_window_lag(
+                partition_starts.as_ptr(),
+                values.as_ptr(),
+                nm_ptr,
+                count,
+                offset,
+                default_val,
+                results.as_mut_ptr(),
+                result_nulls.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_lag(
+            partition_starts.as_ptr(),
+            values.as_ptr(),
+            nm_ptr,
+            count,
+            offset,
+            default_val,
+            results.as_mut_ptr(),
+            result_nulls.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+/// GPU-accelerated LEAD within partitions.
+/// Returns `None` if GPU is unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn window_lead(
+    partition_starts: &[u8],
+    values: &[f64],
+    null_mask: &[u8],
+    offset: i32,
+    default_val: f64,
+    results: &mut [f64],
+    result_nulls: &mut [u8],
+) -> Option<()> {
+    let count = partition_starts
+        .len()
+        .min(values.len())
+        .min(results.len())
+        .min(result_nulls.len());
+    if count == 0 {
+        return Some(());
+    }
+    let nm_ptr = if null_mask.is_empty() {
+        std::ptr::null()
+    } else {
+        null_mask.as_ptr()
+    };
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid; nm_ptr is null or valid.
+        let status = unsafe {
+            bridge::pgaccel_window_lead(
+                partition_starts.as_ptr(),
+                values.as_ptr(),
+                nm_ptr,
+                count,
+                offset,
+                default_val,
+                results.as_mut_ptr(),
+                result_nulls.as_mut_ptr(),
+            )
+        };
+        status.is_ok().then_some(())
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_window_lead(
+            partition_starts.as_ptr(),
+            values.as_ptr(),
+            nm_ptr,
+            count,
+            offset,
+            default_val,
+            results.as_mut_ptr(),
+            result_nulls.as_mut_ptr(),
+        );
+        status.is_ok().then_some(())
+    }
+}
+
+#[cfg(test)]
+mod mod_tests {
+    use super::*;
+    use std::ptr;
+
+    // -----------------------------------------------------------------------
+    // Safe wrapper functions — fallback path (no GPU library linked)
+    // -----------------------------------------------------------------------
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn init_returns_error_no_device() {
+        assert_eq!(init(), PgaccelStatus::ErrorNoDevice);
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn shutdown_returns_error_no_device() {
+        assert_eq!(shutdown(), PgaccelStatus::ErrorNoDevice);
+    }
+
+    #[test]
+    fn get_device_info_returns_valid_struct() {
+        let info = get_device_info();
+        // With gpu feature, real device may be present; without, all zeroed.
+        #[cfg(not(feature = "gpu"))]
+        {
+            assert!(!info.has_fp64);
+            assert!(!info.has_atomic64);
+            assert!(!info.is_unified_memory);
+            assert_eq!(info.max_alloc_bytes, 0);
+            assert_eq!(info.compute_units, 0);
+        }
+        #[cfg(feature = "gpu")]
+        {
+            // Just verify we can read the struct without crashing.
+            let _ = info.compute_units;
+            let _ = info.max_alloc_bytes;
+        }
+    }
+
+    #[test]
+    fn get_caps_returns_valid_struct() {
+        let caps = get_caps();
+        #[cfg(not(feature = "gpu"))]
+        {
+            assert!(!caps.has_fp64);
+            assert!(!caps.has_atomic64);
+            assert!(!caps.has_ooo_queue);
+            assert!(!caps.is_unified_memory);
+            assert_eq!(caps.max_alloc_bytes, 0);
+            assert_eq!(caps.compute_units, 0);
+        }
+        #[cfg(feature = "gpu")]
+        {
+            let _ = caps.compute_units;
+            let _ = caps.max_alloc_bytes;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // spatial_intersects_gpu
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spatial_intersects_gpu_empty_slices_returns_empty_vecs() {
+        let result = spatial_intersects_gpu(&[], &[]);
+        let (dt, df, uc) = result.unwrap();
+        assert!(dt.is_empty());
+        assert!(df.is_empty());
+        assert!(uc.is_empty());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn spatial_intersects_gpu_nonempty_returns_none_without_gpu() {
+        // Build a minimal geometry descriptor (pointers unused by fallback).
+        let geom = PgaccelGeometry {
+            geom_type: PgaccelGeomType::Point,
+            bbox: ptr::null(),
+            coords: ptr::null(),
+            coord_count: 1,
+            ring_offsets: ptr::null(),
+            ring_count: 0,
+        };
+        let geoms_a = [geom.clone()];
+        let geoms_b = [geom];
+        let result = spatial_intersects_gpu(&geoms_a, &geoms_b);
+        // Fallback returns ErrorNoDevice, so the wrapper returns None.
+        assert!(result.is_none());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn spatial_intersects_gpu_mismatched_lengths_uses_min() {
+        // With count = min(2, 1) = 1 > 0, so it hits the fallback path
+        // which returns ErrorNoDevice -> None.
+        let geom = PgaccelGeometry {
+            geom_type: PgaccelGeomType::Polygon,
+            bbox: ptr::null(),
+            coords: ptr::null(),
+            coord_count: 0,
+            ring_offsets: ptr::null(),
+            ring_count: 0,
+        };
+        let geoms_a = [geom.clone(), geom.clone()];
+        let geoms_b = [geom];
+        let result = spatial_intersects_gpu(&geoms_a, &geoms_b);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn spatial_intersects_gpu_one_empty_returns_empty_vecs() {
+        // min(0, 1) = 0, so the early-return path fires.
+        let geom = PgaccelGeometry {
+            geom_type: PgaccelGeomType::Point,
+            bbox: ptr::null(),
+            coords: ptr::null(),
+            coord_count: 1,
+            ring_offsets: ptr::null(),
+            ring_count: 0,
+        };
+        let result = spatial_intersects_gpu(&[], &[geom]);
+        let (dt, df, uc) = result.unwrap();
+        assert!(dt.is_empty());
+        assert!(df.is_empty());
+        assert!(uc.is_empty());
+    }
 }

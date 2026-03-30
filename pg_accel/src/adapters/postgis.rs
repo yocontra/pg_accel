@@ -28,14 +28,11 @@ pub fn adapter() -> ExtensionAdapter {
 }
 
 /// GPU-accelerated spatial predicate functions.
+///
+/// Only boolean predicates belong here — scalar-returning functions like
+/// `ST_Distance` use [`AccelStrategy::BatchedEval`].
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &[
-        "st_intersects",
-        "st_contains",
-        "st_within",
-        "st_dwithin",
-        "st_distance",
-    ];
+    const NAMES: &[&str] = &["st_intersects", "st_contains", "st_within", "st_dwithin"];
     NAMES
         .iter()
         .map(|&name| FunctionAccelEntry {
@@ -50,6 +47,8 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
 /// are not yet GPU-accelerated.
 fn batched_eval_entries() -> Vec<FunctionAccelEntry> {
     const NAMES: &[&str] = &[
+        // Scalar measurements (returns float, not boolean)
+        "st_distance",
         // Geometry constructors / transforms
         "st_buffer",
         "st_transform",
@@ -88,7 +87,7 @@ mod tests {
     fn adapter_has_expected_function_count() {
         let a = adapter();
         assert_eq!(a.name, "postgis");
-        // 5 GPU spatial + 15 batched eval = 20
+        // 4 GPU spatial + 16 batched eval = 20
         assert_eq!(a.functions.len(), 20);
     }
 
@@ -100,13 +99,12 @@ mod tests {
             .iter()
             .filter(|f| f.strategy == AccelStrategy::GpuSpatial)
             .collect();
-        assert_eq!(gpu_fns.len(), 5);
+        assert_eq!(gpu_fns.len(), 4);
         let names: Vec<&str> = gpu_fns.iter().map(|f| f.name).collect();
         assert!(names.contains(&"st_intersects"));
         assert!(names.contains(&"st_contains"));
         assert!(names.contains(&"st_within"));
         assert!(names.contains(&"st_dwithin"));
-        assert!(names.contains(&"st_distance"));
     }
 
     #[test]
@@ -117,7 +115,7 @@ mod tests {
             .iter()
             .filter(|f| f.strategy == AccelStrategy::BatchedEval)
             .count();
-        assert_eq!(batched_count, 15);
+        assert_eq!(batched_count, 16);
     }
 
     #[test]
