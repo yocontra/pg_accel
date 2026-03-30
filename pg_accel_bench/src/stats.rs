@@ -728,4 +728,184 @@ mod tests {
         assert!(table.contains("accel"));
         assert!(table.contains("| 3 |")); // iterations
     }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: single value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mean_single_value() {
+        assert!((mean(&[99.9]) - 99.9).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_median_single_value() {
+        assert!((median(&[42.0]) - 42.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_stddev_two_values() {
+        // stddev of [0, 10] with Bessel correction: sqrt((25+25)/1) = sqrt(50)
+        let sd = stddev(&[0.0, 10.0]);
+        let expected = (50.0_f64).sqrt(); // 7.0711...
+        assert!(
+            (sd - expected).abs() < 1e-4,
+            "got {sd}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_ci_95_two_values() {
+        let (lo, hi) = confidence_interval_95(&[10.0, 20.0]);
+        let avg = mean(&[10.0, 20.0]);
+        assert!(lo < avg);
+        assert!(hi > avg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: identical values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stddev_identical_values() {
+        let vals = vec![7.0; 100];
+        assert!(stddev(&vals).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_detect_outliers_identical_values() {
+        let vals = vec![5.0; 20];
+        assert!(detect_outliers(&vals, 3.0).is_empty());
+    }
+
+    #[test]
+    fn test_paired_t_identical_constant_samples() {
+        // All values the same in both -> p should be 1.0
+        let a = vec![5.0; 10];
+        let b = vec![5.0; 10];
+        let p = paired_t_test_p(&a, &b);
+        assert!(
+            (p - 1.0).abs() < 0.01,
+            "identical constant paired samples: p={p}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: very different values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stddev_very_spread() {
+        let vals = [1.0, 1_000_000.0];
+        let sd = stddev(&vals);
+        assert!(sd > 100_000.0, "stddev should be large: {sd}");
+    }
+
+    #[test]
+    fn test_cohens_d_zero_variance_different_means() {
+        // All values identical within each group but groups differ
+        let a = vec![100.0; 5];
+        let b = vec![50.0; 5];
+        let d = cohens_d(&a, &b);
+        // pooled_sd is 0, means differ -> should return infinity
+        assert!(d.is_infinite(), "expected infinity, got {d}");
+        assert!(d > 0.0, "a > b should give positive direction");
+    }
+
+    #[test]
+    fn test_cohens_d_single_value_each() {
+        let a = [10.0];
+        let b = [20.0];
+        let d = cohens_d(&a, &b);
+        assert!(d.is_nan(), "fewer than 2 values should give NaN: {d}");
+    }
+
+    #[test]
+    fn test_welch_single_values() {
+        let a = [10.0];
+        let b = [20.0];
+        assert!(welch_t_test_p(&a, &b).is_nan());
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: min/max
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_min_single() {
+        assert!((min(&[42.0]) - 42.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_max_single() {
+        assert!((max(&[42.0]) - 42.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_min_max_negative() {
+        let vals = [-5.0, -1.0, -10.0, -3.0];
+        assert!((min(&vals) - (-10.0)).abs() < EPSILON);
+        assert!((max(&vals) - (-1.0)).abs() < EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge cases: speedup
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_speedup_zero_experiment() {
+        let baseline = BenchmarkResult::new("a".to_owned(), "b".to_owned(), vec![100.0, 100.0]);
+        let experiment = BenchmarkResult::new("a".to_owned(), "e".to_owned(), vec![0.0, 0.0]);
+        assert!(speedup(&baseline, &experiment).is_nan());
+    }
+
+    #[test]
+    fn test_speedup_equal() {
+        let baseline = BenchmarkResult::new("a".to_owned(), "b".to_owned(), vec![50.0, 50.0]);
+        let experiment = BenchmarkResult::new("a".to_owned(), "e".to_owned(), vec![50.0, 50.0]);
+        let ratio = speedup(&baseline, &experiment);
+        assert!(
+            (ratio - 1.0).abs() < EPSILON,
+            "equal times should give 1x: {ratio}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_outliers edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_detect_outliers_empty() {
+        assert!(detect_outliers(&[], 3.0).is_empty());
+    }
+
+    #[test]
+    fn test_detect_outliers_single_value() {
+        assert!(detect_outliers(&[5.0], 3.0).is_empty());
+    }
+
+    #[test]
+    fn test_detect_outliers_all_outliers_impossible() {
+        // If all values are the same, none are outliers
+        let vals = vec![10.0; 5];
+        assert!(detect_outliers(&vals, 0.0).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // format_markdown_table edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_format_markdown_table_multiple_rows() {
+        let results = vec![
+            BenchmarkResult::new("wl_a".to_owned(), "accel".to_owned(), vec![10.0, 12.0]),
+            BenchmarkResult::new("wl_a".to_owned(), "baseline".to_owned(), vec![20.0, 22.0]),
+        ];
+        let table = format_markdown_table(&results);
+        assert!(table.contains("accel"));
+        assert!(table.contains("baseline"));
+        // Both rows present
+        let data_lines: Vec<&str> = table.lines().skip(2).collect(); // skip header + separator
+        assert_eq!(data_lines.len(), 2);
+    }
 }

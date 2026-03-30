@@ -1,6 +1,6 @@
 use super::Workload;
 
-/// Tests H3 cell computation: `h3_lat_lng_to_cell` on bulk points with GROUP BY.
+/// Tests H3 cell computation: `h3_latlng_to_cell` on bulk points with GROUP BY.
 pub struct H3Bulk;
 
 impl Workload for H3Bulk {
@@ -9,7 +9,7 @@ impl Workload for H3Bulk {
     }
 
     fn description(&self) -> &'static str {
-        "SELECT h3_lat_lng_to_cell(geom, 7), count(*) FROM bench_h3_points \
+        "SELECT h3_latlng_to_cell(geom, 7), count(*) FROM bench_h3_points \
          GROUP BY 1 — tests GpuH3 bulk cell ops"
     }
 
@@ -32,7 +32,7 @@ impl Workload for H3Bulk {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT h3_lat_lng_to_cell(geom, 7), count(*) \
+        "SELECT h3_latlng_to_cell(geom, 7), count(*) \
          FROM bench_h3_points GROUP BY 1"
             .to_owned()
     }

@@ -67,6 +67,10 @@ enum Command {
         /// Output format: `markdown`, `json`, or `csv`.
         #[arg(long, default_value = "markdown")]
         format: ReportFormat,
+
+        /// Validate SQL and print workload plan without executing benchmarks.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Print a previously-stored report (reads JSON from stdin).
@@ -74,6 +78,20 @@ enum Command {
         /// Output format: `markdown` or `json`.
         #[arg(long, default_value = "markdown")]
         format: ReportFormat,
+    },
+
+    /// Validate workload SQL without connecting to PostgreSQL.
+    ///
+    /// Checks structure, balanced parentheses, table references,
+    /// cleanup completeness, and extension requirements.
+    Validate {
+        /// Workload name (omit to validate all workloads).
+        #[arg(long)]
+        workload: Option<String>,
+
+        /// Number of rows (used for setup_sql generation).
+        #[arg(long, default_value_t = 100_000)]
+        rows: usize,
     },
 }
 
@@ -132,16 +150,24 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             seed,
             connection,
             format,
-        } => cmd_run(
-            &connection,
-            workload.as_deref(),
-            iterations,
-            warmup,
-            rows,
-            seed,
-            &format,
-        ),
+            dry_run,
+        } => {
+            if dry_run {
+                cmd_dry_run(workload.as_deref(), rows)
+            } else {
+                cmd_run(
+                    &connection,
+                    workload.as_deref(),
+                    iterations,
+                    warmup,
+                    rows,
+                    seed,
+                    &format,
+                )
+            }
+        }
         Command::Report { format } => cmd_report(&format),
+        Command::Validate { workload, rows } => cmd_validate(workload.as_deref(), rows),
     }
 }
 
@@ -190,6 +216,106 @@ fn resolve_workloads(
         }
         None => Ok(workloads::all_workloads()),
     }
+}
+
+fn cmd_validate(
+    workload_name: Option<&str>,
+    rows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let wls = resolve_workloads(workload_name)?;
+    let ext_reqs = workloads::extension_requirements();
+    let mut total_issues = 0;
+
+    for w in &wls {
+        let issues = workloads::validate_workload(w.as_ref(), rows);
+        let name = w.name();
+
+        // Check extension requirements
+        let required_exts: Vec<&str> = ext_reqs
+            .iter()
+            .filter(|(wl, _)| *wl == name)
+            .map(|(_, ext)| *ext)
+            .collect();
+
+        if issues.is_empty() && required_exts.is_empty() {
+            eprintln!("[validate] {name}: OK");
+        } else if issues.is_empty() {
+            eprintln!(
+                "[validate] {name}: OK (requires extensions: {})",
+                required_exts.join(", ")
+            );
+        } else {
+            for issue in &issues {
+                eprintln!("[validate] {issue}");
+            }
+            total_issues += issues.len();
+        }
+    }
+
+    if total_issues > 0 {
+        Err(format!("{total_issues} validation issue(s) found").into())
+    } else {
+        eprintln!("[validate] all {} workload(s) passed validation", wls.len());
+        Ok(())
+    }
+}
+
+fn cmd_dry_run(workload_name: Option<&str>, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let wls = resolve_workloads(workload_name)?;
+    let ext_reqs = workloads::extension_requirements();
+
+    // First validate
+    let mut total_issues = 0;
+    for w in &wls {
+        let issues = workloads::validate_workload(w.as_ref(), rows);
+        for issue in &issues {
+            eprintln!("[dry-run] WARNING: {issue}");
+        }
+        total_issues += issues.len();
+    }
+
+    if total_issues > 0 {
+        return Err(format!("dry run aborted: {total_issues} validation issue(s)").into());
+    }
+
+    // Print execution plan
+    println!("=== Dry Run: Benchmark Execution Plan ===\n");
+    for w in &wls {
+        let name = w.name();
+        let required_exts: Vec<&str> = ext_reqs
+            .iter()
+            .filter(|(wl, _)| *wl == name)
+            .map(|(_, ext)| *ext)
+            .collect();
+
+        println!("Workload: {name}");
+        println!("  Description: {}", w.description());
+        if !required_exts.is_empty() {
+            println!("  Required extensions: {}", required_exts.join(", "));
+        }
+
+        println!("  Setup ({} statements):", w.setup_sql(rows).len());
+        for (i, sql) in w.setup_sql(rows).iter().enumerate() {
+            let preview = if sql.len() > 80 {
+                format!("{}...", &sql[..77])
+            } else {
+                sql.clone()
+            };
+            println!("    [{i}] {preview}");
+        }
+
+        let query = w.query_sql();
+        println!("  Query: {query}");
+
+        println!("  Cleanup ({} statements):", w.cleanup_sql().len());
+        for (i, sql) in w.cleanup_sql().iter().enumerate() {
+            println!("    [{i}] {sql}");
+        }
+        println!();
+    }
+
+    println!("=== All {len} workload(s) validated ===", len = wls.len());
+    Ok(())
 }
 
 fn print_report(
