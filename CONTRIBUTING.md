@@ -1,5 +1,55 @@
 # Contributing to pg_accel
 
+PostgreSQL extension for GPU-accelerated spatial predicates, H3 cell ops, raster
+operations, and batched executor nodes. Rust (pgrx 0.17) + C++/SYCL (AdaptiveCpp).
+
+## Development Setup
+
+### Prerequisites
+
+- Rust stable (via asdf or rustup)
+- PostgreSQL 17
+- cmake (for GPU kernels)
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17
+- [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
+
+### Quick Start
+
+```bash
+just setup          # Install deps, init pgrx for PG 17
+just setup-gpu      # Optional: install AdaptiveCpp with Metal backend
+```
+
+### Manual Setup
+
+```bash
+brew install postgresql@17
+cargo install cargo-pgrx --locked
+cargo install cargo-deny --locked
+cargo pgrx init --pg17 $(brew --prefix postgresql@17)/bin/pg_config
+```
+
+## Build Commands
+
+All commands are in the [Justfile](Justfile):
+
+| Command | Description |
+|---|---|
+| `just fmt` | Format code (`cargo fmt`) |
+| `just lint` | Lint (`cargo clippy -- -D warnings`) |
+| `just check` | Type check (`cargo check --all-features`) |
+| `just deny` | License + advisory check (`cargo deny check`) |
+| `just test` | Unit tests (`cargo pgrx test pg17`) |
+| `just ci` | Full local CI: lint + test + integration |
+| `just package` | Build installable `.so` (`cargo pgrx package`) |
+| `just gpu-build` | cmake build for GPU kernels (requires AdaptiveCpp) |
+| `just gpu-test` | Run standalone GPU kernel tests |
+| `just dev-up` | Start Docker PG container (port 5488) |
+| `just dev-watch` | Hot-reload watcher (run in separate terminal) |
+| `just dev-test agent=N` | Run integration tests for agent N |
+| `just dev-psql agent=N` | Connect to agent N's database |
+| `just dev-reset agent=N` | Reset agent N's DB to clean fixtures |
+
 ## Adding a new adapter
 
 Adapters teach pg_accel which SQL functions can be accelerated and what strategy
@@ -121,3 +171,40 @@ Before diving in, understand the four layers:
 4. **GPU Kernels** (`pgaccel-kernels/src/`) -- C++/SYCL spatial, H3, raster kernels.
 
 Read `CLAUDE.md` for the full safety rules and architecture details.
+
+## Safety Rules
+
+1. **All PG C functions on main backend thread only.** Never call PG functions from rayon.
+2. **rayon is only for**: GPU kernel orchestration, sort-key extraction, top-k merge.
+3. **Two strategies only**: `BatchedEval` (main thread) and `Gpu*` (GPU kernel + CPU recheck).
+4. **Custom Scan has three vtables**: `CustomPathMethods`, `CustomScanMethods`, `CustomExecMethods`. Never confuse them.
+5. **No `unwrap()` outside tests.** Use `unwrap_or`, `?`, or explicit error handling.
+6. **`CHECK_FOR_INTERRUPTS()` between batches** on main thread.
+7. **Thread budget via shared memory LWLock.** Always release in `before_shmem_exit`.
+8. **`PARALLEL SAFE` != thread-safe.** PG parallel = forked processes, not threads.
+
+## Agent Coordination
+
+pg_accel uses a multi-agent development model:
+
+- **10 agents per phase.** Each owns specific files — no two agents edit the same file.
+- **Plans live in `plans/`.** Each agent updates their checklist and implementation log.
+- **Phase gates are binary.** All items must pass before the next phase starts.
+- All test queries go in `docker/tests/`. The runner always runs ALL of them (cumulative, no regressions).
+
+### Per-Agent Databases
+
+The Docker dev environment provides isolated databases for concurrent work:
+
+- Single PG container with per-agent databases (`pgaccel_a0` through `pgaccel_a9`).
+- Template cloning via `CREATE DATABASE ... TEMPLATE pgaccel_shared`.
+- Use `just dev-test agent=N`, `just dev-psql agent=N`, `just dev-reset agent=N`.
+
+### Flock-Based Reload Safety
+
+`flock` coordinates hot-reloads with test runs:
+
+- **Test scripts** (`run_integration_tests.sh`): acquire a **shared** lock — multiple agents can test concurrently.
+- **Reload watcher** (`dev_reload.sh`): acquires an **exclusive** lock — waits for all running tests to finish before rebuilding the `.so` and restarting PG.
+
+This prevents test failures caused by mid-test extension reloads.

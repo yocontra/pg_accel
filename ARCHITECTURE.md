@@ -277,7 +277,7 @@ a `HashMap<Oid, FunctionAccelEntry>` for O(1) lookup during planning.
 | `BatchedEval` | Scalar functions, property accessors | Tight `FunctionCallInvoke` loop on main thread |
 | `GpuSpatial` | `ST_Intersects`, `ST_Contains`, etc. | Three-layer GPU pipeline |
 | `GpuRaster` | `ST_MapAlgebra`, raster clip | GPU map-algebra expression evaluator |
-| `GpuH3` | `h3_lat_lng_to_cell`, grid distance | GPU H3 cell computation |
+| `GpuH3` | `h3_latlng_to_cell`, grid distance | GPU H3 cell computation |
 | `GpuSort` | `ORDER BY` on numeric columns | GPU radix sort (planned, not yet implemented) |
 | `GpuReduce` | `SUM`, `AVG`, `MIN`, `MAX`, `COUNT` | GPU parallel reduction (planned, not yet implemented) |
 

@@ -7,6 +7,10 @@
 //! When the `gpu` feature is **not** enabled, this script is a no-op — there is
 //! no C++ dependency at all.
 
+// Build scripts are not library code — panicking on missing env vars or
+// cmake failures is the correct behaviour.
+#![allow(clippy::expect_used)]
+
 fn main() {
     // Re-run if the feature set changes.
     println!("cargo::rerun-if-changed=build.rs");
@@ -80,9 +84,15 @@ mod gpu_build {
             // Explicit target avoids concatenated default "ompmetal" bug.
             cmd.arg("-DACPP_TARGETS=omp");
 
-            // On macOS, LLVM's clang needs the Homebrew libomp path.
+            // On macOS, use Homebrew LLVM (required by AdaptiveCpp) and
+            // point the compiler at the Homebrew libomp headers/libs.
             if cfg!(target_os = "macos") {
+                if let Some(llvm) = find_brew_prefix("llvm@20") {
+                    cmd.arg(format!("-DCMAKE_C_COMPILER={llvm}/bin/clang"));
+                    cmd.arg(format!("-DCMAKE_CXX_COMPILER={llvm}/bin/clang++"));
+                }
                 if let Some(libomp) = find_brew_prefix("libomp") {
+                    cmd.arg(format!("-DCMAKE_CXX_FLAGS=-I{libomp}/include"));
                     let lib_flag = format!("-L{libomp}/lib");
                     cmd.arg(format!("-DCMAKE_SHARED_LINKER_FLAGS={lib_flag}"));
                     cmd.arg(format!("-DCMAKE_EXE_LINKER_FLAGS={lib_flag}"));
@@ -125,13 +135,32 @@ mod gpu_build {
     }
 
     fn emit_link_directives(build_dir: &Path) {
-        // CMake places the shared library directly in the build directory by default.
+        // CMake places the static library directly in the build directory.
         println!("cargo::rustc-link-search=native={}", build_dir.display());
-        println!("cargo::rustc-link-lib=dylib=pgaccel_kernels");
+        println!("cargo::rustc-link-lib=static=pgaccel_kernels");
 
-        // On macOS, also set an rpath so the dylib is found at runtime.
+        // Link C++ standard library for static C++ code.
         if cfg!(target_os = "macos") {
-            println!("cargo::rustc-link-arg=-Wl,-rpath,{}", build_dir.display());
+            println!("cargo::rustc-link-lib=c++");
+        } else {
+            println!("cargo::rustc-link-lib=stdc++");
+        }
+
+        // AdaptiveCpp uses OpenMP for CPU dispatch. Link the OMP runtime.
+        if let Some(libomp) = find_brew_prefix("libomp") {
+            println!("cargo::rustc-link-search=native={libomp}/lib");
+            println!("cargo::rustc-link-lib=omp");
+        }
+
+        // Link AdaptiveCpp runtime if present.
+        let acpp_prefix = home_dir().join("local");
+        let acpp_lib = acpp_prefix.join("lib");
+        if acpp_lib.exists() {
+            println!("cargo::rustc-link-search=native={}", acpp_lib.display());
+            // AdaptiveCpp runtime library.
+            println!("cargo::rustc-link-lib=acpp-rt");
+            // Set rpath so the runtime dylib is found at load time.
+            println!("cargo::rustc-link-arg=-Wl,-rpath,{}", acpp_lib.display());
         }
     }
 }

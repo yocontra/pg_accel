@@ -104,7 +104,7 @@ _(no deviations)_
 **Owns:** workloads `h3_bulk`, `jsonb_filter`
 
 **Tasks:**
-- [ ] Implement h3_bulk workload: `h3_lat_lng_to_cell(point, 7)` on 1M points + GROUP BY cell
+- [ ] Implement h3_bulk workload: `h3_latlng_to_cell(point, 7)` on 1M points + GROUP BY cell
 - [ ] Implement jsonb_filter workload: `WHERE data @> '{"type":"X"}' AND (data->>'amount')::float > 100`
 
 **Agent gate:**

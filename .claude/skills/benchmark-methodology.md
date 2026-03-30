@@ -77,7 +77,7 @@ Same seed = same data = reproducible results across machines.
 |---|----------|--------------|--------|
 | 1 | spatial_join | `FROM points, polygons WHERE ST_Contains(poly, point)` | ≥5x (CUDA fp64), ≥3x (Metal fp32), ≥2x (CPU) |
 | 2 | proximity | `WHERE ST_DWithin(location, query, 500)` | ≥2x |
-| 3 | h3_bulk | `h3_lat_lng_to_cell(point, 7) GROUP BY cell` | ≥3x |
+| 3 | h3_bulk | `h3_latlng_to_cell(point, 7) GROUP BY cell` | ≥3x |
 | 4 | aggregate | `GROUP BY dept SUM/AVG/COUNT WHERE selective` | ≥2x |
 | 5 | index_recheck | GiST index `point <@ box` 100K candidates | ≥3x |
 | 6 | join_residual | `ON key AND ts < ts AND interval` | ≥2x |

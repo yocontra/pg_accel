@@ -171,13 +171,13 @@ _(no deviations)_
 
 **Tasks:**
 - [ ] Reimplement hot-path h3 algorithms as GPU kernels (h3's core library is stateless integer math + trigonometry on independent inputs; the pg-h3 wrapper adds palloc overhead but underlying h3 C functions are pure computation)
-- [ ] Implement `h3_lat_lng_to_cell` kernel (the killer -- called per-row for millions of points): converts (lat, lng, resolution) → h3 cell index, involving:
+- [ ] Implement `h3_latlng_to_cell` kernel (the killer -- called per-row for millions of points): converts (lat, lng, resolution) → h3 cell index, involving:
   - Face lookup (icosahedron face containing the point)
   - Gnomonic projection onto face
   - Hex coordinate quantization at target resolution
   - Bit packing into 64-bit cell ID
   ```cpp
-  pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
+  pgaccel_status pgaccel_h3_latlng_to_cell_bulk(
       const void* lat_array,      // [N] latitudes (f32 or f64)
       const void* lng_array,      // [N] longitudes (f32 or f64)
       int resolution,
@@ -205,9 +205,9 @@ _(no deviations)_
   ```
 
 **Agent gate:**
-- [ ] `h3_lat_lng_to_cell` bulk 1M points at res 7: matches h3 C library exactly (all platforms)
-- [ ] `h3_lat_lng_to_cell` at res 15 on fp32 (Metal): invalid cells flagged, CPU fallback correct
-- [ ] `h3_lat_lng_to_cell` at res 15 on fp64 (CUDA): all valid, matches h3 C library
+- [ ] `h3_latlng_to_cell` bulk 1M points at res 7: matches h3 C library exactly (all platforms)
+- [ ] `h3_latlng_to_cell` at res 15 on fp32 (Metal): invalid cells flagged, CPU fallback correct
+- [ ] `h3_latlng_to_cell` at res 15 on fp64 (CUDA): all valid, matches h3 C library
 - [ ] `h3_grid_distance` 100K pairs: exact match with h3 C library (integer math, all platforms)
 - [ ] `h3_cell_to_parent` 1M cells: exact match
 - [ ] Edge cases: invalid cell IDs, resolution 0 and 15, poles, antimeridian
@@ -314,8 +314,8 @@ _(no deviations)_
 - [ ] sphere_distance fp64: within 1e-9 relative error. fp32: within 1e-3
 - [ ] segment_intersects: 100K test, zero false DEFINITE on ALL platforms
 - [ ] Three-layer dispatch: end-to-end correct for 3+ geometry type combos
-- [ ] h3_lat_lng_to_cell GPU: 1M points matches h3 C library on all platforms
-- [ ] h3_lat_lng_to_cell fp32 high-res: invalid cells flagged, CPU fallback correct
+- [ ] h3_latlng_to_cell GPU: 1M points matches h3 C library on all platforms
+- [ ] h3_latlng_to_cell fp32 high-res: invalid cells flagged, CPU fallback correct
 - [ ] h3_grid_distance GPU: exact match with h3 C library (integer math)
 - [ ] Raster map algebra: matches PostGIS CPU for 5+ expression types
 - [ ] Raster clip: pixel-identical to ST_Clip for 3+ geometry shapes

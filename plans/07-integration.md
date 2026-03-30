@@ -85,28 +85,28 @@ _(no deviations)_
 
 **Tasks:**
 - [ ] Register functions with `GpuH3` strategy (GPU kernel -- pure integer/trig math):
-  - `h3_lat_lng_to_cell(point, int)` → GPU bulk conversion (the killer workload -- millions of points indexed in one kernel launch)
+  - `h3_latlng_to_cell(point, int)` → GPU bulk conversion (the killer workload -- millions of points indexed in one kernel launch)
   - `h3_grid_distance(h3index, h3index)` → GPU bulk pairwise distance (integer math)
   - `h3_cell_to_parent(h3index, int)` → GPU bulk (bit shift, nearly free)
   - `h3_get_resolution(h3index)` → GPU bulk (bit mask, nearly free)
 - [ ] Register functions with `BatchedEval` strategy (return complex types requiring palloc):
-  - `h3_cell_to_lat_lng` → returns point (palloc)
+  - `h3_cell_to_latlng` → returns point (palloc)
   - `h3_cell_to_boundary` → returns polygon geometry (palloc)
   - `h3_grid_disk` → returns array of cells (palloc)
   - `h3_compact_cells` → returns array (palloc)
   - `h3_cells_to_multi_polygon` → returns geometry (palloc)
 - [ ] Implement GiST / SP-GiST index recheck acceleration: h3-pg provides both GiST and SP-GiST operator classes for `h3index`; SP-GiST leverages h3's hierarchical cell structure -- parent/child relationships map naturally to SP-GiST's space-partitioning tree, giving tighter candidate sets for hierarchy queries
-- [ ] Support queries like `WHERE cell @> h3_lat_lng_to_cell(point, 7)` (cell containment) and `WHERE cell && h3_grid_disk(center, 3)` (cell overlap with k-ring)
+- [ ] Support queries like `WHERE cell @> h3_latlng_to_cell(point, 7)` (cell containment) and `WHERE cell && h3_grid_disk(center, 3)` (cell overlap with k-ring)
 - [ ] Batch the recheck via GPU h3 kernels in our Custom Scan: GiST/SP-GiST traversal runs on main thread, but exact containment/overlap checking on accumulated candidates runs on GPU; the recheck path is identical regardless of which index type produced the candidates
 
 **Agent gate:**
 - [ ] `#[pg_test]` per function: 1000 rows, ON == OFF
-- [ ] GPU: `h3_lat_lng_to_cell` on 1M random points → identical to sequential, >=5x faster
+- [ ] GPU: `h3_latlng_to_cell` on 1M random points → identical to sequential, >=5x faster
 - [ ] GPU: `h3_grid_distance` on 100K pairs → identical to sequential
 - [ ] GiST recheck: `SELECT * FROM h3_data WHERE cell @> target` with GiST index → identical to vanilla
 - [ ] SP-GiST recheck: `SELECT * FROM h3_data WHERE cell @> target` with SP-GiST index → identical to vanilla
 - [ ] GiST/SP-GiST recheck: batched recheck visible in EXPLAIN ANALYZE stats
-- [ ] NULL handling: `h3_lat_lng_to_cell(NULL, 7)` → NULL
+- [ ] NULL handling: `h3_latlng_to_cell(NULL, 7)` → NULL
 - [ ] High resolution (res 15) on Metal: invalid cells fall back to CPU, correct results
 
 **Implementation log:**
@@ -219,20 +219,20 @@ _(no deviations)_
   ```
 - [ ] Test H3 bulk indexing (GPU kernel):
   ```sql
-  SELECT h3_lat_lng_to_cell(point, 7) as cell, COUNT(*)
+  SELECT h3_latlng_to_cell(point, 7) as cell, COUNT(*)
   FROM events GROUP BY cell ORDER BY count DESC LIMIT 10;
   ```
 - [ ] Test H3 GiST index containment (batched recheck via GPU h3 kernel):
   ```sql
-  SELECT * FROM h3_data WHERE cell @> h3_lat_lng_to_cell(ST_MakePoint(-73.98, 40.75), 7);
+  SELECT * FROM h3_data WHERE cell @> h3_latlng_to_cell(ST_MakePoint(-73.98, 40.75), 7);
   ```
 - [ ] Test H3 SP-GiST index containment (batched recheck via GPU h3 kernel):
   ```sql
-  SELECT * FROM h3_spgist_data WHERE cell @> h3_lat_lng_to_cell(ST_MakePoint(-73.98, 40.75), 7);
+  SELECT * FROM h3_spgist_data WHERE cell @> h3_latlng_to_cell(ST_MakePoint(-73.98, 40.75), 7);
   ```
 - [ ] Test H3 GiST k-ring overlap:
   ```sql
-  SELECT * FROM h3_data WHERE cell && h3_grid_disk(h3_lat_lng_to_cell(ST_MakePoint(-73.98, 40.75), 7), 3);
+  SELECT * FROM h3_data WHERE cell && h3_grid_disk(h3_latlng_to_cell(ST_MakePoint(-73.98, 40.75), 7), 3);
   ```
 - [ ] Test analytical aggregate:
   ```sql
@@ -302,7 +302,7 @@ _(no deviations)_
 - [ ] Complete all 15 workloads with real data generators and three-way comparison (PG single-thread, PG parallel with 4 workers, pg_accel):
   1. `spatial_join` -- point x polygon ST_Contains
   2. `proximity` -- ST_DWithin radius search
-  3. `h3_bulk` -- h3_lat_lng_to_cell on 1M points
+  3. `h3_bulk` -- h3_latlng_to_cell on 1M points
   4. `aggregate` -- GROUP BY + SUM/AVG/COUNT with selective WHERE
   5. `index_recheck` -- GiST index scan with recheck
   6. `join_residual` -- hash join with timestamp residual
@@ -353,7 +353,7 @@ _(no deviations)_
 - [ ] PostGIS vector adapter: 20+ functions produce identical results to vanilla
 - [ ] PostGIS raster adapter: ST_MapAlgebra, ST_Clip, ST_Reclass pixel-identical to vanilla
 - [ ] h3 adapter: all functions produce identical results
-- [ ] h3 GPU pipeline: h3_lat_lng_to_cell bulk GPU correct with stats showing usage
+- [ ] h3 GPU pipeline: h3_latlng_to_cell bulk GPU correct with stats showing usage
 - [ ] h3 GiST batched recheck: cell containment queries correct via GPU h3 kernel
 - [ ] h3 SP-GiST batched recheck: cell containment queries correct via GPU h3 kernel
 - [ ] pg_builtins adapter: 10+ functions produce identical results

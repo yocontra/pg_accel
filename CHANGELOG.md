@@ -6,7 +6,7 @@
 - Custom Scan Provider for batch-parallel query execution
 - GPU-accelerated spatial predicates (ST_Intersects, ST_Contains, ST_Within, ST_DWithin, ST_Distance)
 - Three-layer spatial pipeline: bbox filter -> GPU geometric predicate -> CPU recheck
-- H3 hexagonal index operations (h3_lat_lng_to_cell, h3_grid_distance, h3_cell_to_parent, h3_get_resolution)
+- H3 hexagonal index operations (h3_latlng_to_cell, h3_grid_distance, h3_cell_to_parent, h3_get_resolution)
 - Raster operations (ST_MapAlgebra, ST_Clip, ST_Reclass) via GPU
 - PostgreSQL built-in function batching (math, text, timestamp, JSON)
 - Adapter system for third-party extension support

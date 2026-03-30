@@ -13,7 +13,7 @@ name = "pgrx_embed_pg_accel"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]
-default = ["pg17"]
+default = ["pg17", "gpu"]
 pg15 = ["pgrx/pg15"]
 pg16 = ["pgrx/pg16"]
 pg17 = ["pgrx/pg17"]

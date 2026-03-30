@@ -201,7 +201,7 @@ libpgaccel_kernels.so (C++/SYCL, AdaptiveCpp, feature "gpu")
 │       fp64: tight epsilon (exact for 99.9%+ of rows)
 │       fp32: wider epsilon (exact for ~98%, more CPU rechecks)
 ├── h3_ops.cpp
-│     h3_lat_lng_to_cell()      coord→cell, trig+bit ops (fp64 CUDA, fp32+fallback Metal)
+│     h3_latlng_to_cell()      coord→cell, trig+bit ops (fp64 CUDA, fp32+fallback Metal)
 │     h3_grid_distance()        pairwise cell distance (pure integer math, all platforms)
 │     h3_cell_to_parent()       bit shift (nearly free on GPU)
 │     h3_get_resolution()       bit mask (nearly free on GPU)

@@ -87,7 +87,7 @@ _(no deviations)_
 - [ ] Run 100K random inputs for ST_Contains
 - [ ] Run 100K random inputs for ST_DWithin
 - [ ] Run 100K random inputs for ST_Distance (geography)
-- [ ] Run 100K random inputs for h3_lat_lng_to_cell
+- [ ] Run 100K random inputs for h3_latlng_to_cell
 - [ ] Log any disagreements with full reproduction case
 
 **Agent gate:**

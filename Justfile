@@ -111,9 +111,9 @@ fmt-check:
 lint:
     cargo clippy -- -D warnings
 
-# Type check (default features: pg17)
+# Type check (pg17 + all non-pg features)
 check:
-    cargo check
+    cargo check --features pg17
 
 # Type check with GPU feature
 check-gpu:
@@ -123,19 +123,35 @@ check-gpu:
 deny:
     cargo deny check
 
-# Run pgrx tests against PG 17
-test pg="17":
+# Pre-commit checks: fmt, lint, type-check, deny
+pre-commit: fmt-check lint check deny
+    @echo "Pre-commit checks passed."
+
+# Run pgrx unit tests against PG 17
+test-unit pg="17":
     cargo pgrx test pg{{pg}}
+
+# Run SQL integration tests against the dev Docker environment
+test-integration db="pgaccel_shared":
+    PGPASSWORD=pgaccel_test docker/tests/run_all.sh "host=localhost port=5488 user=postgres dbname={{db}}"
+
+# Run all tests: pgrx unit tests + SQL integration tests
+test pg="17": (test-unit pg) test-integration
+    @echo "All tests passed."
+
+# Run benchmark suite against dev Docker environment
+bench rows="1000000" iterations="30" warmup="5" connection="host=localhost port=5488 user=postgres password=pgaccel_test dbname=pgaccel_a9":
+    cargo run -p pg_accel_bench --release -- run \
+        --rows {{rows}} --iterations {{iterations}} --warmup {{warmup}} \
+        --connection "{{connection}}" --format markdown
 
 # === Docker Dev Environment ===
 
 # Start dev PG (PostGIS + h3 + pg_accel, 10 agent DBs)
 dev-up:
-    docker compose -f docker/docker-compose.test.yml up -d
+    docker compose -f docker/docker-compose.test.yml up -d --build
     @echo "Waiting for PG to be ready..."
     @until docker compose -f docker/docker-compose.test.yml exec -T pgaccel-test pg_isready -U postgres > /dev/null 2>&1; do sleep 1; done
-    @echo "PG ready. Initializing agent databases..."
-    docker compose -f docker/docker-compose.test.yml exec -T pgaccel-test bash /docker-entrypoint-initdb.d/02-create-agent-dbs.sh || true
     @echo "Dev environment ready on port 5488"
 
 # Stop dev PG and remove volumes
@@ -153,6 +169,10 @@ dev-test agent="0":
 # Run all integration tests (all agents)
 dev-test-all:
     docker/scripts/run_integration_tests.sh
+
+# Run comprehensive integration test suite against dev PG
+dev-test-suite db="pgaccel_shared":
+    docker/tests/run_all.sh "host=localhost port=5488 user=postgres dbname={{db}}"
 
 # Connect to an agent's database via psql
 dev-psql agent="0":
@@ -174,6 +194,7 @@ gpu-build:
         -DACPP_TARGETS="omp" \
         -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
         -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++ \
+        -DCMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
         -DCMAKE_SHARED_LINKER_FLAGS="-L$(brew --prefix libomp)/lib" \
         -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib" \
     && cmake --build pgaccel-kernels/build
@@ -190,8 +211,8 @@ gpu-test: gpu-build
 
 # === CI ===
 
-# Run full CI locally (lint + test + integration)
-ci: fmt-check lint deny test dev-up dev-test-all dev-down
+# Run full CI locally (pre-commit checks + all tests)
+ci: pre-commit dev-up test-unit test-integration dev-down
 
 # Build installable pgrx package
 package pg="17":

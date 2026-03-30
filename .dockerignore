@@ -1,0 +1,4 @@
+target/
+.git/
+pgaccel-kernels/build/
+*.dylib

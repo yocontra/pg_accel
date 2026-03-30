@@ -15,5 +15,6 @@ services:
       timeout: 5s
       retries: 10
     volumes:
-      - ./fixtures:/docker-entrypoint-initdb.d/fixtures
-      - ./init:/docker-entrypoint-initdb.d/init
+      - ./tests:/opt/pg_accel/tests:ro
+    # Init scripts and fixtures are baked into the image via Dockerfile.test.
+    # They run in sorted order on first startup (see Dockerfile.test for ordering).

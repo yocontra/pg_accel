@@ -126,7 +126,7 @@ Phase 0 completed — all items passing.
 - [x] All fixture data generated with fixed seeds for deterministic, reproducible results
 - [x] All fixture SQL uses `CREATE TABLE IF NOT EXISTS` and `INSERT ... ON CONFLICT DO NOTHING` (idempotent, safe to re-run after restart)
 - [x] Create `docker/scripts/run_integration_tests.sh`: for each .sql in `docker/tests/`, run with `pg_accel.enabled = on` (capture), run with `pg_accel.enabled = off` (capture), diff (any difference = FAIL), exit 0 = all pass, non-zero = failures listed
-- [x] Create `docker/tests/00_smoke.sql` with: `SELECT * FROM pg_accel_device_info();`, `SELECT ST_AsText(ST_MakePoint(0, 0));` (PostGIS verification), `SELECT h3_lat_lng_to_cell(POINT(40.7128, -74.0060), 7);` (h3-pg verification), `SELECT COUNT(*) FROM analytics_events WHERE value > 0.5;` (basic scan, vanilla path)
+- [x] Create `docker/tests/00_smoke.sql` with: `SELECT * FROM pg_accel_device_info();`, `SELECT ST_AsText(ST_MakePoint(0, 0));` (PostGIS verification), `SELECT h3_latlng_to_cell(POINT(40.7128, -74.0060), 7);` (h3-pg verification), `SELECT COUNT(*) FROM analytics_events WHERE value > 0.5;` (basic scan, vanilla path)
 - [x] Each subsequent phase adds test queries to `docker/tests/`; the runner always runs ALL of them, ensuring no regressions
 
 **Agent gate:**

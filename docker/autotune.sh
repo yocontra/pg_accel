@@ -105,6 +105,7 @@ EFFECTIVE_CACHE_SIZE="${PG_EFFECTIVE_CACHE_SIZE:-${ecs_mb}MB}"
 MAX_PARALLEL_WORKERS_PER_GATHER="${PG_MAX_PARALLEL_WORKERS_PER_GATHER:-$gather}"
 
 echo "pg_accel/autotune: ${RAM_MB}MB RAM, ${CPUS} CPUs detected"
+echo "  shared_preload_libraries=pg_accel"
 echo "  shared_buffers=$SHARED_BUFFERS"
 echo "  work_mem=$WORK_MEM"
 echo "  effective_cache_size=$EFFECTIVE_CACHE_SIZE"
@@ -114,6 +115,7 @@ echo "  jit=off"
 echo "  default_statistics_target=500"
 
 exec docker-entrypoint.sh postgres \
+  -c "shared_preload_libraries=pg_accel" \
   -c "shared_buffers=$SHARED_BUFFERS" \
   -c "work_mem=$WORK_MEM" \
   -c "effective_cache_size=$EFFECTIVE_CACHE_SIZE" \

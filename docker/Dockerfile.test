@@ -14,8 +14,13 @@ RUN apk add --no-cache \
     openssl-dev \
     openssl-libs-static \
     clang-dev \
+    clang-libs \
     git \
     pkgconf
+
+# bindgen/clang-sys needs to dlopen libclang; on musl this requires dynamic linking
+ENV LIBCLANG_PATH=/usr/lib/llvm21/lib
+ENV RUSTFLAGS="-C target-feature=-crt-static"
 
 # Install Rust via rustup
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -35,7 +40,8 @@ COPY pg_accel_bench/ /build/pg_accel_bench/
 WORKDIR /build
 
 # Build the extension package
-RUN cargo pgrx package --pg-config "$(which pg_config)" --features pg17
+# No GPU in Docker (no Metal/CUDA passthrough) — build CPU-fallback only
+RUN cargo pgrx package --package pg_accel --pg-config "$(which pg_config)" --no-default-features --features pg17
 
 # Stage 2: Final image with all extensions installed
 FROM imresamu/postgis:17-3.5-alpine
@@ -72,8 +78,15 @@ COPY --from=builder /build/target/release/pg_accel-pg17/usr/ /usr/
 COPY docker/autotune.sh /usr/local/bin/autotune.sh
 RUN chmod +x /usr/local/bin/autotune.sh
 
-# Copy fixtures and init scripts
-COPY docker/fixtures/ /docker-entrypoint-initdb.d/fixtures/
-COPY docker/init/ /docker-entrypoint-initdb.d/init/
+# Copy init scripts and fixtures into initdb.d with correct ordering:
+# 01: create extensions, 02-06: fixtures (schema, data, indexes), 07: agent DBs
+COPY docker/init/01-create-extensions.sql /docker-entrypoint-initdb.d/01-create-extensions.sql
+COPY docker/fixtures/01_schema.sql        /docker-entrypoint-initdb.d/02-schema.sql
+COPY docker/fixtures/02_spatial_data.sql  /docker-entrypoint-initdb.d/03-spatial-data.sql
+COPY docker/fixtures/03_h3_data.sql       /docker-entrypoint-initdb.d/04-h3-data.sql
+COPY docker/fixtures/04_analytics_data.sql /docker-entrypoint-initdb.d/05-analytics-data.sql
+COPY docker/fixtures/05_indexes.sql       /docker-entrypoint-initdb.d/06-indexes.sql
+COPY docker/init/02-create-agent-dbs.sh   /docker-entrypoint-initdb.d/07-create-agent-dbs.sh
+RUN chmod +x /docker-entrypoint-initdb.d/07-create-agent-dbs.sh
 
 ENTRYPOINT ["autotune.sh"]
