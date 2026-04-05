@@ -17,12 +17,11 @@ use crate::engine::function_matcher::{self, FunctionPattern};
 static GLOBAL_REGISTRY: OnceLock<AdapterRegistry> = OnceLock::new();
 
 /// Strategy that `pg_accel` applies when accelerating a function call.
+///
+/// All strategies require GPU hardware. There is no CPU-only fallback path.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccelStrategy {
-    /// Evaluate multiple rows in a tight loop on the main backend thread,
-    /// avoiding repeated executor overhead.
-    BatchedEval = 0,
     /// Offload spatial predicate evaluation to the GPU.
     GpuSpatial = 1,
     /// Offload raster map-algebra and similar operations to the GPU.
@@ -33,20 +32,19 @@ pub enum AccelStrategy {
     GpuSort = 4,
     /// GPU-accelerated reduction / aggregate (sum, avg, min, max, count).
     GpuReduce = 5,
-    /// GPU expression evaluator — general WHERE clauses and projections.
+    /// GPU expression evaluator �� general WHERE clauses and projections.
     GpuExpr = 6,
-    /// GPU hash join — equi-join via hash build + probe.
+    /// GPU hash join ��� equi-join via hash build + probe.
     GpuHashJoin = 7,
     /// GPU window functions — ROW_NUMBER, RANK, SUM OVER, LAG/LEAD, etc.
     GpuWindow = 8,
 }
 
 impl AccelStrategy {
-    /// Convert from raw integer, defaulting to `BatchedEval` for unknown values.
+    /// Convert from raw integer, defaulting to `GpuSpatial` for unknown values.
     #[must_use]
     pub const fn from_i32(v: i32) -> Self {
         match v {
-            1 => Self::GpuSpatial,
             2 => Self::GpuRaster,
             3 => Self::GpuH3,
             4 => Self::GpuSort,
@@ -54,7 +52,7 @@ impl AccelStrategy {
             6 => Self::GpuExpr,
             7 => Self::GpuHashJoin,
             8 => Self::GpuWindow,
-            _ => Self::BatchedEval,
+            _ => Self::GpuSpatial,
         }
     }
 }
@@ -117,7 +115,6 @@ impl AdapterRegistry {
             crate::adapters::postgis::adapter(),
             crate::adapters::postgis_raster::adapter(),
             crate::adapters::h3::adapter(),
-            crate::adapters::pg_builtins::adapter(),
         ];
 
         for adapter in all_adapters {
@@ -240,13 +237,8 @@ impl AdapterRegistry {
 /// pgrx converts those errors to panics which abort the server when
 /// they occur inside a planner hook.
 ///
-/// The `pg_builtins` adapter always returns `true` (no extension needed).
+/// Returns `true` if the adapter's extension is installed in `pg_extension`.
 fn check_extension_installed(adapter: &ExtensionAdapter) -> bool {
-    // pg_builtins doesn't require any extension.
-    if adapter.name == "pg_builtins" {
-        return true;
-    }
-
     // Adapter name matches extension name in pg_extension.
     let ext_name = adapter.name;
 
@@ -403,14 +395,11 @@ mod tests {
             FunctionAccelEntry {
                 schema: "public",
                 name: "func_a",
-                strategy: AccelStrategy::BatchedEval,
+                strategy: AccelStrategy::GpuSpatial,
             },
         );
         assert_eq!(reg.resolved_count(), 1);
-        assert_eq!(
-            reg.lookup(oid).unwrap().strategy,
-            AccelStrategy::BatchedEval
-        );
+        assert_eq!(reg.lookup(oid).unwrap().strategy, AccelStrategy::GpuSpatial);
 
         // Re-register same OID with different entry
         reg.register_function(
@@ -488,7 +477,7 @@ mod tests {
                 FunctionAccelEntry {
                     schema: "public",
                     name: "fn2",
-                    strategy: AccelStrategy::BatchedEval,
+                    strategy: AccelStrategy::GpuH3,
                 },
             ],
         });
@@ -515,16 +504,14 @@ mod tests {
 
     #[test]
     fn accel_strategy_equality() {
-        assert_eq!(AccelStrategy::BatchedEval, AccelStrategy::BatchedEval);
         assert_eq!(AccelStrategy::GpuSpatial, AccelStrategy::GpuSpatial);
-        assert_ne!(AccelStrategy::BatchedEval, AccelStrategy::GpuSpatial);
+        assert_ne!(AccelStrategy::GpuSpatial, AccelStrategy::GpuH3);
         assert_ne!(AccelStrategy::GpuRaster, AccelStrategy::GpuH3);
         assert_ne!(AccelStrategy::GpuSort, AccelStrategy::GpuReduce);
     }
 
     #[test]
     fn accel_strategy_debug() {
-        assert_eq!(format!("{:?}", AccelStrategy::BatchedEval), "BatchedEval");
         assert_eq!(format!("{:?}", AccelStrategy::GpuSpatial), "GpuSpatial");
         assert_eq!(format!("{:?}", AccelStrategy::GpuRaster), "GpuRaster");
         assert_eq!(format!("{:?}", AccelStrategy::GpuH3), "GpuH3");
@@ -545,9 +532,9 @@ mod tests {
     fn accel_strategy_hash() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(AccelStrategy::BatchedEval);
         set.insert(AccelStrategy::GpuSpatial);
-        set.insert(AccelStrategy::BatchedEval); // duplicate
+        set.insert(AccelStrategy::GpuH3);
+        set.insert(AccelStrategy::GpuSpatial); // duplicate
         assert_eq!(set.len(), 2);
     }
 

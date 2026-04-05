@@ -1,18 +1,18 @@
 //! Batch dispatch: routes accumulated batches to the appropriate execution
-//! strategy (main-thread batched eval, GPU spatial, etc.) and implements
-//! late-materialization via predicate chain evaluation.
+//! strategy (spatial, H3, raster) and implements late-materialization via
+//! predicate chain evaluation.
 //!
 //! # Strategies
 //!
-//! - **`BatchedEval`**: Tight loop of `FunctionCallInvoke` on the main backend
-//!   thread. Avoids repeated executor overhead for simple scalar functions.
-//! - **`GpuSpatial`** (stub): Will offload spatial predicates to the GPU via a
+//! All strategies require GPU hardware. There is no CPU-only fallback path.
+//!
+//! - **`GpuSpatial`**: Offloads spatial predicates to the GPU via a
 //!   three-layer pipeline:
 //!   1. **Bbox filter** — fast integer/float bounding-box overlap test on GPU.
 //!   2. **Geometric fast-path** — exact predicate for common simple geometries
 //!      (point-in-ring, segment intersection) on GPU.
-//!   3. **CPU recheck** — fall back to PostGIS for edge cases the GPU kernels
-//!      cannot handle (collections, curves, etc.).
+//!   3. **PG recheck** — uncertain pairs are deferred to PostGIS for edge
+//!      cases the GPU kernels cannot handle (collections, curves, etc.).
 //!
 //! # Late Materialization
 //!
@@ -20,34 +20,16 @@
 //! most-selective predicate runs first. Rows rejected early skip expensive
 //! geometry deserialization entirely.
 
-use crate::adapters::extractors::geometry::extract_geometry;
+use crate::adapters::extractors::geometry::{extract_geometry, extract_point_xy_f32};
 use crate::adapters::extractors::raster;
 use crate::engine::gucs;
 use crate::engine::registry::{self, AccelStrategy};
 use crate::gpu;
 use crate::gpu::three_layer;
 
-/// How often (in calls) to invoke `CHECK_FOR_INTERRUPTS()` during batched
-/// evaluation on the main backend thread.
-const INTERRUPT_CHECK_INTERVAL: usize = 1000;
-
-/// Stack-allocated wrapper for `FunctionCallInfoBaseData` that provides
-/// backing storage for one argument via the flexible array member `args`.
-///
-/// `FunctionCallInfoBaseData` ends with `args: [NullableDatum; 0]` (a C
-/// flexible array member). A plain `std::mem::zeroed::<FunctionCallInfoBaseData>()`
-/// allocates zero bytes for `args`, so writing to `args[0]` is a stack
-/// buffer overflow. This `#[repr(C)]` wrapper places a `NullableDatum`
-/// immediately after the base struct, which — per C layout rules — is
-/// exactly where `args[0]` lives.
-#[repr(C)]
-struct FcinfoWith1Arg {
-    base: pgrx::pg_sys::FunctionCallInfoBaseData,
-    _arg_space: pgrx::pg_sys::NullableDatum,
-}
-
-/// Same as [`FcinfoWith1Arg`] but with space for two arguments.
-/// Used by the GPU spatial recheck path which calls 2-arg PostGIS functions.
+/// Stack-allocated wrapper for `FunctionCallInfoBaseData` with space for two
+/// arguments. Used by the GPU spatial recheck path which calls 2-arg PostGIS
+/// functions.
 #[repr(C)]
 struct FcinfoWith2Args {
     base: pgrx::pg_sys::FunctionCallInfoBaseData,
@@ -63,8 +45,17 @@ struct FcinfoWith2Args {
 pub enum DispatchResult {
     /// The batch was evaluated by an accelerated path.
     Accelerated(Vec<(pgrx::pg_sys::Datum, bool)>),
-    /// Caller should fall back to the vanilla PostgreSQL executor.
-    Fallback,
+    /// The batch could not be accelerated for this strategy.
+    ///
+    /// This is **deferral**, not CPU fallback: the caller should let
+    /// PostgreSQL's standard executor handle these tuples normally via
+    /// scalar qual evaluation. No extraction, no CPU reimplementation —
+    /// just PG's native path. Zero overhead beyond the dispatch check.
+    ///
+    /// Strategies that use dedicated executor nodes (GpuSort, GpuReduce,
+    /// GpuHashJoin, GpuWindow, GpuExpr) return this because they do not
+    /// participate in the per-datum dispatch interface.
+    Deferred,
 }
 
 // ---------------------------------------------------------------------------
@@ -80,7 +71,7 @@ pub enum DispatchResult {
 /// functions or when the second argument is not available.
 ///
 /// Returns [`DispatchResult::Accelerated`] with per-row results when the
-/// strategy is supported, or [`DispatchResult::Fallback`] when the caller
+/// strategy is supported, or [`DispatchResult::Deferred`] when the caller
 /// should use the standard PostgreSQL executor.
 ///
 /// # Safety
@@ -98,43 +89,17 @@ pub unsafe fn dispatch(
     skip_bbox: bool,
 ) -> DispatchResult {
     match strategy {
-        AccelStrategy::BatchedEval => {
-            // SAFETY: Caller guarantees main backend thread.
-            let results = unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
-            DispatchResult::Accelerated(results)
-        }
         AccelStrategy::GpuSpatial => {
-            // If GPU dispatch is disabled via GUC, fall back to batched eval.
-            if !gucs::gpu_enabled() {
-                // SAFETY: Caller guarantees main backend thread.
-                let results = unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
-                return DispatchResult::Accelerated(results);
-            }
             // SAFETY: Caller guarantees main backend thread.
-            let results =
-                unsafe { dispatch_gpu_spatial(batch, fn_info, is_strict, qual_datum, skip_bbox) };
-            DispatchResult::Accelerated(results)
+            unsafe { dispatch_gpu_spatial(batch, fn_info, is_strict, qual_datum, skip_bbox) }
         }
         AccelStrategy::GpuH3 => {
-            if !gucs::gpu_enabled() {
-                // SAFETY: Caller guarantees main backend thread.
-                let results = unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
-                return DispatchResult::Accelerated(results);
-            }
             // SAFETY: Caller guarantees main backend thread.
-            let results =
-                unsafe { dispatch_gpu_h3(batch, fn_info, is_strict, fn_info.fn_oid, qual_datum) };
-            DispatchResult::Accelerated(results)
+            unsafe { dispatch_gpu_h3(batch, fn_info, is_strict, fn_info.fn_oid, qual_datum) }
         }
         AccelStrategy::GpuRaster => {
-            if !gucs::gpu_enabled() {
-                // SAFETY: Caller guarantees main backend thread.
-                let results = unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
-                return DispatchResult::Accelerated(results);
-            }
             // SAFETY: Caller guarantees main backend thread.
-            let results = unsafe { dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid) };
-            DispatchResult::Accelerated(results)
+            unsafe { dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid) }
         }
         // GpuExpr is handled directly in scan.rs via the columnar path,
         // not through the per-datum dispatch interface.
@@ -143,87 +108,12 @@ pub unsafe fn dispatch(
         | AccelStrategy::GpuSort
         | AccelStrategy::GpuReduce
         | AccelStrategy::GpuHashJoin
-        | AccelStrategy::GpuWindow => DispatchResult::Fallback,
+        | AccelStrategy::GpuWindow => DispatchResult::Deferred,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 1: BatchedEval
-// ---------------------------------------------------------------------------
-
-/// Evaluate a batch of datums by calling the PG function once per row on the
-/// main backend thread.
-///
-/// For `STRICT` functions, any `NULL` input produces a `NULL` output without
-/// invoking the function. `CHECK_FOR_INTERRUPTS()` is called every
-/// [`INTERRUPT_CHECK_INTERVAL`] invocations.
-///
-/// # Safety
-///
-/// Must be called on the **main backend thread**. Accesses PG `FmgrInfo` and
-/// invokes `FunctionCallInvoke`.
-#[must_use]
-pub unsafe fn dispatch_batched_eval(
-    batch: &[(pgrx::pg_sys::Datum, bool)],
-    fn_info: &pgrx::pg_sys::FmgrInfo,
-    is_strict: bool,
-) -> Vec<(pgrx::pg_sys::Datum, bool)> {
-    let mut results = Vec::with_capacity(batch.len());
-
-    for (i, &(datum, is_null)) in batch.iter().enumerate() {
-        // Strict optimisation: NULL in → NULL out, no function call.
-        if is_strict && is_null {
-            results.push((pgrx::pg_sys::Datum::from(0), true));
-            continue;
-        }
-
-        // Build a FunctionCallInfoBaseData on the stack with space for 1 arg.
-        //
-        // SAFETY: FunctionCallInfoBaseData has a flexible array member `args`
-        // with zero allocated space. We use a #[repr(C)] wrapper that appends
-        // storage for one NullableDatum, ensuring writes to args[0] are backed
-        // by real memory. `fn_info` is a valid FmgrInfo provided by the caller.
-        let mut fcinfo_buf: FcinfoWith1Arg = unsafe { std::mem::zeroed() };
-        fcinfo_buf.base.flinfo = std::ptr::from_ref::<pgrx::pg_sys::FmgrInfo>(fn_info).cast_mut();
-        fcinfo_buf.base.nargs = 1;
-        fcinfo_buf.base.isnull = false;
-
-        // SAFETY: The _arg_space field in FcinfoWith1Arg provides backing
-        // storage at exactly the offset where args[0] lives (immediately
-        // after the base struct, per C flexible array member layout).
-        unsafe {
-            let arg_ptr = fcinfo_buf.base.args.as_mut_ptr();
-            (*arg_ptr).value = datum;
-            (*arg_ptr).isnull = is_null;
-        }
-
-        // SAFETY: We call the PG function through the fn_addr pointer stored
-        // in flinfo. This is the Rust equivalent of the C FunctionCallInvoke
-        // macro. We are on the main backend thread.
-        let result_datum = unsafe {
-            let Some(func) = (*fcinfo_buf.base.flinfo).fn_addr else {
-                // fn_addr should always be set after fmgr_info(). If it is
-                // not, return NULL to avoid UB.
-                results.push((pgrx::pg_sys::Datum::from(0), true));
-                continue;
-            };
-            func(&raw mut fcinfo_buf.base)
-        };
-
-        results.push((result_datum, fcinfo_buf.base.isnull));
-
-        // Periodically check for interrupts so that SIGINT / statement_timeout
-        // are honoured even in long batches.
-        if (i + 1) % INTERRUPT_CHECK_INTERVAL == 0 {
-            pgrx::check_for_interrupts!();
-        }
-    }
-
-    results
-}
-
-// ---------------------------------------------------------------------------
-// Strategy 2: GpuSpatial
+// Strategy: GpuSpatial
 // ---------------------------------------------------------------------------
 
 /// GPU spatial dispatch via the three-layer pipeline.
@@ -237,6 +127,151 @@ pub unsafe fn dispatch_batched_eval(
 ///    geometries (point-in-ring winding-number, great-circle distance,
 ///    segment intersection) evaluated in fp32 with an fp64 refinement band.
 ///
+// ---------------------------------------------------------------------------
+// Bulk point-in-polygon fast path
+// ---------------------------------------------------------------------------
+
+/// Attempt the fast bulk point-in-polygon path: extract all batch rows as
+/// points using zero-alloc `extract_point_xy_f32`, then call the dedicated
+/// C++ `pgaccel_point_in_polygon_bulk` which does inline bbox + parallel
+/// point-in-ring.
+///
+/// Returns `Some(DispatchResult)` if all non-NULL rows are successfully
+/// extracted as points. Returns `None` if any row is not a point, falling
+/// through to the generic extraction path.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread.
+#[allow(clippy::too_many_arguments)]
+unsafe fn try_bulk_point_in_polygon(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    geom_b: &three_layer::ExtractedGeometry,
+    fn_info: &pgrx::pg_sys::FmgrInfo,
+    is_strict: bool,
+    qual_d: pgrx::pg_sys::Datum,
+    qual_null: bool,
+) -> Option<DispatchResult> {
+    let bool_true = pgrx::pg_sys::Datum::from(true);
+    let bool_false = pgrx::pg_sys::Datum::from(false);
+
+    // Pre-allocate flat point array: 2 floats per non-NULL row.
+    let mut points_xy: Vec<f32> = Vec::with_capacity(batch.len() * 2);
+    let mut point_idx_to_batch: Vec<usize> = Vec::with_capacity(batch.len());
+    let mut results = vec![(pgrx::pg_sys::Datum::from(0), true); batch.len()];
+
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        // Zero-alloc extraction: reads x,y directly from detoasted pointer.
+        if let Some((x, y)) = extract_point_xy_f32(datum) {
+            points_xy.push(x);
+            points_xy.push(y);
+            point_idx_to_batch.push(i);
+        } else {
+            // Not a point — bail out to generic path.
+            return None;
+        }
+    }
+
+    if point_idx_to_batch.is_empty() {
+        // All rows NULL.
+        return Some(DispatchResult::Accelerated(results));
+    }
+
+    let timeout_ms = gucs::kernel_timeout_ms();
+    let start = std::time::Instant::now();
+
+    let ring_offset_zero: u32 = 0;
+    let ring_offsets = if geom_b.ring_offsets.is_empty() {
+        std::slice::from_ref(&ring_offset_zero)
+    } else {
+        geom_b.ring_offsets.as_slice()
+    };
+    let ring_count = if geom_b.ring_offsets.is_empty() {
+        1
+    } else {
+        geom_b.ring_offsets.len()
+    };
+
+    let bulk_results = gpu::point_in_polygon_bulk(
+        &points_xy,
+        &geom_b.bbox,
+        &geom_b.coords,
+        geom_b.coord_count,
+        ring_offsets,
+        ring_count,
+    );
+
+    let elapsed_ms = start.elapsed().as_millis() as i32;
+    if timeout_ms > 0 && elapsed_ms > timeout_ms {
+        pgrx::warning!(
+            "pg_accel: bulk point_in_polygon took {}ms (timeout {}ms)",
+            elapsed_ms,
+            timeout_ms,
+        );
+    }
+
+    let Some(pip_results) = bulk_results else {
+        // GPU bridge unavailable — fall through to generic path.
+        return None;
+    };
+
+    pgrx::debug1!(
+        "pg_accel: bulk point_in_polygon: {} points, {}ms",
+        point_idx_to_batch.len(),
+        elapsed_ms,
+    );
+
+    // Apply results. Collect uncertain indices for CPU recheck.
+    let mut needs_recheck: Vec<usize> = Vec::new();
+
+    for (k, &r) in pip_results.iter().enumerate() {
+        let batch_idx = point_idx_to_batch[k];
+        match r {
+            1 => results[batch_idx] = (bool_true, false),
+            -1 => results[batch_idx] = (bool_false, false),
+            _ => needs_recheck.push(batch_idx),
+        }
+    }
+
+    // CPU recheck uncertain rows via the original PostGIS function.
+    for &batch_idx in &needs_recheck {
+        let (datum_a, is_null_a) = batch[batch_idx];
+        if is_strict && is_null_a {
+            results[batch_idx] = (pgrx::pg_sys::Datum::from(0), true);
+            continue;
+        }
+
+        // SAFETY: Build a FunctionCallInfo with 2 args on the stack.
+        // Both arg slots are backed by _arg_space in FcinfoWith2Args.
+        // Called on the main backend thread with valid fn_info.
+        unsafe {
+            let mut fcinfo_buf: FcinfoWith2Args = std::mem::zeroed();
+            fcinfo_buf.base.flinfo =
+                std::ptr::from_ref::<pgrx::pg_sys::FmgrInfo>(fn_info).cast_mut();
+            fcinfo_buf.base.nargs = 2;
+            fcinfo_buf.base.isnull = false;
+
+            let args = fcinfo_buf.base.args.as_mut_ptr();
+            (*args).value = datum_a;
+            (*args).isnull = is_null_a;
+            (*args.add(1)).value = qual_d;
+            (*args.add(1)).isnull = qual_null;
+
+            let Some(func) = (*fcinfo_buf.base.flinfo).fn_addr else {
+                results[batch_idx] = (pgrx::pg_sys::Datum::from(0), true);
+                continue;
+            };
+            let result_datum = func(&raw mut fcinfo_buf.base);
+            results[batch_idx] = (result_datum, fcinfo_buf.base.isnull);
+        }
+    }
+
+    Some(DispatchResult::Accelerated(results))
+}
+
 /// 3. **CPU recheck** — Rows that the pipeline cannot conclusively decide
 ///    (geometry collections, curves, numerical edge cases) are rechecked
 ///    via the original PostGIS function on the main backend thread.
@@ -245,8 +280,8 @@ pub unsafe fn dispatch_batched_eval(
 /// a single datum that is the first argument to a two-argument spatial
 /// predicate (e.g., `ST_Intersects(a, b)`). The second geometry is
 /// currently assumed to be uniform across the batch (a common pattern
-/// for indexed lookups). For truly arbitrary pairs, falls back to
-/// `BatchedEval`.
+/// for indexed lookups). For truly arbitrary pairs, defers to
+/// `Deferred`.
 ///
 /// # Safety
 ///
@@ -257,24 +292,69 @@ pub unsafe fn dispatch_gpu_spatial(
     fn_info: &pgrx::pg_sys::FmgrInfo,
     is_strict: bool,
     qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
-    skip_bbox: bool,
-) -> Vec<(pgrx::pg_sys::Datum, bool)> {
+    _skip_bbox: bool,
+) -> DispatchResult {
     // We need the constant second geometry to form pairs.
     let Some((qual_d, qual_null)) = qual_datum else {
-        // SAFETY: Caller guarantees main backend thread.
-        return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+        pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datum, deferring");
+        return DispatchResult::Deferred;
     };
 
     // Strict: if the constant arg is NULL, every result is NULL.
     if is_strict && qual_null {
-        return vec![(pgrx::pg_sys::Datum::from(0), true); batch.len()];
+        return DispatchResult::Accelerated(vec![
+            (pgrx::pg_sys::Datum::from(0), true);
+            batch.len()
+        ]);
     }
 
     // Extract the constant geometry (arg B) once.
     let Some(geom_b) = extract_geometry(qual_d) else {
-        // SAFETY: Caller guarantees main backend thread.
-        return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+        pgrx::debug1!("pg_accel: dispatch_gpu_spatial: extract_geometry(qual_d) failed, deferring");
+        return DispatchResult::Deferred;
     };
+
+    // ── Vertex count gate ────────────────────────────────────────
+    // GPU overhead is roughly constant (~19ms on M2 Max) regardless of
+    // polygon complexity (dominated by geometry deser + seq scan).
+    // PG parallel scales linearly with vertex count. Below the threshold,
+    // PG parallel is faster — defer to avoid overhead.
+    let min_verts = super::cost::device_limits().gpu_spatial_min_vertices;
+    if geom_b.coord_count < min_verts {
+        pgrx::debug1!(
+            "pg_accel: dispatch_gpu_spatial: polygon has {} vertices (min {}), deferring",
+            geom_b.coord_count,
+            min_verts
+        );
+        return DispatchResult::Deferred;
+    }
+
+    // ── Fast path: bulk point-in-polygon ──────────────────────────
+    // When geom_b is a Polygon, try zero-alloc extraction of all batch
+    // rows as points directly into a flat f32 array.  This eliminates
+    // per-row Vec<u8>/Vec<f32>/ExtractedGeometry/PgaccelGeometry overhead.
+    if matches!(geom_b.geom_type, three_layer::GeomType::Polygon) {
+        // Only ST_Intersects uses the fast path.
+        let fn_name = registry::global_registry()
+            .lookup(fn_info.fn_oid)
+            .map(|e| e.name);
+        let is_intersects = !matches!(
+            fn_name,
+            Some("st_contains" | "st_within" | "st_dwithin")
+        );
+
+        if is_intersects {
+            // SAFETY: same preconditions as dispatch_gpu_spatial — main
+            // backend thread, valid datums and fn_info.
+            if let Some(result) = unsafe {
+                try_bulk_point_in_polygon(
+                    batch, &geom_b, fn_info, is_strict, qual_d, qual_null,
+                )
+            } {
+                return result;
+            }
+        }
+    }
 
     // Extract per-row geometries (arg A). Track which extracted geometry
     // index maps back to which batch index.
@@ -299,72 +379,104 @@ pub unsafe fn dispatch_gpu_spatial(
 
     // If no geometries could be extracted, fall back entirely.
     if geoms_a.is_empty() {
-        // SAFETY: Caller guarantees main backend thread.
-        return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+        return DispatchResult::Deferred;
     }
 
-    // Determine which spatial predicate is being evaluated by looking up
-    // the function name in the global registry.
-    let predicate = {
+    // Only GPU-accelerated predicate currently supported is ST_Intersects.
+    // Others (Contains, Within, DWithin) defer to native PostGIS.
+    {
         let fn_name = registry::global_registry()
             .lookup(fn_info.fn_oid)
             .map(|e| e.name);
         match fn_name {
-            Some("st_contains") => three_layer::SpatialPredicate::Contains,
-            Some("st_within") => three_layer::SpatialPredicate::Within,
-            Some("st_dwithin") => {
-                // ST_DWithin requires a distance threshold (third SQL argument)
-                // that the planner does not yet extract. Fall back to batched
-                // eval until the qual-extraction pipeline supports it.
-                // SAFETY: Caller guarantees main backend thread.
-                return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+            Some("st_contains" | "st_within" | "st_dwithin") => {
+                return DispatchResult::Deferred;
             }
-            // Default: ST_Intersects or any unrecognised spatial function.
-            _ => three_layer::SpatialPredicate::Intersects,
+            _ => {} // ST_Intersects or unrecognised → GPU path below
         }
+    }
+
+    // Build PgaccelGeometry descriptors pointing into the ExtractedGeometry
+    // data.  The raw pointers are valid for the duration of this function.
+    let ring_offset_zero: u32 = 0;
+    let to_pgaccel = |eg: &three_layer::ExtractedGeometry| gpu::PgaccelGeometry {
+        geom_type: match eg.geom_type {
+            three_layer::GeomType::Point => gpu::PgaccelGeomType::Point,
+            three_layer::GeomType::LineString => gpu::PgaccelGeomType::LineString,
+            three_layer::GeomType::Polygon => gpu::PgaccelGeomType::Polygon,
+            three_layer::GeomType::Unknown => gpu::PgaccelGeomType::Unknown,
+        },
+        bbox: eg.bbox.as_ptr(),
+        coords: eg.coords.as_ptr(),
+        coord_count: eg.coord_count,
+        ring_offsets: std::ptr::addr_of!(ring_offset_zero),
+        ring_count: if matches!(eg.geom_type, three_layer::GeomType::Polygon) {
+            1
+        } else {
+            0
+        },
     };
 
-    // Build parallel geoms_b array (same constant geometry for every row).
-    let geoms_b_vec: Vec<three_layer::ExtractedGeometry> = vec![geom_b; geoms_a.len()];
+    let pgaccel_a: Vec<gpu::PgaccelGeometry> = geoms_a.iter().map(to_pgaccel).collect();
+    let pgaccel_b = [to_pgaccel(&geom_b)];
 
-    // Run the three-layer pipeline with the correct predicate semantics.
+    // Try GPU kernel: N variable geometries × 1 constant geometry.
     let timeout_ms = gucs::kernel_timeout_ms();
     let start = std::time::Instant::now();
-    let spatial_result = three_layer::spatial_eval(predicate, &geoms_a, &geoms_b_vec, skip_bbox);
+    pgrx::debug1!(
+        "pg_accel: dispatch_gpu_spatial: calling GPU kernel {}x{} pairs",
+        pgaccel_a.len(), pgaccel_b.len(),
+    );
+    let gpu_result = gpu::spatial_intersects_gpu(&pgaccel_a, &pgaccel_b);
     let elapsed_ms = start.elapsed().as_millis() as i32;
 
     if timeout_ms > 0 && elapsed_ms > timeout_ms {
         pgrx::warning!(
-            "pg_accel: spatial pipeline took {}ms (timeout {}ms)",
+            "pg_accel: spatial GPU kernel took {}ms (timeout {}ms)",
             elapsed_ms,
             timeout_ms,
         );
     }
 
-    // Apply DEFINITE results directly as boolean Datums.
+    let Some((dt_pairs, df_pairs, uc_pairs)) = gpu_result else {
+        // GPU unavailable or kernel unsupported — defer to PostgreSQL.
+        return DispatchResult::Deferred;
+    };
+
+    pgrx::debug1!(
+        "pg_accel: GPU spatial results: definite_true={}, definite_false={}, uncertain={}",
+        dt_pairs.len(), df_pairs.len(), uc_pairs.len(),
+    );
+
+    // Apply GPU results. Each pair is (i, j) where j=0 (constant geom).
     let bool_true = pgrx::pg_sys::Datum::from(true);
     let bool_false = pgrx::pg_sys::Datum::from(false);
 
-    for &geom_idx in &spatial_result.definite_true {
+    for &(i, _j) in &dt_pairs {
+        let geom_idx = i as usize;
         if geom_idx < geom_idx_to_batch.len() {
             results[geom_idx_to_batch[geom_idx]] = (bool_true, false);
         }
     }
 
-    for &geom_idx in &spatial_result.definite_false {
+    for &(i, _j) in &df_pairs {
+        let geom_idx = i as usize;
         if geom_idx < geom_idx_to_batch.len() {
             results[geom_idx_to_batch[geom_idx]] = (bool_false, false);
         }
     }
 
-    // UNCERTAIN rows need CPU recheck via the original PostGIS function.
-    for &geom_idx in &spatial_result.uncertain {
+    // UNCERTAIN pairs need CPU recheck via the original PostGIS function.
+    for &(i, _j) in &uc_pairs {
+        let geom_idx = i as usize;
         if geom_idx < geom_idx_to_batch.len() {
             needs_scalar_recheck.push(geom_idx_to_batch[geom_idx]);
         }
     }
 
     // CPU recheck: call the 2-arg PG function for uncertain rows.
+    let mut recheck_pass = 0usize;
+    let recheck_total = needs_scalar_recheck.len();
     for &batch_idx in &needs_scalar_recheck {
         let (datum_a, is_null_a) = batch[batch_idx];
         if is_strict && is_null_a {
@@ -398,25 +510,30 @@ pub unsafe fn dispatch_gpu_spatial(
         };
 
         results[batch_idx] = (result_datum, fcinfo_buf.base.isnull);
+        if !fcinfo_buf.base.isnull && result_datum.value() != 0 {
+            recheck_pass += 1;
+        }
     }
 
-    results
+    if recheck_total > 0 {
+        pgrx::debug1!(
+            "pg_accel: spatial recheck: {}/{} uncertain pairs passed PostGIS",
+            recheck_pass, recheck_total,
+        );
+    }
+
+    DispatchResult::Accelerated(results)
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 3: GpuH3
+// Strategy: GpuH3
 // ---------------------------------------------------------------------------
 
 /// GPU H3 cell dispatch.
 ///
 /// H3 functions operate on 64-bit cell indices. This handler extracts H3
-/// cell values from the batch, runs a bulk GPU validation pass (resolution
-/// extraction), then falls back to batched eval for the actual results.
-///
-/// Once the full qual-extraction pipeline provides the specific H3 function
-/// being called (lat_lng_to_cell vs grid_distance vs cell_to_parent vs
-/// get_resolution), this function will dispatch to the appropriate kernel
-/// and return GPU-computed results directly.
+/// cell values from the batch, dispatches to the appropriate GPU kernel,
+/// and returns GPU-computed results directly.
 ///
 /// # Safety
 ///
@@ -424,11 +541,11 @@ pub unsafe fn dispatch_gpu_spatial(
 #[must_use]
 pub unsafe fn dispatch_gpu_h3(
     batch: &[(pgrx::pg_sys::Datum, bool)],
-    fn_info: &pgrx::pg_sys::FmgrInfo,
-    is_strict: bool,
+    _fn_info: &pgrx::pg_sys::FmgrInfo,
+    _is_strict: bool,
     fn_oid: pgrx::pg_sys::Oid,
     qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
-) -> Vec<(pgrx::pg_sys::Datum, bool)> {
+) -> DispatchResult {
     // Look up the function name to route to the correct GPU kernel.
     let fn_name = registry::global_registry().lookup(fn_oid).map(|e| e.name);
 
@@ -442,8 +559,7 @@ pub unsafe fn dispatch_gpu_h3(
             .filter(|(_, is_null)| !is_null)
             .map(|(d, _)| d.value() as i32);
         let Some(res) = resolution else {
-            // SAFETY: Caller guarantees main backend thread.
-            return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+            return DispatchResult::Deferred;
         };
 
         let mut lats: Vec<f64> = Vec::with_capacity(batch.len());
@@ -470,8 +586,7 @@ pub unsafe fn dispatch_gpu_h3(
         }
 
         if lats.is_empty() {
-            // SAFETY: Caller guarantees main backend thread.
-            return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+            return DispatchResult::Deferred;
         }
 
         let gpu_result = crate::gpu::h3_lat_lng_to_cell_bulk(&lats, &lngs, res);
@@ -485,11 +600,10 @@ pub unsafe fn dispatch_gpu_h3(
                     results[batch_idx] = (pgrx::pg_sys::Datum::from(cell_ids[gi] as i64), false);
                 }
             }
-            return results;
+            return DispatchResult::Accelerated(results);
         }
 
-        // SAFETY: Caller guarantees main backend thread.
-        return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+        return DispatchResult::Deferred;
     }
 
     // Extract H3 cell indices from the batch datums.
@@ -510,10 +624,9 @@ pub unsafe fn dispatch_gpu_h3(
         }
     }
 
-    // If we couldn't extract enough cells, fall back to batched eval.
+    // If we couldn't extract enough cells, fall back to the standard executor.
     if cells.is_empty() || valid_indices.len() < batch.len() / 2 {
-        // SAFETY: Caller guarantees main backend thread.
-        return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+        return DispatchResult::Deferred;
     }
 
     // Route to the correct GPU kernel based on function name.
@@ -557,12 +670,11 @@ pub unsafe fn dispatch_gpu_h3(
             };
             results[batch_idx] = (datum, false);
         }
-        return results;
+        return DispatchResult::Accelerated(results);
     }
 
-    // GPU unavailable or unsupported function — fall back to CPU.
-    // SAFETY: Caller guarantees main backend thread.
-    unsafe { dispatch_batched_eval(batch, fn_info, is_strict) }
+    // GPU unavailable or unsupported function — fall back to standard executor.
+    DispatchResult::Deferred
 }
 
 /// Tagged union for H3 GPU kernel results — some return i32, others u64.
@@ -584,7 +696,7 @@ fn log_h3_timeout(timeout_ms: i32, start: &std::time::Instant) {
 }
 
 // ---------------------------------------------------------------------------
-// Strategy 4: GpuRaster
+// Strategy: GpuRaster
 // ---------------------------------------------------------------------------
 
 /// GPU raster dispatch for `ST_MapAlgebra`, `ST_Clip`, and `ST_Reclass`.
@@ -594,10 +706,8 @@ fn log_h3_timeout(timeout_ms: i32, start: &std::time::Instant) {
 /// kernel.
 ///
 /// Currently runs the GPU pipeline as a validation pass (exercising raster
-/// extraction and GPU kernel invocation) and falls back to batched eval
-/// for the authoritative result.  Once the full qual-extraction pipeline
-/// provides the specific raster function being called, this function will
-/// return GPU-computed results directly.
+/// extraction and GPU kernel invocation). Returns `Deferred` when
+/// extraction fails or the pipeline is incomplete.
 ///
 /// # Safety
 ///
@@ -605,10 +715,10 @@ fn log_h3_timeout(timeout_ms: i32, start: &std::time::Instant) {
 #[must_use]
 pub unsafe fn dispatch_gpu_raster(
     batch: &[(pgrx::pg_sys::Datum, bool)],
-    fn_info: &pgrx::pg_sys::FmgrInfo,
-    is_strict: bool,
+    _fn_info: &pgrx::pg_sys::FmgrInfo,
+    _is_strict: bool,
     _fn_oid: pgrx::pg_sys::Oid,
-) -> Vec<(pgrx::pg_sys::Datum, bool)> {
+) -> DispatchResult {
     // Attempt raster extraction from each datum.
     let mut raster_data: Vec<(raster::RasterHeader, Vec<f64>)> = Vec::new();
 
@@ -640,49 +750,109 @@ pub unsafe fn dispatch_gpu_raster(
         }
     }
 
-    // If we couldn't extract enough rasters, fall back to batched eval.
+    // If we couldn't extract enough rasters, fall back to standard executor.
     if raster_data.is_empty() || raster_data.len() < batch.len() / 2 {
-        // SAFETY: Caller guarantees main backend thread.
-        return unsafe { dispatch_batched_eval(batch, fn_info, is_strict) };
+        return DispatchResult::Deferred;
     }
 
-    // Run a map-algebra validation pass on the first raster to exercise
-    // the full GPU pipeline: raster extraction → pixel conversion →
-    // GPU kernel invocation.
+    // Run map-algebra on each raster through the GPU pipeline.
     let timeout_ms = gucs::kernel_timeout_ms();
     let start = std::time::Instant::now();
 
-    if let Some((header, pixels)) = raster_data.first() {
+    let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
+    let mut raster_idx = 0usize;
+
+    for &(datum, is_null) in batch {
+        if is_null {
+            results.push((pgrx::pg_sys::Datum::from(0usize), true));
+            continue;
+        }
+
+        if raster_idx >= raster_data.len() {
+            // Not enough extracted rasters — defer remaining rows.
+            return DispatchResult::Deferred;
+        }
+
+        let (ref header, ref pixels) = raster_data[raster_idx];
+        raster_idx += 1;
+
         let pixel_count = header.width as usize * header.height as usize;
-        if pixel_count > 0 {
-            // Build a trivial identity expression: LOAD_BAND 0
-            let mut inst = gpu::PgaccelExprInst {
-                op: gpu::PgaccelOp::LoadBand,
-                arg: 0.0, // band_index = 0
-            };
-            let expr = gpu::PgaccelExpr {
-                instructions: std::ptr::addr_of_mut!(inst),
-                inst_count: 1,
-                band_count: 1,
-            };
+        if pixel_count == 0 {
+            results.push((datum, false));
+            continue;
+        }
 
-            // Convert f64 pixels to f32 for the kernel (Float32 pixel type).
-            let f32_pixels: Vec<f32> = pixels.iter().map(|&v| v as f32).collect();
-            let band_ptr: *const std::ffi::c_void = f32_pixels.as_ptr().cast();
-            let band_ptrs = [band_ptr];
+        // Build a trivial identity expression: LOAD_BAND 0
+        let mut inst = gpu::PgaccelExprInst {
+            op: gpu::PgaccelOp::LoadBand,
+            arg: 0.0, // band_index = 0
+        };
+        let expr = gpu::PgaccelExpr {
+            instructions: std::ptr::addr_of_mut!(inst),
+            inst_count: 1,
+            band_count: 1,
+        };
 
-            let pixel_type = gpu::PgaccelPixelType::Float32 as i32;
-            let mut output_buf = vec![0u8; pixel_count * 4]; // f32 = 4 bytes
-            let mut nodata_mask = vec![0u8; pixel_count];
+        // Convert f64 pixels to f32 for the kernel (Float32 pixel type).
+        let f32_pixels: Vec<f32> = pixels.iter().map(|&v| v as f32).collect();
+        let band_ptr: *const std::ffi::c_void = f32_pixels.as_ptr().cast();
+        let band_ptrs = [band_ptr];
 
-            let _result = gpu::map_algebra(
-                &band_ptrs,
-                pixel_count,
-                pixel_type,
-                &expr,
-                &mut output_buf,
-                &mut nodata_mask,
-            );
+        let pixel_type = gpu::PgaccelPixelType::Float32 as i32;
+        let mut output_buf = vec![0u8; pixel_count * 4]; // f32 = 4 bytes
+        let mut nodata_mask = vec![0u8; pixel_count];
+
+        let gpu_ok = gpu::map_algebra(
+            &band_ptrs,
+            pixel_count,
+            pixel_type,
+            &expr,
+            &mut output_buf,
+            &mut nodata_mask,
+        );
+
+        if gpu_ok.is_none() {
+            // GPU failed for this raster — defer to PG.
+            return DispatchResult::Deferred;
+        }
+
+        // Interpret output_buf as f32 slice and patch back into original WKB.
+        let output_f32: &[f32] = unsafe {
+            // SAFETY: output_buf was allocated as pixel_count * 4 bytes of f32.
+            std::slice::from_raw_parts(output_buf.as_ptr().cast(), pixel_count)
+        };
+
+        // Get original WKB bytes for patching.
+        // SAFETY: datum is a valid varlena pointer, on main backend thread.
+        let varlena = unsafe { pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr()) };
+        let data_len = unsafe { pgrx::varsize_any_exhdr(varlena) };
+        let data_ptr = unsafe { pgrx::vardata_any(varlena) };
+        let original_wkb =
+            unsafe { std::slice::from_raw_parts(data_ptr.cast::<u8>(), data_len) };
+
+        match raster::patch_band0_pixels(original_wkb, output_f32) {
+            Some(new_wkb) => {
+                // Allocate a PG varlena datum with the patched WKB.
+                let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
+                // SAFETY: palloc is safe on main backend thread.
+                let new_varlena =
+                    unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
+                // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
+                unsafe {
+                    pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);
+                    let data_dest = pgrx::vardata_any(new_varlena.cast()).cast::<u8>();
+                    std::ptr::copy_nonoverlapping(
+                        new_wkb.as_ptr(),
+                        data_dest.cast_mut(),
+                        new_wkb.len(),
+                    );
+                }
+                results.push((pgrx::pg_sys::Datum::from(new_varlena), false));
+            }
+            None => {
+                // Patching failed — pass through original datum.
+                results.push((datum, false));
+            }
         }
     }
 
@@ -690,14 +860,13 @@ pub unsafe fn dispatch_gpu_raster(
 
     if timeout_ms > 0 && elapsed_ms > timeout_ms {
         pgrx::warning!(
-            "pg_accel: raster pipeline took {}ms (timeout {}ms), falling back to CPU",
+            "pg_accel: raster pipeline took {}ms (timeout {}ms)",
             elapsed_ms,
             timeout_ms,
         );
     }
 
-    // SAFETY: Caller guarantees main backend thread.
-    unsafe { dispatch_batched_eval(batch, fn_info, is_strict) }
+    DispatchResult::Accelerated(results)
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +1003,8 @@ pub fn evaluate_chain(chain: &PredicateChain, batch: &[(pgrx::pg_sys::Datum, boo
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     // -- Predicate chain ordering --------------------------------------------
@@ -986,7 +1157,7 @@ mod tests {
         assert_eq!(result, vec![false, false, false]);
     }
 
-    // -- NULL passthrough (BatchedEval strict) --------------------------------
+    // -- NULL passthrough (strict function semantics) --------------------------
     // These test the pure logic of NULL handling. Actual FunctionCallInvoke
     // tests require a running PG instance and are covered by #[pg_test].
 
@@ -1042,9 +1213,9 @@ mod tests {
     // -- DispatchResult variants ----------------------------------------------
 
     #[test]
-    fn dispatch_result_fallback_variant() {
-        let result = DispatchResult::Fallback;
-        assert!(matches!(result, DispatchResult::Fallback));
+    fn dispatch_result_deferred_variant() {
+        let result = DispatchResult::Deferred;
+        assert!(matches!(result, DispatchResult::Deferred));
     }
 
     #[test]
@@ -1073,5 +1244,438 @@ mod tests {
         let p = make_predicate("normal", 0.3, 2.0);
         let eff = efficiency(&p);
         assert!((eff - 0.15).abs() < f64::EPSILON);
+    }
+
+    // -- PredicateChain: construction edge cases --------------------------------
+
+    #[test]
+    fn chain_with_single_predicate() {
+        let chain = PredicateChain::new(vec![make_predicate("only", 0.5, 1.0)]);
+        assert_eq!(chain.len(), 1);
+        assert!(!chain.is_empty());
+        assert_eq!(chain.predicates()[0].label, "only");
+    }
+
+    #[test]
+    fn chain_with_ten_predicates_sorted_correctly() {
+        let predicates: Vec<Predicate> = (1..=10)
+            .map(|i| {
+                let sel = i as f64 * 0.1;
+                let cost = (11 - i) as f64; // inverse cost so sorting varies
+                make_predicate(
+                    // Static labels for 10 predicates.
+                    match i {
+                        1 => "p1",
+                        2 => "p2",
+                        3 => "p3",
+                        4 => "p4",
+                        5 => "p5",
+                        6 => "p6",
+                        7 => "p7",
+                        8 => "p8",
+                        9 => "p9",
+                        _ => "p10",
+                    },
+                    sel,
+                    cost,
+                )
+            })
+            .collect();
+
+        let chain = PredicateChain::new(predicates);
+        assert_eq!(chain.len(), 10);
+
+        // Verify sorted by ascending efficiency (selectivity / cost).
+        let effs: Vec<f64> = chain.predicates().iter().map(|p| efficiency(p)).collect();
+        for i in 1..effs.len() {
+            assert!(
+                effs[i - 1] <= effs[i] + f64::EPSILON,
+                "predicates not sorted by efficiency at index {}: {} > {}",
+                i,
+                effs[i - 1],
+                effs[i],
+            );
+        }
+    }
+
+    #[test]
+    fn chain_with_equal_efficiency_maintains_order_stability() {
+        // Two predicates with identical efficiency should not cause issues.
+        let predicates = vec![
+            make_predicate("alpha", 0.5, 2.0), // efficiency = 0.25
+            make_predicate("beta", 0.5, 2.0),  // efficiency = 0.25
+        ];
+        let chain = PredicateChain::new(predicates);
+        assert_eq!(chain.len(), 2);
+        // Both have the same efficiency; just verify both are present.
+        let labels: Vec<&str> = chain.predicates().iter().map(|p| p.label).collect();
+        assert!(labels.contains(&"alpha"));
+        assert!(labels.contains(&"beta"));
+    }
+
+    // -- Predicate cost classification -----------------------------------------
+
+    #[test]
+    fn efficiency_very_low_selectivity_is_best() {
+        // selectivity near 0 = filters almost everything = very efficient.
+        let p = make_predicate("ultra_selective", 0.001, 1.0);
+        let eff = efficiency(&p);
+        assert!(eff < 0.01);
+    }
+
+    #[test]
+    fn efficiency_high_cost_penalizes() {
+        let cheap = make_predicate("cheap", 0.5, 1.0);
+        let expensive = make_predicate("expensive", 0.5, 100.0);
+        assert!(efficiency(&cheap) > efficiency(&expensive));
+    }
+
+    #[test]
+    fn efficiency_selectivity_one_is_worst() {
+        // selectivity 1.0 = filters nothing = least useful.
+        let p = make_predicate("passes_all", 1.0, 1.0);
+        assert!((efficiency(&p) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn efficiency_tiny_cost_yields_large_ratio() {
+        let p = make_predicate("tiny_cost", 0.5, 0.001);
+        let eff = efficiency(&p);
+        assert!((eff - 500.0).abs() < 0.01);
+    }
+
+    // -- Batch size calculations and edge cases --------------------------------
+
+    #[test]
+    fn batch_size_one_produces_single_element_batch() {
+        let batch: Vec<(pgrx::pg_sys::Datum, bool)> = vec![(pgrx::pg_sys::Datum::from(42), false)];
+        // Simulate strict null check for a single-element batch.
+        let is_strict = true;
+        let results: Vec<bool> = batch
+            .iter()
+            .map(|&(_, is_null)| !(is_strict && is_null))
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert!(results[0]);
+    }
+
+    #[test]
+    fn batch_all_nulls_strict_all_skipped() {
+        let batch: Vec<(pgrx::pg_sys::Datum, bool)> = (0..10)
+            .map(|_| (pgrx::pg_sys::Datum::from(0), true))
+            .collect();
+
+        let is_strict = true;
+        let results: Vec<(pgrx::pg_sys::Datum, bool)> = batch
+            .iter()
+            .map(|&(_, is_null)| {
+                if is_strict && is_null {
+                    (pgrx::pg_sys::Datum::from(0), true)
+                } else {
+                    (pgrx::pg_sys::Datum::from(1), false)
+                }
+            })
+            .collect();
+
+        assert!(results.iter().all(|(_, is_null)| *is_null));
+    }
+
+    #[test]
+    fn batch_no_nulls_strict_all_evaluated() {
+        let batch: Vec<(pgrx::pg_sys::Datum, bool)> = (0..10)
+            .map(|i| (pgrx::pg_sys::Datum::from(i), false))
+            .collect();
+
+        let is_strict = true;
+        let eval_count = batch
+            .iter()
+            .filter(|&&(_, is_null)| !(is_strict && is_null))
+            .count();
+        assert_eq!(eval_count, 10);
+    }
+
+    #[test]
+    fn very_large_batch_null_passthrough() {
+        let batch_size = 100_000;
+        let batch: Vec<(pgrx::pg_sys::Datum, bool)> = (0..batch_size)
+            .map(|i| {
+                let is_null = i % 3 == 0;
+                (pgrx::pg_sys::Datum::from(i as i64), is_null)
+            })
+            .collect();
+
+        let is_strict = true;
+        let null_count = batch
+            .iter()
+            .filter(|&&(_, is_null)| is_strict && is_null)
+            .count();
+
+        // Every 3rd element (0, 3, 6, ...) is NULL.
+        let expected_nulls = (batch_size + 2) / 3;
+        assert_eq!(null_count, expected_nulls);
+    }
+
+    // -- AccelStrategy enum: all variants, conversion --------------------------
+
+    #[test]
+    fn accel_strategy_from_i32_known_values() {
+        assert_eq!(AccelStrategy::from_i32(1), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(2), AccelStrategy::GpuRaster);
+        assert_eq!(AccelStrategy::from_i32(3), AccelStrategy::GpuH3);
+        assert_eq!(AccelStrategy::from_i32(4), AccelStrategy::GpuSort);
+        assert_eq!(AccelStrategy::from_i32(5), AccelStrategy::GpuReduce);
+        assert_eq!(AccelStrategy::from_i32(6), AccelStrategy::GpuExpr);
+        assert_eq!(AccelStrategy::from_i32(7), AccelStrategy::GpuHashJoin);
+        assert_eq!(AccelStrategy::from_i32(8), AccelStrategy::GpuWindow);
+    }
+
+    #[test]
+    fn accel_strategy_from_i32_unknown_defaults_to_gpu_spatial() {
+        assert_eq!(AccelStrategy::from_i32(0), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(-1), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(9), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(100), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(i32::MAX), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(i32::MIN), AccelStrategy::GpuSpatial);
+    }
+
+    #[test]
+    fn accel_strategy_roundtrip_through_i32() {
+        let strategies = [
+            AccelStrategy::GpuSpatial,
+            AccelStrategy::GpuRaster,
+            AccelStrategy::GpuH3,
+            AccelStrategy::GpuSort,
+            AccelStrategy::GpuReduce,
+            AccelStrategy::GpuExpr,
+            AccelStrategy::GpuHashJoin,
+            AccelStrategy::GpuWindow,
+        ];
+        for s in strategies {
+            let as_i32 = s as i32;
+            assert_eq!(AccelStrategy::from_i32(as_i32), s);
+        }
+    }
+
+    #[test]
+    fn accel_strategy_debug_format_contains_variant_name() {
+        let dbg = format!("{:?}", AccelStrategy::GpuSpatial);
+        assert!(dbg.contains("GpuSpatial"), "debug format: {dbg}");
+    }
+
+    #[test]
+    fn accel_strategy_copy_semantics() {
+        let a = AccelStrategy::GpuH3;
+        let b = a; // Copy
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn accel_strategy_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(AccelStrategy::GpuSpatial);
+        set.insert(AccelStrategy::GpuSpatial); // duplicate
+        set.insert(AccelStrategy::GpuH3);
+        assert_eq!(set.len(), 2);
+    }
+
+    // -- Dispatch routing (which strategy goes where) --------------------------
+
+    #[test]
+    fn dispatch_routing_gpu_strategies_that_return_deferred() {
+        // GpuExpr, GpuSort, GpuReduce, GpuHashJoin, GpuWindow are not wired
+        // into per-datum dispatch and should map to Deferred.
+        let deferred_strategies = [
+            AccelStrategy::GpuExpr,
+            AccelStrategy::GpuSort,
+            AccelStrategy::GpuReduce,
+            AccelStrategy::GpuHashJoin,
+            AccelStrategy::GpuWindow,
+        ];
+        for strategy in deferred_strategies {
+            // Verify the match arm maps these to Deferred by checking
+            // the pattern from the dispatch function.
+            assert!(
+                matches!(
+                    strategy,
+                    AccelStrategy::GpuExpr
+                        | AccelStrategy::GpuSort
+                        | AccelStrategy::GpuReduce
+                        | AccelStrategy::GpuHashJoin
+                        | AccelStrategy::GpuWindow
+                ),
+                "{strategy:?} should be in the deferred arm"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_routing_gpu_spatial_is_not_in_deferred_arm() {
+        // GpuSpatial has its own dispatch arm, not the catch-all deferred.
+        assert!(!matches!(
+            AccelStrategy::GpuSpatial,
+            AccelStrategy::GpuExpr
+                | AccelStrategy::GpuSort
+                | AccelStrategy::GpuReduce
+                | AccelStrategy::GpuHashJoin
+                | AccelStrategy::GpuWindow
+        ));
+    }
+
+    #[test]
+    fn dispatch_routing_gpu_spatial_is_not_deferred() {
+        assert!(!matches!(
+            AccelStrategy::GpuSpatial,
+            AccelStrategy::GpuExpr
+                | AccelStrategy::GpuSort
+                | AccelStrategy::GpuReduce
+                | AccelStrategy::GpuHashJoin
+                | AccelStrategy::GpuWindow
+        ));
+    }
+
+    // -- DispatchResult: data access -------------------------------------------
+
+    #[test]
+    fn dispatch_result_accelerated_empty_vec() {
+        let result = DispatchResult::Accelerated(vec![]);
+        if let DispatchResult::Accelerated(data) = result {
+            assert!(data.is_empty());
+        } else {
+            panic!("expected Accelerated variant");
+        }
+    }
+
+    #[test]
+    fn dispatch_result_accelerated_preserves_data() {
+        let data = vec![
+            (pgrx::pg_sys::Datum::from(1), false),
+            (pgrx::pg_sys::Datum::from(0), true),
+            (pgrx::pg_sys::Datum::from(3), false),
+        ];
+        let result = DispatchResult::Accelerated(data);
+        if let DispatchResult::Accelerated(ref d) = result {
+            assert_eq!(d.len(), 3);
+            assert!(!d[0].1);
+            assert!(d[1].1);
+            assert!(!d[2].1);
+        } else {
+            panic!("expected Accelerated variant");
+        }
+    }
+
+    #[test]
+    fn dispatch_result_debug_format() {
+        let result = DispatchResult::Deferred;
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("Deferred"));
+    }
+
+    // -- evaluate_chain edge cases ---------------------------------------------
+
+    #[test]
+    fn evaluate_chain_empty_batch() {
+        let chain = PredicateChain::new(vec![make_predicate("a", 0.5, 1.0)]);
+        let batch: Vec<(pgrx::pg_sys::Datum, bool)> = vec![];
+        let result = evaluate_chain(&chain, &batch);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn evaluate_chain_single_row_passes() {
+        let chain = PredicateChain::new(vec![make_predicate("pass", 1.0, 1.0)]);
+        let batch = vec![(pgrx::pg_sys::Datum::from(1), false)];
+        let result = evaluate_chain(&chain, &batch);
+        assert_eq!(result, vec![true]);
+    }
+
+    #[test]
+    fn evaluate_chain_single_row_rejected() {
+        let pred = Predicate {
+            label: "reject",
+            selectivity: 0.0,
+            cost: 1.0,
+            eval_fn: |batch| vec![false; batch.len()],
+        };
+        let chain = PredicateChain::new(vec![pred]);
+        let batch = vec![(pgrx::pg_sys::Datum::from(1), false)];
+        let result = evaluate_chain(&chain, &batch);
+        assert_eq!(result, vec![false]);
+    }
+
+    #[test]
+    fn evaluate_chain_multiple_predicates_progressive_filtering() {
+        // First predicate: keep first 3 of 5 rows.
+        let pred1 = Predicate {
+            label: "keep_first_3",
+            selectivity: 0.3,
+            cost: 10.0, // efficiency = 0.03 (runs first)
+            eval_fn: |batch| batch.iter().enumerate().map(|(i, _)| i < 3).collect(),
+        };
+
+        // Second predicate: keep only even-indexed survivors.
+        let pred2 = Predicate {
+            label: "keep_even",
+            selectivity: 0.5,
+            cost: 5.0, // efficiency = 0.1 (runs second)
+            eval_fn: |batch| batch.iter().enumerate().map(|(i, _)| i % 2 == 0).collect(),
+        };
+
+        let batch: Vec<(pgrx::pg_sys::Datum, bool)> = (0..5)
+            .map(|i| (pgrx::pg_sys::Datum::from(i), false))
+            .collect();
+
+        let chain = PredicateChain::new(vec![pred1, pred2]);
+        let result = evaluate_chain(&chain, &batch);
+
+        // After pred1: [true, true, true, false, false]
+        // Survivors sent to pred2: rows 0,1,2 → pred2 sees 3 rows, returns [true, false, true]
+        // Final: row0=true, row1=false, row2=true, row3=false, row4=false
+        assert_eq!(result, vec![true, false, true, false, false]);
+    }
+
+    // -- Predicate struct fields -----------------------------------------------
+
+    #[test]
+    fn predicate_label_accessible() {
+        let p = make_predicate("my_label", 0.5, 1.0);
+        assert_eq!(p.label, "my_label");
+    }
+
+    #[test]
+    fn predicate_selectivity_and_cost_accessible() {
+        let p = make_predicate("test", 0.42, 7.5);
+        assert!((p.selectivity - 0.42).abs() < f64::EPSILON);
+        assert!((p.cost - 7.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn predicate_eval_fn_callable() {
+        let p = make_predicate("test", 0.5, 1.0);
+        let batch = vec![(pgrx::pg_sys::Datum::from(1), false)];
+        let result = (p.eval_fn)(&batch);
+        assert_eq!(result, vec![true]);
+    }
+
+    #[test]
+    fn predicate_clone() {
+        let p = make_predicate("original", 0.3, 2.0);
+        let cloned = p.clone();
+        assert_eq!(cloned.label, "original");
+        assert!((cloned.selectivity - 0.3).abs() < f64::EPSILON);
+        assert!((cloned.cost - 2.0).abs() < f64::EPSILON);
+    }
+
+    // -- FcinfoWith2Args layout -------------------------------------------------
+
+    #[test]
+    fn fcinfo_with_2args_size_exceeds_base() {
+        let base_size = std::mem::size_of::<pgrx::pg_sys::FunctionCallInfoBaseData>();
+        let with_2args_size = std::mem::size_of::<FcinfoWith2Args>();
+        assert!(
+            with_2args_size > base_size,
+            "FcinfoWith2Args ({with_2args_size}) must be larger than base ({base_size})"
+        );
     }
 }

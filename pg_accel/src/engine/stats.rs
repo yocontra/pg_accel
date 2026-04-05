@@ -119,6 +119,7 @@ fn pg_accel_reset_stats() {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -235,5 +236,106 @@ mod tests {
         assert_eq!(s.gpu_uncertain_count, 3);
         assert_eq!(s.fallback_count, 1);
         assert_eq!(s.thread_budget_exhausted_count, 1);
+    }
+
+    // -- reset idempotency ----------------------------------------------------
+
+    #[test]
+    fn reset_twice_same_state() {
+        reset();
+        record_query_accelerated();
+        record_batch(100, 50);
+
+        reset();
+        let after_first = snapshot();
+
+        reset();
+        let after_second = snapshot();
+
+        assert_eq!(
+            after_first.queries_accelerated,
+            after_second.queries_accelerated
+        );
+        assert_eq!(after_first.rows_dispatched, after_second.rows_dispatched);
+        assert_eq!(after_first.batches_executed, after_second.batches_executed);
+        assert_eq!(
+            after_first.total_dispatch_us,
+            after_second.total_dispatch_us
+        );
+        assert_eq!(after_first.fallback_count, after_second.fallback_count);
+        assert_eq!(
+            after_first.gpu_rows_processed,
+            after_second.gpu_rows_processed
+        );
+        assert_eq!(
+            after_first.gpu_uncertain_count,
+            after_second.gpu_uncertain_count
+        );
+        assert_eq!(
+            after_first.thread_budget_exhausted_count,
+            after_second.thread_budget_exhausted_count
+        );
+    }
+
+    // -- multiple counter fields independently --------------------------------
+
+    #[test]
+    fn counters_are_independent() {
+        reset();
+        record_query_accelerated();
+        let s = snapshot();
+        assert_eq!(s.queries_accelerated, 1);
+        assert_eq!(s.rows_dispatched, 0);
+        assert_eq!(s.batches_executed, 0);
+        assert_eq!(s.fallback_count, 0);
+        assert_eq!(s.gpu_rows_processed, 0);
+    }
+
+    #[test]
+    fn gpu_batch_does_not_affect_regular_batch() {
+        reset();
+        record_gpu_batch(500, 10);
+        let s = snapshot();
+        assert_eq!(s.gpu_rows_processed, 500);
+        assert_eq!(s.gpu_uncertain_count, 10);
+        // Regular batch counters untouched.
+        assert_eq!(s.batches_executed, 0);
+        assert_eq!(s.rows_dispatched, 0);
+        assert_eq!(s.total_dispatch_us, 0);
+    }
+
+    // -- Debug formatting -----------------------------------------------------
+
+    #[test]
+    fn accel_stats_debug_format() {
+        let s = AccelStats {
+            queries_accelerated: 5,
+            rows_dispatched: 1000,
+            batches_executed: 2,
+            total_dispatch_us: 500,
+            fallback_count: 1,
+            gpu_rows_processed: 800,
+            gpu_uncertain_count: 3,
+            thread_budget_exhausted_count: 0,
+        };
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("queries_accelerated: 5"));
+        assert!(dbg.contains("rows_dispatched: 1000"));
+        assert!(dbg.contains("gpu_rows_processed: 800"));
+    }
+
+    // -- Default trait --------------------------------------------------------
+
+    #[test]
+    fn default_stats_all_zero() {
+        let s = AccelStats::default();
+        assert_eq!(s.queries_accelerated, 0);
+        assert_eq!(s.rows_dispatched, 0);
+        assert_eq!(s.batches_executed, 0);
+        assert_eq!(s.total_dispatch_us, 0);
+        assert_eq!(s.fallback_count, 0);
+        assert_eq!(s.gpu_rows_processed, 0);
+        assert_eq!(s.gpu_uncertain_count, 0);
+        assert_eq!(s.thread_budget_exhausted_count, 0);
     }
 }

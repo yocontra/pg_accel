@@ -81,6 +81,7 @@ impl BatchAccumulator {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -244,6 +245,107 @@ mod tests {
         assert_eq!(batch.len(), 1);
         assert_eq!(batch[0].0, sentinel);
         assert!(batch[0].1);
+    }
+
+    // -- push to exactly batch_size capacity --------------------------------
+
+    #[test]
+    fn push_exact_capacity_is_full() {
+        let mut acc = BatchAccumulator::new(5);
+        for i in 0..5 {
+            acc.push(pg_sys::Datum::from(i), false);
+        }
+        assert!(acc.is_full());
+        assert_eq!(acc.len(), 5);
+    }
+
+    #[test]
+    fn push_one_below_capacity_not_full() {
+        let mut acc = BatchAccumulator::new(5);
+        for i in 0..4 {
+            acc.push(pg_sys::Datum::from(i), false);
+        }
+        assert!(!acc.is_full());
+        assert_eq!(acc.len(), 4);
+    }
+
+    // -- push past batch_size -------------------------------------------------
+
+    #[test]
+    fn push_past_capacity_still_accepted() {
+        let mut acc = BatchAccumulator::new(3);
+        for i in 0..10 {
+            acc.push(pg_sys::Datum::from(i), false);
+        }
+        // Buffer grows beyond batch_size; is_full is true.
+        assert!(acc.is_full());
+        assert_eq!(acc.len(), 10);
+        let batch = acc.flush();
+        assert_eq!(batch.len(), 10);
+        assert_eq!(acc.total_flushed(), 10);
+    }
+
+    // -- reset/clear behavior -------------------------------------------------
+
+    #[test]
+    fn flush_then_reuse_cycle() {
+        let mut acc = BatchAccumulator::new(3);
+
+        // First cycle.
+        for i in 0..3 {
+            acc.push(pg_sys::Datum::from(i), false);
+        }
+        let b1 = acc.flush();
+        assert_eq!(b1.len(), 3);
+        assert!(acc.is_empty());
+
+        // Second cycle.
+        for i in 10..13 {
+            acc.push(pg_sys::Datum::from(i), false);
+        }
+        let b2 = acc.flush();
+        assert_eq!(b2.len(), 3);
+        assert_eq!(acc.total_flushed(), 6);
+
+        // Values from second batch are distinct from first.
+        assert_ne!(b1[0].0, b2[0].0);
+    }
+
+    #[test]
+    fn finish_then_finish_is_empty() {
+        let mut acc = BatchAccumulator::new(10);
+        acc.push(pg_sys::Datum::from(1_usize), false);
+        let b1 = acc.finish();
+        assert_eq!(b1.len(), 1);
+
+        // Second finish with no new data returns empty.
+        let b2 = acc.finish();
+        assert!(b2.is_empty());
+        assert_eq!(acc.total_flushed(), 1);
+    }
+
+    // -- batch metadata -------------------------------------------------------
+
+    #[test]
+    fn new_accumulator_metadata() {
+        let acc = BatchAccumulator::new(512);
+        assert!(acc.is_empty());
+        assert_eq!(acc.len(), 0);
+        assert_eq!(acc.total_flushed(), 0);
+        assert!(!acc.is_full());
+    }
+
+    #[test]
+    fn datum_ordering_preserved() {
+        let mut acc = BatchAccumulator::new(100);
+        let values: Vec<usize> = (0..20).collect();
+        for &v in &values {
+            acc.push(pg_sys::Datum::from(v), false);
+        }
+        let batch = acc.flush();
+        for (i, (d, _)) in batch.iter().enumerate() {
+            assert_eq!(d.value(), values[i]);
+        }
     }
 
     #[test]

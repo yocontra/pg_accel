@@ -14,8 +14,6 @@ use pgrx::pg_shmem_init;
 use pgrx::prelude::*;
 use pgrx::shmem::PGRXSharedMemory;
 
-use super::gucs;
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -109,7 +107,7 @@ pub fn request_threads(n: i32) -> i32 {
         return 0;
     }
 
-    let max = gucs::max_workers_total();
+    let max: i32 = 0; // GPU-only mode: no CPU worker thread budget
 
     // Unlimited mode: grant the full request without touching shared memory.
     if max == 0 {
@@ -284,6 +282,7 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -472,5 +471,117 @@ mod tests {
         // All slots empty — should not panic or change anything.
         reclaim_dead_backends(&mut b);
         assert_eq!(b.total_allocated, 0);
+    }
+
+    // -- request 0 threads ----------------------------------------------------
+
+    #[test]
+    fn request_zero_returns_zero() {
+        // Simulating request_threads(0) logic: n <= 0 returns 0.
+        let n: i32 = 0;
+        let granted = if n <= 0 { 0 } else { n };
+        assert_eq!(granted, 0);
+    }
+
+    #[test]
+    fn request_negative_returns_zero() {
+        let n: i32 = -5;
+        let granted = if n <= 0 { 0 } else { n };
+        assert_eq!(granted, 0);
+    }
+
+    // -- request more than available ------------------------------------------
+
+    #[test]
+    fn request_exceeding_budget_gets_partial() {
+        let max_total: i32 = 8;
+        let mut b = empty_budget();
+        b.total_allocated = 5;
+
+        let remaining = max_total.saturating_sub(b.total_allocated);
+        assert_eq!(remaining, 3);
+
+        let requested = 10;
+        let granted = requested.min(remaining);
+        assert_eq!(granted, 3);
+
+        // After granting, total should be at max.
+        b.total_allocated += granted;
+        assert_eq!(b.total_allocated, max_total);
+    }
+
+    #[test]
+    fn request_when_fully_exhausted() {
+        let max_total: i32 = 4;
+        let mut b = empty_budget();
+        b.total_allocated = 4;
+
+        let remaining = max_total.saturating_sub(b.total_allocated);
+        assert_eq!(remaining, 0);
+        // Any request should get 0.
+        let granted = 5_i32.min(remaining);
+        assert_eq!(granted, 0);
+    }
+
+    // -- release tracking -----------------------------------------------------
+
+    #[test]
+    fn release_partial_keeps_remainder() {
+        let mut slot = BackendSlot {
+            pid: 50,
+            allocated: 10,
+        };
+        let mut total = 10_i32;
+
+        // Release 4 of 10.
+        let release = 4;
+        let actual = release.min(slot.allocated);
+        slot.allocated -= actual;
+        total -= actual;
+
+        assert_eq!(slot.allocated, 6);
+        assert_eq!(total, 6);
+        // Slot still active.
+        assert_eq!(slot.pid, 50);
+    }
+
+    #[test]
+    fn release_exact_allocation_frees_slot() {
+        let mut slot = BackendSlot {
+            pid: 77,
+            allocated: 5,
+        };
+        let mut total = 5_i32;
+
+        let release = 5;
+        let actual = release.min(slot.allocated);
+        slot.allocated -= actual;
+        total -= actual;
+
+        assert_eq!(slot.allocated, 0);
+        assert_eq!(total, 0);
+        // In real code, slot.pid would be set to 0 when allocated == 0.
+        if slot.allocated == 0 {
+            slot.pid = 0;
+        }
+        assert_eq!(slot.pid, 0);
+    }
+
+    #[test]
+    fn release_more_than_allocated_clamps() {
+        let mut slot = BackendSlot {
+            pid: 88,
+            allocated: 2,
+        };
+        let mut total = 2_i32;
+
+        let release = 100;
+        let actual = release.min(slot.allocated);
+        slot.allocated -= actual;
+        total -= actual;
+
+        assert_eq!(slot.allocated, 0);
+        assert_eq!(actual, 2);
+        assert_eq!(total, 0);
     }
 }

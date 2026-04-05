@@ -419,6 +419,7 @@ pub fn extractor_for_oid(oid: pg_sys::Oid) -> Option<Box<dyn TypeExtractor>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -860,6 +861,207 @@ mod tests {
         // SAFETY: buf is a valid minimal short varlena.
         let (_data_ptr, data_len) = unsafe { varlena_data_and_len(buf.as_ptr()) };
         assert_eq!(data_len, 0);
+    }
+
+    // -- f64 boundary values ---------------------------------------------------
+
+    #[test]
+    fn float8_min_max_round_trip() {
+        let ext = Float8Extractor;
+
+        // f64::MIN (most negative finite)
+        let datum = pg_sys::Datum::from(f64::MIN.to_bits() as usize);
+        // SAFETY: Test datum from known f64 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f64::from_bits(d.value() as u64));
+        assert_eq!(result, Some(f64::MIN));
+
+        // f64::MAX (most positive finite)
+        let datum = pg_sys::Datum::from(f64::MAX.to_bits() as usize);
+        // SAFETY: Test datum from known f64 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f64::from_bits(d.value() as u64));
+        assert_eq!(result, Some(f64::MAX));
+
+        // f64::MIN_POSITIVE (smallest positive normal)
+        let datum = pg_sys::Datum::from(f64::MIN_POSITIVE.to_bits() as usize);
+        // SAFETY: Test datum from known f64 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f64::from_bits(d.value() as u64));
+        assert_eq!(result, Some(f64::MIN_POSITIVE));
+
+        // f64::EPSILON
+        let datum = pg_sys::Datum::from(f64::EPSILON.to_bits() as usize);
+        // SAFETY: Test datum from known f64 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f64::from_bits(d.value() as u64));
+        assert_eq!(result, Some(f64::EPSILON));
+    }
+
+    // -- f32 boundary values ---------------------------------------------------
+
+    #[test]
+    fn float4_min_max_round_trip() {
+        let ext = Float4Extractor;
+
+        // f32::MIN
+        let datum = pg_sys::Datum::from(f32::MIN.to_bits() as usize);
+        // SAFETY: Test datum from known f32 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f32::from_bits(d.value() as u32));
+        assert_eq!(result, Some(f32::MIN));
+
+        // f32::MAX
+        let datum = pg_sys::Datum::from(f32::MAX.to_bits() as usize);
+        // SAFETY: Test datum from known f32 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f32::from_bits(d.value() as u32));
+        assert_eq!(result, Some(f32::MAX));
+
+        // f32::MIN_POSITIVE
+        let datum = pg_sys::Datum::from(f32::MIN_POSITIVE.to_bits() as usize);
+        // SAFETY: Test datum from known f32 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f32::from_bits(d.value() as u32));
+        assert_eq!(result, Some(f32::MIN_POSITIVE));
+
+        // f32::EPSILON
+        let datum = pg_sys::Datum::from(f32::EPSILON.to_bits() as usize);
+        // SAFETY: Test datum from known f32 bits.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| f32::from_bits(d.value() as u32));
+        assert_eq!(result, Some(f32::EPSILON));
+    }
+
+    #[test]
+    fn float4_negative_zero() {
+        let ext = Float4Extractor;
+        let neg_zero = (-0.0_f32).to_bits();
+        let datum = pg_sys::Datum::from(neg_zero as usize);
+        // SAFETY: Test datum from known f32 bits.
+        let repr = unsafe { ext.extract(datum, false) };
+        match repr {
+            GpuRepr::Float4(v) => {
+                assert!(v.is_sign_negative());
+                assert_eq!(v, 0.0); // -0.0 == 0.0 in IEEE 754
+            }
+            _ => panic!("Expected Float4"),
+        }
+    }
+
+    #[test]
+    fn float8_negative_zero() {
+        let ext = Float8Extractor;
+        let neg_zero = (-0.0_f64).to_bits();
+        let datum = pg_sys::Datum::from(neg_zero as usize);
+        // SAFETY: Test datum from known f64 bits.
+        let repr = unsafe { ext.extract(datum, false) };
+        match repr {
+            GpuRepr::Float8(v) => {
+                assert!(v.is_sign_negative());
+                assert_eq!(v, 0.0);
+            }
+            _ => panic!("Expected Float8"),
+        }
+    }
+
+    // -- int4 round-trip at boundaries ----------------------------------------
+
+    #[test]
+    fn int4_max_round_trip() {
+        let ext = Int4Extractor;
+        let datum = pg_sys::Datum::from(i32::MAX as usize);
+        // SAFETY: Test datum from known i32 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i32);
+        assert_eq!(result, Some(i32::MAX));
+    }
+
+    #[test]
+    fn int4_min_round_trip() {
+        let ext = Int4Extractor;
+        let datum = pg_sys::Datum::from(i32::MIN as usize);
+        // SAFETY: Test datum from known i32 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i32);
+        assert_eq!(result, Some(i32::MIN));
+    }
+
+    // -- int8 round-trip at boundaries ----------------------------------------
+
+    #[test]
+    fn int8_max_round_trip() {
+        let ext = Int8Extractor;
+        let datum = pg_sys::Datum::from(i64::MAX as usize);
+        // SAFETY: Test datum from known i64 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(i64::MAX));
+    }
+
+    #[test]
+    fn int8_min_round_trip() {
+        let ext = Int8Extractor;
+        let datum = pg_sys::Datum::from(i64::MIN as usize);
+        // SAFETY: Test datum from known i64 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(i64::MIN));
+    }
+
+    #[test]
+    fn int8_zero_round_trip() {
+        let ext = Int8Extractor;
+        let datum = pg_sys::Datum::from(0_usize);
+        // SAFETY: Test datum from known i64 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(0_i64));
+    }
+
+    // -- timestamp boundary values --------------------------------------------
+
+    #[test]
+    fn timestamp_max_round_trip() {
+        let ext = TimestampExtractor;
+        let datum = pg_sys::Datum::from(i64::MAX as usize);
+        // SAFETY: Test datum from known i64 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(i64::MAX));
+    }
+
+    #[test]
+    fn timestamp_min_round_trip() {
+        let ext = TimestampExtractor;
+        let datum = pg_sys::Datum::from(i64::MIN as usize);
+        // SAFETY: Test datum from known i64 value.
+        let packed = unsafe { round_trip(&ext, datum) };
+        let result = packed.map(|d| d.value() as i64);
+        assert_eq!(result, Some(i64::MIN));
+    }
+
+    // -- bool edge cases ------------------------------------------------------
+
+    #[test]
+    fn bool_nonzero_values_are_true() {
+        let ext = BoolExtractor;
+        // PostgreSQL stores bool as 0/1, but any nonzero should be true.
+        for val in [1_usize, 2, 255, usize::MAX] {
+            let datum = pg_sys::Datum::from(val);
+            // SAFETY: Test datum from known value.
+            let repr = unsafe { ext.extract(datum, false) };
+            assert_eq!(repr, GpuRepr::Bool(true), "Expected true for value {val}");
+        }
+    }
+
+    // -- unknown type handling ------------------------------------------------
+
+    #[test]
+    fn extractor_for_high_oid_returns_none() {
+        // Arbitrary high OIDs that don't correspond to supported types.
+        assert!(extractor_for_oid(pg_sys::Oid::from(100_000_u32)).is_none());
+        assert!(extractor_for_oid(pg_sys::Oid::from(u32::MAX)).is_none());
     }
 
     #[test]

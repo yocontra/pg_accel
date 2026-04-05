@@ -3,7 +3,6 @@
 use pgrx::prelude::*;
 
 use super::cost::PlatformProfile;
-use super::gucs;
 
 /// Helper to extract a printable string from a fixed-size `c_char` buffer.
 #[must_use]
@@ -35,7 +34,7 @@ fn pg_accel_device_info() -> TableIterator<
     ),
 > {
     let profile = PlatformProfile::detect();
-    let configured_workers = gucs::workers();
+    let configured_workers = 0_i32; // GPU-only mode, no CPU worker threads
     let device = crate::gpu::get_device_info();
 
     let gpu_device_name = cchar_buf_to_string(&device.device_name);

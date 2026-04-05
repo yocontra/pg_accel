@@ -12,14 +12,9 @@ use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 /// Master switch for the extension.
 static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// Per-session worker count (0 = auto-detect).
-static WORKERS: GucSetting<i32> = GucSetting::<i32>::new(0);
-
-/// Cluster-wide maximum worker threads (0 = unlimited).
-static MAX_WORKERS_TOTAL: GucSetting<i32> = GucSetting::<i32>::new(0);
-
-/// Minimum number of rows before batching kicks in.
-static MIN_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(1000);
+/// Batch size for GPU dispatch. Larger batches amortize dispatch overhead
+/// but use more memory. Default 65536 balances throughput and memory.
+static MIN_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(65536);
 
 /// Whether GPU acceleration is enabled.
 static GPU_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -73,30 +68,8 @@ pub fn init_gucs() {
     );
 
     GucRegistry::define_int_guc(
-        c"pg_accel.workers",
-        c"Number of worker threads for this session (0 = auto).",
-        c"Set to 0 to let pg_accel choose based on available cores and budget.",
-        &WORKERS,
-        0,
-        256,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
-
-    GucRegistry::define_int_guc(
-        c"pg_accel.max_workers_total",
-        c"Cluster-wide cap on pg_accel worker threads (0 = unlimited).",
-        c"Enforced via shared-memory LWLock. Requires SIGHUP to change at runtime.",
-        &MAX_WORKERS_TOTAL,
-        0,
-        4096,
-        GucContext::Sighup,
-        GucFlags::default(),
-    );
-
-    GucRegistry::define_int_guc(
         c"pg_accel.min_batch_size",
-        c"Minimum row estimate before batched execution is considered.",
+        c"Minimum row estimate before GPU batched execution is considered.",
         c"Below this threshold, the standard row-at-a-time executor is used.",
         &MIN_BATCH_SIZE,
         1,
@@ -108,7 +81,7 @@ pub fn init_gucs() {
     GucRegistry::define_bool_guc(
         c"pg_accel.gpu_enabled",
         c"Enable or disable GPU kernel dispatch.",
-        c"When false, only CPU-side batched evaluation is used.",
+        c"When false, pg_accel will not inject any custom scan paths.",
         &GPU_ENABLED,
         GucContext::Userset,
         GucFlags::default(),
@@ -155,20 +128,6 @@ pub fn init_gucs() {
 #[must_use]
 pub fn enabled() -> bool {
     ENABLED.get()
-}
-
-/// Per-session worker count (0 means auto-detect).
-#[inline]
-#[must_use]
-pub fn workers() -> i32 {
-    WORKERS.get()
-}
-
-/// Cluster-wide maximum worker threads (0 means unlimited).
-#[inline]
-#[must_use]
-pub fn max_workers_total() -> i32 {
-    MAX_WORKERS_TOTAL.get()
 }
 
 /// Minimum batch size threshold.
