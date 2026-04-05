@@ -22,6 +22,9 @@ static pgaccel_platform_caps g_caps = {};
 // Accessed by other translation units (sort.cpp, mem_pool.cpp) via extern.
 sycl::queue* g_queue = nullptr;
 
+// Accessed by alloc_helper.h via extern. Set during pgaccel_init().
+bool g_unified_memory = false;
+
 // ---------------------------------------------------------------------------
 // Backend name detection
 // ---------------------------------------------------------------------------
@@ -178,6 +181,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
 
         std::string backend = detect_backend_name(best);
         populate_caps(best, backend);
+        g_unified_memory = g_caps.is_unified_memory;
         populate_device_info(best, backend);
 
         // Create queue: in-order for Metal, out-of-order otherwise.

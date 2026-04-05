@@ -4,6 +4,11 @@ project(pgaccel_kernels LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Default to Release for optimized GPU kernels (-O3).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
 option(PGACCEL_USE_SYCL "Build with AdaptiveCpp/SYCL support" OFF)
 
 if(PGACCEL_USE_SYCL)

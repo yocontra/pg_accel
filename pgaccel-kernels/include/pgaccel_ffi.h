@@ -176,6 +176,22 @@ typedef struct {
     size_t ring_count;            /* number of rings (0 for non-polygon) */
 } pgaccel_geometry;
 
+/*
+ * Bulk point-in-polygon: tests each point against a single polygon.
+ * Inline bbox pre-filter, then GPU dispatch (>=256 survivors) or CPU scalar.
+ * results[i]: 1=inside, -1=outside, 0=uncertain.
+ */
+pgaccel_status pgaccel_point_in_polygon_bulk(
+    const float* points_xy,        /* [N * 2] interleaved x,y */
+    size_t point_count,
+    const float* poly_bbox,        /* [4] xmin, ymin, xmax, ymax */
+    const float* poly_coords,      /* [V * 2] polygon vertices */
+    size_t poly_coord_count,       /* number of coordinate pairs */
+    const uint32_t* ring_offsets,  /* ring offsets (NULL for simple polygon) */
+    size_t ring_count,             /* number of rings (0 for simple polygon) */
+    int8_t* results                /* [N] output */
+);
+
 pgaccel_status pgaccel_spatial_intersects(
     const pgaccel_geometry* geoms_a,
     size_t count_a,

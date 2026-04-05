@@ -76,7 +76,8 @@ pgaccel_status bbox_intersects_bulk_sycl(
     T* d_a = sycl::malloc_device<T>(count_a * 4, q);
     T* d_b = sycl::malloc_device<T>(count_b * 4, q);
     uint8_t* d_result = sycl::malloc_device<uint8_t>(total_pairs, q);
-    size_t* d_hits = sycl::malloc_device<size_t>(1, q);
+    // Use uint32_t for atomic counter — Metal lacks 64-bit atomics.
+    uint32_t* d_hits = sycl::malloc_device<uint32_t>(1, q);
 
     if (!d_a || !d_b || !d_result || !d_hits) {
         sycl::free(d_a, q);
@@ -89,7 +90,7 @@ pgaccel_status bbox_intersects_bulk_sycl(
     // Copy inputs to device, zero the hit counter
     q.memcpy(d_a, boxes_a, count_a * 4 * sizeof(T));
     q.memcpy(d_b, boxes_b, count_b * 4 * sizeof(T));
-    q.memset(d_hits, 0, sizeof(size_t));
+    q.memset(d_hits, 0, sizeof(uint32_t));
     q.wait();
 
     const size_t cb = count_b; // capture for kernel lambda
@@ -118,24 +119,24 @@ pgaccel_status bbox_intersects_bulk_sycl(
             if (intersects) {
                 // SAFETY: atomic ref to device memory for concurrent increment
                 sycl::atomic_ref<
-                    size_t,
+                    uint32_t,
                     sycl::memory_order::relaxed,
                     sycl::memory_scope::device,
                     sycl::access::address_space::global_space
                 > hits_ref(*d_hits);
-                hits_ref.fetch_add(1);
+                hits_ref.fetch_add(static_cast<uint32_t>(1));
             }
         });
     }).wait();
 
     // Copy results back to host
     q.memcpy(result, d_result, total_pairs * sizeof(uint8_t));
-    size_t gpu_hits = 0;
-    q.memcpy(&gpu_hits, d_hits, sizeof(size_t));
+    uint32_t gpu_hits = 0;
+    q.memcpy(&gpu_hits, d_hits, sizeof(uint32_t));
     q.wait();
 
     if (hit_count) {
-        *hit_count = gpu_hits;
+        *hit_count = static_cast<size_t>(gpu_hits);
     }
 
     sycl::free(d_a, q);

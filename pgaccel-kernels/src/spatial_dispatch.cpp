@@ -5,12 +5,21 @@
 #include <cstring>
 #include <vector>
 
+#if PGACCEL_HAS_SYCL
+#include <sycl/sycl.hpp>
+#include "alloc_helper.h"
+
+// SAFETY: g_queue is defined in device_manager.cpp and linked into the same
+// shared library.  Written once during pgaccel_init(), read-only thereafter.
+extern sycl::queue* g_queue;
+#endif
+
 /* ----------------------------------------------------------------
- * Layer 2 — CPU fallback predicates
+ * Layer 2 — CPU fallback predicates + GPU-accelerated bulk paths
  *
- * These inline implementations handle the geometric tests on the
- * CPU.  They will be replaced by bulk GPU kernel calls once
- * spatial_predicates.cpp lands.
+ * CPU scalar implementations handle small batches and non-spatial
+ * geometry combos.  SYCL GPU kernels handle bulk point-in-polygon
+ * when a Metal/CUDA/etc. device is available.
  *
  * Return values:
  *    1  = DEFINITE_TRUE   (geometries definitely intersect)
@@ -182,6 +191,153 @@ static int8_t evaluate_predicate(const pgaccel_geometry& a,
 }
 
 /* ================================================================
+ * GPU-accelerated point-in-polygon kernel (SYCL)
+ *
+ * Each GPU thread evaluates one point against the full polygon.
+ * On Apple Silicon (unified memory), alloc_input returns the host
+ * pointer directly — zero allocation, zero copy overhead.
+ * ================================================================ */
+
+#if PGACCEL_HAS_SYCL
+
+/* Minimum surviving points before GPU dispatch is worthwhile.
+ * Below this, CPU scalar loop is cheaper than kernel launch. */
+static constexpr size_t GPU_PIP_MIN_BATCH = 256;
+
+/* Device-side point-in-ring: same ray-casting algorithm as CPU.
+ * Returns true if point is inside the ring. */
+static bool device_point_in_ring(
+    float px, float py,
+    const float* ring_coords, size_t ring_len)
+{
+    bool inside = false;
+    for (size_t i = 0, j = ring_len - 1; i < ring_len; j = i++) {
+        float xi = ring_coords[i * 2];
+        float yi = ring_coords[i * 2 + 1];
+        float xj = ring_coords[j * 2];
+        float yj = ring_coords[j * 2 + 1];
+
+        /* On-vertex check. */
+        float dx = px - xi;
+        float dy = py - yi;
+        if (dx * dx + dy * dy < EPSILON * EPSILON) {
+            return true;
+        }
+
+        bool crosses = ((yi > py) != (yj > py)) &&
+                       (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+        if (crosses) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+/* Device-side full polygon check: outer ring + hole rings. */
+static int8_t device_point_in_polygon(
+    float px, float py,
+    const float* poly_coords, size_t poly_coord_count,
+    const uint32_t* ring_offsets, size_t ring_count)
+{
+    if (ring_count == 0 || ring_offsets == nullptr) {
+        return device_point_in_ring(px, py, poly_coords, poly_coord_count) ? 1 : -1;
+    }
+
+    size_t outer_start = ring_offsets[0];
+    size_t outer_end = (ring_count > 1) ? ring_offsets[1] : poly_coord_count;
+    size_t outer_len = outer_end - outer_start;
+
+    if (!device_point_in_ring(px, py, poly_coords + outer_start * 2, outer_len)) {
+        return -1;
+    }
+
+    for (size_t r = 1; r < ring_count; ++r) {
+        size_t start = ring_offsets[r];
+        size_t end = (r + 1 < ring_count) ? ring_offsets[r + 1] : poly_coord_count;
+        size_t len = end - start;
+        if (device_point_in_ring(px, py, poly_coords + start * 2, len)) {
+            return -1;
+        }
+    }
+
+    return 1;
+}
+
+/* GPU dispatch: parallel_for over all surviving points. */
+static pgaccel_status sycl_point_in_polygon_bulk(
+    const float* surv_pts, size_t surv_count,
+    const float* poly_coords, size_t poly_coord_count,
+    const uint32_t* ring_offsets, size_t ring_count,
+    int8_t* results)
+{
+    sycl::queue* q = g_queue;
+    if (!q) return PGACCEL_ERROR;
+
+    try {
+        // On unified memory (Apple Silicon), alloc_input returns the host
+        // pointer directly — zero allocation, zero copy.
+        float* d_pts = pgaccel_alloc_input<float>(
+            surv_count * 2, *q, surv_pts);
+        float* d_poly = pgaccel_alloc_input<float>(
+            poly_coord_count * 2, *q, poly_coords);
+
+        // Handle ring_offsets: may be nullptr for single-ring polygons
+        uint32_t dummy_ring = 0;
+        uint32_t* d_rings = nullptr;
+        if (ring_offsets && ring_count > 0) {
+            d_rings = pgaccel_alloc_input<uint32_t>(ring_count, *q, ring_offsets);
+        } else {
+            d_rings = pgaccel_alloc_input<uint32_t>(1, *q, &dummy_ring);
+        }
+
+        int8_t* d_results = pgaccel_alloc<int8_t>(surv_count, *q);
+
+        if (!d_pts || !d_poly || !d_results) {
+            pgaccel_free_input(d_pts, *q, surv_pts);
+            pgaccel_free_input(d_poly, *q, poly_coords);
+            if (ring_offsets && ring_count > 0)
+                pgaccel_free_input(d_rings, *q, ring_offsets);
+            else
+                pgaccel_free_input(d_rings, *q, &dummy_ring);
+            if (d_results) sycl::free(d_results, *q);
+            return PGACCEL_OOM;
+        }
+
+        size_t vc = poly_coord_count;
+        size_t rc = ring_count;
+        bool has_rings = (ring_offsets != nullptr && ring_count > 0);
+
+        q->parallel_for(sycl::range<1>(surv_count), [=](sycl::id<1> id) {
+            size_t i = id[0];
+            float px = d_pts[i * 2];
+            float py = d_pts[i * 2 + 1];
+            d_results[i] = device_point_in_polygon(
+                px, py, d_poly, vc,
+                has_rings ? d_rings : nullptr, rc);
+        }).wait();
+
+        pgaccel_d2h(*q, results, d_results, surv_count);
+
+        pgaccel_free_input(d_pts, *q, surv_pts);
+        pgaccel_free_input(d_poly, *q, poly_coords);
+        if (ring_offsets && ring_count > 0)
+            pgaccel_free_input(d_rings, *q, ring_offsets);
+        else
+            pgaccel_free_input(d_rings, *q, &dummy_ring);
+        sycl::free(d_results, *q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception& e) {
+        fprintf(stderr, "pgaccel: SYCL point_in_polygon failed: %s\n", e.what());
+        return PGACCEL_ERROR;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: point_in_polygon failed: %s\n", e.what());
+        return PGACCEL_ERROR;
+    }
+}
+
+#endif // PGACCEL_HAS_SYCL
+
+/* ================================================================
  * pgaccel_spatial_intersects — three-layer spatial dispatch
  * ================================================================ */
 extern "C" pgaccel_status pgaccel_spatial_intersects(
@@ -206,9 +362,6 @@ extern "C" pgaccel_status pgaccel_spatial_intersects(
 
     /* ----------------------------------------------------------
      * Layer 1: Bbox filter
-     *
-     * Extract flat bbox arrays from geometry descriptors and
-     * call the bulk bbox intersection test.
      * ---------------------------------------------------------- */
     size_t total_pairs = count_a * count_b;
 
@@ -219,8 +372,7 @@ extern "C" pgaccel_status pgaccel_spatial_intersects(
         if (geoms_a[i].bbox != nullptr) {
             std::memcpy(&bboxes_a[i * 4], geoms_a[i].bbox, 4 * sizeof(float));
         } else {
-            /* No bbox — use degenerate box that forces a miss. */
-            bboxes_a[i * 4 + 0] = 1.0f;   /* xmin > xmax → always misses */
+            bboxes_a[i * 4 + 0] = 1.0f;
             bboxes_a[i * 4 + 1] = 1.0f;
             bboxes_a[i * 4 + 2] = -1.0f;
             bboxes_a[i * 4 + 3] = -1.0f;
@@ -252,41 +404,125 @@ extern "C" pgaccel_status pgaccel_spatial_intersects(
 
     /* ----------------------------------------------------------
      * Layer 2: Geometric predicate for bbox survivors
-     *
-     * Pairs that failed bbox are DEFINITE_FALSE (bbox is
-     * conservative — never misses a true intersection).
      * ---------------------------------------------------------- */
     for (size_t i = 0; i < count_a; ++i) {
         for (size_t j = 0; j < count_b; ++j) {
             if (bbox_results[i * count_b + j] == 0) {
-                /* Bbox miss → definite false. */
                 definite_false_pairs[(*definite_false_count) * 2]     = static_cast<uint32_t>(i);
                 definite_false_pairs[(*definite_false_count) * 2 + 1] = static_cast<uint32_t>(j);
                 (*definite_false_count)++;
                 continue;
             }
 
-            /* Bbox hit → run geometric predicate. */
             int8_t result = evaluate_predicate(geoms_a[i], geoms_b[j]);
 
             switch (result) {
-                case 1: /* DEFINITE_TRUE */
+                case 1:
                     definite_true_pairs[(*definite_true_count) * 2]     = static_cast<uint32_t>(i);
                     definite_true_pairs[(*definite_true_count) * 2 + 1] = static_cast<uint32_t>(j);
                     (*definite_true_count)++;
                     break;
-                case -1: /* DEFINITE_FALSE */
+                case -1:
                     definite_false_pairs[(*definite_false_count) * 2]     = static_cast<uint32_t>(i);
                     definite_false_pairs[(*definite_false_count) * 2 + 1] = static_cast<uint32_t>(j);
                     (*definite_false_count)++;
                     break;
-                default: /* UNCERTAIN (0) */
+                default:
                     uncertain_pairs[(*uncertain_count) * 2]     = static_cast<uint32_t>(i);
                     uncertain_pairs[(*uncertain_count) * 2 + 1] = static_cast<uint32_t>(j);
                     (*uncertain_count)++;
                     break;
             }
         }
+    }
+
+    return PGACCEL_OK;
+}
+
+/* ================================================================
+ * pgaccel_point_in_polygon_bulk — dedicated fast path
+ *
+ * Takes a flat array of point x,y pairs and a single polygon.
+ * Inline bbox pre-filter, then GPU dispatch (preferred) or
+ * CPU scalar fallback.
+ * ================================================================ */
+extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
+    const float* points_xy,
+    size_t point_count,
+    const float* poly_bbox,
+    const float* poly_coords,
+    size_t poly_coord_count,
+    const uint32_t* ring_offsets,
+    size_t ring_count,
+    int8_t* results)
+{
+    if (point_count == 0) return PGACCEL_OK;
+    if (!points_xy || !poly_coords || !poly_bbox || !results) return PGACCEL_ERROR;
+
+    static constexpr float BBOX_TOL = 1.0e-4f;
+
+    float bxmin = poly_bbox[0] - BBOX_TOL;
+    float bymin = poly_bbox[1] - BBOX_TOL;
+    float bxmax = poly_bbox[2] + BBOX_TOL;
+    float bymax = poly_bbox[3] + BBOX_TOL;
+
+    /* Pass 1: bbox pre-filter — mark points outside polygon bbox as -1.
+     * Collect surviving indices for the expensive point-in-ring pass. */
+    std::vector<uint32_t> surviving;
+    surviving.reserve(point_count);
+
+    for (size_t i = 0; i < point_count; ++i) {
+        float px = points_xy[i * 2];
+        float py = points_xy[i * 2 + 1];
+        if (px < bxmin || px > bxmax || py < bymin || py > bymax) {
+            results[i] = -1;
+        } else {
+            results[i] = 0; /* placeholder */
+            surviving.push_back(static_cast<uint32_t>(i));
+        }
+    }
+
+    if (surviving.empty()) return PGACCEL_OK;
+
+    /* Build flat point array for survivors only. */
+    std::vector<float> surv_pts(surviving.size() * 2);
+    for (size_t k = 0; k < surviving.size(); ++k) {
+        uint32_t idx = surviving[k];
+        surv_pts[k * 2]     = points_xy[idx * 2];
+        surv_pts[k * 2 + 1] = points_xy[idx * 2 + 1];
+    }
+
+    std::vector<int8_t> pir_results(surviving.size());
+
+#if PGACCEL_HAS_SYCL
+    /* Prefer GPU dispatch when SYCL is available and batch is large enough. */
+    if (g_queue && surviving.size() >= GPU_PIP_MIN_BATCH) {
+        pgaccel_status st = sycl_point_in_polygon_bulk(
+            surv_pts.data(), surviving.size(),
+            poly_coords, poly_coord_count,
+            ring_offsets, ring_count,
+            pir_results.data());
+        if (st == PGACCEL_OK) {
+            for (size_t k = 0; k < surviving.size(); ++k) {
+                results[surviving[k]] = pir_results[k];
+            }
+            return PGACCEL_OK;
+        }
+        /* GPU failed — fall through to CPU path. */
+        fprintf(stderr, "pgaccel: GPU point_in_polygon failed (status=%d), CPU fallback\n", st);
+    }
+#endif
+
+    /* CPU fallback: scalar point-in-polygon. */
+    for (size_t k = 0; k < surviving.size(); ++k) {
+        float pt[2] = { surv_pts[k * 2], surv_pts[k * 2 + 1] };
+        pir_results[k] = point_in_polygon_check(
+            pt, poly_coords, poly_coord_count,
+            ring_offsets, ring_count);
+    }
+
+    for (size_t k = 0; k < surviving.size(); ++k) {
+        results[surviving[k]] = pir_results[k];
     }
 
     return PGACCEL_OK;
