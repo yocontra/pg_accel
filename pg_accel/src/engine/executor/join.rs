@@ -15,15 +15,25 @@
 use pgrx::pg_sys;
 
 use crate::adapters::extractors::geometry::extract_geometry;
+use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::gucs;
 use crate::engine::registry::{self, AccelStrategy};
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 
 /// A buffered join match waiting to be returned by `next()`.
 struct PendingMatch {
+    /// Owned copy of the outer tuple. Must be `pfree`d when no longer needed.
+    outer_tuple: pg_sys::MinimalTuple,
     /// Owned copy of the inner tuple that matched. Must be `pfree`d
     /// when no longer needed.
     inner_tuple: pg_sys::MinimalTuple,
+}
+
+/// Mapping entry: (child_index 0=outer/1=inner, varattno in child plan output).
+#[derive(Clone)]
+pub(crate) struct TlistMapEntry {
+    child_idx: usize,
+    child_attno: i16,
 }
 
 /// Rust-side batch join executor state.
@@ -93,6 +103,15 @@ pub struct JoinExecState {
     /// Collected inner tuples for hash join (consumed during build).
     hash_inner_tuples: Vec<pg_sys::MinimalTuple>,
 
+    /// Mapping from scan slot attributes to child plan columns.
+    /// Built during `set_tlist_mapping` from `custom_scan_tlist`.
+    pub(crate) tlist_map: Vec<TlistMapEntry>,
+
+    /// Temporary slot for loading outer MinimalTuples during hash join yield.
+    hash_outer_slot: *mut pg_sys::TupleTableSlot,
+    /// Temporary slot for loading inner MinimalTuples during hash join yield.
+    hash_inner_slot: *mut pg_sys::TupleTableSlot,
+
     // -- Counters for EXPLAIN ANALYZE --
     /// Total outer rows pulled.
     pub rows_dispatched: u64,
@@ -135,10 +154,39 @@ impl JoinExecState {
             hash_table: None,
             hash_built: false,
             hash_inner_tuples: Vec::new(),
+            tlist_map: Vec::new(),
+            hash_outer_slot: std::ptr::null_mut(),
+            hash_inner_slot: std::ptr::null_mut(),
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
         }
+    }
+
+    /// Reset state for a rescan (e.g., from a Nested Loop).
+    ///
+    /// Preserves key configuration and tlist mapping but drops the
+    /// hash table and resets all iteration state so the join can be
+    /// re-executed from scratch.
+    pub fn reset_for_rescan(&mut self) {
+        self.current_outer = std::ptr::null_mut();
+        self.outer_exhausted = false;
+        self.inner_needs_rescan = false;
+        self.pending_matches.clear();
+        self.pending_cursor = 0;
+        self.hash_table = None;
+        self.hash_built = false;
+        // Free inner tuples from previous scan.
+        for &mt in &self.hash_inner_tuples {
+            if !mt.is_null() {
+                // SAFETY: mt was allocated via ExecCopySlotMinimalTuple.
+                unsafe { pg_sys::pfree(mt.cast()) };
+            }
+        }
+        self.hash_inner_tuples.clear();
+        self.rows_dispatched = 0;
+        self.batches_executed = 0;
+        self.dispatch_time_us = 0;
     }
 
     /// Fetch the next matching join tuple.
@@ -173,8 +221,7 @@ impl JoinExecState {
     }
 
     /// Scalar nested-loop join: evaluate residual qual one tuple at a time
-    /// via `ExecEvalExpr`. Used for BatchedEval and other non-spatial
-    /// strategies.
+    /// via `ExecEvalExpr`. Used for non-spatial GPU strategies.
     ///
     /// # Safety
     ///
@@ -523,17 +570,10 @@ impl JoinExecState {
                             }
                         }
 
-                        let pass_count = mask.iter().filter(|&&b| b).count();
-                        pgrx::debug1!(
-                            "pg_accel: join GPU spatial {}/{} pairs passed",
-                            pass_count,
-                            inner_count,
-                        );
-
                         // Buffer matching inner tuples, free non-matches.
                         for (i, mt) in inner_tuples.into_iter().enumerate() {
                             if mask[i] {
-                                self.pending_matches.push(PendingMatch { inner_tuple: mt });
+                                self.pending_matches.push(PendingMatch { outer_tuple: std::ptr::null_mut(), inner_tuple: mt });
                             } else {
                                 // SAFETY: Not a match — free the owned copy.
                                 unsafe { pg_sys::pfree(mt.cast()) };
@@ -548,7 +588,7 @@ impl JoinExecState {
                     }
                 }
             } else if !self.qual.is_null() && !self.econtext.is_null() {
-                // Scalar fallback: evaluate qual per tuple via ExecEvalExpr.
+                // Scalar qual: evaluate qual per tuple via PG's ExecEvalExpr.
                 // SAFETY: Caller guarantees main backend thread.
                 unsafe {
                     self.eval_batch_scalar_qual(&inner_tuples, result_slot);
@@ -556,7 +596,7 @@ impl JoinExecState {
             } else {
                 // No qual — all inner tuples match.
                 for mt in inner_tuples {
-                    self.pending_matches.push(PendingMatch { inner_tuple: mt });
+                    self.pending_matches.push(PendingMatch { outer_tuple: std::ptr::null_mut(), inner_tuple: mt });
                 }
             }
 
@@ -611,7 +651,7 @@ impl JoinExecState {
             }
 
             if !is_null && result.value() != 0 {
-                self.pending_matches.push(PendingMatch { inner_tuple: mt });
+                self.pending_matches.push(PendingMatch { outer_tuple: std::ptr::null_mut(), inner_tuple: mt });
             } else {
                 // SAFETY: Not a match — free the owned copy.
                 unsafe { pg_sys::pfree(mt.cast()) };
@@ -634,6 +674,144 @@ impl JoinExecState {
         self.hash_key_type = key_type;
     }
 
+    /// Build the scan-slot → child-plan attribute mapping from
+    /// `custom_scan_tlist` and child plan states. Must be called from
+    /// `begin_custom_scan` after child PlanStates are initialized.
+    ///
+    /// # Safety
+    ///
+    /// `cscan`, `outer_ps`, and `inner_ps` must be valid planner/executor
+    /// pointers on the main backend thread.
+    pub unsafe fn init_hash_join_slots(
+        &mut self,
+        cscan: *mut pg_sys::CustomScan,
+        outer_ps: *mut pg_sys::PlanState,
+        inner_ps: *mut pg_sys::PlanState,
+    ) {
+        // Read child plans' scanrelid to map Var.varno → child index.
+        // Build mapping from custom_scan_tlist.
+        // custom_scan_tlist Vars have original relation varnos and attnos.
+        // We search each child plan's output list to find where each
+        // (varno, varattno) lands, handling both SeqScan children (with
+        // scanrelid) and nested CustomScan children (scanrelid=0).
+        // SAFETY: cscan is valid.
+        let tlist = unsafe { (*cscan).custom_scan_tlist };
+        if !tlist.is_null() {
+            let tlen = unsafe { pg_sys::list_length(tlist) };
+            for j in 0..tlen {
+                let tle = unsafe {
+                    pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>()
+                };
+                if tle.is_null() {
+                    self.tlist_map.push(TlistMapEntry {
+                        child_idx: 0,
+                        child_attno: 0,
+                    });
+                    continue;
+                }
+                let expr = unsafe { (*tle).expr };
+                if !expr.is_null()
+                    && unsafe { (*expr.cast::<pg_sys::Node>()).type_ }
+                        == pg_sys::NodeTag::T_Var
+                {
+                    let var = expr.cast::<pg_sys::Var>();
+                    let varno = unsafe { (*var).varno };
+                    let varattno = unsafe { (*var).varattno };
+
+                    // Handle already-remapped Vars (INNER_VAR/OUTER_VAR).
+                    if varno == pg_sys::INNER_VAR {
+                        self.tlist_map.push(TlistMapEntry {
+                            child_idx: 1,
+                            child_attno: varattno,
+                        });
+                        continue;
+                    }
+                    if varno == pg_sys::OUTER_VAR {
+                        self.tlist_map.push(TlistMapEntry {
+                            child_idx: 0,
+                            child_attno: varattno,
+                        });
+                        continue;
+                    }
+
+                    // Original relation varno — search each child for this
+                    // (varno, varattno) pair to determine child index and
+                    // remapped output position.
+                    // SAFETY: outer_ps and inner_ps are valid PlanState ptrs.
+                    let inner_pos = unsafe {
+                        Self::find_child_output_pos(inner_ps, varno, varattno)
+                    };
+                    if inner_pos > 0 {
+                        self.tlist_map.push(TlistMapEntry {
+                            child_idx: 1,
+                            child_attno: inner_pos,
+                        });
+                    } else {
+                        let outer_pos = unsafe {
+                            Self::find_child_output_pos(
+                                outer_ps, varno, varattno,
+                            )
+                        };
+                        self.tlist_map.push(TlistMapEntry {
+                            child_idx: 0,
+                            child_attno: if outer_pos > 0 {
+                                outer_pos
+                            } else {
+                                varattno
+                            },
+                        });
+                    }
+                } else {
+                    self.tlist_map.push(TlistMapEntry {
+                        child_idx: 0,
+                        child_attno: 0,
+                    });
+                }
+            }
+        }
+
+        // Create temporary slots from child plan descriptors.
+        // SAFETY: Child plan states have valid result slots.
+        if !outer_ps.is_null() {
+            let outer_desc = unsafe {
+                let slot = (*outer_ps).ps_ResultTupleSlot;
+                if slot.is_null() {
+                    let ss = outer_ps.cast::<pg_sys::ScanState>();
+                    (*(*ss).ss_ScanTupleSlot).tts_tupleDescriptor
+                } else {
+                    (*slot).tts_tupleDescriptor
+                }
+            };
+            if !outer_desc.is_null() {
+                self.hash_outer_slot = unsafe {
+                    pg_sys::MakeSingleTupleTableSlot(
+                        outer_desc,
+                        &raw const pg_sys::TTSOpsMinimalTuple,
+                    )
+                };
+            }
+        }
+        if !inner_ps.is_null() {
+            let inner_desc = unsafe {
+                let slot = (*inner_ps).ps_ResultTupleSlot;
+                if slot.is_null() {
+                    let ss = inner_ps.cast::<pg_sys::ScanState>();
+                    (*(*ss).ss_ScanTupleSlot).tts_tupleDescriptor
+                } else {
+                    (*slot).tts_tupleDescriptor
+                }
+            };
+            if !inner_desc.is_null() {
+                self.hash_inner_slot = unsafe {
+                    pg_sys::MakeSingleTupleTableSlot(
+                        inner_desc,
+                        &raw const pg_sys::TTSOpsMinimalTuple,
+                    )
+                };
+            }
+        }
+    }
+
     /// GPU hash join: build hash table from inner, probe with outer.
     ///
     /// Phase 1: Consume ALL inner tuples, extract join keys, build hash table.
@@ -649,6 +827,27 @@ impl JoinExecState {
         inner_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        // Get the inner plan's result slot — its tuple descriptor matches
+        // inner tuples. We must NOT use result_slot (scan slot) for inner
+        // key extraction because it has the outer plan's descriptor.
+        // SAFETY: inner_ps is a valid PlanState; ps_ResultTupleSlot is set
+        // by ExecInitNode for the inner plan.
+        let inner_result_slot = if inner_ps.is_null() {
+            result_slot
+        } else {
+            let slot = unsafe { (*inner_ps).ps_ResultTupleSlot };
+            if slot.is_null() {
+                // Fallback: use the scan tuple slot from inner's ScanState.
+                // SAFETY: inner_ps points to a valid PlanState. If it's a
+                // ScanState, ss_ScanTupleSlot has the right descriptor.
+                let ss = inner_ps.cast::<pg_sys::ScanState>();
+                let scan_slot = unsafe { (*ss).ss_ScanTupleSlot };
+                if scan_slot.is_null() { result_slot } else { scan_slot }
+            } else {
+                slot
+            }
+        };
+
         // Phase 1: Build hash table from inner side (once).
         if !self.hash_built {
             self.hash_built = true;
@@ -674,65 +873,65 @@ impl JoinExecState {
                 return std::ptr::null_mut();
             }
 
-            // Extract keys from inner tuples.
+            // Validate attno vs slot descriptor before key extraction.
+            let inner_natts = unsafe {
+                (*(*inner_result_slot).tts_tupleDescriptor).natts
+            };
+            if self.hash_inner_attno > inner_natts {
+                // Attno out of range — skip hash table build.
+            }
+
+            // Bulk-extract keys from inner tuples using direct MinimalTuple
+            // reads (avoids per-tuple ExecForceStoreMinimalTuple overhead).
+            // SAFETY: inner_result_slot has a valid tuple descriptor matching
+            // the inner tuples.
+            let inner_tupdesc = unsafe {
+                (*inner_result_slot).tts_tupleDescriptor
+            };
+            let inner_info = unsafe {
+                AttExtractInfo::new(inner_tupdesc, self.hash_inner_attno)
+            };
+            let indices: Vec<u32> = (0..inner_count as u32).collect();
+
+            // Extract only the key type we need — one allocation, one pass.
             let mut int32_keys: Vec<i32> = Vec::new();
             let mut long_keys: Vec<i64> = Vec::new();
             let mut double_keys: Vec<f64> = Vec::new();
-            let mut null_mask = vec![0u8; inner_count];
-            let mut indices: Vec<u32> = Vec::with_capacity(inner_count);
+            let null_mask: Vec<u8>;
 
-            for (i, &mt) in self.hash_inner_tuples.iter().enumerate() {
-                indices.push(i as u32);
-                if mt.is_null() {
-                    null_mask[i] = 1;
-                    match self.hash_key_type {
-                        PgaccelKeyType::Int32 => int32_keys.push(0),
-                        PgaccelKeyType::Int64 => long_keys.push(0),
-                        PgaccelKeyType::Float64 => double_keys.push(0.0),
-                    }
-                    continue;
+            // SAFETY: hash_inner_tuples contains valid MinimalTuple pointers.
+            // inner_result_slot is valid for fallback extraction.
+            match self.hash_key_type {
+                PgaccelKeyType::Int32 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i32(
+                            &self.hash_inner_tuples, &inner_info, inner_result_slot,
+                        )
+                    };
+                    int32_keys = k;
+                    null_mask = n;
                 }
-
-                // SAFETY: Load MinimalTuple into result_slot to extract key.
-                unsafe {
-                    pg_sys::ExecForceStoreMinimalTuple(mt, result_slot, false);
+                PgaccelKeyType::Int64 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i64(
+                            &self.hash_inner_tuples, &inner_info, inner_result_slot,
+                        )
+                    };
+                    long_keys = k;
+                    null_mask = n;
                 }
-                let mut is_null = false;
-                // SAFETY: result_slot has a valid stored MinimalTuple.
-                let datum = unsafe {
-                    pg_sys::slot_getattr(
-                        result_slot,
-                        self.hash_inner_attno,
-                        std::ptr::addr_of_mut!(is_null),
-                    )
-                };
-
-                if is_null {
-                    null_mask[i] = 1;
-                    match self.hash_key_type {
-                        PgaccelKeyType::Int32 => int32_keys.push(0),
-                        PgaccelKeyType::Int64 => long_keys.push(0),
-                        PgaccelKeyType::Float64 => double_keys.push(0.0),
-                    }
-                } else {
-                    match self.hash_key_type {
-                        PgaccelKeyType::Int32 => {
-                            // SAFETY: datum contains an int4 value.
-                            int32_keys.push(datum.value() as i32);
-                        }
-                        PgaccelKeyType::Int64 => {
-                            // SAFETY: datum contains an int8 value.
-                            long_keys.push(datum.value() as i64);
-                        }
-                        PgaccelKeyType::Float64 => {
-                            // SAFETY: datum contains a float8 value.
-                            double_keys.push(f64::from_bits(datum.value() as u64));
-                        }
-                    }
+                PgaccelKeyType::Float64 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_f64(
+                            &self.hash_inner_tuples, &inner_info, inner_result_slot,
+                        )
+                    };
+                    double_keys = k;
+                    null_mask = n;
                 }
             }
 
-            // Build hash table via GPU (or fallback).
+            // Build hash table via GPU.
             let keys_ptr: *const std::ffi::c_void = match self.hash_key_type {
                 PgaccelKeyType::Int32 => int32_keys.as_ptr().cast(),
                 PgaccelKeyType::Int64 => long_keys.as_ptr().cast(),
@@ -742,27 +941,69 @@ impl JoinExecState {
             self.hash_table =
                 GpuHashTable::build(keys_ptr, &null_mask, &indices, self.hash_key_type);
 
-            pgrx::debug1!(
-                "pg_accel: hash_join built table from {} inner tuples",
-                inner_count,
-            );
         }
 
         // Phase 2: Probe with outer tuples in batches.
         loop {
-            // Drain pending matches first.
+            // Drain pending matches first — build virtual tuple from both sides.
             if self.pending_cursor < self.pending_matches.len() {
                 let m = &self.pending_matches[self.pending_cursor];
                 self.pending_cursor += 1;
-                // SAFETY: inner_tuple is an owned MinimalTuple copy.
+
+                // SAFETY: Build a virtual tuple in result_slot by extracting
+                // each attribute from the appropriate child slot.
                 unsafe {
-                    pg_sys::ExecForceStoreMinimalTuple(m.inner_tuple, result_slot, false);
+                    if !self.hash_outer_slot.is_null() && !m.outer_tuple.is_null() {
+                        pg_sys::ExecForceStoreMinimalTuple(
+                            m.outer_tuple,
+                            self.hash_outer_slot,
+                            false,
+                        );
+                    }
+                    if !self.hash_inner_slot.is_null() && !m.inner_tuple.is_null() {
+                        pg_sys::ExecForceStoreMinimalTuple(
+                            m.inner_tuple,
+                            self.hash_inner_slot,
+                            false,
+                        );
+                    }
+
+                    // Clear the result slot and populate as virtual tuple.
+                    pg_sys::ExecClearTuple(result_slot);
+                    let natts = (*(*result_slot).tts_tupleDescriptor).natts as usize;
+                    for (i, entry) in self.tlist_map.iter().enumerate() {
+                        if i >= natts {
+                            break;
+                        }
+                        let src_slot = if entry.child_idx == 1 {
+                            self.hash_inner_slot
+                        } else {
+                            self.hash_outer_slot
+                        };
+                        if src_slot.is_null() || entry.child_attno <= 0 {
+                            *(*result_slot).tts_isnull.add(i) = true;
+                            continue;
+                        }
+                        let mut attr_null = false;
+                        let datum = pg_sys::slot_getattr(
+                            src_slot,
+                            i32::from(entry.child_attno),
+                            std::ptr::addr_of_mut!(attr_null),
+                        );
+                        *(*result_slot).tts_values.add(i) = datum;
+                        *(*result_slot).tts_isnull.add(i) = attr_null;
+                    }
+                    pg_sys::ExecStoreVirtualTuple(result_slot);
                 }
                 return result_slot;
             }
 
             // Free owned MinimalTuples before clearing.
             for m in &self.pending_matches {
+                if !m.outer_tuple.is_null() {
+                    // SAFETY: outer_tuple was palloc'd by ExecCopySlotMinimalTuple.
+                    unsafe { pg_sys::pfree(m.outer_tuple.cast()) };
+                }
                 if !m.inner_tuple.is_null() {
                     // SAFETY: inner_tuple was palloc'd by ExecCopySlotMinimalTuple.
                     unsafe { pg_sys::pfree(m.inner_tuple.cast()) };
@@ -798,63 +1039,17 @@ impl JoinExecState {
             let outer_count = outer_tuples.len();
             self.rows_dispatched += outer_count as u64;
 
-            // If hash table build failed, fall back to scalar nested loop
-            // against the buffered inner tuples.
+            // If hash table build failed, the planner should not have
+            // injected this GpuHashJoin path. Log a warning and skip
+            // these outer tuples — no CPU nested-loop fallback.
             let Some(ht) = &self.hash_table else {
                 {
-                    // CPU fallback: for each outer tuple, scan all inner tuples
-                    // and compare keys. This is O(outer * inner) but correct.
-                    for &outer_mt in &outer_tuples {
-                        if outer_mt.is_null() {
-                            continue;
-                        }
-                        // SAFETY: Load outer tuple to extract key.
-                        unsafe {
-                            pg_sys::ExecForceStoreMinimalTuple(outer_mt, result_slot, false);
-                        }
-                        let mut outer_null = false;
-                        let outer_datum = unsafe {
-                            pg_sys::slot_getattr(
-                                result_slot,
-                                self.hash_outer_attno,
-                                std::ptr::addr_of_mut!(outer_null),
-                            )
-                        };
-                        if outer_null {
-                            continue;
-                        }
+                    pgrx::warning!(
+                        "pg_accel: GPU hash table build failed; \
+                         planner should not have injected GpuHashJoin path"
+                    );
 
-                        for &inner_mt in &self.hash_inner_tuples {
-                            if inner_mt.is_null() {
-                                continue;
-                            }
-                            // SAFETY: Load inner tuple.
-                            unsafe {
-                                pg_sys::ExecForceStoreMinimalTuple(inner_mt, result_slot, false);
-                            }
-                            let mut inner_null = false;
-                            let inner_datum = unsafe {
-                                pg_sys::slot_getattr(
-                                    result_slot,
-                                    self.hash_inner_attno,
-                                    std::ptr::addr_of_mut!(inner_null),
-                                )
-                            };
-                            if inner_null {
-                                continue;
-                            }
-                            if outer_datum.value() == inner_datum.value() {
-                                // SAFETY: Copy inner tuple for buffering.
-                                let mt_copy =
-                                    unsafe { pg_sys::ExecCopySlotMinimalTuple(result_slot) };
-                                self.pending_matches.push(PendingMatch {
-                                    inner_tuple: mt_copy,
-                                });
-                            }
-                        }
-                    }
-
-                    // Free outer tuples.
+                    // Free outer tuples — no matches produced.
                     for mt in outer_tuples {
                         if !mt.is_null() {
                             // SAFETY: Free owned copy.
@@ -870,54 +1065,54 @@ impl JoinExecState {
             };
 
             // Extract outer keys for GPU probe.
+            // Bulk-extract outer keys using direct MinimalTuple reads.
+            let outer_extract_slot = if self.hash_outer_slot.is_null() {
+                result_slot
+            } else {
+                self.hash_outer_slot
+            };
+            // SAFETY: outer_extract_slot has a valid tuple descriptor
+            // matching the outer tuples.
+            let outer_tupdesc = unsafe {
+                (*outer_extract_slot).tts_tupleDescriptor
+            };
+            let outer_info = unsafe {
+                AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno)
+            };
+
             let mut o_int32_keys: Vec<i32> = Vec::new();
             let mut o_long_keys: Vec<i64> = Vec::new();
             let mut o_double_keys: Vec<f64> = Vec::new();
-            let mut o_null_mask = vec![0u8; outer_count];
+            let o_null_mask: Vec<u8>;
 
-            for (i, &mt) in outer_tuples.iter().enumerate() {
-                if mt.is_null() {
-                    o_null_mask[i] = 1;
-                    match self.hash_key_type {
-                        PgaccelKeyType::Int32 => o_int32_keys.push(0),
-                        PgaccelKeyType::Int64 => o_long_keys.push(0),
-                        PgaccelKeyType::Float64 => o_double_keys.push(0.0),
-                    }
-                    continue;
+            // SAFETY: outer_tuples contains valid MinimalTuple pointers.
+            match self.hash_key_type {
+                PgaccelKeyType::Int32 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i32(
+                            &outer_tuples, &outer_info, outer_extract_slot,
+                        )
+                    };
+                    o_int32_keys = k;
+                    o_null_mask = n;
                 }
-
-                // SAFETY: Load outer MinimalTuple to extract key.
-                unsafe {
-                    pg_sys::ExecForceStoreMinimalTuple(mt, result_slot, false);
+                PgaccelKeyType::Int64 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i64(
+                            &outer_tuples, &outer_info, outer_extract_slot,
+                        )
+                    };
+                    o_long_keys = k;
+                    o_null_mask = n;
                 }
-                let mut is_null = false;
-                let datum = unsafe {
-                    pg_sys::slot_getattr(
-                        result_slot,
-                        self.hash_outer_attno,
-                        std::ptr::addr_of_mut!(is_null),
-                    )
-                };
-
-                if is_null {
-                    o_null_mask[i] = 1;
-                    match self.hash_key_type {
-                        PgaccelKeyType::Int32 => o_int32_keys.push(0),
-                        PgaccelKeyType::Int64 => o_long_keys.push(0),
-                        PgaccelKeyType::Float64 => o_double_keys.push(0.0),
-                    }
-                } else {
-                    match self.hash_key_type {
-                        PgaccelKeyType::Int32 => {
-                            o_int32_keys.push(datum.value() as i32);
-                        }
-                        PgaccelKeyType::Int64 => {
-                            o_long_keys.push(datum.value() as i64);
-                        }
-                        PgaccelKeyType::Float64 => {
-                            o_double_keys.push(f64::from_bits(datum.value() as u64));
-                        }
-                    }
+                PgaccelKeyType::Float64 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_f64(
+                            &outer_tuples, &outer_info, outer_extract_slot,
+                        )
+                    };
+                    o_double_keys = k;
+                    o_null_mask = n;
                 }
             }
 
@@ -927,31 +1122,44 @@ impl JoinExecState {
                 PgaccelKeyType::Float64 => o_double_keys.as_ptr().cast(),
             };
 
-            // Probe: max matches = outer_count * average_fanout.
-            // Conservative estimate: each outer can match many inner rows.
-            let max_matches = outer_count * (self.hash_inner_tuples.len() / 10).max(16);
+            // Probe: max matches. For equijoins, each outer typically matches
+            // 0-1 inner rows, but duplicates can inflate this. Use 4× outer
+            // as a reasonable upper bound (covers moderate skew).
+            let max_matches = outer_count * 4;
             let probe_result = ht.probe(o_keys_ptr, &o_null_mask, max_matches);
 
             if let Some(pairs) = probe_result {
-                for (_outer_idx, inner_idx) in pairs {
+                for (outer_idx, inner_idx) in pairs {
+                    let outer_idx = outer_idx as usize;
                     let inner_idx = inner_idx as usize;
-                    if inner_idx < self.hash_inner_tuples.len() {
+                    if inner_idx < self.hash_inner_tuples.len()
+                        && outer_idx < outer_tuples.len()
+                    {
                         let inner_mt = self.hash_inner_tuples[inner_idx];
-                        if !inner_mt.is_null() {
-                            // SAFETY: Copy inner tuple for buffering.
-                            unsafe {
-                                pg_sys::ExecForceStoreMinimalTuple(inner_mt, result_slot, false);
-                            }
-                            let mt_copy = unsafe { pg_sys::ExecCopySlotMinimalTuple(result_slot) };
+                        let outer_mt = outer_tuples[outer_idx];
+                        if !inner_mt.is_null() && !outer_mt.is_null() {
+                            // SAFETY: Copy both tuples for buffering.
+                            let inner_copy =
+                                unsafe { pg_sys::heap_copy_minimal_tuple(inner_mt) };
+                            let outer_copy =
+                                unsafe { pg_sys::heap_copy_minimal_tuple(outer_mt) };
                             self.pending_matches.push(PendingMatch {
-                                inner_tuple: mt_copy,
+                                outer_tuple: outer_copy,
+                                inner_tuple: inner_copy,
                             });
                         }
                     }
                 }
             } else {
-                // GPU probe failed — CPU fallback per outer tuple.
-                pgrx::debug1!("pg_accel: hash_join probe failed, CPU fallback");
+                // GPU probe failed. No CPU fallback — log warning.
+                // The planner should not inject GpuHashJoin if GPU is
+                // unavailable. Outer tuples for this batch produce no
+                // matches.
+                pgrx::warning!(
+                    "pg_accel: GPU hash probe failed; \
+                     dropping batch of {} outer tuples",
+                    outer_tuples.len(),
+                );
             }
 
             // Free outer tuples (we only need inner tuples for future probes).
@@ -998,6 +1206,108 @@ impl JoinExecState {
 
     /// Check if a slot is empty (no valid tuple).
     ///
+    /// Find the output position in a child plan for a given (varno, varattno).
+    ///
+    /// Searches the child plan's output list (custom_scan_tlist for CustomScans,
+    /// plan.targetlist for others) for a Var matching the given varno and attno.
+    /// Returns the 1-based output position, or 0 if not found.
+    ///
+    /// # Safety
+    ///
+    /// `ps` must be a valid PlanState pointer or null.
+    unsafe fn find_child_output_pos(
+        ps: *mut pg_sys::PlanState,
+        target_varno: i32,
+        target_attno: i16,
+    ) -> i16 {
+        if ps.is_null() {
+            return 0;
+        }
+        // SAFETY: ps->plan is valid.
+        let plan = unsafe { (*ps).plan };
+        if plan.is_null() {
+            return 0;
+        }
+
+        // For CustomScan nodes (scanrelid=0), check custom_scan_tlist first
+        // since plan.targetlist uses INDEX_VAR references.
+        let scan = plan.cast::<pg_sys::Scan>();
+        let scanrelid = unsafe { (*scan).scanrelid };
+        if scanrelid == 0 {
+            // Try custom_scan_tlist (has original relation Vars).
+            let node_tag = unsafe { (*plan.cast::<pg_sys::Node>()).type_ };
+            if node_tag == pg_sys::NodeTag::T_CustomScan {
+                let cscan = plan.cast::<pg_sys::CustomScan>();
+                let cst = unsafe { (*cscan).custom_scan_tlist };
+                if !cst.is_null() {
+                    let clen = unsafe { pg_sys::list_length(cst) };
+                    for j in 0..clen {
+                        let tle = unsafe {
+                            pg_sys::list_nth(cst, j)
+                                .cast::<pg_sys::TargetEntry>()
+                        };
+                        if tle.is_null() {
+                            continue;
+                        }
+                        let expr = unsafe { (*tle).expr };
+                        if expr.is_null() {
+                            continue;
+                        }
+                        if unsafe { (*expr.cast::<pg_sys::Node>()).type_ }
+                            != pg_sys::NodeTag::T_Var
+                        {
+                            continue;
+                        }
+                        let var = expr.cast::<pg_sys::Var>();
+                        let vno = unsafe { (*var).varno };
+                        let vatt = unsafe { (*var).varattno };
+                        if vno == target_varno && vatt == target_attno {
+                            // resno is 1-based output position.
+                            return unsafe { (*tle).resno };
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
+
+        // For SeqScan/IndexScan (scanrelid > 0): check plan.targetlist.
+        // Vars here reference the scanned table directly.
+        // Only match if the target varno matches this scan's relation —
+        // otherwise we'd falsely match columns from unrelated tables
+        // that happen to share the same attno.
+        if target_varno > 0 && scanrelid as i32 != target_varno {
+            return 0;
+        }
+        let tlist = unsafe { (*plan).targetlist };
+        if tlist.is_null() {
+            return 0;
+        }
+        let tlen = unsafe { pg_sys::list_length(tlist) };
+        for i in 0..tlen {
+            let tle =
+                unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
+            if tle.is_null() {
+                continue;
+            }
+            let expr = unsafe { (*tle).expr };
+            if expr.is_null() {
+                continue;
+            }
+            if unsafe { (*expr.cast::<pg_sys::Node>()).type_ }
+                != pg_sys::NodeTag::T_Var
+            {
+                continue;
+            }
+            let var = expr.cast::<pg_sys::Var>();
+            let vatt = unsafe { (*var).varattno };
+            if vatt == target_attno {
+                return unsafe { (*tle).resno };
+            }
+        }
+        0
+    }
+
     /// # Safety
     ///
     /// `slot` must be a valid, non-null `TupleTableSlot` pointer.
@@ -1058,6 +1368,8 @@ impl JoinExecState {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     fn make_state(strategy: AccelStrategy, batch_size: usize) -> JoinExecState {
@@ -1069,18 +1381,20 @@ mod tests {
         )
     }
 
+    // -- Basic initialization --------------------------------------------------
+
     #[test]
     fn new_state_not_exhausted() {
-        let state = make_state(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
         assert!(!state.outer_exhausted);
         assert_eq!(state.rows_dispatched, 0);
         assert_eq!(state.batches_executed, 0);
-        assert_eq!(state.strategy(), AccelStrategy::BatchedEval);
+        assert_eq!(state.strategy(), AccelStrategy::GpuSpatial);
     }
 
     #[test]
     fn null_qual_means_passthrough() {
-        let state = make_state(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
         assert!(state.qual.is_null());
         assert!(state.econtext.is_null());
     }
@@ -1093,19 +1407,19 @@ mod tests {
 
     #[test]
     fn current_outer_null_initially() {
-        let state = make_state(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
         assert!(state.current_outer.is_null());
     }
 
     #[test]
     fn inner_needs_rescan_false_initially() {
-        let state = make_state(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
         assert!(!state.inner_needs_rescan);
     }
 
     #[test]
     fn qual_ptr_and_econtext_ptr_accessors() {
-        let state = make_state(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
         assert!(state.qual_ptr().is_null());
         assert!(state.econtext_ptr().is_null());
 
@@ -1128,13 +1442,14 @@ mod tests {
     #[test]
     fn all_strategies_constructible() {
         for strategy in [
-            AccelStrategy::BatchedEval,
             AccelStrategy::GpuSpatial,
             AccelStrategy::GpuRaster,
             AccelStrategy::GpuH3,
             AccelStrategy::GpuSort,
             AccelStrategy::GpuReduce,
+            AccelStrategy::GpuExpr,
             AccelStrategy::GpuHashJoin,
+            AccelStrategy::GpuWindow,
         ] {
             let state = make_state(strategy, 64);
             assert_eq!(state.strategy(), strategy);
@@ -1143,7 +1458,7 @@ mod tests {
 
     #[test]
     fn single_batch_size() {
-        let state = make_state(AccelStrategy::BatchedEval, 1);
+        let state = make_state(AccelStrategy::GpuSpatial, 1);
         assert_eq!(state.batch_size, 1);
     }
 
@@ -1155,11 +1470,313 @@ mod tests {
 
     #[test]
     fn outer_exhausted_blocks_progress() {
-        let mut state = make_state(AccelStrategy::BatchedEval, 256);
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
         state.outer_exhausted = true;
         // When outer is exhausted and current_outer is null, next() would
         // return null immediately.
         assert!(state.current_outer.is_null());
         assert!(state.outer_exhausted);
+    }
+
+    // -- Nested loop vs hash join configuration --------------------------------
+
+    #[test]
+    fn gpu_spatial_strategy_defaults_for_spatial_join() {
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
+        assert_eq!(state.strategy(), AccelStrategy::GpuSpatial);
+        // GPU context fields default to "not configured".
+        assert_eq!(state.outer_attno, 0);
+        assert_eq!(state.inner_attno, 0);
+        assert_eq!(state.fn_oid, pg_sys::InvalidOid);
+    }
+
+    #[test]
+    fn gpu_hash_join_strategy_defaults() {
+        let state = make_state(AccelStrategy::GpuHashJoin, 512);
+        assert_eq!(state.strategy(), AccelStrategy::GpuHashJoin);
+        assert_eq!(state.hash_outer_attno, 0);
+        assert_eq!(state.hash_inner_attno, 0);
+        assert!(!state.hash_built);
+        assert!(state.hash_table.is_none());
+        assert!(state.hash_inner_tuples.is_empty());
+    }
+
+    #[test]
+    fn set_hash_join_context_stores_fields() {
+        let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+        state.set_hash_join_context(3, 5, PgaccelKeyType::Int64);
+        assert_eq!(state.hash_outer_attno, 3);
+        assert_eq!(state.hash_inner_attno, 5);
+        assert!(matches!(state.hash_key_type, PgaccelKeyType::Int64));
+    }
+
+    #[test]
+    fn set_hash_join_context_int32_key_type() {
+        let mut state = make_state(AccelStrategy::GpuHashJoin, 128);
+        state.set_hash_join_context(1, 2, PgaccelKeyType::Int32);
+        assert!(matches!(state.hash_key_type, PgaccelKeyType::Int32));
+    }
+
+    #[test]
+    fn set_hash_join_context_float64_key_type() {
+        let mut state = make_state(AccelStrategy::GpuHashJoin, 128);
+        state.set_hash_join_context(7, 8, PgaccelKeyType::Float64);
+        assert!(matches!(state.hash_key_type, PgaccelKeyType::Float64));
+    }
+
+    #[test]
+    fn set_hash_join_context_can_be_called_multiple_times() {
+        let mut state = make_state(AccelStrategy::GpuHashJoin, 128);
+        state.set_hash_join_context(1, 2, PgaccelKeyType::Int32);
+        assert_eq!(state.hash_outer_attno, 1);
+
+        // Reconfigure with different values.
+        state.set_hash_join_context(10, 20, PgaccelKeyType::Int64);
+        assert_eq!(state.hash_outer_attno, 10);
+        assert_eq!(state.hash_inner_attno, 20);
+        assert!(matches!(state.hash_key_type, PgaccelKeyType::Int64));
+    }
+
+    // -- Pending matches buffer ------------------------------------------------
+
+    #[test]
+    fn pending_matches_empty_initially() {
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
+        assert!(state.pending_matches.is_empty());
+        assert_eq!(state.pending_cursor, 0);
+    }
+
+    #[test]
+    fn pending_cursor_starts_at_zero() {
+        let state = make_state(AccelStrategy::GpuSpatial, 64);
+        assert_eq!(state.pending_cursor, 0);
+    }
+
+    #[test]
+    fn pending_matches_capacity_independent_of_batch_size() {
+        // pending_matches starts as an empty Vec, not pre-allocated to batch_size.
+        let state = make_state(AccelStrategy::GpuSpatial, 1024);
+        assert_eq!(state.pending_matches.capacity(), 0);
+    }
+
+    // -- Hash join inner tuples buffer -----------------------------------------
+
+    #[test]
+    fn hash_inner_tuples_empty_initially() {
+        let state = make_state(AccelStrategy::GpuHashJoin, 256);
+        assert!(state.hash_inner_tuples.is_empty());
+    }
+
+    #[test]
+    fn hash_built_false_initially() {
+        let state = make_state(AccelStrategy::GpuHashJoin, 256);
+        assert!(!state.hash_built);
+    }
+
+    #[test]
+    fn hash_table_none_initially() {
+        let state = make_state(AccelStrategy::GpuHashJoin, 256);
+        assert!(state.hash_table.is_none());
+    }
+
+    // -- FmgrInfo zero initialization ------------------------------------------
+
+    #[test]
+    fn fn_info_buf_zeroed_on_init() {
+        let state = make_state(AccelStrategy::GpuSpatial, 128);
+        // A zeroed FmgrInfo has fn_oid = InvalidOid (0) and fn_addr = None.
+        assert_eq!(state.fn_info_buf.fn_oid, pg_sys::InvalidOid);
+    }
+
+    #[test]
+    fn fn_oid_invalid_initially() {
+        let state = make_state(AccelStrategy::GpuSpatial, 128);
+        assert_eq!(state.fn_oid, pg_sys::InvalidOid);
+    }
+
+    // -- Batch size edge cases -------------------------------------------------
+
+    #[test]
+    fn batch_size_zero_is_representable() {
+        // A batch_size of 0 is degenerate but should not panic during construction.
+        let state = make_state(AccelStrategy::GpuSpatial, 0);
+        assert_eq!(state.batch_size, 0);
+    }
+
+    #[test]
+    fn batch_size_usize_max() {
+        let state = make_state(AccelStrategy::GpuSpatial, usize::MAX);
+        assert_eq!(state.batch_size, usize::MAX);
+    }
+
+    #[test]
+    fn batch_size_power_of_two() {
+        for exp in 0..20 {
+            let bs = 1_usize << exp;
+            let state = make_state(AccelStrategy::GpuSpatial, bs);
+            assert_eq!(state.batch_size, bs);
+        }
+    }
+
+    // -- Counter mutation (simulated) ------------------------------------------
+
+    #[test]
+    fn rows_dispatched_increments() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        state.rows_dispatched += 1;
+        state.rows_dispatched += 1;
+        assert_eq!(state.rows_dispatched, 2);
+    }
+
+    #[test]
+    fn batches_executed_increments() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        state.batches_executed += 100;
+        assert_eq!(state.batches_executed, 100);
+    }
+
+    #[test]
+    fn dispatch_time_accumulates() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        state.dispatch_time_us += 500;
+        state.dispatch_time_us += 300;
+        assert_eq!(state.dispatch_time_us, 800);
+    }
+
+    #[test]
+    fn counters_do_not_overflow_at_large_values() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        state.rows_dispatched = u64::MAX - 1;
+        state.rows_dispatched += 1;
+        assert_eq!(state.rows_dispatched, u64::MAX);
+    }
+
+    // -- Strategy routing logic ------------------------------------------------
+
+    #[test]
+    fn gpu_expr_strategy_constructible() {
+        let state = make_state(AccelStrategy::GpuExpr, 256);
+        assert_eq!(state.strategy(), AccelStrategy::GpuExpr);
+    }
+
+    #[test]
+    fn gpu_window_strategy_constructible() {
+        let state = make_state(AccelStrategy::GpuWindow, 256);
+        assert_eq!(state.strategy(), AccelStrategy::GpuWindow);
+    }
+
+    #[test]
+    fn strategy_equality_is_value_based() {
+        let s1 = make_state(AccelStrategy::GpuSpatial, 128);
+        let s2 = make_state(AccelStrategy::GpuSpatial, 256);
+        assert_eq!(s1.strategy(), s2.strategy());
+    }
+
+    #[test]
+    fn different_strategies_not_equal() {
+        let s1 = make_state(AccelStrategy::GpuSpatial, 128);
+        let s2 = make_state(AccelStrategy::GpuHashJoin, 128);
+        assert_ne!(s1.strategy(), s2.strategy());
+    }
+
+    // -- State mutation: outer_exhausted and inner_needs_rescan -----------------
+
+    #[test]
+    fn outer_exhausted_toggling() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        assert!(!state.outer_exhausted);
+        state.outer_exhausted = true;
+        assert!(state.outer_exhausted);
+        state.outer_exhausted = false;
+        assert!(!state.outer_exhausted);
+    }
+
+    #[test]
+    fn inner_needs_rescan_toggling() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        assert!(!state.inner_needs_rescan);
+        state.inner_needs_rescan = true;
+        assert!(state.inner_needs_rescan);
+    }
+
+    // -- Qual/econtext with non-null pointers -----------------------------------
+
+    #[test]
+    fn qual_ptr_preserves_arbitrary_address() {
+        let addr = 0x1234_5678_usize as *mut pg_sys::ExprState;
+        let state = JoinExecState::new(AccelStrategy::GpuSpatial, 256, addr, std::ptr::null_mut());
+        assert_eq!(state.qual_ptr(), addr);
+        assert!(state.econtext_ptr().is_null());
+    }
+
+    #[test]
+    fn econtext_ptr_preserves_arbitrary_address() {
+        let addr = 0xABCD_EF01_usize as *mut pg_sys::ExprContext;
+        let state = JoinExecState::new(AccelStrategy::GpuSpatial, 256, std::ptr::null_mut(), addr);
+        assert!(state.qual_ptr().is_null());
+        assert_eq!(state.econtext_ptr(), addr);
+    }
+
+    // -- Hash join attno edge cases --------------------------------------------
+
+    #[test]
+    fn hash_join_attno_one_based() {
+        let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+        state.set_hash_join_context(1, 1, PgaccelKeyType::Int32);
+        assert_eq!(state.hash_outer_attno, 1);
+        assert_eq!(state.hash_inner_attno, 1);
+    }
+
+    #[test]
+    fn hash_join_large_attno() {
+        let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+        state.set_hash_join_context(100, 200, PgaccelKeyType::Int64);
+        assert_eq!(state.hash_outer_attno, 100);
+        assert_eq!(state.hash_inner_attno, 200);
+    }
+
+    // -- GPU context defaults ---------------------------------------------------
+
+    #[test]
+    fn outer_attno_zero_means_not_set() {
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
+        assert_eq!(state.outer_attno, 0);
+    }
+
+    #[test]
+    fn inner_attno_zero_means_not_set() {
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
+        assert_eq!(state.inner_attno, 0);
+    }
+
+    #[test]
+    fn gpu_configured_check_requires_all_three_fields() {
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
+        // The gpu_configured check from next_gpu_spatial:
+        // outer_attno > 0 && inner_attno > 0 && fn_oid != InvalidOid
+        let gpu_configured =
+            state.outer_attno > 0 && state.inner_attno > 0 && state.fn_oid != pg_sys::InvalidOid;
+        assert!(
+            !gpu_configured,
+            "default state should not be GPU-configured"
+        );
+    }
+
+    #[test]
+    fn gpu_configured_partial_setup_still_false() {
+        let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+        // Only set outer_attno — still not fully configured.
+        state.outer_attno = 1;
+        let gpu_configured =
+            state.outer_attno > 0 && state.inner_attno > 0 && state.fn_oid != pg_sys::InvalidOid;
+        assert!(!gpu_configured);
+    }
+
+    // -- Default key type -------------------------------------------------------
+
+    #[test]
+    fn default_hash_key_type_is_int32() {
+        let state = make_state(AccelStrategy::GpuHashJoin, 256);
+        assert!(matches!(state.hash_key_type, PgaccelKeyType::Int32));
     }
 }

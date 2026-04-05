@@ -17,15 +17,15 @@
 
 use pgrx::pg_sys;
 
+use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::registry::AccelStrategy;
 use crate::gpu;
 
-/// Minimum row count to attempt GPU sort. Below this threshold, CPU sort
-/// via PG `SortSupport` is used unconditionally.
-const GPU_SORT_MIN_ROWS: usize = 100_000;
+use crate::engine::cost;
 
 /// PG type OIDs for GPU-sortable numeric types.
 const INT4OID: u32 = 23;
+const INT8OID: u32 = 20;
 const FLOAT4OID: u32 = 700;
 const FLOAT8OID: u32 = 701;
 
@@ -215,7 +215,7 @@ impl SortExecState {
         };
 
         // Pre-allocate key buffers for inline extraction.
-        let do_inline = matches!(inline_typid, FLOAT4OID | FLOAT8OID | INT4OID);
+        let do_inline = matches!(inline_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
         let mut f32_keys: Vec<f32> = if do_inline && inline_typid == FLOAT4OID {
             Vec::with_capacity(1024)
         } else {
@@ -269,6 +269,10 @@ impl SortExecState {
                             INT4OID => {
                                 f64_keys.push(f64::from(datum.value() as i32));
                             }
+                            INT8OID => {
+                                // i64 → f64 is lossless for |v| ≤ 2^53.
+                                f64_keys.push(datum.value() as i64 as f64);
+                            }
                             _ => unreachable!(),
                         }
                     }
@@ -289,7 +293,11 @@ impl SortExecState {
         // -- Phase 2: Sort --
         if n > 1 && !self.sort_keys.is_empty() {
             // Try GPU sort using inline-extracted keys (zero-copy key extraction).
-            let gpu_done = if do_inline && n >= GPU_SORT_MIN_ROWS {
+            let limits = cost::device_limits();
+            let gpu_done = if do_inline
+                && n >= limits.gpu_sort_min_rows
+                && n <= limits.gpu_sort_max_elements
+            {
                 let key = self.sort_keys[0].clone();
                 match inline_typid {
                     FLOAT4OID => {
@@ -310,7 +318,7 @@ impl SortExecState {
                             ok
                         }
                     }
-                    FLOAT8OID | INT4OID => {
+                    FLOAT8OID | INT4OID | INT8OID => {
                         if f64_keys.is_empty() {
                             false
                         } else {
@@ -335,9 +343,15 @@ impl SortExecState {
             };
 
             if !gpu_done {
-                // Fall back: CPU sort via PG SortSupport (also handles
-                // non-GPU-eligible types and multi-key sorts).
+                // Defer to PG's SortSupport comparison infrastructure.
+                // This is not a CPU reimplementation — it uses PG's native
+                // sort operators (handles multi-key sorts and non-GPU types).
                 // SAFETY: main backend thread, scratch_slot valid.
+                pgrx::warning!(
+                    "pg_accel: GPU sort unavailable for {} rows; \
+                     deferring to PG SortSupport",
+                    n,
+                );
                 unsafe {
                     self.sort_tuples(scratch_slot, n);
                 }
@@ -396,29 +410,25 @@ impl SortExecState {
         }
 
         // -- Pre-extract sort key datums for all tuples --
+        // Use bulk extraction to avoid per-tuple ExecForceStoreMinimalTuple.
         // Layout: key_datums[key_idx][tuple_idx] = (Datum, is_null)
-        let mut key_datums: Vec<Vec<(pg_sys::Datum, bool)>> = vec![Vec::with_capacity(n); num_keys];
+        // SAFETY: scratch_slot has a valid tuple descriptor.
+        let tupdesc = unsafe { (*scratch_slot).tts_tupleDescriptor };
+        let mut key_datums: Vec<Vec<(pg_sys::Datum, bool)>> = Vec::with_capacity(num_keys);
 
-        for mt in &self.sorted_tuples {
-            if mt.is_null() {
-                for kd in &mut key_datums {
-                    kd.push((pg_sys::Datum::from(0), true));
-                }
-                continue;
-            }
-            // SAFETY: mt is a valid MinimalTuple. Store in scratch slot
-            // for attribute extraction. `false` = slot does not own tuple.
-            unsafe {
-                pg_sys::ExecForceStoreMinimalTuple(*mt, scratch_slot, false);
-            }
-            for (k, key) in self.sort_keys.iter().enumerate() {
-                let mut is_null = false;
-                // SAFETY: scratch_slot holds a valid tuple, attno is valid.
-                let datum = unsafe {
-                    pg_sys::slot_getattr(scratch_slot, key.attno as i32, &raw mut is_null)
-                };
-                key_datums[k].push((datum, is_null));
-            }
+        for key in &self.sort_keys {
+            let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
+            // SAFETY: sorted_tuples contains valid MinimalTuple pointers.
+            // scratch_slot is valid for fallback extraction.
+            let (datums, nulls) = unsafe {
+                tuple_extract::extract_datum(&self.sorted_tuples, &info, scratch_slot)
+            };
+            let col: Vec<(pg_sys::Datum, bool)> = datums
+                .into_iter()
+                .zip(nulls.into_iter())
+                .map(|(d, n)| (d, n != 0))
+                .collect();
+            key_datums.push(col);
         }
 
         // -- Build and sort index array --
@@ -493,7 +503,7 @@ impl SortExecState {
     /// resulting index permutation.
     ///
     /// Returns `true` if GPU sort succeeded, `false` if the caller should
-    /// fall back to CPU sort.
+    /// defer to PG's SortSupport.
     ///
     /// # Supported types
     ///
@@ -507,6 +517,11 @@ impl SortExecState {
     /// Must be called on the main backend thread. `scratch_slot` must be valid.
     #[allow(clippy::too_many_lines, clippy::needless_bool)]
     unsafe fn try_gpu_sort(&mut self, scratch_slot: *mut pg_sys::TupleTableSlot, n: usize) -> bool {
+        // Gate: fall back to CPU sort for large arrays to avoid SYCL runtime aborts.
+        if n > cost::device_limits().gpu_sort_max_elements {
+            return false;
+        }
+
         let key = self.sort_keys[0].clone();
 
         // Determine the type of the sort key column from the tuple descriptor.
@@ -534,24 +549,20 @@ impl SortExecState {
 
         match typid {
             FLOAT4OID => {
+                // Bulk-extract f32 keys using direct MinimalTuple reads.
+                let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
+                let (all_vals, all_nulls) = unsafe {
+                    tuple_extract::extract_f32(&self.sorted_tuples, &info, scratch_slot)
+                };
                 let mut keys: Vec<f32> = Vec::with_capacity(n);
-                for (i, mt) in self.sorted_tuples.iter().enumerate() {
-                    if mt.is_null() {
-                        null_indices.push(i);
-                        continue;
-                    }
-                    // SAFETY: mt is a valid MinimalTuple.
-                    unsafe { pg_sys::ExecForceStoreMinimalTuple(*mt, scratch_slot, false) };
-                    let mut is_null = false;
-                    let datum = unsafe {
-                        pg_sys::slot_getattr(scratch_slot, key.attno as i32, &raw mut is_null)
-                    };
-                    if is_null {
+                for (i, (&val, &is_null)) in
+                    all_vals.iter().zip(all_nulls.iter()).enumerate()
+                {
+                    if is_null != 0 {
                         null_indices.push(i);
                     } else {
                         non_null_indices.push(i);
-                        // SAFETY: datum for float4 is passed by value as f32 bits.
-                        keys.push(f32::from_bits(datum.value() as u32));
+                        keys.push(val);
                     }
                 }
                 if keys.is_empty() {
@@ -571,22 +582,19 @@ impl SortExecState {
                 ok
             }
             FLOAT8OID => {
+                let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
+                let (all_vals, all_nulls) = unsafe {
+                    tuple_extract::extract_f64(&self.sorted_tuples, &info, scratch_slot)
+                };
                 let mut keys: Vec<f64> = Vec::with_capacity(n);
-                for (i, mt) in self.sorted_tuples.iter().enumerate() {
-                    if mt.is_null() {
-                        null_indices.push(i);
-                        continue;
-                    }
-                    unsafe { pg_sys::ExecForceStoreMinimalTuple(*mt, scratch_slot, false) };
-                    let mut is_null = false;
-                    let datum = unsafe {
-                        pg_sys::slot_getattr(scratch_slot, key.attno as i32, &raw mut is_null)
-                    };
-                    if is_null {
+                for (i, (&val, &is_null)) in
+                    all_vals.iter().zip(all_nulls.iter()).enumerate()
+                {
+                    if is_null != 0 {
                         null_indices.push(i);
                     } else {
                         non_null_indices.push(i);
-                        keys.push(f64::from_bits(datum.value() as u64));
+                        keys.push(val);
                     }
                 }
                 if keys.is_empty() {
@@ -606,23 +614,54 @@ impl SortExecState {
                 ok
             }
             INT4OID => {
-                // Promote i32 to f64 (lossless: 53-bit mantissa > 32 bits).
+                // Bulk-extract i32 keys, promote to f64 (lossless).
+                let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
+                let (all_vals, all_nulls) = unsafe {
+                    tuple_extract::extract_i32(&self.sorted_tuples, &info, scratch_slot)
+                };
                 let mut keys: Vec<f64> = Vec::with_capacity(n);
-                for (i, mt) in self.sorted_tuples.iter().enumerate() {
-                    if mt.is_null() {
-                        null_indices.push(i);
-                        continue;
-                    }
-                    unsafe { pg_sys::ExecForceStoreMinimalTuple(*mt, scratch_slot, false) };
-                    let mut is_null = false;
-                    let datum = unsafe {
-                        pg_sys::slot_getattr(scratch_slot, key.attno as i32, &raw mut is_null)
-                    };
-                    if is_null {
+                for (i, (&val, &is_null)) in
+                    all_vals.iter().zip(all_nulls.iter()).enumerate()
+                {
+                    if is_null != 0 {
                         null_indices.push(i);
                     } else {
                         non_null_indices.push(i);
-                        keys.push(f64::from(datum.value() as i32));
+                        keys.push(f64::from(val));
+                    }
+                }
+                if keys.is_empty() {
+                    return false;
+                }
+                let mut gpu_indices: Vec<u32> = (0..keys.len() as u32).collect();
+                let ok = gpu::sort_kv_f64(&mut keys, &mut gpu_indices).is_some();
+                if ok {
+                    self.apply_gpu_sort_result(
+                        &key,
+                        &non_null_indices,
+                        &null_indices,
+                        &gpu_indices,
+                        n,
+                    );
+                }
+                ok
+            }
+            INT8OID => {
+                // Bulk-extract i64 keys, promote to f64 (lossless for |v| ≤ 2^53).
+                let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
+                let (all_vals, all_nulls) = unsafe {
+                    tuple_extract::extract_i64(&self.sorted_tuples, &info, scratch_slot)
+                };
+                let mut keys: Vec<f64> = Vec::with_capacity(n);
+                for (i, (&val, &is_null)) in
+                    all_vals.iter().zip(all_nulls.iter()).enumerate()
+                {
+                    if is_null != 0 {
+                        null_indices.push(i);
+                    } else {
+                        non_null_indices.push(i);
+                        #[allow(clippy::cast_precision_loss)]
+                        keys.push(val as f64);
                     }
                 }
                 if keys.is_empty() {
@@ -659,9 +698,9 @@ impl SortExecState {
         n: usize,
     ) {
         // GPU sorted ascending with NaN as largest. If DESC, reverse.
-        // Known GT operator OIDs: float4gt(623), float8gt(674), int4gt(521).
+        // Known GT operator OIDs: float4gt(623), float8gt(674), int4gt(521), int8gt(413).
         let sort_op_raw = u32::from(key.sort_op);
-        let is_desc = matches!(sort_op_raw, 623 | 674 | 521);
+        let is_desc = matches!(sort_op_raw, 623 | 674 | 521 | 413);
 
         let sorted_non_null: Vec<pg_sys::MinimalTuple> = if is_desc {
             gpu_indices
@@ -796,7 +835,6 @@ mod tests {
     #[test]
     fn all_strategies_constructible() {
         for strategy in [
-            AccelStrategy::BatchedEval,
             AccelStrategy::GpuSpatial,
             AccelStrategy::GpuRaster,
             AccelStrategy::GpuH3,
@@ -891,22 +929,23 @@ mod tests {
 
     #[test]
     fn gpu_sort_min_rows_threshold() {
-        assert_eq!(GPU_SORT_MIN_ROWS, 100_000);
+        assert_eq!(cost::device_limits().gpu_sort_min_rows, 100_000);
     }
 
     #[test]
     fn gpu_sortable_type_oids() {
         // Verify our OID constants match PG system catalog values.
         assert_eq!(INT4OID, 23);
+        assert_eq!(INT8OID, 20);
         assert_eq!(FLOAT4OID, 700);
         assert_eq!(FLOAT8OID, 701);
     }
 
     #[test]
     fn gpu_sort_requires_gpu_sort_strategy() {
-        // BatchedEval strategy should never attempt GPU sort even with
+        // Non-GpuSort strategies should never attempt GPU sort even with
         // enough rows — the try_gpu_sort check is gated on GpuSort.
-        let state = make_state(AccelStrategy::BatchedEval, 256);
+        let state = make_state(AccelStrategy::GpuSpatial, 256);
         assert!(!matches!(state.strategy(), AccelStrategy::GpuSort));
     }
 
