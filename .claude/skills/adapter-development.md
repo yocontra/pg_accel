@@ -15,40 +15,70 @@ Each adapter is typically 20–50 lines of Rust declaring which functions to acc
 ```rust
 // adapters/myext.rs
 
-use crate::core::registry::{ExtensionAdapter, FunctionAccelEntry, AccelStrategy};
-use crate::core::function_matcher::FunctionPattern;
+use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
 
-pub fn myext_adapter() -> ExtensionAdapter {
+pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "myext",
         version_query: "SELECT extversion FROM pg_extension WHERE extname = 'myext'",
-        functions: vec![
-            // BatchedEval — function called on main thread, Custom Scan batching
-            FunctionAccelEntry {
-                pattern: FunctionPattern {
-                    schema: "public",
-                    name: "my_expensive_func",
-                    arg_types: Some(vec!["float8", "float8"]),
-                    return_type: Some("float8"),
-                },
-                strategy: AccelStrategy::BatchedEval,
-            },
-            // Strategy 2: GpuSpatial — three-layer GPU model
-            FunctionAccelEntry {
-                pattern: FunctionPattern {
-                    schema: "public",
-                    name: "my_spatial_predicate",
-                    arg_types: Some(vec!["geometry", "geometry"]),
-                    return_type: Some("boolean"),
-                },
-                strategy: AccelStrategy::GpuSpatial {
-                    gpu_kernel: "my_spatial_kernel",
-                    layer1_bbox: true,
-                    layer2_geometric: true,
-                },
-            },
-        ],
+        functions: gpu_entries()
+            .into_iter()
+            .chain(batched_entries())
+            .collect(),
     }
+}
+
+fn gpu_entries() -> Vec<FunctionAccelEntry> {
+    const NAMES: &[&str] = &["my_spatial_predicate"];
+    NAMES
+        .iter()
+        .map(|&name| FunctionAccelEntry {
+            schema: "public",
+            name,
+            strategy: AccelStrategy::GpuSpatial,
+        })
+        .collect()
+}
+
+fn batched_entries() -> Vec<FunctionAccelEntry> {
+    const NAMES: &[&str] = &["my_expensive_func", "my_other_func"];
+    NAMES
+        .iter()
+        .map(|&name| FunctionAccelEntry {
+            schema: "public",
+            name,
+            strategy: AccelStrategy::BatchedEval,
+        })
+        .collect()
+}
+```
+
+## Key Types
+
+### FunctionAccelEntry
+
+Flat struct with three fields — no nested `FunctionPattern`:
+
+```rust
+pub struct FunctionAccelEntry {
+    pub schema: &'static str,   // e.g. "public", "pg_catalog"
+    pub name: &'static str,     // lower-case function name
+    pub strategy: AccelStrategy, // how to accelerate it
+}
+```
+
+### FunctionPattern (internal)
+
+Used internally by the registry during OID resolution (querying `pg_proc`).
+Adapters don't construct these directly — the registry builds them from
+`FunctionAccelEntry` fields.
+
+```rust
+pub struct FunctionPattern {
+    pub schema: Option<String>,
+    pub name: String,
+    pub arg_types: Option<Vec<pg_sys::Oid>>,  // OIDs, not strings
+    pub return_type: Option<pg_sys::Oid>,      // OID, not string
 }
 ```
 
@@ -80,8 +110,17 @@ Requirements:
 - Geometry types must have a TypeExtractor for bbox and vertex extraction
 - CPU recheck must use the original PostGIS function (correctness guarantee)
 
+### GpuH3 (H3 cell computation)
+GPU-accelerated H3 index functions — pure integer/trig math.
+
+### GpuRaster (raster map-algebra)
+GPU-accelerated raster operations.
+
 ### GpuSort / GpuReduce (aggregates and sorts)
 GPU-accelerated sort and reduction for numeric types.
+
+### GpuExpr / GpuHashJoin / GpuWindow
+GPU expression evaluator, hash joins, and window functions.
 
 ## Type Extractors
 
@@ -118,39 +157,39 @@ impl TypeExtractor for VectorExtractor {
 
 ## PostGIS Adapter Reference
 
-The PostGIS adapter is the most complete example:
+The PostGIS adapter (`adapters/postgis.rs`) is the most complete example.
+4 GPU spatial + 16 batched eval = 20 functions total:
 
 ```rust
-pub fn postgis_adapter() -> ExtensionAdapter {
+pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "postgis",
-        version_query: "SELECT PostGIS_Version()",
-        functions: vec![
-            // GPU-accelerated spatial predicates (three-layer model)
-            accel_gpu_spatial("st_intersects", &["geometry", "geometry"], "boolean"),
-            accel_gpu_spatial("st_contains",   &["geometry", "geometry"], "boolean"),
-            accel_gpu_spatial("st_within",     &["geometry", "geometry"], "boolean"),
-            accel_gpu_spatial("st_dwithin",    &["geometry", "geometry", "float8"], "boolean"),
-            accel_gpu_spatial("st_distance",   &["geography", "geography"], "float8"),
-
-            // BatchedEval — main thread, batched Custom Scan
-            accel_batched("st_buffer",     &["geometry", "float8"], "geometry"),
-            accel_batched("st_transform",  &["geometry", "int4"], "geometry"),
-            accel_batched("st_area",       &["geometry"], "float8"),
-            accel_batched("st_centroid",   &["geometry"], "geometry"),
-            accel_batched("st_length",     &["geometry"], "float8"),
-            accel_batched("st_simplify",   &["geometry", "float8"], "geometry"),
-            accel_batched("st_asmvtgeom",  &["geometry", "box2d", "int4", "int4", "boolean"], "geometry"),
-            accel_batched("st_union",      &["geometry", "geometry"], "geometry"),
-            accel_batched("st_crosses",    &["geometry", "geometry"], "boolean"),
-            accel_batched("st_overlaps",   &["geometry", "geometry"], "boolean"),
-            accel_batched("st_touches",    &["geometry", "geometry"], "boolean"),
-            accel_batched("st_x",          &["geometry"], "float8"),
-            accel_batched("st_y",          &["geometry"], "float8"),
-            accel_batched("st_srid",       &["geometry"], "int4"),
-            accel_batched("st_geometrytype", &["geometry"], "text"),
-        ],
+        version_query: "SELECT postgis_version()",
+        functions: gpu_spatial_entries()
+            .into_iter()
+            .chain(batched_eval_entries())
+            .collect(),
     }
+}
+
+fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
+    const NAMES: &[&str] = &["st_intersects", "st_contains", "st_within", "st_dwithin"];
+    NAMES.iter().map(|&name| FunctionAccelEntry {
+        schema: "public", name, strategy: AccelStrategy::GpuSpatial,
+    }).collect()
+}
+
+fn batched_eval_entries() -> Vec<FunctionAccelEntry> {
+    const NAMES: &[&str] = &[
+        "st_distance", "st_buffer", "st_transform", "st_simplify",
+        "st_union", "st_centroid", "st_asmvtgeom",
+        "st_area", "st_length",
+        "st_crosses", "st_overlaps", "st_touches",
+        "st_x", "st_y", "st_srid", "st_geometrytype",
+    ];
+    NAMES.iter().map(|&name| FunctionAccelEntry {
+        schema: "public", name, strategy: AccelStrategy::BatchedEval,
+    }).collect()
 }
 ```
 
@@ -196,16 +235,23 @@ Is it called on enough rows to justify Custom Scan overhead?
 
 ## Registration
 
-Add your adapter to `adapters/mod.rs`:
+Add your adapter module to `adapters/mod.rs` and wire it into the registry's
+`init_adapters()` method in `engine/registry.rs`:
 
 ```rust
-pub fn all_adapters() -> Vec<ExtensionAdapter> {
-    vec![
-        postgis::postgis_adapter(),
-        h3::h3_adapter(),
-        pg_builtins::pg_builtins_adapter(),
-        myext::myext_adapter(),  // ADD HERE
-    ]
+// adapters/mod.rs — add your module
+pub mod myext;
+
+// engine/registry.rs — add to init_adapters()
+pub fn init_adapters(&mut self) {
+    let all_adapters = vec![
+        crate::adapters::postgis::adapter(),
+        crate::adapters::postgis_raster::adapter(),
+        crate::adapters::h3::adapter(),
+        crate::adapters::pg_builtins::adapter(),
+        crate::adapters::myext::adapter(),  // ADD HERE
+    ];
+    // ...
 }
 ```
 

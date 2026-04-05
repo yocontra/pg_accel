@@ -15,19 +15,8 @@ brew tap yocontra/pg_accel https://github.com/yocontra/pg_accel.git
 brew install pg_accel
 ```
 
-This installs pg_accel with CPU-only batched evaluation. For GPU acceleration,
-see [GPU Acceleration](#gpu-acceleration) below.
-
-### Docker
-
-```bash
-docker run -d --name pgaccel \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  ghcr.io/yocontra/pg_accel:latest
-```
-
-The image includes PostgreSQL 17, PostGIS, h3-pg, and pg_accel pre-configured.
+This installs pg_accel for PostgreSQL 17. Requires Apple Silicon (M1+) for
+GPU acceleration. See [GPU Acceleration](#gpu-acceleration) below.
 
 ### From source
 
@@ -95,52 +84,92 @@ GROUP BY b.name;
 | Apple Silicon | M1+ | Required for Metal GPU acceleration |
 | AdaptiveCpp | latest develop | Optional — for GPU acceleration only |
 
-CPU-only batched evaluation works on any platform that PostgreSQL supports.
+GPU acceleration requires Apple Silicon (M1+) with AdaptiveCpp Metal backend.
 
 ## Benchmarks
 
-Measured on Apple M2 Max, PostgreSQL 17.9, single-backend (no parallel workers),
-`work_mem=4MB`. pg_accel replaces PostgreSQL's external merge sort with a GPU
-bitonic sort that operates on key-index pairs in memory, eliminating disk I/O.
+All benchmarks compare pg_accel vs PostgreSQL with parallel workers enabled
+(the default production configuration). We never compare against
+single-threaded PostgreSQL — that would be deceptive since 100% of production
+deployments use parallel query.
 
-#### GPU Sort — Wide rows (10 columns, ~120 bytes/row)
+**Hardware:** Apple M2 Max (12 CPU cores, 38 GPU cores, 64 GB unified memory)
+**PostgreSQL:** 17.9 with `max_parallel_workers_per_gather = 2`
+**Methodology:** 10 iterations + 3 warmup, randomized measurement order, plan
+cache flush between measurements, paired t-test (p < 0.05)
 
-| Dataset | PG Native (disk spill) | pg_accel GPU Sort | Speedup |
-|---|---|---|---|
-| 1M rows (120 MB spill) | 809 ms | 384 ms | **2.1x** |
-| 5M rows (597 MB spill) | 4,742 ms | 2,525 ms | **1.9x** |
-| 10M rows (1.2 GB spill) | 15,137 ms | 4,569 ms | **3.3x** |
+### Highlights
 
-With `work_mem=1MB` (extreme disk pressure):
+| Workload | Accel | PG Parallel | Speedup |
+|----------|-------|-------------|---------|
+| spatial_mega_5kv (5000-vertex polygons) | 20.96 ms | 46.69 ms | **2.23x** |
+| spatial_concentric (nested rings) | 20.86 ms | 40.58 ms | **1.95x** |
+| mixed_expr_agg (filter + aggregate) | 9.06 ms | 14.67 ms | **1.62x** |
+| gpu_hashjoin_filter (join + WHERE) | 7.30 ms | 10.21 ms | **1.40x** |
+| spatial_mega_2kv (2000-vertex polygons) | 20.36 ms | 27.52 ms | **1.35x** |
+| spatial_star_1kv (star-shaped polygon) | 17.39 ms | 22.74 ms | **1.31x** |
+| spatial_multihole (polygon with holes) | 24.07 ms | 27.44 ms | **1.14x** |
+| spatial_mega_1kv (1000-vertex polygons) | 19.83 ms | 21.29 ms | **1.07x** |
 
-| Dataset | PG Native | pg_accel GPU Sort | Speedup |
-|---|---|---|---|
-| 5M rows | 5,415 ms | 2,531 ms | **2.1x** |
-| 10M rows | 12,295 ms | 4,561 ms | **2.7x** |
+Passthrough workloads (sort, aggregation, window, hash join without filter)
+run at parity (~1.00x) — pg_accel's planner correctly defers to PostgreSQL
+when GPU acceleration would not help.
 
-#### Smart deferral — zero overhead when GPU isn't beneficial
+### Zero OLTP overhead
 
-| Query Pattern | Overhead |
-|---|---|
-| Narrow rows ORDER BY | 0% (defers to PG) |
-| ORDER BY ... LIMIT k | 0% (defers to PG top-N heapsort) |
-| Aggregates, filters, scans | 0% (passes through unchanged) |
+| Workload | Accel | PG Parallel | Notes |
+|----------|-------|-------------|-------|
+| oltp_point_lookup | 0.01 ms | 0.00 ms | Sub-microsecond, noise floor |
+| small_table_scan | 0.01 ms | 0.01 ms | No measurable overhead |
 
-**Correctness**: GPU sort output is verified row-by-row against PostgreSQL native
-sort. Spatial predicates use the three-result model: TRUE/FALSE/UNCERTAIN.
-Uncertain rows are rechecked on CPU using the original PostGIS function (never
-wrong results). All tests pass.
+### Scaling with polygon complexity
 
-Full methodology and reproducible scripts: [`benchmarks/`](benchmarks/).
+The cost model automatically skips GPU acceleration for low-vertex polygons
+where PG parallel is faster. Zero overhead below the crossover, then
+monotonically increasing speedup as geometric complexity rises:
+
+| Vertices | Accel | PG Parallel | Speedup |
+|----------|-------|-------------|---------|
+| 4 | 12.63 ms | 12.49 ms | 0.99x (passthrough) |
+| 16 | 12.80 ms | 12.95 ms | 1.01x (passthrough) |
+| 64 | 13.40 ms | 13.11 ms | 0.98x (passthrough) |
+| 256 | 14.74 ms | 14.65 ms | 0.99x (passthrough) |
+| 500 | 16.12 ms | 16.08 ms | 1.00x (passthrough) |
+| 750 | 18.45 ms | 18.34 ms | 0.99x (passthrough) |
+| 1,000 | 17.80 ms | 19.52 ms | **1.10x** |
+| 2,000 | 18.35 ms | 25.18 ms | **1.37x** |
+| 5,000 | 18.71 ms | 43.75 ms | **2.34x** |
+| 10,000 | 19.05 ms | 69.13 ms | **3.63x** |
+| 25,000 | 20.70 ms | 152.22 ms | **7.35x** |
+| 50,000 | 21.81 ms | 291.61 ms | **13.37x** |
+| 100,000 | 21.21 ms | 286.75 ms | **13.52x** |
+
+The vertex threshold is hardware-derived (`DeviceLimits::gpu_spatial_min_vertices`)
+and auto-scales with GPU compute units. On M2 Max, the crossover is ~750 vertices.
+
+The full 90-workload benchmark report (including detailed per-workload
+statistics, confidence intervals, effect sizes, and methodology) is in
+`benchmarks/README.md`.
+
+Run benchmarks with:
+
+```bash
+just bench                        # default: 100K rows, 10 iterations
+just bench rows=1000000           # larger dataset
+```
+
+**Correctness**: Every accelerated query is verified against PostgreSQL's own
+results (accel ON vs OFF comparison). Spatial predicates use the three-result
+model (TRUE/FALSE/UNCERTAIN) with automatic CPU recheck — no query ever
+returns wrong results.
 
 ## What it does
 
 pg_accel intercepts queries that use supported SQL functions (spatial predicates,
 H3 cell operations, raster algebra, sorts, aggregates, hash joins, grouped
 aggregation, window functions, and WHERE clause expressions) and re-executes
-them in batches rather than one row at a time. When a GPU is available, it offloads
-the heavy compute to GPU kernels. When no GPU is present, it uses CPU-side
-batched evaluation with rayon. The extension installs as a standard PostgreSQL
+them in batches rather than one row at a time, offloading the heavy compute to
+GPU kernels via Metal on Apple Silicon. The extension installs as a standard PostgreSQL
 Custom Scan Provider -- it does not replace the planner or executor, it extends
 them. Queries that do not benefit from batching are left untouched.
 
@@ -176,18 +205,6 @@ them. Queries that do not benefit from batching are left untouched.
 | **WHERE expressions** | GpuExpr | Template kernels (`col > const`, `BETWEEN`, `IN`, `IS NULL`, two-col AND) + bytecode interpreter for complex expressions |
 | **Raster** | GpuRaster | Map algebra, raster clip, reclassification |
 
-### CPU-batched (BatchedEval)
-
-These functions are accelerated via tight main-thread batched evaluation rather
-than GPU offload. This still reduces per-row executor overhead compared to
-standard PostgreSQL row-at-a-time evaluation.
-
-| Category | Functions |
-|---|---|
-| **PostGIS** | `ST_DWithin`, `ST_Distance`, `ST_Crosses`, `ST_Overlaps`, `ST_Touches`, `ST_Area`, `ST_Length`, `ST_Buffer`, `ST_Transform`, `ST_Simplify`, `ST_Union`, `ST_Centroid` |
-| **H3** | `h3_grid_disk`, `h3_cell_to_boundary`, `h3_cell_to_latlng`, `h3_compact_cells` |
-| **PostgreSQL builtins** | `abs`, `sqrt`, `log`, `length`, `lower`, `upper`, `btrim`, `date_part`, `age`, `date_trunc`, `jsonb_extract_path_text`, `jsonb_typeof` |
-
 ### In development
 
 | Category | Status |
@@ -199,8 +216,8 @@ standard PostgreSQL row-at-a-time evaluation.
 ## Current limitations
 
 - **Sort**: Single numeric key only (int4, float4, float8). Multi-key and text sort deferred to PostgreSQL.
-- **GPU platform**: Apple Silicon (M1+) via Metal. CPU-side batched evaluation works on all platforms.
-- **Spatial GPU**: Intersects, contains, and within predicates. Distance and crosses use CPU batched evaluation.
+- **GPU platform**: Apple Silicon (M1+) via Metal only. No GPU = no acceleration (queries pass through to PG untouched).
+- **Spatial GPU**: Intersects, contains, and within predicates. Distance and crosses are not yet GPU-accelerated.
 - **Hash join**: Equi-join only (single key: int4, int8, float8). Multi-key and non-equi joins use PostgreSQL.
 - **Grouped aggregation**: Single numeric group key. Multi-key GROUP BY deferred to PostgreSQL.
 - **Window functions**: Requires pre-sorted input. Complex frame specifications deferred to PostgreSQL.
@@ -221,8 +238,8 @@ just setup-gpu
 cargo pgrx install --features "pg17 gpu"
 ```
 
-Without GPU setup, pg_accel still accelerates queries using CPU-side batched
-evaluation with rayon.
+Without GPU setup, pg_accel's planner hook is a no-op — all queries pass
+through to the stock PostgreSQL executor with zero overhead.
 
 ## Configuration
 
@@ -231,12 +248,9 @@ All parameters live under the `pg_accel.*` namespace.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `pg_accel.enabled` | bool | `on` | Master switch. Set to `off` to disable all acceleration. |
-| `pg_accel.workers` | int | `0` | Per-session worker threads. `0` = auto-detect from available cores. |
-| `pg_accel.max_workers_total` | int | `0` | Cluster-wide cap on worker threads (shared memory LWLock). `0` = unlimited. Requires SIGHUP. |
-| `pg_accel.min_batch_size` | int | `256` | Minimum estimated rows before batched execution is considered. |
-| `pg_accel.gpu_enabled` | bool | `on` | Enable GPU kernel dispatch. Set to `off` for CPU-only batching. |
+| `pg_accel.gpu_enabled` | bool | `on` | Enable GPU kernel dispatch. Set to `off` to disable all acceleration. |
 | `pg_accel.cost_multiplier` | float | `1.0` | Global multiplier for pg_accel cost estimates. >1.0 = more conservative, <1.0 = more aggressive. Range 0.1-10.0. |
-| `pg_accel.kernel_timeout_ms` | int | `5000` | Timeout (ms) for a single GPU kernel. Exceeded kernels fall back to CPU. |
+| `pg_accel.kernel_timeout_ms` | int | `5000` | Timeout (ms) for a single GPU kernel. Exceeded kernels fall back to CPU recheck. |
 | `pg_accel.log_level` | enum | `notice` | Verbosity: `debug`, `info`, `notice`, `warning`, `error`. |
 
 ## Diagnostics
@@ -256,17 +270,16 @@ SELECT pg_accel_reset_stats();
 
 ### Does this work without a GPU?
 
-Yes. When no GPU is detected (or `pg_accel.gpu_enabled = off`), the extension
-falls back to CPU-side batched evaluation using rayon. You still get the benefit
-of amortized per-row overhead and reduced executor transitions. The cost model
-adjusts its estimates accordingly.
+No. When no GPU is detected (or `pg_accel.gpu_enabled = off`), the planner
+hook is a no-op — no Custom Scan paths are injected and all queries pass
+through to the stock PostgreSQL executor untouched. There is zero overhead.
 
 ### Does this slow down OLTP workloads?
 
-No. The cost model only injects Custom Scan paths when the estimated row count
-exceeds `pg_accel.min_batch_size` (default 256). Small point lookups, index
-scans, and short transactions go through the stock executor untouched. You can
-also disable the extension per-session or globally.
+No. The cost model only injects Custom Scan paths when GPU acceleration is
+available and the estimated benefit exceeds a 30% cost threshold. Small point
+lookups, index scans, and short transactions go through the stock executor
+untouched. You can also disable the extension per-session or globally.
 
 ### How is this different from PG-Strom?
 

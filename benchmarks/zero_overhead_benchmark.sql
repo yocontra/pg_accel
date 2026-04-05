@@ -1,6 +1,6 @@
 -- pg_accel Zero-Overhead Benchmark Suite
 -- Proves <1% overhead on ANY query pg_accel does not accelerate.
--- Run: psql -h localhost -p 5488 -d postgres -f benchmarks/zero_overhead_benchmark.sql
+-- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/zero_overhead_benchmark.sql
 --
 -- pg_accel's hard constraint: no query may ever be slower with the extension loaded.
 -- This benchmark exercises 13 query pattern categories that pg_accel should never touch.

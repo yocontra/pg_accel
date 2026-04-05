@@ -189,15 +189,6 @@ brew tap yocontra/pg_accel https://github.com/yocontra/pg_accel.git
 brew install pg_accel
 ```
 
-### Docker
-
-```bash
-docker run -d --name pgaccel \
-  -e POSTGRES_PASSWORD=postgres \
-  -p 5432:5432 \
-  ghcr.io/yocontra/pg_accel:latest
-```
-
 ### From source
 
 ```bash

@@ -1,10 +1,8 @@
 -- pg_accel Scan Benchmark Suite
 -- Tests WHERE clause filtering across data types and row counts.
--- Exercises planner hook fast-reject gates for non-spatial scans.
--- Run: psql -h localhost -p 5488 -d postgres -f benchmarks/scan_benchmark.sql
---
--- All queries here are DEFERRED — no GPU-accelerable FuncExpr appears in
--- restriction clauses. This proves zero overhead on the scan path.
+-- With OLAP ungating, numeric OpExpr predicates now match GpuExpr and
+-- are evaluated on the GPU via the bytecode expression evaluator.
+-- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/scan_benchmark.sql
 
 \timing on
 \pset pager off

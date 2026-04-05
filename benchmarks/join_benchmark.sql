@@ -1,11 +1,9 @@
 -- pg_accel Join Benchmark Suite
--- Tests join patterns that pg_accel does NOT accelerate (non-spatial equi-joins).
--- All queries should show zero overhead — no Custom Scan nodes in plans.
--- Run: psql -h localhost -p 5488 -d postgres -f benchmarks/join_benchmark.sql
---
--- Non-spatial joins are not touched by pg_accel because the planner hook
--- requires a registered FuncExpr (like ST_Intersects) in the join clause.
--- Standard equi-joins on int/text columns pass through unchanged.
+-- Tests join patterns: equi-joins on int/float columns are now GPU-
+-- accelerated via GpuHashJoin (hash build + probe on GPU). The planner
+-- detects Var = Var conditions and injects CustomPath when row counts
+-- and cost model thresholds are met.
+-- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/join_benchmark.sql
 
 \timing on
 \pset pager off

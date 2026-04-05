@@ -1,7 +1,7 @@
 -- pg_accel PostGIS Spatial Benchmark Suite
 -- Tests GPU-accelerated spatial predicates (GpuSpatial: st_intersects, st_contains,
 -- st_within, st_dwithin) and BatchedEval spatial functions (st_distance, st_area, etc.)
--- Run: psql -h localhost -p 5488 -d postgres -f benchmarks/spatial_benchmark.sql
+-- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/spatial_benchmark.sql
 --
 -- Requires: PostGIS extension installed.
 -- The GpuSpatial path uses a three-layer GPU pipeline:

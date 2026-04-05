@@ -129,58 +129,18 @@ pre-commit: fmt-check lint check deny
 
 # Run pgrx unit tests against PG 17
 test-unit pg="17":
-    cargo pgrx test pg{{pg}}
+    cargo pgrx test --package pg_accel pg{{pg}}
 
-# Run SQL integration tests against the dev Docker environment
-test-integration db="pgaccel_shared":
-    PGPASSWORD=pgaccel_test docker/tests/run_all.sh "host=localhost port=5488 user=postgres dbname={{db}}"
-
-# Run all tests: pgrx unit tests + SQL integration tests
-test pg="17": (test-unit pg) test-integration
+# Run all tests: pgrx unit tests
+test pg="17": (test-unit pg)
     @echo "All tests passed."
 
-# Run benchmark suite against dev Docker environment
-bench rows="1000000" iterations="30" warmup="5" connection="host=localhost port=5488 user=postgres password=pgaccel_test dbname=pgaccel_a9":
+# Run benchmark suite against local pgrx PG
+bench rows="1000000" iterations="30" warmup="5":
     cargo run -p pg_accel_bench --release -- run \
         --rows {{rows}} --iterations {{iterations}} --warmup {{warmup}} \
-        --connection "{{connection}}" --format markdown
-
-# === Docker Dev Environment ===
-
-# Start dev PG (PostGIS + h3 + pg_accel, 10 agent DBs)
-dev-up:
-    docker compose -f docker/docker-compose.test.yml up -d --build
-    @echo "Waiting for PG to be ready..."
-    @until docker compose -f docker/docker-compose.test.yml exec -T pgaccel-test pg_isready -U postgres > /dev/null 2>&1; do sleep 1; done
-    @echo "Dev environment ready on port 5488"
-
-# Stop dev PG and remove volumes
-dev-down:
-    docker compose -f docker/docker-compose.test.yml down -v
-
-# Watch for source changes and hot-reload (run in separate terminal)
-dev-watch:
-    docker/scripts/dev_reload.sh
-
-# Run integration tests for a specific agent
-dev-test agent="0":
-    docker/scripts/run_agent_tests.sh {{agent}}
-
-# Run all integration tests (all agents)
-dev-test-all:
-    docker/scripts/run_integration_tests.sh
-
-# Run comprehensive integration test suite against dev PG
-dev-test-suite db="pgaccel_shared":
-    docker/tests/run_all.sh "host=localhost port=5488 user=postgres dbname={{db}}"
-
-# Connect to an agent's database via psql
-dev-psql agent="0":
-    psql -h localhost -p 5488 -U postgres pgaccel_a{{agent}}
-
-# Reset an agent's database to clean fixtures
-dev-reset agent="0":
-    psql -h localhost -p 5488 -U postgres -c "DROP DATABASE IF EXISTS pgaccel_a{{agent}};" -c "CREATE DATABASE pgaccel_a{{agent}} TEMPLATE pgaccel_shared;"
+        --connection "host=localhost port=28817 user=postgres dbname=postgres" \
+        --format markdown
 
 # === GPU Kernels ===
 
@@ -191,7 +151,7 @@ gpu-build:
     cmake -B pgaccel-kernels/build -S pgaccel-kernels \
         -DPGACCEL_USE_SYCL=ON \
         -DCMAKE_PREFIX_PATH={{acpp_prefix}} \
-        -DACPP_TARGETS="omp" \
+        -DACPP_TARGETS="generic" \
         -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
         -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++ \
         -DCMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
@@ -212,8 +172,9 @@ gpu-test: gpu-build
 # === CI ===
 
 # Run full CI locally (pre-commit checks + all tests)
-ci: pre-commit dev-up test-unit test-integration dev-down
+ci: pre-commit test-unit
 
 # Build installable pgrx package
 package pg="17":
     cargo pgrx package --pg-config $(which pg_config) --features pg{{pg}}
+

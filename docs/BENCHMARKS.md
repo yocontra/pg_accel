@@ -71,7 +71,7 @@ All benchmarks use the `pg_accel_bench` harness (`pg_accel_bench/`). The harness
 ```bash
 # Run all workloads (30 iterations, 5 warmup, 100K rows)
 cargo run -p pg_accel_bench -- \
-  --connection "host=localhost port=5488 dbname=pgaccel_a0" \
+  --connection "host=localhost port=28817 dbname=postgres" \
   --iterations 30 --warmup 5 --rows 100000 --seed 42
 
 # Run a specific workload

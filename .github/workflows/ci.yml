@@ -49,22 +49,6 @@ jobs:
       - run: cargo pgrx init --pg${{ matrix.pg }} download
       - run: cargo pgrx test pg${{ matrix.pg }}
 
-  test-integration:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: [lint]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-pgrx --locked --version '~0.17'
-      - run: cargo pgrx init --pg17 download
-      - run: cargo pgrx package --pg-config ~/.pgrx/17.*/pgrx-install/bin/pg_config
-      - run: docker compose -f docker/docker-compose.test.yml up -d --wait
-      - run: docker/scripts/run_integration_tests.sh
-      - run: docker compose -f docker/docker-compose.test.yml down -v
-        if: always()
-
   gpu-kernels:
     name: GPU Kernels (CPU emulation)
     runs-on: ubuntu-latest

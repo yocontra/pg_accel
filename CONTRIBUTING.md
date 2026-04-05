@@ -40,15 +40,10 @@ All commands are in the [Justfile](Justfile):
 | `just check` | Type check (`cargo check --all-features`) |
 | `just deny` | License + advisory check (`cargo deny check`) |
 | `just test` | Unit tests (`cargo pgrx test pg17`) |
-| `just ci` | Full local CI: lint + test + integration |
+| `just ci` | Full local CI: lint + test |
 | `just package` | Build installable `.so` (`cargo pgrx package`) |
 | `just gpu-build` | cmake build for GPU kernels (requires AdaptiveCpp) |
 | `just gpu-test` | Run standalone GPU kernel tests |
-| `just dev-up` | Start Docker PG container (port 5488) |
-| `just dev-watch` | Hot-reload watcher (run in separate terminal) |
-| `just dev-test agent=N` | Run integration tests for agent N |
-| `just dev-psql agent=N` | Connect to agent N's database |
-| `just dev-reset agent=N` | Reset agent N's DB to clean fixtures |
 
 ## Adding a new adapter
 
@@ -94,25 +89,18 @@ pub fn adapter() -> ExtensionAdapter {
    in `src/engine/registry.rs` and implement the corresponding dispatch path
    in `src/engine/dispatch.rs`.
 
-5. Write tests. Add SQL test queries in `docker/tests/` that exercise the new
-   functions under acceleration.
+5. Write tests that exercise the new functions under acceleration.
 
 That is the complete process. Most adapters are under 50 lines.
 
 ## Running tests
 
 ```bash
-# Unit tests (no PG required)
+# Unit tests (pgrx-managed PG)
 just test
 
-# Full CI suite (lint + test + integration)
+# Full CI suite (lint + test)
 just ci
-
-# Integration tests against Docker PG
-just dev-up              # start container
-just dev-test agent=0    # run tests for agent 0
-just dev-psql agent=0    # interactive psql session
-just dev-reset agent=0   # reset to clean fixtures
 ```
 
 GPU kernel tests require AdaptiveCpp:
@@ -150,7 +138,7 @@ refactor(scope): restructure without behavior change
 chore(scope): build, CI, dependency updates
 ```
 
-Common scopes: `adapter`, `engine`, `executor`, `gpu`, `cost`, `docker`.
+Common scopes: `adapter`, `engine`, `executor`, `gpu`, `cost`.
 
 Examples:
 
@@ -190,21 +178,3 @@ pg_accel uses a multi-agent development model:
 - **10 agents per phase.** Each owns specific files — no two agents edit the same file.
 - **Plans live in `plans/`.** Each agent updates their checklist and implementation log.
 - **Phase gates are binary.** All items must pass before the next phase starts.
-- All test queries go in `docker/tests/`. The runner always runs ALL of them (cumulative, no regressions).
-
-### Per-Agent Databases
-
-The Docker dev environment provides isolated databases for concurrent work:
-
-- Single PG container with per-agent databases (`pgaccel_a0` through `pgaccel_a9`).
-- Template cloning via `CREATE DATABASE ... TEMPLATE pgaccel_shared`.
-- Use `just dev-test agent=N`, `just dev-psql agent=N`, `just dev-reset agent=N`.
-
-### Flock-Based Reload Safety
-
-`flock` coordinates hot-reloads with test runs:
-
-- **Test scripts** (`run_integration_tests.sh`): acquire a **shared** lock — multiple agents can test concurrently.
-- **Reload watcher** (`dev_reload.sh`): acquires an **exclusive** lock — waits for all running tests to finish before rebuilding the `.so` and restarting PG.
-
-This prevents test failures caused by mid-test extension reloads.

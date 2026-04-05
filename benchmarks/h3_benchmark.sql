@@ -2,7 +2,7 @@
 -- Tests GPU-accelerated H3 discrete global grid functions (GpuH3: h3_latlng_to_cell,
 -- h3_grid_distance, h3_cell_to_parent, h3_get_resolution) and BatchedEval H3 functions
 -- (h3_cell_to_latlng, h3_cell_to_boundary, h3_grid_disk, h3_compact_cells).
--- Run: psql -h localhost -p 5488 -d postgres -f benchmarks/h3_benchmark.sql
+-- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/h3_benchmark.sql
 --
 -- Requires: h3 extension (h3-pg) installed.
 

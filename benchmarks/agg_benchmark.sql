@@ -1,7 +1,7 @@
 -- pg_accel Aggregate Benchmark Suite
--- Tests GpuReduce path for simple full-table aggregates and deferral for
--- GROUP BY, non-numeric types, sub-threshold rows, and expression args.
--- Run: psql -h localhost -p 5488 -d postgres -f benchmarks/agg_benchmark.sql
+-- Tests GpuReduce (full-table) and GpuHashAgg (GROUP BY) paths including
+-- single- and two-column GROUP BY, expression arguments, and scaling.
+-- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/agg_benchmark.sql
 
 \timing on
 \pset pager off
