@@ -593,7 +593,7 @@ impl Drop for WindowExecState {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     #![allow(clippy::unwrap_used)]
 

@@ -118,7 +118,7 @@ fn pg_accel_reset_stats() {
 // Unit tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

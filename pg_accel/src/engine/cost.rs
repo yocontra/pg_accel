@@ -528,7 +528,7 @@ pub fn estimate_threads(profile: &PlatformProfile, available_budget: usize) -> u
     available_budget.min(max).max(1)
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

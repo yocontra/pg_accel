@@ -490,7 +490,7 @@ fn write_pixel_at(buf: &mut [u8], offset: usize, pt: PixelType, val: f64, le: bo
 // Test helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod test_helpers {
     use super::*;
 
@@ -586,7 +586,7 @@ mod test_helpers {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

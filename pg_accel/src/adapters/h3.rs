@@ -34,7 +34,7 @@ pub fn adapter() -> ExtensionAdapter {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

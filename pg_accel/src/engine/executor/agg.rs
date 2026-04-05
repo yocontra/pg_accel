@@ -1586,7 +1586,7 @@ fn append_value_bytes(
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -2257,6 +2257,7 @@ mod tests {
             256,
             &[(AggOp::Sum, 2, F8)],
             gk,
+            0,
         );
         assert!(state.is_grouped());
         let info = state.group_key_info().unwrap();

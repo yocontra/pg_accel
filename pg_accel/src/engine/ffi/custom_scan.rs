@@ -3155,7 +3155,7 @@ unsafe fn passthrough_exec(node: *mut pg_sys::CustomScanState) -> *mut pg_sys::T
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

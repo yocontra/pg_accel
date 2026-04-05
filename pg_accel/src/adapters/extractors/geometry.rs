@@ -586,7 +586,7 @@ fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

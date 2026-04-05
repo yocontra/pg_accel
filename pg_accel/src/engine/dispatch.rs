@@ -1001,7 +1001,7 @@ pub fn evaluate_chain(chain: &PredicateChain, batch: &[(pgrx::pg_sys::Datum, boo
 // Tests
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     #![allow(clippy::unwrap_used)]
 

@@ -82,6 +82,7 @@ pub static BUDGET: PgLwLock<ThreadBudgetData> =
 /// are unavailable. The actual extension `.so` loaded by PG is built as
 /// `cdylib` without the `test` cfg and includes this code.
 #[cfg(not(test))]
+#[cfg(not(feature = "pg_test"))]
 #[allow(unexpected_cfgs)]
 pub fn init_shmem() {
     pg_shmem_init!(BUDGET);
@@ -89,7 +90,7 @@ pub fn init_shmem() {
 
 /// No-op stub used by the test binary so that `_PG_init` compiles without
 /// referencing PG server-internal shared-memory symbols.
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 pub fn init_shmem() {}
 
 /// Request `n` worker threads from the cluster-wide budget.
@@ -281,7 +282,7 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
 // Pure-logic unit tests (no PG required)
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

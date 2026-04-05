@@ -2748,7 +2748,7 @@ unsafe fn path_node_size(path: *mut Path) -> usize {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

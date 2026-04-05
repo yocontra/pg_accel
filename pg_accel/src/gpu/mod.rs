@@ -9,7 +9,7 @@ mod fallback;
 
 pub mod three_layer;
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod three_layer_tests;
 
 // Re-export types from whichever module is active.
@@ -1528,7 +1528,7 @@ pub fn window_lead(
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod mod_tests {
     use super::three_layer::{

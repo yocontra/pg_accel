@@ -310,7 +310,7 @@ fn all_uncertain(n: usize) -> SpatialResult {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

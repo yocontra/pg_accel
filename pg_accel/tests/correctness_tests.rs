@@ -187,7 +187,7 @@ fn build_raster_offline_band(width: u16, height: u16) -> Vec<u8> {
 // Geometry GSERIALIZED helpers
 // ---------------------------------------------------------------------------
 
-const HAS_BBOX_BIT: u32 = 1 << 23;
+const HAS_BBOX_BIT: u32 = 1 << 26;
 const WKB_POINT_TYPE: u32 = 1;
 
 /// Build a minimal GSERIALIZED buffer without bbox.
@@ -684,12 +684,9 @@ fn adapter_h3_gpu_strategy_for_gpu_functions() {
 #[test]
 fn adapter_postgis_gpu_spatial_strategy() {
     let a = postgis::adapter();
-    let spatial_names = [
-        "st_intersects",
-        "st_contains",
-        "st_within",
-        "st_dwithin",
-    ];
+    // Only st_intersects has a working GPU kernel; others were removed
+    // because the three-layer pipeline returns all_uncertain() for them.
+    let spatial_names = ["st_intersects"];
     for name in &spatial_names {
         let entry = a.functions.iter().find(|f| f.name == *name);
         assert!(entry.is_some(), "Missing spatial function '{name}'");
@@ -711,8 +708,8 @@ fn adapter_postgis_raster_gpu_strategy() {
 #[test]
 fn adapter_combined_function_count() {
     let total: usize = all_adapters().iter().map(|a| a.functions.len()).sum();
-    // h3=4, postgis=4, postgis_raster=3 = 11
-    assert_eq!(total, 11);
+    // h3=4, postgis=1, postgis_raster=3 = 8
+    assert_eq!(total, 8);
 }
 
 #[test]

@@ -330,7 +330,7 @@ pub fn global_registry() -> &'static AdapterRegistry {
         .expect("pg_accel: global registry not initialised — lazy_init was not called")
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

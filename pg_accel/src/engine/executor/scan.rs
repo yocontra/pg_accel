@@ -1612,7 +1612,7 @@ impl ScanExecState {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

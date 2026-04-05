@@ -376,7 +376,7 @@ pub fn extract_field_opcode(field: &str) -> Option<u16> {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

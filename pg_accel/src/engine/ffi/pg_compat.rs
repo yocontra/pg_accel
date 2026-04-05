@@ -76,7 +76,7 @@ pub const fn is_parallel_unsafe(proparallel: i8) -> bool {
     proparallel == PROPARALLEL_UNSAFE
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

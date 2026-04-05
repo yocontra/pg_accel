@@ -93,7 +93,7 @@ pub fn plan_column_order(columns: &[(usize, pg_sys::Oid)]) -> Vec<ColumnCostEsti
 // Tests
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

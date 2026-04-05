@@ -36,7 +36,7 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

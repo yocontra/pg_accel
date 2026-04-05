@@ -169,7 +169,7 @@ pub fn discover_functions(pattern: &FunctionPattern) -> Vec<MatchedFunction> {
     })
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 

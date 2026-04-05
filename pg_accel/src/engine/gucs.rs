@@ -165,7 +165,7 @@ pub fn log_level() -> PgAccelLogLevel {
     LOG_LEVEL.get()
 }
 
-#[cfg(test)]
+#[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
 
