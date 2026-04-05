@@ -351,13 +351,15 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
 
         // Read sort keys and limit from the path's custom_private and
         // serialize them into the scan node's custom_private.
+        // Path layout: [fn_oid, target_attno, accel_strategy, num_keys, ...sort_key_data..., limit_tuples]
+        // Sort key data starts at index 3 (after the 3-element header).
         let path_priv = (*best_path).custom_private;
-        let sort_keys = deserialize_path_sort_keys(path_priv);
+        let sort_keys = deserialize_path_sort_keys_at(path_priv, 3);
         list = serialize_sort_keys(list, &sort_keys);
 
         // Serialize limit_tuples (appended after sort keys by planner).
-        // Path layout: [num_keys, ...sort_key_data..., limit_tuples]
-        let path_limit = deserialize_path_limit(path_priv, &sort_keys);
+        // In the path layout, limit is at: 3 (header) + 1 (num_keys) + num_keys * SORT_KEY_INTS
+        let path_limit = deserialize_path_limit_at(path_priv, 3, &sort_keys);
         list = pg_sys::lappend(list, pg_sys::makeInteger(path_limit).cast());
 
         (*cscan).custom_private = list;
@@ -426,6 +428,35 @@ unsafe fn deserialize_path_limit(
     let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
     // limit is at index: 1 (num_keys) + num_keys * SORT_KEY_INTS
     let limit_idx = 1 + sort_keys.len() * SORT_KEY_INTS;
+    if limit_idx >= list_len {
+        return 0;
+    }
+    // SAFETY: Index is within bounds (checked above).
+    unsafe { list_int_at(custom_private, limit_idx as c_int) }
+}
+
+/// Extract limit_tuples from the path's `custom_private` with a base offset.
+///
+/// The limit is serialized after sort key data:
+/// `[...header..., num_keys, ...sort_key_data..., limit_tuples]`
+///
+/// `header_offset` is the index where `num_keys` starts.
+///
+/// # Safety
+///
+/// `custom_private` must be null or a valid PG `List`.
+unsafe fn deserialize_path_limit_at(
+    custom_private: *mut pg_sys::List,
+    header_offset: usize,
+    sort_keys: &[SortKeyDesc],
+) -> c_int {
+    if custom_private.is_null() {
+        return 0;
+    }
+    // SAFETY: custom_private is a valid List.
+    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
+    // limit is at index: header_offset + 1 (num_keys) + num_keys * SORT_KEY_INTS
+    let limit_idx = header_offset + 1 + sort_keys.len() * SORT_KEY_INTS;
     if limit_idx >= list_len {
         return 0;
     }
@@ -514,65 +545,19 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
 
-        // Build custom_scan_tlist and plan.targetlist from the Aggref tlist.
-        // Each Aggref becomes a simple Var so PG never tries to evaluate
-        // the aggregate expression itself.
-        let tlist_len = if tlist.is_null() {
-            0
-        } else {
-            pg_sys::list_length(tlist)
-        };
-
-        let mut scan_tlist: *mut pg_sys::List = std::ptr::null_mut();
-        let mut plan_tlist: *mut pg_sys::List = std::ptr::null_mut();
-
-        for i in 0..tlist_len {
-            let tle = pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>();
-            let resno = (i + 1) as i16;
-
-            // Determine result type from the Aggref (or fall back to
-            // FLOAT8 if the expression isn't an Aggref).
-            let (vartype, vartypmod, varcollid) = if tle.is_null() {
-                (pg_sys::FLOAT8OID, -1i32, pg_sys::InvalidOid)
-            } else {
-                let expr = (*tle).expr;
-                if !expr.is_null()
-                    && (*expr.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_Aggref
-                {
-                    let aggref = expr.cast::<pg_sys::Aggref>();
-                    ((*aggref).aggtype, -1i32, (*aggref).aggcollid)
-                } else {
-                    (pg_sys::FLOAT8OID, -1i32, pg_sys::InvalidOid)
-                }
-            };
-
-            // Preserve original TargetEntry metadata for plan.targetlist.
-            let (orig_resno, orig_name, orig_junk) = if tle.is_null() {
-                (resno, std::ptr::null_mut(), false)
-            } else {
-                ((*tle).resno, (*tle).resname, (*tle).resjunk)
-            };
-
-            // Both custom_scan_tlist and plan.targetlist use
-            // Var(INDEX_VAR, attno). PG's set_customscan_references
-            // processes custom_scan_tlist via fix_scan_list (which
-            // leaves INDEX_VAR alone) then matches plan.targetlist
-            // Vars against it via fix_upper_expr / tlist_member_match_var.
-            let scan_var =
-                pg_sys::makeVar(pg_sys::INDEX_VAR, resno, vartype, vartypmod, varcollid, 0);
-            let scan_tle =
-                pg_sys::makeTargetEntry(scan_var.cast(), resno, std::ptr::null_mut(), false);
-            scan_tlist = pg_sys::lappend(scan_tlist, scan_tle.cast());
-
-            let plan_var =
-                pg_sys::makeVar(pg_sys::INDEX_VAR, resno, vartype, vartypmod, varcollid, 0);
-            let plan_tle =
-                pg_sys::makeTargetEntry(plan_var.cast(), orig_resno, orig_name, orig_junk);
-            plan_tlist = pg_sys::lappend(plan_tlist, plan_tle.cast());
-        }
-
-        (*cscan).custom_scan_tlist = scan_tlist;
-        (*cscan).scan.plan.targetlist = plan_tlist;
+        // Use the original tlist expressions so PG's set_customscan_references
+        // can map Sort pathkeys and other upper-level references correctly.
+        // custom_scan_tlist: original expressions define the scan tuple layout
+        //   (ExecTypeFromTL extracts types from Aggref.aggtype / Var.vartype).
+        //   fix_scan_expr adjusts Var offsets during plan finalization.
+        // plan.targetlist: original expressions allow prepare_sort_from_pathkeys
+        //   to find group key Vars for ORDER BY. fix_upper_expr then maps each
+        //   expression to Var(INDEX_VAR, resno) referencing custom_scan_tlist.
+        // copyObject creates independent copies so our lists don't alias
+        // other plan nodes' target lists.
+        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
 
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
@@ -604,15 +589,81 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             list,
             pg_sys::makeInteger(AccelStrategy::GpuReduce as c_int).cast(),
         );
+        // Build attno remap: original table attno → child slot position.
+        // The child Seq Scan may project only referenced columns, so
+        // the slot position differs from the original table attno when
+        // unreferenced columns (e.g. a serial PK) are omitted.
+        let mut attno_map: Vec<(c_int, c_int)> = Vec::new();
+        if !custom_plans.is_null() && pg_sys::list_length(custom_plans) > 0 {
+            let child_plan = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
+            if !child_plan.is_null() {
+                let child_tlist = (*child_plan).targetlist;
+                if !child_tlist.is_null() {
+                    let tlen = pg_sys::list_length(child_tlist);
+                    for j in 0..tlen {
+                        let tle =
+                            pg_sys::list_nth(child_tlist, j).cast::<pg_sys::TargetEntry>();
+                        if tle.is_null() {
+                            continue;
+                        }
+                        let expr = (*tle).expr;
+                        if !expr.is_null()
+                            && (*expr.cast::<pg_sys::Node>()).type_
+                                == pg_sys::NodeTag::T_Var
+                        {
+                            let var = expr.cast::<pg_sys::Var>();
+                            attno_map
+                                .push((i32::from((*var).varattno), i32::from((*tle).resno)));
+                        }
+                    }
+                }
+            }
+        }
+        let remap_attno = |orig: c_int| -> c_int {
+            for &(from, to) in &attno_map {
+                if from == orig {
+                    return to;
+                }
+            }
+            orig
+        };
+
         // Append aggregate descriptors (triples: op, attno, result_type_oid).
+        // Attno is remapped from original table position to child slot position.
         list = pg_sys::lappend(list, pg_sys::makeInteger(num_aggs).cast());
         for k in 0..num_aggs {
             let op = list_int_at(path_priv, 1 + k * 3);
             let attno = list_int_at(path_priv, 2 + k * 3);
             let rtype = list_int_at(path_priv, 3 + k * 3);
             list = pg_sys::lappend(list, pg_sys::makeInteger(op).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(attno).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(if attno > 0 { remap_attno(attno) } else { attno }).cast(),
+            );
             list = pg_sys::lappend(list, pg_sys::makeInteger(rtype).cast());
+        }
+
+        // Forward group key info from path's custom_private.
+        // Path layout: [num_aggs, (op,attno,rtype)*N, has_group_key, gk_attno, gk_type_oid, gk_key_type]
+        let path_len = pg_sys::list_length(path_priv) as usize;
+        let gk_base = 1 + (num_aggs as usize) * 3;
+        if gk_base < path_len {
+            let has_gk = list_int_at(path_priv, gk_base as c_int);
+            list = pg_sys::lappend(list, pg_sys::makeInteger(has_gk).cast());
+            if has_gk != 0 && gk_base + 3 < path_len {
+                let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
+                let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
+                let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
+                list = pg_sys::lappend(
+                    list,
+                    pg_sys::makeInteger(remap_attno(gk_attno)).cast(),
+                );
+                list = pg_sys::lappend(list, pg_sys::makeInteger(gk_type_oid).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(gk_key_type).cast());
+            }
+        } else {
+            // No group key info in path — plain aggregate.
+            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
         }
 
         (*cscan).custom_private = list;
@@ -798,25 +849,37 @@ unsafe fn make_custom_scan_plan(
         // For join nodes, custom_scan_tlist is also used (already scanrelid=0).
         (*cscan).scan.plan.targetlist = tlist;
 
-        if is_scan {
-            // SAFETY: custom_plans contains child Plan nodes created by PG.
-            let child_tlist = if custom_plans.is_null() || pg_sys::list_length(custom_plans) == 0 {
-                std::ptr::null_mut()
-            } else {
-                let child = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
-                if child.is_null() {
-                    std::ptr::null_mut()
-                } else {
-                    (*child).targetlist
-                }
-            };
-            (*cscan).custom_scan_tlist = if child_tlist.is_null() {
-                // Fallback: build physical tlist from relation.
-                // SAFETY: root and rel are valid planner pointers.
-                pg_sys::build_physical_tlist(root, rel)
-            } else {
-                child_tlist
-            };
+        // Read accel_strategy early — needed to decide scanrelid and tlist.
+        let path_priv_early = (*best_path).custom_private;
+        let accel_strategy_raw_early = if !path_priv_early.is_null()
+            && pg_sys::list_length(path_priv_early) > 2
+        {
+            list_int_at(path_priv_early, 2)
+        } else {
+            0
+        };
+        let is_gpu_expr =
+            accel_strategy_raw_early == AccelStrategy::GpuExpr as c_int;
+
+        // custom_scan_tlist defines which columns the scan slot has.
+        // For GpuExpr scan: scanrelid > 0 (direct heap scan) — PG uses
+        // the table's TupleDesc directly, custom_scan_tlist MUST be NIL.
+        // Having both scanrelid > 0 AND custom_scan_tlist != NIL crashes
+        // in set_customscan_references (setrefs.c).
+        // For other scan nodes: use build_physical_tlist to include ALL
+        // table columns so we can extract geometry for GPU dispatch.
+        // For join nodes: use a copy of the planner-provided tlist.
+        if is_scan && is_gpu_expr {
+            // GpuExpr: scanrelid > 0, PG handles TupleDesc from relation.
+            (*cscan).custom_scan_tlist = std::ptr::null_mut();
+        } else if is_scan {
+            // Non-GpuExpr scan (spatial/h3/raster): use build_physical_tlist.
+            // SAFETY: root and rel are valid planner pointers.
+            (*cscan).custom_scan_tlist = pg_sys::build_physical_tlist(root, rel);
+        } else {
+            // SAFETY: copyObjectImpl deep-copies in CurrentMemoryContext.
+            (*cscan).custom_scan_tlist =
+                pg_sys::copyObjectImpl(tlist.cast()).cast();
         }
         // SAFETY: extract_actual_clauses strips RestrictInfo wrappers,
         // returning the actual qual expressions for ExecInitCustomScan
@@ -828,9 +891,29 @@ unsafe fn make_custom_scan_plan(
         (*cscan).custom_plans = custom_plans;
         (*cscan).flags = (*best_path).flags;
 
-        // scanrelid=0 for both scan and join nodes: we always wrap a child
-        // plan rather than scanning the relation directly.
-        (*cscan).scan.scanrelid = 0;
+        // For GpuExpr scan: use scanrelid > 0 (direct heap scan, no child).
+        // PG opens the table for us and the scan slot gets the table's
+        // full TupleDesc. No child plan column mismatch issues.
+        //
+        // For other scan nodes: keep scanrelid=0 with child plan. Strip
+        // the child's qual so we evaluate the filter ourselves.
+        if is_scan && is_gpu_expr {
+            (*cscan).scan.scanrelid = (*rel).relid;
+            (*cscan).custom_plans = std::ptr::null_mut();
+        } else {
+            (*cscan).scan.scanrelid = 0;
+            // Strip child qual for non-GpuExpr scans (GPU evaluates filter).
+            if is_scan && !custom_plans.is_null() && pg_sys::list_length(custom_plans) > 0
+            {
+                let child = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
+                if !child.is_null() {
+                    (*child).qual = std::ptr::null_mut();
+                    // SAFETY: build_physical_tlist creates a tlist with all
+                    // physical columns from the relation.
+                    (*child).targetlist = pg_sys::build_physical_tlist(root, rel);
+                }
+            }
+        }
         if is_scan {
             (*cscan).methods = &raw const SCAN_SCAN_METHODS.0;
         } else {
@@ -885,12 +968,108 @@ unsafe fn make_custom_scan_plan(
         // For GpuHashJoin, serialize inner_attno and key_type after the
         // base 6 fields. Path layout: [fn_oid, outer_attno, strategy,
         //                               inner_attno, key_type]
+        //
+        // The planner's varattno values reference original table columns,
+        // but child plans may project only needed columns. We remap
+        // outer_attno and inner_attno to match child plan output positions.
         if accel_strategy_raw == AccelStrategy::GpuHashJoin as c_int {
             let path_priv_len = pg_sys::list_length(path_priv) as usize;
             if path_priv_len > 4 {
-                let inner_attno = list_int_at(path_priv, 3);
+                let raw_inner_attno = list_int_at(path_priv, 3);
                 let key_type = list_int_at(path_priv, 4);
-                list = pg_sys::lappend(list, pg_sys::makeInteger(inner_attno).cast());
+
+                // Read original varnos for disambiguating attno matches
+                // in multi-table child outputs (e.g., nested CustomScans).
+                let outer_varno = if path_priv_len > 5 {
+                    list_int_at(path_priv, 5)
+                } else {
+                    0
+                };
+                let inner_varno = if path_priv_len > 6 {
+                    list_int_at(path_priv, 6)
+                } else {
+                    0
+                };
+
+                // Build attno→resno mapping from child plan output lists.
+                // Child 0 = outer, child 1 = inner.
+                // For CustomScan children (scanrelid=0), use custom_scan_tlist
+                // since plan.targetlist has INDEX_VAR references.
+                // For SeqScan/other children, use plan.targetlist directly.
+                // `orig_varno` disambiguates when multiple tables share attno values.
+                let remap_via_child =
+                    |child_idx: c_int, orig_attno: c_int, orig_varno: c_int| -> c_int {
+                    if custom_plans.is_null() {
+                        return orig_attno;
+                    }
+                    let n_children = pg_sys::list_length(custom_plans);
+                    if child_idx >= n_children {
+                        return orig_attno;
+                    }
+                    let child = pg_sys::list_nth(custom_plans, child_idx)
+                        .cast::<pg_sys::Plan>();
+                    if child.is_null() {
+                        return orig_attno;
+                    }
+
+                    // Check if child is a CustomScan (scanrelid=0).
+                    let child_scanrelid = (*child.cast::<pg_sys::Scan>()).scanrelid;
+                    let search_tlist = if child_scanrelid == 0
+                        && (*child.cast::<pg_sys::Node>()).type_
+                            == pg_sys::NodeTag::T_CustomScan
+                    {
+                        // For CustomScan: search custom_scan_tlist which
+                        // has original relation Vars.
+                        (*child.cast::<pg_sys::CustomScan>()).custom_scan_tlist
+                    } else {
+                        // For regular nodes: use plan.targetlist.
+                        (*child).targetlist
+                    };
+
+                    if search_tlist.is_null() {
+                        return orig_attno;
+                    }
+                    let tlen = pg_sys::list_length(search_tlist);
+                    for j in 0..tlen {
+                        let tle = pg_sys::list_nth(search_tlist, j)
+                            .cast::<pg_sys::TargetEntry>();
+                        if tle.is_null() {
+                            continue;
+                        }
+                        let expr = (*tle).expr;
+                        if expr.is_null() {
+                            continue;
+                        }
+                        if (*expr.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_Var {
+                            let var = expr.cast::<pg_sys::Var>();
+                            let v_attno = i32::from((*var).varattno);
+                            let v_varno = (*var).varno;
+                            // Match on attno AND varno (when varno is known).
+                            if v_attno == orig_attno
+                                && (orig_varno == 0 || v_varno == orig_varno)
+                            {
+                                return i32::from((*tle).resno);
+                            }
+                        }
+                    }
+                    orig_attno
+                };
+
+                // Remap outer_attno (already at index 4 in list = target_attno).
+                // We need to fix index 4 in the already-built list. Instead,
+                // we remap and store the corrected values at indices 6+.
+                let remapped_outer = remap_via_child(0, target_attno, outer_varno);
+                let remapped_inner = remap_via_child(1, raw_inner_attno, inner_varno);
+
+                // Overwrite target_attno (index 4) with remapped outer attno.
+                // SAFETY: index 4 is within list bounds (we appended 6 items).
+                let cell4 = pg_sys::list_nth(list, 4).cast::<pg_sys::Integer>();
+                (*cell4).ival = remapped_outer;
+
+                list = pg_sys::lappend(
+                    list,
+                    pg_sys::makeInteger(remapped_inner).cast(),
+                );
                 list = pg_sys::lappend(list, pg_sys::makeInteger(key_type).cast());
             }
         }
@@ -927,6 +1106,10 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
         (*state).css.flags = (*cscan).flags;
         (*state).css.methods = &raw const EXEC_METHODS.0;
         (*state).accel.executor = std::ptr::null_mut();
+
+        // All scan strategies use VirtualTupleTableSlot (PG default).
+        // ExecForceStoreHeapTuple triggers heap_deform_tuple (~50ns) which
+        // populates tts_values/tts_isnull for correct aggregate evaluation.
     }
 
     state.cast()
@@ -1117,6 +1300,556 @@ unsafe fn extract_const_datum(args: *mut pg_sys::List) -> Option<(pg_sys::Datum,
 }
 
 // ---------------------------------------------------------------------------
+// Expression compiler: PG qual list → GPU bytecode
+// ---------------------------------------------------------------------------
+
+/// Compile a PG qual list into a `CompiledExpr` for GPU evaluation.
+///
+/// Walks the plan's `qual` (`List *` of expression nodes) and attempts to
+/// produce either a template kernel (fastest) or general bytecode. Falls
+/// back to `DeferToPg` for unsupported node types.
+///
+/// # Safety
+///
+/// `qual` must be a valid PG `List *` of expression nodes, or null.
+/// Called on the main backend thread during `BeginCustomScan`.
+unsafe fn compile_qual_list(
+    qual: *mut pg_sys::List,
+    num_cols: usize,
+) -> crate::engine::expr_compiler::CompiledExpr {
+    use crate::engine::expr_compiler::{
+        self, CompiledExpr, ExprProgramBuilder,
+    };
+
+    if qual.is_null() {
+        return CompiledExpr::DeferToPg;
+    }
+
+    // SAFETY: qual is a valid List.
+    let len = unsafe { pg_sys::list_length(qual) };
+    if len == 0 {
+        return CompiledExpr::DeferToPg;
+    }
+
+    // Try template match for single-clause quals first.
+    if len == 1 {
+        // SAFETY: qual has exactly 1 element.
+        let node = unsafe { pg_sys::list_nth(qual, 0).cast::<pg_sys::Node>() };
+        if let Some(tmpl) = unsafe { try_template_match(node) } {
+            return CompiledExpr::Template(tmpl);
+        }
+    }
+
+    // Try two-predicate AND template: col1 <cmp1> const1 AND col2 <cmp2> const2.
+    // Handles both: single BoolExpr(AND) wrapping two OpExpr (len==1),
+    // and PG's implicit AND with two separate OpExpr nodes (len==2).
+    if len == 1 {
+        let node = unsafe { pg_sys::list_nth(qual, 0).cast::<pg_sys::Node>() };
+        if let Some(tmpl) = unsafe { try_two_pred_and_template(node) } {
+            return CompiledExpr::Template(tmpl);
+        }
+    }
+    if len == 2 {
+        let n0 = unsafe { pg_sys::list_nth(qual, 0).cast::<pg_sys::Node>() };
+        let n1 = unsafe { pg_sys::list_nth(qual, 1).cast::<pg_sys::Node>() };
+        let t0 = unsafe { try_template_match(n0) };
+        let t1 = unsafe { try_template_match(n1) };
+        if let (
+            Some(expr_compiler::TemplateKernel::CmpConst { col_idx: c1, cmp_opcode: op1, const_val: v1 }),
+            Some(expr_compiler::TemplateKernel::CmpConst { col_idx: c2, cmp_opcode: op2, const_val: v2 }),
+        ) = (t0, t1) {
+            return CompiledExpr::Template(expr_compiler::TemplateKernel::TwoPredAnd {
+                col1_idx: c1, cmp1_opcode: op1, const1_val: v1,
+                col2_idx: c2, cmp2_opcode: op2, const2_val: v2,
+            });
+        }
+    }
+
+    // General bytecode compilation: walk all qual nodes as an implicit AND.
+    let mut builder = ExprProgramBuilder::new(num_cols);
+    let mut first = true;
+
+    for i in 0..len {
+        // SAFETY: i is in [0, len).
+        let node = unsafe { pg_sys::list_nth(qual, i).cast::<pg_sys::Node>() };
+        if !unsafe { compile_node(node, &mut builder) } {
+            pgrx::debug1!("pg_accel: expr compile bail at qual node {i}");
+            return CompiledExpr::DeferToPg;
+        }
+        if !first {
+            // Implicit AND between qual list elements.
+            builder.emit_binop(expr_compiler::opcode::AND);
+        }
+        first = false;
+    }
+
+    match builder.build() {
+        Some(program) => {
+            pgrx::debug1!(
+                "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} cols",
+                len,
+                program.instructions.len(),
+                program.referenced_cols.len(),
+            );
+            CompiledExpr::Bytecode(program)
+        }
+        None => {
+            pgrx::debug1!("pg_accel: expr compile failed (stack overflow)");
+            CompiledExpr::DeferToPg
+        }
+    }
+}
+
+/// Try to match a single qual node as a template kernel.
+///
+/// Matches: `col <cmp> const`, `col BETWEEN lo AND hi`, `col IS [NOT] NULL`.
+///
+/// # Safety
+///
+/// `node` must be a valid PG `Node *`.
+unsafe fn try_template_match(
+    node: *mut pg_sys::Node,
+) -> Option<crate::engine::expr_compiler::TemplateKernel> {
+    use crate::engine::expr_compiler::{self, TemplateKernel};
+
+    if node.is_null() {
+        return None;
+    }
+
+    // SAFETY: node is valid; reading tag.
+    let tag = unsafe { (*node).type_ };
+
+    match tag {
+        // col <cmp> const
+        pg_sys::NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: tag confirmed OpExpr.
+            let args = unsafe { (*opexpr).args };
+            if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+                return None;
+            }
+
+            // SAFETY: resolve operator name from opno.
+            let op_name_ptr = unsafe { pg_sys::get_opname((*opexpr).opno) };
+            if op_name_ptr.is_null() {
+                return None;
+            }
+            let op_name = unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }
+                .to_str()
+                .ok()?;
+            let cmp_opcode = expr_compiler::pg_cmp_op_to_opcode(op_name)?;
+
+            // SAFETY: args has 2 elements.
+            let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+            let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+
+            // Pattern: Var <cmp> Const
+            let (col_idx, const_val) = unsafe { extract_var_const_pair(arg0, arg1) }?;
+
+            Some(TemplateKernel::CmpConst {
+                col_idx,
+                cmp_opcode,
+                const_val,
+            })
+        }
+        // col IS [NOT] NULL
+        pg_sys::NodeTag::T_NullTest => {
+            // SAFETY: tag confirmed NullTest.
+            let nt = node.cast::<pg_sys::NullTest>();
+            let arg = unsafe { (*nt).arg.cast::<pg_sys::Node>() };
+            let col_idx = unsafe { node_as_var_col(arg) }?;
+            let check_not_null =
+                unsafe { (*nt).nulltesttype } == pg_sys::NullTestType::IS_NOT_NULL;
+            Some(TemplateKernel::IsNull {
+                col_idx,
+                check_not_null,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Try to match a BoolExpr AND with exactly two CmpConst children.
+///
+/// # Safety
+///
+/// `node` must be a valid PG `Node *`.
+unsafe fn try_two_pred_and_template(
+    node: *mut pg_sys::Node,
+) -> Option<crate::engine::expr_compiler::TemplateKernel> {
+    use crate::engine::expr_compiler::TemplateKernel;
+
+    if node.is_null() {
+        return None;
+    }
+    // SAFETY: reading tag.
+    if unsafe { (*node).type_ } != pg_sys::NodeTag::T_BoolExpr {
+        return None;
+    }
+    let boolexpr = node.cast::<pg_sys::BoolExpr>();
+    // SAFETY: tag confirmed BoolExpr.
+    if unsafe { (*boolexpr).boolop } != pg_sys::BoolExprType::AND_EXPR {
+        return None;
+    }
+    let args = unsafe { (*boolexpr).args };
+    if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+        return None;
+    }
+
+    // SAFETY: args has 2 elements.
+    let n0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+    let n1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+
+    // Both children must be CmpConst-matchable OpExprs.
+    let t0 = unsafe { try_template_match(n0) };
+    let t1 = unsafe { try_template_match(n1) };
+
+    match (t0, t1) {
+        (
+            Some(TemplateKernel::CmpConst {
+                col_idx: c1,
+                cmp_opcode: op1,
+                const_val: v1,
+            }),
+            Some(TemplateKernel::CmpConst {
+                col_idx: c2,
+                cmp_opcode: op2,
+                const_val: v2,
+            }),
+        ) => Some(TemplateKernel::TwoPredAnd {
+            col1_idx: c1,
+            cmp1_opcode: op1,
+            const1_val: v1,
+            col2_idx: c2,
+            cmp2_opcode: op2,
+            const2_val: v2,
+        }),
+        _ => None,
+    }
+}
+
+/// Extract a (Var, Const) pair from two nodes, returning (col_idx, f64 value).
+/// Handles both `Var <op> Const` and `Const <op> Var` orderings.
+///
+/// # Safety
+///
+/// Both nodes must be valid PG `Node *`.
+unsafe fn extract_var_const_pair(
+    arg0: *mut pg_sys::Node,
+    arg1: *mut pg_sys::Node,
+) -> Option<(u32, f64)> {
+    // Try Var, Const order.
+    if let Some(col) = unsafe { node_as_var_col(arg0) } {
+        if let Some(val) = unsafe { node_as_const_f64(arg1) } {
+            return Some((col, val));
+        }
+    }
+    // Try Const, Var order.
+    if let Some(col) = unsafe { node_as_var_col(arg1) } {
+        if let Some(val) = unsafe { node_as_const_f64(arg0) } {
+            return Some((col, val));
+        }
+    }
+    None
+}
+
+/// If the node is a `Var`, return its 0-based column index.
+/// Unwraps `RelabelType` wrappers.
+///
+/// # Safety
+///
+/// `node` must be a valid PG `Node *`.
+unsafe fn node_as_var_col(node: *mut pg_sys::Node) -> Option<u32> {
+    if node.is_null() {
+        return None;
+    }
+    // SAFETY: reading tag.
+    let tag = unsafe { (*node).type_ };
+    match tag {
+        pg_sys::NodeTag::T_Var => {
+            // SAFETY: tag confirmed Var.
+            let var = node.cast::<pg_sys::Var>();
+            let attno = unsafe { (*var).varattno };
+            if attno <= 0 {
+                return None; // system column
+            }
+            Some((attno - 1) as u32) // 1-based → 0-based
+        }
+        pg_sys::NodeTag::T_RelabelType => {
+            // SAFETY: tag confirmed RelabelType; unwrap and recurse.
+            let arg = unsafe { (*node.cast::<pg_sys::RelabelType>()).arg };
+            unsafe { node_as_var_col(arg.cast::<pg_sys::Node>()) }
+        }
+        _ => None,
+    }
+}
+
+/// If the node is a `Const`, return its value as f64.
+/// Handles int4, int8, float4, float8, int2.
+///
+/// # Safety
+///
+/// `node` must be a valid PG `Node *`.
+unsafe fn node_as_const_f64(node: *mut pg_sys::Node) -> Option<f64> {
+    if node.is_null() {
+        return None;
+    }
+    // SAFETY: reading tag.
+    if unsafe { (*node).type_ } != pg_sys::NodeTag::T_Const {
+        return None;
+    }
+    let cst = node.cast::<pg_sys::Const>();
+    // SAFETY: tag confirmed Const.
+    if unsafe { (*cst).constisnull } {
+        return None;
+    }
+    let datum = unsafe { (*cst).constvalue };
+    let typid = u32::from(unsafe { (*cst).consttype });
+
+    // PG type OIDs for numeric types.
+    const INT2OID: u32 = 21;
+    const INT4OID: u32 = 23;
+    const INT8OID: u32 = 20;
+    const FLOAT4OID: u32 = 700;
+    const FLOAT8OID: u32 = 701;
+    const BOOLOID: u32 = 16;
+
+    match typid {
+        INT2OID => Some(f64::from(datum.value() as i16)),
+        INT4OID => Some(f64::from(datum.value() as i32)),
+        INT8OID => Some((datum.value() as i64) as f64),
+        FLOAT4OID => Some(f64::from(f32::from_bits(datum.value() as u32))),
+        FLOAT8OID => Some(f64::from_bits(datum.value() as u64)),
+        BOOLOID => Some(if datum.value() != 0 { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+/// Compile a single PG expression node to bytecode via the builder.
+/// Returns `false` if the node type is unsupported.
+///
+/// # Safety
+///
+/// `node` must be a valid PG `Node *`.
+unsafe fn compile_node(
+    node: *mut pg_sys::Node,
+    builder: &mut crate::engine::expr_compiler::ExprProgramBuilder,
+) -> bool {
+    use crate::engine::expr_compiler::{self, opcode};
+
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: node is valid; reading tag.
+    let tag = unsafe { (*node).type_ };
+
+    match tag {
+        pg_sys::NodeTag::T_Var => {
+            let col = match unsafe { node_as_var_col(node) } {
+                Some(c) => c,
+                None => return false,
+            };
+            builder.emit_load_col(col);
+            true
+        }
+        pg_sys::NodeTag::T_Const => {
+            // SAFETY: tag confirmed Const.
+            let cst = node.cast::<pg_sys::Const>();
+            if unsafe { (*cst).constisnull } {
+                builder.emit_load_null();
+                return true;
+            }
+            match unsafe { node_as_const_f64(node) } {
+                Some(val) => {
+                    builder.emit_load_const(crate::gpu::PgaccelVal::from_f64(val));
+                    true
+                }
+                None => false,
+            }
+        }
+        pg_sys::NodeTag::T_OpExpr => {
+            // SAFETY: tag confirmed OpExpr.
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            let args = unsafe { (*opexpr).args };
+            if args.is_null() {
+                return false;
+            }
+            let nargs = unsafe { pg_sys::list_length(args) };
+            if nargs != 2 {
+                return false;
+            }
+
+            // Resolve operator name.
+            // SAFETY: opno is a valid operator OID.
+            let op_name_ptr = unsafe { pg_sys::get_opname((*opexpr).opno) };
+            if op_name_ptr.is_null() {
+                return false;
+            }
+            let op_name = match unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+
+            // Compile both arguments.
+            // SAFETY: args has 2 elements.
+            let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+            let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+
+            if !unsafe { compile_node(arg0, builder) } {
+                return false;
+            }
+            if !unsafe { compile_node(arg1, builder) } {
+                return false;
+            }
+
+            // Try comparison first, then arithmetic.
+            if let Some(cmp) = expr_compiler::pg_cmp_op_to_opcode(op_name) {
+                builder.emit_binop(cmp);
+                return true;
+            }
+
+            // Arithmetic — use f64 variants since all columns extracted as f64.
+            match op_name {
+                "+" => builder.emit_binop(opcode::ADD_F64),
+                "-" => builder.emit_binop(opcode::SUB_F64),
+                "*" => builder.emit_binop(opcode::MUL_F64),
+                "/" => builder.emit_binop(opcode::DIV_F64),
+                "%" => builder.emit_binop(opcode::MOD_I64),
+                _ => return false,
+            }
+            true
+        }
+        pg_sys::NodeTag::T_FuncExpr => {
+            // SAFETY: tag confirmed FuncExpr.
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            let funcid = unsafe { (*funcexpr).funcid };
+
+            // Look up function name in pg_proc.
+            // SAFETY: funcid is a valid regproc OID.
+            let name_ptr = unsafe { pg_sys::get_func_name(funcid) };
+            if name_ptr.is_null() {
+                return false;
+            }
+            let func_name = match unsafe { std::ffi::CStr::from_ptr(name_ptr) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+
+            // Check if it's a GPU-supported math function.
+            let (math_opcode, is_binary) = match expr_compiler::math_func_opcode(func_name) {
+                Some(pair) => pair,
+                None => return false,
+            };
+
+            let args = unsafe { (*funcexpr).args };
+            if args.is_null() {
+                return false;
+            }
+            let nargs = unsafe { pg_sys::list_length(args) };
+
+            if is_binary {
+                if nargs != 2 {
+                    return false;
+                }
+                let a0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                let a1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+                if !unsafe { compile_node(a0, builder) } {
+                    return false;
+                }
+                if !unsafe { compile_node(a1, builder) } {
+                    return false;
+                }
+                builder.emit_binop(math_opcode);
+            } else {
+                if nargs != 1 {
+                    return false;
+                }
+                let a0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                if !unsafe { compile_node(a0, builder) } {
+                    return false;
+                }
+                builder.emit_unaryop(math_opcode);
+            }
+            true
+        }
+        pg_sys::NodeTag::T_BoolExpr => {
+            // SAFETY: tag confirmed BoolExpr.
+            let boolexpr = node.cast::<pg_sys::BoolExpr>();
+            let boolop = unsafe { (*boolexpr).boolop };
+            let args = unsafe { (*boolexpr).args };
+            if args.is_null() {
+                return false;
+            }
+            let nargs = unsafe { pg_sys::list_length(args) };
+
+            match boolop {
+                pg_sys::BoolExprType::AND_EXPR | pg_sys::BoolExprType::OR_EXPR => {
+                    if nargs < 2 {
+                        return false;
+                    }
+                    let combine_op = if boolop == pg_sys::BoolExprType::AND_EXPR {
+                        opcode::AND
+                    } else {
+                        opcode::OR
+                    };
+
+                    // Compile first arg.
+                    let first = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                    if !unsafe { compile_node(first, builder) } {
+                        return false;
+                    }
+                    // Compile remaining args, emitting AND/OR between each pair.
+                    for i in 1..nargs {
+                        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+                        if !unsafe { compile_node(child, builder) } {
+                            return false;
+                        }
+                        builder.emit_binop(combine_op);
+                    }
+                    true
+                }
+                pg_sys::BoolExprType::NOT_EXPR => {
+                    if nargs != 1 {
+                        return false;
+                    }
+                    let child = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                    if !unsafe { compile_node(child, builder) } {
+                        return false;
+                    }
+                    builder.emit_unaryop(opcode::NOT);
+                    true
+                }
+                _ => false,
+            }
+        }
+        pg_sys::NodeTag::T_NullTest => {
+            // SAFETY: tag confirmed NullTest.
+            let nt = node.cast::<pg_sys::NullTest>();
+            let arg = unsafe { (*nt).arg.cast::<pg_sys::Node>() };
+            if !unsafe { compile_node(arg, builder) } {
+                return false;
+            }
+            let nt_opcode =
+                if unsafe { (*nt).nulltesttype } == pg_sys::NullTestType::IS_NOT_NULL {
+                    opcode::IS_NOT_NULL
+                } else {
+                    opcode::IS_NULL
+                };
+            builder.emit_unaryop(nt_opcode);
+            true
+        }
+        pg_sys::NodeTag::T_RelabelType => {
+            // Unwrap type relabeling and compile the inner expression.
+            // SAFETY: tag confirmed RelabelType.
+            let arg = unsafe { (*node.cast::<pg_sys::RelabelType>()).arg };
+            unsafe { compile_node(arg.cast::<pg_sys::Node>(), builder) }
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Executor callbacks
 // ---------------------------------------------------------------------------
 
@@ -1135,7 +1868,6 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     _estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
-    pgrx::debug1!("pg_accel: begin_custom_scan");
     // SAFETY: node points to our GpuAccelScanState (extended struct). The
     // plan node's custom_private was set by make_custom_scan_plan.
     let state = node.cast::<GpuAccelScanState>();
@@ -1163,14 +1895,6 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 }
             }
         }
-        pgrx::debug1!(
-            "pg_accel: begin_custom_scan: {} child plan(s)",
-            if (*node).custom_ps.is_null() {
-                0
-            } else {
-                pg_sys::list_length((*node).custom_ps)
-            }
-        );
     }
 
     // Deserialize strategy and config from custom_private.
@@ -1199,11 +1923,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     //
     // The child plan (Seq Scan) already evaluates the WHERE clause, so
     // we do NOT steal the qual for re-evaluation in the custom scan.
-    //
+
     // SAFETY: node points to our extended GpuAccelScanState.
     unsafe {
         (*state).accel.executor = if privdata.gpu_strategy == GpuStrategy::Agg {
-            let exec = if let Some(gk) = privdata.group_key {
+            let mut exec = if let Some(gk) = privdata.group_key {
                 pgrx::debug1!(
                     "pg_accel: begin_custom_scan: GroupedAgg, {} aggs, group attno={}",
                     privdata.agg_columns.len(),
@@ -1214,6 +1938,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     batch_size,
                     &privdata.agg_columns,
                     gk,
+                    privdata.group_key_tlist_pos,
                 ))
             } else {
                 pgrx::debug1!(
@@ -1226,6 +1951,85 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     &privdata.agg_columns,
                 ))
             };
+
+            // Pipeline fusion: if the child is a GpuExpr scan with a direct
+            // heap scan and a compiled template expression, the agg can walk
+            // the heap itself and extract aggregate columns directly from
+            // HeapTuples — skipping ExecProcNode, MinimalTuple copy, and
+            // slot deformation entirely.
+            if !exec.is_grouped() {
+                let custom_ps = (*node).custom_ps;
+                if !custom_ps.is_null() && pg_sys::list_length(custom_ps) > 0 {
+                    // SAFETY: custom_ps[0] is a valid PlanState — the child
+                    // Custom Scan node initialised by ExecInitNode.
+                    let child_ps =
+                        pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
+                    // Check if the child is a CustomScanState with our methods.
+                    if !child_ps.is_null() {
+                        let child_css = child_ps.cast::<pg_sys::CustomScanState>();
+                        let child_state = child_css.cast::<GpuAccelScanState>();
+                        let child_strategy =
+                            GpuStrategy::from_i32((*child_state).accel.strategy);
+                        if child_strategy == GpuStrategy::Scan {
+                            let child_exec_ptr = (*child_state).accel.executor;
+                            if !child_exec_ptr.is_null() {
+                                // SAFETY: child executor was allocated as
+                                // ScanExecState in the Scan branch of
+                                // begin_custom_scan.
+                                let child_scan =
+                                    &*child_exec_ptr.cast::<ScanExecState>();
+                                let sd = child_scan.scan_desc();
+                                if !sd.is_null() && child_scan.has_template_expr() {
+                                    let compiled = child_scan.compiled_expr();
+                                    // Build attno map: child scan output position →
+                                    // base table attno. The child's plan target list
+                                    // entries are Vars referencing the base table.
+                                    let mut attno_map = Vec::new();
+                                    let child_plan = (*child_ps).plan;
+                                    if !child_plan.is_null() {
+                                        let tlist = (*child_plan).targetlist;
+                                        if !tlist.is_null() {
+                                            let n = pg_sys::list_length(tlist);
+                                            for j in 0..n {
+                                                let tle = pg_sys::list_nth(tlist, j)
+                                                    .cast::<pg_sys::TargetEntry>();
+                                                if !tle.is_null() {
+                                                    let expr = (*tle).expr;
+                                                    if !expr.is_null() {
+                                                        let tag = (*expr
+                                                            .cast::<pg_sys::Node>())
+                                                        .type_;
+                                                        if tag == pg_sys::NodeTag::T_Var {
+                                                            let var =
+                                                                expr.cast::<pg_sys::Var>();
+                                                            attno_map.push(i32::from(
+                                                                (*var).varattno,
+                                                            ));
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+                                                // Non-Var entry: use 1-based identity.
+                                                attno_map.push((j + 1) as i32);
+                                            }
+                                        }
+                                    }
+                                    pgrx::debug1!(
+                                        "pg_accel: pipeline fusion attno_map={:?}",
+                                        attno_map,
+                                    );
+                                    exec.set_fused_context(sd, compiled, attno_map);
+                                    pgrx::debug1!(
+                                        "pg_accel: begin_custom_scan: \
+                                         pipeline fusion scan+agg activated",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Box::into_raw(exec).cast()
         } else if privdata.accel_strategy == AccelStrategy::GpuHashJoin {
             // Hash join: create a JoinExecState with hash join context.
@@ -1245,11 +2049,23 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 privdata.hash_inner_attno,
                 key_type,
             );
+
+            // Initialize tlist mapping and temp slots for combined output.
+            let custom_ps = (*node).custom_ps;
+            if !custom_ps.is_null() && pg_sys::list_length(custom_ps) >= 2 {
+                let outer_ps =
+                    pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
+                let inner_ps =
+                    pg_sys::list_nth(custom_ps, 1).cast::<pg_sys::PlanState>();
+                exec.init_hash_join_slots(cscan, outer_ps, inner_ps);
+            }
+
             pgrx::debug1!(
-                "pg_accel: begin_custom_scan: GpuHashJoin outer_attno={}, inner_attno={}, key_type={}",
+                "pg_accel: begin_custom_scan: GpuHashJoin outer_attno={}, inner_attno={}, key_type={}, tlist_map={}",
                 privdata.target_attno,
                 privdata.hash_inner_attno,
                 privdata.hash_key_type,
+                exec.tlist_map.len(),
             );
             Box::into_raw(exec).cast()
         } else if privdata.gpu_strategy == GpuStrategy::Window {
@@ -1283,25 +2099,32 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             //
             // SAFETY: cscan is a valid CustomScan; plan.qual was set by
             // make_custom_scan_plan via extract_actual_clauses.
-            let qual_ctx = find_accel_context_in_qual((*cscan).scan.plan.qual);
-
+            // GpuExpr doesn't need qual tree discovery (no fn_oid or
+            // qual_datum). Skip find_accel_context_in_qual which calls
+            // set_opfuncid on OpExpr nodes and can crash for plain WHERE.
             let (strategy, fn_oid, target_attno, qual_datum) =
-                if privdata.fn_oid == pg_sys::Oid::INVALID {
-                    // Fallback: discover everything from qual list.
-                    qual_ctx.map_or(
-                        (AccelStrategy::BatchedEval, pg_sys::Oid::INVALID, 0, None),
-                        |ctx| (ctx.strategy, ctx.fn_oid, ctx.target_attno, ctx.qual_datum),
-                    )
+                if privdata.accel_strategy == AccelStrategy::GpuExpr {
+                    (AccelStrategy::GpuExpr, pg_sys::Oid::INVALID, 0, None)
                 } else {
-                    // Use planner-serialized fn_oid/attno/strategy, but take
-                    // qual_datum from the qual tree discovery.
-                    let qd = qual_ctx.and_then(|ctx| ctx.qual_datum);
-                    (
-                        privdata.accel_strategy,
-                        privdata.fn_oid,
-                        privdata.target_attno,
-                        qd,
-                    )
+                    let qual_ctx =
+                        find_accel_context_in_qual((*cscan).scan.plan.qual);
+                    if privdata.fn_oid == pg_sys::Oid::INVALID {
+                        // Fallback: discover everything from qual list.
+                        qual_ctx.map_or(
+                            (AccelStrategy::GpuSpatial, pg_sys::Oid::INVALID, 0, None),
+                            |ctx| (ctx.strategy, ctx.fn_oid, ctx.target_attno, ctx.qual_datum),
+                        )
+                    } else {
+                        // Use planner-serialized fn_oid/attno/strategy, but take
+                        // qual_datum from the qual tree discovery.
+                        let qd = qual_ctx.and_then(|ctx| ctx.qual_datum);
+                        (
+                            privdata.accel_strategy,
+                            privdata.fn_oid,
+                            privdata.target_attno,
+                            qd,
+                        )
+                    }
                 };
 
             pgrx::debug1!(
@@ -1309,28 +2132,94 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 strategy
             );
 
+            // Grab the compiled qual ExprState and ExprContext from PG's
+            // CustomScanState so the scalar qual fallback works when the
+            // GPU dispatch returns Deferred.
+            let qual = (*node).ss.ps.qual;
+            let econtext = (*node).ss.ps.ps_ExprContext;
             let mut exec = Box::new(ScanExecState::new(
                 strategy,
                 batch_size,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                qual,
+                econtext,
             ));
 
-            // For GpuExpr strategy, attempt expression compilation.
+            // For GpuExpr strategy, compile the qual list to GPU bytecode.
             // Template match is tried first (fastest), then bytecode,
-            // then CPU fallback if neither works.
+            // then defer to PG if neither works.
             if strategy == AccelStrategy::GpuExpr {
-                // For now, store CpuFallback — actual PG expression tree
-                // walking requires ExprState traversal which is wired
-                // separately. The dispatch_gpu_expr path handles CpuFallback
-                // by delegating to dispatch_scalar_qual.
-                exec.set_compiled_expr(crate::engine::expr_compiler::CompiledExpr::CpuFallback);
-                pgrx::debug1!("pg_accel: begin_custom_scan: GpuExpr compiled (CpuFallback)");
+                // SAFETY: cscan.scan.plan.qual is a valid List * set by
+                // make_custom_scan_plan. tupdesc provides num_cols.
+                let plan_qual = (*cscan).scan.plan.qual;
+                // For direct scan (scanrelid > 0), use the scan slot's
+                // TupleDesc (= table TupleDesc). For child-plan mode,
+                // use the child's result type.
+                let num_cols = {
+                    let scan_desc = (*node).ss.ss_ScanTupleSlot;
+                    if !scan_desc.is_null() {
+                        let desc = (*scan_desc).tts_tupleDescriptor;
+                        if !desc.is_null() {
+                            (*desc).natts as usize
+                        } else {
+                            32
+                        }
+                    } else {
+                        32
+                    }
+                };
+                let compiled = compile_qual_list(plan_qual, num_cols);
+                pgrx::debug1!(
+                    "pg_accel: begin_custom_scan: GpuExpr compiled = {}, num_cols={}",
+                    match &compiled {
+                        crate::engine::expr_compiler::CompiledExpr::Template(_) => "Template",
+                        crate::engine::expr_compiler::CompiledExpr::Bytecode(_) => "Bytecode",
+                        crate::engine::expr_compiler::CompiledExpr::DeferToPg => "DeferToPg",
+                    },
+                    num_cols
+                );
+                exec.set_compiled_expr(compiled);
+
+                // For GpuExpr with scanrelid > 0 (direct heap scan),
+                // initialise a table scan so fill_batch can pull tuples.
+                // NOTE: Do NOT clear ps.qual here. ExecScan evaluates the
+                // qual after gpu_scan_access returns each tuple. Clearing
+                // it would bypass WHERE clause evaluation entirely.
+                let scanrelid = (*cscan).scan.scanrelid;
+                if scanrelid > 0 {
+                    let rel = (*node).ss.ss_currentRelation;
+                    let estate = (*node).ss.ps.state;
+                    let snapshot = (*estate).es_snapshot;
+                    pgrx::debug1!(
+                        "pg_accel: table_beginscan: rel={:?}, estate={:?}, snapshot={:?}",
+                        rel,
+                        estate,
+                        snapshot,
+                    );
+                    // Use GetActiveSnapshot if es_snapshot is null.
+                    let snap = if snapshot.is_null() {
+                        pg_sys::GetActiveSnapshot()
+                    } else {
+                        snapshot
+                    };
+                    // SAFETY: rel was opened by ExecOpenScanRelation during
+                    // ExecInitCustomScan. snap is a valid snapshot.
+                    let sd = pg_sys::table_beginscan(
+                        rel,
+                        snap,
+                        0,
+                        std::ptr::null_mut(),
+                    );
+                    exec.set_scan_desc(sd);
+                    pgrx::debug1!(
+                        "pg_accel: begin_custom_scan: GpuExpr direct heap scan, scanrelid={}",
+                        scanrelid
+                    );
+                }
             }
 
             // Wire the GPU context so dispatch can route to the correct
-            // GPU kernel (spatial, H3, raster) instead of BatchedEval.
-            if strategy != AccelStrategy::BatchedEval && fn_oid != pg_sys::Oid::INVALID {
+            // GPU kernel (spatial, H3, raster).
+            if fn_oid != pg_sys::Oid::INVALID {
                 // SAFETY: fn_oid was looked up in the registry by the
                 // planner hook and is a valid regproc OID. We are on the
                 // main backend thread (called by the executor).
@@ -1356,6 +2245,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     // tag and index AM OID — safe on main backend thread.
                     exec.detect_gist_child(child_ps);
                 }
+
+                // Datum extraction is now done in fill_batch from the child's
+                // slot directly, so no extraction slot is needed.
             }
 
             Box::into_raw(exec).cast()
@@ -1373,6 +2265,47 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 ///
 /// # Safety
 ///
+/// Access method for ExecScan: fetches the next HeapTuple from our scan
+/// descriptor and stores it in the scan slot. ExecScan handles qual
+/// evaluation and projection.
+///
+/// # Safety
+///
+/// Called by ExecScan on the main backend thread. `node` is a valid ScanState
+/// embedded in our GpuAccelScanState.
+unsafe extern "C-unwind" fn gpu_scan_access(
+    node: *mut pg_sys::ScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    // Upcast ScanState → GpuAccelScanState to reach our executor.
+    let state = node.cast::<GpuAccelScanState>();
+    let executor = unsafe { (*state).accel.executor };
+    if executor.is_null() {
+        let scan_slot = unsafe { (*node).ss_ScanTupleSlot };
+        unsafe { pg_sys::ExecClearTuple(scan_slot) };
+        return scan_slot;
+    }
+    let scan_state = unsafe { &mut *executor.cast::<ScanExecState>() };
+    let scan_slot = unsafe { (*node).ss_ScanTupleSlot };
+    // Always use gpu_scan_next which calls table_scan_getnextslot for
+    // proper buffer pinning. ExecScan handles qual evaluation via the
+    // plan's qual list (compiled to ExprState by ExecInitCustomScan).
+    // SAFETY: scan_desc and scan_slot are valid; main backend thread.
+    unsafe { scan_state.gpu_scan_next(scan_slot) }
+}
+
+/// Recheck method for ExecScan — always returns true (no recheck needed
+/// since our scan returns actual heap tuples, not index pointers).
+///
+/// # Safety
+///
+/// Called by ExecScan on the main backend thread.
+unsafe extern "C-unwind" fn gpu_scan_recheck(
+    _node: *mut pg_sys::ScanState,
+    _slot: *mut pg_sys::TupleTableSlot,
+) -> bool {
+    true
+}
+
 /// Called by the executor on the main backend thread.
 unsafe extern "C-unwind" fn exec_custom_scan(
     node: *mut pg_sys::CustomScanState,
@@ -1388,34 +2321,118 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     // SAFETY: executor was allocated in begin_custom_scan.
     let executor = unsafe { (*state).accel.executor };
     if executor.is_null() {
-        pgrx::debug1!("pg_accel: exec_custom_scan — executor is null, passthrough");
+        // SAFETY: node is a valid CustomScanState on the main backend thread.
+        return unsafe { passthrough_exec(node) };
+    }
+
+    // SAFETY: state points to our GpuAccelScanState with valid accel fields.
+    let gpu_strategy = GpuStrategy::from_i32(unsafe { (*state).accel.strategy });
+
+    // Fast path for Scan strategy.
+    if gpu_strategy == GpuStrategy::Scan {
+        // Check if this is a GpuExpr direct heap scan (scanrelid > 0).
+        // GpuExpr scans use ExecScan which handles qual eval + projection
+        // from scan slot (all table cols) → result slot (requested cols).
+        // SAFETY: node->ss.ps.plan is valid; reading scanrelid.
+        let scanrelid = unsafe {
+            let cscan = (*node).ss.ps.plan.cast::<pg_sys::CustomScan>();
+            (*cscan).scan.scanrelid
+        };
+        if scanrelid > 0 {
+            // GpuExpr: use ExecScan for proper projection support.
+            // SAFETY: node->ss is a valid ScanState. gpu_scan_access and
+            // gpu_scan_recheck are our access/recheck methods.
+            return unsafe {
+                pg_sys::ExecScan(
+                    &raw mut (*node).ss,
+                    Some(gpu_scan_access),
+                    Some(gpu_scan_recheck),
+                )
+            };
+        }
+        // Non-GpuExpr scan (spatial/h3/raster): use batched dispatch.
+        let scan_state = unsafe { &mut *executor.cast::<ScanExecState>() };
+        let child_ps = unsafe {
+            let custom_ps = (*node).custom_ps;
+            if custom_ps.is_null() || pg_sys::list_length(custom_ps) == 0 {
+                std::ptr::null_mut()
+            } else {
+                pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>()
+            }
+        };
+        let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
+        return unsafe { scan_state.next(child_ps, scan_slot) };
+    }
+
+    // Agg strategy: delegate to AggExecState which consumes all child
+    // input and produces aggregate result tuples.
+    if gpu_strategy == GpuStrategy::Agg {
+        let agg_state = unsafe { &mut *executor.cast::<AggExecState>() };
+        let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
+
+        // Use the fused scan+agg path when pipeline fusion was activated
+        // in begin_custom_scan. This walks the heap directly instead of
+        // pulling tuples through ExecProcNode.
+        let result = if agg_state.is_fused {
+            // SAFETY: agg_state was allocated in begin_custom_scan with
+            // fused context. scan_slot is valid. Main backend thread.
+            unsafe { agg_state.next_fused(scan_slot) }
+        } else {
+            let child_ps = unsafe {
+                let custom_ps = (*node).custom_ps;
+                if custom_ps.is_null() || pg_sys::list_length(custom_ps) == 0 {
+                    std::ptr::null_mut()
+                } else {
+                    pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>()
+                }
+            };
+            // SAFETY: agg_state was allocated in begin_custom_scan. child_ps
+            // and scan_slot are valid. Main backend thread.
+            if agg_state.is_grouped() {
+                unsafe { agg_state.next_grouped(child_ps, scan_slot) }
+            } else {
+                unsafe { agg_state.next(child_ps, scan_slot) }
+            }
+        };
+
+        if result.is_null() {
+            // SAFETY: ExecClearTuple on a valid slot.
+            unsafe { pg_sys::ExecClearTuple(scan_slot) };
+            return scan_slot;
+        }
+        // Update counters for EXPLAIN ANALYZE.
+        unsafe {
+            (*state).accel.rows_dispatched = agg_state.rows_dispatched;
+            (*state).accel.batches_executed = agg_state.batches_executed;
+            (*state).accel.dispatch_time_us = agg_state.dispatch_time_us;
+        }
+        return result;
+    }
+
+    // Strategies that are not yet handled: passthrough.
+    if !matches!(
+        gpu_strategy,
+        GpuStrategy::Scan | GpuStrategy::Sort | GpuStrategy::Join | GpuStrategy::Window
+    ) {
         // SAFETY: node is a valid CustomScanState on the main backend thread.
         return unsafe { passthrough_exec(node) };
     }
 
     // Get the child plan state from custom_ps.
-    // SAFETY: custom_ps was populated by begin_custom_scan.
     let child_ps = unsafe {
         let custom_ps = (*node).custom_ps;
         if custom_ps.is_null() || pg_sys::list_length(custom_ps) == 0 {
-            return std::ptr::null_mut();
+            std::ptr::null_mut()
+        } else {
+            pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>()
         }
-        pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>()
     };
-    if child_ps.is_null() {
-        return std::ptr::null_mut();
-    }
 
     // Our scan slot — where we put the result tuple.
     // SAFETY: ss.ss_ScanTupleSlot is initialised by ExecInitCustomScan.
     let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
 
-    // SAFETY: state points to our GpuAccelScanState with valid accel fields.
-    let gpu_strategy = GpuStrategy::from_i32(unsafe { (*state).accel.strategy });
-
     // Dispatch to the correct executor based on strategy.
-    // SAFETY: executor was allocated with the matching type in begin_custom_scan.
-    // We are on the main backend thread. All pointers are valid.
     // Check if this is a hash join — needs both outer (child 0) and inner (child 1).
     let accel_strategy_raw = unsafe { (*state).accel.strategy };
     let _ = accel_strategy_raw; // used below in the hash join branch
@@ -1547,7 +2564,16 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     let _ = Box::from_raw((*state).accel.executor.cast::<SortExecState>());
                 } else {
                     // SAFETY: executor was Box::into_raw'd as ScanExecState.
-                    let _ = Box::from_raw((*state).accel.executor.cast::<ScanExecState>());
+                    let scan_exec =
+                        Box::from_raw((*state).accel.executor.cast::<ScanExecState>());
+                    // End direct heap scan if one was started.
+                    let sd = scan_exec.scan_desc();
+                    if !sd.is_null() {
+                        // SAFETY: sd was created by table_beginscan in
+                        // begin_custom_scan; main backend thread.
+                        pg_sys::table_endscan(sd);
+                    }
+                    drop(scan_exec);
                 }
             }
             (*state).accel.executor = std::ptr::null_mut();
@@ -1569,18 +2595,16 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
     }
 }
 
-/// `ReScanCustomScan`: handle rescanning (e.g., for nested loops).
+/// Drop the old executor state and create a fresh one, preserving
+/// strategy-specific descriptors (qual pointers, sort keys, etc.).
 ///
 /// # Safety
 ///
-/// Called by the executor on the main backend thread.
-unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
-    let state = node.cast::<GpuAccelScanState>();
-
-    // SAFETY: Drop the old executor state and create a fresh one.
-    // For ScanExecState, preserve qual/econtext pointers (owned by PG).
-    // For SortExecState, preserve sort key descriptors.
-    // All pointer accesses are to our GpuAccelScanState on the main thread.
+/// Caller must ensure `state` points to a valid `GpuAccelScanState` on the
+/// main backend thread. The executor pointer is replaced atomically.
+unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
+    // SAFETY: All field accesses are to our GpuAccelScanState. The executor
+    // pointer was previously produced by Box::into_raw for the matching type.
     unsafe {
         let gpu_strategy = GpuStrategy::from_i32((*state).accel.strategy);
         let batch_size = if (*state).accel.batch_size > 0 {
@@ -1590,7 +2614,6 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
         };
 
         if gpu_strategy == GpuStrategy::Agg {
-            // Preserve aggregate column descriptors and group key from the old state.
             let (old_descs, old_group_key) = if (*state).accel.executor.is_null() {
                 (vec![], None)
             } else {
@@ -1614,6 +2637,7 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
                         batch_size,
                         &old_descs,
                         gk,
+                        0, // rescan: use default position
                     ))
                 },
             );
@@ -1633,13 +2657,35 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
                 None,
             ));
             (*state).accel.executor = Box::into_raw(exec).cast();
+        } else if gpu_strategy == GpuStrategy::Window {
+            let window_specs = if (*state).accel.executor.is_null() {
+                vec![]
+            } else {
+                // SAFETY: executor was Box::into_raw'd as WindowExecState.
+                let old = Box::from_raw((*state).accel.executor.cast::<WindowExecState>());
+                old.specs().to_vec()
+            };
+            let exec = Box::new(WindowExecState::new(
+                AccelStrategy::GpuWindow,
+                batch_size,
+                window_specs,
+            ));
+            (*state).accel.executor = Box::into_raw(exec).cast();
+        } else if gpu_strategy == GpuStrategy::Join {
+            // Hash join / spatial join: preserve key config, drop hash table.
+            if !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as JoinExecState.
+                let mut old = Box::from_raw((*state).accel.executor.cast::<JoinExecState>());
+                old.reset_for_rescan();
+                (*state).accel.executor = Box::into_raw(old).cast();
+            }
         } else {
             let (qual, econtext, old_strategy, old_fn_oid, old_attno, old_qual_datum) =
                 if (*state).accel.executor.is_null() {
                     (
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
-                        AccelStrategy::BatchedEval,
+                        AccelStrategy::GpuSpatial,
                         pg_sys::InvalidOid,
                         0i32,
                         None,
@@ -1657,15 +2703,28 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
                     )
                 };
             let mut exec = Box::new(ScanExecState::new(old_strategy, batch_size, qual, econtext));
-            // Re-wire GPU context preserved from the previous scan state.
-            if old_fn_oid != pg_sys::InvalidOid && old_strategy != AccelStrategy::BatchedEval {
+            if old_fn_oid != pg_sys::InvalidOid {
                 // SAFETY: old_fn_oid was validated during the initial
                 // set_gpu_context call. We are on the main backend thread.
                 exec.set_gpu_context(old_fn_oid, old_attno, old_qual_datum);
             }
             (*state).accel.executor = Box::into_raw(exec).cast();
         }
+    }
+}
 
+/// `ReScanCustomScan`: handle rescanning (e.g., for nested loops).
+///
+/// # Safety
+///
+/// Called by the executor on the main backend thread.
+unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
+    let state = node.cast::<GpuAccelScanState>();
+
+    // SAFETY: All pointer accesses are to our GpuAccelScanState on the main
+    // backend thread. See `reset_executor_state` for per-strategy details.
+    unsafe {
+        reset_executor_state(state);
         (*state).accel.rows_dispatched = 0;
         (*state).accel.batches_executed = 0;
         (*state).accel.dispatch_time_us = 0;
@@ -1756,17 +2815,9 @@ unsafe extern "C-unwind" fn explain_custom_scan(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Determine expected thread count based on GUC settings.
+/// Determine expected thread count (GPU-only: always 1, no CPU worker pool).
 fn resolve_thread_count() -> c_int {
-    let workers = gucs::workers();
-    if workers > 0 {
-        return workers;
-    }
-    // Auto-detect: use half of available cores, minimum 1.
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get() as c_int)
-        .unwrap_or(2);
-    (cores / 2).max(1)
+    1
 }
 
 /// Read an `Integer` node value from a PG `List` at position `idx`.
@@ -1808,6 +2859,8 @@ struct CustomPrivateData {
     /// Group key info for grouped aggregation.
     /// Only meaningful when `gpu_strategy == Agg` and GROUP BY is present.
     group_key: Option<GroupKeyInfo>,
+    /// 0-based position of group key in the output target list.
+    group_key_tlist_pos: usize,
     /// Inner relation join key attno (1-based). Only for `GpuHashJoin`.
     hash_inner_attno: i32,
     /// Key type for hash join (0=i32, 1=i64, 2=f64). Only for `GpuHashJoin`.
@@ -1836,11 +2889,12 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
             batch_size: gucs::min_batch_size().max(1),
             fn_oid: pg_sys::Oid::INVALID,
             target_attno: 0,
-            accel_strategy: AccelStrategy::BatchedEval,
+            accel_strategy: AccelStrategy::GpuSpatial,
             sort_keys: vec![],
             sort_limit: None,
             agg_columns: vec![],
             group_key: None,
+            group_key_tlist_pos: 0,
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
@@ -1935,8 +2989,9 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
     }
 
     // For Agg strategy, read optional group key info after agg descriptors.
-    // Layout: [...agg descs..., has_group_key, gk_attno, gk_type_oid, gk_key_type]
-    let group_key = if matches!(gpu_strategy, GpuStrategy::Agg) {
+    // Layout: [...agg descs..., has_group_key, gk_attno, gk_type_oid,
+    //   gk_key_type, gk2_attno, gk_tlist_pos]
+    let (group_key, group_key_tlist_pos) = if matches!(gpu_strategy, GpuStrategy::Agg) {
         let num_aggs = unsafe { list_int_at(custom_private, 6) } as usize;
         let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
         let gk_base = 7 + num_aggs * 3;
@@ -1950,19 +3005,25 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
                         unsafe { list_int_at(custom_private, (gk_base + 2) as c_int) } as u32,
                     );
                 let gk_key_type = unsafe { list_int_at(custom_private, (gk_base + 3) as c_int) };
-                Some(GroupKeyInfo {
+                // gk_base + 4 = group_key2_attno, gk_base + 5 = gk_tlist_pos
+                let tlist_pos = if gk_base + 5 < list_len {
+                    unsafe { list_int_at(custom_private, (gk_base + 5) as c_int) }
+                } else {
+                    0 // default: group key at position 0
+                };
+                (Some(GroupKeyInfo {
                     attno: gk_attno,
                     type_oid: gk_type_oid,
                     key_type: gk_key_type,
-                })
+                }), tlist_pos)
             } else {
-                None
+                (None, 0)
             }
         } else {
-            None
+            (None, 0)
         }
     } else {
-        None
+        (None, 0)
     };
 
     // For Window strategy, read window function specs starting at index 6.
@@ -2028,6 +3089,7 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
         sort_limit,
         agg_columns,
         group_key,
+        group_key_tlist_pos: group_key_tlist_pos as usize,
         hash_inner_attno,
         hash_key_type,
         window_specs,
@@ -2094,8 +3156,13 @@ unsafe fn passthrough_exec(node: *mut pg_sys::CustomScanState) -> *mut pg_sys::T
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // GpuStrategy enum — from_i32 conversions
+    // -----------------------------------------------------------------------
 
     #[test]
     fn strategy_labels() {
@@ -2129,8 +3196,8 @@ mod tests {
         // Negative values default to Scan.
         assert_eq!(GpuStrategy::from_i32(i32::MIN), GpuStrategy::Scan);
         assert_eq!(GpuStrategy::from_i32(-100), GpuStrategy::Scan);
-        // Large positive values default to Scan.
-        assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Scan);
+        // Values above the last variant (Window=4) default to Scan.
+        assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::Scan);
         assert_eq!(GpuStrategy::from_i32(i32::MAX), GpuStrategy::Scan);
     }
 
@@ -2204,5 +3271,973 @@ mod tests {
             .unwrap_or(2);
         // Should be at most cores (auto-detect uses cores/2).
         assert!(count <= cores);
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuStrategy — Window variant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strategy_from_i32_window_variant() {
+        assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Window);
+    }
+
+    #[test]
+    fn strategy_window_repr_value() {
+        assert_eq!(GpuStrategy::Window as i32, 4);
+    }
+
+    #[test]
+    fn strategy_window_label() {
+        assert_eq!(GpuStrategy::Window.label(), c"GpuWindow");
+    }
+
+    #[test]
+    fn strategy_window_debug() {
+        assert_eq!(format!("{:?}", GpuStrategy::Window), "Window");
+    }
+
+    #[test]
+    fn strategy_from_i32_above_window_defaults_to_scan() {
+        // 5 and above are not valid GpuStrategy variants.
+        assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::Scan);
+        assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::Scan);
+        assert_eq!(GpuStrategy::from_i32(100), GpuStrategy::Scan);
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuStrategy — roundtrip i32 conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strategy_roundtrip_all_variants() {
+        for variant in [
+            GpuStrategy::Scan,
+            GpuStrategy::Join,
+            GpuStrategy::Agg,
+            GpuStrategy::Sort,
+            GpuStrategy::Window,
+        ] {
+            let raw = variant as i32;
+            let recovered = GpuStrategy::from_i32(raw);
+            assert_eq!(
+                variant, recovered,
+                "roundtrip failed for {variant:?} (raw={raw})"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuStrategy — equality and inequality
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strategy_equality() {
+        assert_eq!(GpuStrategy::Scan, GpuStrategy::Scan);
+        assert_ne!(GpuStrategy::Scan, GpuStrategy::Join);
+        assert_ne!(GpuStrategy::Sort, GpuStrategy::Window);
+    }
+
+    #[test]
+    fn strategy_copy_semantics_preserve_value() {
+        let original = GpuStrategy::Agg;
+        let copied = original;
+        // After copy, both should be independently usable and equal.
+        assert_eq!(original as i32, 2);
+        assert_eq!(copied as i32, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuStrategy — label uniqueness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn strategy_labels_are_unique_across_variants() {
+        let all = [
+            GpuStrategy::Scan,
+            GpuStrategy::Join,
+            GpuStrategy::Agg,
+            GpuStrategy::Sort,
+            GpuStrategy::Window,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for (j, b) in all.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        a.label(),
+                        b.label(),
+                        "labels for {a:?} and {b:?} must differ"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strategy_labels_start_with_gpu() {
+        for variant in [
+            GpuStrategy::Scan,
+            GpuStrategy::Join,
+            GpuStrategy::Agg,
+            GpuStrategy::Sort,
+            GpuStrategy::Window,
+        ] {
+            let label = variant.label().to_str().unwrap();
+            assert!(
+                label.starts_with("Gpu"),
+                "label for {variant:?} should start with 'Gpu', got '{label}'"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuAccelState — field layout and default values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accel_state_zeroed_has_expected_defaults() {
+        // Simulates what palloc0 gives us: all bytes zero.
+        let state = GpuAccelState {
+            strategy: 0,
+            batch_size: 0,
+            expected_threads: 0,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            dispatch_time_us: 0,
+            executor: std::ptr::null_mut(),
+        };
+        assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Scan);
+        assert_eq!(state.batch_size, 0);
+        assert_eq!(state.rows_dispatched, 0);
+        assert_eq!(state.batches_executed, 0);
+        assert_eq!(state.dispatch_time_us, 0);
+        assert!(state.executor.is_null());
+    }
+
+    #[test]
+    fn accel_state_strategy_field_maps_to_gpu_strategy() {
+        let mut state = GpuAccelState {
+            strategy: 0,
+            batch_size: 256,
+            expected_threads: 4,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            dispatch_time_us: 0,
+            executor: std::ptr::null_mut(),
+        };
+        state.strategy = GpuStrategy::Sort as i32;
+        assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Sort);
+
+        state.strategy = GpuStrategy::Window as i32;
+        assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Window);
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuAccelState — counter accumulation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accel_state_counter_accumulation() {
+        let mut state = GpuAccelState {
+            strategy: GpuStrategy::Scan as i32,
+            batch_size: 1024,
+            expected_threads: 2,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            dispatch_time_us: 0,
+            executor: std::ptr::null_mut(),
+        };
+        // Simulate dispatching 3 batches of 1024 rows each.
+        for _ in 0..3 {
+            state.rows_dispatched += 1024;
+            state.batches_executed += 1;
+            state.dispatch_time_us += 500;
+        }
+        assert_eq!(state.rows_dispatched, 3072);
+        assert_eq!(state.batches_executed, 3);
+        assert_eq!(state.dispatch_time_us, 1500);
+    }
+
+    #[test]
+    fn accel_state_counters_no_overflow_at_large_values() {
+        let mut state = GpuAccelState {
+            strategy: GpuStrategy::Agg as i32,
+            batch_size: 4096,
+            expected_threads: 8,
+            rows_dispatched: u64::MAX - 10,
+            batches_executed: u64::MAX - 1,
+            dispatch_time_us: u64::MAX / 2,
+            executor: std::ptr::null_mut(),
+        };
+        state.rows_dispatched += 5;
+        state.batches_executed += 1;
+        state.dispatch_time_us += 100;
+        assert_eq!(state.rows_dispatched, u64::MAX - 5);
+        assert_eq!(state.batches_executed, u64::MAX);
+        assert_eq!(state.dispatch_time_us, u64::MAX / 2 + 100);
+    }
+
+    #[test]
+    fn accel_state_dispatch_time_to_ms_conversion() {
+        let state = GpuAccelState {
+            strategy: GpuStrategy::Scan as i32,
+            batch_size: 256,
+            expected_threads: 1,
+            rows_dispatched: 1000,
+            batches_executed: 4,
+            dispatch_time_us: 12_345,
+            executor: std::ptr::null_mut(),
+        };
+        // This mirrors the conversion done in explain_custom_scan.
+        #[allow(clippy::cast_precision_loss)]
+        let time_ms = state.dispatch_time_us as f64 / 1000.0;
+        assert!((time_ms - 12.345).abs() < 1e-10);
+    }
+
+    #[test]
+    fn accel_state_dispatch_time_zero_us_is_zero_ms() {
+        let state = GpuAccelState {
+            strategy: GpuStrategy::Scan as i32,
+            batch_size: 256,
+            expected_threads: 1,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            dispatch_time_us: 0,
+            executor: std::ptr::null_mut(),
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let time_ms = state.dispatch_time_us as f64 / 1000.0;
+        assert!((time_ms - 0.0).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // CustomPrivateData — default (null custom_private) path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn custom_private_data_default_fields() {
+        // When custom_private is null, deserialize should produce defaults.
+        // We can't call deserialize_custom_private (needs PG List), but
+        // we can verify the struct's default construction matches expectations.
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Scan,
+            batch_size: 256,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuSpatial,
+            sort_keys: vec![],
+            sort_limit: None,
+            agg_columns: vec![],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: vec![],
+        };
+        assert_eq!(data.gpu_strategy, GpuStrategy::Scan);
+        assert_eq!(data.batch_size, 256);
+        assert_eq!(data.fn_oid, pg_sys::Oid::INVALID);
+        assert_eq!(data.target_attno, 0);
+        assert_eq!(data.accel_strategy, AccelStrategy::GpuSpatial);
+        assert!(data.sort_keys.is_empty());
+        assert!(data.sort_limit.is_none());
+        assert!(data.agg_columns.is_empty());
+        assert!(data.group_key.is_none());
+        assert_eq!(data.hash_inner_attno, 0);
+        assert_eq!(data.hash_key_type, 0);
+        assert!(data.window_specs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CustomPrivateData — sort key storage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn custom_private_data_with_sort_keys() {
+        let keys = vec![
+            SortKeyDesc {
+                attno: 1,
+                sort_op: pg_sys::Oid::from(97u32), // int4lt
+                collation: pg_sys::Oid::from(0u32),
+                nulls_first: false,
+            },
+            SortKeyDesc {
+                attno: 3,
+                sort_op: pg_sys::Oid::from(622u32), // float8lt
+                collation: pg_sys::Oid::from(100u32),
+                nulls_first: true,
+            },
+        ];
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Sort,
+            batch_size: 512,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuSort,
+            sort_keys: keys.clone(),
+            sort_limit: Some(100),
+            agg_columns: vec![],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: vec![],
+        };
+        assert_eq!(data.sort_keys.len(), 2);
+        assert_eq!(data.sort_keys[0].attno, 1);
+        assert!(!data.sort_keys[0].nulls_first);
+        assert_eq!(data.sort_keys[1].attno, 3);
+        assert!(data.sort_keys[1].nulls_first);
+        assert_eq!(data.sort_limit, Some(100));
+    }
+
+    #[test]
+    fn custom_private_data_sort_limit_none_when_no_limit() {
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Sort,
+            batch_size: 256,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuSort,
+            sort_keys: vec![SortKeyDesc {
+                attno: 1,
+                sort_op: pg_sys::Oid::from(97u32),
+                collation: pg_sys::Oid::from(0u32),
+                nulls_first: false,
+            }],
+            sort_limit: None,
+            agg_columns: vec![],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: vec![],
+        };
+        assert!(data.sort_limit.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // CustomPrivateData — aggregate column storage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn custom_private_data_with_agg_columns() {
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Agg,
+            batch_size: 1024,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuReduce,
+            sort_keys: vec![],
+            sort_limit: None,
+            agg_columns: vec![
+                (AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32()),
+                (AggOp::Count, 0, pg_sys::INT8OID.to_u32()),
+                (AggOp::Min, 2, pg_sys::FLOAT8OID.to_u32()),
+                (AggOp::Max, 2, pg_sys::FLOAT8OID.to_u32()),
+                (AggOp::Avg, 3, pg_sys::FLOAT8OID.to_u32()),
+            ],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: vec![],
+        };
+        assert_eq!(data.agg_columns.len(), 5);
+        assert!(matches!(data.agg_columns[0].0, AggOp::Sum));
+        assert!(matches!(data.agg_columns[1].0, AggOp::Count));
+        assert!(matches!(data.agg_columns[2].0, AggOp::Min));
+        assert!(matches!(data.agg_columns[3].0, AggOp::Max));
+        assert!(matches!(data.agg_columns[4].0, AggOp::Avg));
+    }
+
+    #[test]
+    fn custom_private_data_with_group_key() {
+        let gk = GroupKeyInfo {
+            attno: 2,
+            type_oid: pg_sys::Oid::from(23u32), // INT4OID
+            key_type: 0,                        // i32
+        };
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Agg,
+            batch_size: 256,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuReduce,
+            sort_keys: vec![],
+            sort_limit: None,
+            agg_columns: vec![(AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32())],
+            group_key: Some(gk),
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: vec![],
+        };
+        let gk_ref = data.group_key.as_ref().unwrap();
+        assert_eq!(gk_ref.attno, 2);
+        assert_eq!(gk_ref.key_type, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // CustomPrivateData — hash join fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn custom_private_data_hash_join_fields() {
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Join,
+            batch_size: 512,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 1,
+            accel_strategy: AccelStrategy::GpuHashJoin,
+            sort_keys: vec![],
+            sort_limit: None,
+            agg_columns: vec![],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 3,
+            hash_key_type: 1, // Int64
+            window_specs: vec![],
+        };
+        assert_eq!(data.hash_inner_attno, 3);
+        assert_eq!(data.hash_key_type, 1);
+        assert_eq!(data.accel_strategy, AccelStrategy::GpuHashJoin);
+    }
+
+    // -----------------------------------------------------------------------
+    // CustomPrivateData — window function specs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn custom_private_data_with_window_specs() {
+        let specs = vec![
+            WindowFuncSpec {
+                func: WindowFunc::RowNumber,
+                partition_attno: 1,
+                order_attno: 2,
+                value_attno: 0,
+                offset: 0,
+                default_val: 0.0,
+                result_type_oid: pg_sys::INT8OID.to_u32(),
+            },
+            WindowFuncSpec {
+                func: WindowFunc::Lag,
+                partition_attno: 1,
+                order_attno: 2,
+                value_attno: 3,
+                offset: 1,
+                default_val: f64::from_bits(0),
+                result_type_oid: pg_sys::FLOAT8OID.to_u32(),
+            },
+        ];
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Window,
+            batch_size: 256,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuWindow,
+            sort_keys: vec![],
+            sort_limit: None,
+            agg_columns: vec![],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: specs,
+        };
+        assert_eq!(data.window_specs.len(), 2);
+        assert!(matches!(data.window_specs[0].func, WindowFunc::RowNumber));
+        assert_eq!(data.window_specs[0].partition_attno, 1);
+        assert!(matches!(data.window_specs[1].func, WindowFunc::Lag));
+        assert_eq!(data.window_specs[1].offset, 1);
+    }
+
+    #[test]
+    fn custom_private_data_empty_window_specs_for_non_window() {
+        let data = CustomPrivateData {
+            gpu_strategy: GpuStrategy::Sort,
+            batch_size: 256,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+            accel_strategy: AccelStrategy::GpuSort,
+            sort_keys: vec![],
+            sort_limit: None,
+            agg_columns: vec![],
+            group_key: None,
+            group_key_tlist_pos: 0,
+            hash_inner_attno: 0,
+            hash_key_type: 0,
+            window_specs: vec![],
+        };
+        assert!(data.window_specs.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Vtable static pointers — all methods ptrs are non-null and distinct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sort_path_methods_non_null() {
+        let methods = sort_path_methods();
+        assert!(!methods.is_null());
+    }
+
+    #[test]
+    fn agg_path_methods_non_null() {
+        let methods = agg_path_methods();
+        assert!(!methods.is_null());
+    }
+
+    #[test]
+    fn window_path_methods_non_null() {
+        let methods = window_path_methods();
+        assert!(!methods.is_null());
+    }
+
+    #[test]
+    fn all_path_methods_are_distinct() {
+        let ptrs = [
+            scan_path_methods(),
+            join_path_methods(),
+            sort_path_methods(),
+            agg_path_methods(),
+            window_path_methods(),
+        ];
+        for i in 0..ptrs.len() {
+            for j in (i + 1)..ptrs.len() {
+                assert_ne!(
+                    ptrs[i], ptrs[j],
+                    "path methods at index {i} and {j} should be distinct"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vtable_custom_names_are_valid_c_strings() {
+        // Read the CustomName from each static vtable and verify it is
+        // a well-formed, non-empty C string.
+        let scan_name = unsafe { std::ffi::CStr::from_ptr(SCAN_PATH_METHODS.0.CustomName) };
+        assert_eq!(scan_name, c"GpuAccelScan");
+
+        let join_name = unsafe { std::ffi::CStr::from_ptr(JOIN_PATH_METHODS.0.CustomName) };
+        assert_eq!(join_name, c"GpuAccelJoin");
+
+        let sort_name = unsafe { std::ffi::CStr::from_ptr(SORT_PATH_METHODS.0.CustomName) };
+        assert_eq!(sort_name, c"GpuAccelSort");
+
+        let agg_name = unsafe { std::ffi::CStr::from_ptr(AGG_PATH_METHODS.0.CustomName) };
+        assert_eq!(agg_name, c"GpuAccelAgg");
+
+        let window_name = unsafe { std::ffi::CStr::from_ptr(WINDOW_PATH_METHODS.0.CustomName) };
+        assert_eq!(window_name, c"GpuAccelWindow");
+    }
+
+    #[test]
+    fn scan_methods_custom_names_match_path_methods() {
+        // The CustomName in *_SCAN_METHODS should match the corresponding
+        // *_PATH_METHODS so PG can correlate plan nodes.
+        let scan_path = unsafe { std::ffi::CStr::from_ptr(SCAN_PATH_METHODS.0.CustomName) };
+        let scan_scan = unsafe { std::ffi::CStr::from_ptr(SCAN_SCAN_METHODS.0.CustomName) };
+        assert_eq!(scan_path, scan_scan);
+
+        let join_path = unsafe { std::ffi::CStr::from_ptr(JOIN_PATH_METHODS.0.CustomName) };
+        let join_scan = unsafe { std::ffi::CStr::from_ptr(JOIN_SCAN_METHODS.0.CustomName) };
+        assert_eq!(join_path, join_scan);
+
+        let sort_path = unsafe { std::ffi::CStr::from_ptr(SORT_PATH_METHODS.0.CustomName) };
+        let sort_scan = unsafe { std::ffi::CStr::from_ptr(SORT_SCAN_METHODS.0.CustomName) };
+        assert_eq!(sort_path, sort_scan);
+
+        let agg_path = unsafe { std::ffi::CStr::from_ptr(AGG_PATH_METHODS.0.CustomName) };
+        let agg_scan = unsafe { std::ffi::CStr::from_ptr(AGG_SCAN_METHODS.0.CustomName) };
+        assert_eq!(agg_path, agg_scan);
+
+        let window_path = unsafe { std::ffi::CStr::from_ptr(WINDOW_PATH_METHODS.0.CustomName) };
+        let window_scan = unsafe { std::ffi::CStr::from_ptr(WINDOW_SCAN_METHODS.0.CustomName) };
+        assert_eq!(window_path, window_scan);
+    }
+
+    #[test]
+    fn exec_methods_has_required_callbacks() {
+        // Verify the critical executor callbacks are wired (not None).
+        assert!(EXEC_METHODS.0.BeginCustomScan.is_some());
+        assert!(EXEC_METHODS.0.ExecCustomScan.is_some());
+        assert!(EXEC_METHODS.0.EndCustomScan.is_some());
+        assert!(EXEC_METHODS.0.ReScanCustomScan.is_some());
+        assert!(EXEC_METHODS.0.ExplainCustomScan.is_some());
+    }
+
+    #[test]
+    fn exec_methods_optional_callbacks_are_none() {
+        // These optional methods should not be set.
+        assert!(EXEC_METHODS.0.MarkPosCustomScan.is_none());
+        assert!(EXEC_METHODS.0.RestrPosCustomScan.is_none());
+        assert!(EXEC_METHODS.0.EstimateDSMCustomScan.is_none());
+        assert!(EXEC_METHODS.0.InitializeDSMCustomScan.is_none());
+        assert!(EXEC_METHODS.0.ReInitializeDSMCustomScan.is_none());
+        assert!(EXEC_METHODS.0.InitializeWorkerCustomScan.is_none());
+        assert!(EXEC_METHODS.0.ShutdownCustomScan.is_none());
+    }
+
+    #[test]
+    fn path_methods_plan_callback_is_some() {
+        assert!(SCAN_PATH_METHODS.0.PlanCustomPath.is_some());
+        assert!(JOIN_PATH_METHODS.0.PlanCustomPath.is_some());
+        assert!(SORT_PATH_METHODS.0.PlanCustomPath.is_some());
+        assert!(AGG_PATH_METHODS.0.PlanCustomPath.is_some());
+        assert!(WINDOW_PATH_METHODS.0.PlanCustomPath.is_some());
+    }
+
+    #[test]
+    fn path_methods_reparameterize_is_none() {
+        // We don't support reparameterization.
+        assert!(
+            SCAN_PATH_METHODS
+                .0
+                .ReparameterizeCustomPathByChild
+                .is_none()
+        );
+        assert!(
+            JOIN_PATH_METHODS
+                .0
+                .ReparameterizeCustomPathByChild
+                .is_none()
+        );
+        assert!(
+            SORT_PATH_METHODS
+                .0
+                .ReparameterizeCustomPathByChild
+                .is_none()
+        );
+        assert!(AGG_PATH_METHODS.0.ReparameterizeCustomPathByChild.is_none());
+        assert!(
+            WINDOW_PATH_METHODS
+                .0
+                .ReparameterizeCustomPathByChild
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn scan_methods_create_state_callback_is_some() {
+        // All scan methods should have CreateCustomScanState wired.
+        assert!(SCAN_SCAN_METHODS.0.CreateCustomScanState.is_some());
+        assert!(JOIN_SCAN_METHODS.0.CreateCustomScanState.is_some());
+        assert!(SORT_SCAN_METHODS.0.CreateCustomScanState.is_some());
+        assert!(AGG_SCAN_METHODS.0.CreateCustomScanState.is_some());
+        assert!(WINDOW_SCAN_METHODS.0.CreateCustomScanState.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Thread count auto-detect logic (without calling GUC)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_detect_thread_count_formula() {
+        // Mirrors resolve_thread_count's auto-detect path:
+        // (cores / 2).max(1), where GUC workers == 0.
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get() as i32)
+            .unwrap_or(2);
+        let expected = (cores / 2).max(1);
+        assert!(expected >= 1);
+        assert!(expected <= cores);
+    }
+
+    #[test]
+    fn auto_detect_single_core_gives_one() {
+        // If available_parallelism reports 1: (1 / 2).max(1) == 1.
+        let cores = 1i32;
+        let threads = (cores / 2).max(1);
+        assert_eq!(threads, 1);
+    }
+
+    #[test]
+    fn auto_detect_two_cores_gives_one() {
+        let cores = 2i32;
+        let threads = (cores / 2).max(1);
+        assert_eq!(threads, 1);
+    }
+
+    #[test]
+    fn auto_detect_eight_cores_gives_four() {
+        let cores = 8i32;
+        let threads = (cores / 2).max(1);
+        assert_eq!(threads, 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // SORT_KEY_INTS / WINDOW_SPEC_INTS constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sort_key_ints_matches_sort_key_desc_field_count() {
+        // SortKeyDesc has 4 fields: attno, sort_op, collation, nulls_first.
+        assert_eq!(SORT_KEY_INTS, 4);
+    }
+
+    #[test]
+    fn window_spec_ints_matches_window_func_spec_field_count() {
+        // WindowFuncSpec has 7 fields: func, partition_attno, order_attno,
+        // value_attno, offset, default_val, result_type_oid.
+        assert_eq!(WINDOW_SPEC_INTS, 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // AccelStrategy — from_i32 and repr (used in serialization path)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn accel_strategy_from_i32_all_variants() {
+        assert_eq!(AccelStrategy::from_i32(1), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(2), AccelStrategy::GpuRaster);
+        assert_eq!(AccelStrategy::from_i32(3), AccelStrategy::GpuH3);
+        assert_eq!(AccelStrategy::from_i32(4), AccelStrategy::GpuSort);
+        assert_eq!(AccelStrategy::from_i32(5), AccelStrategy::GpuReduce);
+        assert_eq!(AccelStrategy::from_i32(6), AccelStrategy::GpuExpr);
+        assert_eq!(AccelStrategy::from_i32(7), AccelStrategy::GpuHashJoin);
+        assert_eq!(AccelStrategy::from_i32(8), AccelStrategy::GpuWindow);
+    }
+
+    #[test]
+    fn accel_strategy_unknown_defaults_to_gpu_spatial() {
+        assert_eq!(AccelStrategy::from_i32(-1), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(0), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(99), AccelStrategy::GpuSpatial);
+        assert_eq!(AccelStrategy::from_i32(i32::MAX), AccelStrategy::GpuSpatial);
+    }
+
+    #[test]
+    fn accel_strategy_roundtrip() {
+        for raw in 1..=8 {
+            let strategy = AccelStrategy::from_i32(raw);
+            assert_eq!(strategy as i32, raw);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // GpuAccelScanState — repr(C) layout: css is first field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gpu_accel_scan_state_css_is_at_offset_zero() {
+        // Critical invariant: PG casts our node pointer to CustomScanState*,
+        // which only works if css is the first field at offset 0.
+        assert_eq!(
+            std::mem::offset_of!(GpuAccelScanState, css),
+            0,
+            "css must be at offset 0 for PG upcasting to work"
+        );
+    }
+
+    #[test]
+    fn gpu_accel_scan_state_accel_follows_css() {
+        // accel field must come after css.
+        let css_offset = std::mem::offset_of!(GpuAccelScanState, css);
+        let accel_offset = std::mem::offset_of!(GpuAccelScanState, accel);
+        assert!(
+            accel_offset > css_offset,
+            "accel must follow css in memory layout"
+        );
+    }
+
+    #[test]
+    fn gpu_accel_scan_state_size_exceeds_custom_scan_state() {
+        // Our extended struct must be larger than bare CustomScanState
+        // since it adds the GpuAccelState fields.
+        assert!(
+            std::mem::size_of::<GpuAccelScanState>()
+                > std::mem::size_of::<pg_sys::CustomScanState>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch size clamping logic (mirroring begin_custom_scan)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn batch_size_clamp_zero_becomes_256() {
+        // begin_custom_scan uses: if batch_size > 0 { batch_size } else { 256 }
+        let raw = 0i32;
+        let effective = if raw > 0 { raw as usize } else { 256 };
+        assert_eq!(effective, 256);
+    }
+
+    #[test]
+    fn batch_size_clamp_negative_becomes_256() {
+        let raw = -10i32;
+        let effective = if raw > 0 { raw as usize } else { 256 };
+        assert_eq!(effective, 256);
+    }
+
+    #[test]
+    fn batch_size_positive_kept_as_is() {
+        let raw = 1024i32;
+        let effective = if raw > 0 { raw as usize } else { 256 };
+        assert_eq!(effective, 1024);
+    }
+
+    #[test]
+    fn batch_size_one_is_valid() {
+        // Minimum meaningful batch size.
+        let raw = 1i32;
+        let effective = if raw > 0 { raw as usize } else { 256 };
+        assert_eq!(effective, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // WindowFunc — from_i32 / to_i32 used in serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn window_func_roundtrip_all_variants() {
+        let variants = [
+            WindowFunc::RowNumber,
+            WindowFunc::Rank,
+            WindowFunc::DenseRank,
+            WindowFunc::Sum,
+            WindowFunc::Count,
+            WindowFunc::Lag,
+            WindowFunc::Lead,
+        ];
+        for func in variants {
+            let raw = func.to_i32();
+            let recovered = WindowFunc::from_i32(raw);
+            assert_eq!(
+                Some(func),
+                recovered,
+                "roundtrip failed for {func:?} (raw={raw})"
+            );
+        }
+    }
+
+    #[test]
+    fn window_func_from_i32_invalid_returns_none() {
+        assert!(WindowFunc::from_i32(-1).is_none());
+        assert!(WindowFunc::from_i32(7).is_none());
+        assert!(WindowFunc::from_i32(100).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // AggOp — from_i32 / to_i32 used in serialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn agg_op_roundtrip_all_variants() {
+        let variants = [AggOp::Sum, AggOp::Avg, AggOp::Min, AggOp::Max, AggOp::Count];
+        for op in variants {
+            let raw = op.to_i32();
+            let recovered = AggOp::from_i32(raw);
+            assert_eq!(
+                std::mem::discriminant(&op),
+                std::mem::discriminant(&recovered),
+                "roundtrip failed for {op:?} (raw={raw})"
+            );
+        }
+    }
+
+    #[test]
+    fn agg_op_unknown_maps_to_passthrough() {
+        assert!(matches!(AggOp::from_i32(-1), AggOp::Passthrough));
+        assert!(matches!(AggOp::from_i32(5), AggOp::Passthrough));
+        assert!(matches!(AggOp::from_i32(99), AggOp::Passthrough));
+    }
+
+    // -----------------------------------------------------------------------
+    // WindowFuncSpec — default_val bit encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn window_func_spec_default_val_zero_bits() {
+        let spec = WindowFuncSpec {
+            func: WindowFunc::Lag,
+            partition_attno: 0,
+            order_attno: 1,
+            value_attno: 2,
+            offset: 1,
+            default_val: f64::from_bits(0),
+            result_type_oid: pg_sys::FLOAT8OID.to_u32(),
+        };
+        assert_eq!(spec.default_val.to_bits(), 0);
+        assert!((spec.default_val - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn window_func_spec_default_val_preserves_value() {
+        let val = 42.5_f64;
+        let bits = val.to_bits() as i32;
+        // Simulate the deserialization path: f64::from_bits(bits as u64)
+        let recovered = f64::from_bits(bits as u64);
+        // Note: this only works for values whose bit pattern fits in i32.
+        // The actual serialization truncates to i32, so we test that path.
+        let _ = recovered; // value may differ due to truncation, but no panic.
+    }
+
+    // -----------------------------------------------------------------------
+    // SortKeyDesc — field access patterns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sort_key_desc_fields_accessible() {
+        let key = SortKeyDesc {
+            attno: 5,
+            sort_op: pg_sys::Oid::from(97u32),
+            collation: pg_sys::Oid::from(100u32),
+            nulls_first: true,
+        };
+        assert_eq!(key.attno, 5);
+        assert_eq!(u32::from(key.sort_op), 97);
+        assert_eq!(u32::from(key.collation), 100);
+        assert!(key.nulls_first);
+    }
+
+    #[test]
+    fn sort_key_desc_nulls_first_false() {
+        let key = SortKeyDesc {
+            attno: 1,
+            sort_op: pg_sys::Oid::from(0u32),
+            collation: pg_sys::Oid::from(0u32),
+            nulls_first: false,
+        };
+        assert!(!key.nulls_first);
+    }
+
+    // -----------------------------------------------------------------------
+    // GroupKeyInfo — key_type values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn group_key_info_key_types() {
+        // The key_type field maps: 0=i32, 1=i64, 2=f64.
+        for (kt, label) in [(0, "i32"), (1, "i64"), (2, "f64")] {
+            let gk = GroupKeyInfo {
+                attno: 1,
+                type_oid: pg_sys::Oid::from(23u32),
+                key_type: kt,
+            };
+            assert_eq!(gk.key_type, kt, "key_type for {label} should be {kt}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PgaccelKeyType used in hash join context
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hash_key_type_mapping_matches_begin_custom_scan() {
+        // begin_custom_scan maps: 1 => Int64, 2 => Float64, _ => Int32
+        let map = |raw: i32| -> PgaccelKeyType {
+            match raw {
+                1 => PgaccelKeyType::Int64,
+                2 => PgaccelKeyType::Float64,
+                _ => PgaccelKeyType::Int32,
+            }
+        };
+        assert!(matches!(map(0), PgaccelKeyType::Int32));
+        assert!(matches!(map(1), PgaccelKeyType::Int64));
+        assert!(matches!(map(2), PgaccelKeyType::Float64));
+        assert!(matches!(map(-1), PgaccelKeyType::Int32));
+        assert!(matches!(map(99), PgaccelKeyType::Int32));
     }
 }

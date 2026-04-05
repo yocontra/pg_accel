@@ -10,8 +10,8 @@
 //!    pre-compiled C kernels with zero interpretation overhead.
 //! 2. **Bytecode** — general expressions compile to a stack-based program
 //!    evaluated by the GPU interpreter.
-//! 3. **CpuFallback** — unsupported nodes (string collation, numeric type,
-//!    custom functions) fall back to PG's executor.
+//! 3. **DeferToPg** — unsupported nodes (string collation, numeric type,
+//!    custom functions) defer to PG's native executor.
 
 use crate::gpu::{PgaccelExprInstruction, PgaccelVal, PgaccelValTag};
 
@@ -85,21 +85,52 @@ pub mod opcode {
     pub const JUMP: u16 = 101;
 
     pub const COALESCE: u16 = 110;
+
+    pub const EXTRACT_YEAR: u16 = 120;
+    pub const EXTRACT_MONTH: u16 = 121;
+    pub const EXTRACT_DAY: u16 = 122;
+    pub const EXTRACT_DOW: u16 = 123;
+    pub const EXTRACT_EPOCH: u16 = 124;
+    pub const EXTRACT_HOUR: u16 = 125;
+    pub const EXTRACT_MINUTE: u16 = 126;
+    pub const EXTRACT_QUARTER: u16 = 127;
+
+    pub const BIT_AND: u16 = 130;
+    pub const BIT_OR: u16 = 131;
+    pub const BIT_XOR: u16 = 132;
+    pub const BIT_NOT: u16 = 133;
+    pub const BIT_SHL: u16 = 134;
+    pub const BIT_SHR: u16 = 135;
+
+    pub const LN_F64: u16 = 140;
+    pub const EXP_F64: u16 = 141;
+    pub const SIN_F64: u16 = 142;
+    pub const COS_F64: u16 = 143;
+    pub const TAN_F64: u16 = 144;
+    pub const LOG10_F64: u16 = 145;
+
+    pub const IN_LIST: u16 = 150;
+
+    pub const CASE_END: u16 = 160;
 }
 
 // ── Compiled expression variants ────────────────────────────────────────
 
 /// Result of compiling a PG expression tree.
+#[derive(Clone)]
 pub enum CompiledExpr {
     /// Pre-compiled template kernel — fastest path.
     Template(TemplateKernel),
     /// General bytecode program for the GPU interpreter.
     Bytecode(ExprProgram),
-    /// Expression cannot be evaluated on GPU — use PG's executor.
-    CpuFallback,
+    /// Expression cannot be evaluated on GPU — defer to PG's scalar
+    /// executor (`ExecEvalExpr`). This is not CPU reimplementation;
+    /// PG handles the expression natively with zero overhead.
+    DeferToPg,
 }
 
 /// Pre-compiled template kernel matching a common pattern.
+#[derive(Clone)]
 pub enum TemplateKernel {
     /// `col <cmp> const` — single comparison.
     CmpConst {
@@ -125,6 +156,7 @@ pub enum TemplateKernel {
 }
 
 /// Bytecode program ready for the GPU interpreter.
+#[derive(Clone)]
 pub struct ExprProgram {
     pub instructions: Vec<PgaccelExprInstruction>,
     pub const_pool: Vec<PgaccelVal>,
@@ -257,6 +289,31 @@ pub fn looks_compilable(estimated_rows: f64, num_clauses: usize) -> bool {
     estimated_rows >= 1000.0 && num_clauses > 0
 }
 
+/// Map a PostgreSQL math function name to a GPU opcode.
+///
+/// Returns `(opcode, is_binary)` — `is_binary` is true for pow (2 args).
+/// Function names are PG internal names from `pg_proc.proname`.
+#[must_use]
+pub fn math_func_opcode(func_name: &str) -> Option<(u16, bool)> {
+    match func_name {
+        "dsqrt" | "sqrt" => Some((opcode::SQRT_F64, false)),
+        "dpow" | "power" => Some((opcode::POW_F64, true)),
+        "dabs" | "abs" | "float8abs" | "float4abs" | "int4abs" | "int8abs" => {
+            Some((opcode::ABS_F64, false))
+        }
+        "dceil" | "ceil" | "ceiling" => Some((opcode::CEIL_F64, false)),
+        "dfloor" | "floor" => Some((opcode::FLOOR_F64, false)),
+        "dround" | "round" => Some((opcode::ROUND_F64, false)),
+        "ln" | "dlog1" => Some((opcode::LN_F64, false)),
+        "exp" | "dexp" => Some((opcode::EXP_F64, false)),
+        "sin" | "dsin" => Some((opcode::SIN_F64, false)),
+        "cos" | "dcos" => Some((opcode::COS_F64, false)),
+        "tan" | "dtan" => Some((opcode::TAN_F64, false)),
+        "log" | "dlog10" => Some((opcode::LOG10_F64, false)),
+        _ => None,
+    }
+}
+
 /// Map a PostgreSQL comparison operator OID to a GPU comparison opcode.
 ///
 /// Returns `None` for non-comparison operators.
@@ -297,6 +354,24 @@ pub fn arithmetic_opcode(op: &str, val_tag: PgaccelValTag) -> Option<u16> {
         ("/", PgaccelValTag::Float64) => Some(opcode::DIV_F64),
         ("%", PgaccelValTag::Int32) => Some(opcode::MOD_I32),
         ("%", PgaccelValTag::Int64) => Some(opcode::MOD_I64),
+        _ => None,
+    }
+}
+
+/// Map a `date_part`/`extract` field name to a GPU extraction opcode.
+///
+/// Field names are lowercase PG identifiers (e.g. `"year"`, `"dow"`).
+#[must_use]
+pub fn extract_field_opcode(field: &str) -> Option<u16> {
+    match field {
+        "year" => Some(opcode::EXTRACT_YEAR),
+        "month" => Some(opcode::EXTRACT_MONTH),
+        "day" => Some(opcode::EXTRACT_DAY),
+        "dow" | "dayofweek" => Some(opcode::EXTRACT_DOW),
+        "epoch" => Some(opcode::EXTRACT_EPOCH),
+        "hour" => Some(opcode::EXTRACT_HOUR),
+        "minute" => Some(opcode::EXTRACT_MINUTE),
+        "quarter" => Some(opcode::EXTRACT_QUARTER),
         _ => None,
     }
 }
@@ -366,5 +441,111 @@ mod tests {
         b.patch_jump(jump_pc, target);
         let prog = b.build().expect("should build");
         assert_eq!(prog.instructions[jump_pc as usize].arg, target);
+    }
+
+    #[test]
+    fn extract_field_mapping() {
+        assert_eq!(extract_field_opcode("year"), Some(opcode::EXTRACT_YEAR));
+        assert_eq!(extract_field_opcode("month"), Some(opcode::EXTRACT_MONTH));
+        assert_eq!(extract_field_opcode("day"), Some(opcode::EXTRACT_DAY));
+        assert_eq!(extract_field_opcode("dow"), Some(opcode::EXTRACT_DOW));
+        assert_eq!(
+            extract_field_opcode("dayofweek"),
+            Some(opcode::EXTRACT_DOW)
+        );
+        assert_eq!(extract_field_opcode("epoch"), Some(opcode::EXTRACT_EPOCH));
+        assert_eq!(extract_field_opcode("hour"), Some(opcode::EXTRACT_HOUR));
+        assert_eq!(extract_field_opcode("minute"), Some(opcode::EXTRACT_MINUTE));
+        assert_eq!(
+            extract_field_opcode("quarter"),
+            Some(opcode::EXTRACT_QUARTER)
+        );
+        assert_eq!(extract_field_opcode("microsecond"), None);
+    }
+
+    #[test]
+    fn math_func_trig_log_mapping() {
+        assert_eq!(math_func_opcode("ln"), Some((opcode::LN_F64, false)));
+        assert_eq!(math_func_opcode("dlog1"), Some((opcode::LN_F64, false)));
+        assert_eq!(math_func_opcode("exp"), Some((opcode::EXP_F64, false)));
+        assert_eq!(math_func_opcode("dexp"), Some((opcode::EXP_F64, false)));
+        assert_eq!(math_func_opcode("sin"), Some((opcode::SIN_F64, false)));
+        assert_eq!(math_func_opcode("dsin"), Some((opcode::SIN_F64, false)));
+        assert_eq!(math_func_opcode("cos"), Some((opcode::COS_F64, false)));
+        assert_eq!(math_func_opcode("dcos"), Some((opcode::COS_F64, false)));
+        assert_eq!(math_func_opcode("tan"), Some((opcode::TAN_F64, false)));
+        assert_eq!(math_func_opcode("dtan"), Some((opcode::TAN_F64, false)));
+        assert_eq!(math_func_opcode("log"), Some((opcode::LOG10_F64, false)));
+        assert_eq!(
+            math_func_opcode("dlog10"),
+            Some((opcode::LOG10_F64, false))
+        );
+    }
+
+    #[test]
+    fn builder_in_list() {
+        // Emit: push 3 candidate values, push test col, IN_LIST(3)
+        let mut b = ExprProgramBuilder::new(1);
+        b.emit_load_const(PgaccelVal::from_i32(10));
+        b.emit_load_const(PgaccelVal::from_i32(20));
+        b.emit_load_const(PgaccelVal::from_i32(30));
+        b.emit_load_col(0);
+        b.emit(opcode::IN_LIST, 3);
+        let prog = b.build().expect("should build");
+        assert_eq!(prog.instructions.len(), 5);
+        assert_eq!(prog.instructions[4].opcode, opcode::IN_LIST);
+        assert_eq!(prog.instructions[4].arg, 3);
+        assert_eq!(prog.const_pool.len(), 3);
+    }
+
+    #[test]
+    fn builder_case_expression() {
+        // CASE WHEN col0 > 10 THEN 1 WHEN col0 > 5 THEN 2 ELSE 0 END
+        let mut b = ExprProgramBuilder::new(1);
+
+        // WHEN col0 > 10
+        b.emit_load_col(0);
+        b.emit_load_const(PgaccelVal::from_i32(10));
+        b.emit_binop(opcode::GT);
+        let jump1 = b.current_pc();
+        b.emit(opcode::JUMP_IF_FALSE, 0);
+        // THEN 1
+        b.emit_load_const(PgaccelVal::from_i32(1));
+        let end_jump1 = b.current_pc();
+        b.emit(opcode::JUMP, 0);
+
+        // WHEN col0 > 5
+        let branch2 = b.current_pc();
+        b.patch_jump(jump1, branch2);
+        b.emit_load_col(0);
+        b.emit_load_const(PgaccelVal::from_i32(5));
+        b.emit_binop(opcode::GT);
+        let jump2 = b.current_pc();
+        b.emit(opcode::JUMP_IF_FALSE, 0);
+        // THEN 2
+        b.emit_load_const(PgaccelVal::from_i32(2));
+        let end_jump2 = b.current_pc();
+        b.emit(opcode::JUMP, 0);
+
+        // ELSE 0
+        let else_pc = b.current_pc();
+        b.patch_jump(jump2, else_pc);
+        b.emit_load_const(PgaccelVal::from_i32(0));
+
+        // CASE_END marker
+        let end_pc = b.current_pc();
+        b.patch_jump(end_jump1, end_pc);
+        b.patch_jump(end_jump2, end_pc);
+        b.emit(opcode::CASE_END, 0);
+
+        let prog = b.build().expect("should build");
+        // Verify jumps land correctly
+        assert_eq!(prog.instructions[jump1 as usize].arg, branch2);
+        assert_eq!(prog.instructions[end_jump1 as usize].arg, end_pc);
+        assert_eq!(prog.instructions[end_jump2 as usize].arg, end_pc);
+        assert_eq!(
+            prog.instructions[end_pc as usize].opcode,
+            opcode::CASE_END
+        );
     }
 }

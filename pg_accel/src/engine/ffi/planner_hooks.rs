@@ -69,6 +69,7 @@ pub unsafe fn install() {
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[allow(clippy::too_many_lines)]
 unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     root: *mut PlannerInfo,
     rel: *mut RelOptInfo,
@@ -85,8 +86,16 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
     // Gate 1: GUC check — single branch, ~1ns.
     if !gucs::enabled() {
+        pgrx::debug1!("pg_accel: set_rel_pathlist: extension disabled");
         return;
     }
+
+    // Gate 1b: GPU must be available and enabled — no CPU-only fallback.
+    if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
+        return;
+    }
+    pgrx::debug1!("pg_accel: set_rel_pathlist: GPU usable, checking rel");
 
     // SAFETY: rel and rte are valid pointers provided by the planner.
     let rel_ref = unsafe { &*rel };
@@ -101,55 +110,144 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
-    // Gate 3: Ensure adapter registry is initialised. Combined
-    // init + readiness check avoids redundant atomic loads.
+    // Gate 2c: Skip system catalog tables. GpuExpr (and other strategies)
+    // are only useful for user tables. System catalogs have OIDs below
+    // FirstNormalObjectId (16384).
+    if u32::from(rte_ref.relid) < pg_sys::FirstNormalObjectId {
+        return;
+    }
+
+    // Gate 2b: Early-exit when there is nothing to accelerate.
+    // If no WHERE clauses and no ORDER BY, skip all registry and clause
+    // work. This eliminates 100-500µs overhead on queries like SSBM
+    // that pg_accel cannot accelerate anyway.
+    // SAFETY: root is a valid PlannerInfo pointer.
+    let has_sort = unsafe { !(*root).sort_pathkeys.is_null() };
+    let has_restrictions = !rel_ref.baserestrictinfo.is_null()
+        && unsafe { pg_sys::list_length(rel_ref.baserestrictinfo) } > 0;
+    if !has_sort && !has_restrictions {
+        return;
+    }
+
+    // GPU sort path for ORDER BY on numeric columns.
+    if has_sort {
+        pgrx::debug1!("pg_accel: calling try_inject_gpu_sort_path");
+        // SAFETY: root, rel are valid planner pointers.
+        unsafe { try_inject_gpu_sort_path(root, rel) };
+    }
+
+    // Early exit if no restriction clauses — sort was the only possibility.
+    if !has_restrictions {
+        return;
+    }
+
+    // GpuExpr path: standard numeric WHERE clauses (OpExpr, BoolExpr,
+    // NullTest). Independent of adapter registry — expression compilability
+    // is checked via node-tag and type inspection. This enables GPU-
+    // accelerated scan for queries like `WHERE val > 0.5 AND id < 1000`.
+    let gpu_expr_match = try_gpu_expr_match(rel_ref.baserestrictinfo);
+
+    // Extension-function match: requires the adapter registry (PostGIS,
+    // H3, raster). Only initialise and check when GpuExpr didn't match,
+    // or always to prefer the more specific strategy.
     registry::lazy_init();
-    if !registry::is_ready() {
-        return;
-    }
+    let reg_match = if registry::is_ready() {
+        let reg = registry::global_registry();
+        if reg.is_empty() {
+            None
+        } else {
+            find_accelerable_match(rel_ref.baserestrictinfo)
+        }
+    } else {
+        None
+    };
 
-    // Gate 4: Fast-reject — if no extensions are installed (empty
-    // registry), skip clause walking entirely. Cost: one pointer
-    // deref + len check (~5ns).
-    let reg = registry::global_registry();
-    if reg.is_empty() {
-        return;
-    }
-
-    // GPU sort path: ORDER BY on numeric columns. Checked independently
-    // of restriction clauses since ORDER BY queries may have no WHERE.
-    pgrx::debug1!("pg_accel: calling try_inject_gpu_sort_path");
-    // SAFETY: root, rel are valid planner pointers.
-    unsafe { try_inject_gpu_sort_path(root, rel) };
-
-    // Gate 5: Check if restriction clauses contain a registered function
-    // and determine its strategy. This is checked before the row-count
-    // gate so we can use the strategy's per-row cost in the threshold.
-    let Some(accel) = find_accelerable_match(rel_ref.baserestrictinfo) else {
+    // Prefer extension-specific match (spatial, H3, raster) over generic
+    // GpuExpr — extension strategies have dedicated kernels optimised for
+    // their data types.
+    let accel = reg_match.or(gpu_expr_match);
+    let Some(accel) = accel else {
+        pgrx::debug1!("pg_accel: set_rel_pathlist: no accelerable match found");
         return;
     };
     let strategy = accel.strategy;
-
-    // Gate 3b: Only inject for GPU-accelerable strategies. BatchedEval
-    // just adds MinimalTuple copy overhead without benefit — the standard
-    // PG executor already handles scalar functions efficiently.
-    if matches!(strategy, registry::AccelStrategy::BatchedEval) {
-        return;
-    }
+    pgrx::debug1!("pg_accel: set_rel_pathlist: found {:?} match", strategy);
 
     // Gate 4: Cost model gating — skip if batching is not worthwhile.
     // Use strategy-aware per-row cost so GPU paths (with higher overhead)
     // require more rows to break even.
-    let rows = rel_ref.rows as usize;
+    // Use rel.tuples (total table rows) not rel.rows (estimated output after
+    // filtering). The GPU processes ALL input rows to evaluate the predicate;
+    // rel.rows is the post-filter estimate which can be tiny for selective
+    // spatial predicates even on large tables.
+    let rows = rel_ref.tuples.max(rel_ref.rows) as usize;
     let min_batch = gucs::min_batch_size().max(1) as usize;
     let per_row_cost = match strategy {
-        registry::AccelStrategy::GpuSpatial => cost::GPU_SPATIAL_PER_ROW_COST,
         registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
         registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
-        _ => cost::BATCHED_EVAL_PER_ROW_COST,
+        registry::AccelStrategy::GpuExpr => cost::GPU_EXPR_PER_ROW_COST,
+        _ => cost::GPU_SPATIAL_PER_ROW_COST,
     };
     if !cost::should_batch(rows, per_row_cost, min_batch) {
+        pgrx::debug1!("pg_accel: set_rel_pathlist: batch rejected tuples={} min_batch={}", rows, min_batch);
         return;
+    }
+    // GpuExpr has a device-derived minimum row threshold in addition to the
+    // GUC-based min_batch_size. The inline template filter is lightweight
+    // but still needs enough rows to amortize compilation + scan overhead.
+    if strategy == registry::AccelStrategy::GpuExpr
+        && rows < cost::device_limits().gpu_expr_min_rows
+    {
+        pgrx::debug1!(
+            "pg_accel: set_rel_pathlist: GpuExpr rejected rows={} < expr_min={}",
+            rows,
+            cost::device_limits().gpu_expr_min_rows
+        );
+        return;
+    }
+
+    // Gate 4b: Defer to GiST/SP-GiST index scan for selective spatial filters.
+    // When a spatial index exists and is highly selective, PG's native index
+    // scan avoids touching most heap pages entirely. Wrapping that in a Custom
+    // Scan adds geometry deser + batch + kernel overhead that causes a
+    // regression (measured 6.9x slower on spatial_filter benchmark).
+    if matches!(
+        strategy,
+        registry::AccelStrategy::GpuSpatial | registry::AccelStrategy::GpuRaster
+    ) {
+        // Find the cheapest path as a baseline for cost-ratio comparison.
+        // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
+        let baseline = unsafe { find_cheapest_path(rel_ref.pathlist) };
+        let baseline_cost = if baseline.is_null() {
+            0.0
+        } else {
+            // SAFETY: baseline is non-null, valid Path.
+            unsafe { (*baseline).total_cost }
+        };
+        // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
+        if unsafe { has_cheap_spatial_index_path(rel_ref.pathlist, baseline_cost) } {
+            return;
+        }
+    }
+
+    // Gate 4c: Vertex count threshold for spatial predicates.
+    // GPU overhead is ~19ms constant (geometry deser + seq scan), regardless
+    // of polygon complexity. PG parallel scales linearly with vertex count.
+    // Below the threshold, PG parallel is faster — skip Custom Scan injection
+    // entirely for true zero overhead.
+    if strategy == registry::AccelStrategy::GpuSpatial {
+        let min_verts = cost::device_limits().gpu_spatial_min_vertices;
+        // SAFETY: rel_ref.baserestrictinfo is a valid List from the planner.
+        if let Some(vcount) = unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) } {
+            if vcount < min_verts {
+                pgrx::debug1!(
+                    "pg_accel: set_rel_pathlist: polygon has {} vertices (min {}), skipping",
+                    vcount,
+                    min_verts
+                );
+                return;
+            }
+        }
     }
 
     // Gate 5: Find cheapest path. Hook fires BEFORE set_cheapest(), so
@@ -168,24 +266,33 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let num_batches = (base.rows / batch_size).ceil();
     let batch_overhead = num_batches * 0.5; // per-batch dispatch cost
     // GPU strategies incur a fixed kernel launch overhead.
+    // GpuExpr uses CPU inline template filter (no GPU launch).
     let gpu_overhead = match strategy {
         registry::AccelStrategy::GpuSpatial
         | registry::AccelStrategy::GpuRaster
         | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
         _ => 0.0,
     };
-    // Batched evaluation amortises per-call overhead across the batch.
-    let calls_saved = base.rows - num_batches;
-    let per_row_saving = calls_saved * per_row_cost;
     let startup_cost = base.startup_cost + 1.0 + gpu_overhead;
-    let total_cost = (base.total_cost + batch_overhead + gpu_overhead - per_row_saving)
+
+    // GPU accelerates per-row function evaluation for spatial/H3/raster.
+    // GPU_COST_SAFETY_MARGIN (0.7) = 30% savings from GPU batch execution.
+    // For GpuExpr (CPU inline filter), modest discount (5%) — the template
+    // evaluates the predicate inline during heap walk, avoiding PG's
+    // per-tuple ExecQual + slot machinery overhead.
+    let cost_margin = if strategy == registry::AccelStrategy::GpuExpr {
+        0.95
+    } else {
+        cost::GPU_COST_SAFETY_MARGIN
+    };
+    let raw_total = (base.total_cost * cost_margin
+        + batch_overhead
+        + gpu_overhead)
         * gucs::cost_multiplier();
 
-    // Gate 6: Safety margin — GPU path must be significantly cheaper
-    // than CPU to account for estimation uncertainty. If not, skip.
-    if total_cost > base.total_cost * cost::GPU_COST_SAFETY_MARGIN {
-        return;
-    }
+    // Let PG's native cost comparison decide — add_path() discards
+    // paths that are strictly dominated by cheaper alternatives.
+    let total_cost = raw_total;
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -222,11 +329,9 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
 /// GPU-sortable numeric type OIDs.
 const SORT_INT4OID: u32 = 23;
+const SORT_INT8OID: u32 = 20;
 const SORT_FLOAT4OID: u32 = 700;
 const SORT_FLOAT8OID: u32 = 701;
-
-/// Minimum estimated rows to consider GPU sort at the planner level.
-const GPU_SORT_PLANNER_MIN_ROWS: usize = 1_000_000;
 
 /// Inject a GPU sort `CustomPath` at the scan level when `root->sort_pathkeys`
 /// has a single numeric key and the relation has enough rows.
@@ -241,9 +346,9 @@ const GPU_SORT_PLANNER_MIN_ROWS: usize = 1_000_000;
 /// `root` and `rel` must be valid planner-provided pointers.
 #[allow(clippy::too_many_lines)]
 unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo) {
-    // Gate: GPU must be enabled.
-    if !gucs::gpu_enabled() {
-        pgrx::debug1!("pg_accel sort: gpu_enabled=false");
+    // Gate: GPU must be available and enabled.
+    if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel sort: gpu not usable");
         return;
     }
 
@@ -260,17 +365,41 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
     // SAFETY: sort_pathkeys is a valid List.
     let num_pathkeys = unsafe { pg_sys::list_length(sort_pathkeys) };
     pgrx::debug1!("pg_accel sort: num_pathkeys={num_pathkeys}");
-    // GPU sort only supports single-key sort.
+    // GPU sort supports up to gpu_multi_key_sort_max_keys keys. Currently
+    // the executor only handles single-key; the limit is configurable via
+    // DeviceLimits for future multi-key cascaded stable sort support.
+    let max_keys = cost::device_limits().gpu_multi_key_sort_max_keys;
+    if num_pathkeys < 1 || num_pathkeys > max_keys as i32 {
+        pgrx::debug1!("pg_accel sort: {num_pathkeys} keys exceeds max={max_keys}, skipping");
+        return;
+    }
+    // Executor currently only supports single-key sort. Multi-key requires
+    // cascaded stable sorts (sort by last key first, then by prior keys).
+    // TODO: implement multi-key sort executor support.
     if num_pathkeys != 1 {
-        pgrx::debug1!("pg_accel sort: multi-key sort, skipping");
+        pgrx::debug1!("pg_accel sort: multi-key sort not yet implemented, skipping");
         return;
     }
 
     // Gate: Row count threshold.
     let rows = rel_ref.rows as usize;
-    pgrx::debug1!("pg_accel sort: rows={rows}, min={GPU_SORT_PLANNER_MIN_ROWS}");
-    if rows < GPU_SORT_PLANNER_MIN_ROWS {
+    let limits = cost::device_limits();
+    let min_rows = limits.gpu_sort_planner_min_rows;
+    pgrx::debug1!("pg_accel sort: rows={rows}, min={min_rows}");
+    if rows < min_rows {
         pgrx::debug1!("pg_accel sort: too few rows");
+        return;
+    }
+
+    // Gate: Max row count. GPU sort kernel has a hard limit
+    // (gpu_sort_max_elements). Above this the executor falls back to CPU
+    // sort but still pays Custom Scan yield overhead (~3μs/row), making it
+    // strictly slower than PG's native sort. Skip injection entirely.
+    if rows > limits.gpu_sort_max_elements {
+        pgrx::debug1!(
+            "pg_accel sort: rows={rows} exceeds GPU sort max={}, deferring to PG",
+            limits.gpu_sort_max_elements
+        );
         return;
     }
 
@@ -287,12 +416,9 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Gate: Skip narrow rows. GPU sort's advantage comes from avoiding
-    // disk-spill I/O on wide tuples. For narrow rows (<40 bytes), the
-    // disk spill is small enough that PG's external merge sort is fast
-    // on modern SSDs and GPU materialization overhead isn't amortized.
+    // Gate: Skip very narrow rows where GPU sort overhead isn't amortized.
     let output_width = unsafe { (*(*rel).reltarget).width } as usize;
-    if output_width < 40 {
+    if output_width < 8 {
         pgrx::debug1!(
             "pg_accel sort: narrow rows (width={}), deferring to PG",
             output_width
@@ -375,8 +501,14 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
     pgrx::debug1!("pg_accel sort: var_attno={var_attno}, var_typid={var_typid}");
 
     // Gate: Only GPU-sortable numeric types.
-    if !matches!(var_typid, SORT_INT4OID | SORT_FLOAT4OID | SORT_FLOAT8OID) {
+    if !matches!(var_typid, SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID) {
         pgrx::debug1!("pg_accel sort: unsupported type {var_typid}");
+        return;
+    }
+
+    // Gate: Skip float8 sort when GPU lacks native fp64 support.
+    if var_typid == SORT_FLOAT8OID && !cost::platform_has_fp64() {
+        pgrx::debug1!("pg_accel sort: float8 sort skipped — GPU lacks fp64");
         return;
     }
 
@@ -400,22 +532,28 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Cost estimate: GPU sort must account for tuple materialization
-    // (ExecCopySlotMinimalTuple), key extraction, GPU kernel, and emit.
-    // Measured overhead: ~0.00026/row on M2 Max. We use a conservative
-    // multiplier so PG's parallel sort wins when available.
+    // Cost estimate: GPU sort replaces PG's comparison-based sort.
+    // Custom Scan sort has per-row overhead that PG's native sort
+    // avoids: input materialization (ExecCopySlotMinimalTuple) and
+    // output yield (ExecForceStoreMinimalTuple). Only beneficial when
+    // the sort itself is the bottleneck (e.g., disk spill on wide rows).
     // SAFETY: cheapest is non-null.
     let base = unsafe { &*cheapest };
     #[allow(clippy::cast_precision_loss)]
     let n = base.rows;
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    // Per-row cost: materialization (0.02) + key extract (0.001) + sort
-    // kernel (0.015) + emit (0.01). Total ~0.046/row — deliberately
-    // conservative so PG parallel sort wins when workers are available.
-    let per_row = cost::GPU_SORT_PER_ROW_COST + cost::PER_DATUM_EXTRACT_COST + 0.03; // materialization + emit overhead
+    // Per-row overhead for Custom Scan sort: materialization (0.005) +
+    // key extraction (0.002) + comparison sort O(n log n) amortized (0.06) +
+    // yield/deform (0.025) + Custom Scan framing (0.03).
+    // This must be high enough that PG's native sort wins when GPU kernel
+    // is unavailable (CPU fallback is strictly slower than PG native sort).
+    let per_row = 0.15;
     let sort_cost = n * per_row;
     let startup_cost = base.startup_cost + gpu_overhead;
-    let total_cost = (base.total_cost + gpu_overhead + sort_cost) * gucs::cost_multiplier();
+    // Honest cost — do not apply cost_multiplier. Custom Scan sort has
+    // inherent per-row overhead that makes it slower than PG native sort
+    // unless the GPU kernel provides a real speedup.
+    let total_cost = base.total_cost + gpu_overhead + sort_cost;
 
     // Build the sort key descriptor.
     let sort_key = SortKeyDesc {
@@ -522,13 +660,8 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Gate 2: Registry init + fast-reject.
-    registry::lazy_init();
-    if !registry::is_ready() {
-        return;
-    }
-    let reg = registry::global_registry();
-    if reg.is_empty() {
+    // Gate 1b: GPU must be available and enabled — no CPU-only fallback.
+    if !cost::gpu_is_usable() {
         return;
     }
 
@@ -538,23 +671,29 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     let innerrel_ref = unsafe { &*innerrel };
     let extra_ref = unsafe { &*extra };
 
-    // Gate 3: Check join restrictlist for accelerable FuncExpr first,
-    // then fall back to equi-join detection for hash join (GPU only).
-    let accel = find_accelerable_match(extra_ref.restrictlist);
-
-    // Hash join (equi-join) detection is only enabled when GPU feature is compiled in.
-    // Without GPU support, the hash join fallback code is broken, so we prevent
-    // GpuHashJoin path injection entirely and let PG's native HashJoin handle it.
+    // Equi-join detection: independent of adapter registry. Check for
+    // Var = Var conditions usable for GPU hash join. This enables GPU-
+    // accelerated joins for standard OLAP patterns like fact×dim joins
+    // even when no extension adapters are installed.
     #[cfg(feature = "gpu")]
-    let equi = if accel.is_none() {
-        // SAFETY: extra_ref.restrictlist is a valid List from the planner.
-        unsafe { find_equi_join_key(extra_ref.restrictlist, outerrel, innerrel) }
-    } else {
-        None
-    };
+    let equi = unsafe { find_equi_join_key(extra_ref.restrictlist, outerrel, innerrel) };
 
     #[cfg(not(feature = "gpu"))]
     let equi: Option<EquiJoinKey> = None;
+
+    // Extension-function match: requires adapter registry (PostGIS, H3,
+    // raster). Only initialise when equi-join didn't match.
+    registry::lazy_init();
+    let accel = if registry::is_ready() {
+        let reg = registry::global_registry();
+        if reg.is_empty() {
+            None
+        } else {
+            find_accelerable_match(extra_ref.restrictlist)
+        }
+    } else {
+        None
+    };
 
     // If neither spatial predicate nor equi-join detected, bail.
     if accel.is_none() && equi.is_none() {
@@ -565,17 +704,55 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         .as_ref()
         .map_or(registry::AccelStrategy::GpuHashJoin, |a| a.strategy);
 
+    // Gate 3b: Skip spatial join injection — no GPU spatial join kernel
+    // exists yet (ST_Contains/ST_Within/ST_DWithin all return 100% uncertain,
+    // and the geometry detoasting path is not production-ready). Let PG
+    // handle spatial joins natively. Only GpuHashJoin is injected for joins.
+    if matches!(
+        strategy,
+        registry::AccelStrategy::GpuSpatial
+            | registry::AccelStrategy::GpuRaster
+            | registry::AccelStrategy::GpuH3
+    ) {
+        return;
+    }
+
     // Gate 4: Cost model gating — skip if batching is not worthwhile.
     let join_rows_gate = joinrel_ref.rows as usize;
     let min_batch = gucs::min_batch_size().max(1) as usize;
     let per_row_cost = match strategy {
-        registry::AccelStrategy::GpuSpatial => cost::GPU_SPATIAL_PER_ROW_COST,
         registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
         registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
-        _ => cost::BATCHED_EVAL_PER_ROW_COST,
+        registry::AccelStrategy::GpuHashJoin => cost::GPU_HASH_JOIN_PER_ROW_COST,
+        _ => cost::GPU_SPATIAL_PER_ROW_COST,
     };
     if !cost::should_batch(join_rows_gate, per_row_cost, min_batch) {
         return;
+    }
+
+    // Gate 4b: Max output rows for hash join. Custom Scan yield overhead
+    // (~3μs/row) makes large-output joins strictly slower than PG's
+    // native HashJoin which avoids per-row materialization overhead.
+    if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
+        let limits = cost::device_limits();
+        let max_output = limits.gpu_join_max_output_rows;
+        if join_rows_gate > max_output {
+            pgrx::debug1!(
+                "pg_accel join: output rows={join_rows_gate} exceeds max={max_output}, deferring to PG"
+            );
+            return;
+        }
+        // Gate 4c: Max inner-side rows for hash build. The build-side hash
+        // table must fit in GPU memory.
+        #[allow(clippy::cast_sign_loss)]
+        let inner_rows = innerrel_ref.rows as usize;
+        if inner_rows > limits.gpu_hash_join_build_max_rows {
+            pgrx::debug1!(
+                "pg_accel join: inner rows={inner_rows} exceeds build max={}, deferring to PG",
+                limits.gpu_hash_join_build_max_rows
+            );
+            return;
+        }
     }
 
     // Gate 5: Both sides need cheapest paths.
@@ -585,37 +762,39 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Cost estimate using cost model with strategy-aware constants.
+    // Cost estimate using honest per-row costs. No cost_multiplier or
+    // safety margin — let add_path() decide based on real cost comparison
+    // against PG's native parallel hash join.
+    //
     // SAFETY: paths are non-null, verified above.
     let outer_cost = unsafe { (*outer_path).total_cost };
     let inner_cost = unsafe { (*inner_path).total_cost };
-    let join_rows = joinrel_ref.rows as usize;
-    #[allow(clippy::cast_precision_loss)]
-    let batch_size = cost::optimal_batch_size(join_rows) as f64;
-    let num_batches = (joinrel_ref.rows / batch_size).ceil();
-    let batch_overhead = num_batches * 0.5;
-    let gpu_overhead = match strategy {
-        registry::AccelStrategy::GpuSpatial
-        | registry::AccelStrategy::GpuRaster
-        | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
-        registry::AccelStrategy::GpuHashJoin => {
-            // Hash build O(inner) + probe O(outer).
-            let inner_rows = innerrel_ref.rows;
-            inner_rows * 0.001 // build cost estimate
-        }
-        _ => 0.0,
-    };
-    let per_row_saving = joinrel_ref.rows * per_row_cost;
-    // SAFETY: outer_path is non-null, verified above.
-    let startup_cost = unsafe { (*outer_path).startup_cost } + 1.0 + gpu_overhead;
     let base_cost = outer_cost + inner_cost;
-    let total_cost =
-        (base_cost + batch_overhead + gpu_overhead - per_row_saving) * gucs::cost_multiplier();
 
-    // Safety margin — GPU path must be significantly cheaper.
-    if total_cost > base_cost * cost::GPU_COST_SAFETY_MARGIN {
-        return;
-    }
+    // GPU hash join overhead components:
+    // - GPU launch: fixed overhead for kernel dispatch.
+    let gpu_launch = cost::GPU_LAUNCH_OVERHEAD;
+    // - Hash build: consume all inner tuples + GPU hash table construction.
+    //   Per inner row: ExecCopySlotMinimalTuple (0.005) + key extract (0.002)
+    //   + GPU hash insert amortized (0.003) = 0.01.
+    let build_cost = innerrel_ref.rows * 0.01;
+    // - Probe: per outer row: ExecCopySlotMinimalTuple (0.005) + key extract
+    //   (0.002) + GPU probe (0.003) = 0.01.
+    let probe_cost = outerrel_ref.rows * 0.01;
+    // - Yield: per output row: ExecForceStoreMinimalTuple + slot_getattr for
+    //   building virtual result tuple (~3μs/row ≈ 0.03 cost units).
+    let yield_cost = joinrel_ref.rows * 0.03;
+
+    // SAFETY: outer_path is non-null, verified above.
+    let startup_cost = unsafe { (*outer_path).startup_cost } + gpu_launch + build_cost;
+    // Honest total — no cost_multiplier. Custom Scan hash join has inherent
+    // per-row overhead. PG's native parallel hash join avoids yield overhead
+    // entirely, so we only win when the GPU probe is fast enough to offset it.
+    let total_cost =
+        base_cost + gpu_launch + build_cost + probe_cost + yield_cost;
+
+    // Let PG's native cost comparison decide — add_path() discards
+    // paths that are strictly dominated by cheaper alternatives.
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -639,7 +818,7 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         let mut priv_list: *mut List = std::ptr::null_mut();
 
         if let Some(ref equi_info) = equi {
-            // Hash join path: [fn_oid=0, outer_attno, GpuHashJoin, inner_attno, key_type]
+            // Hash join path: [fn_oid=0, outer_attno, GpuHashJoin, inner_attno, key_type, outer_varno, inner_varno]
             priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // fn_oid
             priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.outer_attno).cast());
             priv_list = lappend(
@@ -648,6 +827,8 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             );
             priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.inner_attno).cast());
             priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.key_type).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.outer_varno).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.inner_varno).cast());
         } else if let Some(ref accel_info) = accel {
             // Spatial/other accelerable path: [fn_oid, target_attno, accel_strategy]
             priv_list = lappend(
@@ -699,27 +880,27 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         return;
     }
 
-    // Aggregate injection for UPPERREL_GROUP_AGG.
-    if stage == UpperRelationKind::UPPERREL_GROUP_AGG {
-        pgrx::debug1!("pg_accel: create_upper_paths hook fired for UPPERREL_GROUP_AGG");
-        // SAFETY: all pointers are valid planner-provided arguments.
-        unsafe { pgaccel_inject_gpu_agg(root, input_rel, output_rel) };
+    // Dispatch by upper relation stage.
+    match stage {
+        pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
+            // Only inject for full aggregate, NOT partial. Partial agg
+            // paths are used inside parallel workers; our GpuAgg doesn't
+            // support partial aggregation protocol.
+            // SAFETY: All pointers are valid planner arguments.
+            unsafe { pgaccel_inject_gpu_agg(root, input_rel, output_rel) };
+        }
+        pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
+            // SAFETY: All pointers are valid planner arguments.
+            unsafe { pgaccel_inject_gpu_window(root, input_rel, output_rel) };
+        }
+        _ => {}
     }
-
-    // Window function injection for UPPERREL_WINDOW.
-    if stage == UpperRelationKind::UPPERREL_WINDOW {
-        pgrx::debug1!("pg_accel: create_upper_paths hook fired for UPPERREL_WINDOW");
-        // SAFETY: all pointers are valid planner-provided arguments.
-        unsafe { pgaccel_inject_gpu_window(root, input_rel, output_rel) };
-    }
+    let _ = extra;
 }
 
 // ---------------------------------------------------------------------------
 // GPU window function injection
 // ---------------------------------------------------------------------------
-
-/// Minimum estimated rows to consider GPU window functions.
-const GPU_WINDOW_PLANNER_MIN_ROWS: usize = 50_000;
 
 /// Numeric type OIDs supported by window kernels.
 const WIN_FLOAT4OID: u32 = 700;
@@ -745,9 +926,9 @@ unsafe fn pgaccel_inject_gpu_window(
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
 ) {
-    // Gate: GPU must be enabled.
-    if !gucs::gpu_enabled() {
-        pgrx::debug1!("pg_accel window: gpu_enabled=false");
+    // Gate: GPU must be available and enabled.
+    if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel window: gpu not usable");
         return;
     }
 
@@ -758,11 +939,11 @@ unsafe fn pgaccel_inject_gpu_window(
     // Gate: Row count threshold.
     #[allow(clippy::cast_sign_loss)]
     let rows = input_ref.rows as usize;
-    if rows < GPU_WINDOW_PLANNER_MIN_ROWS {
+    if rows < cost::device_limits().gpu_window_min_rows {
         pgrx::debug1!(
             "pg_accel window: rows {} < min {}",
             rows,
-            GPU_WINDOW_PLANNER_MIN_ROWS
+            cost::device_limits().gpu_window_min_rows
         );
         return;
     }
@@ -1020,16 +1201,16 @@ unsafe fn pgaccel_inject_gpu_window(
         return;
     }
 
-    // Cost estimate: GPU window is cheaper than PG's WindowAgg for large
-    // tables because partition boundary detection + running aggregates
-    // are parallelized on the GPU.
+    // Honest cost — no cost_multiplier discount. Window functions process
+    // all input rows and add window output columns, so cost is:
+    //   child_cost + per_row_overhead * rows * num_specs
     // SAFETY: cheapest is non-null.
     let base = unsafe { &*cheapest };
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    let per_row = 0.04; // materialization + partition detect + kernel dispatch
+    let per_row = cost::PER_DATUM_EXTRACT_COST + 0.002; // datum extract + partition detect
     let window_cost = base.rows * per_row * specs.len() as f64;
     let startup_cost = base.total_cost + gpu_overhead;
-    let total_cost = (base.total_cost + gpu_overhead + window_cost) * gucs::cost_multiplier();
+    let total_cost = base.total_cost + gpu_overhead + window_cost;
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -1085,9 +1266,6 @@ const AGG_FLOAT8OID: u32 = 701;
 const AGG_INT4OID: u32 = 23;
 const AGG_INT8OID: u32 = 20;
 
-/// Minimum estimated rows to consider GPU reduce.
-const GPU_REDUCE_PLANNER_MIN_ROWS: usize = 50_000;
-
 /// Detect simple aggregate queries (`SELECT sum/min/max/avg/count FROM table`
 /// with no GROUP BY) and inject a `CustomPath` that uses GPU reduce.
 ///
@@ -1104,13 +1282,9 @@ unsafe fn pgaccel_inject_gpu_agg(
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
 ) {
-    // Gate: GPU must be enabled for hash aggregation.
-    #[cfg(not(feature = "gpu"))]
-    {
-        return;
-    }
-    if !gucs::gpu_enabled() {
-        pgrx::debug1!("pg_accel: gpu_agg rejected: gpu_enabled=false");
+    // Gate: GPU must be available and enabled.
+    if !cfg!(feature = "gpu") || !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel: gpu_agg rejected: gpu not available or disabled");
         return;
     }
 
@@ -1118,7 +1292,8 @@ unsafe fn pgaccel_inject_gpu_agg(
     let root_ref = unsafe { &*root };
     let input_ref = unsafe { &*input_rel };
 
-    // Gate: Check GROUP BY — we support plain aggregates and single-column GROUP BY.
+    // Gate: Check GROUP BY — we support plain aggregates, single-column,
+    // and two-column GROUP BY (composite key encoding: two int4 → one int8).
     let parse = root_ref.parse;
     if parse.is_null() {
         return;
@@ -1131,79 +1306,176 @@ unsafe fn pgaccel_inject_gpu_agg(
         // SAFETY: groupClause is a valid List.
         unsafe { pg_sys::list_length(query.groupClause) }
     };
-    // Reject multi-column GROUP BY (only single-column supported for now).
-    if group_len > 1 {
-        pgrx::debug1!("pg_accel: gpu_agg rejected: multi-column GROUP BY");
+    // Reject GROUP BY with more than 2 columns.
+    if group_len > 2 {
+        pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY has {} cols (max 2)", group_len);
         return;
     }
 
-    // Extract group key info for single-column GROUP BY.
-    let group_key_info: Option<GroupKeyInfo> = if group_len == 1 {
-        // SAFETY: groupClause is a non-null List with at least 1 element.
-        let sc =
-            unsafe { pg_sys::list_nth(query.groupClause, 0).cast::<pg_sys::SortGroupClause>() };
-        if sc.is_null() {
-            return;
-        }
-        // Find the TargetEntry in the target list that matches tleSortGroupRef.
-        // SAFETY: sc is a valid SortGroupClause.
-        let sgref = unsafe { (*sc).tleSortGroupRef };
+    // Extract group key info for single- or two-column GROUP BY.
+    let group_key_info: Option<GroupKeyInfo> = if group_len >= 1 {
         let tlist = query.targetList;
-        let mut group_tle: *mut pg_sys::TargetEntry = std::ptr::null_mut();
         let tlist_len = if tlist.is_null() {
             0
         } else {
             unsafe { pg_sys::list_length(tlist) }
         };
+
+        // Helper: resolve a SortGroupClause to (attno, type_oid).
+        let resolve_group_col = |idx: i32| -> Option<(i32, pg_sys::Oid)> {
+            // SAFETY: groupClause has at least idx+1 elements.
+            let sc = unsafe {
+                pg_sys::list_nth(query.groupClause, idx).cast::<pg_sys::SortGroupClause>()
+            };
+            if sc.is_null() {
+                return None;
+            }
+            let sgref = unsafe { (*sc).tleSortGroupRef };
+            for j in 0..tlist_len {
+                // SAFETY: j is in [0, tlist_len).
+                let tle = unsafe { pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>() };
+                if tle.is_null() {
+                    continue;
+                }
+                if unsafe { (*tle).ressortgroupref } != sgref {
+                    continue;
+                }
+                let gk_expr = unsafe { (*tle).expr };
+                if gk_expr.is_null() {
+                    return None;
+                }
+                // SAFETY: reading node tag.
+                let gk_tag = unsafe { (*gk_expr.cast::<pg_sys::Node>()).type_ };
+                if gk_tag != NodeTag::T_Var {
+                    return None;
+                }
+                let gk_var = gk_expr.cast::<pg_sys::Var>();
+                let gk_typid = unsafe { (*gk_var).vartype };
+                let gk_attno = i32::from(unsafe { (*gk_var).varattno });
+                return Some((gk_attno, gk_typid));
+            }
+            None
+        };
+
+        if group_len == 1 {
+            let Some((gk_attno, gk_typid)) = resolve_group_col(0) else {
+                pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY col not a Var");
+                return;
+            };
+            let Some(key_type) = GroupKeyInfo::key_type_from_oid(gk_typid) else {
+                pgrx::debug1!("pg_accel: gpu_agg rejected: unsupported GROUP BY type");
+                return;
+            };
+            Some(GroupKeyInfo {
+                attno: gk_attno,
+                type_oid: gk_typid,
+                key_type,
+            })
+        } else {
+            // Two-column GROUP BY: composite key encoding.
+            // Both columns must be int2 or int4 so we can pack them into a
+            // single int8 key (high 32 bits = col1, low 32 bits = col2).
+            let Some((attno1, typid1)) = resolve_group_col(0) else {
+                pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY col1 not a Var");
+                return;
+            };
+            let Some((_attno2, typid2)) = resolve_group_col(1) else {
+                pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY col2 not a Var");
+                return;
+            };
+            // Only int2/int4 types can be packed into a composite int8 key.
+            let is_small_int = |oid: pg_sys::Oid| {
+                matches!(u32::from(oid), 21 | 23) // INT2OID | INT4OID
+            };
+            if !is_small_int(typid1) || !is_small_int(typid2) {
+                pgrx::debug1!(
+                    "pg_accel: gpu_agg rejected: 2-col GROUP BY requires int2/int4 types"
+                );
+                return;
+            }
+            // Encode as composite: key_type=3 signals the executor to pack
+            // two int4 values into one int8. attno stores col1, and we
+            // serialize col2's attno separately in custom_private.
+            Some(GroupKeyInfo {
+                attno: attno1,
+                type_oid: pg_sys::INT8OID, // composite key is i64
+                key_type: 3,               // CompositeInt4x2
+            })
+        }
+    } else {
+        None
+    };
+
+    // Stash second group key attno for two-column GROUP BY serialization.
+    let group_key2_attno: i32 = if group_len == 2 {
+        let tlist = query.targetList;
+        let tlist_len = if tlist.is_null() {
+            0
+        } else {
+            unsafe { pg_sys::list_length(tlist) }
+        };
+        let sc = unsafe {
+            pg_sys::list_nth(query.groupClause, 1).cast::<pg_sys::SortGroupClause>()
+        };
+        if sc.is_null() {
+            return;
+        }
+        let sgref = unsafe { (*sc).tleSortGroupRef };
+        let mut attno2 = 0i32;
         for j in 0..tlist_len {
-            // SAFETY: j is in [0, tlist_len).
             let tle = unsafe { pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>() };
             if !tle.is_null() && unsafe { (*tle).ressortgroupref } == sgref {
-                group_tle = tle;
+                let gk_expr = unsafe { (*tle).expr };
+                if !gk_expr.is_null()
+                    && unsafe { (*gk_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var
+                {
+                    attno2 = i32::from(unsafe { (*gk_expr.cast::<pg_sys::Var>()).varattno });
+                }
                 break;
             }
         }
-        if group_tle.is_null() {
-            return;
-        }
-        // The group key expression must be a Var on a numeric type.
-        // SAFETY: group_tle is a valid TargetEntry.
-        let gk_expr = unsafe { (*group_tle).expr };
-        if gk_expr.is_null() {
-            return;
-        }
-        // SAFETY: reading node tag.
-        let gk_tag = unsafe { (*gk_expr.cast::<pg_sys::Node>()).type_ };
-        if gk_tag != NodeTag::T_Var {
-            pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY expr is not a Var");
-            return;
-        }
-        let gk_var = gk_expr.cast::<pg_sys::Var>();
-        let gk_typid = unsafe { (*gk_var).vartype };
-        let gk_attno = i32::from(unsafe { (*gk_var).varattno });
-        let Some(key_type) = GroupKeyInfo::key_type_from_oid(gk_typid) else {
-            pgrx::debug1!("pg_accel: gpu_agg rejected: unsupported GROUP BY type");
-            return;
-        };
-        Some(GroupKeyInfo {
-            attno: gk_attno,
-            type_oid: gk_typid,
-            key_type,
-        })
+        attno2
     } else {
-        None
+        0
     };
 
     // Gate: Row count threshold.
     #[allow(clippy::cast_sign_loss)]
     let rows = input_ref.rows as usize;
     pgrx::debug1!("pg_accel: gpu_agg candidate, rows={}", rows);
-    if rows < GPU_REDUCE_PLANNER_MIN_ROWS {
+    if rows < cost::device_limits().gpu_reduce_min_rows {
         pgrx::debug1!(
             "pg_accel: gpu_agg rejected: rows < {}",
-            GPU_REDUCE_PLANNER_MIN_ROWS
+            cost::device_limits().gpu_reduce_min_rows
         );
         return;
+    }
+
+    // Gate: If GROUP BY, estimate group count via estimate_num_groups().
+    if group_key_info.is_some() && !query.groupClause.is_null() {
+        // SAFETY: root, groupClause are valid; input_ref.rows is the input cardinality.
+        let est_groups = unsafe {
+            pg_sys::estimate_num_groups(
+                root,
+                pg_sys::get_sortgrouplist_exprs(query.groupClause, query.targetList),
+                input_ref.rows,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        } as usize;
+        pgrx::debug1!(
+            "pg_accel: gpu_agg group check: est_groups={}, max={}",
+            est_groups,
+            cost::device_limits().gpu_hash_agg_max_groups
+        );
+        if est_groups > cost::device_limits().gpu_hash_agg_max_groups {
+            pgrx::debug1!(
+                "pg_accel: gpu_agg rejected: estimated {} groups > {}",
+                est_groups,
+                cost::device_limits().gpu_hash_agg_max_groups
+            );
+            return;
+        }
     }
 
     // Gate: Scan the target list for Aggref nodes on numeric columns.
@@ -1219,6 +1491,8 @@ unsafe fn pgaccel_inject_gpu_agg(
 
     // Collect (AggOp, attno, result_type_oid) for each target list entry.
     let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::with_capacity(tlist_len as usize);
+    // Track 0-based position of group key Var(s) in the target list.
+    let mut group_key_tlist_pos: i32 = -1;
 
     // SAFETY: tlist is a valid List of TargetEntry nodes.
     for i in 0..tlist_len {
@@ -1238,6 +1512,9 @@ unsafe fn pgaccel_inject_gpu_agg(
             // In grouped mode, the group key Var is expected in the target list.
             // Skip it (it's handled separately via group_key_info).
             if group_key_info.is_some() && tag == NodeTag::T_Var {
+                if group_key_tlist_pos < 0 {
+                    group_key_tlist_pos = i;
+                }
                 continue;
             }
             // Non-aggregate, non-group-key in target list — reject.
@@ -1275,13 +1552,20 @@ unsafe fn pgaccel_inject_gpu_agg(
             }
         };
 
+        // Gate: AVG returns float8 regardless of input type. Skip when
+        // GPU lacks native fp64 to avoid precision loss.
+        if op == AggOp::Avg && !cost::platform_has_fp64() {
+            pgrx::debug1!("pg_accel: gpu_agg rejected: AVG requires fp64");
+            return;
+        }
+
         // COUNT(*): attno = 0, result type = int8.
         if op == AggOp::Count && aggref_ref.aggstar {
             agg_descs.push((AggOp::Count, 0, u32::from(aggref_ref.aggtype)));
             continue;
         }
 
-        // Non-star aggregate: must have a Var argument on a numeric type.
+        // Non-star aggregate: must have at least one argument.
         let args = aggref_ref.args;
         if args.is_null() {
             return;
@@ -1297,20 +1581,48 @@ unsafe fn pgaccel_inject_gpu_agg(
             return;
         }
         let arg_expr = unsafe { (*arg_tle).expr };
-        if arg_expr.is_null()
-            || unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ } != NodeTag::T_Var
-        {
+        if arg_expr.is_null() {
             return;
         }
-        let var = arg_expr.cast::<pg_sys::Var>();
-        let typid = u32::from(unsafe { (*var).vartype });
-        if !matches!(
+
+        // Check if argument is a plain Var (fast path) or an expression
+        // (compilable to GPU bytecode — e.g., SUM(a * b), SUM(CASE ...)).
+        let arg_tag = unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ };
+        let (typid, attno) = if arg_tag == NodeTag::T_Var {
+            let var = arg_expr.cast::<pg_sys::Var>();
+            (
+                u32::from(unsafe { (*var).vartype }),
+                i32::from(unsafe { (*var).varattno }),
+            )
+        } else {
+            // Expression argument — check if it's a GPU-compilable expr
+            // (OpExpr, BoolExpr, FuncExpr). The result type must be numeric.
+            // Use attno=0 to signal the executor that this is an expression
+            // argument requiring GPU expression evaluation before aggregation.
+            // For now, accept and let the executor attempt compilation.
+            let result_type = u32::from(aggref_ref.aggtype);
+            // Infer the expression result type. For SUM/AVG the result is
+            // always numeric (float8 or int8), so we check the aggtype.
+            let is_numeric_result = matches!(
+                result_type,
+                AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
+            );
+            if !is_numeric_result {
+                return;
+            }
+            // Use float8 as the assumed type for expression args (safe default).
+            (AGG_FLOAT8OID, 0)
+        };
+
+        if attno != 0 && !matches!(
             typid,
             AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
         ) {
             return;
         }
-        let attno = i32::from(unsafe { (*var).varattno });
+        // Note: float8 aggregates on non-fp64 GPU (Metal) fall back to CPU
+        // Kahan summation in the agg executor. This is still faster than PG's
+        // per-tuple transition functions thanks to batch columnar extraction.
         agg_descs.push((op, attno, u32::from(aggref_ref.aggtype)));
     }
 
@@ -1325,15 +1637,43 @@ unsafe fn pgaccel_inject_gpu_agg(
     }
 
     // Cost estimate: GPU reduce/hash-agg replaces PG's hash/sort aggregate.
+    //
+    // Our agg path is single-threaded: sequential child scan → columnar
+    // extraction → reduce. On fp32-only GPUs (Metal), the reduce is CPU
+    // Kahan summation. The cost must be HONEST — do NOT apply the
+    // aggressive cost_multiplier/safety_margin used for GPU spatial ops.
+    //
+    // When the child is our GpuExpr scan CustomPath, pipeline fusion
+    // kicks in: heap_getnext → inline filter → columnar extract →
+    // accumulate in one pass, no ExecProcNode or MinimalTuple overhead.
     // SAFETY: cheapest is non-null.
     let base = unsafe { &*cheapest };
+
+    // Detect fusion opportunity: child is our scan CustomPath AND the
+    // row count meets the fusion minimum. Below the threshold, fusion
+    // setup overhead (scan_desc open, template compile) exceeds savings.
+    let child_is_our_scan = if unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ }
+        == NodeTag::T_CustomPath
+    {
+        let cp = cheapest.cast::<CustomPath>();
+        // SAFETY: cp is a valid CustomPath (tag checked above).
+        let is_ours = unsafe { (*cp).methods == custom_scan::scan_path_methods() };
+        is_ours && rows >= cost::device_limits().gpu_pipeline_fusion_min_rows
+    } else {
+        false
+    };
+
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    let reduce_per_row = cost::GPU_REDUCE_PER_ROW_COST + 0.02;
-    // For grouped agg, add hash table build + probe cost.
-    let hash_overhead = if group_key_info.is_some() { 0.005 } else { 0.0 };
-    let reduce_cost = base.rows * (reduce_per_row + hash_overhead);
+    // Per-row cost depends on fusion. Fused path: direct heap walk +
+    // inline filter + columnar accumulate (no ExecProcNode, no
+    // MinimalTuple copy). Non-fused: ExecProcNode + tuple copy + extract.
+    let agg_per_row = if child_is_our_scan { 0.001 } else { 0.005 };
+    // For grouped agg, add hash table build + probe cost per row.
+    let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
+    let reduce_cost = base.rows * (agg_per_row + hash_overhead);
     let startup_cost = base.total_cost + gpu_overhead;
-    let total_cost = (base.total_cost + gpu_overhead + reduce_cost) * gucs::cost_multiplier();
+    // No cost_multiplier or safety_margin — honest single-threaded cost.
+    let total_cost = base.total_cost + gpu_overhead + reduce_cost;
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -1391,6 +1731,10 @@ unsafe fn pgaccel_inject_gpu_agg(
                 pg_sys::makeInteger(u32::from(gk.type_oid) as i32).cast(),
             );
             priv_list = lappend(priv_list, pg_sys::makeInteger(gk.key_type).cast());
+            // For composite key (key_type=3), append second column attno.
+            priv_list = lappend(priv_list, pg_sys::makeInteger(group_key2_attno).cast());
+            // Group key's 0-based position in the output target list.
+            priv_list = lappend(priv_list, pg_sys::makeInteger(group_key_tlist_pos).cast());
         } else {
             priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // no group key
         }
@@ -1441,6 +1785,136 @@ unsafe fn find_cheapest_path(pathlist: *mut List) -> *mut Path {
     best
 }
 
+/// GiST access method OID.
+const GIST_AM_OID: u32 = 783;
+/// SP-GiST access method OID.
+const SPGIST_AM_OID: u32 = 4000;
+
+/// Check whether the relation's pathlist contains a cheap spatial index path
+/// (GiST or SP-GiST) that makes Custom Scan injection counterproductive.
+///
+/// When a GiST index scan is available and highly selective, PostgreSQL's
+/// native index scan avoids touching most heap pages entirely. Wrapping that
+/// in a Custom Scan adds geometry deserialization, batch setup, and kernel
+/// launch overhead that exceeds the savings — causing a regression.
+///
+/// Returns `true` if the planner should defer to PG's index scan (i.e., do
+/// NOT inject a Custom Scan).
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` pointer or null. `seq_scan_cost`
+/// is the total cost of the cheapest sequential (non-index) path.
+unsafe fn has_cheap_spatial_index_path(pathlist: *mut List, seq_scan_cost: f64) -> bool {
+    if pathlist.is_null() {
+        return false;
+    }
+
+    // SAFETY: pathlist is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a valid pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+
+        // SAFETY: path is a valid Path node from the planner.
+        let tag = unsafe { (*path).type_ };
+
+        match tag {
+            NodeTag::T_IndexPath => {
+                let ipath = path.cast::<pg_sys::IndexPath>();
+                // SAFETY: ipath is a valid IndexPath (tag checked above).
+                let info = unsafe { (*ipath).indexinfo };
+                if info.is_null() {
+                    continue;
+                }
+                // SAFETY: info is a valid IndexOptInfo from the planner.
+                let relam = u32::from(unsafe { (*info).relam });
+                if relam != GIST_AM_OID && relam != SPGIST_AM_OID {
+                    continue;
+                }
+
+                // Check 1: selectivity-based — if the index is very
+                // selective, PG's index scan is hard to beat.
+                let selectivity = unsafe { (*ipath).indexselectivity };
+                if selectivity > 0.0 && selectivity < cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD {
+                    pgrx::debug1!(
+                        "pg_accel: deferring to GiST index scan \
+                         (selectivity={:.4}, threshold={:.2})",
+                        selectivity,
+                        cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD
+                    );
+                    return true;
+                }
+
+                // Check 2: cost-ratio — even without precise selectivity,
+                // if the index path is much cheaper than seq scan, defer.
+                if seq_scan_cost > 0.0 {
+                    let idx_cost = unsafe { (*path).total_cost };
+                    let ratio = idx_cost / seq_scan_cost;
+                    if ratio < cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD {
+                        pgrx::debug1!(
+                            "pg_accel: deferring to GiST index scan \
+                             (cost_ratio={:.4}, threshold={:.2})",
+                            ratio,
+                            cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD
+                        );
+                        return true;
+                    }
+                }
+            }
+            NodeTag::T_BitmapHeapPath => {
+                // Bitmap heap scans over GiST indices are also efficient
+                // for selective spatial filters. Check the underlying
+                // bitmap qual path for a GiST index.
+                let bpath = path.cast::<pg_sys::BitmapHeapPath>();
+                // SAFETY: bpath is a valid BitmapHeapPath (tag checked).
+                let qual = unsafe { (*bpath).bitmapqual };
+                if qual.is_null() {
+                    continue;
+                }
+                // The bitmapqual is typically a T_IndexPath for simple
+                // single-index bitmap scans.
+                // SAFETY: qual is a valid Path node.
+                let qual_tag = unsafe { (*qual).type_ };
+                if qual_tag == NodeTag::T_IndexPath {
+                    let ipath = qual.cast::<pg_sys::IndexPath>();
+                    let info = unsafe { (*ipath).indexinfo };
+                    if info.is_null() {
+                        continue;
+                    }
+                    let relam = u32::from(unsafe { (*info).relam });
+                    if relam != GIST_AM_OID && relam != SPGIST_AM_OID {
+                        continue;
+                    }
+
+                    // For bitmap paths, use cost-ratio check since
+                    // bitmap selectivity is on the BitmapAnd/Or nodes.
+                    if seq_scan_cost > 0.0 {
+                        let bmp_cost = unsafe { (*path).total_cost };
+                        let ratio = bmp_cost / seq_scan_cost;
+                        if ratio < cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD {
+                            pgrx::debug1!(
+                                "pg_accel: deferring to GiST bitmap scan \
+                                 (cost_ratio={:.4}, threshold={:.2})",
+                                ratio,
+                                cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD
+                            );
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// Check if a `List` of `RestrictInfo` contains a function registered in the
 /// acceleration registry.
 ///
@@ -1482,6 +1956,250 @@ struct AccelMatch {
     fn_oid: pg_sys::Oid,
     /// 1-based attribute number of the Var argument, or 0 if none found.
     target_attno: i32,
+}
+
+/// Extract the vertex count of the constant geometry argument in a spatial
+/// FuncExpr clause.  Returns `Some(count)` when a Const argument with a
+/// valid GSERIALIZED datum is found; `None` otherwise (e.g. two Var args,
+/// or expression not yet folded to Const).
+///
+/// # Safety
+///
+/// `restrictinfo_list` must be null or a valid PG `List` of `RestrictInfo`.
+unsafe fn extract_const_geom_vertex_count(restrictinfo_list: *mut List) -> Option<usize> {
+    use crate::adapters::extractors::geometry::extract_geometry;
+
+    if restrictinfo_list.is_null() {
+        return None;
+    }
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    for i in 0..len {
+        // SAFETY: i in [0, len).
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            continue;
+        }
+        // SAFETY: clause is a valid Node.
+        let tag = unsafe { (*clause.cast::<pg_sys::Node>()).type_ };
+        #[allow(clippy::cast_ptr_alignment)]
+        let args = match tag {
+            NodeTag::T_FuncExpr => unsafe { (*clause.cast::<pg_sys::FuncExpr>()).args },
+            NodeTag::T_OpExpr => unsafe { (*clause.cast::<pg_sys::OpExpr>()).args },
+            _ => continue,
+        };
+        if args.is_null() {
+            continue;
+        }
+        let alen = unsafe { pg_sys::list_length(args) };
+        for j in 0..alen {
+            let node = unsafe { pg_sys::list_nth(args, j).cast::<pg_sys::Node>() };
+            if node.is_null() {
+                continue;
+            }
+            // SAFETY: reading tag of arg node.
+            if unsafe { (*node).type_ } != NodeTag::T_Const {
+                continue;
+            }
+            let cst = node.cast::<pg_sys::Const>();
+            // SAFETY: tag-checked Const; skip NULL constants.
+            if unsafe { (*cst).constisnull } {
+                continue;
+            }
+            let datum = unsafe { (*cst).constvalue };
+            if let Some(geom) = extract_geometry(datum) {
+                return Some(geom.coord_count);
+            }
+        }
+    }
+    None
+}
+
+/// GPU-supported numeric type OIDs for expression evaluation.
+const EXPR_BOOL_OID: u32 = 16;
+const EXPR_INT2_OID: u32 = 21;
+const EXPR_INT4_OID: u32 = 23;
+const EXPR_INT8_OID: u32 = 20;
+const EXPR_FLOAT4_OID: u32 = 700;
+const EXPR_FLOAT8_OID: u32 = 701;
+const EXPR_DATE_OID: u32 = 1082;
+const EXPR_TIMESTAMP_OID: u32 = 1114;
+
+/// Whether a PG type OID is supported by the GPU expression evaluator.
+#[inline]
+fn is_gpu_expr_type(oid: u32) -> bool {
+    matches!(
+        oid,
+        EXPR_BOOL_OID
+            | EXPR_INT2_OID
+            | EXPR_INT4_OID
+            | EXPR_INT8_OID
+            | EXPR_FLOAT4_OID
+            | EXPR_FLOAT8_OID
+            | EXPR_DATE_OID
+            | EXPR_TIMESTAMP_OID
+    )
+}
+
+/// Check if restriction clauses are candidates for GpuExpr evaluation.
+///
+/// Returns a GpuExpr match when all clauses look like standard numeric
+/// expressions (OpExpr or BoolExpr at the top level). Full compilability
+/// is checked at executor time — if compilation fails, the executor
+/// gracefully falls back to PG's standard `ExecEvalExpr`.
+fn try_gpu_expr_match(restrictinfo_list: *mut List) -> Option<AccelMatch> {
+    if restrictinfo_list.is_null() {
+        return None;
+    }
+
+    // SAFETY: restrictinfo_list is a valid List pointer from the planner.
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    if len == 0 {
+        return None;
+    }
+
+    // Quick top-level check: all clauses must be GPU-compilable node types
+    // operating on numeric types.
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a valid RestrictInfo*.
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            return None;
+        }
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            return None;
+        }
+        // SAFETY: clause is a valid Expr node from the planner.
+        if !is_gpu_compilable_clause(clause.cast()) {
+            return None;
+        }
+    }
+
+    Some(AccelMatch {
+        strategy: registry::AccelStrategy::GpuExpr,
+        fn_oid: pg_sys::InvalidOid,
+        target_attno: 0,
+    })
+}
+
+/// Recursively check whether a clause node is GPU-compilable.
+///
+/// Verifies node type AND that operand types are GPU-supported numerics.
+/// This prevents non-numeric operators (LIKE, ~, etc.) from being
+/// accepted as GpuExpr candidates.
+///
+/// # Safety
+///
+/// `node` must be a valid PG expression `Node` pointer.
+#[allow(clippy::cast_ptr_alignment)]
+fn is_gpu_compilable_clause(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    // SAFETY: node is a valid Node pointer.
+    let tag = unsafe { (*node).type_ };
+    match tag {
+        NodeTag::T_OpExpr => {
+            // OpExpr: verify result type is boolean or numeric.
+            let op = node.cast::<pg_sys::OpExpr>();
+            let result_type = u32::from(unsafe { (*op).opresulttype });
+            if !is_gpu_expr_type(result_type) {
+                return false;
+            }
+            // Check operand types via the args list.
+            let args = unsafe { (*op).args };
+            if !args.is_null() {
+                let nargs = unsafe { pg_sys::list_length(args) };
+                for j in 0..nargs {
+                    let arg = unsafe { pg_sys::list_nth(args, j).cast::<pg_sys::Node>() };
+                    if !is_gpu_compilable_expr_node(arg) {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+        NodeTag::T_BoolExpr => {
+            // BoolExpr (AND/OR/NOT): check all sub-clauses recursively.
+            let boolexpr = node.cast::<pg_sys::BoolExpr>();
+            let args = unsafe { (*boolexpr).args };
+            if args.is_null() {
+                return false;
+            }
+            let nargs = unsafe { pg_sys::list_length(args) };
+            for j in 0..nargs {
+                let arg = unsafe { pg_sys::list_nth(args, j).cast::<pg_sys::Node>() };
+                if !is_gpu_compilable_clause(arg) {
+                    return false;
+                }
+            }
+            true
+        }
+        NodeTag::T_NullTest => true,
+        NodeTag::T_ScalarArrayOpExpr => {
+            // IN-list: check that the array element type is numeric.
+            let saop = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            // The first arg is the scalar, second is the array/list.
+            let args = unsafe { (*saop).args };
+            if args.is_null() {
+                return false;
+            }
+            let scalar = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+            is_gpu_compilable_expr_node(scalar)
+        }
+        NodeTag::T_FuncExpr => {
+            // FuncExpr: accept only known GPU-compilable functions.
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            let result_type = u32::from(unsafe { (*funcexpr).funcresulttype });
+            is_gpu_expr_type(result_type)
+        }
+        NodeTag::T_CaseExpr => {
+            // CASE expressions: result type must be numeric.
+            let caseexpr = node.cast::<pg_sys::CaseExpr>();
+            let result_type = u32::from(unsafe { (*caseexpr).casetype });
+            is_gpu_expr_type(result_type)
+        }
+        NodeTag::T_RelabelType | NodeTag::T_CoerceViaIO => true,
+        _ => false,
+    }
+}
+
+/// Check whether an expression leaf node has a GPU-supported type.
+///
+/// # Safety
+///
+/// `node` must be a valid PG expression `Node` pointer.
+#[allow(clippy::cast_ptr_alignment)]
+fn is_gpu_compilable_expr_node(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+    // SAFETY: node is a valid Node pointer.
+    let tag = unsafe { (*node).type_ };
+    match tag {
+        NodeTag::T_Var => {
+            let var = node.cast::<pg_sys::Var>();
+            is_gpu_expr_type(u32::from(unsafe { (*var).vartype }))
+        }
+        NodeTag::T_Const => {
+            let cst = node.cast::<pg_sys::Const>();
+            is_gpu_expr_type(u32::from(unsafe { (*cst).consttype }))
+        }
+        // Nested expressions: recurse into the clause checker.
+        NodeTag::T_OpExpr
+        | NodeTag::T_BoolExpr
+        | NodeTag::T_FuncExpr
+        | NodeTag::T_CaseExpr
+        | NodeTag::T_NullTest
+        | NodeTag::T_ScalarArrayOpExpr => is_gpu_compilable_clause(node),
+        // Cast wrappers: accept and let the compiler handle them.
+        NodeTag::T_RelabelType | NodeTag::T_CoerceViaIO => true,
+        _ => false,
+    }
 }
 
 /// Find the first registered accelerable function in a `List` of `RestrictInfo`.
@@ -1528,6 +2246,10 @@ struct EquiJoinKey {
     outer_attno: i32,
     /// 1-based attribute number of the inner relation's join key.
     inner_attno: i32,
+    /// Range table index (varno) of the outer join key variable.
+    outer_varno: i32,
+    /// Range table index (varno) of the inner join key variable.
+    inner_varno: i32,
     /// Key type: 0=int32, 1=int64, 2=float64.
     key_type: i32,
 }
@@ -1636,13 +2358,14 @@ unsafe fn find_equi_join_key(
         let right_is_outer = unsafe { pg_sys::bms_is_member(right_varno, outer_relids) };
         let right_is_inner = unsafe { pg_sys::bms_is_member(right_varno, inner_relids) };
 
-        let (outer_attno, inner_attno, key_oid) = if left_is_outer && right_is_inner {
-            (left_attno, right_attno, left_type)
-        } else if left_is_inner && right_is_outer {
-            (right_attno, left_attno, right_type)
-        } else {
-            continue;
-        };
+        let (outer_attno, inner_attno, outer_varno, inner_varno, key_oid) =
+            if left_is_outer && right_is_inner {
+                (left_attno, right_attno, left_varno, right_varno, left_type)
+            } else if left_is_inner && right_is_outer {
+                (right_attno, left_attno, right_varno, left_varno, right_type)
+            } else {
+                continue;
+            };
 
         // Map PG type OID to key type tag.
         let key_type = match u32::from(key_oid) {
@@ -1655,9 +2378,17 @@ unsafe fn find_equi_join_key(
             _ => continue,  // Unsupported key type
         };
 
+        // Gate: Skip Float64 join keys when GPU lacks native fp64.
+        if key_type == 2 && !cost::platform_has_fp64() {
+            pgrx::debug1!("pg_accel join: float64 key skipped — GPU lacks fp64");
+            continue;
+        }
+
         return Some(EquiJoinKey {
             outer_attno,
             inner_attno,
+            outer_varno,
+            inner_varno,
             key_type,
         });
     }
@@ -2018,8 +2749,13 @@ unsafe fn path_node_size(path: *mut Path) -> usize {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // =====================================================================
+    // Existing tests (preserved)
+    // =====================================================================
 
     #[test]
     fn has_accelerable_restriction_null_list_returns_false() {
@@ -2034,8 +2770,6 @@ mod tests {
 
     #[test]
     fn path_node_size_for_known_tags() {
-        // Verify known path types return correct sizes (all > 0).
-        // We test a representative subset of the match arms.
         let known_sizes = [
             (
                 NodeTag::T_IndexPath,
@@ -2074,15 +2808,12 @@ mod tests {
 
     #[test]
     fn path_node_size_unknown_tag_falls_back_to_base_path() {
-        // For unknown tags, should return size_of::<Path>().
         let base_size = std::mem::size_of::<pg_sys::Path>();
         assert!(base_size > 0);
     }
 
     #[test]
     fn path_node_size_all_match_arms_return_positive() {
-        // Verify that all sizes in the match are positive (compile-time
-        // check that the types exist and have non-zero size).
         let sizes = [
             std::mem::size_of::<pg_sys::IndexPath>(),
             std::mem::size_of::<pg_sys::BitmapHeapPath>(),
@@ -2145,5 +2876,1006 @@ mod tests {
                 "subtype index {i} (size {size}) smaller than base Path (size {base})"
             );
         }
+    }
+
+    // =====================================================================
+    // Null-pointer guards on helper functions
+    // =====================================================================
+
+    #[test]
+    fn find_accelerable_match_null_returns_none() {
+        assert!(find_accelerable_match(std::ptr::null_mut()).is_none());
+    }
+
+    #[test]
+    fn find_accelerable_strategy_null_returns_none() {
+        assert!(find_accelerable_strategy(std::ptr::null_mut()).is_none());
+    }
+
+    #[test]
+    fn extract_var_attno_from_args_null_returns_zero() {
+        assert_eq!(extract_var_attno_from_args(std::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn node_find_accel_match_null_returns_none() {
+        let reg = registry::AdapterRegistry::new();
+        assert!(node_find_accel_match(std::ptr::null_mut(), &reg).is_none());
+    }
+
+    #[test]
+    fn recurse_args_for_match_null_returns_none() {
+        let reg = registry::AdapterRegistry::new();
+        assert!(recurse_args_for_match(std::ptr::null_mut(), &reg).is_none());
+    }
+
+    // =====================================================================
+    // AccelMatch struct construction and field access
+    // =====================================================================
+
+    #[test]
+    fn accel_match_stores_gpu_spatial_strategy() {
+        let m = AccelMatch {
+            strategy: registry::AccelStrategy::GpuSpatial,
+            fn_oid: pg_sys::Oid::from(12345u32),
+            target_attno: 3,
+        };
+        assert_eq!(m.strategy, registry::AccelStrategy::GpuSpatial);
+        assert_eq!(u32::from(m.fn_oid), 12345);
+        assert_eq!(m.target_attno, 3);
+    }
+
+    #[test]
+    fn accel_match_stores_gpu_h3_strategy() {
+        let m = AccelMatch {
+            strategy: registry::AccelStrategy::GpuH3,
+            fn_oid: pg_sys::Oid::from(99u32),
+            target_attno: 0,
+        };
+        assert_eq!(m.strategy, registry::AccelStrategy::GpuH3);
+        assert_eq!(m.target_attno, 0);
+    }
+
+    #[test]
+    fn accel_match_stores_gpu_spatial_strategy_minimal() {
+        let m = AccelMatch {
+            strategy: registry::AccelStrategy::GpuSpatial,
+            fn_oid: pg_sys::Oid::from(1u32),
+            target_attno: 1,
+        };
+        assert_eq!(m.strategy, registry::AccelStrategy::GpuSpatial);
+    }
+
+    // =====================================================================
+    // EquiJoinKey struct construction and field access
+    // =====================================================================
+
+    #[test]
+    fn equi_join_key_int32_construction() {
+        let k = EquiJoinKey {
+            outer_attno: 1,
+            inner_attno: 2,
+            outer_varno: 1,
+            inner_varno: 2,
+            key_type: 0, // Int32
+        };
+        assert_eq!(k.outer_attno, 1);
+        assert_eq!(k.inner_attno, 2);
+        assert_eq!(k.key_type, 0);
+    }
+
+    #[test]
+    fn equi_join_key_int64_construction() {
+        let k = EquiJoinKey {
+            outer_attno: 5,
+            inner_attno: 3,
+            outer_varno: 1,
+            inner_varno: 2,
+            key_type: 1, // Int64
+        };
+        assert_eq!(k.key_type, 1);
+    }
+
+    #[test]
+    fn equi_join_key_float64_construction() {
+        let k = EquiJoinKey {
+            outer_attno: 2,
+            inner_attno: 7,
+            outer_varno: 1,
+            inner_varno: 2,
+            key_type: 2, // Float64
+        };
+        assert_eq!(k.key_type, 2);
+    }
+
+    // =====================================================================
+    // AccelStrategy round-trip via from_i32
+    // =====================================================================
+
+    #[test]
+    fn accel_strategy_from_i32_all_variants() {
+        assert_eq!(
+            registry::AccelStrategy::from_i32(1),
+            registry::AccelStrategy::GpuSpatial
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(2),
+            registry::AccelStrategy::GpuRaster
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(3),
+            registry::AccelStrategy::GpuH3
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(4),
+            registry::AccelStrategy::GpuSort
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(5),
+            registry::AccelStrategy::GpuReduce
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(6),
+            registry::AccelStrategy::GpuExpr
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(7),
+            registry::AccelStrategy::GpuHashJoin
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(8),
+            registry::AccelStrategy::GpuWindow
+        );
+    }
+
+    #[test]
+    fn accel_strategy_from_i32_unknown_defaults_to_gpu_spatial() {
+        assert_eq!(
+            registry::AccelStrategy::from_i32(-1),
+            registry::AccelStrategy::GpuSpatial
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(0),
+            registry::AccelStrategy::GpuSpatial
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(99),
+            registry::AccelStrategy::GpuSpatial
+        );
+        assert_eq!(
+            registry::AccelStrategy::from_i32(i32::MAX),
+            registry::AccelStrategy::GpuSpatial
+        );
+    }
+
+    #[test]
+    fn accel_strategy_repr_i32_roundtrip() {
+        // The enum is #[repr(i32)], so casting to i32 and back should work.
+        let strategies = [
+            registry::AccelStrategy::GpuSpatial,
+            registry::AccelStrategy::GpuRaster,
+            registry::AccelStrategy::GpuH3,
+            registry::AccelStrategy::GpuSort,
+            registry::AccelStrategy::GpuReduce,
+            registry::AccelStrategy::GpuExpr,
+            registry::AccelStrategy::GpuHashJoin,
+            registry::AccelStrategy::GpuWindow,
+        ];
+        for s in strategies {
+            let i = s as i32;
+            assert_eq!(registry::AccelStrategy::from_i32(i), s);
+        }
+    }
+
+    // =====================================================================
+    // AggOp round-trip
+    // =====================================================================
+
+    #[test]
+    fn agg_op_to_i32_roundtrip() {
+        let ops = [
+            AggOp::Sum,
+            AggOp::Avg,
+            AggOp::Min,
+            AggOp::Max,
+            AggOp::Count,
+            AggOp::Passthrough,
+        ];
+        for op in ops {
+            assert_eq!(AggOp::from_i32(op.to_i32()), op);
+        }
+    }
+
+    #[test]
+    fn agg_op_from_i32_unknown_returns_passthrough() {
+        assert_eq!(AggOp::from_i32(100), AggOp::Passthrough);
+        assert_eq!(AggOp::from_i32(-1), AggOp::Passthrough);
+    }
+
+    // =====================================================================
+    // WindowFunc round-trip
+    // =====================================================================
+
+    #[test]
+    fn window_func_to_i32_roundtrip() {
+        let funcs = [
+            WindowFunc::RowNumber,
+            WindowFunc::Rank,
+            WindowFunc::DenseRank,
+            WindowFunc::Sum,
+            WindowFunc::Count,
+            WindowFunc::Lag,
+            WindowFunc::Lead,
+        ];
+        for f in funcs {
+            assert_eq!(WindowFunc::from_i32(f.to_i32()), Some(f));
+        }
+    }
+
+    #[test]
+    fn window_func_from_i32_unknown_returns_none() {
+        assert_eq!(WindowFunc::from_i32(7), None);
+        assert_eq!(WindowFunc::from_i32(-1), None);
+        assert_eq!(WindowFunc::from_i32(100), None);
+    }
+
+    // =====================================================================
+    // WindowFuncSpec construction
+    // =====================================================================
+
+    #[test]
+    fn window_func_spec_construction() {
+        let spec = WindowFuncSpec {
+            func: WindowFunc::Sum,
+            partition_attno: 2,
+            order_attno: 3,
+            value_attno: 4,
+            offset: 1,
+            default_val: 0.0,
+            result_type_oid: 701, // float8
+        };
+        assert_eq!(spec.func, WindowFunc::Sum);
+        assert_eq!(spec.partition_attno, 2);
+        assert_eq!(spec.order_attno, 3);
+        assert_eq!(spec.value_attno, 4);
+        assert_eq!(spec.offset, 1);
+        assert!((spec.default_val - 0.0).abs() < f64::EPSILON);
+        assert_eq!(spec.result_type_oid, 701);
+    }
+
+    #[test]
+    fn window_func_spec_lag_with_offset_and_default() {
+        let spec = WindowFuncSpec {
+            func: WindowFunc::Lag,
+            partition_attno: 0,
+            order_attno: 1,
+            value_attno: 2,
+            offset: 3,
+            default_val: -999.0,
+            result_type_oid: 701,
+        };
+        assert_eq!(spec.func, WindowFunc::Lag);
+        assert_eq!(spec.offset, 3);
+        assert!((spec.default_val - (-999.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn window_func_spec_no_partition() {
+        let spec = WindowFuncSpec {
+            func: WindowFunc::RowNumber,
+            partition_attno: 0,
+            order_attno: 0,
+            value_attno: 0,
+            offset: 1,
+            default_val: 0.0,
+            result_type_oid: 23,
+        };
+        assert_eq!(spec.partition_attno, 0);
+        assert_eq!(spec.order_attno, 0);
+    }
+
+    // =====================================================================
+    // SortKeyDesc construction
+    // =====================================================================
+
+    #[test]
+    fn sort_key_desc_construction() {
+        let sk = SortKeyDesc {
+            attno: 5,
+            sort_op: pg_sys::Oid::from(97u32), // int4lt
+            collation: pg_sys::Oid::from(0u32),
+            nulls_first: false,
+        };
+        assert_eq!(sk.attno, 5);
+        assert!(!sk.nulls_first);
+    }
+
+    #[test]
+    fn sort_key_desc_nulls_first() {
+        let sk = SortKeyDesc {
+            attno: 1,
+            sort_op: pg_sys::Oid::from(622u32), // float8lt
+            collation: pg_sys::Oid::from(0u32),
+            nulls_first: true,
+        };
+        assert!(sk.nulls_first);
+    }
+
+    // =====================================================================
+    // GPU-sortable type OID classification
+    // =====================================================================
+
+    #[test]
+    fn sort_type_oid_int4_is_sortable() {
+        assert!(matches!(SORT_INT4OID, 23));
+    }
+
+    #[test]
+    fn sort_type_oid_float4_is_sortable() {
+        assert!(matches!(SORT_FLOAT4OID, 700));
+    }
+
+    #[test]
+    fn sort_type_oid_float8_is_sortable() {
+        assert!(matches!(SORT_FLOAT8OID, 701));
+    }
+
+    #[test]
+    fn sort_type_oids_match_guard_accepts_all_three() {
+        for oid in [SORT_INT4OID, SORT_FLOAT4OID, SORT_FLOAT8OID] {
+            assert!(
+                matches!(oid, SORT_INT4OID | SORT_FLOAT4OID | SORT_FLOAT8OID),
+                "OID {oid} should match the sortable guard"
+            );
+        }
+    }
+
+    #[test]
+    fn sort_type_oids_reject_non_sortable() {
+        let non_sortable = [16u32, 20, 21, 25, 1043]; // bool, int8, int2, text, varchar
+        for oid in non_sortable {
+            assert!(
+                !matches!(oid, SORT_INT4OID | SORT_FLOAT4OID | SORT_FLOAT8OID),
+                "OID {oid} should NOT match the sortable guard"
+            );
+        }
+    }
+
+    // =====================================================================
+    // Agg type OID classification
+    // =====================================================================
+
+    #[test]
+    fn agg_type_oids_match_guard_accepts_numeric() {
+        for oid in [AGG_FLOAT4OID, AGG_FLOAT8OID, AGG_INT4OID, AGG_INT8OID] {
+            assert!(
+                matches!(
+                    oid,
+                    AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
+                ),
+                "OID {oid} should be accepted for agg"
+            );
+        }
+    }
+
+    #[test]
+    fn agg_type_oids_reject_non_numeric() {
+        let non_numeric = [16u32, 21, 25, 1043, 1700]; // bool, int2, text, varchar, numeric
+        for oid in non_numeric {
+            assert!(
+                !matches!(
+                    oid,
+                    AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
+                ),
+                "OID {oid} should NOT be accepted for agg"
+            );
+        }
+    }
+
+    // =====================================================================
+    // Window type OID classification
+    // =====================================================================
+
+    #[test]
+    fn win_type_oids_match_guard_accepts_numeric() {
+        for oid in [WIN_FLOAT4OID, WIN_FLOAT8OID, WIN_INT4OID, WIN_INT8OID] {
+            assert!(
+                matches!(
+                    oid,
+                    WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
+                ),
+                "OID {oid} should be accepted for window"
+            );
+        }
+    }
+
+    #[test]
+    fn win_type_oids_reject_non_numeric() {
+        let non_numeric = [16u32, 21, 25, 1043];
+        for oid in non_numeric {
+            assert!(
+                !matches!(
+                    oid,
+                    WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
+                ),
+                "OID {oid} should NOT be accepted for window"
+            );
+        }
+    }
+
+    // =====================================================================
+    // GiST / SP-GiST AM OID constants
+    // =====================================================================
+
+    #[test]
+    fn gist_am_oid_is_783() {
+        assert_eq!(GIST_AM_OID, 783);
+    }
+
+    #[test]
+    fn spgist_am_oid_is_4000() {
+        assert_eq!(SPGIST_AM_OID, 4000);
+    }
+
+    // =====================================================================
+    // GroupKeyInfo::key_type_from_oid classification
+    // =====================================================================
+
+    #[test]
+    fn group_key_type_int2_maps_to_int32() {
+        assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::INT2OID), Some(0));
+    }
+
+    #[test]
+    fn group_key_type_int4_maps_to_int32() {
+        assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::INT4OID), Some(0));
+    }
+
+    #[test]
+    fn group_key_type_int8_maps_to_int64() {
+        assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::INT8OID), Some(1));
+    }
+
+    #[test]
+    fn group_key_type_float4_maps_to_float64() {
+        assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::FLOAT4OID), Some(2));
+    }
+
+    #[test]
+    fn group_key_type_float8_maps_to_float64() {
+        assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::FLOAT8OID), Some(2));
+    }
+
+    #[test]
+    fn group_key_type_text_returns_none() {
+        assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::TEXTOID), None);
+    }
+
+    // =====================================================================
+    // Cost model: should_batch with strategy-specific per-row costs
+    // =====================================================================
+
+    #[test]
+    fn should_batch_gpu_spatial_sufficient_rows() {
+        // GPU spatial: per_row_cost = 0.05 (well above 0.01 threshold)
+        assert!(cost::should_batch(
+            1000,
+            cost::GPU_SPATIAL_PER_ROW_COST,
+            256
+        ));
+    }
+
+    #[test]
+    fn should_batch_gpu_h3_sufficient_rows() {
+        assert!(cost::should_batch(500, cost::GPU_H3_PER_ROW_COST, 256));
+    }
+
+    #[test]
+    fn should_batch_gpu_raster_sufficient_rows() {
+        assert!(cost::should_batch(1000, cost::GPU_RASTER_PER_ROW_COST, 256));
+    }
+
+    #[test]
+    fn should_batch_gpu_reduce_sufficient_rows() {
+        assert!(cost::should_batch(500, cost::GPU_REDUCE_PER_ROW_COST, 256));
+    }
+
+    // =====================================================================
+    // Cost model: optimal_batch_size clamping
+    // =====================================================================
+
+    #[test]
+    fn optimal_batch_size_small_input_clamps_to_min() {
+        let limits = cost::device_limits();
+        let result = cost::optimal_batch_size(1);
+        assert_eq!(result, limits.optimal_batch_min);
+    }
+
+    #[test]
+    fn optimal_batch_size_large_input_clamps_to_max() {
+        let limits = cost::device_limits();
+        let result = cost::optimal_batch_size(usize::MAX);
+        assert_eq!(result, limits.optimal_batch_max);
+    }
+
+    #[test]
+    fn optimal_batch_size_mid_range_returns_input() {
+        let limits = cost::device_limits();
+        let mid = (limits.optimal_batch_min + limits.optimal_batch_max) / 2;
+        assert_eq!(cost::optimal_batch_size(mid), mid);
+    }
+
+    // =====================================================================
+    // Cost constant sanity checks
+    // =====================================================================
+
+    #[test]
+    fn gpu_launch_overhead_is_positive() {
+        assert!(cost::GPU_LAUNCH_OVERHEAD > 0.0);
+    }
+
+    #[test]
+    fn gpu_cost_safety_margin_between_zero_and_one() {
+        assert!(cost::GPU_COST_SAFETY_MARGIN > 0.0);
+        assert!(cost::GPU_COST_SAFETY_MARGIN < 1.0);
+    }
+
+    #[test]
+    fn spatial_index_selectivity_threshold_between_zero_and_one() {
+        assert!(cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD > 0.0);
+        assert!(cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD < 1.0);
+    }
+
+    #[test]
+    fn spatial_index_cost_ratio_threshold_between_zero_and_one() {
+        assert!(cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD > 0.0);
+        assert!(cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD < 1.0);
+    }
+
+    #[test]
+    fn gpu_spatial_per_row_cost_is_positive() {
+        assert!(cost::GPU_SPATIAL_PER_ROW_COST > 0.0);
+    }
+
+    #[test]
+    fn gpu_raster_per_row_cost_is_positive() {
+        assert!(cost::GPU_RASTER_PER_ROW_COST > 0.0);
+    }
+
+    #[test]
+    fn gpu_h3_per_row_cost_is_positive() {
+        assert!(cost::GPU_H3_PER_ROW_COST > 0.0);
+    }
+
+    #[test]
+    fn gpu_reduce_per_row_cost_is_positive() {
+        assert!(cost::GPU_REDUCE_PER_ROW_COST > 0.0);
+    }
+
+    #[test]
+    fn per_datum_extract_cost_is_positive() {
+        assert!(cost::PER_DATUM_EXTRACT_COST > 0.0);
+    }
+
+    // =====================================================================
+    // Cost calculation: scan hook cost formula
+    // =====================================================================
+
+    /// Replicate the scan hook's cost formula to verify it produces
+    /// sane results with known inputs.
+    #[test]
+    fn scan_cost_formula_gpu_path_cheaper_than_base() {
+        // Simulate: 100K rows, base total_cost = 500.0, startup_cost = 10.0
+        let base_rows = 100_000.0_f64;
+        let base_startup = 10.0;
+        let base_total = 500.0;
+        let strategy = registry::AccelStrategy::GpuSpatial;
+        let per_row_cost = cost::GPU_SPATIAL_PER_ROW_COST;
+        let cost_multiplier = 1.0; // neutral multiplier
+
+        let batch_size = cost::optimal_batch_size(base_rows as usize) as f64;
+        let num_batches = (base_rows / batch_size).ceil();
+        let batch_overhead = num_batches * 0.5;
+        let gpu_overhead = match strategy {
+            registry::AccelStrategy::GpuSpatial
+            | registry::AccelStrategy::GpuRaster
+            | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
+            _ => 0.0,
+        };
+        let calls_saved = base_rows - num_batches;
+        let per_row_saving = calls_saved * per_row_cost;
+        let startup_cost = base_startup + 1.0 + gpu_overhead;
+        let total_cost =
+            (base_total + batch_overhead + gpu_overhead - per_row_saving) * cost_multiplier;
+
+        // With 100K rows and per-row saving of ~0.05 each, savings should
+        // dominate the overhead, making total < base.
+        assert!(
+            total_cost < base_total,
+            "GPU path total_cost ({total_cost:.2}) should be cheaper than \
+             base ({base_total:.2}) for {base_rows} rows"
+        );
+        assert!(startup_cost > base_startup);
+    }
+
+    #[test]
+    fn scan_cost_formula_small_batch_not_cheaper() {
+        // Simulate: 50 rows, base total_cost = 5.0, using H3 (lowest GPU per-row cost).
+        // With very few rows, GPU launch overhead should dominate per-row savings.
+        let base_rows = 50.0_f64;
+        let base_total = 5.0;
+        let per_row_cost = cost::GPU_H3_PER_ROW_COST; // 0.02
+
+        let batch_size = cost::optimal_batch_size(base_rows as usize) as f64;
+        let num_batches = (base_rows / batch_size).ceil();
+        let batch_overhead = num_batches * 0.5;
+        let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD; // 5.0
+        let calls_saved = base_rows - num_batches;
+        let per_row_saving = calls_saved * per_row_cost;
+        let total_cost = base_total + batch_overhead + gpu_overhead - per_row_saving;
+
+        // Per-row savings: ~50 * 0.02 = 1.0. Overhead: 5.0 + 0.5 = 5.5.
+        // Net cost increase: ~4.5, so total_cost > base_total.
+        assert!(
+            total_cost > base_total * cost::GPU_COST_SAFETY_MARGIN,
+            "GPU path ({total_cost:.2}) should fail safety margin for \
+             only {base_rows} rows"
+        );
+    }
+
+    // =====================================================================
+    // Cost calculation: safety margin gate
+    // =====================================================================
+
+    #[test]
+    fn safety_margin_gate_rejects_marginal_improvement() {
+        let base_cost = 100.0;
+        // If total_cost is 75% of base, it exceeds the 0.7 margin.
+        let total_cost = base_cost * 0.75;
+        assert!(total_cost > base_cost * cost::GPU_COST_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn safety_margin_gate_accepts_clear_improvement() {
+        let base_cost = 100.0;
+        // If total_cost is 50% of base, it's well under the 0.7 margin.
+        let total_cost = base_cost * 0.50;
+        assert!(total_cost <= base_cost * cost::GPU_COST_SAFETY_MARGIN);
+    }
+
+    #[test]
+    fn safety_margin_gate_boundary_exactly_at_margin() {
+        let base_cost = 100.0;
+        let total_cost = base_cost * cost::GPU_COST_SAFETY_MARGIN;
+        // Exactly at margin should NOT pass the `>` check (it's not strictly greater).
+        assert!(!(total_cost > base_cost * cost::GPU_COST_SAFETY_MARGIN));
+    }
+
+    // =====================================================================
+    // LIMIT gate logic (limit_tuples < rows / 4)
+    // =====================================================================
+
+    #[test]
+    fn limit_gate_small_limit_skips_gpu_sort() {
+        let rows: usize = 1_000_000;
+        let limit_tuples: f64 = 100.0;
+        // When limit < rows/4, GPU sort should be skipped.
+        assert!(
+            limit_tuples > 0.0 && (limit_tuples as usize) < rows / 4,
+            "small LIMIT should trigger skip"
+        );
+    }
+
+    #[test]
+    fn limit_gate_large_limit_allows_gpu_sort() {
+        let rows: usize = 1000;
+        let limit_tuples: f64 = 500.0;
+        // When limit >= rows/4, GPU sort is allowed.
+        assert!(
+            !(limit_tuples > 0.0 && (limit_tuples as usize) < rows / 4),
+            "large LIMIT should NOT trigger skip"
+        );
+    }
+
+    #[test]
+    fn limit_gate_zero_limit_allows_gpu_sort() {
+        let limit_tuples: f64 = 0.0;
+        // Zero limit means no LIMIT clause — GPU sort allowed.
+        assert!(!(limit_tuples > 0.0), "zero limit should NOT trigger skip");
+    }
+
+    #[test]
+    fn limit_gate_negative_limit_allows_gpu_sort() {
+        let limit_tuples: f64 = -1.0;
+        assert!(
+            !(limit_tuples > 0.0),
+            "negative limit should NOT trigger skip"
+        );
+    }
+
+    // =====================================================================
+    // Narrow-row gate (width < 40 skips GPU sort)
+    // =====================================================================
+
+    #[test]
+    fn narrow_row_gate_width_39_skips() {
+        let output_width: usize = 39;
+        assert!(output_width < 40, "width 39 should skip GPU sort");
+    }
+
+    #[test]
+    fn narrow_row_gate_width_40_allows() {
+        let output_width: usize = 40;
+        assert!(!(output_width < 40), "width 40 should allow GPU sort");
+    }
+
+    #[test]
+    fn narrow_row_gate_width_120_allows() {
+        let output_width: usize = 120;
+        assert!(!(output_width < 40), "wide rows should allow GPU sort");
+    }
+
+    // =====================================================================
+    // Per-row cost selection by strategy
+    // =====================================================================
+
+    #[test]
+    fn per_row_cost_selection_gpu_spatial() {
+        let strategy = registry::AccelStrategy::GpuSpatial;
+        let per_row = match strategy {
+            registry::AccelStrategy::GpuSpatial => cost::GPU_SPATIAL_PER_ROW_COST,
+            registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
+            registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
+            _ => cost::GPU_SPATIAL_PER_ROW_COST,
+        };
+        assert!((per_row - cost::GPU_SPATIAL_PER_ROW_COST).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn per_row_cost_selection_gpu_raster() {
+        let strategy = registry::AccelStrategy::GpuRaster;
+        let per_row = match strategy {
+            registry::AccelStrategy::GpuSpatial => cost::GPU_SPATIAL_PER_ROW_COST,
+            registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
+            registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
+            _ => cost::GPU_SPATIAL_PER_ROW_COST,
+        };
+        assert!((per_row - cost::GPU_RASTER_PER_ROW_COST).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn per_row_cost_selection_gpu_hash_join_falls_to_default() {
+        let strategy = registry::AccelStrategy::GpuHashJoin;
+        let per_row = match strategy {
+            registry::AccelStrategy::GpuSpatial => cost::GPU_SPATIAL_PER_ROW_COST,
+            registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
+            registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
+            _ => cost::GPU_SPATIAL_PER_ROW_COST,
+        };
+        assert!((per_row - cost::GPU_SPATIAL_PER_ROW_COST).abs() < f64::EPSILON);
+    }
+
+    // =====================================================================
+    // GPU overhead selection by strategy
+    // =====================================================================
+
+    #[test]
+    fn gpu_overhead_spatial_uses_launch_overhead() {
+        let strategies = [
+            registry::AccelStrategy::GpuSpatial,
+            registry::AccelStrategy::GpuRaster,
+            registry::AccelStrategy::GpuH3,
+        ];
+        for s in strategies {
+            let overhead = match s {
+                registry::AccelStrategy::GpuSpatial
+                | registry::AccelStrategy::GpuRaster
+                | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
+                _ => 0.0,
+            };
+            assert!(
+                (overhead - cost::GPU_LAUNCH_OVERHEAD).abs() < f64::EPSILON,
+                "strategy {s:?} should use GPU_LAUNCH_OVERHEAD"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_overhead_for_gpu_strategies_is_positive() {
+        let overhead = match registry::AccelStrategy::GpuSpatial {
+            registry::AccelStrategy::GpuSpatial
+            | registry::AccelStrategy::GpuRaster
+            | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
+            _ => 0.0,
+        };
+        assert!(overhead > 0.0);
+    }
+
+    // =====================================================================
+    // DeviceLimits::cpu_only thresholds
+    // =====================================================================
+
+    #[test]
+    fn device_limits_cpu_only_thresholds_are_sane() {
+        let limits = cost::DeviceLimits::cpu_only();
+        assert_eq!(limits.gpu_min_rows, 10_000);
+        assert_eq!(limits.gpu_sort_min_rows, 100_000);
+        assert_eq!(limits.gpu_sort_planner_min_rows, 1_000_000);
+        assert_eq!(limits.gpu_window_min_rows, 50_000);
+        assert_eq!(limits.gpu_reduce_min_rows, 10_000);
+        assert_eq!(limits.gpu_hash_agg_threshold, 1_000);
+        assert_eq!(limits.gpu_hash_agg_max_groups, 10_000);
+        assert_eq!(limits.optimal_batch_min, 256);
+        assert_eq!(limits.optimal_batch_max, 8192);
+    }
+
+    #[test]
+    fn device_limits_cpu_only_batch_min_lte_max() {
+        let limits = cost::DeviceLimits::cpu_only();
+        assert!(limits.optimal_batch_min <= limits.optimal_batch_max);
+    }
+
+    // =====================================================================
+    // Equi-join key type mapping (replicate the match from find_equi_join_key)
+    // =====================================================================
+
+    #[test]
+    fn equi_join_key_type_mapping_int2_to_int32() {
+        let key_type = match 21u32 {
+            21 | 23 => Some(0),   // Int32
+            20 => Some(1),        // Int64
+            700 | 701 => Some(2), // Float64
+            _ => None,
+        };
+        assert_eq!(key_type, Some(0));
+    }
+
+    #[test]
+    fn equi_join_key_type_mapping_int4_to_int32() {
+        let key_type = match 23u32 {
+            21 | 23 => Some(0),
+            20 => Some(1),
+            700 | 701 => Some(2),
+            _ => None,
+        };
+        assert_eq!(key_type, Some(0));
+    }
+
+    #[test]
+    fn equi_join_key_type_mapping_int8_to_int64() {
+        let key_type = match 20u32 {
+            21 | 23 => Some(0),
+            20 => Some(1),
+            700 | 701 => Some(2),
+            _ => None,
+        };
+        assert_eq!(key_type, Some(1));
+    }
+
+    #[test]
+    fn equi_join_key_type_mapping_float4_to_float64() {
+        let key_type = match 700u32 {
+            21 | 23 => Some(0),
+            20 => Some(1),
+            700 | 701 => Some(2),
+            _ => None,
+        };
+        assert_eq!(key_type, Some(2));
+    }
+
+    #[test]
+    fn equi_join_key_type_mapping_float8_to_float64() {
+        let key_type = match 701u32 {
+            21 | 23 => Some(0),
+            20 => Some(1),
+            700 | 701 => Some(2),
+            _ => None,
+        };
+        assert_eq!(key_type, Some(2));
+    }
+
+    #[test]
+    fn equi_join_key_type_mapping_text_unsupported() {
+        let key_type = match 25u32 {
+            21 | 23 => Some(0),
+            20 => Some(1),
+            700 | 701 => Some(2),
+            _ => None,
+        };
+        assert_eq!(key_type, None);
+    }
+
+    // =====================================================================
+    // All strategies are GPU strategies (no CPU-only paths)
+    // =====================================================================
+
+    #[test]
+    fn all_strategies_are_gpu() {
+        let gpu_strategies = [
+            registry::AccelStrategy::GpuSpatial,
+            registry::AccelStrategy::GpuRaster,
+            registry::AccelStrategy::GpuH3,
+            registry::AccelStrategy::GpuSort,
+        ];
+        for s in gpu_strategies {
+            assert!(s as i32 >= 1, "strategy {s:?} should be a GPU strategy");
+        }
+    }
+
+    // =====================================================================
+    // Cost calculation: sort cost formula
+    // =====================================================================
+
+    #[test]
+    fn sort_cost_formula_produces_positive_total() {
+        let base_rows = 500_000.0_f64;
+        let base_startup = 10.0;
+        let base_total = 200.0;
+        let cost_multiplier = 1.0;
+
+        let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
+        let per_row = cost::GPU_SORT_PER_ROW_COST + cost::PER_DATUM_EXTRACT_COST + 0.03;
+        let sort_cost = base_rows * per_row;
+        let startup_cost = base_startup + gpu_overhead;
+        let total_cost = (base_total + gpu_overhead + sort_cost) * cost_multiplier;
+
+        assert!(total_cost > 0.0);
+        assert!(startup_cost > base_startup);
+        // Sort cost should dominate for large row counts.
+        assert!(sort_cost > gpu_overhead);
+    }
+
+    // =====================================================================
+    // Cost calculation: join cost formula
+    // =====================================================================
+
+    #[test]
+    fn join_cost_hash_build_overhead_scales_with_inner_rows() {
+        let inner_rows_small = 1000.0_f64;
+        let inner_rows_large = 100_000.0_f64;
+
+        let overhead_small = inner_rows_small * 0.001;
+        let overhead_large = inner_rows_large * 0.001;
+
+        assert!(overhead_large > overhead_small);
+        assert!((overhead_small - 1.0).abs() < f64::EPSILON);
+        assert!((overhead_large - 100.0).abs() < f64::EPSILON);
+    }
+
+    // =====================================================================
+    // Cost calculation: agg cost formula
+    // =====================================================================
+
+    #[test]
+    fn agg_cost_grouped_adds_hash_overhead() {
+        let base_rows = 50_000.0_f64;
+        let reduce_per_row = cost::GPU_REDUCE_PER_ROW_COST + 0.02;
+
+        let hash_overhead_plain = 0.0;
+        let hash_overhead_grouped = 0.005;
+
+        let cost_plain = base_rows * (reduce_per_row + hash_overhead_plain);
+        let cost_grouped = base_rows * (reduce_per_row + hash_overhead_grouped);
+
+        assert!(cost_grouped > cost_plain);
+        // The difference should be exactly base_rows * 0.005.
+        let expected_diff = base_rows * 0.005;
+        assert!((cost_grouped - cost_plain - expected_diff).abs() < 1e-6);
+    }
+
+    // =====================================================================
+    // Empty registry fast-reject
+    // =====================================================================
+
+    #[test]
+    fn empty_registry_is_empty() {
+        let reg = registry::AdapterRegistry::new();
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn empty_registry_lookup_returns_none() {
+        let reg = registry::AdapterRegistry::new();
+        assert!(reg.lookup(pg_sys::Oid::from(12345u32)).is_none());
     }
 }
