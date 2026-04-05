@@ -8,6 +8,5 @@
 #[allow(dead_code)]
 pub mod extractors;
 pub mod h3;
-pub mod pg_builtins;
 pub mod postgis;
 pub mod postgis_raster;

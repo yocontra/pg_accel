@@ -5,14 +5,20 @@
 //! `GSERIALIZED` format:
 //!
 //! ```text
-//! Bytes 0-3:   int32 total_size  (varlena header — already stripped by PG detoast)
-//! Bytes 4-7:   uint32 srid_flags (SRID in bits 0-20, flags in bits 21-31)
-//!   Flag bits: bit 21 = HasZ, bit 22 = HasM, bit 23 = HasBBox
+//! Bytes 0-3:   uint32 varlena header (total_size << 2)
+//! Bytes 4-6:   uint8[3] srid (big-endian, 21-bit SRID)
+//! Byte  7:     uint8 gflags
+//!   Flag bits: bit 0 = HasZ, bit 1 = HasM, bit 2 = HasBBox,
+//!              bit 3 = IsGeodetic, bit 6 = Version
 //! If HasBBox:
-//!   Bytes 8-23: BOX2DF (4x float32: xmin, ymin, xmax, ymax)
+//!   Bytes 8-23: BOX2DF (4x float32: xmin, xmax, ymin, ymax)
 //!   Bytes 24+:  geometry data
 //! Else:
 //!   Bytes 8+:   geometry data
+//!
+//! Geometry data (POINT):  type(4) + npoints(4) + x(f64) + y(f64)
+//! Geometry data (LINE):   type(4) + npoints(4) + npoints*(x f64, y f64)
+//! Geometry data (POLY):   type(4) + nrings(4) + per ring: npoints(4) + coords
 //! ```
 
 use pgrx::pg_sys::Datum;
@@ -25,8 +31,9 @@ const MIN_HEADER_LEN: usize = 8;
 /// Byte offset of the `srid_flags` field inside `GSERIALIZED`.
 const SRID_FLAGS_OFFSET: usize = 4;
 
-/// Bit 23 of `srid_flags` indicates an embedded bounding box.
-const HAS_BBOX_BIT: u32 = 1 << 23;
+/// HasBBox = bit 2 of `gflags` (byte 7). When `srid_flags` is read as a
+/// u32 LE from bytes 4-7, gflags occupies bits 24-31, so HasBBox = bit 26.
+const HAS_BBOX_BIT: u32 = 1 << 26;
 
 /// Size of `BOX2DF`: 4 x `f32`.
 const BOX2DF_SIZE: usize = 16;
@@ -182,6 +189,105 @@ pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
     Some((x, y))
 }
 
+/// Zero-allocation point extraction: reads (x, y) as f32 directly from a
+/// detoasted `GSERIALIZED` datum pointer without copying bytes or creating
+/// intermediate structs.
+///
+/// Returns `None` if the datum is null, too short, or not a POINT geometry.
+///
+/// # Safety
+///
+/// The caller must ensure `datum` points to a valid, detoasted `GSERIALIZED`
+/// varlena on the main backend thread. The detoasted pointer is read
+/// in-place — no bytes are copied.
+#[must_use]
+pub fn extract_point_xy_f32(datum: Datum) -> Option<(f32, f32)> {
+    if datum.value() == 0 {
+        return None;
+    }
+
+    // SAFETY: Detoast to get flat varlena. Must be on the main backend thread.
+    let detoasted = unsafe {
+        pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
+    };
+    if detoasted.is_null() {
+        return None;
+    }
+
+    // SAFETY: detoasted is a valid flat varlena.
+    let total_size = unsafe { pgrx::varsize(detoasted.cast()) };
+    if total_size < MIN_HEADER_LEN {
+        return None;
+    }
+
+    let ptr = detoasted as *const u8;
+
+    // SAFETY: total_size >= 8, so bytes 4..8 are readable.
+    let srid_flags = u32::from_le_bytes(unsafe {
+        [
+            *ptr.add(SRID_FLAGS_OFFSET),
+            *ptr.add(SRID_FLAGS_OFFSET + 1),
+            *ptr.add(SRID_FLAGS_OFFSET + 2),
+            *ptr.add(SRID_FLAGS_OFFSET + 3),
+        ]
+    });
+    let has_bbox = srid_flags & HAS_BBOX_BIT != 0;
+    let geom_start = if has_bbox {
+        MIN_HEADER_LEN + BOX2DF_SIZE
+    } else {
+        MIN_HEADER_LEN
+    };
+
+    // Need: type(4) + npoints(4) + x(8) + y(8) = 24 bytes from geom_start.
+    let needed = geom_start + 24;
+    if total_size < needed {
+        return None;
+    }
+
+    // SAFETY: we verified total_size >= needed.
+    let wkb_type = u32::from_le_bytes(unsafe {
+        [
+            *ptr.add(geom_start),
+            *ptr.add(geom_start + 1),
+            *ptr.add(geom_start + 2),
+            *ptr.add(geom_start + 3),
+        ]
+    });
+    if wkb_type != WKB_POINT_TYPE {
+        return None;
+    }
+
+    let x_off = geom_start + 8; // skip type(4) + npoints(4)
+    // SAFETY: verified total_size covers x_off + 16.
+    let x = f64::from_le_bytes(unsafe {
+        [
+            *ptr.add(x_off),
+            *ptr.add(x_off + 1),
+            *ptr.add(x_off + 2),
+            *ptr.add(x_off + 3),
+            *ptr.add(x_off + 4),
+            *ptr.add(x_off + 5),
+            *ptr.add(x_off + 6),
+            *ptr.add(x_off + 7),
+        ]
+    });
+    let y = f64::from_le_bytes(unsafe {
+        [
+            *ptr.add(x_off + 8),
+            *ptr.add(x_off + 9),
+            *ptr.add(x_off + 10),
+            *ptr.add(x_off + 11),
+            *ptr.add(x_off + 12),
+            *ptr.add(x_off + 13),
+            *ptr.add(x_off + 14),
+            *ptr.add(x_off + 15),
+        ]
+    });
+
+    #[allow(clippy::cast_possible_truncation)]
+    Some((x as f32, y as f32))
+}
+
 /// Extract a full [`ExtractedGeometry`] from a `GSERIALIZED` datum.
 ///
 /// Handles POINT, LINESTRING, and POLYGON types. All other WKB types
@@ -206,36 +312,37 @@ pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
     }
 
     // Extract bbox from embedded BOX2DF, or compute later.
+    // PostGIS BOX2DF stores [xmin, xmax, ymin, ymax]; we reorder to
+    // [xmin, ymin, xmax, ymax] for the GPU kernel layout.
     let embedded_bbox = if has_bbox_flag(bytes) {
         let bbox_start = MIN_HEADER_LEN;
         let bbox_end = bbox_start + BOX2DF_SIZE;
         if bytes.len() >= bbox_end {
-            Some([
-                f32::from_le_bytes([
-                    bytes[bbox_start],
-                    bytes[bbox_start + 1],
-                    bytes[bbox_start + 2],
-                    bytes[bbox_start + 3],
-                ]),
-                f32::from_le_bytes([
-                    bytes[bbox_start + 4],
-                    bytes[bbox_start + 5],
-                    bytes[bbox_start + 6],
-                    bytes[bbox_start + 7],
-                ]),
-                f32::from_le_bytes([
-                    bytes[bbox_start + 8],
-                    bytes[bbox_start + 9],
-                    bytes[bbox_start + 10],
-                    bytes[bbox_start + 11],
-                ]),
-                f32::from_le_bytes([
-                    bytes[bbox_start + 12],
-                    bytes[bbox_start + 13],
-                    bytes[bbox_start + 14],
-                    bytes[bbox_start + 15],
-                ]),
-            ])
+            let xmin = f32::from_le_bytes([
+                bytes[bbox_start],
+                bytes[bbox_start + 1],
+                bytes[bbox_start + 2],
+                bytes[bbox_start + 3],
+            ]);
+            let xmax = f32::from_le_bytes([
+                bytes[bbox_start + 4],
+                bytes[bbox_start + 5],
+                bytes[bbox_start + 6],
+                bytes[bbox_start + 7],
+            ]);
+            let ymin = f32::from_le_bytes([
+                bytes[bbox_start + 8],
+                bytes[bbox_start + 9],
+                bytes[bbox_start + 10],
+                bytes[bbox_start + 11],
+            ]);
+            let ymax = f32::from_le_bytes([
+                bytes[bbox_start + 12],
+                bytes[bbox_start + 13],
+                bytes[bbox_start + 14],
+                bytes[bbox_start + 15],
+            ]);
+            Some([xmin, ymin, xmax, ymax])
         } else {
             None
         }
@@ -270,22 +377,27 @@ pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
             coords: Vec::new(),
             coord_count: 0,
             geom_type: GeomType::Unknown,
+            ring_offsets: Vec::new(),
         }),
     }
 }
 
-/// Extract a POINT geometry: type(4) + x(f64) + y(f64).
+/// Extract a POINT geometry: type(4) + npoints(4) + x(f64) + y(f64).
+///
+/// GSERIALIZED stores a `uint32 npoints` field after the type, even for
+/// single points. We skip it (always 1 for non-empty points).
 fn extract_point_geom(
     bytes: &[u8],
     geom_start: usize,
     embedded_bbox: Option<[f32; 4]>,
 ) -> Option<ExtractedGeometry> {
-    let needed = geom_start + 4 + 16;
+    // type(4) + npoints(4) + x(8) + y(8) = 24
+    let needed = geom_start + 4 + 4 + 16;
     if bytes.len() < needed {
         return None;
     }
 
-    let x_off = geom_start + 4;
+    let x_off = geom_start + 8; // skip type(4) + npoints(4)
     let y_off = x_off + 8;
     let x = f64::from_le_bytes(bytes[x_off..x_off + 8].try_into().ok()?);
     let y = f64::from_le_bytes(bytes[y_off..y_off + 8].try_into().ok()?);
@@ -299,6 +411,7 @@ fn extract_point_geom(
         coords: vec![xf, yf],
         coord_count: 1,
         geom_type: GeomType::Point,
+        ring_offsets: Vec::new(),
     })
 }
 
@@ -347,10 +460,20 @@ fn extract_linestring_geom(
         coords,
         coord_count: npoints,
         geom_type: GeomType::LineString,
+        ring_offsets: Vec::new(),
     })
 }
 
-/// Extract a POLYGON: type(4) + nrings(4) + for each ring: npoints(4) + coords.
+/// Extract a POLYGON from GSERIALIZED v2 format.
+///
+/// Layout (after the 4-byte type field at `geom_start`):
+///   nrings (4 bytes)
+///   ring_npoints[nrings] (4 bytes each)
+///   [padding to 8-byte alignment from buffer start]
+///   coordinates for all rings, concatenated (each point = x f64, y f64)
+///
+/// PostGIS 3.x (GSERIALIZED v2) stores all ring point counts first, then
+/// pads to 8-byte alignment (from the allocation start), then all coords.
 fn extract_polygon_geom(
     bytes: &[u8],
     geom_start: usize,
@@ -362,25 +485,43 @@ fn extract_polygon_geom(
     }
     let nrings = u32::from_le_bytes(bytes[nrings_off..nrings_off + 4].try_into().ok()?) as usize;
 
+    // Read all ring point counts first.
+    let mut ring_sizes: Vec<usize> = Vec::with_capacity(nrings);
     let mut offset = nrings_off + 4;
+    for _ in 0..nrings {
+        if bytes.len() < offset + 4 {
+            return None;
+        }
+        let npoints =
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+        ring_sizes.push(npoints);
+        offset += 4;
+    }
+
+    // Pad to 8-byte alignment (PostGIS GSERIALIZED v2 aligns coordinate
+    // data to 8 bytes from the start of the buffer).
+    let rem = offset % 8;
+    if rem != 0 {
+        offset += 8 - rem;
+    }
+
+    // Now read coordinates for all rings in sequence.
     let mut coords = Vec::new();
     let mut total_points: usize = 0;
+    let mut ring_offsets_out: Vec<u32> = Vec::with_capacity(nrings);
     let mut xmin = f32::INFINITY;
     let mut ymin = f32::INFINITY;
     let mut xmax = f32::NEG_INFINITY;
     let mut ymax = f32::NEG_INFINITY;
 
-    for _ in 0..nrings {
-        if bytes.len() < offset + 4 {
-            return None;
-        }
-        let npoints = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
-        offset += 4;
-
+    for &npoints in &ring_sizes {
         let needed = offset + npoints * 16;
         if bytes.len() < needed {
             return None;
         }
+
+        #[allow(clippy::cast_possible_truncation)]
+        ring_offsets_out.push(total_points as u32);
 
         for i in 0..npoints {
             let off = offset + i * 16;
@@ -407,64 +548,73 @@ fn extract_polygon_geom(
         coords,
         coord_count: total_points,
         geom_type: GeomType::Polygon,
+        ring_offsets: ring_offsets_out,
     })
 }
 
-/// Convert a `Datum` to a byte slice over the detoasted `GSERIALIZED` varlena.
+/// Convert a `Datum` to owned bytes over the detoasted `GSERIALIZED` varlena.
 ///
-/// Returns `None` if the datum is null (zero).
+/// Returns `None` if the datum is null (zero) or the varlena is too small.
 fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
-    let ptr = datum.value() as *const u8;
-    if ptr.is_null() {
+    if datum.value() == 0 {
         return None;
     }
 
-    // SAFETY: The caller guarantees `datum` points to a valid, detoasted
-    // varlena. The first 4 bytes encode the varlena total size (including
-    // the 4-byte header itself). We read that to determine slice length.
-    // This must run on the main backend thread where the datum is live.
-    let total_size = unsafe {
-        let size_bytes: [u8; 4] = [*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)];
-        // Varlena uses lower 2 bits for flags; actual size is >> 2.
-        let raw = u32::from_le_bytes(size_bytes);
-        (raw >> 2) as usize
+    // SAFETY: Detoast the datum to get a flat, uncompressed varlena.
+    // This handles TOAST pointers, compressed varlenas, and short headers.
+    // Must run on the main backend thread.
+    let detoasted = unsafe {
+        pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
     };
+    if detoasted.is_null() {
+        return None;
+    }
+
+    // SAFETY: detoasted is a valid flat varlena. VARSIZE returns total
+    // size including the 4-byte header.
+    let total_size = unsafe { pgrx::varsize(detoasted.cast()) };
 
     if total_size < MIN_HEADER_LEN {
         return None;
     }
 
-    // SAFETY: `total_size` bytes starting at `ptr` are the detoasted
-    // varlena payload owned by the current memory context. Valid for the
-    // duration of this tuple's processing on the main backend thread.
-    // SAFETY: `total_size` bytes starting at `ptr` are the detoasted
-    // varlena payload. Copy into owned Vec to avoid lifetime issues —
-    // the underlying PG memory may be freed after tuple processing.
+    // SAFETY: `total_size` bytes starting at `detoasted` are the flat
+    // varlena payload. Copy into owned Vec — PG memory may be freed
+    // after tuple processing.
+    let ptr = detoasted as *const u8;
     let bytes = unsafe { std::slice::from_raw_parts(ptr, total_size) };
     Some(bytes.to_vec())
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     /// Build a minimal GSERIALIZED buffer without bbox.
+    ///
+    /// Layout: varlena(4) + srid[3]+gflags(4) + type(4) + npoints(4) + x(8) + y(8) = 32
     fn make_gserialized_no_bbox(srid: u32, wkb_type: u32, x: f64, y: f64) -> Vec<u8> {
         let mut buf = Vec::new();
-        // varlena header: total_size << 2 (no flags in lower 2 bits)
-        let total_size: u32 = 8 + 4 + 16; // header + type + x + y = 28
+        let total_size: u32 = 32;
         buf.extend_from_slice(&(total_size << 2).to_le_bytes());
-        // srid_flags: srid in bits 0-20, no flags
-        let srid_flags = srid & 0x001F_FFFF;
-        buf.extend_from_slice(&srid_flags.to_le_bytes());
-        // geometry data: type + coords
+        // srid[3] (big-endian) + gflags
+        buf.push(((srid >> 16) & 0xFF) as u8);
+        buf.push(((srid >> 8) & 0xFF) as u8);
+        buf.push((srid & 0xFF) as u8);
+        buf.push(0x00); // gflags: no flags
+        // geometry data: type + npoints + coords
         buf.extend_from_slice(&wkb_type.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // npoints
         buf.extend_from_slice(&x.to_le_bytes());
         buf.extend_from_slice(&y.to_le_bytes());
         buf
     }
 
     /// Build a GSERIALIZED buffer with bbox.
+    ///
+    /// `bbox` is `(xmin, ymin, xmax, ymax)` — written in PostGIS BOX2DF
+    /// order `[xmin, xmax, ymin, ymax]`.
     fn make_gserialized_with_bbox(
         bbox: (f32, f32, f32, f32),
         wkb_type: u32,
@@ -472,17 +622,21 @@ mod tests {
         y: f64,
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        let total_size: u32 = 8 + 16 + 4 + 16; // header + bbox + type + coords = 44
+        let total_size: u32 = 48; // 4+4+16+4+4+16
         buf.extend_from_slice(&(total_size << 2).to_le_bytes());
-        let srid_flags: u32 = HAS_BBOX_BIT; // srid=0, HasBBox set
-        buf.extend_from_slice(&srid_flags.to_le_bytes());
-        // BOX2DF
-        buf.extend_from_slice(&bbox.0.to_le_bytes());
-        buf.extend_from_slice(&bbox.1.to_le_bytes());
-        buf.extend_from_slice(&bbox.2.to_le_bytes());
-        buf.extend_from_slice(&bbox.3.to_le_bytes());
-        // geometry data
+        // srid[3] + gflags(HasBBox = bit 2)
+        buf.push(0x00);
+        buf.push(0x00);
+        buf.push(0x00);
+        buf.push(0x04); // gflags: HasBBox
+        // BOX2DF in PostGIS order: xmin, xmax, ymin, ymax
+        buf.extend_from_slice(&bbox.0.to_le_bytes()); // xmin
+        buf.extend_from_slice(&bbox.2.to_le_bytes()); // xmax
+        buf.extend_from_slice(&bbox.1.to_le_bytes()); // ymin
+        buf.extend_from_slice(&bbox.3.to_le_bytes()); // ymax
+        // geometry data: type + npoints + coords
         buf.extend_from_slice(&wkb_type.to_le_bytes());
+        buf.extend_from_slice(&1u32.to_le_bytes()); // npoints
         buf.extend_from_slice(&x.to_le_bytes());
         buf.extend_from_slice(&y.to_le_bytes());
         buf
@@ -808,5 +962,247 @@ mod tests {
         assert!((g.bbox[1] - (-40.0_f32)).abs() < f32::EPSILON);
         assert!((g.bbox[2] - (-10.0_f32)).abs() < f32::EPSILON);
         assert!((g.bbox[3] - (-20.0_f32)).abs() < f32::EPSILON);
+    }
+
+    // -- WKB geometry type byte coverage --------------------------------------
+
+    #[test]
+    fn wkb_type_point_recognized() {
+        let buf = make_gserialized_no_bbox(0, 1, 5.0, 10.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+    }
+
+    #[test]
+    fn wkb_type_linestring_recognized() {
+        let buf = make_linestring_no_bbox(&[(0.0, 0.0), (1.0, 1.0)]);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::LineString);
+    }
+
+    #[test]
+    fn wkb_type_polygon_recognized() {
+        let ring = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0)];
+        let buf = make_polygon_no_bbox(&ring);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Polygon);
+    }
+
+    #[test]
+    fn wkb_type_geometrycollection_is_unknown() {
+        let buf = make_gserialized_no_bbox(0, 7, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Unknown);
+        assert_eq!(g.coord_count, 0);
+    }
+
+    #[test]
+    fn wkb_type_invalid_high_value_is_unknown() {
+        let buf = make_gserialized_no_bbox(0, 99, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Unknown);
+    }
+
+    // -- Flag combination tests -----------------------------------------------
+
+    /// Helper: build a GSERIALIZED buffer with explicit srid_flags value.
+    fn make_gserialized_with_flags(srid_flags: u32, wkb_type: u32, x: f64, y: f64) -> Vec<u8> {
+        let has_bbox = (srid_flags & HAS_BBOX_BIT) != 0;
+        let bbox_size: u32 = if has_bbox { BOX2DF_SIZE as u32 } else { 0 };
+        let total_size: u32 = 8 + bbox_size + 4 + 16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(total_size << 2).to_le_bytes());
+        buf.extend_from_slice(&srid_flags.to_le_bytes());
+        if has_bbox {
+            // Dummy bbox
+            for _ in 0..4 {
+                buf.extend_from_slice(&0.0f32.to_le_bytes());
+            }
+        }
+        buf.extend_from_slice(&wkb_type.to_le_bytes());
+        buf.extend_from_slice(&x.to_le_bytes());
+        buf.extend_from_slice(&y.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn flag_has_z_bit21_no_bbox() {
+        // Bit 21 = HasZ, no HasBBox
+        let srid_flags: u32 = 1 << 21;
+        let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 1.0, 2.0);
+        assert!(!has_bbox_flag(&buf));
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+    }
+
+    #[test]
+    fn flag_has_m_bit22_no_bbox() {
+        // Bit 22 = HasM, no HasBBox
+        let srid_flags: u32 = 1 << 22;
+        let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 3.0, 4.0);
+        assert!(!has_bbox_flag(&buf));
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+    }
+
+    #[test]
+    fn flag_has_z_and_m_no_bbox() {
+        // Bits 21+22 set, no bbox
+        let srid_flags: u32 = (1 << 21) | (1 << 22);
+        let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 5.0, 6.0);
+        assert!(!has_bbox_flag(&buf));
+    }
+
+    #[test]
+    fn flag_has_bbox_with_srid() {
+        // SRID=4326 + HasBBox
+        let srid_flags: u32 = 4326 | HAS_BBOX_BIT;
+        let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 7.0, 8.0);
+        assert!(has_bbox_flag(&buf));
+    }
+
+    #[test]
+    fn flag_all_bits_set() {
+        // HasZ + HasM + HasBBox + SRID
+        let srid_flags: u32 = 4326 | (1 << 21) | (1 << 22) | HAS_BBOX_BIT;
+        let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 9.0, 10.0);
+        assert!(has_bbox_flag(&buf));
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.geom_type, GeomType::Point);
+    }
+
+    // -- Corrupt / truncated input tests --------------------------------------
+
+    #[test]
+    fn truncated_at_1_byte() {
+        let buf = vec![0x00u8]; // just 1 byte
+        assert!(!has_bbox_flag(&buf));
+    }
+
+    #[test]
+    fn truncated_at_4_bytes() {
+        // Only varlena header, no srid_flags
+        let buf = vec![0x20, 0x00, 0x00, 0x00]; // total_size = 8 << 2
+        assert!(!has_bbox_flag(&buf));
+    }
+
+    #[test]
+    fn truncated_header_only_no_geom_data() {
+        // Valid 8-byte header but no geometry data at all
+        let mut buf = Vec::new();
+        let total_size: u32 = 8;
+        buf.extend_from_slice(&(total_size << 2).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // srid_flags
+        let datum = Datum::from(buf.as_ptr() as usize);
+        // Not enough bytes for wkb_type, should return None
+        assert!(extract_geometry(datum).is_none());
+    }
+
+    #[test]
+    fn truncated_no_coordinates_after_type() {
+        // Header + wkb_type but no coordinate data
+        let mut buf = Vec::new();
+        let total_size: u32 = 12; // 8 header + 4 type
+        buf.extend_from_slice(&(total_size << 2).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&WKB_POINT_TYPE.to_le_bytes());
+        let datum = Datum::from(buf.as_ptr() as usize);
+        assert!(extract_geometry(datum).is_none());
+    }
+
+    #[test]
+    fn truncated_bbox_too_short() {
+        // HasBBox flag set but not enough bytes for the bbox
+        let mut buf = Vec::new();
+        let total_size: u32 = 16; // 8 header + 8 bytes (only half a bbox)
+        buf.extend_from_slice(&(total_size << 2).to_le_bytes());
+        buf.extend_from_slice(&HAS_BBOX_BIT.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        buf.extend_from_slice(&0.0f32.to_le_bytes());
+        let datum = Datum::from(buf.as_ptr() as usize);
+        // extract_bbox should return None (bbox truncated)
+        assert!(extract_bbox(datum).is_none());
+    }
+
+    // -- Bbox extraction tests ------------------------------------------------
+
+    #[test]
+    fn extract_bbox_negative_values() {
+        let buf =
+            make_gserialized_with_bbox((-180.0, -90.0, 180.0, 90.0), WKB_POINT_TYPE, 0.0, 0.0);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let (xmin, ymin, xmax, ymax) = extract_bbox(datum).unwrap();
+        assert!((xmin - (-180.0_f32)).abs() < f32::EPSILON);
+        assert!((ymin - (-90.0_f32)).abs() < f32::EPSILON);
+        assert!((xmax - 180.0_f32).abs() < f32::EPSILON);
+        assert!((ymax - 90.0_f32).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn extract_geometry_no_bbox_computes_from_coords() {
+        let buf = make_gserialized_no_bbox(0, WKB_POINT_TYPE, 42.5, -17.3);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        // For a point without embedded bbox, bbox should be the point itself
+        assert!((g.bbox[0] - 42.5_f32).abs() < 0.01);
+        assert!((g.bbox[1] - (-17.3_f32)).abs() < 0.01);
+        assert!((g.bbox[2] - 42.5_f32).abs() < 0.01);
+        assert!((g.bbox[3] - (-17.3_f32)).abs() < 0.01);
+    }
+
+    // -- Coordinate extraction tests ------------------------------------------
+
+    #[test]
+    fn extract_single_point_coords() {
+        let buf = make_gserialized_no_bbox(0, WKB_POINT_TYPE, 123.456, -78.9);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.coords.len(), 2);
+        assert!((g.coords[0] - 123.456_f32).abs() < 0.001);
+        assert!((g.coords[1] - (-78.9_f32)).abs() < 0.01);
+    }
+
+    #[test]
+    fn extract_linestring_multi_point_coords() {
+        let pts = vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)];
+        let buf = make_linestring_no_bbox(&pts);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.coord_count, 4);
+        assert_eq!(g.coords.len(), 8);
+        for (i, &(ex, ey)) in pts.iter().enumerate() {
+            assert!((g.coords[i * 2] - ex as f32).abs() < f32::EPSILON);
+            assert!((g.coords[i * 2 + 1] - ey as f32).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn extract_polygon_ring_vertices() {
+        let ring = vec![
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ];
+        let buf = make_polygon_no_bbox(&ring);
+        let datum = Datum::from(buf.as_ptr() as usize);
+        let g = extract_geometry(datum).unwrap();
+        assert_eq!(g.coord_count, 5);
+        assert_eq!(g.coords.len(), 10);
+        // First vertex
+        assert!((g.coords[0] - 0.0_f32).abs() < f32::EPSILON);
+        assert!((g.coords[1] - 0.0_f32).abs() < f32::EPSILON);
+        // Last vertex should close the ring (same as first)
+        assert!((g.coords[8] - 0.0_f32).abs() < f32::EPSILON);
+        assert!((g.coords[9] - 0.0_f32).abs() < f32::EPSILON);
     }
 }
