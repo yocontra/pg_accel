@@ -80,9 +80,9 @@ mod gpu_build {
         // AdaptiveCpp installs to ~/local via `just setup-gpu`.
         if acpp_prefix.join("lib/cmake/AdaptiveCpp").exists() {
             cmd.arg(format!("-DCMAKE_PREFIX_PATH={}", acpp_prefix.display()));
-            // Target OMP (CPU) by default; Metal/CUDA selected at runtime.
+            // Target generic JIT compilation (works with Metal on macOS).
             // Explicit target avoids concatenated default "ompmetal" bug.
-            cmd.arg("-DACPP_TARGETS=omp");
+            cmd.arg("-DACPP_TARGETS=generic");
 
             // On macOS, use Homebrew LLVM (required by AdaptiveCpp) and
             // point the compiler at the Homebrew libomp headers/libs.
@@ -92,7 +92,7 @@ mod gpu_build {
                     cmd.arg(format!("-DCMAKE_CXX_COMPILER={llvm}/bin/clang++"));
                 }
                 if let Some(libomp) = find_brew_prefix("libomp") {
-                    cmd.arg(format!("-DCMAKE_CXX_FLAGS=-I{libomp}/include"));
+                    cmd.arg(format!("-DCMAKE_CXX_FLAGS=-O2 -I{libomp}/include"));
                     let lib_flag = format!("-L{libomp}/lib");
                     cmd.arg(format!("-DCMAKE_SHARED_LINKER_FLAGS={lib_flag}"));
                     cmd.arg(format!("-DCMAKE_EXE_LINKER_FLAGS={lib_flag}"));

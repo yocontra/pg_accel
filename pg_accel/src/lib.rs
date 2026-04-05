@@ -36,10 +36,12 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // before any queries. Saves previous hooks and installs ours.
     unsafe { engine::ffi::planner_hooks::install() };
 
-    // 5. GPU runtime is NOT initialised here because the SYCL runtime
-    //    spawns threads and PG's postmaster is strictly single-threaded
-    //    during shared_preload_libraries. Instead, gpu::ensure_init() is
-    //    called lazily on the first query in a forked backend process.
+    // 5. GPU runtime init is deferred to first query in a forked backend.
+    //    PG 17 postmaster enforces single-threaded startup — SYCL runtime
+    //    spawns threads, which triggers a FATAL. Instead, gpu::ensure_init()
+    //    is called lazily. On macOS/Metal, the persistent JIT cache at
+    //    ~/.acpp/apps/global/jit-cache/ allows forked backends to reuse
+    //    pre-compiled shaders without needing MTLCompilerService.
 
     // 6. Log startup summary (GPU status deferred to first query).
     let cpu_cores = std::thread::available_parallelism()
@@ -52,8 +54,7 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     );
 }
 
-/// `before_shmem_exit` callback: release thread budget and shut down the
-/// per-backend rayon pool before the process exits.
+/// `before_shmem_exit` callback: release thread budget before the process exits.
 ///
 /// # Safety
 ///
@@ -62,7 +63,6 @@ pub unsafe extern "C-unwind" fn _PG_init() {
 #[pg_guard]
 unsafe extern "C-unwind" fn pgaccel_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
     engine::thread_budget::cleanup_backend();
-    engine::thread_pool::shutdown_pool();
 }
 
 /// Returns the current version of the pg_accel extension.

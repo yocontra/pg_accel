@@ -24,7 +24,6 @@ pg_test = []
 [dependencies]
 libc = "0.2"
 pgrx = "0.17.0"
-rayon = "1"
 
 [dev-dependencies]
 pgrx-tests = "0.17.0"
