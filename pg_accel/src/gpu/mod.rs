@@ -5,7 +5,6 @@
 #[cfg(feature = "gpu")]
 mod bridge;
 
-#[cfg(not(feature = "gpu"))]
 mod fallback;
 
 pub mod three_layer;
@@ -128,7 +127,13 @@ pub fn spatial_intersects_gpu(
 
     // The C++ kernel writes (i, j) pair indices — 2 u32 values per pair.
     // Worst case: all pairs land in one bucket = count_a * count_b pairs.
-    let total_pairs = count_a * count_b;
+    let total_pairs = count_a.checked_mul(count_b)?;
+    // Cap pair buffer at 128 MB (3 buffers × buf_len × 4 bytes each).
+    // Beyond this, defer to PG recheck — the transfer overhead dominates.
+    const MAX_PAIRS: usize = 8_000_000; // 3 × 16M × 4 = ~192 MB total
+    if total_pairs > MAX_PAIRS {
+        return None;
+    }
     let buf_len = total_pairs * 2;
     let mut dt_buf = vec![0u32; buf_len];
     let mut df_buf = vec![0u32; buf_len];
@@ -137,8 +142,10 @@ pub fn spatial_intersects_gpu(
     let mut df_count: usize = 0;
     let mut uc_count: usize = 0;
 
+    // Try GPU bridge first; if it fails (no SYCL / UNSUPPORTED), fall
+    // through to the CPU fallback which does bbox + point-in-ring in Rust.
     #[cfg(feature = "gpu")]
-    {
+    let gpu_ok = {
         // SAFETY: geoms arrays are valid slices.  Output buffers are
         // pre-allocated to `total_pairs * 2` u32 elements each.  The C
         // function writes at most `total_pairs` pairs (2 u32 each) into
@@ -158,27 +165,20 @@ pub fn spatial_intersects_gpu(
             )
         };
         if !status.is_ok() {
-            return None; // GPU call failed, caller should use CPU fallback.
+            pgrx::debug1!(
+                "pg_accel: spatial_intersects_gpu bridge returned {:?} for {}x{} pairs",
+                status, count_a, count_b,
+            );
         }
-    }
-
+        status.is_ok()
+    };
     #[cfg(not(feature = "gpu"))]
-    {
-        let status = fallback::pgaccel_spatial_intersects(
-            geoms_a.as_ptr(),
-            count_a,
-            geoms_b.as_ptr(),
-            count_b,
-            dt_buf.as_mut_ptr(),
-            std::ptr::addr_of_mut!(dt_count),
-            df_buf.as_mut_ptr(),
-            std::ptr::addr_of_mut!(df_count),
-            uc_buf.as_mut_ptr(),
-            std::ptr::addr_of_mut!(uc_count),
-        );
-        if !status.is_ok() {
-            return None;
-        }
+    let gpu_ok = false;
+
+    if !gpu_ok {
+        // No CPU fallback — GPU only. Return None so the caller defers
+        // to the standard PostgreSQL executor.
+        return None;
     }
 
     // Each count is the number of PAIRS; each pair is 2 consecutive u32s.
@@ -194,6 +194,59 @@ pub fn spatial_intersects_gpu(
         parse_pairs(&df_buf, df_count),
         parse_pairs(&uc_buf, uc_count),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Bulk point-in-polygon (fast path)
+// ---------------------------------------------------------------------------
+
+/// Dedicated bulk point-in-polygon test. Takes a flat array of point (x,y)
+/// pairs and a single polygon. Returns per-point results: 1=inside,
+/// -1=outside, 0=uncertain/boundary.
+///
+/// Returns `None` if GPU bridge is unavailable.
+#[allow(clippy::too_many_arguments)]
+pub fn point_in_polygon_bulk(
+    points_xy: &[f32],
+    poly_bbox: &[f32; 4],
+    poly_coords: &[f32],
+    poly_coord_count: usize,
+    ring_offsets: &[u32],
+    ring_count: usize,
+) -> Option<Vec<i8>> {
+    let point_count = points_xy.len() / 2;
+    if point_count == 0 {
+        return Some(Vec::new());
+    }
+
+    let mut results = vec![0i8; point_count];
+
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: all slices are valid; results is pre-allocated to point_count.
+        let status = unsafe {
+            bridge::pgaccel_point_in_polygon_bulk(
+                points_xy.as_ptr(),
+                point_count,
+                poly_bbox.as_ptr(),
+                poly_coords.as_ptr(),
+                poly_coord_count,
+                ring_offsets.as_ptr(),
+                ring_count,
+                results.as_mut_ptr(),
+            )
+        };
+        if status.is_ok() {
+            return Some(results);
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = (poly_bbox, poly_coords, poly_coord_count, ring_offsets, ring_count);
+    }
+
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -1476,7 +1529,11 @@ pub fn window_lead(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod mod_tests {
+    use super::three_layer::{
+        ExtractedGeometry, GeomType, PredicateResult, SpatialPredicate, SpatialResult,
+    };
     use super::*;
     use std::ptr;
 
@@ -1602,5 +1659,284 @@ mod mod_tests {
         assert!(dt.is_empty());
         assert!(df.is_empty());
         assert!(uc.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // SpatialPredicate enum
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spatial_predicate_intersects_debug() {
+        let p = SpatialPredicate::Intersects;
+        let dbg = format!("{p:?}");
+        assert!(dbg.contains("Intersects"));
+    }
+
+    #[test]
+    fn spatial_predicate_contains_eq() {
+        assert_eq!(SpatialPredicate::Contains, SpatialPredicate::Contains);
+        assert_ne!(SpatialPredicate::Contains, SpatialPredicate::Within);
+    }
+
+    #[test]
+    fn spatial_predicate_within_clone() {
+        let p = SpatialPredicate::Within;
+        let cloned = p;
+        assert_eq!(cloned, SpatialPredicate::Within);
+    }
+
+    #[test]
+    fn spatial_predicate_dwithin_stores_distance() {
+        let p = SpatialPredicate::DWithin(100.5);
+        if let SpatialPredicate::DWithin(d) = p {
+            assert!((d - 100.5).abs() < f64::EPSILON);
+        } else {
+            panic!("expected DWithin variant");
+        }
+    }
+
+    #[test]
+    fn spatial_predicate_all_variants_are_distinct() {
+        let variants: Vec<SpatialPredicate> = vec![
+            SpatialPredicate::Intersects,
+            SpatialPredicate::Contains,
+            SpatialPredicate::Within,
+            SpatialPredicate::DWithin(0.0),
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "variants at {i} and {j} should differ");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ExtractedGeometry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extracted_geometry_construction_with_bbox() {
+        let geom = ExtractedGeometry {
+            bbox: [1.0, 2.0, 3.0, 4.0],
+            coords: vec![1.0, 2.0, 3.0, 4.0],
+            coord_count: 2,
+            geom_type: GeomType::LineString,
+            ring_offsets: Vec::new(),
+        };
+        assert_eq!(geom.bbox[0], 1.0);
+        assert_eq!(geom.bbox[3], 4.0);
+        assert_eq!(geom.coord_count, 2);
+        assert_eq!(geom.coords.len(), 4);
+        assert_eq!(geom.geom_type, GeomType::LineString);
+    }
+
+    #[test]
+    fn extracted_geometry_empty_coords() {
+        let geom = ExtractedGeometry {
+            bbox: [0.0, 0.0, 0.0, 0.0],
+            coords: vec![],
+            coord_count: 0,
+            geom_type: GeomType::Unknown,
+            ring_offsets: Vec::new(),
+        };
+        assert!(geom.coords.is_empty());
+        assert_eq!(geom.coord_count, 0);
+        assert_eq!(geom.geom_type, GeomType::Unknown);
+    }
+
+    #[test]
+    fn extracted_geometry_point_has_degenerate_bbox() {
+        let geom = ExtractedGeometry {
+            bbox: [5.5, 3.3, 5.5, 3.3],
+            coords: vec![5.5, 3.3],
+            coord_count: 1,
+            geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
+        };
+        // Point bbox: xmin == xmax, ymin == ymax
+        assert_eq!(geom.bbox[0], geom.bbox[2]);
+        assert_eq!(geom.bbox[1], geom.bbox[3]);
+    }
+
+    #[test]
+    fn extracted_geometry_clone() {
+        let geom = ExtractedGeometry {
+            bbox: [1.0, 2.0, 3.0, 4.0],
+            coords: vec![1.0, 2.0, 3.0, 4.0],
+            coord_count: 2,
+            geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
+        };
+        let cloned = geom.clone();
+        assert_eq!(cloned.coord_count, geom.coord_count);
+        assert_eq!(cloned.coords, geom.coords);
+        assert_eq!(cloned.bbox, geom.bbox);
+    }
+
+    #[test]
+    fn extracted_geometry_debug_output() {
+        let geom = ExtractedGeometry {
+            bbox: [0.0; 4],
+            coords: vec![],
+            coord_count: 0,
+            geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
+        };
+        let dbg = format!("{geom:?}");
+        assert!(dbg.contains("ExtractedGeometry"));
+        assert!(dbg.contains("Point"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PredicateResult
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn predicate_result_true_variant() {
+        let r = PredicateResult::True;
+        assert_eq!(r, PredicateResult::True);
+        assert_ne!(r, PredicateResult::False);
+        assert_ne!(r, PredicateResult::Uncertain);
+    }
+
+    #[test]
+    fn predicate_result_false_variant() {
+        let r = PredicateResult::False;
+        assert_eq!(r, PredicateResult::False);
+        assert_ne!(r, PredicateResult::True);
+    }
+
+    #[test]
+    fn predicate_result_uncertain_variant() {
+        let r = PredicateResult::Uncertain;
+        assert_eq!(r, PredicateResult::Uncertain);
+        assert_ne!(r, PredicateResult::False);
+    }
+
+    #[test]
+    fn predicate_result_clone_and_copy() {
+        let r = PredicateResult::True;
+        let cloned = r;
+        assert_eq!(r, cloned);
+    }
+
+    #[test]
+    fn predicate_result_debug_output() {
+        assert!(format!("{:?}", PredicateResult::True).contains("True"));
+        assert!(format!("{:?}", PredicateResult::False).contains("False"));
+        assert!(format!("{:?}", PredicateResult::Uncertain).contains("Uncertain"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SpatialResult construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spatial_result_construction_and_field_access() {
+        let sr = SpatialResult {
+            definite_true: vec![0, 1, 2],
+            definite_false: vec![3, 4],
+            uncertain: vec![5],
+        };
+        assert_eq!(sr.definite_true.len(), 3);
+        assert_eq!(sr.definite_false.len(), 2);
+        assert_eq!(sr.uncertain.len(), 1);
+        assert_eq!(sr.uncertain[0], 5);
+    }
+
+    #[test]
+    fn spatial_result_empty() {
+        let sr = SpatialResult {
+            definite_true: vec![],
+            definite_false: vec![],
+            uncertain: vec![],
+        };
+        assert!(sr.definite_true.is_empty());
+        assert!(sr.definite_false.is_empty());
+        assert!(sr.uncertain.is_empty());
+    }
+
+    #[test]
+    fn spatial_result_clone() {
+        let sr = SpatialResult {
+            definite_true: vec![10],
+            definite_false: vec![20, 30],
+            uncertain: vec![],
+        };
+        let cloned = sr.clone();
+        assert_eq!(cloned.definite_true, sr.definite_true);
+        assert_eq!(cloned.definite_false, sr.definite_false);
+    }
+
+    // -----------------------------------------------------------------------
+    // GeomType enum
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn geom_type_all_variants_distinct() {
+        let variants = [
+            GeomType::Point,
+            GeomType::LineString,
+            GeomType::Polygon,
+            GeomType::Unknown,
+        ];
+        for (i, a) in variants.iter().enumerate() {
+            for (j, b) in variants.iter().enumerate() {
+                if i == j {
+                    assert_eq!(a, b);
+                } else {
+                    assert_ne!(a, b);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn geom_type_debug_output() {
+        assert!(format!("{:?}", GeomType::Point).contains("Point"));
+        assert!(format!("{:?}", GeomType::LineString).contains("LineString"));
+        assert!(format!("{:?}", GeomType::Polygon).contains("Polygon"));
+        assert!(format!("{:?}", GeomType::Unknown).contains("Unknown"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sort wrappers — fallback returns None
+    // -----------------------------------------------------------------------
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn sort_f32_returns_none_without_gpu() {
+        let mut data = [3.0f32, 1.0, 2.0];
+        assert!(sort_f32(&mut data).is_none());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn sort_i64_returns_none_without_gpu() {
+        let mut data = [3i64, 1, 2];
+        assert!(sort_i64(&mut data).is_none());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn reduce_sum_f32_returns_none_without_gpu() {
+        let data = [1.0f32, 2.0, 3.0];
+        assert!(reduce_sum_f32(&data).is_none());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn reduce_count_returns_none_without_gpu() {
+        let mask = [1u8, 0, 1, 1];
+        assert!(reduce_count(&mask).is_none());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn h3_get_resolution_returns_none_without_gpu() {
+        let cells = [0x8928308280fffffu64];
+        assert!(h3_get_resolution_bulk(&cells).is_none());
     }
 }

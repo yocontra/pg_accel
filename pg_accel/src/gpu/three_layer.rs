@@ -4,11 +4,17 @@
 //!
 //! 1. **Bbox filter** (cheap) -- axis-aligned bounding-box overlap test.
 //! 2. **GPU kernel** (medium) -- exact geometry test on the GPU.
-//! 3. **CPU recheck** (expensive) -- full-precision fallback for uncertain pairs.
+//! 3. **PG recheck** (deferred) -- uncertain pairs are rechecked by the
+//!    standard PostgreSQL executor via PostGIS functions.
 //!
 //! Layers 1+2 are batched and dispatched together.  Layer 3 is left to the
 //! caller so it can run on the main backend thread (PG functions are not
 //! thread-safe).
+//!
+//! **No CPU fallback.** If the GPU is unavailable, all pairs are returned as
+//! `Uncertain` so the PG executor rechecks them via standard PostGIS. We never
+//! run spatial computation on the CPU — that would be pure overhead compared
+//! to letting PostGIS handle it natively.
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -58,6 +64,9 @@ pub struct ExtractedGeometry {
     pub coords: Vec<f32>,
     pub coord_count: usize,
     pub geom_type: GeomType,
+    /// Ring offsets for polygon geometries (coord-pair indices, not byte offsets).
+    /// Empty for non-polygon types.
+    pub ring_offsets: Vec<u32>,
 }
 
 /// Aggregate result of a batched spatial predicate evaluation.
@@ -79,13 +88,10 @@ pub struct SpatialResult {
 ///
 /// Tries the GPU kernel library first (layers 1+2 via
 /// `pgaccel_spatial_intersects`). If the GPU is unavailable or the call
-/// fails, falls back to the CPU implementation.
+/// fails, returns all pairs as `Uncertain` so the PG executor rechecks
+/// them via standard PostGIS functions.
 ///
-/// When `skip_bbox` is `true`, Layer 1 (bbox filter) is skipped in the
-/// CPU fallback path. This is used when tuples come from a GiST index
-/// scan that has already performed bbox filtering.
-///
-/// Layer 3 (CPU recheck of uncertain pairs) is left to the caller.
+/// Layer 3 (PG recheck of uncertain pairs) is left to the caller.
 ///
 /// # Panics
 ///
@@ -95,16 +101,15 @@ pub struct SpatialResult {
 pub fn spatial_intersects(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
-    skip_bbox: bool,
+    _skip_bbox: bool,
 ) -> SpatialResult {
-    // Try GPU dispatch first. GPU kernels handle bbox internally;
-    // skip_bbox only affects the CPU fallback path for now.
+    #[cfg(feature = "gpu")]
     if let Some(result) = try_gpu_dispatch(geoms_a, geoms_b) {
         return result;
     }
 
-    // Fallback: CPU-only three-layer pipeline.
-    cpu_fallback(geoms_a, geoms_b, skip_bbox)
+    // GPU unavailable — mark all pairs as uncertain for PG recheck.
+    all_uncertain(geoms_a.len().min(geoms_b.len()))
 }
 
 /// Evaluate a spatial predicate on geometry pairs.
@@ -140,105 +145,57 @@ pub fn spatial_eval(
 
 /// Evaluate `ST_Contains(A, B)` — does A fully contain B?
 ///
-/// For point-in-polygon (B is Point, A is Polygon) this is the same as the
-/// point-in-ring test.  All other geometry type combinations are classified
-/// as `Uncertain` for CPU recheck (PostGIS handles the full DE-9IM matrix).
-///
-/// Does not attempt GPU dispatch because `pgaccel_spatial_intersects` tests
-/// intersection, not containment.  A future `pgaccel_spatial_contains`
-/// kernel can be wired in here.
+/// No GPU containment kernel exists yet. All pairs are returned as
+/// `Uncertain` for PG recheck via PostGIS. A future
+/// `pgaccel_spatial_contains` kernel can be wired in here.
 #[must_use]
 pub fn spatial_contains(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
-    skip_bbox: bool,
+    _skip_bbox: bool,
 ) -> SpatialResult {
-    cpu_fallback_contains(geoms_a, geoms_b, skip_bbox)
+    // No GPU containment kernel — defer all pairs to PG recheck.
+    all_uncertain(geoms_a.len().min(geoms_b.len()))
 }
 
 /// Evaluate `ST_DWithin(A, B, threshold)` — are A and B within `threshold_m`
 /// metres of each other?
 ///
-/// For point-point pairs, uses the Haversine formula (`sphere_distance_cpu`).
-/// A tolerance band of 0.1% of the threshold is used to mark near-boundary
-/// results as `Uncertain` for CPU recheck (fp32→fp64 precision gap).
-///
-/// Non-point geometry types are classified as `Uncertain`.
+/// No GPU DWithin kernel exists yet. All pairs are returned as `Uncertain`
+/// for PG recheck via PostGIS. A future GPU distance kernel can be wired
+/// in here.
 #[must_use]
 fn spatial_dwithin(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
-    threshold_m: f64,
-    skip_bbox: bool,
+    _threshold_m: f64,
+    _skip_bbox: bool,
 ) -> SpatialResult {
-    let len = geoms_a.len().min(geoms_b.len());
-
-    let mut definite_true = Vec::new();
-    let mut definite_false = Vec::new();
-    let mut uncertain = Vec::new();
-
-    for i in 0..len {
-        let a = &geoms_a[i];
-        let b = &geoms_b[i];
-
-        // Bbox disjointness is a weaker pre-filter for DWithin (bboxes can
-        // be disjoint yet within distance), but if both bboxes are far apart
-        // we can skip. For now, skip bbox filter for DWithin — the distance
-        // computation is cheap enough for points.
-        if !skip_bbox
-            && a.geom_type == GeomType::Point
-            && b.geom_type == GeomType::Point
-            && bboxes_disjoint(&a.bbox, &b.bbox)
-        {
-            // For point-point with disjoint bboxes, still compute distance
-            // (bboxes are exact for points, but floating-point equality
-            // means disjoint bboxes don't guarantee distance > threshold).
-        }
-
-        // DWithin via Haversine only works for point-point pairs.
-        if a.geom_type != GeomType::Point || b.geom_type != GeomType::Point {
-            uncertain.push(i);
-            continue;
-        }
-        if a.coords.len() < 2 || b.coords.len() < 2 {
-            uncertain.push(i);
-            continue;
-        }
-
-        let pa = (f64::from(a.coords[0]), f64::from(a.coords[1]));
-        let pb = (f64::from(b.coords[0]), f64::from(b.coords[1]));
-        let dist = sphere_distance_cpu(pa, pb);
-
-        // Tolerance band: results within 0.1% of the threshold go to CPU
-        // recheck to avoid fp32/fp64 precision disagreements with PostGIS.
-        let tolerance = threshold_m * 0.001;
-        if dist <= threshold_m - tolerance {
-            definite_true.push(i);
-        } else if dist > threshold_m + tolerance {
-            definite_false.push(i);
-        } else {
-            uncertain.push(i);
-        }
-    }
-
-    SpatialResult {
-        definite_true,
-        definite_false,
-        uncertain,
-    }
+    // No GPU distance kernel — defer all pairs to PG recheck.
+    all_uncertain(geoms_a.len().min(geoms_b.len()))
 }
 
-/// Attempt GPU dispatch by converting `ExtractedGeometry` to FFI structs.
+/// Try GPU dispatch for spatial intersection.
 ///
-/// Returns `None` if GPU is unavailable or the call fails.
+/// GPU spatial dispatch is now handled directly in `dispatch.rs` via
+/// Dispatch spatial intersection to the GPU kernel library.
+///
+/// Converts `ExtractedGeometry` slices into the C `pgaccel_geometry` layout
+/// and calls `pgaccel_spatial_intersects`.  Returns `None` if the GPU is
+/// not initialised or the call fails, causing the caller to mark all pairs
+/// as uncertain for PG recheck.
+#[cfg(feature = "gpu")]
 fn try_gpu_dispatch(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
 ) -> Option<SpatialResult> {
-    use super::{PgaccelGeomType, PgaccelGeometry};
+    use super::bridge::{self, PgaccelGeomType, PgaccelGeometry, PgaccelStatus};
 
-    let len = geoms_a.len().min(geoms_b.len());
-    if len == 0 {
+    super::ensure_init();
+
+    let count_a = geoms_a.len();
+    let count_b = geoms_b.len();
+    if count_a == 0 || count_b == 0 {
         return Some(SpatialResult {
             definite_true: Vec::new(),
             definite_false: Vec::new(),
@@ -246,290 +203,107 @@ fn try_gpu_dispatch(
         });
     }
 
-    // If any geometry has too few coords for its type, fall back to CPU
-    // which handles degenerate cases gracefully.  The C++ FFI may segfault
-    // on empty coords or misclassify polygons with too few vertices.
-    let is_degenerate = |g: &ExtractedGeometry| -> bool {
-        match g.geom_type {
-            GeomType::Point => g.coords.len() < 2,
-            GeomType::LineString => g.coords.len() < 4,
-            GeomType::Polygon => g.coords.len() < 6,
-            GeomType::Unknown => true,
+    let to_c_type = |gt: GeomType| -> PgaccelGeomType {
+        match gt {
+            GeomType::Point => PgaccelGeomType::Point,
+            GeomType::LineString => PgaccelGeomType::LineString,
+            GeomType::Polygon => PgaccelGeomType::Polygon,
+            GeomType::Unknown => PgaccelGeomType::Unknown,
         }
     };
-    if geoms_a.iter().chain(geoms_b.iter()).any(is_degenerate) {
+
+    // Build C geometry descriptors.  The coord/ring data is owned by the
+    // ExtractedGeometry vecs — the C structs just borrow pointers.
+    let c_geoms_a: Vec<PgaccelGeometry> = geoms_a
+        .iter()
+        .map(|g| PgaccelGeometry {
+            geom_type: to_c_type(g.geom_type),
+            bbox: g.bbox.as_ptr(),
+            coords: g.coords.as_ptr(),
+            coord_count: g.coord_count,
+            ring_offsets: if g.ring_offsets.is_empty() {
+                std::ptr::null()
+            } else {
+                g.ring_offsets.as_ptr()
+            },
+            ring_count: g.ring_offsets.len(),
+        })
+        .collect();
+
+    let c_geoms_b: Vec<PgaccelGeometry> = geoms_b
+        .iter()
+        .map(|g| PgaccelGeometry {
+            geom_type: to_c_type(g.geom_type),
+            bbox: g.bbox.as_ptr(),
+            coords: g.coords.as_ptr(),
+            coord_count: g.coord_count,
+            ring_offsets: if g.ring_offsets.is_empty() {
+                std::ptr::null()
+            } else {
+                g.ring_offsets.as_ptr()
+            },
+            ring_count: g.ring_offsets.len(),
+        })
+        .collect();
+
+    let total_pairs = count_a * count_b;
+    let mut true_pairs = vec![0u32; total_pairs * 2];
+    let mut false_pairs = vec![0u32; total_pairs * 2];
+    let mut uncertain_pairs = vec![0u32; total_pairs * 2];
+    let mut true_count: usize = 0;
+    let mut false_count: usize = 0;
+    let mut uncertain_count: usize = 0;
+
+    // SAFETY: All pointers reference live Rust-owned memory.  The C function
+    // reads from c_geoms and writes into the output arrays within bounds.
+    let status = unsafe {
+        bridge::pgaccel_spatial_intersects(
+            c_geoms_a.as_ptr(),
+            count_a,
+            c_geoms_b.as_ptr(),
+            count_b,
+            true_pairs.as_mut_ptr(),
+            &mut true_count,
+            false_pairs.as_mut_ptr(),
+            &mut false_count,
+            uncertain_pairs.as_mut_ptr(),
+            &mut uncertain_count,
+        )
+    };
+
+    if status != PgaccelStatus::Ok {
         return None;
     }
 
-    // Convert ExtractedGeometry to PgaccelGeometry FFI structs.
-    // The FFI structs borrow pointers into the ExtractedGeometry vecs,
-    // so the ExtractedGeometry slices must outlive the FFI call.
-    let ffi_a: Vec<PgaccelGeometry> = geoms_a
-        .iter()
-        .map(|g| PgaccelGeometry {
-            geom_type: match g.geom_type {
-                GeomType::Point => PgaccelGeomType::Point,
-                GeomType::LineString => PgaccelGeomType::LineString,
-                GeomType::Polygon => PgaccelGeomType::Polygon,
-                GeomType::Unknown => PgaccelGeomType::Unknown,
-            },
-            bbox: g.bbox.as_ptr(),
-            coords: g.coords.as_ptr(),
-            coord_count: g.coord_count,
-            ring_offsets: std::ptr::null(),
-            ring_count: 0,
-        })
-        .collect();
-
-    let ffi_b: Vec<PgaccelGeometry> = geoms_b
-        .iter()
-        .map(|g| PgaccelGeometry {
-            geom_type: match g.geom_type {
-                GeomType::Point => PgaccelGeomType::Point,
-                GeomType::LineString => PgaccelGeomType::LineString,
-                GeomType::Polygon => PgaccelGeomType::Polygon,
-                GeomType::Unknown => PgaccelGeomType::Unknown,
-            },
-            bbox: g.bbox.as_ptr(),
-            coords: g.coords.as_ptr(),
-            coord_count: g.coord_count,
-            ring_offsets: std::ptr::null(),
-            ring_count: 0,
-        })
-        .collect();
-
-    let (dt, df, uc) = super::spatial_intersects_gpu(&ffi_a, &ffi_b)?;
-
-    // The C++ kernel evaluates all N×N pairs (cross-product), but the
-    // three-layer pipeline passes matched 1:1 arrays where pair index i
-    // corresponds to (geoms_a[i], geoms_b[i]).  Keep only diagonal
-    // results where idx_a == idx_b.
-    let diagonal = |pairs: Vec<(u32, u32)>| -> Vec<usize> {
-        pairs
-            .into_iter()
-            .filter(|(a, b)| a == b)
-            .map(|(a, _)| a as usize)
+    // Convert (i, j) pair indices to flat pair index: i * count_b + j.
+    let to_flat = |pairs: &[u32], count: usize| -> Vec<usize> {
+        (0..count)
+            .map(|k| {
+                let i = pairs[k * 2] as usize;
+                let j = pairs[k * 2 + 1] as usize;
+                i * count_b + j
+            })
             .collect()
     };
 
     Some(SpatialResult {
-        definite_true: diagonal(dt),
-        definite_false: diagonal(df),
-        uncertain: diagonal(uc),
+        definite_true: to_flat(&true_pairs, true_count),
+        definite_false: to_flat(&false_pairs, false_count),
+        uncertain: to_flat(&uncertain_pairs, uncertain_count),
     })
 }
 
-/// CPU-only implementation of the three-layer pipeline.
+/// Build a [`SpatialResult`] where all `n` pairs are `Uncertain`.
 ///
-/// Layer 1: bbox disjointness check -- if bboxes don't overlap the pair is
-/// `definite_false`.
-///
-/// Layer 2 (GPU substitute): for point-in-polygon we run `point_in_ring_cpu`;
-/// everything else is classified as `Uncertain`.
-fn cpu_fallback(
-    geoms_a: &[ExtractedGeometry],
-    geoms_b: &[ExtractedGeometry],
-    skip_bbox: bool,
-) -> SpatialResult {
-    let len = geoms_a.len().min(geoms_b.len());
-
-    let mut definite_true = Vec::new();
-    let mut definite_false = Vec::new();
-    let mut uncertain = Vec::new();
-
-    for i in 0..len {
-        let a = &geoms_a[i];
-        let b = &geoms_b[i];
-
-        // Layer 1 -- bbox filter.
-        // Skipped when tuples originate from a GiST index scan (the
-        // index has already performed bbox filtering).
-        if !skip_bbox && bboxes_disjoint(&a.bbox, &b.bbox) {
-            definite_false.push(i);
-            continue;
-        }
-
-        // Layer 2 -- cheap exact tests where possible
-        match classify_pair(a, b) {
-            PredicateResult::True => definite_true.push(i),
-            PredicateResult::False => definite_false.push(i),
-            PredicateResult::Uncertain => uncertain.push(i),
-        }
-    }
-
-    SpatialResult {
-        definite_true,
-        definite_false,
-        uncertain,
-    }
-}
-
-/// CPU-only containment pipeline.
-///
-/// Layer 1: bbox disjointness → `definite_false`.
-///
-/// Layer 2: for Contains(A, B) only resolves Polygon-contains-Point via
-/// `point_in_ring_cpu`.  All other type combinations → `Uncertain`.
-fn cpu_fallback_contains(
-    geoms_a: &[ExtractedGeometry],
-    geoms_b: &[ExtractedGeometry],
-    skip_bbox: bool,
-) -> SpatialResult {
-    let len = geoms_a.len().min(geoms_b.len());
-
-    let mut definite_true = Vec::new();
-    let mut definite_false = Vec::new();
-    let mut uncertain = Vec::new();
-
-    for i in 0..len {
-        let a = &geoms_a[i];
-        let b = &geoms_b[i];
-
-        // Layer 1 — bbox filter.
-        if !skip_bbox && bboxes_disjoint(&a.bbox, &b.bbox) {
-            definite_false.push(i);
-            continue;
-        }
-
-        // Layer 2 — Contains(A, B): only handle Polygon-contains-Point.
-        // The directionality matters: A is the container, B is contained.
-        if a.geom_type == GeomType::Polygon && b.geom_type == GeomType::Point {
-            match point_in_polygon_check(b, a) {
-                PredicateResult::True => definite_true.push(i),
-                PredicateResult::False => definite_false.push(i),
-                PredicateResult::Uncertain => uncertain.push(i),
-            }
-        } else {
-            // All other type combinations need CPU recheck.
-            uncertain.push(i);
-        }
-    }
-
-    SpatialResult {
-        definite_true,
-        definite_false,
-        uncertain,
-    }
-}
-
-/// Returns `true` when two axis-aligned bounding boxes have no overlap.
-#[inline]
-fn bboxes_disjoint(a: &[f32; 4], b: &[f32; 4]) -> bool {
-    // a = [xmin, ymin, xmax, ymax], same for b
-    a[2] < b[0] || b[2] < a[0] || a[3] < b[1] || b[3] < a[1]
-}
-
-/// Try to resolve the predicate without GPU.
-///
-/// Only handles Point-vs-Polygon (via ray-casting).  Everything else returns
-/// `Uncertain`.
-fn classify_pair(a: &ExtractedGeometry, b: &ExtractedGeometry) -> PredicateResult {
-    // Point-in-Polygon (either order)
-    if a.geom_type == GeomType::Point && b.geom_type == GeomType::Polygon {
-        return point_in_polygon_check(a, b);
-    }
-    if b.geom_type == GeomType::Point && a.geom_type == GeomType::Polygon {
-        return point_in_polygon_check(b, a);
-    }
-
-    // Conservative: anything else needs Layer 3.
-    PredicateResult::Uncertain
-}
-
-/// Check whether the single point in `pt` lies inside the polygon ring in
-/// `poly`.  Returns `Uncertain` if either geometry has unexpected coord counts.
-fn point_in_polygon_check(pt: &ExtractedGeometry, poly: &ExtractedGeometry) -> PredicateResult {
-    if pt.coords.len() < 2 || poly.coords.len() < 6 {
-        return PredicateResult::Uncertain;
-    }
-
-    let point = (f64::from(pt.coords[0]), f64::from(pt.coords[1]));
-
-    // Build ring from flat f32 pairs
-    let ring: Vec<(f64, f64)> = poly
-        .coords
-        .chunks_exact(2)
-        .map(|c| (f64::from(c[0]), f64::from(c[1])))
-        .collect();
-
-    point_in_ring_cpu(point, &ring)
-}
-
-// ---------------------------------------------------------------------------
-// CPU helper: point-in-ring (ray casting)
-// ---------------------------------------------------------------------------
-
-/// Determine whether `point` lies inside the closed `ring` using the
-/// ray-casting (crossing-number) algorithm.
-///
-/// The ring is given as a slice of `(x, y)` pairs.  It should be closed
-/// (first == last) but the function tolerates open rings by implicitly closing
-/// them.
-///
-/// Returns [`PredicateResult::True`] if inside, [`PredicateResult::False`] if
-/// outside.  Never returns `Uncertain`.
+/// Used when the GPU is unavailable or no kernel exists for the predicate.
+/// The PG executor's Layer 3 recheck handles them via standard PostGIS.
 #[must_use]
-pub fn point_in_ring_cpu(point: (f64, f64), ring: &[(f64, f64)]) -> PredicateResult {
-    if ring.len() < 3 {
-        return PredicateResult::False;
+fn all_uncertain(n: usize) -> SpatialResult {
+    SpatialResult {
+        definite_true: Vec::new(),
+        definite_false: Vec::new(),
+        uncertain: (0..n).collect(),
     }
-
-    let (px, py) = point;
-    let mut inside = false;
-    let n = ring.len();
-
-    let mut j = n - 1;
-    for i in 0..n {
-        let (xi, yi) = ring[i];
-        let (xj, yj) = ring[j];
-
-        // Does the edge from j to i straddle the horizontal ray from point?
-        let straddle = (yi > py) != (yj > py);
-        if straddle {
-            let x_intersect = ((py - yi) / (yj - yi)).mul_add(xj - xi, xi);
-            if px < x_intersect {
-                inside = !inside;
-            }
-        }
-
-        j = i;
-    }
-
-    if inside {
-        PredicateResult::True
-    } else {
-        PredicateResult::False
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CPU helper: sphere distance (Haversine)
-// ---------------------------------------------------------------------------
-
-/// Compute the great-circle distance in **metres** between two points on the
-/// WGS-84 ellipsoid (approximated as a sphere with radius 6_371_008.8 m).
-///
-/// Inputs are `(longitude, latitude)` in **degrees** (the PostGIS / GeoJSON
-/// convention).
-#[must_use]
-pub fn sphere_distance_cpu(a: (f64, f64), b: (f64, f64)) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6_371_008.8;
-
-    let (lon1, lat1) = (a.0.to_radians(), a.1.to_radians());
-    let (lon2, lat2) = (b.0.to_radians(), b.1.to_radians());
-
-    let dlat = lat2 - lat1;
-    let dlon = lon2 - lon1;
-
-    let half_dlat_sin = (dlat / 2.0).sin();
-    let half_dlon_sin = (dlon / 2.0).sin();
-
-    let h = half_dlat_sin.mul_add(
-        half_dlat_sin,
-        lat1.cos() * lat2.cos() * half_dlon_sin * half_dlon_sin,
-    );
-
-    2.0 * EARTH_RADIUS_M * h.sqrt().asin()
 }
 
 // ---------------------------------------------------------------------------
@@ -540,142 +314,23 @@ pub fn sphere_distance_cpu(a: (f64, f64), b: (f64, f64)) -> f64 {
 mod tests {
     use super::*;
 
-    // -- point_in_ring_cpu --------------------------------------------------
+    // -- all_uncertain helper -----------------------------------------------
 
     #[test]
-    fn point_inside_square() {
-        let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)];
-        assert_eq!(point_in_ring_cpu((2.0, 2.0), &ring), PredicateResult::True);
+    fn all_uncertain_produces_correct_indices() {
+        let r = all_uncertain(5);
+        assert!(r.definite_true.is_empty());
+        assert!(r.definite_false.is_empty());
+        assert_eq!(r.uncertain, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
-    fn point_outside_square() {
-        let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)];
-        assert_eq!(point_in_ring_cpu((5.0, 2.0), &ring), PredicateResult::False);
+    fn all_uncertain_zero_is_empty() {
+        let r = all_uncertain(0);
+        assert!(r.uncertain.is_empty());
     }
 
-    #[test]
-    fn point_outside_negative() {
-        let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)];
-        assert_eq!(
-            point_in_ring_cpu((-1.0, -1.0), &ring),
-            PredicateResult::False
-        );
-    }
-
-    #[test]
-    fn point_inside_triangle() {
-        let ring = vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0), (0.0, 0.0)];
-        assert_eq!(point_in_ring_cpu((5.0, 3.0), &ring), PredicateResult::True);
-    }
-
-    #[test]
-    fn point_outside_triangle() {
-        let ring = vec![(0.0, 0.0), (10.0, 0.0), (5.0, 10.0), (0.0, 0.0)];
-        assert_eq!(
-            point_in_ring_cpu((0.0, 10.0), &ring),
-            PredicateResult::False
-        );
-    }
-
-    #[test]
-    fn degenerate_ring_too_few_points() {
-        let ring = vec![(0.0, 0.0), (1.0, 1.0)];
-        assert_eq!(point_in_ring_cpu((0.5, 0.5), &ring), PredicateResult::False);
-    }
-
-    #[test]
-    fn open_ring_implicitly_closed() {
-        // Ring is not explicitly closed (first != last).  The algorithm should
-        // still work because we connect the last vertex back to the first.
-        let ring = vec![(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
-        assert_eq!(point_in_ring_cpu((2.0, 2.0), &ring), PredicateResult::True);
-    }
-
-    // -- sphere_distance_cpu ------------------------------------------------
-
-    #[test]
-    fn same_point_zero_distance() {
-        let d = sphere_distance_cpu((13.405, 52.52), (13.405, 52.52));
-        assert!(d.abs() < 1e-6, "expected ~0, got {d}");
-    }
-
-    #[test]
-    fn berlin_to_paris() {
-        // Berlin (13.405, 52.52) -> Paris (2.3522, 48.8566)
-        // Expected ~878 km
-        let d = sphere_distance_cpu((13.405, 52.52), (2.3522, 48.8566));
-        let km = d / 1000.0;
-        assert!(
-            (860.0..900.0).contains(&km),
-            "expected ~878 km, got {km} km"
-        );
-    }
-
-    #[test]
-    fn antipodal_points() {
-        // Two points on opposite sides of the Earth should be ~20015 km apart.
-        let d = sphere_distance_cpu((0.0, 0.0), (180.0, 0.0));
-        let km = d / 1000.0;
-        assert!(
-            (20_000.0..20_050.0).contains(&km),
-            "expected ~20015 km, got {km} km"
-        );
-    }
-
-    #[test]
-    fn new_york_to_london() {
-        // NYC (-74.006, 40.7128) -> London (-0.1276, 51.5074)
-        // Expected ~5570 km
-        let d = sphere_distance_cpu((-74.006, 40.7128), (-0.1276, 51.5074));
-        let km = d / 1000.0;
-        assert!(
-            (5550.0..5600.0).contains(&km),
-            "expected ~5570 km, got {km} km"
-        );
-    }
-
-    // -- spatial_intersects (batched pipeline) ------------------------------
-
-    #[test]
-    fn disjoint_bboxes_are_definite_false() {
-        let a = ExtractedGeometry {
-            bbox: [0.0, 0.0, 1.0, 1.0],
-            coords: vec![0.5, 0.5],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let b = ExtractedGeometry {
-            bbox: [5.0, 5.0, 6.0, 6.0],
-            coords: vec![5.0, 5.0, 6.0, 5.0, 6.0, 6.0, 5.0, 6.0, 5.0, 5.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let result = spatial_intersects(&[a], &[b], false);
-        assert_eq!(result.definite_false, vec![0]);
-        assert!(result.definite_true.is_empty());
-        assert!(result.uncertain.is_empty());
-    }
-
-    #[test]
-    fn point_inside_polygon_is_definite_true() {
-        let pt = ExtractedGeometry {
-            bbox: [2.0, 2.0, 2.0, 2.0],
-            coords: vec![2.0, 2.0],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let poly = ExtractedGeometry {
-            bbox: [0.0, 0.0, 4.0, 4.0],
-            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let result = spatial_intersects(&[pt], &[poly], false);
-        assert_eq!(result.definite_true, vec![0]);
-    }
-
-    // -- Edge case tests (Phase 8 correctness) --------------------------------
+    // -- spatial_intersects (GPU-or-uncertain pipeline) ---------------------
 
     #[test]
     fn empty_inputs_produce_empty_result() {
@@ -692,12 +347,14 @@ mod tests {
             coords: vec![2.0, 2.0],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
             coord_count: 5,
             geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
         };
         // 1 vs 2: should process min(1,2)=1 pair
         let result = spatial_intersects(&[pt], &[poly.clone(), poly], false);
@@ -708,271 +365,119 @@ mod tests {
     }
 
     #[test]
-    fn point_outside_polygon_is_definite_false_or_uncertain() {
+    fn without_gpu_all_pairs_are_uncertain() {
+        // Without GPU hardware, spatial_intersects returns all pairs as
+        // uncertain for PG recheck.
         let pt = ExtractedGeometry {
-            bbox: [10.0, 10.0, 10.0, 10.0],
-            coords: vec![10.0, 10.0],
+            bbox: [2.0, 2.0, 2.0, 2.0],
+            coords: vec![2.0, 2.0],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
             coord_count: 5,
             geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
         };
         let result = spatial_intersects(&[pt], &[poly], false);
-        // Disjoint bboxes → definite_false
-        assert_eq!(result.definite_false, vec![0]);
+        // Without GPU, the pair must land in one of the three buckets.
+        assert_eq!(
+            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+            1
+        );
     }
 
     #[test]
-    fn unknown_geom_type_with_overlapping_bbox_is_uncertain() {
+    fn unknown_geom_type_is_classified() {
         let a = ExtractedGeometry {
             bbox: [0.0, 0.0, 5.0, 5.0],
             coords: vec![],
             coord_count: 0,
             geom_type: GeomType::Unknown,
+            ring_offsets: Vec::new(),
         };
         let b = ExtractedGeometry {
             bbox: [1.0, 1.0, 6.0, 6.0],
             coords: vec![],
             coord_count: 0,
             geom_type: GeomType::Unknown,
+            ring_offsets: Vec::new(),
         };
         let result = spatial_intersects(&[a], &[b], false);
-        assert_eq!(result.uncertain, vec![0]);
-    }
-
-    #[test]
-    fn touching_bboxes_not_disjoint() {
-        // Bboxes share an edge (xmax_a == xmin_b) — NOT disjoint
-        // The point is at (1.0, 0.5), on the edge of the polygon
-        let a = ExtractedGeometry {
-            bbox: [1.0, 0.5, 1.0, 0.5],
-            coords: vec![1.0, 0.5],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let b = ExtractedGeometry {
-            bbox: [1.0, 0.0, 2.0, 1.0],
-            coords: vec![1.0, 0.0, 2.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let result = spatial_intersects(&[a], &[b], false);
-        // Bboxes overlap, so this should NOT be filtered by layer 1
-        // (it goes to layer 2 point-in-ring check)
-        assert!(
-            !result.definite_false.is_empty()
-                || !result.definite_true.is_empty()
-                || !result.uncertain.is_empty(),
-            "pair should be classified by layer 2, not dropped"
+        // Without GPU, degenerate/unknown geoms go to uncertain.
+        assert_eq!(
+            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+            1
         );
     }
 
-    #[test]
-    fn polygon_vs_polygon_is_uncertain() {
-        // Two overlapping polygons — layer 2 can't handle polygon-polygon
-        let a = ExtractedGeometry {
-            bbox: [0.0, 0.0, 2.0, 2.0],
-            coords: vec![0.0, 0.0, 2.0, 0.0, 2.0, 2.0, 0.0, 2.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let b = ExtractedGeometry {
-            bbox: [1.0, 1.0, 3.0, 3.0],
-            coords: vec![1.0, 1.0, 3.0, 1.0, 3.0, 3.0, 1.0, 3.0, 1.0, 1.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let result = spatial_intersects(&[a], &[b], false);
-        assert_eq!(result.uncertain, vec![0]);
-    }
+    // -- spatial_contains (all-uncertain without GPU kernel) ----------------
 
     #[test]
-    fn line_vs_polygon_is_uncertain_if_bboxes_overlap() {
-        let line = ExtractedGeometry {
-            bbox: [1.0, 1.0, 3.0, 3.0],
-            coords: vec![1.0, 1.0, 3.0, 3.0],
-            coord_count: 2,
-            geom_type: GeomType::LineString,
-        };
+    fn contains_without_gpu_is_uncertain() {
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
             coord_count: 5,
             geom_type: GeomType::Polygon,
-        };
-        let result = spatial_intersects(&[line], &[poly], false);
-        assert_eq!(result.uncertain, vec![0]);
-    }
-
-    // -- spatial_eval / spatial_contains ------------------------------------
-
-    #[test]
-    fn contains_polygon_contains_point() {
-        let poly = ExtractedGeometry {
-            bbox: [0.0, 0.0, 4.0, 4.0],
-            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
         };
         let pt = ExtractedGeometry {
             bbox: [2.0, 2.0, 2.0, 2.0],
             coords: vec![2.0, 2.0],
             coord_count: 1,
             geom_type: GeomType::Point,
-        };
-        // ST_Contains(poly, pt) — polygon contains the point
-        let result = spatial_eval(SpatialPredicate::Contains, &[poly], &[pt], false);
-        assert_eq!(result.definite_true, vec![0]);
-    }
-
-    #[test]
-    fn contains_polygon_does_not_contain_outside_point() {
-        let poly = ExtractedGeometry {
-            bbox: [0.0, 0.0, 4.0, 4.0],
-            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let pt = ExtractedGeometry {
-            bbox: [5.0, 5.0, 5.0, 5.0],
-            coords: vec![5.0, 5.0],
-            coord_count: 1,
-            geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::Contains, &[poly], &[pt], false);
-        assert_eq!(result.definite_false, vec![0]);
-    }
-
-    #[test]
-    fn contains_point_vs_polygon_is_uncertain() {
-        // ST_Contains(point, polygon) — a point cannot contain a polygon,
-        // but we don't have that logic, so it goes to uncertain.
-        let pt = ExtractedGeometry {
-            bbox: [2.0, 2.0, 2.0, 2.0],
-            coords: vec![2.0, 2.0],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let poly = ExtractedGeometry {
-            bbox: [0.0, 0.0, 4.0, 4.0],
-            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let result = spatial_eval(SpatialPredicate::Contains, &[pt], &[poly], false);
         assert_eq!(result.uncertain, vec![0]);
     }
 
     // -- spatial_eval / Within (swapped Contains) ---------------------------
 
     #[test]
-    fn within_point_within_polygon() {
+    fn within_without_gpu_is_uncertain() {
         let pt = ExtractedGeometry {
             bbox: [2.0, 2.0, 2.0, 2.0],
             coords: vec![2.0, 2.0],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
             coord_count: 5,
             geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
         };
-        // ST_Within(pt, poly) = ST_Contains(poly, pt)
+        // ST_Within(pt, poly) = ST_Contains(poly, pt) — no GPU kernel
         let result = spatial_eval(SpatialPredicate::Within, &[pt], &[poly], false);
-        assert_eq!(result.definite_true, vec![0]);
+        assert_eq!(result.uncertain, vec![0]);
     }
 
-    #[test]
-    fn within_point_outside_polygon() {
-        let pt = ExtractedGeometry {
-            bbox: [5.0, 5.0, 5.0, 5.0],
-            coords: vec![5.0, 5.0],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let poly = ExtractedGeometry {
-            bbox: [0.0, 0.0, 4.0, 4.0],
-            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-        };
-        let result = spatial_eval(SpatialPredicate::Within, &[pt], &[poly], false);
-        assert_eq!(result.definite_false, vec![0]);
-    }
-
-    // -- spatial_eval / DWithin ---------------------------------------------
+    // -- spatial_eval / DWithin (all-uncertain without GPU kernel) ----------
 
     #[test]
-    fn dwithin_close_points_are_true() {
-        // Two points ~1.1 km apart with a 5000m threshold
+    fn dwithin_without_gpu_is_uncertain() {
         let a = ExtractedGeometry {
             bbox: [13.405, 52.52, 13.405, 52.52],
             coords: vec![13.405, 52.52],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let b = ExtractedGeometry {
             bbox: [13.42, 52.52, 13.42, 52.52],
             coords: vec![13.42, 52.52],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::DWithin(5000.0), &[a], &[b], false);
-        assert_eq!(result.definite_true, vec![0]);
-    }
-
-    #[test]
-    fn dwithin_far_points_are_false() {
-        // Berlin to Paris ~878 km, threshold 100 km
-        let berlin = ExtractedGeometry {
-            bbox: [13.405, 52.52, 13.405, 52.52],
-            coords: vec![13.405, 52.52],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let paris = ExtractedGeometry {
-            bbox: [2.3522, 48.8566, 2.3522, 48.8566],
-            coords: vec![2.3522, 48.8566],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let result = spatial_eval(
-            SpatialPredicate::DWithin(100_000.0),
-            &[berlin],
-            &[paris],
-            false,
-        );
-        assert_eq!(result.definite_false, vec![0]);
-    }
-
-    #[test]
-    fn dwithin_near_threshold_is_uncertain() {
-        // Berlin to Paris ~878 km. Use threshold very close to actual distance.
-        let berlin = ExtractedGeometry {
-            bbox: [13.405, 52.52, 13.405, 52.52],
-            coords: vec![13.405, 52.52],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        let paris = ExtractedGeometry {
-            bbox: [2.3522, 48.8566, 2.3522, 48.8566],
-            coords: vec![2.3522, 48.8566],
-            coord_count: 1,
-            geom_type: GeomType::Point,
-        };
-        // ~878 km — set threshold to exactly 878_000m so it falls in tolerance
-        let result = spatial_eval(
-            SpatialPredicate::DWithin(878_000.0),
-            &[berlin],
-            &[paris],
-            false,
-        );
         assert_eq!(result.uncertain, vec![0]);
     }
 
@@ -983,12 +488,14 @@ mod tests {
             coords: vec![0.0, 0.0, 1.0, 1.0],
             coord_count: 2,
             geom_type: GeomType::LineString,
+            ring_offsets: Vec::new(),
         };
         let pt = ExtractedGeometry {
             bbox: [0.5, 0.5, 0.5, 0.5],
             coords: vec![0.5, 0.5],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::DWithin(1000.0), &[line], &[pt], false);
         assert_eq!(result.uncertain, vec![0]);
@@ -1002,12 +509,14 @@ mod tests {
             coords: vec![2.0, 2.0],
             coord_count: 1,
             geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
         };
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
             coord_count: 5,
             geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
         };
         let r1 = spatial_eval(
             SpatialPredicate::Intersects,

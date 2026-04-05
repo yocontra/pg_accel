@@ -384,6 +384,18 @@ unsafe extern "C" {
         uncertain_count: *mut usize,
     ) -> PgaccelStatus;
 
+    /// Dedicated bulk point-in-polygon: flat point array vs single polygon.
+    pub fn pgaccel_point_in_polygon_bulk(
+        points_xy: *const f32,
+        point_count: usize,
+        poly_bbox: *const f32,
+        poly_coords: *const f32,
+        poly_coord_count: usize,
+        ring_offsets: *const u32,
+        ring_count: usize,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
     /// Bulk bbox intersection test (fp32).
     pub fn pgaccel_bbox_intersects_bulk_f32(
         boxes_a: *const f32,
@@ -740,6 +752,7 @@ unsafe extern "C" {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::mem;
@@ -820,6 +833,207 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expr_instruction_size_is_8_bytes() {
+        // PgaccelExprInstruction: u16 opcode + u16 pad + u32 arg = 8 bytes
+        assert_eq!(mem::size_of::<PgaccelExprInstruction>(), 8);
+    }
+
+    #[test]
+    fn expr_instruction_alignment() {
+        assert!(mem::align_of::<PgaccelExprInstruction>() >= mem::align_of::<u32>());
+    }
+
+    #[test]
+    fn pgaccel_val_size_is_16_bytes() {
+        // tag (i32 = 4 bytes) + padding (4 bytes) + data (u64 = 8 bytes) = 16
+        assert_eq!(mem::size_of::<PgaccelVal>(), 16);
+    }
+
+    #[test]
+    fn pgaccel_val_alignment() {
+        assert!(mem::align_of::<PgaccelVal>() >= mem::align_of::<u64>());
+    }
+
+    #[test]
+    fn agg_col_size_and_alignment() {
+        let size = mem::size_of::<PgaccelAggCol>();
+        let align = mem::align_of::<PgaccelAggCol>();
+        // func (repr(C) enum) + col_idx (usize)
+        assert!(
+            size >= mem::size_of::<usize>(),
+            "PgaccelAggCol too small: {size}"
+        );
+        assert!(
+            align >= mem::align_of::<usize>(),
+            "alignment too small: {align}"
+        );
+    }
+
+    #[test]
+    fn reclass_rule_size_is_three_f64s() {
+        // min_val + max_val + new_val = 3 * 8 = 24 bytes
+        assert_eq!(mem::size_of::<PgaccelReclassRule>(), 24);
+    }
+
+    #[test]
+    fn reclass_rule_alignment() {
+        assert_eq!(
+            mem::align_of::<PgaccelReclassRule>(),
+            mem::align_of::<f64>()
+        );
+    }
+
+    #[test]
+    fn expr_inst_size_and_alignment() {
+        let size = mem::size_of::<PgaccelExprInst>();
+        let align = mem::align_of::<PgaccelExprInst>();
+        // op (repr(C) enum, at least 4 bytes) + arg (f64, 8 bytes) + padding
+        assert!(size >= 12, "PgaccelExprInst too small: {size}");
+        assert!(
+            align >= mem::align_of::<f64>(),
+            "alignment too small: {align}"
+        );
+    }
+
+    #[test]
+    fn batch_struct_nonzero_size() {
+        let size = mem::size_of::<PgaccelBatch>();
+        // 2 usizes + 3 pointers
+        assert!(
+            size >= 5 * mem::size_of::<usize>(),
+            "PgaccelBatch too small: {size}"
+        );
+    }
+
+    #[test]
+    fn expr_program_struct_nonzero_size() {
+        let size = mem::size_of::<PgaccelExprProgram>();
+        // 2 pointers + 4 usizes
+        assert!(
+            size >= 6 * mem::size_of::<usize>(),
+            "PgaccelExprProgram too small: {size}"
+        );
+    }
+
+    #[test]
+    fn expr_struct_nonzero_size() {
+        let size = mem::size_of::<PgaccelExpr>();
+        // 1 pointer + 2 usizes
+        assert!(
+            size >= 3 * mem::size_of::<usize>(),
+            "PgaccelExpr too small: {size}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Enum variant values match expected C constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn val_tag_discriminant_values_match_c() {
+        assert_eq!(PgaccelValTag::Null as i32, 0);
+        assert_eq!(PgaccelValTag::Bool as i32, 1);
+        assert_eq!(PgaccelValTag::Int32 as i32, 2);
+        assert_eq!(PgaccelValTag::Int64 as i32, 3);
+        assert_eq!(PgaccelValTag::Float32 as i32, 4);
+        assert_eq!(PgaccelValTag::Float64 as i32, 5);
+        assert_eq!(PgaccelValTag::Date as i32, 6);
+        assert_eq!(PgaccelValTag::Timestamp as i32, 7);
+    }
+
+    #[test]
+    fn agg_func_discriminant_values_match_c() {
+        assert_eq!(PgaccelAggFunc::Sum as i32, 0);
+        assert_eq!(PgaccelAggFunc::Min as i32, 1);
+        assert_eq!(PgaccelAggFunc::Max as i32, 2);
+        assert_eq!(PgaccelAggFunc::Count as i32, 3);
+    }
+
+    #[test]
+    fn key_type_discriminant_values_match_c() {
+        assert_eq!(PgaccelKeyType::Int32 as i32, 0);
+        assert_eq!(PgaccelKeyType::Int64 as i32, 1);
+        assert_eq!(PgaccelKeyType::Float64 as i32, 2);
+    }
+
+    #[test]
+    fn pixel_type_discriminant_values_match_c() {
+        assert_eq!(PgaccelPixelType::Int8 as i32, 0);
+        assert_eq!(PgaccelPixelType::Int16 as i32, 1);
+        assert_eq!(PgaccelPixelType::Int32 as i32, 2);
+        assert_eq!(PgaccelPixelType::Float32 as i32, 3);
+        assert_eq!(PgaccelPixelType::Float64 as i32, 4);
+    }
+
+    #[test]
+    fn op_discriminant_values_match_c() {
+        assert_eq!(PgaccelOp::LoadBand as i32, 0);
+        assert_eq!(PgaccelOp::LoadConst as i32, 1);
+        assert_eq!(PgaccelOp::Add as i32, 2);
+        assert_eq!(PgaccelOp::Sub as i32, 3);
+        assert_eq!(PgaccelOp::Mul as i32, 4);
+        assert_eq!(PgaccelOp::Div as i32, 5);
+        assert_eq!(PgaccelOp::Sqrt as i32, 6);
+        assert_eq!(PgaccelOp::Abs as i32, 7);
+        assert_eq!(PgaccelOp::Log as i32, 8);
+        assert_eq!(PgaccelOp::Pow as i32, 9);
+        assert_eq!(PgaccelOp::Gt as i32, 10);
+        assert_eq!(PgaccelOp::Lt as i32, 11);
+        assert_eq!(PgaccelOp::Eq as i32, 12);
+        assert_eq!(PgaccelOp::Select as i32, 13);
+    }
+
+    // -----------------------------------------------------------------------
+    // PgaccelVal type conversion helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn val_null_constructor() {
+        let v = PgaccelVal::null();
+        assert_eq!(v.tag, PgaccelValTag::Null);
+        assert_eq!(v.data, 0);
+    }
+
+    #[test]
+    fn val_from_i32_roundtrips() {
+        let v = PgaccelVal::from_i32(-42);
+        assert_eq!(v.tag, PgaccelValTag::Int32);
+        assert_eq!(v.data as i32, -42);
+    }
+
+    #[test]
+    fn val_from_i64_roundtrips() {
+        let v = PgaccelVal::from_i64(i64::MAX);
+        assert_eq!(v.tag, PgaccelValTag::Int64);
+        assert_eq!(v.data as i64, i64::MAX);
+    }
+
+    #[test]
+    fn val_from_f64_roundtrips() {
+        let v = PgaccelVal::from_f64(std::f64::consts::PI);
+        assert_eq!(v.tag, PgaccelValTag::Float64);
+        assert_eq!(f64::from_bits(v.data), std::f64::consts::PI);
+    }
+
+    #[test]
+    fn val_from_f32_roundtrips() {
+        let v = PgaccelVal::from_f32(1.5f32);
+        assert_eq!(v.tag, PgaccelValTag::Float32);
+        assert_eq!(f32::from_bits(v.data as u32), 1.5f32);
+    }
+
+    #[test]
+    fn val_from_bool_true_and_false() {
+        let t = PgaccelVal::from_bool(true);
+        assert_eq!(t.tag, PgaccelValTag::Bool);
+        assert_eq!(t.data, 1);
+
+        let f = PgaccelVal::from_bool(false);
+        assert_eq!(f.tag, PgaccelValTag::Bool);
+        assert_eq!(f.data, 0);
+    }
+
     // -----------------------------------------------------------------------
     // Clone / Debug / PartialEq derive coverage
     // -----------------------------------------------------------------------
@@ -879,5 +1093,61 @@ mod tests {
         assert_eq!(cloned.compute_units, 16);
         let dbg = format!("{caps:?}");
         assert!(dbg.contains("PgaccelPlatformCaps"));
+    }
+
+    #[test]
+    fn agg_col_debug_clone() {
+        let col = PgaccelAggCol {
+            func: PgaccelAggFunc::Count,
+            col_idx: 7,
+        };
+        let cloned = col;
+        assert_eq!(cloned.func, PgaccelAggFunc::Count);
+        assert_eq!(cloned.col_idx, 7);
+        let dbg = format!("{col:?}");
+        assert!(dbg.contains("PgaccelAggCol"));
+    }
+
+    #[test]
+    fn reclass_rule_debug_clone() {
+        let rule = PgaccelReclassRule {
+            min_val: -10.0,
+            max_val: 10.0,
+            new_val: 0.0,
+        };
+        let cloned = rule;
+        assert!((cloned.min_val - (-10.0)).abs() < f64::EPSILON);
+        let dbg = format!("{rule:?}");
+        assert!(dbg.contains("PgaccelReclassRule"));
+    }
+
+    #[test]
+    fn pixel_type_clone_debug_partial_eq() {
+        let a = PgaccelPixelType::Float32;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(a, PgaccelPixelType::Int8);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Float32"));
+    }
+
+    #[test]
+    fn op_clone_debug_partial_eq() {
+        let a = PgaccelOp::Sqrt;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(a, PgaccelOp::Add);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Sqrt"));
+    }
+
+    #[test]
+    fn key_type_clone_debug_partial_eq() {
+        let a = PgaccelKeyType::Float64;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(a, PgaccelKeyType::Int32);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("Float64"));
     }
 }
