@@ -62,11 +62,6 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_guc_workers_exists() {
-        Spi::run("SHOW pg_accel.workers").expect("pg_accel.workers GUC should exist");
-    }
-
-    #[pg_test]
     fn test_guc_min_batch_size_exists() {
         Spi::run("SHOW pg_accel.min_batch_size").expect("pg_accel.min_batch_size GUC should exist");
     }
@@ -91,12 +86,6 @@ mod tests {
     fn test_enabled_guc_toggle() {
         Spi::run("SET pg_accel.enabled = off").expect("SET OFF should succeed");
         Spi::run("SET pg_accel.enabled = on").expect("SET ON should succeed");
-    }
-
-    #[pg_test]
-    fn test_guc_workers_set() {
-        Spi::run("SET pg_accel.workers = 4").expect("SET workers should succeed");
-        Spi::run("SET pg_accel.workers = 0").expect("SET workers back to auto should succeed");
     }
 
     #[pg_test]
@@ -421,7 +410,7 @@ mod tests {
 
     #[pg_test]
     fn test_custom_scan_skipped_for_scalar_builtins() {
-        // BatchedEval (scalar builtins like abs, length) should NOT inject
+        // Scalar builtins (like abs, length) are no longer registered, so should NOT inject
         // a Custom Scan — only GPU strategies benefit from batching.
         Spi::run("CREATE TABLE cscan_test (id int, val text)").expect("CREATE TABLE");
         Spi::run("INSERT INTO cscan_test SELECT g, 'row' || g FROM generate_series(1,5000) g")
@@ -925,100 +914,19 @@ mod tests {
     // =========================================================================
 
     #[pg_test]
-    fn test_registry_initializes_with_builtins() {
-        // Verify the registry loaded by exercising a builtin function
-        // through the planner hook. If the registry failed to initialize,
-        // the accel path would not be available.
-        let result = Spi::get_one::<i32>("SELECT abs(-42)");
-        assert_eq!(
-            result
-                .expect("abs(-42) should succeed")
-                .expect("should not be NULL"),
-            42,
-            "abs(-42) should return 42, proving the registry resolved the builtin"
-        );
-    }
-
-    #[pg_test]
-    fn test_registry_resolves_builtin_oids() {
-        // Verify OID resolution by checking that abs(int4) exists in pg_proc
-        // and that our extension can use it. If OID resolution failed, queries
-        // using registered builtins would fall back to the standard planner.
-        let oid = Spi::get_one::<i64>(
-            "SELECT oid::bigint FROM pg_proc \
-             WHERE proname = 'abs' AND proargtypes::text ~ '^23'",
-        )
-        .expect("OID lookup should succeed")
-        .expect("abs(int4) should exist in pg_proc");
-        assert!(oid > 0, "abs(int4) OID should be positive, got {oid}");
-
-        // Confirm the function actually works through the accel path
-        let val = Spi::get_one::<i32>("SELECT abs(-1)")
-            .expect("abs(-1) should succeed")
-            .expect("should not be NULL");
-        assert_eq!(val, 1, "abs(-1) should return 1");
-    }
-
-    #[pg_test]
-    fn test_builtin_abs_oid_resolves() {
-        // Look up the OID of abs(int4) and verify it's in the registry.
-        let oid = Spi::get_one::<i64>(
-            "SELECT oid::bigint FROM pg_proc WHERE proname = 'abs' \
-             AND pronamespace = 'pg_catalog'::regnamespace LIMIT 1",
-        )
-        .expect("query should succeed")
-        .expect("abs should exist in pg_proc");
-
-        // Trigger registry init.
-        Spi::run("SELECT abs(1)").expect("trigger planner hook");
-
-        let reg = crate::engine::registry::global_registry();
-        let pg_oid = pgrx::pg_sys::Oid::from(oid as u32);
-        let entry = reg.lookup(pg_oid);
-        assert!(
-            entry.is_some(),
-            "abs (OID {oid}) should be registered in the adapter registry"
-        );
-        let entry = entry.expect("checked above");
-        assert_eq!(entry.name, "abs");
-        assert_eq!(
-            entry.strategy,
-            crate::engine::registry::AccelStrategy::BatchedEval,
-        );
-    }
-
-    #[pg_test]
-    fn test_builtin_lower_oid_resolves() {
-        let oid = Spi::get_one::<i64>(
-            "SELECT oid::bigint FROM pg_proc WHERE proname = 'lower' \
-             AND pronamespace = 'pg_catalog'::regnamespace LIMIT 1",
-        )
-        .expect("query should succeed")
-        .expect("lower should exist in pg_proc");
-
-        Spi::run("SELECT lower('X')").expect("trigger planner hook");
-
-        let reg = crate::engine::registry::global_registry();
-        let pg_oid = pgrx::pg_sys::Oid::from(oid as u32);
-        let entry = reg.lookup(pg_oid);
-        assert!(entry.is_some(), "lower (OID {oid}) should be registered");
-        assert_eq!(entry.expect("checked").name, "lower");
-    }
-
-    #[pg_test]
     fn test_adapter_postgis_structure() {
         // Verify PostGIS adapter has correct function counts without
         // needing PostGIS installed.
         let a = crate::adapters::postgis::adapter();
         assert_eq!(a.name, "postgis");
-        assert_eq!(a.functions.len(), 20, "5 GPU spatial + 15 batched eval");
+        assert_eq!(a.functions.len(), 4, "4 GPU spatial");
 
         let gpu_count = a
             .functions
             .iter()
             .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuSpatial)
             .count();
-        assert_eq!(gpu_count, 5, "5 spatial predicates for GPU");
+        assert_eq!(gpu_count, 4, "4 spatial predicates for GPU");
 
         // Verify key function names are present.
         let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
@@ -1032,7 +940,7 @@ mod tests {
     fn test_adapter_h3_structure() {
         let a = crate::adapters::h3::adapter();
         assert_eq!(a.name, "h3");
-        assert_eq!(a.functions.len(), 8, "4 GPU H3 + 4 batched eval");
+        assert_eq!(a.functions.len(), 4, "4 GPU H3");
 
         let gpu_count = a
             .functions
@@ -1047,27 +955,10 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_adapter_pg_builtins_structure() {
-        let a = crate::adapters::pg_builtins::adapter();
-        assert_eq!(a.name, "pg_builtins");
-        assert_eq!(a.functions.len(), 12, "3 math + 4 text + 3 ts + 2 json");
-
-        // All builtins use BatchedEval.
-        assert!(
-            a.functions
-                .iter()
-                .all(|f| { f.strategy == crate::engine::registry::AccelStrategy::BatchedEval })
-        );
-
-        // All builtins use pg_catalog schema.
-        assert!(a.functions.iter().all(|f| f.schema == "pg_catalog"));
-    }
-
-    #[pg_test]
     fn test_adapter_postgis_raster_structure() {
         let a = crate::adapters::postgis_raster::adapter();
         assert_eq!(a.name, "postgis_raster");
-        assert_eq!(a.functions.len(), 7, "3 GPU raster + 4 batched eval");
+        assert_eq!(a.functions.len(), 3, "3 GPU raster");
 
         let gpu_count = a
             .functions
@@ -1075,45 +966,6 @@ mod tests {
             .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuRaster)
             .count();
         assert_eq!(gpu_count, 3);
-    }
-
-    #[pg_test]
-    fn test_builtin_results_match_with_accel() {
-        // Verify that pg_builtins functions produce correct results
-        // with pg_accel enabled vs disabled.
-        Spi::run("CREATE TEMP TABLE t_accel_verify (x int, t text)").expect("CREATE TABLE");
-        Spi::run(
-            "INSERT INTO t_accel_verify \
-             SELECT g, 'Hello World' FROM generate_series(1, 100) g",
-        )
-        .expect("INSERT");
-
-        // Collect results with accel ON.
-        Spi::run("SET pg_accel.enabled = on").expect("set on");
-        let on_sum = Spi::get_one::<i64>("SELECT sum(abs(x - 50)) FROM t_accel_verify")
-            .expect("query ok")
-            .expect("not null");
-
-        let on_cnt = Spi::get_one::<i64>("SELECT count(*) FROM t_accel_verify WHERE length(t) > 5")
-            .expect("query ok")
-            .expect("not null");
-
-        // Collect results with accel OFF.
-        Spi::run("SET pg_accel.enabled = off").expect("set off");
-        let off_sum = Spi::get_one::<i64>("SELECT sum(abs(x - 50)) FROM t_accel_verify")
-            .expect("query ok")
-            .expect("not null");
-
-        let off_cnt =
-            Spi::get_one::<i64>("SELECT count(*) FROM t_accel_verify WHERE length(t) > 5")
-                .expect("query ok")
-                .expect("not null");
-
-        assert_eq!(on_sum, off_sum, "abs() sum should match ON vs OFF");
-        assert_eq!(on_cnt, off_cnt, "length() filter count should match");
-
-        // Reset.
-        Spi::run("SET pg_accel.enabled = on").expect("reset");
     }
 
     #[pg_test]

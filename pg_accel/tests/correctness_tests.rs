@@ -6,7 +6,7 @@
 
 use pg_accel::adapters::extractors::geometry;
 use pg_accel::adapters::extractors::raster::{self, PixelType};
-use pg_accel::adapters::{h3, pg_builtins, postgis, postgis_raster};
+use pg_accel::adapters::{h3, postgis, postgis_raster};
 use pg_accel::engine::registry::{AccelStrategy, AdapterRegistry, ExtensionAdapter};
 use std::collections::HashSet;
 
@@ -598,26 +598,15 @@ fn geometry_has_bbox_with_has_z_has_m_bits() {
 // ADAPTER REGISTRATION TESTS (15+)
 // ===========================================================================
 
-/// Collect all four adapters.
+/// Collect all GPU adapters.
 fn all_adapters() -> Vec<ExtensionAdapter> {
-    vec![
-        h3::adapter(),
-        pg_builtins::adapter(),
-        postgis::adapter(),
-        postgis_raster::adapter(),
-    ]
+    vec![h3::adapter(), postgis::adapter(), postgis_raster::adapter()]
 }
 
 #[test]
 fn adapter_h3_no_panic() {
     let a = h3::adapter();
     assert_eq!(a.name, "h3");
-}
-
-#[test]
-fn adapter_pg_builtins_no_panic() {
-    let a = pg_builtins::adapter();
-    assert_eq!(a.name, "pg_builtins");
 }
 
 #[test]
@@ -700,7 +689,6 @@ fn adapter_postgis_gpu_spatial_strategy() {
         "st_contains",
         "st_within",
         "st_dwithin",
-        "st_distance",
     ];
     for name in &spatial_names {
         let entry = a.functions.iter().find(|f| f.name == *name);
@@ -721,23 +709,10 @@ fn adapter_postgis_raster_gpu_strategy() {
 }
 
 #[test]
-fn adapter_pg_builtins_all_batched_eval() {
-    let a = pg_builtins::adapter();
-    for func in &a.functions {
-        assert_eq!(
-            func.strategy,
-            AccelStrategy::BatchedEval,
-            "pg_builtins function '{}' should be BatchedEval",
-            func.name,
-        );
-    }
-}
-
-#[test]
 fn adapter_combined_function_count() {
     let total: usize = all_adapters().iter().map(|a| a.functions.len()).sum();
-    // h3=8, pg_builtins=12, postgis=20, postgis_raster=7 = 47
-    assert_eq!(total, 47);
+    // h3=4, postgis=4, postgis_raster=3 = 11
+    assert_eq!(total, 11);
 }
 
 #[test]
@@ -765,7 +740,7 @@ fn adapter_no_conflicting_strategies_across_adapters() {
 
 #[test]
 fn adapter_schemas_are_valid() {
-    let valid_schemas = ["public", "pg_catalog"];
+    let valid_schemas = ["public"];
     for adapter in all_adapters() {
         for func in &adapter.functions {
             assert!(
@@ -813,7 +788,7 @@ fn registry_register_all_adapters() {
     for adapter in all_adapters() {
         reg.register_adapter(adapter);
     }
-    assert_eq!(reg.adapter_count(), 4);
+    assert_eq!(reg.adapter_count(), 3);
 }
 
 #[test]
@@ -824,7 +799,6 @@ fn registry_adapters_iterable() {
     }
     let names: Vec<&str> = reg.adapters().iter().map(|a| a.name).collect();
     assert!(names.contains(&"h3"));
-    assert!(names.contains(&"pg_builtins"));
     assert!(names.contains(&"postgis"));
     assert!(names.contains(&"postgis_raster"));
 }
