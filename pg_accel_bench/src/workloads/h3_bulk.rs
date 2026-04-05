@@ -13,6 +13,10 @@ impl Workload for H3Bulk {
          GROUP BY 1 — tests GpuH3 bulk cell ops"
     }
 
+    fn category(&self) -> &'static str {
+        "gpu_h3"
+    }
+
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_h3_points".to_owned(),

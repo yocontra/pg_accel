@@ -9,7 +9,11 @@ impl Workload for TopkWide {
     }
 
     fn description(&self) -> &'static str {
-        "ORDER BY val LIMIT 100 on wide rows — tests top-k deferral"
+        "ORDER BY val LIMIT 100 on wide rows — regression: tests top-k deferral (1.00x expected)"
+    }
+
+    fn category(&self) -> &'static str {
+        "regression"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

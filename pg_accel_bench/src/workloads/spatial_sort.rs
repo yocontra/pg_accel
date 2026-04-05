@@ -14,6 +14,10 @@ impl Workload for SpatialSort {
          — tests mixed spatial + sort (k-nearest)"
     }
 
+    fn category(&self) -> &'static str {
+        "mixed"
+    }
+
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_spatial_sort".to_owned(),

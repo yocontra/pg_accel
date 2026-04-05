@@ -1,59 +1,128 @@
-mod aggregate;
-mod fts_rank;
-mod gpu_expr_filter;
+// --- GPU Reduce ---
+mod gpu_reduce_scaling;
+mod gpu_reduce_sum;
+mod reduce_variants;
+// --- GPU HashAgg ---
+mod gpu_hashagg_med_card;
 mod grouped_agg;
 mod grouped_agg_high_card;
-mod h3_bulk;
-mod hash_join;
-mod index_recheck;
-mod join_residual;
+mod hashagg_sweep;
+// --- GPU Sort ---
+mod gpu_sort_multikey;
+mod gpu_sort_topk_wide;
 mod large_sort;
-mod oltp_point;
+mod sort_variants;
+// --- GPU HashJoin ---
+mod gpu_hashjoin_filter;
+mod gpu_hashjoin_large_build;
+mod hash_join;
+mod hashjoin_sweep;
+// --- GPU Spatial ---
+mod index_recheck;
 mod proximity;
-mod raster_algebra;
-mod simple_agg;
-mod small_table;
-mod spatial_agg;
+mod spatial_complex_poly;
+mod spatial_contains;
 mod spatial_filter;
 mod spatial_join;
-mod spatial_sort;
-mod topk_sort;
-mod topk_wide;
+mod spatial_megapoly;
+mod spatial_multi_pred;
+mod spatial_selectivity;
+mod spatial_selectivity_sweep;
+mod spatial_shapes;
+mod vertex_sweep;
+// --- GPU H3 ---
+mod h3_bulk;
+mod h3_cell_to_parent;
+mod h3_grid_distance;
+mod h3_resolution_sweep;
+mod h3_variants;
+// --- GPU Expr ---
+mod expr_math;
+mod expr_variants;
+mod gpu_expr_complex;
+mod gpu_expr_filter;
+mod gpu_expr_null_heavy;
+// --- GPU Raster ---
+mod raster_variants;
+// --- GPU Window ---
 mod window_analytics;
+mod window_variants;
+// --- SSBM ---
+mod ssbm;
+// --- Real Boundary (realistic data from plazafyi/boundaries) ---
+mod real_boundary;
+// --- Mixed ---
+mod filtered_grouped_agg;
+mod mixed_variants;
+mod scale_sweep;
+mod spatial_agg;
+mod spatial_sort;
+// --- Regression ---
+mod oltp_point;
+mod small_table;
+mod topk_wide;
 
-pub use aggregate::Aggregate;
-pub use fts_rank::FtsRank;
+pub use filtered_grouped_agg::FilteredGroupedAgg;
+pub use gpu_expr_complex::GpuExprComplex;
 pub use gpu_expr_filter::GpuExprFilter;
+pub use gpu_expr_null_heavy::GpuExprNullHeavy;
+pub use gpu_hashagg_med_card::GpuHashaggMedCard;
+pub use gpu_hashjoin_filter::GpuHashjoinFilter;
+pub use gpu_hashjoin_large_build::GpuHashjoinLargeBuild;
+pub use gpu_reduce_scaling::GpuReduceScaling;
+pub use gpu_reduce_sum::GpuReduceSum;
+pub use gpu_sort_multikey::GpuSortMultikey;
+pub use gpu_sort_topk_wide::GpuSortTopkWide;
 pub use grouped_agg::GroupedAgg;
 pub use grouped_agg_high_card::GroupedAggHighCard;
 pub use h3_bulk::H3Bulk;
+pub use h3_cell_to_parent::H3CellToParent;
+pub use h3_grid_distance::H3GridDistance;
+pub use h3_resolution_sweep::H3ResolutionSweep;
 pub use hash_join::HashJoin;
 pub use index_recheck::IndexRecheck;
-pub use join_residual::JoinResidual;
 pub use large_sort::LargeSort;
 pub use oltp_point::OltpPoint;
 pub use proximity::Proximity;
-pub use raster_algebra::RasterAlgebra;
-pub use simple_agg::SimpleAgg;
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
+pub use spatial_complex_poly::SpatialComplexPoly;
+pub use spatial_contains::SpatialContains;
 pub use spatial_filter::SpatialFilter;
 pub use spatial_join::SpatialJoin;
+pub use spatial_multi_pred::SpatialMultiPred;
+pub use spatial_selectivity::SpatialSelectivity;
 pub use spatial_sort::SpatialSort;
-pub use topk_sort::TopkSort;
+pub use ssbm::{
+    SsbmQ1_1, SsbmQ1_2, SsbmQ1_3, SsbmQ2_1, SsbmQ2_2, SsbmQ2_3, SsbmQ3_1, SsbmQ3_2, SsbmQ3_3,
+    SsbmQ3_4, SsbmQ4_1, SsbmQ4_2, SsbmQ4_3,
+};
 pub use topk_wide::TopkWide;
 pub use window_analytics::WindowAnalytics;
 
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
-    /// Short identifier for this workload (e.g. `"simple_agg"`).
+    /// Short identifier for this workload (e.g. `"gpu_reduce_sum"`).
     fn name(&self) -> &'static str;
 
     /// Human-readable description of what this workload tests.
     fn description(&self) -> &'static str;
 
+    /// Workload category for `--category` filtering.
+    fn category(&self) -> &'static str {
+        "gpu"
+    }
+
     /// SQL statements to create and populate benchmark tables.
     fn setup_sql(&self, rows: usize) -> Vec<String>;
+
+    /// SQL statements to execute before each EXPLAIN ANALYZE measurement.
+    ///
+    /// Use this for session-level settings like `SET work_mem = '4MB'` that
+    /// must be active during the benchmark query but are not part of setup.
+    fn pre_query_sql(&self) -> Vec<String> {
+        vec![]
+    }
 
     /// The query to benchmark under `EXPLAIN ANALYZE`.
     fn query_sql(&self) -> String;
@@ -65,33 +134,341 @@ pub trait Workload: Send + Sync {
 /// Return all registered workloads.
 pub fn all_workloads() -> Vec<Box<dyn Workload>> {
     vec![
-        // --- Acceleration workloads (expect speedup) ---
-        Box::new(SimpleAgg),
-        Box::new(Aggregate),
-        Box::new(SpatialJoin),
-        Box::new(Proximity),
-        Box::new(LargeSort),
-        Box::new(TopkSort),
-        Box::new(H3Bulk),
-        Box::new(JoinResidual),
-        Box::new(IndexRecheck),
-        Box::new(SpatialFilter),
-        Box::new(FtsRank),
-        Box::new(RasterAlgebra),
-        Box::new(GpuExprFilter),
-        Box::new(TopkWide),
-        // --- Grouped aggregation workloads ---
+        // --- GPU Reduce (original) ---
+        Box::new(GpuReduceSum),
+        Box::new(GpuReduceScaling),
+        // --- GPU Reduce (variants) ---
+        Box::new(reduce_variants::REDUCE_SUM_F32),
+        Box::new(reduce_variants::REDUCE_SUM_F64),
+        Box::new(reduce_variants::REDUCE_SUM_I64),
+        Box::new(reduce_variants::REDUCE_MIN_F64),
+        Box::new(reduce_variants::REDUCE_MAX_F64),
+        Box::new(reduce_variants::REDUCE_MULTI),
+        // --- GPU HashAgg (original) ---
         Box::new(GroupedAgg),
         Box::new(GroupedAggHighCard),
+        Box::new(GpuHashaggMedCard),
+        // --- GPU HashAgg (sweep) ---
+        Box::new(hashagg_sweep::HashAggSweep {
+            name: "hashagg_10g",
+            description: "GROUP BY 10 groups — low-cardinality GPU hash agg",
+            num_groups: 10,
+        }),
+        Box::new(hashagg_sweep::HashAggSweep {
+            name: "hashagg_100g",
+            description: "GROUP BY 100 groups — medium-cardinality GPU hash agg",
+            num_groups: 100,
+        }),
+        Box::new(hashagg_sweep::HashAggSweep {
+            name: "hashagg_1kg",
+            description: "GROUP BY 1K groups — GPU hash agg",
+            num_groups: 1_000,
+        }),
+        Box::new(hashagg_sweep::HashAggSweep {
+            name: "hashagg_10kg",
+            description: "GROUP BY 10K groups — high-cardinality GPU hash agg",
+            num_groups: 10_000,
+        }),
+        // --- GPU Sort (original) ---
+        Box::new(LargeSort),
+        Box::new(GpuSortMultikey),
+        Box::new(GpuSortTopkWide),
+        // --- GPU Sort (type variants) ---
+        Box::new(sort_variants::SORT_INT4),
+        Box::new(sort_variants::SORT_INT8),
+        Box::new(sort_variants::SORT_FLOAT4),
+        Box::new(sort_variants::SORT_FLOAT8),
+        // --- GPU HashJoin (original) ---
         Box::new(HashJoin),
-        // --- Window function workloads ---
+        Box::new(GpuHashjoinLargeBuild),
+        Box::new(GpuHashjoinFilter),
+        // --- GPU HashJoin (sweep) ---
+        Box::new(hashjoin_sweep::HashJoinSweep {
+            name: "hashjoin_100_1m",
+            description: "inner=100 outer=1M — tiny build, massive probe",
+            inner_rows: 100,
+        }),
+        Box::new(hashjoin_sweep::HashJoinSweep {
+            name: "hashjoin_1k_1m",
+            description: "inner=1K outer=1M — small build, large probe",
+            inner_rows: 1_000,
+        }),
+        Box::new(hashjoin_sweep::HashJoinSweep {
+            name: "hashjoin_10k_1m",
+            description: "inner=10K outer=1M — medium build",
+            inner_rows: 10_000,
+        }),
+        Box::new(hashjoin_sweep::HashJoinSweep {
+            name: "hashjoin_100k_1m",
+            description: "inner=100K outer=1M — large build",
+            inner_rows: 100_000,
+        }),
+        // --- GPU Spatial (original) ---
+        Box::new(SpatialFilter),
+        Box::new(SpatialComplexPoly),
+        Box::new(SpatialSelectivity),
+        // --- GPU Spatial Megapoly (vertex-count sweep) ---
+        Box::new(spatial_megapoly::SpatialMegaPoly {
+            name: "spatial_mega_100v",
+            description: "ST_Intersects ~100-vertex polygon — compute-bound GPU",
+            segments: 25,
+        }),
+        Box::new(spatial_megapoly::SpatialMegaPoly {
+            name: "spatial_mega_250v",
+            description: "ST_Intersects ~250-vertex polygon — compute-bound GPU",
+            segments: 63,
+        }),
+        Box::new(spatial_megapoly::SpatialMegaPoly {
+            name: "spatial_mega_500v",
+            description: "ST_Intersects ~500-vertex polygon — compute-bound GPU",
+            segments: 125,
+        }),
+        Box::new(spatial_megapoly::SpatialMegaPoly {
+            name: "spatial_mega_1kv",
+            description: "ST_Intersects ~1000-vertex polygon — heavily compute-bound GPU",
+            segments: 250,
+        }),
+        Box::new(spatial_megapoly::SpatialMegaPoly {
+            name: "spatial_mega_2kv",
+            description: "ST_Intersects ~2000-vertex polygon — massively compute-bound GPU",
+            segments: 500,
+        }),
+        Box::new(spatial_megapoly::SpatialMegaPoly {
+            name: "spatial_mega_5kv",
+            description: "ST_Intersects ~5000-vertex polygon — extreme compute-bound GPU",
+            segments: 1250,
+        }),
+        // --- Vertex sweep (0→1M vertices, crossover analysis) ---
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_4v",
+            description: "ST_Intersects ~4-vertex polygon (rectangle)",
+            segments: 1,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_16v",
+            description: "ST_Intersects ~16-vertex polygon",
+            segments: 4,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_32v",
+            description: "ST_Intersects ~32-vertex polygon",
+            segments: 8,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_64v",
+            description: "ST_Intersects ~64-vertex polygon",
+            segments: 16,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_128v",
+            description: "ST_Intersects ~128-vertex polygon",
+            segments: 32,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_256v",
+            description: "ST_Intersects ~256-vertex polygon",
+            segments: 64,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_500v",
+            description: "ST_Intersects ~500-vertex polygon",
+            segments: 125,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_750v",
+            description: "ST_Intersects ~750-vertex polygon (near crossover)",
+            segments: 188,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_1kv",
+            description: "ST_Intersects ~1000-vertex polygon",
+            segments: 250,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_1500v",
+            description: "ST_Intersects ~1500-vertex polygon",
+            segments: 375,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_2kv",
+            description: "ST_Intersects ~2000-vertex polygon",
+            segments: 500,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_3kv",
+            description: "ST_Intersects ~3000-vertex polygon",
+            segments: 750,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_5kv",
+            description: "ST_Intersects ~5000-vertex polygon",
+            segments: 1250,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_10kv",
+            description: "ST_Intersects ~10000-vertex polygon",
+            segments: 2500,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_25kv",
+            description: "ST_Intersects ~25000-vertex polygon",
+            segments: 6250,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_50kv",
+            description: "ST_Intersects ~50000-vertex polygon",
+            segments: 12500,
+        }),
+        Box::new(vertex_sweep::VertexSweep {
+            name: "vsweep_100kv",
+            description: "ST_Intersects ~100000-vertex polygon",
+            segments: 25000,
+        }),
+        // --- GPU Spatial Shapes ---
+        Box::new(spatial_shapes::SpatialShape {
+            name: "spatial_concentric",
+            description: "ST_Intersects donut polygon ~4000 vertices — multi-ring GPU test",
+            polygon_sql: spatial_shapes::CONCENTRIC_SQL,
+        }),
+        Box::new(spatial_shapes::SpatialShape {
+            name: "spatial_star_1kv",
+            description: "ST_Intersects star polygon ~1000 vertices — concave GPU test",
+            polygon_sql: spatial_shapes::STAR_SQL,
+        }),
+        Box::new(spatial_shapes::SpatialShape {
+            name: "spatial_multihole",
+            description: "ST_Intersects polygon with 10 holes ~2200 vertices",
+            polygon_sql: spatial_shapes::MULTIHOLE_SQL,
+        }),
+        Box::new(spatial_shapes::SpatialShape {
+            name: "spatial_zigzag",
+            description: "ST_Intersects zigzag polygon ~1000 vertices — many crossings",
+            polygon_sql: spatial_shapes::ZIGZAG_SQL,
+        }),
+        // --- GPU Spatial Selectivity Sweep ---
+        Box::new(spatial_selectivity_sweep::SpatialSelectivitySweep {
+            name: "spatial_sel_1pct",
+            description: "ST_Intersects 500v, ~1% selectivity",
+            inside_fraction: 0.01,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivitySweep {
+            name: "spatial_sel_10pct",
+            description: "ST_Intersects 500v, ~10% selectivity",
+            inside_fraction: 0.10,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivitySweep {
+            name: "spatial_sel_50pct",
+            description: "ST_Intersects 500v, ~50% selectivity",
+            inside_fraction: 0.50,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivitySweep {
+            name: "spatial_sel_90pct",
+            description: "ST_Intersects 500v, ~90% selectivity",
+            inside_fraction: 0.90,
+        }),
+        // --- GPU H3 (original) ---
+        Box::new(H3Bulk),
+        Box::new(H3CellToParent),
+        Box::new(H3GridDistance),
+        Box::new(H3ResolutionSweep),
+        // --- GPU H3 (variants) ---
+        Box::new(h3_variants::H3_LATLNG_RES3),
+        Box::new(h3_variants::H3_LATLNG_RES9),
+        Box::new(h3_variants::H3_LATLNG_RES15),
+        Box::new(h3_variants::H3_DIST_NEAR),
+        Box::new(h3_variants::H3_DIST_FAR),
+        Box::new(h3_variants::H3_PARENT_DEEP),
+        // --- GPU Expr (original) ---
+        Box::new(GpuExprFilter),
+        Box::new(GpuExprComplex),
+        Box::new(GpuExprNullHeavy),
+        // --- GPU Expr (variants) ---
+        Box::new(expr_variants::EXPR_2PRED),
+        Box::new(expr_variants::EXPR_3PRED),
+        Box::new(expr_variants::EXPR_4PRED),
+        Box::new(expr_variants::EXPR_ARITH_CHAIN),
+        Box::new(expr_variants::EXPR_DEEP_ARITH),
+        Box::new(expr_variants::EXPR_MULTI_OR),
+        // --- GPU Expr (math functions) ---
+        Box::new(expr_math::EXPR_SQRT_HEAVY),
+        Box::new(expr_math::EXPR_POW_CHAIN),
+        Box::new(expr_math::EXPR_MATH_MIXED),
+        // --- GPU Window (original) ---
         Box::new(WindowAnalytics),
-        // --- Mixed workloads (spatial + aggregate/sort) ---
+        // --- GPU Window (variants) ---
+        Box::new(window_variants::WINDOW_ROW_NUMBER),
+        Box::new(window_variants::WINDOW_RANK),
+        Box::new(window_variants::WINDOW_DENSE_RANK),
+        Box::new(window_variants::WINDOW_RUNNING_SUM),
+        Box::new(window_variants::WINDOW_LAG),
+        Box::new(window_variants::WINDOW_LEAD),
+        // --- SSBM (Star Schema Benchmark — PG-Strom comparison) ---
+        Box::new(SsbmQ1_1),
+        Box::new(SsbmQ1_2),
+        Box::new(SsbmQ1_3),
+        Box::new(SsbmQ2_1),
+        Box::new(SsbmQ2_2),
+        Box::new(SsbmQ2_3),
+        Box::new(SsbmQ3_1),
+        Box::new(SsbmQ3_2),
+        Box::new(SsbmQ3_3),
+        Box::new(SsbmQ3_4),
+        Box::new(SsbmQ4_1),
+        Box::new(SsbmQ4_2),
+        Box::new(SsbmQ4_3),
+        // --- Mixed workloads (original) ---
         Box::new(SpatialAgg),
         Box::new(SpatialSort),
+        Box::new(FilteredGroupedAgg),
+        // --- Mixed workloads (variants) ---
+        Box::new(mixed_variants::MIXED_MEGAPOLY_AGG),
+        Box::new(mixed_variants::MIXED_EXPR_AGG),
+        Box::new(mixed_variants::MIXED_JOIN_AGG),
+        Box::new(mixed_variants::MIXED_SPATIAL_SORT),
+        // --- Scale sweep ---
+        Box::new(scale_sweep::ScaleSweep {
+            name: "scale_100k_mega500v",
+            description: "500v polygon at 100K rows — scale sweep baseline",
+            fixed_rows: 100_000,
+        }),
+        Box::new(scale_sweep::ScaleSweep {
+            name: "scale_1m_mega500v",
+            description: "500v polygon at 1M rows — scale sweep mid",
+            fixed_rows: 1_000_000,
+        }),
+        Box::new(scale_sweep::ScaleSweep {
+            name: "scale_5m_mega500v",
+            description: "500v polygon at 5M rows — scale sweep large",
+            fixed_rows: 5_000_000,
+        }),
+        // --- Raster workloads ---
+        Box::new(raster_variants::RASTER_NDVI),
+        Box::new(raster_variants::RASTER_SLOPE),
+        Box::new(raster_variants::RASTER_RECLASS),
+        Box::new(raster_variants::RASTER_ALGEBRA_DEEP),
+        // --- Real Boundary (realistic data from plazafyi/boundaries) ---
+        Box::new(real_boundary::REAL_PIP_COMPLEX),
+        Box::new(real_boundary::REAL_MULTIPOLY_CONTAIN),
+        Box::new(real_boundary::REAL_SPATIAL_JOIN_DENSE),
+        Box::new(real_boundary::REAL_BIDIRECTIONAL_CONTAIN),
+        Box::new(real_boundary::REAL_WINDOW_REGION_RANK),
+        Box::new(real_boundary::REAL_GROUPED_REGION_STATS),
+        Box::new(real_boundary::REAL_HASHJOIN_BOUNDARY),
+        Box::new(real_boundary::REAL_TOPK_BOUNDARY),
+        Box::new(real_boundary::REAL_SPATIAL_FILTER_AGG),
+        Box::new(real_boundary::REAL_SPATIAL_JOIN_WINDOW),
+        Box::new(real_boundary::REAL_EXPR_SPATIAL),
+        Box::new(real_boundary::REAL_BOUNDARY_ANALYTICS),
+        Box::new(real_boundary::REAL_SPATIAL_KNN_AGG),
         // --- Regression workloads (expect ~1.00x, proving no overhead) ---
+        Box::new(Proximity),
+        Box::new(IndexRecheck),
+        Box::new(SpatialJoin),
+        Box::new(SpatialContains),
+        Box::new(SpatialMultiPred),
         Box::new(OltpPoint),
         Box::new(SmallTable),
+        Box::new(TopkWide),
     ]
 }
 
@@ -108,14 +485,90 @@ pub fn find_workload(name: &str) -> Option<Box<dyn Workload>> {
 #[must_use]
 pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
     vec![
+        // GPU Spatial (original)
         ("spatial_join", "postgis"),
         ("proximity", "postgis"),
         ("index_recheck", "postgis"),
         ("spatial_filter", "postgis"),
-        ("h3_bulk", "h3"),
-        ("raster_algebra", "postgis_raster"),
+        ("spatial_contains", "postgis"),
+        ("spatial_multi_pred", "postgis"),
+        ("spatial_complex_poly", "postgis"),
+        ("spatial_selectivity", "postgis"),
+        // GPU Spatial (megapoly)
+        ("spatial_mega_100v", "postgis"),
+        ("spatial_mega_250v", "postgis"),
+        ("spatial_mega_500v", "postgis"),
+        ("spatial_mega_1kv", "postgis"),
+        ("spatial_mega_2kv", "postgis"),
+        ("spatial_mega_5kv", "postgis"),
+        // Vertex sweep
+        ("vsweep_4v", "postgis"),
+        ("vsweep_16v", "postgis"),
+        ("vsweep_32v", "postgis"),
+        ("vsweep_64v", "postgis"),
+        ("vsweep_128v", "postgis"),
+        ("vsweep_256v", "postgis"),
+        ("vsweep_500v", "postgis"),
+        ("vsweep_750v", "postgis"),
+        ("vsweep_1kv", "postgis"),
+        ("vsweep_1500v", "postgis"),
+        ("vsweep_2kv", "postgis"),
+        ("vsweep_3kv", "postgis"),
+        ("vsweep_5kv", "postgis"),
+        ("vsweep_10kv", "postgis"),
+        ("vsweep_25kv", "postgis"),
+        ("vsweep_50kv", "postgis"),
+        ("vsweep_100kv", "postgis"),
+        // GPU Spatial (shapes)
+        ("spatial_concentric", "postgis"),
+        ("spatial_star_1kv", "postgis"),
+        ("spatial_multihole", "postgis"),
+        ("spatial_zigzag", "postgis"),
+        // GPU Spatial (selectivity sweep)
+        ("spatial_sel_1pct", "postgis"),
+        ("spatial_sel_10pct", "postgis"),
+        ("spatial_sel_50pct", "postgis"),
+        ("spatial_sel_90pct", "postgis"),
+        // Scale sweep (spatial)
+        ("scale_100k_mega500v", "postgis"),
+        ("scale_1m_mega500v", "postgis"),
+        ("scale_5m_mega500v", "postgis"),
+        // Mixed spatial
         ("spatial_agg", "postgis"),
         ("spatial_sort", "postgis"),
+        ("mixed_megapoly_agg", "postgis"),
+        ("mixed_spatial_sort", "postgis"),
+        // GPU H3 (original)
+        ("h3_bulk", "h3"),
+        ("h3_cell_to_parent", "h3"),
+        ("h3_grid_distance", "h3"),
+        ("h3_resolution_sweep", "h3"),
+        // GPU H3 (variants)
+        ("h3_latlng_res3", "h3"),
+        ("h3_latlng_res9", "h3"),
+        ("h3_latlng_res15", "h3"),
+        ("h3_dist_near", "h3"),
+        ("h3_dist_far", "h3"),
+        ("h3_parent_deep", "h3"),
+        // Real Boundary (all require PostGIS + real_boundaries staging table)
+        ("real_pip_complex", "postgis"),
+        ("real_multipoly_contain", "postgis"),
+        ("real_spatial_join_dense", "postgis"),
+        ("real_bidirectional_contain", "postgis"),
+        ("real_window_region_rank", "postgis"),
+        ("real_grouped_region_stats", "postgis"),
+        ("real_hashjoin_boundary", "postgis"),
+        ("real_topk_boundary", "postgis"),
+        ("real_spatial_filter_agg", "postgis"),
+        ("real_spatial_join_window", "postgis"),
+        ("real_expr_spatial", "postgis"),
+        ("real_boundary_analytics", "postgis"),
+        ("real_spatial_knn_agg", "postgis"),
+        // GPU Raster
+        ("raster_ndvi", "postgis_raster"),
+        ("raster_slope", "postgis_raster"),
+        ("raster_reclass", "postgis_raster"),
+        ("raster_algebra_deep", "postgis_raster"),
     ]
 }
 
@@ -298,8 +751,11 @@ mod tests {
 
     #[test]
     fn test_find_workload_case_insensitive() {
-        let wl = find_workload("SIMPLE_AGG");
-        assert!(wl.is_some(), "should find simple_agg case-insensitively");
+        let wl = find_workload("GPU_REDUCE_SUM");
+        assert!(
+            wl.is_some(),
+            "should find gpu_reduce_sum case-insensitively"
+        );
     }
 
     #[test]

@@ -9,11 +9,16 @@ impl Workload for HashJoin {
     }
 
     fn description(&self) -> &'static str {
-        "Equi-join 1M orders x 10K customers with GROUP BY + SUM — tests GPU hash join"
+        "Equi-join orders x customers with GROUP BY + SUM — tests GPU hash join"
+    }
+
+    fn category(&self) -> &'static str {
+        "gpu_hashjoin"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
-        let customer_count = (rows / 100).max(1);
+        // Scale dimension table: 1K at 100K rows, 10K at 1M, 100K at 10M.
+        let customer_count = (rows / 100).clamp(100, 100_000);
         vec![
             "DROP TABLE IF EXISTS bench_orders".to_owned(),
             "DROP TABLE IF EXISTS bench_customers".to_owned(),

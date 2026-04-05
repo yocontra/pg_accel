@@ -10,8 +10,12 @@ impl Workload for IndexRecheck {
 
     fn description(&self) -> &'static str {
         "SELECT count(*) FROM bench_gist_points \
-         WHERE geom <@ ST_MakeEnvelope(-74.1, 40.6, -73.8, 40.9, 4326) \
+         WHERE ST_Within(geom, ST_MakeEnvelope(-74.1, 40.6, -73.8, 40.9, 4326)) \
          — tests BatchedEval on GiST index recheck"
+    }
+
+    fn category(&self) -> &'static str {
+        "regression"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -37,7 +41,7 @@ impl Workload for IndexRecheck {
 
     fn query_sql(&self) -> String {
         "SELECT count(*) FROM bench_gist_points \
-         WHERE geom <@ ST_MakeEnvelope(-74.1, 40.6, -73.8, 40.9, 4326)"
+         WHERE ST_Within(geom, ST_MakeEnvelope(-74.1, 40.6, -73.8, 40.9, 4326))"
             .to_owned()
     }
 

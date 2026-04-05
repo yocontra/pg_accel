@@ -20,6 +20,10 @@ impl Workload for OltpPoint {
          regression: pg_accel should NOT accelerate this (1.00x expected)"
     }
 
+    fn category(&self) -> &'static str {
+        "regression"
+    }
+
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_oltp".to_owned(),

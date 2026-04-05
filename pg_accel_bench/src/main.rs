@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::report::BenchReport;
 
-const DEFAULT_CONNECTION: &str = "host=localhost port=5488 user=postgres dbname=pgaccel_a9";
+const DEFAULT_CONNECTION: &str = "host=localhost port=28817 dbname=postgres";
 
 #[derive(Parser)]
 #[command(name = "pg_accel_bench", about = "Benchmark harness for pg_accel")]
@@ -21,11 +21,11 @@ enum Command {
     /// Create benchmark tables and populate with test data.
     Setup {
         /// Number of rows to generate.
-        #[arg(long, default_value_t = 100_000)]
+        #[arg(long, default_value_t = 1_000_000)]
         rows: usize,
 
-        /// Seed for deterministic random data generation (0 = random).
-        #[arg(long, default_value_t = 0)]
+        /// Seed for deterministic random data generation.
+        #[arg(long, default_value_t = 42)]
         seed: u64,
 
         /// PostgreSQL connection string.
@@ -35,6 +35,10 @@ enum Command {
         /// Workload name (omit to set up all workloads).
         #[arg(long)]
         workload: Option<String>,
+
+        /// Filter workloads by category (comma-separated, e.g. `gpu_spatial,ssbm`).
+        #[arg(long)]
+        category: Option<String>,
     },
 
     /// Run benchmarks and print results.
@@ -43,21 +47,20 @@ enum Command {
         #[arg(long)]
         workload: Option<String>,
 
-        /// Number of iterations per workload (minimum 10 recommended for
-        /// statistical significance).
-        #[arg(long, default_value_t = 30)]
+        /// Filter workloads by category (comma-separated, e.g. `gpu_spatial,ssbm`).
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Number of iterations per workload (minimum 10 for statistical validity).
+        #[arg(long, default_value_t = 10)]
         iterations: usize,
 
         /// Number of warmup iterations (excluded from statistics).
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 3)]
         warmup: usize,
 
-        /// Number of rows for setup (used if tables don't exist yet).
-        #[arg(long, default_value_t = 100_000)]
-        rows: usize,
-
-        /// Seed for deterministic random data generation (0 = random).
-        #[arg(long, default_value_t = 0)]
+        /// Seed for deterministic random data generation.
+        #[arg(long, default_value_t = 42)]
         seed: u64,
 
         /// PostgreSQL connection string.
@@ -89,8 +92,12 @@ enum Command {
         #[arg(long)]
         workload: Option<String>,
 
+        /// Filter workloads by category (comma-separated, e.g. `gpu_spatial,ssbm`).
+        #[arg(long)]
+        category: Option<String>,
+
         /// Number of rows (used for setup_sql generation).
-        #[arg(long, default_value_t = 100_000)]
+        #[arg(long, default_value_t = 1_000_000)]
         rows: usize,
     },
 }
@@ -141,33 +148,44 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             seed,
             connection,
             workload,
-        } => cmd_setup(&connection, rows, seed, workload.as_deref()),
+            category,
+        } => cmd_setup(
+            &connection,
+            rows,
+            seed,
+            workload.as_deref(),
+            category.as_deref(),
+        ),
         Command::Run {
             workload,
+            category,
             iterations,
             warmup,
-            rows,
             seed,
             connection,
             format,
             dry_run,
         } => {
             if dry_run {
-                cmd_dry_run(workload.as_deref(), rows)
+                cmd_dry_run(workload.as_deref(), category.as_deref())
             } else {
                 cmd_run(
                     &connection,
                     workload.as_deref(),
+                    category.as_deref(),
                     iterations,
                     warmup,
-                    rows,
                     seed,
                     &format,
                 )
             }
         }
         Command::Report { format } => cmd_report(&format),
-        Command::Validate { workload, rows } => cmd_validate(workload.as_deref(), rows),
+        Command::Validate {
+            workload,
+            category,
+            rows,
+        } => cmd_validate(workload.as_deref(), category.as_deref(), rows),
     }
 }
 
@@ -176,8 +194,9 @@ fn cmd_setup(
     rows: usize,
     seed: u64,
     workload_name: Option<&str>,
+    category: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let workloads = resolve_workloads(workload_name)?;
+    let workloads = resolve_workloads(workload_name, category)?;
     for w in &workloads {
         runner::setup(connection, w.as_ref(), rows, seed)?;
     }
@@ -187,14 +206,14 @@ fn cmd_setup(
 fn cmd_run(
     connection: &str,
     workload_name: Option<&str>,
+    category: Option<&str>,
     iterations: usize,
     warmup: usize,
-    rows: usize,
     seed: u64,
     format: &ReportFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let workloads = resolve_workloads(workload_name)?;
-    let report = runner::run_all(connection, &workloads, rows, iterations, warmup, seed)?;
+    let workloads = resolve_workloads(workload_name, category)?;
+    let report = runner::run_all(connection, &workloads, iterations, warmup, seed)?;
     print_report(&report, format)?;
     Ok(())
 }
@@ -208,21 +227,30 @@ fn cmd_report(format: &ReportFormat) -> Result<(), Box<dyn std::error::Error>> {
 
 fn resolve_workloads(
     name: Option<&str>,
+    category: Option<&str>,
 ) -> Result<Vec<Box<dyn workloads::Workload>>, Box<dyn std::error::Error>> {
-    match name {
-        Some(n) => {
-            let w = workloads::find_workload(n).ok_or_else(|| format!("unknown workload: {n}"))?;
-            Ok(vec![w])
+    if let Some(n) = name {
+        let w = workloads::find_workload(n).ok_or_else(|| format!("unknown workload: {n}"))?;
+        Ok(vec![w])
+    } else {
+        let mut wls = workloads::all_workloads();
+        if let Some(cats) = category {
+            let allowed: Vec<&str> = cats.split(',').map(str::trim).collect();
+            wls.retain(|w| allowed.iter().any(|c| w.category() == *c));
+            if wls.is_empty() {
+                return Err(format!("no workloads match category filter: {cats}").into());
+            }
         }
-        None => Ok(workloads::all_workloads()),
+        Ok(wls)
     }
 }
 
 fn cmd_validate(
     workload_name: Option<&str>,
+    category: Option<&str>,
     rows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let wls = resolve_workloads(workload_name)?;
+    let wls = resolve_workloads(workload_name, category)?;
     let ext_reqs = workloads::extension_requirements();
     let mut total_issues = 0;
 
@@ -260,14 +288,18 @@ fn cmd_validate(
     }
 }
 
-fn cmd_dry_run(workload_name: Option<&str>, rows: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let wls = resolve_workloads(workload_name)?;
+fn cmd_dry_run(
+    workload_name: Option<&str>,
+    category: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let wls = resolve_workloads(workload_name, category)?;
     let ext_reqs = workloads::extension_requirements();
+    let sample_rows = runner::ROW_SCALES[0];
 
     // First validate
     let mut total_issues = 0;
     for w in &wls {
-        let issues = workloads::validate_workload(w.as_ref(), rows);
+        let issues = workloads::validate_workload(w.as_ref(), sample_rows);
         for issue in &issues {
             eprintln!("[dry-run] WARNING: {issue}");
         }
@@ -280,6 +312,14 @@ fn cmd_dry_run(workload_name: Option<&str>, rows: usize) -> Result<(), Box<dyn s
 
     // Print execution plan
     println!("=== Dry Run: Benchmark Execution Plan ===\n");
+    println!(
+        "Row scales: {}\n",
+        runner::ROW_SCALES
+            .iter()
+            .map(|r| format!("{r}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     for w in &wls {
         let name = w.name();
         let required_exts: Vec<&str> = ext_reqs
@@ -294,8 +334,8 @@ fn cmd_dry_run(workload_name: Option<&str>, rows: usize) -> Result<(), Box<dyn s
             println!("  Required extensions: {}", required_exts.join(", "));
         }
 
-        println!("  Setup ({} statements):", w.setup_sql(rows).len());
-        for (i, sql) in w.setup_sql(rows).iter().enumerate() {
+        println!("  Setup ({} statements @ {sample_rows} rows):", w.setup_sql(sample_rows).len());
+        for (i, sql) in w.setup_sql(sample_rows).iter().enumerate() {
             let preview = if sql.len() > 80 {
                 format!("{}...", &sql[..77])
             } else {

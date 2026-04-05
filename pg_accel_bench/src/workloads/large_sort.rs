@@ -1,6 +1,8 @@
 use super::Workload;
 
-/// Tests sort acceleration with `ORDER BY ... LIMIT`.
+/// Tests GPU sort on wide rows (~120 bytes/row) where PG external merge sort
+/// spills to disk. GPU sorts only 8-byte key+index pairs, avoiding full-tuple
+/// disk writes.
 pub struct LargeSort;
 
 impl Workload for LargeSort {
@@ -9,27 +11,59 @@ impl Workload for LargeSort {
     }
 
     fn description(&self) -> &'static str {
-        "SELECT * FROM bench_sort_ints ORDER BY x DESC LIMIT 1000 — tests sort acceleration"
+        "SELECT * FROM bench_sort_wide ORDER BY sort_key — wide-row GPU sort vs PG disk spill"
+    }
+
+    fn category(&self) -> &'static str {
+        "gpu_sort"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
-            "DROP TABLE IF EXISTS bench_sort_ints".to_owned(),
-            "CREATE TABLE bench_sort_ints (x bigint NOT NULL)".to_owned(),
+            "DROP TABLE IF EXISTS bench_sort_wide".to_owned(),
+            "CREATE TABLE bench_sort_wide (\
+               id serial PRIMARY KEY, \
+               sort_key float4 NOT NULL, \
+               c01 int4 NOT NULL, \
+               c02 int4 NOT NULL, \
+               c03 int4 NOT NULL, \
+               c04 int4 NOT NULL, \
+               c05 int4 NOT NULL, \
+               c06 int4 NOT NULL, \
+               c07 int4 NOT NULL, \
+               c08 int4 NOT NULL, \
+               c09 int4 NOT NULL\
+             )"
+            .to_owned(),
             format!(
-                "INSERT INTO bench_sort_ints (x) \
-                 SELECT (random() * 2000000 - 1000000)::bigint \
+                "INSERT INTO bench_sort_wide \
+                 (sort_key, c01, c02, c03, c04, c05, c06, c07, c08, c09) \
+                 SELECT \
+                   (random() * 1000000)::float4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4, \
+                   (random() * 1000000)::int4 \
                  FROM generate_series(1, {rows})"
             ),
-            "ANALYZE bench_sort_ints".to_owned(),
+            "ANALYZE bench_sort_wide".to_owned(),
         ]
     }
 
+    fn pre_query_sql(&self) -> Vec<String> {
+        vec!["SET work_mem = '4MB'".to_owned()]
+    }
+
     fn query_sql(&self) -> String {
-        "SELECT * FROM bench_sort_ints ORDER BY x DESC LIMIT 1000".to_owned()
+        "SELECT * FROM bench_sort_wide ORDER BY sort_key".to_owned()
     }
 
     fn cleanup_sql(&self) -> Vec<String> {
-        vec!["DROP TABLE IF EXISTS bench_sort_ints".to_owned()]
+        vec!["DROP TABLE IF EXISTS bench_sort_wide".to_owned()]
     }
 }

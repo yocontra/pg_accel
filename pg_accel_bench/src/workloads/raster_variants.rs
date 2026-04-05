@@ -1,0 +1,157 @@
+use super::Workload;
+
+/// Parametric raster map-algebra benchmark.
+pub struct RasterVariant {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub setup_stmts: &'static [&'static str],
+    pub query: &'static str,
+    pub cleanup_stmts: &'static [&'static str],
+}
+
+impl Workload for RasterVariant {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn description(&self) -> &'static str {
+        self.description
+    }
+
+    fn category(&self) -> &'static str {
+        "gpu_raster"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        self.setup_stmts
+            .iter()
+            .map(|s| s.replace("{rows}", &rows.to_string()))
+            .collect()
+    }
+
+    fn query_sql(&self) -> String {
+        self.query.to_owned()
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        self.cleanup_stmts.iter().map(|s| (*s).to_owned()).collect()
+    }
+}
+
+/// NDVI: (B1-B2)/(B1+B2) — 3 FLOPs/pixel
+pub const RASTER_NDVI: RasterVariant = RasterVariant {
+    name: "raster_ndvi",
+    description: "(B1-B2)/(B1+B2) — NDVI map algebra, 3 FLOPs/pixel",
+    setup_stmts: &[
+        "DROP TABLE IF EXISTS bench_raster",
+        "CREATE TABLE bench_raster (\
+           id serial PRIMARY KEY, \
+           rast raster NOT NULL\
+         )",
+        "INSERT INTO bench_raster (rast) \
+         SELECT ST_AddBand(\
+           ST_AddBand(\
+             ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+             1, '32BF'::text, random() * 255, 0\
+           ),\
+           '32BF'::text, random() * 255, 0\
+         ) FROM generate_series(1, {rows})",
+        "ANALYZE bench_raster",
+    ],
+    query: "SELECT count(*) FROM (\
+              SELECT ST_MapAlgebra(\
+                rast, 1, rast, 2, \
+                '([rast1]-[rast2])/([rast1]+[rast2]+0.001)'::text, \
+                '32BF'::text\
+              ) AS result \
+              FROM bench_raster\
+            ) t",
+    cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster"],
+};
+
+/// Slope: sqrt(pow(dzdx,2)+pow(dzdy,2)) — ~35 FLOPs/pixel
+pub const RASTER_SLOPE: RasterVariant = RasterVariant {
+    name: "raster_slope",
+    description: "ST_Slope — ~35 FLOPs/pixel",
+    setup_stmts: &[
+        "DROP TABLE IF EXISTS bench_raster_elev",
+        "CREATE TABLE bench_raster_elev (\
+           id serial PRIMARY KEY, \
+           rast raster NOT NULL\
+         )",
+        "INSERT INTO bench_raster_elev (rast) \
+         SELECT ST_AddBand(\
+           ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+           1, '32BF'::text, random() * 1000, 0\
+         ) FROM generate_series(1, {rows})",
+        "ANALYZE bench_raster_elev",
+    ],
+    query: "SELECT count(*) FROM (\
+              SELECT ST_Slope(rast, 1, '32BF'::text) AS result \
+              FROM bench_raster_elev\
+            ) t",
+    cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster_elev"],
+};
+
+/// Reclassify: 5-class reclassification — 5 FLOPs/pixel
+pub const RASTER_RECLASS: RasterVariant = RasterVariant {
+    name: "raster_reclass",
+    description: "ST_Reclass — 5-class reclassification, 5 FLOPs/pixel",
+    setup_stmts: &[
+        "DROP TABLE IF EXISTS bench_raster_rc",
+        "CREATE TABLE bench_raster_rc (\
+           id serial PRIMARY KEY, \
+           rast raster NOT NULL\
+         )",
+        "INSERT INTO bench_raster_rc (rast) \
+         SELECT ST_AddBand(\
+           ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+           1, '32BF'::text, random() * 255, 0\
+         ) FROM generate_series(1, {rows})",
+        "ANALYZE bench_raster_rc",
+    ],
+    query: "SELECT count(*) FROM (\
+              SELECT ST_Reclass(\
+                rast, \
+                1, \
+                '0-50:1, 50-100:2, 100-150:3, 150-200:4, 200-255:5'::text, \
+                '32BF'::text, 0\
+              ) AS result \
+              FROM bench_raster_rc\
+            ) t",
+    cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster_rc"],
+};
+
+/// Deep algebra: sqrt(pow(B1,2)+pow(B2,2))*log(B3+1) — ~50 FLOPs/pixel
+pub const RASTER_ALGEBRA_DEEP: RasterVariant = RasterVariant {
+    name: "raster_algebra_deep",
+    description: "sqrt(pow(B1,2)+pow(B2,2))*log(B3+1) — deep algebra, ~50 FLOPs/pixel",
+    setup_stmts: &[
+        "DROP TABLE IF EXISTS bench_raster_deep",
+        "CREATE TABLE bench_raster_deep (\
+           id serial PRIMARY KEY, \
+           rast raster NOT NULL\
+         )",
+        "INSERT INTO bench_raster_deep (rast) \
+         SELECT ST_AddBand(\
+           ST_AddBand(\
+             ST_AddBand(\
+               ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+               1, '32BF'::text, random() * 255, 0\
+             ),\
+             '32BF'::text, random() * 255, 0\
+           ),\
+           '32BF'::text, random() * 255, 0\
+         ) FROM generate_series(1, {rows})",
+        "ANALYZE bench_raster_deep",
+    ],
+    query: "SELECT count(*) FROM (\
+              SELECT ST_MapAlgebra(\
+                rast, 1, rast, 2, \
+                'sqrt(pow([rast1],2)+pow([rast2],2))'::text, \
+                '32BF'::text\
+              ) AS result \
+              FROM bench_raster_deep\
+            ) t",
+    cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster_deep"],
+};

@@ -12,6 +12,10 @@ impl Workload for GroupedAgg {
         "GROUP BY dept with SUM, AVG, COUNT — tests GPU hash aggregation"
     }
 
+    fn category(&self) -> &'static str {
+        "gpu_hashagg"
+    }
+
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_employees_agg".to_owned(),

@@ -18,6 +18,10 @@ impl Workload for SpatialFilter {
          — tests GpuSpatial single-table filter"
     }
 
+    fn category(&self) -> &'static str {
+        "gpu_spatial"
+    }
+
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_spatial_pts".to_owned(),
@@ -35,19 +39,22 @@ impl Workload for SpatialFilter {
                  ), 4326) \
                  FROM generate_series(1, {rows})"
             ),
-            "CREATE INDEX ON bench_spatial_pts USING gist (geom)".to_owned(),
+            // No GiST index — force seq scan so GPU evaluates all rows.
             "ANALYZE bench_spatial_pts".to_owned(),
         ]
     }
 
     fn query_sql(&self) -> String {
-        // Reference polygon covering roughly lower Manhattan.
-        // ~25% of points should match, forcing a meaningful recheck volume.
+        // Complex 15-vertex polygon covering roughly central Manhattan.
+        // Without an index, all rows must be evaluated → GPU wins on compute.
         "SELECT count(*) FROM bench_spatial_pts \
          WHERE ST_Intersects(geom, \
            ST_SetSRID(ST_MakePolygon(ST_GeomFromText(\
-             'LINESTRING(-74.02 40.70, -73.97 40.70, -73.97 40.75, \
-                          -74.02 40.75, -74.02 40.70)'\
+             'LINESTRING(-74.02 40.70, -74.00 40.72, -73.98 40.70, \
+                          -73.97 40.72, -73.96 40.71, -73.97 40.74, \
+                          -73.95 40.75, -73.97 40.76, -73.99 40.75, \
+                          -74.00 40.77, -74.02 40.76, -74.03 40.74, \
+                          -74.01 40.73, -74.03 40.72, -74.02 40.70)'\
            )), 4326))"
             .to_owned()
     }

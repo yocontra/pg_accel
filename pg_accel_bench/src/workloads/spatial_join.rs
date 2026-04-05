@@ -13,8 +13,15 @@ impl Workload for SpatialJoin {
          WHERE ST_Contains(g.geom, p.geom) — tests GpuSpatial"
     }
 
+    fn category(&self) -> &'static str {
+        "regression"
+    }
+
     fn setup_sql(&self, rows: usize) -> Vec<String> {
-        let poly_rows = rows / 10;
+        // Polygon count scales with data size. ST_MakeEnvelope produces simple
+        // 4-vertex rectangles. At 1M points / 1K polygons the GiST index keeps
+        // the candidate pair count manageable.
+        let poly_rows = (rows / 1000).clamp(100, 10_000);
         vec![
             "DROP TABLE IF EXISTS bench_points".to_owned(),
             "DROP TABLE IF EXISTS bench_polygons".to_owned(),
@@ -32,11 +39,13 @@ impl Workload for SpatialJoin {
             ),
             format!(
                 "INSERT INTO bench_polygons (geom) \
-                 SELECT ST_Buffer(\
-                   ST_SetSRID(ST_MakePoint(\
-                     random() * 360 - 180, random() * 180 - 90), 4326), \
-                   0.1) \
-                 FROM generate_series(1, {poly_rows})"
+                 SELECT ST_SetSRID(ST_MakeEnvelope(\
+                   x, y, x + 0.2, y + 0.2), 4326) \
+                 FROM (\
+                   SELECT random() * 359.8 - 180 AS x, \
+                          random() * 179.8 - 90 AS y \
+                   FROM generate_series(1, {poly_rows})\
+                 ) AS coords"
             ),
             "CREATE INDEX ON bench_points USING gist (geom)".to_owned(),
             "CREATE INDEX ON bench_polygons USING gist (geom)".to_owned(),

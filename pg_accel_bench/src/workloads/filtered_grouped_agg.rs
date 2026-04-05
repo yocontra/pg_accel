@@ -1,16 +1,20 @@
 use super::Workload;
 
-/// Tests `BatchedEval` on a GROUP BY aggregate with selective filter.
-pub struct Aggregate;
+/// Tests GPU hash aggregation with a selective boolean filter + GROUP BY.
+pub struct FilteredGroupedAgg;
 
-impl Workload for Aggregate {
+impl Workload for FilteredGroupedAgg {
     fn name(&self) -> &'static str {
-        "aggregate"
+        "filtered_grouped_agg"
     }
 
     fn description(&self) -> &'static str {
         "SELECT dept, sum(salary), avg(salary), count(*) FROM bench_employees \
-         WHERE active GROUP BY dept — tests BatchedEval grouped aggregate"
+         WHERE active GROUP BY dept — tests GpuHashAgg with filter"
+    }
+
+    fn category(&self) -> &'static str {
+        "mixed"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

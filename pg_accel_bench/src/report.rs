@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
 use crate::stats;
 
-/// Timing results for a single iteration (three-way comparison).
+/// Timing results for a single iteration (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_field_names)]
 pub struct IterationResult {
@@ -12,15 +13,15 @@ pub struct IterationResult {
     pub accel_ms: f64,
     /// Execution time in milliseconds with PG parallel workers (pg_accel off).
     pub parallel_ms: f64,
-    /// Execution time in milliseconds single-threaded (pg_accel off, no parallel).
-    pub single_ms: f64,
 }
 
-/// Aggregated results for one workload (three-way comparison).
+/// Aggregated results for one workload at one row scale (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkloadResult {
     pub name: String,
     pub description: String,
+    /// Row count this result was measured at.
+    pub rows: usize,
     pub iterations: Vec<IterationResult>,
     // -- pg_accel stats --
     pub accel_mean_ms: f64,
@@ -38,25 +39,11 @@ pub struct WorkloadResult {
     pub parallel_outliers: Vec<usize>,
     pub parallel_min_ms: f64,
     pub parallel_max_ms: f64,
-    // -- PG single-threaded stats --
-    pub single_mean_ms: f64,
-    pub single_stddev_ms: f64,
-    pub single_median_ms: f64,
-    pub single_ci_95: (f64, f64),
-    pub single_outliers: Vec<usize>,
-    pub single_min_ms: f64,
-    pub single_max_ms: f64,
     // -- Derived --
-    /// `single_mean / accel_mean`. Values > 1 mean pg_accel is faster than single-threaded.
-    pub speedup_vs_single: f64,
     /// `parallel_mean / accel_mean`. Values > 1 mean pg_accel is faster than PG parallel.
     pub speedup_vs_parallel: f64,
-    /// Paired t-test p-value: accel vs single-threaded.
-    pub p_value_vs_single: f64,
     /// Paired t-test p-value: accel vs parallel.
     pub p_value_vs_parallel: f64,
-    /// Cohen's d: accel vs single-threaded.
-    pub cohens_d_vs_single: f64,
     /// Cohen's d: accel vs parallel.
     pub cohens_d_vs_parallel: f64,
 }
@@ -78,13 +65,24 @@ pub struct GucSettings {
     pub settings: Vec<(String, String)>,
 }
 
-/// Full benchmark report containing results for all workloads.
+/// A workload+scale that crashed during benchmarking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrashedScale {
+    pub workload: String,
+    pub rows: usize,
+    pub error: String,
+}
+
+/// Full benchmark report containing results for all workloads at all scales.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchReport {
     pub hardware: Option<HardwareProfile>,
     pub gucs: Option<GucSettings>,
     pub methodology: Methodology,
     pub workloads: Vec<WorkloadResult>,
+    /// Scales that crashed and were skipped (not included in workloads).
+    #[serde(default)]
+    pub crashes: Vec<CrashedScale>,
 }
 
 /// Methodology metadata for reproducibility.
@@ -92,31 +90,25 @@ pub struct BenchReport {
 pub struct Methodology {
     pub iterations: usize,
     pub warmup: usize,
-    pub rows: usize,
+    pub row_scales: Vec<usize>,
     pub ordering: String,
     pub statistical_tests: Vec<String>,
 }
 
 impl WorkloadResult {
-    /// Build aggregated result from raw iterations (three-way).
+    /// Build aggregated result from raw iterations (two-way: accel vs parallel).
     pub fn from_iterations(
         name: String,
         description: String,
+        rows: usize,
         iterations: Vec<IterationResult>,
     ) -> Self {
         let accel_times: Vec<f64> = iterations.iter().map(|i| i.accel_ms).collect();
         let parallel_times: Vec<f64> = iterations.iter().map(|i| i.parallel_ms).collect();
-        let single_times: Vec<f64> = iterations.iter().map(|i| i.single_ms).collect();
 
         let accel_mean = stats::mean(&accel_times);
         let parallel_mean = stats::mean(&parallel_times);
-        let single_mean = stats::mean(&single_times);
 
-        let speedup_vs_single = if accel_mean > 0.0 {
-            single_mean / accel_mean
-        } else {
-            f64::NAN
-        };
         let speedup_vs_parallel = if accel_mean > 0.0 {
             parallel_mean / accel_mean
         } else {
@@ -126,6 +118,7 @@ impl WorkloadResult {
         Self {
             name,
             description,
+            rows,
             accel_mean_ms: accel_mean,
             accel_stddev_ms: stats::stddev(&accel_times),
             accel_median_ms: stats::median(&accel_times),
@@ -140,18 +133,8 @@ impl WorkloadResult {
             parallel_outliers: stats::detect_outliers(&parallel_times, 3.0),
             parallel_min_ms: stats::min(&parallel_times),
             parallel_max_ms: stats::max(&parallel_times),
-            single_mean_ms: single_mean,
-            single_stddev_ms: stats::stddev(&single_times),
-            single_median_ms: stats::median(&single_times),
-            single_ci_95: stats::confidence_interval_95(&single_times),
-            single_outliers: stats::detect_outliers(&single_times, 3.0),
-            single_min_ms: stats::min(&single_times),
-            single_max_ms: stats::max(&single_times),
-            speedup_vs_single,
             speedup_vs_parallel,
-            p_value_vs_single: stats::paired_t_test_p(&accel_times, &single_times),
             p_value_vs_parallel: stats::paired_t_test_p(&accel_times, &parallel_times),
-            cohens_d_vs_single: stats::cohens_d(&single_times, &accel_times),
             cohens_d_vs_parallel: stats::cohens_d(&parallel_times, &accel_times),
             iterations,
         }
@@ -209,8 +192,20 @@ impl GucSettings {
     }
 }
 
+/// Format row count for display: 1000 → "1K", 1000000 → "1M".
+fn format_rows(rows: usize) -> String {
+    match rows {
+        r if r >= 1_000_000 && r % 1_000_000 == 0 => format!("{}M", r / 1_000_000),
+        r if r >= 1_000 && r % 1_000 == 0 => format!("{}K", r / 1_000),
+        r => r.to_string(),
+    }
+}
+
 impl BenchReport {
     /// Render the report as a Markdown document.
+    ///
+    /// The summary table shows speedup at each row scale. Detailed sections
+    /// follow with per-scale statistics for every workload.
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn to_markdown(&self) -> String {
@@ -249,7 +244,8 @@ impl BenchReport {
         let _ = writeln!(out, "|-----------|-------|");
         let _ = writeln!(out, "| Iterations | {} |", self.methodology.iterations);
         let _ = writeln!(out, "| Warmup iterations | {} |", self.methodology.warmup);
-        let _ = writeln!(out, "| Rows per table | {} |", self.methodology.rows);
+        let scales_str: Vec<String> = self.methodology.row_scales.iter().map(|r| format_rows(*r)).collect();
+        let _ = writeln!(out, "| Row scales | {} |", scales_str.join(", "));
         let _ = writeln!(
             out,
             "| Measurement ordering | {} |",
@@ -260,133 +256,145 @@ impl BenchReport {
         }
         out.push_str("\n**Ordering note:** Measurement order (accel-first vs baseline-first) ");
         out.push_str("is randomized per iteration to eliminate cache-warming bias. ");
-        out.push_str("Plan caches are flushed between measurements via `DISCARD PLANS`.\n\n");
-
-        // Results summary table (three-way)
-        out.push_str("## Results\n\n");
-        out.push_str(
-            "| Workload | Accel (ms) | PG Parallel (ms) | PG Single (ms) | vs Single | vs Parallel | Sig? |\n",
-        );
-        out.push_str(
-            "|----------|------------|-------------------|----------------|-----------|-------------|------|\n",
-        );
-        for w in &self.workloads {
-            let sig = if w.p_value_vs_single < 0.01 {
-                "YES"
-            } else if w.p_value_vs_single < 0.05 {
-                "marginal"
-            } else {
-                "no"
-            };
+        out.push_str("Each mode uses a fresh connection with `DISCARD ALL` on close.\n");
+        if !self.crashes.is_empty() {
             let _ = writeln!(
                 out,
-                "| {} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | {:.2}x | {:.2}x | {} |",
-                w.name,
-                w.accel_mean_ms,
-                w.accel_stddev_ms,
-                w.parallel_mean_ms,
-                w.parallel_stddev_ms,
-                w.single_mean_ms,
-                w.single_stddev_ms,
-                w.speedup_vs_single,
-                w.speedup_vs_parallel,
-                sig,
+                "\n**Crashes:** {} scale(s) crashed and were excluded from results.",
+                self.crashes.len()
             );
+        }
+        out.push('\n');
+
+        // Collect unique scales and workload names (preserving order).
+        let scales = &self.methodology.row_scales;
+        let mut workload_names: Vec<String> = Vec::new();
+        for w in &self.workloads {
+            if !workload_names.contains(&w.name) {
+                workload_names.push(w.name.clone());
+            }
+        }
+
+        // Build lookup: (name, rows) -> &WorkloadResult
+        let mut lookup: BTreeMap<(&str, usize), &WorkloadResult> = BTreeMap::new();
+        for w in &self.workloads {
+            lookup.insert((&w.name, w.rows), w);
+        }
+
+        // Build crash lookup: (name, rows) -> true
+        let mut crash_lookup: std::collections::HashSet<(String, usize)> =
+            std::collections::HashSet::new();
+        for c in &self.crashes {
+            crash_lookup.insert((c.workload.clone(), c.rows));
+            // Ensure crashed workloads appear in the name list.
+            if !workload_names.contains(&c.workload) {
+                workload_names.push(c.workload.clone());
+            }
+        }
+
+        // Summary table: workload × scale → speedup
+        out.push_str("## Results\n\n");
+        out.push_str(
+            "All comparisons are against PostgreSQL with parallel workers enabled \
+             (the default production configuration). Speedup > 1.00x means pg_accel \
+             is faster.\n\n",
+        );
+
+        // Header
+        out.push_str("| Workload |");
+        for &s in scales {
+            let _ = write!(out, " {} |", format_rows(s));
+        }
+        out.push('\n');
+        out.push_str("|----------|");
+        for _ in scales {
+            out.push_str("------|");
+        }
+        out.push('\n');
+
+        // Data rows
+        for name in &workload_names {
+            let _ = write!(out, "| {name} |");
+            for &s in scales {
+                if let Some(w) = lookup.get(&(name.as_str(), s)) {
+                    let sp = w.speedup_vs_parallel;
+                    let sig = w.p_value_vs_parallel < 0.05;
+                    if sig && sp > 1.005 {
+                        let _ = write!(out, " **{sp:.2}x** |");
+                    } else if sig && sp < 0.995 {
+                        let _ = write!(out, " {sp:.2}x |");
+                    } else {
+                        let _ = write!(out, " {sp:.2}x |");
+                    }
+                } else if crash_lookup.contains(&(name.clone(), s)) {
+                    out.push_str(" crash |");
+                } else {
+                    out.push_str(" — |");
+                }
+            }
+            out.push('\n');
         }
         out.push('\n');
 
         // Detailed per-workload sections
         out.push_str("## Detailed Results\n\n");
-        for w in &self.workloads {
-            let _ = writeln!(out, "### {}\n", w.name);
-            let _ = writeln!(out, "**Query:** {}\n", w.description);
-            let _ = writeln!(out, "| Metric | Accel | PG Parallel | PG Single |");
-            let _ = writeln!(out, "|--------|-------|-------------|-----------|");
-            let _ = writeln!(
-                out,
-                "| Mean (ms) | {:.2} | {:.2} | {:.2} |",
-                w.accel_mean_ms, w.parallel_mean_ms, w.single_mean_ms
-            );
-            let _ = writeln!(
-                out,
-                "| Median (ms) | {:.2} | {:.2} | {:.2} |",
-                w.accel_median_ms, w.parallel_median_ms, w.single_median_ms
-            );
-            let _ = writeln!(
-                out,
-                "| Stddev (ms) | {:.2} | {:.2} | {:.2} |",
-                w.accel_stddev_ms, w.parallel_stddev_ms, w.single_stddev_ms
-            );
-            let _ = writeln!(
-                out,
-                "| 95% CI (ms) | {:.2}..{:.2} | {:.2}..{:.2} | {:.2}..{:.2} |",
-                w.accel_ci_95.0,
-                w.accel_ci_95.1,
-                w.parallel_ci_95.0,
-                w.parallel_ci_95.1,
-                w.single_ci_95.0,
-                w.single_ci_95.1,
-            );
-            let _ = writeln!(
-                out,
-                "| Min (ms) | {:.2} | {:.2} | {:.2} |",
-                w.accel_min_ms, w.parallel_min_ms, w.single_min_ms
-            );
-            let _ = writeln!(
-                out,
-                "| Max (ms) | {:.2} | {:.2} | {:.2} |",
-                w.accel_max_ms, w.parallel_max_ms, w.single_max_ms
-            );
-            let _ = writeln!(
-                out,
-                "| Speedup vs single | {:.2}x | {:.2}x | 1.00x |",
-                w.speedup_vs_single,
-                if w.parallel_mean_ms > 0.0 {
-                    w.single_mean_ms / w.parallel_mean_ms
-                } else {
-                    f64::NAN
-                },
-            );
-            let _ = writeln!(
-                out,
-                "| p-value (vs single) | {:.6} | | |",
-                w.p_value_vs_single
-            );
-            let _ = writeln!(
-                out,
-                "| p-value (vs parallel) | {:.6} | | |",
-                w.p_value_vs_parallel
-            );
-            let _ = writeln!(
-                out,
-                "| Cohen's d (vs single) | {:.4} | | |",
-                w.cohens_d_vs_single
-            );
-            let _ = writeln!(
-                out,
-                "| Cohen's d (vs parallel) | {:.4} | | |",
-                w.cohens_d_vs_parallel
-            );
+        for name in &workload_names {
+            let _ = writeln!(out, "### {name}\n");
 
-            if !w.accel_outliers.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "\n**Accel outliers** (>3 sigma): iterations {:?}",
-                    w.accel_outliers
-                );
+            // Get description from first result
+            if let Some(w) = self.workloads.iter().find(|w| w.name == *name) {
+                let _ = writeln!(out, "**Query:** {}\n", w.description);
             }
-            if !w.parallel_outliers.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "\n**Parallel outliers** (>3 sigma): iterations {:?}",
-                    w.parallel_outliers
-                );
+
+            // Per-scale table
+            let _ = writeln!(out, "| Scale | Accel (ms) | PG Parallel (ms) | Speedup | Significant? |");
+            let _ = writeln!(out, "|-------|------------|-------------------|---------|-------------|");
+            for &s in scales {
+                if let Some(w) = lookup.get(&(name.as_str(), s)) {
+                    let sig = if w.p_value_vs_parallel < 0.01 {
+                        "YES"
+                    } else if w.p_value_vs_parallel < 0.05 {
+                        "marginal"
+                    } else {
+                        "no"
+                    };
+                    let _ = writeln!(
+                        out,
+                        "| {} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | **{:.2}x** | {} |",
+                        format_rows(s),
+                        w.accel_mean_ms,
+                        w.accel_stddev_ms,
+                        w.parallel_mean_ms,
+                        w.parallel_stddev_ms,
+                        w.speedup_vs_parallel,
+                        sig,
+                    );
+                }
             }
-            if !w.single_outliers.is_empty() {
+            out.push('\n');
+        }
+
+        // Crashed scales section
+        if !self.crashes.is_empty() {
+            out.push_str("## Crashed Scales\n\n");
+            out.push_str(
+                "The following workload/scale combinations crashed the PostgreSQL \
+                 backend and were excluded from results.\n\n",
+            );
+            let _ = writeln!(out, "| Workload | Scale | Error |");
+            let _ = writeln!(out, "|----------|-------|-------|");
+            for c in &self.crashes {
+                let short_err = if c.error.len() > 80 {
+                    format!("{}...", &c.error[..77])
+                } else {
+                    c.error.clone()
+                };
                 let _ = writeln!(
                     out,
-                    "\n**Single outliers** (>3 sigma): iterations {:?}",
-                    w.single_outliers
+                    "| {} | {} | {} |",
+                    c.workload,
+                    format_rows(c.rows),
+                    short_err,
                 );
             }
             out.push('\n');
@@ -404,34 +412,31 @@ impl BenchReport {
         serde_json::to_string_pretty(self)
     }
 
-    /// Render the report as CSV (one row per workload, three-way).
+    /// Render the report as CSV (one row per workload per scale, two-way).
     #[must_use]
     pub fn to_csv(&self) -> String {
         let mut out = String::new();
         out.push_str(
-            "workload,\
+            "workload,rows,\
              accel_mean_ms,accel_stddev_ms,accel_median_ms,accel_min_ms,accel_max_ms,\
              parallel_mean_ms,parallel_stddev_ms,parallel_median_ms,parallel_min_ms,parallel_max_ms,\
-             single_mean_ms,single_stddev_ms,single_median_ms,single_min_ms,single_max_ms,\
-             speedup_vs_single,speedup_vs_parallel,\
-             p_value_vs_single,p_value_vs_parallel,\
-             cohens_d_vs_single,cohens_d_vs_parallel,significant\n",
+             speedup_vs_parallel,p_value_vs_parallel,cohens_d_vs_parallel,significant\n",
         );
         for w in &self.workloads {
-            let sig = if w.p_value_vs_single < 0.01 {
+            let sig = if w.p_value_vs_parallel < 0.01 {
                 "yes"
-            } else if w.p_value_vs_single < 0.05 {
+            } else if w.p_value_vs_parallel < 0.05 {
                 "marginal"
             } else {
                 "no"
             };
             let _ = writeln!(
                 out,
-                "{},{:.4},{:.4},{:.4},{:.4},{:.4},\
+                "{},{},{:.4},{:.4},{:.4},{:.4},{:.4},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},\
-                 {:.4},{:.4},{:.4},{:.4},{:.4},\
-                 {:.4},{:.4},{:.6},{:.6},{:.4},{:.4},{}",
+                 {:.4},{:.6},{:.4},{}",
                 w.name,
+                w.rows,
                 w.accel_mean_ms,
                 w.accel_stddev_ms,
                 w.accel_median_ms,
@@ -442,16 +447,8 @@ impl BenchReport {
                 w.parallel_median_ms,
                 w.parallel_min_ms,
                 w.parallel_max_ms,
-                w.single_mean_ms,
-                w.single_stddev_ms,
-                w.single_median_ms,
-                w.single_min_ms,
-                w.single_max_ms,
-                w.speedup_vs_single,
                 w.speedup_vs_parallel,
-                w.p_value_vs_single,
                 w.p_value_vs_parallel,
-                w.cohens_d_vs_single,
                 w.cohens_d_vs_parallel,
                 sig,
             );
@@ -468,17 +465,27 @@ impl BenchReport {
 /// without GUCs).
 pub fn generate_report(
     workloads: Vec<WorkloadResult>,
+    crashes: Vec<CrashedScale>,
     connection: Option<&str>,
     iterations: usize,
     warmup: usize,
-    rows: usize,
 ) -> BenchReport {
     let hardware = Some(HardwareProfile::detect());
     let gucs = connection.and_then(|c| GucSettings::from_connection(c).ok());
+
+    // Collect unique row scales from results (preserving order).
+    let mut row_scales: Vec<usize> = Vec::new();
+    for w in &workloads {
+        if !row_scales.contains(&w.rows) {
+            row_scales.push(w.rows);
+        }
+    }
+    row_scales.sort_unstable();
+
     let methodology = Methodology {
         iterations,
         warmup,
-        rows,
+        row_scales,
         ordering: "randomized per iteration (accel-first vs baseline-first)".to_owned(),
         statistical_tests: vec![
             "Paired t-test (two-tailed, p < 0.05)".to_owned(),
@@ -492,6 +499,7 @@ pub fn generate_report(
         gucs,
         methodology,
         workloads,
+        crashes,
     }
 }
 
@@ -611,11 +619,7 @@ fn detect_memory() -> String {
 mod tests {
     use super::*;
 
-    /// Build a simple mock `WorkloadResult` for testing report formatting.
-    ///
-    /// `single_ms` is set to `baseline_ms * 1.5` to simulate parallel being
-    /// faster than single-threaded.
-    fn mock_workload_result(name: &str, accel_ms: f64, baseline_ms: f64) -> WorkloadResult {
+    fn mock_workload_result(name: &str, rows: usize, accel_ms: f64, baseline_ms: f64) -> WorkloadResult {
         let iterations: Vec<IterationResult> = (0..10)
             .map(|i| {
                 #[allow(clippy::cast_precision_loss)]
@@ -623,13 +627,13 @@ mod tests {
                 IterationResult {
                     accel_ms: accel_ms + jitter,
                     parallel_ms: baseline_ms + jitter,
-                    single_ms: baseline_ms * 1.5 + jitter,
                 }
             })
             .collect();
         WorkloadResult::from_iterations(
             name.to_owned(),
             format!("Mock workload: {name}"),
+            rows,
             iterations,
         )
     }
@@ -653,30 +657,21 @@ mod tests {
             methodology: Methodology {
                 iterations: 30,
                 warmup: 5,
-                rows: 100_000,
+                row_scales: vec![1_000, 10_000, 100_000, 1_000_000],
                 ordering: "randomized".to_owned(),
                 statistical_tests: vec!["Paired t-test".to_owned()],
             },
             workloads,
+            crashes: Vec::new(),
         }
     }
 
-    // -----------------------------------------------------------------------
-    // WorkloadResult::from_iterations
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_workload_result_from_iterations_basic() {
-        let result = mock_workload_result("test_wl", 10.0, 20.0);
+        let result = mock_workload_result("test_wl", 100_000, 10.0, 20.0);
         assert_eq!(result.name, "test_wl");
-        assert!(
-            result.speedup_vs_single > 1.0,
-            "single>accel should give speedup>1"
-        );
-        assert!(
-            result.speedup_vs_parallel > 1.0,
-            "parallel>accel should give speedup>1"
-        );
+        assert_eq!(result.rows, 100_000);
+        assert!(result.speedup_vs_parallel > 1.0);
         assert_eq!(result.iterations.len(), 10);
     }
 
@@ -685,242 +680,114 @@ mod tests {
         let iters = vec![IterationResult {
             accel_ms: 5.0,
             parallel_ms: 10.0,
-            single_ms: 20.0,
         }];
-        let result = WorkloadResult::from_iterations("single".to_owned(), "desc".to_owned(), iters);
+        let result = WorkloadResult::from_iterations("one".to_owned(), "desc".to_owned(), 1000, iters);
         assert!((result.accel_mean_ms - 5.0).abs() < f64::EPSILON);
-        assert!((result.parallel_mean_ms - 10.0).abs() < f64::EPSILON);
-        assert!((result.single_mean_ms - 20.0).abs() < f64::EPSILON);
-        assert!((result.speedup_vs_single - 4.0).abs() < f64::EPSILON);
         assert!((result.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
-        assert!((result.accel_stddev_ms - 0.0).abs() < f64::EPSILON);
     }
-
-    #[test]
-    fn test_workload_result_identical_times() {
-        let iters: Vec<IterationResult> = (0..5)
-            .map(|_| IterationResult {
-                accel_ms: 10.0,
-                parallel_ms: 10.0,
-                single_ms: 10.0,
-            })
-            .collect();
-        let result =
-            WorkloadResult::from_iterations("identical".to_owned(), "desc".to_owned(), iters);
-        assert!((result.speedup_vs_single - 1.0).abs() < f64::EPSILON);
-        assert!((result.speedup_vs_parallel - 1.0).abs() < f64::EPSILON);
-        assert!((result.accel_stddev_ms).abs() < f64::EPSILON);
-        assert!((result.parallel_stddev_ms).abs() < f64::EPSILON);
-        assert!((result.single_stddev_ms).abs() < f64::EPSILON);
-        assert!(result.accel_outliers.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // Markdown output
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_markdown_contains_header() {
-        let report = mock_report(vec![mock_workload_result("wl1", 5.0, 15.0)]);
+        let report = mock_report(vec![mock_workload_result("wl1", 1000, 5.0, 15.0)]);
         let md = report.to_markdown();
         assert!(md.contains("# pg_accel Benchmark Report"));
     }
 
     #[test]
-    fn test_markdown_contains_hardware_profile() {
-        let report = mock_report(vec![mock_workload_result("wl1", 5.0, 15.0)]);
+    fn test_markdown_contains_row_scales() {
+        let report = mock_report(vec![mock_workload_result("wl1", 1000, 5.0, 15.0)]);
         let md = report.to_markdown();
-        assert!(md.contains("## Hardware Profile"));
-        assert!(md.contains("Test CPU"));
-        assert!(md.contains("x86_64"));
-        assert!(md.contains("32 GB"));
+        assert!(md.contains("Row scales"));
+        assert!(md.contains("1K"));
+        assert!(md.contains("1M"));
     }
 
     #[test]
-    fn test_markdown_contains_guc_settings() {
-        let report = mock_report(vec![mock_workload_result("wl1", 5.0, 15.0)]);
-        let md = report.to_markdown();
-        assert!(md.contains("## PostgreSQL Settings"));
-        assert!(md.contains("work_mem"));
-        assert!(md.contains("256MB"));
-    }
-
-    #[test]
-    fn test_markdown_contains_methodology() {
-        let report = mock_report(vec![mock_workload_result("wl1", 5.0, 15.0)]);
-        let md = report.to_markdown();
-        assert!(md.contains("## Methodology"));
-        assert!(md.contains("| Iterations | 30 |"));
-        assert!(md.contains("| Warmup iterations | 5 |"));
-    }
-
-    #[test]
-    fn test_markdown_contains_workload_results() {
+    fn test_markdown_multi_scale_table() {
         let report = mock_report(vec![
-            mock_workload_result("fast_wl", 5.0, 15.0),
-            mock_workload_result("slow_wl", 50.0, 50.0),
+            mock_workload_result("wl1", 1_000, 5.0, 15.0),
+            mock_workload_result("wl1", 1_000_000, 5.0, 15.0),
         ]);
         let md = report.to_markdown();
-        assert!(md.contains("fast_wl"));
-        assert!(md.contains("slow_wl"));
-        assert!(md.contains("## Results"));
-        assert!(md.contains("## Detailed Results"));
+        // Summary table should have scale columns
+        assert!(md.contains("| 1K |"));
+        assert!(md.contains("| 1M |"));
     }
-
-    #[test]
-    fn test_markdown_no_hardware_section_when_none() {
-        let report = BenchReport {
-            hardware: None,
-            gucs: None,
-            methodology: Methodology {
-                iterations: 10,
-                warmup: 2,
-                rows: 1000,
-                ordering: "randomized".to_owned(),
-                statistical_tests: vec![],
-            },
-            workloads: vec![mock_workload_result("wl", 10.0, 20.0)],
-        };
-        let md = report.to_markdown();
-        assert!(!md.contains("## Hardware Profile"));
-        assert!(!md.contains("## PostgreSQL Settings"));
-    }
-
-    #[test]
-    fn test_markdown_empty_workloads() {
-        let report = mock_report(vec![]);
-        let md = report.to_markdown();
-        assert!(md.contains("## Results"));
-        // Table header present but no data rows
-        assert!(md.contains("| Workload |"));
-    }
-
-    // -----------------------------------------------------------------------
-    // JSON output
-    // -----------------------------------------------------------------------
 
     #[test]
     #[allow(clippy::expect_used)]
     fn test_json_roundtrip() {
-        let report = mock_report(vec![mock_workload_result("json_wl", 8.0, 16.0)]);
+        let report = mock_report(vec![mock_workload_result("json_wl", 100_000, 8.0, 16.0)]);
         let json_str = report.to_json().expect("serialization should succeed");
         let deserialized: BenchReport =
             serde_json::from_str(&json_str).expect("deserialization should succeed");
         assert_eq!(deserialized.workloads.len(), 1);
-        assert_eq!(deserialized.workloads[0].name, "json_wl");
-        assert!(
-            (deserialized.workloads[0].speedup_vs_single - report.workloads[0].speedup_vs_single)
-                .abs()
-                < f64::EPSILON
-        );
+        assert_eq!(deserialized.workloads[0].rows, 100_000);
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn test_json_contains_all_fields() {
-        let report = mock_report(vec![mock_workload_result("fields", 10.0, 20.0)]);
+        let report = mock_report(vec![mock_workload_result("fields", 100_000, 10.0, 20.0)]);
         let json_str = report.to_json().expect("serialization should succeed");
+        assert!(json_str.contains("\"rows\""));
         assert!(json_str.contains("\"accel_mean_ms\""));
         assert!(json_str.contains("\"parallel_mean_ms\""));
-        assert!(json_str.contains("\"single_mean_ms\""));
-        assert!(json_str.contains("\"speedup_vs_single\""));
-        assert!(json_str.contains("\"speedup_vs_parallel\""));
-        assert!(json_str.contains("\"p_value_vs_single\""));
-        assert!(json_str.contains("\"accel_ci_95\""));
-        assert!(json_str.contains("\"hardware\""));
-        assert!(json_str.contains("\"methodology\""));
+        assert!(json_str.contains("\"row_scales\""));
+        // Must NOT contain single-threaded fields
+        assert!(!json_str.contains("\"single_mean_ms\""));
     }
-
-    // -----------------------------------------------------------------------
-    // CSV output
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_csv_header_row() {
-        let report = mock_report(vec![mock_workload_result("csv_wl", 10.0, 20.0)]);
+        let report = mock_report(vec![mock_workload_result("csv_wl", 100_000, 10.0, 20.0)]);
         let csv = report.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
-        assert!(lines.len() >= 2, "CSV should have header + data");
-        assert!(lines[0].starts_with("workload,"));
+        assert!(lines[0].starts_with("workload,rows,"));
         assert!(lines[0].contains("accel_mean_ms"));
-        assert!(lines[0].contains("parallel_mean_ms"));
-        assert!(lines[0].contains("single_mean_ms"));
-        assert!(lines[0].contains("speedup_vs_single"));
-        assert!(lines[0].contains("speedup_vs_parallel"));
-        assert!(lines[0].contains("significant"));
     }
 
     #[test]
-    fn test_csv_data_row_count() {
+    fn test_csv_includes_rows() {
         let report = mock_report(vec![
-            mock_workload_result("wl_a", 5.0, 10.0),
-            mock_workload_result("wl_b", 20.0, 20.0),
-            mock_workload_result("wl_c", 30.0, 15.0),
+            mock_workload_result("wl", 1_000, 5.0, 10.0),
+            mock_workload_result("wl", 1_000_000, 5.0, 10.0),
         ]);
         let csv = report.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
-        // 1 header + 3 data rows
-        assert_eq!(lines.len(), 4);
-    }
-
-    #[test]
-    fn test_csv_workload_name_in_row() {
-        let report = mock_report(vec![mock_workload_result("my_workload", 10.0, 20.0)]);
-        let csv = report.to_csv();
-        let data_line = csv.lines().nth(1);
-        assert!(
-            data_line.is_some_and(|l| l.starts_with("my_workload,")),
-            "data row should start with workload name"
-        );
-    }
-
-    #[test]
-    fn test_csv_significance_labels() {
-        // p < 0.01 -> "yes", p in [0.01, 0.05) -> "marginal", p >= 0.05 -> "no"
-        // With very different accel/baseline, p should be small -> "yes"
-        let report = mock_report(vec![mock_workload_result("sig_test", 1.0, 100.0)]);
-        let csv = report.to_csv();
-        let data_line = csv.lines().nth(1).unwrap_or("");
-        assert!(
-            data_line.ends_with(",yes") || data_line.ends_with(",marginal"),
-            "large difference should be significant: {data_line}"
-        );
-    }
-
-    #[test]
-    fn test_csv_empty_workloads() {
-        let report = mock_report(vec![]);
-        let csv = report.to_csv();
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(lines.len(), 1, "only header row when no workloads");
+        assert_eq!(lines.len(), 3); // header + 2 data rows
+        assert!(lines[1].contains(",1000,"));
+        assert!(lines[2].contains(",1000000,"));
     }
 
     #[test]
     fn test_csv_column_count_matches_header() {
-        let report = mock_report(vec![mock_workload_result("col_test", 10.0, 20.0)]);
+        let report = mock_report(vec![mock_workload_result("col_test", 100_000, 10.0, 20.0)]);
         let csv = report.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
         let header_cols = lines[0].split(',').count();
         let data_cols = lines[1].split(',').count();
-        assert_eq!(
-            header_cols, data_cols,
-            "header has {header_cols} columns but data has {data_cols}"
-        );
+        assert_eq!(header_cols, data_cols);
     }
-
-    // -----------------------------------------------------------------------
-    // generate_report (without PG connection)
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_generate_report_no_connection() {
-        let workloads = vec![mock_workload_result("gen_test", 10.0, 20.0)];
-        let report = generate_report(workloads, None, 30, 5, 100_000);
+        let workloads = vec![
+            mock_workload_result("gen_test", 1_000, 10.0, 20.0),
+            mock_workload_result("gen_test", 1_000_000, 10.0, 20.0),
+        ];
+        let report = generate_report(workloads, Vec::new(), None, 30, 5);
         assert!(report.hardware.is_some());
-        assert!(report.gucs.is_none()); // no connection -> no GUCs
-        assert_eq!(report.methodology.iterations, 30);
-        assert_eq!(report.methodology.warmup, 5);
-        assert_eq!(report.methodology.rows, 100_000);
-        assert_eq!(report.workloads.len(), 1);
+        assert!(report.gucs.is_none());
+        assert_eq!(report.methodology.row_scales, vec![1_000, 1_000_000]);
+        assert_eq!(report.workloads.len(), 2);
+    }
+
+    #[test]
+    fn test_format_rows() {
+        assert_eq!(format_rows(1_000), "1K");
+        assert_eq!(format_rows(10_000), "10K");
+        assert_eq!(format_rows(100_000), "100K");
+        assert_eq!(format_rows(1_000_000), "1M");
     }
 }
