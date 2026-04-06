@@ -22,15 +22,15 @@ impl Workload for H3ResolutionSweep {
             "DROP TABLE IF EXISTS bench_h3_sweep".to_owned(),
             "CREATE TABLE bench_h3_sweep (\
                id serial PRIMARY KEY, \
-               geom geometry(Point, 4326) NOT NULL\
+               geom point NOT NULL\
              )"
             .to_owned(),
             format!(
                 "INSERT INTO bench_h3_sweep (geom) \
-                 SELECT ST_SetSRID(ST_MakePoint(\
+                 SELECT point(\
                    -74.0 + random() * 0.3, \
                    40.6 + random() * 0.4\
-                 ), 4326) \
+                 ) \
                  FROM generate_series(1, {rows})"
             ),
             "ANALYZE bench_h3_sweep".to_owned(),

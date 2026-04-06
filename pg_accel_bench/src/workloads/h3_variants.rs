@@ -64,7 +64,7 @@ pub const H3_LATLNG_RES3: H3Variant = H3Variant {
     name: "h3_latlng_res3",
     description: "h3_latlng_to_cell at resolution 3 — coarse grid, trig-heavy GPU",
     setup_extra: "",
-    query: "SELECT count(h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng, lat), 4326), 3)) \
+    query: "SELECT count(h3_latlng_to_cell(point(lng, lat), 3)) \
             FROM bench_h3_var",
     cleanup_extra: "",
 };
@@ -74,7 +74,7 @@ pub const H3_LATLNG_RES9: H3Variant = H3Variant {
     name: "h3_latlng_res9",
     description: "h3_latlng_to_cell at resolution 9 — medium grid, trig-heavy GPU",
     setup_extra: "",
-    query: "SELECT count(h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng, lat), 4326), 9)) \
+    query: "SELECT count(h3_latlng_to_cell(point(lng, lat), 9)) \
             FROM bench_h3_var",
     cleanup_extra: "",
 };
@@ -84,7 +84,7 @@ pub const H3_LATLNG_RES15: H3Variant = H3Variant {
     name: "h3_latlng_res15",
     description: "h3_latlng_to_cell at resolution 15 — finest grid, maximum compute",
     setup_extra: "",
-    query: "SELECT count(h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng, lat), 4326), 15)) \
+    query: "SELECT count(h3_latlng_to_cell(point(lng, lat), 15)) \
             FROM bench_h3_var",
     cleanup_extra: "",
 };
@@ -96,8 +96,8 @@ pub const H3_DIST_NEAR: H3Variant = H3Variant {
     setup_extra: "ALTER TABLE bench_h3_var ADD COLUMN cell_a h3index, \
                   ADD COLUMN cell_b h3index; \
                   UPDATE bench_h3_var SET \
-                    cell_a = h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng, lat), 4326), 7), \
-                    cell_b = h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng + 0.001, lat + 0.001), 4326), 7)",
+                    cell_a = h3_latlng_to_cell(point(lng, lat), 7), \
+                    cell_b = h3_latlng_to_cell(point(lng + 0.001, lat + 0.001), 7)",
     query: "SELECT count(h3_grid_distance(cell_a, cell_b)) FROM bench_h3_var",
     cleanup_extra: "",
 };
@@ -109,8 +109,8 @@ pub const H3_DIST_FAR: H3Variant = H3Variant {
     setup_extra: "ALTER TABLE bench_h3_var ADD COLUMN cell_a h3index, \
                   ADD COLUMN cell_b h3index; \
                   UPDATE bench_h3_var SET \
-                    cell_a = h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng, lat), 4326), 5), \
-                    cell_b = h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng + 0.5, lat + 0.5), 4326), 5)",
+                    cell_a = h3_latlng_to_cell(point(lng, lat), 5), \
+                    cell_b = h3_latlng_to_cell(point(lng + 0.5, lat + 0.5), 5)",
     query: "SELECT count(h3_grid_distance(cell_a, cell_b)) FROM bench_h3_var",
     cleanup_extra: "",
 };
@@ -121,7 +121,7 @@ pub const H3_PARENT_DEEP: H3Variant = H3Variant {
     description: "h3_cell_to_parent res 15→3 — deep resolution traversal",
     setup_extra: "ALTER TABLE bench_h3_var ADD COLUMN cell h3index; \
                   UPDATE bench_h3_var SET \
-                    cell = h3_latlng_to_cell(ST_SetSRID(ST_MakePoint(lng, lat), 4326), 15)",
+                    cell = h3_latlng_to_cell(point(lng, lat), 15)",
     query: "SELECT count(h3_cell_to_parent(cell, 3)) FROM bench_h3_var",
     cleanup_extra: "",
 };

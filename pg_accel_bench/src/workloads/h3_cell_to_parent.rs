@@ -28,10 +28,10 @@ impl Workload for H3CellToParent {
             format!(
                 "INSERT INTO bench_h3_parent (cell) \
                  SELECT h3_latlng_to_cell(\
-                   ST_SetSRID(ST_MakePoint(\
+                   point(\
                      -74.0 + random() * 0.3, \
                      40.6 + random() * 0.4\
-                   ), 4326), 7\
+                   ), 7\
                  ) \
                  FROM generate_series(1, {rows})"
             ),

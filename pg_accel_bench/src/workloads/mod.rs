@@ -49,8 +49,6 @@ mod window_analytics;
 mod window_variants;
 // --- SSBM ---
 mod ssbm;
-// --- Real Boundary (realistic data from plazafyi/boundaries) ---
-mod real_boundary;
 // --- Mixed ---
 mod filtered_grouped_agg;
 mod mixed_variants;
@@ -446,20 +444,6 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(raster_variants::RASTER_SLOPE),
         Box::new(raster_variants::RASTER_RECLASS),
         Box::new(raster_variants::RASTER_ALGEBRA_DEEP),
-        // --- Real Boundary (realistic data from plazafyi/boundaries) ---
-        Box::new(real_boundary::REAL_PIP_COMPLEX),
-        Box::new(real_boundary::REAL_MULTIPOLY_CONTAIN),
-        Box::new(real_boundary::REAL_SPATIAL_JOIN_DENSE),
-        Box::new(real_boundary::REAL_BIDIRECTIONAL_CONTAIN),
-        Box::new(real_boundary::REAL_WINDOW_REGION_RANK),
-        Box::new(real_boundary::REAL_GROUPED_REGION_STATS),
-        Box::new(real_boundary::REAL_HASHJOIN_BOUNDARY),
-        Box::new(real_boundary::REAL_TOPK_BOUNDARY),
-        Box::new(real_boundary::REAL_SPATIAL_FILTER_AGG),
-        Box::new(real_boundary::REAL_SPATIAL_JOIN_WINDOW),
-        Box::new(real_boundary::REAL_EXPR_SPATIAL),
-        Box::new(real_boundary::REAL_BOUNDARY_ANALYTICS),
-        Box::new(real_boundary::REAL_SPATIAL_KNN_AGG),
         // --- Regression workloads (expect ~1.00x, proving no overhead) ---
         Box::new(Proximity),
         Box::new(IndexRecheck),
@@ -550,20 +534,6 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("h3_dist_near", "h3"),
         ("h3_dist_far", "h3"),
         ("h3_parent_deep", "h3"),
-        // Real Boundary (all require PostGIS + real_boundaries staging table)
-        ("real_pip_complex", "postgis"),
-        ("real_multipoly_contain", "postgis"),
-        ("real_spatial_join_dense", "postgis"),
-        ("real_bidirectional_contain", "postgis"),
-        ("real_window_region_rank", "postgis"),
-        ("real_grouped_region_stats", "postgis"),
-        ("real_hashjoin_boundary", "postgis"),
-        ("real_topk_boundary", "postgis"),
-        ("real_spatial_filter_agg", "postgis"),
-        ("real_spatial_join_window", "postgis"),
-        ("real_expr_spatial", "postgis"),
-        ("real_boundary_analytics", "postgis"),
-        ("real_spatial_knn_agg", "postgis"),
         // GPU Raster
         ("raster_ndvi", "postgis_raster"),
         ("raster_slope", "postgis_raster"),

@@ -9,6 +9,18 @@ pub struct RasterVariant {
     pub cleanup_stmts: &'static [&'static str],
 }
 
+/// Scale tile dimensions so total pixel volume stays roughly constant.
+/// Target: ~256×256 at 1K rows ≈ 65M pixels total.
+/// At 1M rows we use 8×8 tiles to keep setup under a minute.
+fn tile_size(rows: usize) -> usize {
+    match rows {
+        r if r <= 1_000 => 256,
+        r if r <= 10_000 => 64,
+        r if r <= 100_000 => 24,
+        _ => 8,
+    }
+}
+
 impl Workload for RasterVariant {
     fn name(&self) -> &'static str {
         self.name
@@ -23,9 +35,13 @@ impl Workload for RasterVariant {
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
+        let ts = tile_size(rows);
         self.setup_stmts
             .iter()
-            .map(|s| s.replace("{rows}", &rows.to_string()))
+            .map(|s| {
+                s.replace("{rows}", &rows.to_string())
+                    .replace("{tile}", &ts.to_string())
+            })
             .collect()
     }
 
@@ -51,7 +67,7 @@ pub const RASTER_NDVI: RasterVariant = RasterVariant {
         "INSERT INTO bench_raster (rast) \
          SELECT ST_AddBand(\
            ST_AddBand(\
-             ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+             ST_MakeEmptyRaster({tile}, {tile}, 0, 0, 1),\
              1, '32BF'::text, random() * 255, 0\
            ),\
            '32BF'::text, random() * 255, 0\
@@ -81,7 +97,7 @@ pub const RASTER_SLOPE: RasterVariant = RasterVariant {
          )",
         "INSERT INTO bench_raster_elev (rast) \
          SELECT ST_AddBand(\
-           ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+           ST_MakeEmptyRaster({tile}, {tile}, 0, 0, 1),\
            1, '32BF'::text, random() * 1000, 0\
          ) FROM generate_series(1, {rows})",
         "ANALYZE bench_raster_elev",
@@ -105,7 +121,7 @@ pub const RASTER_RECLASS: RasterVariant = RasterVariant {
          )",
         "INSERT INTO bench_raster_rc (rast) \
          SELECT ST_AddBand(\
-           ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+           ST_MakeEmptyRaster({tile}, {tile}, 0, 0, 1),\
            1, '32BF'::text, random() * 255, 0\
          ) FROM generate_series(1, {rows})",
         "ANALYZE bench_raster_rc",
@@ -136,7 +152,7 @@ pub const RASTER_ALGEBRA_DEEP: RasterVariant = RasterVariant {
          SELECT ST_AddBand(\
            ST_AddBand(\
              ST_AddBand(\
-               ST_MakeEmptyRaster(256, 256, 0, 0, 1),\
+               ST_MakeEmptyRaster({tile}, {tile}, 0, 0, 1),\
                1, '32BF'::text, random() * 255, 0\
              ),\
              '32BF'::text, random() * 255, 0\

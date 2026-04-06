@@ -30,16 +30,16 @@ impl Workload for H3GridDistance {
                 "INSERT INTO bench_h3_dist (cell_a, cell_b) \
                  SELECT \
                    h3_latlng_to_cell(\
-                     ST_SetSRID(ST_MakePoint(\
+                     point(\
                        -74.0 + random() * 0.3, \
                        40.6 + random() * 0.4\
-                     ), 4326), 4\
+                     ), 4\
                    ), \
                    h3_latlng_to_cell(\
-                     ST_SetSRID(ST_MakePoint(\
+                     point(\
                        -74.0 + random() * 0.3, \
                        40.6 + random() * 0.4\
-                     ), 4326), 4\
+                     ), 4\
                    ) \
                  FROM generate_series(1, {rows})"
             ),
