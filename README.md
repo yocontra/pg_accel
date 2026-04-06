@@ -95,34 +95,42 @@ deployments use parallel query.
 
 **Hardware:** Apple M2 Max (12 CPU cores, 38 GPU cores, 64 GB unified memory)
 **PostgreSQL:** 17.9 with `max_parallel_workers_per_gather = 2`
-**Methodology:** 10 iterations + 3 warmup, randomized measurement order, plan
-cache flush between measurements, paired t-test (p < 0.05)
+**Suite:** 127 workloads × 4 row scales (1K, 10K, 100K, 1M) = 508 measurements
+**Methodology:** 10 iterations + 3 warmup per measurement, randomized
+accel/baseline ordering, fresh connection per mode with `DISCARD ALL`,
+deterministic seed (42), paired t-test (p < 0.05)
 
-### Highlights
+### Highlights (100K rows)
 
 | Workload | Accel | PG Parallel | Speedup |
 |----------|-------|-------------|---------|
-| spatial_mega_5kv (5000-vertex polygons) | 20.96 ms | 46.69 ms | **2.23x** |
-| spatial_concentric (nested rings) | 20.86 ms | 40.58 ms | **1.95x** |
-| mixed_expr_agg (filter + aggregate) | 9.06 ms | 14.67 ms | **1.62x** |
-| gpu_hashjoin_filter (join + WHERE) | 7.30 ms | 10.21 ms | **1.40x** |
-| spatial_mega_2kv (2000-vertex polygons) | 20.36 ms | 27.52 ms | **1.35x** |
-| spatial_star_1kv (star-shaped polygon) | 17.39 ms | 22.74 ms | **1.31x** |
-| spatial_multihole (polygon with holes) | 24.07 ms | 27.44 ms | **1.14x** |
-| spatial_mega_1kv (1000-vertex polygons) | 19.83 ms | 21.29 ms | **1.07x** |
+| h3_latlng_res15 (H3 resolution 15) | 10.72 ms | 124.18 ms | **11.59x** |
+| vsweep_50kv (50K-vertex polygons) | 28.93 ms | 302.96 ms | **10.47x** |
+| h3_latlng_res9 (H3 resolution 9) | 10.73 ms | 87.38 ms | **8.15x** |
+| vsweep_25kv (25K-vertex polygons) | 27.87 ms | 161.29 ms | **5.79x** |
+| h3_latlng_res3 (H3 resolution 3) | 10.54 ms | 51.60 ms | **4.90x** |
+| h3_dist_near (H3 grid distance) | 12.11 ms | 49.43 ms | **4.08x** |
+| vsweep_10kv (10K-vertex polygons) | 25.74 ms | 75.13 ms | **2.92x** |
+| spatial_mega_5kv (5K-vertex polygons) | 25.20 ms | 47.55 ms | **1.89x** |
+| gpu_expr_filter (expression filter) | 3.60 ms | 6.12 ms | **1.70x** |
+| expr_2pred (two-predicate WHERE) | 3.89 ms | 6.53 ms | **1.68x** |
+| spatial_concentric (nested rings) | 25.53 ms | 41.86 ms | **1.64x** |
+| spatial_mega_2kv (2K-vertex polygons) | 23.86 ms | 28.57 ms | **1.20x** |
 
-Passthrough workloads (sort, aggregation, window, hash join without filter)
-run at parity (~1.00x) — pg_accel's planner correctly defers to PostgreSQL
-when GPU acceleration would not help.
+### Passthrough (zero overhead at 1M rows)
 
-### Zero OLTP overhead
+Workloads where GPU acceleration would not help run at parity — the planner
+correctly defers to PostgreSQL:
 
-| Workload | Accel | PG Parallel | Notes |
-|----------|-------|-------------|-------|
-| oltp_point_lookup | 0.01 ms | 0.00 ms | Sub-microsecond, noise floor |
-| small_table_scan | 0.01 ms | 0.01 ms | No measurable overhead |
+| Workload | Accel | PG Parallel | Speedup |
+|----------|-------|-------------|---------|
+| large_sort | 206.40 ms | 203.88 ms | 0.99x |
+| gpu_reduce_sum | 36.20 ms | 36.13 ms | 1.00x |
+| grouped_agg | 49.96 ms | 49.74 ms | 1.00x |
+| hash_join | 92.20 ms | 92.20 ms | 1.00x |
+| window_lag | 313.59 ms | 312.78 ms | 1.00x |
 
-### Scaling with polygon complexity
+### Scaling with polygon complexity (100K rows)
 
 The cost model automatically skips GPU acceleration for low-vertex polygons
 where PG parallel is faster. Zero overhead below the crossover, then
@@ -130,32 +138,31 @@ monotonically increasing speedup as geometric complexity rises:
 
 | Vertices | Accel | PG Parallel | Speedup |
 |----------|-------|-------------|---------|
-| 4 | 12.63 ms | 12.49 ms | 0.99x (passthrough) |
-| 16 | 12.80 ms | 12.95 ms | 1.01x (passthrough) |
-| 64 | 13.40 ms | 13.11 ms | 0.98x (passthrough) |
-| 256 | 14.74 ms | 14.65 ms | 0.99x (passthrough) |
-| 500 | 16.12 ms | 16.08 ms | 1.00x (passthrough) |
-| 750 | 18.45 ms | 18.34 ms | 0.99x (passthrough) |
-| 1,000 | 17.80 ms | 19.52 ms | **1.10x** |
-| 2,000 | 18.35 ms | 25.18 ms | **1.37x** |
-| 5,000 | 18.71 ms | 43.75 ms | **2.34x** |
-| 10,000 | 19.05 ms | 69.13 ms | **3.63x** |
-| 25,000 | 20.70 ms | 152.22 ms | **7.35x** |
-| 50,000 | 21.81 ms | 291.61 ms | **13.37x** |
-| 100,000 | 21.21 ms | 286.75 ms | **13.52x** |
+| 4 | 14.39 ms | 14.27 ms | 0.99x (passthrough) |
+| 16 | 14.83 ms | 14.73 ms | 0.99x (passthrough) |
+| 64 | 15.18 ms | 15.47 ms | 1.02x (passthrough) |
+| 256 | 17.18 ms | 17.32 ms | 1.01x (passthrough) |
+| 500 | 19.05 ms | 18.54 ms | 0.97x (passthrough) |
+| 750 | 20.81 ms | 20.82 ms | 1.00x (passthrough) |
+| 1,000 | 24.25 ms | 22.15 ms | 0.91x (passthrough) |
+| 2,000 | 24.49 ms | 28.66 ms | **1.17x** |
+| 5,000 | 25.21 ms | 47.58 ms | **1.89x** |
+| 10,000 | 25.74 ms | 75.13 ms | **2.92x** |
+| 25,000 | 27.87 ms | 161.29 ms | **5.79x** |
+| 50,000 | 28.93 ms | 302.96 ms | **10.47x** |
+| 100,000 | 29.30 ms | 302.10 ms | **10.31x** |
 
 The vertex threshold is hardware-derived (`DeviceLimits::gpu_spatial_min_vertices`)
-and auto-scales with GPU compute units. On M2 Max, the crossover is ~750 vertices.
+and auto-scales with GPU compute units. On M2 Max, the crossover is ~1500 vertices.
 
-The full 90-workload benchmark report (including detailed per-workload
+The full 127-workload benchmark report (including detailed per-workload
 statistics, confidence intervals, effect sizes, and methodology) is in
 `benchmarks/README.md`.
 
 Run benchmarks with:
 
 ```bash
-just bench                        # default: 100K rows, 10 iterations
-just bench rows=1000000           # larger dataset
+just bench                        # default: all scales, 10 iterations
 ```
 
 **Correctness**: Every accelerated query is verified against PostgreSQL's own

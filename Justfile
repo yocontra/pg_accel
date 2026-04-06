@@ -16,15 +16,40 @@ setup-tools:
     asdf plugin add just 2>/dev/null || true
     asdf install
 
-# Install Homebrew dependencies
+# Install Homebrew dependencies (including PostGIS + h3 for pgrx)
 setup-brew:
-    brew install postgresql@17
+    brew install postgresql@17 postgis h3
     cargo install cargo-pgrx --locked
     cargo install cargo-deny --locked
 
-# Initialize pgrx for PG 17
+# Initialize pgrx for PG 17 and link all required extensions into it
 setup-pgrx:
-    cargo pgrx init --pg17 $(brew --prefix postgresql@17)/bin/pg_config
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo pgrx init --pg17 "$(brew --prefix postgresql@17)/bin/pg_config"
+
+    # Symlink PostGIS, h3, and other extensions into pgrx-managed PG.
+    # Without this, CREATE EXTENSION fails inside the pgrx instance.
+    PGRX_LIB="$HOME/.pgrx/17.9/pgrx-install/lib/postgresql"
+    PGRX_EXT="$HOME/.pgrx/17.9/pgrx-install/share/postgresql/extension"
+
+    # PostGIS
+    for f in "$(brew --prefix postgis)"/lib/postgresql@17/*.dylib; do
+        ln -sf "$f" "$PGRX_LIB/$(basename "$f")"
+    done
+    for f in "$(brew --prefix postgis)"/share/postgresql@17/extension/*; do
+        ln -sf "$f" "$PGRX_EXT/$(basename "$f")"
+    done
+
+    # h3 + h3_postgis
+    for f in /opt/homebrew/lib/postgresql@17/h3*.dylib; do
+        ln -sf "$f" "$PGRX_LIB/$(basename "$f")"
+    done
+    for f in /opt/homebrew/share/postgresql@17/extension/h3*; do
+        ln -sf "$f" "$PGRX_EXT/$(basename "$f")"
+    done
+
+    echo "pgrx PG17 initialized with postgis, postgis_raster, h3, h3_postgis"
 
 # Install AdaptiveCpp with Metal backend (macOS Apple Silicon)
 setup-gpu: setup-gpu-deps setup-gpu-metal-headers setup-gpu-acpp
@@ -177,4 +202,16 @@ ci: pre-commit test-unit
 # Build installable pgrx package
 package pg="17":
     cargo pgrx package --pg-config $(which pg_config) --features pg{{pg}}
+
+# Live OTel span viewer TUI (reads OTLP JSON file)
+otel-tui:
+    otel-tui --from-json-file ~/.pgrx/data-17/pg_accel_otel.jsonl
+
+# Live trace viewer (tail tracing-subscriber JSONL)
+traces:
+    tail -f ~/.pgrx/data-17/pg_accel_traces.jsonl | python3 -m json.tool --no-ensure-ascii
+
+# View last N trace entries
+traces-last n="20":
+    tail -{{n}} ~/.pgrx/data-17/pg_accel_traces.jsonl | python3 -m json.tool --no-ensure-ascii
 

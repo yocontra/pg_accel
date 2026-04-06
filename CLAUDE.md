@@ -42,6 +42,7 @@ just gpu-test         # Run standalone GPU kernel tests
 8. **Thread budget via shared memory LWLock.** Always release in before_shmem_exit.
 9. **PARALLEL SAFE != thread-safe.** PG parallel = forked processes, not threads.
 10. **No hardcoded GPU thresholds.** All dispatch limits (min rows, max chunk sizes, batch bounds) go in `DeviceLimits` (`src/engine/cost.rs`) and are derived from hardware profile. Never use magic constants in executor/planner code.
+11. **NEVER add CPU fallbacks.** GPU execution is the entire purpose of this library. If a GPU kernel crashes or fails, the fix is to make the GPU path work — not to add a CPU fallback that bypasses it. CPU fallbacks are test cheats that hide real bugs. Any code introducing CPU fallback paths for operations that should run on GPU must be rejected.
 
 ## Linting (enforced by CI, don't configure manually)
 
@@ -63,6 +64,72 @@ just gpu-test         # Run standalone GPU kernel tests
 | `adaptivecpp-metal` | AdaptiveCpp SYCL, Metal backend, fp32 constraints, platform caps |
 | `cost-model` | Decision chain, GPU break-even, late materialization, platform profiles |
 | `benchmark-methodology` | Benchmark harness, workload definitions, statistical methodology |
+
+## Diagnostics & Tracing
+
+### Architecture
+
+pg_accel uses the `tracing` crate with a triple-output subscriber initialized lazily in each backend:
+
+1. **OTel JSONL file** — `$PGDATA/pg_accel_otel.jsonl` (OTLP JSON format, consumed by `otel-tui`)
+2. **tracing JSONL file** — `$PGDATA/pg_accel_traces.jsonl` (tracing-subscriber JSON, for Claude `Read` tool)
+3. **PG stderr** — compact human-readable format for `pg_log` / terminal
+
+The subscriber is configured by the `pg_accel.log_level` GUC (default: `notice`). Set to `debug` for full span output. The filter is read once when the backend's first query triggers tracing init.
+
+**Source:** `src/engine/otel.rs`
+
+### Viewing traces
+
+```bash
+# Live OTel span viewer TUI (install: brew install ymtdzzz/tap/otel-tui)
+just otel-tui
+
+# Tail the tracing-subscriber JSONL (for manual inspection)
+just traces
+
+# Last N entries
+just traces-last 20
+```
+
+Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to inspect spans.
+
+### Key span names
+
+| Span | Location | What it tells you |
+|------|----------|-------------------|
+| `exec.window_compute` | `executor/window.rs` | Window consume + compute phase (n_specs) |
+| `exec.window_emit` | `executor/window.rs` | Per-row tuple emission (pos) |
+| `gpu.window.*` | `executor/window.rs` | Per-spec GPU dispatch (func, n) |
+| `gpu.window_row_number` etc. | `gpu/mod.rs` | Individual GPU kernel call (n) |
+| `gpu.reduce_*` | `gpu/mod.rs` | GPU reduce kernels (n) |
+| `gpu.sort_*` | `gpu/mod.rs` | GPU sort kernels (n, key_type) |
+| `exec.agg_*` | `executor/agg.rs` | Agg executor next/fused/grouped |
+| `exec.sort_next` | `executor/sort.rs` | Sort executor emission |
+| `planner.*` | `ffi/planner_hooks.rs` | Planner hook decisions |
+
+### Crash diagnosis workflow
+
+1. **Check PG logs:** `tail -50 ~/.pgrx/data-17/pg.log` — look for `signal 6` (SIGABRT), `signal 11` (SIGSEGV)
+2. **Check macOS crash reports:** `ls -lt ~/Library/Logs/DiagnosticReports/postgres-*.ips | head -5` — parse with `grep "symbol"` for stack frames
+3. **Check trace file:** `cat ~/.pgrx/data-17/pg_accel_traces.jsonl` — last completed span shows where execution reached before crash
+4. **Check stats:** `SELECT * FROM pg_accel_stats();` — counters for hook calls, skips, GPU failures
+5. **Common crash patterns:**
+   - `apply_tlist_labeling` assert → target list mismatch in `PlanCustomPath` callback
+   - `ExceptionalCondition` in planner → Custom Scan path metadata issue
+   - `MTLCompilerService` / `hipsycl::sycl::queue` → Metal/SYCL fork issue (GPU shader compilation fails in forked backend)
+   - `crashed on child side of fork pre-exec` → SYCL runtime thread creation in forked process
+
+### GUCs
+
+| GUC | Default | Purpose |
+|-----|---------|---------|
+| `pg_accel.enabled` | `true` | Master switch |
+| `pg_accel.gpu_enabled` | `true` | GPU dispatch switch |
+| `pg_accel.log_level` | `notice` | Tracing filter (debug/info/notice/warning/error) |
+| `pg_accel.min_batch_size` | `65536` | Min rows for GPU dispatch |
+| `pg_accel.kernel_timeout_ms` | `5000` | GPU kernel timeout |
+| `pg_accel.cost_multiplier` | `1.0` | Cost estimate multiplier (>1 = more conservative) |
 
 ## Agent Coordination
 
