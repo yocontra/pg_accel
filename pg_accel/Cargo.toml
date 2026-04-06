@@ -24,6 +24,13 @@ pg_test = []
 [dependencies]
 libc = "0.2"
 pgrx = "0.17.0"
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-opentelemetry = "0.32"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 
 [dev-dependencies]
 pgrx-tests = "0.17.0"

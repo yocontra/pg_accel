@@ -15,6 +15,9 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // 1. Register GUC variables.
     engine::gucs::init_gucs();
 
+    // 1b. Initialize OTel tracing (must be after GUCs so log_level is available).
+    engine::otel::init();
+
     // 2–3. Shared memory + exit callback.
     // Gated out of the test binary because PG server symbols
     // (shmem_request_hook, before_shmem_exit, etc.) are unavailable at link

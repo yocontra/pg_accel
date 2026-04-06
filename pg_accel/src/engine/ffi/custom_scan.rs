@@ -698,62 +698,24 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
 
-        // Build custom_scan_tlist and plan.targetlist from the window tlist.
-        // Window functions add extra output columns; we need to map them
-        // through as simple Vars so PG doesn't try to evaluate WindowFunc
-        // expressions itself.
-        let tlist_len = if tlist.is_null() {
-            0
+        // PG may pass an empty tlist when the CustomScan is not the top-level
+        // plan node (e.g., under Limit). In that case, use root->processed_tlist
+        // which has the full query target list including WindowFunc expressions.
+        // apply_tlist_labeling (createplan.c:360) asserts that our plan's
+        // targetlist length matches root->processed_tlist length.
+        let effective_tlist = if tlist.is_null()
+            || pg_sys::list_length(tlist) == 0
+        {
+            (*_root).processed_tlist
         } else {
-            pg_sys::list_length(tlist)
+            tlist
         };
 
-        let mut scan_tlist: *mut pg_sys::List = std::ptr::null_mut();
-        let mut plan_tlist: *mut pg_sys::List = std::ptr::null_mut();
-
-        for i in 0..tlist_len {
-            let tle = pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>();
-            let resno = (i + 1) as i16;
-
-            let (vartype, vartypmod, varcollid) = if tle.is_null() {
-                (pg_sys::FLOAT8OID, -1i32, pg_sys::InvalidOid)
-            } else {
-                let expr = (*tle).expr;
-                if expr.is_null() {
-                    (pg_sys::FLOAT8OID, -1i32, pg_sys::InvalidOid)
-                } else {
-                    let tag = (*expr.cast::<pg_sys::Node>()).type_;
-                    if tag == pg_sys::NodeTag::T_WindowFunc {
-                        let wf = expr.cast::<pg_sys::WindowFunc>();
-                        ((*wf).wintype, -1i32, (*wf).wincollid)
-                    } else {
-                        // Use exprType for regular expressions.
-                        (pg_sys::exprType(expr.cast()), -1i32, pg_sys::InvalidOid)
-                    }
-                }
-            };
-
-            let (orig_resno, orig_name, orig_junk) = if tle.is_null() {
-                (resno, std::ptr::null_mut(), false)
-            } else {
-                ((*tle).resno, (*tle).resname, (*tle).resjunk)
-            };
-
-            let scan_var =
-                pg_sys::makeVar(pg_sys::INDEX_VAR, resno, vartype, vartypmod, varcollid, 0);
-            let scan_tle =
-                pg_sys::makeTargetEntry(scan_var.cast(), resno, std::ptr::null_mut(), false);
-            scan_tlist = pg_sys::lappend(scan_tlist, scan_tle.cast());
-
-            let plan_var =
-                pg_sys::makeVar(pg_sys::INDEX_VAR, resno, vartype, vartypmod, varcollid, 0);
-            let plan_tle =
-                pg_sys::makeTargetEntry(plan_var.cast(), orig_resno, orig_name, orig_junk);
-            plan_tlist = pg_sys::lappend(plan_tlist, plan_tle.cast());
-        }
-
-        (*cscan).custom_scan_tlist = scan_tlist;
-        (*cscan).scan.plan.targetlist = plan_tlist;
+        // Use the original tlist expressions so PG's set_customscan_references
+        // can map WindowFunc / Var references correctly — same approach as agg.
+        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(effective_tlist.cast()).cast();
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(effective_tlist.cast()).cast();
 
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
@@ -791,7 +753,45 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
             pg_sys::makeInteger(AccelStrategy::GpuWindow as c_int).cast(),
         );
 
-        // Copy window specs from path's custom_private.
+        // Build attno remap: original table attno → child slot position.
+        // The child plan (Sort/SeqScan) may project only referenced columns,
+        // so the slot position differs from the original table attno.
+        let mut attno_map: Vec<(c_int, c_int)> = Vec::new();
+        if !custom_plans.is_null() && pg_sys::list_length(custom_plans) > 0 {
+            let child_plan = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
+            if !child_plan.is_null() {
+                let child_tlist = (*child_plan).targetlist;
+                if !child_tlist.is_null() {
+                    let tlen = pg_sys::list_length(child_tlist);
+                    for j in 0..tlen {
+                        let tle =
+                            pg_sys::list_nth(child_tlist, j).cast::<pg_sys::TargetEntry>();
+                        if tle.is_null() {
+                            continue;
+                        }
+                        let expr = (*tle).expr;
+                        if !expr.is_null()
+                            && (*expr.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_Var
+                        {
+                            let var = expr.cast::<pg_sys::Var>();
+                            let table_attno = i32::from((*var).varattno);
+                            let slot_pos = i32::from((*tle).resno);
+                            attno_map.push((table_attno, slot_pos));
+                        }
+                    }
+                }
+            }
+        }
+        let remap = |orig: c_int| -> c_int {
+            for &(table_a, slot_p) in &attno_map {
+                if table_a == orig {
+                    return slot_p;
+                }
+            }
+            orig // no remap found — use as-is
+        };
+
+        // Copy window specs from path's custom_private, remapping attnos.
         // Path layout: [num_specs, spec0_func, spec0_part_attno, spec0_order_attno,
         //               spec0_value_attno, spec0_offset, spec0_default_bits,
         //               spec0_result_type, ...]
@@ -800,10 +800,18 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
             list = pg_sys::lappend(list, pg_sys::makeInteger(num_specs).cast());
             for k in 0..num_specs {
                 let base = 1 + k * WINDOW_SPEC_INTS as c_int;
+                // Fields: [func, part_attno, order_attno, value_attno,
+                //          offset, default_bits, result_type]
+                // Remap indices 1,2,3 (part_attno, order_attno, value_attno).
                 for j in 0..WINDOW_SPEC_INTS as c_int {
                     if (base + j) < path_len as c_int {
                         let val = list_int_at(path_priv, base + j);
-                        list = pg_sys::lappend(list, pg_sys::makeInteger(val).cast());
+                        let remapped = if (1..=3).contains(&j) && val > 0 {
+                            remap(val)
+                        } else {
+                            val
+                        };
+                        list = pg_sys::lappend(list, pg_sys::makeInteger(remapped).cast());
                     }
                 }
             }
@@ -1964,9 +1972,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     // Custom Scan node initialised by ExecInitNode.
                     let child_ps =
                         pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
-                    // Check if the child is a CustomScanState with our methods.
-                    if !child_ps.is_null() {
+                    // Verify the child is actually a CustomScanState with our
+                    // exec methods before casting to GpuAccelScanState. Without
+                    // this check, a SeqScan child would be misinterpreted as
+                    // our extended state, reading garbage memory.
+                    if !child_ps.is_null()
+                        && (*child_ps.cast::<pg_sys::Node>()).type_
+                            == pg_sys::NodeTag::T_CustomScanState
+                    {
                         let child_css = child_ps.cast::<pg_sys::CustomScanState>();
+                        // SAFETY: child_css is a valid CustomScanState (tag
+                        // verified above). Only proceed if it uses our exec
+                        // methods vtable.
+                        if (*child_css).methods == &raw const EXEC_METHODS.0 {
                         let child_state = child_css.cast::<GpuAccelScanState>();
                         let child_strategy =
                             GpuStrategy::from_i32((*child_state).accel.strategy);
@@ -2026,6 +2044,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                                 }
                             }
                         }
+                        } // methods check
                     }
                 }
             }
@@ -2503,8 +2522,8 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             sort_state.batches_executed,
             sort_state.dispatch_time_us,
         )
-    } else {
-        // SAFETY: For non-Sort strategies, executor points to ScanExecState.
+    } else if gpu_strategy == GpuStrategy::Scan {
+        // SAFETY: For Scan strategy, executor points to ScanExecState.
         let scan_state = unsafe { &mut *executor.cast::<ScanExecState>() };
         let slot = unsafe { scan_state.next(child_ps, scan_slot) };
         (
@@ -2513,6 +2532,10 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             scan_state.batches_executed,
             scan_state.dispatch_time_us,
         )
+    } else {
+        // Unknown strategy — pass through to stock PG executor.
+        // SAFETY: node is a valid CustomScanState on the main backend thread.
+        return unsafe { passthrough_exec(node) };
     };
 
     // SAFETY: state points to our GpuAccelScanState; writing counters back

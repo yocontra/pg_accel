@@ -513,6 +513,7 @@ impl AggExecState {
         child_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.agg_next").entered();
         if self.result_returned {
             return std::ptr::null_mut();
         }
@@ -592,7 +593,6 @@ impl AggExecState {
             if !tuples.is_empty() && !last_child_slot.is_null() {
                 // SAFETY: last_child_slot is valid; tts_tupleDescriptor is set.
                 let tupdesc = unsafe { (*last_child_slot).tts_tupleDescriptor };
-
                 for (i, col) in self.columns.iter_mut().enumerate() {
                     if col.attno <= 0 {
                         continue;
@@ -819,6 +819,7 @@ impl AggExecState {
         &mut self,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.agg_fused").entered();
         if self.result_returned {
             return std::ptr::null_mut();
         }
@@ -1467,6 +1468,7 @@ impl AggExecState {
         child_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.agg_grouped").entered();
         // First call: consume all input and run hash aggregation.
         if !self.child_exhausted {
             self.child_exhausted = true;

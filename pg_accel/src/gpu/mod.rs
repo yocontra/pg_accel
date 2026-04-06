@@ -121,6 +121,12 @@ pub fn spatial_intersects_gpu(
 ) -> Option<(Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>)> {
     let count_a = geoms_a.len();
     let count_b = geoms_b.len();
+    let _span = tracing::info_span!(
+        "gpu.spatial_intersects",
+        count_a,
+        count_b,
+    )
+    .entered();
     if count_a == 0 || count_b == 0 {
         return Some((Vec::new(), Vec::new(), Vec::new()));
     }
@@ -215,6 +221,12 @@ pub fn point_in_polygon_bulk(
     ring_count: usize,
 ) -> Option<Vec<i8>> {
     let point_count = points_xy.len() / 2;
+    let _span = tracing::info_span!(
+        "gpu.point_in_polygon_bulk",
+        point_count,
+        ring_count,
+    )
+    .entered();
     if point_count == 0 {
         return Some(Vec::new());
     }
@@ -256,6 +268,7 @@ pub fn point_in_polygon_bulk(
 /// GPU-accelerated in-place sort for f32 data.
 /// Returns `None` if GPU is unavailable.
 pub fn sort_f32(data: &mut [f32]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.sort_f32", n = data.len()).entered();
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid mutable slice.
@@ -271,6 +284,7 @@ pub fn sort_f32(data: &mut [f32]) -> Option<()> {
 
 /// GPU-accelerated in-place sort for f64 data.
 pub fn sort_f64(data: &mut [f64]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.sort_f64", n = data.len()).entered();
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid mutable slice.
@@ -286,6 +300,7 @@ pub fn sort_f64(data: &mut [f64]) -> Option<()> {
 
 /// GPU-accelerated in-place sort for i32 data.
 pub fn sort_i32(data: &mut [i32]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.sort_i32", n = data.len()).entered();
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid mutable slice.
@@ -301,6 +316,7 @@ pub fn sort_i32(data: &mut [i32]) -> Option<()> {
 
 /// GPU-accelerated in-place sort for i64 data.
 pub fn sort_i64(data: &mut [i64]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.sort_i64", n = data.len()).entered();
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid mutable slice.
@@ -319,6 +335,7 @@ pub fn sort_i64(data: &mut [i64]) -> Option<()> {
 /// Returns `None` if GPU is unavailable.
 pub fn sort_kv_f32(keys: &mut [f32], indices: &mut [u32]) -> Option<()> {
     let count = keys.len().min(indices.len());
+    let _span = tracing::debug_span!("gpu.sort_kv_f32", n = count).entered();
     #[cfg(feature = "gpu")]
     {
         // SAFETY: keys and indices are valid mutable slices.
@@ -337,6 +354,7 @@ pub fn sort_kv_f32(keys: &mut [f32], indices: &mut [u32]) -> Option<()> {
 /// Sorts `keys` in place and permutes `indices` to match.
 /// Returns `None` if GPU is unavailable.
 pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.sort_kv_f64", n = keys.len()).entered();
     let count = keys.len().min(indices.len());
     #[cfg(feature = "gpu")]
     {
@@ -358,6 +376,7 @@ pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
 
 /// GPU-accelerated f32 sum reduction. Returns `None` if GPU unavailable.
 pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
+    let _span = tracing::debug_span!("gpu.reduce_sum_f32", n = data.len()).entered();
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -375,6 +394,7 @@ pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
 
 /// GPU-accelerated f32 min reduction. Returns `None` if GPU unavailable.
 pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
+    let _span = tracing::debug_span!("gpu.reduce_min_f32", n = data.len()).entered();
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -392,6 +412,7 @@ pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
 
 /// GPU-accelerated f32 max reduction. Returns `None` if GPU unavailable.
 pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
+    let _span = tracing::debug_span!("gpu.reduce_max_f32", n = data.len()).entered();
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -409,6 +430,7 @@ pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
 
 /// GPU-accelerated f64 sum reduction.
 pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
+    let _span = tracing::debug_span!("gpu.reduce_sum_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -426,6 +448,7 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
 
 /// GPU-accelerated i64 sum reduction.
 pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
+    let _span = tracing::debug_span!("gpu.reduce_sum_i64", n = data.len()).entered();
     let mut result: i64 = 0;
     #[cfg(feature = "gpu")]
     {
@@ -443,6 +466,7 @@ pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
 
 /// GPU-accelerated f64 min reduction.
 pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
+    let _span = tracing::debug_span!("gpu.reduce_min_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -460,6 +484,7 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
 
 /// GPU-accelerated f64 max reduction.
 pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
+    let _span = tracing::debug_span!("gpu.reduce_max_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -477,6 +502,7 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 
 /// GPU-accelerated mask popcount.
 pub fn reduce_count(mask: &[u8]) -> Option<usize> {
+    let _span = tracing::debug_span!("gpu.reduce_count", n = mask.len()).entered();
     let mut result: usize = 0;
     #[cfg(feature = "gpu")]
     {
@@ -1050,6 +1076,13 @@ pub fn hash_agg_execute(
     value_types: &[i32],
     agg_cols: &[PgaccelAggCol],
 ) -> Option<HashAggResult> {
+    let _span = tracing::info_span!(
+        "gpu.hash_agg",
+        n_rows = row_count,
+        n_aggs = agg_cols.len(),
+        key_type,
+    )
+    .entered();
     if row_count == 0 || agg_cols.is_empty() {
         return None;
     }
@@ -1230,6 +1263,7 @@ impl GpuHashTable {
 /// GPU-accelerated ROW_NUMBER within partitions.
 /// Returns `None` if GPU is unavailable.
 pub fn window_row_number(partition_starts: &[u8], results: &mut [i64]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.window_row_number", n = partition_starts.len()).entered();
     let count = partition_starts.len().min(results.len());
     if count == 0 {
         return Some(());
@@ -1260,6 +1294,7 @@ pub fn window_row_number(partition_starts: &[u8], results: &mut [i64]) -> Option
 /// GPU-accelerated RANK within partitions.
 /// Returns `None` if GPU is unavailable.
 pub fn window_rank(partition_starts: &[u8], sort_keys: &[f64], results: &mut [i64]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.window_rank", n = partition_starts.len()).entered();
     let count = partition_starts
         .len()
         .min(sort_keys.len())
@@ -1299,6 +1334,8 @@ pub fn window_dense_rank(
     sort_keys: &[f64],
     results: &mut [i64],
 ) -> Option<()> {
+    let _span =
+        tracing::debug_span!("gpu.window_dense_rank", n = partition_starts.len()).entered();
     let count = partition_starts
         .len()
         .min(sort_keys.len())
@@ -1339,6 +1376,7 @@ pub fn window_sum(
     null_mask: &[u8],
     results: &mut [f64],
 ) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.window_sum", n = partition_starts.len()).entered();
     let count = partition_starts.len().min(values.len()).min(results.len());
     if count == 0 {
         return Some(());
@@ -1378,6 +1416,7 @@ pub fn window_sum(
 /// GPU-accelerated running COUNT within partitions.
 /// `null_mask` may be empty (no nulls). Returns `None` if GPU unavailable.
 pub fn window_count(partition_starts: &[u8], null_mask: &[u8], results: &mut [i64]) -> Option<()> {
+    let _span = tracing::debug_span!("gpu.window_count", n = partition_starts.len()).entered();
     let count = partition_starts.len().min(results.len());
     if count == 0 {
         return Some(());
@@ -1424,6 +1463,8 @@ pub fn window_lag(
     results: &mut [f64],
     result_nulls: &mut [u8],
 ) -> Option<()> {
+    let _span =
+        tracing::debug_span!("gpu.window_lag", n = partition_starts.len(), offset).entered();
     let count = partition_starts
         .len()
         .min(values.len())
@@ -1482,6 +1523,8 @@ pub fn window_lead(
     results: &mut [f64],
     result_nulls: &mut [u8],
 ) -> Option<()> {
+    let _span =
+        tracing::debug_span!("gpu.window_lead", n = partition_starts.len(), offset).entered();
     let count = partition_starts
         .len()
         .min(values.len())

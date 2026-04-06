@@ -20,6 +20,9 @@ pub struct AccelStats {
     /// Rows that required CPU recheck after GPU evaluation.
     pub gpu_uncertain_count: u64,
     pub thread_budget_exhausted_count: u64,
+    pub planner_hook_calls: u64,
+    pub command_type_skips: u64,
+    pub window_gpu_failures: u64,
 }
 
 thread_local! {
@@ -70,6 +73,27 @@ pub fn record_budget_exhausted() {
     });
 }
 
+/// Record a planner hook invocation.
+pub fn record_planner_hook_call() {
+    STATS.with(|s| {
+        s.borrow_mut().planner_hook_calls += 1;
+    });
+}
+
+/// Record that a query was skipped due to unsupported command type.
+pub fn record_command_type_skip() {
+    STATS.with(|s| {
+        s.borrow_mut().command_type_skips += 1;
+    });
+}
+
+/// Record a window function GPU dispatch failure.
+pub fn record_window_gpu_failure() {
+    STATS.with(|s| {
+        s.borrow_mut().window_gpu_failures += 1;
+    });
+}
+
 // ---------------------------------------------------------------------------
 // SQL-callable functions
 // ---------------------------------------------------------------------------
@@ -88,6 +112,9 @@ fn pg_accel_stats() -> TableIterator<
         name!(gpu_rows_processed, i64),
         name!(gpu_uncertain_count, i64),
         name!(thread_budget_exhausted_count, i64),
+        name!(planner_hook_calls, i64),
+        name!(command_type_skips, i64),
+        name!(window_gpu_failures, i64),
     ),
 > {
     let row = STATS.with(|s| {
@@ -101,6 +128,9 @@ fn pg_accel_stats() -> TableIterator<
             st.gpu_rows_processed as i64,
             st.gpu_uncertain_count as i64,
             st.thread_budget_exhausted_count as i64,
+            st.planner_hook_calls as i64,
+            st.command_type_skips as i64,
+            st.window_gpu_failures as i64,
         )
     });
     TableIterator::new(std::iter::once(row))
@@ -213,6 +243,9 @@ mod tests {
         assert_eq!(after.gpu_rows_processed, 0);
         assert_eq!(after.gpu_uncertain_count, 0);
         assert_eq!(after.thread_budget_exhausted_count, 0);
+        assert_eq!(after.planner_hook_calls, 0);
+        assert_eq!(after.command_type_skips, 0);
+        assert_eq!(after.window_gpu_failures, 0);
     }
 
     // -- combined scenario ----------------------------------------------------
@@ -317,6 +350,9 @@ mod tests {
             gpu_rows_processed: 800,
             gpu_uncertain_count: 3,
             thread_budget_exhausted_count: 0,
+            planner_hook_calls: 0,
+            command_type_skips: 0,
+            window_gpu_failures: 0,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("queries_accelerated: 5"));
@@ -337,5 +373,8 @@ mod tests {
         assert_eq!(s.gpu_rows_processed, 0);
         assert_eq!(s.gpu_uncertain_count, 0);
         assert_eq!(s.thread_budget_exhausted_count, 0);
+        assert_eq!(s.planner_hook_calls, 0);
+        assert_eq!(s.command_type_skips, 0);
+        assert_eq!(s.window_gpu_failures, 0);
     }
 }

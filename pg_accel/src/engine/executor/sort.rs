@@ -138,6 +138,7 @@ impl SortExecState {
         child_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.sort_next").entered();
         // Phase 1: Consume all input and sort (once).
         if !self.sort_done {
             // SAFETY: child_ps and result_slot are valid, main backend thread.

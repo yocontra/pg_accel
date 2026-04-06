@@ -76,6 +76,9 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     rti: pg_sys::Index,
     rte: *mut RangeTblEntry,
 ) {
+    // Lazy-init tracing in this backend (no-op after first call).
+    crate::engine::otel::init();
+
     // Chain previous hook first.
     // SAFETY: Previous hook, if set, accepts the same planner-provided args.
     unsafe {
@@ -90,6 +93,15 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
+    // Gate: Only accelerate pure SELECT statements. INSERT...SELECT,
+    // UPDATE...FROM, DELETE...USING run scans in ModifyTable context
+    // where Custom Scan slot handling is incompatible.
+    // SAFETY: root.parse is a valid Query pointer provided by the planner.
+    let parse = unsafe { (*root).parse };
+    if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
+        return;
+    }
+
     // Gate 1b: GPU must be available and enabled — no CPU-only fallback.
     if !cost::gpu_is_usable() {
         pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
@@ -100,6 +112,8 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // SAFETY: rel and rte are valid pointers provided by the planner.
     let rel_ref = unsafe { &*rel };
     let rte_ref = unsafe { &*rte };
+
+    let _span = tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
     // Gate 2: Only base table relations — cheap field checks before
     // any registry or clause work.
@@ -647,6 +661,8 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     jointype: pg_sys::JoinType::Type,
     extra: *mut JoinPathExtraData,
 ) {
+    crate::engine::otel::init();
+
     // Chain previous hook first.
     // SAFETY: Previous hook, if set, accepts the same planner-provided args.
     unsafe {
@@ -660,10 +676,21 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
+    // Gate: Only accelerate pure SELECT statements. INSERT...SELECT,
+    // UPDATE...FROM, DELETE...USING run scans in ModifyTable context
+    // where Custom Scan slot handling is incompatible.
+    // SAFETY: root.parse is a valid Query pointer provided by the planner.
+    let parse = unsafe { (*root).parse };
+    if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
+        return;
+    }
+
     // Gate 1b: GPU must be available and enabled — no CPU-only fallback.
     if !cost::gpu_is_usable() {
         return;
     }
+
+    let _span = tracing::info_span!("planner.join_pathlist", join_type = jointype).entered();
 
     // SAFETY: pointers provided by the planner are valid.
     let joinrel_ref = unsafe { &*joinrel };
@@ -868,6 +895,8 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     output_rel: *mut RelOptInfo,
     extra: *mut std::ffi::c_void,
 ) {
+    crate::engine::otel::init();
+
     // Chain previous hook first.
     // SAFETY: Previous hook, if set, accepts the same planner-provided args.
     unsafe {
@@ -879,6 +908,17 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     if !gucs::enabled() {
         return;
     }
+
+    // Gate: Only accelerate pure SELECT statements. INSERT...SELECT,
+    // UPDATE...FROM, DELETE...USING run scans in ModifyTable context
+    // where Custom Scan slot handling is incompatible.
+    // SAFETY: root.parse is a valid Query pointer provided by the planner.
+    let parse = unsafe { (*root).parse };
+    if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
+        return;
+    }
+
+    let _span = tracing::info_span!("planner.upper_paths", stage = stage).entered();
 
     // Dispatch by upper relation stage.
     match stage {
@@ -1115,57 +1155,52 @@ unsafe fn pgaccel_inject_gpu_window(
         let args = wf.args;
         if !args.is_null() {
             let nargs = unsafe { pg_sys::list_length(args) };
+            // WindowFunc.args is a List of Expr* nodes (NOT TargetEntry*).
             if nargs >= 1 {
-                let arg_tle = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::TargetEntry>() };
-                if !arg_tle.is_null() {
-                    let arg_expr = unsafe { (*arg_tle).expr };
-                    if !arg_expr.is_null()
-                        && unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var
-                    {
-                        let var = arg_expr.cast::<pg_sys::Var>();
-                        let typid = u32::from(unsafe { (*var).vartype });
-                        if !matches!(
-                            typid,
-                            WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
-                        ) {
-                            pgrx::debug1!("pg_accel window: unsupported value type {typid}");
-                            return;
-                        }
-                        value_attno = i32::from(unsafe { (*var).varattno });
+                // SAFETY: first arg is an Expr* node.
+                let arg_expr = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Expr>() };
+                if !arg_expr.is_null()
+                    && unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var
+                {
+                    let var = arg_expr.cast::<pg_sys::Var>();
+                    let typid = u32::from(unsafe { (*var).vartype });
+                    if !matches!(
+                        typid,
+                        WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
+                    ) {
+                        pgrx::debug1!("pg_accel window: unsupported value type {typid}");
+                        return;
                     }
+                    value_attno = i32::from(unsafe { (*var).varattno });
                 }
             }
             // LAG/LEAD offset (second argument, if present and constant).
             if nargs >= 2 {
-                let offset_tle = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::TargetEntry>() };
-                if !offset_tle.is_null() {
-                    let offset_expr = unsafe { (*offset_tle).expr };
-                    if !offset_expr.is_null()
-                        && unsafe { (*offset_expr.cast::<pg_sys::Node>()).type_ }
-                            == NodeTag::T_Const
-                    {
-                        let cst = offset_expr.cast::<pg_sys::Const>();
-                        if !unsafe { (*cst).constisnull } {
-                            // SAFETY: int4 Const value is stored in Datum.
-                            lag_offset = unsafe { (*cst).constvalue.value() as i32 };
-                        }
+                // SAFETY: second arg is an Expr* node.
+                let offset_expr = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Expr>() };
+                if !offset_expr.is_null()
+                    && unsafe { (*offset_expr.cast::<pg_sys::Node>()).type_ }
+                        == NodeTag::T_Const
+                {
+                    let cst = offset_expr.cast::<pg_sys::Const>();
+                    if !unsafe { (*cst).constisnull } {
+                        // SAFETY: int4 Const value is stored in Datum.
+                        lag_offset = unsafe { (*cst).constvalue.value() as i32 };
                     }
                 }
             }
             // LAG/LEAD default (third argument, if present and constant).
             if nargs >= 3 {
-                let def_tle = unsafe { pg_sys::list_nth(args, 2).cast::<pg_sys::TargetEntry>() };
-                if !def_tle.is_null() {
-                    let def_expr = unsafe { (*def_tle).expr };
-                    if !def_expr.is_null()
-                        && unsafe { (*def_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Const
-                    {
-                        let cst = def_expr.cast::<pg_sys::Const>();
-                        if !unsafe { (*cst).constisnull } {
-                            // SAFETY: float8 Const value is stored in Datum.
-                            default_val =
-                                f64::from_bits(unsafe { (*cst).constvalue.value() } as u64);
-                        }
+                // SAFETY: third arg is an Expr* node.
+                let def_expr = unsafe { pg_sys::list_nth(args, 2).cast::<pg_sys::Expr>() };
+                if !def_expr.is_null()
+                    && unsafe { (*def_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Const
+                {
+                    let cst = def_expr.cast::<pg_sys::Const>();
+                    if !unsafe { (*cst).constisnull } {
+                        // SAFETY: float8 Const value is stored in Datum.
+                        default_val =
+                            f64::from_bits(unsafe { (*cst).constvalue.value() } as u64);
                     }
                 }
             }
@@ -1195,17 +1230,35 @@ unsafe fn pgaccel_inject_gpu_window(
         return;
     }
 
-    // Find cheapest input path.
+    // Find cheapest input path and wrap with Sort if needed.
+    // Window functions require input sorted by PARTITION BY + ORDER BY.
+    // PG stores the required sort keys in root->window_pathkeys.
     let cheapest = unsafe { find_cheapest_path(input_ref.pathlist) };
     if cheapest.is_null() {
         return;
     }
 
+    // SAFETY: root->window_pathkeys is the planner's sort key list for
+    // the window phase. create_sort_path wraps cheapest with a Sort
+    // node if it's not already sorted by these keys.
+    let window_pathkeys = unsafe { (*root).window_pathkeys };
+    let sorted_path = if window_pathkeys.is_null()
+        || unsafe { pg_sys::list_length(window_pathkeys) } == 0
+    {
+        cheapest
+    } else {
+        // SAFETY: All pointers from the planner; create_sort_path pallocs.
+        unsafe {
+            pg_sys::create_sort_path(root, input_rel, cheapest, window_pathkeys, -1.0)
+                .cast::<Path>()
+        }
+    };
+
     // Honest cost — no cost_multiplier discount. Window functions process
     // all input rows and add window output columns, so cost is:
     //   child_cost + per_row_overhead * rows * num_specs
-    // SAFETY: cheapest is non-null.
-    let base = unsafe { &*cheapest };
+    // SAFETY: sorted_path is non-null.
+    let base = unsafe { &*sorted_path };
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
     let per_row = cost::PER_DATUM_EXTRACT_COST + 0.002; // datum extract + partition detect
     let window_cost = base.rows * per_row * specs.len() as f64;
@@ -1216,7 +1269,7 @@ unsafe fn pgaccel_inject_gpu_window(
     unsafe {
         let cpath = create_custom_path(
             output_rel,
-            cheapest,
+            sorted_path,
             startup_cost,
             total_cost,
             base.rows,

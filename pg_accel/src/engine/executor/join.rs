@@ -204,6 +204,7 @@ impl JoinExecState {
         inner_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.join_next").entered();
         match self.strategy {
             AccelStrategy::GpuSpatial => {
                 // SAFETY: Caller guarantees main backend thread.

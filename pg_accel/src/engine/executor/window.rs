@@ -173,6 +173,8 @@ impl WindowExecState {
         child_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.window_emit", pos = self.emit_pos).entered();
+
         if !self.compute_done {
             // SAFETY: child_ps and result_slot are valid, main backend thread.
             unsafe {
@@ -307,6 +309,8 @@ impl WindowExecState {
         scratch_slot: *mut pg_sys::TupleTableSlot,
     ) {
         let start = std::time::Instant::now();
+        let _span =
+            tracing::info_span!("exec.window_compute", n_specs = self.specs.len()).entered();
 
         // -- Phase 1: Consume all input --
         while !self.child_exhausted {
@@ -363,8 +367,11 @@ impl WindowExecState {
             ps
         };
 
-        // -- Phase 3: Dispatch each window function --
+        // -- Phase 3: Dispatch each window function via GPU --
         for (spec_idx, spec) in self.specs.iter().enumerate() {
+            let _span =
+                tracing::debug_span!("gpu.window", func = ?spec.func, n = n).entered();
+
             match spec.func {
                 WindowFunc::RowNumber => {
                     let mut results = vec![0i64; n];
@@ -431,7 +438,6 @@ impl WindowExecState {
                     self.null_results[spec_idx] = result_nulls;
                 }
             }
-
             pgrx::check_for_interrupts!();
         }
 
