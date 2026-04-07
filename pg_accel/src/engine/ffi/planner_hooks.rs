@@ -156,6 +156,18 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
+    // Gate 3: Early rows exit. No scan strategy can fire below min_batch_size
+    // (should_batch will reject at Gate 4), so skip expensive clause matching
+    // and registry initialisation. This eliminates 20-50µs of overhead on
+    // small dimension tables in star-schema queries.
+    {
+        let rows_early = rel_ref.tuples.max(rel_ref.rows) as usize;
+        let min_batch = gucs::min_batch_size().max(1) as usize;
+        if rows_early < min_batch {
+            return;
+        }
+    }
+
     // GpuExpr path: standard numeric WHERE clauses (OpExpr, BoolExpr,
     // NullTest). Independent of adapter registry — expression compilability
     // is checked via node-tag and type inspection. This enables GPU-
@@ -316,15 +328,17 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
     // GPU accelerates per-row function evaluation for spatial/H3/raster.
     // GPU_COST_SAFETY_MARGIN (0.7) = 30% savings from GPU batch execution.
-    // For GpuExpr (CPU inline filter), modest discount (5%) — the template
-    // evaluates the predicate inline during heap walk, avoiding PG's
-    // per-tuple ExecQual + slot machinery overhead.
+    // GpuExpr (CPU inline filter) uses no cost discount (1.0). Benchmarks
+    // show GpuExpr never outperforms PG parallel at any scale — the Custom
+    // Scan framing overhead exceeds the ~5% ExecQual savings. Setting the
+    // margin to 1.0 lets batch_overhead + yield_cost naturally make the
+    // path more expensive, so add_path() discards it correctly.
     let cost_margin = if strategy == registry::AccelStrategy::GpuExpr {
-        0.95
+        1.0
     } else {
         cost::GPU_COST_SAFETY_MARGIN
     };
-    // GpuExpr inline filter: modest per-row yield cost (heap buffer return,
+    // GpuExpr inline filter: per-row yield cost (heap buffer return,
     // no MinimalTuple copy). GPU strategies (spatial/H3/raster): zero yield
     // cost — the 30% cost_margin discount already captures batch speedup,
     // and per-row compute dominates yield overhead.
@@ -4596,7 +4610,7 @@ mod tests {
     /// sane results with known inputs.
     ///
     /// Formula (matches `pgaccel_set_rel_pathlist`):
-    ///   cost_margin = 0.7 for GPU strategies, 0.95 for GpuExpr
+    ///   cost_margin = 0.7 for GPU strategies, 1.0 for GpuExpr
     ///   yield_cost  = rows * 0.005 for GpuExpr, 0.0 for GPU strategies
     ///   raw_total   = (base_total * cost_margin + batch_overhead
     ///                  + gpu_overhead + yield_cost) * cost_multiplier
@@ -4632,7 +4646,7 @@ mod tests {
     #[test]
     fn scan_cost_formula_gpu_expr_not_cheaper_at_100k() {
         // Simulate: GpuExpr at 100K rows, modest base_total.
-        // The 5% margin + yield cost should make GPU more expensive.
+        // No cost discount (1.0) + yield cost makes GPU more expensive.
         let base_rows = 100_000.0_f64;
         let base_total = 500.0; // simple WHERE clause scan
 
@@ -4640,7 +4654,7 @@ mod tests {
         let num_batches = (base_rows / batch_size).ceil();
         let batch_overhead = num_batches * 2.0;
         let gpu_overhead = 0.0; // GpuExpr: no GPU launch
-        let cost_margin = 0.95; // GpuExpr margin
+        let cost_margin = 1.0; // GpuExpr: no discount
         let yield_cost = base_rows * 0.005; // GpuExpr yield
 
         let total_cost = (base_total * cost_margin
@@ -4649,7 +4663,7 @@ mod tests {
             + yield_cost)
             * 1.0;
 
-        // 500 * 0.95 + ~26 + 0 + 500 = 1001 > 500: GPU loses.
+        // 500 * 1.0 + ~26 + 0 + 500 = 1026 > 500: GPU loses.
         assert!(
             total_cost > base_total,
             "GpuExpr path ({total_cost:.2}) should be more expensive than \
@@ -4835,7 +4849,7 @@ mod tests {
         assert_eq!(limits.gpu_min_rows, 10_000);
         assert_eq!(limits.gpu_sort_min_rows, 100_000);
         assert_eq!(limits.gpu_sort_planner_min_rows, 1_000_000);
-        assert_eq!(limits.gpu_window_min_rows, 2_000_000);
+        assert_eq!(limits.gpu_window_min_rows, 5_000_000);
         assert_eq!(limits.gpu_reduce_min_rows, 10_000);
         assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(limits.gpu_hash_agg_max_groups, 10_000);

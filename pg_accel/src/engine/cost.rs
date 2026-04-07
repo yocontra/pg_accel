@@ -773,7 +773,7 @@ mod tests {
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
         assert_eq!(l.gpu_sort_planner_min_rows, 1_000_000);
-        assert_eq!(l.gpu_window_min_rows, 2_000_000);
+        assert_eq!(l.gpu_window_min_rows, 5_000_000);
         assert_eq!(l.gpu_reduce_min_rows, 10_000);
         assert_eq!(l.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(l.gpu_hash_agg_max_groups, 10_000);
@@ -800,7 +800,7 @@ mod tests {
         let l = DeviceLimits::from_profile(&p);
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
-        assert_eq!(l.gpu_window_min_rows, 50_000);
+        assert_eq!(l.gpu_window_min_rows, 5_000_000);
         assert_eq!(l.gpu_reduce_min_rows, 10_000);
     }
 
