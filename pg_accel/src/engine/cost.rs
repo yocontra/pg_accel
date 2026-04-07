@@ -77,8 +77,9 @@ pub struct DeviceLimits {
     pub gpu_window_min_rows: usize,
     /// Minimum rows for GPU reduce / aggregate.
     pub gpu_reduce_min_rows: usize,
-    /// Minimum rows for GPU hash aggregation dispatch.
-    pub gpu_hash_agg_threshold: usize,
+    /// Minimum rows for GPU hash aggregation (grouped agg) dispatch.
+    /// Below this, PG's native HashAgg with parallel workers is faster.
+    pub gpu_hash_agg_min_rows: usize,
     /// Maximum number of groups for GPU hash aggregation.
     pub gpu_hash_agg_max_groups: usize,
     /// Maximum elements per GPU reduce dispatch chunk.
@@ -108,6 +109,20 @@ pub struct DeviceLimits {
     /// Maximum sort keys for GPU multi-key sort.
     /// Each additional key requires a separate stable sort pass.
     pub gpu_multi_key_sort_max_keys: usize,
+    /// Minimum fact table rows for PreAgg (fused star-join + agg) injection.
+    pub gpu_preagg_min_fact_rows: usize,
+    /// Maximum dimension table rows (per dimension) for PreAgg.
+    pub gpu_preagg_max_dim_rows: usize,
+    /// Per-row cost for dimension materialization in PreAgg costing.
+    pub preagg_dim_materialize_cost: f64,
+    /// Per-row cost for fact table heap scan in PreAgg costing.
+    pub preagg_fact_scan_cost: f64,
+    /// Per-row cost for hash probe in PreAgg costing.
+    pub preagg_probe_cost: f64,
+    /// Per-row cost for aggregate accumulation in PreAgg costing.
+    pub preagg_agg_cost: f64,
+    /// Per-row cost for result yield in PreAgg costing.
+    pub preagg_yield_cost: f64,
     /// Lower bound for `optimal_batch_size`.
     pub optimal_batch_min: usize,
     /// Upper bound for `optimal_batch_size`.
@@ -141,9 +156,9 @@ impl DeviceLimits {
         let gpu_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
         let gpu_sort_min_rows = cu_scale(100_000).clamp(10_000, 1_000_000);
         let gpu_sort_planner_min_rows = (gpu_sort_min_rows * 10).min(10_000_000);
-        let gpu_window_min_rows = cu_scale(50_000).clamp(5_000, 500_000);
+        let gpu_window_min_rows = cu_scale(5_000_000).clamp(1_000_000, 20_000_000);
         let gpu_reduce_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
-        let gpu_hash_agg_threshold = cu_scale(1_000).clamp(100, 10_000);
+        let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
 
         // ~64 bytes per hash entry; use 1/256th of GPU memory as budget.
         // GPU hash agg kernel uses open-addressing with atomic accumulators;
@@ -201,21 +216,21 @@ impl DeviceLimits {
             gpu_sort_planner_min_rows,
             gpu_window_min_rows,
             gpu_reduce_min_rows,
-            gpu_hash_agg_threshold,
+            gpu_hash_agg_min_rows,
             gpu_hash_agg_max_groups,
             gpu_reduce_max_chunk,
             gpu_sort_max_elements,
             gpu_join_max_output_rows,
-            // Spatial vertex threshold: GPU overhead is ~19ms constant
-            // regardless of vertex count (dominated by geom deser + seq
-            // scan). PG parallel scales linearly with vertices. Crossover
-            // is ~750 vertices on M2 Max (38 CUs, unified memory).
-            // cu_scale halves for unified memory, so base must be ~2x the
-            // target crossover point for unified-memory platforms.
-            gpu_spatial_min_vertices: cu_scale(1800).clamp(200, 10_000),
-            // GpuExpr scan: inline template filter is cheap, so threshold
-            // is lower than spatial. Scale with CUs.
-            gpu_expr_min_rows: cu_scale(5_000).clamp(1_000, 50_000),
+            // Spatial vertex threshold: GPU kernel overhead is constant
+            // (~19ms for geom deser + seq scan), while PG parallel scales
+            // linearly with vertex count. Benchmarks show crossover at
+            // ~25K vertices on M2 Max at 100K rows. Conservative base so
+            // the cost model never picks GPU for mid-vertex polygons.
+            gpu_spatial_min_vertices: cu_scale(50_000).clamp(5_000, 50_000),
+            // GpuExpr scan: inline template filter avoids ExecQual overhead
+            // but Custom Scan framing still adds per-row cost. Needs enough
+            // rows to amortize compilation + scan overhead.
+            gpu_expr_min_rows: cu_scale(250_000).clamp(50_000, 2_000_000),
             // Hash join build: ~64 bytes per hash entry. Use 1/64th of
             // GPU memory as budget for the build-side hash table.
             gpu_hash_join_build_max_rows: if mem > 0 {
@@ -229,6 +244,22 @@ impl DeviceLimits {
             // Multi-key sort: each key is a separate stable sort pass.
             // Diminishing returns beyond 4 keys on GPU.
             gpu_multi_key_sort_max_keys: 4,
+            // PreAgg (star-join fusion): needs enough fact rows to amortize
+            // dimension materialization and hash table build.
+            gpu_preagg_min_fact_rows: cu_scale(50_000).clamp(10_000, 500_000),
+            // Dimension tables must be small enough to fit in memory.
+            gpu_preagg_max_dim_rows: if mem > 0 {
+                (mem / 64 / 64).clamp(10_000, 2_000_000)
+            } else {
+                100_000
+            },
+            // PreAgg per-row cost model: derived from empirical measurement.
+            // Unified memory halves probe cost (no DMA).
+            preagg_dim_materialize_cost: 0.01,
+            preagg_fact_scan_cost: 0.001,
+            preagg_probe_cost: if unified { 0.0015 } else { 0.003 },
+            preagg_agg_cost: 0.002,
+            preagg_yield_cost: 0.03,
             optimal_batch_min: 256,
             optimal_batch_max: optimal_batch_max.max(256),
             // Interrupt check every 64K rows balances responsiveness
@@ -244,18 +275,25 @@ impl DeviceLimits {
             gpu_min_rows: 10_000,
             gpu_sort_min_rows: 100_000,
             gpu_sort_planner_min_rows: 1_000_000,
-            gpu_window_min_rows: 50_000,
+            gpu_window_min_rows: 5_000_000,
             gpu_reduce_min_rows: 10_000,
-            gpu_hash_agg_threshold: 1_000,
+            gpu_hash_agg_min_rows: 250_000,
             gpu_hash_agg_max_groups: 10_000,
             gpu_reduce_max_chunk: 256_000,
             gpu_sort_max_elements: 2_000_000,
             gpu_join_max_output_rows: 100_000,
-            gpu_spatial_min_vertices: 750,
-            gpu_expr_min_rows: 5_000,
+            gpu_spatial_min_vertices: 50_000,
+            gpu_expr_min_rows: 250_000,
             gpu_hash_join_build_max_rows: 100_000,
             gpu_pipeline_fusion_min_rows: 10_000,
             gpu_multi_key_sort_max_keys: 4,
+            gpu_preagg_min_fact_rows: 50_000,
+            gpu_preagg_max_dim_rows: 100_000,
+            preagg_dim_materialize_cost: 0.01,
+            preagg_fact_scan_cost: 0.001,
+            preagg_probe_cost: 0.003,
+            preagg_agg_cost: 0.002,
+            preagg_yield_cost: 0.03,
             optimal_batch_min: 256,
             optimal_batch_max: 8192,
             fused_interrupt_interval: 65_536,
@@ -397,6 +435,20 @@ pub const PER_DATUM_EXTRACT_COST: f64 = 0.001;
 /// 100µs ≈ 0.1 in PG cost units. We use 5.0 (50x) as a conservative
 /// fixed penalty to strongly discourage GPU for small batches.
 pub const GPU_LAUNCH_OVERHEAD: f64 = 5.0;
+
+/// Fixed overhead for PreAgg (fused star-join aggregation), in cost units.
+///
+/// PreAgg is a CPU-only executor node: it walks the fact table heap
+/// directly via `heap_getnext`, probes in-memory hash tables, and
+/// accumulates aggregates — no GPU kernel is launched. The overhead
+/// covers scan descriptor setup, dimension materialization, and hash
+/// table construction, but NOT GPU queue submission or device sync.
+///
+/// Derivation: Measured PreAgg setup (open scan + build N hash tables
+/// for N=2 dimensions, 2K rows each) at ~200-400µs on M2 Max. In PG
+/// cost units (1.0 ≈ 1ms), this is ~0.3. We use 0.5 as a conservative
+/// estimate.
+pub const PREAGG_FIXED_OVERHEAD: f64 = 0.5;
 
 /// Maximum index selectivity at which a GiST/SP-GiST index scan is
 /// considered "cheap enough" to skip Custom Scan injection.
@@ -721,11 +773,11 @@ mod tests {
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
         assert_eq!(l.gpu_sort_planner_min_rows, 1_000_000);
-        assert_eq!(l.gpu_window_min_rows, 50_000);
+        assert_eq!(l.gpu_window_min_rows, 2_000_000);
         assert_eq!(l.gpu_reduce_min_rows, 10_000);
-        assert_eq!(l.gpu_hash_agg_threshold, 1_000);
+        assert_eq!(l.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(l.gpu_hash_agg_max_groups, 10_000);
-        assert_eq!(l.gpu_expr_min_rows, 5_000);
+        assert_eq!(l.gpu_expr_min_rows, 250_000);
         assert_eq!(l.gpu_hash_join_build_max_rows, 100_000);
         assert_eq!(l.gpu_pipeline_fusion_min_rows, 10_000);
         assert_eq!(l.gpu_multi_key_sort_max_keys, 4);
@@ -883,6 +935,76 @@ mod tests {
     fn spatial_per_row_exceeds_h3() {
         // Spatial deserialization is more expensive than H3 integer math.
         assert!(GPU_SPATIAL_PER_ROW_COST > GPU_H3_PER_ROW_COST);
+    }
+
+    // -- PreAgg cost constants ---------------------------------------------------
+
+    #[test]
+    fn preagg_fixed_overhead_less_than_gpu_launch() {
+        // PreAgg is CPU-only — its fixed overhead must be strictly less
+        // than GPU kernel launch overhead.
+        assert!(PREAGG_FIXED_OVERHEAD < GPU_LAUNCH_OVERHEAD);
+        assert!(PREAGG_FIXED_OVERHEAD > 0.0);
+    }
+
+    #[test]
+    fn preagg_costs_positive() {
+        let l = DeviceLimits::cpu_only();
+        assert!(l.preagg_dim_materialize_cost > 0.0);
+        assert!(l.preagg_fact_scan_cost > 0.0);
+        assert!(l.preagg_probe_cost > 0.0);
+        assert!(l.preagg_agg_cost > 0.0);
+        assert!(l.preagg_yield_cost > 0.0);
+    }
+
+    #[test]
+    fn preagg_probe_cheaper_than_yield() {
+        // Probing a hash table is much cheaper per-row than yielding results.
+        let l = DeviceLimits::cpu_only();
+        assert!(l.preagg_probe_cost < l.preagg_yield_cost);
+    }
+
+    #[test]
+    fn preagg_scan_cheapest_per_row() {
+        // Sequential scan is the cheapest per-row operation.
+        let l = DeviceLimits::cpu_only();
+        assert!(l.preagg_fact_scan_cost <= l.preagg_probe_cost);
+        assert!(l.preagg_fact_scan_cost <= l.preagg_agg_cost);
+    }
+
+    #[test]
+    fn preagg_min_fact_rows_sane() {
+        let l = DeviceLimits::cpu_only();
+        assert!(l.gpu_preagg_min_fact_rows >= 10_000);
+        assert!(l.gpu_preagg_max_dim_rows >= 10_000);
+    }
+
+    #[test]
+    fn window_min_rows_above_one_million() {
+        // Window GPU dispatch must not activate below 1M rows to avoid
+        // yield overhead regression on small datasets.
+        let l = DeviceLimits::cpu_only();
+        assert!(l.gpu_window_min_rows >= 1_000_000);
+    }
+
+    #[test]
+    fn preagg_unified_memory_cheaper_probe() {
+        let unified = PlatformProfile {
+            cpu_cores: 8,
+            has_gpu: true,
+            unified_memory: true,
+            estimated_gpu_gflops: 2000.0,
+            compute_units: 32,
+            gpu_max_alloc_bytes: 256 * 1024 * 1024,
+            has_fp64: false,
+        };
+        let discrete = PlatformProfile {
+            unified_memory: false,
+            ..unified.clone()
+        };
+        let lu = DeviceLimits::from_profile(&unified);
+        let ld = DeviceLimits::from_profile(&discrete);
+        assert!(lu.preagg_probe_cost < ld.preagg_probe_cost);
     }
 
     #[test]

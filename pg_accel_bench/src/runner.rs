@@ -4,9 +4,9 @@ use rand::Rng;
 use crate::report::{self, IterationResult, WorkloadResult};
 use crate::workloads::Workload;
 
-/// The four row scales every benchmark is run at. Not configurable —
-/// the entire suite always runs at all four for reproducible, comparable results.
-pub const ROW_SCALES: &[usize] = &[1_000, 10_000, 100_000, 1_000_000];
+/// The five row scales every benchmark is run at. Not configurable —
+/// the entire suite always runs at all five for reproducible, comparable results.
+pub const ROW_SCALES: &[usize] = &[1_000, 10_000, 100_000, 1_000_000, 10_000_000];
 
 /// Execute setup SQL for a workload against the given connection string.
 ///
@@ -43,8 +43,11 @@ pub fn setup(
 ///
 /// To eliminate ordering bias (cache warming, shared buffer state), the order
 /// of accel-first vs baseline-first is randomized per iteration. Each mode
-/// measurement uses a fresh connection (`DISCARD ALL` on close) so neither
-/// side benefits from the other's cached plans or buffer state.
+/// measurement uses `DISCARD ALL` between modes so neither side benefits
+/// from the other's cached plans or buffer state. Each mode gets a
+/// persistent connection (one per mode per workload/scale) so that
+/// one-time backend init costs (tracing, GPU probe) are amortised by
+/// warmup iterations rather than paid on every measurement.
 ///
 /// # Errors
 ///
@@ -64,6 +67,15 @@ pub fn run(
     // Two modes: accel vs PG parallel. Order randomized per iteration.
     let modes = [BenchMode::Accel, BenchMode::PgParallel];
 
+    // Persistent connection per mode — backend init costs (tracing, GPU
+    // probe ~40ms) are paid once during warmup, not on every measurement.
+    // DISCARD ALL between measurements resets session state (plan cache,
+    // GUCs, temp tables) without the fork overhead.
+    let mut mode_clients = [
+        Client::connect(connection, NoTls)?,
+        Client::connect(connection, NoTls)?,
+    ];
+
     for i in 0..total_runs {
         let is_warmup = i < warmup;
 
@@ -73,14 +85,12 @@ pub fn run(
             order.swap(0, 1);
         }
 
-        // Fresh connection per mode — eliminates client-side plan cache,
-        // prepared statement leaks, and session state carryover.
         let mut timings = [0.0_f64; 2];
         for &idx in &order {
-            let mut mode_client = Client::connect(connection, NoTls)?;
-            timings[idx] = run_with_mode(&mut mode_client, &query, modes[idx], &pre_query)?;
-            // DISCARD ALL resets all session state before connection drops.
-            mode_client.batch_execute("DISCARD ALL")?;
+            // DISCARD ALL resets session state before each measurement.
+            mode_clients[idx].batch_execute("DISCARD ALL")?;
+            timings[idx] =
+                run_with_mode(&mut mode_clients[idx], &query, modes[idx], &pre_query)?;
         }
 
         let accel_ms = timings[0];
@@ -101,6 +111,11 @@ pub fn run(
                 parallel_ms,
             });
         }
+    }
+
+    // Clean close.
+    for client in &mut mode_clients {
+        let _ = client.batch_execute("DISCARD ALL");
     }
 
     Ok(WorkloadResult::from_iterations(
@@ -480,7 +495,7 @@ mod tests {
 
     #[test]
     fn test_row_scales_constant() {
-        assert_eq!(ROW_SCALES, &[1_000, 10_000, 100_000, 1_000_000]);
+        assert_eq!(ROW_SCALES, &[1_000, 10_000, 100_000, 1_000_000, 10_000_000]);
     }
 
     #[test]

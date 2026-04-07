@@ -2109,4 +2109,199 @@ mod tests {
         assert_eq!(off, 500, "single partition should have 500 rows");
         assert_eq!(off, on, "single partition ROW_NUMBER mismatch");
     }
+
+    // =========================================================================
+    // PreAgg (fused star-join pre-aggregation) correctness
+    // =========================================================================
+
+    /// Create a mini star schema: fact table + date dimension + part dimension.
+    fn setup_star_schema() {
+        Spi::run(
+            "CREATE TEMP TABLE _dim_date (d_datekey int PRIMARY KEY, d_year int, d_month int)",
+        )
+        .expect("CREATE _dim_date");
+        Spi::run(
+            "INSERT INTO _dim_date \
+             SELECT i, 1992 + (i / 365), (i % 12) + 1 \
+             FROM generate_series(1, 2556) i",
+        )
+        .expect("INSERT _dim_date");
+
+        Spi::run(
+            "CREATE TEMP TABLE _dim_part (p_partkey int PRIMARY KEY, p_mfgr text, p_brand text)",
+        )
+        .expect("CREATE _dim_part");
+        Spi::run(
+            "INSERT INTO _dim_part \
+             SELECT i, 'MFGR#' || ((i % 5) + 1), 'BRAND#' || ((i % 40) + 1) \
+             FROM generate_series(1, 200) i",
+        )
+        .expect("INSERT _dim_part");
+
+        Spi::run(
+            "CREATE TEMP TABLE _fact_lineorder (\
+             lo_orderkey int, lo_partkey int, lo_orderdate int, \
+             lo_revenue float8, lo_discount float8, lo_quantity int)",
+        )
+        .expect("CREATE _fact_lineorder");
+        Spi::run(
+            "INSERT INTO _fact_lineorder \
+             SELECT i, (i % 200) + 1, (i % 2556) + 1, \
+                    (random() * 10000)::float8, \
+                    (random() * 10)::float8, \
+                    (random() * 50)::int \
+             FROM generate_series(1, 100000) i",
+        )
+        .expect("INSERT _fact_lineorder");
+
+        Spi::run("ANALYZE _dim_date").expect("ANALYZE");
+        Spi::run("ANALYZE _dim_part").expect("ANALYZE");
+        Spi::run("ANALYZE _fact_lineorder").expect("ANALYZE");
+    }
+
+    #[pg_test]
+    fn test_preagg_plain_sum_one_dim() {
+        setup_star_schema();
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let off = Spi::get_one::<f64>(
+            "SELECT sum(lo_revenue) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             WHERE d_year = 1993",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let on = Spi::get_one::<f64>(
+            "SELECT sum(lo_revenue) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             WHERE d_year = 1993",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        let diff = (off - on).abs();
+        assert!(
+            diff < 0.01,
+            "plain SUM with dim filter: off={off}, on={on}, diff={diff}"
+        );
+    }
+
+    #[pg_test]
+    fn test_preagg_count_one_dim() {
+        setup_star_schema();
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let off = Spi::get_one::<i64>(
+            "SELECT count(*) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             WHERE d_year = 1994",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let on = Spi::get_one::<i64>(
+            "SELECT count(*) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             WHERE d_year = 1994",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        assert_eq!(off, on, "COUNT with dim filter mismatch: off={off}, on={on}");
+    }
+
+    #[pg_test]
+    fn test_preagg_grouped_by_dim_col() {
+        setup_star_schema();
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let off = Spi::get_one::<i64>(
+            "SELECT count(DISTINCT d_year) FROM (\
+             SELECT d_year, sum(lo_revenue) \
+             FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             GROUP BY d_year) t",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let on = Spi::get_one::<i64>(
+            "SELECT count(DISTINCT d_year) FROM (\
+             SELECT d_year, sum(lo_revenue) \
+             FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             GROUP BY d_year) t",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        assert_eq!(
+            off, on,
+            "grouped agg by dim col: distinct group count mismatch"
+        );
+    }
+
+    #[pg_test]
+    fn test_preagg_two_dims() {
+        setup_star_schema();
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let off = Spi::get_one::<f64>(
+            "SELECT sum(lo_revenue) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             JOIN _dim_part ON lo_partkey = p_partkey \
+             WHERE d_year = 1993",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let on = Spi::get_one::<f64>(
+            "SELECT sum(lo_revenue) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             JOIN _dim_part ON lo_partkey = p_partkey \
+             WHERE d_year = 1993",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        let diff = (off - on).abs();
+        assert!(
+            diff < 0.01,
+            "two-dim join SUM: off={off}, on={on}, diff={diff}"
+        );
+    }
+
+    #[pg_test]
+    fn test_preagg_fact_side_filter() {
+        setup_star_schema();
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let off = Spi::get_one::<f64>(
+            "SELECT sum(lo_revenue) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             WHERE d_year = 1993 AND lo_discount BETWEEN 1 AND 3",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let on = Spi::get_one::<f64>(
+            "SELECT sum(lo_revenue) FROM _fact_lineorder \
+             JOIN _dim_date ON lo_orderdate = d_datekey \
+             WHERE d_year = 1993 AND lo_discount BETWEEN 1 AND 3",
+        )
+        .expect("query ok")
+        .expect("not null");
+
+        let diff = (off - on).abs();
+        assert!(
+            diff < 0.01,
+            "fact-side filter SUM: off={off}, on={on}, diff={diff}"
+        );
+    }
 }

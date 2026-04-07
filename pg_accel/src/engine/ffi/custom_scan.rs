@@ -18,6 +18,7 @@ use pgrx::pg_sys;
 use super::super::gucs;
 use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo};
 use crate::engine::executor::join::JoinExecState;
+use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortExecState, SortKeyDesc};
 use crate::engine::executor::window::{
@@ -39,6 +40,8 @@ pub enum GpuStrategy {
     Agg = 2,
     Sort = 3,
     Window = 4,
+    /// Fused star-join pre-aggregation: scan + N joins + aggregate in one node.
+    PreAgg = 5,
 }
 
 impl GpuStrategy {
@@ -50,6 +53,7 @@ impl GpuStrategy {
             2 => Self::Agg,
             3 => Self::Sort,
             4 => Self::Window,
+            5 => Self::PreAgg,
             _ => Self::Scan,
         }
     }
@@ -63,6 +67,7 @@ impl GpuStrategy {
             Self::Agg => c"GpuAgg",
             Self::Sort => c"GpuSort",
             Self::Window => c"GpuWindow",
+            Self::PreAgg => c"GpuPreAgg",
         }
     }
 }
@@ -176,6 +181,17 @@ static WINDOW_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScan
     CreateCustomScanState: Some(create_custom_scan_state),
 });
 
+static PREAGG_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
+    CustomName: c"GpuAccelPreAgg".as_ptr(),
+    PlanCustomPath: Some(plan_custom_path_preagg),
+    ReparameterizeCustomPathByChild: None,
+});
+
+static PREAGG_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
+    CustomName: c"GpuAccelPreAgg".as_ptr(),
+    CreateCustomScanState: Some(create_custom_scan_state),
+});
+
 static EXEC_METHODS: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods {
     CustomName: c"GpuAccelScan".as_ptr(),
     BeginCustomScan: Some(begin_custom_scan),
@@ -231,6 +247,13 @@ pub fn window_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const WINDOW_PATH_METHODS.0
 }
 
+/// Pointer to preagg `CustomPathMethods` vtable.
+#[inline]
+#[must_use]
+pub fn preagg_path_methods() -> *const pg_sys::CustomPathMethods {
+    &raw const PREAGG_PATH_METHODS.0
+}
+
 /// Register Custom Scan methods with PostgreSQL. Must be called from `_PG_init`.
 pub fn register() {
     // SAFETY: RegisterCustomScanMethods stores pointers to our static vtables
@@ -242,6 +265,7 @@ pub fn register() {
         pg_sys::RegisterCustomScanMethods(&raw const SORT_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const AGG_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const WINDOW_SCAN_METHODS.0);
+        pg_sys::RegisterCustomScanMethods(&raw const PREAGG_SCAN_METHODS.0);
     }
 }
 
@@ -818,6 +842,55 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
         }
 
         (*cscan).custom_private = list;
+    }
+
+    cscan.cast()
+}
+
+/// Convert a PreAgg `CustomPath` into a `CustomScan` plan node.
+///
+/// The PreAgg path carries all join depths + aggregation info in
+/// `custom_private`. This callback copies that into the plan node
+/// and sets up inner (dimension) plans.
+///
+/// # Safety
+///
+/// Called by the PostgreSQL planner on the main backend thread.
+unsafe extern "C-unwind" fn plan_custom_path_preagg(
+    _root: *mut pg_sys::PlannerInfo,
+    _rel: *mut pg_sys::RelOptInfo,
+    best_path: *mut pg_sys::CustomPath,
+    tlist: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::Plan {
+    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
+    let cscan = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
+    };
+
+    // SAFETY: cscan is freshly palloc'd and zeroed; best_path is valid.
+    unsafe {
+        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
+        (*cscan).scan.plan.targetlist = tlist;
+        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        (*cscan).custom_plans = custom_plans;
+        (*cscan).flags = (*best_path).flags;
+        // scanrelid > 0 tells PG to open the fact table relation for us.
+        // The scan_relid is stored as the first integer after the strategy
+        // header in custom_private.
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const PREAGG_SCAN_METHODS.0;
+
+        // Copy custom_private from path to plan (already serialized by planner hook).
+        (*cscan).custom_private = (*best_path).custom_private;
+
+        // Set custom_scan_tlist so PG knows the output schema.
+        // For PreAgg, we produce GROUP BY keys + aggregates.
+        (*cscan).custom_scan_tlist = tlist;
     }
 
     cscan.cast()
@@ -1934,7 +2007,53 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 
     // SAFETY: node points to our extended GpuAccelScanState.
     unsafe {
-        (*state).accel.executor = if privdata.gpu_strategy == GpuStrategy::Agg {
+        (*state).accel.executor = if privdata.gpu_strategy == GpuStrategy::PreAgg {
+            // Deserialize PreAgg configuration from custom_private.
+            let preagg_info = deserialize_preagg_private((*cscan).custom_private);
+
+            let mut exec = Box::new(PreAggExecState::new(
+                preagg_info.depths,
+                preagg_info.agg_descs,
+                preagg_info.group_keys,
+                preagg_info.scan_expr,
+            ));
+
+            // Materialize dimension tables from child plan states.
+            let custom_ps = (*node).custom_ps;
+            if !custom_ps.is_null() {
+                let n_children = pg_sys::list_length(custom_ps);
+                let mut child_states: Vec<*mut pg_sys::PlanState> = Vec::new();
+                for i in 0..n_children {
+                    // SAFETY: custom_ps[i] is a valid PlanState.
+                    let child = pg_sys::list_nth(custom_ps, i).cast::<pg_sys::PlanState>();
+                    child_states.push(child);
+                }
+                // SAFETY: child_states are valid PlanState pointers.
+                exec.materialize_dimensions(&child_states);
+            }
+
+            // Open the fact table for direct heap scan.
+            // The scan_relid is stored in the preagg info.
+            if preagg_info.scan_relid > 0 {
+                let estate = (*node).ss.ps.state;
+                let rt_entry = pg_sys::exec_rt_fetch(preagg_info.scan_relid, estate);
+                if !rt_entry.is_null() {
+                    let rel = pg_sys::ExecOpenScanRelation(estate, preagg_info.scan_relid, eflags);
+                    let snap = (*estate).es_snapshot;
+                    // SAFETY: rel and snap are valid; main backend thread.
+                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                    exec.set_scan_desc(sd);
+                }
+            }
+
+            pgrx::debug1!(
+                "pg_accel: begin_custom_scan: PreAgg, {} depths, {} aggs, {} group keys",
+                exec.depths.len(),
+                exec.agg_descs.len(),
+                exec.group_keys.len(),
+            );
+            Box::into_raw(exec).cast()
+        } else if privdata.gpu_strategy == GpuStrategy::Agg {
             let mut exec = if let Some(gk) = privdata.group_key {
                 pgrx::debug1!(
                     "pg_accel: begin_custom_scan: GroupedAgg, {} aggs, group attno={}",
@@ -2428,6 +2547,26 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         return result;
     }
 
+    // PreAgg strategy: fused star-join + pre-aggregation.
+    if gpu_strategy == GpuStrategy::PreAgg {
+        let preagg_state = unsafe { &mut *executor.cast::<PreAggExecState>() };
+        let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
+
+        let result = unsafe { preagg_state.next(scan_slot) };
+        if result.is_null() {
+            // SAFETY: ExecClearTuple on a valid slot.
+            unsafe { pg_sys::ExecClearTuple(scan_slot) };
+            return scan_slot;
+        }
+        // Update counters for EXPLAIN ANALYZE.
+        unsafe {
+            (*state).accel.rows_dispatched = preagg_state.rows_dispatched;
+            (*state).accel.batches_executed = preagg_state.batches_executed;
+            (*state).accel.dispatch_time_us = preagg_state.dispatch_time_us;
+        }
+        return result;
+    }
+
     // Strategies that are not yet handled: passthrough.
     if !matches!(
         gpu_strategy,
@@ -2576,7 +2715,16 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                 let _ = Box::from_raw((*state).accel.executor.cast::<JoinExecState>());
             } else {
                 let gpu_strategy = GpuStrategy::from_i32((*state).accel.strategy);
-                if gpu_strategy == GpuStrategy::Agg {
+                if gpu_strategy == GpuStrategy::PreAgg {
+                    // SAFETY: executor was Box::into_raw'd as PreAggExecState.
+                    let preagg = Box::from_raw((*state).accel.executor.cast::<PreAggExecState>());
+                    // End direct heap scan if one was started.
+                    if !preagg.scan_desc.is_null() {
+                        // SAFETY: scan_desc was created by table_beginscan.
+                        pg_sys::table_endscan(preagg.scan_desc);
+                    }
+                    drop(preagg);
+                } else if gpu_strategy == GpuStrategy::Agg {
                     // SAFETY: executor was Box::into_raw'd as AggExecState.
                     let _ = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
                 } else if gpu_strategy == GpuStrategy::Window {
@@ -2827,6 +2975,30 @@ unsafe extern "C-unwind" fn explain_custom_scan(
                 pg_sys::ExplainPropertyBool(
                     c"GPU Dispatched".as_ptr(),
                     agg_state.gpu_dispatched,
+                    es,
+                );
+            }
+
+            // For PreAgg strategy, report fused pipeline metrics.
+            if strategy == GpuStrategy::PreAgg && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as PreAggExecState.
+                let preagg_state =
+                    &*(*state).accel.executor.cast::<PreAggExecState>();
+                pg_sys::ExplainPropertyInteger(
+                    c"Depths".as_ptr(),
+                    std::ptr::null(),
+                    preagg_state.depths.len() as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Fact Rows Scanned".as_ptr(),
+                    std::ptr::null(),
+                    preagg_state.rows_dispatched as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyBool(
+                    c"Has Scan Expr".as_ptr(),
+                    preagg_state.scan_expr.is_some(),
                     es,
                 );
             }
@@ -4262,5 +4434,384 @@ mod tests {
         assert!(matches!(map(2), PgaccelKeyType::Float64));
         assert!(matches!(map(-1), PgaccelKeyType::Int32));
         assert!(matches!(map(99), PgaccelKeyType::Int32));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PreAgg serialization / deserialization
+// ---------------------------------------------------------------------------
+
+use crate::engine::executor::preagg::{
+    DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc,
+};
+
+/// Deserialized PreAgg configuration from `custom_private`.
+struct PreAggPrivData {
+    scan_relid: pg_sys::Index,
+    depths: Vec<JoinDepthDesc>,
+    agg_descs: Vec<PreAggColDesc>,
+    group_keys: Vec<GroupKeyDesc>,
+    scan_expr: Option<crate::engine::expr_compiler::CompiledExpr>,
+}
+
+/// Serialize PreAgg metadata into a PG `List` of `Integer` nodes.
+///
+/// Layout:
+/// ```text
+/// [STRATEGY=5, batch_size, expected_threads,
+///  scan_relid, n_depths,
+///  // Per depth:
+///  outer_attno, inner_attno, key_type, n_dim_filters,
+///  // Per dim filter: col_idx, cmp_opcode, const_val_hi, const_val_lo
+///  // Per depth group cols: n_group_col_attnos, attno1, attno2, ...
+///  n_agg_ops,
+///  // Per agg: op_type, attno, type_oid
+///  n_group_keys,
+///  // Per group key: source, attno, type_oid
+///  has_scan_expr, (if 1: template_type, ...template_data...)
+/// ]
+/// ```
+///
+/// # Safety
+///
+/// Must be called during planning on the main backend thread.
+#[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
+#[must_use]
+pub unsafe fn serialize_preagg_private(
+    scan_relid: pg_sys::Index,
+    depths: &[JoinDepthDesc],
+    agg_descs: &[PreAggColDesc],
+    group_keys: &[GroupKeyDesc],
+    scan_expr: Option<&crate::engine::expr_compiler::CompiledExpr>,
+) -> *mut pg_sys::List {
+    use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
+
+    let batch_size = super::super::gucs::min_batch_size();
+    let expected_threads = resolve_thread_count();
+
+    let mut list: *mut pg_sys::List = std::ptr::null_mut();
+    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
+    unsafe {
+        list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::PreAgg as c_int).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(scan_relid as c_int).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(depths.len() as c_int).cast());
+
+        // Per depth.
+        for depth in depths {
+            list = pg_sys::lappend(list, pg_sys::makeInteger(depth.outer_attno).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(depth.inner_attno).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(depth.key_type).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(depth.dim_filters.len() as c_int).cast(),
+            );
+            for filt in &depth.dim_filters {
+                list = pg_sys::lappend(
+                    list,
+                    pg_sys::makeInteger(filt.col_idx as c_int).cast(),
+                );
+                list = pg_sys::lappend(
+                    list,
+                    pg_sys::makeInteger(filt.cmp_opcode as c_int).cast(),
+                );
+                // Encode f64 as two i32s (hi and lo bits).
+                let bits = filt.const_val.to_bits();
+                list = pg_sys::lappend(
+                    list,
+                    pg_sys::makeInteger((bits >> 32) as c_int).cast(),
+                );
+                list = pg_sys::lappend(
+                    list,
+                    pg_sys::makeInteger(bits as u32 as c_int).cast(),
+                );
+            }
+            // Group col attnos for this depth.
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(depth.group_col_attnos.len() as c_int).cast(),
+            );
+            for &attno in &depth.group_col_attnos {
+                list = pg_sys::lappend(list, pg_sys::makeInteger(attno).cast());
+            }
+        }
+
+        // Aggregates.
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(agg_descs.len() as c_int).cast(),
+        );
+        for desc in agg_descs {
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(desc.op.to_i32()).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(desc.attno).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(u32::from(desc.type_oid) as c_int).cast(),
+            );
+        }
+
+        // GROUP BY keys.
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(group_keys.len() as c_int).cast(),
+        );
+        for gk in group_keys {
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(gk.source as c_int).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(gk.attno).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(u32::from(gk.type_oid) as c_int).cast(),
+            );
+        }
+
+        // Serialize fact-side scan expression.
+        match scan_expr {
+            Some(CompiledExpr::Template(TemplateKernel::CmpConst {
+                col_idx, cmp_opcode, const_val,
+            })) => {
+                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has
+                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // type=CmpConst
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*col_idx as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*cmp_opcode as c_int).cast());
+                let bits = const_val.to_bits();
+                list = pg_sys::lappend(list, pg_sys::makeInteger((bits >> 32) as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(bits as u32 as c_int).cast());
+            }
+            Some(CompiledExpr::Template(TemplateKernel::Between {
+                col_idx, lo, hi,
+            })) => {
+                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has
+                list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast()); // type=Between
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*col_idx as c_int).cast());
+                let lo_bits = lo.to_bits();
+                list = pg_sys::lappend(list, pg_sys::makeInteger((lo_bits >> 32) as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(lo_bits as u32 as c_int).cast());
+                let hi_bits = hi.to_bits();
+                list = pg_sys::lappend(list, pg_sys::makeInteger((hi_bits >> 32) as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(hi_bits as u32 as c_int).cast());
+            }
+            Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
+                col1_idx, cmp1_opcode, const1_val,
+                col2_idx, cmp2_opcode, const2_val,
+            })) => {
+                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has
+                list = pg_sys::lappend(list, pg_sys::makeInteger(3).cast()); // type=TwoPredAnd
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*col1_idx as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*cmp1_opcode as c_int).cast());
+                let b1 = const1_val.to_bits();
+                list = pg_sys::lappend(list, pg_sys::makeInteger((b1 >> 32) as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(b1 as u32 as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*col2_idx as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(*cmp2_opcode as c_int).cast());
+                let b2 = const2_val.to_bits();
+                list = pg_sys::lappend(list, pg_sys::makeInteger((b2 >> 32) as c_int).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(b2 as u32 as c_int).cast());
+            }
+            _ => {
+                list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // no scan_expr
+            }
+        }
+    }
+
+    list
+}
+
+/// Deserialize PreAgg configuration from `custom_private`.
+///
+/// # Safety
+///
+/// `custom_private` must be a valid PG `List` of Integer nodes.
+#[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
+unsafe fn deserialize_preagg_private(custom_private: *mut pg_sys::List) -> PreAggPrivData {
+    use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
+
+    let empty = PreAggPrivData {
+        scan_relid: 0,
+        depths: vec![],
+        agg_descs: vec![],
+        group_keys: vec![],
+        scan_expr: None,
+    };
+    if custom_private.is_null() {
+        return empty;
+    }
+
+    let mut idx: c_int = 3; // skip [strategy, batch_size, expected_threads]
+
+    // SAFETY: custom_private is a valid List.
+    let scan_relid = unsafe { list_int_at(custom_private, idx) } as pg_sys::Index;
+    idx += 1;
+    let n_depths = unsafe { list_int_at(custom_private, idx) } as usize;
+    idx += 1;
+
+    let mut depths = Vec::with_capacity(n_depths);
+    for _ in 0..n_depths {
+        let outer_attno = unsafe { list_int_at(custom_private, idx) };
+        idx += 1;
+        let inner_attno = unsafe { list_int_at(custom_private, idx) };
+        idx += 1;
+        let key_type = unsafe { list_int_at(custom_private, idx) };
+        idx += 1;
+        let n_filters = unsafe { list_int_at(custom_private, idx) } as usize;
+        idx += 1;
+
+        let mut dim_filters = Vec::with_capacity(n_filters);
+        for _ in 0..n_filters {
+            let col_idx = unsafe { list_int_at(custom_private, idx) } as usize;
+            idx += 1;
+            let cmp_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
+            idx += 1;
+            let bits_hi = unsafe { list_int_at(custom_private, idx) } as u32;
+            idx += 1;
+            let bits_lo = unsafe { list_int_at(custom_private, idx) } as u32;
+            idx += 1;
+            let const_val = f64::from_bits(((bits_hi as u64) << 32) | bits_lo as u64);
+            dim_filters.push(DimFilter {
+                col_idx,
+                cmp_opcode,
+                const_val,
+            });
+        }
+
+        let n_group_cols = unsafe { list_int_at(custom_private, idx) } as usize;
+        idx += 1;
+        let mut group_col_attnos = Vec::with_capacity(n_group_cols);
+        for _ in 0..n_group_cols {
+            group_col_attnos.push(unsafe { list_int_at(custom_private, idx) });
+            idx += 1;
+        }
+
+        depths.push(JoinDepthDesc {
+            outer_attno,
+            inner_attno,
+            key_type,
+            dim_filters,
+            group_col_attnos,
+        });
+    }
+
+    // Aggregates.
+    let n_aggs = unsafe { list_int_at(custom_private, idx) } as usize;
+    idx += 1;
+    let mut agg_descs = Vec::with_capacity(n_aggs);
+    for _ in 0..n_aggs {
+        let op = AggOp::from_i32(unsafe { list_int_at(custom_private, idx) });
+        idx += 1;
+        let attno = unsafe { list_int_at(custom_private, idx) };
+        idx += 1;
+        let type_oid_raw = unsafe { list_int_at(custom_private, idx) } as u32;
+        idx += 1;
+        agg_descs.push(PreAggColDesc {
+            op,
+            attno,
+            type_oid: pg_sys::Oid::from(type_oid_raw),
+        });
+    }
+
+    // GROUP BY keys.
+    let n_gkeys = unsafe { list_int_at(custom_private, idx) } as usize;
+    idx += 1;
+    let mut group_keys = Vec::with_capacity(n_gkeys);
+    for _ in 0..n_gkeys {
+        let source = unsafe { list_int_at(custom_private, idx) } as u32;
+        idx += 1;
+        let attno = unsafe { list_int_at(custom_private, idx) };
+        idx += 1;
+        let type_oid_raw = unsafe { list_int_at(custom_private, idx) } as u32;
+        idx += 1;
+        group_keys.push(GroupKeyDesc {
+            source,
+            attno,
+            type_oid: pg_sys::Oid::from(type_oid_raw),
+        });
+    }
+
+    // Deserialize scan_expr.
+    let has_scan_expr = unsafe { list_int_at(custom_private, idx) };
+    idx += 1;
+    let scan_expr = if has_scan_expr == 1 {
+        let template_type = unsafe { list_int_at(custom_private, idx) };
+        idx += 1;
+        match template_type {
+            1 => {
+                // CmpConst
+                let col_idx = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let cmp_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
+                idx += 1;
+                let bits_hi = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let bits_lo = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let const_val = f64::from_bits(((bits_hi as u64) << 32) | bits_lo as u64);
+                Some(CompiledExpr::Template(TemplateKernel::CmpConst {
+                    col_idx, cmp_opcode, const_val,
+                }))
+            }
+            2 => {
+                // Between
+                let col_idx = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let lo_hi = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let lo_lo = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let lo = f64::from_bits(((lo_hi as u64) << 32) | lo_lo as u64);
+                let hi_hi = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let hi_lo = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let hi = f64::from_bits(((hi_hi as u64) << 32) | hi_lo as u64);
+                Some(CompiledExpr::Template(TemplateKernel::Between {
+                    col_idx, lo, hi,
+                }))
+            }
+            3 => {
+                // TwoPredAnd
+                let col1_idx = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let cmp1_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
+                idx += 1;
+                let b1_hi = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let b1_lo = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let const1_val = f64::from_bits(((b1_hi as u64) << 32) | b1_lo as u64);
+                let col2_idx = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let cmp2_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
+                idx += 1;
+                let b2_hi = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let b2_lo = unsafe { list_int_at(custom_private, idx) } as u32;
+                idx += 1;
+                let const2_val = f64::from_bits(((b2_hi as u64) << 32) | b2_lo as u64);
+                Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
+                    col1_idx, cmp1_opcode, const1_val,
+                    col2_idx, cmp2_opcode, const2_val,
+                }))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Suppress unused-assignment warning for idx.
+    let _ = idx;
+
+    PreAggPrivData {
+        scan_relid,
+        depths,
+        agg_descs,
+        group_keys,
+        scan_expr,
     }
 }

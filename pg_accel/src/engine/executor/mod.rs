@@ -13,6 +13,7 @@
 pub mod agg;
 pub mod deser;
 pub mod join;
+pub mod preagg;
 pub mod scan;
 pub mod sort;
 pub mod tuple_extract;

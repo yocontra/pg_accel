@@ -10,6 +10,7 @@ use pgrx::pg_sys::{
 };
 
 use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
+use crate::engine::executor::preagg::DimFilter;
 use crate::engine::executor::sort::SortKeyDesc;
 use crate::engine::executor::window::{WindowFunc, WindowFuncSpec};
 
@@ -229,17 +230,14 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         strategy,
         registry::AccelStrategy::GpuSpatial | registry::AccelStrategy::GpuRaster
     ) {
-        // Find the cheapest path as a baseline for cost-ratio comparison.
+        // Find the cheapest sequential scan (T_Path) as the baseline for
+        // cost-ratio comparison. Using find_cheapest_path() here would
+        // return the index path itself when it's cheapest, making the
+        // ratio idx_cost/idx_cost = 1.0 (always fails the < 0.40 check).
         // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
-        let baseline = unsafe { find_cheapest_path(rel_ref.pathlist) };
-        let baseline_cost = if baseline.is_null() {
-            0.0
-        } else {
-            // SAFETY: baseline is non-null, valid Path.
-            unsafe { (*baseline).total_cost }
-        };
+        let seq_scan_cost = unsafe { find_cheapest_seqscan_cost(rel_ref.pathlist) };
         // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
-        if unsafe { has_cheap_spatial_index_path(rel_ref.pathlist, baseline_cost) } {
+        if unsafe { has_cheap_spatial_index_path(rel_ref.pathlist, seq_scan_cost) } {
             return;
         }
     }
@@ -252,23 +250,39 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     if strategy == registry::AccelStrategy::GpuSpatial {
         let min_verts = cost::device_limits().gpu_spatial_min_vertices;
         // SAFETY: rel_ref.baserestrictinfo is a valid List from the planner.
-        if let Some(vcount) = unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) } {
-            if vcount < min_verts {
-                pgrx::debug1!(
-                    "pg_accel: set_rel_pathlist: polygon has {} vertices (min {}), skipping",
-                    vcount,
-                    min_verts
-                );
-                return;
-            }
+        // Treat unknown vertex count (None) as 0 — conservatively reject
+        // when the planner cannot confirm the polygon has enough vertices.
+        // This prevents injection for FuncExpr geometry args (ST_Buffer,
+        // ST_MakeEnvelope) that PG didn't constant-fold.
+        let vcount = unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) }
+            .unwrap_or(0);
+        if vcount < min_verts {
+            pgrx::debug1!(
+                "pg_accel: spatial vertex gate: vcount={} < min={}, skipping",
+                vcount,
+                min_verts
+            );
+            return;
         }
     }
 
-    // Gate 5: Find cheapest path. Hook fires BEFORE set_cheapest(), so
-    // cheapest_total_path may be NULL — scan the pathlist manually.
+    // Gate 5: Find the sequential scan path as cost baseline.
+    // The Custom Scan always does a full sequential heap scan, so its cost
+    // must be derived from the seq scan cost — NOT from index/bitmap paths.
+    // Using an index path as baseline + discount makes the Custom Scan appear
+    // cheaper than the index scan it was based on, causing regressions when
+    // an index scan would be far faster (e.g., GiST at 10M rows).
+    //
+    // If PG pruned the seq scan from the pathlist, that means index/bitmap
+    // paths dominate it. Since our Custom Scan is fundamentally a seq scan,
+    // it would also be dominated — skip injection entirely.
     // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
-    let cheapest = unsafe { find_cheapest_path(rel_ref.pathlist) };
+    let cheapest = unsafe { find_cheapest_seqscan_path(rel_ref.pathlist) };
     if cheapest.is_null() {
+        pgrx::debug1!(
+            "pg_accel: scan hook: no seq scan path in pathlist, \
+             index paths dominate — skipping Custom Scan injection"
+        );
         return;
     }
 
@@ -278,7 +292,7 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     #[allow(clippy::cast_precision_loss)]
     let batch_size = cost::optimal_batch_size(rows) as f64;
     let num_batches = (base.rows / batch_size).ceil();
-    let batch_overhead = num_batches * 0.5; // per-batch dispatch cost
+    let batch_overhead = num_batches * 2.0; // per-batch dispatch + sync cost
     // GPU strategies incur a fixed kernel launch overhead.
     // GpuExpr uses CPU inline template filter (no GPU launch).
     let gpu_overhead = match strategy {
@@ -287,7 +301,18 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
         _ => 0.0,
     };
-    let startup_cost = base.startup_cost + 1.0 + gpu_overhead;
+    // Custom Scan runs single-threaded. If PG can parallelize this relation,
+    // our startup_cost must be at least parallel_setup_cost so that add_path()
+    // can properly dominate us when a cheaper Gather path exists. Without this,
+    // our low startup_cost prevents domination even when total_cost is higher.
+    let parallel_penalty = if rel_ref.consider_parallel {
+        // SAFETY: reading PG GUC parallel_setup_cost.
+        let psc = unsafe { pg_sys::parallel_setup_cost };
+        psc.max(0.0)
+    } else {
+        0.0
+    };
+    let startup_cost = base.startup_cost + 1.0 + gpu_overhead + parallel_penalty;
 
     // GPU accelerates per-row function evaluation for spatial/H3/raster.
     // GPU_COST_SAFETY_MARGIN (0.7) = 30% savings from GPU batch execution.
@@ -299,14 +324,35 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     } else {
         cost::GPU_COST_SAFETY_MARGIN
     };
+    // GpuExpr inline filter: modest per-row yield cost (heap buffer return,
+    // no MinimalTuple copy). GPU strategies (spatial/H3/raster): zero yield
+    // cost — the 30% cost_margin discount already captures batch speedup,
+    // and per-row compute dominates yield overhead.
+    let yield_cost = if strategy == registry::AccelStrategy::GpuExpr {
+        base.rows * 0.005
+    } else {
+        0.0
+    };
     let raw_total = (base.total_cost * cost_margin
         + batch_overhead
-        + gpu_overhead)
+        + gpu_overhead
+        + yield_cost)
         * gucs::cost_multiplier();
 
     // Let PG's native cost comparison decide — add_path() discards
     // paths that are strictly dominated by cheaper alternatives.
     let total_cost = raw_total;
+
+    // Gate 6: Post-cost spatial index check.
+    // After computing our Custom Scan cost, compare against any GiST/SP-GiST
+    // index path. The Custom Scan always does a full sequential heap scan.
+    // At large scales (10M+), a selective GiST index scan reads far fewer
+    // heap pages, making it faster even if PG's cost estimate is close.
+    // This applies to all strategies — GpuExpr also does a full heap walk.
+    // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
+    if unsafe { has_cheaper_spatial_index_path(rel_ref.pathlist, total_cost) } {
+        return;
+    }
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -690,6 +736,20 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
+    // Gate 1c: Early output-rows check. Skip all expensive work (equi-join
+    // detection, registry scan, restrict-list walks) when the join output is
+    // too small for any GPU path to break even. This is the hot path for
+    // multi-table OLAP queries where the planner evaluates many join orderings.
+    // SAFETY: joinrel is a valid RelOptInfo provided by the planner.
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let est_rows = unsafe { (*joinrel).rows } as usize;
+        let min = cost::device_limits().gpu_join_max_output_rows / 2;
+        if est_rows < min {
+            return;
+        }
+    }
+
     let _span = tracing::info_span!("planner.join_pathlist", join_type = jointype).entered();
 
     // SAFETY: pointers provided by the planner are valid.
@@ -742,6 +802,22 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             | registry::AccelStrategy::GpuH3
     ) {
         return;
+    }
+
+    // Gate 3c: Minimum output rows for GPU hash join. Custom Scan yield
+    // overhead (~3µs/row ≈ 0.03 cost units) makes small-output joins
+    // strictly slower than PG's native HashJoin. Require at least
+    // gpu_join_max_output_rows / 2 output rows for GPU to have any chance.
+    if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
+        let min_output = cost::device_limits().gpu_join_max_output_rows / 2;
+        #[allow(clippy::cast_sign_loss)]
+        let output_rows = joinrel_ref.rows as usize;
+        if output_rows < min_output {
+            pgrx::debug1!(
+                "pg_accel join: output rows={output_rows} < min={min_output}, deferring to PG"
+            );
+            return;
+        }
     }
 
     // Gate 4: Cost model gating — skip if batching is not worthwhile.
@@ -923,9 +999,11 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     // Dispatch by upper relation stage.
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
-            // Only inject for full aggregate, NOT partial. Partial agg
-            // paths are used inside parallel workers; our GpuAgg doesn't
-            // support partial aggregation protocol.
+            // Try fused star-join pre-aggregation first (most benefit).
+            // SAFETY: All pointers are valid planner arguments.
+            unsafe { pgaccel_inject_gpu_preagg(root, input_rel, output_rel) };
+
+            // Also inject standard GpuAgg path for non-star-schema queries.
             // SAFETY: All pointers are valid planner arguments.
             unsafe { pgaccel_inject_gpu_agg(root, input_rel, output_rel) };
         }
@@ -1260,7 +1338,9 @@ unsafe fn pgaccel_inject_gpu_window(
     // SAFETY: sorted_path is non-null.
     let base = unsafe { &*sorted_path };
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    let per_row = cost::PER_DATUM_EXTRACT_COST + 0.002; // datum extract + partition detect
+    // Realistic per-row cost: datum extract + partition detect + yield overhead.
+    // Measured ~30µs/row total on M2 Max (vs PG's ~5µs/row for native WindowAgg).
+    let per_row = 0.03;
     let window_cost = base.rows * per_row * specs.len() as f64;
     let startup_cost = base.total_cost + gpu_overhead;
     let total_cost = base.total_cost + gpu_overhead + window_cost;
@@ -1319,9 +1399,768 @@ const AGG_FLOAT8OID: u32 = 701;
 const AGG_INT4OID: u32 = 23;
 const AGG_INT8OID: u32 = 20;
 
-/// Detect simple aggregate queries (`SELECT sum/min/max/avg/count FROM table`
-/// with no GROUP BY) and inject a `CustomPath` that uses GPU reduce.
+// ---------------------------------------------------------------------------
+// GPU PreAgg (fused star-join + aggregate) injection
+// ---------------------------------------------------------------------------
+
+/// Detect star-schema join trees (fact table + small dimension joins + aggregate)
+/// and inject a fused `GpuPreAgg` CustomPath that replaces the entire pipeline.
 ///
+/// Walks the cheapest input path backwards through join nodes to find:
+/// - A chain of HashJoin paths where each inner side is a small table
+/// - A base (fact) table scan at the bottom
+/// - Equi-join keys at each join level
+/// - Aggregate operations in the output target list
+///
+/// # Safety
+///
+/// All pointers must be valid planner-provided arguments.
+#[allow(
+    clippy::too_many_lines,
+    clippy::similar_names,
+    clippy::cast_ptr_alignment,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+unsafe fn pgaccel_inject_gpu_preagg(
+    root: *mut PlannerInfo,
+    input_rel: *mut RelOptInfo,
+    output_rel: *mut RelOptInfo,
+) {
+    use crate::engine::executor::preagg::{GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
+    use crate::engine::ffi::custom_scan;
+
+    // Gate: GPU must be available and enabled.
+    if !cfg!(feature = "gpu") || !cost::gpu_is_usable() {
+        return;
+    }
+
+    let _span = tracing::info_span!("planner.preagg").entered();
+
+    let input_ref = unsafe { &*input_rel };
+    let root_ref = unsafe { &*root };
+    let parse = root_ref.parse;
+    if parse.is_null() {
+        return;
+    }
+    let query = unsafe { &*parse };
+
+    // Gate: need a cheapest path to walk.
+    let cheapest = unsafe { find_cheapest_path(input_ref.pathlist) };
+    if cheapest.is_null() {
+        return;
+    }
+
+    // Gate: must have aggregation (hasAggs or groupClause).
+    if !query.hasAggs && query.groupClause.is_null() {
+        return;
+    }
+
+    let limits = cost::device_limits();
+
+    // -----------------------------------------------------------------------
+    // Phase 1: Walk the join tree to find star-schema pattern.
+    // -----------------------------------------------------------------------
+
+    // We walk backwards from the cheapest path, collecting join depths.
+    // Each level must be a HashJoin/NestLoop with a small inner side.
+    let mut depths: Vec<JoinDepthDesc> = Vec::new();
+    let mut inner_paths: Vec<*mut Path> = Vec::new();
+    let mut inner_relids: Vec<pg_sys::Index> = Vec::new();
+    let mut current = cheapest;
+    let mut fact_rows: f64 = 0.0;
+    let mut fact_relid: pg_sys::Index = 0;
+    let mut fact_scan_expr: Option<crate::engine::expr_compiler::CompiledExpr> = None;
+
+    loop {
+        // SAFETY: current is a valid Path pointer.
+        let tag = unsafe { (*current.cast::<pg_sys::Node>()).type_ };
+
+        match tag {
+            // HashJoin or NestLoop join path — extract join info.
+            NodeTag::T_HashPath | NodeTag::T_NestPath => {
+                let jp = current.cast::<pg_sys::JoinPath>();
+                // SAFETY: jp is a valid JoinPath.
+                let join_type = unsafe { (*jp).jointype };
+
+                // Only support INNER JOIN for star-schema.
+                if join_type != pg_sys::JoinType::JOIN_INNER {
+                    pgrx::debug1!("pg_accel: preagg rejected: non-inner join");
+                    return;
+                }
+
+                let outer_path = unsafe { (*jp).outerjoinpath };
+                let inner_path = unsafe { (*jp).innerjoinpath };
+                if outer_path.is_null() || inner_path.is_null() {
+                    return;
+                }
+
+                // Inner side must be small (dimension table).
+                let inner_rows = unsafe { (*inner_path).rows };
+                if inner_rows as usize > limits.gpu_preagg_max_dim_rows {
+                    pgrx::debug1!(
+                        "pg_accel: preagg rejected: inner rows {} > max {}",
+                        inner_rows,
+                        limits.gpu_preagg_max_dim_rows
+                    );
+                    return;
+                }
+
+                // Extract equi-join key from join restrictinfo.
+                let restrict = unsafe { (*jp).joinrestrictinfo };
+                let equi = unsafe { find_equi_join_from_restrictinfo(restrict, outer_path, inner_path) };
+                let Some(equi) = equi else {
+                    pgrx::debug1!("pg_accel: preagg rejected: no equi-join key found");
+                    return;
+                };
+
+                // SAFETY: inner_path.parent is the inner relation's RelOptInfo.
+                let inner_parent = unsafe { (*inner_path).parent };
+                let inner_relid: pg_sys::Index = if !inner_parent.is_null() {
+                    unsafe { (*inner_parent).relid }
+                } else {
+                    0
+                };
+
+                // Extract dimension-side filter predicates from baserestrictinfo.
+                // SAFETY: inner_parent is a valid RelOptInfo.
+                let dim_filters = if !inner_parent.is_null() {
+                    unsafe { extract_dim_filters_from_rel(inner_parent) }
+                } else {
+                    vec![]
+                };
+
+                depths.push(JoinDepthDesc {
+                    outer_attno: equi.outer_attno,
+                    inner_attno: equi.inner_attno,
+                    key_type: equi.key_type,
+                    dim_filters,
+                    group_col_attnos: vec![], // populated later from GROUP BY
+                });
+                inner_paths.push(inner_path);
+                inner_relids.push(inner_relid);
+
+                // Continue walking the outer side.
+                current = outer_path;
+            }
+            // Base relation (fact table) — end of walk.
+            _ => {
+                // SAFETY: current is a valid Path.
+                let parent = unsafe { (*current).parent };
+                if parent.is_null() {
+                    return;
+                }
+                let parent_ref = unsafe { &*parent };
+
+                // Must be a base relation.
+                if parent_ref.reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL {
+                    pgrx::debug1!("pg_accel: preagg rejected: outer is not base rel");
+                    return;
+                }
+                fact_rows = parent_ref.rows;
+                fact_relid = parent_ref.relid;
+
+                // Extract fact-side WHERE clause as a compiled template.
+                fact_scan_expr = unsafe {
+                    compile_restrictinfo_to_template(parent_ref.baserestrictinfo)
+                };
+                break;
+            }
+        }
+    }
+
+    // Gate: need at least one join depth (otherwise it's a single-table query).
+    if depths.is_empty() {
+        return;
+    }
+
+    // Gate: fact table must have enough rows.
+    if (fact_rows as usize) < limits.gpu_preagg_min_fact_rows {
+        pgrx::debug1!(
+            "pg_accel: preagg rejected: fact rows {} < min {}",
+            fact_rows,
+            limits.gpu_preagg_min_fact_rows
+        );
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Detect aggregate operations from the output target list.
+    // -----------------------------------------------------------------------
+
+    let tlist = query.targetList;
+    if tlist.is_null() {
+        return;
+    }
+    let tlist_len = unsafe { pg_sys::list_length(tlist) };
+
+    let mut agg_descs: Vec<PreAggColDesc> = Vec::new();
+    let mut group_keys: Vec<GroupKeyDesc> = Vec::new();
+
+    for i in 0..tlist_len {
+        // SAFETY: i is in [0, tlist_len).
+        let tle = unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
+        if tle.is_null() {
+            continue;
+        }
+        let expr = unsafe { (*tle).expr };
+        if expr.is_null() {
+            continue;
+        }
+        let expr_tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
+
+        if expr_tag == NodeTag::T_Aggref {
+            let aggref = expr.cast::<pg_sys::Aggref>();
+            // SAFETY: aggref is valid.
+            let aggfnoid = unsafe { (*aggref).aggfnoid };
+            let op = agg_op_from_oid(aggfnoid);
+            if matches!(op, AggOp::Passthrough) {
+                pgrx::debug1!("pg_accel: preagg rejected: unsupported agg function");
+                return;
+            }
+
+            // Get the aggregate's argument attno (if any).
+            let args = unsafe { (*aggref).args };
+            let arg_attno = if args.is_null() || unsafe { pg_sys::list_length(args) } == 0 {
+                0 // COUNT(*)
+            } else {
+                // First argument.
+                let te = unsafe {
+                    pg_sys::list_nth(args, 0).cast::<pg_sys::TargetEntry>()
+                };
+                if te.is_null() {
+                    0
+                } else {
+                    let arg_expr = unsafe { (*te).expr };
+                    // SAFETY: arg_expr is a valid Node pointer from PG parser output.
+                    unsafe { extract_var_attno(arg_expr) }
+                }
+            };
+
+            let type_oid = unsafe { (*aggref).aggtype };
+            agg_descs.push(PreAggColDesc {
+                op,
+                attno: arg_attno,
+                type_oid,
+            });
+        } else if expr_tag == NodeTag::T_Var {
+            // This is likely a GROUP BY column reference.
+            let var = expr.cast::<pg_sys::Var>();
+            let varattno = i32::from(unsafe { (*var).varattno });
+            let varno = unsafe { (*var).varno } as u32;
+            let typid = unsafe { (*var).vartype };
+
+            // Determine if this var references the fact table or a dimension.
+            let (source, attno) = resolve_var_to_star_source(
+                varno, varattno, fact_relid, &inner_relids,
+            );
+
+            group_keys.push(GroupKeyDesc {
+                source,
+                attno,
+                type_oid: typid,
+            });
+        }
+    }
+
+    // Gate: need at least one aggregate.
+    if agg_descs.is_empty() && group_keys.is_empty() {
+        pgrx::debug1!("pg_accel: preagg rejected: no aggregates or group keys found");
+        return;
+    }
+
+    // Populate group_col_attnos in depths for dimension-side GROUP BY columns.
+    for gk in &group_keys {
+        if gk.source > 0 {
+            let depth_idx = (gk.source - 1) as usize;
+            if depth_idx < depths.len() {
+                depths[depth_idx].group_col_attnos.push(gk.attno);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Cost estimation.
+    // -----------------------------------------------------------------------
+
+    // Dimension materialization (one-time).
+    let limits = cost::device_limits();
+    let dim_cost: f64 = inner_paths
+        .iter()
+        .map(|&p| unsafe { (*p).rows } * limits.preagg_dim_materialize_cost)
+        .sum();
+
+    // Fact table scan + probe + aggregate.
+    let fact_scan_cost = fact_rows * limits.preagg_fact_scan_cost;
+    let mut surviving = fact_rows;
+    let mut probe_cost = 0.0;
+    for ip in &inner_paths {
+        probe_cost += surviving * limits.preagg_probe_cost;
+        // Estimate join selectivity: inner_rows / fact_rows, clamped.
+        let inner_rows = unsafe { (**ip).rows };
+        let sel = (inner_rows / fact_rows).clamp(0.01, 1.0);
+        surviving *= sel;
+    }
+    let agg_cost = surviving * limits.preagg_agg_cost;
+    let n_groups = if group_keys.is_empty() {
+        1.0
+    } else {
+        surviving.sqrt().clamp(1.0, 10000.0)
+    };
+    let yield_cost = n_groups * limits.preagg_yield_cost;
+
+    // PreAgg is CPU-only (heap_getnext + hash probe + accumulate) — use
+    // the PreAgg-specific fixed overhead, not GPU_LAUNCH_OVERHEAD.
+    let total_cost = dim_cost
+        + fact_scan_cost
+        + probe_cost
+        + agg_cost
+        + yield_cost
+        + cost::PREAGG_FIXED_OVERHEAD;
+
+    // Gate: only inject if substantially cheaper than PG's best existing path.
+    // PG's cost estimates have ±20-30% noise, so use a tighter gate to avoid
+    // injecting PreAgg when it would actually be slower. The 50% threshold
+    // means PreAgg must estimate at least half PG's best cost — conservative
+    // enough to prevent regressions but loose enough to allow injection when
+    // the fused pipeline genuinely wins.
+    let output_ref = unsafe { &*output_rel };
+    let pg_best_cost = unsafe { find_cheapest_total_cost(output_ref.pathlist) };
+    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * 0.50 {
+        pgrx::debug1!(
+            "pg_accel: preagg rejected: cost {:.1} >= 50% of PG best {:.1}",
+            total_cost,
+            pg_best_cost,
+        );
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4: Create the PreAgg CustomPath.
+    // -----------------------------------------------------------------------
+
+    pgrx::debug1!(
+        "pg_accel: preagg injecting: {} depths, {} aggs, {} groups, cost={:.1} vs pg={:.1}",
+        depths.len(),
+        agg_descs.len(),
+        group_keys.len(),
+        total_cost,
+        pg_best_cost,
+    );
+
+    // SAFETY: Allocating via palloc.
+    unsafe {
+        let cpath = pg_sys::palloc0(std::mem::size_of::<CustomPath>()).cast::<CustomPath>();
+
+        (*cpath).path.type_ = NodeTag::T_CustomPath;
+        (*cpath).path.pathtype = NodeTag::T_CustomScan;
+        (*cpath).path.parent = output_rel;
+        (*cpath).path.pathtarget = (*output_rel).reltarget;
+        (*cpath).path.param_info = std::ptr::null_mut();
+        (*cpath).path.parallel_aware = false;
+        (*cpath).path.parallel_safe = false;
+        (*cpath).path.parallel_workers = 0;
+        (*cpath).path.rows = n_groups;
+        (*cpath).path.startup_cost = dim_cost + cost::PREAGG_FIXED_OVERHEAD;
+        (*cpath).path.total_cost = total_cost;
+        (*cpath).path.pathkeys = std::ptr::null_mut();
+
+        (*cpath).flags = 0;
+        (*cpath).methods = custom_scan::preagg_path_methods();
+
+        // Attach inner (dimension) paths as custom_paths.
+        let mut child_list: *mut List = std::ptr::null_mut();
+        for &ip in &inner_paths {
+            child_list = lappend(child_list, ip.cast());
+        }
+        (*cpath).custom_paths = child_list;
+
+        // Serialize PreAgg metadata into custom_private.
+        (*cpath).custom_private = custom_scan::serialize_preagg_private(
+            fact_relid,
+            &depths,
+            &agg_descs,
+            &group_keys,
+            fact_scan_expr.as_ref(),
+        );
+
+        add_path(output_rel, cpath.cast());
+    }
+}
+
+/// Extract a Var's varattno as i32. Returns 0 if expr is not a Var.
+unsafe fn extract_var_attno(expr: *mut pg_sys::Expr) -> i32 {
+    if expr.is_null() {
+        return 0;
+    }
+    let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
+    if tag == NodeTag::T_Var {
+        #[allow(clippy::cast_ptr_alignment)]
+        i32::from(unsafe { (*expr.cast::<pg_sys::Var>()).varattno })
+    } else if tag == NodeTag::T_OpExpr {
+        // For expressions like (lo_revenue - lo_supplycost), return 0
+        // to signal "complex expression" which we'll handle as COUNT-like.
+        0
+    } else {
+        0
+    }
+}
+
+/// Map an aggregate function OID to an `AggOp`.
+fn agg_op_from_oid(oid: pg_sys::Oid) -> AggOp {
+    // PostgreSQL built-in aggregate function OIDs.
+    // These are well-known and stable across versions.
+    let oid_raw = u32::from(oid);
+    match oid_raw {
+        // SUM variants
+        2108 | 2109 | 2110 | 2111 | 2114 => AggOp::Sum,
+        // AVG variants
+        2100..=2106 => AggOp::Avg,
+        // MIN variants
+        2117 | 2118 | 2119 | 2120 | 2132 | 2133 | 2134 | 2135 | 2136 | 2245 => AggOp::Min,
+        // MAX variants
+        2115 | 2116 | 2126 | 2127 | 2128 | 2129 | 2130 | 2131 | 2243 | 2244 => AggOp::Max,
+        // COUNT(*) / COUNT(expr)
+        2803 | 2147 => AggOp::Count,
+        _ => {
+            // Try to resolve by name via pg_proc.
+            // For simplicity, check the common procnames.
+            AggOp::Passthrough
+        }
+    }
+}
+
+/// Resolve a Var reference to (source, attno) in the star schema.
+/// source=0 means fact table, source=1+ means dimension depth index.
+#[allow(clippy::cast_possible_wrap)]
+fn resolve_var_to_star_source(
+    varno: u32,
+    varattno: i32,
+    fact_relid: pg_sys::Index,
+    inner_relids: &[pg_sys::Index],
+) -> (u32, i32) {
+    if varno as pg_sys::Index == fact_relid {
+        return (0, varattno);
+    }
+    // Match varno against each dimension's inner relation relid.
+    for (idx, &relid) in inner_relids.iter().enumerate() {
+        if varno as pg_sys::Index == relid {
+            return ((idx + 1) as u32, varattno);
+        }
+    }
+    // Fallback: treat as first dimension.
+    (1, varattno)
+}
+
+/// Compile a relation's `baserestrictinfo` into a `CompiledExpr::Template`
+/// for fact-side WHERE pushdown. Supports `CmpConst`, `Between` (two range
+/// predicates on the same column), and `TwoPredAnd` (two predicates on
+/// different columns).
+///
+/// # Safety
+///
+/// `restrict` must be a valid PG `List` of `RestrictInfo` nodes, or null.
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+unsafe fn compile_restrictinfo_to_template(
+    restrict: *mut pg_sys::List,
+) -> Option<crate::engine::expr_compiler::CompiledExpr> {
+    use crate::engine::expr_compiler::{self, CompiledExpr, TemplateKernel};
+
+    if restrict.is_null() {
+        return None;
+    }
+    // SAFETY: restrict is a valid List.
+    let len = unsafe { pg_sys::list_length(restrict) };
+    if len == 0 {
+        return None;
+    }
+
+    // Collect (col_idx_0based, cmp_opcode, const_val) from each simple Var op Const.
+    let mut predicates: Vec<(u32, u16, f64)> = Vec::new();
+    for i in 0..len {
+        // SAFETY: i is in bounds.
+        let ri = unsafe { pg_sys::list_nth(restrict, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is valid.
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            continue;
+        }
+        // SAFETY: clause is valid Node.
+        let tag = unsafe { (*clause.cast::<pg_sys::Node>()).type_ };
+        if tag != pg_sys::NodeTag::T_OpExpr {
+            continue;
+        }
+        // SAFETY: tag confirmed T_OpExpr; alignment widening is safe for PG node casts.
+        #[allow(clippy::cast_ptr_alignment)]
+        let opexpr = clause.cast::<pg_sys::OpExpr>();
+        // SAFETY: opexpr is valid.
+        let args = unsafe { (*opexpr).args };
+        if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+            continue;
+        }
+        // SAFETY: resolve op name.
+        let op_name_ptr = unsafe { pg_sys::get_opname((*opexpr).opno) };
+        if op_name_ptr.is_null() {
+            continue;
+        }
+        // SAFETY: op_name_ptr is a valid C string from get_opname.
+        let Ok(op_name) = unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }.to_str() else {
+            continue;
+        };
+        let Some(cmp_opcode) = expr_compiler::pg_cmp_op_to_opcode(op_name) else {
+            continue;
+        };
+
+        // SAFETY: args has 2 elements.
+        let left = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+        let right = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+
+        // Try Var <cmp> Const.
+        if let Some((attno, val)) = unsafe { extract_dim_var_const(left, right) } {
+            predicates.push(((attno - 1) as u32, cmp_opcode, val));
+        } else if let Some((attno, val)) = unsafe { extract_dim_var_const(right, left) } {
+            // Flip comparison direction.
+            let flipped = match cmp_opcode {
+                2 => 4, 3 => 5, 4 => 2, 5 => 3,
+                other => other,
+            };
+            predicates.push(((attno - 1) as u32, flipped, val));
+        }
+    }
+
+    if predicates.is_empty() {
+        return None;
+    }
+
+    // Try to form a Between: two predicates on the same column, >= and <=.
+    if predicates.len() == 2 && predicates[0].0 == predicates[1].0 {
+        let (col, op0, v0) = predicates[0];
+        let (_, op1, v1) = predicates[1];
+        // GE + LE or LE + GE → Between
+        if (op0 == 5 && op1 == 3) || (op0 == 3 && op1 == 5) {
+            let (lo, hi) = if op0 == 5 { (v0, v1) } else { (v1, v0) };
+            return Some(CompiledExpr::Template(TemplateKernel::Between {
+                col_idx: col,
+                lo,
+                hi,
+            }));
+        }
+    }
+
+    // Single predicate → CmpConst.
+    if predicates.len() == 1 {
+        let (col, op, val) = predicates[0];
+        return Some(CompiledExpr::Template(TemplateKernel::CmpConst {
+            col_idx: col,
+            cmp_opcode: op,
+            const_val: val,
+        }));
+    }
+
+    // Two predicates on different columns → TwoPredAnd.
+    if predicates.len() >= 2 {
+        let (col1, op1, val1) = predicates[0];
+        let (col2, op2, val2) = predicates[1];
+        return Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
+            col1_idx: col1,
+            cmp1_opcode: op1,
+            const1_val: val1,
+            col2_idx: col2,
+            cmp2_opcode: op2,
+            const2_val: val2,
+        }));
+    }
+
+    None
+}
+
+/// Extract pushable dimension-side filter predicates from a relation's
+/// `baserestrictinfo`. Returns `DimFilter` entries with `col_idx` set to
+/// the raw attno (1-based) — resolved to column index in the executor.
+///
+/// # Safety
+///
+/// `inner_rel` must be a valid `RelOptInfo` pointer from the planner.
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+unsafe fn extract_dim_filters_from_rel(
+    inner_rel: *mut pg_sys::RelOptInfo,
+) -> Vec<DimFilter> {
+    use crate::engine::expr_compiler;
+
+    let mut filters = Vec::new();
+    // SAFETY: inner_rel is valid per caller contract.
+    let restrict = unsafe { (*inner_rel).baserestrictinfo };
+    if restrict.is_null() {
+        return filters;
+    }
+    // SAFETY: restrict is a valid List.
+    let len = unsafe { pg_sys::list_length(restrict) };
+    for i in 0..len {
+        // SAFETY: i is within bounds.
+        let ri = unsafe { pg_sys::list_nth(restrict, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is a valid RestrictInfo.
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            continue;
+        }
+        // SAFETY: clause is a valid Node.
+        let tag = unsafe { (*clause.cast::<pg_sys::Node>()).type_ };
+        if tag != pg_sys::NodeTag::T_OpExpr {
+            continue;
+        }
+
+        // SAFETY: tag confirmed T_OpExpr; alignment widening is safe for PG node casts.
+        #[allow(clippy::cast_ptr_alignment)]
+        let opexpr = clause.cast::<pg_sys::OpExpr>();
+        // SAFETY: opexpr is a valid OpExpr.
+        let args = unsafe { (*opexpr).args };
+        if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+            continue;
+        }
+
+        // Resolve operator to cmp_opcode.
+        // SAFETY: opno is valid.
+        let op_name_ptr = unsafe { pg_sys::get_opname((*opexpr).opno) };
+        if op_name_ptr.is_null() {
+            continue;
+        }
+        // SAFETY: op_name_ptr is a valid C string from get_opname.
+        let Ok(op_name) = unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }.to_str() else {
+            continue;
+        };
+        let Some(cmp_opcode) = expr_compiler::pg_cmp_op_to_opcode(op_name) else {
+            continue;
+        };
+
+        // SAFETY: args has 2 elements.
+        let left = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+        let right = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+
+        // SAFETY: left and right are valid PG Node pointers from list_nth.
+        // Try to extract Var <cmp> Const in either order.
+        if let Some((attno, const_val)) = unsafe { extract_dim_var_const(left, right) } {
+            filters.push(DimFilter {
+                col_idx: attno as usize, // raw attno, resolved later in executor
+                cmp_opcode,
+                const_val,
+            });
+        } else if let Some((attno, const_val)) = unsafe { extract_dim_var_const(right, left) } {
+            // Swap operand order: flip comparison direction.
+            let flipped = match cmp_opcode {
+                2 => 4, // LT → GT
+                3 => 5, // LE → GE
+                4 => 2, // GT → LT
+                5 => 3, // GE → LE
+                other => other, // EQ, NE unchanged
+            };
+            filters.push(DimFilter {
+                col_idx: attno as usize,
+                cmp_opcode: flipped,
+                const_val,
+            });
+        }
+    }
+    filters
+}
+
+/// Try to extract (attno, const_value) from a (Var, Const) node pair.
+/// Returns the Var's attno (1-based) and the Const's f64 value.
+///
+/// # Safety
+///
+/// Both pointers must be valid PG Node pointers.
+#[allow(clippy::cast_precision_loss, clippy::cast_ptr_alignment)]
+unsafe fn extract_dim_var_const(
+    var_node: *mut pg_sys::Node,
+    const_node: *mut pg_sys::Node,
+) -> Option<(i32, f64)> {
+    if var_node.is_null() || const_node.is_null() {
+        return None;
+    }
+
+    // Unwrap Var (handle RelabelType wrappers).
+    let var_tag = unsafe { (*var_node).type_ };
+    let attno = match var_tag {
+        pg_sys::NodeTag::T_Var => {
+            // SAFETY: tag confirmed Var.
+            let v = var_node.cast::<pg_sys::Var>();
+            i32::from(unsafe { (*v).varattno })
+        }
+        pg_sys::NodeTag::T_RelabelType => {
+            // SAFETY: tag confirmed RelabelType.
+            let arg = unsafe { (*var_node.cast::<pg_sys::RelabelType>()).arg };
+            let inner_tag = unsafe { (*arg.cast::<pg_sys::Node>()).type_ };
+            if inner_tag != pg_sys::NodeTag::T_Var {
+                return None;
+            }
+            i32::from(unsafe { (*arg.cast::<pg_sys::Var>()).varattno })
+        }
+        _ => return None,
+    };
+    if attno <= 0 {
+        return None; // system column
+    }
+
+    // Extract Const value.
+    // SAFETY: const_node tag check.
+    if unsafe { (*const_node).type_ } != pg_sys::NodeTag::T_Const {
+        return None;
+    }
+    let cst = const_node.cast::<pg_sys::Const>();
+    // SAFETY: tag confirmed Const.
+    if unsafe { (*cst).constisnull } {
+        return None;
+    }
+    let datum = unsafe { (*cst).constvalue };
+    let typid = u32::from(unsafe { (*cst).consttype });
+
+    let val = match typid {
+        21 => Some(f64::from(datum.value() as i16)),     // INT2
+        23 => Some(f64::from(datum.value() as i32)),     // INT4
+        20 => Some((datum.value() as i64) as f64),       // INT8
+        700 => Some(f64::from(f32::from_bits(datum.value() as u32))), // FLOAT4
+        701 => Some(f64::from_bits(datum.value() as u64)), // FLOAT8
+        1082 => Some(f64::from(datum.value() as i32)),   // DATE (stored as int32)
+        _ => None,
+    }?;
+
+    Some((attno, val))
+}
+
+/// Find an equi-join key from a restrictinfo list.
+///
+/// # Safety
+///
+/// All pointers must be valid planner structures.
+unsafe fn find_equi_join_from_restrictinfo(
+    restrictinfo: *mut List,
+    outer_path: *mut Path,
+    inner_path: *mut Path,
+) -> Option<EquiJoinKey> {
+    if restrictinfo.is_null() {
+        return None;
+    }
+    // Reuse the existing equi-join key finder with the restrictinfo.
+    let outer_rel = unsafe { (*outer_path).parent };
+    let inner_rel = unsafe { (*inner_path).parent };
+    if outer_rel.is_null() || inner_rel.is_null() {
+        return None;
+    }
+    // SAFETY: all pointers are valid planner structures.
+    unsafe { find_equi_join_key(restrictinfo, outer_rel, inner_rel) }
+}
+
+// ---------------------------------------------------------------------------
+// GPU aggregate injection
+// ---------------------------------------------------------------------------
+
 /// # Safety
 ///
 /// All pointers must be valid planner-provided arguments.
@@ -1502,6 +2341,42 @@ unsafe fn pgaccel_inject_gpu_agg(
             cost::device_limits().gpu_reduce_min_rows
         );
         return;
+    }
+
+    // Gate: Grouped aggregation has higher overhead (hash table build + probe
+    // + per-group yield) than plain reduce. Require more rows to break even.
+    if group_key_info.is_some()
+        && rows < cost::device_limits().gpu_hash_agg_min_rows
+    {
+        pgrx::debug1!(
+            "pg_accel: gpu_agg rejected: grouped agg rows {} < min {}",
+            rows,
+            cost::device_limits().gpu_hash_agg_min_rows
+        );
+        return;
+    }
+
+    // Gate: Reject GpuAgg wrapping small multi-join outputs.
+    // When the input is a join path with small output, the Custom Scan
+    // per-row yield overhead (~3µs/row) is not offset by GPU kernel savings.
+    {
+        let cheapest_input = unsafe { find_cheapest_path(input_ref.pathlist) };
+        if !cheapest_input.is_null() {
+            // SAFETY: cheapest_input is a valid Path from the input pathlist.
+            let input_tag = unsafe { (*cheapest_input.cast::<pg_sys::Node>()).type_ };
+            let is_join = matches!(
+                input_tag,
+                NodeTag::T_HashPath | NodeTag::T_NestPath | NodeTag::T_MergePath
+            );
+            if is_join && rows < cost::device_limits().gpu_join_max_output_rows {
+                pgrx::debug1!(
+                    "pg_accel: gpu_agg rejected: multi-join input with {} rows < join_max {}",
+                    rows,
+                    cost::device_limits().gpu_join_max_output_rows,
+                );
+                return;
+            }
+        }
     }
 
     // Gate: If GROUP BY, estimate group count via estimate_num_groups().
@@ -1720,6 +2595,9 @@ unsafe fn pgaccel_inject_gpu_agg(
     // Per-row cost depends on fusion. Fused path: direct heap walk +
     // inline filter + columnar accumulate (no ExecProcNode, no
     // MinimalTuple copy). Non-fused: ExecProcNode + tuple copy + extract.
+    // Non-fused path: ExecProcNode + tuple copy + extract overhead.
+    // Keep modest for plain reduce (single output row, negligible yield).
+    // Grouped agg is gated separately by gpu_hash_agg_min_rows.
     let agg_per_row = if child_is_our_scan { 0.001 } else { 0.005 };
     // For grouped agg, add hash table build + probe cost per row.
     let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
@@ -1727,6 +2605,21 @@ unsafe fn pgaccel_inject_gpu_agg(
     let startup_cost = base.total_cost + gpu_overhead;
     // No cost_multiplier or safety_margin — honest single-threaded cost.
     let total_cost = base.total_cost + gpu_overhead + reduce_cost;
+
+    // Gate: Only inject if GpuAgg is meaningfully cheaper than PG's best
+    // existing agg path. This prevents injection when the function being
+    // aggregated is cheap (e.g. h3_cell_to_parent) and Custom Scan framing
+    // overhead outweighs any GPU batch benefit.
+    let output_ref = unsafe { &*output_rel };
+    let pg_best_cost = unsafe { find_cheapest_total_cost(output_ref.pathlist) };
+    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * 0.90 {
+        pgrx::debug1!(
+            "pg_accel: gpu_agg rejected: cost {:.1} >= 90% of PG best {:.1}",
+            total_cost,
+            pg_best_cost,
+        );
+        return;
+    }
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -1813,6 +2706,34 @@ unsafe fn pgaccel_inject_gpu_agg(
 ///
 /// `pathlist` must be a valid PG `List` pointer or null.
 unsafe fn find_cheapest_path(pathlist: *mut List) -> *mut Path {
+    // SAFETY: delegates to find_cheapest_path_filtered with no filter.
+    unsafe { find_cheapest_path_filtered(pathlist, false) }
+}
+
+/// Find the cheapest non-parallel path in a pathlist.
+///
+/// Skips Gather and GatherMerge paths so the returned cost reflects
+/// single-process execution. Use this as the baseline when estimating
+/// Custom Scan cost — the Custom Scan runs single-threaded, so comparing
+/// against PG's parallel Gather cost would underestimate our true cost.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` of `Path*` or null.
+unsafe fn find_cheapest_nonparallel_path(pathlist: *mut List) -> *mut Path {
+    // SAFETY: delegates to find_cheapest_path_filtered, skipping parallel.
+    unsafe { find_cheapest_path_filtered(pathlist, true) }
+}
+
+/// Inner helper: find cheapest path, optionally skipping Gather/GatherMerge.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` of `Path*` or null.
+unsafe fn find_cheapest_path_filtered(
+    pathlist: *mut List,
+    skip_parallel: bool,
+) -> *mut Path {
     if pathlist.is_null() {
         return std::ptr::null_mut();
     }
@@ -1830,12 +2751,106 @@ unsafe fn find_cheapest_path(pathlist: *mut List) -> *mut Path {
         if path.is_null() {
             continue;
         }
+        if skip_parallel {
+            // SAFETY: path is a valid Path, checking the Node tag.
+            let tag = unsafe { (*path.cast::<pg_sys::Node>()).type_ };
+            if matches!(tag, NodeTag::T_GatherPath | NodeTag::T_GatherMergePath) {
+                continue;
+            }
+        }
         // SAFETY: path and best are non-null valid Path pointers from the planner list.
         if best.is_null() || unsafe { (*path).total_cost < (*best).total_cost } {
             best = path;
         }
     }
     best
+}
+
+/// Find the total_cost of the cheapest path in a pathlist.
+/// Returns 0.0 if the list is empty or null.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` of `Path*` or null.
+unsafe fn find_cheapest_total_cost(pathlist: *mut List) -> f64 {
+    let path = unsafe { find_cheapest_path(pathlist) };
+    if path.is_null() {
+        0.0
+    } else {
+        // SAFETY: path is a valid Path pointer.
+        unsafe { (*path).total_cost }
+    }
+}
+
+/// Find the cheapest sequential scan path (`T_Path`) in the pathlist.
+/// Returns a pointer to the Path, or null if no seq scan path exists
+/// (e.g., PG pruned it because an index path dominates).
+///
+/// # Safety
+///
+/// `pathlist` must be a valid `List` pointer from the planner, or null.
+unsafe fn find_cheapest_seqscan_path(pathlist: *mut List) -> *mut Path {
+    if pathlist.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: pathlist is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let mut best: *mut Path = std::ptr::null_mut();
+    let mut best_cost = f64::MAX;
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a valid pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+        // SAFETY: reading node tag from valid Path pointer.
+        let tag = unsafe { (*path).type_ };
+        // Plain T_Path node = sequential scan (no index, bitmap, or custom).
+        if tag == NodeTag::T_Path {
+            // SAFETY: path is a valid Path pointer.
+            let cost = unsafe { (*path).total_cost };
+            if cost < best_cost {
+                best_cost = cost;
+                best = path;
+            }
+        }
+    }
+    best
+}
+
+/// Find the cost of the cheapest sequential scan path (`T_Path` with no
+/// special pathtype). This gives the true seq scan baseline for comparing
+/// index path selectivity — using `find_cheapest_path` would return the
+/// index path itself when it's cheapest, making the ratio 1.0.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid `List` pointer from the planner, or null.
+unsafe fn find_cheapest_seqscan_cost(pathlist: *mut List) -> f64 {
+    if pathlist.is_null() {
+        return 0.0;
+    }
+    // SAFETY: pathlist is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let mut best = f64::MAX;
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a valid pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+        // SAFETY: reading node tag from valid Path pointer.
+        let tag = unsafe { (*path).type_ };
+        // Plain T_Path node = sequential scan (no index, bitmap, or custom).
+        if tag == NodeTag::T_Path {
+            // SAFETY: path is a valid Path pointer.
+            let cost = unsafe { (*path).total_cost };
+            if cost < best {
+                best = cost;
+            }
+        }
+    }
+    if best == f64::MAX { 0.0 } else { best }
 }
 
 /// GiST access method OID.
@@ -1962,6 +2977,69 @@ unsafe fn has_cheap_spatial_index_path(pathlist: *mut List, seq_scan_cost: f64) 
                 }
             }
             _ => {}
+        }
+    }
+
+    false
+}
+
+/// Check whether any GiST/SP-GiST index path in the pathlist has a lower
+/// total cost than the proposed Custom Scan `custom_cost`.
+///
+/// This is a post-cost-computation gate: after we know our Custom Scan's
+/// total_cost, reject injection if a spatial index path would be cheaper.
+/// At large scales, PG's GiST index scan reads far fewer heap pages than
+/// a full sequential scan, making it faster despite the 30% GPU discount.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` pointer or null.
+unsafe fn has_cheaper_spatial_index_path(pathlist: *mut List, custom_cost: f64) -> bool {
+    if pathlist.is_null() {
+        return false;
+    }
+
+    // SAFETY: pathlist is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a valid pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+
+        // SAFETY: path is a valid Path node from the planner.
+        let tag = unsafe { (*path).type_ };
+
+        let is_spatial_index = match tag {
+            NodeTag::T_IndexPath => {
+                let ipath = path.cast::<pg_sys::IndexPath>();
+                // SAFETY: ipath is a valid IndexPath (tag checked above).
+                let info = unsafe { (*ipath).indexinfo };
+                if info.is_null() {
+                    false
+                } else {
+                    // SAFETY: info is a valid IndexOptInfo from the planner.
+                    let relam = u32::from(unsafe { (*info).relam });
+                    relam == GIST_AM_OID || relam == SPGIST_AM_OID
+                }
+            }
+            _ => false,
+        };
+
+        if is_spatial_index {
+            // SAFETY: path is a valid Path pointer.
+            let idx_cost = unsafe { (*path).total_cost };
+            if idx_cost < custom_cost {
+                pgrx::debug1!(
+                    "pg_accel: deferring to spatial index path \
+                     (idx_cost={:.2}, custom_cost={:.2})",
+                    idx_cost,
+                    custom_cost,
+                );
+                return true;
+            }
         }
     }
 
@@ -3516,63 +4594,66 @@ mod tests {
 
     /// Replicate the scan hook's cost formula to verify it produces
     /// sane results with known inputs.
+    ///
+    /// Formula (matches `pgaccel_set_rel_pathlist`):
+    ///   cost_margin = 0.7 for GPU strategies, 0.95 for GpuExpr
+    ///   yield_cost  = rows * 0.005 for GpuExpr, 0.0 for GPU strategies
+    ///   raw_total   = (base_total * cost_margin + batch_overhead
+    ///                  + gpu_overhead + yield_cost) * cost_multiplier
     #[test]
-    fn scan_cost_formula_gpu_path_cheaper_than_base() {
-        // Simulate: 100K rows, base total_cost = 500.0, startup_cost = 10.0
+    fn scan_cost_formula_gpu_spatial_cheaper_than_base() {
+        // Simulate: GpuSpatial, high base_total (expensive spatial function).
+        // The 30% cost_margin discount should make GPU cheaper.
         let base_rows = 100_000.0_f64;
-        let base_startup = 10.0;
-        let base_total = 500.0;
-        let strategy = registry::AccelStrategy::GpuSpatial;
-        let per_row_cost = cost::GPU_SPATIAL_PER_ROW_COST;
-        let cost_multiplier = 1.0; // neutral multiplier
+        let base_total = 5000.0; // expensive spatial predicate
+        let cost_multiplier = 1.0;
 
         let batch_size = cost::optimal_batch_size(base_rows as usize) as f64;
         let num_batches = (base_rows / batch_size).ceil();
-        let batch_overhead = num_batches * 0.5;
-        let gpu_overhead = match strategy {
-            registry::AccelStrategy::GpuSpatial
-            | registry::AccelStrategy::GpuRaster
-            | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
-            _ => 0.0,
-        };
-        let calls_saved = base_rows - num_batches;
-        let per_row_saving = calls_saved * per_row_cost;
-        let startup_cost = base_startup + 1.0 + gpu_overhead;
-        let total_cost =
-            (base_total + batch_overhead + gpu_overhead - per_row_saving) * cost_multiplier;
+        let batch_overhead = num_batches * 2.0;
+        let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
+        let cost_margin = cost::GPU_COST_SAFETY_MARGIN; // 0.7
+        let yield_cost = 0.0; // GPU strategies: no yield cost
 
-        // With 100K rows and per-row saving of ~0.05 each, savings should
-        // dominate the overhead, making total < base.
+        let total_cost = (base_total * cost_margin
+            + batch_overhead
+            + gpu_overhead
+            + yield_cost)
+            * cost_multiplier;
+
+        // 5000 * 0.7 + ~26 + 5 = 3531 < 5000: GPU wins for expensive functions.
         assert!(
             total_cost < base_total,
-            "GPU path total_cost ({total_cost:.2}) should be cheaper than \
-             base ({base_total:.2}) for {base_rows} rows"
+            "GPU spatial path ({total_cost:.2}) should be cheaper than \
+             base ({base_total:.2}) for expensive spatial predicate"
         );
-        assert!(startup_cost > base_startup);
     }
 
     #[test]
-    fn scan_cost_formula_small_batch_not_cheaper() {
-        // Simulate: 50 rows, base total_cost = 5.0, using H3 (lowest GPU per-row cost).
-        // With very few rows, GPU launch overhead should dominate per-row savings.
-        let base_rows = 50.0_f64;
-        let base_total = 5.0;
-        let per_row_cost = cost::GPU_H3_PER_ROW_COST; // 0.02
+    fn scan_cost_formula_gpu_expr_not_cheaper_at_100k() {
+        // Simulate: GpuExpr at 100K rows, modest base_total.
+        // The 5% margin + yield cost should make GPU more expensive.
+        let base_rows = 100_000.0_f64;
+        let base_total = 500.0; // simple WHERE clause scan
 
         let batch_size = cost::optimal_batch_size(base_rows as usize) as f64;
         let num_batches = (base_rows / batch_size).ceil();
-        let batch_overhead = num_batches * 0.5;
-        let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD; // 5.0
-        let calls_saved = base_rows - num_batches;
-        let per_row_saving = calls_saved * per_row_cost;
-        let total_cost = base_total + batch_overhead + gpu_overhead - per_row_saving;
+        let batch_overhead = num_batches * 2.0;
+        let gpu_overhead = 0.0; // GpuExpr: no GPU launch
+        let cost_margin = 0.95; // GpuExpr margin
+        let yield_cost = base_rows * 0.005; // GpuExpr yield
 
-        // Per-row savings: ~50 * 0.02 = 1.0. Overhead: 5.0 + 0.5 = 5.5.
-        // Net cost increase: ~4.5, so total_cost > base_total.
+        let total_cost = (base_total * cost_margin
+            + batch_overhead
+            + gpu_overhead
+            + yield_cost)
+            * 1.0;
+
+        // 500 * 0.95 + ~26 + 0 + 500 = 1001 > 500: GPU loses.
         assert!(
-            total_cost > base_total * cost::GPU_COST_SAFETY_MARGIN,
-            "GPU path ({total_cost:.2}) should fail safety margin for \
-             only {base_rows} rows"
+            total_cost > base_total,
+            "GpuExpr path ({total_cost:.2}) should be more expensive than \
+             base ({base_total:.2}) at 100K rows with modest base cost"
         );
     }
 
@@ -3754,9 +4835,9 @@ mod tests {
         assert_eq!(limits.gpu_min_rows, 10_000);
         assert_eq!(limits.gpu_sort_min_rows, 100_000);
         assert_eq!(limits.gpu_sort_planner_min_rows, 1_000_000);
-        assert_eq!(limits.gpu_window_min_rows, 50_000);
+        assert_eq!(limits.gpu_window_min_rows, 2_000_000);
         assert_eq!(limits.gpu_reduce_min_rows, 10_000);
-        assert_eq!(limits.gpu_hash_agg_threshold, 1_000);
+        assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(limits.gpu_hash_agg_max_groups, 10_000);
         assert_eq!(limits.optimal_batch_min, 256);
         assert_eq!(limits.optimal_batch_max, 8192);

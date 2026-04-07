@@ -164,7 +164,7 @@ test pg="17": (test-unit pg)
 bench rows="1000000" iterations="30" warmup="5":
     cargo run -p pg_accel_bench --release -- run \
         --rows {{rows}} --iterations {{iterations}} --warmup {{warmup}} \
-        --connection "host=localhost port=28817 user=postgres dbname=postgres" \
+        --connection "host=localhost port=28817 dbname=postgres" \
         --format markdown
 
 # === GPU Kernels ===
