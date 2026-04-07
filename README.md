@@ -95,8 +95,8 @@ deployments use parallel query.
 
 **Hardware:** Apple M2 Max (12 CPU cores, 38 GPU cores, 64 GB unified memory)
 **PostgreSQL:** 17.9 with `max_parallel_workers_per_gather = 2`
-**Suite:** 129 workloads × 4 row scales (1K, 10K, 100K, 1M) = 514 measurements (2 crashed scales excluded)
-**Methodology:** 30 iterations + 5 warmup per measurement, randomized
+**Suite:** 129 workloads × 5 row scales (1K, 10K, 100K, 1M, 10M) = 643 measurements (2 crashed scales excluded)
+**Methodology:** 10 iterations + 3 warmup per measurement, randomized
 accel/baseline ordering, fresh connection per mode with `DISCARD ALL`,
 deterministic seed (42), paired t-test (p < 0.05)
 
@@ -104,13 +104,15 @@ deterministic seed (42), paired t-test (p < 0.05)
 
 | Workload | Accel | PG Parallel | Speedup |
 |----------|-------|-------------|---------|
-| h3_latlng_res15 (H3 resolution 15) | 26.22 ms | 121.57 ms | **4.64x** |
-| vsweep_50kv (50K-vertex polygons) | 79.80 ms | 291.88 ms | **3.66x** |
-| vsweep_100kv (100K-vertex polygons) | 79.75 ms | 291.51 ms | **3.66x** |
-| h3_latlng_res9 (H3 resolution 9) | 26.12 ms | 85.95 ms | **3.29x** |
-| oltp_point_lookup (index point lookup) | 0.01 ms | 0.02 ms | **2.35x** |
-| vsweep_25kv (25K-vertex polygons) | 75.70 ms | 154.41 ms | **2.04x** |
-| h3_latlng_res3 (H3 resolution 3) | 26.07 ms | 50.44 ms | **1.93x** |
+| vsweep_50kv (50K-vertex polygons) | 21.28 ms | 289.39 ms | **13.60x** |
+| vsweep_100kv (100K-vertex polygons) | 21.20 ms | 287.10 ms | **13.54x** |
+| h3_latlng_res15 (H3 resolution 15) | 9.18 ms | 118.71 ms | **12.94x** |
+| h3_latlng_res9 (H3 resolution 9) | 9.18 ms | 83.73 ms | **9.12x** |
+| vsweep_25kv (25K-vertex polygons) | 19.87 ms | 150.73 ms | **7.59x** |
+| h3_latlng_res3 (H3 resolution 3) | 9.13 ms | 48.33 ms | **5.29x** |
+| hashjoin_1k_1m (1K×1M hash join) | 3.70 ms | 13.29 ms | **3.59x** |
+| hashjoin_100_1m (100×1M hash join) | 3.74 ms | 12.63 ms | **3.38x** |
+| gpu_hashjoin_large_build (100K build) | 11.63 ms | 28.72 ms | **2.47x** |
 
 ### Passthrough (zero overhead at 1M rows)
 
@@ -119,11 +121,11 @@ correctly defers to PostgreSQL:
 
 | Workload | Accel | PG Parallel | Speedup |
 |----------|-------|-------------|---------|
-| large_sort | 195.91 ms | 195.39 ms | 1.00x |
-| gpu_reduce_sum | 34.93 ms | 34.47 ms | 0.99x |
-| grouped_agg | 48.77 ms | 48.33 ms | 0.99x |
-| hash_join | 87.59 ms | 87.29 ms | 1.00x |
-| window_lag | 303.11 ms | 302.99 ms | 1.00x |
+| large_sort | 194.38 ms | 193.68 ms | 1.00x |
+| gpu_reduce_sum | 33.80 ms | 33.71 ms | 1.00x |
+| grouped_agg | 48.18 ms | 47.96 ms | 1.00x |
+| hash_join | 86.81 ms | 86.94 ms | 1.00x |
+| window_lag | 292.20 ms | 291.24 ms | 1.00x |
 
 ### Scaling with polygon complexity (100K rows)
 
@@ -133,22 +135,22 @@ monotonically increasing speedup as geometric complexity rises:
 
 | Vertices | Accel | PG Parallel | Speedup |
 |----------|-------|-------------|---------|
-| 4 | 13.70 ms | 13.51 ms | 0.99x (passthrough) |
-| 16 | 14.15 ms | 13.96 ms | 0.99x (passthrough) |
-| 64 | 14.64 ms | 14.45 ms | 0.99x (passthrough) |
-| 256 | 16.28 ms | 16.19 ms | 0.99x (passthrough) |
-| 500 | 17.93 ms | 17.76 ms | 0.99x (passthrough) |
-| 750 | 19.66 ms | 19.40 ms | 0.99x (passthrough) |
-| 1,000 | 21.20 ms | 21.03 ms | 0.99x (passthrough) |
-| 2,000 | 27.45 ms | 27.27 ms | 0.99x (passthrough) |
-| 5,000 | 46.16 ms | 45.85 ms | 0.99x (passthrough) |
-| 10,000 | 72.83 ms | 72.85 ms | 1.00x (passthrough) |
-| 25,000 | 75.70 ms | 154.41 ms | **2.04x** |
-| 50,000 | 79.80 ms | 291.88 ms | **3.66x** |
-| 100,000 | 79.75 ms | 291.51 ms | **3.66x** |
+| 4 | 12.99 ms | 13.03 ms | 1.00x (passthrough) |
+| 16 | 13.50 ms | 13.50 ms | 1.00x (passthrough) |
+| 64 | 13.92 ms | 13.95 ms | 1.00x (passthrough) |
+| 256 | 15.53 ms | 15.51 ms | 1.00x (passthrough) |
+| 500 | 16.90 ms | 16.92 ms | 1.00x (passthrough) |
+| 750 | 18.69 ms | 18.64 ms | 1.00x (passthrough) |
+| 1,000 | 20.18 ms | 20.22 ms | 1.00x (passthrough) |
+| 2,000 | 26.34 ms | 26.25 ms | 1.00x (passthrough) |
+| 5,000 | 44.21 ms | 44.22 ms | 1.00x (passthrough) |
+| 10,000 | 70.47 ms | 70.26 ms | 1.00x (passthrough) |
+| 25,000 | 19.87 ms | 150.73 ms | **7.59x** |
+| 50,000 | 21.28 ms | 289.39 ms | **13.60x** |
+| 100,000 | 21.20 ms | 287.10 ms | **13.54x** |
 
 The cost model correctly defers to PostgreSQL for all vertex counts below
-~25K. Above that threshold, GPU acceleration dominates with up to 3.66x
+~25K. Above that threshold, GPU acceleration dominates with up to 13.6x
 speedup.
 
 ### SSBM Star-Schema Queries (PreAgg fused pipeline, 1M rows)
@@ -161,17 +163,17 @@ is planned.
 
 | Workload | Accel | PG Parallel | Speedup |
 |----------|-------|-------------|---------|
-| ssbm_q1_1 (revenue, 1 dim, discount filter) | 43.16 ms | 43.07 ms | 1.00x |
-| ssbm_q1_2 (revenue, 1 dim, yearmonth filter) | 41.07 ms | 40.30 ms | 0.98x |
-| ssbm_q1_3 (revenue, 1 dim, week+year filter) | 40.68 ms | 40.06 ms | 0.98x |
-| ssbm_q2_1 (revenue by year/brand, 3 dims) | 5.92 ms | 5.46 ms | 0.92x |
-| ssbm_q2_2 (revenue by year/brand, brand range) | 55.96 ms | 56.24 ms | 1.00x |
-| ssbm_q3_1 (revenue by nation/year, 3 dims) | 95.15 ms | 94.81 ms | 1.00x |
-| ssbm_q3_2 (revenue by city/year, US filter) | 50.99 ms | 50.64 ms | 0.99x |
-| ssbm_q4_1 (profit by year/nation, 4 dims) | 55.61 ms | 55.22 ms | 0.99x |
-| ssbm_q4_2 (profit by year/nation/category) | 53.91 ms | 54.15 ms | 1.00x |
+| ssbm_q1_1 (revenue, 1 dim, discount filter) | 39.93 ms | 39.96 ms | 1.00x |
+| ssbm_q1_2 (revenue, 1 dim, yearmonth filter) | 38.17 ms | 38.30 ms | 1.00x |
+| ssbm_q1_3 (revenue, 1 dim, week+year filter) | 37.68 ms | 38.13 ms | 1.01x |
+| ssbm_q2_1 (revenue by year/brand, 3 dims) | 5.37 ms | 5.39 ms | 1.00x |
+| ssbm_q2_2 (revenue by year/brand, brand range) | 43.63 ms | 43.89 ms | 1.01x |
+| ssbm_q3_1 (revenue by nation/year, 3 dims) | 92.25 ms | 92.42 ms | 1.00x |
+| ssbm_q3_2 (revenue by city/year, US filter) | 48.18 ms | 47.93 ms | 0.99x |
+| ssbm_q4_1 (profit by year/nation, 4 dims) | 51.84 ms | 51.77 ms | 1.00x |
+| ssbm_q4_2 (profit by year/nation/category) | 50.27 ms | 50.81 ms | 1.01x |
 
-At 1M rows the fused pipeline runs at parity with PG parallel (0.98x-1.00x).
+At 1M rows the fused pipeline runs at parity with PG parallel (0.99x-1.01x).
 The elimination of per-row yield overhead between join and aggregate nodes
 compensates for the dimension materialization cost. GPU-accelerated hash
 probe and reduction kernels will push these above 1.0x.
