@@ -189,7 +189,10 @@ static pgaccel_hash_table* build_cpu(
 /// Set very high because bitonic sort is O(n·log²n) with many kernel
 /// launches, making it slower than CPU hash O(n) for most sizes.
 /// Will be lowered once radix sort (O(n·w), ~12 kernel launches) lands.
-static constexpr size_t GPU_SORT_MERGE_MIN_INNER = 5000000;
+// Radix sort (8 kernel launches for 32-bit) makes sort-merge viable at
+// lower counts than bitonic sort (~200 launches at 1M). 100K is the
+// crossover point where GPU radix sort-merge beats CPU linear-probe hash.
+static constexpr size_t GPU_SORT_MERGE_MIN_INNER = 100000;
 
 template <typename T>
 static pgaccel_hash_table* build_sort_merge(

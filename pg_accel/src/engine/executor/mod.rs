@@ -17,4 +17,5 @@ pub mod preagg;
 pub mod scan;
 pub mod sort;
 pub mod tuple_extract;
+pub mod vectorized_scan;
 pub mod window;

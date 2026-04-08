@@ -454,8 +454,9 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
         sycl::free(d_cells, q);
         sycl::free(d_res, q);
         return PGACCEL_OK;
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
     return h3_get_resolution_bulk_cpu(cells, count, resolutions);
@@ -530,8 +531,9 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
         sycl::free(d_cells, q);
         sycl::free(d_parents, q);
         return PGACCEL_OK;
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
     return h3_cell_to_parent_bulk_cpu(cells, count, parent_res, parents);
@@ -625,8 +627,9 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
         sycl::free(d_b, q);
         sycl::free(d_dist, q);
         return PGACCEL_OK;
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
     return h3_grid_distance_bulk_cpu(cells_a, cells_b, count, distances);
@@ -844,8 +847,9 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
         sycl::free(d_fc_lat, q);
         sycl::free(d_fc_lng, q);
         return PGACCEL_OK;
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
     return h3_lat_lng_to_cell_bulk_cpu(lats, lngs, count, resolution,

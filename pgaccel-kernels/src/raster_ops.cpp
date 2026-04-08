@@ -467,8 +467,9 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         sycl::free(d_mask, q);
         sycl::free(d_ring, q);
         return PGACCEL_OK;
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
     return raster_clip_cpu(
@@ -587,8 +588,9 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         sycl::free(d_out, q);
         sycl::free(d_rules, q);
         return PGACCEL_OK;
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
     return raster_reclass_cpu(

@@ -16,19 +16,21 @@ mod three_layer_tests;
 #[cfg(feature = "gpu")]
 #[allow(unused_imports)]
 pub use bridge::{
-    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
-    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
-    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
-    PgaccelReclassRule, PgaccelStatus, PgaccelVal, PgaccelValTag,
+    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelCmpOp, PgaccelDeviceInfo,
+    PgaccelExpr, PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelFusedAggOp,
+    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp,
+    PgaccelPixelType, PgaccelPlatformCaps, PgaccelReclassRule, PgaccelStatus, PgaccelVal,
+    PgaccelValTag,
 };
 
 #[cfg(not(feature = "gpu"))]
 #[allow(unused_imports)]
 pub use fallback::{
-    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
-    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
-    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
-    PgaccelReclassRule, PgaccelStatus, PgaccelVal, PgaccelValTag,
+    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelCmpOp, PgaccelDeviceInfo,
+    PgaccelExpr, PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelFusedAggOp,
+    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp,
+    PgaccelPixelType, PgaccelPlatformCaps, PgaccelReclassRule, PgaccelStatus, PgaccelVal,
+    PgaccelValTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,20 +52,30 @@ fn init() -> PgaccelStatus {
 
 /// Lazily initialise the GPU runtime on first call. Safe to call from
 /// forked backend processes (where SYCL thread creation is allowed).
-/// Subsequent calls are no-ops.
+/// Subsequent calls are no-ops unless the process has forked since the
+/// last init (detected via PID change).
 pub fn ensure_init() {
-    use std::sync::Once;
-    static GPU_INIT: Once = Once::new();
-    GPU_INIT.call_once(|| {
-        let status = init();
-        let device = get_device_info();
-        if device.compute_units > 0 {
-            let name = super::engine::device_info::cchar_buf_to_string(&device.device_name);
-            pgrx::log!("pg_accel GPU: {} ({} CUs)", name, device.compute_units);
-        } else {
-            pgrx::log!("pg_accel GPU: not available (status={status:?})");
-        }
-    });
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static INIT_PID: AtomicU32 = AtomicU32::new(0);
+
+    let pid = std::process::id();
+    let prev = INIT_PID.load(Ordering::Acquire);
+    if prev == pid {
+        return; // Already initialized in this process.
+    }
+
+    // First call or forked child — (re)initialize the GPU runtime.
+    // The C++ side detects fork via its own PID check and creates a
+    // fresh SYCL queue.
+    let status = init();
+    let device = get_device_info();
+    if device.compute_units > 0 {
+        let name = super::engine::device_info::cchar_buf_to_string(&device.device_name);
+        pgrx::log!("pg_accel GPU: {} ({} CUs)", name, device.compute_units);
+    } else {
+        pgrx::log!("pg_accel GPU: not available (status={status:?})");
+    }
+    INIT_PID.store(pid, Ordering::Release);
 }
 
 /// Tear down the GPU runtime.
@@ -372,10 +384,14 @@ pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
 
 // ---------------------------------------------------------------------------
 // Reduce wrappers
+//
+// Each wrapper calls `ensure_init()` to guarantee the SYCL runtime is
+// alive in this process (handles post-fork reinit via PID check).
 // ---------------------------------------------------------------------------
 
 /// GPU-accelerated f32 sum reduction. Returns `None` if GPU unavailable.
 pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_sum_f32", n = data.len()).entered();
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
@@ -394,6 +410,7 @@ pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
 
 /// GPU-accelerated f32 min reduction. Returns `None` if GPU unavailable.
 pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_min_f32", n = data.len()).entered();
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
@@ -412,6 +429,7 @@ pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
 
 /// GPU-accelerated f32 max reduction. Returns `None` if GPU unavailable.
 pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_max_f32", n = data.len()).entered();
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
@@ -430,6 +448,7 @@ pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
 
 /// GPU-accelerated f64 sum reduction.
 pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_sum_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
@@ -448,6 +467,7 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
 
 /// GPU-accelerated i64 sum reduction.
 pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_sum_i64", n = data.len()).entered();
     let mut result: i64 = 0;
     #[cfg(feature = "gpu")]
@@ -466,6 +486,7 @@ pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
 
 /// GPU-accelerated f64 min reduction.
 pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_min_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
@@ -484,6 +505,7 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
 
 /// GPU-accelerated f64 max reduction.
 pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_max_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
@@ -502,6 +524,7 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 
 /// GPU-accelerated mask popcount.
 pub fn reduce_count(mask: &[u8]) -> Option<usize> {
+    ensure_init();
     let _span = tracing::debug_span!("gpu.reduce_count", n = mask.len()).entered();
     let mut result: usize = 0;
     #[cfg(feature = "gpu")]
@@ -1568,6 +1591,101 @@ pub fn window_lead(
             result_nulls.as_mut_ptr(),
         );
         status.is_ok().then_some(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fused filter+reduce (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Fused filter + single-column aggregate in one GPU pass.
+///
+/// Evaluates `filter_col[i] <cmp_op> filter_val` and aggregates matching
+/// rows from `agg_col` using `agg_op`.  Returns `None` on GPU failure.
+#[must_use]
+pub fn fused_filter_reduce_f32(
+    filter_col: &[f32],
+    cmp_op: PgaccelCmpOp,
+    filter_val: f32,
+    agg_col: &[f32],
+    agg_op: PgaccelFusedAggOp,
+) -> Option<f64> {
+    let count = filter_col.len();
+    if count == 0 {
+        return Some(match agg_op {
+            PgaccelFusedAggOp::Sum | PgaccelFusedAggOp::Count => 0.0,
+            PgaccelFusedAggOp::Min => f64::INFINITY,
+            PgaccelFusedAggOp::Max => f64::NEG_INFINITY,
+        });
+    }
+    let mut result: f64 = 0.0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid for count elements.
+        let status = unsafe {
+            bridge::pgaccel_fused_filter_reduce_f32(
+                filter_col.as_ptr(),
+                cmp_op,
+                filter_val,
+                agg_col.as_ptr(),
+                agg_op,
+                count,
+                &mut result,
+            )
+        };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_fused_filter_reduce_f32(
+            filter_col.as_ptr(),
+            cmp_op,
+            filter_val,
+            agg_col.as_ptr(),
+            agg_op,
+            count,
+            &mut result,
+        );
+        status.is_ok().then_some(result)
+    }
+}
+
+/// Fused filter + COUNT(*) — counts rows matching the predicate.
+#[must_use]
+pub fn fused_filter_count_f32(
+    filter_col: &[f32],
+    cmp_op: PgaccelCmpOp,
+    filter_val: f32,
+) -> Option<i64> {
+    let count = filter_col.len();
+    if count == 0 {
+        return Some(0);
+    }
+    let mut result: i64 = 0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: slices are valid for count elements.
+        let status = unsafe {
+            bridge::pgaccel_fused_filter_count_f32(
+                filter_col.as_ptr(),
+                cmp_op,
+                filter_val,
+                count,
+                &mut result,
+            )
+        };
+        status.is_ok().then_some(result)
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let status = fallback::pgaccel_fused_filter_count_f32(
+            filter_col.as_ptr(),
+            cmp_op,
+            filter_val,
+            count,
+            &mut result,
+        );
+        status.is_ok().then_some(result)
     }
 }
 

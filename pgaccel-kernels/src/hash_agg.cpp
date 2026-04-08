@@ -332,7 +332,9 @@ static pgaccel_agg_state* agg_cpu(
 /// Minimum rows to use sort-based path instead of CPU hash.
 /// Set very high because bitonic sort is O(n·log²n) with many kernel
 /// launches. Will be lowered once radix sort lands.
-static constexpr size_t SORT_AGG_MIN_ROWS = 5000000;
+// With radix sort (8 kernel launches for 32-bit keys), sort-based
+// aggregation is competitive at lower row counts than with bitonic sort.
+static constexpr size_t SORT_AGG_MIN_ROWS = 100000;
 
 static pgaccel_agg_state* agg_sort_based(
     const void*              group_keys,

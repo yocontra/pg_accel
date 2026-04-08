@@ -178,8 +178,9 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(
         sycl::queue q{sycl::default_selector_v};
         return bbox_intersects_bulk_sycl<float>(
             q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
 
@@ -220,8 +221,9 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(
         }
         return bbox_intersects_bulk_sycl<double>(
             q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
-    } catch (const sycl::exception&) {
-        // SYCL unavailable at runtime, fall through to CPU
+    } catch (const std::exception&) {
+        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
+    } catch (...) {
     }
 #endif
 

@@ -314,10 +314,236 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
     }
 }
 
+// ---------------------------------------------------------------------------
+// LSD Radix sort — 8-bit radix, 4 passes for 32-bit keys
+// ---------------------------------------------------------------------------
+
+/// Threshold: use radix sort above this count, bitonic below.
+/// Radix sort has higher constant overhead (8 kernel launches for 32-bit)
+/// but O(n·w) complexity vs bitonic O(n·log²n).
+static constexpr size_t RADIX_SORT_THRESHOLD = 65536;
+
+/// Number of bins for 8-bit radix.
+static constexpr size_t RADIX_BINS = 256;
+
+/// Convert signed int32 to sortable uint32 (flip sign bit so negative < positive).
+static inline uint32_t i32_to_sortable(int32_t v) {
+    return static_cast<uint32_t>(v) ^ 0x80000000u;
+}
+
+/// Convert sortable uint32 back to signed int32.
+static inline int32_t sortable_to_i32(uint32_t u) {
+    return static_cast<int32_t>(u ^ 0x80000000u);
+}
+
+/// Convert float to sortable uint32 (preserves order including NaN-last for PG).
+static inline uint32_t f32_to_sortable(float f) {
+    // Canonicalize NaN to positive quiet NaN (PG: NaN sorts last).
+    if (f != f) f = std::numeric_limits<float>::quiet_NaN();
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    // If sign bit set, flip all bits; otherwise flip only sign bit.
+    uint32_t mask = (bits & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+    return bits ^ mask;
+}
+
+/// Convert sortable uint32 back to float.
+static inline float sortable_to_f32(uint32_t u) {
+    uint32_t mask = (u & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+    uint32_t bits = u ^ mask;
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+/// GPU radix sort for uint32 keys + uint32 indices (key-value variant).
+/// 4 passes × (histogram + scatter) = 8 kernel launches total.
+static pgaccel_status sycl_radix_sort_kv_u32(
+    uint32_t* keys, uint32_t* indices, size_t count)
+{
+    sycl::queue* q = get_queue();
+    if (q == nullptr) return PGACCEL_UNSUPPORTED;
+
+    try {
+        // Double-buffered: src/dst swap each pass.
+        uint32_t* buf_keys[2];
+        uint32_t* buf_idx[2];
+
+        if (g_unified_memory) {
+            buf_keys[0] = sycl::malloc_shared<uint32_t>(count, *q);
+            buf_keys[1] = sycl::malloc_shared<uint32_t>(count, *q);
+            buf_idx[0]  = sycl::malloc_shared<uint32_t>(count, *q);
+            buf_idx[1]  = sycl::malloc_shared<uint32_t>(count, *q);
+        } else {
+            buf_keys[0] = sycl::malloc_device<uint32_t>(count, *q);
+            buf_keys[1] = sycl::malloc_device<uint32_t>(count, *q);
+            buf_idx[0]  = sycl::malloc_device<uint32_t>(count, *q);
+            buf_idx[1]  = sycl::malloc_device<uint32_t>(count, *q);
+        }
+
+        if (!buf_keys[0] || !buf_keys[1] || !buf_idx[0] || !buf_idx[1]) {
+            for (int b = 0; b < 2; b++) {
+                if (buf_keys[b]) sycl::free(buf_keys[b], *q);
+                if (buf_idx[b])  sycl::free(buf_idx[b], *q);
+            }
+            return PGACCEL_OOM;
+        }
+
+        // Histogram buffer (256 bins, shared memory for host access).
+        uint32_t* d_hist = sycl::malloc_shared<uint32_t>(RADIX_BINS, *q);
+        if (!d_hist) {
+            for (int b = 0; b < 2; b++) {
+                sycl::free(buf_keys[b], *q);
+                sycl::free(buf_idx[b], *q);
+            }
+            return PGACCEL_OOM;
+        }
+
+        // Copy input to buffer 0.
+        if (g_unified_memory) {
+            std::memcpy(buf_keys[0], keys, count * sizeof(uint32_t));
+            std::memcpy(buf_idx[0], indices, count * sizeof(uint32_t));
+        } else {
+            q->memcpy(buf_keys[0], keys, count * sizeof(uint32_t)).wait();
+            q->memcpy(buf_idx[0], indices, count * sizeof(uint32_t)).wait();
+        }
+
+        int src = 0;
+
+        // 4 passes for 32-bit keys (8 bits per pass).
+        for (int pass = 0; pass < 4; pass++) {
+            const int shift = pass * 8;
+            int dst = 1 - src;
+
+            // -- Histogram: count occurrences of each digit --
+            std::memset(d_hist, 0, RADIX_BINS * sizeof(uint32_t));
+
+            // Use atomic increments for histogram on GPU.
+            q->parallel_for(sycl::range<1>(count),
+                [=](sycl::id<1> id) {
+                    uint32_t digit = (buf_keys[src][id] >> shift) & 0xFFu;
+                    sycl::atomic_ref<uint32_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space>
+                            ref(d_hist[digit]);
+                    ref.fetch_add(1u);
+                }).wait();
+
+            // -- Prefix sum on histogram (host, 256 elements) --
+            uint32_t prefix[RADIX_BINS];
+            prefix[0] = 0;
+            for (size_t i = 1; i < RADIX_BINS; i++) {
+                prefix[i] = prefix[i - 1] + d_hist[i - 1];
+            }
+            // Copy prefix sums to d_hist for scatter kernel.
+            std::memcpy(d_hist, prefix, RADIX_BINS * sizeof(uint32_t));
+
+            // -- Scatter: write elements to sorted positions --
+            // We need per-bin atomic counters for the scatter offset.
+            // Reuse d_hist as atomic offset array (initialized to prefix sums).
+            q->parallel_for(sycl::range<1>(count),
+                [=](sycl::id<1> id) {
+                    uint32_t k = buf_keys[src][id];
+                    uint32_t digit = (k >> shift) & 0xFFu;
+                    sycl::atomic_ref<uint32_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space>
+                            ref(d_hist[digit]);
+                    uint32_t pos = ref.fetch_add(1u);
+                    buf_keys[dst][pos] = k;
+                    buf_idx[dst][pos] = buf_idx[src][id];
+                }).wait();
+
+            src = dst;
+        }
+
+        // Copy result back from final src buffer.
+        if (g_unified_memory) {
+            std::memcpy(keys, buf_keys[src], count * sizeof(uint32_t));
+            std::memcpy(indices, buf_idx[src], count * sizeof(uint32_t));
+        } else {
+            q->memcpy(keys, buf_keys[src], count * sizeof(uint32_t)).wait();
+            q->memcpy(indices, buf_idx[src], count * sizeof(uint32_t)).wait();
+        }
+
+        // Cleanup.
+        sycl::free(d_hist, *q);
+        for (int b = 0; b < 2; b++) {
+            sycl::free(buf_keys[b], *q);
+            sycl::free(buf_idx[b], *q);
+        }
+
+        return PGACCEL_OK;
+    } catch (const sycl::exception& e) {
+        fprintf(stderr,
+                "pgaccel: SYCL radix sort failed: %s — falling back\n",
+                e.what());
+        return PGACCEL_UNSUPPORTED;
+    } catch (const std::exception& e) {
+        fprintf(stderr,
+                "pgaccel: radix sort failed: %s — falling back\n",
+                e.what());
+        return PGACCEL_UNSUPPORTED;
+    }
+}
+
+/// GPU radix sort for int32 keys + indices (key-value).
+static pgaccel_status sycl_radix_sort_kv_i32(
+    int32_t* keys, uint32_t* indices, size_t count)
+{
+    // Convert to sortable uint32, radix sort, convert back.
+    std::vector<uint32_t> ukeys(count);
+    for (size_t i = 0; i < count; i++) {
+        ukeys[i] = i32_to_sortable(keys[i]);
+    }
+
+    pgaccel_status st = sycl_radix_sort_kv_u32(ukeys.data(), indices, count);
+    if (st != PGACCEL_OK) return st;
+
+    for (size_t i = 0; i < count; i++) {
+        keys[i] = sortable_to_i32(ukeys[i]);
+    }
+    return PGACCEL_OK;
+}
+
+/// GPU radix sort for float32 keys + indices (key-value).
+static pgaccel_status sycl_radix_sort_kv_f32(
+    float* keys, uint32_t* indices, size_t count)
+{
+    std::vector<uint32_t> ukeys(count);
+    for (size_t i = 0; i < count; i++) {
+        ukeys[i] = f32_to_sortable(keys[i]);
+    }
+
+    pgaccel_status st = sycl_radix_sort_kv_u32(ukeys.data(), indices, count);
+    if (st != PGACCEL_OK) return st;
+
+    for (size_t i = 0; i < count; i++) {
+        keys[i] = sortable_to_f32(ukeys[i]);
+    }
+    return PGACCEL_OK;
+}
+
+/// GPU radix sort for plain int32 (values only, no indices).
+static pgaccel_status sycl_radix_sort_i32(int32_t* data, size_t count) {
+    std::vector<uint32_t> indices(count);
+    for (size_t i = 0; i < count; i++) indices[i] = static_cast<uint32_t>(i);
+    return sycl_radix_sort_kv_i32(data, indices.data(), count);
+}
+
+/// GPU radix sort for plain float32 (values only, no indices).
+static pgaccel_status sycl_radix_sort_f32(float* data, size_t count) {
+    std::vector<uint32_t> indices(count);
+    for (size_t i = 0; i < count; i++) indices[i] = static_cast<uint32_t>(i);
+    return sycl_radix_sort_kv_f32(data, indices.data(), count);
+}
+
 #endif // PGACCEL_HAS_SYCL
 
 // ===========================================================================
-// Dispatch: choose GPU bitonic or CPU std::sort
+// Dispatch: choose GPU radix / GPU bitonic / CPU std::sort
 // ===========================================================================
 
 template <typename T>
@@ -331,6 +557,20 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
     }
 
 #if PGACCEL_HAS_SYCL
+    // Try radix sort for 32-bit types above threshold — O(n·w) with only
+    // 8 kernel launches vs bitonic's O(n·log²n) with ~200 launches at 1M.
+    if constexpr (std::is_same_v<T, int32_t>) {
+        if (count >= RADIX_SORT_THRESHOLD) {
+            pgaccel_status st = sycl_radix_sort_i32(data, count);
+            if (st == PGACCEL_OK) return st;
+            // Fall through to bitonic on failure.
+        }
+    } else if constexpr (std::is_same_v<T, float>) {
+        if (count >= RADIX_SORT_THRESHOLD) {
+            pgaccel_status st = sycl_radix_sort_f32(data, count);
+            if (st == PGACCEL_OK) return st;
+        }
+    }
     return sycl_bitonic_sort(data, count);
 #else
     return cpu_sort(data, count);
@@ -368,6 +608,18 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices,
     }
 
 #if PGACCEL_HAS_SYCL
+    // Try radix sort for 32-bit key types above threshold.
+    if constexpr (std::is_same_v<K, int32_t>) {
+        if (count >= RADIX_SORT_THRESHOLD) {
+            pgaccel_status st = sycl_radix_sort_kv_i32(keys, indices, count);
+            if (st == PGACCEL_OK) return st;
+        }
+    } else if constexpr (std::is_same_v<K, float>) {
+        if (count >= RADIX_SORT_THRESHOLD) {
+            pgaccel_status st = sycl_radix_sort_kv_f32(keys, indices, count);
+            if (st == PGACCEL_OK) return st;
+        }
+    }
     return sycl_bitonic_sort_kv(keys, indices, count);
 #else
     return cpu_sort_kv(keys, indices, count);

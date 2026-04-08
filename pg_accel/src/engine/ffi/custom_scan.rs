@@ -17,6 +17,7 @@ use pgrx::pg_sys;
 
 use super::super::gucs;
 use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo};
+use crate::engine::executor::vectorized_scan::VectorizedScan;
 use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
@@ -602,6 +603,9 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         // Path layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...]
         let path_priv = (*best_path).custom_private;
         let num_aggs = list_int_at(path_priv, 0);
+        let path_len = pg_sys::list_length(path_priv) as usize;
+        // Self-scan relid is always the last element in path's custom_private.
+        let self_scan_relid = list_int_at(path_priv, (path_len - 1) as c_int);
 
         let mut list: *mut pg_sys::List = std::ptr::null_mut();
         list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Agg as c_int).cast());
@@ -643,7 +647,12 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
                 }
             }
         }
+        // When self-scanning, attnos reference the base table directly —
+        // no remapping needed.
         let remap_attno = |orig: c_int| -> c_int {
+            if self_scan_relid > 0 {
+                return orig;
+            }
             for &(from, to) in &attno_map {
                 if from == orig {
                     return to;
@@ -668,8 +677,8 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         }
 
         // Forward group key info from path's custom_private.
-        // Path layout: [num_aggs, (op,attno,rtype)*N, has_group_key, gk_attno, gk_type_oid, gk_key_type]
-        let path_len = pg_sys::list_length(path_priv) as usize;
+        // Path layout: [num_aggs, (op,attno,rtype)*N, has_group_key, gk_attno,
+        //               gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos, self_scan_relid]
         let gk_base = 1 + (num_aggs as usize) * 3;
         if gk_base < path_len {
             let has_gk = list_int_at(path_priv, gk_base as c_int);
@@ -689,6 +698,12 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             // No group key info in path — plain aggregate.
             list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
         }
+
+        // Append self-scan relid so begin_custom_scan can open the heap.
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(self_scan_relid).cast(),
+        );
 
         (*cscan).custom_private = list;
     }
@@ -2079,6 +2094,31 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 ))
             };
 
+            // Vectorized self-scan: if self_scan_relid is set, open a heap
+            // scan on the base table and create a VectorizedScan. This
+            // bypasses ExecProcNode entirely — the agg walks the heap
+            // directly.
+            if privdata.self_scan_relid > 0 {
+                let estate = (*node).ss.ps.state;
+                // SAFETY: estate is valid; self_scan_relid references a
+                // valid range table entry set by the planner.
+                let rel = pg_sys::ExecOpenScanRelation(
+                    estate,
+                    privdata.self_scan_relid,
+                    eflags,
+                );
+                let snap = (*estate).es_snapshot;
+                // SAFETY: rel and snap are valid; main backend thread.
+                let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                // SAFETY: sd is a valid, open TableScanDesc.
+                let vscan = VectorizedScan::new(sd);
+                exec.set_vscan(vscan);
+                pgrx::debug1!(
+                    "pg_accel: begin_custom_scan: Agg self-scan on relid {}",
+                    privdata.self_scan_relid,
+                );
+            }
+
             // Pipeline fusion: if the child is a GpuExpr scan with a direct
             // heap scan and a compiled template expression, the agg can walk
             // the heap itself and extract aggregate columns directly from
@@ -2508,10 +2548,18 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         let agg_state = unsafe { &mut *executor.cast::<AggExecState>() };
         let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
 
-        // Use the fused scan+agg path when pipeline fusion was activated
-        // in begin_custom_scan. This walks the heap directly instead of
-        // pulling tuples through ExecProcNode.
-        let result = if agg_state.is_fused {
+        // Use the vectorized self-scan path when a VectorizedScan was
+        // created in begin_custom_scan, or the fused path for pipeline
+        // fusion with a child GpuExpr scan.
+        let result = if agg_state.has_vscan() {
+            // SAFETY: agg_state has a valid VectorizedScan from
+            // begin_custom_scan. scan_slot is valid. Main backend thread.
+            if agg_state.is_grouped() {
+                unsafe { agg_state.next_grouped_vectorized(scan_slot) }
+            } else {
+                unsafe { agg_state.next_vectorized(scan_slot) }
+            }
+        } else if agg_state.is_fused {
             // SAFETY: agg_state was allocated in begin_custom_scan with
             // fused context. scan_slot is valid. Main backend thread.
             unsafe { agg_state.next_fused(scan_slot) }
@@ -2726,7 +2774,17 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     drop(preagg);
                 } else if gpu_strategy == GpuStrategy::Agg {
                     // SAFETY: executor was Box::into_raw'd as AggExecState.
-                    let _ = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
+                    let agg = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
+                    // End the vectorized heap scan if one was started.
+                    if agg.has_vscan() {
+                        let sd = agg.vscan_scan_desc();
+                        if !sd.is_null() {
+                            // SAFETY: sd was created by table_beginscan in
+                            // begin_custom_scan; main backend thread.
+                            pg_sys::table_endscan(sd);
+                        }
+                    }
+                    drop(agg);
                 } else if gpu_strategy == GpuStrategy::Window {
                     // SAFETY: executor was Box::into_raw'd as WindowExecState.
                     let _ = Box::from_raw((*state).accel.executor.cast::<WindowExecState>());
@@ -3062,6 +3120,10 @@ struct CustomPrivateData {
     hash_key_type: i32,
     /// Window function specifications. Only meaningful when `gpu_strategy == Window`.
     window_specs: Vec<WindowFuncSpec>,
+    /// Base relation OID for self-scanning (vectorized pipeline).
+    /// When > 0, the executor opens its own heap scan instead of pulling
+    /// tuples through ExecProcNode. Only meaningful for Agg strategy.
+    self_scan_relid: pg_sys::Index,
 }
 
 /// Deserialize strategy, batch size, accel context, and sort keys from
@@ -3093,6 +3155,7 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            self_scan_relid: 0,
         };
     }
 
@@ -3274,6 +3337,19 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
         (0, 0)
     };
 
+    // For Agg strategy, self_scan_relid is the last element of custom_private.
+    let self_scan_relid = if matches!(gpu_strategy, GpuStrategy::Agg) {
+        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
+        if list_len > 0 {
+            // SAFETY: custom_private is a valid List; last element is self_scan_relid.
+            (unsafe { list_int_at(custom_private, (list_len - 1) as c_int) }) as pg_sys::Index
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     CustomPrivateData {
         gpu_strategy,
         batch_size,
@@ -3288,6 +3364,7 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
         hash_inner_attno,
         hash_key_type,
         window_specs,
+        self_scan_relid,
     }
 }
 

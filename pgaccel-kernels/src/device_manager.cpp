@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdio>
 #include <atomic>
+#include <unistd.h>
 
 #if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
@@ -15,6 +16,9 @@
 // ---------------------------------------------------------------------------
 
 static std::atomic<bool> g_initialized{false};
+/// PID that called pgaccel_init(). After fork(), getpid() differs, so
+/// we know to reinitialize the SYCL runtime in the child process.
+static pid_t g_init_pid = 0;
 static pgaccel_device_info g_device_info = {};
 static pgaccel_platform_caps g_caps = {};
 
@@ -83,11 +87,10 @@ static void populate_caps(const sycl::device& dev, const std::string& backend) {
     g_caps.has_ooo_queue = (backend != "metal" && backend != "cpu");
     g_caps.is_unified_memory =
         dev.has(sycl::aspect::usm_shared_allocations) && !dev.is_gpu();
-    // On Apple Silicon (Metal), the GPU IS the integrated device with unified
-    // memory, so override the heuristic.
-    if (backend == "metal") {
-        g_caps.is_unified_memory = true;
-    }
+    // Apple Silicon has unified physical memory, but AdaptiveCpp's Metal
+    // backend requires sycl::malloc_device/shared — raw host pointers
+    // silently read as zero from GPU kernels.  Do NOT enable the unified
+    // memory fast-path for Metal.
     g_caps.max_alloc_bytes =
         dev.get_info<sycl::info::device::max_mem_alloc_size>();
     g_caps.compute_units =
@@ -154,7 +157,26 @@ static void populate_cpu_fallback() {
 // ===========================================================================
 
 extern "C" pgaccel_status pgaccel_init(void) {
+    // Detect fork: if PID changed, the SYCL runtime context from the
+    // parent process is stale. Reset state so we reinitialize.
+    pid_t current_pid = getpid();
     if (g_initialized.load(std::memory_order_acquire)) {
+        if (g_init_pid == current_pid) {
+            return PGACCEL_OK;
+        }
+        // Forked child — stale SYCL context. On macOS/Metal, SYCL cannot
+        // reinitialize after fork() because MTLCompilerService XPC connection
+        // is broken. Fall back to CPU to avoid SIGSEGV.
+#if PGACCEL_HAS_SYCL
+        g_queue = nullptr;
+        g_unified_memory = false;
+#endif
+        fprintf(stderr, "pgaccel: fork detected (parent=%d, child=%d)"
+                        " — GPU unavailable, using CPU fallback\n",
+                g_init_pid, current_pid);
+        populate_cpu_fallback();
+        g_init_pid = current_pid;
+        g_initialized.store(true, std::memory_order_release);
         return PGACCEL_OK;
     }
 
@@ -218,6 +240,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
     fprintf(stderr, "pgaccel: built without SYCL, using CPU fallback\n");
 #endif
 
+    g_init_pid = current_pid;
     g_initialized.store(true, std::memory_order_release);
     return PGACCEL_OK;
 }

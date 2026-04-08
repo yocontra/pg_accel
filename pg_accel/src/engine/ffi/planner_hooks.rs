@@ -1804,20 +1804,43 @@ unsafe fn pgaccel_inject_gpu_preagg(
 }
 
 /// Extract a Var's varattno as i32. Returns 0 if expr is not a Var.
+/// Unwraps RelabelType / FuncExpr casts (e.g. `val::float8`) to find the
+/// inner Var.
 unsafe fn extract_var_attno(expr: *mut pg_sys::Expr) -> i32 {
     if expr.is_null() {
         return 0;
     }
     let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
-    if tag == NodeTag::T_Var {
-        #[allow(clippy::cast_ptr_alignment)]
-        i32::from(unsafe { (*expr.cast::<pg_sys::Var>()).varattno })
-    } else if tag == NodeTag::T_OpExpr {
-        // For expressions like (lo_revenue - lo_supplycost), return 0
-        // to signal "complex expression" which we'll handle as COUNT-like.
-        0
-    } else {
-        0
+    match tag {
+        NodeTag::T_Var => {
+            #[allow(clippy::cast_ptr_alignment)]
+            i32::from(unsafe { (*expr.cast::<pg_sys::Var>()).varattno })
+        }
+        NodeTag::T_RelabelType => {
+            // Cast that doesn't change representation (e.g. int4 → int8 in some contexts).
+            // SAFETY: validated by tag check.
+            let inner = unsafe { (*expr.cast::<pg_sys::RelabelType>()).arg };
+            unsafe { extract_var_attno(inner) }
+        }
+        NodeTag::T_FuncExpr => {
+            // Explicit cast like val::float8.  The first argument is the input.
+            // SAFETY: validated by tag check.
+            let func = expr.cast::<pg_sys::FuncExpr>();
+            let args = unsafe { (*func).args };
+            if args.is_null() || unsafe { pg_sys::list_length(args) } == 0 {
+                return 0;
+            }
+            // SAFETY: args[0] is a valid Expr node.
+            let first_arg =
+                unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Expr>() };
+            unsafe { extract_var_attno(first_arg) }
+        }
+        NodeTag::T_OpExpr => {
+            // For expressions like (lo_revenue - lo_supplycost), return 0
+            // to signal "complex expression" which we'll handle as COUNT-like.
+            0
+        }
+        _ => 0,
     }
 }
 
@@ -2527,24 +2550,22 @@ unsafe fn pgaccel_inject_gpu_agg(
             return;
         }
 
-        // Check if argument is a plain Var (fast path) or an expression
-        // (compilable to GPU bytecode — e.g., SUM(a * b), SUM(CASE ...)).
-        let arg_tag = unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ };
-        let (typid, attno) = if arg_tag == NodeTag::T_Var {
-            let var = arg_expr.cast::<pg_sys::Var>();
-            (
-                u32::from(unsafe { (*var).vartype }),
-                i32::from(unsafe { (*var).varattno }),
-            )
+        // Extract attno — unwrap casts (RelabelType, FuncExpr) to find the
+        // inner Var.  For true expression arguments (OpExpr, etc.) attno = 0
+        // signals the executor to use GPU expression evaluation.
+        let attno = unsafe { extract_var_attno(arg_expr) };
+        let typid = if attno != 0 {
+            // Plain Var (possibly wrapped in a cast): use the base column type.
+            let arg_tag = unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ };
+            if arg_tag == NodeTag::T_Var {
+                u32::from(unsafe { (*arg_expr.cast::<pg_sys::Var>()).vartype })
+            } else {
+                // Cast expression — use the aggregate result type as a proxy.
+                u32::from(aggref_ref.aggtype)
+            }
         } else {
-            // Expression argument — check if it's a GPU-compilable expr
-            // (OpExpr, BoolExpr, FuncExpr). The result type must be numeric.
-            // Use attno=0 to signal the executor that this is an expression
-            // argument requiring GPU expression evaluation before aggregation.
-            // For now, accept and let the executor attempt compilation.
+            // Expression argument (OpExpr, etc.) — must be numeric.
             let result_type = u32::from(aggref_ref.aggtype);
-            // Infer the expression result type. For SUM/AVG the result is
-            // always numeric (float8 or int8), so we check the aggtype.
             let is_numeric_result = matches!(
                 result_type,
                 AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
@@ -2552,8 +2573,7 @@ unsafe fn pgaccel_inject_gpu_agg(
             if !is_numeric_result {
                 return;
             }
-            // Use float8 as the assumed type for expression args (safe default).
-            (AGG_FLOAT8OID, 0)
+            AGG_FLOAT8OID
         };
 
         if attno != 0 && !matches!(
@@ -2605,20 +2625,46 @@ unsafe fn pgaccel_inject_gpu_agg(
         false
     };
 
+    // Detect self-scan opportunity: child is a plain path on a base
+    // relation (SeqScan) with NO restriction quals. The executor will
+    // open its own heap scan and use the vectorized pipeline instead of
+    // pulling through ExecProcNode. When the relation has quals (WHERE
+    // clause), we must let PG's SeqScan apply them — our fused scan
+    // doesn't evaluate quals.
+    let has_quals = !input_ref.baserestrictinfo.is_null()
+        && unsafe { pg_sys::list_length(input_ref.baserestrictinfo) } > 0;
+    let self_scan_relid: pg_sys::Index = if !child_is_our_scan
+        && input_ref.relid > 0
+        && rows >= cost::device_limits().gpu_reduce_min_rows
+        && !has_quals
+    {
+        input_ref.relid
+    } else {
+        0
+    };
+
+    let is_vectorized = child_is_our_scan || self_scan_relid > 0;
+
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    // Per-row cost depends on fusion. Fused path: direct heap walk +
-    // inline filter + columnar accumulate (no ExecProcNode, no
-    // MinimalTuple copy). Non-fused: ExecProcNode + tuple copy + extract.
-    // Non-fused path: ExecProcNode + tuple copy + extract overhead.
-    // Keep modest for plain reduce (single output row, negligible yield).
-    // Grouped agg is gated separately by gpu_hash_agg_min_rows.
-    let agg_per_row = if child_is_our_scan { 0.001 } else { 0.005 };
+    // Per-row cost: vectorized paths (self-scan or fused GpuExpr child)
+    // do direct heap walk + columnar extract, eliminating ExecProcNode
+    // and MinimalTuple overhead. Same architecture as hash join.
+    let agg_per_row = if is_vectorized { 0.001 } else { 0.005 };
     // For grouped agg, add hash table build + probe cost per row.
     let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
     let reduce_cost = base.rows * (agg_per_row + hash_overhead);
-    let startup_cost = base.total_cost + gpu_overhead;
+    // For self-scanning paths, compute our own scan cost instead of
+    // inheriting the child's SeqScan cost. Our heap walk + arena copy
+    // is cheaper than PG's full tuple deformation pipeline.
+    let scan_cost = if self_scan_relid > 0 {
+        // heap_getnext + memcpy per row, no slot deformation
+        base.rows * 0.003
+    } else {
+        base.total_cost
+    };
+    let startup_cost = scan_cost + gpu_overhead;
     // No cost_multiplier or safety_margin — honest single-threaded cost.
-    let total_cost = base.total_cost + gpu_overhead + reduce_cost;
+    let total_cost = scan_cost + gpu_overhead + reduce_cost;
 
     // Gate: Only inject if GpuAgg is meaningfully cheaper than PG's best
     // existing agg path. This prevents injection when the function being
@@ -2698,14 +2744,24 @@ unsafe fn pgaccel_inject_gpu_agg(
         } else {
             priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // no group key
         }
+        // Append self-scan relid (0 = no self-scan, >0 = open this relation).
+        #[allow(clippy::cast_possible_wrap)]
+        {
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(self_scan_relid as std::ffi::c_int).cast(),
+            );
+        }
+
         (*cpath).custom_private = priv_list;
 
         add_path(output_rel, cpath.cast());
 
         pgrx::debug1!(
-            "pg_accel: injected GpuReduce path for {} agg(s), rows={}",
+            "pg_accel: injected GpuReduce path for {} agg(s), rows={}, self_scan_relid={}",
             agg_descs.len(),
-            rows
+            rows,
+            self_scan_relid,
         );
     }
 }

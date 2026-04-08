@@ -275,6 +275,32 @@ pub enum PgaccelOp {
     Select = 13,
 }
 
+// ---------------------------------------------------------------------------
+// Fused filter+reduce types (mirrors pgaccel_fused.h).
+// ---------------------------------------------------------------------------
+
+/// Aggregation operation for fused kernels.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgaccelFusedAggOp {
+    Sum = 0,
+    Min = 1,
+    Max = 2,
+    Count = 3,
+}
+
+/// Comparison operator for fused filter predicates.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PgaccelCmpOp {
+    Eq = 0,
+    Ne = 1,
+    Lt = 2,
+    Le = 3,
+    Gt = 4,
+    Ge = 5,
+}
+
 /// Single instruction in a map-algebra expression
 /// (mirrors `pgaccel_expr_inst` in `pgaccel_ffi.h`).
 ///
@@ -754,6 +780,40 @@ unsafe extern "C" {
         default_val: f64,
         results: *mut f64,
         result_nulls: *mut u8,
+    ) -> PgaccelStatus;
+
+    // ── Fused filter+reduce (Phase 4) ─────────────────────────────
+
+    /// Fused filter + single-column reduce (f32).
+    pub fn pgaccel_fused_filter_reduce_f32(
+        filter_col: *const f32,
+        cmp_op: PgaccelCmpOp,
+        filter_val: f32,
+        agg_col: *const f32,
+        agg_op: PgaccelFusedAggOp,
+        count: usize,
+        out_result: *mut f64,
+    ) -> PgaccelStatus;
+
+    /// Fused filter + multi-column reduce (f32).
+    pub fn pgaccel_fused_filter_multi_reduce_f32(
+        filter_col: *const f32,
+        cmp_op: PgaccelCmpOp,
+        filter_val: f32,
+        agg_cols: *const *const f32,
+        agg_ops: *const PgaccelFusedAggOp,
+        num_aggs: usize,
+        count: usize,
+        out_results: *mut f64,
+    ) -> PgaccelStatus;
+
+    /// Fused filter + COUNT(*) (f32 filter column).
+    pub fn pgaccel_fused_filter_count_f32(
+        filter_col: *const f32,
+        cmp_op: PgaccelCmpOp,
+        filter_val: f32,
+        count: usize,
+        out_count: *mut i64,
     ) -> PgaccelStatus;
 }
 

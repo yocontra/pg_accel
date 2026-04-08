@@ -20,6 +20,7 @@ use pgrx::pg_sys;
 
 use crate::engine::cost;
 use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
+use crate::engine::executor::vectorized_scan::VectorizedScan;
 use crate::engine::expr_compiler::{self, CompiledExpr, TemplateKernel};
 use crate::engine::registry::AccelStrategy;
 use crate::gpu;
@@ -192,7 +193,6 @@ impl AggColumn {
             self.apply_gpu_result(result);
             return;
         }
-
         // f64 unsupported (e.g. Metal) — try f32 path with precision loss.
         #[allow(clippy::cast_possible_truncation)]
         let f32_values: Vec<f32> = self.gpu_values.iter().map(|&v| v as f32).collect();
@@ -458,6 +458,12 @@ pub struct AggExecState {
     fused_filter_infos: Option<Vec<AttExtractInfo>>,
     /// Cached extraction info for aggregate columns (lazily initialized).
     fused_agg_infos: Option<Vec<AttExtractInfo>>,
+
+    // -- Vectorized scan state (self-scanning pipeline) --
+    /// When `Some`, this agg node scans the base table directly using
+    /// the arena-based vectorized pipeline instead of pulling tuples
+    /// from a child plan via `ExecProcNode`.
+    vscan: Option<VectorizedScan>,
 }
 
 impl AggExecState {
@@ -491,6 +497,7 @@ impl AggExecState {
             fused_attno_map: Vec::new(),
             fused_filter_infos: None,
             fused_agg_infos: None,
+            vscan: None,
         }
     }
 
@@ -713,6 +720,7 @@ impl AggExecState {
             fused_attno_map: Vec::new(),
             fused_filter_infos: None,
             fused_agg_infos: None,
+            vscan: None,
         }
     }
 
@@ -753,6 +761,7 @@ impl AggExecState {
             fused_attno_map: Vec::new(),
             fused_filter_infos: None,
             fused_agg_infos: None,
+            vscan: None,
         }
     }
 
@@ -794,6 +803,417 @@ impl AggExecState {
         self.fused_scan_desc = scan_desc;
         self.fused_expr = expr;
         self.fused_attno_map = attno_map;
+    }
+
+    // -- Vectorized scan pipeline (self-scanning) --------------------------
+
+    /// Set the vectorized scan for self-scanning mode.
+    pub fn set_vscan(&mut self, vscan: VectorizedScan) {
+        self.vscan = Some(vscan);
+    }
+
+    /// Whether this agg has a vectorized scan (self-scanning mode).
+    #[must_use]
+    pub fn has_vscan(&self) -> bool {
+        self.vscan.is_some()
+    }
+
+    /// Return the scan descriptor from the vectorized scan, if any.
+    /// Used by `end_custom_scan` to close the heap scan.
+    #[must_use]
+    pub fn vscan_scan_desc(&self) -> pg_sys::TableScanDesc {
+        self.vscan
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |v| v.scan_desc())
+    }
+
+    /// Vectorized scan+reduce: scan the base table via arena-based
+    /// vectorized pipeline, extract columns in bulk, dispatch GPU reduce.
+    ///
+    /// This is the universal pipeline: arena heap scan → columnar extract
+    /// → GPU compute. Same architecture as hash join's bulk consume path.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `result_slot` must be
+    /// a valid `TupleTableSlot`.
+    #[allow(clippy::cast_precision_loss)]
+    pub unsafe fn next_vectorized(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.agg_vectorized").entered();
+        if self.result_returned {
+            return std::ptr::null_mut();
+        }
+
+        let start = std::time::Instant::now();
+
+        let vscan = self.vscan.as_mut().expect("vscan must be set");
+
+        // SAFETY: scan_desc is valid, main backend thread.
+        let scan_desc = vscan.scan_desc();
+        let tupdesc = unsafe { (*scan_desc).rs_rd.as_ref() }
+            .map(|rd| rd.rd_att)
+            .unwrap_or(std::ptr::null_mut());
+
+        // Pre-compute extraction info for each column that needs values.
+        let infos: Vec<Option<AttExtractInfo>> = self
+            .columns
+            .iter()
+            .map(|col| {
+                if col.attno > 0 && !tupdesc.is_null() {
+                    // SAFETY: tupdesc is valid.
+                    Some(unsafe { AttExtractInfo::new(tupdesc, col.attno) })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Resolve type OIDs from extraction info.
+        for (col, info) in self.columns.iter_mut().zip(infos.iter()) {
+            if let Some(info) = &info {
+                if col.type_oid == pg_sys::InvalidOid {
+                    col.type_oid = info.typid;
+                }
+            }
+        }
+
+        // Single-pass fused scan+extract+accumulate. No arena, no
+        // intermediate buffers. Each tuple is read from the heap,
+        // column values are extracted inline, and accumulated
+        // immediately. This eliminates the arena copy overhead and
+        // the second-pass extraction.
+        let mut total = 0u64;
+        loop {
+            // SAFETY: scan_desc is valid; main backend thread.
+            let htup = unsafe {
+                pg_sys::heap_getnext(
+                    scan_desc,
+                    pg_sys::ScanDirection::ForwardScanDirection,
+                )
+            };
+            if htup.is_null() {
+                break;
+            }
+
+            total += 1;
+
+            // SAFETY: htup is valid from heap_getnext.
+            let hdr = unsafe { (*htup).t_data };
+
+            for (col, info) in self.columns.iter_mut().zip(infos.iter()) {
+                if col.attno <= 0 {
+                    // COUNT(*)
+                    col.count += 1;
+                    col.has_value = true;
+                    continue;
+                }
+
+                let info = match info {
+                    Some(i) => i,
+                    None => continue,
+                };
+
+                // SAFETY: hdr is valid, info matches schema.
+                // Type-dispatch: read as native type, convert to f64.
+                let val: Option<f64> = unsafe {
+                    match info.typid {
+                        t if t == pg_sys::FLOAT4OID => {
+                            tuple_extract::try_fast_read_heap_pub::<f32>(hdr, info)
+                                .map(f64::from)
+                        }
+                        t if t == pg_sys::INT2OID => {
+                            tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info)
+                                .map(f64::from)
+                        }
+                        t if t == pg_sys::INT4OID => {
+                            tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info)
+                                .map(f64::from)
+                        }
+                        t if t == pg_sys::INT8OID => {
+                            tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info)
+                                .map(|v| v as f64)
+                        }
+                        _ => tuple_extract::try_fast_read_heap_pub::<f64>(hdr, info),
+                    }
+                };
+
+                if let Some(v) = val {
+                    col.count += 1;
+                    col.has_value = true;
+                    col.accumulate(v);
+                }
+            }
+
+            // CHECK_FOR_INTERRUPTS every 8192 rows.
+            if total % 8192 == 0 {
+                pgrx::check_for_interrupts!();
+            }
+        }
+
+        if total == 0 {
+            self.result_returned = true;
+            // SAFETY: result_slot is valid per caller contract.
+            return unsafe { self.finalize_result(result_slot) };
+        }
+
+        self.rows_dispatched = total;
+        self.batches_executed = 1;
+
+        self.dispatch_time_us = start.elapsed().as_micros() as u64;
+        self.result_returned = true;
+
+        // SAFETY: result_slot is valid per caller contract.
+        unsafe { self.finalize_result(result_slot) }
+    }
+
+    /// Vectorized scan+grouped agg: scan the base table via arena,
+    /// extract group key + value columns in bulk, dispatch GPU hash agg.
+    ///
+    /// Follows the same pattern as `next_grouped`: first call consumes
+    /// all input and runs GPU hash agg, subsequent calls emit groups.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `result_slot` must be
+    /// a valid `TupleTableSlot`.
+    pub unsafe fn next_grouped_vectorized(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.agg_grouped_vectorized").entered();
+
+        // First call: scan all input and run hash aggregation.
+        if !self.child_exhausted {
+            self.child_exhausted = true;
+            unsafe { self.execute_grouped_agg_vectorized() };
+        }
+
+        // Emit one result tuple per call (reuses existing emit logic).
+        unsafe { self.emit_grouped_tuple(result_slot) }
+    }
+
+    /// Bulk-scan the base table via VectorizedScan and dispatch GPU hash
+    /// aggregation. Stores results in `self.grouped_result`.
+    #[allow(clippy::too_many_lines)]
+    unsafe fn execute_grouped_agg_vectorized(&mut self) {
+        let vscan = self.vscan.as_mut().expect("vscan must be set");
+
+        // SAFETY: main backend thread, scan_desc is valid.
+        let total = unsafe { vscan.scan_all() };
+        if total == 0 {
+            return;
+        }
+
+        let start = std::time::Instant::now();
+
+        // SAFETY: scan_desc is valid after scan_all.
+        let tupdesc = unsafe { vscan.tupdesc() };
+
+        let group_key_info = self.group_key.as_ref().expect("grouped agg needs key");
+        let key_size = group_key_info.key_size();
+        let num_aggs = self.columns.len();
+
+        // Resolve value type tags from tupdesc.
+        let mut value_type_tags: Vec<i32> = vec![0; num_aggs];
+        for (i, col) in self.columns.iter_mut().enumerate() {
+            if col.attno > 0 {
+                // SAFETY: tupdesc is valid.
+                let info = unsafe { AttExtractInfo::new(tupdesc, col.attno) };
+                col.type_oid = info.typid;
+                value_type_tags[i] = oid_to_val_tag(col.type_oid);
+            }
+        }
+
+        // Extract group key column. Use typed extraction to match kernel format.
+        let gk_extract_info =
+            unsafe { AttExtractInfo::new(tupdesc, group_key_info.attno) };
+        let mut key_buf: Vec<u8> = Vec::with_capacity(total * key_size);
+        let mut key_null_mask: Vec<u8> = Vec::with_capacity(total);
+
+        match group_key_info.key_type {
+            0 => {
+                // i32 key
+                let (vals, nulls) = unsafe { vscan.extract_i32(&gk_extract_info) };
+                for (j, &v) in vals.iter().enumerate() {
+                    key_buf.extend_from_slice(&v.to_ne_bytes());
+                    key_null_mask.push(nulls[j]);
+                }
+            }
+            1 => {
+                // i64 key
+                let (vals, nulls) = unsafe { vscan.extract_i64(&gk_extract_info) };
+                for (j, &v) in vals.iter().enumerate() {
+                    key_buf.extend_from_slice(&v.to_ne_bytes());
+                    key_null_mask.push(nulls[j]);
+                }
+            }
+            2 => {
+                // f64 key
+                let (vals, nulls) = unsafe { vscan.extract_f64(&gk_extract_info) };
+                for (j, &v) in vals.iter().enumerate() {
+                    key_buf.extend_from_slice(&v.to_ne_bytes());
+                    key_null_mask.push(nulls[j]);
+                }
+            }
+            _ => return,
+        }
+
+        // Extract value columns as typed byte buffers.
+        let mut value_bufs: Vec<Vec<u8>> = vec![Vec::new(); num_aggs];
+        let mut value_null_masks: Vec<Vec<u8>> = vec![Vec::new(); num_aggs];
+
+        for (i, col) in self.columns.iter().enumerate() {
+            if col.op == AggOp::Count && col.attno <= 0 {
+                // COUNT(*): dummy f64 zero buffer.
+                value_bufs[i] = vec![0u8; total * 8];
+                value_null_masks[i] = vec![0u8; total];
+                value_type_tags[i] = 5; // f64
+                continue;
+            }
+            if col.attno <= 0 {
+                value_bufs[i] = vec![0u8; total * 8];
+                value_null_masks[i] = vec![1u8; total];
+                value_type_tags[i] = 5;
+                continue;
+            }
+
+            // SAFETY: tupdesc is valid.
+            let info = unsafe { AttExtractInfo::new(tupdesc, col.attno) };
+
+            // Extract as the native type matching the value tag.
+            match value_type_tags[i] {
+                2 => {
+                    // Int32
+                    let (vals, nulls) = unsafe { vscan.extract_i32(&info) };
+                    let mut buf = Vec::with_capacity(total * 4);
+                    for &v in &vals {
+                        buf.extend_from_slice(&v.to_ne_bytes());
+                    }
+                    value_bufs[i] = buf;
+                    value_null_masks[i] = nulls;
+                }
+                3 => {
+                    // Int64
+                    let (vals, nulls) = unsafe { vscan.extract_i64(&info) };
+                    let mut buf = Vec::with_capacity(total * 8);
+                    for &v in &vals {
+                        buf.extend_from_slice(&v.to_ne_bytes());
+                    }
+                    value_bufs[i] = buf;
+                    value_null_masks[i] = nulls;
+                }
+                4 => {
+                    // Float32
+                    let (vals, nulls) = unsafe { vscan.extract_f32(&info) };
+                    let mut buf = Vec::with_capacity(total * 4);
+                    for &v in &vals {
+                        buf.extend_from_slice(&v.to_ne_bytes());
+                    }
+                    value_bufs[i] = buf;
+                    value_null_masks[i] = nulls;
+                }
+                _ => {
+                    // Float64 (default)
+                    let (vals, nulls) = unsafe { vscan.extract_f64(&info) };
+                    let mut buf = Vec::with_capacity(total * 8);
+                    for &v in &vals {
+                        buf.extend_from_slice(&v.to_ne_bytes());
+                    }
+                    value_bufs[i] = buf;
+                    value_null_masks[i] = nulls;
+                    value_type_tags[i] = 5;
+                }
+            }
+        }
+
+        self.rows_dispatched = total as u64;
+        self.batches_executed = 1;
+
+        // Build FFI descriptors (same as execute_grouped_agg).
+        let ffi_agg_cols: Vec<PgaccelAggCol> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| PgaccelAggCol {
+                func: agg_op_to_ffi(col.op),
+                col_idx: if col.op == AggOp::Count && col.attno <= 0 {
+                    usize::MAX
+                } else {
+                    i
+                },
+            })
+            .collect();
+
+        let value_col_ptrs: Vec<*const std::ffi::c_void> = value_bufs
+            .iter()
+            .map(|buf| buf.as_ptr().cast::<std::ffi::c_void>())
+            .collect();
+        let value_null_ptrs: Vec<*const u8> =
+            value_null_masks.iter().map(Vec::as_ptr).collect();
+
+        let dispatch_start = std::time::Instant::now();
+
+        let result = gpu::hash_agg_execute(
+            key_buf.as_ptr().cast(),
+            key_null_mask.as_ptr(),
+            total,
+            group_key_info.key_type,
+            &value_col_ptrs,
+            &value_null_ptrs,
+            &value_type_tags,
+            &ffi_agg_cols,
+        );
+
+        self.dispatch_time_us = start.elapsed().as_micros() as u64
+            + dispatch_start.elapsed().as_micros() as u64;
+
+        if let Some(hash_result) = result {
+            let group_count = hash_result.group_count();
+            self.gpu_dispatched = true;
+            pgrx::debug1!(
+                "pg_accel: hash_agg_vectorized: {} groups from {} rows",
+                group_count,
+                total
+            );
+            self.grouped_result = Some(GroupedAggResult {
+                result: hash_result,
+                next_group: 0,
+                group_count,
+                key_type: group_key_info.key_type,
+            });
+        } else {
+            pgrx::debug1!(
+                "pg_accel: hash_agg_vectorized: GPU dispatch failed for {} rows",
+                total,
+            );
+        }
+    }
+
+    /// Build the final result tuple from accumulated column values.
+    ///
+    /// # Safety
+    ///
+    /// `result_slot` must be a valid `TupleTableSlot`.
+    unsafe fn finalize_result(
+        &self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: result_slot is a valid TupleTableSlot pointer.
+        unsafe {
+            pg_sys::ExecClearTuple(result_slot);
+            let values = (*result_slot).tts_values;
+            let isnull = (*result_slot).tts_isnull;
+            for (i, col) in self.columns.iter().enumerate() {
+                let (datum, null) = col.finalize();
+                *values.add(i) = datum;
+                *isnull.add(i) = null;
+            }
+            pg_sys::ExecStoreVirtualTuple(result_slot);
+        }
+        result_slot
     }
 
     /// Fused scan+agg: walk the heap directly, apply the filter predicate
