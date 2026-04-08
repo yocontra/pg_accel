@@ -169,10 +169,19 @@ impl DeviceLimits {
             100_000
         };
 
-        // Max elements per reduce dispatch. Use 1/32nd of GPU memory
-        // (in f64 elements) or 256K, whichever is smaller. Prevents
-        // SYCL runtime aborts on large parallel_for ranges.
-        let gpu_reduce_max_chunk = if mem > 0 {
+        // Max elements per reduce dispatch. On unified memory, no VRAM
+        // limit applies — allow large single-kernel launches to avoid
+        // chunking overhead (each chunk = separate kernel launch + alloc).
+        // On discrete GPUs, use 1/32nd of GPU memory capped at 256K.
+        let gpu_reduce_max_chunk = if unified {
+            // Unified memory: no copy overhead, allow up to 16M elements
+            // per kernel to minimise launch overhead.
+            if mem > 0 {
+                (mem / 8 / 8).clamp(256_000, 16_000_000)
+            } else {
+                4_000_000
+            }
+        } else if mem > 0 {
             (mem / 32 / 8).clamp(64_000, 256_000)
         } else {
             256_000

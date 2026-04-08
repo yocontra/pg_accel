@@ -443,6 +443,12 @@ unsafe extern "C" {
     /// Key-value sort (fp64 keys).
     pub fn pgaccel_sort_kv_f64(keys: *mut f64, indices: *mut u32, count: usize) -> PgaccelStatus;
 
+    /// Key-value sort (i32 keys).
+    pub fn pgaccel_sort_kv_i32(keys: *mut i32, indices: *mut u32, count: usize) -> PgaccelStatus;
+
+    /// Key-value sort (i64 keys).
+    pub fn pgaccel_sort_kv_i64(keys: *mut i64, indices: *mut u32, count: usize) -> PgaccelStatus;
+
     // -- Reduce kernels --
 
     pub fn pgaccel_reduce_sum_f32(

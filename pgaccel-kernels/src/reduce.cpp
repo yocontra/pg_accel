@@ -95,28 +95,57 @@ size_t reduce_count_cpu(const uint8_t* mask, size_t count) {
     return hits;
 }
 
+} // anonymous namespace (CPU fallbacks)
+
 // ---------------------------------------------------------------------------
 // SYCL kernel implementations
 // ---------------------------------------------------------------------------
 
 #if PGACCEL_HAS_SYCL
 
+// SAFETY: g_queue is defined in device_manager.cpp and linked into the same
+// shared library.  It is written once during pgaccel_init() (single writer,
+// guarded by g_initialized) and read-only thereafter.
+extern sycl::queue* g_queue;
+
+// SAFETY: g_unified_memory is written once during pgaccel_init() and
+// read-only thereafter.
+extern bool g_unified_memory;
+
+/// Get the global SYCL queue created by pgaccel_init().
+/// Returns nullptr when SYCL was not initialized or init failed.
+static sycl::queue* get_queue() {
+    return g_queue;
+}
+
+namespace {
+
 template <typename T>
 pgaccel_status reduce_sum_sycl(sycl::queue& q, const T* data, size_t count,
                                T* result) {
-    T* d_data = sycl::malloc_device<T>(count, q);
-    T* d_result = sycl::malloc_device<T>(1, q);
+    // On unified memory, the host pointer is directly GPU-accessible —
+    // skip device allocation and copy entirely.
+    T* d_data = nullptr;
+    bool owns_data = false;
+    if (g_unified_memory) {
+        // SAFETY: On Apple Silicon unified memory, host pointers are
+        // accessible from GPU kernels. Cast away const for SYCL API.
+        d_data = const_cast<T*>(data);
+    } else {
+        d_data = sycl::malloc_device<T>(count, q);
+        if (!d_data) return PGACCEL_OOM;
+        owns_data = true;
+        q.memcpy(d_data, data, count * sizeof(T)).wait();
+    }
 
-    if (!d_data || !d_result) {
-        sycl::free(d_data, q);
-        sycl::free(d_result, q);
+    T* d_result = sycl::malloc_shared<T>(1, q);
+    if (!d_result) {
+        if (owns_data) sycl::free(d_data, q);
         return PGACCEL_OOM;
     }
 
-    // SAFETY: d_result is device memory; zero-initialize for reduction identity.
-    q.memcpy(d_data, data, count * sizeof(T));
-    q.memset(d_result, 0, sizeof(T));
-    q.wait();
+    // SAFETY: d_result is shared memory; zero-initialize for reduction identity.
+    *d_result = T{0};
 
     q.submit([&](sycl::handler& h) {
         auto sum_reducer = sycl::reduction(d_result, sycl::plus<T>());
@@ -126,10 +155,9 @@ pgaccel_status reduce_sum_sycl(sycl::queue& q, const T* data, size_t count,
             });
     }).wait();
 
-    q.memcpy(result, d_result, sizeof(T));
-    q.wait();
+    *result = *d_result;
 
-    sycl::free(d_data, q);
+    if (owns_data) sycl::free(d_data, q);
     sycl::free(d_result, q);
     return PGACCEL_OK;
 }
@@ -137,19 +165,25 @@ pgaccel_status reduce_sum_sycl(sycl::queue& q, const T* data, size_t count,
 template <typename T>
 pgaccel_status reduce_min_sycl(sycl::queue& q, const T* data, size_t count,
                                T* result) {
-    T* d_data = sycl::malloc_device<T>(count, q);
-    T* d_result = sycl::malloc_device<T>(1, q);
+    T* d_data = nullptr;
+    bool owns_data = false;
+    if (g_unified_memory) {
+        d_data = const_cast<T*>(data);
+    } else {
+        d_data = sycl::malloc_device<T>(count, q);
+        if (!d_data) return PGACCEL_OOM;
+        owns_data = true;
+        q.memcpy(d_data, data, count * sizeof(T)).wait();
+    }
 
-    if (!d_data || !d_result) {
-        sycl::free(d_data, q);
-        sycl::free(d_result, q);
+    T* d_result = sycl::malloc_shared<T>(1, q);
+    if (!d_result) {
+        if (owns_data) sycl::free(d_data, q);
         return PGACCEL_OOM;
     }
 
     // SAFETY: copy first element as initial value for min reduction.
-    q.memcpy(d_data, data, count * sizeof(T));
-    q.memcpy(d_result, &data[0], sizeof(T));
-    q.wait();
+    *d_result = data[0];
 
     q.submit([&](sycl::handler& h) {
         auto min_reducer = sycl::reduction(d_result, sycl::minimum<T>());
@@ -159,10 +193,9 @@ pgaccel_status reduce_min_sycl(sycl::queue& q, const T* data, size_t count,
             });
     }).wait();
 
-    q.memcpy(result, d_result, sizeof(T));
-    q.wait();
+    *result = *d_result;
 
-    sycl::free(d_data, q);
+    if (owns_data) sycl::free(d_data, q);
     sycl::free(d_result, q);
     return PGACCEL_OK;
 }
@@ -170,19 +203,25 @@ pgaccel_status reduce_min_sycl(sycl::queue& q, const T* data, size_t count,
 template <typename T>
 pgaccel_status reduce_max_sycl(sycl::queue& q, const T* data, size_t count,
                                T* result) {
-    T* d_data = sycl::malloc_device<T>(count, q);
-    T* d_result = sycl::malloc_device<T>(1, q);
+    T* d_data = nullptr;
+    bool owns_data = false;
+    if (g_unified_memory) {
+        d_data = const_cast<T*>(data);
+    } else {
+        d_data = sycl::malloc_device<T>(count, q);
+        if (!d_data) return PGACCEL_OOM;
+        owns_data = true;
+        q.memcpy(d_data, data, count * sizeof(T)).wait();
+    }
 
-    if (!d_data || !d_result) {
-        sycl::free(d_data, q);
-        sycl::free(d_result, q);
+    T* d_result = sycl::malloc_shared<T>(1, q);
+    if (!d_result) {
+        if (owns_data) sycl::free(d_data, q);
         return PGACCEL_OOM;
     }
 
     // SAFETY: copy first element as initial value for max reduction.
-    q.memcpy(d_data, data, count * sizeof(T));
-    q.memcpy(d_result, &data[0], sizeof(T));
-    q.wait();
+    *d_result = data[0];
 
     q.submit([&](sycl::handler& h) {
         auto max_reducer = sycl::reduction(d_result, sycl::maximum<T>());
@@ -192,29 +231,34 @@ pgaccel_status reduce_max_sycl(sycl::queue& q, const T* data, size_t count,
             });
     }).wait();
 
-    q.memcpy(result, d_result, sizeof(T));
-    q.wait();
+    *result = *d_result;
 
-    sycl::free(d_data, q);
+    if (owns_data) sycl::free(d_data, q);
     sycl::free(d_result, q);
     return PGACCEL_OK;
 }
 
 pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
                                  size_t count, size_t* result) {
-    uint8_t* d_mask = sycl::malloc_device<uint8_t>(count, q);
-    size_t* d_result = sycl::malloc_device<size_t>(1, q);
+    uint8_t* d_mask = nullptr;
+    bool owns_mask = false;
+    if (g_unified_memory) {
+        d_mask = const_cast<uint8_t*>(mask);
+    } else {
+        d_mask = sycl::malloc_device<uint8_t>(count, q);
+        if (!d_mask) return PGACCEL_OOM;
+        owns_mask = true;
+        q.memcpy(d_mask, mask, count * sizeof(uint8_t)).wait();
+    }
 
-    if (!d_mask || !d_result) {
-        sycl::free(d_mask, q);
-        sycl::free(d_result, q);
+    size_t* d_result = sycl::malloc_shared<size_t>(1, q);
+    if (!d_result) {
+        if (owns_mask) sycl::free(d_mask, q);
         return PGACCEL_OOM;
     }
 
-    // SAFETY: d_result is device memory; zero-initialize for sum identity.
-    q.memcpy(d_mask, mask, count * sizeof(uint8_t));
-    q.memset(d_result, 0, sizeof(size_t));
-    q.wait();
+    // SAFETY: d_result is shared memory; zero-initialize for sum identity.
+    *d_result = 0;
 
     q.submit([&](sycl::handler& h) {
         auto sum_reducer = sycl::reduction(d_result, sycl::plus<size_t>());
@@ -225,17 +269,16 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
             });
     }).wait();
 
-    q.memcpy(result, d_result, sizeof(size_t));
-    q.wait();
+    *result = *d_result;
 
-    sycl::free(d_mask, q);
+    if (owns_mask) sycl::free(d_mask, q);
     sycl::free(d_result, q);
     return PGACCEL_OK;
 }
 
-#endif // PGACCEL_HAS_SYCL
+} // anonymous namespace (SYCL kernels)
 
-} // anonymous namespace
+#endif // PGACCEL_HAS_SYCL
 
 // ---------------------------------------------------------------------------
 // Public API — fp32 (all platforms)
@@ -251,10 +294,12 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        pgaccel_status st = reduce_sum_sycl<float>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
-        // Fall through to CPU on error
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = reduce_sum_sycl<float>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
+        }
+        // Fall through to CPU on error or no queue
     } catch (const sycl::exception&) {
         // SYCL unavailable at runtime, fall through to CPU
     }
@@ -274,9 +319,11 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        pgaccel_status st = reduce_min_sycl<float>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = reduce_min_sycl<float>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
+        }
     } catch (const sycl::exception&) {}
 #endif
 
@@ -294,9 +341,11 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        pgaccel_status st = reduce_max_sycl<float>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = reduce_max_sycl<float>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
+        }
     } catch (const sycl::exception&) {}
 #endif
 
@@ -321,12 +370,11 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        if (!q.get_device().has(sycl::aspect::fp64)) {
-            return PGACCEL_UNSUPPORTED;
+        sycl::queue* q = get_queue();
+        if (q && q->get_device().has(sycl::aspect::fp64)) {
+            pgaccel_status st = reduce_sum_sycl<double>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
         }
-        pgaccel_status st = reduce_sum_sycl<double>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
     } catch (const sycl::exception&) {}
 #endif
 
@@ -347,12 +395,11 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        if (!q.get_device().has(sycl::aspect::fp64)) {
-            return PGACCEL_UNSUPPORTED;
+        sycl::queue* q = get_queue();
+        if (q && q->get_device().has(sycl::aspect::fp64)) {
+            pgaccel_status st = reduce_min_sycl<double>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
         }
-        pgaccel_status st = reduce_min_sycl<double>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
     } catch (const sycl::exception&) {}
 #endif
 
@@ -373,12 +420,11 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        if (!q.get_device().has(sycl::aspect::fp64)) {
-            return PGACCEL_UNSUPPORTED;
+        sycl::queue* q = get_queue();
+        if (q && q->get_device().has(sycl::aspect::fp64)) {
+            pgaccel_status st = reduce_max_sycl<double>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
         }
-        pgaccel_status st = reduce_max_sycl<double>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
     } catch (const sycl::exception&) {}
 #endif
 
@@ -400,9 +446,11 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        pgaccel_status st = reduce_sum_sycl<int64_t>(q, data, count, result);
-        if (st == PGACCEL_OK) return st;
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = reduce_sum_sycl<int64_t>(*q, data, count, result);
+            if (st == PGACCEL_OK) return st;
+        }
     } catch (const sycl::exception&) {}
 #endif
 
@@ -423,9 +471,11 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
 
 #if PGACCEL_HAS_SYCL
     try {
-        sycl::queue q{sycl::default_selector_v};
-        pgaccel_status st = reduce_count_sycl(q, mask, count, result);
-        if (st == PGACCEL_OK) return st;
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = reduce_count_sycl(*q, mask, count, result);
+            if (st == PGACCEL_OK) return st;
+        }
     } catch (const sycl::exception&) {}
 #endif
 

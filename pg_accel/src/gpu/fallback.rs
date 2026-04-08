@@ -926,6 +926,16 @@ pub fn pgaccel_sort_kv_f64(_keys: *mut f64, _indices: *mut u32, _count: usize) -
     PgaccelStatus::ErrorNoDevice
 }
 
+#[must_use]
+pub fn pgaccel_sort_kv_i32(_keys: *mut i32, _indices: *mut u32, _count: usize) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
+}
+
+#[must_use]
+pub fn pgaccel_sort_kv_i64(_keys: *mut i64, _indices: *mut u32, _count: usize) -> PgaccelStatus {
+    PgaccelStatus::ErrorNoDevice
+}
+
 // ---------------------------------------------------------------------------
 // Reduce kernel stubs
 // ---------------------------------------------------------------------------
@@ -1795,6 +1805,22 @@ mod tests {
     fn sort_kv_f64_returns_error_no_device() {
         assert_eq!(
             pgaccel_sort_kv_f64(ptr::null_mut(), ptr::null_mut(), 0),
+            PgaccelStatus::ErrorNoDevice
+        );
+    }
+
+    #[test]
+    fn sort_kv_i32_returns_error_no_device() {
+        assert_eq!(
+            pgaccel_sort_kv_i32(ptr::null_mut(), ptr::null_mut(), 0),
+            PgaccelStatus::ErrorNoDevice
+        );
+    }
+
+    #[test]
+    fn sort_kv_i64_returns_error_no_device() {
+        assert_eq!(
+            pgaccel_sort_kv_i64(ptr::null_mut(), ptr::null_mut(), 0),
             PgaccelStatus::ErrorNoDevice
         );
     }

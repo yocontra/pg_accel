@@ -325,6 +325,197 @@ static pgaccel_agg_state* agg_cpu(
     return state;
 }
 
+// ---------------------------------------------------------------------------
+// Sort-based grouped aggregation (GPU sort + sequential reduce)
+// ---------------------------------------------------------------------------
+
+/// Minimum rows to use sort-based path instead of CPU hash.
+/// Set very high because bitonic sort is O(n·log²n) with many kernel
+/// launches. Will be lowered once radix sort lands.
+static constexpr size_t SORT_AGG_MIN_ROWS = 5000000;
+
+static pgaccel_agg_state* agg_sort_based(
+    const void*              group_keys,
+    const uint8_t*           group_null_mask,
+    size_t                   row_count,
+    int                      key_type,
+    const void* const*       value_cols,
+    const uint8_t* const*    value_nulls,
+    const int*               value_types,
+    const pgaccel_agg_col*   agg_cols,
+    size_t                   num_aggs)
+{
+    size_t ksz = key_size_for_type(key_type);
+    if (ksz == 0) return nullptr;
+
+    // Build sort key + index arrays. NULLs get a sentinel key that
+    // sorts to the end (we'll handle the NULL group separately).
+    std::vector<uint32_t> indices(row_count);
+    for (size_t i = 0; i < row_count; i++) indices[i] = static_cast<uint32_t>(i);
+
+    // Copy keys for sorting (sort is in-place).
+    pgaccel_status st = PGACCEL_ERROR;
+    std::vector<int32_t> keys_i32;
+    std::vector<int64_t> keys_i64;
+    std::vector<double> keys_f64;
+
+    switch (key_type) {
+        case 0: { // INT32
+            keys_i32.resize(row_count);
+            auto* src = static_cast<const int32_t*>(group_keys);
+            for (size_t i = 0; i < row_count; i++) {
+                if (group_null_mask != nullptr && group_null_mask[i])
+                    keys_i32[i] = std::numeric_limits<int32_t>::max();
+                else
+                    keys_i32[i] = src[i];
+            }
+            st = pgaccel_sort_kv_i32(keys_i32.data(), indices.data(), row_count);
+            break;
+        }
+        case 1: { // INT64
+            keys_i64.resize(row_count);
+            auto* src = static_cast<const int64_t*>(group_keys);
+            for (size_t i = 0; i < row_count; i++) {
+                if (group_null_mask != nullptr && group_null_mask[i])
+                    keys_i64[i] = std::numeric_limits<int64_t>::max();
+                else
+                    keys_i64[i] = src[i];
+            }
+            st = pgaccel_sort_kv_i64(keys_i64.data(), indices.data(), row_count);
+            break;
+        }
+        case 2: { // FLOAT64
+            keys_f64.resize(row_count);
+            auto* src = static_cast<const double*>(group_keys);
+            for (size_t i = 0; i < row_count; i++) {
+                if (group_null_mask != nullptr && group_null_mask[i])
+                    keys_f64[i] = std::numeric_limits<double>::infinity();
+                else
+                    keys_f64[i] = src[i];
+            }
+            st = pgaccel_sort_kv_f64(keys_f64.data(), indices.data(), row_count);
+            break;
+        }
+        default:
+            return nullptr;
+    }
+
+    if (st != PGACCEL_OK) return nullptr;
+
+    // Scan sorted keys to find group boundaries.
+    // A boundary occurs where adjacent keys differ.
+    std::vector<size_t> group_starts;
+    group_starts.push_back(0);
+    for (size_t i = 1; i < row_count; i++) {
+        bool different = false;
+        switch (key_type) {
+            case 0: different = (keys_i32[i] != keys_i32[i - 1]); break;
+            case 1: different = (keys_i64[i] != keys_i64[i - 1]); break;
+            case 2: {
+                double a = keys_f64[i], b = keys_f64[i - 1];
+                bool a_nan = (a != a), b_nan = (b != b);
+                different = !((a_nan && b_nan) || a == b);
+                break;
+            }
+        }
+        if (different) group_starts.push_back(i);
+    }
+
+    size_t n_groups = group_starts.size();
+
+    // Check if the last group is the NULL sentinel group.
+    bool has_null_group = false;
+    if (group_null_mask != nullptr) {
+        // The NULL sentinel sorts to the end.
+        uint32_t last_orig = indices[group_starts[n_groups - 1]];
+        has_null_group = group_null_mask[last_orig] != 0;
+    }
+
+    // Build result state.
+    auto* state = new(std::nothrow) pgaccel_agg_state();
+    if (state == nullptr) return nullptr;
+
+    state->key_size = ksz;
+    state->key_type = key_type;
+    state->group_count = n_groups;
+    state->num_aggs = num_aggs;
+
+    // Build group key buffer (one key per group from first row).
+    state->group_key_buf.resize(n_groups * ksz);
+    for (size_t g = 0; g < n_groups; g++) {
+        uint32_t orig_row = indices[group_starts[g]];
+        const uint8_t* src_key =
+            static_cast<const uint8_t*>(group_keys) + orig_row * ksz;
+        // For NULL group, store zeros.
+        if (has_null_group && g == n_groups - 1) {
+            memset(state->group_key_buf.data() + g * ksz, 0, ksz);
+        } else {
+            memcpy(state->group_key_buf.data() + g * ksz, src_key, ksz);
+        }
+    }
+
+    // Accumulate aggregates per group (sequential scan — cache-friendly).
+    state->counts.resize(n_groups, 0);
+    state->results.resize(num_aggs);
+    for (size_t a = 0; a < num_aggs; a++) {
+        state->results[a].resize(n_groups);
+        for (size_t g = 0; g < n_groups; g++) {
+            if (agg_cols[a].func == PGACCEL_AGG_MIN)
+                state->results[a][g] = std::numeric_limits<double>::infinity();
+            else if (agg_cols[a].func == PGACCEL_AGG_MAX)
+                state->results[a][g] = -std::numeric_limits<double>::infinity();
+            else
+                state->results[a][g] = 0.0;
+        }
+    }
+
+    for (size_t g = 0; g < n_groups; g++) {
+        size_t start = group_starts[g];
+        size_t end = (g + 1 < n_groups) ? group_starts[g + 1] : row_count;
+
+        for (size_t i = start; i < end; i++) {
+            uint32_t orig_row = indices[i];
+            state->counts[g]++;
+
+            for (size_t a = 0; a < num_aggs; a++) {
+                size_t col = agg_cols[a].col_idx;
+
+                if (agg_cols[a].func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
+                    state->results[a][g] += 1.0;
+                    continue;
+                }
+
+                const void* col_data = value_cols[a];
+                const uint8_t* col_nulls =
+                    value_nulls != nullptr ? value_nulls[a] : nullptr;
+                int vtype = value_types[a];
+
+                val_read vr = read_value(col_data, col_nulls, orig_row, vtype);
+                if (vr.is_null) continue;
+
+                switch (agg_cols[a].func) {
+                    case PGACCEL_AGG_SUM:
+                        state->results[a][g] += vr.value;
+                        break;
+                    case PGACCEL_AGG_MIN:
+                        if (vr.value < state->results[a][g])
+                            state->results[a][g] = vr.value;
+                        break;
+                    case PGACCEL_AGG_MAX:
+                        if (vr.value > state->results[a][g])
+                            state->results[a][g] = vr.value;
+                        break;
+                    case PGACCEL_AGG_COUNT:
+                        state->results[a][g] += 1.0;
+                        break;
+                }
+            }
+        }
+    }
+
+    return state;
+}
+
 // ===========================================================================
 // Public C API
 // ===========================================================================
@@ -343,6 +534,16 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(
     size_t                   num_aggs)
 {
     if (row_count == 0 || agg_cols == nullptr) return nullptr;
+
+    // Use sort-based path for large datasets (GPU sort + sequential reduce).
+    // Falls back to CPU hash on sort failure.
+    if (row_count >= SORT_AGG_MIN_ROWS) {
+        pgaccel_agg_state* st = agg_sort_based(
+            group_keys, group_null_mask, row_count, key_type,
+            value_cols, value_nulls, value_types, agg_cols, num_aggs);
+        if (st != nullptr) return st;
+    }
+
     return agg_cpu(group_keys, group_null_mask, row_count, key_type,
                    value_cols, value_nulls, value_types, agg_cols, num_aggs);
 }

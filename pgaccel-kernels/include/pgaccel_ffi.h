@@ -105,6 +105,8 @@ pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count);
  */
 pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count);
 pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count);
+pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count);
+pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count);
 
 /* ── Reduce Kernels ──────────────────────────────────────────────── */
 

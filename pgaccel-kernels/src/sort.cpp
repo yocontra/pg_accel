@@ -101,6 +101,10 @@ static T pad_value() {
 // guarded by g_initialized) and read-only thereafter.
 extern sycl::queue* g_queue;
 
+// SAFETY: g_unified_memory is written once during pgaccel_init() and
+// read-only thereafter.
+extern bool g_unified_memory;
+
 /// Get the global SYCL queue created by pgaccel_init().
 /// Returns nullptr when SYCL was not initialized or init failed.
 static sycl::queue* get_queue() {
@@ -127,14 +131,20 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
     const size_t padded = next_power_of_two(count);
 
     try {
-        // Allocate device buffer and copy data + padding.
-        T* d_buf = sycl::malloc_device<T>(padded, *q);
+        // On unified memory, use malloc_shared to avoid device copy.
+        T* d_buf = g_unified_memory
+            ? sycl::malloc_shared<T>(padded, *q)
+            : sycl::malloc_device<T>(padded, *q);
         if (d_buf == nullptr) {
             return cpu_sort(data, count);
         }
 
-        // Copy original data.
-        q->memcpy(d_buf, data, count * sizeof(T)).wait();
+        if (g_unified_memory) {
+            // Direct host-side copy into shared allocation.
+            std::memcpy(d_buf, data, count * sizeof(T));
+        } else {
+            q->memcpy(d_buf, data, count * sizeof(T)).wait();
+        }
 
         // Fill padding with sentinel.
         if (padded > count) {
@@ -142,7 +152,8 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
             q->fill(d_buf + count, sentinel, padded - count).wait();
         }
 
-        // Bitonic sort network.
+        // Bitonic sort network. The queue is in-order, so sequential
+        // submissions execute in order without explicit per-step waits.
         for (size_t k = 2; k <= padded; k *= 2) {
             for (size_t j = k / 2; j > 0; j /= 2) {
                 q->parallel_for(sycl::range<1>(padded),
@@ -159,12 +170,18 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
                                 d_buf[partner] = vi;
                             }
                         }
-                    }).wait();
+                    });
             }
         }
+        // Single wait after all bitonic steps complete.
+        q->wait();
 
         // Copy sorted data back (only the original count).
-        q->memcpy(data, d_buf, count * sizeof(T)).wait();
+        if (g_unified_memory) {
+            std::memcpy(data, d_buf, count * sizeof(T));
+        } else {
+            q->memcpy(data, d_buf, count * sizeof(T)).wait();
+        }
         sycl::free(d_buf, *q);
 
         return PGACCEL_OK;
@@ -194,8 +211,13 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
     const size_t padded = next_power_of_two(count);
 
     try {
-        K* d_keys = sycl::malloc_device<K>(padded, *q);
-        uint32_t* d_idx = sycl::malloc_device<uint32_t>(padded, *q);
+        // On unified memory, use malloc_shared to avoid device copy.
+        K* d_keys = g_unified_memory
+            ? sycl::malloc_shared<K>(padded, *q)
+            : sycl::malloc_device<K>(padded, *q);
+        uint32_t* d_idx = g_unified_memory
+            ? sycl::malloc_shared<uint32_t>(padded, *q)
+            : sycl::malloc_device<uint32_t>(padded, *q);
         if (d_keys == nullptr || d_idx == nullptr) {
             if (d_keys) sycl::free(d_keys, *q);
             if (d_idx) sycl::free(d_idx, *q);
@@ -203,8 +225,13 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
         }
 
         // Copy data.
-        q->memcpy(d_keys, keys, count * sizeof(K)).wait();
-        q->memcpy(d_idx, indices, count * sizeof(uint32_t)).wait();
+        if (g_unified_memory) {
+            std::memcpy(d_keys, keys, count * sizeof(K));
+            std::memcpy(d_idx, indices, count * sizeof(uint32_t));
+        } else {
+            q->memcpy(d_keys, keys, count * sizeof(K)).wait();
+            q->memcpy(d_idx, indices, count * sizeof(uint32_t)).wait();
+        }
 
         // Pad keys with sentinel, indices with max uint32.
         if (padded > count) {
@@ -215,7 +242,7 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
         }
 
         // Bitonic sort network — stable for equal keys by using index as
-        // tiebreaker.
+        // tiebreaker. Queue is in-order: no per-step wait needed.
         for (size_t k = 2; k <= padded; k *= 2) {
             for (size_t j = k / 2; j > 0; j /= 2) {
                 q->parallel_for(sycl::range<1>(padded),
@@ -255,13 +282,20 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
                                 d_idx[partner] = ii;
                             }
                         }
-                    }).wait();
+                    });
             }
         }
+        // Single wait after all bitonic steps complete.
+        q->wait();
 
         // Copy back.
-        q->memcpy(keys, d_keys, count * sizeof(K)).wait();
-        q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait();
+        if (g_unified_memory) {
+            std::memcpy(keys, d_keys, count * sizeof(K));
+            std::memcpy(indices, d_idx, count * sizeof(uint32_t));
+        } else {
+            q->memcpy(keys, d_keys, count * sizeof(K)).wait();
+            q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait();
+        }
 
         sycl::free(d_keys, *q);
         sycl::free(d_idx, *q);
@@ -389,6 +423,16 @@ pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices,
 pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices,
                                    size_t count) {
     return dispatch_sort_kv_fp_checked(keys, indices, count);
+}
+
+pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices,
+                                   size_t count) {
+    return dispatch_sort_kv(keys, indices, count);
+}
+
+pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices,
+                                   size_t count) {
+    return dispatch_sort_kv(keys, indices, count);
 }
 
 } // extern "C"
