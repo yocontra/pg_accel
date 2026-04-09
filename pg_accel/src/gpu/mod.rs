@@ -16,22 +16,26 @@ mod three_layer_tests;
 #[cfg(feature = "gpu")]
 #[allow(unused_imports)]
 pub use bridge::{
-    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelCmpOp, PgaccelDeviceInfo,
-    PgaccelExpr, PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelFusedAggOp,
-    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp,
-    PgaccelPixelType, PgaccelPlatformCaps, PgaccelReclassRule, PgaccelStatus, PgaccelVal,
-    PgaccelValTag,
+    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
+    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
+    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
+    PgaccelReclassRule, PgaccelReduceCol, PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
 
 #[cfg(not(feature = "gpu"))]
 #[allow(unused_imports)]
 pub use fallback::{
-    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelCmpOp, PgaccelDeviceInfo,
-    PgaccelExpr, PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelFusedAggOp,
-    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp,
-    PgaccelPixelType, PgaccelPlatformCaps, PgaccelReclassRule, PgaccelStatus, PgaccelVal,
-    PgaccelValTag,
+    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
+    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
+    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
+    PgaccelReclassRule, PgaccelReduceCol, PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
+
+// Re-export fused ops constants from the active module.
+#[cfg(feature = "gpu")]
+pub use bridge::{cmp_op, reduce_op};
+#[cfg(not(feature = "gpu"))]
+pub use fallback::{cmp_op, reduce_op};
 
 // ---------------------------------------------------------------------------
 // Unified safe wrappers
@@ -1593,98 +1597,75 @@ pub fn window_lead(
 }
 
 // ---------------------------------------------------------------------------
-// Fused filter+reduce (Phase 4)
+// Fused filter + multi-reduce
 // ---------------------------------------------------------------------------
 
-/// Fused filter + single-column aggregate in one GPU pass.
+/// Applies `filter_data[i] <cmp_op> cmp_val` to each row, then reduces
+/// all passing rows for each column described in `cols`. When `cmp_op`
+/// is [`cmp_op::ALWAYS_TRUE`], all rows pass (no filter column needed).
 ///
-/// Evaluates `filter_col[i] <cmp_op> filter_val` and aggregates matching
-/// rows from `agg_col` using `agg_op`.  Returns `None` on GPU failure.
+/// Returns `(results_vec, pass_count)` or `None` on GPU failure.
 #[must_use]
-pub fn fused_filter_reduce_f32(
-    filter_col: &[f32],
-    cmp_op: PgaccelCmpOp,
-    filter_val: f32,
-    agg_col: &[f32],
-    agg_op: PgaccelFusedAggOp,
-) -> Option<f64> {
-    let count = filter_col.len();
-    if count == 0 {
-        return Some(match agg_op {
-            PgaccelFusedAggOp::Sum | PgaccelFusedAggOp::Count => 0.0,
-            PgaccelFusedAggOp::Min => f64::INFINITY,
-            PgaccelFusedAggOp::Max => f64::NEG_INFINITY,
-        });
-    }
-    let mut result: f64 = 0.0;
-    #[cfg(feature = "gpu")]
-    {
-        // SAFETY: slices are valid for count elements.
-        let status = unsafe {
-            bridge::pgaccel_fused_filter_reduce_f32(
-                filter_col.as_ptr(),
-                cmp_op,
-                filter_val,
-                agg_col.as_ptr(),
-                agg_op,
-                count,
-                &mut result,
-            )
-        };
-        status.is_ok().then_some(result)
-    }
-    #[cfg(not(feature = "gpu"))]
-    {
-        let status = fallback::pgaccel_fused_filter_reduce_f32(
-            filter_col.as_ptr(),
-            cmp_op,
-            filter_val,
-            agg_col.as_ptr(),
-            agg_op,
-            count,
-            &mut result,
-        );
-        status.is_ok().then_some(result)
-    }
-}
+pub fn fused_filter_multi_reduce_f32(
+    filter_data: Option<&[f32]>,
+    n: usize,
+    cmp: i32,
+    cmp_val: f32,
+    cols: &[PgaccelReduceCol],
+    num_cols: usize,
+) -> Option<(Vec<f32>, usize)> {
+    let _span =
+        tracing::debug_span!("gpu.fused_filter_multi_reduce_f32", n, num_cols, cmp,).entered();
 
-/// Fused filter + COUNT(*) — counts rows matching the predicate.
-#[must_use]
-pub fn fused_filter_count_f32(
-    filter_col: &[f32],
-    cmp_op: PgaccelCmpOp,
-    filter_val: f32,
-) -> Option<i64> {
-    let count = filter_col.len();
-    if count == 0 {
-        return Some(0);
+    if num_cols == 0 {
+        return Some((Vec::new(), 0));
     }
-    let mut result: i64 = 0;
+
+    let mut results = vec![0.0f32; num_cols];
+    let mut pass_count: usize = 0;
+
+    let filter_ptr = filter_data.map_or(std::ptr::null(), |data| data.as_ptr());
+
     #[cfg(feature = "gpu")]
     {
-        // SAFETY: slices are valid for count elements.
+        // SAFETY: filter_ptr is valid (or null for ALWAYS_TRUE). cols is
+        // a valid slice of PgaccelReduceCol descriptors with valid data
+        // pointers. results and pass_count are valid output pointers.
         let status = unsafe {
-            bridge::pgaccel_fused_filter_count_f32(
-                filter_col.as_ptr(),
-                cmp_op,
-                filter_val,
-                count,
-                &mut result,
+            bridge::pgaccel_fused_filter_multi_reduce_f32(
+                filter_ptr,
+                n,
+                cmp,
+                cmp_val,
+                cols.as_ptr(),
+                num_cols,
+                results.as_mut_ptr(),
+                &raw mut pass_count,
             )
         };
-        status.is_ok().then_some(result)
+        if status.is_ok() {
+            return Some((results, pass_count));
+        }
     }
+
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_fused_filter_count_f32(
-            filter_col.as_ptr(),
-            cmp_op,
-            filter_val,
-            count,
-            &mut result,
+        let status = fallback::pgaccel_fused_filter_multi_reduce_f32(
+            filter_ptr,
+            n,
+            cmp,
+            cmp_val,
+            cols.as_ptr(),
+            num_cols,
+            results.as_mut_ptr(),
+            &mut pass_count,
         );
-        status.is_ok().then_some(result)
+        if status.is_ok() {
+            return Some((results, pass_count));
+        }
     }
+
+    None
 }
 
 #[cfg(feature = "pg_test")]

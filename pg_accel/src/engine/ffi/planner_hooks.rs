@@ -492,33 +492,9 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Gate: Skip very narrow rows where GPU sort overhead isn't amortized.
-    let output_width = unsafe { (*(*rel).reltarget).width } as usize;
-    if output_width < 8 {
-        pgrx::debug1!(
-            "pg_accel sort: narrow rows (width={}), deferring to PG",
-            output_width
-        );
-        return;
-    }
-
-    // Gate: Skip large tables when PG could use parallel workers.
-    // PG's Gather Merge with parallel sort is faster than our single-
-    // backend GPU sort. The threshold is set high enough that PG would
-    // choose parallel sort — typically tables with > ~2M rows qualify.
-    // When max_parallel_workers_per_gather = 0, consider_parallel is
-    // still true but PG won't actually use workers.
-    if rel_ref.consider_parallel && rows > 20_000_000 {
-        // Check if max_parallel_workers_per_gather > 0 via GUC.
-        let max_par = unsafe { pg_sys::max_parallel_workers_per_gather };
-        if max_par > 0 {
-            pgrx::debug1!(
-                "pg_accel sort: large table ({} rows) with parallel available, deferring to PG",
-                rows
-            );
-            return;
-        }
-    }
+    // Width is used for cost estimation but not as a hard gate —
+    // the cost model decides whether GPU sort is beneficial.
+    let _output_width = unsafe { (*(*rel).reltarget).width } as usize;
 
     // Extract sort key info from the single PathKey.
     // SAFETY: sort_pathkeys has exactly 1 element (checked above).
@@ -611,28 +587,21 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Cost estimate: GPU sort replaces PG's comparison-based sort.
-    // Custom Scan sort has per-row overhead that PG's native sort
-    // avoids: input materialization (ExecCopySlotMinimalTuple) and
-    // output yield (ExecForceStoreMinimalTuple). Only beneficial when
-    // the sort itself is the bottleneck (e.g., disk spill on wide rows).
+    // Universal cost model for self-scanning sort path.
+    // Sort extracts 1 key column; output includes all columns (yield overhead
+    // accounted for in scan_cost component of self_scan_cost).
     // SAFETY: cheapest is non-null.
     let base = unsafe { &*cheapest };
     #[allow(clippy::cast_precision_loss)]
     let n = base.rows;
-    let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    // Per-row overhead for Custom Scan sort: materialization (0.005) +
-    // key extraction (0.002) + comparison sort O(n log n) amortized (0.06) +
-    // yield/deform (0.025) + Custom Scan framing (0.03).
-    // This must be high enough that PG's native sort wins when GPU kernel
-    // is unavailable (CPU fallback is strictly slower than PG native sort).
-    let per_row = 0.15;
-    let sort_cost = n * per_row;
-    let startup_cost = base.startup_cost + gpu_overhead;
-    // Honest cost — do not apply cost_multiplier. Custom Scan sort has
-    // inherent per-row overhead that makes it slower than PG native sort
-    // unless the GPU kernel provides a real speedup.
-    let total_cost = base.total_cost + gpu_overhead + sort_cost;
+    let sort_scan_cost = cost::self_scan_cost(
+        n,
+        1, // single sort key column
+        cost::device_limits().gpu_op_cost_sort,
+    );
+    let startup_cost = base.startup_cost + cost::GPU_LAUNCH_OVERHEAD;
+    // Honest cost — no cost_multiplier. Let add_path() decide.
+    let total_cost = base.total_cost + sort_scan_cost;
 
     // Build the sort key descriptor.
     let sort_key = SortKeyDesc {
@@ -1367,18 +1336,67 @@ unsafe fn pgaccel_inject_gpu_window(
             }
         };
 
-    // Honest cost — no cost_multiplier discount. Window functions process
-    // all input rows and add window output columns, so cost is:
-    //   child_cost + per_row_overhead * rows * num_specs
+    // Detect whether we can do a direct heap scan (vectorized path).
+    // This is possible when:
+    // 1. No sort is needed (no PARTITION BY, no ORDER BY), AND
+    // 2. The cheapest input path is on a simple base relation
+    //
+    // When these conditions hold, we can scan the heap directly instead of
+    // pulling tuples through ExecProcNode on a child SeqScan plan.
+    let no_sort_needed =
+        window_pathkeys.is_null() || unsafe { pg_sys::list_length(window_pathkeys) } == 0;
+
+    // SAFETY: cheapest path's parent is the input_rel.
+    let scan_relid: pg_sys::Index = if no_sort_needed {
+        let parent = unsafe { (*cheapest).parent };
+        if !parent.is_null() {
+            let rel = unsafe { &*parent };
+            // A simple base relation has relid > 0 and reloptkind == RELOPT_BASEREL.
+            if rel.relid > 0 && rel.reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL {
+                rel.relid
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Universal cost model for window path via self_scan_cost.
+    // Count extracted columns: each spec contributes partition + order + value columns.
     // SAFETY: sorted_path is non-null.
     let base = unsafe { &*sorted_path };
-    let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    // Realistic per-row cost: datum extract + partition detect + yield overhead.
-    // Measured ~30µs/row total on M2 Max (vs PG's ~5µs/row for native WindowAgg).
-    let per_row = 0.03;
-    let window_cost = base.rows * per_row * specs.len() as f64;
-    let startup_cost = base.total_cost + gpu_overhead;
-    let total_cost = base.total_cost + gpu_overhead + window_cost;
+    #[allow(clippy::cast_precision_loss)]
+    let num_extract_cols: usize = specs.iter().map(|s| {
+        let mut cols = 0usize;
+        if s.partition_attno > 0 { cols += 1; }
+        if s.order_attno > 0 { cols += 1; }
+        if s.value_attno > 0 { cols += 1; }
+        cols
+    }).sum::<usize>().max(1);
+    let window_scan_cost = cost::self_scan_cost(
+        base.rows,
+        num_extract_cols,
+        cost::device_limits().gpu_op_cost_window * specs.len() as f64,
+    );
+    let startup_cost = base.total_cost + cost::GPU_LAUNCH_OVERHEAD;
+    let total_cost = base.total_cost + window_scan_cost;
+
+    // Cost gate: skip injection when our cost is within 90% of PG's best
+    // existing window path. Custom Scan per-row yield overhead means marginal
+    // wins are illusory — only inject when we offer a clear advantage.
+    let output_ref = unsafe { &*output_rel };
+    let pg_best_cost = unsafe { find_cheapest_total_cost(output_ref.pathlist) };
+    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * 0.90 {
+        pgrx::debug1!(
+            "pg_accel window: cost {:.1} >= 90% of PG best {:.1}, skipping",
+            total_cost,
+            pg_best_cost,
+        );
+        return;
+    }
 
     // SAFETY: Allocating via palloc, building valid CustomPath.
     unsafe {
@@ -1392,8 +1410,9 @@ unsafe fn pgaccel_inject_gpu_window(
         );
 
         // Serialize window specs into custom_private.
-        // Layout: [num_specs, func0, part_attno0, order_attno0, value_attno0,
-        //   offset0, default_bits0, result_type0, ...]
+        // Layout: [num_specs, spec0..., scan_relid]
+        // The scan_relid is appended after all specs so the existing
+        // deserialization of specs (starting at index 0) is unchanged.
         let mut priv_list: *mut List = std::ptr::null_mut();
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let num_specs = specs.len() as i32;
@@ -1412,14 +1431,21 @@ unsafe fn pgaccel_inject_gpu_window(
                 pg_sys::makeInteger(spec.result_type_oid as i32).cast(),
             );
         }
+
+        // Append scan_relid for direct heap scan (0 = use child plan).
+        #[allow(clippy::cast_possible_wrap)]
+        let relid_int = scan_relid as i32;
+        priv_list = lappend(priv_list, pg_sys::makeInteger(relid_int).cast());
+
         (*cpath).custom_private = priv_list;
 
         add_path(output_rel, cpath.cast());
 
         pgrx::debug1!(
-            "pg_accel: injected GpuWindow path for {} spec(s), rows={}",
+            "pg_accel: injected GpuWindow path for {} spec(s), rows={}, scan_relid={}",
             specs.len(),
-            rows
+            rows,
+            scan_relid
         );
     }
 }
@@ -2653,8 +2679,17 @@ unsafe fn pgaccel_inject_gpu_agg(
     // doesn't evaluate quals.
     let has_quals = !input_ref.baserestrictinfo.is_null()
         && unsafe { pg_sys::list_length(input_ref.baserestrictinfo) } > 0;
+    // Self-scan requires: (1) base relation, (2) cheapest path is a plain
+    // Path (T_Path = SeqScan), not a Sort/WindowAgg/etc. This prevents
+    // self-scanning when the input needs preprocessing (e.g., window funcs).
+    let is_baserel =
+        input_ref.reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL && input_ref.relid > 0;
+    let child_is_plain_path = unsafe {
+        (*cheapest.cast::<pg_sys::Node>()).type_ == NodeTag::T_Path
+    };
     let self_scan_relid: pg_sys::Index = if !child_is_our_scan
-        && input_ref.relid > 0
+        && is_baserel
+        && child_is_plain_path
         && rows >= cost::device_limits().gpu_reduce_min_rows
         && !has_quals
     {

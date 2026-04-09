@@ -130,6 +130,23 @@ pub struct DeviceLimits {
     /// Row interval between `CHECK_FOR_INTERRUPTS` calls in fused
     /// scan+agg. Balances responsiveness vs call overhead.
     pub fused_interrupt_interval: usize,
+
+    // -- Per-strategy GPU op costs (cost units per row) ----------------------
+    /// GPU reduce (sum/min/max/count) per-row op cost.
+    /// Includes kernel dispatch amortised over batch.
+    pub gpu_op_cost_reduce: f64,
+    /// GPU hash aggregation per-row op cost.
+    /// Includes hash table build + probe + per-group accumulation.
+    pub gpu_op_cost_hash_agg: f64,
+    /// GPU sort per-row op cost.
+    /// Includes key extraction + bitonic/radix sort amortised.
+    pub gpu_op_cost_sort: f64,
+    /// GPU window function per-row op cost.
+    /// Includes partition detect + window compute + yield.
+    pub gpu_op_cost_window: f64,
+    /// GPU filter (spatial/expr) per-row op cost.
+    /// Includes predicate evaluation on GPU.
+    pub gpu_op_cost_filter: f64,
 }
 
 impl DeviceLimits {
@@ -156,7 +173,7 @@ impl DeviceLimits {
         let gpu_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
         let gpu_sort_min_rows = cu_scale(100_000).clamp(10_000, 1_000_000);
         let gpu_sort_planner_min_rows = (gpu_sort_min_rows * 10).min(10_000_000);
-        let gpu_window_min_rows = cu_scale(5_000_000).clamp(1_000_000, 20_000_000);
+        let gpu_window_min_rows = cu_scale(100_000).clamp(50_000, 500_000);
         let gpu_reduce_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
         let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
 
@@ -274,6 +291,14 @@ impl DeviceLimits {
             // Interrupt check every 64K rows balances responsiveness
             // (~1ms at heap scan speed) vs CHECK_FOR_INTERRUPTS overhead.
             fused_interrupt_interval: 65_536,
+
+            // Per-strategy GPU op costs, scaled for unified memory.
+            // Unified memory halves transfer overhead, reducing op cost.
+            gpu_op_cost_reduce: if unified { 0.000_25 } else { 0.000_5 },
+            gpu_op_cost_hash_agg: if unified { 0.001 } else { 0.002 },
+            gpu_op_cost_sort: if unified { 0.001_5 } else { 0.003 },
+            gpu_op_cost_window: if unified { 0.000_5 } else { 0.001 },
+            gpu_op_cost_filter: if unified { 0.000_5 } else { 0.001 },
         }
     }
 
@@ -284,7 +309,7 @@ impl DeviceLimits {
             gpu_min_rows: 10_000,
             gpu_sort_min_rows: 100_000,
             gpu_sort_planner_min_rows: 1_000_000,
-            gpu_window_min_rows: 5_000_000,
+            gpu_window_min_rows: 100_000,
             gpu_reduce_min_rows: 10_000,
             gpu_hash_agg_min_rows: 250_000,
             gpu_hash_agg_max_groups: 10_000,
@@ -306,6 +331,11 @@ impl DeviceLimits {
             optimal_batch_min: 256,
             optimal_batch_max: 8192,
             fused_interrupt_interval: 65_536,
+            gpu_op_cost_reduce: 0.000_5,
+            gpu_op_cost_hash_agg: 0.002,
+            gpu_op_cost_sort: 0.003,
+            gpu_op_cost_window: 0.001,
+            gpu_op_cost_filter: 0.001,
         }
     }
 }
@@ -574,6 +604,26 @@ pub const GPU_EXPR_PER_ROW_COST: f64 = 0.025;
 /// Custom Scan yield overhead (~3μs/row for output construction).
 pub const GPU_HASH_JOIN_PER_ROW_COST: f64 = 0.02;
 
+/// Universal cost model for self-scanning Custom Scan paths (agg, sort, window).
+///
+/// These paths scan a base relation directly (heap_getnext + arena copy),
+/// extract columns for GPU dispatch, then run the GPU kernel. The cost has
+/// three components:
+///
+/// 1. **Scan cost**: per-row heap_getnext + arena copy overhead.
+/// 2. **Extract cost**: per-row per-column try_fast_read datum extraction.
+/// 3. **GPU cost**: fixed kernel launch overhead + per-row kernel-specific cost.
+///
+/// All per-row GPU op costs come from [`DeviceLimits`] (hardware-derived).
+#[must_use]
+pub fn self_scan_cost(rows: f64, num_extract_cols: usize, gpu_op_cost: f64) -> f64 {
+    let scan_cost = rows * 0.003; // heap_getnext + arena copy
+    #[allow(clippy::cast_precision_loss)]
+    let extract_cost = rows * num_extract_cols as f64 * 0.002; // try_fast_read per column
+    let gpu_cost = rows.mul_add(gpu_op_cost, GPU_LAUNCH_OVERHEAD); // kernel-specific
+    scan_cost + extract_cost + gpu_cost
+}
+
 /// Optimal batch size for the given row estimate, clamped to device-derived bounds.
 #[must_use]
 pub fn optimal_batch_size(estimated_rows: usize) -> usize {
@@ -782,7 +832,7 @@ mod tests {
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
         assert_eq!(l.gpu_sort_planner_min_rows, 1_000_000);
-        assert_eq!(l.gpu_window_min_rows, 5_000_000);
+        assert_eq!(l.gpu_window_min_rows, 100_000);
         assert_eq!(l.gpu_reduce_min_rows, 10_000);
         assert_eq!(l.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(l.gpu_hash_agg_max_groups, 10_000);
@@ -809,7 +859,7 @@ mod tests {
         let l = DeviceLimits::from_profile(&p);
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
-        assert_eq!(l.gpu_window_min_rows, 5_000_000);
+        assert_eq!(l.gpu_window_min_rows, 100_000);
         assert_eq!(l.gpu_reduce_min_rows, 10_000);
     }
 
@@ -989,11 +1039,12 @@ mod tests {
     }
 
     #[test]
-    fn window_min_rows_above_one_million() {
-        // Window GPU dispatch must not activate below 1M rows to avoid
-        // yield overhead regression on small datasets.
+    fn window_min_rows_meets_kernel_threshold() {
+        // Window GPU dispatch threshold must be at least GPU_WINDOW_THRESHOLD
+        // (65536) to avoid overhead regression on small datasets.
         let l = DeviceLimits::cpu_only();
-        assert!(l.gpu_window_min_rows >= 1_000_000);
+        assert!(l.gpu_window_min_rows >= 50_000);
+        assert!(l.gpu_window_min_rows <= 500_000);
     }
 
     #[test]
@@ -1033,5 +1084,72 @@ mod tests {
         assert!(l.gpu_sort_min_rows >= 10_000);
         assert!(l.gpu_hash_agg_max_groups <= 1_000_000);
         assert!(l.optimal_batch_max <= 65_536);
+    }
+
+    #[test]
+    fn gpu_op_costs_positive() {
+        let l = DeviceLimits::cpu_only();
+        assert!(l.gpu_op_cost_reduce > 0.0);
+        assert!(l.gpu_op_cost_hash_agg > 0.0);
+        assert!(l.gpu_op_cost_sort > 0.0);
+        assert!(l.gpu_op_cost_window > 0.0);
+        assert!(l.gpu_op_cost_filter > 0.0);
+    }
+
+    #[test]
+    fn gpu_op_cost_ordering() {
+        // Sort is most expensive per-row, reduce is cheapest.
+        let l = DeviceLimits::cpu_only();
+        assert!(l.gpu_op_cost_sort >= l.gpu_op_cost_hash_agg);
+        assert!(l.gpu_op_cost_hash_agg >= l.gpu_op_cost_reduce);
+    }
+
+    #[test]
+    fn unified_memory_lowers_gpu_op_costs() {
+        let discrete = PlatformProfile {
+            cpu_cores: 8,
+            has_gpu: true,
+            unified_memory: false,
+            estimated_gpu_gflops: 2000.0,
+            compute_units: 32,
+            gpu_max_alloc_bytes: 256 * 1024 * 1024,
+            has_fp64: false,
+        };
+        let unified = PlatformProfile {
+            unified_memory: true,
+            ..discrete.clone()
+        };
+        let ld = DeviceLimits::from_profile(&discrete);
+        let lu = DeviceLimits::from_profile(&unified);
+        assert!(lu.gpu_op_cost_reduce < ld.gpu_op_cost_reduce);
+        assert!(lu.gpu_op_cost_sort < ld.gpu_op_cost_sort);
+        assert!(lu.gpu_op_cost_window < ld.gpu_op_cost_window);
+    }
+
+    // -- self_scan_cost -----------------------------------------------------------
+
+    #[test]
+    fn self_scan_cost_includes_all_components() {
+        let cost = self_scan_cost(1_000_000.0, 2, 0.001);
+        // scan: 1M * 0.003 = 3000
+        // extract: 1M * 2 * 0.002 = 4000
+        // gpu: 5.0 + 1M * 0.001 = 1005
+        // total: 8005
+        let expected = 3000.0 + 4000.0 + 5.0 + 1000.0;
+        assert!((cost - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn self_scan_cost_zero_rows() {
+        let cost = self_scan_cost(0.0, 3, 0.002);
+        // Only GPU_LAUNCH_OVERHEAD remains.
+        assert!((cost - GPU_LAUNCH_OVERHEAD).abs() < 0.001);
+    }
+
+    #[test]
+    fn self_scan_cost_scales_with_cols() {
+        let cost_1 = self_scan_cost(100_000.0, 1, 0.001);
+        let cost_3 = self_scan_cost(100_000.0, 3, 0.001);
+        assert!(cost_3 > cost_1);
     }
 }

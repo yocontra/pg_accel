@@ -125,6 +125,11 @@ pub struct WindowExecState {
     /// Whether the child plan is exhausted.
     child_exhausted: bool,
 
+    /// Table scan descriptor for direct heap scan (vectorized path).
+    /// When non-null, `next_vectorized` scans the heap directly instead of
+    /// pulling tuples one at a time via `ExecProcNode` on a child plan.
+    scan_desc: pg_sys::TableScanDesc,
+
     // -- Counters for EXPLAIN ANALYZE --
     pub rows_dispatched: u64,
     pub batches_executed: u64,
@@ -153,6 +158,7 @@ impl WindowExecState {
             emit_pos: 0,
             compute_done: false,
             child_exhausted: false,
+            scan_desc: std::ptr::null_mut(),
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
@@ -295,6 +301,292 @@ impl WindowExecState {
         }
 
         result_slot
+    }
+
+    /// Configure direct heap scan mode for the vectorized path.
+    ///
+    /// When set, [`next_vectorized`](Self::next_vectorized) scans the heap
+    /// directly via `heap_getnext` instead of pulling tuples through
+    /// `ExecProcNode` on a child plan node.
+    pub fn set_scan_desc(&mut self, desc: pg_sys::TableScanDesc) {
+        self.scan_desc = desc;
+    }
+
+    /// Returns `true` if a direct heap scan descriptor has been configured.
+    #[must_use]
+    pub fn has_scan_desc(&self) -> bool {
+        !self.scan_desc.is_null()
+    }
+
+    /// Returns the table scan descriptor (for cleanup in `end_custom_scan`).
+    #[must_use]
+    pub fn scan_desc(&self) -> pg_sys::TableScanDesc {
+        self.scan_desc
+    }
+
+    /// Vectorized path: scan the heap directly, compute window functions,
+    /// and emit result tuples one at a time.
+    ///
+    /// On the first call this method scans all rows from the heap via
+    /// `heap_getnext`, converts each to a `MinimalTuple`, extracts the
+    /// columns needed by window specs, dispatches GPU kernels, and stores
+    /// the results. Subsequent calls emit one result tuple at a time with
+    /// window result columns appended.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `result_slot` must be a
+    /// valid `TupleTableSlot`. `self.scan_desc` must be non-null and valid.
+    pub unsafe fn next_vectorized(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.window_emit", pos = self.emit_pos).entered();
+
+        if !self.compute_done {
+            // SAFETY: scan_desc is valid and non-null (caller guarantees).
+            // result_slot is valid. Main backend thread.
+            unsafe {
+                self.consume_and_compute_vectorized(result_slot);
+            }
+        }
+
+        if self.emit_pos >= self.tuples.len() {
+            return std::ptr::null_mut();
+        }
+
+        let mt = self.tuples[self.emit_pos];
+        let pos = self.emit_pos;
+        self.emit_pos += 1;
+
+        if mt.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        // Emit logic is identical to the non-vectorized path: build a
+        // virtual tuple with base columns from the MinimalTuple plus
+        // appended window function result columns.
+        //
+        // SAFETY: result_slot, mt, and tupdesc are valid. Main backend thread.
+        unsafe {
+            let tupdesc = (*result_slot).tts_tupleDescriptor;
+            if tupdesc.is_null() {
+                return std::ptr::null_mut();
+            }
+
+            let natts = (*tupdesc).natts as usize;
+            let base_natts = natts.saturating_sub(self.specs.len());
+
+            pg_sys::ExecClearTuple(result_slot);
+
+            let values = (*result_slot).tts_values;
+            let nulls = (*result_slot).tts_isnull;
+            if values.is_null() || nulls.is_null() {
+                return std::ptr::null_mut();
+            }
+
+            for i in 0..natts {
+                *values.add(i) = pg_sys::Datum::from(0);
+                *nulls.add(i) = true;
+            }
+
+            let heap_tuple = pg_sys::heap_tuple_from_minimal_tuple(mt);
+            for i in 0..base_natts {
+                let attno = (i + 1) as i16;
+                let mut is_null = false;
+                // SAFETY: heap_tuple and tupdesc are valid.
+                let datum = pg_sys::heap_getattr(heap_tuple, attno.into(), tupdesc, &mut is_null);
+                *values.add(i) = datum;
+                *nulls.add(i) = is_null;
+            }
+            pg_sys::pfree(heap_tuple.cast());
+
+            for (spec_idx, spec) in self.specs.iter().enumerate() {
+                let col_idx = base_natts + spec_idx;
+                if col_idx >= natts {
+                    break;
+                }
+
+                let (datum, is_null) = match spec.func {
+                    WindowFunc::RowNumber
+                    | WindowFunc::Rank
+                    | WindowFunc::DenseRank
+                    | WindowFunc::Count => {
+                        let val = self
+                            .i64_results
+                            .get(spec_idx)
+                            .and_then(|v| v.get(pos))
+                            .copied()
+                            .unwrap_or(0);
+                        (pg_sys::Datum::from(val), false)
+                    }
+                    WindowFunc::Sum => {
+                        let val = self
+                            .f64_results
+                            .get(spec_idx)
+                            .and_then(|v| v.get(pos))
+                            .copied()
+                            .unwrap_or(0.0);
+                        (pg_sys::Datum::from(val.to_bits()), false)
+                    }
+                    WindowFunc::Lag | WindowFunc::Lead => {
+                        let is_null = self
+                            .null_results
+                            .get(spec_idx)
+                            .and_then(|v| v.get(pos))
+                            .copied()
+                            .unwrap_or(0)
+                            != 0;
+                        let val = self
+                            .f64_results
+                            .get(spec_idx)
+                            .and_then(|v| v.get(pos))
+                            .copied()
+                            .unwrap_or(0.0);
+                        (pg_sys::Datum::from(val.to_bits()), is_null)
+                    }
+                };
+
+                *values.add(col_idx) = datum;
+                *nulls.add(col_idx) = is_null;
+            }
+
+            pg_sys::ExecStoreVirtualTuple(result_slot);
+        }
+
+        result_slot
+    }
+
+    /// Vectorized consume: scan all rows from the heap directly and compute
+    /// window functions.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `self.scan_desc` must be
+    /// non-null and valid. `scratch_slot` must be a valid `TupleTableSlot`.
+    #[allow(clippy::too_many_lines)]
+    unsafe fn consume_and_compute_vectorized(&mut self, scratch_slot: *mut pg_sys::TupleTableSlot) {
+        let start = std::time::Instant::now();
+        let _span =
+            tracing::info_span!("exec.window_compute_vscan", n_specs = self.specs.len()).entered();
+
+        // -- Phase 1: Scan all rows from the heap --
+        loop {
+            // SAFETY: scan_desc is valid; main backend thread.
+            let htup = unsafe {
+                pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
+            };
+            if htup.is_null() {
+                break;
+            }
+
+            // SAFETY: htup is a valid HeapTuple from heap_getnext.
+            let mt = unsafe { pg_sys::minimal_tuple_from_heap_tuple(htup) };
+            self.tuples.push(mt);
+            self.rows_dispatched += 1;
+
+            if self.tuples.len().is_multiple_of(self.batch_size) {
+                self.batches_executed += 1;
+                pgrx::check_for_interrupts!();
+            }
+        }
+        self.batches_executed += 1;
+
+        let n = self.tuples.len();
+        if n == 0 {
+            self.compute_done = true;
+            self.dispatch_time_us = start.elapsed().as_micros() as u64;
+            return;
+        }
+
+        // -- Phase 2: Extract columns needed by window specs --
+        let tupdesc = unsafe { (*scratch_slot).tts_tupleDescriptor };
+
+        let partition_attno = self.specs.first().map_or(0, |s| s.partition_attno);
+        let partition_starts = if partition_attno > 0 {
+            // SAFETY: tupdesc is valid, tuples are valid MinimalTuples.
+            unsafe { self.build_partition_starts(partition_attno, tupdesc) }
+        } else {
+            let mut ps = vec![0u8; n];
+            ps[0] = 1;
+            ps
+        };
+
+        // -- Phase 3: Dispatch each window function via GPU --
+        for (spec_idx, spec) in self.specs.iter().enumerate() {
+            let _span = tracing::debug_span!("gpu.window", func = ?spec.func, n = n).entered();
+
+            match spec.func {
+                WindowFunc::RowNumber => {
+                    let mut results = vec![0i64; n];
+                    gpu::window_row_number(&partition_starts, &mut results);
+                    self.i64_results[spec_idx] = results;
+                }
+                WindowFunc::Rank => {
+                    let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
+                    let mut results = vec![0i64; n];
+                    gpu::window_rank(&partition_starts, &sort_keys, &mut results);
+                    self.i64_results[spec_idx] = results;
+                }
+                WindowFunc::DenseRank => {
+                    let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
+                    let mut results = vec![0i64; n];
+                    gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results);
+                    self.i64_results[spec_idx] = results;
+                }
+                WindowFunc::Sum => {
+                    let (values, null_mask) =
+                        unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
+                    let mut results = vec![0.0f64; n];
+                    gpu::window_sum(&partition_starts, &values, &null_mask, &mut results);
+                    self.f64_results[spec_idx] = results;
+                }
+                WindowFunc::Count => {
+                    let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
+                    let mut results = vec![0i64; n];
+                    gpu::window_count(&partition_starts, &null_mask, &mut results);
+                    self.i64_results[spec_idx] = results;
+                }
+                WindowFunc::Lag => {
+                    let (values, null_mask) =
+                        unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
+                    let mut results = vec![0.0f64; n];
+                    let mut result_nulls = vec![0u8; n];
+                    gpu::window_lag(
+                        &partition_starts,
+                        &values,
+                        &null_mask,
+                        spec.offset,
+                        spec.default_val,
+                        &mut results,
+                        &mut result_nulls,
+                    );
+                    self.f64_results[spec_idx] = results;
+                    self.null_results[spec_idx] = result_nulls;
+                }
+                WindowFunc::Lead => {
+                    let (values, null_mask) =
+                        unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
+                    let mut results = vec![0.0f64; n];
+                    let mut result_nulls = vec![0u8; n];
+                    gpu::window_lead(
+                        &partition_starts,
+                        &values,
+                        &null_mask,
+                        spec.offset,
+                        spec.default_val,
+                        &mut results,
+                        &mut result_nulls,
+                    );
+                    self.f64_results[spec_idx] = results;
+                    self.null_results[spec_idx] = result_nulls;
+                }
+            }
+            pgrx::check_for_interrupts!();
+        }
+
+        self.compute_done = true;
+        self.dispatch_time_us = start.elapsed().as_micros() as u64;
     }
 
     /// Consume all input tuples and compute window functions.

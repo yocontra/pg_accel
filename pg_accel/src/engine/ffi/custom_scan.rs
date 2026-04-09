@@ -823,9 +823,7 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
         };
 
         // Copy window specs from path's custom_private, remapping attnos.
-        // Path layout: [num_specs, spec0_func, spec0_part_attno, spec0_order_attno,
-        //               spec0_value_attno, spec0_offset, spec0_default_bits,
-        //               spec0_result_type, ...]
+        // Path layout: [num_specs, spec0..., scan_relid]
         if path_len > 0 {
             let num_specs = list_int_at(path_priv, 0);
             list = pg_sys::lappend(list, pg_sys::makeInteger(num_specs).cast());
@@ -846,6 +844,15 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
                     }
                 }
             }
+
+            // Copy scan_relid (last element in path private, after all specs).
+            let scan_relid_idx = 1 + num_specs * WINDOW_SPEC_INTS as c_int;
+            let scan_relid = if scan_relid_idx < path_len as c_int {
+                list_int_at(path_priv, scan_relid_idx)
+            } else {
+                0
+            };
+            list = pg_sys::lappend(list, pg_sys::makeInteger(scan_relid).cast());
         }
 
         (*cscan).custom_private = list;
@@ -2251,14 +2258,36 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             Box::into_raw(exec).cast()
         } else if privdata.gpu_strategy == GpuStrategy::Window {
             pgrx::debug1!(
-                "pg_accel: begin_custom_scan: Window strategy, {} specs",
-                privdata.window_specs.len()
+                "pg_accel: begin_custom_scan: Window strategy, {} specs, scan_relid={}",
+                privdata.window_specs.len(),
+                privdata.window_scan_relid
             );
-            let exec = Box::new(WindowExecState::new(
+            let mut exec = Box::new(WindowExecState::new(
                 AccelStrategy::GpuWindow,
                 batch_size,
                 privdata.window_specs,
             ));
+
+            // Open direct heap scan when scan_relid > 0 (vectorized path).
+            if privdata.window_scan_relid > 0 {
+                // SAFETY: estate is valid; scan_relid is a valid RT index.
+                let estate = (*node).ss.ps.state;
+                let rt_entry = pg_sys::exec_rt_fetch(privdata.window_scan_relid, estate);
+                if !rt_entry.is_null() {
+                    // SAFETY: estate and scan_relid are valid; main backend thread.
+                    let rel =
+                        pg_sys::ExecOpenScanRelation(estate, privdata.window_scan_relid, eflags);
+                    let snap = (*estate).es_snapshot;
+                    // SAFETY: rel and snap are valid; main backend thread.
+                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                    exec.set_scan_desc(sd);
+                    pgrx::debug1!(
+                        "pg_accel: begin_custom_scan: Window vectorized scan, relid={}",
+                        privdata.window_scan_relid
+                    );
+                }
+            }
+
             Box::into_raw(exec).cast()
         } else if privdata.gpu_strategy == GpuStrategy::Sort {
             let mut exec = Box::new(SortExecState::new(
@@ -2304,7 +2333,8 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                         (0, 0)
                     };
 
-                    let vscan = SortVectorizedScan::new(sd, key_attno, key_typid);
+                    // SAFETY: rel is a valid, open Relation.
+                    let vscan = unsafe { SortVectorizedScan::new(sd, rel, key_attno, key_typid) };
                     exec.set_vscan(vscan);
                     pgrx::debug1!(
                         "pg_accel: begin_custom_scan: Sort VectorizedScan, \
@@ -2733,7 +2763,16 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     } else if gpu_strategy == GpuStrategy::Window {
         // SAFETY: For Window strategy, executor points to WindowExecState.
         let win_state = unsafe { &mut *executor.cast::<WindowExecState>() };
-        let slot = unsafe { win_state.next(child_ps, scan_slot) };
+        let slot = if win_state.has_scan_desc() {
+            // Vectorized path: direct heap scan, no child plan.
+            // SAFETY: scan_desc is valid (set in begin_custom_scan).
+            // scan_slot is valid. Main backend thread.
+            unsafe { win_state.next_vectorized(scan_slot) }
+        } else {
+            // Standard path: pull tuples from child plan.
+            // SAFETY: child_ps and scan_slot are valid. Main backend thread.
+            unsafe { win_state.next(child_ps, scan_slot) }
+        };
         (
             slot,
             win_state.rows_dispatched,
@@ -3212,6 +3251,9 @@ struct CustomPrivateData {
     hash_key_type: i32,
     /// Window function specifications. Only meaningful when `gpu_strategy == Window`.
     window_specs: Vec<WindowFuncSpec>,
+    /// Scan relation index for direct heap scan (Window vectorized path).
+    /// 0 means use child plan; > 0 means open this relation directly.
+    window_scan_relid: pg_sys::Index,
     /// Base relation index for self-scanning (vectorized pipeline).
     /// When > 0, the executor opens its own heap scan instead of pulling
     /// tuples through ExecProcNode. Used by Agg and Sort strategies.
@@ -3247,6 +3289,7 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
             self_scan_relid: 0,
         };
     }
@@ -3320,7 +3363,7 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
 
     // For Sort strategy, read self_scan_relid for VectorizedScan.
     // It's one position after limit_tuples in the plan's custom_private.
-    let self_scan_relid = if matches!(gpu_strategy, GpuStrategy::Sort) {
+    let sort_self_scan_relid = if matches!(gpu_strategy, GpuStrategy::Sort) {
         // SAFETY: custom_private is a valid List.
         let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
         let num_keys = unsafe { list_int_at(custom_private, 6) } as usize;
@@ -3434,6 +3477,23 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
         }
     }
 
+    // For Window strategy, read scan_relid after the specs.
+    // Plan layout: [...base 6 fields..., num_specs, spec0..., scan_relid]
+    let window_scan_relid: pg_sys::Index = if matches!(gpu_strategy, GpuStrategy::Window) {
+        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
+        // scan_relid is the last element: index = 7 + num_specs * WINDOW_SPEC_INTS
+        let num_specs_raw = unsafe { list_int_at(custom_private, 6) } as usize;
+        let relid_idx = 7 + num_specs_raw * WINDOW_SPEC_INTS;
+        if relid_idx < list_len {
+            // SAFETY: Index is within bounds (checked above).
+            unsafe { list_int_at(custom_private, relid_idx as c_int) as pg_sys::Index }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     // For Join strategy with GpuHashJoin accel, read hash join info at index 6+.
     // Layout: [...base 6 fields..., inner_attno, key_type]
     let (hash_inner_attno, hash_key_type) = if accel_strategy == AccelStrategy::GpuHashJoin {
@@ -3459,6 +3519,8 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
         } else {
             0
         }
+    } else if matches!(gpu_strategy, GpuStrategy::Sort) {
+        sort_self_scan_relid
     } else {
         0
     };
@@ -3477,6 +3539,7 @@ unsafe fn deserialize_custom_private(custom_private: *mut pg_sys::List) -> Custo
         hash_inner_attno,
         hash_key_type,
         window_specs,
+        window_scan_relid,
         self_scan_relid,
     }
 }
@@ -3918,6 +3981,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         assert_eq!(data.gpu_strategy, GpuStrategy::Scan);
         assert_eq!(data.batch_size, 256);
@@ -3967,6 +4031,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         assert_eq!(data.sort_keys.len(), 2);
         assert_eq!(data.sort_keys[0].attno, 1);
@@ -3997,6 +4062,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         assert!(data.sort_limit.is_none());
     }
@@ -4027,6 +4093,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         assert_eq!(data.agg_columns.len(), 5);
         assert!(matches!(data.agg_columns[0].0, AggOp::Sum));
@@ -4057,6 +4124,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         let gk_ref = data.group_key.as_ref().unwrap();
         assert_eq!(gk_ref.attno, 2);
@@ -4083,6 +4151,7 @@ mod tests {
             hash_inner_attno: 3,
             hash_key_type: 1, // Int64
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         assert_eq!(data.hash_inner_attno, 3);
         assert_eq!(data.hash_key_type, 1);
@@ -4129,6 +4198,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: specs,
+            window_scan_relid: 0,
         };
         assert_eq!(data.window_specs.len(), 2);
         assert!(matches!(data.window_specs[0].func, WindowFunc::RowNumber));
@@ -4153,6 +4223,7 @@ mod tests {
             hash_inner_attno: 0,
             hash_key_type: 0,
             window_specs: vec![],
+            window_scan_relid: 0,
         };
         assert!(data.window_specs.is_empty());
     }

@@ -269,28 +269,6 @@ pub enum PgaccelOp {
 // Fused filter+reduce types (mirrors pgaccel_fused.h).
 // ---------------------------------------------------------------------------
 
-/// Aggregation operation for fused kernels.
-#[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PgaccelFusedAggOp {
-    Sum = 0,
-    Min = 1,
-    Max = 2,
-    Count = 3,
-}
-
-/// Comparison operator for fused filter predicates.
-#[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PgaccelCmpOp {
-    Eq = 0,
-    Ne = 1,
-    Lt = 2,
-    Le = 3,
-    Gt = 4,
-    Ge = 5,
-}
-
 /// Single instruction in a map-algebra expression
 /// (fallback mirror of bridge::PgaccelExprInst).
 #[repr(C)]
@@ -1622,43 +1600,47 @@ pub fn pgaccel_window_lead(
 }
 
 // ---------------------------------------------------------------------------
-// Fused filter+reduce stubs
+// Fused ops types and stubs (mirrors bridge.rs / pgaccel_fused.h)
 // ---------------------------------------------------------------------------
 
-#[must_use]
-pub fn pgaccel_fused_filter_reduce_f32(
-    _filter_col: *const f32,
-    _cmp_op: PgaccelCmpOp,
-    _filter_val: f32,
-    _agg_col: *const f32,
-    _agg_op: PgaccelFusedAggOp,
-    _count: usize,
-    _out_result: *mut f64,
-) -> PgaccelStatus {
-    PgaccelStatus::ErrorNoDevice
+/// Comparison operator constants for fused filter predicates.
+pub mod cmp_op {
+    pub const EQ: i32 = 0;
+    pub const NE: i32 = 1;
+    pub const LT: i32 = 2;
+    pub const LE: i32 = 3;
+    pub const GT: i32 = 4;
+    pub const GE: i32 = 5;
+    pub const ALWAYS_TRUE: i32 = 6;
+}
+
+/// Reduce operation tag constants for fused multi-reduce.
+pub mod reduce_op {
+    pub const SUM: i32 = 0;
+    pub const MIN: i32 = 1;
+    pub const MAX: i32 = 2;
+    pub const COUNT: i32 = 3;
+}
+
+/// Per-column reduce descriptor (mirrors `pgaccel_reduce_col`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PgaccelReduceCol {
+    pub op: i32,
+    pub data: *const f32,
 }
 
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn pgaccel_fused_filter_multi_reduce_f32(
-    _filter_col: *const f32,
-    _cmp_op: PgaccelCmpOp,
-    _filter_val: f32,
-    _agg_cols: *const *const f32,
-    _agg_ops: *const PgaccelFusedAggOp,
-    _num_aggs: usize,
-    _count: usize,
-    _out_results: *mut f64,
-) -> PgaccelStatus {
-    PgaccelStatus::ErrorNoDevice
-}
-
-#[must_use]
-pub fn pgaccel_fused_filter_count_f32(
-    _filter_col: *const f32,
-    _cmp_op: PgaccelCmpOp,
-    _filter_val: f32,
-    _count: usize,
-    _out_count: *mut i64,
+    _filter_data: *const f32,
+    _n: usize,
+    _cmp_op: i32,
+    _cmp_val: f32,
+    _cols: *const PgaccelReduceCol,
+    _num_cols: usize,
+    _results: *mut f32,
+    _pass_count: *mut usize,
 ) -> PgaccelStatus {
     PgaccelStatus::ErrorNoDevice
 }
@@ -2256,57 +2238,6 @@ mod tests {
                 1,
                 0.0,
                 ptr::null_mut(),
-                ptr::null_mut(),
-            ),
-            PgaccelStatus::ErrorNoDevice
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Fused filter+reduce stubs
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn fused_filter_reduce_f32_returns_error_no_device() {
-        assert_eq!(
-            pgaccel_fused_filter_reduce_f32(
-                ptr::null(),
-                PgaccelCmpOp::Gt,
-                0.0,
-                ptr::null(),
-                PgaccelFusedAggOp::Sum,
-                0,
-                ptr::null_mut(),
-            ),
-            PgaccelStatus::ErrorNoDevice
-        );
-    }
-
-    #[test]
-    fn fused_filter_multi_reduce_f32_returns_error_no_device() {
-        assert_eq!(
-            pgaccel_fused_filter_multi_reduce_f32(
-                ptr::null(),
-                PgaccelCmpOp::Lt,
-                0.0,
-                ptr::null(),
-                ptr::null(),
-                0,
-                0,
-                ptr::null_mut(),
-            ),
-            PgaccelStatus::ErrorNoDevice
-        );
-    }
-
-    #[test]
-    fn fused_filter_count_f32_returns_error_no_device() {
-        assert_eq!(
-            pgaccel_fused_filter_count_f32(
-                ptr::null(),
-                PgaccelCmpOp::Eq,
-                0.0,
-                0,
                 ptr::null_mut(),
             ),
             PgaccelStatus::ErrorNoDevice

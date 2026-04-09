@@ -777,9 +777,9 @@ impl SortExecState {
 
         // Phase 1: Scan all rows and sort (once).
         if !self.sort_done {
-            // SAFETY: vscan is Some (caller guarantees), result_slot valid.
+            // SAFETY: vscan is Some (caller guarantees).
             unsafe {
-                self.vscan_consume_and_sort(result_slot);
+                self.vscan_consume_and_sort();
             }
         }
 
@@ -813,22 +813,32 @@ impl SortExecState {
     ///
     /// Must be called on the main backend thread. `scan_slot` must be valid.
     #[allow(clippy::too_many_lines)]
-    unsafe fn vscan_consume_and_sort(&mut self, scan_slot: *mut pg_sys::TupleTableSlot) {
+    unsafe fn vscan_consume_and_sort(&mut self) {
         let start = std::time::Instant::now();
 
-        let vscan = self.vscan.as_mut().expect("vscan must be set");
+        // Extract everything from vscan in one block to release the borrow
+        // before calling self methods (apply_gpu_sort_result, sort_tuples).
+        let (n, key_typid, scratch_slot, non_null_indices, null_indices, f32_keys, f64_keys) = {
+            let vscan = self.vscan.as_mut().expect("vscan must be set");
+            // SAFETY: vscan has its own scan slot and valid scan_desc.
+            let n = unsafe { vscan.scan_all() };
+            let key_typid = vscan.key_typid();
+            let scratch_slot = vscan.scan_slot();
+            let arena = vscan.take_arena();
+            let non_null = vscan.take_non_null_indices();
+            let null_idx = vscan.take_null_indices();
+            let f32k = vscan.take_keys_f32();
+            let f64k = vscan.take_keys_f64();
+            // Move arena into sorted_tuples (vscan no longer owns them).
+            self.sorted_tuples = arena;
+            (n, key_typid, scratch_slot, non_null, null_idx, f32k, f64k)
+        };
 
-        // SAFETY: scan_slot is valid, vscan.scan_desc is valid.
-        let n = unsafe { vscan.scan_all(scan_slot) };
         self.rows_dispatched = n as u64;
         self.batches_executed = 1;
 
-        // Take the arena from vscan — sorted_tuples now owns the MinimalTuples.
-        self.sorted_tuples = vscan.take_arena();
-
         if n > 1 && !self.sort_keys.is_empty() {
             let limits = cost::device_limits();
-            let key_typid = vscan.key_typid();
             let do_inline = matches!(key_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
 
             let gpu_done = if do_inline
@@ -836,12 +846,10 @@ impl SortExecState {
                 && n <= limits.gpu_sort_max_elements
             {
                 let key = self.sort_keys[0].clone();
-                let non_null_indices = vscan.take_non_null_indices();
-                let null_indices = vscan.take_null_indices();
 
                 match key_typid {
                     FLOAT4OID => {
-                        let mut f32_keys = vscan.take_keys_f32();
+                        let mut f32_keys = f32_keys;
                         if f32_keys.is_empty() {
                             false
                         } else {
@@ -860,7 +868,7 @@ impl SortExecState {
                         }
                     }
                     FLOAT8OID | INT4OID | INT8OID => {
-                        let mut f64_keys = vscan.take_keys_f64();
+                        let mut f64_keys = f64_keys;
                         if f64_keys.is_empty() {
                             false
                         } else {
@@ -885,15 +893,14 @@ impl SortExecState {
             };
 
             if !gpu_done {
-                // Defer to PG's SortSupport comparison infrastructure.
                 pgrx::warning!(
                     "pg_accel: GPU sort unavailable for {} rows (vscan); \
                      deferring to PG SortSupport",
                     n,
                 );
-                // SAFETY: scan_slot is valid, main backend thread.
+                // SAFETY: scratch_slot has base relation's TupleDesc.
                 unsafe {
-                    self.sort_tuples(scan_slot, n);
+                    self.sort_tuples(scratch_slot, n);
                 }
             }
         }

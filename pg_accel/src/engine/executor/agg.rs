@@ -642,7 +642,11 @@ impl AggExecState {
             pgrx::check_for_interrupts!();
         }
 
-        // Dispatch GPU reduce for columns that buffered values.
+        // Try fused multi-reduce first (single GPU pass for all columns),
+        // then fall back to per-column dispatch for any columns not handled.
+        self.try_fused_multi_reduce();
+
+        // Per-column fallback for columns not handled by fused path.
         for col in &mut self.columns {
             if !col.gpu_values.is_empty() {
                 col.dispatch_gpu_reduce();
@@ -1471,7 +1475,11 @@ impl AggExecState {
         self.batches_executed = 1;
         self.dispatch_time_us = start.elapsed().as_micros() as u64;
 
-        // Dispatch GPU reduce for columns that buffered values.
+        // Try fused multi-reduce first (single GPU pass for all columns),
+        // then fall back to per-column dispatch for any columns not handled.
+        self.try_fused_multi_reduce();
+
+        // Per-column fallback for columns not handled by fused path.
         for col in &mut self.columns {
             if !col.gpu_values.is_empty() {
                 col.dispatch_gpu_reduce();
@@ -1504,6 +1512,125 @@ impl AggExecState {
         );
 
         result_slot
+    }
+
+    /// Attempt a single fused GPU pass that reduces all eligible columns
+    /// simultaneously via `fused_filter_multi_reduce_f32`.  When several
+    /// columns need the same reduce-style operation (Sum/Avg/Min/Max) they
+    /// can be computed simultaneously.
+    ///
+    /// Only eligible for non-grouped, simple reduce strategy with multiple
+    /// columns. Columns successfully reduced are drained; columns that
+    /// cannot participate (e.g., wrong type, Count) are left for per-column
+    /// dispatch.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn try_fused_multi_reduce(&mut self) {
+        // Only attempt fused path for GpuReduce strategy, non-grouped,
+        // with at least 2 GPU-buffered columns worth reducing together.
+        if self.strategy != AccelStrategy::GpuReduce || self.group_key.is_some() {
+            return;
+        }
+
+        let limits = cost::device_limits();
+
+        // Identify eligible columns: have GPU-buffered values, are
+        // Sum/Avg/Min/Max (not Count/Passthrough), and all have the
+        // same row count (they were extracted from the same rows).
+        // Avg participates as Sum; the count is already tracked by the
+        // accumulator and used in finalize().
+        let eligible: Vec<usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                !c.gpu_values.is_empty()
+                    && matches!(c.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if eligible.len() < 2 {
+            return; // Single column doesn't benefit from fusion.
+        }
+
+        // All eligible columns must have the same row count.
+        let n = self.columns[eligible[0]].gpu_values.len();
+        if n < limits.gpu_reduce_min_rows {
+            return; // Too few rows for GPU dispatch.
+        }
+        let same_len = eligible
+            .iter()
+            .all(|&i| self.columns[i].gpu_values.len() == n);
+        if !same_len {
+            return;
+        }
+
+        let _span =
+            tracing::debug_span!("gpu.fused_multi_reduce", n, num_cols = eligible.len(),).entered();
+
+        // Convert f64 GPU buffers to f32 for the fused kernel (Metal: no fp64).
+        let f32_buffers: Vec<Vec<f32>> = eligible
+            .iter()
+            .map(|&i| {
+                self.columns[i]
+                    .gpu_values
+                    .iter()
+                    .map(|&v| v as f32)
+                    .collect()
+            })
+            .collect();
+
+        // Build reduce column descriptors.
+        let reduce_cols: Vec<gpu::PgaccelReduceCol> = eligible
+            .iter()
+            .zip(f32_buffers.iter())
+            .map(|(&col_idx, buf)| {
+                let op = match self.columns[col_idx].op {
+                    AggOp::Sum | AggOp::Avg => gpu::reduce_op::SUM,
+                    AggOp::Min => gpu::reduce_op::MIN,
+                    AggOp::Max => gpu::reduce_op::MAX,
+                    _ => gpu::reduce_op::SUM, // unreachable for eligible cols
+                };
+                gpu::PgaccelReduceCol {
+                    op,
+                    data: buf.as_ptr(),
+                }
+            })
+            .collect();
+
+        // Use ALWAYS_TRUE — no filter predicate for simple aggregates.
+        let result = gpu::fused_filter_multi_reduce_f32(
+            None,
+            n,
+            gpu::cmp_op::ALWAYS_TRUE,
+            0.0,
+            &reduce_cols,
+            reduce_cols.len(),
+        );
+
+        if let Some((results, _pass_count)) = result {
+            // Apply results to each eligible column and drain their buffers.
+            for (result_idx, &col_idx) in eligible.iter().enumerate() {
+                let col = &mut self.columns[col_idx];
+                let fused_val = f64::from(results[result_idx]);
+                col.gpu_dispatched = true;
+                match col.op {
+                    AggOp::Sum => col.sum = fused_val,
+                    AggOp::Min => col.min_val = fused_val,
+                    AggOp::Max => col.max_val = fused_val,
+                    _ => {}
+                }
+                col.gpu_values.clear();
+            }
+            self.gpu_dispatched = true;
+            pgrx::debug1!(
+                "pg_accel: fused multi-reduce dispatched {} columns, {} rows",
+                eligible.len(),
+                n,
+            );
+        }
+        // If fused dispatch failed, columns retain their gpu_values buffers
+        // and the caller will fall through to per-column dispatch.
     }
 
     /// Evaluate a single `col <cmp> const` predicate inline on a HeapTuple.
@@ -1545,6 +1672,7 @@ impl AggExecState {
         };
 
         match cmp_opcode {
+            expr_compiler::opcode::ALWAYS_TRUE => true,
             expr_compiler::opcode::EQ => (v - const_val).abs() < f64::EPSILON,
             expr_compiler::opcode::NE => (v - const_val).abs() >= f64::EPSILON,
             expr_compiler::opcode::LT => v < const_val,

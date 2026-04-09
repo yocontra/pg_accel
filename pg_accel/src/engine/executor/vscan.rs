@@ -33,6 +33,11 @@ pub struct VectorizedScan {
     /// Table scan descriptor from `table_beginscan`.
     scan_desc: pg_sys::TableScanDesc,
 
+    /// Dedicated scan slot with TupleDesc matching the scanned relation.
+    /// Created from the relation's TupleDesc so `table_scan_getnextslot`
+    /// works correctly even when the Custom Scan result slot differs.
+    scan_slot: *mut pg_sys::TupleTableSlot,
+
     /// Arena of materialized tuples. Each entry is a palloc'd MinimalTuple.
     arena: Vec<pg_sys::MinimalTuple>,
 
@@ -59,12 +64,31 @@ impl VectorizedScan {
     /// Create a new vectorized scanner.
     ///
     /// `scan_desc` must be a valid `TableScanDesc` from `table_beginscan`.
+    /// `rel` must be the opened relation (for TupleDesc to create scan slot).
     /// `key_attno` is the 1-based attribute for inline key extraction (0 to skip).
     /// `key_typid` is the PG type OID of the key column.
+    ///
+    /// # Safety
+    ///
+    /// `rel` must be a valid, open `Relation`. Must be called on the main
+    /// backend thread.
     #[must_use]
-    pub fn new(scan_desc: pg_sys::TableScanDesc, key_attno: i32, key_typid: u32) -> Self {
+    pub unsafe fn new(
+        scan_desc: pg_sys::TableScanDesc,
+        rel: pg_sys::Relation,
+        key_attno: i32,
+        key_typid: u32,
+    ) -> Self {
+        // SAFETY: rel is a valid Relation; rd_att is its TupleDesc.
+        // MakeSingleTupleTableSlot creates a slot compatible with
+        // table_scan_getnextslot.
+        let tupdesc = unsafe { (*rel).rd_att };
+        let scan_slot = unsafe {
+            pg_sys::MakeSingleTupleTableSlot(tupdesc, &raw const pg_sys::TTSOpsBufferHeapTuple)
+        };
         Self {
             scan_desc,
+            scan_slot,
             arena: Vec::new(),
             keys_f32: Vec::new(),
             keys_f64: Vec::new(),
@@ -83,9 +107,8 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// Must be called on the main backend thread. `scan_desc` must be valid.
-    /// `scan_slot` must be a valid `TupleTableSlot` with a TupleDesc matching
-    /// the scanned relation.
-    pub unsafe fn scan_all(&mut self, scan_slot: *mut pg_sys::TupleTableSlot) -> usize {
+    pub unsafe fn scan_all(&mut self) -> usize {
+        let scan_slot = self.scan_slot;
         let do_inline = self.key_attno > 0
             && matches!(self.key_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
 
@@ -269,6 +292,12 @@ impl VectorizedScan {
     pub fn scan_desc(&self) -> pg_sys::TableScanDesc {
         self.scan_desc
     }
+
+    /// The dedicated scan slot (has base relation's TupleDesc).
+    #[must_use]
+    pub fn scan_slot(&self) -> *mut pg_sys::TupleTableSlot {
+        self.scan_slot
+    }
 }
 
 impl Drop for VectorizedScan {
@@ -281,6 +310,13 @@ impl Drop for VectorizedScan {
                 unsafe {
                     pg_sys::pfree((*mt).cast());
                 }
+            }
+        }
+        // Free the dedicated scan slot.
+        if !self.scan_slot.is_null() {
+            // SAFETY: scan_slot was created by MakeSingleTupleTableSlot.
+            unsafe {
+                pg_sys::ExecDropSingleTupleTableSlot(self.scan_slot);
             }
         }
     }

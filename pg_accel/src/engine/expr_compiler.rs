@@ -56,6 +56,7 @@ pub mod opcode {
     pub const LE: u16 = 43;
     pub const GT: u16 = 44;
     pub const GE: u16 = 45;
+    pub const ALWAYS_TRUE: u16 = 46;
 
     pub const AND: u16 = 50;
     pub const OR: u16 = 51;
