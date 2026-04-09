@@ -89,7 +89,12 @@ mod tests {
     #[test]
     fn all_function_names_are_lowercase() {
         for f in &adapter().functions {
-            assert_eq!(f.name, f.name.to_lowercase(), "name not lowercase: {}", f.name);
+            assert_eq!(
+                f.name,
+                f.name.to_lowercase(),
+                "name not lowercase: {}",
+                f.name
+            );
         }
     }
 
@@ -158,34 +163,64 @@ mod tests {
 
     #[test]
     fn no_gpu_spatial_strategy() {
-        assert!(adapter().functions.iter().all(|f| f.strategy != AccelStrategy::GpuSpatial));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .all(|f| f.strategy != AccelStrategy::GpuSpatial)
+        );
     }
 
     #[test]
     fn no_gpu_raster_strategy() {
-        assert!(adapter().functions.iter().all(|f| f.strategy != AccelStrategy::GpuRaster));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .all(|f| f.strategy != AccelStrategy::GpuRaster)
+        );
     }
 
     // -- Specific function presence -------------------------------------------
 
     #[test]
     fn contains_h3_latlng_to_cell() {
-        assert!(adapter().functions.iter().any(|f| f.name == "h3_latlng_to_cell"));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_latlng_to_cell")
+        );
     }
 
     #[test]
     fn contains_h3_grid_distance() {
-        assert!(adapter().functions.iter().any(|f| f.name == "h3_grid_distance"));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_grid_distance")
+        );
     }
 
     #[test]
     fn contains_h3_cell_to_parent() {
-        assert!(adapter().functions.iter().any(|f| f.name == "h3_cell_to_parent"));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_cell_to_parent")
+        );
     }
 
     #[test]
     fn contains_h3_get_resolution() {
-        assert!(adapter().functions.iter().any(|f| f.name == "h3_get_resolution"));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_get_resolution")
+        );
     }
 
     // -- Determinism ----------------------------------------------------------

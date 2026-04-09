@@ -567,8 +567,7 @@ impl AggExecState {
                                 let natts = unsafe { (*tupdesc).natts as usize };
                                 if idx < natts {
                                     // SAFETY: idx < natts so attrs[idx] is valid.
-                                    let attr =
-                                        unsafe { &*(*tupdesc).attrs.as_ptr().add(idx) };
+                                    let attr = unsafe { &*(*tupdesc).attrs.as_ptr().add(idx) };
                                     col.type_oid = attr.atttypid;
                                 }
                             }
@@ -896,14 +895,9 @@ impl AggExecState {
                 unsafe { (*result_slot).tts_tupleDescriptor }
             };
             let infos = match &self.fused_expr {
-                Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                    col_idx,
-                    ..
-                })) => {
+                Some(CompiledExpr::Template(TemplateKernel::CmpConst { col_idx, .. })) => {
                     // SAFETY: table_tupdesc is valid.
-                    vec![unsafe {
-                        AttExtractInfo::new(table_tupdesc, (*col_idx + 1) as i32)
-                    }]
+                    vec![unsafe { AttExtractInfo::new(table_tupdesc, (*col_idx + 1) as i32) }]
                 }
                 Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
                     col1_idx,
@@ -911,12 +905,8 @@ impl AggExecState {
                     ..
                 })) => vec![
                     // SAFETY: table_tupdesc is valid.
-                    unsafe {
-                        AttExtractInfo::new(table_tupdesc, (*col1_idx + 1) as i32)
-                    },
-                    unsafe {
-                        AttExtractInfo::new(table_tupdesc, (*col2_idx + 1) as i32)
-                    },
+                    unsafe { AttExtractInfo::new(table_tupdesc, (*col1_idx + 1) as i32) },
+                    unsafe { AttExtractInfo::new(table_tupdesc, (*col2_idx + 1) as i32) },
                 ],
                 _ => vec![],
             };
@@ -966,12 +956,7 @@ impl AggExecState {
                     ..
                 })) => {
                     if !filter_infos.is_empty() {
-                        Self::fused_eval_cmp(
-                            t_data,
-                            &filter_infos[0],
-                            *cmp_opcode,
-                            *const_val,
-                        )
+                        Self::fused_eval_cmp(t_data, &filter_infos[0], *cmp_opcode, *const_val)
                     } else {
                         true
                     }
@@ -984,25 +969,19 @@ impl AggExecState {
                     ..
                 })) => {
                     if filter_infos.len() >= 2 {
-                        Self::fused_eval_cmp(
-                            t_data,
-                            &filter_infos[0],
-                            *cmp1_opcode,
-                            *const1_val,
-                        ) && Self::fused_eval_cmp(
-                            t_data,
-                            &filter_infos[1],
-                            *cmp2_opcode,
-                            *const2_val,
-                        )
+                        Self::fused_eval_cmp(t_data, &filter_infos[0], *cmp1_opcode, *const1_val)
+                            && Self::fused_eval_cmp(
+                                t_data,
+                                &filter_infos[1],
+                                *cmp2_opcode,
+                                *const2_val,
+                            )
                     } else {
                         true
                     }
                 }
                 // No filter or unsupported template: all rows pass.
-                None | Some(CompiledExpr::DeferToPg) | Some(CompiledExpr::Bytecode(_)) => {
-                    true
-                }
+                None | Some(CompiledExpr::DeferToPg) | Some(CompiledExpr::Bytecode(_)) => true,
                 // Other template patterns: conservatively pass.
                 _ => true,
             };
@@ -1126,20 +1105,16 @@ impl AggExecState {
         let val: Option<f64> = unsafe {
             match info.typid {
                 t if t == pg_sys::FLOAT4OID => {
-                    tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info)
-                        .map(f64::from)
+                    tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info).map(f64::from)
                 }
                 t if t == pg_sys::INT2OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info)
-                        .map(f64::from)
+                    tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info).map(f64::from)
                 }
                 t if t == pg_sys::INT4OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info)
-                        .map(f64::from)
+                    tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info).map(f64::from)
                 }
                 t if t == pg_sys::INT8OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info)
-                        .map(|v| v as f64)
+                    tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info).map(|v| v as f64)
                 }
                 _ => tuple_extract::try_fast_read_heap_pub::<f64>(t_data, info),
             }
@@ -2028,7 +2003,11 @@ mod tests {
         let vals: Vec<i32> = ops.iter().map(|o| o.to_i32()).collect();
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
-                assert_ne!(vals[i], vals[j], "ops {:?} and {:?} collide", ops[i], ops[j]);
+                assert_ne!(
+                    vals[i], vals[j],
+                    "ops {:?} and {:?} collide",
+                    ops[i], ops[j]
+                );
             }
         }
     }
@@ -2105,7 +2084,10 @@ mod tests {
                 col.accumulate(-1.0);
             }
         }
-        assert!(col.sum.abs() < f64::EPSILON, "500 pairs of +1/-1 should cancel to 0");
+        assert!(
+            col.sum.abs() < f64::EPSILON,
+            "500 pairs of +1/-1 should cancel to 0"
+        );
     }
 
     #[test]
@@ -2254,13 +2236,8 @@ mod tests {
             type_oid: pg_sys::INT4OID,
             key_type: 0,
         };
-        let state = AggExecState::new_grouped(
-            AccelStrategy::GpuReduce,
-            256,
-            &[(AggOp::Sum, 2, F8)],
-            gk,
-            0,
-        );
+        let state =
+            AggExecState::new_grouped(AccelStrategy::GpuReduce, 256, &[(AggOp::Sum, 2, F8)], gk, 0);
         assert!(state.is_grouped());
         let info = state.group_key_info().unwrap();
         assert_eq!(info.attno, 1);

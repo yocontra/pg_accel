@@ -98,15 +98,19 @@ fn try_init() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// The file is compatible with `otel-tui --from-json-file`.
 /// Returns `None` if the file cannot be opened.
-fn build_otel_layer<S>(
-) -> Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>>
+fn build_otel_layer<S>()
+-> Option<tracing_opentelemetry::OpenTelemetryLayer<S, opentelemetry_sdk::trace::SdkTracer>>
 where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
     use opentelemetry::trace::TracerProvider;
 
     let otel_path = trace_file_path("pg_accel_otel.jsonl");
-    let file = match OpenOptions::new().create(true).append(true).open(&otel_path) {
+    let file = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&otel_path)
+    {
         Ok(f) => f,
         Err(e) => {
             pgrx::log!("pg_accel: OTel trace file open failed: {e}");
@@ -191,10 +195,7 @@ mod otlp_file {
     }
 
     impl SpanExporter for FileSpanExporter {
-        async fn export(
-            &self,
-            batch: Vec<SpanData>,
-        ) -> opentelemetry_sdk::error::OTelSdkResult {
+        async fn export(&self, batch: Vec<SpanData>) -> opentelemetry_sdk::error::OTelSdkResult {
             if batch.is_empty() {
                 return Ok(());
             }
@@ -244,7 +245,10 @@ mod otlp_file {
         let parent = if span.parent_span_id == SpanId::INVALID {
             String::new()
         } else {
-            format!("{:016x}", u64::from_be_bytes(span.parent_span_id.to_bytes()))
+            format!(
+                "{:016x}",
+                u64::from_be_bytes(span.parent_span_id.to_bytes())
+            )
         };
 
         let attributes: Vec<Attribute> = span

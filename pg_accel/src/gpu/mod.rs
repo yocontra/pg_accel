@@ -121,12 +121,7 @@ pub fn spatial_intersects_gpu(
 ) -> Option<(Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>)> {
     let count_a = geoms_a.len();
     let count_b = geoms_b.len();
-    let _span = tracing::info_span!(
-        "gpu.spatial_intersects",
-        count_a,
-        count_b,
-    )
-    .entered();
+    let _span = tracing::info_span!("gpu.spatial_intersects", count_a, count_b,).entered();
     if count_a == 0 || count_b == 0 {
         return Some((Vec::new(), Vec::new(), Vec::new()));
     }
@@ -173,7 +168,9 @@ pub fn spatial_intersects_gpu(
         if !status.is_ok() {
             pgrx::debug1!(
                 "pg_accel: spatial_intersects_gpu bridge returned {:?} for {}x{} pairs",
-                status, count_a, count_b,
+                status,
+                count_a,
+                count_b,
             );
         }
         status.is_ok()
@@ -221,12 +218,8 @@ pub fn point_in_polygon_bulk(
     ring_count: usize,
 ) -> Option<Vec<i8>> {
     let point_count = points_xy.len() / 2;
-    let _span = tracing::info_span!(
-        "gpu.point_in_polygon_bulk",
-        point_count,
-        ring_count,
-    )
-    .entered();
+    let _span =
+        tracing::info_span!("gpu.point_in_polygon_bulk", point_count, ring_count,).entered();
     if point_count == 0 {
         return Some(Vec::new());
     }
@@ -255,7 +248,13 @@ pub fn point_in_polygon_bulk(
 
     #[cfg(not(feature = "gpu"))]
     {
-        let _ = (poly_bbox, poly_coords, poly_coord_count, ring_offsets, ring_count);
+        let _ = (
+            poly_bbox,
+            poly_coords,
+            poly_coord_count,
+            ring_offsets,
+            ring_count,
+        );
     }
 
     None
@@ -1334,8 +1333,7 @@ pub fn window_dense_rank(
     sort_keys: &[f64],
     results: &mut [i64],
 ) -> Option<()> {
-    let _span =
-        tracing::debug_span!("gpu.window_dense_rank", n = partition_starts.len()).entered();
+    let _span = tracing::debug_span!("gpu.window_dense_rank", n = partition_starts.len()).entered();
     let count = partition_starts
         .len()
         .min(sort_keys.len())

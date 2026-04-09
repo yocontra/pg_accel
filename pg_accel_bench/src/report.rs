@@ -244,7 +244,12 @@ impl BenchReport {
         let _ = writeln!(out, "|-----------|-------|");
         let _ = writeln!(out, "| Iterations | {} |", self.methodology.iterations);
         let _ = writeln!(out, "| Warmup iterations | {} |", self.methodology.warmup);
-        let scales_str: Vec<String> = self.methodology.row_scales.iter().map(|r| format_rows(*r)).collect();
+        let scales_str: Vec<String> = self
+            .methodology
+            .row_scales
+            .iter()
+            .map(|r| format_rows(*r))
+            .collect();
         let _ = writeln!(out, "| Row scales | {} |", scales_str.join(", "));
         let _ = writeln!(
             out,
@@ -347,8 +352,14 @@ impl BenchReport {
             }
 
             // Per-scale table
-            let _ = writeln!(out, "| Scale | Accel (ms) | PG Parallel (ms) | Speedup | Significant? |");
-            let _ = writeln!(out, "|-------|------------|-------------------|---------|-------------|");
+            let _ = writeln!(
+                out,
+                "| Scale | Accel (ms) | PG Parallel (ms) | Speedup | Significant? |"
+            );
+            let _ = writeln!(
+                out,
+                "|-------|------------|-------------------|---------|-------------|"
+            );
             for &s in scales {
                 if let Some(w) = lookup.get(&(name.as_str(), s)) {
                     let sig = if w.p_value_vs_parallel < 0.01 {
@@ -619,7 +630,12 @@ fn detect_memory() -> String {
 mod tests {
     use super::*;
 
-    fn mock_workload_result(name: &str, rows: usize, accel_ms: f64, baseline_ms: f64) -> WorkloadResult {
+    fn mock_workload_result(
+        name: &str,
+        rows: usize,
+        accel_ms: f64,
+        baseline_ms: f64,
+    ) -> WorkloadResult {
         let iterations: Vec<IterationResult> = (0..10)
             .map(|i| {
                 #[allow(clippy::cast_precision_loss)]
@@ -681,7 +697,8 @@ mod tests {
             accel_ms: 5.0,
             parallel_ms: 10.0,
         }];
-        let result = WorkloadResult::from_iterations("one".to_owned(), "desc".to_owned(), 1000, iters);
+        let result =
+            WorkloadResult::from_iterations("one".to_owned(), "desc".to_owned(), 1000, iters);
         assert!((result.accel_mean_ms - 5.0).abs() < f64::EPSILON);
         assert!((result.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
     }

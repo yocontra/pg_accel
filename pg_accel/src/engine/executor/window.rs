@@ -369,8 +369,7 @@ impl WindowExecState {
 
         // -- Phase 3: Dispatch each window function via GPU --
         for (spec_idx, spec) in self.specs.iter().enumerate() {
-            let _span =
-                tracing::debug_span!("gpu.window", func = ?spec.func, n = n).entered();
+            let _span = tracing::debug_span!("gpu.window", func = ?spec.func, n = n).entered();
 
             match spec.func {
                 WindowFunc::RowNumber => {

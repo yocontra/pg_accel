@@ -89,8 +89,7 @@ pub fn run(
         for &idx in &order {
             // DISCARD ALL resets session state before each measurement.
             mode_clients[idx].batch_execute("DISCARD ALL")?;
-            timings[idx] =
-                run_with_mode(&mut mode_clients[idx], &query, modes[idx], &pre_query)?;
+            timings[idx] = run_with_mode(&mut mode_clients[idx], &query, modes[idx], &pre_query)?;
         }
 
         let accel_ms = timings[0];
@@ -213,11 +212,7 @@ pub fn run_all(
 
     for w in workloads {
         for &rows in ROW_SCALES {
-            eprintln!(
-                "\n[scale] {} @ {} rows",
-                w.name(),
-                format_rows(rows)
-            );
+            eprintln!("\n[scale] {} @ {} rows", w.name(), format_rows(rows));
             match run_workload(connection, w.as_ref(), rows, seed, iterations, warmup) {
                 Ok(mut result) => {
                     result.rows = rows;
@@ -288,10 +283,7 @@ fn run_workload(
 /// Detect which extensions are installed in the target database.
 fn detect_extensions(connection: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
-    let rows = client.query(
-        "SELECT extname FROM pg_extension",
-        &[],
-    )?;
+    let rows = client.query("SELECT extname FROM pg_extension", &[])?;
     let exts: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
     eprintln!("[detect] installed extensions: {}", exts.join(", "));
     Ok(exts)

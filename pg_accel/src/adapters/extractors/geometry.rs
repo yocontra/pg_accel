@@ -207,9 +207,8 @@ pub fn extract_point_xy_f32(datum: Datum) -> Option<(f32, f32)> {
     }
 
     // SAFETY: Detoast to get flat varlena. Must be on the main backend thread.
-    let detoasted = unsafe {
-        pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
-    };
+    let detoasted =
+        unsafe { pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) };
     if detoasted.is_null() {
         return None;
     }
@@ -492,8 +491,7 @@ fn extract_polygon_geom(
         if bytes.len() < offset + 4 {
             return None;
         }
-        let npoints =
-            u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+        let npoints = u32::from_le_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
         ring_sizes.push(npoints);
         offset += 4;
     }
@@ -563,9 +561,8 @@ fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
     // SAFETY: Detoast the datum to get a flat, uncompressed varlena.
     // This handles TOAST pointers, compressed varlenas, and short headers.
     // Must run on the main backend thread.
-    let detoasted = unsafe {
-        pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
-    };
+    let detoasted =
+        unsafe { pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) };
     if detoasted.is_null() {
         return None;
     }

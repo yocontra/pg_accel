@@ -369,8 +369,7 @@ fn point_in_ring(px: f32, py: f32, ring_coords: *const f32, ring_len: usize) -> 
             return true;
         }
 
-        let crosses =
-            ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+        let crosses = ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
         if crosses {
             inside = !inside;
         }
@@ -408,7 +407,12 @@ fn point_in_polygon_check(
     let outer_len = outer_end - outer_start;
 
     // SAFETY: outer_start * 2 is within poly_coords bounds.
-    if !point_in_ring(px, py, unsafe { poly_coords.add(outer_start * 2) }, outer_len) {
+    if !point_in_ring(
+        px,
+        py,
+        unsafe { poly_coords.add(outer_start * 2) },
+        outer_len,
+    ) {
         return -1; // outside outer ring
     }
 
@@ -440,8 +444,14 @@ fn cross2d(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
 ///
 /// Returns `1` (definite intersection), `-1` (no intersection), `0` (uncertain).
 fn segments_intersect(
-    p1x: f32, p1y: f32, p2x: f32, p2y: f32,
-    p3x: f32, p3y: f32, p4x: f32, p4y: f32,
+    p1x: f32,
+    p1y: f32,
+    p2x: f32,
+    p2y: f32,
+    p3x: f32,
+    p3y: f32,
+    p4x: f32,
+    p4y: f32,
 ) -> i8 {
     let d1 = cross2d(p3x, p3y, p4x, p4y, p1x, p1y);
     let d2 = cross2d(p3x, p3y, p4x, p4y, p2x, p2y);
@@ -455,8 +465,7 @@ fn segments_intersect(
     }
 
     // Collinear / endpoint touch — uncertain, let CPU recheck.
-    if d1.abs() < EPSILON || d2.abs() < EPSILON || d3.abs() < EPSILON || d4.abs() < EPSILON
-    {
+    if d1.abs() < EPSILON || d2.abs() < EPSILON || d3.abs() < EPSILON || d4.abs() < EPSILON {
         return 0; // UNCERTAIN
     }
 
@@ -509,9 +518,7 @@ fn linestring_intersect_check(a: &PgaccelGeometry, b: &PgaccelGeometry) -> i8 {
 /// Point vs point: equal within epsilon.
 fn points_equal_check(a: *const f32, b: *const f32) -> i8 {
     // SAFETY: caller guarantees a and b each have at least 2 floats.
-    let (ax, ay, bx, by) = unsafe {
-        (*a, *a.add(1), *b, *b.add(1))
-    };
+    let (ax, ay, bx, by) = unsafe { (*a, *a.add(1), *b, *b.add(1)) };
     if (ax - bx).abs() < EPSILON && (ay - by).abs() < EPSILON {
         1 // coincident
     } else {
@@ -525,21 +532,27 @@ fn points_equal_check(a: *const f32, b: *const f32) -> i8 {
 fn evaluate_predicate(a: &PgaccelGeometry, b: &PgaccelGeometry) -> i8 {
     match (a.geom_type, b.geom_type) {
         // Point vs Polygon
-        (PgaccelGeomType::Point, PgaccelGeomType::Polygon) => {
-            point_in_polygon_check(a.coords, b.coords, b.coord_count, b.ring_offsets, b.ring_count)
-        }
+        (PgaccelGeomType::Point, PgaccelGeomType::Polygon) => point_in_polygon_check(
+            a.coords,
+            b.coords,
+            b.coord_count,
+            b.ring_offsets,
+            b.ring_count,
+        ),
         // Polygon vs Point (reverse)
-        (PgaccelGeomType::Polygon, PgaccelGeomType::Point) => {
-            point_in_polygon_check(b.coords, a.coords, a.coord_count, a.ring_offsets, a.ring_count)
-        }
+        (PgaccelGeomType::Polygon, PgaccelGeomType::Point) => point_in_polygon_check(
+            b.coords,
+            a.coords,
+            a.coord_count,
+            a.ring_offsets,
+            a.ring_count,
+        ),
         // Linestring vs Linestring
         (PgaccelGeomType::LineString, PgaccelGeomType::LineString) => {
             linestring_intersect_check(a, b)
         }
         // Point vs Point
-        (PgaccelGeomType::Point, PgaccelGeomType::Point) => {
-            points_equal_check(a.coords, b.coords)
-        }
+        (PgaccelGeomType::Point, PgaccelGeomType::Point) => points_equal_check(a.coords, b.coords),
         // Unknown / unsupported combination
         _ => 0,
     }
@@ -735,7 +748,9 @@ pub fn pgaccel_bbox_intersects_bulk_f32(
     }
 
     // SAFETY: hit_count validated as non-null above.
-    unsafe { *hit_count = 0; }
+    unsafe {
+        *hit_count = 0;
+    }
 
     for i in 0..count_a {
         // SAFETY: i < count_a, boxes_a has count_a * 4 floats.
@@ -759,10 +774,8 @@ pub fn pgaccel_bbox_intersects_bulk_f32(
                 )
             };
 
-            let overlaps = a_xmin <= b_xmax
-                && a_xmax >= b_xmin
-                && a_ymin <= b_ymax
-                && a_ymax >= b_ymin;
+            let overlaps =
+                a_xmin <= b_xmax && a_xmax >= b_xmin && a_ymin <= b_ymax && a_ymax >= b_ymin;
 
             let idx = i * count_b + j;
             // SAFETY: idx < count_a * count_b, result has that many entries.
@@ -802,9 +815,7 @@ pub fn pgaccel_point_in_ring_bulk(
 
     for i in 0..point_count {
         // SAFETY: i < point_count, points_xy has point_count * 2 floats.
-        let (px, py) = unsafe {
-            (*points_xy.add(i * 2), *points_xy.add(i * 2 + 1))
-        };
+        let (px, py) = unsafe { (*points_xy.add(i * 2), *points_xy.add(i * 2 + 1)) };
         let inside = point_in_ring(px, py, ring_xy, vertex_count);
         // SAFETY: i < point_count, results has point_count entries.
         unsafe {
@@ -1408,8 +1419,7 @@ pub fn pgaccel_window_sum(
                 comp = 0.0;
             }
 
-            let is_null =
-                !null_mask.is_null() && *null_mask.add(i) != 0;
+            let is_null = !null_mask.is_null() && *null_mask.add(i) != 0;
             if !is_null {
                 let y = *values.add(i) - comp;
                 let t = sum + y;
@@ -1446,8 +1456,7 @@ pub fn pgaccel_window_count(
             if *partition_starts.add(i) != 0 {
                 cnt = 0;
             }
-            let is_null =
-                !null_mask.is_null() && *null_mask.add(i) != 0;
+            let is_null = !null_mask.is_null() && *null_mask.add(i) != 0;
             if !is_null {
                 cnt += 1;
             }
@@ -1493,16 +1502,13 @@ pub fn pgaccel_window_lag(
 
             let target = if i >= off { Some(i - off) } else { None };
 
-            if target.is_none() || target.is_some_and(|t| t < part_start)
-            {
+            if target.is_none() || target.is_some_and(|t| t < part_start) {
                 // Before partition start — use default
                 *results.add(i) = default_val;
                 if !result_nulls.is_null() {
                     *result_nulls.add(i) = 0;
                 }
-            } else if !null_mask.is_null()
-                && *null_mask.add(target.unwrap_or(0)) != 0
-            {
+            } else if !null_mask.is_null() && *null_mask.add(target.unwrap_or(0)) != 0 {
                 // Source is NULL
                 *results.add(i) = default_val;
                 if !result_nulls.is_null() {
@@ -1573,8 +1579,7 @@ pub fn pgaccel_window_lead(
                 if !result_nulls.is_null() {
                     *result_nulls.add(i) = 0;
                 }
-            } else if !null_mask.is_null() && *null_mask.add(target) != 0
-            {
+            } else if !null_mask.is_null() && *null_mask.add(target) != 0 {
                 *results.add(i) = default_val;
                 if !result_nulls.is_null() {
                     *result_nulls.add(i) = 1;
