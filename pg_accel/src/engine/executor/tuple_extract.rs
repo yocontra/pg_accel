@@ -216,14 +216,12 @@ unsafe fn try_fast_read<T: Copy>(
     has_null_flag: bool,
 ) -> Option<T> {
     if info.can_fast_extract
-        && (!has_null_flag
-            || !unsafe { has_preceding_null((*mt).t_bits.as_ptr(), info.att_index) })
+        && (!has_null_flag || !unsafe { has_preceding_null((*mt).t_bits.as_ptr(), info.att_index) })
     {
         // SAFETY: mt is valid. In a MinimalTuple, t_hoff includes
         // MINIMAL_TUPLE_OFFSET so data starts at t_hoff - offset.
-        let data_start = unsafe {
-            (mt as *const u8).add((*mt).t_hoff as usize - minimal_tuple_offset())
-        };
+        let data_start =
+            unsafe { (mt as *const u8).add((*mt).t_hoff as usize - minimal_tuple_offset()) };
         Some(unsafe { *(data_start.add(info.data_offset).cast::<T>()) })
     } else {
         None
@@ -244,9 +242,8 @@ unsafe fn slow_getattr(
     // SAFETY: mt is valid, fallback_slot is valid, on main thread.
     unsafe { pg_sys::ExecForceStoreMinimalTuple(mt, fallback_slot, false) };
     let mut is_null = false;
-    let datum = unsafe {
-        pg_sys::slot_getattr(fallback_slot, attno, std::ptr::addr_of_mut!(is_null))
-    };
+    let datum =
+        unsafe { pg_sys::slot_getattr(fallback_slot, attno, std::ptr::addr_of_mut!(is_null)) };
     (datum, is_null)
 }
 
@@ -333,14 +330,7 @@ pub unsafe fn extract_i32(
 ) -> (Vec<i32>, Vec<u8>) {
     // SAFETY: caller guarantees all preconditions.
     unsafe {
-        extract_typed::<i32, i32>(
-            tuples,
-            info,
-            fallback_slot,
-            0,
-            |v| v,
-            |d| d.value() as i32,
-        )
+        extract_typed::<i32, i32>(tuples, info, fallback_slot, 0, |v| v, |d| d.value() as i32)
     }
 }
 
@@ -356,14 +346,7 @@ pub unsafe fn extract_i64(
 ) -> (Vec<i64>, Vec<u8>) {
     // SAFETY: caller guarantees all preconditions.
     unsafe {
-        extract_typed::<i64, i64>(
-            tuples,
-            info,
-            fallback_slot,
-            0,
-            |v| v,
-            |d| d.value() as i64,
-        )
+        extract_typed::<i64, i64>(tuples, info, fallback_slot, 0, |v| v, |d| d.value() as i64)
     }
 }
 
@@ -434,13 +417,19 @@ pub unsafe fn diagnose_extraction(
         let rust_t_hoff_val = mt_ref.t_hoff;
 
         // Dump first 32 bytes of the MinimalTuple
-        let mt_bytes: Vec<u8> = (0..32usize).map(|j| unsafe { *((mt as *const u8).add(j)) }).collect();
+        let mt_bytes: Vec<u8> = (0..32usize)
+            .map(|j| unsafe { *((mt as *const u8).add(j)) })
+            .collect();
         let hex: Vec<String> = mt_bytes.iter().map(|b| format!("{b:02x}")).collect();
         pgrx::debug1!(
             "pg_accel: DIAG[{}] rust_thoff_offset={} rust_thoff={} raw_byte14={} \
              data_offset={} slow_datum=0x{:016x} bytes=[{}]",
-            i, rust_t_hoff_offset, rust_t_hoff_val, raw_byte_14,
-            info.data_offset, datum.value(),
+            i,
+            rust_t_hoff_offset,
+            rust_t_hoff_val,
+            raw_byte_14,
+            info.data_offset,
+            datum.value(),
             hex.join(" "),
         );
     }
@@ -464,28 +453,43 @@ pub unsafe fn extract_f64(
     unsafe {
         match info.typid {
             pg_sys::FLOAT4OID => extract_typed::<f32, f64>(
-                tuples, info, fallback_slot, 0.0,
+                tuples,
+                info,
+                fallback_slot,
+                0.0,
                 |v| f64::from(v),
                 |d| f64::from(f32::from_bits(d.value() as u32)),
             ),
             pg_sys::INT2OID => extract_typed::<i16, f64>(
-                tuples, info, fallback_slot, 0.0,
+                tuples,
+                info,
+                fallback_slot,
+                0.0,
                 |v| f64::from(v),
                 |d| (d.value() as i16) as f64,
             ),
             pg_sys::INT4OID => extract_typed::<i32, f64>(
-                tuples, info, fallback_slot, 0.0,
+                tuples,
+                info,
+                fallback_slot,
+                0.0,
                 |v| f64::from(v),
                 |d| (d.value() as i32) as f64,
             ),
             pg_sys::INT8OID => extract_typed::<i64, f64>(
-                tuples, info, fallback_slot, 0.0,
+                tuples,
+                info,
+                fallback_slot,
+                0.0,
                 |v| v as f64,
                 |d| (d.value() as i64) as f64,
             ),
             // Default: float8 or any other 8-byte numeric type.
             _ => extract_typed::<f64, f64>(
-                tuples, info, fallback_slot, 0.0,
+                tuples,
+                info,
+                fallback_slot,
+                0.0,
                 |v| v,
                 |d| f64::from_bits(d.value() as u64),
             ),
@@ -539,9 +543,8 @@ pub unsafe fn extract_datum(
         {
             // SAFETY: t_hoff - MINIMAL_TUPLE_OFFSET + data_offset is
             // within the tuple data area.
-            let data_start = unsafe {
-                (mt as *const u8).add(mt_ref.t_hoff as usize - minimal_tuple_offset())
-            };
+            let data_start =
+                unsafe { (mt as *const u8).add(mt_ref.t_hoff as usize - minimal_tuple_offset()) };
             let val_ptr = unsafe { data_start.add(info.data_offset) };
             let datum_val: usize = match info.typlen {
                 1 => unsafe { *val_ptr as usize },
@@ -608,9 +611,7 @@ unsafe fn try_fast_read_heap<T: Copy>(
     let hdr = unsafe { &*ht_data };
     let has_null_flag = (hdr.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
 
-    if has_null_flag
-        && unsafe { has_preceding_null(hdr.t_bits.as_ptr(), info.att_index) }
-    {
+    if has_null_flag && unsafe { has_preceding_null(hdr.t_bits.as_ptr(), info.att_index) } {
         return None;
     }
 
@@ -653,18 +654,10 @@ pub unsafe fn extract_f64_from_heap_headers(
 
         let val: Option<f64> = unsafe {
             match info.typid {
-                t if t == pg_sys::FLOAT4OID => {
-                    try_fast_read_heap::<f32>(hdr, info).map(f64::from)
-                }
-                t if t == pg_sys::INT2OID => {
-                    try_fast_read_heap::<i16>(hdr, info).map(f64::from)
-                }
-                t if t == pg_sys::INT4OID => {
-                    try_fast_read_heap::<i32>(hdr, info).map(f64::from)
-                }
-                t if t == pg_sys::INT8OID => {
-                    try_fast_read_heap::<i64>(hdr, info).map(|v| v as f64)
-                }
+                t if t == pg_sys::FLOAT4OID => try_fast_read_heap::<f32>(hdr, info).map(f64::from),
+                t if t == pg_sys::INT2OID => try_fast_read_heap::<i16>(hdr, info).map(f64::from),
+                t if t == pg_sys::INT4OID => try_fast_read_heap::<i32>(hdr, info).map(f64::from),
+                t if t == pg_sys::INT8OID => try_fast_read_heap::<i64>(hdr, info).map(|v| v as f64),
                 _ => try_fast_read_heap::<f64>(hdr, info),
             }
         };

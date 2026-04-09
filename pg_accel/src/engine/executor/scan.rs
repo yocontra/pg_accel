@@ -240,9 +240,7 @@ impl ScanExecState {
         if self.inline_filter_infos.is_none() {
             let tupdesc = unsafe { (*scan_slot).tts_tupleDescriptor };
             let infos = match &self.compiled_expr {
-                Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                    col_idx, ..
-                })) => {
+                Some(CompiledExpr::Template(TemplateKernel::CmpConst { col_idx, .. })) => {
                     vec![unsafe { AttExtractInfo::new(tupdesc, (*col_idx + 1) as i32) }]
                 }
                 Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
@@ -316,12 +314,7 @@ impl ScanExecState {
                     ..
                 })) => {
                     Self::inline_eval_cmp(t_data, &infos[0], *cmp1_opcode, *const1_val)
-                        && Self::inline_eval_cmp(
-                            t_data,
-                            &infos[1],
-                            *cmp2_opcode,
-                            *const2_val,
-                        )
+                        && Self::inline_eval_cmp(t_data, &infos[1], *cmp2_opcode, *const2_val)
                 }
                 _ => true,
             };
@@ -352,20 +345,16 @@ impl ScanExecState {
         let val: Option<f64> = unsafe {
             match info.typid {
                 t if t == pg_sys::FLOAT4OID => {
-                    tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info)
-                        .map(f64::from)
+                    tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info).map(f64::from)
                 }
                 t if t == pg_sys::INT2OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info)
-                        .map(f64::from)
+                    tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info).map(f64::from)
                 }
                 t if t == pg_sys::INT4OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info)
-                        .map(f64::from)
+                    tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info).map(f64::from)
                 }
                 t if t == pg_sys::INT8OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info)
-                        .map(|v| v as f64)
+                    tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info).map(|v| v as f64)
                 }
                 _ => tuple_extract::try_fast_read_heap_pub::<f64>(t_data, info),
             }
@@ -446,11 +435,7 @@ impl ScanExecState {
     ///
     /// Must be called on the main backend thread. `scan_slot` and
     /// `self.scan_desc` must be valid.
-    unsafe fn fill_batch_direct(
-        &mut self,
-        _scan_slot: *mut pg_sys::TupleTableSlot,
-        target: usize,
-    ) {
+    unsafe fn fill_batch_direct(&mut self, _scan_slot: *mut pg_sys::TupleTableSlot, target: usize) {
         // Switch to batch memory context for all MinimalTuple allocations.
         // SAFETY: batch_mcxt was created in set_scan_desc and is valid.
         let old_mcxt = if !self.batch_mcxt.is_null() {
@@ -462,10 +447,7 @@ impl ScanExecState {
         while self.tuple_buffer.len() < target {
             // SAFETY: scan_desc is valid; main backend thread.
             let htup = unsafe {
-                pg_sys::heap_getnext(
-                    self.scan_desc,
-                    pg_sys::ScanDirection::ForwardScanDirection,
-                )
+                pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
             };
             if htup.is_null() {
                 self.child_exhausted = true;
@@ -500,10 +482,7 @@ impl ScanExecState {
     ///
     /// Must be called on the main backend thread. `self.scan_desc` and
     /// `scan_slot` must be valid. `self.compiled_expr` must be `Some(Template(_))`.
-    unsafe fn fill_and_filter_direct(
-        &mut self,
-        scan_slot: *mut pg_sys::TupleTableSlot,
-    ) {
+    unsafe fn fill_and_filter_direct(&mut self, scan_slot: *mut pg_sys::TupleTableSlot) {
         // Reset batch state (no pfree needed — we haven't created MTs yet
         // for non-passing rows, and passing MTs are in batch_mcxt).
         if !self.batch_mcxt.is_null() {
@@ -538,10 +517,7 @@ impl ScanExecState {
         while count < target {
             // SAFETY: scan_desc is valid; main backend thread.
             let htup = unsafe {
-                pg_sys::heap_getnext(
-                    self.scan_desc,
-                    pg_sys::ScanDirection::ForwardScanDirection,
-                )
+                pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
             };
             if htup.is_null() {
                 self.child_exhausted = true;
@@ -604,9 +580,7 @@ impl ScanExecState {
                         1 => {
                             // Definite TRUE — materialize this row.
                             let (offset, t_len) = entries[i];
-                            let mt = unsafe {
-                                self.materialize_from_arena(&arena, offset, t_len)
-                            };
+                            let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
                             self.tuple_buffer.push(mt);
                             self.result_mask.push(true);
                             pass_count += 1;
@@ -618,12 +592,8 @@ impl ScanExecState {
                             // Uncertain — materialize and CPU recheck.
                             recheck_count += 1;
                             let (offset, t_len) = entries[i];
-                            let mt = unsafe {
-                                self.materialize_from_arena(&arena, offset, t_len)
-                            };
-                            let passed = unsafe {
-                                self.cpu_recheck_tuple(mt, scan_slot)
-                            };
+                            let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
+                            let passed = unsafe { self.cpu_recheck_tuple(mt, scan_slot) };
                             if passed {
                                 self.tuple_buffer.push(mt);
                                 self.result_mask.push(true);
@@ -639,7 +609,9 @@ impl ScanExecState {
                 }
                 pgrx::debug1!(
                     "pg_accel: deferred GpuExpr {}/{} passed ({} rechecked)",
-                    pass_count, count, recheck_count,
+                    pass_count,
+                    count,
+                    recheck_count,
                 );
                 self.rows_dispatched += count as u64;
                 self.batches_executed += 1;
@@ -648,9 +620,7 @@ impl ScanExecState {
                 // GPU unavailable — materialize all and use scalar qual.
                 for i in 0..count {
                     let (offset, t_len) = entries[i];
-                    let mt = unsafe {
-                        self.materialize_from_arena(&arena, offset, t_len)
-                    };
+                    let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
                     self.tuple_buffer.push(mt);
                 }
                 // Restore mcxt before scalar qual (which may allocate).
@@ -693,11 +663,7 @@ impl ScanExecState {
             t_data,
         };
         // SAFETY: ht_data points to valid HeapTuple header data in the arena.
-        unsafe {
-            pg_sys::minimal_tuple_from_heap_tuple(
-                &mut ht_data as *mut pg_sys::HeapTupleData,
-            )
-        }
+        unsafe { pg_sys::minimal_tuple_from_heap_tuple(&mut ht_data as *mut pg_sys::HeapTupleData) }
     }
 
     /// CPU-recheck a single tuple via the scalar qual expression.
@@ -722,11 +688,7 @@ impl ScanExecState {
         }
         let mut is_null = false;
         let result = unsafe {
-            pg_sys::ExecEvalExpr(
-                self.qual,
-                self.econtext,
-                std::ptr::addr_of_mut!(is_null),
-            )
+            pg_sys::ExecEvalExpr(self.qual, self.econtext, std::ptr::addr_of_mut!(is_null))
         };
         let passed = !is_null && result.value() != 0;
         // SAFETY: Reset per-tuple memory to prevent leaks.
@@ -814,11 +776,7 @@ impl ScanExecState {
     /// # Safety
     ///
     /// Must be called on the main backend thread. `child_ps` must be valid.
-    unsafe fn fill_batch_child(
-        &mut self,
-        child_ps: *mut pg_sys::PlanState,
-        target: usize,
-    ) {
+    unsafe fn fill_batch_child(&mut self, child_ps: *mut pg_sys::PlanState, target: usize) {
         let extract_attno = self.target_attno;
 
         while self.tuple_buffer.len() < target {
@@ -834,8 +792,7 @@ impl ScanExecState {
             // SAFETY: child_slot is non-null. TTS_EMPTY checks whether the
             // slot has a valid tuple. In PG, an empty slot signals end of
             // scan.
-            let is_empty =
-                unsafe { (*child_slot).tts_flags & pg_sys::TTS_FLAG_EMPTY as u16 != 0 };
+            let is_empty = unsafe { (*child_slot).tts_flags & pg_sys::TTS_FLAG_EMPTY as u16 != 0 };
             if is_empty {
                 self.child_exhausted = true;
                 break;
@@ -866,10 +823,8 @@ impl ScanExecState {
                         // Deep copy varlena datum — the child reuses its slot.
                         // SAFETY: pg_detoast_datum_copy returns a palloc'd copy.
                         let varlena_ptr = datum.cast_mut_ptr::<pg_sys::varlena>();
-                        let copied =
-                            unsafe { pg_sys::pg_detoast_datum_copy(varlena_ptr) };
-                        self.datum_buffer
-                            .push((pg_sys::Datum::from(copied), false));
+                        let copied = unsafe { pg_sys::pg_detoast_datum_copy(varlena_ptr) };
+                        self.datum_buffer.push((pg_sys::Datum::from(copied), false));
                     } else {
                         self.datum_buffer.push((pg_sys::Datum::from(0), true));
                     }
@@ -1049,7 +1004,8 @@ impl ScanExecState {
             // Fallback: no pre-extracted datums (shouldn't happen for GPU path).
             pgrx::debug1!(
                 "pg_accel: dispatch_gpu_path: datum_buffer size mismatch {}/{}",
-                self.datum_buffer.len(), batch_len,
+                self.datum_buffer.len(),
+                batch_len,
             );
             vec![(pg_sys::Datum::from(0), true); batch_len]
         };
@@ -1058,7 +1014,9 @@ impl ScanExecState {
             let (d, n) = datum_batch[0];
             pgrx::debug1!(
                 "pg_accel: dispatch_gpu_path: first row attno={} datum={:#x} is_null={}",
-                self.target_attno, d.value(), n,
+                self.target_attno,
+                d.value(),
+                n,
             );
         }
 
@@ -1443,10 +1401,7 @@ impl ScanExecState {
     /// inline evaluation during the heap walk.
     #[must_use]
     pub fn has_template_expr(&self) -> bool {
-        matches!(
-            &self.compiled_expr,
-            Some(CompiledExpr::Template(_))
-        )
+        matches!(&self.compiled_expr, Some(CompiledExpr::Template(_)))
     }
 
     /// Returns a clone of the compiled expression, if present.
@@ -1507,10 +1462,7 @@ impl ScanExecState {
         // next heap_getnext call, so the tuple is valid for this iteration.
         // SAFETY: scan_desc is valid; main backend thread.
         let htup = unsafe {
-            pg_sys::heap_getnext(
-                self.scan_desc,
-                pg_sys::ScanDirection::ForwardScanDirection,
-            )
+            pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
         };
         if htup.is_null() {
             self.child_exhausted = true;
@@ -1913,10 +1865,7 @@ mod tests {
     fn set_compiled_expr_defer_to_pg() {
         let mut state = make_state(AccelStrategy::GpuExpr, 256);
         state.set_compiled_expr(CompiledExpr::DeferToPg);
-        assert!(matches!(
-            state.compiled_expr,
-            Some(CompiledExpr::DeferToPg)
-        ));
+        assert!(matches!(state.compiled_expr, Some(CompiledExpr::DeferToPg)));
     }
 
     #[test]

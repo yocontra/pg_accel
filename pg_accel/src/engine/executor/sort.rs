@@ -18,6 +18,7 @@
 use pgrx::pg_sys;
 
 use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
+use crate::engine::executor::vscan::VectorizedScan;
 use crate::engine::registry::AccelStrategy;
 use crate::gpu;
 
@@ -86,6 +87,11 @@ pub struct SortExecState {
     /// Whether the child plan is exhausted.
     child_exhausted: bool,
 
+    /// Optional vectorized scanner for direct heap scan mode.
+    /// When set, `next_vectorized()` is used instead of `next()`,
+    /// bypassing the child plan's `ExecProcNode` overhead.
+    vscan: Option<VectorizedScan>,
+
     // -- Counters for EXPLAIN ANALYZE --
     /// Total rows consumed.
     pub rows_dispatched: u64,
@@ -117,6 +123,7 @@ impl SortExecState {
             emit_pos: 0,
             sort_done: false,
             child_exhausted: false,
+            vscan: None,
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
@@ -421,9 +428,8 @@ impl SortExecState {
             let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
             // SAFETY: sorted_tuples contains valid MinimalTuple pointers.
             // scratch_slot is valid for fallback extraction.
-            let (datums, nulls) = unsafe {
-                tuple_extract::extract_datum(&self.sorted_tuples, &info, scratch_slot)
-            };
+            let (datums, nulls) =
+                unsafe { tuple_extract::extract_datum(&self.sorted_tuples, &info, scratch_slot) };
             let col: Vec<(pg_sys::Datum, bool)> = datums
                 .into_iter()
                 .zip(nulls.into_iter())
@@ -552,13 +558,10 @@ impl SortExecState {
             FLOAT4OID => {
                 // Bulk-extract f32 keys using direct MinimalTuple reads.
                 let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
-                let (all_vals, all_nulls) = unsafe {
-                    tuple_extract::extract_f32(&self.sorted_tuples, &info, scratch_slot)
-                };
+                let (all_vals, all_nulls) =
+                    unsafe { tuple_extract::extract_f32(&self.sorted_tuples, &info, scratch_slot) };
                 let mut keys: Vec<f32> = Vec::with_capacity(n);
-                for (i, (&val, &is_null)) in
-                    all_vals.iter().zip(all_nulls.iter()).enumerate()
-                {
+                for (i, (&val, &is_null)) in all_vals.iter().zip(all_nulls.iter()).enumerate() {
                     if is_null != 0 {
                         null_indices.push(i);
                     } else {
@@ -584,13 +587,10 @@ impl SortExecState {
             }
             FLOAT8OID => {
                 let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
-                let (all_vals, all_nulls) = unsafe {
-                    tuple_extract::extract_f64(&self.sorted_tuples, &info, scratch_slot)
-                };
+                let (all_vals, all_nulls) =
+                    unsafe { tuple_extract::extract_f64(&self.sorted_tuples, &info, scratch_slot) };
                 let mut keys: Vec<f64> = Vec::with_capacity(n);
-                for (i, (&val, &is_null)) in
-                    all_vals.iter().zip(all_nulls.iter()).enumerate()
-                {
+                for (i, (&val, &is_null)) in all_vals.iter().zip(all_nulls.iter()).enumerate() {
                     if is_null != 0 {
                         null_indices.push(i);
                     } else {
@@ -617,13 +617,10 @@ impl SortExecState {
             INT4OID => {
                 // Bulk-extract i32 keys, promote to f64 (lossless).
                 let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
-                let (all_vals, all_nulls) = unsafe {
-                    tuple_extract::extract_i32(&self.sorted_tuples, &info, scratch_slot)
-                };
+                let (all_vals, all_nulls) =
+                    unsafe { tuple_extract::extract_i32(&self.sorted_tuples, &info, scratch_slot) };
                 let mut keys: Vec<f64> = Vec::with_capacity(n);
-                for (i, (&val, &is_null)) in
-                    all_vals.iter().zip(all_nulls.iter()).enumerate()
-                {
+                for (i, (&val, &is_null)) in all_vals.iter().zip(all_nulls.iter()).enumerate() {
                     if is_null != 0 {
                         null_indices.push(i);
                     } else {
@@ -650,13 +647,10 @@ impl SortExecState {
             INT8OID => {
                 // Bulk-extract i64 keys, promote to f64 (lossless for |v| ≤ 2^53).
                 let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
-                let (all_vals, all_nulls) = unsafe {
-                    tuple_extract::extract_i64(&self.sorted_tuples, &info, scratch_slot)
-                };
+                let (all_vals, all_nulls) =
+                    unsafe { tuple_extract::extract_i64(&self.sorted_tuples, &info, scratch_slot) };
                 let mut keys: Vec<f64> = Vec::with_capacity(n);
-                for (i, (&val, &is_null)) in
-                    all_vals.iter().zip(all_nulls.iter()).enumerate()
-                {
+                for (i, (&val, &is_null)) in all_vals.iter().zip(all_nulls.iter()).enumerate() {
                     if is_null != 0 {
                         null_indices.push(i);
                     } else {
@@ -742,6 +736,186 @@ impl SortExecState {
     #[must_use]
     pub fn sort_keys(&self) -> &[SortKeyDesc] {
         &self.sort_keys
+    }
+
+    /// Attach a [`VectorizedScan`] for direct heap scan mode.
+    ///
+    /// When set, `next_vectorized()` is used instead of `next()` to bypass
+    /// `ExecProcNode` per-tuple overhead.
+    pub fn set_vscan(&mut self, vscan: VectorizedScan) {
+        self.vscan = Some(vscan);
+    }
+
+    /// Whether a vectorized scanner is attached.
+    #[must_use]
+    pub fn has_vscan(&self) -> bool {
+        self.vscan.is_some()
+    }
+
+    /// Borrow the attached vectorized scanner (if any).
+    #[must_use]
+    pub fn vscan_ref(&self) -> &Option<VectorizedScan> {
+        &self.vscan
+    }
+
+    /// Fetch the next sorted tuple using the vectorized scan path.
+    ///
+    /// On the first call, scans the entire heap via [`VectorizedScan`],
+    /// extracts sort key columns inline, dispatches GPU sort on keys +
+    /// indices, and prepares the sorted tuple order. Subsequent calls
+    /// emit tuples from the arena in sorted order via `materialize()`.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `result_slot` must be
+    /// a valid `TupleTableSlot`. `self.vscan` must be `Some`.
+    pub unsafe fn next_vectorized(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let _span = tracing::debug_span!("exec.sort_next_vectorized").entered();
+
+        // Phase 1: Scan all rows and sort (once).
+        if !self.sort_done {
+            // SAFETY: vscan is Some (caller guarantees), result_slot valid.
+            unsafe {
+                self.vscan_consume_and_sort(result_slot);
+            }
+        }
+
+        // Phase 2: Emit sorted tuples one at a time.
+        if self.emit_pos >= self.sorted_tuples.len() {
+            return std::ptr::null_mut();
+        }
+
+        let mt = self.sorted_tuples[self.emit_pos];
+        self.emit_pos += 1;
+
+        if mt.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        // SAFETY: mt is a valid MinimalTuple from the vscan arena.
+        // ExecForceStoreMinimalTuple stores it into result_slot.
+        // `false` = slot does not own the tuple.
+        unsafe {
+            pg_sys::ExecForceStoreMinimalTuple(mt, result_slot, false);
+        }
+        result_slot
+    }
+
+    /// Consume all tuples via VectorizedScan and sort them.
+    ///
+    /// Uses the vscan's inline-extracted keys for GPU sort when available,
+    /// falling back to PG's SortSupport for unsupported types.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `scan_slot` must be valid.
+    #[allow(clippy::too_many_lines)]
+    unsafe fn vscan_consume_and_sort(&mut self, scan_slot: *mut pg_sys::TupleTableSlot) {
+        let start = std::time::Instant::now();
+
+        let vscan = self.vscan.as_mut().expect("vscan must be set");
+
+        // SAFETY: scan_slot is valid, vscan.scan_desc is valid.
+        let n = unsafe { vscan.scan_all(scan_slot) };
+        self.rows_dispatched = n as u64;
+        self.batches_executed = 1;
+
+        // Take the arena from vscan — sorted_tuples now owns the MinimalTuples.
+        self.sorted_tuples = vscan.take_arena();
+
+        if n > 1 && !self.sort_keys.is_empty() {
+            let limits = cost::device_limits();
+            let key_typid = vscan.key_typid();
+            let do_inline = matches!(key_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
+
+            let gpu_done = if do_inline
+                && n >= limits.gpu_sort_min_rows
+                && n <= limits.gpu_sort_max_elements
+            {
+                let key = self.sort_keys[0].clone();
+                let non_null_indices = vscan.take_non_null_indices();
+                let null_indices = vscan.take_null_indices();
+
+                match key_typid {
+                    FLOAT4OID => {
+                        let mut f32_keys = vscan.take_keys_f32();
+                        if f32_keys.is_empty() {
+                            false
+                        } else {
+                            let mut gpu_idx: Vec<u32> = (0..f32_keys.len() as u32).collect();
+                            let ok = gpu::sort_kv_f32(&mut f32_keys, &mut gpu_idx).is_some();
+                            if ok {
+                                self.apply_gpu_sort_result(
+                                    &key,
+                                    &non_null_indices,
+                                    &null_indices,
+                                    &gpu_idx,
+                                    n,
+                                );
+                            }
+                            ok
+                        }
+                    }
+                    FLOAT8OID | INT4OID | INT8OID => {
+                        let mut f64_keys = vscan.take_keys_f64();
+                        if f64_keys.is_empty() {
+                            false
+                        } else {
+                            let mut gpu_idx: Vec<u32> = (0..f64_keys.len() as u32).collect();
+                            let ok = gpu::sort_kv_f64(&mut f64_keys, &mut gpu_idx).is_some();
+                            if ok {
+                                self.apply_gpu_sort_result(
+                                    &key,
+                                    &non_null_indices,
+                                    &null_indices,
+                                    &gpu_idx,
+                                    n,
+                                );
+                            }
+                            ok
+                        }
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            if !gpu_done {
+                // Defer to PG's SortSupport comparison infrastructure.
+                pgrx::warning!(
+                    "pg_accel: GPU sort unavailable for {} rows (vscan); \
+                     deferring to PG SortSupport",
+                    n,
+                );
+                // SAFETY: scan_slot is valid, main backend thread.
+                unsafe {
+                    self.sort_tuples(scan_slot, n);
+                }
+            }
+        }
+
+        // Top-k truncation.
+        if let Some(k) = self.limit
+            && k < self.sorted_tuples.len()
+        {
+            for mt in &self.sorted_tuples[k..] {
+                if !mt.is_null() {
+                    // SAFETY: MinimalTuples were palloc'd by
+                    // ExecCopySlotMinimalTuple in VectorizedScan.
+                    unsafe {
+                        pg_sys::pfree((*mt).cast());
+                    }
+                }
+            }
+            self.sorted_tuples.truncate(k);
+        }
+
+        self.sort_done = true;
+        self.dispatch_time_us += start.elapsed().as_micros() as u64;
     }
 }
 

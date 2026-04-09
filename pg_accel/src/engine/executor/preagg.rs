@@ -116,13 +116,13 @@ impl DimHashTable {
 #[inline]
 fn eval_cmp(val: f64, opcode: u16, const_val: f64) -> bool {
     match opcode {
-        0 => (val - const_val).abs() < f64::EPSILON, // EQ
+        0 => (val - const_val).abs() < f64::EPSILON,  // EQ
         1 => (val - const_val).abs() >= f64::EPSILON, // NE
-        2 => val < const_val,                          // LT
-        3 => val <= const_val,                         // LE
-        4 => val > const_val,                          // GT
-        5 => val >= const_val,                         // GE
-        _ => true,                                     // unknown → pass
+        2 => val < const_val,                         // LT
+        3 => val <= const_val,                        // LE
+        4 => val > const_val,                         // GT
+        5 => val >= const_val,                        // GE
+        _ => true,                                    // unknown → pass
     }
 }
 
@@ -353,10 +353,7 @@ impl PreAggExecState {
     ///
     /// `child_plan_states` must be valid PlanState pointers. Must be called
     /// on the main backend thread.
-    pub unsafe fn materialize_dimensions(
-        &mut self,
-        child_plan_states: &[*mut pg_sys::PlanState],
-    ) {
+    pub unsafe fn materialize_dimensions(&mut self, child_plan_states: &[*mut pg_sys::PlanState]) {
         let _span = tracing::info_span!("exec.preagg_materialize_dims").entered();
 
         for (depth_idx, &child_ps) in child_plan_states.iter().enumerate() {
@@ -381,17 +378,22 @@ impl PreAggExecState {
             }
 
             // Resolve DimFilter col_idx from raw attno to index in needed_attnos.
-            let resolved_filters: Vec<DimFilter> = depth.dim_filters.iter().map(|filt| {
-                let filt_attno = filt.col_idx as i32;
-                let resolved_idx = needed_attnos.iter()
-                    .position(|&a| a == filt_attno)
-                    .unwrap_or(0);
-                DimFilter {
-                    col_idx: resolved_idx,
-                    cmp_opcode: filt.cmp_opcode,
-                    const_val: filt.const_val,
-                }
-            }).collect();
+            let resolved_filters: Vec<DimFilter> = depth
+                .dim_filters
+                .iter()
+                .map(|filt| {
+                    let filt_attno = filt.col_idx as i32;
+                    let resolved_idx = needed_attnos
+                        .iter()
+                        .position(|&a| a == filt_attno)
+                        .unwrap_or(0);
+                    DimFilter {
+                        col_idx: resolved_idx,
+                        cmp_opcode: filt.cmp_opcode,
+                        const_val: filt.const_val,
+                    }
+                })
+                .collect();
 
             let mut ht = DimHashTable {
                 hash_table: HashMap::new(),
@@ -535,10 +537,7 @@ impl PreAggExecState {
     ///
     /// `self.scan_desc` must be a valid TableScanDesc. Main backend thread.
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
-    unsafe fn scan_and_accumulate(
-        &mut self,
-        _result_slot: *mut pg_sys::TupleTableSlot,
-    ) {
+    unsafe fn scan_and_accumulate(&mut self, _result_slot: *mut pg_sys::TupleTableSlot) {
         let _span = tracing::info_span!("exec.preagg_scan").entered();
 
         let limits = cost::device_limits();
@@ -584,9 +583,8 @@ impl PreAggExecState {
                     | TemplateKernel::Between { col_idx, .. },
                 )) => {
                     // SAFETY: table_tupdesc is valid.
-                    self.fact_filter_infos.push(unsafe {
-                        AttExtractInfo::new(table_tupdesc, (*col_idx + 1) as i32)
-                    });
+                    self.fact_filter_infos
+                        .push(unsafe { AttExtractInfo::new(table_tupdesc, (*col_idx + 1) as i32) });
                 }
                 Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
                     col1_idx,
@@ -701,10 +699,13 @@ impl PreAggExecState {
                 // Build group key from fact + dimension columns.
                 let group_key = self.build_group_key(t_data, &dim_match_indices);
 
-                let accums = self.grouped_accums.entry(group_key.clone()).or_insert_with(|| {
-                    self.group_key_order.push(group_key.clone());
-                    self.agg_descs.iter().map(|d| AggAccum::new(d.op)).collect()
-                });
+                let accums = self
+                    .grouped_accums
+                    .entry(group_key.clone())
+                    .or_insert_with(|| {
+                        self.group_key_order.push(group_key.clone());
+                        self.agg_descs.iter().map(|d| AggAccum::new(d.op)).collect()
+                    });
 
                 for (i, val) in agg_vals.iter().enumerate() {
                     if let Some(v) = val {
@@ -741,11 +742,10 @@ impl PreAggExecState {
                 cmp_opcode,
                 const_val,
                 ..
-            })) => {
-                self.fact_filter_infos
-                    .first()
-                    .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp_opcode, *const_val))
-            }
+            })) => self
+                .fact_filter_infos
+                .first()
+                .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp_opcode, *const_val)),
             Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
                 cmp1_opcode,
                 const1_val,
@@ -753,12 +753,15 @@ impl PreAggExecState {
                 const2_val,
                 ..
             })) => {
-                let pass1 = self.fact_filter_infos.first()
+                let pass1 = self
+                    .fact_filter_infos
+                    .first()
                     .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp1_opcode, *const1_val));
                 if !pass1 {
                     return false;
                 }
-                self.fact_filter_infos.get(1)
+                self.fact_filter_infos
+                    .get(1)
                     .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp2_opcode, *const2_val))
             }
             Some(CompiledExpr::Template(TemplateKernel::Between { lo, hi, .. })) => {
@@ -957,10 +960,7 @@ fn fused_eval_cmp(
 ///
 /// `ht_data` must be a valid `HeapTupleHeader`. `info` must match the schema.
 #[inline]
-unsafe fn heap_read_i64(
-    ht_data: pg_sys::HeapTupleHeader,
-    info: &AttExtractInfo,
-) -> Option<i64> {
+unsafe fn heap_read_i64(ht_data: pg_sys::HeapTupleHeader, info: &AttExtractInfo) -> Option<i64> {
     // SAFETY: caller guarantees ht_data and info validity.
     unsafe {
         match info.typid {
@@ -981,10 +981,7 @@ unsafe fn heap_read_i64(
 ///
 /// `ht_data` must be a valid `HeapTupleHeader`. `info` must match the schema.
 #[inline]
-unsafe fn heap_read_f64(
-    ht_data: pg_sys::HeapTupleHeader,
-    info: &AttExtractInfo,
-) -> Option<f64> {
+unsafe fn heap_read_f64(ht_data: pg_sys::HeapTupleHeader, info: &AttExtractInfo) -> Option<f64> {
     // SAFETY: caller guarantees ht_data and info validity.
     unsafe {
         match info.typid {
@@ -1235,13 +1232,18 @@ mod tests {
         let mut ht = DimHashTable {
             hash_table: HashMap::new(),
             n_rows: 3,
-            columns: vec![
-                make_dim_col(&[1993, 1993, 1994]),
-                make_dim_col(&[1, 2, 1]),
-            ],
+            columns: vec![make_dim_col(&[1993, 1993, 1994]), make_dim_col(&[1, 2, 1])],
             dim_filters: vec![
-                DimFilter { col_idx: 0, cmp_opcode: 0, const_val: 1993.0 }, // year == 1993
-                DimFilter { col_idx: 1, cmp_opcode: 3, const_val: 1.0 },    // quarter <= 1
+                DimFilter {
+                    col_idx: 0,
+                    cmp_opcode: 0,
+                    const_val: 1993.0,
+                }, // year == 1993
+                DimFilter {
+                    col_idx: 1,
+                    cmp_opcode: 3,
+                    const_val: 1.0,
+                }, // quarter <= 1
             ],
             group_col_indices: vec![],
         };

@@ -6,9 +6,7 @@
 //! GPU-present tests (gated by `#[cfg(feature = "gpu")]`) verify actual
 //! spatial results from the GPU kernels.
 
-use crate::gpu::three_layer::{
-    ExtractedGeometry, GeomType, spatial_intersects,
-};
+use crate::gpu::three_layer::{ExtractedGeometry, GeomType, spatial_intersects};
 
 // ---------------------------------------------------------------------------
 // Helpers

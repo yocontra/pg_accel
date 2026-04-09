@@ -2210,7 +2210,10 @@ mod tests {
         .expect("query ok")
         .expect("not null");
 
-        assert_eq!(off, on, "COUNT with dim filter mismatch: off={off}, on={on}");
+        assert_eq!(
+            off, on,
+            "COUNT with dim filter mismatch: off={off}, on={on}"
+        );
     }
 
     #[pg_test]

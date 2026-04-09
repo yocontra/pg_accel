@@ -338,18 +338,13 @@ pub unsafe fn dispatch_gpu_spatial(
         let fn_name = registry::global_registry()
             .lookup(fn_info.fn_oid)
             .map(|e| e.name);
-        let is_intersects = !matches!(
-            fn_name,
-            Some("st_contains" | "st_within" | "st_dwithin")
-        );
+        let is_intersects = !matches!(fn_name, Some("st_contains" | "st_within" | "st_dwithin"));
 
         if is_intersects {
             // SAFETY: same preconditions as dispatch_gpu_spatial — main
             // backend thread, valid datums and fn_info.
             if let Some(result) = unsafe {
-                try_bulk_point_in_polygon(
-                    batch, &geom_b, fn_info, is_strict, qual_d, qual_null,
-                )
+                try_bulk_point_in_polygon(batch, &geom_b, fn_info, is_strict, qual_d, qual_null)
             } {
                 return result;
             }
@@ -425,7 +420,8 @@ pub unsafe fn dispatch_gpu_spatial(
     let start = std::time::Instant::now();
     pgrx::debug1!(
         "pg_accel: dispatch_gpu_spatial: calling GPU kernel {}x{} pairs",
-        pgaccel_a.len(), pgaccel_b.len(),
+        pgaccel_a.len(),
+        pgaccel_b.len(),
     );
     let gpu_result = gpu::spatial_intersects_gpu(&pgaccel_a, &pgaccel_b);
     let elapsed_ms = start.elapsed().as_millis() as i32;
@@ -445,7 +441,9 @@ pub unsafe fn dispatch_gpu_spatial(
 
     pgrx::debug1!(
         "pg_accel: GPU spatial results: definite_true={}, definite_false={}, uncertain={}",
-        dt_pairs.len(), df_pairs.len(), uc_pairs.len(),
+        dt_pairs.len(),
+        df_pairs.len(),
+        uc_pairs.len(),
     );
 
     // Apply GPU results. Each pair is (i, j) where j=0 (constant geom).
@@ -518,7 +516,8 @@ pub unsafe fn dispatch_gpu_spatial(
     if recheck_total > 0 {
         pgrx::debug1!(
             "pg_accel: spatial recheck: {}/{} uncertain pairs passed PostGIS",
-            recheck_pass, recheck_total,
+            recheck_pass,
+            recheck_total,
         );
     }
 
@@ -827,16 +826,14 @@ pub unsafe fn dispatch_gpu_raster(
         let varlena = unsafe { pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr()) };
         let data_len = unsafe { pgrx::varsize_any_exhdr(varlena) };
         let data_ptr = unsafe { pgrx::vardata_any(varlena) };
-        let original_wkb =
-            unsafe { std::slice::from_raw_parts(data_ptr.cast::<u8>(), data_len) };
+        let original_wkb = unsafe { std::slice::from_raw_parts(data_ptr.cast::<u8>(), data_len) };
 
         match raster::patch_band0_pixels(original_wkb, output_f32) {
             Some(new_wkb) => {
                 // Allocate a PG varlena datum with the patched WKB.
                 let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
                 // SAFETY: palloc is safe on main backend thread.
-                let new_varlena =
-                    unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
+                let new_varlena = unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
                 // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
                 unsafe {
                     pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);

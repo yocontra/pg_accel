@@ -85,7 +85,12 @@ mod tests {
     #[test]
     fn all_function_names_are_lowercase() {
         for f in &adapter().functions {
-            assert_eq!(f.name, f.name.to_lowercase(), "name not lowercase: {}", f.name);
+            assert_eq!(
+                f.name,
+                f.name.to_lowercase(),
+                "name not lowercase: {}",
+                f.name
+            );
         }
     }
 
@@ -153,19 +158,34 @@ mod tests {
 
     #[test]
     fn no_gpu_spatial_strategy() {
-        assert!(adapter().functions.iter().all(|f| f.strategy != AccelStrategy::GpuSpatial));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .all(|f| f.strategy != AccelStrategy::GpuSpatial)
+        );
     }
 
     #[test]
     fn no_gpu_h3_strategy() {
-        assert!(adapter().functions.iter().all(|f| f.strategy != AccelStrategy::GpuH3));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .all(|f| f.strategy != AccelStrategy::GpuH3)
+        );
     }
 
     // -- Specific function presence -------------------------------------------
 
     #[test]
     fn contains_st_mapalgebra() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_mapalgebra"));
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "st_mapalgebra")
+        );
     }
 
     #[test]

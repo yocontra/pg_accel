@@ -574,7 +574,10 @@ impl JoinExecState {
                         // Buffer matching inner tuples, free non-matches.
                         for (i, mt) in inner_tuples.into_iter().enumerate() {
                             if mask[i] {
-                                self.pending_matches.push(PendingMatch { outer_tuple: std::ptr::null_mut(), inner_tuple: mt });
+                                self.pending_matches.push(PendingMatch {
+                                    outer_tuple: std::ptr::null_mut(),
+                                    inner_tuple: mt,
+                                });
                             } else {
                                 // SAFETY: Not a match — free the owned copy.
                                 unsafe { pg_sys::pfree(mt.cast()) };
@@ -597,7 +600,10 @@ impl JoinExecState {
             } else {
                 // No qual — all inner tuples match.
                 for mt in inner_tuples {
-                    self.pending_matches.push(PendingMatch { outer_tuple: std::ptr::null_mut(), inner_tuple: mt });
+                    self.pending_matches.push(PendingMatch {
+                        outer_tuple: std::ptr::null_mut(),
+                        inner_tuple: mt,
+                    });
                 }
             }
 
@@ -652,7 +658,10 @@ impl JoinExecState {
             }
 
             if !is_null && result.value() != 0 {
-                self.pending_matches.push(PendingMatch { outer_tuple: std::ptr::null_mut(), inner_tuple: mt });
+                self.pending_matches.push(PendingMatch {
+                    outer_tuple: std::ptr::null_mut(),
+                    inner_tuple: mt,
+                });
             } else {
                 // SAFETY: Not a match — free the owned copy.
                 unsafe { pg_sys::pfree(mt.cast()) };
@@ -700,9 +709,7 @@ impl JoinExecState {
         if !tlist.is_null() {
             let tlen = unsafe { pg_sys::list_length(tlist) };
             for j in 0..tlen {
-                let tle = unsafe {
-                    pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>()
-                };
+                let tle = unsafe { pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>() };
                 if tle.is_null() {
                     self.tlist_map.push(TlistMapEntry {
                         child_idx: 0,
@@ -712,8 +719,7 @@ impl JoinExecState {
                 }
                 let expr = unsafe { (*tle).expr };
                 if !expr.is_null()
-                    && unsafe { (*expr.cast::<pg_sys::Node>()).type_ }
-                        == pg_sys::NodeTag::T_Var
+                    && unsafe { (*expr.cast::<pg_sys::Node>()).type_ } == pg_sys::NodeTag::T_Var
                 {
                     let var = expr.cast::<pg_sys::Var>();
                     let varno = unsafe { (*var).varno };
@@ -739,27 +745,19 @@ impl JoinExecState {
                     // (varno, varattno) pair to determine child index and
                     // remapped output position.
                     // SAFETY: outer_ps and inner_ps are valid PlanState ptrs.
-                    let inner_pos = unsafe {
-                        Self::find_child_output_pos(inner_ps, varno, varattno)
-                    };
+                    let inner_pos =
+                        unsafe { Self::find_child_output_pos(inner_ps, varno, varattno) };
                     if inner_pos > 0 {
                         self.tlist_map.push(TlistMapEntry {
                             child_idx: 1,
                             child_attno: inner_pos,
                         });
                     } else {
-                        let outer_pos = unsafe {
-                            Self::find_child_output_pos(
-                                outer_ps, varno, varattno,
-                            )
-                        };
+                        let outer_pos =
+                            unsafe { Self::find_child_output_pos(outer_ps, varno, varattno) };
                         self.tlist_map.push(TlistMapEntry {
                             child_idx: 0,
-                            child_attno: if outer_pos > 0 {
-                                outer_pos
-                            } else {
-                                varattno
-                            },
+                            child_attno: if outer_pos > 0 { outer_pos } else { varattno },
                         });
                     }
                 } else {
@@ -843,7 +841,11 @@ impl JoinExecState {
                 // ScanState, ss_ScanTupleSlot has the right descriptor.
                 let ss = inner_ps.cast::<pg_sys::ScanState>();
                 let scan_slot = unsafe { (*ss).ss_ScanTupleSlot };
-                if scan_slot.is_null() { result_slot } else { scan_slot }
+                if scan_slot.is_null() {
+                    result_slot
+                } else {
+                    scan_slot
+                }
             } else {
                 slot
             }
@@ -875,9 +877,7 @@ impl JoinExecState {
             }
 
             // Validate attno vs slot descriptor before key extraction.
-            let inner_natts = unsafe {
-                (*(*inner_result_slot).tts_tupleDescriptor).natts
-            };
+            let inner_natts = unsafe { (*(*inner_result_slot).tts_tupleDescriptor).natts };
             if self.hash_inner_attno > inner_natts {
                 // Attno out of range — skip hash table build.
             }
@@ -886,12 +886,8 @@ impl JoinExecState {
             // reads (avoids per-tuple ExecForceStoreMinimalTuple overhead).
             // SAFETY: inner_result_slot has a valid tuple descriptor matching
             // the inner tuples.
-            let inner_tupdesc = unsafe {
-                (*inner_result_slot).tts_tupleDescriptor
-            };
-            let inner_info = unsafe {
-                AttExtractInfo::new(inner_tupdesc, self.hash_inner_attno)
-            };
+            let inner_tupdesc = unsafe { (*inner_result_slot).tts_tupleDescriptor };
+            let inner_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.hash_inner_attno) };
             let indices: Vec<u32> = (0..inner_count as u32).collect();
 
             // Extract only the key type we need — one allocation, one pass.
@@ -906,7 +902,9 @@ impl JoinExecState {
                 PgaccelKeyType::Int32 => {
                     let (k, n) = unsafe {
                         tuple_extract::extract_i32(
-                            &self.hash_inner_tuples, &inner_info, inner_result_slot,
+                            &self.hash_inner_tuples,
+                            &inner_info,
+                            inner_result_slot,
                         )
                     };
                     int32_keys = k;
@@ -915,7 +913,9 @@ impl JoinExecState {
                 PgaccelKeyType::Int64 => {
                     let (k, n) = unsafe {
                         tuple_extract::extract_i64(
-                            &self.hash_inner_tuples, &inner_info, inner_result_slot,
+                            &self.hash_inner_tuples,
+                            &inner_info,
+                            inner_result_slot,
                         )
                     };
                     long_keys = k;
@@ -924,7 +924,9 @@ impl JoinExecState {
                 PgaccelKeyType::Float64 => {
                     let (k, n) = unsafe {
                         tuple_extract::extract_f64(
-                            &self.hash_inner_tuples, &inner_info, inner_result_slot,
+                            &self.hash_inner_tuples,
+                            &inner_info,
+                            inner_result_slot,
                         )
                     };
                     double_keys = k;
@@ -941,7 +943,6 @@ impl JoinExecState {
 
             self.hash_table =
                 GpuHashTable::build(keys_ptr, &null_mask, &indices, self.hash_key_type);
-
         }
 
         // Phase 2: Probe with outer tuples in batches.
@@ -1074,12 +1075,8 @@ impl JoinExecState {
             };
             // SAFETY: outer_extract_slot has a valid tuple descriptor
             // matching the outer tuples.
-            let outer_tupdesc = unsafe {
-                (*outer_extract_slot).tts_tupleDescriptor
-            };
-            let outer_info = unsafe {
-                AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno)
-            };
+            let outer_tupdesc = unsafe { (*outer_extract_slot).tts_tupleDescriptor };
+            let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno) };
 
             let mut o_int32_keys: Vec<i32> = Vec::new();
             let mut o_long_keys: Vec<i64> = Vec::new();
@@ -1090,27 +1087,21 @@ impl JoinExecState {
             match self.hash_key_type {
                 PgaccelKeyType::Int32 => {
                     let (k, n) = unsafe {
-                        tuple_extract::extract_i32(
-                            &outer_tuples, &outer_info, outer_extract_slot,
-                        )
+                        tuple_extract::extract_i32(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_int32_keys = k;
                     o_null_mask = n;
                 }
                 PgaccelKeyType::Int64 => {
                     let (k, n) = unsafe {
-                        tuple_extract::extract_i64(
-                            &outer_tuples, &outer_info, outer_extract_slot,
-                        )
+                        tuple_extract::extract_i64(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_long_keys = k;
                     o_null_mask = n;
                 }
                 PgaccelKeyType::Float64 => {
                     let (k, n) = unsafe {
-                        tuple_extract::extract_f64(
-                            &outer_tuples, &outer_info, outer_extract_slot,
-                        )
+                        tuple_extract::extract_f64(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_double_keys = k;
                     o_null_mask = n;
@@ -1133,17 +1124,13 @@ impl JoinExecState {
                 for (outer_idx, inner_idx) in pairs {
                     let outer_idx = outer_idx as usize;
                     let inner_idx = inner_idx as usize;
-                    if inner_idx < self.hash_inner_tuples.len()
-                        && outer_idx < outer_tuples.len()
-                    {
+                    if inner_idx < self.hash_inner_tuples.len() && outer_idx < outer_tuples.len() {
                         let inner_mt = self.hash_inner_tuples[inner_idx];
                         let outer_mt = outer_tuples[outer_idx];
                         if !inner_mt.is_null() && !outer_mt.is_null() {
                             // SAFETY: Copy both tuples for buffering.
-                            let inner_copy =
-                                unsafe { pg_sys::heap_copy_minimal_tuple(inner_mt) };
-                            let outer_copy =
-                                unsafe { pg_sys::heap_copy_minimal_tuple(outer_mt) };
+                            let inner_copy = unsafe { pg_sys::heap_copy_minimal_tuple(inner_mt) };
+                            let outer_copy = unsafe { pg_sys::heap_copy_minimal_tuple(outer_mt) };
                             self.pending_matches.push(PendingMatch {
                                 outer_tuple: outer_copy,
                                 inner_tuple: inner_copy,
@@ -1243,10 +1230,7 @@ impl JoinExecState {
                 if !cst.is_null() {
                     let clen = unsafe { pg_sys::list_length(cst) };
                     for j in 0..clen {
-                        let tle = unsafe {
-                            pg_sys::list_nth(cst, j)
-                                .cast::<pg_sys::TargetEntry>()
-                        };
+                        let tle = unsafe { pg_sys::list_nth(cst, j).cast::<pg_sys::TargetEntry>() };
                         if tle.is_null() {
                             continue;
                         }
@@ -1254,8 +1238,7 @@ impl JoinExecState {
                         if expr.is_null() {
                             continue;
                         }
-                        if unsafe { (*expr.cast::<pg_sys::Node>()).type_ }
-                            != pg_sys::NodeTag::T_Var
+                        if unsafe { (*expr.cast::<pg_sys::Node>()).type_ } != pg_sys::NodeTag::T_Var
                         {
                             continue;
                         }
@@ -1286,8 +1269,7 @@ impl JoinExecState {
         }
         let tlen = unsafe { pg_sys::list_length(tlist) };
         for i in 0..tlen {
-            let tle =
-                unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
+            let tle = unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
             if tle.is_null() {
                 continue;
             }
@@ -1295,9 +1277,7 @@ impl JoinExecState {
             if expr.is_null() {
                 continue;
             }
-            if unsafe { (*expr.cast::<pg_sys::Node>()).type_ }
-                != pg_sys::NodeTag::T_Var
-            {
+            if unsafe { (*expr.cast::<pg_sys::Node>()).type_ } != pg_sys::NodeTag::T_Var {
                 continue;
             }
             let var = expr.cast::<pg_sys::Var>();

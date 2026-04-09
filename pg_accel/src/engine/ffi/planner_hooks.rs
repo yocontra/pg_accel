@@ -114,7 +114,8 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let rel_ref = unsafe { &*rel };
     let rte_ref = unsafe { &*rte };
 
-    let _span = tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
+    let _span =
+        tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
     // Gate 2: Only base table relations — cheap field checks before
     // any registry or clause work.
@@ -216,7 +217,11 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         _ => cost::GPU_SPATIAL_PER_ROW_COST,
     };
     if !cost::should_batch(rows, per_row_cost, min_batch) {
-        pgrx::debug1!("pg_accel: set_rel_pathlist: batch rejected tuples={} min_batch={}", rows, min_batch);
+        pgrx::debug1!(
+            "pg_accel: set_rel_pathlist: batch rejected tuples={} min_batch={}",
+            rows,
+            min_batch
+        );
         return;
     }
     // GpuExpr has a device-derived minimum row threshold in addition to the
@@ -266,8 +271,8 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         // when the planner cannot confirm the polygon has enough vertices.
         // This prevents injection for FuncExpr geometry args (ST_Buffer,
         // ST_MakeEnvelope) that PG didn't constant-fold.
-        let vcount = unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) }
-            .unwrap_or(0);
+        let vcount =
+            unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) }.unwrap_or(0);
         if vcount < min_verts {
             pgrx::debug1!(
                 "pg_accel: spatial vertex gate: vcount={} < min={}, skipping",
@@ -347,10 +352,7 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     } else {
         0.0
     };
-    let raw_total = (base.total_cost * cost_margin
-        + batch_overhead
-        + gpu_overhead
-        + yield_cost)
+    let raw_total = (base.total_cost * cost_margin + batch_overhead + gpu_overhead + yield_cost)
         * gucs::cost_multiplier();
 
     // Let PG's native cost comparison decide — add_path() discards
@@ -575,7 +577,10 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
     pgrx::debug1!("pg_accel sort: var_attno={var_attno}, var_typid={var_typid}");
 
     // Gate: Only GPU-sortable numeric types.
-    if !matches!(var_typid, SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID) {
+    if !matches!(
+        var_typid,
+        SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID
+    ) {
         pgrx::debug1!("pg_accel sort: unsupported type {var_typid}");
         return;
     }
@@ -689,6 +694,26 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
             0
         };
         priv_list = lappend(priv_list, pg_sys::makeInteger(limit_int).cast());
+
+        // Serialize self_scan_relid for VectorizedScan. When the child is a
+        // plain SeqScan on a base relation, we can bypass ExecProcNode and
+        // scan the heap directly.
+        let self_scan_relid = if !cheapest.is_null() {
+            // SAFETY: cheapest is the child path; check if it's a simple
+            // Path on a base relation (i.e., parent is a baserel).
+            let parent = (*cheapest).parent;
+            if !parent.is_null()
+                && (*parent).rtekind == pg_sys::RTEKind::RTE_RELATION
+                && (*parent).relid > 0
+            {
+                (*parent).relid as i32
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        priv_list = lappend(priv_list, pg_sys::makeInteger(self_scan_relid).cast());
         (*cpath).custom_private = priv_list;
 
         add_path(rel, cpath.cast());
@@ -907,8 +932,7 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // Honest total — no cost_multiplier. Custom Scan hash join has inherent
     // per-row overhead. PG's native parallel hash join avoids yield overhead
     // entirely, so we only win when the GPU probe is fast enough to offset it.
-    let total_cost =
-        base_cost + gpu_launch + build_cost + probe_cost + yield_cost;
+    let total_cost = base_cost + gpu_launch + build_cost + probe_cost + yield_cost;
 
     // Let PG's native cost comparison decide — add_path() discards
     // paths that are strictly dominated by cheaper alternatives.
@@ -1271,8 +1295,7 @@ unsafe fn pgaccel_inject_gpu_window(
                 // SAFETY: second arg is an Expr* node.
                 let offset_expr = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Expr>() };
                 if !offset_expr.is_null()
-                    && unsafe { (*offset_expr.cast::<pg_sys::Node>()).type_ }
-                        == NodeTag::T_Const
+                    && unsafe { (*offset_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Const
                 {
                     let cst = offset_expr.cast::<pg_sys::Const>();
                     if !unsafe { (*cst).constisnull } {
@@ -1291,8 +1314,7 @@ unsafe fn pgaccel_inject_gpu_window(
                     let cst = def_expr.cast::<pg_sys::Const>();
                     if !unsafe { (*cst).constisnull } {
                         // SAFETY: float8 Const value is stored in Datum.
-                        default_val =
-                            f64::from_bits(unsafe { (*cst).constvalue.value() } as u64);
+                        default_val = f64::from_bits(unsafe { (*cst).constvalue.value() } as u64);
                     }
                 }
             }
@@ -1334,17 +1356,16 @@ unsafe fn pgaccel_inject_gpu_window(
     // the window phase. create_sort_path wraps cheapest with a Sort
     // node if it's not already sorted by these keys.
     let window_pathkeys = unsafe { (*root).window_pathkeys };
-    let sorted_path = if window_pathkeys.is_null()
-        || unsafe { pg_sys::list_length(window_pathkeys) } == 0
-    {
-        cheapest
-    } else {
-        // SAFETY: All pointers from the planner; create_sort_path pallocs.
-        unsafe {
-            pg_sys::create_sort_path(root, input_rel, cheapest, window_pathkeys, -1.0)
-                .cast::<Path>()
-        }
-    };
+    let sorted_path =
+        if window_pathkeys.is_null() || unsafe { pg_sys::list_length(window_pathkeys) } == 0 {
+            cheapest
+        } else {
+            // SAFETY: All pointers from the planner; create_sort_path pallocs.
+            unsafe {
+                pg_sys::create_sort_path(root, input_rel, cheapest, window_pathkeys, -1.0)
+                    .cast::<Path>()
+            }
+        };
 
     // Honest cost — no cost_multiplier discount. Window functions process
     // all input rows and add window output columns, so cost is:
@@ -1523,7 +1544,8 @@ unsafe fn pgaccel_inject_gpu_preagg(
 
                 // Extract equi-join key from join restrictinfo.
                 let restrict = unsafe { (*jp).joinrestrictinfo };
-                let equi = unsafe { find_equi_join_from_restrictinfo(restrict, outer_path, inner_path) };
+                let equi =
+                    unsafe { find_equi_join_from_restrictinfo(restrict, outer_path, inner_path) };
                 let Some(equi) = equi else {
                     pgrx::debug1!("pg_accel: preagg rejected: no equi-join key found");
                     return;
@@ -1576,9 +1598,8 @@ unsafe fn pgaccel_inject_gpu_preagg(
                 fact_relid = parent_ref.relid;
 
                 // Extract fact-side WHERE clause as a compiled template.
-                fact_scan_expr = unsafe {
-                    compile_restrictinfo_to_template(parent_ref.baserestrictinfo)
-                };
+                fact_scan_expr =
+                    unsafe { compile_restrictinfo_to_template(parent_ref.baserestrictinfo) };
                 break;
             }
         }
@@ -1640,9 +1661,7 @@ unsafe fn pgaccel_inject_gpu_preagg(
                 0 // COUNT(*)
             } else {
                 // First argument.
-                let te = unsafe {
-                    pg_sys::list_nth(args, 0).cast::<pg_sys::TargetEntry>()
-                };
+                let te = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::TargetEntry>() };
                 if te.is_null() {
                     0
                 } else {
@@ -1666,9 +1685,8 @@ unsafe fn pgaccel_inject_gpu_preagg(
             let typid = unsafe { (*var).vartype };
 
             // Determine if this var references the fact table or a dimension.
-            let (source, attno) = resolve_var_to_star_source(
-                varno, varattno, fact_relid, &inner_relids,
-            );
+            let (source, attno) =
+                resolve_var_to_star_source(varno, varattno, fact_relid, &inner_relids);
 
             group_keys.push(GroupKeyDesc {
                 source,
@@ -1962,7 +1980,10 @@ unsafe fn compile_restrictinfo_to_template(
         } else if let Some((attno, val)) = unsafe { extract_dim_var_const(right, left) } {
             // Flip comparison direction.
             let flipped = match cmp_opcode {
-                2 => 4, 3 => 5, 4 => 2, 5 => 3,
+                2 => 4,
+                3 => 5,
+                4 => 2,
+                5 => 3,
                 other => other,
             };
             predicates.push(((attno - 1) as u32, flipped, val));
@@ -2023,9 +2044,7 @@ unsafe fn compile_restrictinfo_to_template(
 ///
 /// `inner_rel` must be a valid `RelOptInfo` pointer from the planner.
 #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
-unsafe fn extract_dim_filters_from_rel(
-    inner_rel: *mut pg_sys::RelOptInfo,
-) -> Vec<DimFilter> {
+unsafe fn extract_dim_filters_from_rel(inner_rel: *mut pg_sys::RelOptInfo) -> Vec<DimFilter> {
     use crate::engine::expr_compiler;
 
     let mut filters = Vec::new();
@@ -2091,10 +2110,10 @@ unsafe fn extract_dim_filters_from_rel(
         } else if let Some((attno, const_val)) = unsafe { extract_dim_var_const(right, left) } {
             // Swap operand order: flip comparison direction.
             let flipped = match cmp_opcode {
-                2 => 4, // LT → GT
-                3 => 5, // LE → GE
-                4 => 2, // GT → LT
-                5 => 3, // GE → LE
+                2 => 4,         // LT → GT
+                3 => 5,         // LE → GE
+                4 => 2,         // GT → LT
+                5 => 3,         // GE → LE
                 other => other, // EQ, NE unchanged
             };
             filters.push(DimFilter {
@@ -2159,12 +2178,12 @@ unsafe fn extract_dim_var_const(
     let typid = u32::from(unsafe { (*cst).consttype });
 
     let val = match typid {
-        21 => Some(f64::from(datum.value() as i16)),     // INT2
-        23 => Some(f64::from(datum.value() as i32)),     // INT4
-        20 => Some((datum.value() as i64) as f64),       // INT8
+        21 => Some(f64::from(datum.value() as i16)), // INT2
+        23 => Some(f64::from(datum.value() as i32)), // INT4
+        20 => Some((datum.value() as i64) as f64),   // INT8
         700 => Some(f64::from(f32::from_bits(datum.value() as u32))), // FLOAT4
         701 => Some(f64::from_bits(datum.value() as u64)), // FLOAT8
-        1082 => Some(f64::from(datum.value() as i32)),   // DATE (stored as int32)
+        1082 => Some(f64::from(datum.value() as i32)), // DATE (stored as int32)
         _ => None,
     }?;
 
@@ -2237,7 +2256,10 @@ unsafe fn pgaccel_inject_gpu_agg(
     };
     // Reject GROUP BY with more than 2 columns.
     if group_len > 2 {
-        pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY has {} cols (max 2)", group_len);
+        pgrx::debug1!(
+            "pg_accel: gpu_agg rejected: GROUP BY has {} cols (max 2)",
+            group_len
+        );
         return;
     }
 
@@ -2343,9 +2365,8 @@ unsafe fn pgaccel_inject_gpu_agg(
         } else {
             unsafe { pg_sys::list_length(tlist) }
         };
-        let sc = unsafe {
-            pg_sys::list_nth(query.groupClause, 1).cast::<pg_sys::SortGroupClause>()
-        };
+        let sc =
+            unsafe { pg_sys::list_nth(query.groupClause, 1).cast::<pg_sys::SortGroupClause>() };
         if sc.is_null() {
             return;
         }
@@ -2382,9 +2403,7 @@ unsafe fn pgaccel_inject_gpu_agg(
 
     // Gate: Grouped aggregation has higher overhead (hash table build + probe
     // + per-group yield) than plain reduce. Require more rows to break even.
-    if group_key_info.is_some()
-        && rows < cost::device_limits().gpu_hash_agg_min_rows
-    {
+    if group_key_info.is_some() && rows < cost::device_limits().gpu_hash_agg_min_rows {
         pgrx::debug1!(
             "pg_accel: gpu_agg rejected: grouped agg rows {} < min {}",
             rows,
@@ -2576,10 +2595,12 @@ unsafe fn pgaccel_inject_gpu_agg(
             AGG_FLOAT8OID
         };
 
-        if attno != 0 && !matches!(
-            typid,
-            AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
-        ) {
+        if attno != 0
+            && !matches!(
+                typid,
+                AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
+            )
+        {
             return;
         }
         // Note: float8 aggregates on non-fp64 GPU (Metal) fall back to CPU
@@ -2614,16 +2635,15 @@ unsafe fn pgaccel_inject_gpu_agg(
     // Detect fusion opportunity: child is our scan CustomPath AND the
     // row count meets the fusion minimum. Below the threshold, fusion
     // setup overhead (scan_desc open, template compile) exceeds savings.
-    let child_is_our_scan = if unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ }
-        == NodeTag::T_CustomPath
-    {
-        let cp = cheapest.cast::<CustomPath>();
-        // SAFETY: cp is a valid CustomPath (tag checked above).
-        let is_ours = unsafe { (*cp).methods == custom_scan::scan_path_methods() };
-        is_ours && rows >= cost::device_limits().gpu_pipeline_fusion_min_rows
-    } else {
-        false
-    };
+    let child_is_our_scan =
+        if unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ } == NodeTag::T_CustomPath {
+            let cp = cheapest.cast::<CustomPath>();
+            // SAFETY: cp is a valid CustomPath (tag checked above).
+            let is_ours = unsafe { (*cp).methods == custom_scan::scan_path_methods() };
+            is_ours && rows >= cost::device_limits().gpu_pipeline_fusion_min_rows
+        } else {
+            false
+        };
 
     // Detect self-scan opportunity: child is a plain path on a base
     // relation (SeqScan) with NO restriction quals. The executor will
@@ -2800,10 +2820,7 @@ unsafe fn find_cheapest_nonparallel_path(pathlist: *mut List) -> *mut Path {
 /// # Safety
 ///
 /// `pathlist` must be a valid PG `List` of `Path*` or null.
-unsafe fn find_cheapest_path_filtered(
-    pathlist: *mut List,
-    skip_parallel: bool,
-) -> *mut Path {
+unsafe fn find_cheapest_path_filtered(pathlist: *mut List, skip_parallel: bool) -> *mut Path {
     if pathlist.is_null() {
         return std::ptr::null_mut();
     }
@@ -4685,10 +4702,7 @@ mod tests {
         let cost_margin = cost::GPU_COST_SAFETY_MARGIN; // 0.7
         let yield_cost = 0.0; // GPU strategies: no yield cost
 
-        let total_cost = (base_total * cost_margin
-            + batch_overhead
-            + gpu_overhead
-            + yield_cost)
+        let total_cost = (base_total * cost_margin + batch_overhead + gpu_overhead + yield_cost)
             * cost_multiplier;
 
         // 5000 * 0.7 + ~26 + 5 = 3531 < 5000: GPU wins for expensive functions.
@@ -4713,11 +4727,8 @@ mod tests {
         let cost_margin = 1.0; // GpuExpr: no discount
         let yield_cost = base_rows * 0.005; // GpuExpr yield
 
-        let total_cost = (base_total * cost_margin
-            + batch_overhead
-            + gpu_overhead
-            + yield_cost)
-            * 1.0;
+        let total_cost =
+            (base_total * cost_margin + batch_overhead + gpu_overhead + yield_cost) * 1.0;
 
         // 500 * 1.0 + ~26 + 0 + 500 = 1026 > 500: GPU loses.
         assert!(

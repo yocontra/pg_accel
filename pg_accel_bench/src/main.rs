@@ -334,7 +334,10 @@ fn cmd_dry_run(
             println!("  Required extensions: {}", required_exts.join(", "));
         }
 
-        println!("  Setup ({} statements @ {sample_rows} rows):", w.setup_sql(sample_rows).len());
+        println!(
+            "  Setup ({} statements @ {sample_rows} rows):",
+            w.setup_sql(sample_rows).len()
+        );
         for (i, sql) in w.setup_sql(sample_rows).iter().enumerate() {
             let preview = if sql.len() > 80 {
                 format!("{}...", &sql[..77])

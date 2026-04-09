@@ -449,10 +449,7 @@ mod tests {
         assert_eq!(extract_field_opcode("month"), Some(opcode::EXTRACT_MONTH));
         assert_eq!(extract_field_opcode("day"), Some(opcode::EXTRACT_DAY));
         assert_eq!(extract_field_opcode("dow"), Some(opcode::EXTRACT_DOW));
-        assert_eq!(
-            extract_field_opcode("dayofweek"),
-            Some(opcode::EXTRACT_DOW)
-        );
+        assert_eq!(extract_field_opcode("dayofweek"), Some(opcode::EXTRACT_DOW));
         assert_eq!(extract_field_opcode("epoch"), Some(opcode::EXTRACT_EPOCH));
         assert_eq!(extract_field_opcode("hour"), Some(opcode::EXTRACT_HOUR));
         assert_eq!(extract_field_opcode("minute"), Some(opcode::EXTRACT_MINUTE));
@@ -476,10 +473,7 @@ mod tests {
         assert_eq!(math_func_opcode("tan"), Some((opcode::TAN_F64, false)));
         assert_eq!(math_func_opcode("dtan"), Some((opcode::TAN_F64, false)));
         assert_eq!(math_func_opcode("log"), Some((opcode::LOG10_F64, false)));
-        assert_eq!(
-            math_func_opcode("dlog10"),
-            Some((opcode::LOG10_F64, false))
-        );
+        assert_eq!(math_func_opcode("dlog10"), Some((opcode::LOG10_F64, false)));
     }
 
     #[test]
@@ -543,9 +537,6 @@ mod tests {
         assert_eq!(prog.instructions[jump1 as usize].arg, branch2);
         assert_eq!(prog.instructions[end_jump1 as usize].arg, end_pc);
         assert_eq!(prog.instructions[end_jump2 as usize].arg, end_pc);
-        assert_eq!(
-            prog.instructions[end_pc as usize].opcode,
-            opcode::CASE_END
-        );
+        assert_eq!(prog.instructions[end_pc as usize].opcode, opcode::CASE_END);
     }
 }
