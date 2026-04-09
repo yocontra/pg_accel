@@ -2562,12 +2562,8 @@ unsafe fn pgaccel_inject_gpu_agg(
             }
         };
 
-        // Gate: AVG returns float8 regardless of input type. Skip when
-        // GPU lacks native fp64 to avoid precision loss.
-        if op == AggOp::Avg && !cost::platform_has_fp64() {
-            pgrx::debug1!("pg_accel: gpu_agg rejected: AVG requires fp64");
-            return;
-        }
+        // AVG is computed as Sum / Count. The fused scan path uses CPU-side
+        // f64 Kahan accumulation, so fp64 GPU support is not required.
 
         // COUNT(*): attno = 0, result type = int8.
         if op == AggOp::Count && aggref_ref.aggstar {
@@ -2705,8 +2701,10 @@ unsafe fn pgaccel_inject_gpu_agg(
     // do direct heap walk + columnar extract, eliminating ExecProcNode
     // and MinimalTuple overhead. Same architecture as hash join.
     let agg_per_row = if is_vectorized { 0.001 } else { 0.005 };
-    // For grouped agg, add hash table build + probe cost per row.
-    let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
+    // For grouped agg, add hash table build + probe + per-group
+    // accumulation cost per row. This must be high enough to reflect
+    // the real cost vs PG's parallel HashAgg (2-3 workers).
+    let hash_overhead = if group_key_info.is_some() { 0.02 } else { 0.0 };
     let reduce_cost = base.rows * (agg_per_row + hash_overhead);
     // For self-scanning paths, compute our own scan cost instead of
     // inheriting the child's SeqScan cost. Our heap walk + arena copy
