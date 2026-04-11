@@ -23,6 +23,7 @@ use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::executor::vectorized_scan::VectorizedScan;
 use crate::engine::expr_compiler::{self, CompiledExpr, TemplateKernel};
 use crate::engine::registry::AccelStrategy;
+use crate::engine::stats;
 use crate::gpu;
 use crate::gpu::{PgaccelAggCol, PgaccelAggFunc};
 
@@ -850,6 +851,9 @@ impl AggExecState {
             return std::ptr::null_mut();
         }
 
+        // Record a query acceleration attempt once per executor instance.
+        stats::record_query_accelerated();
+
         let start = std::time::Instant::now();
 
         let vscan = self.vscan.as_mut().expect("vscan must be set");
@@ -882,11 +886,21 @@ impl AggExecState {
             }
         }
 
+        // Pre-compute which columns want GPU buffering. Columns flagged
+        // here push their values into `gpu_values` for a post-scan GPU
+        // reduce dispatch. Non-flagged columns (Count, Passthrough, or
+        // non-numeric types) use the scalar accumulator.
+        let gpu_flags: Vec<bool> = self
+            .columns
+            .iter()
+            .map(|c| c.wants_gpu_buffer(self.strategy))
+            .collect();
+
         // Single-pass fused scan+extract+accumulate. No arena, no
         // intermediate buffers. Each tuple is read from the heap,
-        // column values are extracted inline, and accumulated
-        // immediately. This eliminates the arena copy overhead and
-        // the second-pass extraction.
+        // column values are extracted inline, and buffered (for GPU
+        // reduce) or accumulated (scalar Kahan) depending on the
+        // column's GPU eligibility.
         let mut total = 0u64;
         loop {
             // SAFETY: scan_desc is valid; main backend thread.
@@ -902,7 +916,7 @@ impl AggExecState {
             // SAFETY: htup is valid from heap_getnext.
             let hdr = unsafe { (*htup).t_data };
 
-            for (col, info) in self.columns.iter_mut().zip(infos.iter()) {
+            for (i, (col, info)) in self.columns.iter_mut().zip(infos.iter()).enumerate() {
                 if col.attno <= 0 {
                     // COUNT(*)
                     col.count += 1;
@@ -911,7 +925,7 @@ impl AggExecState {
                 }
 
                 let info = match info {
-                    Some(i) => i,
+                    Some(inf) => inf,
                     None => continue,
                 };
 
@@ -939,7 +953,11 @@ impl AggExecState {
                 if let Some(v) = val {
                     col.count += 1;
                     col.has_value = true;
-                    col.accumulate(v);
+                    if gpu_flags[i] {
+                        col.gpu_values.push(v);
+                    } else {
+                        col.accumulate(v);
+                    }
                 }
             }
 
@@ -951,6 +969,8 @@ impl AggExecState {
 
         if total == 0 {
             self.result_returned = true;
+            self.dispatch_time_us = start.elapsed().as_micros() as u64;
+            stats::record_batch(0, self.dispatch_time_us);
             // SAFETY: result_slot is valid per caller contract.
             return unsafe { self.finalize_result(result_slot) };
         }
@@ -958,8 +978,29 @@ impl AggExecState {
         self.rows_dispatched = total;
         self.batches_executed = 1;
 
+        // Try fused multi-reduce first (single GPU pass for all eligible
+        // columns), then fall back to per-column dispatch for any columns
+        // not handled. `dispatch_gpu_reduce` handles small batches via
+        // `drain_small_batch`, so sub-threshold queries still produce
+        // correct results without GPU overhead.
+        self.try_fused_multi_reduce();
+
+        for col in &mut self.columns {
+            if !col.gpu_values.is_empty() {
+                col.dispatch_gpu_reduce();
+                if col.gpu_dispatched {
+                    self.gpu_dispatched = true;
+                }
+            }
+        }
+
         self.dispatch_time_us = start.elapsed().as_micros() as u64;
         self.result_returned = true;
+
+        stats::record_batch(total, self.dispatch_time_us);
+        if self.gpu_dispatched {
+            stats::record_gpu_batch(total, 0);
+        }
 
         // SAFETY: result_slot is valid per caller contract.
         unsafe { self.finalize_result(result_slot) }
@@ -983,8 +1024,13 @@ impl AggExecState {
 
         // First call: scan all input and run hash aggregation.
         if !self.child_exhausted {
+            stats::record_query_accelerated();
             self.child_exhausted = true;
             unsafe { self.execute_grouped_agg_vectorized() };
+            stats::record_batch(self.rows_dispatched, self.dispatch_time_us);
+            if self.gpu_dispatched {
+                stats::record_gpu_batch(self.rows_dispatched, 0);
+            }
         }
 
         // Emit one result tuple per call (reuses existing emit logic).
@@ -1238,6 +1284,9 @@ impl AggExecState {
             return std::ptr::null_mut();
         }
 
+        // Record a query acceleration attempt once per executor instance.
+        stats::record_query_accelerated();
+
         let start = std::time::Instant::now();
         let limits = cost::device_limits();
         let interrupt_interval = limits.fused_interrupt_interval;
@@ -1464,7 +1513,6 @@ impl AggExecState {
 
         self.rows_dispatched = row_count;
         self.batches_executed = 1;
-        self.dispatch_time_us = start.elapsed().as_micros() as u64;
 
         // Try fused multi-reduce first (single GPU pass for all columns),
         // then fall back to per-column dispatch for any columns not handled.
@@ -1480,7 +1528,13 @@ impl AggExecState {
             }
         }
 
+        self.dispatch_time_us = start.elapsed().as_micros() as u64;
         self.result_returned = true;
+
+        stats::record_batch(row_count, self.dispatch_time_us);
+        if self.gpu_dispatched {
+            stats::record_gpu_batch(row_count, 0);
+        }
 
         // Build a virtual tuple with all aggregate results.
         // SAFETY: result_slot is a valid TupleTableSlot pointer.
