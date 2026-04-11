@@ -98,6 +98,15 @@ target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 add_executable(test_exec_gpu test/test_exec_gpu.cpp)
 target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_sort_bench test/test_sort_bench.cpp)
+target_link_libraries(test_sort_bench PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_spatial_bench test/test_spatial_bench.cpp)
+target_link_libraries(test_spatial_bench PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_raster_bench test/test_raster_bench.cpp)
+target_link_libraries(test_raster_bench PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_sycl_basic test/test_sycl_basic.cpp)
 target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
 if(PGACCEL_USE_SYCL AND AdaptiveCpp_FOUND)

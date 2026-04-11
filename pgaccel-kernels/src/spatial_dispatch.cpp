@@ -263,8 +263,26 @@ static int8_t device_point_in_polygon(
     return 1;
 }
 
-/* GPU dispatch: parallel_for over all surviving points. */
-static pgaccel_status sycl_point_in_polygon_bulk(
+/* Threshold: polygons with this many outer-ring vertices trigger the
+ * cooperative work-group-per-point kernel. Below this, the simple
+ * one-thread-per-point kernel is faster (less barrier overhead). */
+static constexpr size_t COOP_VERTEX_THRESHOLD = 1024;
+
+/* Work-group size for the cooperative kernel. Metal prefers 128–256. */
+static constexpr size_t COOP_GROUP_SIZE = 128;
+
+/* GPU dispatch: parallel_for over all surviving points, one thread
+ * per point. Good when polygons are small.
+ *
+ * Each thread:
+ *   - reads its point (px, py)
+ *   - loops sequentially through every polygon edge
+ *   - runs the ray-casting test
+ *
+ * Scales poorly when vc (vertex count) is tens of thousands — each
+ * thread does vc serial ops. For megapolygons see the cooperative
+ * kernel below. */
+static pgaccel_status sycl_point_in_polygon_simple(
     const float* surv_pts, size_t surv_count,
     const float* poly_coords, size_t poly_coord_count,
     const uint32_t* ring_offsets, size_t ring_count,
@@ -274,18 +292,16 @@ static pgaccel_status sycl_point_in_polygon_bulk(
     if (!q) return PGACCEL_ERROR;
 
     try {
-        // On unified memory (Apple Silicon), alloc_input returns the host
-        // pointer directly — zero allocation, zero copy.
         float* d_pts = pgaccel_alloc_input<float>(
             surv_count * 2, *q, surv_pts);
         float* d_poly = pgaccel_alloc_input<float>(
             poly_coord_count * 2, *q, poly_coords);
 
-        // Handle ring_offsets: may be nullptr for single-ring polygons
         uint32_t dummy_ring = 0;
         uint32_t* d_rings = nullptr;
         if (ring_offsets && ring_count > 0) {
-            d_rings = pgaccel_alloc_input<uint32_t>(ring_count, *q, ring_offsets);
+            d_rings = pgaccel_alloc_input<uint32_t>(
+                ring_count, *q, ring_offsets);
         } else {
             d_rings = pgaccel_alloc_input<uint32_t>(1, *q, &dummy_ring);
         }
@@ -327,12 +343,242 @@ static pgaccel_status sycl_point_in_polygon_bulk(
         sycl::free(d_results, *q);
         return PGACCEL_OK;
     } catch (const sycl::exception& e) {
-        fprintf(stderr, "pgaccel: SYCL point_in_polygon failed: %s\n", e.what());
+        fprintf(stderr,
+                "pgaccel: SYCL point_in_polygon failed: %s\n", e.what());
         return PGACCEL_ERROR;
     } catch (const std::exception& e) {
-        fprintf(stderr, "pgaccel: point_in_polygon failed: %s\n", e.what());
+        fprintf(stderr,
+                "pgaccel: point_in_polygon failed: %s\n", e.what());
         return PGACCEL_ERROR;
     }
+}
+
+/* GPU dispatch: one work-group per point, threads in the group share
+ * the vertex scan. For a 100k-vertex polygon and 128-thread groups,
+ * each thread handles ~780 edges instead of all 100k.
+ *
+ * Per-ring reduction pattern:
+ *   - Each thread strides its subset of edges (i = lid, lid+gsz, ...)
+ *     and keeps a private 'crossings' counter and 'on_edge' flag.
+ *   - A work-group reduction XORs crossings parity and ORs on_edge.
+ *   - Outer ring: inside = (crossings & 1). Hole rings: if any hole
+ *     contains the point, mark outside.
+ *
+ * This serialises strictly within the work-group (group_barrier + local
+ * XOR), so it's safe under Metal's memory model. No global atomics. */
+static pgaccel_status sycl_point_in_polygon_coop(
+    const float* surv_pts, size_t surv_count,
+    const float* poly_coords, size_t poly_coord_count,
+    const uint32_t* ring_offsets, size_t ring_count,
+    int8_t* results)
+{
+    sycl::queue* q = g_queue;
+    if (!q) return PGACCEL_ERROR;
+
+    try {
+        float* d_pts = pgaccel_alloc_input<float>(
+            surv_count * 2, *q, surv_pts);
+        float* d_poly = pgaccel_alloc_input<float>(
+            poly_coord_count * 2, *q, poly_coords);
+
+        uint32_t dummy_ring = 0;
+        uint32_t* d_rings = nullptr;
+        if (ring_offsets && ring_count > 0) {
+            d_rings = pgaccel_alloc_input<uint32_t>(
+                ring_count, *q, ring_offsets);
+        } else {
+            d_rings = pgaccel_alloc_input<uint32_t>(1, *q, &dummy_ring);
+        }
+
+        int8_t* d_results = pgaccel_alloc<int8_t>(surv_count, *q);
+
+        if (!d_pts || !d_poly || !d_results) {
+            pgaccel_free_input(d_pts, *q, surv_pts);
+            pgaccel_free_input(d_poly, *q, poly_coords);
+            if (ring_offsets && ring_count > 0)
+                pgaccel_free_input(d_rings, *q, ring_offsets);
+            else
+                pgaccel_free_input(d_rings, *q, &dummy_ring);
+            if (d_results) sycl::free(d_results, *q);
+            return PGACCEL_OOM;
+        }
+
+        const size_t vc = poly_coord_count;
+        const size_t rc = ring_count;
+        const bool has_rings = (ring_offsets != nullptr && ring_count > 0);
+        const float eps_sq = EPSILON * EPSILON;
+
+        // One work-group per point.
+        auto nd = sycl::nd_range<1>(
+            sycl::range<1>(surv_count * COOP_GROUP_SIZE),
+            sycl::range<1>(COOP_GROUP_SIZE));
+
+        q->submit([&](sycl::handler& h) {
+            // Per-group scratch: parity bit, on_edge flag.
+            sycl::local_accessor<uint32_t, 1> lparity(
+                sycl::range<1>(1), h);
+            sycl::local_accessor<uint32_t, 1> lon_edge(
+                sycl::range<1>(1), h);
+
+            float* pts_ptr  = d_pts;
+            float* poly_ptr = d_poly;
+            uint32_t* rings_ptr = d_rings;
+            int8_t* res_ptr = d_results;
+
+            h.parallel_for(nd, [=](sycl::nd_item<1> it) {
+                const size_t lid = it.get_local_id(0);
+                const size_t pi  = it.get_group(0);      // point index
+                const size_t gsz = it.get_local_range(0);
+
+                const float px = pts_ptr[pi * 2];
+                const float py = pts_ptr[pi * 2 + 1];
+
+                // Final result bits collected across rings.
+                int8_t result = 1; // assume inside; will be updated.
+                bool definitive = false;
+
+                // Scan each ring cooperatively.
+                size_t nrings = has_rings ? rc : 1;
+                for (size_t r = 0; !definitive && r < nrings; ++r) {
+                    size_t start;
+                    size_t end;
+                    if (has_rings) {
+                        start = rings_ptr[r];
+                        end = (r + 1 < rc) ? rings_ptr[r + 1] : vc;
+                    } else {
+                        start = 0;
+                        end = vc;
+                    }
+                    size_t rlen = end - start;
+                    if (rlen < 3) continue;
+
+                    // Reset shared counters.
+                    if (lid == 0) {
+                        lparity[0] = 0u;
+                        lon_edge[0] = 0u;
+                    }
+                    sycl::group_barrier(it.get_group());
+
+                    // Each thread scans its strided subset of edges.
+                    uint32_t my_crossings = 0u;
+                    uint32_t my_on_edge = 0u;
+
+                    // Treat edges as (i, j) where j = (i + 1) % rlen.
+                    // Iterate with stride gsz.
+                    for (size_t e = lid; e < rlen; e += gsz) {
+                        const size_t vi = start + e;
+                        const size_t vj = start + ((e + 1 == rlen) ? 0 : e + 1);
+                        const float xi = poly_ptr[vi * 2];
+                        const float yi = poly_ptr[vi * 2 + 1];
+                        const float xj = poly_ptr[vj * 2];
+                        const float yj = poly_ptr[vj * 2 + 1];
+
+                        // On-vertex test.
+                        const float dx = px - xi;
+                        const float dy = py - yi;
+                        if (dx * dx + dy * dy < eps_sq) {
+                            my_on_edge = 1u;
+                            continue;
+                        }
+
+                        // Ray-cast test.
+                        if ((yi > py) != (yj > py)) {
+                            const float denom = yj - yi;
+                            const float xint =
+                                (xj - xi) * (py - yi) / denom + xi;
+                            if (px < xint) {
+                                my_crossings ^= 1u;
+                            }
+                        }
+                    }
+
+                    // Reduce parity and on_edge across the work-group.
+                    sycl::atomic_ref<uint32_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::work_group,
+                        sycl::access::address_space::local_space>
+                            parity_ref(lparity[0]);
+                    sycl::atomic_ref<uint32_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::work_group,
+                        sycl::access::address_space::local_space>
+                            onedge_ref(lon_edge[0]);
+                    if (my_crossings) parity_ref.fetch_xor(1u);
+                    if (my_on_edge)   onedge_ref.fetch_or(1u);
+
+                    sycl::group_barrier(it.get_group());
+
+                    const uint32_t parity  = lparity[0];
+                    const uint32_t onedge  = lon_edge[0];
+
+                    const bool inside_ring =
+                        (onedge != 0u) || (parity != 0u);
+
+                    if (r == 0) {
+                        // Outer ring.
+                        if (!inside_ring) {
+                            result = -1;
+                            definitive = true;
+                        }
+                    } else {
+                        // Hole ring.
+                        if (inside_ring) {
+                            result = -1;
+                            definitive = true;
+                        }
+                    }
+
+                    sycl::group_barrier(it.get_group());
+                }
+
+                if (lid == 0) {
+                    res_ptr[pi] = result;
+                }
+            });
+        }).wait();
+
+        pgaccel_d2h(*q, results, d_results, surv_count);
+
+        pgaccel_free_input(d_pts, *q, surv_pts);
+        pgaccel_free_input(d_poly, *q, poly_coords);
+        if (ring_offsets && ring_count > 0)
+            pgaccel_free_input(d_rings, *q, ring_offsets);
+        else
+            pgaccel_free_input(d_rings, *q, &dummy_ring);
+        sycl::free(d_results, *q);
+        return PGACCEL_OK;
+    } catch (const sycl::exception& e) {
+        fprintf(stderr,
+                "pgaccel: SYCL coop point_in_polygon failed: %s\n",
+                e.what());
+        return PGACCEL_ERROR;
+    } catch (const std::exception& e) {
+        fprintf(stderr,
+                "pgaccel: coop point_in_polygon failed: %s\n", e.what());
+        return PGACCEL_ERROR;
+    }
+}
+
+/* Top-level GPU dispatch: pick simple vs cooperative kernel based on
+ * the polygon's total vertex count. */
+static pgaccel_status sycl_point_in_polygon_bulk(
+    const float* surv_pts, size_t surv_count,
+    const float* poly_coords, size_t poly_coord_count,
+    const uint32_t* ring_offsets, size_t ring_count,
+    int8_t* results)
+{
+    if (poly_coord_count >= COOP_VERTEX_THRESHOLD) {
+        return sycl_point_in_polygon_coop(
+            surv_pts, surv_count,
+            poly_coords, poly_coord_count,
+            ring_offsets, ring_count,
+            results);
+    }
+    return sycl_point_in_polygon_simple(
+        surv_pts, surv_count,
+        poly_coords, poly_coord_count,
+        ring_offsets, ring_count,
+        results);
 }
 
 #endif // PGACCEL_HAS_SYCL
