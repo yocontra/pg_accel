@@ -1,3 +1,12 @@
+#![allow(
+    clippy::needless_continue,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::literal_string_with_formatting_args,
+    clippy::too_many_lines
+)]
+
 mod report;
 mod runner;
 mod stats;

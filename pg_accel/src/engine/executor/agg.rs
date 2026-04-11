@@ -211,7 +211,7 @@ impl AggColumn {
             // if the planner correctly verified GPU availability. Log a
             // warning and drain values so the query still completes, but
             // the result may differ from what a pure GPU path would produce.
-            pgrx::warning!(
+            tracing::warn!(
                 "pg_accel: GPU reduce unavailable for {:?} with {} values; \
                  planner should not have injected GpuReduce path",
                 self.op,
@@ -253,7 +253,7 @@ impl AggColumn {
             }
         }
         if any_gpu_failure {
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: GPU reduce unavailable for {:?} chunks, using CPU Kahan",
                 self.op,
             );
@@ -535,7 +535,6 @@ impl AggExecState {
         // Consume all input in batches.
         while !self.child_exhausted {
             let start = std::time::Instant::now();
-            let batch_count: u64;
 
             // Phase 1: Buffer MinimalTuples for the batch.
             let mut tuples: Vec<pg_sys::MinimalTuple> = Vec::with_capacity(self.batch_size);
@@ -583,7 +582,7 @@ impl AggExecState {
                 }
             }
 
-            batch_count = tuples.len() as u64;
+            let batch_count: u64 = tuples.len() as u64;
 
             // Handle columns that don't need extraction (COUNT(*), attno <= 0).
             for col in &mut self.columns {
@@ -825,9 +824,10 @@ impl AggExecState {
     /// Used by `end_custom_scan` to close the heap scan.
     #[must_use]
     pub fn vscan_scan_desc(&self) -> pg_sys::TableScanDesc {
-        self.vscan
-            .as_ref()
-            .map_or(std::ptr::null_mut(), |v| v.scan_desc())
+        self.vscan.as_ref().map_or(
+            std::ptr::null_mut(),
+            super::vectorized_scan::VectorizedScan::scan_desc,
+        )
     }
 
     /// Vectorized scan+reduce: scan the base table via arena-based
@@ -856,9 +856,8 @@ impl AggExecState {
 
         // SAFETY: scan_desc is valid, main backend thread.
         let scan_desc = vscan.scan_desc();
-        let tupdesc = unsafe { (*scan_desc).rs_rd.as_ref() }
-            .map(|rd| rd.rd_att)
-            .unwrap_or(std::ptr::null_mut());
+        let tupdesc =
+            unsafe { (*scan_desc).rs_rd.as_ref() }.map_or(std::ptr::null_mut(), |rd| rd.rd_att);
 
         // Pre-compute extraction info for each column that needs values.
         let infos: Vec<Option<AttExtractInfo>> = self
@@ -876,10 +875,10 @@ impl AggExecState {
 
         // Resolve type OIDs from extraction info.
         for (col, info) in self.columns.iter_mut().zip(infos.iter()) {
-            if let Some(info) = &info {
-                if col.type_oid == pg_sys::InvalidOid {
-                    col.type_oid = info.typid;
-                }
+            if let Some(info) = &info
+                && col.type_oid == pg_sys::InvalidOid
+            {
+                col.type_oid = info.typid;
             }
         }
 
@@ -892,10 +891,7 @@ impl AggExecState {
         loop {
             // SAFETY: scan_desc is valid; main backend thread.
             let htup = unsafe {
-                pg_sys::heap_getnext(
-                    scan_desc,
-                    pg_sys::ScanDirection::ForwardScanDirection,
-                )
+                pg_sys::heap_getnext(scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
             };
             if htup.is_null() {
                 break;
@@ -924,16 +920,13 @@ impl AggExecState {
                 let val: Option<f64> = unsafe {
                     match info.typid {
                         t if t == pg_sys::FLOAT4OID => {
-                            tuple_extract::try_fast_read_heap_pub::<f32>(hdr, info)
-                                .map(f64::from)
+                            tuple_extract::try_fast_read_heap_pub::<f32>(hdr, info).map(f64::from)
                         }
                         t if t == pg_sys::INT2OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info)
-                                .map(f64::from)
+                            tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info).map(f64::from)
                         }
                         t if t == pg_sys::INT4OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info)
-                                .map(f64::from)
+                            tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info).map(f64::from)
                         }
                         t if t == pg_sys::INT8OID => {
                             tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info)
@@ -951,7 +944,7 @@ impl AggExecState {
             }
 
             // CHECK_FOR_INTERRUPTS every 8192 rows.
-            if total % 8192 == 0 {
+            if total.is_multiple_of(8192) {
                 pgrx::check_for_interrupts!();
             }
         }
@@ -1031,8 +1024,7 @@ impl AggExecState {
         }
 
         // Extract group key column. Use typed extraction to match kernel format.
-        let gk_extract_info =
-            unsafe { AttExtractInfo::new(tupdesc, group_key_info.attno) };
+        let gk_extract_info = unsafe { AttExtractInfo::new(tupdesc, group_key_info.attno) };
         let mut key_buf: Vec<u8> = Vec::with_capacity(total * key_size);
         let mut key_null_mask: Vec<u8> = Vec::with_capacity(total);
 
@@ -1154,8 +1146,7 @@ impl AggExecState {
             .iter()
             .map(|buf| buf.as_ptr().cast::<std::ffi::c_void>())
             .collect();
-        let value_null_ptrs: Vec<*const u8> =
-            value_null_masks.iter().map(Vec::as_ptr).collect();
+        let value_null_ptrs: Vec<*const u8> = value_null_masks.iter().map(Vec::as_ptr).collect();
 
         let dispatch_start = std::time::Instant::now();
 
@@ -1170,13 +1161,13 @@ impl AggExecState {
             &ffi_agg_cols,
         );
 
-        self.dispatch_time_us = start.elapsed().as_micros() as u64
-            + dispatch_start.elapsed().as_micros() as u64;
+        self.dispatch_time_us =
+            start.elapsed().as_micros() as u64 + dispatch_start.elapsed().as_micros() as u64;
 
         if let Some(hash_result) = result {
             let group_count = hash_result.group_count();
             self.gpu_dispatched = true;
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: hash_agg_vectorized: {} groups from {} rows",
                 group_count,
                 total
@@ -1188,7 +1179,7 @@ impl AggExecState {
                 key_type: group_key_info.key_type,
             });
         } else {
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: hash_agg_vectorized: GPU dispatch failed for {} rows",
                 total,
             );
@@ -1260,11 +1251,11 @@ impl AggExecState {
             // descriptor's relation gives us the table TupleDesc.
             // SAFETY: fused_scan_desc is valid per set_fused_context.
             let rel = unsafe { (*self.fused_scan_desc).rs_rd };
-            let table_tupdesc = if !rel.is_null() {
+            let table_tupdesc = if rel.is_null() {
+                tupdesc
+            } else {
                 // SAFETY: rs_rd is a valid Relation pointer.
                 unsafe { (*rel).rd_att }
-            } else {
-                tupdesc
             };
             let mut infos = Vec::with_capacity(self.columns.len());
             for col in &mut self.columns {
@@ -1272,15 +1263,15 @@ impl AggExecState {
                     // The agg's attno references the child scan's output
                     // position. Map it to the base table attno for direct
                     // heap extraction.
-                    let table_attno = if !self.fused_attno_map.is_empty() {
+                    let table_attno = if self.fused_attno_map.is_empty() {
+                        col.attno
+                    } else {
                         let idx = (col.attno - 1) as usize;
                         if idx < self.fused_attno_map.len() {
                             self.fused_attno_map[idx]
                         } else {
                             col.attno
                         }
-                    } else {
-                        col.attno
                     };
                     // SAFETY: table_tupdesc is a valid TupleDesc.
                     let info = unsafe { AttExtractInfo::new(table_tupdesc, table_attno) };
@@ -1311,12 +1302,12 @@ impl AggExecState {
         if self.fused_filter_infos.is_none() {
             // SAFETY: fused_scan_desc is valid.
             let rel = unsafe { (*self.fused_scan_desc).rs_rd };
-            let table_tupdesc = if !rel.is_null() {
-                // SAFETY: rs_rd is a valid Relation pointer.
-                unsafe { (*rel).rd_att }
-            } else {
+            let table_tupdesc = if rel.is_null() {
                 // SAFETY: result_slot is valid.
                 unsafe { (*result_slot).tts_tupleDescriptor }
+            } else {
+                // SAFETY: rs_rd is a valid Relation pointer.
+                unsafe { (*rel).rd_att }
             };
             let infos = match &self.fused_expr {
                 Some(CompiledExpr::Template(TemplateKernel::CmpConst { col_idx, .. })) => {
@@ -1365,7 +1356,7 @@ impl AggExecState {
             row_count += 1;
 
             // Periodic interrupt check (interval from DeviceLimits).
-            if row_count % interrupt_interval as u64 == 0 {
+            if row_count.is_multiple_of(interrupt_interval as u64) {
                 pgrx::check_for_interrupts!();
             }
 
@@ -1379,10 +1370,10 @@ impl AggExecState {
                     const_val,
                     ..
                 })) => {
-                    if !filter_infos.is_empty() {
-                        Self::fused_eval_cmp(t_data, &filter_infos[0], *cmp_opcode, *const_val)
-                    } else {
+                    if filter_infos.is_empty() {
                         true
+                    } else {
+                        Self::fused_eval_cmp(t_data, &filter_infos[0], *cmp_opcode, *const_val)
                     }
                 }
                 Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
@@ -1405,7 +1396,7 @@ impl AggExecState {
                     }
                 }
                 // No filter or unsupported template: all rows pass.
-                None | Some(CompiledExpr::DeferToPg) | Some(CompiledExpr::Bytecode(_)) => true,
+                None | Some(CompiledExpr::DeferToPg | CompiledExpr::Bytecode(_)) => true,
                 // Other template patterns: conservatively pass.
                 _ => true,
             };
@@ -1505,7 +1496,7 @@ impl AggExecState {
             pg_sys::ExecStoreVirtualTuple(result_slot);
         }
 
-        pgrx::debug1!(
+        tracing::debug!(
             "pg_accel: fused scan+agg complete: {} rows scanned, {}us",
             row_count,
             self.dispatch_time_us,
@@ -1623,7 +1614,7 @@ impl AggExecState {
                 col.gpu_values.clear();
             }
             self.gpu_dispatched = true;
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: fused multi-reduce dispatched {} columns, {} rows",
                 eligible.len(),
                 n,
@@ -1965,7 +1956,7 @@ impl AggExecState {
         if let Some(hash_result) = result {
             let group_count = hash_result.group_count();
             self.gpu_dispatched = true;
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: hash_agg: {} groups from {} rows",
                 group_count,
                 row_count
@@ -1977,7 +1968,7 @@ impl AggExecState {
                 key_type: group_key_info.key_type,
             });
         } else {
-            pgrx::debug1!("pg_accel: hash_agg: GPU dispatch failed, no results");
+            tracing::debug!("pg_accel: hash_agg: GPU dispatch failed, no results");
         }
     }
 

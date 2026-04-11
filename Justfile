@@ -192,7 +192,9 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_spatial_dispatch \
     && ./pgaccel-kernels/build/test_h3 \
     && ./pgaccel-kernels/build/test_raster \
-    && ./pgaccel-kernels/build/test_correctness
+    && ./pgaccel-kernels/build/test_correctness \
+    && ./pgaccel-kernels/build/test_exec_gpu \
+    && ./pgaccel-kernels/build/test_fork
 
 # === CI ===
 

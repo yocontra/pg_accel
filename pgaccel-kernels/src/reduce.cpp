@@ -17,87 +17,6 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// CPU fallback implementations
-// ---------------------------------------------------------------------------
-
-namespace {
-
-float reduce_sum_f32_cpu(const float* data, size_t count) {
-    // Kahan compensated summation for reduced fp32 accumulation error
-    float sum = 0.0f;
-    float c = 0.0f;
-    for (size_t i = 0; i < count; ++i) {
-        float y = data[i] - c;
-        float t = sum + y;
-        c = (t - sum) - y;
-        sum = t;
-    }
-    return sum;
-}
-
-float reduce_min_f32_cpu(const float* data, size_t count) {
-    float result = data[0];
-    for (size_t i = 1; i < count; ++i) {
-        if (data[i] < result) result = data[i];
-    }
-    return result;
-}
-
-float reduce_max_f32_cpu(const float* data, size_t count) {
-    float result = data[0];
-    for (size_t i = 1; i < count; ++i) {
-        if (data[i] > result) result = data[i];
-    }
-    return result;
-}
-
-double reduce_sum_f64_cpu(const double* data, size_t count) {
-    double sum = 0.0;
-    double c = 0.0;
-    for (size_t i = 0; i < count; ++i) {
-        double y = data[i] - c;
-        double t = sum + y;
-        c = (t - sum) - y;
-        sum = t;
-    }
-    return sum;
-}
-
-double reduce_min_f64_cpu(const double* data, size_t count) {
-    double result = data[0];
-    for (size_t i = 1; i < count; ++i) {
-        if (data[i] < result) result = data[i];
-    }
-    return result;
-}
-
-double reduce_max_f64_cpu(const double* data, size_t count) {
-    double result = data[0];
-    for (size_t i = 1; i < count; ++i) {
-        if (data[i] > result) result = data[i];
-    }
-    return result;
-}
-
-int64_t reduce_sum_i64_cpu(const int64_t* data, size_t count) {
-    int64_t sum = 0;
-    for (size_t i = 0; i < count; ++i) {
-        sum += data[i];
-    }
-    return sum;
-}
-
-size_t reduce_count_cpu(const uint8_t* mask, size_t count) {
-    size_t hits = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (mask[i] != 0) ++hits;
-    }
-    return hits;
-}
-
-} // anonymous namespace (CPU fallbacks)
-
-// ---------------------------------------------------------------------------
 // SYCL kernel implementations
 // ---------------------------------------------------------------------------
 
@@ -311,23 +230,18 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data,
         sycl::queue* q = get_queue();
         if (q) {
             pgaccel_status st = reduce_sum_sycl<float>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
         // Fall through to CPU on error or no queue
     } catch (const std::exception& e) {
-        // SYCL or Metal/AdaptiveCpp failure (e.g. post-fork shader
-        // compilation), fall through to CPU
         fprintf(stderr,
-                "pgaccel: reduce_sum_f32 SYCL failed: %s — CPU fallback\n",
-                e.what());
+                "pgaccel: reduce_sum_f32 SYCL failed: %s\n", e.what());
     } catch (...) {
-        fprintf(stderr,
-                "pgaccel: reduce_sum_f32 SYCL failed (unknown) — CPU fallback\n");
     }
 #endif
 
-    *result = reduce_sum_f32_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_sum_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data,
@@ -343,15 +257,15 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data,
         sycl::queue* q = get_queue();
         if (q) {
             pgaccel_status st = reduce_min_sycl<float>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_min_f32_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_min_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
@@ -367,15 +281,15 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
         sycl::queue* q = get_queue();
         if (q) {
             pgaccel_status st = reduce_max_sycl<float>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_max_f32_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_max_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 // ---------------------------------------------------------------------------
@@ -398,15 +312,15 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data,
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
             pgaccel_status st = reduce_sum_sycl<double>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_sum_f64_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_sum_f64");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data,
@@ -425,15 +339,15 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data,
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
             pgaccel_status st = reduce_min_sycl<double>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_min_f64_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_min_f64");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data,
@@ -452,15 +366,15 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data,
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
             pgaccel_status st = reduce_max_sycl<double>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_max_f64_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_max_f64");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,15 +394,15 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data,
         sycl::queue* q = get_queue();
         if (q) {
             pgaccel_status st = reduce_sum_sycl<int64_t>(*q, data, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_sum_i64_cpu(data, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_sum_i64");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,13 +421,13 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
         sycl::queue* q = get_queue();
         if (q) {
             pgaccel_status st = reduce_count_sycl(*q, mask, count, result);
-            if (st == PGACCEL_OK) return st;
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
     } catch (const std::exception&) {
     } catch (...) {
     }
 #endif
 
-    *result = reduce_count_cpu(mask, count);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("reduce_count");
+    return PGACCEL_ERROR_NO_DEVICE;
 }

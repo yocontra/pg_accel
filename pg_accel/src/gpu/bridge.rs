@@ -333,6 +333,20 @@ unsafe extern "C" {
     /// Return platform-level capability flags.
     pub fn pgaccel_get_caps() -> PgaccelPlatformCaps;
 
+    // -- GPU execution observability --
+
+    /// Number of kernel invocations that ran on GPU since last reset.
+    pub fn pgaccel_gpu_exec_count() -> u64;
+
+    /// Reset the GPU execution counter to zero.
+    pub fn pgaccel_reset_gpu_exec_count();
+
+    /// Number of kernel invocations that fell back to CPU since last reset.
+    pub fn pgaccel_cpu_fallback_count() -> u64;
+
+    /// Reset the CPU fallback counter to zero.
+    pub fn pgaccel_reset_cpu_fallback_count();
+
     // -- Spatial predicate kernels --
 
     /// Bulk point-in-ring test.
@@ -812,8 +826,9 @@ pub struct PgaccelReduceCol {
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use std::mem;
+
+    use super::*;
 
     // -----------------------------------------------------------------------
     // PgaccelStatus discriminants and is_ok

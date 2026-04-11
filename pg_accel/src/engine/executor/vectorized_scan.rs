@@ -114,10 +114,7 @@ impl VectorizedScan {
         while count < batch_size {
             // SAFETY: scan_desc is valid; main backend thread.
             let htup = unsafe {
-                pg_sys::heap_getnext(
-                    self.scan_desc,
-                    pg_sys::ScanDirection::ForwardScanDirection,
-                )
+                pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
             };
             if htup.is_null() {
                 self.exhausted = true;
@@ -131,16 +128,15 @@ impl VectorizedScan {
             // Copy the raw HeapTupleHeader bytes into the arena.
             let offset = self.arena.len();
             // SAFETY: t_data points to t_len bytes of valid tuple data.
-            let data_bytes = unsafe {
-                std::slice::from_raw_parts(ht.t_data.cast::<u8>(), t_len as usize)
-            };
+            let data_bytes =
+                unsafe { std::slice::from_raw_parts(ht.t_data.cast::<u8>(), t_len as usize) };
             self.arena.extend_from_slice(data_bytes);
             self.entries.push((offset, t_len));
 
             count += 1;
 
             // CHECK_FOR_INTERRUPTS every 8192 rows.
-            if count % 8192 == 0 {
+            if count.is_multiple_of(8192) {
                 pgrx::check_for_interrupts!();
             }
         }
@@ -206,6 +202,7 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// `info` must match the schema of the scanned relation.
+    #[must_use]
     pub unsafe fn extract_f64(&self, info: &AttExtractInfo) -> (Vec<f64>, Vec<u8>) {
         let headers = self.collect_headers();
         // SAFETY: headers point into valid arena data; info matches schema.
@@ -217,6 +214,7 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// `info` must match the schema. Column must be FLOAT4.
+    #[must_use]
     pub unsafe fn extract_f32(&self, info: &AttExtractInfo) -> (Vec<f32>, Vec<u8>) {
         let n = self.row_count;
         let mut values = Vec::with_capacity(n);
@@ -227,15 +225,12 @@ impl VectorizedScan {
             let hdr = unsafe { self.header(i) };
             let val: Option<f32> =
                 unsafe { tuple_extract::try_fast_read_heap_pub::<f32>(hdr, info) };
-            match val {
-                Some(v) => {
-                    values.push(v);
-                    nulls.push(0);
-                }
-                None => {
-                    values.push(0.0);
-                    nulls.push(1);
-                }
+            if let Some(v) = val {
+                values.push(v);
+                nulls.push(0);
+            } else {
+                values.push(0.0);
+                nulls.push(1);
             }
         }
 
@@ -247,6 +242,7 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// `info` must match the schema. Column must be INT4.
+    #[must_use]
     pub unsafe fn extract_i32(&self, info: &AttExtractInfo) -> (Vec<i32>, Vec<u8>) {
         let n = self.row_count;
         let mut values = Vec::with_capacity(n);
@@ -257,15 +253,12 @@ impl VectorizedScan {
             let hdr = unsafe { self.header(i) };
             let val: Option<i32> =
                 unsafe { tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info) };
-            match val {
-                Some(v) => {
-                    values.push(v);
-                    nulls.push(0);
-                }
-                None => {
-                    values.push(0);
-                    nulls.push(1);
-                }
+            if let Some(v) = val {
+                values.push(v);
+                nulls.push(0);
+            } else {
+                values.push(0);
+                nulls.push(1);
             }
         }
 
@@ -277,6 +270,7 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// `info` must match the schema. Column must be INT8.
+    #[must_use]
     pub unsafe fn extract_i64(&self, info: &AttExtractInfo) -> (Vec<i64>, Vec<u8>) {
         let n = self.row_count;
         let mut values = Vec::with_capacity(n);
@@ -287,15 +281,12 @@ impl VectorizedScan {
             let hdr = unsafe { self.header(i) };
             let val: Option<i64> =
                 unsafe { tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info) };
-            match val {
-                Some(v) => {
-                    values.push(v);
-                    nulls.push(0);
-                }
-                None => {
-                    values.push(0);
-                    nulls.push(1);
-                }
+            if let Some(v) = val {
+                values.push(v);
+                nulls.push(0);
+            } else {
+                values.push(0);
+                nulls.push(1);
             }
         }
 
@@ -309,10 +300,8 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// `info` must match the schema. Column must be fixed-width.
-    pub unsafe fn extract_bytes(
-        &self,
-        info: &AttExtractInfo,
-    ) -> (Vec<u8>, Vec<u8>) {
+    #[must_use]
+    pub unsafe fn extract_bytes(&self, info: &AttExtractInfo) -> (Vec<u8>, Vec<u8>) {
         let n = self.row_count;
         let typlen = info.typlen as usize;
         let mut bytes = Vec::with_capacity(n * typlen);
@@ -333,22 +322,15 @@ impl VectorizedScan {
 
             // Check for null via bitmap.
             // Read raw bytes at the data offset.
-            let data_start =
-                unsafe { (hdr as *const u8).add(hdr_ref.t_hoff as usize) };
+            let data_start = unsafe { (hdr as *const u8).add(hdr_ref.t_hoff as usize) };
             let val_ptr = data_start.wrapping_add(info.data_offset());
             let _ = has_null;
 
             // Check null using the typed read (returns None if null).
             let is_null = match typlen {
-                4 => unsafe {
-                    tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info).is_none()
-                },
-                8 => unsafe {
-                    tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info).is_none()
-                },
-                2 => unsafe {
-                    tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info).is_none()
-                },
+                4 => unsafe { tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info).is_none() },
+                8 => unsafe { tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info).is_none() },
+                2 => unsafe { tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info).is_none() },
                 _ => true,
             };
 
@@ -379,6 +361,7 @@ impl VectorizedScan {
     ///
     /// `idx` must be < `row_count`. Must be called in an appropriate
     /// memory context.
+    #[must_use]
     pub unsafe fn materialize(&self, idx: usize) -> pg_sys::MinimalTuple {
         let (offset, t_len) = self.entries[idx];
         let t_data = self.arena[offset..].as_ptr() as pg_sys::HeapTupleHeader;
@@ -392,11 +375,7 @@ impl VectorizedScan {
         };
 
         // SAFETY: ht_data points to valid HeapTupleHeader data in the arena.
-        unsafe {
-            pg_sys::minimal_tuple_from_heap_tuple(
-                &mut ht_data as *mut pg_sys::HeapTupleData,
-            )
-        }
+        unsafe { pg_sys::minimal_tuple_from_heap_tuple(&raw mut ht_data) }
     }
 
     /// Get the `TupleDesc` for the scanned relation.
@@ -404,6 +383,7 @@ impl VectorizedScan {
     /// # Safety
     ///
     /// `scan_desc` must be valid.
+    #[must_use]
     pub unsafe fn tupdesc(&self) -> pg_sys::TupleDesc {
         // SAFETY: scan_desc is valid per struct invariant.
         let rel = unsafe { (*self.scan_desc).rs_rd };

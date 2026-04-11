@@ -133,151 +133,6 @@ static double eval_expr(const pgaccel_expr* expr, const double* band_values) {
     return (sp > 0) ? stack[0] : 0.0;
 }
 
-/* ── Point-in-ring (ray casting) ──────────────────────────────── */
-
-static bool point_in_ring(
-    double px, double py,
-    const float* ring_xy, size_t vertex_count
-) {
-    bool inside = false;
-    size_t j = vertex_count - 1;
-    for (size_t i = 0; i < vertex_count; i++) {
-        double xi = static_cast<double>(ring_xy[i * 2]);
-        double yi = static_cast<double>(ring_xy[i * 2 + 1]);
-        double xj = static_cast<double>(ring_xy[j * 2]);
-        double yj = static_cast<double>(ring_xy[j * 2 + 1]);
-
-        if (((yi > py) != (yj > py)) &&
-            (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
-            inside = !inside;
-        }
-        j = i;
-    }
-    return inside;
-}
-
-/* ── CPU fallback: Map Algebra ────────────────────────────────── */
-
-static pgaccel_status map_algebra_cpu(
-    const void* const* band_pixels,
-    size_t pixel_count,
-    int pixel_type,
-    const pgaccel_expr* expr,
-    void* output_pixels,
-    uint8_t* nodata_mask
-) {
-    if (pixel_count == 0) return PGACCEL_OK;
-    if (pixel_type_size(pixel_type) == 0) return PGACCEL_ERROR_UNSUPPORTED;
-
-    double band_values[64]; // max 64 bands
-
-    for (size_t px = 0; px < pixel_count; px++) {
-        // Skip NODATA pixels
-        if (nodata_mask != nullptr && nodata_mask[px] != 0) {
-            // Copy zero to output for NODATA pixels
-            write_pixel(output_pixels, px, pixel_type, 0.0);
-            continue;
-        }
-
-        // Load band values for this pixel
-        for (size_t b = 0; b < expr->band_count; b++) {
-            band_values[b] = read_pixel(band_pixels[b], px, pixel_type);
-        }
-
-        double result = eval_expr(expr, band_values);
-
-        // If result is NaN, mark as NODATA
-        if (std::isnan(result)) {
-            if (nodata_mask != nullptr) {
-                nodata_mask[px] = 1;
-            }
-            write_pixel(output_pixels, px, pixel_type, 0.0);
-        } else {
-            write_pixel(output_pixels, px, pixel_type, result);
-        }
-    }
-    return PGACCEL_OK;
-}
-
-/* ── CPU fallback: Raster Clip ────────────────────────────────── */
-
-static pgaccel_status raster_clip_cpu(
-    const void* rast_pixels,
-    size_t width, size_t height,
-    double origin_x, double origin_y,
-    double scale_x, double scale_y,
-    int pixel_type,
-    const float* clip_ring_xy,
-    size_t vertex_count,
-    void* output_pixels,
-    uint8_t* nodata_mask
-) {
-    size_t total = width * height;
-    if (total == 0) return PGACCEL_OK;
-    if (pixel_type_size(pixel_type) == 0) return PGACCEL_ERROR_UNSUPPORTED;
-
-    size_t psz = pixel_type_size(pixel_type);
-
-    for (size_t row = 0; row < height; row++) {
-        for (size_t col = 0; col < width; col++) {
-            size_t idx = row * width + col;
-
-            // Compute pixel center in world coordinates
-            double px = origin_x + (static_cast<double>(col) + 0.5) * scale_x;
-            double py = origin_y + (static_cast<double>(row) + 0.5) * scale_y;
-
-            // Copy pixel data
-            std::memcpy(
-                static_cast<char*>(output_pixels) + idx * psz,
-                static_cast<const char*>(rast_pixels) + idx * psz,
-                psz
-            );
-
-            if (point_in_ring(px, py, clip_ring_xy, vertex_count)) {
-                if (nodata_mask != nullptr) {
-                    nodata_mask[idx] = 0;
-                }
-            } else {
-                if (nodata_mask != nullptr) {
-                    nodata_mask[idx] = 1;
-                }
-            }
-        }
-    }
-    return PGACCEL_OK;
-}
-
-/* ── CPU fallback: Raster Reclass ─────────────────────────────── */
-
-static pgaccel_status raster_reclass_cpu(
-    const void* input_pixels,
-    size_t pixel_count,
-    int input_type,
-    const pgaccel_reclass_rule* rules,
-    size_t rule_count,
-    int output_type,
-    void* output_pixels
-) {
-    if (pixel_count == 0) return PGACCEL_OK;
-    if (pixel_type_size(input_type) == 0) return PGACCEL_ERROR_UNSUPPORTED;
-    if (pixel_type_size(output_type) == 0) return PGACCEL_ERROR_UNSUPPORTED;
-
-    for (size_t px = 0; px < pixel_count; px++) {
-        double val = read_pixel(input_pixels, px, input_type);
-        double out_val = val; // passthrough by default
-
-        for (size_t r = 0; r < rule_count; r++) {
-            if (val >= rules[r].min_val && val < rules[r].max_val) {
-                out_val = rules[r].new_val;
-                break;
-            }
-        }
-
-        write_pixel(output_pixels, px, output_type, out_val);
-    }
-    return PGACCEL_OK;
-}
-
 /* ── SYCL GPU implementations ────────────────────────────────── */
 
 #if PGACCEL_HAS_SYCL
@@ -339,6 +194,7 @@ static pgaccel_status map_algebra_gpu(
 
     for (size_t b = 0; b < band_count; b++) delete[] host_band_doubles[b];
     delete[] host_band_doubles;
+    pgaccel_record_gpu_exec();
     return PGACCEL_OK;
 }
 
@@ -365,8 +221,8 @@ extern "C" pgaccel_status pgaccel_map_algebra(
     return map_algebra_gpu(
         band_pixels, pixel_count, pixel_type, expr, output_pixels, nodata_mask);
 #else
-    return map_algebra_cpu(
-        band_pixels, pixel_count, pixel_type, expr, output_pixels, nodata_mask);
+    pgaccel_warn_cpu_fallback("map_algebra");
+    return PGACCEL_ERROR_NO_DEVICE;
 #endif
 }
 
@@ -386,6 +242,11 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         return PGACCEL_ERROR_INIT;
     }
 
+    // Empty raster — no-op, avoid zero-sized device allocations.
+    if (width == 0 || height == 0) {
+        return PGACCEL_OK;
+    }
+
 #if PGACCEL_HAS_SYCL
     try {
         auto& q = get_queue();
@@ -402,11 +263,7 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         if (!d_rast || !d_out || !d_mask || !d_ring) {
             sycl::free(d_rast, q); sycl::free(d_out, q);
             sycl::free(d_mask, q); sycl::free(d_ring, q);
-            return raster_clip_cpu(
-                rast_pixels, width, height,
-                origin_x, origin_y, scale_x, scale_y,
-                pixel_type, clip_ring_xy, vertex_count,
-                output_pixels, nodata_mask);
+            return PGACCEL_ERROR_OOM;
         }
 
         q.memcpy(d_rast, rast_pixels, total * psz);
@@ -466,17 +323,15 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         sycl::free(d_out, q);
         sycl::free(d_mask, q);
         sycl::free(d_ring, q);
+        pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
-    return raster_clip_cpu(
-        rast_pixels, width, height,
-        origin_x, origin_y, scale_x, scale_y,
-        pixel_type, clip_ring_xy, vertex_count,
-        output_pixels, nodata_mask);
+    pgaccel_warn_cpu_fallback("raster_clip");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_raster_reclass(
@@ -494,6 +349,10 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
     if (rules == nullptr && rule_count > 0) {
         return PGACCEL_ERROR_INIT;
     }
+    // Empty input — no-op, avoid zero-sized device allocations.
+    if (pixel_count == 0) {
+        return PGACCEL_OK;
+    }
 
 #if PGACCEL_HAS_SYCL
     try {
@@ -505,9 +364,7 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         // Convert input pixels to fp32 on host, apply rules on GPU, write back
         auto* h_in = new (std::nothrow) float[pixel_count];
         if (!h_in) {
-            return raster_reclass_cpu(
-                input_pixels, pixel_count, input_type,
-                rules, rule_count, output_type, output_pixels);
+            return PGACCEL_ERROR_OOM;
         }
         for (size_t i = 0; i < pixel_count; i++) {
             h_in[i] = static_cast<float>(read_pixel(input_pixels, i, input_type));
@@ -517,18 +374,19 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         float* d_in = sycl::malloc_device<float>(pixel_count, q);
         float* d_out = sycl::malloc_device<float>(pixel_count, q);
 
-        // Copy rules to device — flatten to 3 floats per rule (min, max, new)
-        float* h_rules_flat = new (std::nothrow) float[rule_count * 3];
-        float* d_rules = sycl::malloc_device<float>(rule_count * 3, q);
+        // Copy rules to device — flatten to 3 floats per rule (min, max, new).
+        // When rule_count == 0, allocate a 1-element placeholder so device
+        // pointers are valid; the kernel loop naturally no-ops (passthrough).
+        const size_t rule_alloc = rule_count > 0 ? rule_count * 3 : 1;
+        float* h_rules_flat = new (std::nothrow) float[rule_alloc];
+        float* d_rules = sycl::malloc_device<float>(rule_alloc, q);
 
         if (!d_in || !d_out || !h_rules_flat || !d_rules) {
             delete[] h_in;
             delete[] h_rules_flat;
             sycl::free(d_in, q); sycl::free(d_out, q);
             sycl::free(d_rules, q);
-            return raster_reclass_cpu(
-                input_pixels, pixel_count, input_type,
-                rules, rule_count, output_type, output_pixels);
+            return PGACCEL_ERROR_OOM;
         }
 
         for (size_t r = 0; r < rule_count; r++) {
@@ -536,9 +394,12 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
             h_rules_flat[r * 3 + 1] = static_cast<float>(rules[r].max_val);
             h_rules_flat[r * 3 + 2] = static_cast<float>(rules[r].new_val);
         }
+        if (rule_count == 0) {
+            h_rules_flat[0] = 0.0f;
+        }
 
         q.memcpy(d_in, h_in, pixel_count * sizeof(float));
-        q.memcpy(d_rules, h_rules_flat, rule_count * 3 * sizeof(float));
+        q.memcpy(d_rules, h_rules_flat, rule_alloc * sizeof(float));
         q.wait();
 
         delete[] h_in;
@@ -571,9 +432,7 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         if (!h_out) {
             sycl::free(d_in, q); sycl::free(d_out, q);
             sycl::free(d_rules, q);
-            return raster_reclass_cpu(
-                input_pixels, pixel_count, input_type,
-                rules, rule_count, output_type, output_pixels);
+            return PGACCEL_ERROR_OOM;
         }
 
         q.memcpy(h_out, d_out, pixel_count * sizeof(float)).wait();
@@ -587,13 +446,13 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         sycl::free(d_in, q);
         sycl::free(d_out, q);
         sycl::free(d_rules, q);
+        pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
-    return raster_reclass_cpu(
-        input_pixels, pixel_count, input_type,
-        rules, rule_count, output_type, output_pixels);
+    pgaccel_warn_cpu_fallback("raster_reclass");
+    return PGACCEL_ERROR_NO_DEVICE;
 }

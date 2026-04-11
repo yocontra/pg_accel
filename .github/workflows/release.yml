@@ -13,7 +13,10 @@ jobs:
     name: Build (${{ matrix.os }}, PG ${{ matrix.pg }})
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-14]
+        # pg_accel is currently a Metal/macOS-only GPU extension. Linux/CUDA
+        # support requires building AdaptiveCpp + a CUDA backend in CI, which
+        # is not yet wired up. Restrict release builds to macOS for now.
+        os: [macos-26]
         pg: [15, 16, 17, 18]
     runs-on: ${{ matrix.os }}
     steps:

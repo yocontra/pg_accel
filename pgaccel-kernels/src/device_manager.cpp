@@ -12,6 +12,41 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// GPU execution observability — thread-local counters
+// ---------------------------------------------------------------------------
+
+static thread_local uint64_t tl_gpu_exec_count = 0;
+static thread_local uint64_t tl_cpu_fallback_count = 0;
+
+extern "C" uint64_t pgaccel_gpu_exec_count(void) {
+    return tl_gpu_exec_count;
+}
+
+extern "C" void pgaccel_reset_gpu_exec_count(void) {
+    tl_gpu_exec_count = 0;
+}
+
+extern "C" uint64_t pgaccel_cpu_fallback_count(void) {
+    return tl_cpu_fallback_count;
+}
+
+extern "C" void pgaccel_reset_cpu_fallback_count(void) {
+    tl_cpu_fallback_count = 0;
+}
+
+void pgaccel_record_gpu_exec() {
+    tl_gpu_exec_count++;
+}
+
+void pgaccel_warn_cpu_fallback(const char* kernel_name) {
+    tl_cpu_fallback_count++;
+    fprintf(stderr,
+        "pgaccel WARNING: %s fell back to CPU! GPU kernel did not execute. "
+        "Fallback count: %lu. This means the GPU is NOT being used.\n",
+        kernel_name, (unsigned long)tl_cpu_fallback_count);
+}
+
+// ---------------------------------------------------------------------------
 // Module-level state (initialized once, read-only after init)
 // ---------------------------------------------------------------------------
 
@@ -164,15 +199,19 @@ extern "C" pgaccel_status pgaccel_init(void) {
         if (g_init_pid == current_pid) {
             return PGACCEL_OK;
         }
-        // Forked child — stale SYCL context. On macOS/Metal, SYCL cannot
-        // reinitialize after fork() because MTLCompilerService XPC connection
-        // is broken. Fall back to CPU to avoid SIGSEGV.
+        // Forked child — stale SYCL/Metal context. The IOKit GPU
+        // driver connection (Mach ports) is inherited but broken after
+        // fork(). Even creating a fresh sycl::queue doesn't help because
+        // AdaptiveCpp reuses the parent's MTLDevice, whose IOKit
+        // allocator crashes on sycl::malloc_device (SIGSEGV in
+        // IOGPUMetalDevice allocBuffer). Fall back to CPU in forked
+        // backends; GPU work is routed through the BGW coordinator.
 #if PGACCEL_HAS_SYCL
         g_queue = nullptr;
         g_unified_memory = false;
 #endif
         fprintf(stderr, "pgaccel: fork detected (parent=%d, child=%d)"
-                        " — GPU unavailable, using CPU fallback\n",
+                        " — GPU unavailable in forked backend\n",
                 g_init_pid, current_pid);
         populate_cpu_fallback();
         g_init_pid = current_pid;

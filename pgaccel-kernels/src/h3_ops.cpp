@@ -327,91 +327,7 @@ static inline uint64_t lat_lng_to_cell_single(double lat_deg, double lng_deg,
 }
 
 // ---------------------------------------------------------------------------
-// CPU fallback implementations (always available)
-// ---------------------------------------------------------------------------
-
-static pgaccel_status h3_get_resolution_bulk_cpu(
-    const uint64_t *cells, size_t count, int32_t *resolutions) {
-    for (size_t i = 0; i < count; i++) {
-        if (cells[i] == 0) {
-            resolutions[i] = -1;
-        } else {
-            resolutions[i] = h3_get_resolution(cells[i]);
-        }
-    }
-    return PGACCEL_OK;
-}
-
-static pgaccel_status h3_cell_to_parent_bulk_cpu(
-    const uint64_t *cells, size_t count, int parent_res, uint64_t *parents) {
-    for (size_t i = 0; i < count; i++) {
-        if (cells[i] == 0) {
-            parents[i] = 0;
-        } else {
-            parents[i] = h3_cell_to_parent(cells[i], parent_res);
-        }
-    }
-    return PGACCEL_OK;
-}
-
-static pgaccel_status h3_grid_distance_bulk_cpu(
-    const uint64_t *cells_a, const uint64_t *cells_b, size_t count,
-    int32_t *distances) {
-    for (size_t i = 0; i < count; i++) {
-        uint64_t a = cells_a[i];
-        uint64_t b = cells_b[i];
-
-        if (a == 0 || b == 0) {
-            distances[i] = -1;
-            continue;
-        }
-
-        int res_a = h3_get_resolution(a);
-        int res_b = h3_get_resolution(b);
-
-        // Different resolutions — incompatible
-        if (res_a != res_b) {
-            distances[i] = -1;
-            continue;
-        }
-
-        int base_a = h3_get_base_cell(a);
-        int base_b = h3_get_base_cell(b);
-
-        // Different base cells — cannot compute without full IJK system
-        if (base_a != base_b) {
-            distances[i] = -1;
-            continue;
-        }
-
-        // Same cell — distance 0
-        if (a == b) {
-            distances[i] = 0;
-            continue;
-        }
-
-        // Convert to IJK and compute distance
-        int ia, ja, ka, ib, jb, kb;
-        cell_to_ijk(a, res_a, ia, ja, ka);
-        cell_to_ijk(b, res_b, ib, jb, kb);
-        distances[i] = ijk_distance(ia, ja, ka, ib, jb, kb);
-    }
-    return PGACCEL_OK;
-}
-
-static pgaccel_status h3_lat_lng_to_cell_bulk_cpu(
-    const double *lats, const double *lngs, size_t count,
-    int resolution, bool use_fp64,
-    uint64_t *cell_ids, uint8_t *valid) {
-    for (size_t i = 0; i < count; i++) {
-        cell_ids[i] = lat_lng_to_cell_single(
-            lats[i], lngs[i], resolution, use_fp64, &valid[i]);
-    }
-    return PGACCEL_OK;
-}
-
-// ---------------------------------------------------------------------------
-// Extern "C" API — dispatches to SYCL or CPU fallback
+// Extern "C" API — GPU-only (no CPU fallback, per rule #11)
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
@@ -432,7 +348,7 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
         if (!d_cells || !d_res) {
             sycl::free(d_cells, q);
             sycl::free(d_res, q);
-            return h3_get_resolution_bulk_cpu(cells, count, resolutions);
+            return PGACCEL_ERROR_OOM;
         }
 
         q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait();
@@ -453,13 +369,15 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
 
         sycl::free(d_cells, q);
         sycl::free(d_res, q);
+        pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
-    return h3_get_resolution_bulk_cpu(cells, count, resolutions);
+    pgaccel_warn_cpu_fallback("h3_get_resolution_bulk");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
@@ -484,7 +402,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
         if (!d_cells || !d_parents) {
             sycl::free(d_cells, q);
             sycl::free(d_parents, q);
-            return h3_cell_to_parent_bulk_cpu(cells, count, parent_res, parents);
+            return PGACCEL_ERROR_OOM;
         }
 
         q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait();
@@ -530,13 +448,15 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
 
         sycl::free(d_cells, q);
         sycl::free(d_parents, q);
+        pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
-    return h3_cell_to_parent_bulk_cpu(cells, count, parent_res, parents);
+    pgaccel_warn_cpu_fallback("h3_cell_to_parent_bulk");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
@@ -562,7 +482,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
             sycl::free(d_a, q);
             sycl::free(d_b, q);
             sycl::free(d_dist, q);
-            return h3_grid_distance_bulk_cpu(cells_a, cells_b, count, distances);
+            return PGACCEL_ERROR_OOM;
         }
 
         q.memcpy(d_a, cells_a, count * sizeof(uint64_t));
@@ -626,13 +546,15 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
         sycl::free(d_a, q);
         sycl::free(d_b, q);
         sycl::free(d_dist, q);
+        pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
-    return h3_grid_distance_bulk_cpu(cells_a, cells_b, count, distances);
+    pgaccel_warn_cpu_fallback("h3_grid_distance_bulk");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
@@ -651,10 +573,17 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
     if (resolution < 0 || resolution > H3_MAX_RESOLUTION) {
         return PGACCEL_ERROR_UNSUPPORTED;
     }
+    // fp64 requested at high resolution but device is fp32-only (e.g. Metal).
+    // With CPU fallbacks removed we cannot satisfy this — surface it loudly.
+    if (use_fp64 && resolution >= 12) {
+        pgaccel_platform_caps caps = pgaccel_get_caps();
+        if (!caps.has_fp64) {
+            return PGACCEL_ERROR_UNSUPPORTED;
+        }
+    }
 
     // Cast void* to double* — the caller is responsible for providing
-    // correctly typed arrays. fp32 path would use float* but we always
-    // convert to double for the CPU fallback.
+    // correctly typed arrays. The GPU kernel down-converts to fp32.
     const auto *lats = static_cast<const double *>(lat_array);
     const auto *lngs = static_cast<const double *>(lng_array);
 
@@ -673,8 +602,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
             sycl::free(d_lngs, q);
             sycl::free(d_cells, q);
             sycl::free(d_valid, q);
-            return h3_lat_lng_to_cell_bulk_cpu(
-                lats, lngs, count, resolution, use_fp64, cell_ids, valid);
+            return PGACCEL_ERROR_OOM;
         }
 
         // Convert double inputs to fp32 for GPU (Metal: no fp64)
@@ -685,8 +613,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
             delete[] h_lngs_f32;
             sycl::free(d_lats, q); sycl::free(d_lngs, q);
             sycl::free(d_cells, q); sycl::free(d_valid, q);
-            return h3_lat_lng_to_cell_bulk_cpu(
-                lats, lngs, count, resolution, use_fp64, cell_ids, valid);
+            return PGACCEL_ERROR_OOM;
         }
         for (size_t i = 0; i < count; i++) {
             h_lats_f32[i] = static_cast<float>(lats[i]);
@@ -715,8 +642,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
             sycl::free(d_lats, q); sycl::free(d_lngs, q);
             sycl::free(d_cells, q); sycl::free(d_valid, q);
             sycl::free(d_fc_lat, q); sycl::free(d_fc_lng, q);
-            return h3_lat_lng_to_cell_bulk_cpu(
-                lats, lngs, count, resolution, use_fp64, cell_ids, valid);
+            return PGACCEL_ERROR_OOM;
         }
         q.memcpy(d_fc_lat, h_fc_lat, 20 * sizeof(float));
         q.memcpy(d_fc_lng, h_fc_lng, 20 * sizeof(float));
@@ -846,12 +772,13 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
         sycl::free(d_valid, q);
         sycl::free(d_fc_lat, q);
         sycl::free(d_fc_lng, q);
+        pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
-    return h3_lat_lng_to_cell_bulk_cpu(lats, lngs, count, resolution,
-                                        use_fp64, cell_ids, valid);
+    pgaccel_warn_cpu_fallback("h3_lat_lng_to_cell_bulk");
+    return PGACCEL_ERROR_NO_DEVICE;
 }

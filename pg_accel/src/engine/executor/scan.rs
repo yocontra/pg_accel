@@ -13,6 +13,8 @@
 //! 3. **`end_custom_scan`** — reclaims the `ScanExecState` via `Box::from_raw`
 //!    and drops it.
 
+#![allow(clippy::needless_range_loop)]
+
 use pgrx::pg_sys;
 
 use crate::engine::columnar::ColumnarBatchOwner;
@@ -184,10 +186,10 @@ impl ScanExecState {
         // returning passing tuples directly from the heap buffer without
         // creating MinimalTuples. This avoids the ExecForceStoreMinimalTuple
         // overhead that dominates the batched path.
-        if !self.scan_desc.is_null() {
-            if let Some(CompiledExpr::Template(_)) = self.compiled_expr {
-                return unsafe { self.inline_filter_scan(scan_slot) };
-            }
+        if !self.scan_desc.is_null()
+            && let Some(CompiledExpr::Template(_)) = self.compiled_expr
+        {
+            return unsafe { self.inline_filter_scan(scan_slot) };
         }
 
         loop {
@@ -283,7 +285,7 @@ impl ScanExecState {
             self.rows_dispatched += 1;
 
             // Periodic interrupt check.
-            if self.rows_dispatched % 65536 == 0 {
+            if self.rows_dispatched.is_multiple_of(65536) {
                 pgrx::check_for_interrupts!();
             }
 
@@ -390,12 +392,7 @@ impl ScanExecState {
         scan_slot: *mut pg_sys::TupleTableSlot,
     ) {
         // Free previously-buffered allocations.
-        if !self.batch_mcxt.is_null() {
-            // SAFETY: batch_mcxt is a valid PG memory context we own.
-            // MemoryContextReset frees all allocations in O(1) by resetting
-            // the context's block list, instead of O(n) individual pfree calls.
-            unsafe { pg_sys::MemoryContextReset(self.batch_mcxt) };
-        } else {
+        if self.batch_mcxt.is_null() {
             // Fallback for non-direct-scan paths: individual pfree.
             for &mt in &self.tuple_buffer {
                 if !mt.is_null() {
@@ -409,6 +406,11 @@ impl ScanExecState {
                     unsafe { pg_sys::pfree(datum.cast_mut_ptr()) };
                 }
             }
+        } else {
+            // SAFETY: batch_mcxt is a valid PG memory context we own.
+            // MemoryContextReset frees all allocations in O(1) by resetting
+            // the context's block list, instead of O(n) individual pfree calls.
+            unsafe { pg_sys::MemoryContextReset(self.batch_mcxt) };
         }
         self.tuple_buffer.clear();
         self.datum_buffer.clear();
@@ -417,15 +419,15 @@ impl ScanExecState {
 
         let target = self.batch_size.max(gucs::min_batch_size().max(1) as usize);
 
-        if !self.scan_desc.is_null() {
+        if self.scan_desc.is_null() {
+            // Child plan scan (spatial/h3/raster or legacy).
+            unsafe { self.fill_batch_child(child_ps, target) };
+        } else {
             // Direct heap scan (GpuExpr with scanrelid > 0).
             // table_scan_getnextslot writes the heap tuple into scan_slot,
             // which has the table's full TupleDesc. MinimalTuples copied
             // from this slot match the TupleDesc used by extract_col_f64.
             unsafe { self.fill_batch_direct(scan_slot, target) };
-        } else {
-            // Child plan scan (spatial/h3/raster or legacy).
-            unsafe { self.fill_batch_child(child_ps, target) };
         }
     }
 
@@ -438,10 +440,10 @@ impl ScanExecState {
     unsafe fn fill_batch_direct(&mut self, _scan_slot: *mut pg_sys::TupleTableSlot, target: usize) {
         // Switch to batch memory context for all MinimalTuple allocations.
         // SAFETY: batch_mcxt was created in set_scan_desc and is valid.
-        let old_mcxt = if !self.batch_mcxt.is_null() {
-            unsafe { pg_sys::MemoryContextSwitchTo(self.batch_mcxt) }
-        } else {
+        let old_mcxt = if self.batch_mcxt.is_null() {
             std::ptr::null_mut()
+        } else {
+            unsafe { pg_sys::MemoryContextSwitchTo(self.batch_mcxt) }
         };
 
         while self.tuple_buffer.len() < target {
@@ -561,75 +563,72 @@ impl ScanExecState {
 
         // Phase 3: Create MinimalTuples only for passing rows.
         // Switch to batch_mcxt for allocations.
-        let old_mcxt = if !self.batch_mcxt.is_null() {
-            unsafe { pg_sys::MemoryContextSwitchTo(self.batch_mcxt) }
-        } else {
+        let old_mcxt = if self.batch_mcxt.is_null() {
             std::ptr::null_mut()
+        } else {
+            unsafe { pg_sys::MemoryContextSwitchTo(self.batch_mcxt) }
         };
 
         let start_us = std::time::Instant::now();
 
-        match gpu_results {
-            Some(results) => {
-                let mut pass_count = 0u64;
-                let mut recheck_count = 0u64;
+        if let Some(results) = gpu_results {
+            let mut pass_count = 0u64;
+            let mut recheck_count = 0u64;
 
-                for i in 0..count {
-                    let r = results.get(i).copied().unwrap_or(-1);
-                    match r {
-                        1 => {
-                            // Definite TRUE — materialize this row.
-                            let (offset, t_len) = entries[i];
-                            let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
+            for i in 0..count {
+                let r = results.get(i).copied().unwrap_or(-1);
+                match r {
+                    1 => {
+                        // Definite TRUE — materialize this row.
+                        let (offset, t_len) = entries[i];
+                        let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
+                        self.tuple_buffer.push(mt);
+                        self.result_mask.push(true);
+                        pass_count += 1;
+                    }
+                    r if r < 0 => {
+                        // Definite FALSE — skip, no MT created.
+                    }
+                    _ => {
+                        // Uncertain — materialize and CPU recheck.
+                        recheck_count += 1;
+                        let (offset, t_len) = entries[i];
+                        let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
+                        let passed = unsafe { self.cpu_recheck_tuple(mt, scan_slot) };
+                        if passed {
                             self.tuple_buffer.push(mt);
                             self.result_mask.push(true);
                             pass_count += 1;
-                        }
-                        r if r < 0 => {
-                            // Definite FALSE — skip, no MT created.
-                        }
-                        _ => {
-                            // Uncertain — materialize and CPU recheck.
-                            recheck_count += 1;
-                            let (offset, t_len) = entries[i];
-                            let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
-                            let passed = unsafe { self.cpu_recheck_tuple(mt, scan_slot) };
-                            if passed {
-                                self.tuple_buffer.push(mt);
-                                self.result_mask.push(true);
-                                pass_count += 1;
-                            } else if !self.batch_mcxt.is_null() {
-                                // batch_mcxt will bulk-free; no individual pfree needed.
-                            } else {
-                                // SAFETY: mt was palloc'd.
-                                unsafe { pg_sys::pfree(mt.cast()) };
-                            }
+                        } else if !self.batch_mcxt.is_null() {
+                            // batch_mcxt will bulk-free; no individual pfree needed.
+                        } else {
+                            // SAFETY: mt was palloc'd.
+                            unsafe { pg_sys::pfree(mt.cast()) };
                         }
                     }
                 }
-                pgrx::debug1!(
-                    "pg_accel: deferred GpuExpr {}/{} passed ({} rechecked)",
-                    pass_count,
-                    count,
-                    recheck_count,
-                );
-                self.rows_dispatched += count as u64;
-                self.batches_executed += 1;
             }
-            None => {
-                // GPU unavailable — materialize all and use scalar qual.
-                for i in 0..count {
-                    let (offset, t_len) = entries[i];
-                    let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
-                    self.tuple_buffer.push(mt);
-                }
-                // Restore mcxt before scalar qual (which may allocate).
-                if !old_mcxt.is_null() {
-                    unsafe { pg_sys::MemoryContextSwitchTo(old_mcxt) };
-                }
-                unsafe { self.dispatch_scalar_qual(scan_slot, count) };
-                return;
+            tracing::debug!(
+                "pg_accel: deferred GpuExpr {}/{} passed ({} rechecked)",
+                pass_count,
+                count,
+                recheck_count,
+            );
+            self.rows_dispatched += count as u64;
+            self.batches_executed += 1;
+        } else {
+            // GPU unavailable — materialize all and use scalar qual.
+            for i in 0..count {
+                let (offset, t_len) = entries[i];
+                let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
+                self.tuple_buffer.push(mt);
             }
+            // Restore mcxt before scalar qual (which may allocate).
+            if !old_mcxt.is_null() {
+                unsafe { pg_sys::MemoryContextSwitchTo(old_mcxt) };
+            }
+            unsafe { self.dispatch_scalar_qual(scan_slot, count) };
+            return;
         }
 
         self.dispatch_time_us += start_us.elapsed().as_micros() as u64;
@@ -663,7 +662,7 @@ impl ScanExecState {
             t_data,
         };
         // SAFETY: ht_data points to valid HeapTuple header data in the arena.
-        unsafe { pg_sys::minimal_tuple_from_heap_tuple(&mut ht_data as *mut pg_sys::HeapTupleData) }
+        unsafe { pg_sys::minimal_tuple_from_heap_tuple(&raw mut ht_data) }
     }
 
     /// CPU-recheck a single tuple via the scalar qual expression.
@@ -754,10 +753,8 @@ impl ScanExecState {
                             .map(|(&x, &y)| {
                                 if x < 0 || y < 0 {
                                     -1
-                                } else if x > 0 && y > 0 {
-                                    1
                                 } else {
-                                    0
+                                    i8::from(x > 0 && y > 0)
                                 }
                             })
                             .collect();
@@ -808,7 +805,7 @@ impl ScanExecState {
                 } else {
                     unsafe { (*child_desc).natts }
                 };
-                if extract_attno <= child_natts.into() {
+                if extract_attno <= child_natts {
                     let mut is_null = false;
                     // SAFETY: child_slot is valid and non-empty; slot_getattr
                     // deforms the tuple to extract the requested attribute.
@@ -830,7 +827,7 @@ impl ScanExecState {
                     }
                 } else {
                     if self.tuple_buffer.is_empty() {
-                        pgrx::debug1!(
+                        tracing::debug!(
                             "pg_accel: fill_batch: attno={} > child_natts={}, skipping",
                             extract_attno,
                             child_natts,
@@ -865,7 +862,7 @@ impl ScanExecState {
         if batch_len == 0 {
             return;
         }
-        pgrx::debug1!(
+        tracing::debug!(
             "pg_accel: dispatch_batch: len={}, strategy={:?}",
             batch_len,
             self.strategy
@@ -909,7 +906,7 @@ impl ScanExecState {
         scan_slot: *mut pg_sys::TupleTableSlot,
         batch_len: usize,
     ) {
-        pgrx::debug1!(
+        tracing::debug!(
             "pg_accel: dispatch_scalar_qual: batch_len={}, qual_null={}, econtext_null={}",
             batch_len,
             self.qual.is_null(),
@@ -937,7 +934,7 @@ impl ScanExecState {
                         let desc = (*scan_slot).tts_tupleDescriptor;
                         if desc.is_null() { -1 } else { (*desc).natts }
                     };
-                    pgrx::debug1!(
+                    tracing::debug!(
                         "pg_accel: scalar_qual: mt[0] t_len={}, slot natts={}",
                         t_len,
                         natts
@@ -966,7 +963,7 @@ impl ScanExecState {
                     pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
                 }
             }
-            pgrx::debug1!("pg_accel: {}/{} rows passed qual", pass_count, batch_len,);
+            tracing::debug!("pg_accel: {}/{} rows passed qual", pass_count, batch_len,);
         }
     }
 
@@ -1002,7 +999,7 @@ impl ScanExecState {
             self.datum_buffer.clone()
         } else {
             // Fallback: no pre-extracted datums (shouldn't happen for GPU path).
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: dispatch_gpu_path: datum_buffer size mismatch {}/{}",
                 self.datum_buffer.len(),
                 batch_len,
@@ -1012,7 +1009,7 @@ impl ScanExecState {
 
         if !datum_batch.is_empty() {
             let (d, n) = datum_batch[0];
-            pgrx::debug1!(
+            tracing::debug!(
                 "pg_accel: dispatch_gpu_path: first row attno={} datum={:#x} is_null={}",
                 self.target_attno,
                 d.value(),
@@ -1043,7 +1040,7 @@ impl ScanExecState {
                     self.result_mask.push(passed);
                 }
                 let pass_count = self.result_mask.iter().filter(|&&b| b).count();
-                pgrx::debug1!(
+                tracing::debug!(
                     "pg_accel: GPU spatial {}/{} rows passed",
                     pass_count,
                     batch_len,
@@ -1168,10 +1165,8 @@ impl ScanExecState {
                             .map(|(&x, &y)| {
                                 if x < 0 || y < 0 {
                                     -1
-                                } else if x > 0 && y > 0 {
-                                    1
                                 } else {
-                                    0
+                                    i8::from(x > 0 && y > 0)
                                 }
                             })
                             .collect();
@@ -1322,7 +1317,7 @@ impl ScanExecState {
                 }
             }
         }
-        pgrx::debug1!(
+        tracing::debug!(
             "pg_accel: GpuExpr {}/{} passed ({} rechecked)",
             pass_count,
             batch_len,
@@ -1470,7 +1465,7 @@ impl ScanExecState {
             return scan_slot;
         }
         self.rows_dispatched += 1;
-        if self.rows_dispatched % 65536 == 0 {
+        if self.rows_dispatched.is_multiple_of(65536) {
             pgrx::check_for_interrupts!();
         }
         // Store the heap tuple in the scan slot. shouldFree=false because
@@ -1523,7 +1518,7 @@ impl ScanExecState {
 
         if u32::from(relam) == GIST_AM_OID {
             self.gist_recheck = true;
-            pgrx::debug1!("pg_accel: GiST child detected, enabling batched recheck");
+            tracing::debug!("pg_accel: GiST child detected, enabling batched recheck");
         }
     }
 
@@ -2077,12 +2072,7 @@ mod tests {
 
 impl Drop for ScanExecState {
     fn drop(&mut self) {
-        if !self.batch_mcxt.is_null() {
-            // SAFETY: batch_mcxt is a valid PG memory context we created.
-            // MemoryContextDelete frees the context and all its allocations.
-            unsafe { pg_sys::MemoryContextDelete(self.batch_mcxt) };
-            self.batch_mcxt = std::ptr::null_mut();
-        } else {
+        if self.batch_mcxt.is_null() {
             // Non-batch path: free individual MinimalTuples.
             for &mt in &self.tuple_buffer {
                 if !mt.is_null() {
@@ -2095,6 +2085,11 @@ impl Drop for ScanExecState {
                     unsafe { pg_sys::pfree(datum.cast_mut_ptr()) };
                 }
             }
+        } else {
+            // SAFETY: batch_mcxt is a valid PG memory context we created.
+            // MemoryContextDelete frees the context and all its allocations.
+            unsafe { pg_sys::MemoryContextDelete(self.batch_mcxt) };
+            self.batch_mcxt = std::ptr::null_mut();
         }
     }
 }

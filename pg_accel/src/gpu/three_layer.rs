@@ -191,16 +191,40 @@ fn try_gpu_dispatch(
 ) -> Option<SpatialResult> {
     use super::bridge::{self, PgaccelGeomType, PgaccelGeometry, PgaccelStatus};
 
-    super::ensure_init();
-
-    let count_a = geoms_a.len();
-    let count_b = geoms_b.len();
-    if count_a == 0 || count_b == 0 {
+    // Per the public `spatial_intersects` contract, pairs are row-wise:
+    // pair i = (geoms_a[i], geoms_b[i]), truncated to the shorter slice.
+    // The underlying C kernel takes count_a and count_b and computes the
+    // full cross-product; we filter to the diagonal below.
+    let n = geoms_a.len().min(geoms_b.len());
+    if n == 0 {
         return Some(SpatialResult {
             definite_true: Vec::new(),
             definite_false: Vec::new(),
             uncertain: Vec::new(),
         });
+    }
+    let geoms_a = &geoms_a[..n];
+    let geoms_b = &geoms_b[..n];
+    let count_a = n;
+    let count_b = n;
+
+    // The C spatial kernel assumes well-formed inputs. Degenerate inputs
+    // (Point with no coords, Polygon ring with < 3 vertices, Unknown type)
+    // cause out-of-bounds reads inside the kernel, so short-circuit the
+    // entire batch to the uncertain path which lets PG recheck handle it.
+    let is_degenerate = |g: &ExtractedGeometry| -> bool {
+        match g.geom_type {
+            GeomType::Point => g.coord_count == 0 || g.coords.len() < 2,
+            GeomType::LineString => g.coord_count < 2 || g.coords.len() < 4,
+            // Polygon ring must have at least 3 distinct vertices (6 coord
+            // floats). PostGIS also stores the closing vertex, so 4 pairs
+            // (8 floats) is typical — but the bare minimum is 3 pairs.
+            GeomType::Polygon => g.coord_count < 3 || g.coords.len() < 6,
+            GeomType::Unknown => true,
+        }
+    };
+    if geoms_a.iter().any(is_degenerate) || geoms_b.iter().any(is_degenerate) {
+        return None;
     }
 
     let to_c_type = |gt: GeomType| -> PgaccelGeomType {
@@ -263,11 +287,11 @@ fn try_gpu_dispatch(
             c_geoms_b.as_ptr(),
             count_b,
             true_pairs.as_mut_ptr(),
-            &mut true_count,
+            &raw mut true_count,
             false_pairs.as_mut_ptr(),
-            &mut false_count,
+            &raw mut false_count,
             uncertain_pairs.as_mut_ptr(),
-            &mut uncertain_count,
+            &raw mut uncertain_count,
         )
     };
 
@@ -275,21 +299,23 @@ fn try_gpu_dispatch(
         return None;
     }
 
-    // Convert (i, j) pair indices to flat pair index: i * count_b + j.
-    let to_flat = |pairs: &[u32], count: usize| -> Vec<usize> {
+    // The C kernel returns the full cross-product (i, j). The public API
+    // is row-wise, so keep only the diagonal pairs where i == j and emit
+    // their row index. Everything off-diagonal was extra work we ignore.
+    let diagonal = |pairs: &[u32], count: usize| -> Vec<usize> {
         (0..count)
-            .map(|k| {
+            .filter_map(|k| {
                 let i = pairs[k * 2] as usize;
                 let j = pairs[k * 2 + 1] as usize;
-                i * count_b + j
+                (i == j).then_some(i)
             })
             .collect()
     };
 
     Some(SpatialResult {
-        definite_true: to_flat(&true_pairs, true_count),
-        definite_false: to_flat(&false_pairs, false_count),
-        uncertain: to_flat(&uncertain_pairs, uncertain_count),
+        definite_true: diagonal(&true_pairs, true_count),
+        definite_false: diagonal(&false_pairs, false_count),
+        uncertain: diagonal(&uncertain_pairs, uncertain_count),
     })
 }
 

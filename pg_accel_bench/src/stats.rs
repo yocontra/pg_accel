@@ -904,8 +904,7 @@ mod tests {
         let table = format_markdown_table(&results);
         assert!(table.contains("accel"));
         assert!(table.contains("baseline"));
-        // Both rows present
-        let data_lines: Vec<&str> = table.lines().skip(2).collect(); // skip header + separator
-        assert_eq!(data_lines.len(), 2);
+        // Both rows present (skip header + separator)
+        assert_eq!(table.lines().skip(2).count(), 2);
     }
 }

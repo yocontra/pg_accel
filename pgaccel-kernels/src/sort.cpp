@@ -348,8 +348,12 @@ static inline uint32_t f32_to_sortable(float f) {
 }
 
 /// Convert sortable uint32 back to float.
+/// Inverse of f32_to_sortable: high bit set in sortable-space means the
+/// original float was positive (sign bit was 0, then XOR'd with 0x80000000),
+/// so we undo with the same 0x80000000 mask.  High bit clear means the
+/// original was negative (all bits were flipped), so we undo with 0xFFFFFFFF.
 static inline float sortable_to_f32(uint32_t u) {
-    uint32_t mask = (u & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+    uint32_t mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
     uint32_t bits = u ^ mask;
     float f;
     std::memcpy(&f, &bits, sizeof(f));
@@ -369,17 +373,14 @@ static pgaccel_status sycl_radix_sort_kv_u32(
         uint32_t* buf_keys[2];
         uint32_t* buf_idx[2];
 
-        if (g_unified_memory) {
-            buf_keys[0] = sycl::malloc_shared<uint32_t>(count, *q);
-            buf_keys[1] = sycl::malloc_shared<uint32_t>(count, *q);
-            buf_idx[0]  = sycl::malloc_shared<uint32_t>(count, *q);
-            buf_idx[1]  = sycl::malloc_shared<uint32_t>(count, *q);
-        } else {
-            buf_keys[0] = sycl::malloc_device<uint32_t>(count, *q);
-            buf_keys[1] = sycl::malloc_device<uint32_t>(count, *q);
-            buf_idx[0]  = sycl::malloc_device<uint32_t>(count, *q);
-            buf_idx[1]  = sycl::malloc_device<uint32_t>(count, *q);
-        }
+        // Radix sort uses malloc_shared for all buffers: the scatter phase
+        // requires atomic_ref on d_hist (shared), and on Apple Silicon the
+        // GPU cache coherence for atomics between malloc_device and
+        // malloc_shared buffers is unreliable in AdaptiveCpp's Metal backend.
+        buf_keys[0] = sycl::malloc_shared<uint32_t>(count, *q);
+        buf_keys[1] = sycl::malloc_shared<uint32_t>(count, *q);
+        buf_idx[0]  = sycl::malloc_shared<uint32_t>(count, *q);
+        buf_idx[1]  = sycl::malloc_shared<uint32_t>(count, *q);
 
         if (!buf_keys[0] || !buf_keys[1] || !buf_idx[0] || !buf_idx[1]) {
             for (int b = 0; b < 2; b++) {
@@ -399,32 +400,35 @@ static pgaccel_status sycl_radix_sort_kv_u32(
             return PGACCEL_OOM;
         }
 
-        // Copy input to buffer 0.
-        if (g_unified_memory) {
-            std::memcpy(buf_keys[0], keys, count * sizeof(uint32_t));
-            std::memcpy(buf_idx[0], indices, count * sizeof(uint32_t));
-        } else {
-            q->memcpy(buf_keys[0], keys, count * sizeof(uint32_t)).wait();
-            q->memcpy(buf_idx[0], indices, count * sizeof(uint32_t)).wait();
-        }
+        // Copy input to buffer 0 (shared memory — host-accessible).
+        std::memcpy(buf_keys[0], keys, count * sizeof(uint32_t));
+        std::memcpy(buf_idx[0], indices, count * sizeof(uint32_t));
 
-        int src = 0;
+        // Use named pointers instead of C-style arrays — SYCL lambdas
+        // cannot reliably capture C arrays by value via [=].
+        uint32_t* src_keys = buf_keys[0];
+        uint32_t* dst_keys = buf_keys[1];
+        uint32_t* src_idx  = buf_idx[0];
+        uint32_t* dst_idx  = buf_idx[1];
 
         // 4 passes for 32-bit keys (8 bits per pass).
         for (int pass = 0; pass < 4; pass++) {
             const int shift = pass * 8;
-            int dst = 1 - src;
 
             // -- Histogram: count occurrences of each digit --
-            std::memset(d_hist, 0, RADIX_BINS * sizeof(uint32_t));
+            // Use queue memset (not std::memset) to ensure Metal cache
+            // coherence between host writes and GPU reads on shared memory.
+            q->memset(d_hist, 0, RADIX_BINS * sizeof(uint32_t)).wait();
 
             // Use atomic increments for histogram on GPU.
+            // memory_scope::system required on Metal for shared-memory atomics
+            // visible to both GPU threads and host.
             q->parallel_for(sycl::range<1>(count),
                 [=](sycl::id<1> id) {
-                    uint32_t digit = (buf_keys[src][id] >> shift) & 0xFFu;
+                    uint32_t digit = (src_keys[id] >> shift) & 0xFFu;
                     sycl::atomic_ref<uint32_t,
                         sycl::memory_order::relaxed,
-                        sycl::memory_scope::device,
+                        sycl::memory_scope::system,
                         sycl::access::address_space::global_space>
                             ref(d_hist[digit]);
                     ref.fetch_add(1u);
@@ -437,36 +441,34 @@ static pgaccel_status sycl_radix_sort_kv_u32(
                 prefix[i] = prefix[i - 1] + d_hist[i - 1];
             }
             // Copy prefix sums to d_hist for scatter kernel.
-            std::memcpy(d_hist, prefix, RADIX_BINS * sizeof(uint32_t));
+            // Use queue memcpy for Metal cache coherence.
+            q->memcpy(d_hist, prefix, RADIX_BINS * sizeof(uint32_t)).wait();
 
             // -- Scatter: write elements to sorted positions --
             // We need per-bin atomic counters for the scatter offset.
             // Reuse d_hist as atomic offset array (initialized to prefix sums).
             q->parallel_for(sycl::range<1>(count),
                 [=](sycl::id<1> id) {
-                    uint32_t k = buf_keys[src][id];
+                    uint32_t k = src_keys[id];
                     uint32_t digit = (k >> shift) & 0xFFu;
                     sycl::atomic_ref<uint32_t,
                         sycl::memory_order::relaxed,
-                        sycl::memory_scope::device,
+                        sycl::memory_scope::system,
                         sycl::access::address_space::global_space>
                             ref(d_hist[digit]);
                     uint32_t pos = ref.fetch_add(1u);
-                    buf_keys[dst][pos] = k;
-                    buf_idx[dst][pos] = buf_idx[src][id];
+                    dst_keys[pos] = k;
+                    dst_idx[pos] = src_idx[id];
                 }).wait();
 
-            src = dst;
+            // Swap src/dst for next pass.
+            std::swap(src_keys, dst_keys);
+            std::swap(src_idx, dst_idx);
         }
 
-        // Copy result back from final src buffer.
-        if (g_unified_memory) {
-            std::memcpy(keys, buf_keys[src], count * sizeof(uint32_t));
-            std::memcpy(indices, buf_idx[src], count * sizeof(uint32_t));
-        } else {
-            q->memcpy(keys, buf_keys[src], count * sizeof(uint32_t)).wait();
-            q->memcpy(indices, buf_idx[src], count * sizeof(uint32_t)).wait();
-        }
+        // After 4 passes, src_keys/src_idx point to the final sorted buffer.
+        std::memcpy(keys, src_keys, count * sizeof(uint32_t));
+        std::memcpy(indices, src_idx, count * sizeof(uint32_t));
 
         // Cleanup.
         sycl::free(d_hist, *q);
@@ -523,6 +525,7 @@ static pgaccel_status sycl_radix_sort_kv_f32(
     for (size_t i = 0; i < count; i++) {
         keys[i] = sortable_to_f32(ukeys[i]);
     }
+
     return PGACCEL_OK;
 }
 
@@ -557,23 +560,18 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
     }
 
 #if PGACCEL_HAS_SYCL
-    // Try radix sort for 32-bit types above threshold — O(n·w) with only
-    // 8 kernel launches vs bitonic's O(n·log²n) with ~200 launches at 1M.
-    if constexpr (std::is_same_v<T, int32_t>) {
-        if (count >= RADIX_SORT_THRESHOLD) {
-            pgaccel_status st = sycl_radix_sort_i32(data, count);
-            if (st == PGACCEL_OK) return st;
-            // Fall through to bitonic on failure.
-        }
-    } else if constexpr (std::is_same_v<T, float>) {
-        if (count >= RADIX_SORT_THRESHOLD) {
-            pgaccel_status st = sycl_radix_sort_f32(data, count);
-            if (st == PGACCEL_OK) return st;
-        }
+    // Radix sort disabled: AdaptiveCpp Metal backend produces incorrect
+    // results from atomic_ref scatter (non-deterministic position collisions).
+    // Bitonic sort uses compare-and-swap only — reliable on Metal.
+    {
+        pgaccel_status st = sycl_bitonic_sort(data, count);
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-    return sycl_bitonic_sort(data, count);
+    pgaccel_warn_cpu_fallback("sort");
+    return PGACCEL_ERROR_NO_DEVICE;
 #else
-    return cpu_sort(data, count);
+    pgaccel_warn_cpu_fallback("sort");
+    return PGACCEL_ERROR_NO_DEVICE;
 #endif
 }
 
@@ -608,21 +606,16 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices,
     }
 
 #if PGACCEL_HAS_SYCL
-    // Try radix sort for 32-bit key types above threshold.
-    if constexpr (std::is_same_v<K, int32_t>) {
-        if (count >= RADIX_SORT_THRESHOLD) {
-            pgaccel_status st = sycl_radix_sort_kv_i32(keys, indices, count);
-            if (st == PGACCEL_OK) return st;
-        }
-    } else if constexpr (std::is_same_v<K, float>) {
-        if (count >= RADIX_SORT_THRESHOLD) {
-            pgaccel_status st = sycl_radix_sort_kv_f32(keys, indices, count);
-            if (st == PGACCEL_OK) return st;
-        }
+    // Radix sort disabled — see dispatch_sort comment.
+    {
+        pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-    return sycl_bitonic_sort_kv(keys, indices, count);
+    pgaccel_warn_cpu_fallback("sort_kv");
+    return PGACCEL_ERROR_NO_DEVICE;
 #else
-    return cpu_sort_kv(keys, indices, count);
+    pgaccel_warn_cpu_fallback("sort_kv");
+    return PGACCEL_ERROR_NO_DEVICE;
 #endif
 }
 

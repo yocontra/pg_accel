@@ -33,8 +33,9 @@ fn gpu_raster_entries() -> Vec<FunctionAccelEntry> {
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use std::collections::HashSet;
+
+    use super::*;
 
     // -- Extension metadata ---------------------------------------------------
 

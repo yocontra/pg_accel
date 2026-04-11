@@ -17,11 +17,11 @@ use pgrx::pg_sys;
 
 use super::super::gucs;
 use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo};
-use crate::engine::executor::vectorized_scan::VectorizedScan as AggVectorizedScan;
 use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortExecState, SortKeyDesc};
+use crate::engine::executor::vectorized_scan::VectorizedScan as AggVectorizedScan;
 use crate::engine::executor::vscan::VectorizedScan as SortVectorizedScan;
 use crate::engine::executor::window::{
     WINDOW_SPEC_INTS, WindowExecState, WindowFunc, WindowFuncSpec,
@@ -695,10 +695,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         }
 
         // Append self-scan relid so begin_custom_scan can open the heap.
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(self_scan_relid).cast(),
-        );
+        list = pg_sys::lappend(list, pg_sys::makeInteger(self_scan_relid).cast());
 
         (*cscan).custom_private = list;
     }
@@ -1495,20 +1492,17 @@ unsafe fn compile_qual_list(
         first = false;
     }
 
-    match builder.build() {
-        Some(program) => {
-            pgrx::debug1!(
-                "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} cols",
-                len,
-                program.instructions.len(),
-                program.referenced_cols.len(),
-            );
-            CompiledExpr::Bytecode(program)
-        }
-        None => {
-            pgrx::debug1!("pg_accel: expr compile failed (stack overflow)");
-            CompiledExpr::DeferToPg
-        }
+    if let Some(program) = builder.build() {
+        pgrx::debug1!(
+            "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} cols",
+            len,
+            program.instructions.len(),
+            program.referenced_cols.len(),
+        );
+        CompiledExpr::Bytecode(program)
+    } else {
+        pgrx::debug1!("pg_accel: expr compile failed (stack overflow)");
+        CompiledExpr::DeferToPg
     }
 }
 
@@ -1650,16 +1644,16 @@ unsafe fn extract_var_const_pair(
     arg1: *mut pg_sys::Node,
 ) -> Option<(u32, f64)> {
     // Try Var, Const order.
-    if let Some(col) = unsafe { node_as_var_col(arg0) } {
-        if let Some(val) = unsafe { node_as_const_f64(arg1) } {
-            return Some((col, val));
-        }
+    if let Some(col) = unsafe { node_as_var_col(arg0) }
+        && let Some(val) = unsafe { node_as_const_f64(arg1) }
+    {
+        return Some((col, val));
     }
     // Try Const, Var order.
-    if let Some(col) = unsafe { node_as_var_col(arg1) } {
-        if let Some(val) = unsafe { node_as_const_f64(arg0) } {
-            return Some((col, val));
-        }
+    if let Some(col) = unsafe { node_as_var_col(arg1) }
+        && let Some(val) = unsafe { node_as_const_f64(arg0) }
+    {
+        return Some((col, val));
     }
     None
 }
@@ -2116,11 +2110,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 let estate = (*node).ss.ps.state;
                 // SAFETY: estate is valid; self_scan_relid references a
                 // valid range table entry set by the planner.
-                let rel = pg_sys::ExecOpenScanRelation(
-                    estate,
-                    privdata.self_scan_relid,
-                    eflags,
-                );
+                let rel = pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
                 let snap = (*estate).es_snapshot;
                 // SAFETY: rel and snap are valid; main backend thread.
                 let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
@@ -2199,7 +2189,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                                                         }
                                                     }
                                                     // Non-Var entry: use 1-based identity.
-                                                    attno_map.push((j + 1) as i32);
+                                                    attno_map.push(j + 1);
                                                 }
                                             }
                                         }
@@ -2314,11 +2304,15 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
 
                     // Determine sort key type for inline extraction.
-                    let (key_attno, key_typid) = if !privdata.sort_keys.is_empty() {
+                    let (key_attno, key_typid) = if privdata.sort_keys.is_empty() {
+                        (0, 0)
+                    } else {
                         let sk = &privdata.sort_keys[0];
                         let tupdesc = (*rel).rd_att;
                         let attno_idx = (sk.attno as usize).wrapping_sub(1);
-                        if !tupdesc.is_null() {
+                        if tupdesc.is_null() {
+                            (0, 0)
+                        } else {
                             let natts = (*tupdesc).natts as usize;
                             if attno_idx < natts {
                                 let attr = &*(*tupdesc).attrs.as_ptr().add(attno_idx);
@@ -2326,15 +2320,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                             } else {
                                 (0, 0)
                             }
-                        } else {
-                            (0, 0)
                         }
-                    } else {
-                        (0, 0)
                     };
 
                     // SAFETY: rel is a valid, open Relation.
-                    let vscan = unsafe { SortVectorizedScan::new(sd, rel, key_attno, key_typid) };
+                    let vscan = SortVectorizedScan::new(sd, rel, key_attno, key_typid);
                     exec.set_vscan(vscan);
                     pgrx::debug1!(
                         "pg_accel: begin_custom_scan: Sort VectorizedScan, \
@@ -2410,15 +2400,15 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 // use the child's result type.
                 let num_cols = {
                     let scan_desc = (*node).ss.ss_ScanTupleSlot;
-                    if !scan_desc.is_null() {
-                        let desc = (*scan_desc).tts_tupleDescriptor;
-                        if !desc.is_null() {
-                            (*desc).natts as usize
-                        } else {
-                            32
-                        }
-                    } else {
+                    if scan_desc.is_null() {
                         32
+                    } else {
+                        let desc = (*scan_desc).tts_tupleDescriptor;
+                        if desc.is_null() {
+                            32
+                        } else {
+                            (*desc).natts as usize
+                        }
                     }
                 };
                 let compiled = compile_qual_list(plan_qual, num_cols);
@@ -3637,6 +3627,8 @@ mod tests {
         assert_eq!(GpuStrategy::from_i32(1), GpuStrategy::Join);
         assert_eq!(GpuStrategy::from_i32(2), GpuStrategy::Agg);
         assert_eq!(GpuStrategy::from_i32(3), GpuStrategy::Sort);
+        assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Window);
+        assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::PreAgg);
     }
 
     #[test]
@@ -3644,8 +3636,8 @@ mod tests {
         // Negative values default to Scan.
         assert_eq!(GpuStrategy::from_i32(i32::MIN), GpuStrategy::Scan);
         assert_eq!(GpuStrategy::from_i32(-100), GpuStrategy::Scan);
-        // Values above the last variant (Window=4) default to Scan.
-        assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::Scan);
+        // Values above the last variant (PreAgg=5) default to Scan.
+        assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::Scan);
         assert_eq!(GpuStrategy::from_i32(i32::MAX), GpuStrategy::Scan);
     }
 
@@ -3746,10 +3738,10 @@ mod tests {
     }
 
     #[test]
-    fn strategy_from_i32_above_window_defaults_to_scan() {
-        // 5 and above are not valid GpuStrategy variants.
-        assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::Scan);
+    fn strategy_from_i32_above_preagg_defaults_to_scan() {
+        // 6 and above are not valid GpuStrategy variants (PreAgg=5 is the last).
         assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::Scan);
+        assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::Scan);
         assert_eq!(GpuStrategy::from_i32(100), GpuStrategy::Scan);
     }
 
@@ -3982,6 +3974,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert_eq!(data.gpu_strategy, GpuStrategy::Scan);
         assert_eq!(data.batch_size, 256);
@@ -4032,6 +4025,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert_eq!(data.sort_keys.len(), 2);
         assert_eq!(data.sort_keys[0].attno, 1);
@@ -4063,6 +4057,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert!(data.sort_limit.is_none());
     }
@@ -4094,6 +4089,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert_eq!(data.agg_columns.len(), 5);
         assert!(matches!(data.agg_columns[0].0, AggOp::Sum));
@@ -4125,6 +4121,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         let gk_ref = data.group_key.as_ref().unwrap();
         assert_eq!(gk_ref.attno, 2);
@@ -4152,6 +4149,7 @@ mod tests {
             hash_key_type: 1, // Int64
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert_eq!(data.hash_inner_attno, 3);
         assert_eq!(data.hash_key_type, 1);
@@ -4199,6 +4197,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: specs,
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert_eq!(data.window_specs.len(), 2);
         assert!(matches!(data.window_specs[0].func, WindowFunc::RowNumber));
@@ -4224,6 +4223,7 @@ mod tests {
             hash_key_type: 0,
             window_specs: vec![],
             window_scan_relid: 0,
+            self_scan_relid: 0,
         };
         assert!(data.window_specs.is_empty());
     }

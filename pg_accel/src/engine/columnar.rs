@@ -153,7 +153,6 @@ pub fn pg_type_to_val_tag(type_oid: pgrx::pg_sys::Oid) -> Option<PgaccelValTag> 
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::gpu::PgaccelValTag;
 
     // -----------------------------------------------------------------------
     // ColumnarBatchOwner::new

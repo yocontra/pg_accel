@@ -114,19 +114,17 @@ pub unsafe fn dispatch(
 
 // ---------------------------------------------------------------------------
 // Strategy: GpuSpatial
+//
+// GPU spatial dispatch via the three-layer pipeline. The pipeline evaluates
+// spatial predicates in three layers:
+//
+// 1. Bbox filter — coarse bounding-box overlap test rejecting most
+//    non-intersecting pairs with minimal memory traffic.
+// 2. Geometric fast-path — exact spatial predicate for common simple
+//    geometries (point-in-ring winding-number, great-circle distance,
+//    segment intersection) evaluated in fp32 with an fp64 refinement band.
 // ---------------------------------------------------------------------------
 
-/// GPU spatial dispatch via the three-layer pipeline.
-///
-/// The pipeline evaluates spatial predicates in three layers:
-///
-/// 1. **Bbox filter** — Coarse bounding-box overlap test. Rejects the
-///    majority of non-intersecting pairs with minimal memory traffic.
-///
-/// 2. **Geometric fast-path** — Exact spatial predicate for common simple
-///    geometries (point-in-ring winding-number, great-circle distance,
-///    segment intersection) evaluated in fp32 with an fp64 refinement band.
-///
 // ---------------------------------------------------------------------------
 // Bulk point-in-polygon fast path
 // ---------------------------------------------------------------------------
@@ -383,12 +381,10 @@ pub unsafe fn dispatch_gpu_spatial(
         let fn_name = registry::global_registry()
             .lookup(fn_info.fn_oid)
             .map(|e| e.name);
-        match fn_name {
-            Some("st_contains" | "st_within" | "st_dwithin") => {
-                return DispatchResult::Deferred;
-            }
-            _ => {} // ST_Intersects or unrecognised → GPU path below
+        if let Some("st_contains" | "st_within" | "st_dwithin") = fn_name {
+            return DispatchResult::Deferred;
         }
+        // ST_Intersects or unrecognised → GPU path below
     }
 
     // Build PgaccelGeometry descriptors pointing into the ExtractedGeometry
@@ -405,11 +401,7 @@ pub unsafe fn dispatch_gpu_spatial(
         coords: eg.coords.as_ptr(),
         coord_count: eg.coord_count,
         ring_offsets: std::ptr::addr_of!(ring_offset_zero),
-        ring_count: if matches!(eg.geom_type, three_layer::GeomType::Polygon) {
-            1
-        } else {
-            0
-        },
+        ring_count: usize::from(matches!(eg.geom_type, three_layer::GeomType::Polygon)),
     };
 
     let pgaccel_a: Vec<gpu::PgaccelGeometry> = geoms_a.iter().map(to_pgaccel).collect();

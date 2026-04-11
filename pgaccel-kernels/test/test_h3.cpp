@@ -277,11 +277,17 @@ static void test_lat_lng_to_cell() {
     ASSERT_STATUS_OK("fp32 res 12 status", s);
     ASSERT_EQ("fp32 res 12 marked invalid", valid, 0);
 
-    // fp64 at high res should be valid
+    // fp64 at high res: if the device doesn't support fp64 (e.g. Metal),
+    // the kernel returns UNSUPPORTED; on fp64-capable devices it runs.
+    // We only require that the status is OK or UNSUPPORTED — never a
+    // silent CPU fallback masquerading as success.
     s = pgaccel_h3_lat_lng_to_cell_bulk(
         &lat, &lng, 1, 12, true, &cell_id, &valid);
-    ASSERT_STATUS_OK("fp64 res 12 status", s);
-    ASSERT_TRUE("fp64 res 12 valid", valid == 1);
+    ASSERT_TRUE("fp64 res 12 status is OK or UNSUPPORTED",
+                s == PGACCEL_OK || s == PGACCEL_ERROR_UNSUPPORTED);
+    if (s == PGACCEL_OK) {
+        ASSERT_TRUE("fp64 res 12 valid on fp64 device", valid == 1);
+    }
 
     // Invalid lat/lng
     double bad_lat = 100.0, bad_lng = 0.0;

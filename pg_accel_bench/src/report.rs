@@ -326,8 +326,6 @@ impl BenchReport {
                     let sig = w.p_value_vs_parallel < 0.05;
                     if sig && sp > 1.005 {
                         let _ = write!(out, " **{sp:.2}x** |");
-                    } else if sig && sp < 0.995 {
-                        let _ = write!(out, " {sp:.2}x |");
                     } else {
                         let _ = write!(out, " {sp:.2}x |");
                     }

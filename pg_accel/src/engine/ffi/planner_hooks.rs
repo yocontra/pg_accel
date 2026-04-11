@@ -352,8 +352,9 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     } else {
         0.0
     };
-    let raw_total = (base.total_cost * cost_margin + batch_overhead + gpu_overhead + yield_cost)
-        * gucs::cost_multiplier();
+    let raw_total =
+        (base.total_cost.mul_add(cost_margin, batch_overhead) + gpu_overhead + yield_cost)
+            * gucs::cost_multiplier();
 
     // Let PG's native cost comparison decide — add_path() discards
     // paths that are strictly dominated by cheaper alternatives.
@@ -667,7 +668,9 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         // Serialize self_scan_relid for VectorizedScan. When the child is a
         // plain SeqScan on a base relation, we can bypass ExecProcNode and
         // scan the heap directly.
-        let self_scan_relid = if !cheapest.is_null() {
+        let self_scan_relid = if cheapest.is_null() {
+            0
+        } else {
             // SAFETY: cheapest is the child path; check if it's a simple
             // Path on a base relation (i.e., parent is a baserel).
             let parent = (*cheapest).parent;
@@ -679,8 +682,6 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
             } else {
                 0
             }
-        } else {
-            0
         };
         priv_list = lappend(priv_list, pg_sys::makeInteger(self_scan_relid).cast());
         (*cpath).custom_private = priv_list;
@@ -1349,7 +1350,9 @@ unsafe fn pgaccel_inject_gpu_window(
     // SAFETY: cheapest path's parent is the input_rel.
     let scan_relid: pg_sys::Index = if no_sort_needed {
         let parent = unsafe { (*cheapest).parent };
-        if !parent.is_null() {
+        if parent.is_null() {
+            0
+        } else {
             let rel = unsafe { &*parent };
             // A simple base relation has relid > 0 and reloptkind == RELOPT_BASEREL.
             if rel.relid > 0 && rel.reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL {
@@ -1357,8 +1360,6 @@ unsafe fn pgaccel_inject_gpu_window(
             } else {
                 0
             }
-        } else {
-            0
         }
     } else {
         0
@@ -1369,13 +1370,23 @@ unsafe fn pgaccel_inject_gpu_window(
     // SAFETY: sorted_path is non-null.
     let base = unsafe { &*sorted_path };
     #[allow(clippy::cast_precision_loss)]
-    let num_extract_cols: usize = specs.iter().map(|s| {
-        let mut cols = 0usize;
-        if s.partition_attno > 0 { cols += 1; }
-        if s.order_attno > 0 { cols += 1; }
-        if s.value_attno > 0 { cols += 1; }
-        cols
-    }).sum::<usize>().max(1);
+    let num_extract_cols: usize = specs
+        .iter()
+        .map(|s| {
+            let mut cols = 0usize;
+            if s.partition_attno > 0 {
+                cols += 1;
+            }
+            if s.order_attno > 0 {
+                cols += 1;
+            }
+            if s.value_attno > 0 {
+                cols += 1;
+            }
+            cols
+        })
+        .sum::<usize>()
+        .max(1);
     let window_scan_cost = cost::self_scan_cost(
         base.rows,
         num_extract_cols,
@@ -1530,8 +1541,11 @@ unsafe fn pgaccel_inject_gpu_preagg(
     let mut inner_paths: Vec<*mut Path> = Vec::new();
     let mut inner_relids: Vec<pg_sys::Index> = Vec::new();
     let mut current = cheapest;
+    #[allow(unused_assignments)]
     let mut fact_rows: f64 = 0.0;
+    #[allow(unused_assignments)]
     let mut fact_relid: pg_sys::Index = 0;
+    #[allow(unused_assignments)]
     let mut fact_scan_expr: Option<crate::engine::expr_compiler::CompiledExpr> = None;
 
     loop {
@@ -1579,18 +1593,18 @@ unsafe fn pgaccel_inject_gpu_preagg(
 
                 // SAFETY: inner_path.parent is the inner relation's RelOptInfo.
                 let inner_parent = unsafe { (*inner_path).parent };
-                let inner_relid: pg_sys::Index = if !inner_parent.is_null() {
-                    unsafe { (*inner_parent).relid }
-                } else {
+                let inner_relid: pg_sys::Index = if inner_parent.is_null() {
                     0
+                } else {
+                    unsafe { (*inner_parent).relid }
                 };
 
                 // Extract dimension-side filter predicates from baserestrictinfo.
                 // SAFETY: inner_parent is a valid RelOptInfo.
-                let dim_filters = if !inner_parent.is_null() {
-                    unsafe { extract_dim_filters_from_rel(inner_parent) }
-                } else {
+                let dim_filters = if inner_parent.is_null() {
                     vec![]
+                } else {
+                    unsafe { extract_dim_filters_from_rel(inner_parent) }
                 };
 
                 depths.push(JoinDepthDesc {
@@ -1856,7 +1870,8 @@ unsafe fn extract_var_attno(expr: *mut pg_sys::Expr) -> i32 {
     }
     let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
     match tag {
-        NodeTag::T_Var => {
+        NodeTag::T_Var =>
+        {
             #[allow(clippy::cast_ptr_alignment)]
             i32::from(unsafe { (*expr.cast::<pg_sys::Var>()).varattno })
         }
@@ -1875,8 +1890,7 @@ unsafe fn extract_var_attno(expr: *mut pg_sys::Expr) -> i32 {
                 return 0;
             }
             // SAFETY: args[0] is a valid Expr node.
-            let first_arg =
-                unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Expr>() };
+            let first_arg = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Expr>() };
             unsafe { extract_var_attno(first_arg) }
         }
         NodeTag::T_OpExpr => {
@@ -2680,9 +2694,8 @@ unsafe fn pgaccel_inject_gpu_agg(
     // self-scanning when the input needs preprocessing (e.g., window funcs).
     let is_baserel =
         input_ref.reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL && input_ref.relid > 0;
-    let child_is_plain_path = unsafe {
-        (*cheapest.cast::<pg_sys::Node>()).type_ == NodeTag::T_Path
-    };
+    let child_is_plain_path =
+        unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ == NodeTag::T_Path };
     let self_scan_relid: pg_sys::Index = if !child_is_our_scan
         && is_baserel
         && child_is_plain_path
@@ -4949,7 +4962,7 @@ mod tests {
         assert_eq!(limits.gpu_min_rows, 10_000);
         assert_eq!(limits.gpu_sort_min_rows, 100_000);
         assert_eq!(limits.gpu_sort_planner_min_rows, 1_000_000);
-        assert_eq!(limits.gpu_window_min_rows, 5_000_000);
+        assert_eq!(limits.gpu_window_min_rows, 100_000);
         assert_eq!(limits.gpu_reduce_min_rows, 10_000);
         assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(limits.gpu_hash_agg_max_groups, 10_000);

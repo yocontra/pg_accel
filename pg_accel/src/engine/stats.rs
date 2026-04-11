@@ -23,6 +23,10 @@ pub struct AccelStats {
     pub planner_hook_calls: u64,
     pub command_type_skips: u64,
     pub window_gpu_failures: u64,
+    /// GPU kernel executions (from C++ thread-local counter).
+    pub gpu_kernel_executions: u64,
+    /// CPU fallback count (from C++ thread-local counter).
+    pub cpu_fallback_count: u64,
 }
 
 thread_local! {
@@ -115,8 +119,12 @@ fn pg_accel_stats() -> TableIterator<
         name!(planner_hook_calls, i64),
         name!(command_type_skips, i64),
         name!(window_gpu_failures, i64),
+        name!(gpu_kernel_executions, i64),
+        name!(cpu_fallback_count, i64),
     ),
 > {
+    let gpu_execs = crate::gpu::gpu_exec_count();
+    let cpu_fallbacks = crate::gpu::cpu_fallback_count();
     let row = STATS.with(|s| {
         let st = s.borrow();
         (
@@ -131,6 +139,8 @@ fn pg_accel_stats() -> TableIterator<
             st.planner_hook_calls as i64,
             st.command_type_skips as i64,
             st.window_gpu_failures as i64,
+            gpu_execs as i64,
+            cpu_fallbacks as i64,
         )
     });
     TableIterator::new(std::iter::once(row))
@@ -353,6 +363,8 @@ mod tests {
             planner_hook_calls: 0,
             command_type_skips: 0,
             window_gpu_failures: 0,
+            gpu_kernel_executions: 0,
+            cpu_fallback_count: 0,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("queries_accelerated: 5"));
@@ -376,5 +388,7 @@ mod tests {
         assert_eq!(s.planner_hook_calls, 0);
         assert_eq!(s.command_type_skips, 0);
         assert_eq!(s.window_gpu_failures, 0);
+        assert_eq!(s.gpu_kernel_executions, 0);
+        assert_eq!(s.cpu_fallback_count, 0);
     }
 }

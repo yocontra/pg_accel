@@ -1,3 +1,11 @@
 [target.'cfg(target_os="macos")']
-# Postgres symbols won't be available until runtime
-rustflags = ["-Clink-arg=-Wl,-undefined,dynamic_lookup"]
+# Postgres symbols won't be available until runtime. On macOS Sequoia+ the
+# two-level namespace loader enforces symbol resolution at dyld load time, so
+# `-undefined dynamic_lookup` alone is not enough — the test binary's
+# undefined PG symbols would cause a load-time abort. Disable chained
+# fixups (`-no_fixup_chains`) to restore the pre-Sequoia behavior where
+# unresolved symbols are only checked on first use.
+rustflags = [
+    "-Clink-arg=-Wl,-undefined,dynamic_lookup",
+    "-Clink-arg=-Wl,-no_fixup_chains",
+]

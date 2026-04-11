@@ -91,19 +91,21 @@ pub fn extract_bbox(datum: Datum) -> Option<(f32, f32, f32, f32)> {
         return None;
     }
 
+    // PostGIS BOX2DF on-disk order: xmin, xmax, ymin, ymax.
+    // See liblwgeom/gserialized2.c::gserialized2_from_gbox.
     let xmin = f32::from_le_bytes([
         bytes[bbox_start],
         bytes[bbox_start + 1],
         bytes[bbox_start + 2],
         bytes[bbox_start + 3],
     ]);
-    let ymin = f32::from_le_bytes([
+    let xmax = f32::from_le_bytes([
         bytes[bbox_start + 4],
         bytes[bbox_start + 5],
         bytes[bbox_start + 6],
         bytes[bbox_start + 7],
     ]);
-    let xmax = f32::from_le_bytes([
+    let ymin = f32::from_le_bytes([
         bytes[bbox_start + 8],
         bytes[bbox_start + 9],
         bytes[bbox_start + 10],
@@ -381,22 +383,23 @@ pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
     }
 }
 
-/// Extract a POINT geometry: type(4) + npoints(4) + x(f64) + y(f64).
+/// Extract a POINT geometry: type(4) + x(f64) + y(f64).
 ///
-/// GSERIALIZED stores a `uint32 npoints` field after the type, even for
-/// single points. We skip it (always 1 for non-empty points).
+/// Per PostGIS `gserialized2_from_lwpoint` (liblwgeom/gserialized2.c):
+/// a POINT is serialized as type followed directly by its coordinates.
+/// There is NO `npoints` field for POINT (unlike LINESTRING / POLYGON).
 fn extract_point_geom(
     bytes: &[u8],
     geom_start: usize,
     embedded_bbox: Option<[f32; 4]>,
 ) -> Option<ExtractedGeometry> {
-    // type(4) + npoints(4) + x(8) + y(8) = 24
-    let needed = geom_start + 4 + 4 + 16;
+    // type(4) + x(8) + y(8) = 20
+    let needed = geom_start + 4 + 16;
     if bytes.len() < needed {
         return None;
     }
 
-    let x_off = geom_start + 8; // skip type(4) + npoints(4)
+    let x_off = geom_start + 4; // skip type(4)
     let y_off = x_off + 8;
     let x = f64::from_le_bytes(bytes[x_off..x_off + 8].try_into().ok()?);
     let y = f64::from_le_bytes(bytes[y_off..y_off + 8].try_into().ok()?);
@@ -468,11 +471,12 @@ fn extract_linestring_geom(
 /// Layout (after the 4-byte type field at `geom_start`):
 ///   nrings (4 bytes)
 ///   ring_npoints[nrings] (4 bytes each)
-///   [padding to 8-byte alignment from buffer start]
 ///   coordinates for all rings, concatenated (each point = x f64, y f64)
 ///
-/// PostGIS 3.x (GSERIALIZED v2) stores all ring point counts first, then
-/// pads to 8-byte alignment (from the allocation start), then all coords.
+/// Per PostGIS `gserialized2_from_lwpoly` (liblwgeom/gserialized2.c): for
+/// 2D polygons (`FLAGS_NDIMS == 2`) coordinates follow the ring count
+/// headers with no alignment padding. Padding is only inserted for 3D/4D
+/// polygons, which we currently do not support.
 fn extract_polygon_geom(
     bytes: &[u8],
     geom_start: usize,
@@ -496,12 +500,7 @@ fn extract_polygon_geom(
         offset += 4;
     }
 
-    // Pad to 8-byte alignment (PostGIS GSERIALIZED v2 aligns coordinate
-    // data to 8 bytes from the start of the buffer).
-    let rem = offset % 8;
-    if rem != 0 {
-        offset += 8 - rem;
-    }
+    // No alignment padding for 2D polygons (see function docs).
 
     // Now read coordinates for all rings in sequence.
     let mut coords = Vec::new();
@@ -561,8 +560,24 @@ fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
     // SAFETY: Detoast the datum to get a flat, uncompressed varlena.
     // This handles TOAST pointers, compressed varlenas, and short headers.
     // Must run on the main backend thread.
+    //
+    // In `cfg(test)` builds (standalone `cargo test`, not `cargo pgrx test`),
+    // libtest spawns a fresh thread per test and pgrx's guarded wrapper
+    // panics with "postgres FFI may not be called from multiple threads".
+    // The identity stub in `src/pg_stubs.rs` is what the linker resolves
+    // `pg_detoast_datum` against on macOS, so calling the raw extern
+    // directly gives us a safe passthrough without the thread guard.
+    // Tests only use non-TOAST flat varlenas, so identity is correct.
+    #[cfg(not(test))]
     let detoasted =
         unsafe { pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) };
+    #[cfg(test)]
+    let detoasted = {
+        unsafe extern "C" {
+            fn pg_detoast_datum(datum: *mut pgrx::pg_sys::varlena) -> *mut pgrx::pg_sys::varlena;
+        }
+        unsafe { pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) }
+    };
     if detoasted.is_null() {
         return None;
     }
@@ -590,19 +605,20 @@ mod tests {
 
     /// Build a minimal GSERIALIZED buffer without bbox.
     ///
-    /// Layout: varlena(4) + srid[3]+gflags(4) + type(4) + npoints(4) + x(8) + y(8) = 32
+    /// Layout: varlena(4) + srid[3]+gflags(4) + type(4) + x(8) + y(8) = 28.
+    /// POINT geometries do not store an npoints field (see
+    /// `gserialized2_from_lwpoint` in liblwgeom).
     fn make_gserialized_no_bbox(srid: u32, wkb_type: u32, x: f64, y: f64) -> Vec<u8> {
         let mut buf = Vec::new();
-        let total_size: u32 = 32;
+        let total_size: u32 = 28;
         buf.extend_from_slice(&(total_size << 2).to_le_bytes());
         // srid[3] (big-endian) + gflags
         buf.push(((srid >> 16) & 0xFF) as u8);
         buf.push(((srid >> 8) & 0xFF) as u8);
         buf.push((srid & 0xFF) as u8);
         buf.push(0x00); // gflags: no flags
-        // geometry data: type + npoints + coords
+        // geometry data: type + coords (POINTs have no npoints field)
         buf.extend_from_slice(&wkb_type.to_le_bytes());
-        buf.extend_from_slice(&1u32.to_le_bytes()); // npoints
         buf.extend_from_slice(&x.to_le_bytes());
         buf.extend_from_slice(&y.to_le_bytes());
         buf
@@ -619,7 +635,7 @@ mod tests {
         y: f64,
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        let total_size: u32 = 48; // 4+4+16+4+4+16
+        let total_size: u32 = 44; // 4+4+16+4+16 (POINT has no npoints field)
         buf.extend_from_slice(&(total_size << 2).to_le_bytes());
         // srid[3] + gflags(HasBBox = bit 2)
         buf.push(0x00);
@@ -631,9 +647,8 @@ mod tests {
         buf.extend_from_slice(&bbox.2.to_le_bytes()); // xmax
         buf.extend_from_slice(&bbox.1.to_le_bytes()); // ymin
         buf.extend_from_slice(&bbox.3.to_le_bytes()); // ymax
-        // geometry data: type + npoints + coords
+        // geometry data: type + coords (POINTs have no npoints field)
         buf.extend_from_slice(&wkb_type.to_le_bytes());
-        buf.extend_from_slice(&1u32.to_le_bytes()); // npoints
         buf.extend_from_slice(&x.to_le_bytes());
         buf.extend_from_slice(&y.to_le_bytes());
         buf

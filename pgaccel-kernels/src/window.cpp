@@ -381,19 +381,12 @@ pgaccel_status pgaccel_window_row_number(
 #if PGACCEL_HAS_SYCL
     if (count >= GPU_WINDOW_THRESHOLD) {
         pgaccel_status st = sycl_window_row_number(partition_starts, count, results);
-        if (st == PGACCEL_OK) return st;
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
 #endif
 
-    int64_t row_num = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (partition_starts[i]) {
-            row_num = 0;
-        }
-        row_num++;
-        results[i] = row_num;
-    }
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("window_row_number");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_window_rank(
@@ -546,33 +539,12 @@ pgaccel_status pgaccel_window_lag(
         pgaccel_status st = sycl_window_lag(
             partition_starts, values, null_mask, count,
             offset, default_val, results, result_nulls);
-        if (st == PGACCEL_OK) return st;
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
 #endif
 
-    // Track partition start positions
-    size_t part_start = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (partition_starts[i]) {
-            part_start = i;
-        }
-
-        size_t target = (i >= static_cast<size_t>(offset)) ? i - offset : SIZE_MAX;
-
-        if (target == SIZE_MAX || target < part_start) {
-            // Before partition start — use default
-            results[i] = default_val;
-            if (result_nulls) result_nulls[i] = 0;
-        } else if (null_mask != nullptr && null_mask[target]) {
-            // Source is NULL
-            results[i] = default_val;
-            if (result_nulls) result_nulls[i] = 1;
-        } else {
-            results[i] = values[target];
-            if (result_nulls) result_nulls[i] = 0;
-        }
-    }
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("window_lag");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_window_lead(
@@ -597,42 +569,12 @@ pgaccel_status pgaccel_window_lead(
         pgaccel_status st = sycl_window_lead(
             partition_starts, values, null_mask, count,
             offset, default_val, results, result_nulls);
-        if (st == PGACCEL_OK) return st;
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
 #endif
 
-    // Pre-compute partition ends
-    // partition_end[i] = index of last row in partition containing row i
-    size_t* part_end = static_cast<size_t*>(malloc(count * sizeof(size_t)));
-    if (part_end == nullptr) return PGACCEL_OOM;
-
-    // Scan backwards to find partition ends
-    size_t current_end = count - 1;
-    for (size_t i = count; i > 0; i--) {
-        size_t idx = i - 1;
-        if (idx < count - 1 && partition_starts[idx + 1]) {
-            current_end = idx;
-        }
-        part_end[idx] = current_end;
-    }
-
-    for (size_t i = 0; i < count; i++) {
-        size_t target = i + offset;
-
-        if (target > part_end[i]) {
-            results[i] = default_val;
-            if (result_nulls) result_nulls[i] = 0;
-        } else if (null_mask != nullptr && null_mask[target]) {
-            results[i] = default_val;
-            if (result_nulls) result_nulls[i] = 1;
-        } else {
-            results[i] = values[target];
-            if (result_nulls) result_nulls[i] = 0;
-        }
-    }
-
-    free(part_end);
-    return PGACCEL_OK;
+    pgaccel_warn_cpu_fallback("window_lead");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 } // extern "C"

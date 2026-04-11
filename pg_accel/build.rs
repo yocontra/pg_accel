@@ -17,6 +17,235 @@ fn main() {
 
     #[cfg(feature = "gpu")]
     gpu_build::build_kernels();
+
+    // macOS Sequoia+ (26.x) eagerly resolves undefined symbols in flat
+    // namespace binaries at dyld load time, which breaks pgrx test binaries
+    // that reference PG functions via `-undefined dynamic_lookup`. Generate
+    // a stub dylib exporting all PG symbols and link it into test binaries
+    // only (never the production cdylib) so dyld finds a dummy definition
+    // at load time. The stubs are never called: real implementations come
+    // from postgres itself when the extension .so is dlopened.
+    #[cfg(target_os = "macos")]
+    pg_stub::build_stub();
+}
+
+#[cfg(target_os = "macos")]
+mod pg_stub {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    /// Generate a Rust source file with `#[no_mangle]` stubs for every
+    /// global symbol exported by the `postgres` executable.
+    ///
+    /// Background: macOS Sequoia+ (26.x) eagerly resolves undefined data
+    /// symbol references at dyld load time, even with `-undefined
+    /// dynamic_lookup` + `-no_fixup_chains`. pgrx lib unit test binaries
+    /// inherit hundreds of PG symbol references (e.g. static data like
+    /// `CheckXidAlive`), and dyld aborts before the test runner starts.
+    ///
+    /// The generated file is `include!`'d from `src/pg_stubs.rs` under
+    /// `cfg(all(test, target_os = "macos"))`, so the stubs are compiled
+    /// into the test binary only — NEVER into the production cdylib that
+    /// postgres dlopens. Real implementations always come from postgres
+    /// itself at runtime; the stubs exist purely to satisfy the loader.
+    pub fn build_stub() {
+        let pg_config_path = std::env::var("PGRX_PG_CONFIG_PATH")
+            .or_else(|_| std::env::var("PG_CONFIG"))
+            .unwrap_or_else(|_| "pg_config".to_string());
+
+        let Some(bindir) = Command::new(&pg_config_path)
+            .arg("--bindir")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        else {
+            return;
+        };
+
+        let postgres_bin = PathBuf::from(&bindir).join("postgres");
+        if !postgres_bin.exists() {
+            return;
+        }
+
+        println!("cargo::rerun-if-changed={}", postgres_bin.display());
+
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
+        let stub_rs = out_dir.join("pg_stubs_generated.rs");
+
+        // Always emit the path so `include!` resolves even if we bail.
+        println!(
+            "cargo::rustc-env=PG_STUBS_GENERATED={}",
+            stub_rs.display()
+        );
+
+        // Extract all global T (text/function), D (data), and S (other)
+        // symbols. Skip U (undefined), compiler-internal (leading double
+        // underscore), and namespaced (contains '.').
+        let nm = Command::new("nm")
+            .arg("-gP")
+            .arg(&postgres_bin)
+            .output()
+            .expect("nm failed");
+        assert!(nm.status.success(), "nm on postgres binary failed");
+        let nm_out = String::from_utf8_lossy(&nm.stdout);
+
+        let mut funcs: Vec<&str> = Vec::new();
+        let mut datas: Vec<&str> = Vec::new();
+        for line in nm_out.lines() {
+            let mut parts = line.split_whitespace();
+            let (Some(name), Some(ty)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            // macOS nm prefixes with underscore; strip it so our
+            // #[no_mangle] (which re-adds it on mach-o) matches.
+            let clean = name.strip_prefix('_').unwrap_or(name);
+            if clean.is_empty() || clean.starts_with("__") || !is_rust_ident(clean) {
+                continue;
+            }
+            // Skip Rust keywords — we'd need r# prefix and that's noise.
+            if is_rust_keyword(clean) {
+                continue;
+            }
+            // Reserved / auto-provided symbols that would clash with the
+            // test binary's own main + mach-o header.
+            if matches!(
+                clean,
+                "main" | "_main" | "mh_execute_header" | "_mh_execute_header" | "start"
+            ) {
+                continue;
+            }
+            // Symbols we provide manually as passthrough implementations
+            // in `src/pg_stubs.rs` (needed for standalone unit tests
+            // that exercise code paths which hit PG FFI).
+            if is_manual_stub(clean) {
+                continue;
+            }
+            match ty {
+                "T" => funcs.push(clean),
+                "D" | "S" => datas.push(clean),
+                _ => {}
+            }
+        }
+
+        // Stub generation rules:
+        //
+        // - T (text/function): emit an `extern "C-unwind" fn NAME() -> usize`
+        //   that returns 0. Lives in .text (executable), so calls through
+        //   pgrx's `extern "C-unwind"` declarations won't SIGBUS on jump.
+        //   Returns null/zero in x0 — callers that check for null handle
+        //   it gracefully; everything else is undefined but never hit in
+        //   practice because the guarding `pg_guard_ffi_boundary` path
+        //   only reads the function pointer after touching data stubs.
+        //
+        // - D/S (data): emit `static mut NAME: [u64; 16] = [0; 16]` — 128
+        //   bytes of mutable, zero-initialized storage. pgrx's guard
+        //   writes things like `CurrentMemoryContext = ...` and
+        //   `PG_exception_stack = ...` to these addresses; read-only
+        //   stubs would SIGBUS. 128 bytes fits any PG extern static we
+        //   might reference.
+        let mut rs = String::with_capacity(1 << 20);
+        rs.push_str("// AUTO-GENERATED PG symbol stubs. Do not edit.\n");
+        rs.push_str("// Satisfies macOS Sequoia+ dyld at load time; never executed.\n\n");
+        for f in &funcs {
+            rs.push_str("#[unsafe(no_mangle)]\npub extern \"C-unwind\" fn ");
+            rs.push_str(f);
+            rs.push_str("() -> usize { 0 }\n");
+        }
+        for d in &datas {
+            rs.push_str("#[unsafe(no_mangle)]\npub static mut ");
+            rs.push_str(d);
+            rs.push_str(": [u64; 16] = [0; 16];\n");
+        }
+
+        let needs_write = std::fs::read_to_string(&stub_rs).map_or(true, |e| e != rs);
+        if needs_write {
+            std::fs::write(&stub_rs, &rs).expect("write pg_stubs_generated.rs");
+        }
+    }
+
+    /// True if `s` is a valid Rust identifier (ASCII-only, per PG conventions).
+    fn is_rust_ident(s: &str) -> bool {
+        let mut chars = s.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// Keep these out of the auto-generated stub file; `src/pg_stubs.rs`
+    /// defines real passthrough implementations so unit tests that run
+    /// outside postgres can exercise the surrounding code paths.
+    fn is_manual_stub(s: &str) -> bool {
+        matches!(
+            s,
+            "pg_detoast_datum"
+                | "pg_detoast_datum_copy"
+                | "pg_detoast_datum_packed"
+                | "pg_detoast_datum_slice"
+        )
+    }
+
+    /// Rust reserved words that would collide with `pub static NAME`.
+    fn is_rust_keyword(s: &str) -> bool {
+        matches!(
+            s,
+            "as" | "break"
+                | "const"
+                | "continue"
+                | "crate"
+                | "else"
+                | "enum"
+                | "extern"
+                | "false"
+                | "fn"
+                | "for"
+                | "if"
+                | "impl"
+                | "in"
+                | "let"
+                | "loop"
+                | "match"
+                | "mod"
+                | "move"
+                | "mut"
+                | "pub"
+                | "ref"
+                | "return"
+                | "self"
+                | "Self"
+                | "static"
+                | "struct"
+                | "super"
+                | "trait"
+                | "true"
+                | "type"
+                | "unsafe"
+                | "use"
+                | "where"
+                | "while"
+                | "async"
+                | "await"
+                | "dyn"
+                | "abstract"
+                | "become"
+                | "box"
+                | "do"
+                | "final"
+                | "macro"
+                | "override"
+                | "priv"
+                | "typeof"
+                | "unsized"
+                | "virtual"
+                | "yield"
+                | "try"
+                | "union"
+        )
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -62,6 +291,35 @@ mod gpu_build {
 
         // The built shared library lives in the build directory.
         emit_link_directives(&build_dir);
+
+        // Expose the GPU worker binary path for the BGW to fork+exec.
+        let worker_path = build_dir.join("pgaccel_gpu_worker");
+        println!(
+            "cargo::rustc-env=PGACCEL_GPU_WORKER_PATH={}",
+            worker_path.display()
+        );
+
+        // Also copy the worker binary into the PG bindir so `cargo pgrx
+        // install` / `cargo pgrx package` ship it alongside the .so. The
+        // extension .so goes to pg_config --pkglibdir; the worker binary
+        // goes to pg_config --bindir (where BGW fork+exec can find it on PATH).
+        //
+        // pgrx invokes this build.rs with PGRX_PG_CONFIG_PATH set to the
+        // selected pg_config. Fall back to PG_CONFIG or a bare `pg_config`
+        // on PATH so `cargo build` outside of pgrx also works.
+        let pg_config_path = std::env::var("PGRX_PG_CONFIG_PATH")
+            .or_else(|_| std::env::var("PG_CONFIG"))
+            .unwrap_or_else(|_| "pg_config".to_string());
+        if let Ok(output) = Command::new(&pg_config_path).arg("--bindir").output()
+            && output.status.success()
+        {
+            let bindir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !bindir.is_empty() {
+                let dest = PathBuf::from(&bindir).join("pgaccel_gpu_worker");
+                // Best-effort: install may not have write perms; skip silently.
+                let _ = std::fs::copy(&worker_path, &dest);
+            }
+        }
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {

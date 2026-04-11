@@ -4,6 +4,8 @@
 //! detect the absence of GPU support at runtime without conditional compilation
 //! at every call-site.
 
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 use std::ffi::c_char;
 
 // Re-export the same types as `bridge.rs` so the public API is identical
@@ -340,6 +342,28 @@ pub const fn pgaccel_get_caps() -> PgaccelPlatformCaps {
 }
 
 // ---------------------------------------------------------------------------
+// GPU execution observability stubs (no GPU = always 0)
+// ---------------------------------------------------------------------------
+
+/// Stub: always returns 0 (no GPU).
+#[must_use]
+pub fn pgaccel_gpu_exec_count() -> u64 {
+    0
+}
+
+/// Stub: no-op (no GPU).
+pub fn pgaccel_reset_gpu_exec_count() {}
+
+/// Stub: always returns 0 (no GPU).
+#[must_use]
+pub fn pgaccel_cpu_fallback_count() -> u64 {
+    0
+}
+
+/// Stub: no-op (no GPU).
+pub fn pgaccel_reset_cpu_fallback_count() {}
+
+// ---------------------------------------------------------------------------
 // Spatial kernel CPU fallbacks
 // ---------------------------------------------------------------------------
 
@@ -441,7 +465,7 @@ fn point_in_polygon_check(
 
 /// 2D cross product of vectors (b-a) and (c-a).
 fn cross2d(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
-    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    (bx - ax).mul_add(cy - ay, -((by - ay) * (cx - ax)))
 }
 
 /// Test if segments (p1-p2) and (p3-p4) intersect.
@@ -570,167 +594,18 @@ fn evaluate_predicate(a: &PgaccelGeometry, b: &PgaccelGeometry) -> i8 {
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn pgaccel_spatial_intersects(
-    geoms_a: *const PgaccelGeometry,
-    count_a: usize,
-    geoms_b: *const PgaccelGeometry,
-    count_b: usize,
-    definite_true_pairs: *mut u32,
-    definite_true_count: *mut usize,
-    definite_false_pairs: *mut u32,
-    definite_false_count: *mut usize,
-    uncertain_pairs: *mut u32,
-    uncertain_count: *mut usize,
+    _geoms_a: *const PgaccelGeometry,
+    _count_a: usize,
+    _geoms_b: *const PgaccelGeometry,
+    _count_b: usize,
+    _definite_true_pairs: *mut u32,
+    _definite_true_count: *mut usize,
+    _definite_false_pairs: *mut u32,
+    _definite_false_count: *mut usize,
+    _uncertain_pairs: *mut u32,
+    _uncertain_count: *mut usize,
 ) -> PgaccelStatus {
-    // Null-pointer validation.
-    if geoms_a.is_null()
-        || geoms_b.is_null()
-        || definite_true_pairs.is_null()
-        || definite_true_count.is_null()
-        || definite_false_pairs.is_null()
-        || definite_false_count.is_null()
-        || uncertain_pairs.is_null()
-        || uncertain_count.is_null()
-    {
-        return PgaccelStatus::ErrorInit;
-    }
-
-    // SAFETY: pointers validated above as non-null; caller guarantees valid targets.
-    unsafe {
-        *definite_true_count = 0;
-        *definite_false_count = 0;
-        *uncertain_count = 0;
-    }
-
-    if count_a == 0 || count_b == 0 {
-        return PgaccelStatus::Ok;
-    }
-
-    // ------------------------------------------------------------------
-    // Layer 1: Bbox filter
-    //
-    // Extract flat bbox arrays from geometry descriptors and run
-    // the bulk bbox intersection test.
-    // ------------------------------------------------------------------
-    let total_pairs = count_a * count_b;
-
-    let mut bboxes_a = vec![0.0_f32; count_a * 4];
-    let mut bboxes_b = vec![0.0_f32; count_b * 4];
-
-    for i in 0..count_a {
-        // SAFETY: i < count_a, geoms_a points to count_a elements.
-        let geom = unsafe { &*geoms_a.add(i) };
-        if !geom.bbox.is_null() {
-            // SAFETY: bbox is non-null and points to 4 floats.
-            unsafe {
-                bboxes_a[i * 4] = *geom.bbox;
-                bboxes_a[i * 4 + 1] = *geom.bbox.add(1);
-                bboxes_a[i * 4 + 2] = *geom.bbox.add(2);
-                bboxes_a[i * 4 + 3] = *geom.bbox.add(3);
-            }
-        } else {
-            // No bbox — degenerate box that forces a miss (xmin > xmax).
-            bboxes_a[i * 4] = 1.0;
-            bboxes_a[i * 4 + 1] = 1.0;
-            bboxes_a[i * 4 + 2] = -1.0;
-            bboxes_a[i * 4 + 3] = -1.0;
-        }
-    }
-
-    for j in 0..count_b {
-        // SAFETY: j < count_b, geoms_b points to count_b elements.
-        let geom = unsafe { &*geoms_b.add(j) };
-        if !geom.bbox.is_null() {
-            // SAFETY: bbox is non-null and points to 4 floats.
-            unsafe {
-                bboxes_b[j * 4] = *geom.bbox;
-                bboxes_b[j * 4 + 1] = *geom.bbox.add(1);
-                bboxes_b[j * 4 + 2] = *geom.bbox.add(2);
-                bboxes_b[j * 4 + 3] = *geom.bbox.add(3);
-            }
-        } else {
-            bboxes_b[j * 4] = 1.0;
-            bboxes_b[j * 4 + 1] = 1.0;
-            bboxes_b[j * 4 + 2] = -1.0;
-            bboxes_b[j * 4 + 3] = -1.0;
-        }
-    }
-
-    let mut bbox_results = vec![0_u8; total_pairs];
-    let mut bbox_hit_count: usize = 0;
-
-    let bbox_status = pgaccel_bbox_intersects_bulk_f32(
-        bboxes_a.as_ptr(),
-        count_a,
-        bboxes_b.as_ptr(),
-        count_b,
-        bbox_results.as_mut_ptr(),
-        &mut bbox_hit_count,
-    );
-
-    if !bbox_status.is_ok() {
-        return bbox_status;
-    }
-
-    // ------------------------------------------------------------------
-    // Layer 2: Geometric predicate for bbox survivors
-    //
-    // Pairs that failed bbox are DEFINITE_FALSE (bbox is conservative —
-    // never misses a true intersection).
-    // ------------------------------------------------------------------
-    for i in 0..count_a {
-        for j in 0..count_b {
-            if bbox_results[i * count_b + j] == 0 {
-                // Bbox miss -> definite false.
-                // SAFETY: caller allocated enough space for count_a * count_b pairs.
-                unsafe {
-                    let idx = *definite_false_count;
-                    *definite_false_pairs.add(idx * 2) = i as u32;
-                    *definite_false_pairs.add(idx * 2 + 1) = j as u32;
-                    *definite_false_count = idx + 1;
-                }
-                continue;
-            }
-
-            // Bbox hit -> run geometric predicate.
-            // SAFETY: i < count_a, j < count_b.
-            let geom_a = unsafe { &*geoms_a.add(i) };
-            let geom_b = unsafe { &*geoms_b.add(j) };
-            let result = evaluate_predicate(geom_a, geom_b);
-
-            match result {
-                1 => {
-                    // SAFETY: caller allocated enough space.
-                    unsafe {
-                        let idx = *definite_true_count;
-                        *definite_true_pairs.add(idx * 2) = i as u32;
-                        *definite_true_pairs.add(idx * 2 + 1) = j as u32;
-                        *definite_true_count = idx + 1;
-                    }
-                }
-                -1 => {
-                    // SAFETY: caller allocated enough space.
-                    unsafe {
-                        let idx = *definite_false_count;
-                        *definite_false_pairs.add(idx * 2) = i as u32;
-                        *definite_false_pairs.add(idx * 2 + 1) = j as u32;
-                        *definite_false_count = idx + 1;
-                    }
-                }
-                _ => {
-                    // Uncertain (0).
-                    // SAFETY: caller allocated enough space.
-                    unsafe {
-                        let idx = *uncertain_count;
-                        *uncertain_pairs.add(idx * 2) = i as u32;
-                        *uncertain_pairs.add(idx * 2 + 1) = j as u32;
-                        *uncertain_count = idx + 1;
-                    }
-                }
-            }
-        }
-    }
-
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 /// CPU fallback: check bbox overlap for all `count_a * count_b` pairs.
@@ -740,61 +615,14 @@ pub fn pgaccel_spatial_intersects(
 /// `hit_count` is set to the total number of overlapping pairs.
 #[must_use]
 pub fn pgaccel_bbox_intersects_bulk_f32(
-    boxes_a: *const f32,
-    count_a: usize,
-    boxes_b: *const f32,
-    count_b: usize,
-    result: *mut u8,
-    hit_count: *mut usize,
+    _boxes_a: *const f32,
+    _count_a: usize,
+    _boxes_b: *const f32,
+    _count_b: usize,
+    _result: *mut u8,
+    _hit_count: *mut usize,
 ) -> PgaccelStatus {
-    if boxes_a.is_null() || boxes_b.is_null() || result.is_null() || hit_count.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-
-    // SAFETY: hit_count validated as non-null above.
-    unsafe {
-        *hit_count = 0;
-    }
-
-    for i in 0..count_a {
-        // SAFETY: i < count_a, boxes_a has count_a * 4 floats.
-        let (a_xmin, a_ymin, a_xmax, a_ymax) = unsafe {
-            (
-                *boxes_a.add(i * 4),
-                *boxes_a.add(i * 4 + 1),
-                *boxes_a.add(i * 4 + 2),
-                *boxes_a.add(i * 4 + 3),
-            )
-        };
-
-        for j in 0..count_b {
-            // SAFETY: j < count_b, boxes_b has count_b * 4 floats.
-            let (b_xmin, b_ymin, b_xmax, b_ymax) = unsafe {
-                (
-                    *boxes_b.add(j * 4),
-                    *boxes_b.add(j * 4 + 1),
-                    *boxes_b.add(j * 4 + 2),
-                    *boxes_b.add(j * 4 + 3),
-                )
-            };
-
-            let overlaps =
-                a_xmin <= b_xmax && a_xmax >= b_xmin && a_ymin <= b_ymax && a_ymax >= b_ymin;
-
-            let idx = i * count_b + j;
-            // SAFETY: idx < count_a * count_b, result has that many entries.
-            unsafe {
-                if overlaps {
-                    *result.add(idx) = 1;
-                    *hit_count += 1;
-                } else {
-                    *result.add(idx) = 0;
-                }
-            }
-        }
-    }
-
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 /// CPU fallback: ray-casting point-in-ring for bulk points.
@@ -806,28 +634,14 @@ pub fn pgaccel_bbox_intersects_bulk_f32(
 /// in this CPU fallback (all math is `f32`).
 #[must_use]
 pub fn pgaccel_point_in_ring_bulk(
-    points_xy: *const f32,
-    point_count: usize,
-    ring_xy: *const f32,
-    vertex_count: usize,
+    _points_xy: *const f32,
+    _point_count: usize,
+    _ring_xy: *const f32,
+    _vertex_count: usize,
     _use_fp64: bool,
-    results: *mut i8,
+    _results: *mut i8,
 ) -> PgaccelStatus {
-    if points_xy.is_null() || ring_xy.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-
-    for i in 0..point_count {
-        // SAFETY: i < point_count, points_xy has point_count * 2 floats.
-        let (px, py) = unsafe { (*points_xy.add(i * 2), *points_xy.add(i * 2 + 1)) };
-        let inside = point_in_ring(px, py, ring_xy, vertex_count);
-        // SAFETY: i < point_count, results has point_count entries.
-        unsafe {
-            *results.add(i) = if inside { 1 } else { -1 };
-        }
-    }
-
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 /// Stub: returns `ErrorNoDevice`.
@@ -1285,318 +1099,82 @@ fn pg_eq_f64(a: f64, b: f64) -> bool {
 
 #[must_use]
 pub fn pgaccel_window_row_number(
-    partition_starts: *const u8,
-    count: usize,
-    results: *mut i64,
+    _partition_starts: *const u8,
+    _count: usize,
+    _results: *mut i64,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-
-    let mut row_num: i64 = 0;
-    for i in 0..count {
-        // SAFETY: caller guarantees partition_starts[0..count] and
-        // results[0..count] are valid, checked non-null above.
-        unsafe {
-            if *partition_starts.add(i) != 0 {
-                row_num = 0;
-            }
-            row_num += 1;
-            *results.add(i) = row_num;
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 #[must_use]
 pub fn pgaccel_window_rank(
-    partition_starts: *const u8,
-    sort_keys: *const f64,
-    count: usize,
-    results: *mut i64,
+    _partition_starts: *const u8,
+    _sort_keys: *const f64,
+    _count: usize,
+    _results: *mut i64,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || sort_keys.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-
-    let mut row_num: i64 = 0;
-    let mut rank: i64 = 1;
-    let mut prev_key: f64 = 0.0;
-    let mut first_in_partition = true;
-
-    for i in 0..count {
-        // SAFETY: caller guarantees partition_starts, sort_keys, and
-        // results arrays are valid for count elements; non-null checked above.
-        unsafe {
-            if *partition_starts.add(i) != 0 {
-                row_num = 0;
-                rank = 1;
-                first_in_partition = true;
-            }
-            row_num += 1;
-
-            if first_in_partition {
-                rank = 1;
-                first_in_partition = false;
-            } else if !pg_eq_f64(*sort_keys.add(i), prev_key) {
-                rank = row_num;
-            }
-
-            *results.add(i) = rank;
-            prev_key = *sort_keys.add(i);
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 #[must_use]
 pub fn pgaccel_window_dense_rank(
-    partition_starts: *const u8,
-    sort_keys: *const f64,
-    count: usize,
-    results: *mut i64,
+    _partition_starts: *const u8,
+    _sort_keys: *const f64,
+    _count: usize,
+    _results: *mut i64,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || sort_keys.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-
-    let mut rank: i64 = 0;
-    let mut prev_key: f64 = 0.0;
-    let mut first_in_partition = true;
-
-    for i in 0..count {
-        // SAFETY: caller guarantees partition_starts, sort_keys, and
-        // results arrays are valid for count elements; non-null checked above.
-        unsafe {
-            if *partition_starts.add(i) != 0 {
-                rank = 0;
-                first_in_partition = true;
-            }
-
-            if first_in_partition || !pg_eq_f64(*sort_keys.add(i), prev_key) {
-                rank += 1;
-                first_in_partition = false;
-            }
-
-            *results.add(i) = rank;
-            prev_key = *sort_keys.add(i);
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 #[must_use]
 pub fn pgaccel_window_sum(
-    partition_starts: *const u8,
-    values: *const f64,
-    null_mask: *const u8,
-    count: usize,
-    results: *mut f64,
+    _partition_starts: *const u8,
+    _values: *const f64,
+    _null_mask: *const u8,
+    _count: usize,
+    _results: *mut f64,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || values.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-
-    // Kahan compensated summation per partition
-    let mut sum: f64 = 0.0;
-    let mut comp: f64 = 0.0;
-
-    for i in 0..count {
-        // SAFETY: caller guarantees partition_starts, values, and results
-        // arrays are valid for count elements; null_mask may be null (checked
-        // before access); non-null pointers checked above.
-        unsafe {
-            if *partition_starts.add(i) != 0 {
-                sum = 0.0;
-                comp = 0.0;
-            }
-
-            let is_null = !null_mask.is_null() && *null_mask.add(i) != 0;
-            if !is_null {
-                let y = *values.add(i) - comp;
-                let t = sum + y;
-                comp = (t - sum) - y;
-                sum = t;
-            }
-
-            *results.add(i) = sum;
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 #[must_use]
 pub fn pgaccel_window_count(
-    partition_starts: *const u8,
-    null_mask: *const u8,
-    count: usize,
-    results: *mut i64,
+    _partition_starts: *const u8,
+    _null_mask: *const u8,
+    _count: usize,
+    _results: *mut i64,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-
-    let mut cnt: i64 = 0;
-    for i in 0..count {
-        // SAFETY: caller guarantees partition_starts and results arrays are
-        // valid for count elements; null_mask may be null (checked before
-        // access); non-null pointers checked above.
-        unsafe {
-            if *partition_starts.add(i) != 0 {
-                cnt = 0;
-            }
-            let is_null = !null_mask.is_null() && *null_mask.add(i) != 0;
-            if !is_null {
-                cnt += 1;
-            }
-            *results.add(i) = cnt;
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn pgaccel_window_lag(
-    partition_starts: *const u8,
-    values: *const f64,
-    null_mask: *const u8,
-    count: usize,
-    offset: i32,
-    default_val: f64,
-    results: *mut f64,
-    result_nulls: *mut u8,
+    _partition_starts: *const u8,
+    _values: *const f64,
+    _null_mask: *const u8,
+    _count: usize,
+    _offset: i32,
+    _default_val: f64,
+    _results: *mut f64,
+    _result_nulls: *mut u8,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || values.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-    if offset < 0 {
-        return PgaccelStatus::ErrorInit;
-    }
-
-    let off = offset as usize;
-    let mut part_start: usize = 0;
-
-    for i in 0..count {
-        // SAFETY: caller guarantees partition_starts, values, and results
-        // arrays are valid for count elements; null_mask and result_nulls
-        // may be null (checked before access); non-null pointers checked above.
-        unsafe {
-            if *partition_starts.add(i) != 0 {
-                part_start = i;
-            }
-
-            let target = if i >= off { Some(i - off) } else { None };
-
-            if target.is_none() || target.is_some_and(|t| t < part_start) {
-                // Before partition start — use default
-                *results.add(i) = default_val;
-                if !result_nulls.is_null() {
-                    *result_nulls.add(i) = 0;
-                }
-            } else if !null_mask.is_null() && *null_mask.add(target.unwrap_or(0)) != 0 {
-                // Source is NULL
-                *results.add(i) = default_val;
-                if !result_nulls.is_null() {
-                    *result_nulls.add(i) = 1;
-                }
-            } else {
-                let t = target.unwrap_or(0);
-                *results.add(i) = *values.add(t);
-                if !result_nulls.is_null() {
-                    *result_nulls.add(i) = 0;
-                }
-            }
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn pgaccel_window_lead(
-    partition_starts: *const u8,
-    values: *const f64,
-    null_mask: *const u8,
-    count: usize,
-    offset: i32,
-    default_val: f64,
-    results: *mut f64,
-    result_nulls: *mut u8,
+    _partition_starts: *const u8,
+    _values: *const f64,
+    _null_mask: *const u8,
+    _count: usize,
+    _offset: i32,
+    _default_val: f64,
+    _results: *mut f64,
+    _result_nulls: *mut u8,
 ) -> PgaccelStatus {
-    if partition_starts.is_null() || values.is_null() || results.is_null() {
-        return PgaccelStatus::ErrorInit;
-    }
-    if count == 0 {
-        return PgaccelStatus::Ok;
-    }
-    if offset < 0 {
-        return PgaccelStatus::ErrorInit;
-    }
-
-    let off = offset as usize;
-
-    // Pre-compute partition ends (index of last row in each partition)
-    let mut part_end = vec![0_usize; count];
-
-    let mut current_end = count - 1;
-    for i in (0..count).rev() {
-        if i < count - 1 {
-            // SAFETY: partition_starts is valid for count elements and
-            // i+1 < count; non-null checked above.
-            unsafe {
-                if *partition_starts.add(i + 1) != 0 {
-                    current_end = i;
-                }
-            }
-        }
-        part_end[i] = current_end;
-    }
-
-    for i in 0..count {
-        let target = i + off;
-        // SAFETY: caller guarantees partition_starts, values, and results
-        // arrays are valid for count elements; null_mask and result_nulls
-        // may be null (checked before access); target is bounds-checked
-        // against part_end[i] which is at most count-1.
-        unsafe {
-            if target > part_end[i] {
-                *results.add(i) = default_val;
-                if !result_nulls.is_null() {
-                    *result_nulls.add(i) = 0;
-                }
-            } else if !null_mask.is_null() && *null_mask.add(target) != 0 {
-                *results.add(i) = default_val;
-                if !result_nulls.is_null() {
-                    *result_nulls.add(i) = 1;
-                }
-            } else {
-                *results.add(i) = *values.add(target);
-                if !result_nulls.is_null() {
-                    *result_nulls.add(i) = 0;
-                }
-            }
-        }
-    }
-    PgaccelStatus::Ok
+    PgaccelStatus::ErrorNoDevice
 }
 
 // ---------------------------------------------------------------------------
@@ -1648,8 +1226,9 @@ pub fn pgaccel_fused_filter_multi_reduce_f32(
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::*;
     use std::ptr;
+
+    use super::*;
 
     // -----------------------------------------------------------------------
     // Stub return values — init / shutdown / device query

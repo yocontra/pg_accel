@@ -95,6 +95,9 @@ target_link_libraries(test_fork PRIVATE pgaccel_kernels_shared)
 add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
 target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_exec_gpu test/test_exec_gpu.cpp)
+target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_sycl_basic test/test_sycl_basic.cpp)
 target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
 if(PGACCEL_USE_SYCL AND AdaptiveCpp_FOUND)
@@ -114,5 +117,11 @@ add_test(NAME test_raster COMMAND test_raster)
 add_test(NAME test_correctness COMMAND test_correctness)
 add_test(NAME test_fork COMMAND test_fork)
 
+# Standalone GPU worker binary — fork+exec'd by the PG Background Worker.
+# Links against the shared library so it gets all kernel implementations.
+add_executable(pgaccel_gpu_worker src/gpu_worker_main.cpp)
+target_link_libraries(pgaccel_gpu_worker PRIVATE pgaccel_kernels_shared)
+
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
+install(TARGETS pgaccel_gpu_worker RUNTIME DESTINATION bin)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h DESTINATION include)

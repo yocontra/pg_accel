@@ -41,7 +41,7 @@ pub fn init() {
         return;
     }
 
-    let result = std::panic::catch_unwind(|| try_init());
+    let result = std::panic::catch_unwind(try_init);
     match result {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {

@@ -22,8 +22,8 @@ just gpu-test         # Run standalone GPU kernel tests
 ## Architecture (4 layers)
 
 1. **Adapters** (`src/adapters/`) — register extension functions + strategy classification
-2. **Dispatch** (`src/core/dispatch.rs`) — batch accumulator, strategy routing
-3. **Executor Nodes** (`src/core/executor/`) — Custom Scan: scan, join, agg, sort
+2. **Dispatch** (`src/engine/dispatch.rs`) — batch accumulator, strategy routing
+3. **Executor Nodes** (`src/engine/executor/`) — Custom Scan: scan, join, agg, sort
 4. **GPU Kernels** (`pgaccel-kernels/src/`) — C++/SYCL spatial, h3, raster kernels
 
 ## Benchmark Rules

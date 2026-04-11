@@ -6,6 +6,8 @@
 //! The format is documented at:
 //! <https://trac.osgeo.org/postgis/wiki/WKTRaster/RFC/RFC2-V0WKBFormat>
 
+#![allow(clippy::needless_range_loop)]
+
 use std::io::{Cursor, Read};
 
 /// Minimum header size in bytes (endianness + version + nBands + 6xf64 + srid +
@@ -589,8 +591,8 @@ mod test_helpers {
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::test_helpers::build_test_raster;
     use super::*;
-    use test_helpers::build_test_raster;
 
     #[test]
     fn parse_header_basic() {

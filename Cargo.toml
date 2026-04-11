@@ -7,6 +7,12 @@ version = "0.1.0"
 edition = "2024"
 license = "PostgreSQL"
 authors = ["Eric Schoffstall"]
+description = "GPU-accelerated PostgreSQL extension: spatial predicates, h3 cell ops, raster ops, and batched executor nodes via Custom Scan Provider."
+repository = "https://github.com/yocontra/pg_accel"
+homepage = "https://github.com/yocontra/pg_accel"
+keywords = ["postgres", "postgresql", "gpu", "postgis", "h3"]
+categories = ["database"]
+readme = "README.md"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

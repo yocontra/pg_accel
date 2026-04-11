@@ -10,6 +10,8 @@
 //! slot deformation overhead. For 1M-row batches this saves 150-200ms
 //! per extraction pass.
 
+#![allow(clippy::needless_range_loop)]
+
 use pgrx::pg_sys;
 
 /// Alignment characters used in PostgreSQL attribute descriptors.
@@ -410,7 +412,7 @@ pub unsafe fn diagnose_extraction(
         // Check Rust struct field offsets
         let rust_t_hoff_offset = unsafe {
             let base = mt as *const u8;
-            let field = std::ptr::addr_of!((*mt).t_hoff) as *const u8;
+            let field = std::ptr::addr_of!((*mt).t_hoff).cast::<u8>();
             field.offset_from(base) as usize
         };
         let raw_byte_14 = unsafe { *((mt as *const u8).add(14)) };
@@ -452,30 +454,21 @@ pub unsafe fn extract_f64(
     // SAFETY: caller guarantees all preconditions for all branches.
     unsafe {
         match info.typid {
-            pg_sys::FLOAT4OID => extract_typed::<f32, f64>(
-                tuples,
-                info,
-                fallback_slot,
-                0.0,
-                |v| f64::from(v),
-                |d| f64::from(f32::from_bits(d.value() as u32)),
-            ),
-            pg_sys::INT2OID => extract_typed::<i16, f64>(
-                tuples,
-                info,
-                fallback_slot,
-                0.0,
-                |v| f64::from(v),
-                |d| (d.value() as i16) as f64,
-            ),
-            pg_sys::INT4OID => extract_typed::<i32, f64>(
-                tuples,
-                info,
-                fallback_slot,
-                0.0,
-                |v| f64::from(v),
-                |d| (d.value() as i32) as f64,
-            ),
+            pg_sys::FLOAT4OID => {
+                extract_typed::<f32, f64>(tuples, info, fallback_slot, 0.0, f64::from, |d| {
+                    f64::from(f32::from_bits(d.value() as u32))
+                })
+            }
+            pg_sys::INT2OID => {
+                extract_typed::<i16, f64>(tuples, info, fallback_slot, 0.0, f64::from, |d| {
+                    (d.value() as i16) as f64
+                })
+            }
+            pg_sys::INT4OID => {
+                extract_typed::<i32, f64>(tuples, info, fallback_slot, 0.0, f64::from, |d| {
+                    (d.value() as i32) as f64
+                })
+            }
             pg_sys::INT8OID => extract_typed::<i64, f64>(
                 tuples,
                 info,
@@ -662,17 +655,14 @@ pub unsafe fn extract_f64_from_heap_headers(
             }
         };
 
-        match val {
-            Some(v) => {
-                values.push(v);
-                nulls.push(0);
-            }
-            None => {
-                // Null or not fast-extractable — mark as null.
-                // Caller should handle this via recheck.
-                values.push(0.0);
-                nulls.push(1);
-            }
+        if let Some(v) = val {
+            values.push(v);
+            nulls.push(0);
+        } else {
+            // Null or not fast-extractable — mark as null.
+            // Caller should handle this via recheck.
+            values.push(0.0);
+            nulls.push(1);
         }
     }
 

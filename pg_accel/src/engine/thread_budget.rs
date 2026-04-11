@@ -8,7 +8,6 @@
 //! reclaim any threads leaked by a crashing backend.
 
 use pgrx::lwlock::PgLwLock;
-#[cfg(not(test))]
 use pgrx::pg_shmem_init;
 #[cfg(not(test))]
 use pgrx::prelude::*;

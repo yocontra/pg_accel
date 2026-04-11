@@ -24,17 +24,37 @@ pub struct PlatformProfile {
 impl PlatformProfile {
     /// Detect the current platform's capabilities.
     ///
-    /// Must be called **after** [`crate::gpu::init()`] so that the GPU runtime
-    /// has been initialised and device queries return real values.
+    /// In production PG backends, reads GPU device info from BGW shared memory
+    /// (no SYCL init needed — avoids creating threads that break fork).
+    /// In tests, falls through to direct GPU init.
     #[must_use]
     pub fn detect() -> Self {
+        let cpu_cores = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(1);
+
+        // Try BGW shared memory first (production path).
+        #[cfg(not(test))]
+        if let Some(info) = crate::engine::gpu_bgw::bgw_device_info() {
+            #[allow(clippy::cast_precision_loss)]
+            let estimated_gflops = (info.compute_units as f64) * 2.0;
+            return Self {
+                cpu_cores,
+                has_gpu: true,
+                unified_memory: info.is_unified,
+                estimated_gpu_gflops: estimated_gflops,
+                compute_units: info.compute_units,
+                gpu_max_alloc_bytes: info.max_alloc as usize,
+                has_fp64: info.has_fp64,
+            };
+        }
+
+        // Fallback: no BGW available (test builds or BGW not started).
         crate::gpu::ensure_init();
         let device = crate::gpu::get_device_info();
         let has_gpu = device.compute_units > 0;
         let unified = device.is_unified_memory;
 
-        // Rough GFLOPS estimate: CUs × clock MHz × 2 (FMA) / 1000.
-        // Clock is not exposed by all backends, so fall back to 0.
         #[allow(clippy::cast_precision_loss)]
         let estimated_gflops = if has_gpu {
             (device.compute_units as f64) * 2.0
@@ -43,9 +63,7 @@ impl PlatformProfile {
         };
 
         Self {
-            cpu_cores: std::thread::available_parallelism()
-                .map(std::num::NonZero::get)
-                .unwrap_or(1),
+            cpu_cores,
             has_gpu,
             unified_memory: unified,
             estimated_gpu_gflops: estimated_gflops,

@@ -17,130 +17,6 @@
 static constexpr size_t GPU_FUSED_THRESHOLD = 8192;
 
 // ---------------------------------------------------------------------------
-// Predicate evaluation helper
-// ---------------------------------------------------------------------------
-
-static inline bool eval_cmp_f32(float val, pgaccel_cmp_op op, float ref) {
-    switch (op) {
-        case PGACCEL_CMP_EQ: return val == ref;
-        case PGACCEL_CMP_NE: return val != ref;
-        case PGACCEL_CMP_LT: return val < ref;
-        case PGACCEL_CMP_LE: return val <= ref;
-        case PGACCEL_CMP_GT: return val > ref;
-        case PGACCEL_CMP_GE: return val >= ref;
-        default: return false;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CPU fallback implementations
-// ---------------------------------------------------------------------------
-
-namespace {
-
-static inline double agg_identity(pgaccel_fused_agg_op op) {
-    switch (op) {
-        case PGACCEL_FUSED_SUM:   return 0.0;
-        case PGACCEL_FUSED_COUNT: return 0.0;
-        case PGACCEL_FUSED_MIN:   return std::numeric_limits<double>::infinity();
-        case PGACCEL_FUSED_MAX:   return -std::numeric_limits<double>::infinity();
-        default: return 0.0;
-    }
-}
-
-static inline double agg_combine(pgaccel_fused_agg_op op, double acc,
-                                 double val) {
-    switch (op) {
-        case PGACCEL_FUSED_SUM:   return acc + val;
-        case PGACCEL_FUSED_COUNT: return acc + 1.0;
-        case PGACCEL_FUSED_MIN:   return (val < acc) ? val : acc;
-        case PGACCEL_FUSED_MAX:   return (val > acc) ? val : acc;
-        default: return acc;
-    }
-}
-
-pgaccel_status cpu_fused_filter_reduce_f32(
-    const float* filter_col, pgaccel_cmp_op cmp_op, float filter_val,
-    const float* agg_col, pgaccel_fused_agg_op agg_op, size_t count,
-    double* out_result)
-{
-    double acc = agg_identity(agg_op);
-    bool any_match = false;
-
-    for (size_t i = 0; i < count; ++i) {
-        if (eval_cmp_f32(filter_col[i], cmp_op, filter_val)) {
-            double val = (agg_op == PGACCEL_FUSED_COUNT)
-                ? 1.0
-                : static_cast<double>(agg_col[i]);
-            acc = agg_combine(agg_op, acc, val);
-            any_match = true;
-        }
-    }
-
-    // For MIN/MAX with no matches, return 0 (SQL NULL semantics handled
-    // by the caller in Rust).
-    if (!any_match &&
-        (agg_op == PGACCEL_FUSED_MIN || agg_op == PGACCEL_FUSED_MAX)) {
-        acc = 0.0;
-    }
-
-    *out_result = acc;
-    return PGACCEL_OK;
-}
-
-pgaccel_status cpu_fused_filter_multi_reduce_f32(
-    const float* filter_col, pgaccel_cmp_op cmp_op, float filter_val,
-    const float* const* agg_cols, const pgaccel_fused_agg_op* agg_ops,
-    size_t num_aggs, size_t count, double* out_results)
-{
-    // Initialize accumulators
-    bool any_match = false;
-    for (size_t j = 0; j < num_aggs; ++j) {
-        out_results[j] = agg_identity(agg_ops[j]);
-    }
-
-    for (size_t i = 0; i < count; ++i) {
-        if (eval_cmp_f32(filter_col[i], cmp_op, filter_val)) {
-            any_match = true;
-            for (size_t j = 0; j < num_aggs; ++j) {
-                double val = (agg_ops[j] == PGACCEL_FUSED_COUNT)
-                    ? 1.0
-                    : static_cast<double>(agg_cols[j][i]);
-                out_results[j] = agg_combine(agg_ops[j], out_results[j], val);
-            }
-        }
-    }
-
-    // Reset MIN/MAX to 0 when no rows matched
-    if (!any_match) {
-        for (size_t j = 0; j < num_aggs; ++j) {
-            if (agg_ops[j] == PGACCEL_FUSED_MIN ||
-                agg_ops[j] == PGACCEL_FUSED_MAX) {
-                out_results[j] = 0.0;
-            }
-        }
-    }
-
-    return PGACCEL_OK;
-}
-
-pgaccel_status cpu_fused_filter_count_f32(
-    const float* filter_col, pgaccel_cmp_op cmp_op, float filter_val,
-    size_t count, int64_t* out_count)
-{
-    int64_t hits = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (eval_cmp_f32(filter_col[i], cmp_op, filter_val)) {
-            ++hits;
-        }
-    }
-    *out_count = hits;
-    return PGACCEL_OK;
-}
-
-} // anonymous namespace (CPU fallbacks)
-
-// ---------------------------------------------------------------------------
 // SYCL kernel implementations
 // ---------------------------------------------------------------------------
 
@@ -440,24 +316,19 @@ pgaccel_status pgaccel_fused_filter_reduce_f32(
                 pgaccel_status st = sycl_fused_filter_reduce_f32(
                     *q, filter_col, cmp_op, filter_val,
                     agg_col, agg_op, count, out_result);
-                if (st == PGACCEL_OK) return st;
+                if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
             }
         } catch (const std::exception& e) {
-            // SYCL or Metal/AdaptiveCpp failure (e.g. post-fork shader
-            // compilation), fall through to CPU
             fprintf(stderr,
-                    "pgaccel: fused_filter_reduce SYCL failed: %s"
-                    " — CPU fallback\n", e.what());
+                    "pgaccel: fused_filter_reduce SYCL failed: %s\n",
+                    e.what());
         } catch (...) {
-            fprintf(stderr,
-                    "pgaccel: fused_filter_reduce SYCL failed (unknown)"
-                    " — CPU fallback\n");
         }
     }
 #endif
 
-    return cpu_fused_filter_reduce_f32(
-        filter_col, cmp_op, filter_val, agg_col, agg_op, count, out_result);
+    pgaccel_warn_cpu_fallback("fused_filter_reduce_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_fused_filter_multi_reduce_f32(
@@ -485,18 +356,16 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(
                 pgaccel_status st = sycl_fused_filter_multi_reduce_f32(
                     *q, filter_col, cmp_op, filter_val,
                     agg_cols, agg_ops, num_aggs, count, out_results);
-                if (st == PGACCEL_OK) return st;
+                if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
             }
         } catch (const std::exception&) {
-            // Fall through to CPU on SYCL/Metal failure
         } catch (...) {
         }
     }
 #endif
 
-    return cpu_fused_filter_multi_reduce_f32(
-        filter_col, cmp_op, filter_val, agg_cols, agg_ops,
-        num_aggs, count, out_results);
+    pgaccel_warn_cpu_fallback("fused_filter_multi_reduce_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_fused_filter_count_f32(
@@ -514,17 +383,16 @@ pgaccel_status pgaccel_fused_filter_count_f32(
             if (q) {
                 pgaccel_status st = sycl_fused_filter_count_f32(
                     *q, filter_col, cmp_op, filter_val, count, out_count);
-                if (st == PGACCEL_OK) return st;
+                if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
             }
         } catch (const std::exception&) {
-            // Fall through to CPU on SYCL/Metal failure
         } catch (...) {
         }
     }
 #endif
 
-    return cpu_fused_filter_count_f32(
-        filter_col, cmp_op, filter_val, count, out_count);
+    pgaccel_warn_cpu_fallback("fused_filter_count_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 } // extern "C"

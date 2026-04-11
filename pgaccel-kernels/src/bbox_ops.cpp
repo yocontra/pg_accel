@@ -11,48 +11,7 @@
 #include <sycl/sycl.hpp>
 #endif
 
-// ---------------------------------------------------------------------------
-// CPU fallback — sequential reference implementation
-// ---------------------------------------------------------------------------
-
 namespace {
-
-template <typename T>
-pgaccel_status bbox_intersects_bulk_cpu(
-    const T* boxes_a,
-    size_t count_a,
-    const T* boxes_b,
-    size_t count_b,
-    uint8_t* result,
-    size_t* hit_count
-) {
-    // SAFETY: caller guarantees result has count_a * count_b bytes
-    size_t hits = 0;
-    for (size_t i = 0; i < count_a; ++i) {
-        const T a_xmin = boxes_a[i * 4 + 0];
-        const T a_ymin = boxes_a[i * 4 + 1];
-        const T a_xmax = boxes_a[i * 4 + 2];
-        const T a_ymax = boxes_a[i * 4 + 3];
-
-        for (size_t j = 0; j < count_b; ++j) {
-            const T b_xmin = boxes_b[j * 4 + 0];
-            const T b_ymin = boxes_b[j * 4 + 1];
-            const T b_xmax = boxes_b[j * 4 + 2];
-            const T b_ymax = boxes_b[j * 4 + 3];
-
-            const bool intersects = !(a_xmax < b_xmin || a_xmin > b_xmax ||
-                                      a_ymax < b_ymin || a_ymin > b_ymax);
-
-            const size_t idx = i * count_b + j;
-            result[idx] = intersects ? 1 : 0;
-            hits += intersects ? 1 : 0;
-        }
-    }
-    if (hit_count) {
-        *hit_count = hits;
-    }
-    return PGACCEL_OK;
-}
 
 // ---------------------------------------------------------------------------
 // SYCL kernel — parallel over all (i,j) pairs
@@ -176,16 +135,16 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(
 #if PGACCEL_HAS_SYCL
     try {
         sycl::queue q{sycl::default_selector_v};
-        return bbox_intersects_bulk_sycl<float>(
+        pgaccel_status st = bbox_intersects_bulk_sycl<float>(
             q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
 
-    return bbox_intersects_bulk_cpu<float>(
-        boxes_a, count_a, boxes_b, count_b, result, hit_count);
+    pgaccel_warn_cpu_fallback("bbox_intersects_bulk_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(
@@ -219,14 +178,14 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(
         if (!q.get_device().has(sycl::aspect::fp64)) {
             return PGACCEL_UNSUPPORTED;
         }
-        return bbox_intersects_bulk_sycl<double>(
+        pgaccel_status st = bbox_intersects_bulk_sycl<double>(
             q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
+        if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
 #endif
 
-    return bbox_intersects_bulk_cpu<double>(
-        boxes_a, count_a, boxes_b, count_b, result, hit_count);
+    pgaccel_warn_cpu_fallback("bbox_intersects_bulk_f64");
+    return PGACCEL_ERROR_NO_DEVICE;
 }
