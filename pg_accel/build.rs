@@ -74,10 +74,7 @@ mod pg_stub {
         let stub_rs = out_dir.join("pg_stubs_generated.rs");
 
         // Always emit the path so `include!` resolves even if we bail.
-        println!(
-            "cargo::rustc-env=PG_STUBS_GENERATED={}",
-            stub_rs.display()
-        );
+        println!("cargo::rustc-env=PG_STUBS_GENERATED={}", stub_rs.display());
 
         // Extract all global T (text/function), D (data), and S (other)
         // symbols. Skip U (undefined), compiler-internal (leading double
