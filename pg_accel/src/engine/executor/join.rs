@@ -18,6 +18,7 @@ use crate::adapters::extractors::geometry::extract_geometry;
 use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::gucs;
 use crate::engine::registry::{self, AccelStrategy};
+use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 
 /// A buffered join match waiting to be returned by `next()`.
@@ -607,8 +608,15 @@ impl JoinExecState {
                 }
             }
 
-            self.dispatch_time_us += start.elapsed().as_micros() as u64;
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            self.dispatch_time_us += elapsed_us;
             self.batches_executed += 1;
+
+            // Per-backend stats: record spatial NLJ batch completion.
+            stats::record_batch(inner_count as u64, elapsed_us);
+            if gpu_configured {
+                stats::record_gpu_batch(inner_count as u64, 0);
+            }
 
             // If we consumed fewer than batch_size inner tuples, inner is
             // exhausted for this outer.
@@ -1059,8 +1067,12 @@ impl JoinExecState {
                         }
                     }
 
-                    self.dispatch_time_us += start.elapsed().as_micros() as u64;
+                    let elapsed_us = start.elapsed().as_micros() as u64;
+                    self.dispatch_time_us += elapsed_us;
                     self.batches_executed += 1;
+                    // Hash-join batch with no hash table: record only the
+                    // batch-level counters (no GPU rows consumed).
+                    stats::record_batch(outer_count as u64, elapsed_us);
                     pgrx::check_for_interrupts!();
                     continue;
                 }
@@ -1158,8 +1170,15 @@ impl JoinExecState {
                 }
             }
 
-            self.dispatch_time_us += start.elapsed().as_micros() as u64;
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            self.dispatch_time_us += elapsed_us;
             self.batches_executed += 1;
+
+            // Per-backend stats: hash-join probe batch. Count outer rows as
+            // dispatched + GPU-processed (the probe kernel ran on all of them).
+            stats::record_batch(outer_count as u64, elapsed_us);
+            stats::record_gpu_batch(outer_count as u64, 0);
+
             pgrx::check_for_interrupts!();
             // Loop back to drain pending_matches.
         }

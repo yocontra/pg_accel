@@ -27,6 +27,7 @@ use crate::engine::executor::window::{
     WINDOW_SPEC_INTS, WindowExecState, WindowFunc, WindowFuncSpec,
 };
 use crate::engine::registry::{self, AccelStrategy};
+use crate::engine::stats;
 use crate::gpu::PgaccelKeyType;
 
 // ---------------------------------------------------------------------------
@@ -1972,6 +1973,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     _estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
+    // Record that a query was routed through the accelerated custom scan path.
+    // This runs once per CustomScan node init on the main backend thread.
+    stats::record_query_accelerated();
+
     // SAFETY: node points to our GpuAccelScanState (extended struct). The
     // plan node's custom_private was set by make_custom_scan_plan.
     let state = node.cast::<GpuAccelScanState>();

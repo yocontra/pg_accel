@@ -21,6 +21,7 @@
 use pgrx::pg_sys;
 
 use crate::engine::registry::AccelStrategy;
+use crate::engine::stats;
 use crate::gpu;
 
 // ---------------------------------------------------------------------------
@@ -513,46 +514,57 @@ impl WindowExecState {
         };
 
         // -- Phase 3: Dispatch each window function via GPU --
+        let mut gpu_specs_ok: u64 = 0;
         for (spec_idx, spec) in self.specs.iter().enumerate() {
             let _span = tracing::debug_span!("gpu.window", func = ?spec.func, n = n).entered();
 
-            match spec.func {
+            let ok = match spec.func {
                 WindowFunc::RowNumber => {
                     let mut results = vec![0i64; n];
-                    gpu::window_row_number(&partition_starts, &mut results);
+                    let ok = gpu::window_row_number(&partition_starts, &mut results).is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Rank => {
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    gpu::window_rank(&partition_starts, &sort_keys, &mut results);
+                    let ok = gpu::window_rank(&partition_starts, &sort_keys, &mut results)
+                        .is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::DenseRank => {
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results);
+                    let ok = gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results)
+                        .is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Sum => {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
-                    gpu::window_sum(&partition_starts, &values, &null_mask, &mut results);
+                    let ok =
+                        gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
+                            .is_some();
                     self.f64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Count => {
                     let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    gpu::window_count(&partition_starts, &null_mask, &mut results);
+                    let ok = gpu::window_count(&partition_starts, &null_mask, &mut results)
+                        .is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Lag => {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
                     let mut result_nulls = vec![0u8; n];
-                    gpu::window_lag(
+                    let ok = gpu::window_lag(
                         &partition_starts,
                         &values,
                         &null_mask,
@@ -560,16 +572,18 @@ impl WindowExecState {
                         spec.default_val,
                         &mut results,
                         &mut result_nulls,
-                    );
+                    )
+                    .is_some();
                     self.f64_results[spec_idx] = results;
                     self.null_results[spec_idx] = result_nulls;
+                    ok
                 }
                 WindowFunc::Lead => {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
                     let mut result_nulls = vec![0u8; n];
-                    gpu::window_lead(
+                    let ok = gpu::window_lead(
                         &partition_starts,
                         &values,
                         &null_mask,
@@ -577,16 +591,31 @@ impl WindowExecState {
                         spec.default_val,
                         &mut results,
                         &mut result_nulls,
-                    );
+                    )
+                    .is_some();
                     self.f64_results[spec_idx] = results;
                     self.null_results[spec_idx] = result_nulls;
+                    ok
                 }
+            };
+            if ok {
+                gpu_specs_ok += 1;
+            } else {
+                stats::record_window_gpu_failure();
             }
             pgrx::check_for_interrupts!();
         }
 
         self.compute_done = true;
-        self.dispatch_time_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.dispatch_time_us = elapsed_us;
+
+        // Per-backend stats: one logical compute batch per window op (vscan
+        // path) covering all rows.
+        stats::record_batch(n as u64, elapsed_us);
+        if gpu_specs_ok > 0 {
+            stats::record_gpu_batch(n as u64 * gpu_specs_ok, 0);
+        }
     }
 
     /// Consume all input tuples and compute window functions.
@@ -660,46 +689,57 @@ impl WindowExecState {
         };
 
         // -- Phase 3: Dispatch each window function via GPU --
+        let mut gpu_specs_ok: u64 = 0;
         for (spec_idx, spec) in self.specs.iter().enumerate() {
             let _span = tracing::debug_span!("gpu.window", func = ?spec.func, n = n).entered();
 
-            match spec.func {
+            let ok = match spec.func {
                 WindowFunc::RowNumber => {
                     let mut results = vec![0i64; n];
-                    gpu::window_row_number(&partition_starts, &mut results);
+                    let ok = gpu::window_row_number(&partition_starts, &mut results).is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Rank => {
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    gpu::window_rank(&partition_starts, &sort_keys, &mut results);
+                    let ok = gpu::window_rank(&partition_starts, &sort_keys, &mut results)
+                        .is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::DenseRank => {
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results);
+                    let ok = gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results)
+                        .is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Sum => {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
-                    gpu::window_sum(&partition_starts, &values, &null_mask, &mut results);
+                    let ok =
+                        gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
+                            .is_some();
                     self.f64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Count => {
                     let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    gpu::window_count(&partition_starts, &null_mask, &mut results);
+                    let ok = gpu::window_count(&partition_starts, &null_mask, &mut results)
+                        .is_some();
                     self.i64_results[spec_idx] = results;
+                    ok
                 }
                 WindowFunc::Lag => {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
                     let mut result_nulls = vec![0u8; n];
-                    gpu::window_lag(
+                    let ok = gpu::window_lag(
                         &partition_starts,
                         &values,
                         &null_mask,
@@ -707,16 +747,18 @@ impl WindowExecState {
                         spec.default_val,
                         &mut results,
                         &mut result_nulls,
-                    );
+                    )
+                    .is_some();
                     self.f64_results[spec_idx] = results;
                     self.null_results[spec_idx] = result_nulls;
+                    ok
                 }
                 WindowFunc::Lead => {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
                     let mut result_nulls = vec![0u8; n];
-                    gpu::window_lead(
+                    let ok = gpu::window_lead(
                         &partition_starts,
                         &values,
                         &null_mask,
@@ -724,16 +766,32 @@ impl WindowExecState {
                         spec.default_val,
                         &mut results,
                         &mut result_nulls,
-                    );
+                    )
+                    .is_some();
                     self.f64_results[spec_idx] = results;
                     self.null_results[spec_idx] = result_nulls;
+                    ok
                 }
+            };
+            if ok {
+                gpu_specs_ok += 1;
+            } else {
+                stats::record_window_gpu_failure();
             }
             pgrx::check_for_interrupts!();
         }
 
         self.compute_done = true;
-        self.dispatch_time_us = start.elapsed().as_micros() as u64;
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.dispatch_time_us = elapsed_us;
+
+        // Per-backend stats: one logical compute batch per window op covering
+        // all rows. Record GPU rows as n × successful specs (each spec runs
+        // the full row set through a GPU kernel).
+        stats::record_batch(n as u64, elapsed_us);
+        if gpu_specs_ok > 0 {
+            stats::record_gpu_batch(n as u64 * gpu_specs_ok, 0);
+        }
     }
 
     /// Build partition boundary markers by comparing partition key values.

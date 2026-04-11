@@ -18,6 +18,7 @@ use super::custom_scan;
 use crate::engine::cost;
 use crate::engine::gucs;
 use crate::engine::registry;
+use crate::engine::stats;
 
 // ---------------------------------------------------------------------------
 // Previous hook storage
@@ -88,6 +89,9 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         }
     }
 
+    // Record this planner hook invocation (main backend thread only).
+    stats::record_planner_hook_call();
+
     // Gate 1: GUC check — single branch, ~1ns.
     if !gucs::enabled() {
         pgrx::debug1!("pg_accel: set_rel_pathlist: extension disabled");
@@ -100,6 +104,7 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // SAFETY: root.parse is a valid Query pointer provided by the planner.
     let parse = unsafe { (*root).parse };
     if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
+        stats::record_command_type_skip();
         return;
     }
 
@@ -726,6 +731,9 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         }
     }
 
+    // Record this planner hook invocation (main backend thread only).
+    stats::record_planner_hook_call();
+
     // Gate 1: GUC check.
     if !gucs::enabled() {
         return;
@@ -737,6 +745,7 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // SAFETY: root.parse is a valid Query pointer provided by the planner.
     let parse = unsafe { (*root).parse };
     if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
+        stats::record_command_type_skip();
         return;
     }
 
@@ -988,6 +997,10 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             prev(root, stage, input_rel, output_rel, extra);
         }
     }
+
+    // Record this planner hook invocation (main backend thread only).
+    stats::record_planner_hook_call();
+
     // Gate: GUC check.
     if !gucs::enabled() {
         return;
@@ -999,6 +1012,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     // SAFETY: root.parse is a valid Query pointer provided by the planner.
     let parse = unsafe { (*root).parse };
     if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
+        stats::record_command_type_skip();
         return;
     }
 

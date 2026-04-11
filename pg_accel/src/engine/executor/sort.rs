@@ -20,6 +20,7 @@ use pgrx::pg_sys;
 use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::executor::vscan::VectorizedScan;
 use crate::engine::registry::AccelStrategy;
+use crate::engine::stats;
 use crate::gpu;
 
 use crate::engine::cost;
@@ -299,6 +300,7 @@ impl SortExecState {
         let n = self.sorted_tuples.len();
 
         // -- Phase 2: Sort --
+        let mut gpu_rows_sorted: u64 = 0;
         if n > 1 && !self.sort_keys.is_empty() {
             // Try GPU sort using inline-extracted keys (zero-copy key extraction).
             let limits = cost::device_limits();
@@ -350,7 +352,9 @@ impl SortExecState {
                 false
             };
 
-            if !gpu_done {
+            if gpu_done {
+                gpu_rows_sorted = n as u64;
+            } else {
                 // Defer to PG's SortSupport comparison infrastructure.
                 // This is not a CPU reimplementation — it uses PG's native
                 // sort operators (handles multi-key sorts and non-GPU types).
@@ -384,7 +388,16 @@ impl SortExecState {
         }
 
         self.sort_done = true;
-        self.dispatch_time_us += start.elapsed().as_micros() as u64;
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.dispatch_time_us += elapsed_us;
+
+        // Per-backend stats: record the sort batch completion. The sort
+        // executor consumes + sorts as a single logical batch per query, so
+        // record once here. n is the total row count consumed.
+        stats::record_batch(n as u64, elapsed_us);
+        if gpu_rows_sorted > 0 {
+            stats::record_gpu_batch(gpu_rows_sorted, 0);
+        }
     }
 
     /// Index-based sort of `sorted_tuples` using PG `SortSupport`.
@@ -837,6 +850,7 @@ impl SortExecState {
         self.rows_dispatched = n as u64;
         self.batches_executed = 1;
 
+        let mut gpu_rows_sorted: u64 = 0;
         if n > 1 && !self.sort_keys.is_empty() {
             let limits = cost::device_limits();
             let do_inline = matches!(key_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
@@ -892,7 +906,9 @@ impl SortExecState {
                 false
             };
 
-            if !gpu_done {
+            if gpu_done {
+                gpu_rows_sorted = n as u64;
+            } else {
                 pgrx::warning!(
                     "pg_accel: GPU sort unavailable for {} rows (vscan); \
                      deferring to PG SortSupport",
@@ -922,7 +938,14 @@ impl SortExecState {
         }
 
         self.sort_done = true;
-        self.dispatch_time_us += start.elapsed().as_micros() as u64;
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.dispatch_time_us += elapsed_us;
+
+        // Per-backend stats: single logical batch per vectorized sort.
+        stats::record_batch(n as u64, elapsed_us);
+        if gpu_rows_sorted > 0 {
+            stats::record_gpu_batch(gpu_rows_sorted, 0);
+        }
     }
 }
 

@@ -23,6 +23,7 @@ use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::expr_compiler::{self, CompiledExpr, TemplateKernel};
 use crate::engine::gucs;
 use crate::engine::registry::AccelStrategy;
+use crate::engine::stats;
 use crate::gpu::{self, PgaccelExprProgram};
 
 /// Rust-side batch executor state, stored as a raw pointer in
@@ -616,8 +617,19 @@ impl ScanExecState {
             );
             self.rows_dispatched += count as u64;
             self.batches_executed += 1;
+
+            // Per-backend stats: record this inline GpuExpr batch completion.
+            // record_batch is called below after dispatch_time_us is updated,
+            // alongside a GPU-row record (all `count` rows were pushed to the
+            // template kernel).
+            let elapsed_us = start_us.elapsed().as_micros() as u64;
+            stats::record_batch(count as u64, elapsed_us);
+            stats::record_gpu_batch(count as u64, recheck_count);
         } else {
             // GPU unavailable — materialize all and use scalar qual.
+            // This is a real fallback from a GPU path into PG's expression
+            // evaluator; record it for diagnostics.
+            stats::record_fallback();
             for i in 0..count {
                 let (offset, t_len) = entries[i];
                 let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
@@ -891,9 +903,24 @@ impl ScanExecState {
             }
         }
 
+        let elapsed_us = start.elapsed().as_micros() as u64;
         self.rows_dispatched += batch_len as u64;
         self.batches_executed += 1;
-        self.dispatch_time_us += start.elapsed().as_micros() as u64;
+        self.dispatch_time_us += elapsed_us;
+
+        // Per-backend stats: record this batch completion on the main thread.
+        stats::record_batch(batch_len as u64, elapsed_us);
+        // GpuSpatial / GpuH3 / GpuRaster / GpuExpr all dispatched a GPU kernel
+        // above. Count the rows fed to the GPU kernel for this batch.
+        if matches!(
+            self.strategy,
+            AccelStrategy::GpuSpatial
+                | AccelStrategy::GpuH3
+                | AccelStrategy::GpuRaster
+                | AccelStrategy::GpuExpr
+        ) {
+            stats::record_gpu_batch(batch_len as u64, 0);
+        }
     }
 
     /// Scalar qual evaluation path (fallback for non-GPU-dispatch strategies).
