@@ -1,0 +1,67 @@
+=== pg_accel benchmark plans — captured once per workload/scale ===
+
+=== gpu_reduce_sum @ rows=1000 ===
+Aggregate  (cost=28.50..28.51 rows=1 width=32) (actual time=0.103..0.104 rows=1 loops=1)
+  Output: sum(val_f8), avg(val_f4), min(val_i4), max(val_i4), count(*)
+  Buffers: shared hit=6
+  ->  Seq Scan on public.bench_reduce  (cost=0.00..16.00 rows=1000 width=16) (actual time=0.003..0.033 rows=1000 loops=1)
+        Output: val_f8, val_f4, val_i4
+        Buffers: shared hit=6
+Planning:
+  Buffers: shared hit=44 read=4
+Planning Time: 0.564 ms
+Execution Time: 0.126 ms
+
+=== gpu_reduce_sum @ rows=10000 ===
+Custom Scan (GpuAccelAgg)  (cost=35.00..33.00 rows=1 width=32) (actual time=844.505..844.506 rows=1 loops=1)
+  Output: (sum(val_f8)), (avg(val_f4)), (min(val_i4)), (max(val_i4)), (count(*))
+  Strategy: GpuAgg
+  Batch Size: 65536
+  Expected Threads: 1
+  Rows Dispatched: 10000
+  Batches: 1
+  Dispatch Time: 844.498 ms
+  GPU Dispatched: true
+  Buffers: shared hit=55
+  ->  Seq Scan on public.bench_reduce  (cost=0.00..155.00 rows=10000 width=16) (never executed)
+        Output: val_f8, val_f4, val_i4
+Planning:
+  Buffers: shared hit=48
+Planning Time: 0.235 ms
+Execution Time: 844.543 ms
+
+=== gpu_reduce_sum @ rows=100000 ===
+Custom Scan (GpuAccelAgg)  (cost=305.00..285.00 rows=1 width=32) (actual time=808.427..808.434 rows=1 loops=1)
+  Output: (sum(val_f8)), (avg(val_f4)), (min(val_i4)), (max(val_i4)), (count(*))
+  Strategy: GpuAgg
+  Batch Size: 65536
+  Expected Threads: 1
+  Rows Dispatched: 100000
+  Batches: 1
+  Dispatch Time: 808.409 ms
+  GPU Dispatched: true
+  Buffers: shared hit=541
+  ->  Seq Scan on public.bench_reduce  (cost=0.00..1541.00 rows=100000 width=16) (never executed)
+        Output: val_f8, val_f4, val_i4
+Planning:
+  Buffers: shared hit=48
+Planning Time: 0.313 ms
+Execution Time: 808.474 ms
+
+=== gpu_reduce_sum @ rows=1000000 ===
+Custom Scan (GpuAccelAgg)  (cost=3005.00..2805.00 rows=1 width=32) (actual time=3362.091..3362.094 rows=1 loops=1)
+  Output: (sum(val_f8)), (avg(val_f4)), (min(val_i4)), (max(val_i4)), (count(*))
+  Strategy: GpuAgg
+  Batch Size: 65536
+  Expected Threads: 1
+  Rows Dispatched: 1000000
+  Batches: 1
+  Dispatch Time: 3362.080 ms
+  GPU Dispatched: true
+  Buffers: shared hit=5406
+  ->  Seq Scan on public.bench_reduce  (cost=0.00..15406.00 rows=1000000 width=16) (never executed)
+        Output: val_f8, val_f4, val_i4
+Planning:
+  Buffers: shared hit=54
+Planning Time: 0.347 ms
+Execution Time: 3362.131 ms

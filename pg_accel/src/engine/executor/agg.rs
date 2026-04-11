@@ -227,12 +227,15 @@ impl AggColumn {
     /// Each chunk is reduced on GPU independently; partial results are
     /// combined via the accumulator. If GPU fails for any chunk, a warning
     /// is logged — the planner should not have injected this path.
-    #[allow(clippy::cast_possible_truncation)]
     fn dispatch_gpu_reduce_chunked(&mut self) {
         let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
         let values = std::mem::take(&mut self.gpu_values);
         for chunk in values.chunks(max_chunk) {
-            // Try f64 GPU path first (CUDA/ROCm with fp64).
+            // The f64 wrappers in `gpu::` auto-cast to f32 on devices
+            // without fp64 (Metal), so we always call the f64 entry point
+            // here — no two-attempt retry needed. Precision tradeoff: on
+            // fp32-only devices the per-chunk partial is folded into the
+            // outer Kahan accumulator, bounding the drift.
             let gpu_result = match self.op {
                 AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f64(chunk),
                 AggOp::Min => gpu::reduce_min_f64(chunk),
@@ -243,31 +246,11 @@ impl AggColumn {
             if let Some(partial) = gpu_result {
                 self.gpu_dispatched = true;
                 self.accumulate(partial);
-                continue;
-            }
-
-            // f64 unsupported (Metal) — cast chunk to f32 and try the f32
-            // GPU kernel. Precision tradeoff: sum over large chunks may
-            // drift vs. a host f64 Kahan, but min/max are exact. The per-
-            // chunk partial is folded into the outer Kahan accumulator,
-            // which bounds the error. No CPU fallback here (rule 11).
-            let f32_chunk: Vec<f32> = chunk.iter().map(|&v| v as f32).collect();
-            let f32_result = match self.op {
-                AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f32(&f32_chunk).map(f64::from),
-                AggOp::Min => gpu::reduce_min_f32(&f32_chunk).map(f64::from),
-                AggOp::Max => gpu::reduce_max_f32(&f32_chunk).map(f64::from),
-                AggOp::Count | AggOp::Passthrough => None,
-            };
-            if let Some(partial) = f32_result {
-                self.gpu_dispatched = true;
-                self.accumulate(partial);
             } else {
-                // Neither f64 nor f32 GPU reduce is available. The planner
-                // should not have injected GpuReduce in this case; log and
-                // drain to the scalar accumulator so the query still
-                // completes. (Note: this is a measurement-correctness
-                // safeguard, not a feature fallback — it fires only on a
-                // kernel bug or unknown device.)
+                // Planner should not have injected GpuReduce when neither
+                // f64 nor f32 GPU reduce is available. This is a safeguard
+                // for kernel bugs or unknown devices — not a feature
+                // fallback (rule 11).
                 tracing::warn!(
                     "pg_accel: GPU reduce unavailable for {:?} on {}-row chunk; \
                      planner should not have injected GpuReduce path",

@@ -499,9 +499,34 @@ pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
 /// (i.e. we're in a forked backend where direct GPU access is broken).
 #[cfg(not(test))]
 fn use_bgw() -> bool {
-    let avail = crate::engine::gpu_client::bgw_is_available();
-    pgrx::log!("pg_accel: use_bgw() = {avail}");
-    avail
+    crate::engine::gpu_client::bgw_is_available()
+}
+
+/// Cached device fp64 support, read once from BGW shared memory per backend.
+/// Returns `false` until the BGW has populated device info (and stays `false`
+/// on Metal which is fp32-only). Used by `reduce_*_f64` wrappers to skip the
+/// guaranteed-to-fail f64 kernel attempt on Metal.
+#[cfg(not(test))]
+fn device_has_fp64() -> bool {
+    use std::cell::Cell;
+    thread_local! {
+        // 0 = unknown, 1 = no, 2 = yes
+        static CACHED: Cell<u8> = const { Cell::new(0) };
+    }
+    CACHED.with(|c| match c.get() {
+        1 => false,
+        2 => true,
+        _ => {
+            if let Some(info) = crate::engine::gpu_bgw::bgw_device_info() {
+                let v = if info.has_fp64 { 2 } else { 1 };
+                c.set(v);
+                info.has_fp64
+            } else {
+                // BGW not ready yet; don't cache.
+                false
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -586,15 +611,17 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_sum_f64", n = data.len()).entered();
     #[cfg(not(test))]
     if use_bgw() {
-        pgrx::log!(
-            "pg_accel: reduce_sum_f64 routing through BGW (n={})",
-            data.len()
-        );
+        // Metal (fp32-only) can't run the f64 kernel — casting to f32
+        // avoids a guaranteed-to-fail BGW round-trip. Precision tradeoff
+        // is documented in agg.rs::dispatch_gpu_reduce_chunked.
+        if !device_has_fp64() {
+            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+            return reduce_sum_f32(&f32_data).map(f64::from);
+        }
         // SAFETY: data.as_ptr() is valid for data.len() f64 values.
-        let result =
-            unsafe { crate::engine::gpu_client::bgw_reduce_sum_f64(data.as_ptr(), data.len()) };
-        pgrx::log!("pg_accel: reduce_sum_f64 BGW result = {:?}", result);
-        return result;
+        return unsafe {
+            crate::engine::gpu_client::bgw_reduce_sum_f64(data.as_ptr(), data.len())
+        };
     }
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
@@ -639,6 +666,10 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_min_f64", n = data.len()).entered();
     #[cfg(not(test))]
     if use_bgw() {
+        if !device_has_fp64() {
+            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+            return reduce_min_f32(&f32_data).map(f64::from);
+        }
         // SAFETY: data.as_ptr() is valid for data.len() f64 values.
         return unsafe { crate::engine::gpu_client::bgw_reduce_min_f64(data.as_ptr(), data.len()) };
     }
@@ -662,6 +693,10 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_max_f64", n = data.len()).entered();
     #[cfg(not(test))]
     if use_bgw() {
+        if !device_has_fp64() {
+            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+            return reduce_max_f32(&f32_data).map(f64::from);
+        }
         // SAFETY: data.as_ptr() is valid for data.len() f64 values.
         return unsafe { crate::engine::gpu_client::bgw_reduce_max_f64(data.as_ptr(), data.len()) };
     }

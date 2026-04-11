@@ -465,11 +465,38 @@ pub unsafe extern "C-unwind" fn gpu_bgw_main(_arg: pgrx::pg_sys::Datum) {
 
     pgrx::log!("pg_accel BGW: entering main loop");
 
-    while BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(100))) {
-        process_pending_request_via_worker(&mut worker);
+    // Hot path: spin-poll the request slot for sub-millisecond latency.
+    // The SetLatch → SIGUSR1 → procsignal → latch path in pgrx BGW has a
+    // race where posting a latch *before* wait_latch(100ms) is entered
+    // silently loses the wake, so we cannot rely on latch wakes alone —
+    // every reduce workload would see 100ms/request. Instead we spin
+    // briefly on the shared-memory state word (cheap — zero syscalls),
+    // then fall back to wait_latch with a short timeout so we yield
+    // the CPU during long idle periods.
+    loop {
+        if BackgroundWorker::sigterm_received() {
+            break;
+        }
+        // Drain any pending requests that arrived since we last looped.
+        while process_pending_request_via_worker(&mut worker) {}
+
+        // Short spin window, then yield to wait_latch. ~100µs of spinning
+        // catches back-to-back ops without OS involvement; after that we
+        // park for 1ms so the BGW isn't a busy loop when idle.
+        for _ in 0..1000 {
+            let state = GPU_BGW.share();
+            if state.state.load(Ordering::Acquire) == STATE_PENDING {
+                break;
+            }
+            drop(state);
+            std::hint::spin_loop();
+        }
+        if !BackgroundWorker::wait_latch(Some(std::time::Duration::from_millis(1))) {
+            break;
+        }
     }
 
-    process_pending_request_via_worker(&mut worker);
+    while process_pending_request_via_worker(&mut worker) {}
 
     // Worker is cleaned up on drop (stdin closed → worker exits).
     drop(worker);
@@ -477,7 +504,8 @@ pub unsafe extern "C-unwind" fn gpu_bgw_main(_arg: pgrx::pg_sys::Datum) {
 }
 
 /// Check for and process a pending GPU request via the worker process.
-fn process_pending_request_via_worker(worker: &mut GpuWorkerProcess) {
+/// Returns `true` if a request was processed, `false` if the slot was idle.
+fn process_pending_request_via_worker(worker: &mut GpuWorkerProcess) -> bool {
     // Try to transition from PENDING → PROCESSING.
     let state = GPU_BGW.exclusive();
 
@@ -491,17 +519,17 @@ fn process_pending_request_via_worker(worker: &mut GpuWorkerProcess) {
         )
         .is_err()
     {
-        return; // No pending request.
+        return false; // No pending request.
     }
 
     let request = state.request;
     let requester_pid = state.requester_pid.load(Ordering::Acquire);
 
-    pgrx::log!(
-        "pg_accel BGW: processing request op={} from pid={}, n_rows={}",
-        request.op,
-        requester_pid,
-        request.n_rows
+    tracing::trace!(
+        op = request.op,
+        from = requester_pid,
+        n_rows = request.n_rows,
+        "BGW: processing request"
     );
 
     drop(state);
@@ -509,10 +537,10 @@ fn process_pending_request_via_worker(worker: &mut GpuWorkerProcess) {
     // Execute via the worker process (fork+exec'd, clean GPU context).
     let response = execute_via_worker(worker, &request);
 
-    pgrx::log!(
-        "pg_accel BGW: request op={} completed, status={}",
-        request.op,
-        response.status
+    tracing::trace!(
+        op = request.op,
+        status = response.status,
+        "BGW: request completed"
     );
 
     // Write the response and transition to DONE.
@@ -535,6 +563,7 @@ fn process_pending_request_via_worker(worker: &mut GpuWorkerProcess) {
             }
         }
     }
+    true
 }
 
 /// Execute a GPU kernel request via POSIX shared memory.

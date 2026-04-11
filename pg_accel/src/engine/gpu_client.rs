@@ -25,14 +25,13 @@ use super::gpu_bgw::{
 /// Must be called from the main backend thread. The DSM handle must
 /// reference a valid, live DSM segment.
 pub unsafe fn submit_and_wait(request: &GpuRequest) -> Option<GpuResponse> {
-    pgrx::log!("pg_accel: submit_and_wait: op={}", request.op);
+    tracing::trace!("submit_and_wait: op={}", request.op);
     // Check that the BGW is alive.
     let bgw_pid = {
         let state = GPU_BGW.share();
         state.bgw_pid.load(Ordering::Acquire)
     };
     if bgw_pid <= 0 {
-        pgrx::log!("pg_accel: submit_and_wait: BGW not started (pid={bgw_pid})");
         return None; // BGW not started yet.
     }
 
@@ -104,18 +103,27 @@ pub unsafe fn submit_and_wait(request: &GpuRequest) -> Option<GpuResponse> {
 }
 
 /// Wait for the BGW to complete our request.
+///
+/// Hot path spin-polls the shared-memory state word for sub-millisecond
+/// round-trip latency (critical for small reductions, where BGW latency
+/// dominates kernel time). After a brief spin budget we fall back to
+/// WaitLatch with a short timeout so long-running GPU kernels don't
+/// burn a core.
 fn wait_for_response() -> Option<GpuResponse> {
     let timeout_ms = 10_000i64; // 10 second timeout
     let start = std::time::Instant::now();
 
     loop {
-        // Check if response is ready.
-        {
+        // Spin-poll for ~100µs — this catches the common case of a tiny
+        // reduce kernel that the BGW turns around in microseconds.
+        for _ in 0..1000 {
             let state = GPU_BGW.share();
             if state.state.load(Ordering::Acquire) == STATE_DONE {
                 let resp = state.response;
                 return Some(resp);
             }
+            drop(state);
+            std::hint::spin_loop();
         }
 
         // Check timeout.
@@ -133,7 +141,7 @@ fn wait_for_response() -> Option<GpuResponse> {
             pg_sys::WaitLatch(
                 pg_sys::MyLatch,
                 (pg_sys::WL_LATCH_SET | pg_sys::WL_TIMEOUT) as i32,
-                10, // 10ms timeout between checks
+                1, // 1ms timeout between checks
                 pg_sys::PG_WAIT_EXTENSION,
             );
             pg_sys::ResetLatch(pg_sys::MyLatch);

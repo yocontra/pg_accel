@@ -42,3 +42,4 @@ docker/data/
 # Test artifacts
 /tmp/.pgaccel_*
 pgaccel-kernels/build/
+.claude/worktrees/
