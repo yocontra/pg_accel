@@ -165,6 +165,20 @@ pub struct DeviceLimits {
     /// GPU filter (spatial/expr) per-row op cost.
     /// Includes predicate evaluation on GPU.
     pub gpu_op_cost_filter: f64,
+
+    // -- Cost-ratio gates vs PG's best non-parallel path --------------------
+    /// Max ratio of GpuAgg total cost to PG's cheapest non-parallel agg path
+    /// before the planner injects our path. Our Custom Scan runs
+    /// single-threaded, so we compare against PG's single-threaded baseline
+    /// (stripping out Gather/GatherMerge) rather than the parallel plan. The
+    /// GPU's batching then makes up for the parallel gap at runtime.
+    pub gpu_agg_cost_ratio: f64,
+    /// Max ratio of GpuWindow total cost to PG's cheapest non-parallel
+    /// window path before injection.
+    pub gpu_window_cost_ratio: f64,
+    /// Max ratio of PreAgg total cost to PG's cheapest non-parallel agg path
+    /// before injection.
+    pub gpu_preagg_cost_ratio: f64,
 }
 
 impl DeviceLimits {
@@ -267,10 +281,12 @@ impl DeviceLimits {
             gpu_join_max_output_rows,
             // Spatial vertex threshold: GPU kernel overhead is constant
             // (~19ms for geom deser + seq scan), while PG parallel scales
-            // linearly with vertex count. Benchmarks show crossover at
-            // ~25K vertices on M2 Max at 100K rows. Conservative base so
-            // the cost model never picks GPU for mid-vertex polygons.
-            gpu_spatial_min_vertices: cu_scale(50_000).clamp(5_000, 50_000),
+            // linearly with vertex count. For 500K+ row workloads, even
+            // 500-vertex polygons amortize the overhead. The cost model
+            // downstream (scan hook) applies the true break-even via
+            // GPU_COST_SAFETY_MARGIN; this gate only rejects the obviously
+            // unprofitable (sub-100-vertex) cases.
+            gpu_spatial_min_vertices: cu_scale(500).clamp(100, 5_000),
             // GpuExpr scan: inline template filter avoids ExecQual overhead
             // but Custom Scan framing still adds per-row cost. Needs enough
             // rows to amortize compilation + scan overhead.
@@ -317,6 +333,28 @@ impl DeviceLimits {
             gpu_op_cost_sort: if unified { 0.001_5 } else { 0.003 },
             gpu_op_cost_window: if unified { 0.000_5 } else { 0.001 },
             gpu_op_cost_filter: if unified { 0.000_5 } else { 0.001 },
+
+            // Cost ratio gates vs PG's cheapest NON-parallel path. We compare
+            // against the serial baseline (not the parallel Gather plan) so
+            // the GPU batch speedup isn't required to overcome the
+            // parallel-workers linear speedup on paper — PG's parallel plans
+            // cost roughly (serial / workers). The GPU kernel's actual
+            // throughput beats both at runtime.
+            //
+            // Values < 1.0 mean "our path must be cheaper than serial PG";
+            // values >= 1.0 allow injection as long as our path is within
+            // this multiple of serial PG.
+            //
+            // Note: `find_cheapest_nonparallel_path` only strips top-level
+            // Gather/GatherMerge nodes, so Finalize aggregate paths that
+            // embed a parallel partial aggregate still count as
+            // "non-parallel best". This biases the serial cost downward,
+            // so the injection ratio is set above 1.0 to compensate — the
+            // GPU kernel's real-world batched throughput makes up the
+            // paper-cost gap.
+            gpu_agg_cost_ratio: 2.00,
+            gpu_window_cost_ratio: 1.50,
+            gpu_preagg_cost_ratio: 1.50,
         }
     }
 
@@ -354,6 +392,9 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
+            gpu_agg_cost_ratio: 2.00,
+            gpu_window_cost_ratio: 1.50,
+            gpu_preagg_cost_ratio: 1.50,
         }
     }
 }

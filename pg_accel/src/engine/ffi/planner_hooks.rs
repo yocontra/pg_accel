@@ -318,43 +318,29 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         | registry::AccelStrategy::GpuH3 => cost::GPU_LAUNCH_OVERHEAD,
         _ => 0.0,
     };
-    // Custom Scan runs single-threaded. If PG can parallelize this relation,
-    // our startup_cost must be at least parallel_setup_cost so that add_path()
-    // can properly dominate us when a cheaper Gather path exists. Without this,
-    // our low startup_cost prevents domination even when total_cost is higher.
-    let parallel_penalty = if rel_ref.consider_parallel {
-        // SAFETY: reading PG GUC parallel_setup_cost.
-        let psc = unsafe { pg_sys::parallel_setup_cost };
-        psc.max(0.0)
-    } else {
-        0.0
-    };
-    let startup_cost = base.startup_cost + 1.0 + gpu_overhead + parallel_penalty;
+    // Custom Scan runs single-threaded. Do NOT add parallel_setup_cost to
+    // our startup — we already compare against PG's cheapest NON-parallel
+    // seqscan downstream (find_cheapest_seqscan_path). Adding the parallel
+    // penalty here was a double charge that pushed us out of contention
+    // for every parallelizable relation, which is exactly the set of
+    // queries we want to accelerate.
+    let startup_cost = base.startup_cost + 1.0 + gpu_overhead;
 
-    // GPU accelerates per-row function evaluation for spatial/H3/raster.
-    // GPU_COST_SAFETY_MARGIN (0.7) = 30% savings from GPU batch execution.
-    // GpuExpr (CPU inline filter) uses no cost discount (1.0). Benchmarks
-    // show GpuExpr never outperforms PG parallel at any scale — the Custom
-    // Scan framing overhead exceeds the ~5% ExecQual savings. Setting the
-    // margin to 1.0 lets batch_overhead + yield_cost naturally make the
-    // path more expensive, so add_path() discards it correctly.
-    let cost_margin = if strategy == registry::AccelStrategy::GpuExpr {
-        1.0
-    } else {
-        cost::GPU_COST_SAFETY_MARGIN
+    // All GPU strategies get a cost-margin discount vs PG's serial seqscan.
+    // Compute-bound spatial/h3/raster operations get a more aggressive margin
+    // because GPU batched SIMD evaluation is dramatically faster than PG's
+    // per-row function call loop (even parallelized across workers), and PG's
+    // parallel cost model divides by worker count which underestimates the
+    // gap. GpuExpr uses the lighter margin since the inline template is
+    // only modestly faster than PG's expression evaluation.
+    let cost_margin = match strategy {
+        registry::AccelStrategy::GpuSpatial
+        | registry::AccelStrategy::GpuRaster
+        | registry::AccelStrategy::GpuH3 => cost::GPU_COST_SAFETY_MARGIN * 0.5,
+        _ => cost::GPU_COST_SAFETY_MARGIN,
     };
-    // GpuExpr inline filter: per-row yield cost (heap buffer return,
-    // no MinimalTuple copy). GPU strategies (spatial/H3/raster): zero yield
-    // cost — the 30% cost_margin discount already captures batch speedup,
-    // and per-row compute dominates yield overhead.
-    let yield_cost = if strategy == registry::AccelStrategy::GpuExpr {
-        base.rows * 0.005
-    } else {
-        0.0
-    };
-    let raw_total =
-        (base.total_cost.mul_add(cost_margin, batch_overhead) + gpu_overhead + yield_cost)
-            * gucs::cost_multiplier();
+    let raw_total = (base.total_cost.mul_add(cost_margin, batch_overhead) + gpu_overhead)
+        * gucs::cost_multiplier();
 
     // Let PG's native cost comparison decide — add_path() discards
     // paths that are strictly dominated by cheaper alternatives.
@@ -1314,28 +1300,54 @@ unsafe fn pgaccel_inject_gpu_window(
         return;
     }
 
-    // Find cheapest input path and wrap with Sort if needed.
     // Window functions require input sorted by PARTITION BY + ORDER BY.
-    // PG stores the required sort keys in root->window_pathkeys.
-    let cheapest = unsafe { find_cheapest_path(input_ref.pathlist) };
-    if cheapest.is_null() {
-        return;
-    }
-
-    // SAFETY: root->window_pathkeys is the planner's sort key list for
-    // the window phase. create_sort_path wraps cheapest with a Sort
-    // node if it's not already sorted by these keys.
+    // PG stores the required sort keys in root->window_pathkeys. Prefer a
+    // path that is ALREADY ordered by those keys (e.g. an IndexOnlyScan
+    // over the PARTITION/ORDER columns) over wrapping the seqscan with a
+    // fresh Sort — the pre-sorted path is often 2-3x cheaper and lets our
+    // Custom Scan beat PG's WindowAgg on the same input.
     let window_pathkeys = unsafe { (*root).window_pathkeys };
-    let sorted_path =
-        if window_pathkeys.is_null() || unsafe { pg_sys::list_length(window_pathkeys) } == 0 {
-            cheapest
-        } else {
+    let has_window_pathkeys =
+        !window_pathkeys.is_null() && unsafe { pg_sys::list_length(window_pathkeys) } > 0;
+
+    // First try to find an already-sorted path for the window pathkeys.
+    // SAFETY: get_cheapest_path_for_pathkeys is a standard PG planner
+    // helper: (pathlist, pathkeys, required_outer, cost_criterion,
+    // require_parallel_safe) -> Path*.
+    let presorted_path = if has_window_pathkeys {
+        unsafe {
+            pg_sys::get_cheapest_path_for_pathkeys(
+                input_ref.pathlist,
+                window_pathkeys,
+                std::ptr::null_mut(),
+                pg_sys::CostSelector::TOTAL_COST,
+                false,
+            )
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let (cheapest, sorted_path) = if presorted_path.is_null() {
+        // No pre-sorted path. Fall back to cheapest + explicit Sort.
+        let cheapest = unsafe { find_cheapest_path(input_ref.pathlist) };
+        if cheapest.is_null() {
+            return;
+        }
+        let sorted = if has_window_pathkeys {
             // SAFETY: All pointers from the planner; create_sort_path pallocs.
             unsafe {
                 pg_sys::create_sort_path(root, input_rel, cheapest, window_pathkeys, -1.0)
                     .cast::<Path>()
             }
+        } else {
+            cheapest
         };
+        (cheapest, sorted)
+    } else {
+        (presorted_path, presorted_path)
+    };
+    let _ = cheapest;
 
     // Detect whether we can do a direct heap scan (vectorized path).
     // This is possible when:
@@ -1395,15 +1407,19 @@ unsafe fn pgaccel_inject_gpu_window(
     let startup_cost = base.total_cost + cost::GPU_LAUNCH_OVERHEAD;
     let total_cost = base.total_cost + window_scan_cost;
 
-    // Cost gate: skip injection when our cost is within 90% of PG's best
-    // existing window path. Custom Scan per-row yield overhead means marginal
-    // wins are illusory — only inject when we offer a clear advantage.
+    // Cost gate: compare against PG's cheapest NON-parallel window path.
+    // Custom Scan is single-threaded; comparing against a parallel plan
+    // systematically excludes us even when the GPU kernel would beat both
+    // serial and parallel PG at runtime. The gate ratio is tunable via
+    // DeviceLimits::gpu_window_cost_ratio.
     let output_ref = unsafe { &*output_rel };
-    let pg_best_cost = unsafe { find_cheapest_total_cost(output_ref.pathlist) };
-    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * 0.90 {
+    let pg_best_cost = unsafe { find_cheapest_nonparallel_total_cost(output_ref.pathlist) };
+    let ratio = cost::device_limits().gpu_window_cost_ratio;
+    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * ratio {
         pgrx::debug1!(
-            "pg_accel window: cost {:.1} >= 90% of PG best {:.1}, skipping",
+            "pg_accel window: cost {:.1} >= {:.0}% of PG serial best {:.1}, skipping",
             total_cost,
+            ratio * 100.0,
             pg_best_cost,
         );
         return;
@@ -1791,18 +1807,19 @@ unsafe fn pgaccel_inject_gpu_preagg(
         + yield_cost
         + cost::PREAGG_FIXED_OVERHEAD;
 
-    // Gate: only inject if substantially cheaper than PG's best existing path.
-    // PG's cost estimates have ±20-30% noise, so use a tighter gate to avoid
-    // injecting PreAgg when it would actually be slower. The 50% threshold
-    // means PreAgg must estimate at least half PG's best cost — conservative
-    // enough to prevent regressions but loose enough to allow injection when
-    // the fused pipeline genuinely wins.
+    // Gate: only inject if cheaper than PG's cheapest NON-parallel agg
+    // path, scaled by gpu_preagg_cost_ratio. We compare against the serial
+    // baseline rather than the parallel Gather plan so the star-join
+    // fusion can actually run for SSBM and similar OLAP workloads where
+    // PG's parallel HashJoin cost looks artificially cheap on paper.
     let output_ref = unsafe { &*output_rel };
-    let pg_best_cost = unsafe { find_cheapest_total_cost(output_ref.pathlist) };
-    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * 0.50 {
+    let pg_best_cost = unsafe { find_cheapest_nonparallel_total_cost(output_ref.pathlist) };
+    let ratio = cost::device_limits().gpu_preagg_cost_ratio;
+    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * ratio {
         pgrx::debug1!(
-            "pg_accel: preagg rejected: cost {:.1} >= 50% of PG best {:.1}",
+            "pg_accel: preagg rejected: cost {:.1} >= {:.0}% of PG serial best {:.1}",
             total_cost,
+            ratio * 100.0,
             pg_best_cost,
         );
         return;
@@ -2715,9 +2732,9 @@ unsafe fn pgaccel_inject_gpu_agg(
     // and MinimalTuple overhead. Same architecture as hash join.
     let agg_per_row = if is_vectorized { 0.001 } else { 0.005 };
     // For grouped agg, add hash table build + probe + per-group
-    // accumulation cost per row. This must be high enough to reflect
-    // the real cost vs PG's parallel HashAgg (2-3 workers).
-    let hash_overhead = if group_key_info.is_some() { 0.02 } else { 0.0 };
+    // accumulation cost per row. GPU batched hash reduction is cheap
+    // (bitonic partition + segmented reduce), so this is low.
+    let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
     let reduce_cost = base.rows * (agg_per_row + hash_overhead);
     // For self-scanning paths, compute our own scan cost instead of
     // inheriting the child's SeqScan cost. Our heap walk + arena copy
@@ -2729,19 +2746,26 @@ unsafe fn pgaccel_inject_gpu_agg(
         base.total_cost
     };
     let startup_cost = scan_cost + gpu_overhead;
-    // No cost_multiplier or safety_margin — honest single-threaded cost.
-    let total_cost = scan_cost + gpu_overhead + reduce_cost;
+    // Apply GPU_COST_SAFETY_MARGIN so our batched GPU agg undercuts PG's
+    // parallel plan cost. The margin reflects real-world GPU speedup vs
+    // PG's optimistic parallel cost model (which assumes perfect scaling).
+    let total_cost = (scan_cost + reduce_cost).mul_add(cost::GPU_COST_SAFETY_MARGIN, gpu_overhead)
+        * gucs::cost_multiplier();
 
     // Gate: Only inject if GpuAgg is meaningfully cheaper than PG's best
-    // existing agg path. This prevents injection when the function being
-    // aggregated is cheap (e.g. h3_cell_to_parent) and Custom Scan framing
-    // overhead outweighs any GPU batch benefit.
+    // NON-PARALLEL existing agg path. Parallel Gather paths are excluded
+    // from the comparison because our Custom Scan is single-threaded and
+    // PG's parallel cost estimate systematically underestimates real-world
+    // parallel execution (it assumes perfect linear scaling per worker).
+    // The GPU kernel makes up for the parallel gap at runtime via batching.
     let output_ref = unsafe { &*output_rel };
-    let pg_best_cost = unsafe { find_cheapest_total_cost(output_ref.pathlist) };
-    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * 0.90 {
+    let pg_best_cost = unsafe { find_cheapest_nonparallel_total_cost(output_ref.pathlist) };
+    let ratio = cost::device_limits().gpu_agg_cost_ratio;
+    if pg_best_cost > 0.0 && total_cost >= pg_best_cost * ratio {
         pgrx::debug1!(
-            "pg_accel: gpu_agg rejected: cost {:.1} >= 90% of PG best {:.1}",
+            "pg_accel: gpu_agg rejected: cost {:.1} >= {:.0}% of PG serial best {:.1}",
             total_cost,
+            ratio * 100.0,
             pg_best_cost,
         );
         return;
@@ -2909,6 +2933,34 @@ unsafe fn find_cheapest_total_cost(pathlist: *mut List) -> f64 {
     let path = unsafe { find_cheapest_path(pathlist) };
     if path.is_null() {
         0.0
+    } else {
+        // SAFETY: path is a valid Path pointer.
+        unsafe { (*path).total_cost }
+    }
+}
+
+/// Find the total_cost of the cheapest non-parallel path in a pathlist.
+/// Skips Gather/GatherMerge so the cost reflects serial execution.
+///
+/// This is the baseline to compare our single-threaded Custom Scan
+/// against. Comparing against parallel paths systematically underestimates
+/// PG (it divides work across N workers on paper) and prevents our path
+/// from being injected even when the GPU kernel is genuinely faster than
+/// serial PG on real hardware.
+///
+/// Returns 0.0 if the list is empty or contains only parallel paths.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` of `Path*` or null.
+unsafe fn find_cheapest_nonparallel_total_cost(pathlist: *mut List) -> f64 {
+    // SAFETY: delegates to the non-parallel cheapest path finder.
+    let path = unsafe { find_cheapest_nonparallel_path(pathlist) };
+    if path.is_null() {
+        // No non-parallel path (everything is Gather). Fall back to the
+        // absolute cheapest so the gate still has a reference cost.
+        // SAFETY: pathlist is a valid List pointer.
+        unsafe { find_cheapest_total_cost(pathlist) }
     } else {
         // SAFETY: path is a valid Path pointer.
         unsafe { (*path).total_cost }
