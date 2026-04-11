@@ -167,6 +167,15 @@ bench rows="1000000" iterations="30" warmup="5":
         --connection "host=localhost port=28817 dbname=postgres" \
         --format markdown
 
+# Run the rigorous benchmark suite: realistic GUCs, plan capture,
+# raw wall-clock timing (no EXPLAIN ANALYZE overhead).
+bench-rigorous rows="1000000" iterations="30" warmup="5":
+    cargo run --release -p pg_accel_bench -- run \
+        --iterations {{iterations}} --warmup {{warmup}} \
+        --connection "host=localhost port=28817 dbname=postgres" \
+        --format markdown \
+        --realistic-gucs --capture-plans --timing raw
+
 # === GPU Kernels ===
 
 acpp_prefix := env("HOME") + "/local"

@@ -20,6 +20,10 @@ pub struct IterationResult {
 pub struct WorkloadResult {
     pub name: String,
     pub description: String,
+    /// Workload category (`gpu_spatial`, `gpu_h3`, `ssbm`, etc.). Used for
+    /// rollup / geomean grouping in the report.
+    #[serde(default = "default_category")]
+    pub category: String,
     /// Row count this result was measured at.
     pub rows: usize,
     pub iterations: Vec<IterationResult>,
@@ -95,11 +99,18 @@ pub struct Methodology {
     pub statistical_tests: Vec<String>,
 }
 
+/// Default category used when deserializing legacy JSON reports that predate
+/// the `category` field.
+fn default_category() -> String {
+    "gpu".to_owned()
+}
+
 impl WorkloadResult {
     /// Build aggregated result from raw iterations (two-way: accel vs parallel).
     pub fn from_iterations(
         name: String,
         description: String,
+        category: String,
         rows: usize,
         iterations: Vec<IterationResult>,
     ) -> Self {
@@ -118,6 +129,7 @@ impl WorkloadResult {
         Self {
             name,
             description,
+            category,
             rows,
             accel_mean_ms: accel_mean,
             accel_stddev_ms: stats::stddev(&accel_times),
@@ -297,6 +309,56 @@ impl BenchReport {
             }
         }
 
+        // -------------------------------------------------------------------
+        // Geometric-mean headline table (leads the report)
+        // -------------------------------------------------------------------
+        //
+        // Speedups are ratios — arithmetic mean of ratios is biased upward and
+        // gives nonsense results (0.5x + 2.0x should average to 1.0, not
+        // 1.25). The geometric mean is the correct summary, and we report it
+        // per category so reviewers can see where the real wins are.
+        out.push_str("## Geometric Mean Speedup\n\n");
+        out.push_str(
+            "Geometric mean of per-workload speedups (`parallel_mean / accel_mean`), \
+             broken out by category. Significance is after Bonferroni correction \
+             (α = 0.05, family size = number of workload rows in this run).\n\n",
+        );
+        let n_tests = self.workloads.len();
+        let by_cat = stats::geomean_by_category(&self.workloads);
+        // Count of workloads per category and significant-after-Bonferroni count.
+        let mut cat_counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut cat_sig: BTreeMap<String, usize> = BTreeMap::new();
+        for w in &self.workloads {
+            *cat_counts.entry(w.category.clone()).or_insert(0) += 1;
+            let adj = stats::bonferroni_adjusted_p(w.p_value_vs_parallel, n_tests);
+            if adj.is_finite() && adj < 0.05 {
+                *cat_sig.entry(w.category.clone()).or_insert(0) += 1;
+            }
+        }
+        let _ = writeln!(
+            out,
+            "| Category | Workloads | Geomean vs Parallel | Significant (α=0.05, Bonferroni) |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|");
+        for (cat, gm) in &by_cat {
+            let count = cat_counts.get(cat).copied().unwrap_or(0);
+            let sig = cat_sig.get(cat).copied().unwrap_or(0);
+            let _ = writeln!(out, "| {cat} | {count} | {gm:.2}x | {sig} / {count} |");
+        }
+        // Overall geomean row.
+        let overall_speedups: Vec<f64> = self
+            .workloads
+            .iter()
+            .map(|w| w.speedup_vs_parallel)
+            .collect();
+        let overall_gm = stats::geomean(&overall_speedups);
+        let overall_sig = stats::significant_after_bonferroni(&self.workloads, 0.05);
+        let _ = writeln!(
+            out,
+            "| **overall** | **{n_tests}** | **{overall_gm:.2}x** | **{overall_sig} / {n_tests}** |"
+        );
+        out.push('\n');
+
         // Summary table: workload × scale → speedup
         out.push_str("## Results\n\n");
         out.push_str(
@@ -349,36 +411,125 @@ impl BenchReport {
                 let _ = writeln!(out, "**Query:** {}\n", w.description);
             }
 
-            // Per-scale table
+            // Per-scale table — includes both raw and Bonferroni-adjusted p.
             let _ = writeln!(
                 out,
-                "| Scale | Accel (ms) | PG Parallel (ms) | Speedup | Significant? |"
+                "| Scale | Accel (ms) | PG Parallel (ms) | Speedup | p | p (Bonferroni) | Significant? |"
             );
             let _ = writeln!(
                 out,
-                "|-------|------------|-------------------|---------|-------------|"
+                "|-------|------------|-------------------|---------|---|----------------|-------------|"
             );
             for &s in scales {
                 if let Some(w) = lookup.get(&(name.as_str(), s)) {
-                    let sig = if w.p_value_vs_parallel < 0.01 {
+                    let adj_p = stats::bonferroni_adjusted_p(w.p_value_vs_parallel, n_tests);
+                    let sig = if adj_p.is_finite() && adj_p < 0.01 {
                         "YES"
-                    } else if w.p_value_vs_parallel < 0.05 {
+                    } else if adj_p.is_finite() && adj_p < 0.05 {
                         "marginal"
                     } else {
                         "no"
                     };
                     let _ = writeln!(
                         out,
-                        "| {} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | **{:.2}x** | {} |",
+                        "| {} | {:.2} +/- {:.2} | {:.2} +/- {:.2} | **{:.2}x** | {:.4} | {:.4} | {} |",
                         format_rows(s),
                         w.accel_mean_ms,
                         w.accel_stddev_ms,
                         w.parallel_mean_ms,
                         w.parallel_stddev_ms,
                         w.speedup_vs_parallel,
+                        w.p_value_vs_parallel,
+                        adj_p,
                         sig,
                     );
                 }
+            }
+            out.push('\n');
+        }
+
+        // -------------------------------------------------------------------
+        // Regressions: workloads significantly slower than PG parallel.
+        // -------------------------------------------------------------------
+        //
+        // A workload makes the list only if it's BOTH slower by >10% AND
+        // statistically significant after Bonferroni correction. Sorted by
+        // absolute slowdown (worst first).
+        let mut regressions: Vec<&WorkloadResult> = self
+            .workloads
+            .iter()
+            .filter(|w| {
+                let adj_p = stats::bonferroni_adjusted_p(w.p_value_vs_parallel, n_tests);
+                w.speedup_vs_parallel < 0.90 && adj_p.is_finite() && adj_p < 0.05
+            })
+            .collect();
+        regressions.sort_by(|a, b| {
+            a.speedup_vs_parallel
+                .partial_cmp(&b.speedup_vs_parallel)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if !regressions.is_empty() {
+            out.push_str("## Regressions\n\n");
+            out.push_str(
+                "Workloads where pg_accel is **statistically significantly slower** than PG \
+                 parallel (>10% slowdown, Bonferroni-corrected p < 0.05). These are bugs to \
+                 investigate, not tuning targets.\n\n",
+            );
+            let _ = writeln!(
+                out,
+                "| Workload | Scale | Speedup | Accel (ms) | PG Parallel (ms) | p (Bonferroni) |"
+            );
+            let _ = writeln!(out, "|---|---|---|---|---|---|");
+            for w in &regressions {
+                let adj_p = stats::bonferroni_adjusted_p(w.p_value_vs_parallel, n_tests);
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {:.2}x | {:.2} | {:.2} | {:.4} |",
+                    w.name,
+                    format_rows(w.rows),
+                    w.speedup_vs_parallel,
+                    w.accel_mean_ms,
+                    w.parallel_mean_ms,
+                    adj_p,
+                );
+            }
+            out.push('\n');
+        }
+
+        // -------------------------------------------------------------------
+        // Non-Dispatching: workloads where speedup ≈ 1.0, meaning pg_accel
+        // almost certainly did not dispatch to the GPU (no custom scan, or
+        // dispatch rejected). These are the most informative diagnostic rows
+        // — they tell us which workloads never even got off the starting line.
+        // -------------------------------------------------------------------
+        let non_dispatch: Vec<&WorkloadResult> = self
+            .workloads
+            .iter()
+            .filter(|w| (w.speedup_vs_parallel - 1.0).abs() < 0.02)
+            .collect();
+        if !non_dispatch.is_empty() {
+            out.push_str("## Non-Dispatching Workloads\n\n");
+            out.push_str(
+                "Workloads where `|speedup − 1| < 0.02`. pg_accel almost certainly did not \
+                 dispatch a GPU path for these — check `benchmarks/plans.txt` (or run with \
+                 `--capture-plans`) to confirm whether a Custom Scan node appears in the \
+                 plan. If it does not, the planner hook is declining the path.\n\n",
+            );
+            let _ = writeln!(
+                out,
+                "| Workload | Scale | Speedup | Accel (ms) | PG Parallel (ms) |"
+            );
+            let _ = writeln!(out, "|---|---|---|---|---|");
+            for w in &non_dispatch {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {:.2}x | {:.2} | {:.2} |",
+                    w.name,
+                    format_rows(w.rows),
+                    w.speedup_vs_parallel,
+                    w.accel_mean_ms,
+                    w.parallel_mean_ms,
+                );
             }
             out.push('\n');
         }
@@ -647,6 +798,7 @@ mod tests {
         WorkloadResult::from_iterations(
             name.to_owned(),
             format!("Mock workload: {name}"),
+            "gpu".to_owned(),
             rows,
             iterations,
         )
@@ -695,8 +847,13 @@ mod tests {
             accel_ms: 5.0,
             parallel_ms: 10.0,
         }];
-        let result =
-            WorkloadResult::from_iterations("one".to_owned(), "desc".to_owned(), 1000, iters);
+        let result = WorkloadResult::from_iterations(
+            "one".to_owned(),
+            "desc".to_owned(),
+            "gpu".to_owned(),
+            1000,
+            iters,
+        );
         assert!((result.accel_mean_ms - 5.0).abs() < f64::EPSILON);
         assert!((result.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
     }

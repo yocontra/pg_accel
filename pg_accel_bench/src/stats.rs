@@ -260,6 +260,112 @@ pub fn detect_outliers(values: &[f64], sigma_threshold: f64) -> Vec<usize> {
         .collect()
 }
 
+/// Apply Bonferroni correction to a raw p-value.
+///
+/// Multiplies the p-value by the number of tests and clamps to `[0, 1]`.
+/// This is the standard Bonferroni family-wise error rate correction — for
+/// `n` independent tests, we adjust alpha by dividing by `n` (equivalently,
+/// multiply p by `n`) so the family-wise alpha stays at the target level.
+///
+/// Returns `NaN` if the input p is `NaN`. Returns `1.0` if `n_tests == 0`
+/// or the adjusted value exceeds 1.
+#[must_use]
+pub fn bonferroni_adjusted_p(p: f64, n_tests: usize) -> f64 {
+    if p.is_nan() {
+        return f64::NAN;
+    }
+    if n_tests == 0 {
+        return 1.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let n = n_tests as f64;
+    (p * n).clamp(0.0, 1.0)
+}
+
+/// Geometric mean of a slice of speedup ratios.
+///
+/// Computes `exp(mean(ln(x)))`. Non-finite or non-positive inputs are skipped
+/// with a warning printed to stderr. Returns `1.0` for an empty effective
+/// input (the "no effect" neutral element for ratios).
+///
+/// The geometric mean is the correct summary statistic for speedup ratios:
+/// arithmetic mean of ratios is biased upward and gives nonsense results
+/// (e.g. 0.5x and 2.0x should average to 1.0, not 1.25).
+#[must_use]
+pub fn geomean(speedups: &[f64]) -> f64 {
+    if speedups.is_empty() {
+        return 1.0;
+    }
+    let mut log_sum = 0.0_f64;
+    let mut count = 0_usize;
+    let mut skipped = 0_usize;
+    for &v in speedups {
+        if v.is_finite() && v > 0.0 {
+            log_sum += v.ln();
+            count += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    if skipped > 0 {
+        eprintln!(
+            "[stats::geomean] skipped {skipped} non-finite/non-positive value(s) of {}",
+            speedups.len()
+        );
+    }
+    if count == 0 {
+        return 1.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let n = count as f64;
+    (log_sum / n).exp()
+}
+
+/// Compute geometric mean speedup grouped by workload category.
+///
+/// Returns a map from category name to its geomean. Categories with no valid
+/// speedups are omitted. Uses `crate::report::WorkloadResult::category` and
+/// `speedup_vs_parallel` as inputs.
+#[must_use]
+pub fn geomean_by_category(
+    results: &[crate::report::WorkloadResult],
+) -> std::collections::BTreeMap<String, f64> {
+    use std::collections::BTreeMap;
+    let mut buckets: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for w in results {
+        buckets
+            .entry(w.category.clone())
+            .or_default()
+            .push(w.speedup_vs_parallel);
+    }
+    let mut out: BTreeMap<String, f64> = BTreeMap::new();
+    for (cat, speedups) in buckets {
+        let gm = geomean(&speedups);
+        out.insert(cat, gm);
+    }
+    out
+}
+
+/// Count the number of workloads that remain statistically significant
+/// after Bonferroni correction at the given alpha level.
+///
+/// The correction uses `n_tests = results.len()` — every workload in the
+/// set counts against the family-wise error rate.
+#[must_use]
+pub fn significant_after_bonferroni(
+    results: &[crate::report::WorkloadResult],
+    alpha: f64,
+) -> usize {
+    let n = results.len();
+    results
+        .iter()
+        .filter(|w| {
+            let adj = bonferroni_adjusted_p(w.p_value_vs_parallel, n);
+            adj.is_finite() && adj < alpha
+        })
+        .count()
+}
+
 /// Format a set of `BenchmarkResult`s as a markdown comparison table.
 #[must_use]
 #[cfg_attr(not(test), allow(dead_code))]
@@ -906,5 +1012,52 @@ mod tests {
         assert!(table.contains("baseline"));
         // Both rows present (skip header + separator)
         assert_eq!(table.lines().skip(2).count(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bonferroni / geomean
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bonferroni_basic() {
+        assert!((bonferroni_adjusted_p(0.01, 10) - 0.1).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_bonferroni_clamped_to_one() {
+        assert!((bonferroni_adjusted_p(0.5, 10) - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_bonferroni_zero_tests() {
+        assert!((bonferroni_adjusted_p(0.01, 0) - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_bonferroni_nan_passthrough() {
+        assert!(bonferroni_adjusted_p(f64::NAN, 5).is_nan());
+    }
+
+    #[test]
+    fn test_geomean_empty_is_one() {
+        assert!((geomean(&[]) - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_geomean_symmetric_ratios() {
+        // 0.5x and 2.0x should geomean to 1.0 — the whole point of geomean for ratios.
+        assert!((geomean(&[0.5, 2.0]) - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_geomean_skips_nonfinite() {
+        // Non-finite / non-positive inputs are skipped with a warning.
+        let gm = geomean(&[2.0, f64::NAN, -1.0, 2.0]);
+        assert!((gm - 2.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_geomean_all_invalid_returns_one() {
+        assert!((geomean(&[f64::NAN, -1.0, 0.0]) - 1.0).abs() < EPSILON);
     }
 }

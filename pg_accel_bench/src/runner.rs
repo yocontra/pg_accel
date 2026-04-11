@@ -1,3 +1,8 @@
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
 use postgres::{Client, NoTls};
 use rand::Rng;
 
@@ -7,6 +12,174 @@ use crate::workloads::Workload;
 /// The five row scales every benchmark is run at. Not configurable —
 /// the entire suite always runs at all five for reproducible, comparable results.
 pub const ROW_SCALES: &[usize] = &[1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
+/// Timing mode used to measure a single query iteration.
+///
+/// `ExplainAnalyze` uses `EXPLAIN ANALYZE` and parses `Execution Time`. This
+/// is the historical default, but `EXPLAIN ANALYZE` adds per-node
+/// instrumentation overhead which disproportionately penalizes non-custom-scan
+/// plans on short queries.
+///
+/// `RawWallClock` submits the query via `client.execute()` and measures
+/// wall-clock time with `Instant::now()` on the client side. No `EXPLAIN
+/// ANALYZE`, no instrumentation. This is the preferred mode for the
+/// publication-quality rigorous run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TimingMode {
+    /// Use `EXPLAIN ANALYZE` and parse `Execution Time`.
+    #[default]
+    ExplainAnalyze,
+    /// Use client-side `Instant` around a plain `execute()` call.
+    RawWallClock,
+}
+
+/// PostgreSQL GUC profile applied before a benchmark run.
+///
+/// Two built-in profiles:
+/// - `toy()` — the pgrx development defaults (small `shared_buffers`, tiny
+///   `work_mem`, 2 parallel workers). Useful for comparing against the
+///   historical benchmarks, but not representative of production.
+/// - `realistic()` — a production-sized profile tuned for a 64 GB / 12-core
+///   workstation (8 GB `shared_buffers`, 256 MB `work_mem`, 48 GB
+///   `effective_cache_size`, 8 parallel workers). These are the numbers a
+///   production DBA would actually use; benchmarking with `toy()` is
+///   methodologically weak.
+///
+/// `shared_buffers` and `max_worker_processes` are not reloadable — they
+/// require a full PG restart. If the caller is running against an existing
+/// `pgrx` postmaster, those two settings are skipped with a warning instead
+/// of attempting `ALTER SYSTEM`.
+#[derive(Clone, Debug)]
+pub struct GucProfile {
+    pub shared_buffers: String,
+    pub work_mem: String,
+    pub effective_cache_size: String,
+    pub max_parallel_workers_per_gather: u32,
+    pub max_worker_processes: u32,
+}
+
+impl GucProfile {
+    /// pgrx development defaults. The historically-used configuration.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn toy() -> Self {
+        Self {
+            shared_buffers: "128MB".to_owned(),
+            work_mem: "4MB".to_owned(),
+            effective_cache_size: "4GB".to_owned(),
+            max_parallel_workers_per_gather: 2,
+            max_worker_processes: 8,
+        }
+    }
+
+    /// Production-sized profile for a 64 GB / 12-core workstation.
+    #[must_use]
+    pub fn realistic() -> Self {
+        Self {
+            shared_buffers: "8GB".to_owned(),
+            work_mem: "256MB".to_owned(),
+            effective_cache_size: "48GB".to_owned(),
+            max_parallel_workers_per_gather: 8,
+            max_worker_processes: 16,
+        }
+    }
+
+    /// Apply this profile to a running PG backend via `ALTER SYSTEM SET`.
+    ///
+    /// Settings that are not reloadable (`shared_buffers`,
+    /// `max_worker_processes`) are attempted via `ALTER SYSTEM SET` plus
+    /// `pg_reload_conf()`, but a warning is logged because they only take
+    /// effect after a full PG restart. For session-level reloadable GUCs
+    /// (`work_mem`, `effective_cache_size`,
+    /// `max_parallel_workers_per_gather`), the call also issues a
+    /// session-level `SET` so subsequent queries on this connection see the
+    /// new value immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails. Individual `ALTER SYSTEM`
+    /// statements that fail are logged but not fatal — the benchmark
+    /// continues with whatever settings the server accepted.
+    pub fn apply(&self, connection: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut client = Client::connect(connection, NoTls)?;
+
+        // Reloadable GUCs — can take effect immediately via pg_reload_conf.
+        let reloadable: Vec<(&str, String)> = vec![
+            ("work_mem", self.work_mem.clone()),
+            ("effective_cache_size", self.effective_cache_size.clone()),
+            (
+                "max_parallel_workers_per_gather",
+                self.max_parallel_workers_per_gather.to_string(),
+            ),
+        ];
+        for (name, val) in &reloadable {
+            let sql = format!("ALTER SYSTEM SET {name} = '{val}'");
+            if let Err(e) = client.batch_execute(&sql) {
+                eprintln!("[gucs] ALTER SYSTEM SET {name} failed: {e}");
+            }
+        }
+
+        // Non-reloadable — needs a full restart to take effect. Record the
+        // attempt but warn the operator.
+        let non_reloadable: Vec<(&str, String)> = vec![
+            ("shared_buffers", self.shared_buffers.clone()),
+            (
+                "max_worker_processes",
+                self.max_worker_processes.to_string(),
+            ),
+        ];
+        for (name, val) in &non_reloadable {
+            let sql = format!("ALTER SYSTEM SET {name} = '{val}'");
+            if let Err(e) = client.batch_execute(&sql) {
+                eprintln!("[gucs] ALTER SYSTEM SET {name} failed: {e}");
+            } else {
+                eprintln!(
+                    "[gucs] WARNING: {name} = {val} recorded via ALTER SYSTEM but requires a \
+                     full PG restart to take effect — current benchmark run will still use the \
+                     old value."
+                );
+            }
+        }
+
+        if let Err(e) = client.batch_execute("SELECT pg_reload_conf()") {
+            eprintln!("[gucs] pg_reload_conf failed: {e}");
+        }
+        Ok(())
+    }
+}
+
+/// Runtime configuration knobs that are not per-workload.
+///
+/// Created once by the CLI layer and threaded through the runner. Keeping
+/// this as a single struct (vs. adding more parameters to `run_all`)
+/// contains the blast radius of future additions.
+#[derive(Clone, Debug)]
+pub struct BenchConfig {
+    pub iterations: usize,
+    pub warmup: usize,
+    pub seed: u64,
+    pub timing_mode: TimingMode,
+    /// If set, run `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` once per
+    /// workload/scale before the timed loop and append the result to this
+    /// path.
+    pub plans_capture_path: Option<PathBuf>,
+    /// If set, this profile is applied via `ALTER SYSTEM SET` before the
+    /// first workload runs.
+    pub guc_profile: Option<GucProfile>,
+}
+
+impl Default for BenchConfig {
+    fn default() -> Self {
+        Self {
+            iterations: 10,
+            warmup: 3,
+            seed: 42,
+            timing_mode: TimingMode::default(),
+            plans_capture_path: None,
+            guc_profile: None,
+        }
+    }
+}
 
 /// Execute setup SQL for a workload against the given connection string.
 ///
@@ -52,11 +225,33 @@ pub fn setup(
 /// # Errors
 ///
 /// Returns an error if the connection or any query fails.
+#[allow(dead_code)]
 pub fn run(
     connection: &str,
     workload: &dyn Workload,
     iterations: usize,
     warmup: usize,
+) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
+    run_with_timing(
+        connection,
+        workload,
+        iterations,
+        warmup,
+        TimingMode::ExplainAnalyze,
+    )
+}
+
+/// Like [`run`] but with an explicit timing mode.
+///
+/// # Errors
+///
+/// Returns an error if the connection or any query fails.
+pub fn run_with_timing(
+    connection: &str,
+    workload: &dyn Workload,
+    iterations: usize,
+    warmup: usize,
+    timing_mode: TimingMode,
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     let query = workload.query_sql();
     let pre_query = workload.pre_query_sql();
@@ -89,7 +284,13 @@ pub fn run(
         for &idx in &order {
             // DISCARD ALL resets session state before each measurement.
             mode_clients[idx].batch_execute("DISCARD ALL")?;
-            timings[idx] = run_with_mode(&mut mode_clients[idx], &query, modes[idx], &pre_query)?;
+            timings[idx] = run_with_mode(
+                &mut mode_clients[idx],
+                &query,
+                modes[idx],
+                &pre_query,
+                timing_mode,
+            )?;
         }
 
         let accel_ms = timings[0];
@@ -120,6 +321,7 @@ pub fn run(
     Ok(WorkloadResult::from_iterations(
         workload.name().to_owned(),
         workload.description().to_owned(),
+        workload.category().to_owned(),
         0, // rows filled in by caller
         results,
     ))
@@ -134,12 +336,13 @@ enum BenchMode {
     PgParallel,
 }
 
-/// Run a single EXPLAIN ANALYZE measurement with the given mode.
+/// Run a single measurement with the given mode and timing strategy.
 fn run_with_mode(
     client: &mut Client,
     query: &str,
     mode: BenchMode,
     pre_query: &[String],
+    timing_mode: TimingMode,
 ) -> Result<f64, Box<dyn std::error::Error>> {
     for sql in pre_query {
         client.batch_execute(sql)?;
@@ -158,7 +361,25 @@ fn run_with_mode(
             )?;
         }
     }
-    run_explain_analyze(client, query)
+    match timing_mode {
+        TimingMode::ExplainAnalyze => run_explain_analyze(client, query),
+        TimingMode::RawWallClock => run_raw_wall_clock(client, query),
+    }
+}
+
+/// Measure query wall time client-side with `Instant::now()` around a plain
+/// `execute()` call. No `EXPLAIN ANALYZE`, no per-node instrumentation
+/// overhead — this is the timing mode to use for publication-quality
+/// numbers.
+fn run_raw_wall_clock(client: &mut Client, query: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    // simple_query so multi-statement queries and SELECT ... still work; we
+    // don't care about the rows returned.
+    client.simple_query(query)?;
+    let elapsed = start.elapsed();
+    #[allow(clippy::cast_precision_loss)]
+    let ms = (elapsed.as_nanos() as f64) / 1.0e6;
+    Ok(ms)
 }
 
 /// Cleanup benchmark tables.
@@ -190,6 +411,7 @@ const MIN_ITERATIONS: usize = 10;
 ///
 /// Returns an error if setup, execution, or cleanup of any workload fails,
 /// or if `iterations` is below the minimum required for statistical validity.
+#[allow(dead_code)]
 pub fn run_all(
     connection: &str,
     workloads: &[Box<dyn Workload>],
@@ -197,15 +419,70 @@ pub fn run_all(
     warmup: usize,
     seed: u64,
 ) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
-    if iterations < MIN_ITERATIONS {
+    run_all_with_config(
+        connection,
+        workloads,
+        &BenchConfig {
+            iterations,
+            warmup,
+            seed,
+            ..BenchConfig::default()
+        },
+    )
+}
+
+/// Run every workload with a full [`BenchConfig`] (timing mode, GUC profile,
+/// plan capture).
+///
+/// # Errors
+///
+/// Returns an error if setup, execution, or cleanup of any workload fails,
+/// or if `config.iterations` is below the minimum required for statistical
+/// validity.
+pub fn run_all_with_config(
+    connection: &str,
+    workloads: &[Box<dyn Workload>],
+    config: &BenchConfig,
+) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
+    if config.iterations < MIN_ITERATIONS {
         return Err(format!(
             "minimum {MIN_ITERATIONS} iterations required for statistical validity \
-             (got {iterations})"
+             (got {})",
+            config.iterations
         )
         .into());
     }
 
+    if let Some(profile) = &config.guc_profile {
+        eprintln!("[gucs] applying profile: {profile:?}");
+        profile.apply(connection)?;
+    }
+
     ensure_extensions(connection, workloads)?;
+
+    // Truncate plans file once at the start of the run, if plan capture is
+    // enabled. Subsequent workload passes append.
+    if let Some(path) = &config.plans_capture_path {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+        {
+            Ok(mut f) => {
+                let _ = writeln!(
+                    f,
+                    "=== pg_accel benchmark plans — captured once per workload/scale ==="
+                );
+            }
+            Err(e) => eprintln!("[plans] could not open {}: {e}", path.display()),
+        }
+    }
 
     let mut results = Vec::with_capacity(workloads.len() * ROW_SCALES.len());
     let mut crashes: Vec<report::CrashedScale> = Vec::new();
@@ -213,7 +490,7 @@ pub fn run_all(
     for w in workloads {
         for &rows in ROW_SCALES {
             eprintln!("\n[scale] {} @ {} rows", w.name(), format_rows(rows));
-            match run_workload(connection, w.as_ref(), rows, seed, iterations, warmup) {
+            match run_workload_with_config(connection, w.as_ref(), rows, config) {
                 Ok(mut result) => {
                     result.rows = rows;
                     results.push(result);
@@ -237,8 +514,8 @@ pub fn run_all(
         results,
         crashes,
         Some(connection),
-        iterations,
-        warmup,
+        config.iterations,
+        config.warmup,
     ))
 }
 
@@ -265,6 +542,7 @@ fn wait_for_pg(connection: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Run a single workload end-to-end (setup → bench → cleanup).
+#[allow(dead_code)]
 fn run_workload(
     connection: &str,
     workload: &dyn Workload,
@@ -278,6 +556,71 @@ fn run_workload(
     result.rows = rows;
     cleanup(connection, workload)?;
     Ok(result)
+}
+
+/// Run a single workload end-to-end honouring `BenchConfig` (timing mode,
+/// plan capture).
+fn run_workload_with_config(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+    config: &BenchConfig,
+) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
+    setup(connection, workload, rows, config.seed)?;
+
+    // Plan capture happens once per workload/scale BEFORE the timed loop —
+    // the timed loop runs with whatever timing_mode the operator selected.
+    if let Some(path) = &config.plans_capture_path
+        && let Err(e) = capture_plan(connection, workload, rows, path)
+    {
+        eprintln!(
+            "[plans] capture failed for {} @ {rows}: {e}",
+            workload.name()
+        );
+    }
+
+    let mut result = run_with_timing(
+        connection,
+        workload,
+        config.iterations,
+        config.warmup,
+        config.timing_mode,
+    )?;
+    result.rows = rows;
+    cleanup(connection, workload)?;
+    Ok(result)
+}
+
+/// Capture `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output for a workload and
+/// append it to the plans file.
+///
+/// Run with `pg_accel.enabled = on` so the captured plan reflects the
+/// production-like dispatch decision.
+fn capture_plan(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect(connection, NoTls)?;
+    client.batch_execute("SET pg_accel.enabled = on")?;
+    client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
+    for sql in workload.pre_query_sql() {
+        client.batch_execute(&sql)?;
+    }
+    let explain = format!(
+        "EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}",
+        workload.query_sql()
+    );
+    let rows_out = client.query(&explain, &[])?;
+
+    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "\n=== {name} @ rows={rows} ===", name = workload.name())?;
+    for row in &rows_out {
+        let line: &str = row.get(0);
+        writeln!(f, "{line}")?;
+    }
+    Ok(())
 }
 
 /// Detect which extensions are installed in the target database.

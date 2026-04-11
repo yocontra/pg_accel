@@ -83,6 +83,25 @@ enum Command {
         /// Validate SQL and print workload plan without executing benchmarks.
         #[arg(long)]
         dry_run: bool,
+
+        /// Apply the realistic GUC profile (8 GB `shared_buffers`, 256 MB
+        /// `work_mem`, 48 GB `effective_cache_size`, 8 parallel workers)
+        /// before running. Non-reloadable settings (`shared_buffers`,
+        /// `max_worker_processes`) log a warning — they require a full PG
+        /// restart to take effect.
+        #[arg(long)]
+        realistic_gucs: bool,
+
+        /// Capture `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output once per
+        /// workload/scale to `benchmarks/plans.txt`.
+        #[arg(long)]
+        capture_plans: bool,
+
+        /// Timing mode: `explain` (EXPLAIN ANALYZE, historical default) or
+        /// `raw` (client-side `Instant::now()` wall clock with no
+        /// instrumentation overhead). Use `raw` for publication runs.
+        #[arg(long, default_value = "explain")]
+        timing: TimingArg,
     },
 
     /// Print a previously-stored report (reads JSON from stdin).
@@ -116,6 +135,44 @@ enum ReportFormat {
     Markdown,
     Json,
     Csv,
+}
+
+/// CLI wrapper around [`runner::TimingMode`] so clap can parse `--timing raw`
+/// without us leaking the runner type into the CLI surface.
+#[derive(Clone, Debug)]
+enum TimingArg {
+    Explain,
+    Raw,
+}
+
+impl std::fmt::Display for TimingArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Explain => write!(f, "explain"),
+            Self::Raw => write!(f, "raw"),
+        }
+    }
+}
+
+impl std::str::FromStr for TimingArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "explain" | "explain-analyze" | "analyze" => Ok(Self::Explain),
+            "raw" | "wall" | "wall-clock" => Ok(Self::Raw),
+            other => Err(format!("unknown timing mode: {other}")),
+        }
+    }
+}
+
+impl From<&TimingArg> for runner::TimingMode {
+    fn from(value: &TimingArg) -> Self {
+        match value {
+            TimingArg::Explain => Self::ExplainAnalyze,
+            TimingArg::Raw => Self::RawWallClock,
+        }
+    }
 }
 
 impl std::fmt::Display for ReportFormat {
@@ -174,6 +231,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             connection,
             format,
             dry_run,
+            realistic_gucs,
+            capture_plans,
+            timing,
         } => {
             if dry_run {
                 cmd_dry_run(workload.as_deref(), category.as_deref())
@@ -186,6 +246,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     warmup,
                     seed,
                     &format,
+                    realistic_gucs,
+                    capture_plans,
+                    &timing,
                 )
             }
         }
@@ -212,6 +275,7 @@ fn cmd_setup(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     connection: &str,
     workload_name: Option<&str>,
@@ -220,9 +284,28 @@ fn cmd_run(
     warmup: usize,
     seed: u64,
     format: &ReportFormat,
+    realistic_gucs: bool,
+    capture_plans: bool,
+    timing: &TimingArg,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workloads = resolve_workloads(workload_name, category)?;
-    let report = runner::run_all(connection, &workloads, iterations, warmup, seed)?;
+    let config = runner::BenchConfig {
+        iterations,
+        warmup,
+        seed,
+        timing_mode: runner::TimingMode::from(timing),
+        plans_capture_path: if capture_plans {
+            Some(std::path::PathBuf::from("benchmarks/plans.txt"))
+        } else {
+            None
+        },
+        guc_profile: if realistic_gucs {
+            Some(runner::GucProfile::realistic())
+        } else {
+            None
+        },
+    };
+    let report = runner::run_all_with_config(connection, &workloads, &config)?;
     print_report(&report, format)?;
     Ok(())
 }
