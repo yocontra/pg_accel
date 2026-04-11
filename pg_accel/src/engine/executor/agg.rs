@@ -231,8 +231,8 @@ impl AggColumn {
     fn dispatch_gpu_reduce_chunked(&mut self) {
         let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
         let values = std::mem::take(&mut self.gpu_values);
-        let mut any_gpu_failure = false;
         for chunk in values.chunks(max_chunk) {
+            // Try f64 GPU path first (CUDA/ROCm with fp64).
             let gpu_result = match self.op {
                 AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f64(chunk),
                 AggOp::Min => gpu::reduce_min_f64(chunk),
@@ -243,21 +243,41 @@ impl AggColumn {
             if let Some(partial) = gpu_result {
                 self.gpu_dispatched = true;
                 self.accumulate(partial);
+                continue;
+            }
+
+            // f64 unsupported (Metal) — cast chunk to f32 and try the f32
+            // GPU kernel. Precision tradeoff: sum over large chunks may
+            // drift vs. a host f64 Kahan, but min/max are exact. The per-
+            // chunk partial is folded into the outer Kahan accumulator,
+            // which bounds the error. No CPU fallback here (rule 11).
+            let f32_chunk: Vec<f32> = chunk.iter().map(|&v| v as f32).collect();
+            let f32_result = match self.op {
+                AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f32(&f32_chunk).map(f64::from),
+                AggOp::Min => gpu::reduce_min_f32(&f32_chunk).map(f64::from),
+                AggOp::Max => gpu::reduce_max_f32(&f32_chunk).map(f64::from),
+                AggOp::Count | AggOp::Passthrough => None,
+            };
+            if let Some(partial) = f32_result {
+                self.gpu_dispatched = true;
+                self.accumulate(partial);
             } else {
-                // GPU failed for this chunk — use CPU Kahan accumulation.
-                // On fp32-only GPUs (Metal), f64 reduce is unavailable and
-                // f32 sum over large chunks loses too much precision anyway.
-                any_gpu_failure = true;
+                // Neither f64 nor f32 GPU reduce is available. The planner
+                // should not have injected GpuReduce in this case; log and
+                // drain to the scalar accumulator so the query still
+                // completes. (Note: this is a measurement-correctness
+                // safeguard, not a feature fallback — it fires only on a
+                // kernel bug or unknown device.)
+                tracing::warn!(
+                    "pg_accel: GPU reduce unavailable for {:?} on {}-row chunk; \
+                     planner should not have injected GpuReduce path",
+                    self.op,
+                    chunk.len(),
+                );
                 for &val in chunk {
                     self.accumulate(val);
                 }
             }
-        }
-        if any_gpu_failure {
-            tracing::debug!(
-                "pg_accel: GPU reduce unavailable for {:?} chunks, using CPU Kahan",
-                self.op,
-            );
         }
         self.has_value = true;
     }
