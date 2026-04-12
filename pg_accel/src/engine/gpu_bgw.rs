@@ -55,6 +55,12 @@ pub enum GpuOp {
     FusedFilterReduceF32 = 20,
     FusedFilterMultiReduceF32 = 21,
     FusedFilterCountF32 = 22,
+    /// Fix Agent 4 (2026-04-11): fused multi-aggregate (SUM+MIN+MAX+COUNT)
+    /// in one kernel pass over the same input column. Used by hashagg/reduce
+    /// paths for the common GROUP BY query shape.
+    ReduceMultiF32 = 25,
+    ReduceMultiF64 = 26,
+    ReduceMultiI64 = 27,
     WindowRowNumber = 30,
     WindowLag = 31,
     WindowLead = 32,
@@ -115,9 +121,18 @@ pub struct GpuResponse {
     /// 0 = success (PGACCEL_OK), negative = error.
     pub status: i32,
     /// For scalar results (reduce sum/min/max), the result value.
+    /// For fused multi-reduce: carries SUM as f64.
     pub scalar_f64: f64,
     /// For integer scalar results (reduce count).
+    /// For fused multi-reduce: carries COUNT as i64.
     pub scalar_i64: i64,
+    /// Fix Agent 4 (2026-04-11): extra scalar slots for fused multi-reduce.
+    /// For ReduceMultiF32/F64: carries MIN as f64.
+    /// For ReduceMultiI64: carries MIN as i64 (reinterpreted).
+    pub scalar2_f64: f64,
+    /// For ReduceMultiF32/F64: carries MAX as f64.
+    /// For ReduceMultiI64: carries MAX as i64 (reinterpreted).
+    pub scalar3_f64: f64,
     /// Byte offset in DSM where output data was written (for sort, window).
     pub output_offset: u64,
     /// Byte length of output data.
@@ -130,6 +145,8 @@ impl Default for GpuResponse {
             status: 0,
             scalar_f64: 0.0,
             scalar_i64: 0,
+            scalar2_f64: 0.0,
+            scalar3_f64: 0.0,
             output_offset: 0,
             output_len: 0,
         }
@@ -357,8 +374,12 @@ impl GpuWorkerProcess {
             return None;
         }
 
-        // Read response: status(i32) + scalar_f64(f64) + scalar_i64(i64) — 20 bytes.
-        let mut hdr = [0u8; 4 + 8 + 8]; // 20 bytes
+        // Read response: status(i32) + scalar_f64(f64) + scalar_i64(i64)
+        //              + scalar2_f64(f64) + scalar3_f64(f64) — 36 bytes.
+        // Fix Agent 4 (2026-04-11): extended from 20 bytes to 36 bytes to
+        // carry the 4 outputs of the fused multi-aggregate reduce kernel
+        // in a single BGW round-trip.
+        let mut hdr = [0u8; 4 + 8 + 8 + 8 + 8]; // 36 bytes
         if stdout.read_exact(&mut hdr).is_err() {
             return None;
         }
@@ -366,11 +387,15 @@ impl GpuWorkerProcess {
         let status = i32::from_le_bytes(hdr[0..4].try_into().ok()?);
         let scalar_f64 = f64::from_le_bytes(hdr[4..12].try_into().ok()?);
         let scalar_i64 = i64::from_le_bytes(hdr[12..20].try_into().ok()?);
+        let scalar2_f64 = f64::from_le_bytes(hdr[20..28].try_into().ok()?);
+        let scalar3_f64 = f64::from_le_bytes(hdr[28..36].try_into().ok()?);
 
         Some(WorkerResponse {
             status,
             scalar_f64,
             scalar_i64,
+            scalar2_f64,
+            scalar3_f64,
         })
     }
 }
@@ -389,6 +414,9 @@ struct WorkerResponse {
     status: i32,
     scalar_f64: f64,
     scalar_i64: i64,
+    /// Fix Agent 4 (2026-04-11): extra scalars for fused multi-reduce.
+    scalar2_f64: f64,
+    scalar3_f64: f64,
 }
 
 /// Device info received from the GPU worker at startup.
@@ -630,6 +658,8 @@ fn execute_via_worker(worker: &mut GpuWorkerProcess, req: &GpuRequest) -> GpuRes
         resp.status = wr.status;
         resp.scalar_f64 = wr.scalar_f64;
         resp.scalar_i64 = wr.scalar_i64;
+        resp.scalar2_f64 = wr.scalar2_f64;
+        resp.scalar3_f64 = wr.scalar3_f64;
 
         // For sort ops, copy sorted data back from shm to DSM.
         if is_sort_op(op) && wr.status == 0 {
@@ -728,6 +758,11 @@ fn compute_shm_size(req: &GpuRequest) -> usize {
             n * std::mem::size_of::<f64>()
         }
         x if x == GpuOp::ReduceSumI64 as u32 => n * std::mem::size_of::<i64>(),
+        // Fix Agent 4 (2026-04-11): fused multi-reduce uses same shm layout
+        // as the scalar reduce — one contiguous array of the element type.
+        x if x == GpuOp::ReduceMultiF32 as u32 => n * std::mem::size_of::<f32>(),
+        x if x == GpuOp::ReduceMultiF64 as u32 => n * std::mem::size_of::<f64>(),
+        x if x == GpuOp::ReduceMultiI64 as u32 => n * std::mem::size_of::<i64>(),
         x if x == GpuOp::SortKvF32 as u32 => {
             n * std::mem::size_of::<f32>() + n * std::mem::size_of::<u32>()
         }

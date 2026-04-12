@@ -4,9 +4,14 @@
 /// resets all inherited Mach ports, establishing fresh XPC connections to
 /// MTLCompilerService — which is required for Metal shader JIT compilation.
 ///
-/// Protocol (binary, little-endian, v2 — POSIX shm for bulk data):
+/// Protocol (binary, little-endian, v3 — POSIX shm for bulk data):
 ///   Request  (stdin):  [op:u32][n_rows:u64][shm_name_len:u32][shm_name:u8*len][data_len:u64]
 ///   Response (stdout): [status:i32][scalar_f64:f64][scalar_i64:i64]
+///                     [scalar2_f64:f64][scalar3_f64:f64]  -- 36 bytes total
+///
+///   v3 (Fix Agent 4, 2026-04-11): Response extended from 20 to 36 bytes
+///   to carry the 4 outputs of the fused multi-aggregate reduce kernel
+///   (SUM/MIN/MAX/COUNT) in one BGW round-trip.
 ///
 ///   Bulk data is exchanged via a POSIX shared memory segment (shm_open).
 ///   The BGW creates the segment, the worker mmaps it, operates in-place,
@@ -65,6 +70,10 @@ enum GpuWorkerOp : uint32_t {
     ReduceSumI64 = 7,
     SortKvF32 = 14,
     SortKvF64 = 15,
+    // Fix Agent 4 (2026-04-11): fused multi-aggregate (SUM+MIN+MAX+COUNT).
+    ReduceMultiF32 = 25,
+    ReduceMultiF64 = 26,
+    ReduceMultiI64 = 27,
 };
 
 // ---------------------------------------------------------------------------
@@ -141,6 +150,8 @@ int main() {
                 write_exact(out_fd, &err_status, sizeof(err_status));
                 write_exact(out_fd, &zero_f64, sizeof(zero_f64));
                 write_exact(out_fd, &zero_i64, sizeof(zero_i64));
+                write_exact(out_fd, &zero_f64, sizeof(zero_f64));
+                write_exact(out_fd, &zero_f64, sizeof(zero_f64));
                 continue;
             }
             shm_ptr = static_cast<uint8_t*>(
@@ -154,6 +165,8 @@ int main() {
                 write_exact(out_fd, &err_status, sizeof(err_status));
                 write_exact(out_fd, &zero_f64, sizeof(zero_f64));
                 write_exact(out_fd, &zero_i64, sizeof(zero_i64));
+                write_exact(out_fd, &zero_f64, sizeof(zero_f64));
+                write_exact(out_fd, &zero_f64, sizeof(zero_f64));
                 continue;
             }
         }
@@ -162,6 +175,9 @@ int main() {
         int32_t status = 0;
         double scalar_f64 = 0.0;
         int64_t scalar_i64 = 0;
+        // Fix Agent 4 (2026-04-11): fused multi-reduce outputs.
+        double scalar2_f64 = 0.0;
+        double scalar3_f64 = 0.0;
 
         switch (op) {
         case ReduceSumF32: {
@@ -235,6 +251,50 @@ int main() {
             status = pgaccel_sort_kv_f64(keys, indices, n);
             break;
         }
+        case ReduceMultiF32: {
+            // Fix Agent 4 (2026-04-11): single-pass SUM+MIN+MAX+COUNT.
+            float out_sum = 0.0f, out_min = 0.0f, out_max = 0.0f;
+            int64_t out_count = 0;
+            status = pgaccel_reduce_multi_f32(
+                reinterpret_cast<const float*>(shm_ptr),
+                static_cast<size_t>(n_rows),
+                &out_sum, &out_min, &out_max, &out_count);
+            scalar_f64 = static_cast<double>(out_sum);   // SUM
+            scalar_i64 = out_count;                       // COUNT
+            scalar2_f64 = static_cast<double>(out_min);   // MIN
+            scalar3_f64 = static_cast<double>(out_max);   // MAX
+            break;
+        }
+        case ReduceMultiF64: {
+            double out_sum = 0.0, out_min = 0.0, out_max = 0.0;
+            int64_t out_count = 0;
+            status = pgaccel_reduce_multi_f64(
+                reinterpret_cast<const double*>(shm_ptr),
+                static_cast<size_t>(n_rows),
+                &out_sum, &out_min, &out_max, &out_count);
+            scalar_f64 = out_sum;
+            scalar_i64 = out_count;
+            scalar2_f64 = out_min;
+            scalar3_f64 = out_max;
+            break;
+        }
+        case ReduceMultiI64: {
+            int64_t out_sum = 0, out_min = 0, out_max = 0;
+            int64_t out_count = 0;
+            status = pgaccel_reduce_multi_i64(
+                reinterpret_cast<const int64_t*>(shm_ptr),
+                static_cast<size_t>(n_rows),
+                &out_sum, &out_min, &out_max, &out_count);
+            // For i64, SUM goes in scalar_i64 and COUNT can't also fit there.
+            // We pack SUM into scalar_f64 (reinterpret as f64 bit pattern),
+            // COUNT into scalar_i64, and MIN/MAX into scalar2/scalar3 as
+            // bit-reinterpreted f64.
+            std::memcpy(&scalar_f64, &out_sum, sizeof(double));
+            scalar_i64 = out_count;
+            std::memcpy(&scalar2_f64, &out_min, sizeof(double));
+            std::memcpy(&scalar3_f64, &out_max, sizeof(double));
+            break;
+        }
         default:
             fprintf(stderr, "pgaccel-gpu-worker: unknown op %u\n", op);
             status = PGACCEL_UNSUPPORTED;
@@ -250,9 +310,12 @@ int main() {
         }
 
         // Send response: only scalars, no bulk data (it's in shm).
+        // v3 (Fix Agent 4): 36 bytes total — status + 4 scalars.
         if (!write_exact(out_fd, &status, sizeof(status))) break;
         if (!write_exact(out_fd, &scalar_f64, sizeof(scalar_f64))) break;
         if (!write_exact(out_fd, &scalar_i64, sizeof(scalar_i64))) break;
+        if (!write_exact(out_fd, &scalar2_f64, sizeof(scalar2_f64))) break;
+        if (!write_exact(out_fd, &scalar3_f64, sizeof(scalar3_f64))) break;
     }
 
     fprintf(stderr, "pgaccel-gpu-worker: shutting down\n");

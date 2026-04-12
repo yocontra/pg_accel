@@ -5,7 +5,7 @@
 #[cfg(feature = "gpu")]
 pub mod bridge;
 
-mod fallback;
+mod stubs;
 
 pub mod three_layer;
 
@@ -24,7 +24,7 @@ pub use bridge::{
 
 #[cfg(not(feature = "gpu"))]
 #[allow(unused_imports)]
-pub use fallback::{
+pub use stubs::{
     PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
     PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
     PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
@@ -35,7 +35,7 @@ pub use fallback::{
 #[cfg(feature = "gpu")]
 pub use bridge::{cmp_op, reduce_op};
 #[cfg(not(feature = "gpu"))]
-pub use fallback::{cmp_op, reduce_op};
+pub use stubs::{cmp_op, reduce_op};
 
 // ---------------------------------------------------------------------------
 // Unified safe wrappers
@@ -50,7 +50,7 @@ fn init() -> PgaccelStatus {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_init()
+        stubs::pgaccel_init()
     }
 }
 
@@ -95,7 +95,7 @@ pub fn shutdown() -> PgaccelStatus {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_shutdown()
+        stubs::pgaccel_shutdown()
     }
 }
 
@@ -108,7 +108,7 @@ pub fn get_device_info() -> PgaccelDeviceInfo {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_get_device_info()
+        stubs::pgaccel_get_device_info()
     }
 }
 
@@ -121,7 +121,7 @@ pub fn get_caps() -> PgaccelPlatformCaps {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_get_caps()
+        stubs::pgaccel_get_caps()
     }
 }
 
@@ -138,7 +138,7 @@ pub fn gpu_exec_count() -> u64 {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_gpu_exec_count()
+        stubs::pgaccel_gpu_exec_count()
     }
 }
 
@@ -151,7 +151,7 @@ pub fn reset_gpu_exec_count() {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_reset_gpu_exec_count();
+        stubs::pgaccel_reset_gpu_exec_count();
     }
 }
 
@@ -164,7 +164,7 @@ pub fn cpu_fallback_count() -> u64 {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_cpu_fallback_count()
+        stubs::pgaccel_cpu_fallback_count()
     }
 }
 
@@ -177,7 +177,7 @@ pub fn reset_cpu_fallback_count() {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        fallback::pgaccel_reset_cpu_fallback_count();
+        stubs::pgaccel_reset_cpu_fallback_count();
     }
 }
 
@@ -373,7 +373,7 @@ pub fn sort_f32(data: &mut [f32]) -> Option<()> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_sort_f32(data.as_mut_ptr(), data.len());
+        let status = stubs::pgaccel_sort_f32(data.as_mut_ptr(), data.len());
         status.is_ok().then_some(())
     }
 }
@@ -389,7 +389,7 @@ pub fn sort_f64(data: &mut [f64]) -> Option<()> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_sort_f64(data.as_mut_ptr(), data.len());
+        let status = stubs::pgaccel_sort_f64(data.as_mut_ptr(), data.len());
         status.is_ok().then_some(())
     }
 }
@@ -405,7 +405,7 @@ pub fn sort_i32(data: &mut [i32]) -> Option<()> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_sort_i32(data.as_mut_ptr(), data.len());
+        let status = stubs::pgaccel_sort_i32(data.as_mut_ptr(), data.len());
         status.is_ok().then_some(())
     }
 }
@@ -421,7 +421,7 @@ pub fn sort_i64(data: &mut [i64]) -> Option<()> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_sort_i64(data.as_mut_ptr(), data.len());
+        let status = stubs::pgaccel_sort_i64(data.as_mut_ptr(), data.len());
         status.is_ok().then_some(())
     }
 }
@@ -454,7 +454,7 @@ pub fn sort_kv_f32(keys: &mut [f32], indices: &mut [u32]) -> Option<()> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_sort_kv_f32(keys.as_mut_ptr(), indices.as_mut_ptr(), count);
+        let status = stubs::pgaccel_sort_kv_f32(keys.as_mut_ptr(), indices.as_mut_ptr(), count);
         status.is_ok().then_some(())
     }
 }
@@ -486,7 +486,7 @@ pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_sort_kv_f64(keys.as_mut_ptr(), indices.as_mut_ptr(), count);
+        let status = stubs::pgaccel_sort_kv_f64(keys.as_mut_ptr(), indices.as_mut_ptr(), count);
         status.is_ok().then_some(())
     }
 }
@@ -555,7 +555,7 @@ pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_sum_f32(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_sum_f32(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -578,7 +578,7 @@ pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_min_f32(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_min_f32(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -601,7 +601,7 @@ pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_max_f32(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_max_f32(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -633,7 +633,7 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -656,7 +656,7 @@ pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_sum_i64(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_sum_i64(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -683,7 +683,7 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -710,8 +710,228 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result);
         status.is_ok().then_some(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fused multi-aggregate reduce (Fix Agent 4, 2026-04-11)
+// ---------------------------------------------------------------------------
+//
+// Single kernel pass computes SUM+MIN+MAX+COUNT over the same input column,
+// replacing four sequential BGW round-trips. The full benchmark regression
+// (geomean 0.50x on GpuReduce) was dominated by per-op BGW latency — this
+// cuts it to a single round-trip for the common aggregate shape.
+
+/// Result of a fused f32 multi-aggregate reduce.
+#[derive(Debug, Clone, Copy)]
+pub struct ReduceMultiF32 {
+    pub sum: f32,
+    pub min: f32,
+    pub max: f32,
+    pub count: i64,
+}
+
+/// Result of a fused f64 multi-aggregate reduce.
+#[derive(Debug, Clone, Copy)]
+pub struct ReduceMultiF64 {
+    pub sum: f64,
+    pub min: f64,
+    pub max: f64,
+    pub count: i64,
+}
+
+/// Result of a fused i64 multi-aggregate reduce.
+#[derive(Debug, Clone, Copy)]
+pub struct ReduceMultiI64 {
+    pub sum: i64,
+    pub min: i64,
+    pub max: i64,
+    pub count: i64,
+}
+
+/// GPU-accelerated fused f32 SUM+MIN+MAX+COUNT in a single pass.
+#[must_use]
+pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
+    let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
+    if data.is_empty() {
+        return Some(ReduceMultiF32 {
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        });
+    }
+    #[cfg(not(test))]
+    if use_bgw() {
+        // SAFETY: data.as_ptr() is valid for data.len() f32 values.
+        return unsafe {
+            crate::engine::gpu_client::bgw_reduce_multi_f32(data.as_ptr(), data.len()).map(|r| {
+                ReduceMultiF32 {
+                    sum: r.sum,
+                    min: r.min,
+                    max: r.max,
+                    count: r.count,
+                }
+            })
+        };
+    }
+    let mut out_sum = 0.0f32;
+    let mut out_min = 0.0f32;
+    let mut out_max = 0.0f32;
+    let mut out_count: i64 = 0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice; out_* are valid pointers.
+        let status = unsafe {
+            bridge::pgaccel_reduce_multi_f32(
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_sum,
+                &raw mut out_min,
+                &raw mut out_max,
+                &raw mut out_count,
+            )
+        };
+        status.is_ok().then_some(ReduceMultiF32 {
+            sum: out_sum,
+            min: out_min,
+            max: out_max,
+            count: out_count,
+        })
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = (&mut out_sum, &mut out_min, &mut out_max, &mut out_count);
+        None
+    }
+}
+
+/// GPU-accelerated fused f64 SUM+MIN+MAX+COUNT in a single pass.
+///
+/// On fp32-only devices (Metal), casts input to f32 and dispatches the
+/// f32 variant, matching the semantics of the scalar `reduce_sum_f64`
+/// path.
+#[must_use]
+pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
+    let _span = tracing::debug_span!("gpu.reduce_multi_f64", n = data.len()).entered();
+    if data.is_empty() {
+        return Some(ReduceMultiF64 {
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        });
+    }
+    #[cfg(not(test))]
+    if use_bgw() {
+        if !device_has_fp64() {
+            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+            return reduce_multi_f32(&f32_data).map(|r| ReduceMultiF64 {
+                sum: f64::from(r.sum),
+                min: f64::from(r.min),
+                max: f64::from(r.max),
+                count: r.count,
+            });
+        }
+        // SAFETY: data.as_ptr() is valid for data.len() f64 values.
+        return unsafe {
+            crate::engine::gpu_client::bgw_reduce_multi_f64(data.as_ptr(), data.len()).map(|r| {
+                ReduceMultiF64 {
+                    sum: r.sum,
+                    min: r.min,
+                    max: r.max,
+                    count: r.count,
+                }
+            })
+        };
+    }
+    let mut out_sum = 0.0f64;
+    let mut out_min = 0.0f64;
+    let mut out_max = 0.0f64;
+    let mut out_count: i64 = 0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice; out_* are valid pointers.
+        let status = unsafe {
+            bridge::pgaccel_reduce_multi_f64(
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_sum,
+                &raw mut out_min,
+                &raw mut out_max,
+                &raw mut out_count,
+            )
+        };
+        status.is_ok().then_some(ReduceMultiF64 {
+            sum: out_sum,
+            min: out_min,
+            max: out_max,
+            count: out_count,
+        })
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = (&mut out_sum, &mut out_min, &mut out_max, &mut out_count);
+        None
+    }
+}
+
+/// GPU-accelerated fused i64 SUM+MIN+MAX+COUNT in a single pass.
+#[must_use]
+pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
+    let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
+    if data.is_empty() {
+        return Some(ReduceMultiI64 {
+            sum: 0,
+            min: 0,
+            max: 0,
+            count: 0,
+        });
+    }
+    #[cfg(not(test))]
+    if use_bgw() {
+        // SAFETY: data.as_ptr() is valid for data.len() i64 values.
+        return unsafe {
+            crate::engine::gpu_client::bgw_reduce_multi_i64(data.as_ptr(), data.len()).map(|r| {
+                ReduceMultiI64 {
+                    sum: r.sum,
+                    min: r.min,
+                    max: r.max,
+                    count: r.count,
+                }
+            })
+        };
+    }
+    let mut out_sum: i64 = 0;
+    let mut out_min: i64 = 0;
+    let mut out_max: i64 = 0;
+    let mut out_count: i64 = 0;
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: data is a valid slice; out_* are valid pointers.
+        let status = unsafe {
+            bridge::pgaccel_reduce_multi_i64(
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_sum,
+                &raw mut out_min,
+                &raw mut out_max,
+                &raw mut out_count,
+            )
+        };
+        status.is_ok().then_some(ReduceMultiI64 {
+            sum: out_sum,
+            min: out_min,
+            max: out_max,
+            count: out_count,
+        })
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+        let _ = (&mut out_sum, &mut out_min, &mut out_max, &mut out_count);
+        None
     }
 }
 
@@ -729,7 +949,7 @@ pub fn reduce_count(mask: &[u8]) -> Option<usize> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_reduce_count(mask.as_ptr(), mask.len(), &raw mut result);
+        let status = stubs::pgaccel_reduce_count(mask.as_ptr(), mask.len(), &raw mut result);
         status.is_ok().then_some(result)
     }
 }
@@ -755,7 +975,7 @@ pub fn h3_get_resolution_bulk(cells: &[u64]) -> Option<Vec<i32>> {
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_h3_get_resolution_bulk(
+        let status = stubs::pgaccel_h3_get_resolution_bulk(
             cells.as_ptr(),
             cells.len(),
             resolutions.as_mut_ptr(),
@@ -782,7 +1002,7 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_h3_cell_to_parent_bulk(
+        let status = stubs::pgaccel_h3_cell_to_parent_bulk(
             cells.as_ptr(),
             cells.len(),
             parent_res,
@@ -811,7 +1031,7 @@ pub fn h3_grid_distance_bulk(cells_a: &[u64], cells_b: &[u64]) -> Option<Vec<i32
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_h3_grid_distance_bulk(
+        let status = stubs::pgaccel_h3_grid_distance_bulk(
             cells_a.as_ptr(),
             cells_b.as_ptr(),
             count,
@@ -850,7 +1070,7 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_h3_lat_lng_to_cell_bulk(
+        let status = stubs::pgaccel_h3_lat_lng_to_cell_bulk(
             lats.as_ptr().cast(),
             lngs.as_ptr().cast(),
             count,
@@ -917,7 +1137,7 @@ pub fn map_algebra(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_map_algebra(
+        let status = stubs::pgaccel_map_algebra(
             band_pixels.as_ptr(),
             pixel_count,
             pixel_type,
@@ -980,7 +1200,7 @@ pub fn raster_clip(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_raster_clip(
+        let status = stubs::pgaccel_raster_clip(
             rast_pixels,
             width,
             height,
@@ -1033,7 +1253,7 @@ pub fn raster_reclass(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_raster_reclass(
+        let status = stubs::pgaccel_raster_reclass(
             input_pixels,
             pixel_count,
             input_type,
@@ -1076,7 +1296,7 @@ pub fn expr_eval_predicate(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_expr_eval_predicate(
+        let status = stubs::pgaccel_expr_eval_predicate(
             std::ptr::from_ref(program),
             std::ptr::from_ref(batch),
             results.as_mut_ptr(),
@@ -1111,7 +1331,7 @@ pub fn expr_eval_project(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_expr_eval_project(
+        let status = stubs::pgaccel_expr_eval_project(
             std::ptr::from_ref(program),
             std::ptr::from_ref(batch),
             output.as_mut_ptr(),
@@ -1149,7 +1369,7 @@ pub fn expr_template_cmp_const(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_expr_template_cmp_const(
+        let status = stubs::pgaccel_expr_template_cmp_const(
             std::ptr::from_ref(batch),
             col_idx,
             cmp_opcode,
@@ -1181,7 +1401,7 @@ impl Drop for HashAggResult {
             }
             #[cfg(not(feature = "gpu"))]
             {
-                fallback::pgaccel_agg_free(self.state);
+                stubs::pgaccel_agg_free(self.state);
             }
         }
     }
@@ -1198,7 +1418,7 @@ impl HashAggResult {
         }
         #[cfg(not(feature = "gpu"))]
         {
-            fallback::pgaccel_agg_group_count(self.state)
+            stubs::pgaccel_agg_group_count(self.state)
         }
     }
 
@@ -1214,7 +1434,7 @@ impl HashAggResult {
         }
         #[cfg(not(feature = "gpu"))]
         {
-            fallback::pgaccel_agg_get_group_keys(self.state)
+            stubs::pgaccel_agg_get_group_keys(self.state)
         }
     }
 
@@ -1233,7 +1453,7 @@ impl HashAggResult {
             bridge::pgaccel_agg_get_results(self.state, agg_idx)
         };
         #[cfg(not(feature = "gpu"))]
-        let ptr = fallback::pgaccel_agg_get_results(self.state, agg_idx);
+        let ptr = stubs::pgaccel_agg_get_results(self.state, agg_idx);
 
         if ptr.is_null() {
             return None;
@@ -1257,7 +1477,7 @@ impl HashAggResult {
             bridge::pgaccel_agg_get_counts(self.state)
         };
         #[cfg(not(feature = "gpu"))]
-        let ptr = fallback::pgaccel_agg_get_counts(self.state);
+        let ptr = stubs::pgaccel_agg_get_counts(self.state);
 
         if ptr.is_null() {
             return None;
@@ -1321,7 +1541,7 @@ pub fn hash_agg_execute(
     };
 
     #[cfg(not(feature = "gpu"))]
-    let state = fallback::pgaccel_hash_agg_execute(
+    let state = stubs::pgaccel_hash_agg_execute(
         group_keys,
         group_null_mask,
         row_count,
@@ -1362,7 +1582,7 @@ impl Drop for GpuHashTable {
             }
             #[cfg(not(feature = "gpu"))]
             {
-                fallback::pgaccel_hash_join_free(self.ht);
+                stubs::pgaccel_hash_join_free(self.ht);
             }
         }
     }
@@ -1402,7 +1622,7 @@ impl GpuHashTable {
         };
 
         #[cfg(not(feature = "gpu"))]
-        let ht = fallback::pgaccel_hash_join_build(
+        let ht = stubs::pgaccel_hash_join_build(
             keys,
             null_mask.as_ptr(),
             indices.as_ptr(),
@@ -1450,7 +1670,7 @@ impl GpuHashTable {
         };
 
         #[cfg(not(feature = "gpu"))]
-        let status = fallback::pgaccel_hash_join_probe(
+        let status = stubs::pgaccel_hash_join_probe(
             self.ht,
             outer_keys,
             outer_null_mask.as_ptr(),
@@ -1498,7 +1718,7 @@ pub fn window_row_number(partition_starts: &[u8], results: &mut [i64]) -> Option
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_row_number(
+        let status = stubs::pgaccel_window_row_number(
             partition_starts.as_ptr(),
             count,
             results.as_mut_ptr(),
@@ -1533,7 +1753,7 @@ pub fn window_rank(partition_starts: &[u8], sort_keys: &[f64], results: &mut [i6
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_rank(
+        let status = stubs::pgaccel_window_rank(
             partition_starts.as_ptr(),
             sort_keys.as_ptr(),
             count,
@@ -1573,7 +1793,7 @@ pub fn window_dense_rank(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_dense_rank(
+        let status = stubs::pgaccel_window_dense_rank(
             partition_starts.as_ptr(),
             sort_keys.as_ptr(),
             count,
@@ -1617,7 +1837,7 @@ pub fn window_sum(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_sum(
+        let status = stubs::pgaccel_window_sum(
             partition_starts.as_ptr(),
             values.as_ptr(),
             nm_ptr,
@@ -1656,7 +1876,7 @@ pub fn window_count(partition_starts: &[u8], null_mask: &[u8], results: &mut [i6
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_count(
+        let status = stubs::pgaccel_window_count(
             partition_starts.as_ptr(),
             nm_ptr,
             count,
@@ -1712,7 +1932,7 @@ pub fn window_lag(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_lag(
+        let status = stubs::pgaccel_window_lag(
             partition_starts.as_ptr(),
             values.as_ptr(),
             nm_ptr,
@@ -1772,7 +1992,7 @@ pub fn window_lead(
     }
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_window_lead(
+        let status = stubs::pgaccel_window_lead(
             partition_starts.as_ptr(),
             values.as_ptr(),
             nm_ptr,
@@ -1840,7 +2060,7 @@ pub fn fused_filter_multi_reduce_f32(
 
     #[cfg(not(feature = "gpu"))]
     {
-        let status = fallback::pgaccel_fused_filter_multi_reduce_f32(
+        let status = stubs::pgaccel_fused_filter_multi_reduce_f32(
             filter_ptr,
             n,
             cmp,

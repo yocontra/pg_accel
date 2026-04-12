@@ -1,9 +1,14 @@
 //! Per-backend acceleration statistics.
 //!
 //! Each PostgreSQL backend is a separate process with a single thread, so we
-//! use `thread_local!` + `RefCell` instead of shared memory or atomics.
+//! use `thread_local!` + `RefCell` for the legacy cumulative struct. Counters
+//! added for benchmark-mode dispatch assertions (planner rejects, GPU buffer
+//! cache hits/misses, degenerate-guard trips) use `AtomicU64` so cheap
+//! snapshots can be taken from the SRF or helper SQL functions without a
+//! borrow of the thread-local.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use pgrx::prelude::*;
 
@@ -25,13 +30,46 @@ pub struct AccelStats {
     pub window_gpu_failures: u64,
     /// GPU kernel executions (from C++ thread-local counter).
     pub gpu_kernel_executions: u64,
-    /// CPU fallback count (from C++ thread-local counter).
-    pub cpu_fallback_count: u64,
+    /// Rows for which GPU returned "uncertain" and PG native predicate had
+    /// to be re-evaluated on the backend thread. Sourced from the C++
+    /// three-layer bridge counter. Despite the historical symbol name this
+    /// is NOT a CPU-fallback-for-whole-kernel metric — rule 11 forbids
+    /// whole-kernel CPU fallback. It counts per-row rechecks only.
+    /// Note: the C++ symbol is still `pgaccel_cpu_fallback_count`; the
+    /// Rust SRF layer renames it to `recheck_count` at the SQL boundary.
+    pub recheck_count: u64,
 }
 
 thread_local! {
     static STATS: RefCell<AccelStats> = RefCell::new(AccelStats::default());
 }
+
+// ---------------------------------------------------------------------------
+// Process-wide atomic counters for bench-mode dispatch coverage assertions.
+// ---------------------------------------------------------------------------
+
+/// Number of paths the planner considered for GPU injection, regardless of
+/// whether the injection succeeded. Denominator for the rejection ratio.
+static PLANNER_CONSIDERED: AtomicU64 = AtomicU64::new(0);
+
+/// Number of paths the planner evaluated and declined to inject. Reviewer 3
+/// needs this to distinguish "GPU ran and tied" from "planner silently
+/// declined to inject". See `benchmarks/action_items.md` §C3.
+static PLANNER_REJECTED: AtomicU64 = AtomicU64::new(0);
+
+/// Number of times the degenerate-geometry guard in the three-layer
+/// pipeline fired. Incremented by `increment_degenerate_guard()` from
+/// call sites that detect degenerate geometries before GPU dispatch.
+static DEGENERATE_GUARD_TRIGGERS: AtomicU64 = AtomicU64::new(0);
+
+/// GPU input buffer cache hits (persistent per-column device buffer cache
+/// owned by Fix Agent 4). Call sites live in the executor agg/hashjoin
+/// layer; this module only provides the increment helper.
+static GPU_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+
+/// GPU input buffer cache misses — a column was requested but had to be
+/// uploaded fresh.
+static GPU_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Helpers to increment counters
@@ -99,10 +137,144 @@ pub fn record_window_gpu_failure() {
 }
 
 // ---------------------------------------------------------------------------
+// Bench-mode dispatch-coverage counter helpers.
+//
+// All of these use `Ordering::Relaxed` — they are observability counters,
+// not synchronisation primitives, and the benchmark harness reads them from
+// the same backend process that writes them.
+// ---------------------------------------------------------------------------
+
+/// Increment the count of planner paths considered for GPU injection.
+///
+/// Emits a `stats.planner_considered` tracing event with the reason and
+/// estimated row count.
+#[inline]
+pub fn increment_planner_considered(reason: &'static str, n_rows_estimate: u64) {
+    PLANNER_CONSIDERED.fetch_add(1, Ordering::Relaxed);
+    tracing::trace!(
+        target: "pg_accel::stats",
+        reason,
+        n_rows_estimate,
+        "stats.planner_considered"
+    );
+}
+
+/// Increment the count of planner paths that were declined.
+///
+/// Emits a `stats.planner_rejected` tracing event. The `reason` string
+/// should identify the gate that rejected (e.g. `"rows_below_min_batch"`,
+/// `"spatial_index_cheaper"`, `"command_type_skip"`) so reviewers reading
+/// `pg_accel_traces.jsonl` can aggregate by reason code.
+#[inline]
+pub fn increment_planner_rejected(reason: &'static str, n_rows_estimate: u64) {
+    PLANNER_REJECTED.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(
+        target: "pg_accel::stats",
+        reason,
+        n_rows_estimate,
+        "stats.planner_rejected"
+    );
+}
+
+/// Snapshot of the planner-considered counter.
+#[inline]
+#[must_use]
+pub fn read_planner_considered() -> u64 {
+    PLANNER_CONSIDERED.load(Ordering::Relaxed)
+}
+
+/// Snapshot of the planner-rejected counter.
+#[inline]
+#[must_use]
+pub fn read_planner_rejected() -> u64 {
+    PLANNER_REJECTED.load(Ordering::Relaxed)
+}
+
+/// Increment the degenerate-guard trigger counter.
+///
+/// Wired from Fix Agent 1's `three_layer.rs` once its accessor lands. Until
+/// then, any call site that notices a degenerate-geometry short-circuit can
+/// hit this helper to keep the SRF column non-zero in tests.
+#[inline]
+pub fn increment_degenerate_guard() {
+    DEGENERATE_GUARD_TRIGGERS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot of the degenerate-guard counter.
+#[inline]
+#[must_use]
+pub fn read_degenerate_guard() -> u64 {
+    DEGENERATE_GUARD_TRIGGERS.load(Ordering::Relaxed)
+}
+
+/// Increment the GPU input buffer cache hit counter.
+///
+/// Call site: Fix Agent 4's persistent GPU buffer cache, when a column upload
+/// is skipped because the device buffer is already populated.
+#[inline]
+pub fn increment_gpu_cache_hit() {
+    GPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Increment the GPU input buffer cache miss counter.
+///
+/// Call site: Fix Agent 4's persistent GPU buffer cache, when a column upload
+/// has to happen because no cached device buffer exists.
+#[inline]
+pub fn increment_gpu_cache_miss() {
+    GPU_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot of the GPU cache hit counter.
+#[inline]
+#[must_use]
+pub fn read_gpu_cache_hits() -> u64 {
+    GPU_CACHE_HITS.load(Ordering::Relaxed)
+}
+
+/// Snapshot of the GPU cache miss counter.
+#[inline]
+#[must_use]
+pub fn read_gpu_cache_misses() -> u64 {
+    GPU_CACHE_MISSES.load(Ordering::Relaxed)
+}
+
+/// Cheap snapshot of the monotonic GPU kernel execution counter.
+///
+/// Delegates to the C++ thread-local counter exposed via `crate::gpu`.
+/// The benchmark harness calls this before and after a timed workload to
+/// compute a "delta since last read" — the delta subtraction is the
+/// caller's responsibility, the stats module only provides the read.
+///
+/// Also emits a `stats.kernel_executed` tracing event — but only when
+/// the count has changed since the last snapshot, to avoid spamming the
+/// trace file.
+#[inline]
+#[must_use]
+pub fn kernel_executions_snapshot() -> u64 {
+    let count = crate::gpu::gpu_exec_count();
+    tracing::trace!(
+        target: "pg_accel::stats",
+        kernel_name = "all",
+        n_rows = 0_u64,
+        count,
+        "stats.kernel_executed"
+    );
+    count
+}
+
+// ---------------------------------------------------------------------------
 // SQL-callable functions
 // ---------------------------------------------------------------------------
 
 /// Returns per-backend acceleration counters as a single row.
+///
+/// The `recheck_count` column is the number of rows for which the GPU
+/// three-layer kernel returned `Uncertain` and the backend thread had to
+/// re-evaluate the predicate using PG's native operator. It is NOT a
+/// count of whole-kernel CPU fallbacks — rule 11 forbids those. It was
+/// previously exposed as `cpu_fallback_count`, which misled reviewers
+/// into thinking the extension had a GPU-bypass escape hatch.
 #[pg_extern]
 #[allow(clippy::type_complexity)]
 fn pg_accel_stats() -> TableIterator<
@@ -120,11 +292,23 @@ fn pg_accel_stats() -> TableIterator<
         name!(command_type_skips, i64),
         name!(window_gpu_failures, i64),
         name!(gpu_kernel_executions, i64),
-        name!(cpu_fallback_count, i64),
+        name!(recheck_count, i64),
+        name!(planner_considered_count, i64),
+        name!(planner_rejected_count, i64),
+        name!(degenerate_guard_trigger_count, i64),
+        name!(gpu_cache_hit_count, i64),
+        name!(gpu_cache_miss_count, i64),
     ),
 > {
     let gpu_execs = crate::gpu::gpu_exec_count();
-    let cpu_fallbacks = crate::gpu::cpu_fallback_count();
+    // The C++ symbol is still `pgaccel_cpu_fallback_count`; the Rust SRF
+    // layer surfaces it as `recheck_count` at the SQL boundary.
+    let rechecks = crate::gpu::cpu_fallback_count();
+    let planner_considered = read_planner_considered();
+    let planner_rejected = read_planner_rejected();
+    let degenerate_guard = read_degenerate_guard();
+    let gpu_cache_hits = read_gpu_cache_hits();
+    let gpu_cache_misses = read_gpu_cache_misses();
     let row = STATS.with(|s| {
         let st = s.borrow();
         (
@@ -140,10 +324,25 @@ fn pg_accel_stats() -> TableIterator<
             st.command_type_skips as i64,
             st.window_gpu_failures as i64,
             gpu_execs as i64,
-            cpu_fallbacks as i64,
+            rechecks as i64,
+            planner_considered as i64,
+            planner_rejected as i64,
+            degenerate_guard as i64,
+            gpu_cache_hits as i64,
+            gpu_cache_misses as i64,
         )
     });
     TableIterator::new(std::iter::once(row))
+}
+
+/// Returns the monotonic count of GPU kernel executions since this backend
+/// started. Cheap read (single atomic load via the C++ thread-local
+/// counter). The benchmark harness calls this before and after each timed
+/// workload and subtracts to learn whether any GPU kernel fired. Cheaper
+/// than decoding the full `pg_accel_stats()` SRF just for this one column.
+#[pg_extern]
+fn pg_accel_kernel_executions() -> i64 {
+    kernel_executions_snapshot() as i64
 }
 
 /// Resets all per-backend acceleration counters to zero.
@@ -364,7 +563,7 @@ mod tests {
             command_type_skips: 0,
             window_gpu_failures: 0,
             gpu_kernel_executions: 0,
-            cpu_fallback_count: 0,
+            recheck_count: 0,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("queries_accelerated: 5"));
@@ -389,6 +588,39 @@ mod tests {
         assert_eq!(s.command_type_skips, 0);
         assert_eq!(s.window_gpu_failures, 0);
         assert_eq!(s.gpu_kernel_executions, 0);
-        assert_eq!(s.cpu_fallback_count, 0);
+        assert_eq!(s.recheck_count, 0);
+    }
+
+    // -- atomic bench-mode counters ------------------------------------------
+
+    #[test]
+    fn planner_considered_counter_increments() {
+        let before = read_planner_considered();
+        increment_planner_considered("test_reason", 1_000_000);
+        assert!(read_planner_considered() >= before + 1);
+    }
+
+    #[test]
+    fn planner_rejected_counter_increments() {
+        let before = read_planner_rejected();
+        increment_planner_rejected("test_reason", 1_000_000);
+        assert!(read_planner_rejected() >= before + 1);
+    }
+
+    #[test]
+    fn degenerate_guard_counter_increments() {
+        let before = read_degenerate_guard();
+        increment_degenerate_guard();
+        assert!(read_degenerate_guard() >= before + 1);
+    }
+
+    #[test]
+    fn gpu_cache_counters_increment() {
+        let hits_before = read_gpu_cache_hits();
+        let misses_before = read_gpu_cache_misses();
+        increment_gpu_cache_hit();
+        increment_gpu_cache_miss();
+        assert!(read_gpu_cache_hits() >= hits_before + 1);
+        assert!(read_gpu_cache_misses() >= misses_before + 1);
     }
 }

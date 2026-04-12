@@ -511,6 +511,38 @@ unsafe extern "C" {
     pub fn pgaccel_reduce_count(mask: *const u8, count: usize, result: *mut usize)
     -> PgaccelStatus;
 
+    // -- Fused multi-aggregate reduce kernels (Fix Agent 4, 2026-04-11) --
+    //
+    // Single-pass SUM+MIN+MAX+COUNT over the same input column. Replaces
+    // four sequential kernel launches (4x BGW round-trips eliminated).
+
+    pub fn pgaccel_reduce_multi_f32(
+        data: *const f32,
+        count: usize,
+        out_sum: *mut f32,
+        out_min: *mut f32,
+        out_max: *mut f32,
+        out_count: *mut i64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_multi_f64(
+        data: *const f64,
+        count: usize,
+        out_sum: *mut f64,
+        out_min: *mut f64,
+        out_max: *mut f64,
+        out_count: *mut i64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_multi_i64(
+        data: *const i64,
+        count: usize,
+        out_sum: *mut i64,
+        out_min: *mut i64,
+        out_max: *mut i64,
+        out_count: *mut i64,
+    ) -> PgaccelStatus;
+
     // -- H3 cell operations --
 
     pub fn pgaccel_h3_get_resolution_bulk(

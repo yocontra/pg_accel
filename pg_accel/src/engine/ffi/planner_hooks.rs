@@ -264,13 +264,30 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         }
     }
 
-    // Gate 4c: Vertex count threshold for spatial predicates.
-    // GPU overhead is ~19ms constant (geometry deser + seq scan), regardless
-    // of polygon complexity. PG parallel scales linearly with vertex count.
-    // Below the threshold, PG parallel is faster — skip Custom Scan injection
-    // entirely for true zero overhead.
+    // Gate 4c: Vertex count thresholds for spatial predicates.
+    //
+    // Two-sided gate:
+    //
+    // - LOWER gate: GPU overhead is ~19ms constant (geometry deser + seq
+    //   scan), regardless of polygon complexity. PG parallel scales linearly
+    //   with vertex count. Below the threshold, PG parallel is faster.
+    //
+    // - UPPER gate: The relevant work metric for point-in-polygon is the
+    //   product `vertex_count * row_count`. Megapoly fixtures (e.g.
+    //   `scale_1m_mega500v` with a 1M-vertex polygon and 10M rows) push
+    //   this product into the 10^13 range, which fp32 PIP kernels can't
+    //   amortize against transfer. Above the max product the megapoly
+    //   loser path is strictly worse than PG parallel — skip injection
+    //   entirely.
+    //
+    // Both thresholds come from `DeviceLimits` per CLAUDE.md rule 10;
+    // they are calibrated from the 2026-04-11 benchmark run and derived
+    // from the hardware profile in `from_profile`.
     if strategy == registry::AccelStrategy::GpuSpatial {
-        let min_verts = cost::device_limits().gpu_spatial_min_vertices;
+        let dl = cost::device_limits();
+        let min_verts = dl.gpu_spatial_min_vertices;
+        let min_product = dl.spatial_point_in_ring_break_even_verts_x_rows;
+        let max_product = dl.spatial_point_in_ring_max_verts_x_rows;
         // SAFETY: rel_ref.baserestrictinfo is a valid List from the planner.
         // Treat unknown vertex count (None) as 0 — conservatively reject
         // when the planner cannot confirm the polygon has enough vertices.
@@ -283,6 +300,30 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
                 "pg_accel: spatial vertex gate: vcount={} < min={}, skipping",
                 vcount,
                 min_verts
+            );
+            return;
+        }
+        // Compute the work product as u64 to avoid overflow at 10^13.
+        let work_product = (vcount as u64).saturating_mul(rows as u64);
+        if work_product < min_product {
+            pgrx::debug1!(
+                "pg_accel: spatial work-product gate: vcount={} * rows={} = {} < min {}, \
+                 skipping (below break-even)",
+                vcount,
+                rows,
+                work_product,
+                min_product
+            );
+            return;
+        }
+        if work_product > max_product {
+            pgrx::debug1!(
+                "pg_accel: spatial work-product gate: vcount={} * rows={} = {} > max {}, \
+                 skipping (megapoly loser path)",
+                vcount,
+                rows,
+                work_product,
+                max_product
             );
             return;
         }
@@ -2483,9 +2524,21 @@ unsafe fn pgaccel_inject_gpu_agg(
         return;
     }
 
-    // Gate: Reject GpuAgg wrapping small multi-join outputs.
-    // When the input is a join path with small output, the Custom Scan
-    // per-row yield overhead (~3µs/row) is not offset by GPU kernel savings.
+    // Gate: Reject GpuAgg wrapping pathologically small multi-join outputs.
+    // When the input is a join path with too few rows to amortize GPU
+    // kernel launch, PG's native parallel agg wins. The original gate
+    // rejected at `gpu_join_max_output_rows` (~100K) but that is the
+    // *output emission* threshold — GpuAgg emits O(groups) rows, not
+    // O(input) — so the relevant metric is the pre-agg input size.
+    // Use `gpu_reduce_min_rows` (or `gpu_hash_agg_min_rows` for grouped)
+    // as already applied above. This gate only rejects the degenerate
+    // case where the join path has essentially no rows but passed the
+    // earlier threshold through cardinality estimation noise.
+    //
+    // Relaxing this is what enables SSBM Q2/Q3/Q4 to dispatch: those
+    // queries build a multi-way star join whose intermediate result is
+    // in the tens of thousands of rows, still above the reduce/hashagg
+    // minimum but below the old 100K join gate.
     {
         let cheapest_input = unsafe { find_cheapest_path(input_ref.pathlist) };
         if !cheapest_input.is_null() {
@@ -2495,11 +2548,19 @@ unsafe fn pgaccel_inject_gpu_agg(
                 input_tag,
                 NodeTag::T_HashPath | NodeTag::T_NestPath | NodeTag::T_MergePath
             );
-            if is_join && rows < cost::device_limits().gpu_join_max_output_rows {
+            // Minimum input rows for a join-backed agg: use the appropriate
+            // per-kernel-class threshold. Grouped agg has higher break-even
+            // than plain reduce.
+            let min_join_input = if group_key_info.is_some() {
+                cost::device_limits().gpu_hash_agg_min_rows
+            } else {
+                cost::device_limits().gpu_reduce_min_rows
+            };
+            if is_join && rows < min_join_input {
                 pgrx::debug1!(
-                    "pg_accel: gpu_agg rejected: multi-join input with {} rows < join_max {}",
+                    "pg_accel: gpu_agg rejected: multi-join input with {} rows < min {}",
                     rows,
-                    cost::device_limits().gpu_join_max_output_rows,
+                    min_join_input,
                 );
                 return;
             }
@@ -3471,15 +3532,31 @@ fn is_gpu_compilable_clause(node: *mut pg_sys::Node) -> bool {
         }
         NodeTag::T_NullTest => true,
         NodeTag::T_ScalarArrayOpExpr => {
-            // IN-list: check that the array element type is numeric.
-            let saop = node.cast::<pg_sys::ScalarArrayOpExpr>();
-            // The first arg is the scalar, second is the array/list.
-            let args = unsafe { (*saop).args };
-            if args.is_null() {
-                return false;
-            }
-            let scalar = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
-            is_gpu_compilable_expr_node(scalar)
+            // IN-list: the planner hook only accepts clauses that the
+            // bytecode builder actually supports. `compile_node` in
+            // `custom_scan.rs` does NOT emit bytecode for
+            // `T_ScalarArrayOpExpr` today, so accepting the clause here
+            // caused GpuExpr injection to dispatch, then fall through to
+            // `CompiledExpr::DeferToPg` at executor time, which runs the
+            // scalar qual per tuple inside the Custom Scan framing. At
+            // 10M rows that pays the framing cost per row with zero GPU
+            // benefit (observed as `expr_multi_or @ 10M = 0.16x` — a 6x
+            // regression).
+            //
+            // Reject here so PG evaluates the IN-list natively with
+            // SeqScan + parallel workers (≈ 1.00x). Once `compile_node`
+            // emits an OR chain (or a dedicated IN kernel) for
+            // `ScalarArrayOpExpr`, this check should be restored to the
+            // element-type guard.
+            //
+            // NOTE: the old element-type check is preserved for reference:
+            //   let saop = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            //   let args = (*saop).args;
+            //   if args.is_null() { return false; }
+            //   let scalar = list_nth(args, 0).cast::<Node>();
+            //   is_gpu_compilable_expr_node(scalar)
+            let _ = node;
+            false
         }
         NodeTag::T_FuncExpr => {
             // FuncExpr: accept only known GPU-compilable functions.

@@ -31,6 +31,15 @@ static COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(1.0);
 static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
     GucSetting::<PgAccelLogLevel>::new(PgAccelLogLevel::Notice);
 
+/// Bench-mode dispatch coverage assertion. When `true`, the planner hook
+/// emits a loud `WARNING` (and increments `planner_rejected_count`) for
+/// every query above the row-count threshold that would otherwise have
+/// been silently declined. Exists so that benchmark runs can catch the
+/// "Bucket B" class of regressions where a workload appears to run on GPU
+/// because `pg_accel_stats()` looks non-zero, but the planner actually
+/// declined to inject for this particular query.
+static ASSERT_DISPATCH: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // ---------------------------------------------------------------------------
 // Log-level enum
 // ---------------------------------------------------------------------------
@@ -117,6 +126,17 @@ pub fn init_gucs() {
         GucContext::Userset,
         GucFlags::default(),
     );
+
+    GucRegistry::define_bool_guc(
+        c"pg_accel.assert_dispatch",
+        c"Assert that every large-enough query actually ran on the GPU.",
+        c"When true, the planner hook raises a WARNING for any query above \
+          the dispatch threshold that it declined to inject. Use during \
+          benchmark runs to catch silent-decline regressions.",
+        &ASSERT_DISPATCH,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +183,13 @@ pub fn cost_multiplier() -> f64 {
 #[must_use]
 pub fn log_level() -> PgAccelLogLevel {
     LOG_LEVEL.get()
+}
+
+/// Whether bench-mode dispatch-coverage assertion is enabled.
+#[inline]
+#[must_use]
+pub fn assert_dispatch() -> bool {
+    ASSERT_DISPATCH.get()
 }
 
 #[cfg(feature = "pg_test")]

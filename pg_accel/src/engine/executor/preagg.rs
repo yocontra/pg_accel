@@ -1271,10 +1271,9 @@ mod tests {
             }],
             group_col_attnos: vec![2, 3],
         };
-        let d2 = d.clone();
-        assert_eq!(d2.outer_attno, 1);
-        assert_eq!(d2.dim_filters.len(), 1);
-        assert_eq!(d2.group_col_attnos.len(), 2);
+        assert_eq!(d.outer_attno, 1);
+        assert_eq!(d.dim_filters.len(), 1);
+        assert_eq!(d.group_col_attnos.len(), 2);
     }
 
     #[test]

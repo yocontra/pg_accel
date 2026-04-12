@@ -1,6 +1,10 @@
 use super::Workload;
 
 /// Tests h3_latlng_to_cell computation at resolution 9 through the GPU H3 kernel.
+///
+/// Baseline uses h3-pg's `h3_lat_lng_to_cell` alias so the PG-parallel
+/// comparand runs stock h3-pg C code. See `h3_variants.rs` for the
+/// rationale and `benchmarks/action_items.md` §0.
 pub struct H3ResolutionSweep;
 
 impl Workload for H3ResolutionSweep {
@@ -9,8 +13,8 @@ impl Workload for H3ResolutionSweep {
     }
 
     fn description(&self) -> &'static str {
-        "h3_latlng_to_cell at resolution 9 \
-         — tests GPU H3 cell computation"
+        "h3_latlng_to_cell at resolution 9 — tests GPU H3 cell computation. \
+         Baseline uses h3-pg `h3_lat_lng_to_cell`."
     }
 
     fn category(&self) -> &'static str {
@@ -41,6 +45,16 @@ impl Workload for H3ResolutionSweep {
         "SELECT h3_latlng_to_cell(geom, 9), COUNT(*) \
          FROM bench_h3_sweep GROUP BY 1"
             .to_owned()
+    }
+
+    fn baseline_query_sql(&self) -> Option<String> {
+        // h3-pg alias `h3_lat_lng_to_cell` is not in pg_accel's
+        // adapter list — guaranteed bypass of the planner hook.
+        Some(
+            "SELECT public.h3_lat_lng_to_cell(geom, 9), COUNT(*) \
+             FROM bench_h3_sweep GROUP BY 1"
+                .to_owned(),
+        )
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

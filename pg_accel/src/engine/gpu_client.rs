@@ -365,6 +365,164 @@ pub unsafe fn bgw_reduce_sum_i64(data: *const i64, count: usize) -> Option<i64> 
     resp.filter(|r| r.status == 0).map(|r| r.scalar_i64)
 }
 
+// ---------------------------------------------------------------------------
+// Fused multi-aggregate reduce wrappers (Fix Agent 4, 2026-04-11)
+// ---------------------------------------------------------------------------
+
+/// Result of a fused multi-aggregate reduce: SUM/MIN/MAX/COUNT in one pass.
+#[derive(Debug, Clone, Copy)]
+pub struct ReduceMultiF32 {
+    pub sum: f32,
+    pub min: f32,
+    pub max: f32,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReduceMultiF64 {
+    pub sum: f64,
+    pub min: f64,
+    pub max: f64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ReduceMultiI64 {
+    pub sum: i64,
+    pub min: i64,
+    pub max: i64,
+    pub count: i64,
+}
+
+/// Fused multi-aggregate reduce (f32) via BGW.
+///
+/// Single kernel launch computes SUM+MIN+MAX+COUNT over `data` in one pass,
+/// replacing four sequential per-op BGW round-trips.
+///
+/// # Safety
+///
+/// `data` must point to `count` valid f32 values.
+#[must_use]
+pub unsafe fn bgw_reduce_multi_f32(data: *const f32, count: usize) -> Option<ReduceMultiF32> {
+    if count == 0 {
+        return Some(ReduceMultiF32 {
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        });
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), count * 4) };
+    let (handle, seg) = unsafe { create_dsm_with_data(slice)? };
+
+    let req = GpuRequest {
+        op: GpuOp::ReduceMultiF32 as u32,
+        dsm_handle: handle,
+        n_rows: count as u64,
+        input_offset: 0,
+        input_len: (count * 4) as u64,
+        ..GpuRequest::default()
+    };
+
+    let resp = unsafe { submit_and_wait(&req) };
+    // SAFETY: seg is a valid DSM segment we created.
+    unsafe { pg_sys::dsm_detach(seg) };
+
+    let r = resp.filter(|r| r.status == 0)?;
+    // Worker packs: scalar_f64=SUM, scalar_i64=COUNT,
+    //               scalar2_f64=MIN, scalar3_f64=MAX (all as f64/f32).
+    Some(ReduceMultiF32 {
+        sum: r.scalar_f64 as f32,
+        min: r.scalar2_f64 as f32,
+        max: r.scalar3_f64 as f32,
+        count: r.scalar_i64,
+    })
+}
+
+/// Fused multi-aggregate reduce (f64) via BGW.
+///
+/// # Safety
+///
+/// `data` must point to `count` valid f64 values.
+#[must_use]
+pub unsafe fn bgw_reduce_multi_f64(data: *const f64, count: usize) -> Option<ReduceMultiF64> {
+    if count == 0 {
+        return Some(ReduceMultiF64 {
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        });
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), count * 8) };
+    let (handle, seg) = unsafe { create_dsm_with_data(slice)? };
+
+    let req = GpuRequest {
+        op: GpuOp::ReduceMultiF64 as u32,
+        dsm_handle: handle,
+        n_rows: count as u64,
+        input_offset: 0,
+        input_len: (count * 8) as u64,
+        ..GpuRequest::default()
+    };
+
+    let resp = unsafe { submit_and_wait(&req) };
+    // SAFETY: seg is a valid DSM segment we created.
+    unsafe { pg_sys::dsm_detach(seg) };
+
+    let r = resp.filter(|r| r.status == 0)?;
+    Some(ReduceMultiF64 {
+        sum: r.scalar_f64,
+        min: r.scalar2_f64,
+        max: r.scalar3_f64,
+        count: r.scalar_i64,
+    })
+}
+
+/// Fused multi-aggregate reduce (i64) via BGW.
+///
+/// # Safety
+///
+/// `data` must point to `count` valid i64 values.
+#[must_use]
+pub unsafe fn bgw_reduce_multi_i64(data: *const i64, count: usize) -> Option<ReduceMultiI64> {
+    if count == 0 {
+        return Some(ReduceMultiI64 {
+            sum: 0,
+            min: 0,
+            max: 0,
+            count: 0,
+        });
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), count * 8) };
+    let (handle, seg) = unsafe { create_dsm_with_data(slice)? };
+
+    let req = GpuRequest {
+        op: GpuOp::ReduceMultiI64 as u32,
+        dsm_handle: handle,
+        n_rows: count as u64,
+        input_offset: 0,
+        input_len: (count * 8) as u64,
+        ..GpuRequest::default()
+    };
+
+    let resp = unsafe { submit_and_wait(&req) };
+    // SAFETY: seg is a valid DSM segment we created.
+    unsafe { pg_sys::dsm_detach(seg) };
+
+    let r = resp.filter(|r| r.status == 0)?;
+    // Worker packed i64 SUM/MIN/MAX into the f64 bit pattern slots.
+    let sum: i64 = i64::from_ne_bytes(r.scalar_f64.to_ne_bytes());
+    let min: i64 = i64::from_ne_bytes(r.scalar2_f64.to_ne_bytes());
+    let max: i64 = i64::from_ne_bytes(r.scalar3_f64.to_ne_bytes());
+    Some(ReduceMultiI64 {
+        sum,
+        min,
+        max,
+        count: r.scalar_i64,
+    })
+}
+
 /// Sort key-value f32 via BGW. Keys and indices are modified in-place.
 ///
 /// # Safety

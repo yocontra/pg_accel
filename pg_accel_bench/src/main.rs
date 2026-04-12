@@ -64,8 +64,11 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         iterations: usize,
 
-        /// Number of warmup iterations (excluded from statistics).
-        #[arg(long, default_value_t = 3)]
+        /// Number of warmup iterations (excluded from statistics). Must
+        /// be at least 5 for warm-cache measurements (action_items M14 /
+        /// Reviewer 1 Sin #14) to amortize shader compile and kernel
+        /// launch jitter.
+        #[arg(long, default_value_t = 5)]
         warmup: usize,
 
         /// Seed for deterministic random data generation.
@@ -97,11 +100,39 @@ enum Command {
         #[arg(long)]
         capture_plans: bool,
 
-        /// Timing mode: `explain` (EXPLAIN ANALYZE, historical default) or
-        /// `raw` (client-side `Instant::now()` wall clock with no
-        /// instrumentation overhead). Use `raw` for publication runs.
-        #[arg(long, default_value = "explain")]
+        /// Timing mode: `raw` (client-side `Instant::now()` wall clock,
+        /// no instrumentation overhead — **default**, used for
+        /// publication-quality numbers), `explain` (EXPLAIN ANALYZE,
+        /// historical default; penalizes parallel plans vs Custom Scan),
+        /// or `both` (capture both per-iteration for audit).
+        #[arg(long, default_value = "raw")]
         timing: TimingArg,
+
+        /// Cache cleanliness mode: `warm` (default — after ≥5 warmup
+        /// iterations), `cold` (`sync && purge` before every timed
+        /// iteration), or `both` (cold+warm columns side-by-side).
+        ///
+        /// Reviewer 2 §3(ii) / action_items M2: `DISCARD ALL` does not
+        /// clear the OS page cache. Use `cold` or `both` for any report
+        /// published externally.
+        #[arg(long, default_value = "warm")]
+        cache_mode: CacheModeArg,
+
+        /// Source distribution for the headline speedup calculation —
+        /// `median` (default, robust to 22% CV cold-start jitter on the
+        /// GPU side) or `mean` (backwards-compat with the historical
+        /// report).
+        #[arg(long, default_value = "median")]
+        speedup_from: SpeedupSourceArg,
+
+        /// Skip the postmaster-GUC mismatch hard-fail (action_items C4).
+        /// By default the harness refuses to run if `shared_buffers` or
+        /// any other `PGC_POSTMASTER` setting drifts from the requested
+        /// profile — because publishing a settings table that doesn't
+        /// match reality is worse than no table at all. This flag is
+        /// only intended for developer iteration.
+        #[arg(long)]
+        skip_guc_verify: bool,
     },
 
     /// Print a previously-stored report (reads JSON from stdin).
@@ -143,6 +174,7 @@ enum ReportFormat {
 enum TimingArg {
     Explain,
     Raw,
+    Both,
 }
 
 impl std::fmt::Display for TimingArg {
@@ -150,6 +182,7 @@ impl std::fmt::Display for TimingArg {
         match self {
             Self::Explain => write!(f, "explain"),
             Self::Raw => write!(f, "raw"),
+            Self::Both => write!(f, "both"),
         }
     }
 }
@@ -161,6 +194,7 @@ impl std::str::FromStr for TimingArg {
         match s.to_lowercase().as_str() {
             "explain" | "explain-analyze" | "analyze" => Ok(Self::Explain),
             "raw" | "wall" | "wall-clock" => Ok(Self::Raw),
+            "both" => Ok(Self::Both),
             other => Err(format!("unknown timing mode: {other}")),
         }
     }
@@ -171,6 +205,83 @@ impl From<&TimingArg> for runner::TimingMode {
         match value {
             TimingArg::Explain => Self::ExplainAnalyze,
             TimingArg::Raw => Self::RawWallClock,
+            TimingArg::Both => Self::Both,
+        }
+    }
+}
+
+/// CLI wrapper for cold/warm/both cache mode.
+#[derive(Clone, Debug)]
+enum CacheModeArg {
+    Cold,
+    Warm,
+    Both,
+}
+
+impl std::fmt::Display for CacheModeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cold => write!(f, "cold"),
+            Self::Warm => write!(f, "warm"),
+            Self::Both => write!(f, "both"),
+        }
+    }
+}
+
+impl std::str::FromStr for CacheModeArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "cold" => Ok(Self::Cold),
+            "warm" => Ok(Self::Warm),
+            "both" => Ok(Self::Both),
+            other => Err(format!("unknown cache mode: {other}")),
+        }
+    }
+}
+
+impl From<&CacheModeArg> for runner::CacheMode {
+    fn from(value: &CacheModeArg) -> Self {
+        match value {
+            CacheModeArg::Cold => Self::Cold,
+            CacheModeArg::Warm => Self::Warm,
+            CacheModeArg::Both => Self::Both,
+        }
+    }
+}
+
+/// CLI wrapper for median/mean speedup selection.
+#[derive(Clone, Debug)]
+enum SpeedupSourceArg {
+    Median,
+    Mean,
+}
+
+impl std::fmt::Display for SpeedupSourceArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Median => write!(f, "median"),
+            Self::Mean => write!(f, "mean"),
+        }
+    }
+}
+
+impl std::str::FromStr for SpeedupSourceArg {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "median" => Ok(Self::Median),
+            "mean" => Ok(Self::Mean),
+            other => Err(format!("unknown speedup source: {other}")),
+        }
+    }
+}
+
+impl From<&SpeedupSourceArg> for runner::SpeedupSource {
+    fn from(value: &SpeedupSourceArg) -> Self {
+        match value {
+            SpeedupSourceArg::Median => Self::Median,
+            SpeedupSourceArg::Mean => Self::Mean,
         }
     }
 }
@@ -234,6 +345,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             realistic_gucs,
             capture_plans,
             timing,
+            cache_mode,
+            speedup_from,
+            skip_guc_verify,
         } => {
             if dry_run {
                 cmd_dry_run(workload.as_deref(), category.as_deref())
@@ -249,6 +363,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     realistic_gucs,
                     capture_plans,
                     &timing,
+                    &cache_mode,
+                    &speedup_from,
+                    skip_guc_verify,
                 )
             }
         }
@@ -287,6 +404,9 @@ fn cmd_run(
     realistic_gucs: bool,
     capture_plans: bool,
     timing: &TimingArg,
+    cache_mode: &CacheModeArg,
+    speedup_from: &SpeedupSourceArg,
+    skip_guc_verify: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workloads = resolve_workloads(workload_name, category)?;
     let config = runner::BenchConfig {
@@ -294,6 +414,8 @@ fn cmd_run(
         warmup,
         seed,
         timing_mode: runner::TimingMode::from(timing),
+        cache_mode: runner::CacheMode::from(cache_mode),
+        speedup_source: runner::SpeedupSource::from(speedup_from),
         plans_capture_path: if capture_plans {
             Some(std::path::PathBuf::from("benchmarks/plans.txt"))
         } else {
@@ -304,6 +426,7 @@ fn cmd_run(
         } else {
             None
         },
+        skip_guc_verify,
     };
     let report = runner::run_all_with_config(connection, &workloads, &config)?;
     print_report(&report, format)?;

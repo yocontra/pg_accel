@@ -179,6 +179,63 @@ pub struct DeviceLimits {
     /// Max ratio of PreAgg total cost to PG's cheapest non-parallel agg path
     /// before injection.
     pub gpu_preagg_cost_ratio: f64,
+
+    // -- Per-kernel-class break-even thresholds -----------------------------
+    // These thresholds express the minimum input size (or work product) at
+    // which a given GPU kernel class is expected to beat PG's parallel path
+    // on the reference profile (M2 Max, 32 CUs, unified memory). They are
+    // calibrated from the 2026-04-11 benchmark run:
+    //
+    // - `reduce_*`: reduce_f32 wins at ≥ ~25k rows in unified memory, but
+    //   fp64 and i64 pay extra precision / emulation overhead.
+    // - `hashagg_min_rows_per_group`: below this avg rows/group ratio the
+    //   state fits in L2 and PG wins via vectorized CPU scan.
+    // - `sort_break_even_rows_{int,float}`: sort below this loses to PG
+    //   merge sort because of O(n log² n) kernel launches.
+    // - `spatial_point_in_ring_break_even_verts_x_rows`: the relevant work
+    //   metric for PIP is `vertex_count * row_count`; transfer + kernel
+    //   launch only amortises beyond this product.
+    // - `window_min_partition_rows`: per-partition minimum for tiled
+    //   partition dispatch to amortise launch overhead.
+    // - `expr_min_predicate_complexity_x_rows`: (bytecode instructions *
+    //   rows). Below this expr eval is dominated by Custom Scan framing.
+    // - `hashjoin_min_build_rows`: minimum inner build side; below, PG's
+    //   native HashJoin avoids DSM round-trip and wins.
+    //
+    // All derived from `cu_scale` / unified-memory factor where possible,
+    // and clamped so they remain sane on unusual hardware. These replace
+    // ad-hoc uses of `gucs::min_batch_size()` in extension-internal dispatch
+    // paths (the GUC remains for the historical public default).
+    /// Minimum rows for GPU reduce over fp32 values.
+    pub reduce_f32_break_even_rows: usize,
+    /// Minimum rows for GPU reduce over fp64 values.
+    pub reduce_f64_break_even_rows: usize,
+    /// Minimum rows for GPU reduce over i64 values.
+    pub reduce_i64_break_even_rows: usize,
+    /// Minimum average rows-per-group for GPU hash aggregation to beat PG.
+    /// Below this the per-group state fits in CPU L2.
+    pub hashagg_min_rows_per_group: usize,
+    /// Maximum per-group state size (bytes) before GPU hash agg loses to
+    /// L2-resident CPU aggregate. Above this the hashtable spills.
+    pub hashagg_max_state_bytes_per_group: usize,
+    /// Minimum rows for GPU sort on integer keys.
+    pub sort_break_even_rows_int: usize,
+    /// Minimum rows for GPU sort on floating-point keys.
+    pub sort_break_even_rows_float: usize,
+    /// Minimum `vertex_count * row_count` work product for GPU spatial
+    /// `point_in_ring` to amortise kernel launch and data transfer.
+    pub spatial_point_in_ring_break_even_verts_x_rows: u64,
+    /// Maximum `vertex_count * row_count` work product above which the
+    /// megapoly kernel becomes strictly worse than PG parallel (too much
+    /// work per row for fp32 precision recovery, recheck blow-up).
+    pub spatial_point_in_ring_max_verts_x_rows: u64,
+    /// Minimum rows per window partition for GPU window dispatch.
+    pub window_min_partition_rows: usize,
+    /// Minimum `(instructions * rows)` complexity for GpuExpr dispatch to
+    /// amortise Custom Scan framing cost.
+    pub expr_min_predicate_complexity_x_rows: u64,
+    /// Minimum inner build-side rows for GPU hash join dispatch.
+    pub hashjoin_min_build_rows: usize,
 }
 
 impl DeviceLimits {
@@ -281,12 +338,18 @@ impl DeviceLimits {
             gpu_join_max_output_rows,
             // Spatial vertex threshold: GPU kernel overhead is constant
             // (~19ms for geom deser + seq scan), while PG parallel scales
-            // linearly with vertex count. For 500K+ row workloads, even
-            // 500-vertex polygons amortize the overhead. The cost model
-            // downstream (scan hook) applies the true break-even via
-            // GPU_COST_SAFETY_MARGIN; this gate only rejects the obviously
-            // unprofitable (sub-100-vertex) cases.
-            gpu_spatial_min_vertices: cu_scale(500).clamp(100, 5_000),
+            // linearly with vertex count. This gate rejects the obviously
+            // unprofitable (sub-100-vertex) cases; the full work-product
+            // gate (`spatial_point_in_ring_break_even_verts_x_rows`, applied
+            // in `planner_hooks::pgaccel_set_rel_pathlist`) handles the
+            // actual break-even via `vertex_count * row_count`.
+            //
+            // Lowered from 500 to 100 as of the 2026-04-11 bench re-run:
+            // the old gate over-corrected and rejected `vsweep_256v` even at
+            // large row counts where the work product (~25M) cleared
+            // break-even. The work-product gate is the correct discriminator;
+            // keep this only as a hard floor for truly degenerate polygons.
+            gpu_spatial_min_vertices: cu_scale(100).clamp(32, 1_000),
             // GpuExpr scan: inline template filter avoids ExecQual overhead
             // but Custom Scan framing still adds per-row cost. Needs enough
             // rows to amortize compilation + scan overhead.
@@ -355,6 +418,34 @@ impl DeviceLimits {
             gpu_agg_cost_ratio: 2.00,
             gpu_window_cost_ratio: 1.50,
             gpu_preagg_cost_ratio: 1.50,
+
+            // Per-kernel-class break-even thresholds.
+            // f32 reduce wins earliest because transfer is cheapest; f64
+            // pays ~2x precision overhead, i64 pays divergence penalty.
+            reduce_f32_break_even_rows: cu_scale(25_000).clamp(4_000, 250_000),
+            reduce_f64_break_even_rows: cu_scale(50_000).clamp(8_000, 500_000),
+            reduce_i64_break_even_rows: cu_scale(75_000).clamp(10_000, 750_000),
+            // HashAgg: below ~32 rows/group PG's vectorized L2 aggregate
+            // beats GPU per-group atomics. Above, GPU amortises probe +
+            // yield overhead.
+            hashagg_min_rows_per_group: 32,
+            // ~1 MB L2 per core (M2 Max). Above this the hashtable spills
+            // out of L2 on CPU, so GPU wins.
+            hashagg_max_state_bytes_per_group: 256,
+            sort_break_even_rows_int: cu_scale(100_000).clamp(20_000, 1_000_000),
+            sort_break_even_rows_float: cu_scale(80_000).clamp(16_000, 800_000),
+            // Spatial PIP break-even: tuned so `vsweep_256v × 100k = 25.6M`
+            // passes (bucket B2 workload should dispatch) and
+            // `vsweep_4v × 1M = 4M` skips.
+            spatial_point_in_ring_break_even_verts_x_rows: 10_000_000,
+            // Upper gate: `scale_1m_mega500v` hits ~10^12 work items and is
+            // strictly worse on GPU than PG parallel. Reject above ~5 * 10^10.
+            spatial_point_in_ring_max_verts_x_rows: 50_000_000_000,
+            window_min_partition_rows: cu_scale(10_000).clamp(2_000, 100_000),
+            // GpuExpr: min_instrs=1, ~50k rows → 50k (trivial filter).
+            // Used as (program.instructions * rows) lower bound.
+            expr_min_predicate_complexity_x_rows: 50_000,
+            hashjoin_min_build_rows: cu_scale(5_000).clamp(1_000, 50_000),
         }
     }
 
@@ -395,6 +486,19 @@ impl DeviceLimits {
             gpu_agg_cost_ratio: 2.00,
             gpu_window_cost_ratio: 1.50,
             gpu_preagg_cost_ratio: 1.50,
+
+            reduce_f32_break_even_rows: 25_000,
+            reduce_f64_break_even_rows: 50_000,
+            reduce_i64_break_even_rows: 75_000,
+            hashagg_min_rows_per_group: 32,
+            hashagg_max_state_bytes_per_group: 256,
+            sort_break_even_rows_int: 100_000,
+            sort_break_even_rows_float: 80_000,
+            spatial_point_in_ring_break_even_verts_x_rows: 10_000_000,
+            spatial_point_in_ring_max_verts_x_rows: 50_000_000_000,
+            window_min_partition_rows: 10_000,
+            expr_min_predicate_complexity_x_rows: 50_000,
+            hashjoin_min_build_rows: 5_000,
         }
     }
 }

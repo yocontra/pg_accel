@@ -431,3 +431,264 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
     pgaccel_warn_cpu_fallback("reduce_count");
     return PGACCEL_ERROR_NO_DEVICE;
 }
+
+// ---------------------------------------------------------------------------
+// Fused multi-aggregate reduction (Fix Agent 4)
+//
+// Single-pass kernel that computes SUM+MIN+MAX+COUNT over one input buffer
+// in a single launch. Replaces four sequential kernel launches per chunk,
+// which for the benchmark workload translates to a 4x reduction in BGW IPC
+// round-trips at the executor level.
+//
+// Implementation strategy: a tree-reduce per work group over a struct of
+// (sum, min, max, count). Every lane loads one element, initializes its
+// local struct (or identity for out-of-range lanes), then pairwise combines
+// using work-group local memory. Partial results from all work groups are
+// combined on the host (O(num_groups) final merge).
+// ---------------------------------------------------------------------------
+
+#if PGACCEL_HAS_SYCL
+namespace {
+
+template <typename T>
+struct MultiAggPartial {
+    T sum;
+    T min;
+    T max;
+    int64_t count;
+};
+
+template <typename T>
+static inline MultiAggPartial<T> multi_identity() {
+    MultiAggPartial<T> p;
+    p.sum = T{0};
+    // Use type-specific sentinel values (+inf / I64_MAX for MIN identity).
+    if constexpr (std::is_same_v<T, float>) {
+        p.min = FLT_MAX;
+        p.max = -FLT_MAX;
+    } else if constexpr (std::is_same_v<T, double>) {
+        p.min = DBL_MAX;
+        p.max = -DBL_MAX;
+    } else {
+        p.min = std::numeric_limits<T>::max();
+        p.max = std::numeric_limits<T>::min();
+    }
+    p.count = 0;
+    return p;
+}
+
+template <typename T>
+static inline MultiAggPartial<T> multi_combine(MultiAggPartial<T> a,
+                                               MultiAggPartial<T> b) {
+    MultiAggPartial<T> r;
+    r.sum = a.sum + b.sum;
+    r.min = (b.min < a.min) ? b.min : a.min;
+    r.max = (b.max > a.max) ? b.max : a.max;
+    r.count = a.count + b.count;
+    return r;
+}
+
+template <typename T>
+pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data,
+                                       size_t count,
+                                       T* out_sum, T* out_min,
+                                       T* out_max, int64_t* out_count) {
+    if (count == 0) {
+        *out_sum = T{0};
+        *out_min = T{0};
+        *out_max = T{0};
+        *out_count = 0;
+        return PGACCEL_OK;
+    }
+
+    T* d_data = sycl::malloc_device<T>(count, q);
+    if (!d_data) return PGACCEL_OOM;
+    q.memcpy(d_data, data, count * sizeof(T)).wait();
+
+    size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
+
+    using Partial = MultiAggPartial<T>;
+    Partial* partials = sycl::malloc_shared<Partial>(num_groups, q);
+    if (!partials) {
+        sycl::free(d_data, q);
+        return PGACCEL_OOM;
+    }
+
+    Partial identity = multi_identity<T>();
+
+    try {
+        q.submit([&](sycl::handler& h) {
+            sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
+
+            h.parallel_for(
+                sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    size_t gid = item.get_global_id(0);
+                    size_t lid = item.get_local_id(0);
+                    size_t group_id = item.get_group(0);
+
+                    Partial p;
+                    if (gid < count) {
+                        T v = d_data[gid];
+                        p.sum = v;
+                        p.min = v;
+                        p.max = v;
+                        p.count = 1;
+                    } else {
+                        p = identity;
+                    }
+                    local_mem[lid] = p;
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    for (size_t stride = WG_SIZE / 2; stride > 0;
+                         stride >>= 1) {
+                        if (lid < stride) {
+                            local_mem[lid] = multi_combine(
+                                local_mem[lid], local_mem[lid + stride]);
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+                    }
+
+                    if (lid == 0) {
+                        partials[group_id] = local_mem[0];
+                    }
+                });
+        }).wait();
+    } catch (const std::exception& e) {
+        fprintf(stderr,
+                "pgaccel: SYCL tree_reduce_multi failed: %s\n", e.what());
+        sycl::free(d_data, q);
+        sycl::free(partials, q);
+        return PGACCEL_ERROR;
+    } catch (...) {
+        fprintf(stderr,
+                "pgaccel: SYCL tree_reduce_multi failed (unknown)\n");
+        sycl::free(d_data, q);
+        sycl::free(partials, q);
+        return PGACCEL_ERROR;
+    }
+
+    Partial final = identity;
+    for (size_t i = 0; i < num_groups; ++i) {
+        final = multi_combine(final, partials[i]);
+    }
+    *out_sum = final.sum;
+    *out_min = final.min;
+    *out_max = final.max;
+    *out_count = final.count;
+
+    sycl::free(d_data, q);
+    sycl::free(partials, q);
+    return PGACCEL_OK;
+}
+
+} // anonymous namespace
+#endif // PGACCEL_HAS_SYCL
+
+extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data,
+                                                    size_t count,
+                                                    float* out_sum,
+                                                    float* out_min,
+                                                    float* out_max,
+                                                    int64_t* out_count) {
+    if (!out_sum || !out_min || !out_max || !out_count) return PGACCEL_ERROR;
+    if (count == 0) {
+        *out_sum = 0.0f;
+        *out_min = 0.0f;
+        *out_max = 0.0f;
+        *out_count = 0;
+        return PGACCEL_OK;
+    }
+    if (!data) return PGACCEL_ERROR;
+
+#if PGACCEL_HAS_SYCL
+    try {
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = tree_reduce_multi_sycl<float>(
+                *q, data, count, out_sum, out_min, out_max, out_count);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr,
+                "pgaccel: reduce_multi_f32 SYCL failed: %s\n", e.what());
+    } catch (...) {
+    }
+#endif
+
+    pgaccel_warn_cpu_fallback("reduce_multi_f32");
+    return PGACCEL_ERROR_NO_DEVICE;
+}
+
+extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data,
+                                                    size_t count,
+                                                    double* out_sum,
+                                                    double* out_min,
+                                                    double* out_max,
+                                                    int64_t* out_count) {
+    if (!out_sum || !out_min || !out_max || !out_count) return PGACCEL_ERROR;
+    if (count == 0) {
+        *out_sum = 0.0;
+        *out_min = 0.0;
+        *out_max = 0.0;
+        *out_count = 0;
+        return PGACCEL_OK;
+    }
+    if (!data) return PGACCEL_ERROR;
+
+    pgaccel_platform_caps caps = pgaccel_get_caps();
+    if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
+
+#if PGACCEL_HAS_SYCL
+    try {
+        sycl::queue* q = get_queue();
+        if (q && q->get_device().has(sycl::aspect::fp64)) {
+            pgaccel_status st = tree_reduce_multi_sycl<double>(
+                *q, data, count, out_sum, out_min, out_max, out_count);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr,
+                "pgaccel: reduce_multi_f64 SYCL failed: %s\n", e.what());
+    } catch (...) {
+    }
+#endif
+
+    pgaccel_warn_cpu_fallback("reduce_multi_f64");
+    return PGACCEL_ERROR_NO_DEVICE;
+}
+
+extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
+                                                    size_t count,
+                                                    int64_t* out_sum,
+                                                    int64_t* out_min,
+                                                    int64_t* out_max,
+                                                    int64_t* out_count) {
+    if (!out_sum || !out_min || !out_max || !out_count) return PGACCEL_ERROR;
+    if (count == 0) {
+        *out_sum = 0;
+        *out_min = 0;
+        *out_max = 0;
+        *out_count = 0;
+        return PGACCEL_OK;
+    }
+    if (!data) return PGACCEL_ERROR;
+
+#if PGACCEL_HAS_SYCL
+    try {
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = tree_reduce_multi_sycl<int64_t>(
+                *q, data, count, out_sum, out_min, out_max, out_count);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr,
+                "pgaccel: reduce_multi_i64 SYCL failed: %s\n", e.what());
+    } catch (...) {
+    }
+#endif
+
+    pgaccel_warn_cpu_fallback("reduce_multi_i64");
+    return PGACCEL_ERROR_NO_DEVICE;
+}

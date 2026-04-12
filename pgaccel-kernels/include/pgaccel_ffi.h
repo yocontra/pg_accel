@@ -146,6 +146,45 @@ pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data, size_t count, int64_t
 /* Count nonzero bytes in mask (popcount) — all platforms */
 pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count, size_t* result);
 
+/* ── Fused multi-aggregate reductions (single-pass SUM+MIN+MAX+COUNT) ─── */
+/*
+ * Fix Agent 4 (2026-04-11): single kernel launch computes all four
+ * aggregates over the same input buffer in one pass. Replaces four
+ * sequential kernel launches (4x BGW round-trips eliminated).
+ *
+ * Output semantics:
+ *   out_sum   — Σ data[i]  (identity: 0)
+ *   out_min   — min data[i] over non-empty input (identity: +inf / I64_MAX)
+ *   out_max   — max data[i] over non-empty input (identity: -inf / I64_MIN)
+ *   out_count — count (identity: 0). Equal to `count` for these kernels
+ *               since we treat every element as non-null (null handling
+ *               is done on the caller side).
+ *
+ * NaN handling matches PG's SUM/MIN/MAX semantics: any NaN in the input
+ * propagates to out_sum; min/max use the NaN-returning compare (NaN
+ * propagates).
+ */
+pgaccel_status pgaccel_reduce_multi_f32(const float* data,
+                                         size_t count,
+                                         float* out_sum,
+                                         float* out_min,
+                                         float* out_max,
+                                         int64_t* out_count);
+
+pgaccel_status pgaccel_reduce_multi_f64(const double* data,
+                                         size_t count,
+                                         double* out_sum,
+                                         double* out_min,
+                                         double* out_max,
+                                         int64_t* out_count);
+
+pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
+                                         size_t count,
+                                         int64_t* out_sum,
+                                         int64_t* out_min,
+                                         int64_t* out_max,
+                                         int64_t* out_count);
+
 /* ── Spatial Predicate Kernels ────────────────────────────────────── */
 /*
  * Three-result model:

@@ -52,7 +52,9 @@ mod ssbm;
 // --- Mixed ---
 mod filtered_grouped_agg;
 mod mixed_variants;
-mod scale_sweep;
+// scale_sweep retired per action_items W9 (Reviewer 1 Sin #7) — the 5
+// identical rows at every scale were padding from a fixed fixture that
+// didn't actually vary with `rows`.
 mod spatial_agg;
 mod spatial_sort;
 // --- Regression ---
@@ -123,7 +125,31 @@ pub trait Workload: Send + Sync {
     }
 
     /// The query to benchmark under `EXPLAIN ANALYZE`.
+    ///
+    /// By default this is used for both the `Accel` side and the
+    /// `PgParallel` baseline. When the accel and baseline queries must
+    /// differ — for example the H3 category, where the baseline must
+    /// call the real `h3-pg` C functions rather than the same symbol
+    /// pg_accel intercepts — override [`Self::baseline_query_sql`] to
+    /// return a distinct SQL string.
     fn query_sql(&self) -> String;
+
+    /// Optional override for the SQL used by the `PgParallel` baseline.
+    ///
+    /// Returning `Some(sql)` makes the runner execute `sql` in baseline
+    /// mode and [`Self::query_sql`] in accel mode. Returning `None`
+    /// (the default) uses [`Self::query_sql`] for both sides.
+    ///
+    /// This exists because some workloads share a function name between
+    /// pg_accel's adapter matcher and the underlying extension (e.g.
+    /// `public.h3_latlng_to_cell` is recognized by both pg_accel and
+    /// `h3-pg`). Measuring "GPU accel vs stock h3-pg" requires the
+    /// baseline to take a call path pg_accel cannot intercept — either
+    /// a schema-qualified alias (`public.h3_lat_lng_to_cell`) or a
+    /// function whose name is not in the pg_accel adapter's list.
+    fn baseline_query_sql(&self) -> Option<String> {
+        None
+    }
 
     /// SQL statements to tear down benchmark tables.
     fn cleanup_sql(&self) -> Vec<String>;
@@ -205,121 +231,41 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SpatialFilter),
         Box::new(SpatialComplexPoly),
         Box::new(SpatialSelectivity),
-        // --- GPU Spatial Megapoly (vertex-count sweep) ---
-        Box::new(spatial_megapoly::SpatialMegaPoly {
-            name: "spatial_mega_100v",
-            description: "ST_Intersects ~100-vertex polygon — compute-bound GPU",
-            segments: 25,
-        }),
-        Box::new(spatial_megapoly::SpatialMegaPoly {
-            name: "spatial_mega_250v",
-            description: "ST_Intersects ~250-vertex polygon — compute-bound GPU",
-            segments: 63,
-        }),
-        Box::new(spatial_megapoly::SpatialMegaPoly {
-            name: "spatial_mega_500v",
-            description: "ST_Intersects ~500-vertex polygon — compute-bound GPU",
-            segments: 125,
-        }),
+        // --- GPU Spatial Megapoly (action_items W7) ---
+        // Collapsed from `spatial_mega_{100,250,500,1k,2k,5k}v` to one
+        // representative. All six wrapped the same `point_in_ring` kernel;
+        // the remaining five added no information beyond a single pick.
         Box::new(spatial_megapoly::SpatialMegaPoly {
             name: "spatial_mega_1kv",
-            description: "ST_Intersects ~1000-vertex polygon — heavily compute-bound GPU",
+            description: "ST_Intersects ~1000-vertex polygon — representative compute-bound GPU",
             segments: 250,
         }),
-        Box::new(spatial_megapoly::SpatialMegaPoly {
-            name: "spatial_mega_2kv",
-            description: "ST_Intersects ~2000-vertex polygon — massively compute-bound GPU",
-            segments: 500,
-        }),
-        Box::new(spatial_megapoly::SpatialMegaPoly {
-            name: "spatial_mega_5kv",
-            description: "ST_Intersects ~5000-vertex polygon — extreme compute-bound GPU",
-            segments: 1250,
-        }),
-        // --- Vertex sweep (0→1M vertices, crossover analysis) ---
+        // --- Vertex sweep (action_items W6 + W10) ---
+        // Collapsed from 17 variants (`vsweep_{4,16,32,64,128,256,500,750,
+        // 1k,1500,2k,3k,5k,10k,25k,50k,100k}v`) to 4 representatives:
+        // `vsweep_low (32v)`, `vsweep_mid (1kv)`, `vsweep_high (10kv)`,
+        // `vsweep_pathological (100kv)`. Reviewer 1 Sin #6: 85 rows from
+        // one kernel. W10: category moved from `vertex_sweep` to
+        // `gpu_spatial` (vsweep was a parameter sweep, not a separate
+        // kernel class — see VertexSweep::category()).
         Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_4v",
-            description: "ST_Intersects ~4-vertex polygon (rectangle)",
-            segments: 1,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_16v",
-            description: "ST_Intersects ~16-vertex polygon",
-            segments: 4,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_32v",
-            description: "ST_Intersects ~32-vertex polygon",
+            name: "vsweep_low",
+            description: "ST_Intersects ~32-vertex polygon — below GPU break-even",
             segments: 8,
         }),
         Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_64v",
-            description: "ST_Intersects ~64-vertex polygon",
-            segments: 16,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_128v",
-            description: "ST_Intersects ~128-vertex polygon",
-            segments: 32,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_256v",
-            description: "ST_Intersects ~256-vertex polygon",
-            segments: 64,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_500v",
-            description: "ST_Intersects ~500-vertex polygon",
-            segments: 125,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_750v",
-            description: "ST_Intersects ~750-vertex polygon (near crossover)",
-            segments: 188,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_1kv",
-            description: "ST_Intersects ~1000-vertex polygon",
+            name: "vsweep_mid",
+            description: "ST_Intersects ~1000-vertex polygon — around GPU break-even",
             segments: 250,
         }),
         Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_1500v",
-            description: "ST_Intersects ~1500-vertex polygon",
-            segments: 375,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_2kv",
-            description: "ST_Intersects ~2000-vertex polygon",
-            segments: 500,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_3kv",
-            description: "ST_Intersects ~3000-vertex polygon",
-            segments: 750,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_5kv",
-            description: "ST_Intersects ~5000-vertex polygon",
-            segments: 1250,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_10kv",
-            description: "ST_Intersects ~10000-vertex polygon",
+            name: "vsweep_high",
+            description: "ST_Intersects ~10000-vertex polygon — above GPU break-even",
             segments: 2500,
         }),
         Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_25kv",
-            description: "ST_Intersects ~25000-vertex polygon",
-            segments: 6250,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_50kv",
-            description: "ST_Intersects ~50000-vertex polygon",
-            segments: 12500,
-        }),
-        Box::new(vertex_sweep::VertexSweep {
-            name: "vsweep_100kv",
-            description: "ST_Intersects ~100000-vertex polygon",
+            name: "vsweep_pathological",
+            description: "ST_Intersects ~100000-vertex polygon — extreme compute-bound",
             segments: 25000,
         }),
         // --- GPU Spatial Shapes ---
@@ -370,8 +316,10 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(H3GridDistance),
         Box::new(H3ResolutionSweep),
         // --- GPU H3 (variants) ---
-        Box::new(h3_variants::H3_LATLNG_RES3),
-        Box::new(h3_variants::H3_LATLNG_RES9),
+        // NOTE: H3_LATLNG_RES3 and H3_LATLNG_RES9 retired per
+        // action_items.md W8 / Reviewer 1 Sin #3 — they exercise the
+        // same trig kernel as H3_LATLNG_RES15 and only differed in the
+        // literal integer argument. One resolution is sufficient.
         Box::new(h3_variants::H3_LATLNG_RES15),
         Box::new(h3_variants::H3_DIST_NEAR),
         Box::new(h3_variants::H3_DIST_FAR),
@@ -423,22 +371,10 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(mixed_variants::MIXED_EXPR_AGG),
         Box::new(mixed_variants::MIXED_JOIN_AGG),
         Box::new(mixed_variants::MIXED_SPATIAL_SORT),
-        // --- Scale sweep ---
-        Box::new(scale_sweep::ScaleSweep {
-            name: "scale_100k_mega500v",
-            description: "500v polygon at 100K rows — scale sweep baseline",
-            fixed_rows: 100_000,
-        }),
-        Box::new(scale_sweep::ScaleSweep {
-            name: "scale_1m_mega500v",
-            description: "500v polygon at 1M rows — scale sweep mid",
-            fixed_rows: 1_000_000,
-        }),
-        Box::new(scale_sweep::ScaleSweep {
-            name: "scale_5m_mega500v",
-            description: "500v polygon at 5M rows — scale sweep large",
-            fixed_rows: 5_000_000,
-        }),
+        // Scale sweep retired per action_items W9 (Reviewer 1 Sin #7):
+        // `scale_{100k,1m,5m}_mega500v` produced 5 identical rows across
+        // the scale axis because the fixture size was baked into the name,
+        // not the row count. Pure regression padding.
         // --- Raster workloads ---
         Box::new(raster_variants::RASTER_NDVI),
         Box::new(raster_variants::RASTER_SLOPE),
@@ -478,31 +414,13 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("spatial_multi_pred", "postgis"),
         ("spatial_complex_poly", "postgis"),
         ("spatial_selectivity", "postgis"),
-        // GPU Spatial (megapoly)
-        ("spatial_mega_100v", "postgis"),
-        ("spatial_mega_250v", "postgis"),
-        ("spatial_mega_500v", "postgis"),
+        // GPU Spatial (megapoly — collapsed to one representative, W7)
         ("spatial_mega_1kv", "postgis"),
-        ("spatial_mega_2kv", "postgis"),
-        ("spatial_mega_5kv", "postgis"),
-        // Vertex sweep
-        ("vsweep_4v", "postgis"),
-        ("vsweep_16v", "postgis"),
-        ("vsweep_32v", "postgis"),
-        ("vsweep_64v", "postgis"),
-        ("vsweep_128v", "postgis"),
-        ("vsweep_256v", "postgis"),
-        ("vsweep_500v", "postgis"),
-        ("vsweep_750v", "postgis"),
-        ("vsweep_1kv", "postgis"),
-        ("vsweep_1500v", "postgis"),
-        ("vsweep_2kv", "postgis"),
-        ("vsweep_3kv", "postgis"),
-        ("vsweep_5kv", "postgis"),
-        ("vsweep_10kv", "postgis"),
-        ("vsweep_25kv", "postgis"),
-        ("vsweep_50kv", "postgis"),
-        ("vsweep_100kv", "postgis"),
+        // Vertex sweep (collapsed from 17 to 4 reps, W6/W10)
+        ("vsweep_low", "postgis"),
+        ("vsweep_mid", "postgis"),
+        ("vsweep_high", "postgis"),
+        ("vsweep_pathological", "postgis"),
         // GPU Spatial (shapes)
         ("spatial_concentric", "postgis"),
         ("spatial_star_1kv", "postgis"),
@@ -513,10 +431,7 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("spatial_sel_10pct", "postgis"),
         ("spatial_sel_50pct", "postgis"),
         ("spatial_sel_90pct", "postgis"),
-        // Scale sweep (spatial)
-        ("scale_100k_mega500v", "postgis"),
-        ("scale_1m_mega500v", "postgis"),
-        ("scale_5m_mega500v", "postgis"),
+        // Scale sweep retired (action_items W9).
         // Mixed spatial
         ("spatial_agg", "postgis"),
         ("spatial_sort", "postgis"),
@@ -528,8 +443,7 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("h3_grid_distance", "h3"),
         ("h3_resolution_sweep", "h3"),
         // GPU H3 (variants)
-        ("h3_latlng_res3", "h3"),
-        ("h3_latlng_res9", "h3"),
+        // h3_latlng_res3 / h3_latlng_res9 retired per action_items.md W8.
         ("h3_latlng_res15", "h3"),
         ("h3_dist_near", "h3"),
         ("h3_dist_far", "h3"),

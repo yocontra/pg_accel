@@ -47,17 +47,42 @@ pub fn mean(values: &[f64]) -> f64 {
 /// Median of a slice (sorts a copy). Returns 0.0 for empty input.
 #[must_use]
 pub fn median(values: &[f64]) -> f64 {
+    percentile(values, 50.0)
+}
+
+/// Linear-interpolated percentile (inclusive type, identical to NumPy default).
+///
+/// `p` is in `[0, 100]`. Returns `0.0` for empty input.
+#[must_use]
+pub fn percentile(values: &[f64], p: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
     let mut sorted: Vec<f64> = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = sorted.len() / 2;
-    if sorted.len().is_multiple_of(2) {
-        f64::midpoint(sorted[mid - 1], sorted[mid])
-    } else {
-        sorted[mid]
+    if sorted.len() == 1 {
+        return sorted[0];
     }
+    #[allow(clippy::cast_precision_loss)]
+    let last = (sorted.len() - 1) as f64;
+    let rank = (p / 100.0).clamp(0.0, 1.0) * last;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let lo = rank.floor() as usize;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let hi = rank.ceil() as usize;
+    let frac = rank - rank.floor();
+    (sorted[hi] - sorted[lo]).mul_add(frac, sorted[lo])
+}
+
+/// Coefficient of variation (stddev / mean) in percent. Returns `NaN` if
+/// mean is zero or negative (CV is undefined for non-positive means).
+#[must_use]
+pub fn cv_percent(values: &[f64]) -> f64 {
+    let m = mean(values);
+    if m <= 0.0 {
+        return f64::NAN;
+    }
+    (stddev(values) / m) * 100.0
 }
 
 /// Sample standard deviation (Bessel-corrected, n-1 denominator).
@@ -321,12 +346,46 @@ pub fn geomean(speedups: &[f64]) -> f64 {
     (log_sum / n).exp()
 }
 
+/// Compute geometric mean speedup grouped by workload category, but only
+/// over workloads matching a caller-provided filter.
+///
+/// Returns a map from category name to its geomean. Categories with no valid
+/// entries after the filter are omitted.
+#[must_use]
+#[allow(dead_code)] // public API, used by consumers via render_geomean_headline path
+pub fn geomean_by_category_filtered<F>(
+    results: &[crate::report::WorkloadResult],
+    mut filter: F,
+) -> std::collections::BTreeMap<String, f64>
+where
+    F: FnMut(&crate::report::WorkloadResult) -> bool,
+{
+    use std::collections::BTreeMap;
+    let mut buckets: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for w in results {
+        if filter(w) {
+            buckets
+                .entry(w.category.clone())
+                .or_default()
+                .push(w.speedup_vs_parallel);
+        }
+    }
+    let mut out: BTreeMap<String, f64> = BTreeMap::new();
+    for (cat, speedups) in buckets {
+        if !speedups.is_empty() {
+            out.insert(cat, geomean(&speedups));
+        }
+    }
+    out
+}
+
 /// Compute geometric mean speedup grouped by workload category.
 ///
 /// Returns a map from category name to its geomean. Categories with no valid
 /// speedups are omitted. Uses `crate::report::WorkloadResult::category` and
 /// `speedup_vs_parallel` as inputs.
 #[must_use]
+#[allow(dead_code)] // public API, used by consumers and tests
 pub fn geomean_by_category(
     results: &[crate::report::WorkloadResult],
 ) -> std::collections::BTreeMap<String, f64> {
@@ -352,6 +411,7 @@ pub fn geomean_by_category(
 /// The correction uses `n_tests = results.len()` — every workload in the
 /// set counts against the family-wise error rate.
 #[must_use]
+#[allow(dead_code)] // public API, used by external tooling
 pub fn significant_after_bonferroni(
     results: &[crate::report::WorkloadResult],
     alpha: f64,
