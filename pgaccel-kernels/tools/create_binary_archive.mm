@@ -31,6 +31,16 @@ static const char* KERNEL_NAMES[] = {
     "window_row_number",
     "window_lag",
     "window_lead",
+    // h3
+    "h3_get_resolution",
+    "h3_cell_to_parent",
+    "h3_grid_distance",
+    "h3_lat_lng_to_cell",
+    // bbox
+    "bbox_intersects_f32",
+    // fused
+    "fused_filter_reduce_f32",
+    "fused_filter_count_f32",
     nullptr
 };
 

@@ -289,34 +289,6 @@ mod gpu_build {
         // The built shared library lives in the build directory.
         emit_link_directives(&build_dir);
 
-        // Expose the GPU worker binary path for the BGW to fork+exec.
-        let worker_path = build_dir.join("pgaccel_gpu_worker");
-        println!(
-            "cargo::rustc-env=PGACCEL_GPU_WORKER_PATH={}",
-            worker_path.display()
-        );
-
-        // Also copy the worker binary into the PG bindir so `cargo pgrx
-        // install` / `cargo pgrx package` ship it alongside the .so. The
-        // extension .so goes to pg_config --pkglibdir; the worker binary
-        // goes to pg_config --bindir (where BGW fork+exec can find it on PATH).
-        //
-        // pgrx invokes this build.rs with PGRX_PG_CONFIG_PATH set to the
-        // selected pg_config. Fall back to PG_CONFIG or a bare `pg_config`
-        // on PATH so `cargo build` outside of pgrx also works.
-        let pg_config_path = std::env::var("PGRX_PG_CONFIG_PATH")
-            .or_else(|_| std::env::var("PG_CONFIG"))
-            .unwrap_or_else(|_| "pg_config".to_string());
-        if let Ok(output) = Command::new(&pg_config_path).arg("--bindir").output()
-            && output.status.success()
-        {
-            let bindir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !bindir.is_empty() {
-                let dest = PathBuf::from(&bindir).join("pgaccel_gpu_worker");
-                // Best-effort: install may not have write perms; skip silently.
-                let _ = std::fs::copy(&worker_path, &dest);
-            }
-        }
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {
@@ -328,9 +300,8 @@ mod gpu_build {
             .arg("-B")
             .arg(build_dir)
             .arg("-DCMAKE_BUILD_TYPE=Release")
-            // SYCL is optional — CMake will warn and fall back to CPU-only if
-            // AdaptiveCpp is not installed.
-            .arg("-DPGACCEL_USE_SYCL=ON");
+            // SYCL disabled — native Metal backend replaces AdaptiveCpp.
+            .arg("-DPGACCEL_USE_SYCL=OFF");
 
         // AdaptiveCpp installs to ~/local via `just setup-gpu`.
         if acpp_prefix.join("lib/cmake/AdaptiveCpp").exists() {
@@ -401,21 +372,10 @@ mod gpu_build {
             println!("cargo::rustc-link-lib=stdc++");
         }
 
-        // AdaptiveCpp uses OpenMP for CPU dispatch. Link the OMP runtime.
-        if let Some(libomp) = find_brew_prefix("libomp") {
-            println!("cargo::rustc-link-search=native={libomp}/lib");
-            println!("cargo::rustc-link-lib=omp");
-        }
-
-        // Link AdaptiveCpp runtime if present.
-        let acpp_prefix = home_dir().join("local");
-        let acpp_lib = acpp_prefix.join("lib");
-        if acpp_lib.exists() {
-            println!("cargo::rustc-link-search=native={}", acpp_lib.display());
-            // AdaptiveCpp runtime library.
-            println!("cargo::rustc-link-lib=acpp-rt");
-            // Set rpath so the runtime dylib is found at load time.
-            println!("cargo::rustc-link-arg=-Wl,-rpath,{}", acpp_lib.display());
+        // Metal framework (native GPU backend on macOS).
+        if cfg!(target_os = "macos") {
+            println!("cargo::rustc-link-lib=framework=Metal");
+            println!("cargo::rustc-link-lib=framework=Foundation");
         }
     }
 }

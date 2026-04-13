@@ -2313,8 +2313,8 @@ mod tests {
     // =========================================================================
 
     /// Verifies that running a large reduction actually dispatches to the GPU
-    /// (not silently falling back to CPU). Catches regressions in fork/exec
-    /// initialization, BGW IPC, or kernel selection.
+    /// (not silently falling back to CPU). Catches regressions in Metal
+    /// runtime initialization or kernel selection.
     #[pg_test]
     fn test_reduce_actually_uses_gpu() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");

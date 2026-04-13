@@ -87,8 +87,6 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     #[cfg(not(test))]
     {
         engine::thread_budget::init_shmem();
-        engine::gpu_bgw::init_shmem();
-        engine::gpu_bgw::register_bgw();
 
         // SAFETY: `before_shmem_exit` is a PostgreSQL API that registers a
         // callback invoked when the backend detaches from shared memory.
@@ -103,11 +101,8 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // before any queries. Saves previous hooks and installs ours.
     unsafe { engine::ffi::planner_hooks::install() };
 
-    // 5. GPU runtime: backends NEVER call pgaccel_init(). All GPU work is
-    //    routed through the BGW → fork+exec'd GPU worker process. This
-    //    avoids SYCL thread creation in backends (which breaks PG fork-based
-    //    parallel query) and the Metal MTLCompilerService XPC issue after fork.
-    //    Device info is published by the BGW to shared memory.
+    // 5. GPU runtime initialized lazily per-backend via Metal binary archives.
+    //    No BGW needed.
 
     // 6. Log startup summary (GPU status deferred to first query).
     let cpu_cores = std::thread::available_parallelism()

@@ -85,6 +85,41 @@ metal_status metal_window_lead(
 metal_status metal_sort_kv_u32(uint32_t* keys, uint32_t* indices, size_t count);
 metal_status metal_sort_kv_u64(uint64_t* keys, uint32_t* indices, size_t count);
 
+// ── H3 kernels ───────────────────────────────────────────────────
+
+metal_status metal_h3_get_resolution(
+    const uint64_t* cells, size_t count, int32_t* results);
+
+metal_status metal_h3_cell_to_parent(
+    const uint64_t* cells, size_t count, int parent_res, uint64_t* parents);
+
+metal_status metal_h3_grid_distance(
+    const uint64_t* cells_a, const uint64_t* cells_b,
+    size_t count, int32_t* distances);
+
+metal_status metal_h3_lat_lng_to_cell(
+    const double* lats, const double* lngs,
+    size_t count, int resolution,
+    uint64_t* cell_ids, uint8_t* valid);
+
+// ── BBox kernels ─────────────────────────────────────────────────
+
+metal_status metal_bbox_intersects_f32(
+    const float* boxes_a, size_t count_a,
+    const float* boxes_b, size_t count_b,
+    uint8_t* result, size_t* hit_count);
+
+// ── Fused filter+reduce kernels ──────────────────────────────────
+
+metal_status metal_fused_filter_reduce_f32(
+    const float* filter_col, uint32_t cmp_op, float filter_val,
+    const float* agg_col, uint32_t agg_op, size_t count,
+    double* out_result);
+
+metal_status metal_fused_filter_count_f32(
+    const float* filter_col, uint32_t cmp_op, float filter_val,
+    size_t count, int64_t* out_count);
+
 #ifdef __cplusplus
 }
 #endif

@@ -187,6 +187,18 @@ if(PGACCEL_USE_METAL AND APPLE)
     add_executable(test_metal_window test/test_metal_window.mm)
     target_link_libraries(test_metal_window PRIVATE pgaccel_kernels_shared)
     add_test(NAME test_metal_window COMMAND test_metal_window)
+
+    add_executable(test_metal_h3 test/test_metal_h3.mm)
+    target_link_libraries(test_metal_h3 PRIVATE pgaccel_kernels_shared)
+    add_test(NAME test_metal_h3 COMMAND test_metal_h3)
+
+    add_executable(test_metal_bbox test/test_metal_bbox.mm)
+    target_link_libraries(test_metal_bbox PRIVATE pgaccel_kernels_shared)
+    add_test(NAME test_metal_bbox COMMAND test_metal_bbox)
+
+    add_executable(test_metal_fused test/test_metal_fused.mm)
+    target_link_libraries(test_metal_fused PRIVATE pgaccel_kernels_shared)
+    add_test(NAME test_metal_fused COMMAND test_metal_fused)
 endif()
 
 enable_testing()
@@ -199,13 +211,7 @@ add_test(NAME test_raster COMMAND test_raster)
 add_test(NAME test_correctness COMMAND test_correctness)
 add_test(NAME test_fork COMMAND test_fork)
 
-# Standalone GPU worker binary — fork+exec'd by the PG Background Worker.
-# LEGACY: will be removed once Metal backend fully replaces SYCL path.
-add_executable(pgaccel_gpu_worker src/gpu_worker_main.cpp)
-target_link_libraries(pgaccel_gpu_worker PRIVATE pgaccel_kernels_shared)
-
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
-install(TARGETS pgaccel_gpu_worker RUNTIME DESTINATION bin)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h include/metal_backend.h DESTINATION include)
 
 # Install metallib alongside the library

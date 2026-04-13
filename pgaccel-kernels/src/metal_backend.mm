@@ -159,10 +159,16 @@ static const char* KERNEL_NAMES[] = {
     "window_row_number",
     "window_lag",
     "window_lead",
-    // spatial (Phase 1c)
-    // "point_in_ring_f32",
-    // h3 (Phase 1d)
-    // "h3_lat_lng_to_cell",
+    // h3
+    "h3_get_resolution",
+    "h3_cell_to_parent",
+    "h3_grid_distance",
+    "h3_lat_lng_to_cell",
+    // bbox
+    "bbox_intersects_f32",
+    // fused
+    "fused_filter_reduce_f32",
+    "fused_filter_count_f32",
     nullptr
 };
 
@@ -1189,7 +1195,7 @@ extern "C" metal_status metal_window_lag(
         if (!part_buf || !val_buf || !null_buf || !res_buf || !rnull_buf || !params_buf)
             return METAL_ERROR_OOM;
 
-        metal_status st = dispatch_sync(pipeline,
+        metal_status st_lag = dispatch_sync(pipeline,
             ^(id<MTLComputeCommandEncoder> enc) {
                 [enc setBuffer:part_buf offset:0 atIndex:0];
                 [enc setBuffer:val_buf offset:0 atIndex:1];
@@ -1198,7 +1204,7 @@ extern "C" metal_status metal_window_lag(
                 [enc setBuffer:rnull_buf offset:0 atIndex:4];
                 [enc setBuffer:params_buf offset:0 atIndex:5];
             }, (uint32_t)count);
-        if (st != METAL_OK) return st;
+        if (st_lag != METAL_OK) return st_lag;
 
         memcpy(results, [res_buf contents], count * sizeof(double));
         if (result_nulls)
@@ -1260,7 +1266,7 @@ extern "C" metal_status metal_window_lead(
         if (!part_buf || !val_buf || !null_buf || !res_buf || !rnull_buf || !params_buf)
             return METAL_ERROR_OOM;
 
-        metal_status st = dispatch_sync(pipeline,
+        metal_status st_lead = dispatch_sync(pipeline,
             ^(id<MTLComputeCommandEncoder> enc) {
                 [enc setBuffer:part_buf offset:0 atIndex:0];
                 [enc setBuffer:val_buf offset:0 atIndex:1];
@@ -1269,11 +1275,435 @@ extern "C" metal_status metal_window_lead(
                 [enc setBuffer:rnull_buf offset:0 atIndex:4];
                 [enc setBuffer:params_buf offset:0 atIndex:5];
             }, (uint32_t)count);
-        if (st != METAL_OK) return st;
+        if (st_lead != METAL_OK) return st_lead;
 
         memcpy(results, [res_buf contents], count * sizeof(double));
         if (result_nulls)
             memcpy(result_nulls, [rnull_buf contents], count * sizeof(uint8_t));
+        return METAL_OK;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H3 dispatch functions
+// ---------------------------------------------------------------------------
+
+struct MetalH3ResParams {
+    uint32_t count;
+};
+
+extern "C" metal_status metal_h3_get_resolution(
+    const uint64_t* cells, size_t count, int32_t* results)
+{
+    if (!cells || !results) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("h3_get_resolution");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        MetalH3ResParams params = { (uint32_t)count };
+
+        id<MTLBuffer> cells_buf = [g_device newBufferWithBytes:cells
+                                    length:count * sizeof(uint64_t)
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> res_buf = [g_device newBufferWithLength:count * sizeof(int32_t)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!cells_buf || !res_buf || !params_buf) return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:cells_buf offset:0 atIndex:0];
+                [enc setBuffer:res_buf offset:0 atIndex:1];
+                [enc setBuffer:params_buf offset:0 atIndex:2];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        memcpy(results, [res_buf contents], count * sizeof(int32_t));
+        return METAL_OK;
+    }
+}
+
+struct MetalH3ParentParams {
+    uint32_t count;
+    int32_t  parent_res;
+};
+
+extern "C" metal_status metal_h3_cell_to_parent(
+    const uint64_t* cells, size_t count, int parent_res, uint64_t* parents)
+{
+    if (!cells || !parents) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("h3_cell_to_parent");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        MetalH3ParentParams params = { (uint32_t)count, (int32_t)parent_res };
+
+        id<MTLBuffer> cells_buf = [g_device newBufferWithBytes:cells
+                                    length:count * sizeof(uint64_t)
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> parents_buf = [g_device newBufferWithLength:count * sizeof(uint64_t)
+                                      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!cells_buf || !parents_buf || !params_buf) return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:cells_buf offset:0 atIndex:0];
+                [enc setBuffer:parents_buf offset:0 atIndex:1];
+                [enc setBuffer:params_buf offset:0 atIndex:2];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        memcpy(parents, [parents_buf contents], count * sizeof(uint64_t));
+        return METAL_OK;
+    }
+}
+
+struct MetalH3DistParams {
+    uint32_t count;
+};
+
+extern "C" metal_status metal_h3_grid_distance(
+    const uint64_t* cells_a, const uint64_t* cells_b,
+    size_t count, int32_t* distances)
+{
+    if (!cells_a || !cells_b || !distances) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("h3_grid_distance");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        MetalH3DistParams params = { (uint32_t)count };
+
+        id<MTLBuffer> a_buf = [g_device newBufferWithBytes:cells_a
+                                length:count * sizeof(uint64_t)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> b_buf = [g_device newBufferWithBytes:cells_b
+                                length:count * sizeof(uint64_t)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> dist_buf = [g_device newBufferWithLength:count * sizeof(int32_t)
+                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!a_buf || !b_buf || !dist_buf || !params_buf) return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:a_buf offset:0 atIndex:0];
+                [enc setBuffer:b_buf offset:0 atIndex:1];
+                [enc setBuffer:dist_buf offset:0 atIndex:2];
+                [enc setBuffer:params_buf offset:0 atIndex:3];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        memcpy(distances, [dist_buf contents], count * sizeof(int32_t));
+        return METAL_OK;
+    }
+}
+
+// Icosahedron face centers (radians) — must match h3_ops.cpp
+static const float H3_FACE_CENTER_LAT_F32[20] = {
+     0.803582649f,  0.803582649f,  0.803582649f,
+     0.803582649f,  0.803582649f,
+     0.261799387f,  0.261799387f,  0.261799387f,
+     0.261799387f,  0.261799387f,
+    -0.261799387f, -0.261799387f, -0.261799387f,
+    -0.261799387f, -0.261799387f,
+    -0.803582649f, -0.803582649f, -0.803582649f,
+    -0.803582649f, -0.803582649f,
+};
+
+static const float H3_FACE_CENTER_LNG_F32[20] = {
+     0.536587643f,  1.608762931f, -2.765166789f,
+    -1.692991502f, -0.620816214f,
+     1.069678592f, -0.003515038f, -1.076708669f,
+     2.135635021f,  3.207809972f,
+     0.536587643f,  1.608762931f, -2.765166789f,
+    -1.692991502f, -0.620816214f,
+     1.069678592f, -0.003515038f, -1.076708669f,
+     2.135635021f,  3.207809972f,
+};
+
+struct MetalH3LatLngParams {
+    uint32_t count;
+    int32_t  resolution;
+};
+
+extern "C" metal_status metal_h3_lat_lng_to_cell(
+    const double* lats, const double* lngs,
+    size_t count, int resolution,
+    uint64_t* cell_ids, uint8_t* valid)
+{
+    if (!lats || !lngs || !cell_ids || !valid) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+    if (resolution < 0 || resolution >= 12) return METAL_ERROR; // fp32 limit
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("h3_lat_lng_to_cell");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        // Convert double inputs to fp32 for GPU
+        std::vector<float> lats_f32(count), lngs_f32(count);
+        for (size_t i = 0; i < count; i++) {
+            lats_f32[i] = static_cast<float>(lats[i]);
+            lngs_f32[i] = static_cast<float>(lngs[i]);
+        }
+
+        MetalH3LatLngParams params = { (uint32_t)count, (int32_t)resolution };
+
+        id<MTLBuffer> lat_buf = [g_device newBufferWithBytes:lats_f32.data()
+                                  length:count * sizeof(float)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> lng_buf = [g_device newBufferWithBytes:lngs_f32.data()
+                                  length:count * sizeof(float)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> cells_buf = [g_device newBufferWithLength:count * sizeof(uint64_t)
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> valid_buf = [g_device newBufferWithLength:count * sizeof(uint8_t)
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> fc_lat_buf = [g_device newBufferWithBytes:H3_FACE_CENTER_LAT_F32
+                                     length:20 * sizeof(float)
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> fc_lng_buf = [g_device newBufferWithBytes:H3_FACE_CENTER_LNG_F32
+                                     length:20 * sizeof(float)
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!lat_buf || !lng_buf || !cells_buf || !valid_buf ||
+            !fc_lat_buf || !fc_lng_buf || !params_buf)
+            return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:lat_buf offset:0 atIndex:0];
+                [enc setBuffer:lng_buf offset:0 atIndex:1];
+                [enc setBuffer:cells_buf offset:0 atIndex:2];
+                [enc setBuffer:valid_buf offset:0 atIndex:3];
+                [enc setBuffer:fc_lat_buf offset:0 atIndex:4];
+                [enc setBuffer:fc_lng_buf offset:0 atIndex:5];
+                [enc setBuffer:params_buf offset:0 atIndex:6];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        memcpy(cell_ids, [cells_buf contents], count * sizeof(uint64_t));
+        memcpy(valid, [valid_buf contents], count * sizeof(uint8_t));
+        return METAL_OK;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BBox dispatch functions
+// ---------------------------------------------------------------------------
+
+struct MetalBBoxParams {
+    uint32_t count_a;
+    uint32_t count_b;
+};
+
+extern "C" metal_status metal_bbox_intersects_f32(
+    const float* boxes_a, size_t count_a,
+    const float* boxes_b, size_t count_b,
+    uint8_t* result, size_t* hit_count)
+{
+    if (!boxes_a || !boxes_b || !result) return METAL_ERROR;
+    if (count_a == 0 || count_b == 0) {
+        if (hit_count) *hit_count = 0;
+        return METAL_OK;
+    }
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("bbox_intersects_f32");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    size_t total_pairs = count_a * count_b;
+
+    @autoreleasepool {
+        MetalBBoxParams params = { (uint32_t)count_a, (uint32_t)count_b };
+
+        id<MTLBuffer> a_buf = [g_device newBufferWithBytes:boxes_a
+                                length:count_a * 4 * sizeof(float)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> b_buf = [g_device newBufferWithBytes:boxes_b
+                                length:count_b * 4 * sizeof(float)
+                                options:MTLResourceStorageModeShared];
+        id<MTLBuffer> res_buf = [g_device newBufferWithLength:total_pairs * sizeof(uint8_t)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> hits_buf = [g_device newBufferWithLength:sizeof(uint32_t)
+                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!a_buf || !b_buf || !res_buf || !hits_buf || !params_buf)
+            return METAL_ERROR_OOM;
+
+        memset([hits_buf contents], 0, sizeof(uint32_t));
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:a_buf offset:0 atIndex:0];
+                [enc setBuffer:b_buf offset:0 atIndex:1];
+                [enc setBuffer:res_buf offset:0 atIndex:2];
+                [enc setBuffer:hits_buf offset:0 atIndex:3];
+                [enc setBuffer:params_buf offset:0 atIndex:4];
+            }, (uint32_t)total_pairs);
+        if (st != METAL_OK) return st;
+
+        memcpy(result, [res_buf contents], total_pairs * sizeof(uint8_t));
+        if (hit_count) {
+            uint32_t gpu_hits = 0;
+            memcpy(&gpu_hits, [hits_buf contents], sizeof(uint32_t));
+            *hit_count = static_cast<size_t>(gpu_hits);
+        }
+        return METAL_OK;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fused filter+reduce dispatch functions
+// ---------------------------------------------------------------------------
+
+struct MetalFusedReduceParams {
+    uint32_t count;
+    uint32_t cmp_op;
+    float    filter_val;
+    uint32_t agg_op;
+};
+
+extern "C" metal_status metal_fused_filter_reduce_f32(
+    const float* filter_col, uint32_t cmp_op, float filter_val,
+    const float* agg_col, uint32_t agg_op, size_t count,
+    double* out_result)
+{
+    if (!out_result || !filter_col) return METAL_ERROR;
+    if (agg_op != 3 /* COUNT */ && !agg_col) return METAL_ERROR;
+    if (count == 0) { *out_result = 0.0; return METAL_OK; }
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("fused_filter_reduce_f32");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        MetalFusedReduceParams params = {
+            (uint32_t)count, cmp_op, filter_val, agg_op
+        };
+
+        // Initialize result based on agg_op
+        float init_val = 0.0f;
+        if (agg_op == 1 /* MIN */) init_val = HUGE_VALF;
+        if (agg_op == 2 /* MAX */) init_val = -HUGE_VALF;
+        uint32_t init_bits;
+        memcpy(&init_bits, &init_val, sizeof(uint32_t));
+
+        id<MTLBuffer> filter_buf = [g_device newBufferWithBytes:filter_col
+                                     length:count * sizeof(float)
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> agg_buf = agg_col
+            ? [g_device newBufferWithBytes:agg_col
+                        length:count * sizeof(float)
+                        options:MTLResourceStorageModeShared]
+            : [g_device newBufferWithLength:sizeof(float)
+                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> result_buf = [g_device newBufferWithBytes:&init_bits
+                                     length:sizeof(uint32_t)
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> match_buf = [g_device newBufferWithLength:sizeof(uint32_t)
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!filter_buf || !agg_buf || !result_buf || !match_buf || !params_buf)
+            return METAL_ERROR_OOM;
+
+        memset([match_buf contents], 0, sizeof(uint32_t));
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:filter_buf offset:0 atIndex:0];
+                [enc setBuffer:agg_buf offset:0 atIndex:1];
+                [enc setBuffer:result_buf offset:0 atIndex:2];
+                [enc setBuffer:match_buf offset:0 atIndex:3];
+                [enc setBuffer:params_buf offset:0 atIndex:4];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        uint32_t match_count = 0;
+        memcpy(&match_count, [match_buf contents], sizeof(uint32_t));
+
+        if (agg_op == 3 /* COUNT */) {
+            *out_result = static_cast<double>(match_count);
+        } else if (match_count == 0 && (agg_op == 1 || agg_op == 2)) {
+            *out_result = 0.0;
+        } else {
+            uint32_t result_bits_out;
+            memcpy(&result_bits_out, [result_buf contents], sizeof(uint32_t));
+            float result_f32;
+            memcpy(&result_f32, &result_bits_out, sizeof(float));
+            *out_result = static_cast<double>(result_f32);
+        }
+        return METAL_OK;
+    }
+}
+
+struct MetalFusedCountParams {
+    uint32_t count;
+    uint32_t cmp_op;
+    float    filter_val;
+};
+
+extern "C" metal_status metal_fused_filter_count_f32(
+    const float* filter_col, uint32_t cmp_op, float filter_val,
+    size_t count, int64_t* out_count)
+{
+    if (!out_count || !filter_col) return METAL_ERROR;
+    if (count == 0) { *out_count = 0; return METAL_OK; }
+
+    id<MTLComputePipelineState> pipeline = metal_get_pipeline("fused_filter_count_f32");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        MetalFusedCountParams params = {
+            (uint32_t)count, cmp_op, filter_val
+        };
+
+        id<MTLBuffer> filter_buf = [g_device newBufferWithBytes:filter_col
+                                     length:count * sizeof(float)
+                                     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> match_buf = [g_device newBufferWithLength:sizeof(uint32_t)
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(params)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!filter_buf || !match_buf || !params_buf) return METAL_ERROR_OOM;
+
+        memset([match_buf contents], 0, sizeof(uint32_t));
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:filter_buf offset:0 atIndex:0];
+                [enc setBuffer:match_buf offset:0 atIndex:1];
+                [enc setBuffer:params_buf offset:0 atIndex:2];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        uint32_t gpu_count = 0;
+        memcpy(&gpu_count, [match_buf contents], sizeof(uint32_t));
+        *out_count = static_cast<int64_t>(gpu_count);
         return METAL_OK;
     }
 }

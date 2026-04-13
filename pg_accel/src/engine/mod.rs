@@ -9,8 +9,6 @@ pub mod executor;
 pub mod expr_compiler;
 pub mod ffi;
 pub mod function_matcher;
-pub mod gpu_bgw;
-pub mod gpu_client;
 pub mod gucs;
 pub mod otel;
 pub mod registry;

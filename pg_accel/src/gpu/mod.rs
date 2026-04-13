@@ -1,4 +1,7 @@
-//! GPU kernel bridge and fallback stubs.
+//! GPU kernel bridge and stubs stubs.
+//!
+//! GPU kernels run directly in PG backends via native Metal API with
+//! pre-compiled binary archives (safe after fork). No IPC layer needed.
 //!
 //! Re-exports a unified API so callers don't need `cfg` at every call-site.
 
@@ -54,36 +57,23 @@ fn init() -> PgaccelStatus {
     }
 }
 
-/// No-op in forked backends. GPU work is routed through the BGW/worker pipe.
+/// Initialise the Metal GPU runtime once per process.
 ///
-/// In non-test builds, backends must NEVER call `pgaccel_init()` because it
-/// creates SYCL worker threads that are incompatible with PG's fork-based
-/// parallel query (the forked child crashes with "crashed on child side of
-/// fork pre-exec"). Device info is available via BGW shared memory instead.
-///
-/// In test builds (no PG, no BGW), this falls through to direct SYCL init.
+/// Metal binary archives are safe after fork(), so this runs directly in
+/// every PG backend (and in test binaries). Uses PID tracking to ensure
+/// `pgaccel_init()` is called at most once per process.
 pub fn ensure_init() {
-    // In production PG backends, all GPU work goes through the BGW.
-    // Do NOT initialize SYCL here — it creates threads that break fork().
-    #[cfg(not(test))]
-    {
-        // Nothing to do. The BGW owns the GPU.
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static INIT_PID: AtomicU32 = AtomicU32::new(0);
+
+    let pid = std::process::id();
+    let prev = INIT_PID.load(Ordering::Acquire);
+    if prev == pid {
+        return;
     }
 
-    #[cfg(test)]
-    {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static INIT_PID: AtomicU32 = AtomicU32::new(0);
-
-        let pid = std::process::id();
-        let prev = INIT_PID.load(Ordering::Acquire);
-        if prev == pid {
-            return;
-        }
-
-        let _status = init();
-        INIT_PID.store(pid, Ordering::Release);
-    }
+    let _status = init();
+    INIT_PID.store(pid, Ordering::Release);
 }
 
 /// Tear down the GPU runtime.
@@ -190,7 +180,7 @@ pub fn assert_gpu_executed(min_count: u64) {
         count >= min_count,
         "GPU EXECUTION FAILED: expected at least {min_count} GPU kernel \
          executions, got {count}. The GPU is NOT actually running — all work \
-         went to CPU fallback. Check device_manager.cpp fork detection.",
+         went to CPU stubs. Check device_manager.cpp fork detection.",
     );
 }
 
@@ -209,7 +199,7 @@ pub fn assert_no_cpu_fallbacks() {
 ///
 /// Returns `(definite_true, definite_false, uncertain)` as vectors of
 /// `(idx_a, idx_b)` pair indices, or `None` if no GPU device is available
-/// (caller should use CPU fallback).
+/// (caller should use CPU stubs).
 ///
 /// The C++ kernel evaluates all `count_a × count_b` pairs and partitions
 /// them into the three buckets.  Each output pair is two consecutive `u32`
@@ -432,19 +422,6 @@ pub fn sort_i64(data: &mut [i64]) -> Option<()> {
 pub fn sort_kv_f32(keys: &mut [f32], indices: &mut [u32]) -> Option<()> {
     let count = keys.len().min(indices.len());
     let _span = tracing::debug_span!("gpu.sort_kv_f32", n = count).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        pgrx::log!("pg_accel: sort_kv_f32 routing through BGW (n={count})");
-        // SAFETY: keys and indices are valid mutable slices with count elements.
-        let ok = unsafe {
-            crate::engine::gpu_client::bgw_sort_kv_f32(
-                keys.as_mut_ptr(),
-                indices.as_mut_ptr(),
-                count,
-            )
-        };
-        return ok.then_some(());
-    }
     #[cfg(feature = "gpu")]
     {
         // SAFETY: keys and indices are valid mutable slices.
@@ -465,18 +442,6 @@ pub fn sort_kv_f32(keys: &mut [f32], indices: &mut [u32]) -> Option<()> {
 pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
     let _span = tracing::debug_span!("gpu.sort_kv_f64", n = keys.len()).entered();
     let count = keys.len().min(indices.len());
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: keys and indices are valid mutable slices with count elements.
-        let ok = unsafe {
-            crate::engine::gpu_client::bgw_sort_kv_f64(
-                keys.as_mut_ptr(),
-                indices.as_mut_ptr(),
-                count,
-            )
-        };
-        return ok.then_some(());
-    }
     #[cfg(feature = "gpu")]
     {
         // SAFETY: keys and indices are valid mutable slices.
@@ -492,59 +457,22 @@ pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
 }
 
 // ---------------------------------------------------------------------------
-// BGW routing helper
+// Device capability helpers
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if GPU work should be routed through the Background Worker
-/// (i.e. we're in a forked backend where direct GPU access is broken).
-#[cfg(not(test))]
-fn use_bgw() -> bool {
-    crate::engine::gpu_client::bgw_is_available()
-}
-
-/// Cached device fp64 support, read once from BGW shared memory per backend.
-/// Returns `false` until the BGW has populated device info (and stays `false`
-/// on Metal which is fp32-only). Used by `reduce_*_f64` wrappers to skip the
-/// guaranteed-to-fail f64 kernel attempt on Metal.
-#[cfg(not(test))]
-fn device_has_fp64() -> bool {
-    use std::cell::Cell;
-    thread_local! {
-        // 0 = unknown, 1 = no, 2 = yes
-        static CACHED: Cell<u8> = const { Cell::new(0) };
-    }
-    CACHED.with(|c| match c.get() {
-        1 => false,
-        2 => true,
-        _ => {
-            if let Some(info) = crate::engine::gpu_bgw::bgw_device_info() {
-                let v = if info.has_fp64 { 2 } else { 1 };
-                c.set(v);
-                info.has_fp64
-            } else {
-                // BGW not ready yet; don't cache.
-                false
-            }
-        }
-    })
+/// Metal has no fp64 support. Always returns `false`.
+#[allow(dead_code)]
+const fn device_has_fp64() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
 // Reduce wrappers
-//
-// Each wrapper first tries the BGW path (for forked backends where Metal/SYCL
-// is broken). Falls through to direct FFI only when BGW is not available
-// (e.g. standalone tests, or the BGW process itself).
 // ---------------------------------------------------------------------------
 
 /// GPU-accelerated f32 sum reduction. Returns `None` if GPU unavailable.
 pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
     let _span = tracing::debug_span!("gpu.reduce_sum_f32", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: data.as_ptr() is valid for data.len() f32 values.
-        return unsafe { crate::engine::gpu_client::bgw_reduce_sum_f32(data.as_ptr(), data.len()) };
-    }
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -563,11 +491,6 @@ pub fn reduce_sum_f32(data: &[f32]) -> Option<f32> {
 /// GPU-accelerated f32 min reduction. Returns `None` if GPU unavailable.
 pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
     let _span = tracing::debug_span!("gpu.reduce_min_f32", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: data.as_ptr() is valid for data.len() f32 values.
-        return unsafe { crate::engine::gpu_client::bgw_reduce_min_f32(data.as_ptr(), data.len()) };
-    }
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -586,11 +509,6 @@ pub fn reduce_min_f32(data: &[f32]) -> Option<f32> {
 /// GPU-accelerated f32 max reduction. Returns `None` if GPU unavailable.
 pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
     let _span = tracing::debug_span!("gpu.reduce_max_f32", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: data.as_ptr() is valid for data.len() f32 values.
-        return unsafe { crate::engine::gpu_client::bgw_reduce_max_f32(data.as_ptr(), data.len()) };
-    }
     let mut result: f32 = 0.0;
     #[cfg(feature = "gpu")]
     {
@@ -609,27 +527,18 @@ pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
 /// GPU-accelerated f64 sum reduction.
 pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_sum_f64", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        // Metal (fp32-only) can't run the f64 kernel — casting to f32
-        // avoids a guaranteed-to-fail BGW round-trip. Precision tradeoff
-        // is documented in agg.rs::dispatch_gpu_reduce_chunked.
-        if !device_has_fp64() {
-            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-            return reduce_sum_f32(&f32_data).map(f64::from);
-        }
-        // SAFETY: data.as_ptr() is valid for data.len() f64 values.
-        return unsafe {
-            crate::engine::gpu_client::bgw_reduce_sum_f64(data.as_ptr(), data.len())
-        };
-    }
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid slice, result is a valid pointer.
         let status =
             unsafe { bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result) };
-        status.is_ok().then_some(result)
+        if status.is_ok() {
+            return Some(result);
+        }
+        // fp32-only device (Metal): cast to f32 and use f32 kernel.
+        let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        reduce_sum_f32(&f32_data).map(f64::from)
     }
     #[cfg(not(feature = "gpu"))]
     {
@@ -641,11 +550,6 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
 /// GPU-accelerated i64 sum reduction.
 pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
     let _span = tracing::debug_span!("gpu.reduce_sum_i64", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: data.as_ptr() is valid for data.len() i64 values.
-        return unsafe { crate::engine::gpu_client::bgw_reduce_sum_i64(data.as_ptr(), data.len()) };
-    }
     let mut result: i64 = 0;
     #[cfg(feature = "gpu")]
     {
@@ -664,22 +568,17 @@ pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
 /// GPU-accelerated f64 min reduction.
 pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_min_f64", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        if !device_has_fp64() {
-            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-            return reduce_min_f32(&f32_data).map(f64::from);
-        }
-        // SAFETY: data.as_ptr() is valid for data.len() f64 values.
-        return unsafe { crate::engine::gpu_client::bgw_reduce_min_f64(data.as_ptr(), data.len()) };
-    }
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid slice, result is a valid pointer.
         let status =
             unsafe { bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result) };
-        status.is_ok().then_some(result)
+        if status.is_ok() {
+            return Some(result);
+        }
+        let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        reduce_min_f32(&f32_data).map(f64::from)
     }
     #[cfg(not(feature = "gpu"))]
     {
@@ -691,22 +590,17 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
 /// GPU-accelerated f64 max reduction.
 pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_max_f64", n = data.len()).entered();
-    #[cfg(not(test))]
-    if use_bgw() {
-        if !device_has_fp64() {
-            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-            return reduce_max_f32(&f32_data).map(f64::from);
-        }
-        // SAFETY: data.as_ptr() is valid for data.len() f64 values.
-        return unsafe { crate::engine::gpu_client::bgw_reduce_max_f64(data.as_ptr(), data.len()) };
-    }
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
         // SAFETY: data is a valid slice, result is a valid pointer.
         let status =
             unsafe { bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result) };
-        status.is_ok().then_some(result)
+        if status.is_ok() {
+            return Some(result);
+        }
+        let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        reduce_max_f32(&f32_data).map(f64::from)
     }
     #[cfg(not(feature = "gpu"))]
     {
@@ -716,13 +610,8 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 }
 
 // ---------------------------------------------------------------------------
-// Fused multi-aggregate reduce (Fix Agent 4, 2026-04-11)
+// Fused multi-aggregate reduce
 // ---------------------------------------------------------------------------
-//
-// Single kernel pass computes SUM+MIN+MAX+COUNT over the same input column,
-// replacing four sequential BGW round-trips. The full benchmark regression
-// (geomean 0.50x on GpuReduce) was dominated by per-op BGW latency — this
-// cuts it to a single round-trip for the common aggregate shape.
 
 /// Result of a fused f32 multi-aggregate reduce.
 #[derive(Debug, Clone, Copy)]
@@ -756,26 +645,7 @@ pub struct ReduceMultiI64 {
 pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
     if data.is_empty() {
-        return Some(ReduceMultiF32 {
-            sum: 0.0,
-            min: 0.0,
-            max: 0.0,
-            count: 0,
-        });
-    }
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: data.as_ptr() is valid for data.len() f32 values.
-        return unsafe {
-            crate::engine::gpu_client::bgw_reduce_multi_f32(data.as_ptr(), data.len()).map(|r| {
-                ReduceMultiF32 {
-                    sum: r.sum,
-                    min: r.min,
-                    max: r.max,
-                    count: r.count,
-                }
-            })
-        };
+        return Some(ReduceMultiF32 { sum: 0.0, min: 0.0, max: 0.0, count: 0 });
     }
     let mut out_sum = 0.0f32;
     let mut out_min = 0.0f32;
@@ -786,19 +656,13 @@ pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
         // SAFETY: data is a valid slice; out_* are valid pointers.
         let status = unsafe {
             bridge::pgaccel_reduce_multi_f32(
-                data.as_ptr(),
-                data.len(),
-                &raw mut out_sum,
-                &raw mut out_min,
-                &raw mut out_max,
-                &raw mut out_count,
+                data.as_ptr(), data.len(),
+                &raw mut out_sum, &raw mut out_min,
+                &raw mut out_max, &raw mut out_count,
             )
         };
         status.is_ok().then_some(ReduceMultiF32 {
-            sum: out_sum,
-            min: out_min,
-            max: out_max,
-            count: out_count,
+            sum: out_sum, min: out_min, max: out_max, count: out_count,
         })
     }
     #[cfg(not(feature = "gpu"))]
@@ -809,43 +673,11 @@ pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
 }
 
 /// GPU-accelerated fused f64 SUM+MIN+MAX+COUNT in a single pass.
-///
-/// On fp32-only devices (Metal), casts input to f32 and dispatches the
-/// f32 variant, matching the semantics of the scalar `reduce_sum_f64`
-/// path.
 #[must_use]
 pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f64", n = data.len()).entered();
     if data.is_empty() {
-        return Some(ReduceMultiF64 {
-            sum: 0.0,
-            min: 0.0,
-            max: 0.0,
-            count: 0,
-        });
-    }
-    #[cfg(not(test))]
-    if use_bgw() {
-        if !device_has_fp64() {
-            let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-            return reduce_multi_f32(&f32_data).map(|r| ReduceMultiF64 {
-                sum: f64::from(r.sum),
-                min: f64::from(r.min),
-                max: f64::from(r.max),
-                count: r.count,
-            });
-        }
-        // SAFETY: data.as_ptr() is valid for data.len() f64 values.
-        return unsafe {
-            crate::engine::gpu_client::bgw_reduce_multi_f64(data.as_ptr(), data.len()).map(|r| {
-                ReduceMultiF64 {
-                    sum: r.sum,
-                    min: r.min,
-                    max: r.max,
-                    count: r.count,
-                }
-            })
-        };
+        return Some(ReduceMultiF64 { sum: 0.0, min: 0.0, max: 0.0, count: 0 });
     }
     let mut out_sum = 0.0f64;
     let mut out_min = 0.0f64;
@@ -856,19 +688,21 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
         // SAFETY: data is a valid slice; out_* are valid pointers.
         let status = unsafe {
             bridge::pgaccel_reduce_multi_f64(
-                data.as_ptr(),
-                data.len(),
-                &raw mut out_sum,
-                &raw mut out_min,
-                &raw mut out_max,
-                &raw mut out_count,
+                data.as_ptr(), data.len(),
+                &raw mut out_sum, &raw mut out_min,
+                &raw mut out_max, &raw mut out_count,
             )
         };
-        status.is_ok().then_some(ReduceMultiF64 {
-            sum: out_sum,
-            min: out_min,
-            max: out_max,
-            count: out_count,
+        if status.is_ok() {
+            return Some(ReduceMultiF64 {
+                sum: out_sum, min: out_min, max: out_max, count: out_count,
+            });
+        }
+        // fp32-only device: cast and use f32 kernel.
+        let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        reduce_multi_f32(&f32_data).map(|r| ReduceMultiF64 {
+            sum: f64::from(r.sum), min: f64::from(r.min),
+            max: f64::from(r.max), count: r.count,
         })
     }
     #[cfg(not(feature = "gpu"))]
@@ -883,26 +717,7 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
 pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
     if data.is_empty() {
-        return Some(ReduceMultiI64 {
-            sum: 0,
-            min: 0,
-            max: 0,
-            count: 0,
-        });
-    }
-    #[cfg(not(test))]
-    if use_bgw() {
-        // SAFETY: data.as_ptr() is valid for data.len() i64 values.
-        return unsafe {
-            crate::engine::gpu_client::bgw_reduce_multi_i64(data.as_ptr(), data.len()).map(|r| {
-                ReduceMultiI64 {
-                    sum: r.sum,
-                    min: r.min,
-                    max: r.max,
-                    count: r.count,
-                }
-            })
-        };
+        return Some(ReduceMultiI64 { sum: 0, min: 0, max: 0, count: 0 });
     }
     let mut out_sum: i64 = 0;
     let mut out_min: i64 = 0;
@@ -913,19 +728,13 @@ pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
         // SAFETY: data is a valid slice; out_* are valid pointers.
         let status = unsafe {
             bridge::pgaccel_reduce_multi_i64(
-                data.as_ptr(),
-                data.len(),
-                &raw mut out_sum,
-                &raw mut out_min,
-                &raw mut out_max,
-                &raw mut out_count,
+                data.as_ptr(), data.len(),
+                &raw mut out_sum, &raw mut out_min,
+                &raw mut out_max, &raw mut out_count,
             )
         };
         status.is_ok().then_some(ReduceMultiI64 {
-            sum: out_sum,
-            min: out_min,
-            max: out_max,
-            count: out_count,
+            sum: out_sum, min: out_min, max: out_max, count: out_count,
         })
     }
     #[cfg(not(feature = "gpu"))]
@@ -938,7 +747,6 @@ pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
 /// GPU-accelerated mask popcount.
 pub fn reduce_count(mask: &[u8]) -> Option<usize> {
     let _span = tracing::debug_span!("gpu.reduce_count", n = mask.len()).entered();
-    // Note: reduce_count has no BGW path yet (rarely used, low priority).
     let mut result: usize = 0;
     #[cfg(feature = "gpu")]
     {
@@ -2090,7 +1898,7 @@ mod mod_tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // Safe wrapper functions — fallback path (no GPU library linked)
+    // Safe wrapper functions — stubs path (no GPU library linked)
     // -----------------------------------------------------------------------
 
     #[cfg(not(feature = "gpu"))]
@@ -2160,7 +1968,7 @@ mod mod_tests {
     #[cfg(not(feature = "gpu"))]
     #[test]
     fn spatial_intersects_gpu_nonempty_returns_none_without_gpu() {
-        // Build a minimal geometry descriptor (pointers unused by fallback).
+        // Build a minimal geometry descriptor (pointers unused by stubs).
         let geom = PgaccelGeometry {
             geom_type: PgaccelGeomType::Point,
             bbox: ptr::null(),
@@ -2179,7 +1987,7 @@ mod mod_tests {
     #[cfg(not(feature = "gpu"))]
     #[test]
     fn spatial_intersects_gpu_mismatched_lengths_uses_min() {
-        // With count = min(2, 1) = 1 > 0, so it hits the fallback path
+        // With count = min(2, 1) = 1 > 0, so it hits the stubs path
         // which returns ErrorNoDevice -> None.
         let geom = PgaccelGeometry {
             geom_type: PgaccelGeomType::Polygon,
@@ -2454,7 +2262,7 @@ mod mod_tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sort wrappers — fallback returns None
+    // Sort wrappers — stubs returns None
     // -----------------------------------------------------------------------
 
     #[cfg(not(feature = "gpu"))]
