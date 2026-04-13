@@ -92,6 +92,9 @@ target_link_libraries(test_correctness PRIVATE pgaccel_kernels_shared)
 add_executable(test_fork test/test_fork.cpp)
 target_link_libraries(test_fork PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_fork_cold test/test_fork_cold.cpp)
+target_link_libraries(test_fork_cold PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
 target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 
