@@ -133,6 +133,9 @@ static double eval_expr(const pgaccel_expr* expr, const double* band_values) {
     return (sp > 0) ? stack[0] : 0.0;
 }
 
+// Threshold below which inline CPU evaluation beats a GPU kernel launch.
+static constexpr size_t GPU_TILE_THRESHOLD = 65536;
+
 /* ── SYCL GPU implementations ────────────────────────────────── */
 
 #if PGACCEL_HAS_SYCL
@@ -160,7 +163,6 @@ static sycl::queue& get_queue() {
  *
  * For very large rasters (>= GPU_TILE_THRESHOLD pixels, e.g. a single
  * huge raster), we go to a real SYCL kernel launch. */
-static constexpr size_t GPU_TILE_THRESHOLD = 65536;
 
 /// Inline evaluator specialised for float32 pixels — the common case
 /// from PostGIS rasters. Avoids the per-pixel switch in read_pixel.
