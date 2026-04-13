@@ -27,6 +27,12 @@ use crate::engine::stats;
 use crate::gpu;
 use crate::gpu::{PgaccelAggCol, PgaccelAggFunc};
 
+/// PostgreSQL NUMERIC type OID (1700). `SUM(bigint)` and `SUM(int4)` return
+/// this type, which is a varlena (pass-by-reference). We must allocate a
+/// proper `Numeric` datum via `DirectFunctionCall1Coll` rather than storing
+/// raw bits in the `Datum`, which PG would misinterpret as a pointer.
+const NUMERICOID: pg_sys::Oid = pg_sys::Oid::from_u32(1700);
+
 /// Which aggregate operation to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggOp {
@@ -331,12 +337,38 @@ impl AggColumn {
 
         // Encode the f64 result into the correct datum format for the
         // declared result type. PG pass-by-value types store bits directly
-        // in the Datum.
+        // in the Datum. Pass-by-reference types (NUMERIC) need allocation.
         let datum = match self.result_type_oid {
             pg_sys::FLOAT4OID => pg_sys::Datum::from((raw_f64 as f32).to_bits()),
             pg_sys::INT2OID => pg_sys::Datum::from(raw_f64 as i16),
             pg_sys::INT4OID => pg_sys::Datum::from(raw_f64 as i32),
             pg_sys::INT8OID => pg_sys::Datum::from(raw_f64 as i64),
+            // NUMERICOID (1700): SUM(bigint), SUM(int4), etc. return numeric.
+            // Numeric is pass-by-reference (varlena), so we must allocate a
+            // proper Numeric datum. Convert via float8 -> numeric using PG's
+            // own `float8_numeric` cast function.
+            oid if oid == NUMERICOID => {
+                // SAFETY: float8_numeric is a stable PG cast function.
+                // The f64 bits are stored in the Datum as FLOAT8OID encoding.
+                // DirectFunctionCall1Coll allocates in CurrentMemoryContext.
+                let f8_datum = pg_sys::Datum::from(raw_f64.to_bits());
+                // SAFETY: Calling PG's float8_numeric via DirectFunctionCall1Coll
+                // on the main backend thread. The result is a palloc'd Numeric.
+                // Cast needed: pgrx generates Rust-ABI fn items but
+                // DirectFunctionCall1Coll expects extern "C-unwind".
+                unsafe {
+                    let fptr: unsafe extern "C-unwind" fn(
+                        *mut pg_sys::FunctionCallInfoBaseData,
+                    ) -> pg_sys::Datum = core::mem::transmute(
+                        pg_sys::float8_numeric as *const (),
+                    );
+                    pg_sys::DirectFunctionCall1Coll(
+                        Some(fptr),
+                        pg_sys::InvalidOid,
+                        f8_datum,
+                    )
+                }
+            }
             // FLOAT8OID and anything else: store as f64 bits.
             _ => pg_sys::Datum::from(raw_f64.to_bits()),
         };
@@ -1814,6 +1846,24 @@ impl AggExecState {
                             pg_sys::INT2OID => pg_sys::Datum::from(raw_f64 as i16),
                             pg_sys::INT4OID => pg_sys::Datum::from(raw_f64 as i32),
                             pg_sys::INT8OID => pg_sys::Datum::from(raw_f64 as i64),
+                            // NUMERICOID: allocate a proper Numeric varlena via
+                            // PG's float8_numeric cast. See `finalize()` for details.
+                            oid if oid == NUMERICOID => {
+                                let f8_datum = pg_sys::Datum::from(raw_f64.to_bits());
+                                // SAFETY: float8_numeric on main backend thread,
+                                // result is palloc'd in CurrentMemoryContext.
+                                // Cast needed: see finalize() comment.
+                                let fptr: unsafe extern "C-unwind" fn(
+                                    *mut pg_sys::FunctionCallInfoBaseData,
+                                ) -> pg_sys::Datum = core::mem::transmute(
+                                    pg_sys::float8_numeric as *const (),
+                                );
+                                pg_sys::DirectFunctionCall1Coll(
+                                    Some(fptr),
+                                    pg_sys::InvalidOid,
+                                    f8_datum,
+                                )
+                            }
                             _ => pg_sys::Datum::from(raw_f64.to_bits()),
                         }
                     };

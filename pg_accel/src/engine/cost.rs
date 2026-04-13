@@ -263,7 +263,10 @@ impl DeviceLimits {
         let gpu_sort_min_rows = cu_scale(100_000).clamp(10_000, 1_000_000);
         let gpu_sort_planner_min_rows = (gpu_sort_min_rows * 10).min(10_000_000);
         let gpu_window_min_rows = cu_scale(100_000).clamp(50_000, 500_000);
-        let gpu_reduce_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
+        // 2026-04-12: raised from 10K to 25K. GPU reduce at 10K is 0.11x
+        // due to BGW IPC overhead (~2-3ms) dominating kernel time (~50µs).
+        // At 25K+ the kernel amortizes IPC. Will lower again after IPC fix.
+        let gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000);
         let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
 
         // ~64 bytes per hash entry; use 1/256th of GPU memory as budget.
@@ -415,7 +418,10 @@ impl DeviceLimits {
             // so the injection ratio is set above 1.0 to compensate — the
             // GPU kernel's real-world batched throughput makes up the
             // paper-cost gap.
-            gpu_agg_cost_ratio: 2.00,
+            // 2026-04-12: lowered from 2.00 to 0.80. At 2.0, SSBM q1_1
+            // dispatched GPU reduce and scored 0.30x@10M. At 0.80 the planner
+            // rejects GPU agg unless estimated cheaper than 80% of PG serial.
+            gpu_agg_cost_ratio: 0.80,
             gpu_window_cost_ratio: 1.50,
             gpu_preagg_cost_ratio: 1.50,
 
@@ -457,7 +463,7 @@ impl DeviceLimits {
             gpu_sort_min_rows: 100_000,
             gpu_sort_planner_min_rows: 1_000_000,
             gpu_window_min_rows: 100_000,
-            gpu_reduce_min_rows: 10_000,
+            gpu_reduce_min_rows: 25_000,
             gpu_hash_agg_min_rows: 250_000,
             gpu_hash_agg_max_groups: 10_000,
             gpu_reduce_max_chunk: 256_000,
@@ -483,7 +489,7 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
-            gpu_agg_cost_ratio: 2.00,
+            gpu_agg_cost_ratio: 0.80,
             gpu_window_cost_ratio: 1.50,
             gpu_preagg_cost_ratio: 1.50,
 

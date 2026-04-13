@@ -243,6 +243,22 @@ unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
+    // Gate 4a-raster: Raster operations need significantly more rows to
+    // amortize GPU overhead than spatial predicates. Benchmark (2026-04-12)
+    // shows 0.62x at 10K but 1.38x at 100K. Require 5x the device-derived
+    // gpu_min_rows (typically 50K) before injecting a GpuRaster path.
+    if strategy == registry::AccelStrategy::GpuRaster {
+        let raster_min = cost::device_limits().gpu_min_rows * 5;
+        if rows < raster_min {
+            pgrx::debug1!(
+                "pg_accel: set_rel_pathlist: GpuRaster rejected rows={} < raster_min={}",
+                rows,
+                raster_min
+            );
+            return;
+        }
+    }
+
     // Gate 4b: Defer to GiST/SP-GiST index scan for selective spatial filters.
     // When a spatial index exists and is highly selective, PG's native index
     // scan avoids touching most heap pages entirely. Wrapping that in a Custom
@@ -1183,6 +1199,26 @@ unsafe fn pgaccel_inject_gpu_window(
                 return;
             }
         };
+
+        // Gate: Per-function rejection based on 2026-04-12 benchmark results.
+        // Ranking and offset window functions (ROW_NUMBER, RANK, DENSE_RANK,
+        // LAG, LEAD) consistently lose to PG parallel at all scales
+        // (0.46-0.93x). Only aggregate window functions (SUM, COUNT, AVG,
+        // MIN, MAX) show GPU wins. Skip injection for the losing functions.
+        if matches!(
+            wfunc_enum,
+            WindowFunc::RowNumber
+                | WindowFunc::Rank
+                | WindowFunc::DenseRank
+                | WindowFunc::Lag
+                | WindowFunc::Lead
+        ) {
+            pgrx::debug1!(
+                "pg_accel window: rejecting {:?} — benchmark shows GPU loses at all scales",
+                wfunc_enum
+            );
+            continue;
+        }
 
         // Resolve partition and order columns from the WindowClause.
         let winref = wf.winref;
@@ -5106,7 +5142,7 @@ mod tests {
         assert_eq!(limits.gpu_sort_min_rows, 100_000);
         assert_eq!(limits.gpu_sort_planner_min_rows, 1_000_000);
         assert_eq!(limits.gpu_window_min_rows, 100_000);
-        assert_eq!(limits.gpu_reduce_min_rows, 10_000);
+        assert_eq!(limits.gpu_reduce_min_rows, 25_000);
         assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(limits.gpu_hash_agg_max_groups, 10_000);
         assert_eq!(limits.optimal_batch_min, 256);
