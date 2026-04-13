@@ -61,6 +61,30 @@ metal_status metal_reduce_multi_i64(
     const int64_t* data, size_t count,
     int64_t* out_sum, int64_t* out_min, int64_t* out_max, int64_t* out_count);
 
+// ── Window kernels ────────────────────────────────────────────────
+
+metal_status metal_window_row_number(
+    const uint8_t* partition_starts, size_t count, int64_t* results);
+
+metal_status metal_window_lag(
+    const uint8_t* partition_starts,
+    const double* values, const uint8_t* null_mask,
+    size_t count, int offset, double default_val,
+    double* results, uint8_t* result_nulls);
+
+metal_status metal_window_lead(
+    const uint8_t* partition_starts,
+    const double* values, const uint8_t* null_mask,
+    size_t count, int offset, double default_val,
+    double* results, uint8_t* result_nulls);
+
+// ── Sort kernels ──────────────────────────────────────────────────
+// Keys are pre-converted to sortable uint on the CPU side.
+// Internally selects bitonic (<65K) or radix (>=65K).
+
+metal_status metal_sort_kv_u32(uint32_t* keys, uint32_t* indices, size_t count);
+metal_status metal_sort_kv_u64(uint64_t* keys, uint32_t* indices, size_t count);
+
 #ifdef __cplusplus
 }
 #endif

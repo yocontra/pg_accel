@@ -22,6 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -147,9 +148,17 @@ static const char* KERNEL_NAMES[] = {
     "reduce_count",
     "reduce_multi_f32",
     "reduce_multi_i64",
-    // sort (Phase 1b)
-    // "bitonic_sort_step_f32",
-    // "bitonic_sort_step_i64",
+    // sort
+    "bitonic_step_kv_u32",
+    "bitonic_step_kv_u64",
+    "radix_histogram_u32",
+    "radix_histogram_u64",
+    "radix_scatter_kv_u32",
+    "radix_scatter_kv_u64",
+    // window
+    "window_row_number",
+    "window_lag",
+    "window_lead",
     // spatial (Phase 1c)
     // "point_in_ring_f32",
     // h3 (Phase 1d)
@@ -656,4 +665,615 @@ extern "C" metal_status metal_reduce_multi_i64(
     *out_max = mx;
     *out_count = (int64_t)count;
     return METAL_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Sort dispatch functions
+// ---------------------------------------------------------------------------
+
+static constexpr size_t METAL_SORT_WG = 256;
+static constexpr size_t METAL_RADIX_BINS = 256;
+static constexpr size_t METAL_RADIX_THRESHOLD = 65536;
+
+static size_t metal_next_pow2(size_t n) {
+    if (n <= 1) return 1;
+    --n;
+    n |= n >> 1;  n |= n >> 2;  n |= n >> 4;
+    n |= n >> 8;  n |= n >> 16; n |= n >> 32;
+    return n + 1;
+}
+
+// ── Bitonic sort (u32 keys + u32 indices) ─────────────────────────
+// All steps batched into one command buffer with memory barriers.
+
+static metal_status metal_bitonic_kv_u32(
+    id<MTLBuffer> keys_buf, id<MTLBuffer> idx_buf, size_t padded)
+{
+    auto pipeline = metal_get_pipeline("bitonic_step_kv_u32");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [g_queue commandBuffer];
+        if (!cmdBuf) return METAL_ERROR_INIT;
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        if (!enc) return METAL_ERROR_INIT;
+
+        uint32_t tg_size = MIN((uint32_t)[pipeline maxTotalThreadsPerThreadgroup],
+                               (uint32_t)METAL_SORT_WG);
+        uint32_t num_tg = ((uint32_t)padded + tg_size - 1) / tg_size;
+        uint32_t pc = (uint32_t)padded;
+
+        for (size_t k = 2; k <= padded; k *= 2) {
+            for (size_t j = k / 2; j > 0; j /= 2) {
+                uint32_t k_p = (uint32_t)k;
+                uint32_t j_p = (uint32_t)j;
+                [enc setComputePipelineState:pipeline];
+                [enc setBuffer:keys_buf offset:0 atIndex:0];
+                [enc setBuffer:idx_buf offset:0 atIndex:1];
+                [enc setBytes:&k_p length:sizeof(uint32_t) atIndex:2];
+                [enc setBytes:&j_p length:sizeof(uint32_t) atIndex:3];
+                [enc setBytes:&pc length:sizeof(uint32_t) atIndex:4];
+                [enc dispatchThreadgroups:MTLSizeMake(num_tg, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+        }
+
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        if ([cmdBuf error]) {
+            fprintf(stderr, "pgaccel metal: bitonic u32 error: %s\n",
+                    [[[cmdBuf error] localizedDescription] UTF8String]);
+            return METAL_ERROR;
+        }
+    }
+    return METAL_OK;
+}
+
+// ── Bitonic sort (u64 keys + u32 indices) ─────────────────────────
+
+static metal_status metal_bitonic_kv_u64(
+    id<MTLBuffer> keys_buf, id<MTLBuffer> idx_buf, size_t padded)
+{
+    auto pipeline = metal_get_pipeline("bitonic_step_kv_u64");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> cmdBuf = [g_queue commandBuffer];
+        if (!cmdBuf) return METAL_ERROR_INIT;
+        id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
+        if (!enc) return METAL_ERROR_INIT;
+
+        uint32_t tg_size = MIN((uint32_t)[pipeline maxTotalThreadsPerThreadgroup],
+                               (uint32_t)METAL_SORT_WG);
+        uint32_t num_tg = ((uint32_t)padded + tg_size - 1) / tg_size;
+        uint32_t pc = (uint32_t)padded;
+
+        for (size_t k = 2; k <= padded; k *= 2) {
+            for (size_t j = k / 2; j > 0; j /= 2) {
+                uint32_t k_p = (uint32_t)k;
+                uint32_t j_p = (uint32_t)j;
+                [enc setComputePipelineState:pipeline];
+                [enc setBuffer:keys_buf offset:0 atIndex:0];
+                [enc setBuffer:idx_buf offset:0 atIndex:1];
+                [enc setBytes:&k_p length:sizeof(uint32_t) atIndex:2];
+                [enc setBytes:&j_p length:sizeof(uint32_t) atIndex:3];
+                [enc setBytes:&pc length:sizeof(uint32_t) atIndex:4];
+                [enc dispatchThreadgroups:MTLSizeMake(num_tg, 1, 1)
+                    threadsPerThreadgroup:MTLSizeMake(tg_size, 1, 1)];
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+        }
+
+        [enc endEncoding];
+        [cmdBuf commit];
+        [cmdBuf waitUntilCompleted];
+        if ([cmdBuf error]) {
+            fprintf(stderr, "pgaccel metal: bitonic u64 error: %s\n",
+                    [[[cmdBuf error] localizedDescription] UTF8String]);
+            return METAL_ERROR;
+        }
+    }
+    return METAL_OK;
+}
+
+// ── Radix sort (u32 keys + u32 indices) ───────────────────────────
+// 4 passes × (histogram → CPU prefix scan → scatter).
+
+static metal_status metal_radix_kv_u32(
+    id<MTLBuffer> keys_a, id<MTLBuffer> keys_b,
+    id<MTLBuffer> idx_a, id<MTLBuffer> idx_b,
+    id<MTLBuffer> hist_buf,
+    size_t padded, size_t ngroups)
+{
+    auto hist_pipe = metal_get_pipeline("radix_histogram_u32");
+    auto scatter_pipe = metal_get_pipeline("radix_scatter_kv_u32");
+    if (!hist_pipe || !scatter_pipe) return METAL_ERROR_NO_DEVICE;
+
+    id<MTLBuffer> src_keys = keys_a, dst_keys = keys_b;
+    id<MTLBuffer> src_idx  = idx_a,  dst_idx  = idx_b;
+    uint32_t pc = (uint32_t)padded;
+
+    for (int pass = 0; pass < 4; ++pass) {
+        uint32_t shift = (uint32_t)(pass * 8);
+
+        // 1. Histogram
+        metal_status st = dispatch_sync(hist_pipe,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:src_keys offset:0 atIndex:0];
+                [enc setBuffer:hist_buf offset:0 atIndex:1];
+                [enc setBytes:&shift length:sizeof(uint32_t) atIndex:2];
+                [enc setBytes:&pc length:sizeof(uint32_t) atIndex:3];
+            }, pc);
+        if (st != METAL_OK) return st;
+
+        // 2. CPU prefix scan over per-group histograms
+        uint32_t* hist = (uint32_t*)[hist_buf contents];
+        uint32_t bin_total[METAL_RADIX_BINS] = {};
+        for (size_t g = 0; g < ngroups; ++g)
+            for (size_t b = 0; b < METAL_RADIX_BINS; ++b)
+                bin_total[b] += hist[g * METAL_RADIX_BINS + b];
+
+        uint32_t bin_base[METAL_RADIX_BINS];
+        bin_base[0] = 0;
+        for (size_t b = 1; b < METAL_RADIX_BINS; ++b)
+            bin_base[b] = bin_base[b - 1] + bin_total[b - 1];
+
+        uint32_t running[METAL_RADIX_BINS];
+        for (size_t b = 0; b < METAL_RADIX_BINS; ++b) running[b] = bin_base[b];
+        for (size_t g = 0; g < ngroups; ++g) {
+            for (size_t b = 0; b < METAL_RADIX_BINS; ++b) {
+                uint32_t cnt = hist[g * METAL_RADIX_BINS + b];
+                hist[g * METAL_RADIX_BINS + b] = running[b];
+                running[b] += cnt;
+            }
+        }
+
+        // 3. Scatter
+        st = dispatch_sync(scatter_pipe,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:src_keys offset:0 atIndex:0];
+                [enc setBuffer:src_idx  offset:0 atIndex:1];
+                [enc setBuffer:dst_keys offset:0 atIndex:2];
+                [enc setBuffer:dst_idx  offset:0 atIndex:3];
+                [enc setBuffer:hist_buf offset:0 atIndex:4];
+                [enc setBytes:&shift length:sizeof(uint32_t) atIndex:5];
+                [enc setBytes:&pc length:sizeof(uint32_t) atIndex:6];
+            }, pc);
+        if (st != METAL_OK) return st;
+
+        // 4. Swap src ↔ dst
+        id<MTLBuffer> tmp;
+        tmp = src_keys; src_keys = dst_keys; dst_keys = tmp;
+        tmp = src_idx;  src_idx  = dst_idx;  dst_idx  = tmp;
+    }
+    // After 4 swaps (even), results are in keys_a / idx_a.
+    return METAL_OK;
+}
+
+// ── Radix sort (u64 keys + u32 indices) ───────────────────────────
+// 8 passes × (histogram → CPU prefix scan → scatter).
+
+static metal_status metal_radix_kv_u64(
+    id<MTLBuffer> keys_a, id<MTLBuffer> keys_b,
+    id<MTLBuffer> idx_a, id<MTLBuffer> idx_b,
+    id<MTLBuffer> hist_buf,
+    size_t padded, size_t ngroups)
+{
+    auto hist_pipe = metal_get_pipeline("radix_histogram_u64");
+    auto scatter_pipe = metal_get_pipeline("radix_scatter_kv_u64");
+    if (!hist_pipe || !scatter_pipe) return METAL_ERROR_NO_DEVICE;
+
+    id<MTLBuffer> src_keys = keys_a, dst_keys = keys_b;
+    id<MTLBuffer> src_idx  = idx_a,  dst_idx  = idx_b;
+    uint32_t pc = (uint32_t)padded;
+
+    for (int pass = 0; pass < 8; ++pass) {
+        uint32_t shift = (uint32_t)(pass * 8);
+
+        metal_status st = dispatch_sync(hist_pipe,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:src_keys offset:0 atIndex:0];
+                [enc setBuffer:hist_buf offset:0 atIndex:1];
+                [enc setBytes:&shift length:sizeof(uint32_t) atIndex:2];
+                [enc setBytes:&pc length:sizeof(uint32_t) atIndex:3];
+            }, pc);
+        if (st != METAL_OK) return st;
+
+        uint32_t* hist = (uint32_t*)[hist_buf contents];
+        uint32_t bin_total[METAL_RADIX_BINS] = {};
+        for (size_t g = 0; g < ngroups; ++g)
+            for (size_t b = 0; b < METAL_RADIX_BINS; ++b)
+                bin_total[b] += hist[g * METAL_RADIX_BINS + b];
+
+        uint32_t bin_base[METAL_RADIX_BINS];
+        bin_base[0] = 0;
+        for (size_t b = 1; b < METAL_RADIX_BINS; ++b)
+            bin_base[b] = bin_base[b - 1] + bin_total[b - 1];
+
+        uint32_t running[METAL_RADIX_BINS];
+        for (size_t b = 0; b < METAL_RADIX_BINS; ++b) running[b] = bin_base[b];
+        for (size_t g = 0; g < ngroups; ++g) {
+            for (size_t b = 0; b < METAL_RADIX_BINS; ++b) {
+                uint32_t cnt = hist[g * METAL_RADIX_BINS + b];
+                hist[g * METAL_RADIX_BINS + b] = running[b];
+                running[b] += cnt;
+            }
+        }
+
+        st = dispatch_sync(scatter_pipe,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:src_keys offset:0 atIndex:0];
+                [enc setBuffer:src_idx  offset:0 atIndex:1];
+                [enc setBuffer:dst_keys offset:0 atIndex:2];
+                [enc setBuffer:dst_idx  offset:0 atIndex:3];
+                [enc setBuffer:hist_buf offset:0 atIndex:4];
+                [enc setBytes:&shift length:sizeof(uint32_t) atIndex:5];
+                [enc setBytes:&pc length:sizeof(uint32_t) atIndex:6];
+            }, pc);
+        if (st != METAL_OK) return st;
+
+        id<MTLBuffer> tmp;
+        tmp = src_keys; src_keys = dst_keys; dst_keys = tmp;
+        tmp = src_idx;  src_idx  = dst_idx;  dst_idx  = tmp;
+    }
+    // After 8 swaps (even), results are in keys_a / idx_a.
+    return METAL_OK;
+}
+
+// ── Public sort API ───────────────────────────────────────────────
+
+extern "C" metal_status metal_sort_kv_u32(
+    uint32_t* keys, uint32_t* indices, size_t count)
+{
+    if (!keys || !indices) return METAL_ERROR;
+    if (count <= 1) return METAL_OK;
+
+    @autoreleasepool {
+        if (count < METAL_RADIX_THRESHOLD) {
+            // Bitonic sort — pad to next power of two
+            size_t padded = metal_next_pow2(count);
+
+            id<MTLBuffer> keys_buf = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                                       options:MTLResourceStorageModeShared];
+            id<MTLBuffer> idx_buf = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                                      options:MTLResourceStorageModeShared];
+            if (!keys_buf || !idx_buf) return METAL_ERROR_OOM;
+
+            uint32_t* kp = (uint32_t*)[keys_buf contents];
+            uint32_t* ip = (uint32_t*)[idx_buf contents];
+            memcpy(kp, keys, count * sizeof(uint32_t));
+            memcpy(ip, indices, count * sizeof(uint32_t));
+            for (size_t i = count; i < padded; ++i) {
+                kp[i] = UINT32_MAX;
+                ip[i] = UINT32_MAX;
+            }
+
+            metal_status st = metal_bitonic_kv_u32(keys_buf, idx_buf, padded);
+            if (st != METAL_OK) return st;
+
+            memcpy(keys, kp, count * sizeof(uint32_t));
+            memcpy(indices, ip, count * sizeof(uint32_t));
+            return METAL_OK;
+        }
+
+        // Radix sort — pad to multiple of WG_SIZE
+        size_t ngroups = (count + METAL_SORT_WG - 1) / METAL_SORT_WG;
+        size_t padded  = ngroups * METAL_SORT_WG;
+
+        id<MTLBuffer> ka = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> kb2 = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> ia = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> ib2 = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> hb = [g_device newBufferWithLength:ngroups * METAL_RADIX_BINS * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+        if (!ka || !kb2 || !ia || !ib2 || !hb) return METAL_ERROR_OOM;
+
+        uint32_t* kap = (uint32_t*)[ka contents];
+        uint32_t* iap = (uint32_t*)[ia contents];
+        memcpy(kap, keys, count * sizeof(uint32_t));
+        memcpy(iap, indices, count * sizeof(uint32_t));
+        for (size_t i = count; i < padded; ++i) {
+            kap[i] = UINT32_MAX;
+            iap[i] = UINT32_MAX;
+        }
+
+        metal_status st = metal_radix_kv_u32(ka, kb2, ia, ib2, hb, padded, ngroups);
+        if (st != METAL_OK) return st;
+
+        memcpy(keys, kap, count * sizeof(uint32_t));
+        memcpy(indices, iap, count * sizeof(uint32_t));
+        return METAL_OK;
+    }
+}
+
+extern "C" metal_status metal_sort_kv_u64(
+    uint64_t* keys, uint32_t* indices, size_t count)
+{
+    if (!keys || !indices) return METAL_ERROR;
+    if (count <= 1) return METAL_OK;
+
+    @autoreleasepool {
+        if (count < METAL_RADIX_THRESHOLD) {
+            size_t padded = metal_next_pow2(count);
+
+            id<MTLBuffer> keys_buf = [g_device newBufferWithLength:padded * sizeof(uint64_t)
+                                       options:MTLResourceStorageModeShared];
+            id<MTLBuffer> idx_buf = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                                      options:MTLResourceStorageModeShared];
+            if (!keys_buf || !idx_buf) return METAL_ERROR_OOM;
+
+            uint64_t* kp = (uint64_t*)[keys_buf contents];
+            uint32_t* ip = (uint32_t*)[idx_buf contents];
+            memcpy(kp, keys, count * sizeof(uint64_t));
+            memcpy(ip, indices, count * sizeof(uint32_t));
+            for (size_t i = count; i < padded; ++i) {
+                kp[i] = UINT64_MAX;
+                ip[i] = UINT32_MAX;
+            }
+
+            metal_status st = metal_bitonic_kv_u64(keys_buf, idx_buf, padded);
+            if (st != METAL_OK) return st;
+
+            memcpy(keys, kp, count * sizeof(uint64_t));
+            memcpy(indices, ip, count * sizeof(uint32_t));
+            return METAL_OK;
+        }
+
+        size_t ngroups = (count + METAL_SORT_WG - 1) / METAL_SORT_WG;
+        size_t padded  = ngroups * METAL_SORT_WG;
+
+        id<MTLBuffer> ka = [g_device newBufferWithLength:padded * sizeof(uint64_t)
+                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> kb2 = [g_device newBufferWithLength:padded * sizeof(uint64_t)
+                              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> ia = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+        id<MTLBuffer> ib2 = [g_device newBufferWithLength:padded * sizeof(uint32_t)
+                              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> hb = [g_device newBufferWithLength:ngroups * METAL_RADIX_BINS * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+        if (!ka || !kb2 || !ia || !ib2 || !hb) return METAL_ERROR_OOM;
+
+        uint64_t* kap = (uint64_t*)[ka contents];
+        uint32_t* iap = (uint32_t*)[ia contents];
+        memcpy(kap, keys, count * sizeof(uint64_t));
+        memcpy(iap, indices, count * sizeof(uint32_t));
+        for (size_t i = count; i < padded; ++i) {
+            kap[i] = UINT64_MAX;
+            iap[i] = UINT32_MAX;
+        }
+
+        metal_status st = metal_radix_kv_u64(ka, kb2, ia, ib2, hb, padded, ngroups);
+        if (st != METAL_OK) return st;
+
+        memcpy(keys, kap, count * sizeof(uint64_t));
+        memcpy(indices, iap, count * sizeof(uint32_t));
+        return METAL_OK;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Window dispatch functions
+// ---------------------------------------------------------------------------
+
+// CPU helpers: build per-row partition boundary arrays from markers.
+
+static void metal_build_part_start(
+    const uint8_t* partition_starts, size_t count, uint32_t* out)
+{
+    uint32_t cur = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (partition_starts[i]) cur = (uint32_t)i;
+        out[i] = cur;
+    }
+}
+
+static void metal_build_part_end(
+    const uint8_t* partition_starts, size_t count, uint32_t* out)
+{
+    uint32_t end = (uint32_t)(count - 1);
+    for (size_t i = count; i > 0; --i) {
+        size_t idx = i - 1;
+        if (idx < count - 1 && partition_starts[idx + 1]) {
+            end = (uint32_t)idx;
+        }
+        out[idx] = end;
+    }
+}
+
+// Packed params struct matching window.metal LagLeadParams
+struct MetalLagLeadParams {
+    uint32_t offset;
+    uint32_t count;
+    uint32_t has_nulls;
+    uint32_t has_result_nulls;
+    uint64_t default_val_bits;
+};
+
+extern "C" metal_status metal_window_row_number(
+    const uint8_t* partition_starts, size_t count, int64_t* results)
+{
+    if (!partition_starts || !results) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+
+    auto pipeline = metal_get_pipeline("window_row_number");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        // Build partition start indices on CPU
+        std::vector<uint32_t> h_part(count);
+        metal_build_part_start(partition_starts, count, h_part.data());
+
+        uint32_t n = (uint32_t)count;
+
+        id<MTLBuffer> part_buf = [g_device newBufferWithBytes:h_part.data()
+                                   length:count * sizeof(uint32_t)
+                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> res_buf = [g_device newBufferWithLength:count * sizeof(int64_t)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> cnt_buf = [g_device newBufferWithBytes:&n
+                                  length:sizeof(uint32_t)
+                                  options:MTLResourceStorageModeShared];
+        if (!part_buf || !res_buf || !cnt_buf) return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:part_buf offset:0 atIndex:0];
+                [enc setBuffer:res_buf offset:0 atIndex:1];
+                [enc setBuffer:cnt_buf offset:0 atIndex:2];
+            }, n);
+        if (st != METAL_OK) return st;
+
+        memcpy(results, [res_buf contents], count * sizeof(int64_t));
+        return METAL_OK;
+    }
+}
+
+extern "C" metal_status metal_window_lag(
+    const uint8_t* partition_starts,
+    const double* values, const uint8_t* null_mask,
+    size_t count, int offset, double default_val,
+    double* results, uint8_t* result_nulls)
+{
+    if (!partition_starts || !values || !results) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+
+    auto pipeline = metal_get_pipeline("window_lag");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        std::vector<uint32_t> h_part(count);
+        metal_build_part_start(partition_starts, count, h_part.data());
+
+        uint64_t default_bits;
+        memcpy(&default_bits, &default_val, sizeof(double));
+
+        MetalLagLeadParams params = {
+            .offset = (uint32_t)offset,
+            .count = (uint32_t)count,
+            .has_nulls = (null_mask != nullptr) ? 1u : 0u,
+            .has_result_nulls = (result_nulls != nullptr) ? 1u : 0u,
+            .default_val_bits = default_bits,
+        };
+
+        id<MTLBuffer> part_buf = [g_device newBufferWithBytes:h_part.data()
+                                   length:count * sizeof(uint32_t)
+                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> val_buf = [g_device newBufferWithBytes:values
+                                  length:count * sizeof(double)
+                                  options:MTLResourceStorageModeShared];
+        // null_mask: provide a dummy 1-byte buffer if null
+        id<MTLBuffer> null_buf = null_mask
+            ? [g_device newBufferWithBytes:null_mask
+                        length:count * sizeof(uint8_t)
+                        options:MTLResourceStorageModeShared]
+            : [g_device newBufferWithLength:1
+                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> res_buf = [g_device newBufferWithLength:count * sizeof(double)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> rnull_buf = result_nulls
+            ? [g_device newBufferWithLength:count * sizeof(uint8_t)
+                        options:MTLResourceStorageModeShared]
+            : [g_device newBufferWithLength:1
+                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(MetalLagLeadParams)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!part_buf || !val_buf || !null_buf || !res_buf || !rnull_buf || !params_buf)
+            return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:part_buf offset:0 atIndex:0];
+                [enc setBuffer:val_buf offset:0 atIndex:1];
+                [enc setBuffer:null_buf offset:0 atIndex:2];
+                [enc setBuffer:res_buf offset:0 atIndex:3];
+                [enc setBuffer:rnull_buf offset:0 atIndex:4];
+                [enc setBuffer:params_buf offset:0 atIndex:5];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        memcpy(results, [res_buf contents], count * sizeof(double));
+        if (result_nulls)
+            memcpy(result_nulls, [rnull_buf contents], count * sizeof(uint8_t));
+        return METAL_OK;
+    }
+}
+
+extern "C" metal_status metal_window_lead(
+    const uint8_t* partition_starts,
+    const double* values, const uint8_t* null_mask,
+    size_t count, int offset, double default_val,
+    double* results, uint8_t* result_nulls)
+{
+    if (!partition_starts || !values || !results) return METAL_ERROR;
+    if (count == 0) return METAL_OK;
+
+    auto pipeline = metal_get_pipeline("window_lead");
+    if (!pipeline) return METAL_ERROR_NO_DEVICE;
+
+    @autoreleasepool {
+        std::vector<uint32_t> h_part(count);
+        metal_build_part_end(partition_starts, count, h_part.data());
+
+        uint64_t default_bits;
+        memcpy(&default_bits, &default_val, sizeof(double));
+
+        MetalLagLeadParams params = {
+            .offset = (uint32_t)offset,
+            .count = (uint32_t)count,
+            .has_nulls = (null_mask != nullptr) ? 1u : 0u,
+            .has_result_nulls = (result_nulls != nullptr) ? 1u : 0u,
+            .default_val_bits = default_bits,
+        };
+
+        id<MTLBuffer> part_buf = [g_device newBufferWithBytes:h_part.data()
+                                   length:count * sizeof(uint32_t)
+                                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> val_buf = [g_device newBufferWithBytes:values
+                                  length:count * sizeof(double)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> null_buf = null_mask
+            ? [g_device newBufferWithBytes:null_mask
+                        length:count * sizeof(uint8_t)
+                        options:MTLResourceStorageModeShared]
+            : [g_device newBufferWithLength:1
+                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> res_buf = [g_device newBufferWithLength:count * sizeof(double)
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> rnull_buf = result_nulls
+            ? [g_device newBufferWithLength:count * sizeof(uint8_t)
+                        options:MTLResourceStorageModeShared]
+            : [g_device newBufferWithLength:1
+                        options:MTLResourceStorageModeShared];
+        id<MTLBuffer> params_buf = [g_device newBufferWithBytes:&params
+                                     length:sizeof(MetalLagLeadParams)
+                                     options:MTLResourceStorageModeShared];
+
+        if (!part_buf || !val_buf || !null_buf || !res_buf || !rnull_buf || !params_buf)
+            return METAL_ERROR_OOM;
+
+        metal_status st = dispatch_sync(pipeline,
+            ^(id<MTLComputeCommandEncoder> enc) {
+                [enc setBuffer:part_buf offset:0 atIndex:0];
+                [enc setBuffer:val_buf offset:0 atIndex:1];
+                [enc setBuffer:null_buf offset:0 atIndex:2];
+                [enc setBuffer:res_buf offset:0 atIndex:3];
+                [enc setBuffer:rnull_buf offset:0 atIndex:4];
+                [enc setBuffer:params_buf offset:0 atIndex:5];
+            }, (uint32_t)count);
+        if (st != METAL_OK) return st;
+
+        memcpy(results, [res_buf contents], count * sizeof(double));
+        if (result_nulls)
+            memcpy(result_nulls, [rnull_buf contents], count * sizeof(uint8_t));
+        return METAL_OK;
+    }
 }

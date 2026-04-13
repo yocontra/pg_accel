@@ -179,6 +179,14 @@ if(PGACCEL_USE_METAL AND APPLE)
     add_executable(test_metal_reduce test/test_metal_reduce.mm)
     target_link_libraries(test_metal_reduce PRIVATE pgaccel_kernels_shared)
     add_test(NAME test_metal_reduce COMMAND test_metal_reduce)
+
+    add_executable(test_metal_sort test/test_metal_sort.mm)
+    target_link_libraries(test_metal_sort PRIVATE pgaccel_kernels_shared)
+    add_test(NAME test_metal_sort COMMAND test_metal_sort)
+
+    add_executable(test_metal_window test/test_metal_window.mm)
+    target_link_libraries(test_metal_window PRIVATE pgaccel_kernels_shared)
+    add_test(NAME test_metal_window COMMAND test_metal_window)
 endif()
 
 enable_testing()

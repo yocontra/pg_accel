@@ -12,6 +12,7 @@
 
 // All kernel function names that need pipeline states
 static const char* KERNEL_NAMES[] = {
+    // reduce
     "reduce_sum_f32",
     "reduce_min_f32",
     "reduce_max_f32",
@@ -19,6 +20,17 @@ static const char* KERNEL_NAMES[] = {
     "reduce_count",
     "reduce_multi_f32",
     "reduce_multi_i64",
+    // sort
+    "bitonic_step_kv_u32",
+    "bitonic_step_kv_u64",
+    "radix_histogram_u32",
+    "radix_histogram_u64",
+    "radix_scatter_kv_u32",
+    "radix_scatter_kv_u64",
+    // window
+    "window_row_number",
+    "window_lag",
+    "window_lead",
     nullptr
 };
 

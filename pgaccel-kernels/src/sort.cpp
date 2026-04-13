@@ -13,6 +13,10 @@
 #include <sycl/sycl.hpp>
 #endif
 
+#if PGACCEL_HAS_METAL
+#include "metal_backend.h"
+#endif
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -79,6 +83,48 @@ static pgaccel_status cpu_sort_kv(K* keys, uint32_t* indices, size_t count) {
         indices[i] = pairs[i].second;
     }
     return PGACCEL_OK;
+}
+
+// ---------------------------------------------------------------------------
+// Sortable-uint conversion (used by both SYCL and Metal radix sort)
+// ---------------------------------------------------------------------------
+
+/// Convert signed int32 to sortable uint32 (flip sign bit so negative < positive).
+static inline uint32_t i32_to_sortable(int32_t v) {
+    return static_cast<uint32_t>(v) ^ 0x80000000u;
+}
+
+/// Convert sortable uint32 back to signed int32.
+static inline int32_t sortable_to_i32(uint32_t u) {
+    return static_cast<int32_t>(u ^ 0x80000000u);
+}
+
+/// Convert float to sortable uint32 (preserves order including NaN-last for PG).
+static inline uint32_t f32_to_sortable(float f) {
+    if (f != f) f = std::numeric_limits<float>::quiet_NaN();
+    uint32_t bits;
+    std::memcpy(&bits, &f, sizeof(bits));
+    uint32_t mask = (bits & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
+    return bits ^ mask;
+}
+
+/// Convert sortable uint32 back to float.
+static inline float sortable_to_f32(uint32_t u) {
+    uint32_t mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
+    uint32_t bits = u ^ mask;
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+/// Convert signed int64 to sortable uint64 (flip sign bit).
+static inline uint64_t i64_to_sortable(int64_t v) {
+    return static_cast<uint64_t>(v) ^ 0x8000000000000000ULL;
+}
+
+/// Convert sortable uint64 back to signed int64.
+static inline int64_t sortable_to_i64(uint64_t u) {
+    return static_cast<int64_t>(u ^ 0x8000000000000000ULL);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,40 +378,6 @@ static constexpr size_t RADIX_SORT_THRESHOLD = 65536;
 
 /// Number of bins for 8-bit radix.
 static constexpr size_t RADIX_BINS = 256;
-
-/// Convert signed int32 to sortable uint32 (flip sign bit so negative < positive).
-static inline uint32_t i32_to_sortable(int32_t v) {
-    return static_cast<uint32_t>(v) ^ 0x80000000u;
-}
-
-/// Convert sortable uint32 back to signed int32.
-static inline int32_t sortable_to_i32(uint32_t u) {
-    return static_cast<int32_t>(u ^ 0x80000000u);
-}
-
-/// Convert float to sortable uint32 (preserves order including NaN-last for PG).
-static inline uint32_t f32_to_sortable(float f) {
-    // Canonicalize NaN to positive quiet NaN (PG: NaN sorts last).
-    if (f != f) f = std::numeric_limits<float>::quiet_NaN();
-    uint32_t bits;
-    std::memcpy(&bits, &f, sizeof(bits));
-    // If sign bit set, flip all bits; otherwise flip only sign bit.
-    uint32_t mask = (bits & 0x80000000u) ? 0xFFFFFFFFu : 0x80000000u;
-    return bits ^ mask;
-}
-
-/// Convert sortable uint32 back to float.
-/// Inverse of f32_to_sortable: high bit set in sortable-space means the
-/// original float was positive (sign bit was 0, then XOR'd with 0x80000000),
-/// so we undo with the same 0x80000000 mask.  High bit clear means the
-/// original was negative (all bits were flipped), so we undo with 0xFFFFFFFF.
-static inline float sortable_to_f32(uint32_t u) {
-    uint32_t mask = (u & 0x80000000u) ? 0x80000000u : 0xFFFFFFFFu;
-    uint32_t bits = u ^ mask;
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-}
 
 /// Work-group size for the radix histogram / scatter kernels.
 /// 256 = Metal's "sweet spot" threadgroup size. Each work-group handles
@@ -674,15 +686,6 @@ static pgaccel_status sycl_radix_sort_kv_u32(
 // ---------------------------------------------------------------------------
 // 64-bit radix sort — 8 passes × 8 bits
 // ---------------------------------------------------------------------------
-
-/// Convert signed int64 to sortable uint64 (flip sign bit).
-static inline uint64_t i64_to_sortable(int64_t v) {
-    return static_cast<uint64_t>(v) ^ 0x8000000000000000ULL;
-}
-
-static inline int64_t sortable_to_i64(uint64_t u) {
-    return static_cast<int64_t>(u ^ 0x8000000000000000ULL);
-}
 
 /// GPU radix sort for uint64 keys + uint32 indices.
 /// Same pattern as the u32 version but 8 passes instead of 4.
@@ -1054,6 +1057,36 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
     }
     pgaccel_warn_cpu_fallback("sort");
     return PGACCEL_ERROR_NO_DEVICE;
+#elif PGACCEL_HAS_METAL
+    // Metal path: convert to sortable uint, dispatch via metal_sort_kv_u32/u64.
+    {
+        std::vector<uint32_t> indices(count);
+        for (size_t i = 0; i < count; ++i) indices[i] = (uint32_t)i;
+        metal_status mst = METAL_ERROR;
+
+        if constexpr (std::is_same_v<T, float>) {
+            std::vector<uint32_t> ukeys(count);
+            for (size_t i = 0; i < count; ++i) ukeys[i] = f32_to_sortable(data[i]);
+            mst = metal_sort_kv_u32(ukeys.data(), indices.data(), count);
+            if (mst == METAL_OK)
+                for (size_t i = 0; i < count; ++i) data[i] = sortable_to_f32(ukeys[i]);
+        } else if constexpr (std::is_same_v<T, int32_t>) {
+            std::vector<uint32_t> ukeys(count);
+            for (size_t i = 0; i < count; ++i) ukeys[i] = i32_to_sortable(data[i]);
+            mst = metal_sort_kv_u32(ukeys.data(), indices.data(), count);
+            if (mst == METAL_OK)
+                for (size_t i = 0; i < count; ++i) data[i] = sortable_to_i32(ukeys[i]);
+        } else if constexpr (std::is_same_v<T, int64_t>) {
+            std::vector<uint64_t> ukeys(count);
+            for (size_t i = 0; i < count; ++i) ukeys[i] = i64_to_sortable(data[i]);
+            mst = metal_sort_kv_u64(ukeys.data(), indices.data(), count);
+            if (mst == METAL_OK)
+                for (size_t i = 0; i < count; ++i) data[i] = sortable_to_i64(ukeys[i]);
+        }
+        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
+    }
+    pgaccel_warn_cpu_fallback("sort");
+    return PGACCEL_ERROR_NO_DEVICE;
 #else
     pgaccel_warn_cpu_fallback("sort");
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1066,12 +1099,15 @@ static pgaccel_status dispatch_sort_fp_checked(T* data, size_t count) {
     if (count <= 1) return PGACCEL_OK;
 
 #if PGACCEL_HAS_SYCL
-    // fp64 on a device that doesn't support it: signal unsupported so the
-    // Rust side can fall back to rayon.
     if constexpr (sizeof(T) == 8) {
         if (!device_has_fp64()) {
             return PGACCEL_UNSUPPORTED;
         }
+    }
+#elif PGACCEL_HAS_METAL
+    // Metal has no fp64 support.
+    if constexpr (sizeof(T) == 8) {
+        return PGACCEL_UNSUPPORTED;
     }
 #endif
 
@@ -1117,6 +1153,34 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices,
     }
     pgaccel_warn_cpu_fallback("sort_kv");
     return PGACCEL_ERROR_NO_DEVICE;
+#elif PGACCEL_HAS_METAL
+    // Metal path: convert to sortable uint, dispatch via metal_sort_kv_u32/u64.
+    {
+        metal_status mst = METAL_ERROR;
+
+        if constexpr (std::is_same_v<K, float>) {
+            std::vector<uint32_t> ukeys(count);
+            for (size_t i = 0; i < count; ++i) ukeys[i] = f32_to_sortable(keys[i]);
+            mst = metal_sort_kv_u32(ukeys.data(), indices, count);
+            if (mst == METAL_OK)
+                for (size_t i = 0; i < count; ++i) keys[i] = sortable_to_f32(ukeys[i]);
+        } else if constexpr (std::is_same_v<K, int32_t>) {
+            std::vector<uint32_t> ukeys(count);
+            for (size_t i = 0; i < count; ++i) ukeys[i] = i32_to_sortable(keys[i]);
+            mst = metal_sort_kv_u32(ukeys.data(), indices, count);
+            if (mst == METAL_OK)
+                for (size_t i = 0; i < count; ++i) keys[i] = sortable_to_i32(ukeys[i]);
+        } else if constexpr (std::is_same_v<K, int64_t>) {
+            std::vector<uint64_t> ukeys(count);
+            for (size_t i = 0; i < count; ++i) ukeys[i] = i64_to_sortable(keys[i]);
+            mst = metal_sort_kv_u64(ukeys.data(), indices, count);
+            if (mst == METAL_OK)
+                for (size_t i = 0; i < count; ++i) keys[i] = sortable_to_i64(ukeys[i]);
+        }
+        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
+    }
+    pgaccel_warn_cpu_fallback("sort_kv");
+    return PGACCEL_ERROR_NO_DEVICE;
 #else
     pgaccel_warn_cpu_fallback("sort_kv");
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1136,6 +1200,10 @@ static pgaccel_status dispatch_sort_kv_fp_checked(K* keys, uint32_t* indices,
         if (!device_has_fp64()) {
             return PGACCEL_UNSUPPORTED;
         }
+    }
+#elif PGACCEL_HAS_METAL
+    if constexpr (sizeof(K) == 8) {
+        return PGACCEL_UNSUPPORTED;
     }
 #endif
 
