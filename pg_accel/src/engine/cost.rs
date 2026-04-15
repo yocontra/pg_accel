@@ -25,7 +25,7 @@ impl PlatformProfile {
     /// Detect the current platform's capabilities.
     ///
     /// Queries GPU device info directly via the Metal binary-archive runtime.
-    /// No BGW or IPC needed — the GPU runtime is initialized lazily per-backend.
+    /// The GPU runtime is initialized lazily per-backend.
     #[must_use]
     pub fn detect() -> Self {
         let cpu_cores = std::thread::available_parallelism()
@@ -83,10 +83,10 @@ pub struct DeviceLimits {
     /// Maximum number of groups for GPU hash aggregation.
     pub gpu_hash_agg_max_groups: usize,
     /// Maximum elements per GPU reduce dispatch chunk.
-    /// SYCL/OpenMP runtimes may abort on very large `parallel_for` ranges.
+    /// GPU runtime may abort on very large dispatch ranges.
     pub gpu_reduce_max_chunk: usize,
     /// Maximum elements for GPU sort dispatch.
-    /// Falls back to CPU sort above this limit to avoid SYCL runtime aborts.
+    /// Falls back to PG sort above this limit to avoid GPU runtime aborts.
     pub gpu_sort_max_elements: usize,
     /// Maximum output rows for GPU hash join injection.
     /// Custom Scan yield overhead (~3μs/row) makes large-output joins
@@ -246,8 +246,8 @@ impl DeviceLimits {
         let gpu_sort_planner_min_rows = (gpu_sort_min_rows * 10).min(10_000_000);
         let gpu_window_min_rows = cu_scale(100_000).clamp(50_000, 500_000);
         // 2026-04-12: raised from 10K to 25K. GPU reduce at 10K is 0.11x
-        // due to BGW IPC overhead (~2-3ms) dominating kernel time (~50µs).
-        // At 25K+ the kernel amortizes IPC. Will lower again after IPC fix.
+        // due to dispatch overhead dominating kernel time (~50µs).
+        // At 25K+ the kernel amortizes the overhead.
         let gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000);
         let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
 
@@ -280,7 +280,7 @@ impl DeviceLimits {
 
         // Max elements for GPU sort dispatch. Sort requires two arrays
         // (keys + indices) ≈ 12 bytes per element. Capped at 512K because
-        // the SYCL bitonic sort kernel issues O(n log²n) sequential kernel
+        // the bitonic sort kernel issues O(n log²n) sequential kernel
         // launches, which fails on Metal above ~500K elements. This also
         // acts as a planner gate: above this count, PG's native sort wins
         // because Custom Scan yield overhead (~3μs/row) dominates.

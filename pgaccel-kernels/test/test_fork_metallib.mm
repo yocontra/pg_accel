@@ -137,7 +137,7 @@ static int run_gpu_in_child(const char* metallib_path) {
         printf("\n=== CHILD RESULT: SUCCESS ===\n");
         printf("Pre-compiled Metal kernels work after fork!\n");
         printf("Device: OK | Buffers: OK | Metallib load: OK | Pipeline: OK | Kernel: OK\n");
-        printf("→ The ENTIRE BGW IPC layer can be eliminated.\n");
+        printf("→ Metal binary archives work directly in forked PG backends.\n");
         printf("→ GPU kernels can run DIRECTLY in PG parallel workers.\n");
         fflush(stdout);
         return 0;

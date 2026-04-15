@@ -150,7 +150,7 @@ pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count, size_t* r
 /*
  * Fix Agent 4 (2026-04-11): single kernel launch computes all four
  * aggregates over the same input buffer in one pass. Replaces four
- * sequential kernel launches (4x BGW round-trips eliminated).
+ * sequential kernel launches (4x kernel launch round-trips eliminated).
  *
  * Output semantics:
  *   out_sum   — Σ data[i]  (identity: 0)

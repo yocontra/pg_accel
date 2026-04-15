@@ -4,9 +4,9 @@
 // Background: Metal/SYCL state is unusable in a forked child process
 // (MTLCreateSystemDefaultDevice reuses stale IOKit Mach ports whose GPU
 // memory allocator is broken after fork). pg_accel's production path
-// routes GPU work through a separately-forked+execve'd BGW worker, not
-// the query backend. This test pins that contract: forked-backend code
-// paths must detect the fork and return a clean error, never crash.
+// dispatches GPU work directly via Metal API from the query backend.
+// This test pins that contract: forked-backend code paths must detect
+// the fork and return a clean error, never crash.
 
 #include "pgaccel_ffi.h"
 #include <cmath>

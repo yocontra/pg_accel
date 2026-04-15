@@ -102,7 +102,6 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     unsafe { engine::ffi::planner_hooks::install() };
 
     // 5. GPU runtime initialized lazily per-backend via Metal binary archives.
-    //    No BGW needed.
 
     // 6. Log startup summary (GPU status deferred to first query).
     let cpu_cores = std::thread::available_parallelism()

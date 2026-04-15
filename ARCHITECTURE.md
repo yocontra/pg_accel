@@ -3,7 +3,7 @@
 pg_accel is a PostgreSQL extension that accelerates spatial predicates, H3 cell
 operations, raster map-algebra, and scalar functions by injecting batch-parallel
 Custom Scan nodes into query plans. It is written in Rust (pgrx 0.17) with
-C++/SYCL GPU kernels compiled via AdaptiveCpp.
+C++/Metal GPU kernels compiled as binary archives.
 
 ## Four-Layer Architecture
 
@@ -35,7 +35,7 @@ The system is organized into four layers, each with a clear boundary:
         v
 +---------------------------------------------------------------+
 |  Layer 4: GPU Kernels       pgaccel-kernels/                  |
-|  C++/SYCL spatial, sort, reduce, H3, and raster kernels.     |
+|  Metal spatial, sort, reduce, H3, and raster kernels.        |
 |  Called via C FFI (pgaccel_ffi.h).                            |
 +---------------------------------------------------------------+
 ```
@@ -201,7 +201,7 @@ performance. Results near geometric boundaries may be unreliable, so the kernel
 signals uncertainty and the CPU rechecks with full fp64 precision via PostGIS.
 
 **Why not just run everything on GPU?** Geometry collections, curved geometries,
-and 3D types are rare but complex. Implementing every PostGIS edge case in SYCL
+and 3D types are rare but complex. Implementing every PostGIS edge case in Metal
 would be enormous. The three-layer approach handles the common case (simple
 points and polygons) on GPU while correctly falling back for everything else.
 
@@ -372,10 +372,10 @@ the plan tree while preserving the optimizer's ability to choose between our
 path and the standard one based on cost. FDWs cannot intercept local table
 scans. Simple executor hooks cannot add new node types.
 
-**Rust + C++/SYCL split.** PG extension glue (FFI, memory management, error
+**Rust + C++/Metal split.** PG extension glue (FFI, memory management, error
 handling) is written in Rust via pgrx for memory safety. GPU kernels are C++
-because SYCL compilers (AdaptiveCpp) require C++ source. The boundary is a
-narrow C FFI defined in `pgaccel_ffi.h`.
+using the Metal API with precompiled binary archives (.metallib). The boundary
+is a narrow C FFI defined in `pgaccel_ffi.h`.
 
 ## Source Map
 
@@ -415,5 +415,5 @@ pgaccel-kernels/
   include/
     pgaccel_ffi.h                   C FFI header for all GPU kernels
   src/
-    *.cpp                           SYCL kernel implementations
+    *.cpp                           Metal kernel implementations
 ```

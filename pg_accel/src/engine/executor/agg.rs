@@ -178,7 +178,7 @@ impl AggColumn {
             return;
         }
 
-        // Process in chunks to avoid SYCL runtime limits on large ranges.
+        // Process in chunks to avoid GPU runtime limits on large ranges.
         if n > limits.gpu_reduce_max_chunk {
             self.dispatch_gpu_reduce_chunked();
             return;
@@ -1601,14 +1601,13 @@ impl AggExecState {
     /// aggregate columns that all reference the **same** input column but
     /// compute different functions (SUM/MIN/MAX/COUNT) and collapses them
     /// into a single GPU kernel launch. The old implementation routed
-    /// through `gpu::fused_filter_multi_reduce_f32`, which uses the
-    /// direct `bridge::` FFI — that path is dead in forked PG backends
-    /// because Metal/SYCL can't initialise post-fork. The new path goes
-    /// through the BGW `reduce_multi_*` kernel, which runs a single-pass
-    /// tree reduction producing (sum, min, max, count) in one kernel.
+    /// through `gpu::fused_filter_multi_reduce_f32`, which launched
+    /// separate kernels per aggregate. The new path uses the
+    /// `reduce_multi_*` kernel, which runs a single-pass tree reduction
+    /// producing (sum, min, max, count) in one Metal kernel launch.
     ///
     /// Benefit: for a query like `SELECT SUM(x), MIN(x), MAX(x), COUNT(*)
-    /// FROM t`, the previous code paid 4x the BGW round-trip cost
+    /// FROM t`, the previous code paid 4x the dispatch cost
     /// (one per aggregate) — this collapses to 1.
     ///
     /// Only eligible for non-grouped reduce strategies. Columns

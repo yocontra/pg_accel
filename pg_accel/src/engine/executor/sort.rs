@@ -537,7 +537,7 @@ impl SortExecState {
     /// Must be called on the main backend thread. `scratch_slot` must be valid.
     #[allow(clippy::too_many_lines, clippy::needless_bool)]
     unsafe fn try_gpu_sort(&mut self, scratch_slot: *mut pg_sys::TupleTableSlot, n: usize) -> bool {
-        // Gate: fall back to CPU sort for large arrays to avoid SYCL runtime aborts.
+        // Gate: fall back to PG sort for large arrays to avoid GPU runtime aborts.
         if n > cost::device_limits().gpu_sort_max_elements {
             return false;
         }

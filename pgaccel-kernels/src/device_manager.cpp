@@ -205,7 +205,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
         // AdaptiveCpp reuses the parent's MTLDevice, whose IOKit
         // allocator crashes on sycl::malloc_device (SIGSEGV in
         // IOGPUMetalDevice allocBuffer). Fall back to CPU in forked
-        // backends; GPU work is routed through the BGW coordinator.
+        // backends; GPU work is dispatched directly via Metal API.
 #if PGACCEL_HAS_SYCL
         g_queue = nullptr;
         g_unified_memory = false;

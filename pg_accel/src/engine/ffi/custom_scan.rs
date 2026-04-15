@@ -1493,18 +1493,19 @@ unsafe fn compile_qual_list(
         first = false;
     }
 
+    // Bytecode path disabled: the GPU bytecode evaluator produces incorrect
+    // results (see scan.rs TODO). Until the interpreter is fixed, defer
+    // complex expressions to PG's native qual evaluation. Only template
+    // kernels (CmpConst, Between, TwoPredAnd) use the GPU path.
     if let Some(program) = builder.build() {
         pgrx::debug1!(
-            "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} cols",
+            "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} cols (deferred — bytecode evaluator disabled)",
             len,
             program.instructions.len(),
             program.referenced_cols.len(),
         );
-        CompiledExpr::Bytecode(program)
-    } else {
-        pgrx::debug1!("pg_accel: expr compile failed (stack overflow)");
-        CompiledExpr::DeferToPg
     }
+    CompiledExpr::DeferToPg
 }
 
 /// Try to match a single qual node as a template kernel.
@@ -2821,7 +2822,9 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     // ExecInitCustomScan to map from scan slot → result slot. We must call
     // ExecEvalExprSwitchContext (the body of the static-inline ExecProject)
     // to apply this projection.
-    if !result.is_null() && gpu_strategy == GpuStrategy::Sort {
+    if !result.is_null()
+        && (gpu_strategy == GpuStrategy::Sort || gpu_strategy == GpuStrategy::Window)
+    {
         // SAFETY: node is a valid CustomScanState. ps_ProjInfo is set by
         // ExecInitCustomScan when plan.targetlist requires projection from
         // the scan slot. When ps_ProjInfo is NULL, no projection is needed
@@ -2903,7 +2906,18 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     drop(agg);
                 } else if gpu_strategy == GpuStrategy::Window {
                     // SAFETY: executor was Box::into_raw'd as WindowExecState.
-                    let _ = Box::from_raw((*state).accel.executor.cast::<WindowExecState>());
+                    let win = Box::from_raw((*state).accel.executor.cast::<WindowExecState>());
+                    // End heap scan before dropping — table_endscan must be
+                    // called before PG's ExecCloseScanRelation closes the rel.
+                    if win.has_scan_desc() {
+                        let sd = win.scan_desc();
+                        if !sd.is_null() {
+                            // SAFETY: sd was created by table_beginscan
+                            // in begin_custom_scan; main backend thread.
+                            pg_sys::table_endscan(sd);
+                        }
+                    }
+                    drop(win);
                 } else if gpu_strategy == GpuStrategy::Sort {
                     // SAFETY: executor was Box::into_raw'd as SortExecState.
                     let sort_exec = Box::from_raw((*state).accel.executor.cast::<SortExecState>());

@@ -1,7 +1,7 @@
 # pg_accel
 
 PostgreSQL extension: GPU-accelerated spatial predicates, h3 cell ops, raster operations,
-and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.17) + C++/SYCL (AdaptiveCpp).
+and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.17) + C++/Metal (native GPU).
 
 ## Build & Test Commands
 
@@ -15,7 +15,7 @@ just bench            # run benchmark suite against local pgrx PG
 
 just ci               # Full local CI: lint + test
 just package          # cargo pgrx package (installable .so)
-just gpu-build        # cmake build for GPU kernels (requires AdaptiveCpp)
+just gpu-build        # cmake build for GPU kernels (Metal)
 just gpu-test         # Run standalone GPU kernel tests
 ```
 
@@ -24,7 +24,7 @@ just gpu-test         # Run standalone GPU kernel tests
 1. **Adapters** (`src/adapters/`) — register extension functions + strategy classification
 2. **Dispatch** (`src/engine/dispatch.rs`) — batch accumulator, strategy routing
 3. **Executor Nodes** (`src/engine/executor/`) — Custom Scan: scan, join, agg, sort
-4. **GPU Kernels** (`pgaccel-kernels/src/`) — C++/SYCL spatial, h3, raster kernels
+4. **GPU Kernels** (`pgaccel-kernels/src/`) — Metal spatial, h3, raster kernels
 
 ## Benchmark Rules
 
@@ -61,7 +61,7 @@ just gpu-test         # Run standalone GPU kernel tests
 | `adapter-development` | Writing function adapters, strategy classification, type extractors |
 | `spatial-predicate-kernels` | GPU spatial kernels: point_in_ring, sphere_distance, segment_intersects |
 | `geometry-deserialization` | GSERIALIZED format, bbox/point/vertex extraction from PostGIS |
-| `adaptivecpp-metal` | AdaptiveCpp SYCL, Metal backend, fp32 constraints, platform caps |
+| `adaptivecpp-metal` | Metal backend, binary archives, fp32 constraints, platform caps |
 | `cost-model` | Decision chain, GPU break-even, late materialization, platform profiles |
 | `benchmark-methodology` | Benchmark harness, workload definitions, statistical methodology |
 
@@ -117,8 +117,8 @@ Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to
 5. **Common crash patterns:**
    - `apply_tlist_labeling` assert → target list mismatch in `PlanCustomPath` callback
    - `ExceptionalCondition` in planner → Custom Scan path metadata issue
-   - `MTLCompilerService` / `hipsycl::sycl::queue` → Metal/SYCL fork issue (GPU shader compilation fails in forked backend)
-   - `crashed on child side of fork pre-exec` → SYCL runtime thread creation in forked process
+   - Metal binary archive load failure → check that pgaccel_kernels.metallib exists alongside the .so
+   - `crashed on child side of fork pre-exec` → resolved with Metal binary archives (no fork+exec needed)
 
 ### GUCs
 

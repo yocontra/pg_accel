@@ -464,8 +464,8 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
 //
 // Single-pass kernel that computes SUM+MIN+MAX+COUNT over one input buffer
 // in a single launch. Replaces four sequential kernel launches per chunk,
-// which for the benchmark workload translates to a 4x reduction in BGW IPC
-// round-trips at the executor level.
+// which for the benchmark workload translates to a 4x reduction in kernel
+// launch round-trips at the executor level.
 //
 // Implementation strategy: a tree-reduce per work group over a struct of
 // (sum, min, max, count). Every lane loads one element, initializes its

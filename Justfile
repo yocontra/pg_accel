@@ -178,14 +178,9 @@ bench-rigorous rows="1000000" iterations="30" warmup="5":
 
 # === GPU Kernels ===
 
-acpp_prefix := env("HOME") + "/local"
-
-# Build GPU kernel library
+# Build GPU kernel library (Metal)
 gpu-build:
     cmake -B pgaccel-kernels/build -S pgaccel-kernels \
-        -DPGACCEL_USE_SYCL=ON \
-        -DCMAKE_PREFIX_PATH={{acpp_prefix}} \
-        -DACPP_TARGETS="generic" \
         -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
         -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++ \
         -DCMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \

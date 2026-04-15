@@ -5,8 +5,8 @@
 // (_PG_init) but never calls pgaccel_init(). Then it forks a backend.
 // Can that backend initialize Metal from scratch?
 //
-// If YES: we can eliminate the entire BGW IPC layer and run GPU kernels
-// directly inside PG backends/parallel workers.
+// If YES: Metal binary archives work directly in forked PG backends,
+// enabling direct GPU dispatch without fork+exec.
 // If NO: fork+exec remains necessary for Metal on macOS.
 
 #include "pgaccel_ffi.h"
@@ -127,7 +127,7 @@ int main() {
         printf("\n=== RESULT: SUCCESS ===\n");
         printf("Cold Metal init in forked child WORKS!\n");
         printf("GPU kernels execute on real GPU hardware after fork.\n");
-        printf("The entire BGW IPC layer can be eliminated.\n");
+        printf("Metal binary archives work directly in forked PG backends.\n");
         _exit(0);
     }
 
@@ -141,7 +141,7 @@ int main() {
         switch (rc) {
             case 0:
                 printf("PASS: Cold Metal init after fork WORKS.\n");
-                printf("→ IPC layer can be eliminated.\n");
+                printf("→ Direct Metal dispatch in forked backends confirmed.\n");
                 break;
             case 1:
                 printf("FAIL: pgaccel_init() failed in forked child.\n");

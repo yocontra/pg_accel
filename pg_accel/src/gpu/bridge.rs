@@ -1,4 +1,4 @@
-//! FFI bridge to `libpgaccel_kernels` (C++/SYCL GPU library).
+//! FFI bridge to `libpgaccel_kernels` (C++/Metal GPU library).
 //!
 //! Only compiled when the `gpu` feature is enabled.  The declarations here
 //! mirror `pgaccel-kernels/include/pgaccel_ffi.h` exactly.
@@ -513,8 +513,8 @@ unsafe extern "C" {
 
     // -- Fused multi-aggregate reduce kernels (Fix Agent 4, 2026-04-11) --
     //
-    // Single-pass SUM+MIN+MAX+COUNT over the same input column. Replaces
-    // four sequential kernel launches (4x BGW round-trips eliminated).
+    // Single-pass SUM+MIN+MAX+COUNT over the same input column via a
+    // single kernel launch.
 
     pub fn pgaccel_reduce_multi_f32(
         data: *const f32,
