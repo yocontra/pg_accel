@@ -14,10 +14,6 @@
 #include <sycl/sycl.hpp>
 #endif
 
-#if PGACCEL_HAS_METAL
-#include "metal_backend.h"
-#endif
-
 static constexpr size_t GPU_FUSED_THRESHOLD = 8192;
 
 // ---------------------------------------------------------------------------
@@ -329,13 +325,6 @@ pgaccel_status pgaccel_fused_filter_reduce_f32(
         } catch (...) {
         }
     }
-#elif PGACCEL_HAS_METAL
-    if (count >= GPU_FUSED_THRESHOLD) {
-        metal_status mst = metal_fused_filter_reduce_f32(
-            filter_col, static_cast<uint32_t>(cmp_op), filter_val,
-            agg_col, static_cast<uint32_t>(agg_op), count, out_result);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("fused_filter_reduce_f32");
@@ -373,27 +362,6 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(
         } catch (...) {
         }
     }
-#elif PGACCEL_HAS_METAL
-    if (count >= GPU_FUSED_THRESHOLD) {
-        bool all_ok = true;
-        for (size_t j = 0; j < num_aggs; ++j) {
-            if (agg_ops[j] == PGACCEL_FUSED_COUNT) {
-                int64_t cnt = 0;
-                metal_status mst = metal_fused_filter_count_f32(
-                    filter_col, static_cast<uint32_t>(cmp_op), filter_val,
-                    count, &cnt);
-                if (mst != METAL_OK) { all_ok = false; break; }
-                out_results[j] = static_cast<double>(cnt);
-            } else {
-                metal_status mst = metal_fused_filter_reduce_f32(
-                    filter_col, static_cast<uint32_t>(cmp_op), filter_val,
-                    agg_cols[j], static_cast<uint32_t>(agg_ops[j]),
-                    count, &out_results[j]);
-                if (mst != METAL_OK) { all_ok = false; break; }
-            }
-        }
-        if (all_ok) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("fused_filter_multi_reduce_f32");
@@ -420,13 +388,6 @@ pgaccel_status pgaccel_fused_filter_count_f32(
         } catch (const std::exception&) {
         } catch (...) {
         }
-    }
-#elif PGACCEL_HAS_METAL
-    if (count >= GPU_FUSED_THRESHOLD) {
-        metal_status mst = metal_fused_filter_count_f32(
-            filter_col, static_cast<uint32_t>(cmp_op), filter_val,
-            count, out_count);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
 

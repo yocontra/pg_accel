@@ -1,15 +1,25 @@
 ---
 name: AdaptiveCpp Multi-Platform GPU
-description: Building GPU kernels with AdaptiveCpp/SYCL targeting Metal, CUDA, ROCm, Level Zero — platform capabilities, constraints, and patterns
+description: AdaptiveCpp/SYCL is the sole GPU backend for pg_accel. One source tree compiles to CUDA, ROCm, Level Zero, Metal, and CPU. This skill documents the five targets, their capability matrix, Metal-specific constraints, and the runtime dispatch pattern.
 ---
 
 # AdaptiveCpp Multi-Platform GPU Guide for pg_accel
 
+pg_accel builds **every** GPU kernel with AdaptiveCpp/SYCL. There is no native
+Metal backend, no CUDA-specific hand-rolled path, and no backend switch. One `.cpp`
+kernel compiles to all five targets; AdaptiveCpp's SSCP runtime picks the right
+backend per device at load time. Capability differences are handled at runtime via
+`sycl::device::has(...)` probes, not compile-time branches.
+
+Metal is **one of five supported SYCL targets**, not an alternative to SYCL. It has
+more constraints than the other four (no fp64, no atomic64, in-order queues only),
+but the source code path is the same — only runtime kernel selection differs.
+
 ## Platform Capability Matrix
 
-| Capability | CUDA (NVIDIA) | ROCm (AMD) | Level Zero (Intel) | Metal (Apple) | CPU Fallback |
-|------------|--------------|------------|-------------------|--------------|--------------|
-| **Status** | Stable (v25.10) | Stable (v25.10) | Stable (v25.10) | Experimental (develop) | Stable |
+| Capability | CUDA (NVIDIA) | ROCm (AMD) | Level Zero (Intel) | Metal (Apple) | CPU |
+|------------|--------------|------------|-------------------|--------------|-----|
+| **Status** | Stable (v25.10) | Stable (v25.10) | Stable (v25.10) | develop branch | Stable |
 | **FP64** | native | native | varies by GPU | NO | native |
 | **Atomic64** | yes | yes | yes | NO | yes |
 | **OOQ** | yes | yes | yes | NO (deadlocks) | N/A |

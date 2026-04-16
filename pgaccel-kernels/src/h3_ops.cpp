@@ -6,10 +6,6 @@
 #include <sycl/sycl.hpp>
 #endif
 
-#if PGACCEL_HAS_METAL
-#include "metal_backend.h"
-#endif
-
 // ---------------------------------------------------------------------------
 // H3 bit-layout constants
 // ---------------------------------------------------------------------------
@@ -378,11 +374,6 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
     } catch (const std::exception&) {
     } catch (...) {
     }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status mst = metal_h3_get_resolution(cells, count, resolutions);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
     pgaccel_warn_cpu_fallback("h3_get_resolution_bulk");
     return PGACCEL_ERROR_NO_DEVICE;
@@ -461,11 +452,6 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status mst = metal_h3_cell_to_parent(cells, count, parent_res, parents);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
     pgaccel_warn_cpu_fallback("h3_cell_to_parent_bulk");
@@ -564,11 +550,6 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status mst = metal_h3_grid_distance(cells_a, cells_b, count, distances);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
     pgaccel_warn_cpu_fallback("h3_grid_distance_bulk");
@@ -795,12 +776,6 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
     } catch (const std::exception&) {
         // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status mst = metal_h3_lat_lng_to_cell(lats, lngs, count, resolution,
-                                                     cell_ids, valid);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
     pgaccel_warn_cpu_fallback("h3_lat_lng_to_cell_bulk");

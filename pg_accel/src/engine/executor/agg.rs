@@ -359,14 +359,8 @@ impl AggColumn {
                 unsafe {
                     let fptr: unsafe extern "C-unwind" fn(
                         *mut pg_sys::FunctionCallInfoBaseData,
-                    ) -> pg_sys::Datum = core::mem::transmute(
-                        pg_sys::float8_numeric as *const (),
-                    );
-                    pg_sys::DirectFunctionCall1Coll(
-                        Some(fptr),
-                        pg_sys::InvalidOid,
-                        f8_datum,
-                    )
+                    ) -> pg_sys::Datum = core::mem::transmute(pg_sys::float8_numeric as *const ());
+                    pg_sys::DirectFunctionCall1Coll(Some(fptr), pg_sys::InvalidOid, f8_datum)
                 }
             }
             // FLOAT8OID and anything else: store as f64 bits.
@@ -1620,8 +1614,7 @@ impl AggExecState {
             return;
         }
 
-        let reduce_f32_break_even_rows =
-            cost::device_limits().reduce_f32_break_even_rows;
+        let reduce_f32_break_even_rows = cost::device_limits().reduce_f32_break_even_rows;
 
         // Group eligible columns by their source attno so we only fuse
         // aggregates that read the same input. Count/Passthrough are not
@@ -1657,13 +1650,9 @@ impl AggExecState {
                 continue;
             }
 
-            let _span = tracing::debug_span!(
-                "gpu.reduce_multi",
-                attno,
-                n,
-                num_aggs = col_indices.len(),
-            )
-            .entered();
+            let _span =
+                tracing::debug_span!("gpu.reduce_multi", attno, n, num_aggs = col_indices.len(),)
+                    .entered();
 
             // Dispatch the fused f64 multi-reduce. On Metal the wrapper
             // auto-casts to f32 inside gpu/mod.rs.
@@ -1854,9 +1843,9 @@ impl AggExecState {
                                 // Cast needed: see finalize() comment.
                                 let fptr: unsafe extern "C-unwind" fn(
                                     *mut pg_sys::FunctionCallInfoBaseData,
-                                ) -> pg_sys::Datum = core::mem::transmute(
-                                    pg_sys::float8_numeric as *const (),
-                                );
+                                )
+                                    -> pg_sys::Datum =
+                                    core::mem::transmute(pg_sys::float8_numeric as *const ());
                                 pg_sys::DirectFunctionCall1Coll(
                                     Some(fptr),
                                     pg_sys::InvalidOid,

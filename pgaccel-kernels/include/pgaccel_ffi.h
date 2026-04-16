@@ -45,6 +45,12 @@ typedef struct {
 
 pgaccel_status pgaccel_init(void);
 pgaccel_status pgaccel_shutdown(void);
+
+/// Pre-fork warmup: initialize Metal/SkyLight in the postmaster BEFORE
+/// fork so that forked backends inherit the initialized state.
+/// Does NOT create SYCL queues or spawn threads — safe to call from
+/// the postmaster during _PG_init().
+void pgaccel_prefork_warmup(void);
 pgaccel_device_info pgaccel_get_device_info(void);
 pgaccel_platform_caps pgaccel_get_caps(void);
 

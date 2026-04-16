@@ -1,7 +1,8 @@
-//! GPU kernel bridge and stubs stubs.
+//! GPU kernel bridge and stubs.
 //!
-//! GPU kernels run directly in PG backends via native Metal API with
-//! pre-compiled binary archives (safe after fork). No IPC layer needed.
+//! GPU kernels run directly in PG backends via AdaptiveCpp/SYCL. One source
+//! tree compiles to CUDA, ROCm, Level Zero, Metal, and CPU; the SSCP runtime
+//! selects the backend per device and caches compiled kernels across forks.
 //!
 //! Re-exports a unified API so callers don't need `cfg` at every call-site.
 
@@ -57,11 +58,11 @@ fn init() -> PgaccelStatus {
     }
 }
 
-/// Initialise the Metal GPU runtime once per process.
+/// Initialise the AdaptiveCpp/SYCL GPU runtime once per process.
 ///
-/// Metal binary archives are safe after fork(), so this runs directly in
-/// every PG backend (and in test binaries). Uses PID tracking to ensure
-/// `pgaccel_init()` is called at most once per process.
+/// AdaptiveCpp's SSCP runtime caches compiled kernels per-backend, so this
+/// runs directly in every PG backend (and in test binaries). Uses PID
+/// tracking to ensure `pgaccel_init()` is called at most once per process.
 pub fn ensure_init() {
     use std::sync::atomic::{AtomicU32, Ordering};
     static INIT_PID: AtomicU32 = AtomicU32::new(0);
@@ -72,8 +73,26 @@ pub fn ensure_init() {
         return;
     }
 
-    let _status = init();
+    let status = init();
+    if status != PgaccelStatus::Ok {
+        pgrx::warning!(
+            "pg_accel: GPU init failed (status={:?}). GPU acceleration unavailable.",
+            status,
+        );
+    }
     INIT_PID.store(pid, Ordering::Release);
+}
+
+/// Pre-fork warmup: initialize Metal/SkyLight in the postmaster before
+/// fork so forked backends can create Metal devices. Safe to call from
+/// `_PG_init()` — does not spawn threads.
+pub fn prefork_warmup() {
+    #[cfg(feature = "gpu")]
+    {
+        // SAFETY: pgaccel_prefork_warmup does not spawn threads and is
+        // safe to call from the postmaster during _PG_init().
+        unsafe { bridge::pgaccel_prefork_warmup() }
+    }
 }
 
 /// Tear down the GPU runtime.
@@ -99,6 +118,22 @@ pub fn get_device_info() -> PgaccelDeviceInfo {
     #[cfg(not(feature = "gpu"))]
     {
         stubs::pgaccel_get_device_info()
+    }
+}
+
+/// Human-readable device name for log messages.
+pub fn device_name() -> String {
+    let info = get_device_info();
+    let name = info
+        .device_name
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8 as char)
+        .collect::<String>();
+    if name.is_empty() {
+        "none".to_string()
+    } else {
+        name
     }
 }
 
@@ -645,7 +680,12 @@ pub struct ReduceMultiI64 {
 pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
     if data.is_empty() {
-        return Some(ReduceMultiF32 { sum: 0.0, min: 0.0, max: 0.0, count: 0 });
+        return Some(ReduceMultiF32 {
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        });
     }
     let mut out_sum = 0.0f32;
     let mut out_min = 0.0f32;
@@ -656,13 +696,19 @@ pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
         // SAFETY: data is a valid slice; out_* are valid pointers.
         let status = unsafe {
             bridge::pgaccel_reduce_multi_f32(
-                data.as_ptr(), data.len(),
-                &raw mut out_sum, &raw mut out_min,
-                &raw mut out_max, &raw mut out_count,
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_sum,
+                &raw mut out_min,
+                &raw mut out_max,
+                &raw mut out_count,
             )
         };
         status.is_ok().then_some(ReduceMultiF32 {
-            sum: out_sum, min: out_min, max: out_max, count: out_count,
+            sum: out_sum,
+            min: out_min,
+            max: out_max,
+            count: out_count,
         })
     }
     #[cfg(not(feature = "gpu"))]
@@ -677,7 +723,12 @@ pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
 pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f64", n = data.len()).entered();
     if data.is_empty() {
-        return Some(ReduceMultiF64 { sum: 0.0, min: 0.0, max: 0.0, count: 0 });
+        return Some(ReduceMultiF64 {
+            sum: 0.0,
+            min: 0.0,
+            max: 0.0,
+            count: 0,
+        });
     }
     let mut out_sum = 0.0f64;
     let mut out_min = 0.0f64;
@@ -688,21 +739,29 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
         // SAFETY: data is a valid slice; out_* are valid pointers.
         let status = unsafe {
             bridge::pgaccel_reduce_multi_f64(
-                data.as_ptr(), data.len(),
-                &raw mut out_sum, &raw mut out_min,
-                &raw mut out_max, &raw mut out_count,
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_sum,
+                &raw mut out_min,
+                &raw mut out_max,
+                &raw mut out_count,
             )
         };
         if status.is_ok() {
             return Some(ReduceMultiF64 {
-                sum: out_sum, min: out_min, max: out_max, count: out_count,
+                sum: out_sum,
+                min: out_min,
+                max: out_max,
+                count: out_count,
             });
         }
         // fp32-only device: cast and use f32 kernel.
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         reduce_multi_f32(&f32_data).map(|r| ReduceMultiF64 {
-            sum: f64::from(r.sum), min: f64::from(r.min),
-            max: f64::from(r.max), count: r.count,
+            sum: f64::from(r.sum),
+            min: f64::from(r.min),
+            max: f64::from(r.max),
+            count: r.count,
         })
     }
     #[cfg(not(feature = "gpu"))]
@@ -717,7 +776,12 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
 pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
     if data.is_empty() {
-        return Some(ReduceMultiI64 { sum: 0, min: 0, max: 0, count: 0 });
+        return Some(ReduceMultiI64 {
+            sum: 0,
+            min: 0,
+            max: 0,
+            count: 0,
+        });
     }
     let mut out_sum: i64 = 0;
     let mut out_min: i64 = 0;
@@ -728,13 +792,19 @@ pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
         // SAFETY: data is a valid slice; out_* are valid pointers.
         let status = unsafe {
             bridge::pgaccel_reduce_multi_i64(
-                data.as_ptr(), data.len(),
-                &raw mut out_sum, &raw mut out_min,
-                &raw mut out_max, &raw mut out_count,
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_sum,
+                &raw mut out_min,
+                &raw mut out_max,
+                &raw mut out_count,
             )
         };
         status.is_ok().then_some(ReduceMultiI64 {
-            sum: out_sum, min: out_min, max: out_max, count: out_count,
+            sum: out_sum,
+            min: out_min,
+            max: out_max,
+            count: out_count,
         })
     }
     #[cfg(not(feature = "gpu"))]
@@ -779,6 +849,10 @@ pub fn h3_get_resolution_bulk(cells: &[u64]) -> Option<Vec<i32>> {
                 resolutions.as_mut_ptr(),
             )
         };
+        // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+        unsafe {
+            bridge::pgaccel_pool_reset();
+        }
         status.is_ok().then_some(resolutions)
     }
     #[cfg(not(feature = "gpu"))]
@@ -806,6 +880,10 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
                 parents.as_mut_ptr(),
             )
         };
+        // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+        unsafe {
+            bridge::pgaccel_pool_reset();
+        }
         status.is_ok().then_some(parents)
     }
     #[cfg(not(feature = "gpu"))]
@@ -835,6 +913,10 @@ pub fn h3_grid_distance_bulk(cells_a: &[u64], cells_b: &[u64]) -> Option<Vec<i32
                 distances.as_mut_ptr(),
             )
         };
+        // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+        unsafe {
+            bridge::pgaccel_pool_reset();
+        }
         status.is_ok().then_some(distances)
     }
     #[cfg(not(feature = "gpu"))]
@@ -873,7 +955,15 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
             )
         };
         if !status.is_ok() {
+            // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+            unsafe {
+                bridge::pgaccel_pool_reset();
+            }
             return None;
+        }
+        // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+        unsafe {
+            bridge::pgaccel_pool_reset();
         }
     }
     #[cfg(not(feature = "gpu"))]

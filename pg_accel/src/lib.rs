@@ -74,6 +74,11 @@ pg_module_magic!();
 /// Must only be called by the PostgreSQL extension loading mechanism.
 #[pg_guard]
 pub unsafe extern "C-unwind" fn _PG_init() {
+    // 0. Install durable panic hook FIRST so any panic during the rest of
+    //    init (including across C-unwind FFI boundaries) writes a JSONL
+    //    record to $PGDATA/pg_accel_panic.log before SIGABRT.
+    engine::panic_hook::install();
+
     // 1. Register GUC variables.
     engine::gucs::init_gucs();
 
@@ -101,14 +106,20 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // before any queries. Saves previous hooks and installs ours.
     unsafe { engine::ffi::planner_hooks::install() };
 
-    // 5. GPU runtime initialized lazily per-backend via Metal binary archives.
+    // 5. Pre-fork Metal warmup: call MTLCreateSystemDefaultDevice() in the
+    //    postmaster so SkyLight/IOKit state is initialized before fork.
+    //    Without this, forked backends crash when MTLCreateSystemDefaultDevice
+    //    tries to initialize SkyLight (forbidden after fork on macOS Sequoia+).
+    //    This does NOT spawn threads — full GPU init (pgaccel_init) is
+    //    deferred to each backend's first query.
+    crate::gpu::prefork_warmup();
 
-    // 6. Log startup summary (GPU status deferred to first query).
+    // 6. Log startup summary.
     let cpu_cores = std::thread::available_parallelism()
         .map(std::num::NonZero::get)
         .unwrap_or(1);
     pgrx::log!(
-        "pg_accel loaded: version {}, {} CPU cores, GPU: deferred",
+        "pg_accel loaded: version {}, {} CPU cores, GPU: deferred to first query",
         env!("CARGO_PKG_VERSION"),
         cpu_cores,
     );
@@ -123,6 +134,9 @@ pub unsafe extern "C-unwind" fn _PG_init() {
 #[pg_guard]
 unsafe extern "C-unwind" fn pgaccel_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
     engine::thread_budget::cleanup_backend();
+    // Flush tracing writers so the trace JSONL is durable on disk before
+    // the process exits — helps post-mortem inspection of clean exits too.
+    engine::otel::flush_tracing();
 }
 
 /// Returns the current version of the pg_accel extension.
@@ -157,6 +171,6 @@ pub mod pg_test {
 
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec![]
+        vec!["shared_preload_libraries = 'pg_accel'"]
     }
 }

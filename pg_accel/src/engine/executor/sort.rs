@@ -15,6 +15,9 @@
 //! 3. **`exec_custom_scan`** (subsequent) — returns sorted tuples.
 //! 4. **`end_custom_scan`** — reclaims via `Box::from_raw`.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use pgrx::pg_sys;
 
 use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
@@ -30,6 +33,140 @@ const INT4OID: u32 = 23;
 const INT8OID: u32 = 20;
 const FLOAT4OID: u32 = 700;
 const FLOAT8OID: u32 = 701;
+
+// ---------------------------------------------------------------------------
+// Chunked GPU sort — handles arbitrary row counts
+// ---------------------------------------------------------------------------
+
+/// Convert f32 to u32 preserving total order (for k-way merge comparison).
+fn f32_to_sort_key(f: f32) -> u32 {
+    let bits = f.to_bits();
+    if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits ^ 0x8000_0000
+    }
+}
+
+/// Convert f64 to u64 preserving total order (for k-way merge comparison).
+fn f64_to_sort_key(f: f64) -> u64 {
+    let bits = f.to_bits();
+    if bits & 0x8000_0000_0000_0000 != 0 {
+        !bits
+    } else {
+        bits ^ 0x8000_0000_0000_0000
+    }
+}
+
+/// GPU-sort f32 keys in chunks, returning the merged global permutation.
+///
+/// Handles arbitrary input sizes by splitting into chunks of
+/// `gpu_sort_max_elements`, GPU-sorting each independently, and
+/// performing a k-way merge of the sorted chunks.
+fn gpu_sort_chunked_f32(keys: &[f32]) -> Option<Vec<u32>> {
+    let chunk_size = cost::device_limits().gpu_sort_max_elements;
+    let n = keys.len();
+
+    if n <= chunk_size {
+        let mut k = keys.to_vec();
+        let mut idx: Vec<u32> = (0..n as u32).collect();
+        gpu::sort_kv_f32(&mut k, &mut idx)?;
+        return Some(idx);
+    }
+
+    // Multi-chunk: sort each chunk independently, then k-way merge.
+    let num_chunks = n.div_ceil(chunk_size);
+    let mut chunk_keys: Vec<Vec<f32>> = Vec::with_capacity(num_chunks);
+    let mut chunk_globals: Vec<Vec<u32>> = Vec::with_capacity(num_chunks);
+
+    for start in (0..n).step_by(chunk_size) {
+        let end = (start + chunk_size).min(n);
+        let mut ck = keys[start..end].to_vec();
+        let mut ci: Vec<u32> = (0..ck.len() as u32).collect();
+        gpu::sort_kv_f32(&mut ck, &mut ci)?;
+        let gi: Vec<u32> = ci.iter().map(|&i| start as u32 + i).collect();
+        chunk_keys.push(ck);
+        chunk_globals.push(gi);
+        pgrx::check_for_interrupts!();
+    }
+
+    // K-way merge via min-heap on sort-order-preserving u32 keys.
+    let mut positions = vec![0usize; num_chunks];
+    let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::with_capacity(num_chunks);
+    for (ci, ck) in chunk_keys.iter().enumerate() {
+        if !ck.is_empty() {
+            heap.push(Reverse((f32_to_sort_key(ck[0]), ci)));
+        }
+    }
+
+    let mut merged = Vec::with_capacity(n);
+    while let Some(Reverse((_, ci))) = heap.pop() {
+        let pos = positions[ci];
+        merged.push(chunk_globals[ci][pos]);
+        positions[ci] = pos + 1;
+        if positions[ci] < chunk_keys[ci].len() {
+            heap.push(Reverse((
+                f32_to_sort_key(chunk_keys[ci][positions[ci]]),
+                ci,
+            )));
+        }
+    }
+
+    Some(merged)
+}
+
+/// GPU-sort f64 keys in chunks, returning the merged global permutation.
+///
+/// Same algorithm as [`gpu_sort_chunked_f32`] but for f64 keys.
+fn gpu_sort_chunked_f64(keys: &[f64]) -> Option<Vec<u32>> {
+    let chunk_size = cost::device_limits().gpu_sort_max_elements;
+    let n = keys.len();
+
+    if n <= chunk_size {
+        let mut k = keys.to_vec();
+        let mut idx: Vec<u32> = (0..n as u32).collect();
+        gpu::sort_kv_f64(&mut k, &mut idx)?;
+        return Some(idx);
+    }
+
+    let num_chunks = n.div_ceil(chunk_size);
+    let mut chunk_keys: Vec<Vec<f64>> = Vec::with_capacity(num_chunks);
+    let mut chunk_globals: Vec<Vec<u32>> = Vec::with_capacity(num_chunks);
+
+    for start in (0..n).step_by(chunk_size) {
+        let end = (start + chunk_size).min(n);
+        let mut ck = keys[start..end].to_vec();
+        let mut ci: Vec<u32> = (0..ck.len() as u32).collect();
+        gpu::sort_kv_f64(&mut ck, &mut ci)?;
+        let gi: Vec<u32> = ci.iter().map(|&i| start as u32 + i).collect();
+        chunk_keys.push(ck);
+        chunk_globals.push(gi);
+        pgrx::check_for_interrupts!();
+    }
+
+    let mut positions = vec![0usize; num_chunks];
+    let mut heap: BinaryHeap<Reverse<(u64, usize)>> = BinaryHeap::with_capacity(num_chunks);
+    for (ci, ck) in chunk_keys.iter().enumerate() {
+        if !ck.is_empty() {
+            heap.push(Reverse((f64_to_sort_key(ck[0]), ci)));
+        }
+    }
+
+    let mut merged = Vec::with_capacity(n);
+    while let Some(Reverse((_, ci))) = heap.pop() {
+        let pos = positions[ci];
+        merged.push(chunk_globals[ci][pos]);
+        positions[ci] = pos + 1;
+        if positions[ci] < chunk_keys[ci].len() {
+            heap.push(Reverse((
+                f64_to_sort_key(chunk_keys[ci][positions[ci]]),
+                ci,
+            )));
+        }
+    }
+
+    Some(merged)
+}
 
 // ---------------------------------------------------------------------------
 // Sort key descriptor
@@ -303,47 +440,42 @@ impl SortExecState {
         let mut gpu_rows_sorted: u64 = 0;
         if n > 1 && !self.sort_keys.is_empty() {
             // Try GPU sort using inline-extracted keys (zero-copy key extraction).
+            // No max-elements gate: gpu_sort_chunked handles arbitrary sizes
+            // by splitting into chunks and k-way merging.
             let limits = cost::device_limits();
-            let gpu_done = if do_inline
-                && n >= limits.gpu_sort_min_rows
-                && n <= limits.gpu_sort_max_elements
-            {
+            let gpu_done = if do_inline && n >= limits.gpu_sort_min_rows {
                 let key = self.sort_keys[0].clone();
                 match inline_typid {
                     FLOAT4OID => {
                         if f32_keys.is_empty() {
                             false
+                        } else if let Some(gpu_idx) = gpu_sort_chunked_f32(&f32_keys) {
+                            self.apply_gpu_sort_result(
+                                &key,
+                                &non_null_indices,
+                                &null_indices,
+                                &gpu_idx,
+                                n,
+                            );
+                            true
                         } else {
-                            let mut gpu_idx: Vec<u32> = (0..f32_keys.len() as u32).collect();
-                            let ok = gpu::sort_kv_f32(&mut f32_keys, &mut gpu_idx).is_some();
-                            if ok {
-                                self.apply_gpu_sort_result(
-                                    &key,
-                                    &non_null_indices,
-                                    &null_indices,
-                                    &gpu_idx,
-                                    n,
-                                );
-                            }
-                            ok
+                            false
                         }
                     }
                     FLOAT8OID | INT4OID | INT8OID => {
                         if f64_keys.is_empty() {
                             false
+                        } else if let Some(gpu_idx) = gpu_sort_chunked_f64(&f64_keys) {
+                            self.apply_gpu_sort_result(
+                                &key,
+                                &non_null_indices,
+                                &null_indices,
+                                &gpu_idx,
+                                n,
+                            );
+                            true
                         } else {
-                            let mut gpu_idx: Vec<u32> = (0..f64_keys.len() as u32).collect();
-                            let ok = gpu::sort_kv_f64(&mut f64_keys, &mut gpu_idx).is_some();
-                            if ok {
-                                self.apply_gpu_sort_result(
-                                    &key,
-                                    &non_null_indices,
-                                    &null_indices,
-                                    &gpu_idx,
-                                    n,
-                                );
-                            }
-                            ok
+                            false
                         }
                     }
                     _ => false,
@@ -354,16 +486,23 @@ impl SortExecState {
 
             if gpu_done {
                 gpu_rows_sorted = n as u64;
-            } else {
-                // Defer to PG's SortSupport comparison infrastructure.
-                // This is not a CPU reimplementation — it uses PG's native
-                // sort operators (handles multi-key sorts and non-GPU types).
-                // SAFETY: main backend thread, scratch_slot valid.
-                pgrx::warning!(
-                    "pg_accel: GPU sort unavailable for {} rows; \
-                     deferring to PG SortSupport",
-                    n,
+            } else if matches!(self.strategy, AccelStrategy::GpuSort) {
+                // Per rule 11 (no CPU fallbacks): a GpuSort path must execute
+                // on GPU. Reaching here means the planner injected a GpuSort
+                // but the GPU kernel refused — surface that instead of
+                // silently running PG SortSupport.
+                pgrx::error!(
+                    "pg_accel: GPU sort kernel failed for {n} rows \
+                     (strategy=GpuSort, type={inline_typid}). \
+                     No CPU fallback; fix the GPU path instead."
                 );
+            } else {
+                // Non-GpuSort strategies (tests, etc.) may still land here
+                // because they skip inline extraction entirely; defer to
+                // PG's SortSupport for those — this is NOT a CPU fallback
+                // for a GPU path, it's the native path for a non-GPU
+                // strategy that never attempted GPU sort.
+                // SAFETY: main backend thread, scratch_slot valid.
                 unsafe {
                     self.sort_tuples(scratch_slot, n);
                 }
@@ -537,11 +676,7 @@ impl SortExecState {
     /// Must be called on the main backend thread. `scratch_slot` must be valid.
     #[allow(clippy::too_many_lines, clippy::needless_bool)]
     unsafe fn try_gpu_sort(&mut self, scratch_slot: *mut pg_sys::TupleTableSlot, n: usize) -> bool {
-        // Gate: fall back to PG sort for large arrays to avoid GPU runtime aborts.
-        if n > cost::device_limits().gpu_sort_max_elements {
-            return false;
-        }
-
+        // No max-elements gate: gpu_sort_chunked handles arbitrary sizes.
         let key = self.sort_keys[0].clone();
 
         // Determine the type of the sort key column from the tuple descriptor.
@@ -585,9 +720,7 @@ impl SortExecState {
                 if keys.is_empty() {
                     return false;
                 }
-                let mut gpu_indices: Vec<u32> = (0..keys.len() as u32).collect();
-                let ok = gpu::sort_kv_f32(&mut keys, &mut gpu_indices).is_some();
-                if ok {
+                if let Some(gpu_indices) = gpu_sort_chunked_f32(&keys) {
                     self.apply_gpu_sort_result(
                         &key,
                         &non_null_indices,
@@ -595,8 +728,10 @@ impl SortExecState {
                         &gpu_indices,
                         n,
                     );
+                    true
+                } else {
+                    false
                 }
-                ok
             }
             FLOAT8OID => {
                 let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
@@ -614,9 +749,7 @@ impl SortExecState {
                 if keys.is_empty() {
                     return false;
                 }
-                let mut gpu_indices: Vec<u32> = (0..keys.len() as u32).collect();
-                let ok = gpu::sort_kv_f64(&mut keys, &mut gpu_indices).is_some();
-                if ok {
+                if let Some(gpu_indices) = gpu_sort_chunked_f64(&keys) {
                     self.apply_gpu_sort_result(
                         &key,
                         &non_null_indices,
@@ -624,8 +757,10 @@ impl SortExecState {
                         &gpu_indices,
                         n,
                     );
+                    true
+                } else {
+                    false
                 }
-                ok
             }
             INT4OID => {
                 // Bulk-extract i32 keys, promote to f64 (lossless).
@@ -644,9 +779,7 @@ impl SortExecState {
                 if keys.is_empty() {
                     return false;
                 }
-                let mut gpu_indices: Vec<u32> = (0..keys.len() as u32).collect();
-                let ok = gpu::sort_kv_f64(&mut keys, &mut gpu_indices).is_some();
-                if ok {
+                if let Some(gpu_indices) = gpu_sort_chunked_f64(&keys) {
                     self.apply_gpu_sort_result(
                         &key,
                         &non_null_indices,
@@ -654,8 +787,10 @@ impl SortExecState {
                         &gpu_indices,
                         n,
                     );
+                    true
+                } else {
+                    false
                 }
-                ok
             }
             INT8OID => {
                 // Bulk-extract i64 keys, promote to f64 (lossless for |v| ≤ 2^53).
@@ -675,9 +810,7 @@ impl SortExecState {
                 if keys.is_empty() {
                     return false;
                 }
-                let mut gpu_indices: Vec<u32> = (0..keys.len() as u32).collect();
-                let ok = gpu::sort_kv_f64(&mut keys, &mut gpu_indices).is_some();
-                if ok {
+                if let Some(gpu_indices) = gpu_sort_chunked_f64(&keys) {
                     self.apply_gpu_sort_result(
                         &key,
                         &non_null_indices,
@@ -685,8 +818,10 @@ impl SortExecState {
                         &gpu_indices,
                         n,
                     );
+                    true
+                } else {
+                    false
                 }
-                ok
             }
             _ => false,
         }

@@ -14,8 +14,6 @@
 
 #if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#elif PGACCEL_HAS_METAL
-#include "metal_backend.h"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -240,11 +238,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data,
                 "pgaccel: reduce_sum_f32 SYCL failed: %s\n", e.what());
     } catch (...) {
     }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_sum_f32(data, count, result);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("reduce_sum_f32");
@@ -269,11 +262,6 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_min_f32(data, count, result);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("reduce_min_f32");
@@ -297,11 +285,6 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
         }
     } catch (const std::exception&) {
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_max_f32(data, count, result);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
 
@@ -416,11 +399,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_sum_i64(data, count, result);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("reduce_sum_i64");
@@ -447,11 +425,6 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
         }
     } catch (const std::exception&) {
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_count(mask, count, result);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
 
@@ -641,12 +614,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data,
                 "pgaccel: reduce_multi_f32 SYCL failed: %s\n", e.what());
     } catch (...) {
     }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_multi_f32(data, count, out_sum, out_min,
-                                                  out_max, out_count);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("reduce_multi_f32");
@@ -719,12 +686,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
         fprintf(stderr,
                 "pgaccel: reduce_multi_i64 SYCL failed: %s\n", e.what());
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status st = metal_reduce_multi_i64(data, count, out_sum, out_min,
-                                                  out_max, out_count);
-        if (st == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
 

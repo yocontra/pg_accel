@@ -289,6 +289,7 @@ unsafe extern "C-unwind" fn plan_custom_path_scan(
     clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
 ) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_scan").entered();
     // SAFETY: all pointers originate from the planner and are valid.
     unsafe { make_custom_scan_plan(root, rel, best_path, tlist, clauses, custom_plans, true) }
 }
@@ -306,8 +307,13 @@ unsafe extern "C-unwind" fn plan_custom_path_join(
     clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
 ) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_join").entered();
+    tracing::info!("plan_custom_path_join: start");
     // SAFETY: all pointers originate from the planner and are valid.
-    unsafe { make_custom_scan_plan(root, rel, best_path, tlist, clauses, custom_plans, false) }
+    let plan =
+        unsafe { make_custom_scan_plan(root, rel, best_path, tlist, clauses, custom_plans, false) };
+    tracing::info!("plan_custom_path_join: end");
+    plan
 }
 
 /// Convert a sort `CustomPath` into a `CustomScan` plan node.
@@ -326,6 +332,8 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
     clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
 ) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_sort").entered();
+    tracing::info!("plan_custom_path_sort: start");
     // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
     let cscan = unsafe {
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
@@ -392,6 +400,7 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
         (*cscan).custom_private = list;
     }
 
+    tracing::info!("plan_custom_path_sort: end");
     cscan.cast()
 }
 
@@ -563,6 +572,8 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
     clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
 ) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_agg").entered();
+    tracing::info!("plan_custom_path_agg: start");
     // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
     let cscan = unsafe {
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
@@ -701,6 +712,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         (*cscan).custom_private = list;
     }
 
+    tracing::info!("plan_custom_path_agg: end");
     cscan.cast()
 }
 
@@ -721,6 +733,8 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
     clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
 ) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_window").entered();
+    tracing::info!("plan_custom_path_window: start");
     // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
     let cscan = unsafe {
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
@@ -856,6 +870,7 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
         (*cscan).custom_private = list;
     }
 
+    tracing::info!("plan_custom_path_window: end");
     cscan.cast()
 }
 
@@ -876,6 +891,8 @@ unsafe extern "C-unwind" fn plan_custom_path_preagg(
     clauses: *mut pg_sys::List,
     custom_plans: *mut pg_sys::List,
 ) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_preagg").entered();
+    tracing::info!("plan_custom_path_preagg: start");
     // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
     let cscan = unsafe {
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
@@ -884,27 +901,34 @@ unsafe extern "C-unwind" fn plan_custom_path_preagg(
     // SAFETY: cscan is freshly palloc'd and zeroed; best_path is valid.
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        (*cscan).scan.plan.targetlist = tlist;
+
+        // PreAgg has scanrelid=0 and the planner-supplied tlist contains raw
+        // base-relation Vars (GROUP BY keys referencing fact/dim relids) plus
+        // Aggrefs. For scanrelid=0 CustomScans, PG's
+        // `set_customscan_references` treats the node as an upper-plan
+        // projection: it builds an index from `custom_scan_tlist` and calls
+        // `fix_upper_expr` on `plan.targetlist`/`plan.qual`, rewriting each
+        // Var/Aggref in-place to `Var(INDEX_VAR, position_in_cst)`. Both lists
+        // must hold independent copies so rewriting one does not alias the
+        // other — same pattern as plan_custom_path_agg.
+        // SAFETY: copyObjectImpl deep-copies in CurrentMemoryContext.
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
         (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
         (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
         (*cscan).custom_plans = custom_plans;
         (*cscan).flags = (*best_path).flags;
-        // scanrelid > 0 tells PG to open the fact table relation for us.
-        // The scan_relid is stored as the first integer after the strategy
-        // header in custom_private.
         (*cscan).scan.scanrelid = 0;
         (*cscan).methods = &raw const PREAGG_SCAN_METHODS.0;
 
         // Copy custom_private from path to plan (already serialized by planner hook).
         (*cscan).custom_private = (*best_path).custom_private;
-
-        // Set custom_scan_tlist so PG knows the output schema.
-        // For PreAgg, we produce GROUP BY keys + aggregates.
-        (*cscan).custom_scan_tlist = tlist;
     }
 
+    tracing::info!("plan_custom_path_preagg: end");
     cscan.cast()
 }
 
@@ -1192,6 +1216,7 @@ unsafe fn make_custom_scan_plan(
 unsafe extern "C-unwind" fn create_custom_scan_state(
     cscan: *mut pg_sys::CustomScan,
 ) -> *mut pg_sys::Node {
+    let _span = tracing::debug_span!("ffi.create_custom_scan_state").entered();
     // SAFETY: palloc0 returns zeroed, maximally-aligned memory. We allocate
     // our extended struct which has CustomScanState as first field.
     #[allow(clippy::cast_ptr_alignment)]
@@ -1974,6 +1999,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     _estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
+    let _span = tracing::debug_span!("ffi.begin_custom_scan").entered();
     // Record that a query was routed through the accelerated custom scan path.
     // This runs once per CustomScan node init on the main backend thread.
     stats::record_query_accelerated();
@@ -2062,11 +2088,43 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             }
 
             // Open the fact table for direct heap scan.
-            // The scan_relid is stored in the preagg info.
-            if preagg_info.scan_relid > 0 {
-                let estate = (*node).ss.ps.state;
+            //
+            // Prefer the stable relation OID stored at planning time.
+            // The range-table index (scan_relid) can be rewritten by
+            // `set_plan_refs` for upper plans (scanrelid=0 spans a join),
+            // making it an unsafe index into `estate->es_range_table` at
+            // execution time. The OID is stable and always valid.
+            //
+            // When the OID is present we `table_open(oid, AccessShareLock)`
+            // directly — `end_custom_scan` will `table_close` it. Otherwise,
+            // if the RTE index is valid, fall back to `ExecOpenScanRelation`
+            // (which the executor's own cleanup path will close).
+            let estate = (*node).ss.ps.state;
+            if preagg_info.scan_oid != pg_sys::InvalidOid {
+                // SAFETY: OID is valid (resolved at plan time from an
+                // RTE_RELATION entry). Main backend thread.
+                let rel = pg_sys::table_open(
+                    preagg_info.scan_oid,
+                    pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                );
+                let snap = (*estate).es_snapshot;
+                // SAFETY: rel and snap are valid; main backend thread.
+                let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                exec.set_scan_desc(sd);
+                exec.set_scan_rel(rel);
+            } else if preagg_info.scan_relid > 0 {
+                // Guard: the RTE must be a real heap relation. Non-relation
+                // RTEs (function, VALUES, CTE, subquery, or entries
+                // invalidated by setrefs) passed to ExecOpenScanRelation
+                // raise ERROR → SIGABRT. If the relid is not a valid heap
+                // relation, skip the manual self-scan; the executor will
+                // consume rows via custom_ps / child plans instead (not a
+                // CPU fallback — still GPU-executed).
                 let rt_entry = pg_sys::exec_rt_fetch(preagg_info.scan_relid, estate);
-                if !rt_entry.is_null() {
+                if !rt_entry.is_null()
+                    && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
+                    && (*rt_entry).relid != pg_sys::InvalidOid
+                {
                     let rel = pg_sys::ExecOpenScanRelation(estate, preagg_info.scan_relid, eflags);
                     let snap = (*estate).es_snapshot;
                     // SAFETY: rel and snap are valid; main backend thread.
@@ -2114,19 +2172,29 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // directly.
             if privdata.self_scan_relid > 0 {
                 let estate = (*node).ss.ps.state;
-                // SAFETY: estate is valid; self_scan_relid references a
-                // valid range table entry set by the planner.
-                let rel = pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
-                let snap = (*estate).es_snapshot;
-                // SAFETY: rel and snap are valid; main backend thread.
-                let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-                // SAFETY: sd is a valid, open TableScanDesc.
-                let vscan = AggVectorizedScan::new(sd);
-                exec.set_vscan(vscan);
-                pgrx::debug1!(
-                    "pg_accel: begin_custom_scan: Agg self-scan on relid {}",
-                    privdata.self_scan_relid,
-                );
+                // Guard: the RTE must be a real heap relation. Non-relation
+                // RTEs (function, VALUES, CTE, subquery) passed to
+                // ExecOpenScanRelation raise ERROR → panic → SIGABRT.
+                let rt_entry = pg_sys::exec_rt_fetch(privdata.self_scan_relid, estate);
+                if !rt_entry.is_null()
+                    && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
+                    && (*rt_entry).relid != pg_sys::InvalidOid
+                {
+                    // SAFETY: estate is valid; self_scan_relid references a
+                    // valid RTE_RELATION range table entry set by the planner.
+                    let rel =
+                        pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
+                    let snap = (*estate).es_snapshot;
+                    // SAFETY: rel and snap are valid; main backend thread.
+                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                    // SAFETY: sd is a valid, open TableScanDesc.
+                    let vscan = AggVectorizedScan::new(sd);
+                    exec.set_vscan(vscan);
+                    pgrx::debug1!(
+                        "pg_accel: begin_custom_scan: Agg self-scan on relid {}",
+                        privdata.self_scan_relid,
+                    );
+                }
             }
 
             // Pipeline fusion: if the child is a GpuExpr scan with a direct
@@ -2521,6 +2589,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 unsafe extern "C-unwind" fn gpu_scan_access(
     node: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
+    let _span = tracing::debug_span!("ffi.gpu_scan_access").entered();
     // Upcast ScanState → GpuAccelScanState to reach our executor.
     let state = node.cast::<GpuAccelScanState>();
     let executor = unsafe { (*state).accel.executor };
@@ -2555,6 +2624,7 @@ unsafe extern "C-unwind" fn gpu_scan_recheck(
 unsafe extern "C-unwind" fn exec_custom_scan(
     node: *mut pg_sys::CustomScanState,
 ) -> *mut pg_sys::TupleTableSlot {
+    let _span = tracing::debug_span!("ffi.exec_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();
 
     // If the extension is disabled, fall through to passthrough.
@@ -2861,6 +2931,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
 ///
 /// Called by the executor on the main backend thread.
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
+    let _span = tracing::debug_span!("ffi.end_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();
 
     // SAFETY: Reclaim the Rust executor state to prevent leaks.
@@ -2889,6 +2960,19 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     if !preagg.scan_desc.is_null() {
                         // SAFETY: scan_desc was created by table_beginscan.
                         pg_sys::table_endscan(preagg.scan_desc);
+                    }
+                    // Close the relation if we opened it via `table_open`.
+                    // When scan_rel is null the relation was acquired via
+                    // `ExecOpenScanRelation`, and the executor framework
+                    // closes it — we must not double-close.
+                    if !preagg.scan_rel.is_null() {
+                        // SAFETY: scan_rel was opened via table_open with
+                        // AccessShareLock in begin_custom_scan; main backend
+                        // thread.
+                        pg_sys::table_close(
+                            preagg.scan_rel,
+                            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                        );
                     }
                     drop(preagg);
                 } else if gpu_strategy == GpuStrategy::Agg {
@@ -3089,6 +3173,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
 ///
 /// Called by the executor on the main backend thread.
 unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
+    let _span = tracing::debug_span!("ffi.rescan_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();
 
     // SAFETY: All pointer accesses are to our GpuAccelScanState on the main
@@ -3128,6 +3213,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
     _ancestors: *mut pg_sys::List,
     es: *mut pg_sys::ExplainState,
 ) {
+    let _span = tracing::debug_span!("ffi.explain_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();
 
     // SAFETY: state is our extended struct, es is a valid ExplainState.
@@ -4726,6 +4812,11 @@ use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, Pr
 /// Deserialized PreAgg configuration from `custom_private`.
 struct PreAggPrivData {
     scan_relid: pg_sys::Index,
+    /// Stable relation OID for the fact table. Use this (via `table_open`)
+    /// at execution time rather than `scan_relid`, because the planner's
+    /// `set_plan_refs` pass may rewrite the range-table indices for upper
+    /// plans (scanrelid=0 spanning a join).
+    scan_oid: pg_sys::Oid,
     depths: Vec<JoinDepthDesc>,
     agg_descs: Vec<PreAggColDesc>,
     group_keys: Vec<GroupKeyDesc>,
@@ -4737,7 +4828,7 @@ struct PreAggPrivData {
 /// Layout:
 /// ```text
 /// [STRATEGY=5, batch_size, expected_threads,
-///  scan_relid, n_depths,
+///  scan_relid, scan_oid, n_depths,
 ///  // Per depth:
 ///  outer_attno, inner_attno, key_type, n_dim_filters,
 ///  // Per dim filter: col_idx, cmp_opcode, const_val_hi, const_val_lo
@@ -4757,6 +4848,7 @@ struct PreAggPrivData {
 #[must_use]
 pub unsafe fn serialize_preagg_private(
     scan_relid: pg_sys::Index,
+    scan_oid: pg_sys::Oid,
     depths: &[JoinDepthDesc],
     agg_descs: &[PreAggColDesc],
     group_keys: &[GroupKeyDesc],
@@ -4777,6 +4869,11 @@ pub unsafe fn serialize_preagg_private(
         list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
         list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
         list = pg_sys::lappend(list, pg_sys::makeInteger(scan_relid as c_int).cast());
+        // Stable OID: stored as c_int (Oid is u32 — bit-cast via `as c_int`).
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(u32::from(scan_oid) as c_int).cast(),
+        );
         list = pg_sys::lappend(list, pg_sys::makeInteger(depths.len() as c_int).cast());
 
         // Per depth.
@@ -4895,6 +4992,7 @@ unsafe fn deserialize_preagg_private(custom_private: *mut pg_sys::List) -> PreAg
 
     let empty = PreAggPrivData {
         scan_relid: 0,
+        scan_oid: pg_sys::InvalidOid,
         depths: vec![],
         agg_descs: vec![],
         group_keys: vec![],
@@ -4909,6 +5007,9 @@ unsafe fn deserialize_preagg_private(custom_private: *mut pg_sys::List) -> PreAg
     // SAFETY: custom_private is a valid List.
     let scan_relid = unsafe { list_int_at(custom_private, idx) } as pg_sys::Index;
     idx += 1;
+    let scan_oid_raw = unsafe { list_int_at(custom_private, idx) } as u32;
+    idx += 1;
+    let scan_oid = pg_sys::Oid::from(scan_oid_raw);
     let n_depths = unsafe { list_int_at(custom_private, idx) } as usize;
     idx += 1;
 
@@ -5078,6 +5179,7 @@ unsafe fn deserialize_preagg_private(custom_private: *mut pg_sys::List) -> PreAg
 
     PreAggPrivData {
         scan_relid,
+        scan_oid,
         depths,
         agg_descs,
         group_keys,

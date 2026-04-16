@@ -243,7 +243,11 @@ impl DeviceLimits {
 
         let gpu_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
         let gpu_sort_min_rows = cu_scale(100_000).clamp(10_000, 1_000_000);
-        let gpu_sort_planner_min_rows = (gpu_sort_min_rows * 10).min(10_000_000);
+        // Planner threshold must track the executor threshold: if the planner
+        // injects a GpuSort path, the executor must actually dispatch to GPU.
+        // Previously this was `gpu_sort_min_rows * 10`, which starved the GPU
+        // path at sizes the executor was happy to run (tests hit this).
+        let gpu_sort_planner_min_rows = gpu_sort_min_rows;
         let gpu_window_min_rows = cu_scale(100_000).clamp(50_000, 500_000);
         // 2026-04-12: raised from 10K to 25K. GPU reduce at 10K is 0.11x
         // due to dispatch overhead dominating kernel time (~50µs).
@@ -278,12 +282,11 @@ impl DeviceLimits {
             256_000
         };
 
-        // Max elements for GPU sort dispatch. Sort requires two arrays
-        // (keys + indices) ≈ 12 bytes per element. Capped at 512K because
-        // the bitonic sort kernel issues O(n log²n) sequential kernel
-        // launches, which fails on Metal above ~500K elements. This also
-        // acts as a planner gate: above this count, PG's native sort wins
-        // because Custom Scan yield overhead (~3μs/row) dominates.
+        // Chunk size for GPU sort dispatch. Sort requires two arrays
+        // (keys + indices) ≈ 12 bytes per element. The executor sorts in
+        // chunks of this size and k-way merges, so arbitrarily large
+        // inputs are handled. Capped at 4M to keep per-chunk GPU dispatch
+        // fast (Metal radix sort is O(n) but buffer allocation dominates).
         let gpu_sort_max_elements = if mem > 0 {
             (mem / 32 / 12).clamp(64_000, 4_000_000)
         } else {
@@ -443,7 +446,9 @@ impl DeviceLimits {
         Self {
             gpu_min_rows: 10_000,
             gpu_sort_min_rows: 100_000,
-            gpu_sort_planner_min_rows: 1_000_000,
+            // Planner threshold tracks the executor threshold — see comment
+            // in `from_profile`.
+            gpu_sort_planner_min_rows: 100_000,
             gpu_window_min_rows: 100_000,
             gpu_reduce_min_rows: 25_000,
             gpu_hash_agg_min_rows: 250_000,
@@ -557,19 +562,9 @@ static HAS_FP64: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// Whether the GPU supports native fp64 (double-precision) arithmetic.
 ///
 /// Result is cached via [`OnceLock`] so the GPU runtime is only probed once.
-/// In `#[cfg(test)]` builds, always returns `false` (Apple Silicon lacks fp64).
 #[must_use]
 pub fn platform_has_fp64() -> bool {
-    *HAS_FP64.get_or_init(|| {
-        #[cfg(test)]
-        {
-            false
-        }
-        #[cfg(not(test))]
-        {
-            PlatformProfile::detect().has_fp64
-        }
-    })
+    *HAS_FP64.get_or_init(|| PlatformProfile::detect().has_fp64)
 }
 
 /// Whether batching is worthwhile for the given row count and per-row cost.
@@ -982,9 +977,9 @@ mod tests {
         let l = DeviceLimits::cpu_only();
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
-        assert_eq!(l.gpu_sort_planner_min_rows, 1_000_000);
+        assert_eq!(l.gpu_sort_planner_min_rows, 100_000);
         assert_eq!(l.gpu_window_min_rows, 100_000);
-        assert_eq!(l.gpu_reduce_min_rows, 10_000);
+        assert_eq!(l.gpu_reduce_min_rows, 25_000);
         assert_eq!(l.gpu_hash_agg_min_rows, 250_000);
         assert_eq!(l.gpu_hash_agg_max_groups, 10_000);
         assert_eq!(l.gpu_expr_min_rows, 250_000);
@@ -1011,7 +1006,7 @@ mod tests {
         assert_eq!(l.gpu_min_rows, 10_000);
         assert_eq!(l.gpu_sort_min_rows, 100_000);
         assert_eq!(l.gpu_window_min_rows, 100_000);
-        assert_eq!(l.gpu_reduce_min_rows, 10_000);
+        assert_eq!(l.gpu_reduce_min_rows, 25_000);
     }
 
     #[test]

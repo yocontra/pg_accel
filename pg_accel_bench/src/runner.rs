@@ -782,7 +782,9 @@ pub fn run_with_timing_and_cache(
     // Reviewer 1 §4 / action_items §0: some workloads (h3) need a different
     // SQL on the PgParallel baseline side so the planner cannot intercept
     // the call. Default is `None` (use the accel query for both).
-    let baseline_query = workload.baseline_query_sql().unwrap_or_else(|| query.clone());
+    let baseline_query = workload
+        .baseline_query_sql()
+        .unwrap_or_else(|| query.clone());
     let pre_query = workload.pre_query_sql();
     let total_runs = effective_warmup + iterations;
     let mut results = Vec::with_capacity(iterations);
@@ -844,7 +846,11 @@ pub fn run_with_timing_and_cache(
         } else {
             i - effective_warmup + 1
         };
-        let iter_total = if is_warmup { effective_warmup } else { iterations };
+        let iter_total = if is_warmup {
+            effective_warmup
+        } else {
+            iterations
+        };
         let cache_tag = match cache_mode {
             CacheMode::Cold => " [cold]",
             CacheMode::Warm => " [warm]",

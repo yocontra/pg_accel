@@ -15,10 +15,6 @@
 #include <cstdlib>
 #include <vector>
 
-#if PGACCEL_HAS_METAL
-#include "metal_backend.h"
-#endif
-
 #if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
 #include "alloc_helper.h"
@@ -387,11 +383,6 @@ pgaccel_status pgaccel_window_row_number(
         pgaccel_status st = sycl_window_row_number(partition_starts, count, results);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-#elif PGACCEL_HAS_METAL
-    if (count >= GPU_WINDOW_THRESHOLD) {
-        metal_status mst = metal_window_row_number(partition_starts, count, results);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("window_row_number");
@@ -550,13 +541,6 @@ pgaccel_status pgaccel_window_lag(
             offset, default_val, results, result_nulls);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-#elif PGACCEL_HAS_METAL
-    if (count >= GPU_WINDOW_THRESHOLD) {
-        metal_status mst = metal_window_lag(
-            partition_starts, values, null_mask, count,
-            offset, default_val, results, result_nulls);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
 #endif
 
     pgaccel_warn_cpu_fallback("window_lag");
@@ -586,13 +570,6 @@ pgaccel_status pgaccel_window_lead(
             partition_starts, values, null_mask, count,
             offset, default_val, results, result_nulls);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
-    }
-#elif PGACCEL_HAS_METAL
-    if (count >= GPU_WINDOW_THRESHOLD) {
-        metal_status mst = metal_window_lead(
-            partition_starts, values, null_mask, count,
-            offset, default_val, results, result_nulls);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
 

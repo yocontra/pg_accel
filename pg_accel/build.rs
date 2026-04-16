@@ -288,7 +288,6 @@ mod gpu_build {
 
         // The built shared library lives in the build directory.
         emit_link_directives(&build_dir);
-
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {
@@ -300,8 +299,8 @@ mod gpu_build {
             .arg("-B")
             .arg(build_dir)
             .arg("-DCMAKE_BUILD_TYPE=Release")
-            // SYCL disabled — native Metal backend replaces AdaptiveCpp.
-            .arg("-DPGACCEL_USE_SYCL=OFF");
+            // AdaptiveCpp/SYCL is the sole GPU backend (CUDA/ROCm/L0/Metal/CPU).
+            .arg("-DPGACCEL_USE_SYCL=ON");
 
         // AdaptiveCpp installs to ~/local via `just setup-gpu`.
         if acpp_prefix.join("lib/cmake/AdaptiveCpp").exists() {
@@ -365,17 +364,20 @@ mod gpu_build {
         println!("cargo::rustc-link-search=native={}", build_dir.display());
         println!("cargo::rustc-link-lib=static=pgaccel_kernels");
 
+        // AdaptiveCpp SSCP runtime — our static kernels reference hipsycl
+        // symbols resolved by these shared libs at load time.
+        let acpp_lib = home_dir().join("local/lib");
+        println!("cargo::rustc-link-search=native={}", acpp_lib.display());
+        println!("cargo::rustc-link-lib=dylib=acpp-rt");
+        println!("cargo::rustc-link-lib=dylib=acpp-common");
+        // Embed rpath so test binaries + the cdylib find the dylibs.
+        println!("cargo::rustc-link-arg=-Wl,-rpath,{}", acpp_lib.display());
+
         // Link C++ standard library for static C++ code.
         if cfg!(target_os = "macos") {
             println!("cargo::rustc-link-lib=c++");
         } else {
             println!("cargo::rustc-link-lib=stdc++");
-        }
-
-        // Metal framework (native GPU backend on macOS).
-        if cfg!(target_os = "macos") {
-            println!("cargo::rustc-link-lib=framework=Metal");
-            println!("cargo::rustc-link-lib=framework=Foundation");
         }
     }
 }

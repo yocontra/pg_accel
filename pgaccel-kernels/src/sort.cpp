@@ -13,10 +13,6 @@
 #include <sycl/sycl.hpp>
 #endif
 
-#if PGACCEL_HAS_METAL
-#include "metal_backend.h"
-#endif
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1057,36 +1053,6 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
     }
     pgaccel_warn_cpu_fallback("sort");
     return PGACCEL_ERROR_NO_DEVICE;
-#elif PGACCEL_HAS_METAL
-    // Metal path: convert to sortable uint, dispatch via metal_sort_kv_u32/u64.
-    {
-        std::vector<uint32_t> indices(count);
-        for (size_t i = 0; i < count; ++i) indices[i] = (uint32_t)i;
-        metal_status mst = METAL_ERROR;
-
-        if constexpr (std::is_same_v<T, float>) {
-            std::vector<uint32_t> ukeys(count);
-            for (size_t i = 0; i < count; ++i) ukeys[i] = f32_to_sortable(data[i]);
-            mst = metal_sort_kv_u32(ukeys.data(), indices.data(), count);
-            if (mst == METAL_OK)
-                for (size_t i = 0; i < count; ++i) data[i] = sortable_to_f32(ukeys[i]);
-        } else if constexpr (std::is_same_v<T, int32_t>) {
-            std::vector<uint32_t> ukeys(count);
-            for (size_t i = 0; i < count; ++i) ukeys[i] = i32_to_sortable(data[i]);
-            mst = metal_sort_kv_u32(ukeys.data(), indices.data(), count);
-            if (mst == METAL_OK)
-                for (size_t i = 0; i < count; ++i) data[i] = sortable_to_i32(ukeys[i]);
-        } else if constexpr (std::is_same_v<T, int64_t>) {
-            std::vector<uint64_t> ukeys(count);
-            for (size_t i = 0; i < count; ++i) ukeys[i] = i64_to_sortable(data[i]);
-            mst = metal_sort_kv_u64(ukeys.data(), indices.data(), count);
-            if (mst == METAL_OK)
-                for (size_t i = 0; i < count; ++i) data[i] = sortable_to_i64(ukeys[i]);
-        }
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
-    pgaccel_warn_cpu_fallback("sort");
-    return PGACCEL_ERROR_NO_DEVICE;
 #else
     pgaccel_warn_cpu_fallback("sort");
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1103,11 +1069,6 @@ static pgaccel_status dispatch_sort_fp_checked(T* data, size_t count) {
         if (!device_has_fp64()) {
             return PGACCEL_UNSUPPORTED;
         }
-    }
-#elif PGACCEL_HAS_METAL
-    // Metal has no fp64 support.
-    if constexpr (sizeof(T) == 8) {
-        return PGACCEL_UNSUPPORTED;
     }
 #endif
 
@@ -1153,34 +1114,6 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices,
     }
     pgaccel_warn_cpu_fallback("sort_kv");
     return PGACCEL_ERROR_NO_DEVICE;
-#elif PGACCEL_HAS_METAL
-    // Metal path: convert to sortable uint, dispatch via metal_sort_kv_u32/u64.
-    {
-        metal_status mst = METAL_ERROR;
-
-        if constexpr (std::is_same_v<K, float>) {
-            std::vector<uint32_t> ukeys(count);
-            for (size_t i = 0; i < count; ++i) ukeys[i] = f32_to_sortable(keys[i]);
-            mst = metal_sort_kv_u32(ukeys.data(), indices, count);
-            if (mst == METAL_OK)
-                for (size_t i = 0; i < count; ++i) keys[i] = sortable_to_f32(ukeys[i]);
-        } else if constexpr (std::is_same_v<K, int32_t>) {
-            std::vector<uint32_t> ukeys(count);
-            for (size_t i = 0; i < count; ++i) ukeys[i] = i32_to_sortable(keys[i]);
-            mst = metal_sort_kv_u32(ukeys.data(), indices, count);
-            if (mst == METAL_OK)
-                for (size_t i = 0; i < count; ++i) keys[i] = sortable_to_i32(ukeys[i]);
-        } else if constexpr (std::is_same_v<K, int64_t>) {
-            std::vector<uint64_t> ukeys(count);
-            for (size_t i = 0; i < count; ++i) ukeys[i] = i64_to_sortable(keys[i]);
-            mst = metal_sort_kv_u64(ukeys.data(), indices, count);
-            if (mst == METAL_OK)
-                for (size_t i = 0; i < count; ++i) keys[i] = sortable_to_i64(ukeys[i]);
-        }
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
-    }
-    pgaccel_warn_cpu_fallback("sort_kv");
-    return PGACCEL_ERROR_NO_DEVICE;
 #else
     pgaccel_warn_cpu_fallback("sort_kv");
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1200,10 +1133,6 @@ static pgaccel_status dispatch_sort_kv_fp_checked(K* keys, uint32_t* indices,
         if (!device_has_fp64()) {
             return PGACCEL_UNSUPPORTED;
         }
-    }
-#elif PGACCEL_HAS_METAL
-    if constexpr (sizeof(K) == 8) {
-        return PGACCEL_UNSUPPORTED;
     }
 #endif
 

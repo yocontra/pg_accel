@@ -160,33 +160,84 @@ test-unit pg="17":
 test pg="17": (test-unit pg)
     @echo "All tests passed."
 
-# Run benchmark suite against local pgrx PG
-bench rows="1000000" iterations="30" warmup="5":
+# Run benchmark suite against local pgrx PG. Seeds data (1M rows) and runs
+# all workloads. Long benches can fill the PG log; `log-rails` truncates
+# oversized logs first.
+bench iterations="10" warmup="5": log-rails
+    cargo run -p pg_accel_bench --release -- setup \
+        --rows 1000000 \
+        --connection "host=localhost port=28817 dbname=postgres"
     cargo run -p pg_accel_bench --release -- run \
-        --rows {{rows}} --iterations {{iterations}} --warmup {{warmup}} \
+        --iterations {{iterations}} --warmup {{warmup}} \
         --connection "host=localhost port=28817 dbname=postgres" \
-        --format markdown
+        --format markdown --timing raw --skip-guc-verify
 
 # Run the rigorous benchmark suite: realistic GUCs, plan capture,
 # raw wall-clock timing (no EXPLAIN ANALYZE overhead).
-bench-rigorous rows="1000000" iterations="30" warmup="5":
+bench-rigorous iterations="30" warmup="5": log-rails
     cargo run --release -p pg_accel_bench -- run \
         --iterations {{iterations}} --warmup {{warmup}} \
         --connection "host=localhost port=28817 dbname=postgres" \
         --format markdown \
         --realistic-gucs --capture-plans --timing raw
 
+# Guard against the PG log filling the disk.
+# Truncates pgrx PG log + pg_accel trace files when they exceed
+# LOG_RAILS_MAX_MB (default: 500 MB). Called automatically before
+# `bench` / `bench-rigorous`; run manually anytime PG has been
+# logging under `log_statement` / heavy fprintf.
+log-rails:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    MAX_MB="${LOG_RAILS_MAX_MB:-500}"
+    MAX_BYTES=$((MAX_MB * 1024 * 1024))
+    for f in "$HOME/.pgrx/17.log" \
+             "$HOME/.pgrx/data-17/pg_accel_otel.jsonl" \
+             "$HOME/.pgrx/data-17/pg_accel_traces.jsonl" \
+             "$HOME/.pgrx/data-17/pg_accel_panic.log"; do
+        [ -f "$f" ] || continue
+        sz=$(stat -f%z "$f" 2>/dev/null || echo 0)
+        if [ "$sz" -gt "$MAX_BYTES" ]; then
+            : > "$f"
+            printf "log-rails: truncated %s (was %s bytes)\n" "$f" "$sz"
+        fi
+    done
+    # Suppress NOTICE/WARNING-level spam in the PG server log. The h3
+    # extension emits a deprecation WARNING per-row for legacy function
+    # names, which ballooned the log by ~1 GB per workload during long
+    # bench runs. ERROR-level and above still land in the log.
+    if command -v psql > /dev/null 2>&1 && pg_isready -h localhost -p 28817 -q 2>/dev/null; then
+        psql -h localhost -p 28817 -d postgres -tAc \
+            "ALTER SYSTEM SET log_min_messages = 'error';" > /dev/null 2>&1 || true
+        psql -h localhost -p 28817 -d postgres -tAc \
+            "SELECT pg_reload_conf();" > /dev/null 2>&1 || true
+    fi
+
+# Hard-truncate all pgrx PG + pg_accel logs (no size check).
+clean-logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for f in "$HOME/.pgrx/17.log" \
+             "$HOME/.pgrx/data-17/pg_accel_otel.jsonl" \
+             "$HOME/.pgrx/data-17/pg_accel_traces.jsonl" \
+             "$HOME/.pgrx/data-17/pg_accel_panic.log"; do
+        [ -f "$f" ] || continue
+        : > "$f"
+        echo "cleaned $f"
+    done
+
 # === GPU Kernels ===
 
-# Build GPU kernel library (Metal)
+# Build GPU kernel library (AdaptiveCpp/SYCL -> CUDA/ROCm/L0/Metal/CPU)
 gpu-build:
     cmake -B pgaccel-kernels/build -S pgaccel-kernels \
+        -DCMAKE_PREFIX_PATH="$HOME/local" \
         -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
         -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++ \
         -DCMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
         -DCMAKE_SHARED_LINKER_FLAGS="-L$(brew --prefix libomp)/lib" \
         -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib" \
-    && cmake --build pgaccel-kernels/build
+    && cmake --build pgaccel-kernels/build --parallel
 
 # Run GPU kernel tests
 gpu-test: gpu-build
@@ -198,7 +249,8 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_raster \
     && ./pgaccel-kernels/build/test_correctness \
     && ./pgaccel-kernels/build/test_exec_gpu \
-    && ./pgaccel-kernels/build/test_fork
+    && ./pgaccel-kernels/build/test_fork \
+    && ./pgaccel-kernels/build/test_sycl_basic
 
 # === CI ===
 

@@ -1,12 +1,14 @@
-// test_fork: verifies that after fork(), GPU kernels do NOT crash and
-// instead return PGACCEL_ERROR_NO_DEVICE cleanly.
+// test_fork: verifies that after fork(), GPU kernels work correctly in
+// the child process — matching the PostgreSQL production scenario.
 //
-// Background: Metal/SYCL state is unusable in a forked child process
-// (MTLCreateSystemDefaultDevice reuses stale IOKit Mach ports whose GPU
-// memory allocator is broken after fork). pg_accel's production path
-// dispatches GPU work directly via Metal API from the query backend.
-// This test pins that contract: forked-backend code paths must detect
-// the fork and return a clean error, never crash.
+// PostgreSQL pattern: postmaster loads pg_accel.so (and libacpp-rt.dylib)
+// via shared_preload_libraries but never calls pgaccel_init(). Then it
+// forks a backend. The backend calls pgaccel_init() on first query and
+// gets a fresh GPU queue.
+//
+// This test pins that contract: the parent loads the library (triggering
+// static constructors), then forks. The child initializes GPU from
+// scratch and runs kernels.
 
 #include "pgaccel_ffi.h"
 #include <cmath>
@@ -24,113 +26,57 @@ static bool approx_eq(float a, float b, float tol) {
     return std::fabs(a - b) < tol;
 }
 
-// Runs reduce kernels and expects SUCCESS (parent, pre-fork).
-static int run_reduce_tests_parent() {
+// Runs reduce kernels and expects SUCCESS.
+static int run_reduce_tests(const char* label) {
     float data[N];
     for (size_t i = 0; i < N; i++) data[i] = VAL;
 
     float sum = 0.0f;
     pgaccel_status st = pgaccel_reduce_sum_f32(data, N, &sum);
     if (st != PGACCEL_OK) {
-        fprintf(stderr, "[parent] reduce_sum_f32 failed: status=%d\n", st);
+        fprintf(stderr, "[%s] reduce_sum_f32 failed: status=%d\n", label, st);
         return 1;
     }
     if (!approx_eq(sum, EXPECTED_SUM, TOLERANCE)) {
-        fprintf(stderr, "[parent] reduce_sum_f32 WRONG: got %f, expected %f\n",
-                sum, EXPECTED_SUM);
+        fprintf(stderr, "[%s] reduce_sum_f32 WRONG: got %f, expected %f\n",
+                label, sum, EXPECTED_SUM);
         return 1;
     }
-    printf("[parent] reduce_sum_f32: %f OK\n", sum);
+    printf("[%s] reduce_sum_f32: %f OK\n", label, sum);
 
     float min_val = 0.0f;
     st = pgaccel_reduce_min_f32(data, N, &min_val);
     if (st != PGACCEL_OK || !approx_eq(min_val, VAL, TOLERANCE)) {
-        fprintf(stderr, "[parent] reduce_min_f32 failed: status=%d val=%f\n",
-                st, min_val);
+        fprintf(stderr, "[%s] reduce_min_f32 failed: status=%d val=%f\n",
+                label, st, min_val);
         return 1;
     }
-    printf("[parent] reduce_min_f32: %f OK\n", min_val);
+    printf("[%s] reduce_min_f32: %f OK\n", label, min_val);
 
     float max_val = 0.0f;
     st = pgaccel_reduce_max_f32(data, N, &max_val);
     if (st != PGACCEL_OK || !approx_eq(max_val, VAL, TOLERANCE)) {
-        fprintf(stderr, "[parent] reduce_max_f32 failed: status=%d val=%f\n",
-                st, max_val);
+        fprintf(stderr, "[%s] reduce_max_f32 failed: status=%d val=%f\n",
+                label, st, max_val);
         return 1;
     }
-    printf("[parent] reduce_max_f32: %f OK\n", max_val);
-
-    return 0;
-}
-
-// Runs reduce kernels in the child post-fork. Expects clean NO_DEVICE
-// returns — NOT crashes, NOT silent CPU fallback success.
-static int run_reduce_tests_child() {
-    float data[N];
-    for (size_t i = 0; i < N; i++) data[i] = VAL;
-
-    float sum = 0.0f;
-    pgaccel_status st = pgaccel_reduce_sum_f32(data, N, &sum);
-    if (st != PGACCEL_ERROR_NO_DEVICE) {
-        fprintf(stderr,
-            "[child] reduce_sum_f32 expected PGACCEL_ERROR_NO_DEVICE (%d), "
-            "got %d — fork detection is broken\n",
-            PGACCEL_ERROR_NO_DEVICE, st);
-        return 1;
-    }
-    printf("[child] reduce_sum_f32: PGACCEL_ERROR_NO_DEVICE (expected) OK\n");
-
-    st = pgaccel_reduce_min_f32(data, N, &sum);
-    if (st != PGACCEL_ERROR_NO_DEVICE) {
-        fprintf(stderr, "[child] reduce_min_f32 expected NO_DEVICE, got %d\n",
-                st);
-        return 1;
-    }
-    printf("[child] reduce_min_f32: PGACCEL_ERROR_NO_DEVICE (expected) OK\n");
-
-    st = pgaccel_reduce_max_f32(data, N, &sum);
-    if (st != PGACCEL_ERROR_NO_DEVICE) {
-        fprintf(stderr, "[child] reduce_max_f32 expected NO_DEVICE, got %d\n",
-                st);
-        return 1;
-    }
-    printf("[child] reduce_max_f32: PGACCEL_ERROR_NO_DEVICE (expected) OK\n");
+    printf("[%s] reduce_max_f32: %f OK\n", label, max_val);
 
     return 0;
 }
 
 int main() {
-    printf("=== Fork GPU Test (contract: fork → NO_DEVICE, no crash) ===\n");
+    printf("=== Fork GPU Test (PG pattern: parent loads lib, child inits GPU) ===\n");
     printf("Parent PID: %d\n\n", getpid());
 
-    // Step 1: Init in parent (real GPU)
-    pgaccel_status st = pgaccel_init();
-    if (st != PGACCEL_OK) {
-        fprintf(stderr, "Parent pgaccel_init failed: %d\n", st);
-        return 1;
-    }
-    printf("Parent: pgaccel_init OK\n");
+    // DO NOT call pgaccel_init() in the parent.
+    // This matches PG: shared_preload_libraries loads the .so (and all
+    // transitive deps like libacpp-rt.dylib) but the postmaster never
+    // calls pgaccel_init() — that's deferred to each backend's first query.
+    printf("Parent: library loaded (static constructors ran), "
+           "NOT calling pgaccel_init()\n\n");
 
-    // Step 2: Verify kernels work pre-fork
-    if (run_reduce_tests_parent() != 0) return 1;
-
-    uint64_t parent_gpu = pgaccel_gpu_exec_count();
-    uint64_t parent_fb = pgaccel_cpu_fallback_count();
-    printf("[parent] gpu_exec=%llu cpu_fallback=%llu\n",
-           (unsigned long long)parent_gpu, (unsigned long long)parent_fb);
-    if (parent_gpu == 0) {
-        fprintf(stderr, "Parent: FAIL — GPU exec count is 0; GPU not running "
-                        "in parent\n");
-        return 1;
-    }
-    if (parent_fb > 0) {
-        fprintf(stderr, "Parent: FAIL — %llu CPU fallback(s) in parent\n",
-                (unsigned long long)parent_fb);
-        return 1;
-    }
-    printf("\n");
-
-    // Step 3: Fork
+    // Fork — like PG postmaster forking a backend.
     printf("Parent: forking...\n");
     pid_t pid = fork();
     if (pid < 0) {
@@ -139,41 +85,53 @@ int main() {
     }
 
     if (pid == 0) {
-        // ── Child ──
+        // ── Child (simulates PG backend) ──
         printf("\nChild PID: %d (parent was %d)\n", getpid(), getppid());
 
-        // Re-init in child: expected to detect fork and mark GPU unavailable.
-        // init itself should succeed (returns OK with g_queue=nullptr).
-        st = pgaccel_init();
+        // Init GPU in child — first-ever init, like a PG backend's first query.
+        pgaccel_status st = pgaccel_init();
         if (st != PGACCEL_OK) {
-            fprintf(stderr, "Child pgaccel_init failed: %d\n", st);
+            fprintf(stderr, "Child pgaccel_init failed: %d — GPU init "
+                            "after fork did not work\n", st);
             _exit(1);
         }
-        printf("Child: pgaccel_init OK (fork detected, GPU disabled)\n");
 
-        // Reset counters — we'll assert nothing runs on GPU post-fork.
+        pgaccel_device_info info = pgaccel_get_device_info();
+        printf("Child: pgaccel_init OK — device=%s backend=%s CUs=%u\n",
+               info.device_name, info.backend_name, info.compute_units);
+
+        if (info.compute_units == 0) {
+            fprintf(stderr, "Child: FAIL — no GPU (compute_units=0)\n");
+            _exit(2);
+        }
+
+        // Reset counters.
         pgaccel_reset_gpu_exec_count();
         pgaccel_reset_cpu_fallback_count();
 
-        // Kernels must return NO_DEVICE, not crash, not silently succeed.
-        if (run_reduce_tests_child() != 0) {
-            _exit(1);
+        // Run GPU kernels.
+        if (run_reduce_tests("child") != 0) {
+            _exit(3);
         }
 
         uint64_t child_gpu = pgaccel_gpu_exec_count();
-        printf("\nChild: gpu_exec_count=%llu (expect 0)\n",
-               (unsigned long long)child_gpu);
-        if (child_gpu != 0) {
+        uint64_t child_fb = pgaccel_cpu_fallback_count();
+        printf("\nChild: gpu_exec=%llu cpu_fallback=%llu\n",
+               (unsigned long long)child_gpu, (unsigned long long)child_fb);
+        if (child_gpu == 0) {
             fprintf(stderr,
-                "Child: FAIL — GPU ran in forked process (count=%llu). "
-                "This means fork detection broke and kernels executed on "
-                "a stale Metal context.\n",
-                (unsigned long long)child_gpu);
-            _exit(1);
+                "Child: FAIL — GPU exec count is 0. GPU not running.\n");
+            _exit(4);
+        }
+        if (child_fb > 0) {
+            fprintf(stderr,
+                "Child: FAIL — %llu CPU fallback(s). GPU should be working.\n",
+                (unsigned long long)child_fb);
+            _exit(5);
         }
 
-        printf("\nChild: PASS — fork detected, kernels returned NO_DEVICE "
-               "cleanly (no crash).\n");
+        printf("\nChild: PASS — GPU works after fork.\n");
+        pgaccel_shutdown();
         _exit(0);
     }
 
@@ -185,21 +143,17 @@ int main() {
     if (WIFEXITED(wstatus)) {
         int child_rc = WEXITSTATUS(wstatus);
         if (child_rc == 0) {
-            printf("PASS: Child exited cleanly. Fork contract upheld: "
-                   "GPU kernels return NO_DEVICE in forked backend.\n");
+            printf("PASS: GPU works in forked child (PG backend pattern).\n");
         } else {
-            printf("FAIL: Child (PID %d) exited with code %d\n", pid, child_rc);
+            printf("FAIL: Child exited with code %d\n", child_rc);
         }
-        pgaccel_shutdown();
         return child_rc;
     } else if (WIFSIGNALED(wstatus)) {
         int sig = WTERMSIG(wstatus);
-        printf("FAIL: Child (PID %d) killed by signal %d — GPU runtime "
-               "crashed after fork (NO_DEVICE contract broken).\n", pid, sig);
-        pgaccel_shutdown();
+        printf("FAIL: Child killed by signal %d — GPU runtime crashed "
+               "after fork.\n", sig);
         return 1;
     }
 
-    pgaccel_shutdown();
     return 1;
 }

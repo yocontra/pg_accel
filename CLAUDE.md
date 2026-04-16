@@ -1,7 +1,8 @@
 # pg_accel
 
 PostgreSQL extension: GPU-accelerated spatial predicates, h3 cell ops, raster operations,
-and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.17) + C++/Metal (native GPU).
+and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.17) + C++/SYCL via AdaptiveCpp
+(one source → CUDA / ROCm / Level Zero / Metal / CPU).
 
 ## Build & Test Commands
 
@@ -15,7 +16,7 @@ just bench            # run benchmark suite against local pgrx PG
 
 just ci               # Full local CI: lint + test
 just package          # cargo pgrx package (installable .so)
-just gpu-build        # cmake build for GPU kernels (Metal)
+just gpu-build        # cmake build for GPU kernels (AdaptiveCpp/SYCL)
 just gpu-test         # Run standalone GPU kernel tests
 ```
 
@@ -24,7 +25,7 @@ just gpu-test         # Run standalone GPU kernel tests
 1. **Adapters** (`src/adapters/`) — register extension functions + strategy classification
 2. **Dispatch** (`src/engine/dispatch.rs`) — batch accumulator, strategy routing
 3. **Executor Nodes** (`src/engine/executor/`) — Custom Scan: scan, join, agg, sort
-4. **GPU Kernels** (`pgaccel-kernels/src/`) — Metal spatial, h3, raster kernels
+4. **GPU Kernels** (`pgaccel-kernels/src/`) — SYCL spatial, h3, raster kernels via AdaptiveCpp
 
 ## Benchmark Rules
 
@@ -43,6 +44,7 @@ just gpu-test         # Run standalone GPU kernel tests
 9. **PARALLEL SAFE != thread-safe.** PG parallel = forked processes, not threads.
 10. **No hardcoded GPU thresholds.** All dispatch limits (min rows, max chunk sizes, batch bounds) go in `DeviceLimits` (`src/engine/cost.rs`) and are derived from hardware profile. Never use magic constants in executor/planner code.
 11. **NEVER add CPU fallbacks.** GPU execution is the entire purpose of this library. If a GPU kernel crashes or fails, the fix is to make the GPU path work — not to add a CPU fallback that bypasses it. CPU fallbacks are test cheats that hide real bugs. Any code introducing CPU fallback paths for operations that should run on GPU must be rejected.
+12. **AdaptiveCpp/SYCL ONLY.** All GPU code MUST use AdaptiveCpp/SYCL 100%. NO raw Metal (no `#import <Metal/Metal.h>`, no `.metal` shaders, no `.metallib` files period, no `MTLDevice`/`MTLCommandQueue`, no `.mm` Objective-C++ GPU files, no binary archives, no metallib compilation/loading). NO raw CoreML. NO CPU fallbacks. One source, one backend abstraction — AdaptiveCpp dispatches to CUDA/ROCm/L0/Metal/CPU transparently. Any code introducing raw Metal, `.metallib` artifacts, raw CoreML, or CPU fallback paths must be rejected.
 
 ## Linting (enforced by CI, don't configure manually)
 
@@ -61,7 +63,7 @@ just gpu-test         # Run standalone GPU kernel tests
 | `adapter-development` | Writing function adapters, strategy classification, type extractors |
 | `spatial-predicate-kernels` | GPU spatial kernels: point_in_ring, sphere_distance, segment_intersects |
 | `geometry-deserialization` | GSERIALIZED format, bbox/point/vertex extraction from PostGIS |
-| `adaptivecpp-metal` | Metal backend, binary archives, fp32 constraints, platform caps |
+| `adaptivecpp-metal` | AdaptiveCpp backends (CUDA/ROCm/L0/Metal/CPU), capability detection, kernel constraints |
 | `cost-model` | Decision chain, GPU break-even, late materialization, platform profiles |
 | `benchmark-methodology` | Benchmark harness, workload definitions, statistical methodology |
 
@@ -117,8 +119,8 @@ Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to
 5. **Common crash patterns:**
    - `apply_tlist_labeling` assert → target list mismatch in `PlanCustomPath` callback
    - `ExceptionalCondition` in planner → Custom Scan path metadata issue
-   - Metal binary archive load failure → check that pgaccel_kernels.metallib exists alongside the .so
-   - `crashed on child side of fork pre-exec` → resolved with Metal binary archives (no fork+exec needed)
+   - AdaptiveCpp SSCP JIT failure → check `ACPP_TARGETS` and that the `develop` branch is installed to `~/local`
+   - `crashed on child side of fork` → AdaptiveCpp SSCP caches compiled kernels per-backend, avoiding fork+exec recompilation
 
 ### GUCs
 

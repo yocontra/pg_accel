@@ -22,6 +22,71 @@ use crate::engine::executor::agg::AggOp;
 use crate::engine::executor::tuple_extract::{self, AttExtractInfo};
 use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 
+/// NUMERIC type OID (PG `numeric` / `decimal`).
+const NUMERICOID: pg_sys::Oid = pg_sys::Oid::from_u32(1700);
+
+/// Encode an aggregate result into a Datum appropriate for the declared
+/// result column type. Handles COUNT as an integer (never f64 bits) and
+/// NUMERIC as a palloc'd varlena via `float8_numeric`.
+///
+/// Returns `(datum, is_null)`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn encode_agg_result(accum: &AggAccum, type_oid: pg_sys::Oid) -> (pg_sys::Datum, bool) {
+    // COUNT always returns a non-null integer directly; the underlying
+    // counter is i64 regardless of the declared result type. Encode per
+    // the declared type.
+    if matches!(accum.op, AggOp::Count) {
+        let c = accum.count;
+        let datum = match type_oid {
+            pg_sys::INT2OID => pg_sys::Datum::from(c as i16),
+            pg_sys::INT4OID => pg_sys::Datum::from(c as i32),
+            pg_sys::FLOAT4OID => pg_sys::Datum::from((c as f32).to_bits()),
+            pg_sys::FLOAT8OID => pg_sys::Datum::from((c as f64).to_bits()),
+            oid if oid == NUMERICOID => {
+                let f8_datum = pg_sys::Datum::from((c as f64).to_bits());
+                // SAFETY: float8_numeric is a stable PG cast function; called
+                // on the main backend thread. Result is palloc'd Numeric.
+                unsafe {
+                    let fptr: unsafe extern "C-unwind" fn(
+                        *mut pg_sys::FunctionCallInfoBaseData,
+                    ) -> pg_sys::Datum = core::mem::transmute(pg_sys::float8_numeric as *const ());
+                    pg_sys::DirectFunctionCall1Coll(Some(fptr), pg_sys::InvalidOid, f8_datum)
+                }
+            }
+            // Default (INT8OID and anything else): encode as i64.
+            _ => pg_sys::Datum::from(c),
+        };
+        return (datum, false);
+    }
+
+    // Non-COUNT: null if no value observed.
+    if accum.count == 0 {
+        return (pg_sys::Datum::from(0_u64), true);
+    }
+
+    let raw_f64 = accum.result();
+    let datum = match type_oid {
+        pg_sys::FLOAT4OID => pg_sys::Datum::from((raw_f64 as f32).to_bits()),
+        pg_sys::INT2OID => pg_sys::Datum::from(raw_f64 as i16),
+        pg_sys::INT4OID => pg_sys::Datum::from(raw_f64 as i32),
+        pg_sys::INT8OID => pg_sys::Datum::from(raw_f64 as i64),
+        oid if oid == NUMERICOID => {
+            let f8_datum = pg_sys::Datum::from(raw_f64.to_bits());
+            // SAFETY: float8_numeric is a stable PG cast function; called on
+            // the main backend thread. Result is palloc'd Numeric.
+            unsafe {
+                let fptr: unsafe extern "C-unwind" fn(
+                    *mut pg_sys::FunctionCallInfoBaseData,
+                ) -> pg_sys::Datum = core::mem::transmute(pg_sys::float8_numeric as *const ());
+                pg_sys::DirectFunctionCall1Coll(Some(fptr), pg_sys::InvalidOid, f8_datum)
+            }
+        }
+        // FLOAT8OID and anything else: store as f64 bits.
+        _ => pg_sys::Datum::from(raw_f64.to_bits()),
+    };
+    (datum, false)
+}
+
 // ---------------------------------------------------------------------------
 // Dimension hash table
 // ---------------------------------------------------------------------------
@@ -296,6 +361,12 @@ pub struct PreAggExecState {
     // --- Fact table scan ---
     /// Direct heap scan descriptor (set during begin).
     pub scan_desc: pg_sys::TableScanDesc,
+    /// Relation opened via `table_open` during begin (for OID-based open).
+    /// When non-null, `end_custom_scan` must call `table_close(rel,
+    /// AccessShareLock)`. When null, the relation was acquired via
+    /// `ExecOpenScanRelation` and `ExecCloseScanRelation` handles cleanup
+    /// (no explicit close needed here).
+    pub scan_rel: pg_sys::Relation,
 
     // --- Result emission ---
     /// Whether the scan + accumulation phase is complete.
@@ -334,6 +405,7 @@ impl PreAggExecState {
             grouped_accums: HashMap::new(),
             group_key_order: Vec::new(),
             scan_desc: std::ptr::null_mut(),
+            scan_rel: std::ptr::null_mut(),
             scan_done: false,
             result_idx: 0,
             rows_dispatched: 0,
@@ -345,6 +417,11 @@ impl PreAggExecState {
     /// Set the heap scan descriptor for the fact table.
     pub fn set_scan_desc(&mut self, sd: pg_sys::TableScanDesc) {
         self.scan_desc = sd;
+    }
+
+    /// Set the Relation handle opened via `table_open` (caller owns close).
+    pub fn set_scan_rel(&mut self, rel: pg_sys::Relation) {
+        self.scan_rel = rel;
     }
 
     /// Build dimension hash tables from child plan states.
@@ -539,6 +616,14 @@ impl PreAggExecState {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     unsafe fn scan_and_accumulate(&mut self, _result_slot: *mut pg_sys::TupleTableSlot) {
         let _span = tracing::info_span!("exec.preagg_scan").entered();
+
+        // Guard: begin_custom_scan may refuse to open the fact-table scan if
+        // its RTE didn't survive setrefs (non-RTE_RELATION or InvalidOid).
+        // In that case scan_desc is null and we produce zero rows rather
+        // than derefencing and SIGSEGV'ing.
+        if self.scan_desc.is_null() {
+            return;
+        }
 
         let limits = cost::device_limits();
         let interrupt_interval = limits.fused_interrupt_interval;
@@ -865,12 +950,15 @@ impl PreAggExecState {
         let isnull = unsafe { (*result_slot).tts_isnull };
 
         for (i, accum) in self.plain_accums.iter().enumerate() {
-            let val = accum.result();
+            let type_oid = self
+                .agg_descs
+                .get(i)
+                .map_or(pg_sys::FLOAT8OID, |d| d.type_oid);
+            let (datum, is_null) = encode_agg_result(accum, type_oid);
             // SAFETY: writing to the i-th slot attribute.
             unsafe {
-                *isnull.add(i) = accum.count == 0 && !matches!(accum.op, AggOp::Count);
-                // Store as float8 datum.
-                *values.add(i) = pg_sys::Datum::from(val.to_bits());
+                *isnull.add(i) = is_null;
+                *values.add(i) = datum;
             }
         }
 
@@ -912,12 +1000,16 @@ impl PreAggExecState {
             }
             col += 1;
         }
-        for accum in accums {
-            let val = accum.result();
+        for (i, accum) in accums.iter().enumerate() {
+            let type_oid = self
+                .agg_descs
+                .get(i)
+                .map_or(pg_sys::FLOAT8OID, |d| d.type_oid);
+            let (datum, is_null) = encode_agg_result(accum, type_oid);
             // SAFETY: writing to slot attribute.
             unsafe {
-                *isnull.add(col) = accum.count == 0 && !matches!(accum.op, AggOp::Count);
-                *values.add(col) = pg_sys::Datum::from(val.to_bits());
+                *isnull.add(col) = is_null;
+                *values.add(col) = datum;
             }
             col += 1;
         }

@@ -528,8 +528,8 @@ impl WindowExecState {
                 WindowFunc::Rank => {
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    let ok = gpu::window_rank(&partition_starts, &sort_keys, &mut results)
-                        .is_some();
+                    let ok =
+                        gpu::window_rank(&partition_starts, &sort_keys, &mut results).is_some();
                     self.i64_results[spec_idx] = results;
                     ok
                 }
@@ -545,17 +545,16 @@ impl WindowExecState {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
-                    let ok =
-                        gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
-                            .is_some();
+                    let ok = gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
+                        .is_some();
                     self.f64_results[spec_idx] = results;
                     ok
                 }
                 WindowFunc::Count => {
                     let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    let ok = gpu::window_count(&partition_starts, &null_mask, &mut results)
-                        .is_some();
+                    let ok =
+                        gpu::window_count(&partition_starts, &null_mask, &mut results).is_some();
                     self.i64_results[spec_idx] = results;
                     ok
                 }
@@ -703,8 +702,8 @@ impl WindowExecState {
                 WindowFunc::Rank => {
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    let ok = gpu::window_rank(&partition_starts, &sort_keys, &mut results)
-                        .is_some();
+                    let ok =
+                        gpu::window_rank(&partition_starts, &sort_keys, &mut results).is_some();
                     self.i64_results[spec_idx] = results;
                     ok
                 }
@@ -720,17 +719,16 @@ impl WindowExecState {
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
-                    let ok =
-                        gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
-                            .is_some();
+                    let ok = gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
+                        .is_some();
                     self.f64_results[spec_idx] = results;
                     ok
                 }
                 WindowFunc::Count => {
                     let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
                     let mut results = vec![0i64; n];
-                    let ok = gpu::window_count(&partition_starts, &null_mask, &mut results)
-                        .is_some();
+                    let ok =
+                        gpu::window_count(&partition_starts, &null_mask, &mut results).is_some();
                     self.i64_results[spec_idx] = results;
                     ok
                 }

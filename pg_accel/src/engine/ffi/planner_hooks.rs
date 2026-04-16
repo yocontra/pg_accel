@@ -516,17 +516,9 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Gate: Max row count. GPU sort kernel has a hard limit
-    // (gpu_sort_max_elements). Above this the executor falls back to CPU
-    // sort but still pays Custom Scan yield overhead (~3μs/row), making it
-    // strictly slower than PG's native sort. Skip injection entirely.
-    if rows > limits.gpu_sort_max_elements {
-        pgrx::debug1!(
-            "pg_accel sort: rows={rows} exceeds GPU sort max={}, deferring to PG",
-            limits.gpu_sort_max_elements
-        );
-        return;
-    }
+    // No max-rows gate: the executor handles arbitrary row counts via
+    // chunked GPU sort (sort in chunks of gpu_sort_max_elements, then
+    // k-way merge). GPU sort is beneficial at any scale.
 
     // Gate: Skip when LIMIT is small relative to table size. PG's top-N
     // heapsort is O(n log k) with tiny memory — always faster than full
@@ -894,30 +886,9 @@ unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Gate 4b: Max output rows for hash join. Custom Scan yield overhead
-    // (~3μs/row) makes large-output joins strictly slower than PG's
-    // native HashJoin which avoids per-row materialization overhead.
-    if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
-        let limits = cost::device_limits();
-        let max_output = limits.gpu_join_max_output_rows;
-        if join_rows_gate > max_output {
-            pgrx::debug1!(
-                "pg_accel join: output rows={join_rows_gate} exceeds max={max_output}, deferring to PG"
-            );
-            return;
-        }
-        // Gate 4c: Max inner-side rows for hash build. The build-side hash
-        // table must fit in GPU memory.
-        #[allow(clippy::cast_sign_loss)]
-        let inner_rows = innerrel_ref.rows as usize;
-        if inner_rows > limits.gpu_hash_join_build_max_rows {
-            pgrx::debug1!(
-                "pg_accel join: inner rows={inner_rows} exceeds build max={}, deferring to PG",
-                limits.gpu_hash_join_build_max_rows
-            );
-            return;
-        }
-    }
+    // No max-output or max-build gates: hash table is CPU-side malloc,
+    // and GPU probe handles arbitrary row counts. The cost model
+    // (should_batch above) already filters unprofitable small joins.
 
     // Gate 5: Both sides need cheapest paths.
     let outer_path = outerrel_ref.cheapest_total_path;
@@ -1956,9 +1927,29 @@ unsafe fn pgaccel_inject_gpu_preagg(
         }
         (*cpath).custom_paths = child_list;
 
+        // Resolve the fact table's RTE into a stable relation OID. The
+        // range-table index (`fact_relid`) can be rewritten by
+        // `set_plan_refs` for upper plans (scanrelid=0, spans a join), but
+        // the OID is stable across plan rewrites. We carry both through
+        // custom_private so execution can prefer the OID.
+        let fact_oid = {
+            let rte_array = root_ref.simple_rte_array;
+            if rte_array.is_null() || fact_relid == 0 {
+                pg_sys::InvalidOid
+            } else {
+                let rte = *rte_array.offset(fact_relid as isize);
+                if rte.is_null() || (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
+                    pg_sys::InvalidOid
+                } else {
+                    (*rte).relid
+                }
+            }
+        };
+
         // Serialize PreAgg metadata into custom_private.
         (*cpath).custom_private = custom_scan::serialize_preagg_private(
             fact_relid,
+            fact_oid,
             &depths,
             &agg_descs,
             &group_keys,
@@ -2822,10 +2813,22 @@ unsafe fn pgaccel_inject_gpu_agg(
     // self-scanning when the input needs preprocessing (e.g., window funcs).
     let is_baserel =
         input_ref.reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL && input_ref.relid > 0;
+    // Gate: the RTE must be a real heap relation. Function scans
+    // (generate_series), VALUES lists, CTEs, and subqueries have
+    // reloptkind == RELOPT_BASEREL but rtekind != RTE_RELATION.
+    // ExecOpenScanRelation on a non-relation RTE raises an ERROR.
+    let rte_is_relation = is_baserel
+        && unsafe {
+            let rte = *(*root).simple_rte_array.offset(input_ref.relid as isize);
+            !rte.is_null()
+                && (*rte).rtekind == pg_sys::RTEKind::RTE_RELATION
+                && (*rte).relid != pg_sys::InvalidOid
+        };
     let child_is_plain_path =
         unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ == NodeTag::T_Path };
     let self_scan_relid: pg_sys::Index = if !child_is_our_scan
         && is_baserel
+        && rte_is_relation
         && child_is_plain_path
         && rows >= cost::device_limits().gpu_reduce_min_rows
         && !has_quals
@@ -5140,7 +5143,7 @@ mod tests {
         let limits = cost::DeviceLimits::cpu_only();
         assert_eq!(limits.gpu_min_rows, 10_000);
         assert_eq!(limits.gpu_sort_min_rows, 100_000);
-        assert_eq!(limits.gpu_sort_planner_min_rows, 1_000_000);
+        assert_eq!(limits.gpu_sort_planner_min_rows, 100_000);
         assert_eq!(limits.gpu_window_min_rows, 100_000);
         assert_eq!(limits.gpu_reduce_min_rows, 25_000);
         assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);

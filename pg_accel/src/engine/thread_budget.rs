@@ -167,17 +167,25 @@ pub fn release_threads(n: i32) {
 /// Intended to be called from a `before_shmem_exit` callback so that a
 /// crashing backend does not leak budget.
 pub fn cleanup_backend() {
-    let mut exclusive = BUDGET.exclusive();
-    let pid = current_pid();
+    // This runs from a `before_shmem_exit` callback at backend termination.
+    // If shared memory was never wired up (e.g. extension loaded without
+    // `shared_preload_libraries`, or during early startup failure) the
+    // `PgLwLock::exclusive()` call will panic. We cannot propagate errors
+    // from a shmem_exit callback, so swallow any panic here — leaking a slot
+    // is strictly better than aborting the backend exit path.
+    let _ = std::panic::catch_unwind(|| {
+        let mut exclusive = BUDGET.exclusive();
+        let pid = current_pid();
 
-    for i in 0..MAX_BACKENDS {
-        if exclusive.backends[i].pid == pid {
-            exclusive.total_allocated -= exclusive.backends[i].allocated;
-            exclusive.backends[i].allocated = 0;
-            exclusive.backends[i].pid = 0;
-            return;
+        for i in 0..MAX_BACKENDS {
+            if exclusive.backends[i].pid == pid {
+                exclusive.total_allocated -= exclusive.backends[i].allocated;
+                exclusive.backends[i].allocated = 0;
+                exclusive.backends[i].pid = 0;
+                return;
+            }
         }
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------

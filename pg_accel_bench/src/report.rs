@@ -758,10 +758,7 @@ impl BenchReport {
                 "| Scale | Accel median (ms) | Accel p25–p75 | PG Parallel median (ms) | \
                  PG p25–p75 | Speedup (median) | Cohen's d | p (Bonferroni) | Verdict |"
             );
-            let _ = writeln!(
-                out,
-                "|---|---|---|---|---|---|---|---|---|"
-            );
+            let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|");
             for &s in scales {
                 if let Some(w) = lookup.get(&(name.as_str(), s)) {
                     let adj_p = stats::bonferroni_adjusted_p(w.p_value_vs_parallel, n_tests);
@@ -1210,8 +1207,7 @@ impl BenchReport {
             let speedups: Vec<f64> = ws.iter().map(|w| speedup_of(w)).collect();
             let gm = stats::geomean(&speedups);
             let counts = classify_significance(ws, family_size, 0.05);
-            let mut scales: std::collections::BTreeSet<usize> =
-                std::collections::BTreeSet::new();
+            let mut scales: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
             for w in ws {
                 scales.insert(w.rows);
             }
@@ -1287,7 +1283,9 @@ pub fn generate_report_ex(
     } else {
         connection.and_then(|c| GucSettings::from_connection(c).ok())
     };
-    let postmaster_start_time = observed.as_ref().and_then(|s| s.postmaster_start_time.clone());
+    let postmaster_start_time = observed
+        .as_ref()
+        .and_then(|s| s.postmaster_start_time.clone());
 
     // Collect unique row scales from results (preserving order).
     let mut row_scales: Vec<usize> = Vec::new();

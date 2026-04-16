@@ -11,6 +11,7 @@ pub mod ffi;
 pub mod function_matcher;
 pub mod gucs;
 pub mod otel;
+pub mod panic_hook;
 pub mod registry;
 pub mod stats;
 pub mod thread_budget;

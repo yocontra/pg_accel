@@ -11,10 +11,6 @@
 #include <sycl/sycl.hpp>
 #endif
 
-#if PGACCEL_HAS_METAL
-#include "metal_backend.h"
-#endif
-
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -144,12 +140,6 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     } catch (const std::exception&) {
     } catch (...) {
-    }
-#elif PGACCEL_HAS_METAL
-    {
-        metal_status mst = metal_bbox_intersects_f32(
-            boxes_a, count_a, boxes_b, count_b, result, hit_count);
-        if (mst == METAL_OK) { pgaccel_record_gpu_exec(); return PGACCEL_OK; }
     }
 #endif
 

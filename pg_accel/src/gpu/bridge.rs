@@ -333,6 +333,10 @@ unsafe extern "C" {
     /// Return platform-level capability flags.
     pub fn pgaccel_get_caps() -> PgaccelPlatformCaps;
 
+    /// Pre-fork warmup: initialize Metal/SkyLight in the postmaster before
+    /// fork. Safe to call from `_PG_init()` — does not spawn threads.
+    pub fn pgaccel_prefork_warmup();
+
     // -- GPU execution observability --
 
     /// Number of kernel invocations that ran on GPU since last reset.

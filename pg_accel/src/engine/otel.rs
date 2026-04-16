@@ -9,8 +9,10 @@
 //! Controlled by `pg_accel.log_level` GUC (debug/info/notice/warning/error).
 //! Call [`init`] once from `_PG_init` after GUCs are registered.
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -22,6 +24,12 @@ use super::gucs::PgAccelLogLevel;
 /// (COW) so the postmaster's `true` is never seen by children.
 /// We use AtomicBool instead of Once because Once state survives fork.
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Handle to the tracing-subscriber JSONL file, captured so
+/// [`flush_tracing`] can force it to disk on shmem_exit / before abort.
+/// `OnceLock<Option<_>>` so we can tell "not yet initialized" from
+/// "initialized but file open failed".
+static TRACE_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 
 /// Initialize tracing if not already done in this process.
 ///
@@ -62,9 +70,13 @@ fn try_init() -> Result<(), Box<dyn std::error::Error>> {
         .append(true)
         .open(&trace_path)?;
 
+    // Stash the file handle so `flush_tracing` can fsync it on exit /
+    // before an abort. Ignore error if it was already set (forked backend).
+    let _ = TRACE_FILE.set(Mutex::new(trace_file.try_clone()?));
+
     let json_layer = tracing_subscriber::fmt::layer()
         .json()
-        .with_writer(std::sync::Mutex::new(trace_file))
+        .with_writer(FlushingWriter::new(trace_file))
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_target(true)
         .with_thread_ids(false)
@@ -90,7 +102,7 @@ fn try_init() -> Result<(), Box<dyn std::error::Error>> {
         .try_init()
         .map_err(|e| format!("subscriber already set: {e}"))?;
 
-    pgrx::log!("pg_accel: tracing initialized, trace file: {trace_path}");
+    tracing::debug!(trace_path = %trace_path, "pg_accel: tracing initialized");
     Ok(())
 }
 
@@ -133,7 +145,7 @@ where
     // Leak the provider — PG backends are single-use processes.
     std::mem::forget(provider);
 
-    pgrx::log!("pg_accel: OTel traces → {otel_path}");
+    tracing::debug!(otel_path = %otel_path, "pg_accel: OTel traces attached");
     Some(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
@@ -145,6 +157,75 @@ fn level_filter_from_guc() -> tracing_subscriber::filter::LevelFilter {
             tracing_subscriber::filter::LevelFilter::WARN
         }
         PgAccelLogLevel::Error => tracing_subscriber::filter::LevelFilter::ERROR,
+    }
+}
+
+/// Force-flush the tracing JSONL file. Called from `shmem_exit` and, in
+/// principle, anywhere we know the process may be about to abort.
+///
+/// Best-effort: silently ignores I/O errors because callers are typically
+/// on an abort / exit path.
+pub fn flush_tracing() {
+    if let Some(m) = TRACE_FILE.get()
+        && let Ok(mut f) = m.lock()
+    {
+        let _ = f.flush();
+        let _ = f.sync_all();
+    }
+    // Flush stderr for good measure — span events also go there.
+    let _ = std::io::stderr().flush();
+}
+
+/// `MakeWriter` wrapper that calls `flush()` after every write so the
+/// tracing JSONL file is durable line-by-line rather than block-buffered.
+///
+/// Each emitted event ends up calling `make_writer()` → `write_all()` →
+/// our `flush()`. That turns the file into effectively line-buffered,
+/// so `cat pg_accel_traces.jsonl` after a crash shows the last span.
+#[derive(Clone)]
+struct FlushingWriter {
+    inner: std::sync::Arc<Mutex<File>>,
+}
+
+impl FlushingWriter {
+    fn new(file: File) -> Self {
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(file)),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FlushingWriter {
+    type Writer = FlushingGuard<'a>;
+    fn make_writer(&'a self) -> Self::Writer {
+        FlushingGuard {
+            guard: self.inner.lock().ok(),
+        }
+    }
+}
+
+struct FlushingGuard<'a> {
+    guard: Option<std::sync::MutexGuard<'a, File>>,
+}
+
+impl Write for FlushingGuard<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Some(g) = self.guard.as_mut() {
+            let n = g.write(buf)?;
+            // Flush after every write so a crash preserves the line.
+            g.flush()?;
+            Ok(n)
+        } else {
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Some(g) = self.guard.as_mut() {
+            g.flush()
+        } else {
+            Ok(())
+        }
     }
 }
 

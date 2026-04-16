@@ -3,9 +3,12 @@
 #include <cstdio>
 #include <atomic>
 #include <unistd.h>
+#include <signal.h>
+#include <cstdlib>
 
 #if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
+#include <hipSYCL/runtime/fork_safety.h>
 #include <string>
 #include <algorithm>
 #include <cctype>
@@ -162,31 +165,6 @@ static void populate_device_info(const sycl::device& dev,
 
 #endif // PGACCEL_HAS_SYCL
 
-// ---------------------------------------------------------------------------
-// CPU fallback population (no SYCL, or all device init failed)
-// ---------------------------------------------------------------------------
-
-static void populate_cpu_fallback() {
-    std::strncpy(g_device_info.device_name, "CPU Fallback",
-                 sizeof(g_device_info.device_name) - 1);
-    std::strncpy(g_device_info.backend_name, "cpu",
-                 sizeof(g_device_info.backend_name) - 1);
-    g_device_info.has_fp64 = true;
-    g_device_info.has_atomic64 = true;
-    g_device_info.is_unified_memory = true;
-    g_device_info.compute_units = 0;
-    g_device_info.max_alloc_bytes = 0;
-
-    g_caps.has_fp64 = true;
-    g_caps.has_atomic64 = true;
-    g_caps.has_ooo_queue = false;
-    g_caps.is_unified_memory = true;
-    g_caps.max_alloc_bytes = 0;
-    g_caps.compute_units = 0;
-    std::strncpy(g_caps.backend_name, "cpu",
-                 sizeof(g_caps.backend_name) - 1);
-}
-
 // ===========================================================================
 // Public API
 // ===========================================================================
@@ -199,84 +177,89 @@ extern "C" pgaccel_status pgaccel_init(void) {
         if (g_init_pid == current_pid) {
             return PGACCEL_OK;
         }
-        // Forked child — stale SYCL/Metal context. The IOKit GPU
-        // driver connection (Mach ports) is inherited but broken after
-        // fork(). Even creating a fresh sycl::queue doesn't help because
-        // AdaptiveCpp reuses the parent's MTLDevice, whose IOKit
-        // allocator crashes on sycl::malloc_device (SIGSEGV in
-        // IOGPUMetalDevice allocBuffer). Fall back to CPU in forked
-        // backends; GPU work is dispatched directly via Metal API.
+        // Forked child — release inherited backend state through
+        // AdaptiveCpp's fork-safety entry point, then fall through to a
+        // fresh device pick + queue construction. The reset drops stale
+        // MTL::Device/CommandQueue pointers and the in-memory kernel
+        // cache; compiled .metallib files on disk survive and will be
+        // reloaded without re-entering MTLCompilerService.
 #if PGACCEL_HAS_SYCL
         g_queue = nullptr;
         g_unified_memory = false;
+        hipsycl_rt_reset_after_fork();
 #endif
         fprintf(stderr, "pgaccel: fork detected (parent=%d, child=%d)"
-                        " — GPU unavailable in forked backend\n",
+                        " — attempting fresh GPU init\n",
                 g_init_pid, current_pid);
-        populate_cpu_fallback();
-        g_init_pid = current_pid;
-        g_initialized.store(true, std::memory_order_release);
-        return PGACCEL_OK;
+        g_initialized.store(false, std::memory_order_release);
+        // Fall through to normal init path below.
     }
 
 #if PGACCEL_HAS_SYCL
+    // Temporarily reset signal handlers around SYCL init. PG installs
+    // custom SIGSEGV/SIGBUS handlers that interfere with Metal/IOKit
+    // driver initialization (the driver uses signals internally during
+    // device enumeration). shared_preload_libraries ensures libacpp-rt.dylib
+    // was loaded in the postmaster before fork, so the child inherits the
+    // loaded library and can create a fresh MTLDevice without triggering
+    // the compiler service.
+    struct sigaction old_handlers[32];
+    for (int sig = 1; sig < 32; sig++) {
+        if (sig == SIGKILL || sig == SIGSTOP) continue;
+        struct sigaction sa = {};
+        sa.sa_handler = SIG_DFL;
+        sigemptyset(&sa.sa_mask);
+        sigaction(sig, &sa, &old_handlers[sig]);
+    }
+
+    bool init_ok = false;
     try {
-        // Enumerate all devices and pick the best one.
         auto devices = sycl::device::get_devices();
+
         if (devices.empty()) {
-            fprintf(stderr, "pgaccel: no SYCL devices found, using CPU fallback\n");
-            populate_cpu_fallback();
-            g_initialized.store(true, std::memory_order_release);
-            return PGACCEL_OK;
-        }
-
-        sycl::device best = devices[0];
-        int best_score = score_device(best);
-        for (size_t i = 1; i < devices.size(); ++i) {
-            int s = score_device(devices[i]);
-            if (s > best_score) {
-                best = devices[i];
-                best_score = s;
-            }
-        }
-
-        std::string backend = detect_backend_name(best);
-        populate_caps(best, backend);
-        g_unified_memory = g_caps.is_unified_memory;
-        populate_device_info(best, backend);
-
-        // Create queue: in-order for Metal, out-of-order otherwise.
-        if (g_caps.has_ooo_queue) {
-            // SAFETY: g_queue is only written here, under the g_initialized
-            // guard, so no concurrent writes are possible.
-            g_queue = new sycl::queue(
-                best, sycl::property_list{sycl::property::queue::in_order{}});
-            // Note: AdaptiveCpp may not support out-of-order on all backends.
-            // We request in-order universally for now and set has_ooo_queue
-            // based on backend capability for future use.
+            fprintf(stderr, "pgaccel: FATAL: no SYCL devices found\n");
         } else {
-            // SAFETY: same as above.
+            sycl::device best = devices[0];
+            int best_score = score_device(best);
+            for (size_t i = 1; i < devices.size(); ++i) {
+                int s = score_device(devices[i]);
+                if (s > best_score) {
+                    best = devices[i];
+                    best_score = s;
+                }
+            }
+
+            std::string backend = detect_backend_name(best);
+            populate_caps(best, backend);
+            g_unified_memory = g_caps.is_unified_memory;
+            populate_device_info(best, backend);
+
             g_queue = new sycl::queue(
                 best, sycl::property_list{sycl::property::queue::in_order{}});
+
+            // Silent success: backend init fires per-forked-backend, so
+            // logging here produces O(queries) log lines. See Justfile
+            // `log-rails` recipe for how PG's own log is rotated.
+            init_ok = true;
         }
-
-        fprintf(stderr, "pgaccel: initialized [%s] on %s (%u CUs, %s)\n",
-                g_device_info.backend_name, g_device_info.device_name,
-                g_device_info.compute_units,
-                g_caps.has_fp64 ? "fp64" : "fp32-only");
-
     } catch (const sycl::exception& e) {
-        fprintf(stderr, "pgaccel: SYCL init failed: %s — using CPU fallback\n",
-                e.what());
-        populate_cpu_fallback();
+        fprintf(stderr, "pgaccel: FATAL: SYCL init failed: %s\n", e.what());
     } catch (const std::exception& e) {
-        fprintf(stderr, "pgaccel: init failed: %s — using CPU fallback\n",
-                e.what());
-        populate_cpu_fallback();
+        fprintf(stderr, "pgaccel: FATAL: init failed: %s\n", e.what());
+    }
+
+    // Restore PG signal handlers.
+    for (int sig = 1; sig < 32; sig++) {
+        if (sig == SIGKILL || sig == SIGSTOP) continue;
+        sigaction(sig, &old_handlers[sig], nullptr);
+    }
+
+    if (!init_ok) {
+        return PGACCEL_ERROR;
     }
 #else
-    populate_cpu_fallback();
-    fprintf(stderr, "pgaccel: built without SYCL, using CPU fallback\n");
+    fprintf(stderr, "pgaccel: FATAL: built without SYCL — no GPU support\n");
+    return PGACCEL_ERROR;
 #endif
 
     g_init_pid = current_pid;
@@ -315,4 +298,20 @@ extern "C" pgaccel_device_info pgaccel_get_device_info(void) {
 
 extern "C" pgaccel_platform_caps pgaccel_get_caps(void) {
     return g_caps;
+}
+
+extern "C" void pgaccel_prefork_warmup(void) {
+#ifdef __APPLE__
+    // macOS Sequoia+ aborts forked processes that initialize Objective-C
+    // frameworks (like Metal/SkyLight) after fork. This is the documented
+    // opt-out. We deliberately do NOT initialize SYCL or touch Metal in the
+    // parent — Apple's IOGPUMetalDevice caches process-local state that
+    // cannot be reset on the child side, so any parent-side Metal activity
+    // propagates stale IOKit handles into every forked child. Kernel
+    // compilation is deferred to the first child: AdaptiveCpp's Metal
+    // backend now routes MSL through `xcrun metal` in a subprocess and
+    // caches the resulting .metallib on disk, so post-fork cold-starts
+    // avoid MTLCompilerService entirely.
+    setenv("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES", 0);
+#endif
 }
