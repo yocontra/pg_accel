@@ -1,7 +1,8 @@
-//! FFI bridge to `libpgaccel_kernels` (C++/Metal GPU library).
+//! FFI bridge to `libpgaccel_kernels` (AdaptiveCpp/SYCL GPU library).
 //!
-//! Only compiled when the `gpu` feature is enabled.  The declarations here
-//! mirror `pgaccel-kernels/include/pgaccel_ffi.h` exactly.
+//! The declarations here mirror `pgaccel-kernels/include/pgaccel_ffi.h`
+//! exactly. The kernel library is linked unconditionally; there is no
+//! no-GPU build and no CPU fallback.
 
 #![allow(dead_code)]
 
@@ -44,12 +45,6 @@ unsafe extern "C" {
 
     /// Reset the GPU execution counter to zero.
     pub fn pgaccel_reset_gpu_exec_count();
-
-    /// Number of kernel invocations that fell back to CPU since last reset.
-    pub fn pgaccel_cpu_fallback_count() -> u64;
-
-    /// Reset the CPU fallback counter to zero.
-    pub fn pgaccel_reset_cpu_fallback_count();
 
     // -- Spatial predicate kernels --
 

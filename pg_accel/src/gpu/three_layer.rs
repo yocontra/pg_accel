@@ -6,17 +6,20 @@
 //!
 //! 1. **Bbox filter** (cheap) -- axis-aligned bounding-box overlap test.
 //! 2. **GPU kernel** (medium) -- exact geometry test on the GPU.
-//! 3. **PG recheck** (deferred) -- uncertain pairs are rechecked by the
-//!    standard PostgreSQL executor via PostGIS functions.
+//! 3. **PG exact recheck** (correctness) -- pairs the GPU classifies as
+//!    `Uncertain` are rechecked by the standard PostgreSQL executor via
+//!    PostGIS functions. This is a correctness recheck for numerically
+//!    ambiguous cases, not a CPU fallback: the GPU always runs first and
+//!    decides which pairs even need to be rechecked.
 //!
-//! Layers 1+2 are batched and dispatched together.  Layer 3 is left to the
-//! caller so it can run on the main backend thread (PG functions are not
-//! thread-safe).
+//! Layers 1+2 are batched and dispatched together on the GPU. Layer 3 runs
+//! on the main backend thread via PG functions (PG C functions are not
+//! thread-safe, so this cannot move to a worker).
 //!
-//! **No CPU fallback.** If the GPU is unavailable, all pairs are returned as
-//! `Uncertain` so the PG executor rechecks them via standard PostGIS. We never
-//! run spatial computation on the CPU — that would be pure overhead compared
-//! to letting PostGIS handle it natively.
+//! If the GPU kernel itself fails to dispatch, the pipeline returns all
+//! pairs as `Uncertain` so the PG executor handles the entire batch via
+//! PostGIS. There is no CPU implementation of the spatial kernels — the
+//! planner only injects this path when GPU hardware is available.
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -78,7 +81,9 @@ pub struct SpatialResult {
     pub definite_true: Vec<usize>,
     /// Indices of pairs that definitely do **not** intersect.
     pub definite_false: Vec<usize>,
-    /// Indices of pairs that need a CPU recheck (Layer 3).
+    /// Indices of pairs the GPU marked numerically ambiguous. The caller
+    /// rechecks these via PostGIS on the main backend thread (Layer 3
+    /// exact recheck).
     pub uncertain: Vec<usize>,
 }
 
@@ -88,12 +93,12 @@ pub struct SpatialResult {
 
 /// Execute spatial intersection predicate on geometry pairs.
 ///
-/// Tries the GPU kernel library first (layers 1+2 via
-/// `pgaccel_spatial_intersects`). If the GPU is unavailable or the call
-/// fails, returns all pairs as `Uncertain` so the PG executor rechecks
-/// them via standard PostGIS functions.
+/// Dispatches layers 1+2 to the GPU kernel library via
+/// `pgaccel_spatial_intersects`. If the kernel dispatch fails (e.g. the
+/// device died mid-query), returns all pairs as `Uncertain` so the PG
+/// executor rechecks them via standard PostGIS functions.
 ///
-/// Layer 3 (PG recheck of uncertain pairs) is left to the caller.
+/// Layer 3 (PG exact recheck of uncertain pairs) is left to the caller.
 ///
 /// # Panics
 ///
@@ -105,12 +110,11 @@ pub fn spatial_intersects(
     geoms_b: &[ExtractedGeometry],
     _skip_bbox: bool,
 ) -> SpatialResult {
-    #[cfg(feature = "gpu")]
     if let Some(result) = try_gpu_dispatch(geoms_a, geoms_b) {
         return result;
     }
 
-    // GPU unavailable — mark all pairs as uncertain for PG recheck.
+    // GPU dispatch failed — mark all pairs as uncertain for PG exact recheck.
     all_uncertain(geoms_a.len().min(geoms_b.len()))
 }
 
@@ -122,7 +126,7 @@ pub fn spatial_intersects(
 /// - `Within` → inverse containment (swaps arguments, then contains)
 /// - `DWithin(d)` → distance ≤ threshold (Haversine for point pairs)
 ///
-/// Layer 3 (CPU recheck of uncertain pairs) is left to the caller.
+/// Layer 3 (PG exact recheck of uncertain pairs) is left to the caller.
 #[must_use]
 pub fn spatial_eval(
     predicate: SpatialPredicate,
@@ -148,7 +152,7 @@ pub fn spatial_eval(
 /// Evaluate `ST_Contains(A, B)` — does A fully contain B?
 ///
 /// No GPU containment kernel exists yet. All pairs are returned as
-/// `Uncertain` for PG recheck via PostGIS. A future
+/// `Uncertain` for PG exact recheck via PostGIS. A future
 /// `pgaccel_spatial_contains` kernel can be wired in here.
 #[must_use]
 pub fn spatial_contains(
@@ -164,8 +168,8 @@ pub fn spatial_contains(
 /// metres of each other?
 ///
 /// No GPU DWithin kernel exists yet. All pairs are returned as `Uncertain`
-/// for PG recheck via PostGIS. A future GPU distance kernel can be wired
-/// in here.
+/// for PG exact recheck via PostGIS. A future GPU distance kernel can be
+/// wired in here.
 #[must_use]
 fn spatial_dwithin(
     geoms_a: &[ExtractedGeometry],
@@ -177,16 +181,12 @@ fn spatial_dwithin(
     all_uncertain(geoms_a.len().min(geoms_b.len()))
 }
 
-/// Try GPU dispatch for spatial intersection.
-///
-/// GPU spatial dispatch is now handled directly in `dispatch.rs` via
 /// Dispatch spatial intersection to the GPU kernel library.
 ///
 /// Converts `ExtractedGeometry` slices into the C `pgaccel_geometry` layout
-/// and calls `pgaccel_spatial_intersects`.  Returns `None` if the GPU is
-/// not initialised or the call fails, causing the caller to mark all pairs
-/// as uncertain for PG recheck.
-#[cfg(feature = "gpu")]
+/// and calls `pgaccel_spatial_intersects`. Returns `None` if the kernel
+/// dispatch fails, causing the caller to mark all pairs as uncertain for
+/// PG exact recheck.
 fn try_gpu_dispatch(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
@@ -323,8 +323,9 @@ fn try_gpu_dispatch(
 
 /// Build a [`SpatialResult`] where all `n` pairs are `Uncertain`.
 ///
-/// Used when the GPU is unavailable or no kernel exists for the predicate.
-/// The PG executor's Layer 3 recheck handles them via standard PostGIS.
+/// Used when the GPU kernel dispatch fails, or when no kernel exists for
+/// the predicate. The PG executor's Layer 3 exact recheck handles them via
+/// standard PostGIS.
 #[must_use]
 fn all_uncertain(n: usize) -> SpatialResult {
     SpatialResult {
@@ -393,9 +394,9 @@ mod tests {
     }
 
     #[test]
-    fn without_gpu_all_pairs_are_uncertain() {
-        // Without GPU hardware, spatial_intersects returns all pairs as
-        // uncertain for PG recheck.
+    fn single_pair_lands_in_exactly_one_bucket() {
+        // Whether the GPU classifies the pair as true, false, or uncertain
+        // depends on the device — but it must land in exactly one bucket.
         let pt = ExtractedGeometry {
             bbox: [2.0, 2.0, 2.0, 2.0],
             coords: vec![2.0, 2.0],
@@ -411,7 +412,6 @@ mod tests {
             ring_offsets: vec![0],
         };
         let result = spatial_intersects(&[pt], &[poly], false);
-        // Without GPU, the pair must land in one of the three buckets.
         assert_eq!(
             result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
             1
@@ -435,17 +435,17 @@ mod tests {
             ring_offsets: Vec::new(),
         };
         let result = spatial_intersects(&[a], &[b], false);
-        // Without GPU, degenerate/unknown geoms go to uncertain.
+        // Degenerate/unknown geoms short-circuit to uncertain.
         assert_eq!(
             result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
             1
         );
     }
 
-    // -- spatial_contains (all-uncertain without GPU kernel) ----------------
+    // -- spatial_contains (all-uncertain — no GPU containment kernel) -------
 
     #[test]
-    fn contains_without_gpu_is_uncertain() {
+    fn contains_is_uncertain_without_kernel() {
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
@@ -467,7 +467,7 @@ mod tests {
     // -- spatial_eval / Within (swapped Contains) ---------------------------
 
     #[test]
-    fn within_without_gpu_is_uncertain() {
+    fn within_is_uncertain_without_kernel() {
         let pt = ExtractedGeometry {
             bbox: [2.0, 2.0, 2.0, 2.0],
             coords: vec![2.0, 2.0],
@@ -487,10 +487,10 @@ mod tests {
         assert_eq!(result.uncertain, vec![0]);
     }
 
-    // -- spatial_eval / DWithin (all-uncertain without GPU kernel) ----------
+    // -- spatial_eval / DWithin (all-uncertain — no GPU DWithin kernel) -----
 
     #[test]
-    fn dwithin_without_gpu_is_uncertain() {
+    fn dwithin_is_uncertain_without_kernel() {
         let a = ExtractedGeometry {
             bbox: [13.405, 52.52, 13.405, 52.52],
             coords: vec![13.405, 52.52],

@@ -1,10 +1,11 @@
 #![cfg(test)]
 //! Phase 8 correctness tests for the three-layer spatial pipeline.
 //!
-//! With CPU fallback paths removed, all tests verify that without GPU
-//! hardware the pipeline returns all pairs as `Uncertain` for PG recheck.
-//! GPU-present tests (gated by `#[cfg(feature = "gpu")]`) verify actual
-//! spatial results from the GPU kernels.
+//! Tests verify that the pipeline partitions geometry pairs into
+//! `definite_true`, `definite_false`, and `uncertain` buckets. Whether a
+//! given pair lands in true/false vs uncertain depends on the GPU device's
+//! numeric precision — uncertain pairs are handed to PostGIS for an exact
+//! recheck on the main backend thread (Layer 3).
 
 use crate::gpu::three_layer::{ExtractedGeometry, GeomType, spatial_intersects};
 
@@ -55,7 +56,7 @@ fn pipeline_single_pair_classified() {
     let pt = make_point(2.0, 2.0);
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     let result = spatial_intersects(&[pt], &[poly], false);
-    // Without GPU: uncertain. With GPU: definite_true or uncertain.
+    // Device-dependent: definite_true for fp64 GPUs, uncertain for fp32.
     assert_eq!(
         result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
         1
@@ -108,7 +109,8 @@ fn pipeline_line_vs_polygon_uncertain() {
     };
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     let result = spatial_intersects(&[line], &[poly], false);
-    // Without GPU, degenerate geoms (LineString has < 6 coords for GPU) go uncertain.
+    // Degenerate LineString (< 6 coord floats) short-circuits to uncertain
+    // so the PG exact recheck handles it safely.
     assert_eq!(result.uncertain, vec![0]);
 }
 
