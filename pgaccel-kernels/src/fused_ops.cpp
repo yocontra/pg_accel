@@ -10,17 +10,13 @@
 #include <cstdio>
 #include <limits>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 static constexpr size_t GPU_FUSED_THRESHOLD = 8192;
 
 // ---------------------------------------------------------------------------
 // SYCL kernel implementations
 // ---------------------------------------------------------------------------
-
-#if PGACCEL_HAS_SYCL
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  It is written once during pgaccel_init() (single writer,
@@ -284,8 +280,6 @@ pgaccel_status sycl_fused_filter_multi_reduce_f32(
 
 } // anonymous namespace (SYCL kernels)
 
-#endif // PGACCEL_HAS_SYCL
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -308,7 +302,6 @@ pgaccel_status pgaccel_fused_filter_reduce_f32(
         return PGACCEL_OK;
     }
 
-#if PGACCEL_HAS_SYCL
     if (count >= GPU_FUSED_THRESHOLD) {
         try {
             sycl::queue* q = get_queue();
@@ -325,9 +318,7 @@ pgaccel_status pgaccel_fused_filter_reduce_f32(
         } catch (...) {
         }
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("fused_filter_reduce_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -348,7 +339,6 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(
         return PGACCEL_OK;
     }
 
-#if PGACCEL_HAS_SYCL
     if (count >= GPU_FUSED_THRESHOLD) {
         try {
             sycl::queue* q = get_queue();
@@ -362,9 +352,7 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(
         } catch (...) {
         }
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("fused_filter_multi_reduce_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -376,7 +364,6 @@ pgaccel_status pgaccel_fused_filter_count_f32(
     if (count == 0) { *out_count = 0; return PGACCEL_OK; }
     if (!filter_col) return PGACCEL_ERROR;
 
-#if PGACCEL_HAS_SYCL
     if (count >= GPU_FUSED_THRESHOLD) {
         try {
             sycl::queue* q = get_queue();
@@ -389,9 +376,7 @@ pgaccel_status pgaccel_fused_filter_count_f32(
         } catch (...) {
         }
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("fused_filter_count_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 

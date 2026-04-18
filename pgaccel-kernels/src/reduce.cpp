@@ -12,15 +12,11 @@
 #include <cfloat>
 #include <climits>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 // ---------------------------------------------------------------------------
 // SYCL kernel implementations
 // ---------------------------------------------------------------------------
-
-#if PGACCEL_HAS_SYCL
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  It is written once during pgaccel_init() (single writer,
@@ -211,8 +207,6 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
 
 } // anonymous namespace (SYCL kernels)
 
-#endif // PGACCEL_HAS_SYCL
-
 // ---------------------------------------------------------------------------
 // Public API — fp32 (all platforms)
 // ---------------------------------------------------------------------------
@@ -225,22 +219,18 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data,
     if (!data) return PGACCEL_ERROR;
     if (count == 1) { *result = data[0]; return PGACCEL_OK; }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
             pgaccel_status st = reduce_sum_sycl<float>(*q, data, count, result);
             if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
         }
-        // Fall through to CPU on error or no queue
     } catch (const std::exception& e) {
         fprintf(stderr,
                 "pgaccel: reduce_sum_f32 SYCL failed: %s\n", e.what());
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_sum_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -252,7 +242,6 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data,
     if (!data) return PGACCEL_ERROR;
     if (count == 1) { *result = data[0]; return PGACCEL_OK; }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
@@ -262,9 +251,7 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_min_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -276,7 +263,6 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
     if (!data) return PGACCEL_ERROR;
     if (count == 1) { *result = data[0]; return PGACCEL_OK; }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
@@ -286,9 +272,7 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_max_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -307,7 +291,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data,
     pgaccel_platform_caps caps = pgaccel_get_caps();
     if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
@@ -317,9 +300,7 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_sum_f64");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -334,7 +315,6 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data,
     pgaccel_platform_caps caps = pgaccel_get_caps();
     if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
@@ -344,9 +324,7 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_min_f64");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -361,7 +339,6 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data,
     pgaccel_platform_caps caps = pgaccel_get_caps();
     if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
@@ -371,9 +348,7 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_max_f64");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -389,7 +364,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data,
     if (!data) return PGACCEL_ERROR;
     if (count == 1) { *result = data[0]; return PGACCEL_OK; }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
@@ -399,9 +373,7 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_sum_i64");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -416,7 +388,6 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
     if (count == 0) { *result = 0; return PGACCEL_OK; }
     if (!mask) return PGACCEL_ERROR;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
@@ -426,9 +397,7 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_count");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -447,7 +416,6 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask,
 // combined on the host (O(num_groups) final merge).
 // ---------------------------------------------------------------------------
 
-#if PGACCEL_HAS_SYCL
 namespace {
 
 template <typename T>
@@ -583,7 +551,6 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data,
 }
 
 } // anonymous namespace
-#endif // PGACCEL_HAS_SYCL
 
 extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data,
                                                     size_t count,
@@ -601,7 +568,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data,
     }
     if (!data) return PGACCEL_ERROR;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
@@ -614,9 +580,7 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data,
                 "pgaccel: reduce_multi_f32 SYCL failed: %s\n", e.what());
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_multi_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -639,7 +603,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data,
     pgaccel_platform_caps caps = pgaccel_get_caps();
     if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q && q->get_device().has(sycl::aspect::fp64)) {
@@ -652,9 +615,7 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data,
                 "pgaccel: reduce_multi_f64 SYCL failed: %s\n", e.what());
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_multi_f64");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -674,7 +635,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
     }
     if (!data) return PGACCEL_ERROR;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue* q = get_queue();
         if (q) {
@@ -687,8 +647,6 @@ extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
                 "pgaccel: reduce_multi_i64 SYCL failed: %s\n", e.what());
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("reduce_multi_i64");
     return PGACCEL_ERROR_NO_DEVICE;
 }

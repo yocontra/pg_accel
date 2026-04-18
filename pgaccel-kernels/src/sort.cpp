@@ -9,9 +9,7 @@
 #include <type_traits>
 #include <vector>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,45 +38,6 @@ static size_t next_power_of_two(size_t n) {
     n |= n >> 16;
     n |= n >> 32;
     return n + 1;
-}
-
-/// Threshold below which we skip the GPU and use std::sort on the host.
-static constexpr size_t GPU_SORT_THRESHOLD = 4096;
-
-// ---------------------------------------------------------------------------
-// CPU fallback: plain sort
-// ---------------------------------------------------------------------------
-
-template <typename T>
-static pgaccel_status cpu_sort(T* data, size_t count) {
-    if (count <= 1) return PGACCEL_OK;
-    std::sort(data, data + count,
-              [](const T& a, const T& b) { return pg_float_less(a, b); });
-    return PGACCEL_OK;
-}
-
-// ---------------------------------------------------------------------------
-// CPU fallback: key-value sort (stable)
-// ---------------------------------------------------------------------------
-
-template <typename K>
-static pgaccel_status cpu_sort_kv(K* keys, uint32_t* indices, size_t count) {
-    if (count <= 1) return PGACCEL_OK;
-
-    // Build a vector of index pairs and stable-sort by key.
-    std::vector<std::pair<K, uint32_t>> pairs(count);
-    for (size_t i = 0; i < count; ++i) {
-        pairs[i] = {keys[i], indices[i]};
-    }
-    std::stable_sort(pairs.begin(), pairs.end(),
-                     [](const auto& a, const auto& b) {
-                         return pg_float_less(a.first, b.first);
-                     });
-    for (size_t i = 0; i < count; ++i) {
-        keys[i] = pairs[i].first;
-        indices[i] = pairs[i].second;
-    }
-    return PGACCEL_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,8 +86,6 @@ static inline int64_t sortable_to_i64(uint64_t u) {
 // SYCL bitonic sort
 // ---------------------------------------------------------------------------
 
-#if PGACCEL_HAS_SYCL
-
 /// Padding sentinel: +infinity for float types, max value for integer types.
 template <typename T>
 static T pad_value() {
@@ -168,7 +125,7 @@ template <typename T>
 static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
     sycl::queue* q = get_queue();
     if (q == nullptr) {
-        return cpu_sort(data, count);
+        return PGACCEL_ERROR_NO_DEVICE;
     }
 
     const size_t padded = next_power_of_two(count);
@@ -179,7 +136,7 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
             ? sycl::malloc_shared<T>(padded, *q)
             : sycl::malloc_device<T>(padded, *q);
         if (d_buf == nullptr) {
-            return cpu_sort(data, count);
+            return PGACCEL_OOM;
         }
 
         if (g_unified_memory) {
@@ -229,13 +186,11 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
 
         return PGACCEL_OK;
     } catch (const sycl::exception& e) {
-        fprintf(stderr, "pgaccel: SYCL sort failed: %s — falling back to CPU\n",
-                e.what());
-        return cpu_sort(data, count);
+        fprintf(stderr, "pgaccel: SYCL sort failed: %s\n", e.what());
+        return PGACCEL_ERROR_NO_DEVICE;
     } catch (const std::exception& e) {
-        fprintf(stderr, "pgaccel: sort failed: %s — falling back to CPU\n",
-                e.what());
-        return cpu_sort(data, count);
+        fprintf(stderr, "pgaccel: sort failed: %s\n", e.what());
+        return PGACCEL_ERROR_NO_DEVICE;
     }
 }
 
@@ -248,7 +203,7 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
                                            size_t count) {
     sycl::queue* q = get_queue();
     if (q == nullptr) {
-        return cpu_sort_kv(keys, indices, count);
+        return PGACCEL_ERROR_NO_DEVICE;
     }
 
     const size_t padded = next_power_of_two(count);
@@ -264,7 +219,7 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
         if (d_keys == nullptr || d_idx == nullptr) {
             if (d_keys) sycl::free(d_keys, *q);
             if (d_idx) sycl::free(d_idx, *q);
-            return cpu_sort_kv(keys, indices, count);
+            return PGACCEL_OOM;
         }
 
         // Copy data.
@@ -345,15 +300,11 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
 
         return PGACCEL_OK;
     } catch (const sycl::exception& e) {
-        fprintf(stderr,
-                "pgaccel: SYCL kv-sort failed: %s — falling back to CPU\n",
-                e.what());
-        return cpu_sort_kv(keys, indices, count);
+        fprintf(stderr, "pgaccel: SYCL kv-sort failed: %s\n", e.what());
+        return PGACCEL_ERROR_NO_DEVICE;
     } catch (const std::exception& e) {
-        fprintf(stderr,
-                "pgaccel: kv-sort failed: %s — falling back to CPU\n",
-                e.what());
-        return cpu_sort_kv(keys, indices, count);
+        fprintf(stderr, "pgaccel: kv-sort failed: %s\n", e.what());
+        return PGACCEL_ERROR_NO_DEVICE;
     }
 }
 
@@ -990,32 +941,22 @@ static pgaccel_status sycl_radix_sort_f32(float* data, size_t count) {
     return sycl_radix_sort_kv_f32(data, indices.data(), count);
 }
 
-#endif // PGACCEL_HAS_SYCL
-
 // ===========================================================================
-// Dispatch: choose GPU radix / GPU bitonic / CPU std::sort
+// Dispatch: choose GPU radix / GPU bitonic
 // ===========================================================================
 
-#if PGACCEL_HAS_SYCL
 /// Trait: which integer-like types can use radix sort.
 template <typename T> struct is_radix_sortable : std::false_type {};
 template <> struct is_radix_sortable<int32_t>  : std::true_type {};
 template <> struct is_radix_sortable<uint32_t> : std::true_type {};
 template <> struct is_radix_sortable<int64_t>  : std::true_type {};
 template <> struct is_radix_sortable<uint64_t> : std::true_type {};
-#endif
 
 template <typename T>
 static pgaccel_status dispatch_sort(T* data, size_t count) {
     if (data == nullptr && count > 0) return PGACCEL_ERROR;
     if (count <= 1) return PGACCEL_OK;
 
-    // Small arrays: CPU is faster than GPU dispatch overhead.
-    if (count < GPU_SORT_THRESHOLD) {
-        return cpu_sort(data, count);
-    }
-
-#if PGACCEL_HAS_SYCL
     // Integer keys above RADIX_SORT_THRESHOLD: use radix sort.
     // The radix kernel uses local-memory atomics only (reliable on Metal)
     // and a work-group-per-tile scatter with host-computed per-group
@@ -1051,12 +992,7 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
         pgaccel_status st = sycl_bitonic_sort(data, count);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-    pgaccel_warn_cpu_fallback("sort");
     return PGACCEL_ERROR_NO_DEVICE;
-#else
-    pgaccel_warn_cpu_fallback("sort");
-    return PGACCEL_ERROR_NO_DEVICE;
-#endif
 }
 
 template <typename T>
@@ -1064,13 +1000,11 @@ static pgaccel_status dispatch_sort_fp_checked(T* data, size_t count) {
     if (data == nullptr && count > 0) return PGACCEL_ERROR;
     if (count <= 1) return PGACCEL_OK;
 
-#if PGACCEL_HAS_SYCL
     if constexpr (sizeof(T) == 8) {
         if (!device_has_fp64()) {
             return PGACCEL_UNSUPPORTED;
         }
     }
-#endif
 
     return dispatch_sort(data, count);
 }
@@ -1083,11 +1017,6 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices,
     }
     if (count <= 1) return PGACCEL_OK;
 
-    if (count < GPU_SORT_THRESHOLD) {
-        return cpu_sort_kv(keys, indices, count);
-    }
-
-#if PGACCEL_HAS_SYCL
     // Integer keys above RADIX_SORT_THRESHOLD: use radix sort.
     if constexpr (is_radix_sortable<K>::value) {
         if (count >= RADIX_SORT_THRESHOLD) {
@@ -1112,12 +1041,7 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices,
         pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-    pgaccel_warn_cpu_fallback("sort_kv");
     return PGACCEL_ERROR_NO_DEVICE;
-#else
-    pgaccel_warn_cpu_fallback("sort_kv");
-    return PGACCEL_ERROR_NO_DEVICE;
-#endif
 }
 
 template <typename K>
@@ -1128,13 +1052,11 @@ static pgaccel_status dispatch_sort_kv_fp_checked(K* keys, uint32_t* indices,
     }
     if (count <= 1) return PGACCEL_OK;
 
-#if PGACCEL_HAS_SYCL
     if constexpr (sizeof(K) == 8) {
         if (!device_has_fp64()) {
             return PGACCEL_UNSUPPORTED;
         }
     }
-#endif
 
     return dispatch_sort_kv(keys, indices, count);
 }
