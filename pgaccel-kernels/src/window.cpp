@@ -15,7 +15,6 @@
 #include <cstdlib>
 #include <vector>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
 #include "alloc_helper.h"
 
@@ -24,7 +23,6 @@
 extern sycl::queue* g_queue;
 
 static sycl::queue* get_queue() { return g_queue; }
-#endif
 
 // ---------------------------------------------------------------------------
 // GPU dispatch threshold — below this count, CPU sequential is faster.
@@ -45,8 +43,6 @@ static inline bool pg_eq_f64(double a, double b) {
 // ===========================================================================
 // SYCL GPU implementations — embarrassingly parallel window functions
 // ===========================================================================
-
-#if PGACCEL_HAS_SYCL
 
 // ---------------------------------------------------------------------------
 // Host helper: build per-row partition-start-index array from boundary markers.
@@ -362,8 +358,6 @@ static pgaccel_status sycl_window_lead(
     }
 }
 
-#endif // PGACCEL_HAS_SYCL
-
 // ===========================================================================
 // Public C API
 // ===========================================================================
@@ -378,14 +372,11 @@ pgaccel_status pgaccel_window_row_number(
     if (partition_starts == nullptr || results == nullptr) return PGACCEL_ERROR;
     if (count == 0) return PGACCEL_OK;
 
-#if PGACCEL_HAS_SYCL
     if (count >= GPU_WINDOW_THRESHOLD) {
         pgaccel_status st = sycl_window_row_number(partition_starts, count, results);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("window_row_number");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -534,16 +525,13 @@ pgaccel_status pgaccel_window_lag(
     if (count == 0) return PGACCEL_OK;
     if (offset < 0) return PGACCEL_ERROR;
 
-#if PGACCEL_HAS_SYCL
     if (count >= GPU_WINDOW_THRESHOLD) {
         pgaccel_status st = sycl_window_lag(
             partition_starts, values, null_mask, count,
             offset, default_val, results, result_nulls);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("window_lag");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -564,16 +552,13 @@ pgaccel_status pgaccel_window_lead(
     if (count == 0) return PGACCEL_OK;
     if (offset < 0) return PGACCEL_ERROR;
 
-#if PGACCEL_HAS_SYCL
     if (count >= GPU_WINDOW_THRESHOLD) {
         pgaccel_status st = sycl_window_lead(
             partition_starts, values, null_mask, count,
             offset, default_val, results, result_nulls);
         if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("window_lead");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 

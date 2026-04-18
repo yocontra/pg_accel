@@ -2,9 +2,7 @@
 #include <cmath>
 #include <cstring>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 // ---------------------------------------------------------------------------
 // H3 bit-layout constants
@@ -337,7 +335,6 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
     if (count == 0) return PGACCEL_OK;
     if (cells == nullptr || resolutions == nullptr) return PGACCEL_ERROR_INIT;
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue q{sycl::default_selector_v};
 
@@ -374,8 +371,6 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
-    pgaccel_warn_cpu_fallback("h3_get_resolution_bulk");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -390,7 +385,6 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
         return PGACCEL_ERROR_UNSUPPORTED;
     }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue q{sycl::default_selector_v};
 
@@ -450,11 +444,8 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
         pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
-#endif
-    pgaccel_warn_cpu_fallback("h3_cell_to_parent_bulk");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -468,7 +459,6 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
         return PGACCEL_ERROR_INIT;
     }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue q{sycl::default_selector_v};
 
@@ -548,11 +538,8 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
         pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
-#endif
-    pgaccel_warn_cpu_fallback("h3_grid_distance_bulk");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -586,7 +573,6 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
     const auto *lats = static_cast<const double *>(lat_array);
     const auto *lngs = static_cast<const double *>(lng_array);
 
-#if PGACCEL_HAS_SYCL
     // Trig-heavy — excellent GPU candidate. Use fp32 on device (Metal constraint).
     try {
         sycl::queue q{sycl::default_selector_v};
@@ -774,10 +760,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
         pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
-#endif
-    pgaccel_warn_cpu_fallback("h3_lat_lng_to_cell_bulk");
     return PGACCEL_ERROR_NO_DEVICE;
 }

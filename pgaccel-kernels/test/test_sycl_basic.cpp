@@ -2,16 +2,13 @@
 #include "pgaccel_ffi.h"
 #include <cstdio>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
 extern sycl::queue* g_queue;
 extern bool g_unified_memory;
-#endif
 
 int main() {
     pgaccel_init();
 
-#if PGACCEL_HAS_SYCL
     sycl::queue* q = g_queue;
     if (!q) { fprintf(stderr, "No queue\n"); return 1; }
     printf("unified_memory=%d\n", (int)g_unified_memory);
@@ -124,10 +121,6 @@ int main() {
         sycl::free(in, *q);
         sycl::free(out, *q);
     }
-
-#else
-    printf("No SYCL\n");
-#endif
 
     pgaccel_shutdown();
     return 0;

@@ -3,9 +3,7 @@
 #include <cmath>
 #include <cstring>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 /* ── Pixel type helpers ───────────────────────────────────────── */
 
@@ -138,8 +136,6 @@ static constexpr size_t GPU_TILE_THRESHOLD = 65536;
 
 /* ── SYCL GPU implementations ────────────────────────────────── */
 
-#if PGACCEL_HAS_SYCL
-
 static sycl::queue& get_queue() {
     static sycl::queue q{sycl::default_selector_v};
     return q;
@@ -247,7 +243,6 @@ static pgaccel_status map_algebra_gpu(
     // otherwise fall through to the typed host loop.
     size_t band_count = expr->band_count;
 
-#if PGACCEL_HAS_SYCL
     // Real GPU path for large rasters.
     if (pixel_count >= GPU_TILE_THRESHOLD &&
         pixel_type == PGACCEL_PT_FLOAT32) {
@@ -442,7 +437,6 @@ static pgaccel_status map_algebra_gpu(
             // Fall through to typed host loop.
         }
     }
-#endif
 
     // Generic typed host loop — used for non-f32 pixel types and
     // small tiles where even this loop runs in a few microseconds.
@@ -468,8 +462,6 @@ static pgaccel_status map_algebra_gpu(
     return PGACCEL_OK;
 }
 
-#endif /* PGACCEL_HAS_SYCL */
-
 /* ── Public API ───────────────────────────────────────────────── */
 
 extern "C" pgaccel_status pgaccel_map_algebra(
@@ -487,13 +479,8 @@ extern "C" pgaccel_status pgaccel_map_algebra(
         return PGACCEL_ERROR_INIT;
     }
 
-#if PGACCEL_HAS_SYCL
     return map_algebra_gpu(
         band_pixels, pixel_count, pixel_type, expr, output_pixels, nodata_mask);
-#else
-    pgaccel_warn_cpu_fallback("map_algebra");
-    return PGACCEL_ERROR_NO_DEVICE;
-#endif
 }
 
 /// Small-tile raster_clip fast path: runs the same ray-cast
@@ -582,7 +569,6 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         return PGACCEL_OK;
     }
 
-#if PGACCEL_HAS_SYCL
     try {
         auto& q = get_queue();
         size_t total = width * height;
@@ -661,11 +647,8 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
-#endif
-    pgaccel_warn_cpu_fallback("raster_clip");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -689,7 +672,6 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         return PGACCEL_OK;
     }
 
-#if PGACCEL_HAS_SYCL
     try {
         auto& q = get_queue();
         size_t in_psz = pixel_type_size(input_type);
@@ -784,10 +766,7 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
         pgaccel_record_gpu_exec();
         return PGACCEL_OK;
     } catch (const std::exception&) {
-        // SYCL/Metal failure (e.g. post-fork), fall through to CPU
     } catch (...) {
     }
-#endif
-    pgaccel_warn_cpu_fallback("raster_reclass");
     return PGACCEL_ERROR_NO_DEVICE;
 }

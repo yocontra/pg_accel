@@ -61,14 +61,13 @@ int main() {
                info.is_unified_memory, info.has_fp64);
 
         if (info.compute_units == 0) {
-            fprintf(stderr, "\nRESULT: FAIL — Got CPU fallback, not real GPU.\n");
+            fprintf(stderr, "\nRESULT: FAIL — No GPU compute units detected.\n");
             fprintf(stderr, "Cold Metal init after fork does NOT work.\n");
             _exit(2);
         }
 
-        // Reset counters
+        // Reset counter
         pgaccel_reset_gpu_exec_count();
-        pgaccel_reset_cpu_fallback_count();
 
         // Run actual GPU kernels
         float* data = (float*)malloc(N * sizeof(float));
@@ -107,20 +106,12 @@ int main() {
                keys[0], keys[1], keys[2]);
 
         uint64_t gpu_count = pgaccel_gpu_exec_count();
-        uint64_t fb_count = pgaccel_cpu_fallback_count();
-        printf("\nChild: gpu_exec=%llu cpu_fallback=%llu\n",
-               (unsigned long long)gpu_count, (unsigned long long)fb_count);
+        printf("\nChild: gpu_exec=%llu\n", (unsigned long long)gpu_count);
 
         if (gpu_count == 0) {
             fprintf(stderr, "\nRESULT: FAIL — GPU exec count is 0. "
-                    "Kernels ran on CPU, not GPU.\n");
+                    "SYCL did not execute kernels post-fork.\n");
             _exit(7);
-        }
-        if (fb_count > 0) {
-            fprintf(stderr, "\nRESULT: FAIL — %llu CPU fallback(s). "
-                    "Some kernels fell back to CPU.\n",
-                    (unsigned long long)fb_count);
-            _exit(8);
         }
 
         free(data);
@@ -147,16 +138,13 @@ int main() {
                 printf("FAIL: pgaccel_init() failed in forked child.\n");
                 break;
             case 2:
-                printf("FAIL: Got CPU fallback — Metal did not initialize.\n");
+                printf("FAIL: No GPU compute units — Metal did not initialize.\n");
                 break;
             case 3: case 4: case 5: case 6:
                 printf("FAIL: GPU kernel failed or produced wrong results.\n");
                 break;
             case 7:
-                printf("FAIL: GPU exec count was 0 — kernels ran on CPU.\n");
-                break;
-            case 8:
-                printf("FAIL: CPU fallbacks occurred.\n");
+                printf("FAIL: GPU exec count was 0 — SYCL did not dispatch.\n");
                 break;
             default:
                 printf("FAIL: Child exited with code %d\n", rc);

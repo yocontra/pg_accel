@@ -30,14 +30,6 @@ pub struct AccelStats {
     pub window_gpu_failures: u64,
     /// GPU kernel executions (from C++ thread-local counter).
     pub gpu_kernel_executions: u64,
-    /// Rows for which GPU returned "uncertain" and PG native predicate had
-    /// to be re-evaluated on the backend thread. Sourced from the C++
-    /// three-layer bridge counter. Despite the historical symbol name this
-    /// is NOT a CPU-fallback-for-whole-kernel metric — rule 11 forbids
-    /// whole-kernel CPU fallback. It counts per-row rechecks only.
-    /// Note: the C++ symbol is still `pgaccel_cpu_fallback_count`; the
-    /// Rust SRF layer renames it to `recheck_count` at the SQL boundary.
-    pub recheck_count: u64,
 }
 
 thread_local! {
@@ -268,13 +260,6 @@ pub fn kernel_executions_snapshot() -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Returns per-backend acceleration counters as a single row.
-///
-/// The `recheck_count` column is the number of rows for which the GPU
-/// three-layer kernel returned `Uncertain` and the backend thread had to
-/// re-evaluate the predicate using PG's native operator. It is NOT a
-/// count of whole-kernel CPU fallbacks — rule 11 forbids those. It was
-/// previously exposed as `cpu_fallback_count`, which misled reviewers
-/// into thinking the extension had a GPU-bypass escape hatch.
 #[pg_extern]
 #[allow(clippy::type_complexity)]
 fn pg_accel_stats() -> TableIterator<
@@ -292,7 +277,6 @@ fn pg_accel_stats() -> TableIterator<
         name!(command_type_skips, i64),
         name!(window_gpu_failures, i64),
         name!(gpu_kernel_executions, i64),
-        name!(recheck_count, i64),
         name!(planner_considered_count, i64),
         name!(planner_rejected_count, i64),
         name!(degenerate_guard_trigger_count, i64),
@@ -301,9 +285,6 @@ fn pg_accel_stats() -> TableIterator<
     ),
 > {
     let gpu_execs = crate::gpu::gpu_exec_count();
-    // The C++ symbol is still `pgaccel_cpu_fallback_count`; the Rust SRF
-    // layer surfaces it as `recheck_count` at the SQL boundary.
-    let rechecks = crate::gpu::cpu_fallback_count();
     let planner_considered = read_planner_considered();
     let planner_rejected = read_planner_rejected();
     let degenerate_guard = read_degenerate_guard();
@@ -324,7 +305,6 @@ fn pg_accel_stats() -> TableIterator<
             st.command_type_skips as i64,
             st.window_gpu_failures as i64,
             gpu_execs as i64,
-            rechecks as i64,
             planner_considered as i64,
             planner_rejected as i64,
             degenerate_guard as i64,
@@ -563,7 +543,6 @@ mod tests {
             command_type_skips: 0,
             window_gpu_failures: 0,
             gpu_kernel_executions: 0,
-            recheck_count: 0,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("queries_accelerated: 5"));
@@ -588,7 +567,6 @@ mod tests {
         assert_eq!(s.command_type_skips, 0);
         assert_eq!(s.window_gpu_failures, 0);
         assert_eq!(s.gpu_kernel_executions, 0);
-        assert_eq!(s.recheck_count, 0);
     }
 
     // -- atomic bench-mode counters ------------------------------------------

@@ -1,8 +1,8 @@
 //! Shared FFI types for the GPU kernel bridge.
 //!
 //! These `#[repr(C)]` types mirror `pgaccel-kernels/include/pgaccel_ffi.h`
-//! and `pgaccel_fused.h` exactly. They are the single source of truth for
-//! both the real (`bridge.rs`) and stub (`stubs.rs`) backends.
+//! and `pgaccel_fused.h` exactly and are the single source of truth for
+//! the Rust side of the bridge (`bridge.rs`).
 //!
 //! **Layout is load-bearing.** Do not reorder fields, change variant
 //! discriminants, or change underlying integer widths. Any drift corrupts

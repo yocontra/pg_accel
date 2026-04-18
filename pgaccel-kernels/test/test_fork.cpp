@@ -105,9 +105,8 @@ int main() {
             _exit(2);
         }
 
-        // Reset counters.
+        // Reset counter.
         pgaccel_reset_gpu_exec_count();
-        pgaccel_reset_cpu_fallback_count();
 
         // Run GPU kernels.
         if (run_reduce_tests("child") != 0) {
@@ -115,19 +114,11 @@ int main() {
         }
 
         uint64_t child_gpu = pgaccel_gpu_exec_count();
-        uint64_t child_fb = pgaccel_cpu_fallback_count();
-        printf("\nChild: gpu_exec=%llu cpu_fallback=%llu\n",
-               (unsigned long long)child_gpu, (unsigned long long)child_fb);
+        printf("\nChild: gpu_exec=%llu\n", (unsigned long long)child_gpu);
         if (child_gpu == 0) {
             fprintf(stderr,
-                "Child: FAIL — GPU exec count is 0. GPU not running.\n");
+                "Child: FAIL — GPU exec count is 0. SYCL died post-fork.\n");
             _exit(4);
-        }
-        if (child_fb > 0) {
-            fprintf(stderr,
-                "Child: FAIL — %llu CPU fallback(s). GPU should be working.\n",
-                (unsigned long long)child_fb);
-            _exit(5);
         }
 
         printf("\nChild: PASS — GPU works after fork.\n");

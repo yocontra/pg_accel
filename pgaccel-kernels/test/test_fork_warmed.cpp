@@ -66,17 +66,10 @@ int main() {
         printf("Child: reduce_sum_f32(%zu floats) = %f OK\n", N, sum);
 
         uint64_t gpu = pgaccel_gpu_exec_count();
-        uint64_t fb = pgaccel_cpu_fallback_count();
-        printf("Child: gpu_exec=%llu cpu_fallback=%llu\n",
-               (unsigned long long)gpu, (unsigned long long)fb);
+        printf("Child: gpu_exec=%llu\n", (unsigned long long)gpu);
         if (gpu == 0) {
-            fprintf(stderr, "Child: FAIL — gpu_exec=0\n");
+            fprintf(stderr, "Child: FAIL — gpu_exec=0 (SYCL died post-fork)\n");
             _exit(4);
-        }
-        if (fb > 0) {
-            fprintf(stderr, "Child: FAIL — %llu CPU fallback(s)\n",
-                    (unsigned long long)fb);
-            _exit(5);
         }
 
         delete[] data;
