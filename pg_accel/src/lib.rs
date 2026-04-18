@@ -1,5 +1,3 @@
-// Phase 0 scaffold: most public items are not yet wired into the executor.
-#![allow(dead_code)]
 // Test modules use `use super::*;` defensively; not every test uses every item.
 #![allow(unused_imports)]
 // Similar names are common in FFI wrappers (arg0/arg1, geom_a/geom_b).

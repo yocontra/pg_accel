@@ -419,7 +419,7 @@ pub fn extractor_for_oid(oid: pg_sys::Oid) -> Option<Box<dyn TypeExtractor>> {
 }
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, dead_code)]
 mod tests {
     use super::*;
 

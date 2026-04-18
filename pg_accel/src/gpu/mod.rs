@@ -5,6 +5,15 @@
 //! selects the backend per device and caches compiled kernels across forks.
 //!
 //! Re-exports a unified API so callers don't need `cfg` at every call-site.
+//!
+//! Many items in this module are phase-0 scaffolding — FFI declarations and
+//! CPU fallback impls — that are intentionally unused until later executors
+//! wire them up. File-scoped dead-code allow is kept here rather than
+//! crate-wide so other modules surface their own unused items.
+
+#![allow(dead_code)]
+
+pub mod types;
 
 #[cfg(feature = "gpu")]
 pub mod bridge;
@@ -16,30 +25,16 @@ pub mod three_layer;
 #[cfg(feature = "pg_test")]
 mod three_layer_tests;
 
-// Re-export types from whichever module is active.
-#[cfg(feature = "gpu")]
+// Types are declared once in `types.rs` and re-exported so callers don't
+// need to think about the `gpu` feature flag.
 #[allow(unused_imports)]
-pub use bridge::{
+pub use types::{
     PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
     PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
     PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
-    PgaccelReclassRule, PgaccelReduceCol, PgaccelStatus, PgaccelVal, PgaccelValTag,
+    PgaccelReclassRule, PgaccelReduceCol, PgaccelStatus, PgaccelVal, PgaccelValTag, cmp_op,
+    reduce_op,
 };
-
-#[cfg(not(feature = "gpu"))]
-#[allow(unused_imports)]
-pub use stubs::{
-    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
-    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
-    PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
-    PgaccelReclassRule, PgaccelReduceCol, PgaccelStatus, PgaccelVal, PgaccelValTag,
-};
-
-// Re-export fused ops constants from the active module.
-#[cfg(feature = "gpu")]
-pub use bridge::{cmp_op, reduce_op};
-#[cfg(not(feature = "gpu"))]
-pub use stubs::{cmp_op, reduce_op};
 
 // ---------------------------------------------------------------------------
 // Unified safe wrappers
@@ -147,6 +142,28 @@ pub fn get_caps() -> PgaccelPlatformCaps {
     #[cfg(not(feature = "gpu"))]
     {
         stubs::pgaccel_get_caps()
+    }
+}
+
+/// Cached per-process answer to "does the selected GPU support fp64?".
+///
+/// Queried once at first call — subsequent calls are a relaxed atomic load.
+/// Resolved after `ensure_init`, so a zero-initialised caps struct (before
+/// init) appears as `has_fp64 == false`, which matches Metal's behaviour
+/// and keeps callers on the safe f32 path until the device is real.
+fn device_has_fp64_cached() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    // 0 = not queried, 1 = no fp64, 2 = has fp64.
+    static CACHED: AtomicU8 = AtomicU8::new(0);
+    match CACHED.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => {
+            let caps = get_caps();
+            let tag = if caps.has_fp64 { 2 } else { 1 };
+            CACHED.store(tag, Ordering::Relaxed);
+            caps.has_fp64
+        }
     }
 }
 
@@ -565,11 +582,14 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status =
-            unsafe { bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result) };
-        if status.is_ok() {
-            return Some(result);
+        if device_has_fp64_cached() {
+            // SAFETY: data is a valid slice, result is a valid pointer.
+            let status = unsafe {
+                bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result)
+            };
+            if status.is_ok() {
+                return Some(result);
+            }
         }
         // fp32-only device (Metal): cast to f32 and use f32 kernel.
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
@@ -606,11 +626,14 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status =
-            unsafe { bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result) };
-        if status.is_ok() {
-            return Some(result);
+        if device_has_fp64_cached() {
+            // SAFETY: data is a valid slice, result is a valid pointer.
+            let status = unsafe {
+                bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result)
+            };
+            if status.is_ok() {
+                return Some(result);
+            }
         }
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         reduce_min_f32(&f32_data).map(f64::from)
@@ -628,11 +651,14 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
     let mut result: f64 = 0.0;
     #[cfg(feature = "gpu")]
     {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status =
-            unsafe { bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result) };
-        if status.is_ok() {
-            return Some(result);
+        if device_has_fp64_cached() {
+            // SAFETY: data is a valid slice, result is a valid pointer.
+            let status = unsafe {
+                bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result)
+            };
+            if status.is_ok() {
+                return Some(result);
+            }
         }
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
         reduce_max_f32(&f32_data).map(f64::from)
@@ -736,24 +762,26 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
     let mut out_count: i64 = 0;
     #[cfg(feature = "gpu")]
     {
-        // SAFETY: data is a valid slice; out_* are valid pointers.
-        let status = unsafe {
-            bridge::pgaccel_reduce_multi_f64(
-                data.as_ptr(),
-                data.len(),
-                &raw mut out_sum,
-                &raw mut out_min,
-                &raw mut out_max,
-                &raw mut out_count,
-            )
-        };
-        if status.is_ok() {
-            return Some(ReduceMultiF64 {
-                sum: out_sum,
-                min: out_min,
-                max: out_max,
-                count: out_count,
-            });
+        if device_has_fp64_cached() {
+            // SAFETY: data is a valid slice; out_* are valid pointers.
+            let status = unsafe {
+                bridge::pgaccel_reduce_multi_f64(
+                    data.as_ptr(),
+                    data.len(),
+                    &raw mut out_sum,
+                    &raw mut out_min,
+                    &raw mut out_max,
+                    &raw mut out_count,
+                )
+            };
+            if status.is_ok() {
+                return Some(ReduceMultiF64 {
+                    sum: out_sum,
+                    min: out_min,
+                    max: out_max,
+                    count: out_count,
+                });
+            }
         }
         // fp32-only device: cast and use f32 kernel.
         let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();

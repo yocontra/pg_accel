@@ -11,12 +11,13 @@
 //!   materialization and predicate cost ordering.
 
 pub mod agg;
-pub mod deser;
 pub mod join;
 pub mod preagg;
 pub mod scan;
 pub mod sort;
-pub mod tuple_extract;
+pub mod sort_scan;
+pub(crate) mod state;
 pub mod vectorized_scan;
-pub mod vscan;
 pub mod window;
+
+pub(crate) use state::ExecutorState;

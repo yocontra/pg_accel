@@ -20,7 +20,7 @@
 
 use pgrx::pg_sys;
 
-use super::tuple_extract::{self, AttExtractInfo};
+use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
 
 /// Arena-based vectorized heap scan.
 ///

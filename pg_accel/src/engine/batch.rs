@@ -81,7 +81,7 @@ impl BatchAccumulator {
 }
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, dead_code)]
 mod tests {
     use super::*;
 
