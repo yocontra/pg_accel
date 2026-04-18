@@ -2,7 +2,7 @@
 
 PostgreSQL extension: GPU-accelerated spatial predicates, h3 cell ops, raster operations,
 and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.17) + C++/SYCL via AdaptiveCpp
-(one source → CUDA / ROCm / Level Zero / Metal / CPU).
+(one source → CUDA / ROCm / Level Zero / Metal).
 
 ## Build & Test Commands
 
@@ -24,7 +24,7 @@ just gpu-test         # Run standalone GPU kernel tests
 
 1. **Adapters** (`src/adapters/`) — register extension functions + strategy classification
 2. **Dispatch** (`src/engine/dispatch.rs`) — batch accumulator, strategy routing
-3. **Executor Nodes** (`src/engine/executor/`) — Custom Scan: scan, join, agg, sort
+3. **Executor Nodes** (`src/engine/executor/`) — Custom Scan: scan, join, agg, sort, window, preagg, sort_scan, vectorized_scan
 4. **GPU Kernels** (`pgaccel-kernels/src/`) — SYCL spatial, h3, raster kernels via AdaptiveCpp
 
 ## Benchmark Rules
@@ -34,7 +34,7 @@ just gpu-test         # Run standalone GPU kernel tests
 ## Critical Safety Rules
 
 1. **ALL PG C functions on main backend thread ONLY.** Never call PG functions from worker threads.
-2. **GPU-only**: pg_accel only injects Custom Scan paths when GPU hardware is available. No GPU = no-op.
+2. **GPU-only (runtime behavior)**: at runtime, if the device registry reports no capable GPU, the planner hooks skip Custom Scan injection and the query runs via PG's native plan untouched. This is a runtime no-op on unsupported hardware — NOT a compile-time CPU fallback. The GPU bridge is unconditionally compiled (see rule #12); there is no build configuration that swaps in a CPU implementation of a GPU kernel.
 3. **GPU strategies only**: GpuSpatial, GpuH3, GpuSort, GpuReduce, GpuHashAgg, GpuHashJoin, GpuWindow, GpuExpr, GpuRaster.
 4. **Custom Scan has THREE vtables**: CustomPathMethods, CustomScanMethods, CustomExecMethods. Never confuse them.
 5. **Every `unsafe` block needs `// SAFETY:` comment.** No exceptions.
@@ -43,8 +43,14 @@ just gpu-test         # Run standalone GPU kernel tests
 8. **Thread budget via shared memory LWLock.** Always release in before_shmem_exit.
 9. **PARALLEL SAFE != thread-safe.** PG parallel = forked processes, not threads.
 10. **No hardcoded GPU thresholds.** All dispatch limits (min rows, max chunk sizes, batch bounds) go in `DeviceLimits` (`src/engine/cost.rs`) and are derived from hardware profile. Never use magic constants in executor/planner code.
-11. **NEVER add CPU fallbacks.** GPU execution is the entire purpose of this library. If a GPU kernel crashes or fails, the fix is to make the GPU path work — not to add a CPU fallback that bypasses it. CPU fallbacks are test cheats that hide real bugs. Any code introducing CPU fallback paths for operations that should run on GPU must be rejected.
-12. **AdaptiveCpp/SYCL ONLY.** All GPU code MUST use AdaptiveCpp/SYCL 100%. NO raw Metal (no `#import <Metal/Metal.h>`, no `.metal` shaders, no `.metallib` files period, no `MTLDevice`/`MTLCommandQueue`, no `.mm` Objective-C++ GPU files, no binary archives, no metallib compilation/loading). NO raw CoreML. NO CPU fallbacks. One source, one backend abstraction — AdaptiveCpp dispatches to CUDA/ROCm/L0/Metal/CPU transparently. Any code introducing raw Metal, `.metallib` artifacts, raw CoreML, or CPU fallback paths must be rejected.
+11. **NEVER add CPU fallbacks.** GPU execution is the entire purpose of this library. If a GPU kernel crashes or fails, the fix is to make the GPU path work — not to add a CPU fallback that bypasses it. CPU fallbacks are test cheats that hide real bugs. See rule #12 — this is enforced at compile time, not code review.
+12. **SYCL-only, enforced at compile time.** The machinery that used to make CPU fallbacks reviewable-but-forbidden has been deleted. Adding any of the following MUST FAIL `cargo check -p pg_accel` or `cmake --build pgaccel-kernels/build` — it is no longer a code-review question:
+    - The `PGACCEL_HAS_SYCL` preprocessor gate is gone. Kernel `.cpp` files unconditionally require SYCL; there is no `#if PGACCEL_HAS_SYCL` / `#else` branch to slip a CPU path into.
+    - The `gpu` Cargo feature is gone. `cargo check -p pg_accel` (and `--no-default-features`) unconditionally compile the GPU bridge. There is no `#[cfg(feature = "gpu")]` / `#[cfg(not(feature = "gpu"))]` gate.
+    - `pg_accel/src/gpu/stubs.rs` is gone. There is no `mod stubs` to host a CPU implementation of a GPU function.
+    - `pgaccel_cpu_fallback_count` / `pgaccel_reset_cpu_fallback_count` / `pgaccel_warn_cpu_fallback` FFI symbols and their Rust wrappers are gone. There is no counter to increment from a fallback branch.
+    - Policy still forbids raw Metal (no `#import <Metal/Metal.h>`, no `.metal` shaders, no `.metallib` files period, no `MTLDevice`/`MTLCommandQueue`, no `.mm` Objective-C++ GPU files, no binary archives, no metallib compilation/loading) and raw CoreML. AdaptiveCpp dispatches to CUDA / ROCm / Level Zero / Metal transparently from one source.
+    - If an agent reaches for a CPU fallback, the correct response is to fix the GPU path (kernel, bridge, dispatch). The build is the enforcement mechanism.
 
 ## Linting (enforced by CI, don't configure manually)
 
@@ -63,7 +69,7 @@ just gpu-test         # Run standalone GPU kernel tests
 | `adapter-development` | Writing function adapters, strategy classification, type extractors |
 | `spatial-predicate-kernels` | GPU spatial kernels: point_in_ring, sphere_distance, segment_intersects |
 | `geometry-deserialization` | GSERIALIZED format, bbox/point/vertex extraction from PostGIS |
-| `adaptivecpp-metal` | AdaptiveCpp backends (CUDA/ROCm/L0/Metal/CPU), capability detection, kernel constraints |
+| `adaptivecpp-metal` | AdaptiveCpp backends (CUDA/ROCm/L0/Metal), capability detection, kernel constraints |
 | `cost-model` | Decision chain, GPU break-even, late materialization, platform profiles |
 | `benchmark-methodology` | Benchmark harness, workload definitions, statistical methodology |
 
@@ -135,9 +141,8 @@ Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to
 
 ## Agent Coordination
 
-- **10 agents per phase.** Each owns specific files — no two agents edit the same file.
-- **Plans live in `plans/`.** Each agent updates their checklist status and implementation log.
-- **Phase gates are binary.** ALL items must pass before next phase starts.
+- **Agents are partitioned by file ownership.** Each worker owns a disjoint file set — no two agents edit the same file in a single phase.
+- **Phase gates are binary.** ALL items must pass before the next phase starts.
 
 ## Commit Convention
 

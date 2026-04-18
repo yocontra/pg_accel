@@ -121,10 +121,3 @@ For datasets exceeding GPU memory, sort chunks that fit, write sorted runs
 to an arena, then merge. Like PG's external merge sort but with GPU-sorted
 runs. Matters mostly for >100M rows where we currently defer to PG parallel
 sort anyway.
-
-### Vectorized aggregate accumulation (CPU path)
-
-For CPU paths that still exist at scale boundaries, use SIMD (NEON / AVX)
-to accumulate SUM/MIN/MAX over f32/f64 arrays. Rust auto-vectorization
-sometimes catches this; explicit SIMD would guarantee it. Small win (~2x)
-since aggregates are already memory-bound.

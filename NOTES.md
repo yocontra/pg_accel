@@ -166,7 +166,11 @@ GPU fp32 can misclassify points near polygon edges. Instead of:
 Kernels return three results: `definite_true`, `definite_false`, `uncertain`.
 The bbox pre-filter (layer 1) and point-in-ring test (layer 2) run on GPU.
 Uncertain pairs get a precise recheck (layer 3) using PG's exact-precision
-functions. Typically <5% of rows are uncertain, so GPU throughput is
+spatial functions. This recheck is a **correctness path for fp32 edge-case
+classification only** — it is NOT a CPU fallback for GPU unavailability
+or GPU failure. Layers 1 and 2 always run on GPU; layer 3 resolves the
+small set of geometrically-ambiguous rows that fp32 cannot classify
+confidently. Typically <5% of rows are uncertain, so GPU throughput is
 preserved while correctness is guaranteed. Implemented in
 `src/gpu/three_layer.rs`.
 
