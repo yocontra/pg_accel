@@ -7,17 +7,13 @@
 #include <cstddef>
 #include <cstring>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 namespace {
 
 // ---------------------------------------------------------------------------
 // SYCL kernel — parallel over all (i,j) pairs
 // ---------------------------------------------------------------------------
-
-#if PGACCEL_HAS_SYCL
 
 template <typename T>
 pgaccel_status bbox_intersects_bulk_sycl(
@@ -106,8 +102,6 @@ pgaccel_status bbox_intersects_bulk_sycl(
     return PGACCEL_OK;
 }
 
-#endif // PGACCEL_HAS_SYCL
-
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -132,7 +126,6 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(
         return PGACCEL_ERROR;
     }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue q{sycl::default_selector_v};
         pgaccel_status st = bbox_intersects_bulk_sycl<float>(
@@ -141,9 +134,7 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("bbox_intersects_bulk_f32");
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -171,7 +162,6 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(
         return PGACCEL_UNSUPPORTED;
     }
 
-#if PGACCEL_HAS_SYCL
     try {
         sycl::queue q{sycl::default_selector_v};
         // Verify the device actually supports fp64
@@ -184,8 +174,6 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(
     } catch (const std::exception&) {
     } catch (...) {
     }
-#endif
 
-    pgaccel_warn_cpu_fallback("bbox_intersects_bulk_f64");
     return PGACCEL_ERROR_NO_DEVICE;
 }

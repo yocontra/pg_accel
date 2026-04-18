@@ -5,14 +5,12 @@
 #include <cstring>
 #include <vector>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
 #include "alloc_helper.h"
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  Written once during pgaccel_init(), read-only thereafter.
 extern sycl::queue* g_queue;
-#endif
 
 /* ----------------------------------------------------------------
  * Layer 2 — CPU fallback predicates + GPU-accelerated bulk paths
@@ -197,8 +195,6 @@ static int8_t evaluate_predicate(const pgaccel_geometry& a,
  * On Apple Silicon (unified memory), alloc_input returns the host
  * pointer directly — zero allocation, zero copy overhead.
  * ================================================================ */
-
-#if PGACCEL_HAS_SYCL
 
 /* Minimum surviving points before GPU dispatch is worthwhile.
  * Below this, CPU scalar loop is cheaper than kernel launch. */
@@ -581,8 +577,6 @@ static pgaccel_status sycl_point_in_polygon_bulk(
         results);
 }
 
-#endif // PGACCEL_HAS_SYCL
-
 /* ================================================================
  * pgaccel_spatial_intersects — three-layer spatial dispatch
  * ================================================================ */
@@ -740,7 +734,6 @@ extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
 
     std::vector<int8_t> pir_results(surviving.size());
 
-#if PGACCEL_HAS_SYCL
     /* Prefer GPU dispatch when SYCL is available and batch is large enough. */
     if (g_queue && surviving.size() >= GPU_PIP_MIN_BATCH) {
         pgaccel_status st = sycl_point_in_polygon_bulk(
@@ -757,7 +750,6 @@ extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
         /* GPU failed — fall through to CPU path. */
         fprintf(stderr, "pgaccel: GPU point_in_polygon failed (status=%d), CPU fallback\n", st);
     }
-#endif
 
     /* CPU fallback: scalar point-in-polygon. */
     for (size_t k = 0; k < surviving.size(); ++k) {

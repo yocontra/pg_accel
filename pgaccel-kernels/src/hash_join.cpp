@@ -17,9 +17,7 @@
 #include <type_traits>
 #include <vector>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 // ---------------------------------------------------------------------------
 // Hash functions
@@ -267,8 +265,6 @@ static pgaccel_hash_table* build_sort_merge(
 // Sort-merge probe (GPU parallel binary search)
 // ---------------------------------------------------------------------------
 
-#if PGACCEL_HAS_SYCL
-
 extern sycl::queue* g_queue;
 extern bool g_unified_memory;
 
@@ -453,8 +449,6 @@ static pgaccel_status probe_sort_merge_sycl(
     return PGACCEL_OK;
 }
 
-#endif // PGACCEL_HAS_SYCL
-
 // ---------------------------------------------------------------------------
 // Sort-merge probe (CPU fallback)
 // ---------------------------------------------------------------------------
@@ -524,13 +518,11 @@ static pgaccel_status probe_sort_merge(
     size_t                    max_matches,
     size_t*                   match_count)
 {
-#if PGACCEL_HAS_SYCL
     pgaccel_status st = probe_sort_merge_sycl(
         ht, outer_keys, outer_null_mask, outer_count,
         match_pairs, max_matches, match_count);
     if (st == PGACCEL_OK) return st;
     // Fall through to CPU on SYCL failure.
-#endif
     return probe_sort_merge_cpu(
         ht, outer_keys, outer_null_mask, outer_count,
         match_pairs, max_matches, match_count);

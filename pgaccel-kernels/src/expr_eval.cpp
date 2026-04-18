@@ -17,9 +17,7 @@
 #include <cstdio>
 #include <cstring>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 // ---------------------------------------------------------------------------
 // Helpers
