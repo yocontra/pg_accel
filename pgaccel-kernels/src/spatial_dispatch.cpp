@@ -13,16 +13,18 @@
 extern sycl::queue* g_queue;
 
 /* ----------------------------------------------------------------
- * Layer 2 — CPU fallback predicates + GPU-accelerated bulk paths
+ * Layer 2 — scalar predicate evaluator for heterogeneous geometry
+ * pairs, plus SYCL-accelerated bulk point-in-polygon kernel.
  *
- * CPU scalar implementations handle small batches and non-spatial
- * geometry combos.  SYCL GPU kernels handle bulk point-in-polygon
- * when a Metal/CUDA/etc. device is available.
+ * The scalar predicate dispatcher (evaluate_predicate) is the sole
+ * implementation for geometry-type combinations that do not yet
+ * have a dedicated SYCL kernel — it is NOT a CPU fallback for a
+ * GPU path.
  *
  * Return values:
  *    1  = DEFINITE_TRUE   (geometries definitely intersect)
  *   -1  = DEFINITE_FALSE  (geometries definitely do not intersect)
- *    0  = UNCERTAIN       (need CPU recheck on Rust side)
+ *    0  = UNCERTAIN       (needs PG exact recheck for correctness)
  * ---------------------------------------------------------------- */
 
 static constexpr float EPSILON = 1.0e-7f;
@@ -196,11 +198,7 @@ static int8_t evaluate_predicate(const pgaccel_geometry& a,
  * pointer directly — zero allocation, zero copy overhead.
  * ================================================================ */
 
-/* Minimum surviving points before GPU dispatch is worthwhile.
- * Below this, CPU scalar loop is cheaper than kernel launch. */
-static constexpr size_t GPU_PIP_MIN_BATCH = 256;
-
-/* Device-side point-in-ring: same ray-casting algorithm as CPU.
+/* Device-side point-in-ring: same ray-casting algorithm as the scalar path.
  * Returns true if point is inside the ring. */
 static bool device_point_in_ring(
     float px, float py,
@@ -683,8 +681,9 @@ extern "C" pgaccel_status pgaccel_spatial_intersects(
  * pgaccel_point_in_polygon_bulk — dedicated fast path
  *
  * Takes a flat array of point x,y pairs and a single polygon.
- * Inline bbox pre-filter, then GPU dispatch (preferred) or
- * CPU scalar fallback.
+ * Inline bbox pre-filter, then SYCL GPU dispatch for survivors.
+ * Tiny batches are rejected by the upstream planner gate; this
+ * kernel always dispatches to SYCL when called.
  * ================================================================ */
 extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
     const float* points_xy,
@@ -732,32 +731,16 @@ extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
         surv_pts[k * 2 + 1] = points_xy[idx * 2 + 1];
     }
 
+    if (!g_queue) return PGACCEL_ERROR_NO_DEVICE;
+
     std::vector<int8_t> pir_results(surviving.size());
 
-    /* Prefer GPU dispatch when SYCL is available and batch is large enough. */
-    if (g_queue && surviving.size() >= GPU_PIP_MIN_BATCH) {
-        pgaccel_status st = sycl_point_in_polygon_bulk(
-            surv_pts.data(), surviving.size(),
-            poly_coords, poly_coord_count,
-            ring_offsets, ring_count,
-            pir_results.data());
-        if (st == PGACCEL_OK) {
-            for (size_t k = 0; k < surviving.size(); ++k) {
-                results[surviving[k]] = pir_results[k];
-            }
-            return PGACCEL_OK;
-        }
-        /* GPU failed — fall through to CPU path. */
-        fprintf(stderr, "pgaccel: GPU point_in_polygon failed (status=%d), CPU fallback\n", st);
-    }
-
-    /* CPU fallback: scalar point-in-polygon. */
-    for (size_t k = 0; k < surviving.size(); ++k) {
-        float pt[2] = { surv_pts[k * 2], surv_pts[k * 2 + 1] };
-        pir_results[k] = point_in_polygon_check(
-            pt, poly_coords, poly_coord_count,
-            ring_offsets, ring_count);
-    }
+    pgaccel_status st = sycl_point_in_polygon_bulk(
+        surv_pts.data(), surviving.size(),
+        poly_coords, poly_coord_count,
+        ring_offsets, ring_count,
+        pir_results.data());
+    if (st != PGACCEL_OK) return st;
 
     for (size_t k = 0; k < surviving.size(); ++k) {
         results[surviving[k]] = pir_results[k];

@@ -450,62 +450,7 @@ static pgaccel_status probe_sort_merge_sycl(
 }
 
 // ---------------------------------------------------------------------------
-// Sort-merge probe (CPU fallback)
-// ---------------------------------------------------------------------------
-
-template <typename T>
-static pgaccel_status probe_sort_merge_cpu(
-    const pgaccel_hash_table* ht,
-    const T*                  outer_keys,
-    const uint8_t*            outer_null_mask,
-    size_t                    outer_count,
-    uint32_t*                 match_pairs,
-    size_t                    max_matches,
-    size_t*                   match_count)
-{
-    const T* sorted_keys = static_cast<const T*>(ht->slot_keys);
-    const uint32_t* sorted_indices = ht->slot_indices;
-    const size_t inner_count = ht->count;
-    size_t mc = 0;
-
-    for (size_t oi = 0; oi < outer_count; oi++) {
-        if (outer_null_mask != nullptr && outer_null_mask[oi]) continue;
-        const T key = outer_keys[oi];
-
-        // Binary search for leftmost match.
-        size_t lo = 0, hi = inner_count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            if constexpr (std::is_floating_point_v<T>) {
-                bool mk_nan = (sorted_keys[mid] != sorted_keys[mid]);
-                bool k_nan = (key != key);
-                if (mk_nan) lo = mid + 1; // NaN sorts last
-                else if (k_nan) hi = mid;
-                else if (sorted_keys[mid] < key) lo = mid + 1;
-                else hi = mid;
-            } else {
-                if (sorted_keys[mid] < key) lo = mid + 1;
-                else hi = mid;
-            }
-        }
-
-        // Scan all duplicates.
-        for (size_t p = lo; p < inner_count; p++) {
-            if (!keys_equal(sorted_keys[p], key)) break;
-            if (mc < max_matches) {
-                match_pairs[mc * 2] = static_cast<uint32_t>(oi);
-                match_pairs[mc * 2 + 1] = sorted_indices[p];
-            }
-            mc++;
-        }
-    }
-
-    *match_count = mc;
-    return PGACCEL_OK;
-}
-
-// ---------------------------------------------------------------------------
-// Probe dispatcher for sort-merge tables
+// Probe dispatcher for sort-merge tables (SYCL only)
 // ---------------------------------------------------------------------------
 
 template <typename T>
@@ -518,18 +463,16 @@ static pgaccel_status probe_sort_merge(
     size_t                    max_matches,
     size_t*                   match_count)
 {
-    pgaccel_status st = probe_sort_merge_sycl(
-        ht, outer_keys, outer_null_mask, outer_count,
-        match_pairs, max_matches, match_count);
-    if (st == PGACCEL_OK) return st;
-    // Fall through to CPU on SYCL failure.
-    return probe_sort_merge_cpu(
+    return probe_sort_merge_sycl(
         ht, outer_keys, outer_null_mask, outer_count,
         match_pairs, max_matches, match_count);
 }
 
 // ---------------------------------------------------------------------------
-// Probe (CPU) — original hash table probe
+// Open-addressed hash table probe (legacy mode, capacity > 0)
+// The SYCL sort-merge path above covers capacity == 0; this path remains
+// the sole implementation for the legacy open-addressed table layout
+// until a GPU kernel is written for it.
 // ---------------------------------------------------------------------------
 
 template <typename T>
