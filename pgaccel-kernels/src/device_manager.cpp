@@ -6,20 +6,17 @@
 #include <signal.h>
 #include <cstdlib>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
 #include <hipSYCL/runtime/fork_safety.h>
 #include <string>
 #include <algorithm>
 #include <cctype>
-#endif
 
 // ---------------------------------------------------------------------------
-// GPU execution observability — thread-local counters
+// GPU execution observability — thread-local counter
 // ---------------------------------------------------------------------------
 
 static thread_local uint64_t tl_gpu_exec_count = 0;
-static thread_local uint64_t tl_cpu_fallback_count = 0;
 
 extern "C" uint64_t pgaccel_gpu_exec_count(void) {
     return tl_gpu_exec_count;
@@ -29,24 +26,8 @@ extern "C" void pgaccel_reset_gpu_exec_count(void) {
     tl_gpu_exec_count = 0;
 }
 
-extern "C" uint64_t pgaccel_cpu_fallback_count(void) {
-    return tl_cpu_fallback_count;
-}
-
-extern "C" void pgaccel_reset_cpu_fallback_count(void) {
-    tl_cpu_fallback_count = 0;
-}
-
 void pgaccel_record_gpu_exec() {
     tl_gpu_exec_count++;
-}
-
-void pgaccel_warn_cpu_fallback(const char* kernel_name) {
-    tl_cpu_fallback_count++;
-    fprintf(stderr,
-        "pgaccel WARNING: %s fell back to CPU! GPU kernel did not execute. "
-        "Fallback count: %lu. This means the GPU is NOT being used.\n",
-        kernel_name, (unsigned long)tl_cpu_fallback_count);
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +41,6 @@ static pid_t g_init_pid = 0;
 static pgaccel_device_info g_device_info = {};
 static pgaccel_platform_caps g_caps = {};
 
-#if PGACCEL_HAS_SYCL
 // Accessed by other translation units (sort.cpp, mem_pool.cpp) via extern.
 sycl::queue* g_queue = nullptr;
 
@@ -163,8 +143,6 @@ static void populate_device_info(const sycl::device& dev,
     g_device_info.is_unified_memory = g_caps.is_unified_memory;
 }
 
-#endif // PGACCEL_HAS_SYCL
-
 // ===========================================================================
 // Public API
 // ===========================================================================
@@ -183,11 +161,9 @@ extern "C" pgaccel_status pgaccel_init(void) {
         // MTL::Device/CommandQueue pointers and the in-memory kernel
         // cache; compiled .metallib files on disk survive and will be
         // reloaded without re-entering MTLCompilerService.
-#if PGACCEL_HAS_SYCL
         g_queue = nullptr;
         g_unified_memory = false;
         hipsycl_rt_reset_after_fork();
-#endif
         fprintf(stderr, "pgaccel: fork detected (parent=%d, child=%d)"
                         " — attempting fresh GPU init\n",
                 g_init_pid, current_pid);
@@ -195,7 +171,6 @@ extern "C" pgaccel_status pgaccel_init(void) {
         // Fall through to normal init path below.
     }
 
-#if PGACCEL_HAS_SYCL
     // Temporarily reset signal handlers around SYCL init. PG installs
     // custom SIGSEGV/SIGBUS handlers that interfere with Metal/IOKit
     // driver initialization (the driver uses signals internally during
@@ -257,10 +232,6 @@ extern "C" pgaccel_status pgaccel_init(void) {
     if (!init_ok) {
         return PGACCEL_ERROR;
     }
-#else
-    fprintf(stderr, "pgaccel: FATAL: built without SYCL — no GPU support\n");
-    return PGACCEL_ERROR;
-#endif
 
     g_init_pid = current_pid;
     g_initialized.store(true, std::memory_order_release);
@@ -272,7 +243,6 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
         return PGACCEL_OK;
     }
 
-#if PGACCEL_HAS_SYCL
     // SAFETY: g_queue is only modified during init/shutdown which are
     // guaranteed to be called from the PG backend main thread (single writer).
     if (g_queue != nullptr) {
@@ -284,7 +254,6 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
         delete g_queue;
         g_queue = nullptr;
     }
-#endif
 
     std::memset(&g_device_info, 0, sizeof(g_device_info));
     std::memset(&g_caps, 0, sizeof(g_caps));

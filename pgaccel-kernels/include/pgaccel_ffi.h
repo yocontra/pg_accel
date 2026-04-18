@@ -54,23 +54,17 @@ void pgaccel_prefork_warmup(void);
 pgaccel_device_info pgaccel_get_device_info(void);
 pgaccel_platform_caps pgaccel_get_caps(void);
 
-/// GPU execution observability — thread-local counters.
+/// GPU execution observability — thread-local counter.
 /// pgaccel_gpu_exec_count: how many kernel invocations actually ran on GPU.
-/// pgaccel_cpu_fallback_count: how many kernel invocations fell back to CPU.
-/// Both reset to 0 by their respective reset functions.
+/// Reset to 0 by pgaccel_reset_gpu_exec_count().
 uint64_t pgaccel_gpu_exec_count(void);
 void pgaccel_reset_gpu_exec_count(void);
-uint64_t pgaccel_cpu_fallback_count(void);
-void pgaccel_reset_cpu_fallback_count(void);
 
 #ifdef __cplusplus
 }
 /// Called by kernels after successful GPU execution. Increments thread-local
 /// counter. Defined in device_manager.cpp.
 void pgaccel_record_gpu_exec();
-/// Called by kernels on CPU fallback. Emits WARNING to stderr and increments
-/// thread-local counter. Defined in device_manager.cpp.
-void pgaccel_warn_cpu_fallback(const char* kernel_name);
 extern "C" {
 #endif
 

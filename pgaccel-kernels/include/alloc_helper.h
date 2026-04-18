@@ -9,7 +9,6 @@
 
 #pragma once
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
 #include <cstring>
 
@@ -88,5 +87,3 @@ void pgaccel_free_input(T* ptr, sycl::queue& q, const T* host_data) {
         sycl::free(ptr, q);
     }
 }
-
-#endif // PGACCEL_HAS_SYCL

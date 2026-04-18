@@ -48,9 +48,7 @@ target_include_directories(pgaccel_kernels_shared PUBLIC
 
 add_sycl_to_target(TARGET pgaccel_kernels)
 add_sycl_to_target(TARGET pgaccel_kernels_shared)
-target_compile_definitions(pgaccel_kernels PRIVATE PGACCEL_HAS_SYCL=1)
-target_compile_definitions(pgaccel_kernels_shared PRIVATE PGACCEL_HAS_SYCL=1)
-message(STATUS "pgaccel: Building with AdaptiveCpp SYCL (sole GPU backend)")
+message(STATUS "pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp")
 
 # Standalone test binary
 add_executable(test_device test/test_device.cpp)
@@ -101,7 +99,6 @@ target_link_libraries(test_raster_bench PRIVATE pgaccel_kernels_shared)
 add_executable(test_sycl_basic test/test_sycl_basic.cpp)
 target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
 add_sycl_to_target(TARGET test_sycl_basic)
-target_compile_definitions(test_sycl_basic PRIVATE PGACCEL_HAS_SYCL=1)
 
 enable_testing()
 add_test(NAME test_device COMMAND test_device)

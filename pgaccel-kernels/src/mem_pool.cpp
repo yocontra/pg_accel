@@ -4,9 +4,7 @@
 #include <cstring>
 #include <vector>
 
-#if PGACCEL_HAS_SYCL
 #include <sycl/sycl.hpp>
-#endif
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,7 +29,6 @@ struct OversizedAlloc {
 };
 
 enum class AllocMode {
-    CPU,           // standard malloc/free
     SharedUSM,     // sycl::malloc_shared (unified memory, e.g. Apple Silicon)
     DeviceUSM,     // sycl::malloc_device (discrete GPU) + explicit prefetch
 };
@@ -41,11 +38,9 @@ struct Pool {
     std::vector<OversizedAlloc> oversized; // direct allocations > block_size
     size_t block_size = DEFAULT_BLOCK_SIZE;
     size_t total_allocated = 0;
-    AllocMode mode = AllocMode::CPU;
+    AllocMode mode = AllocMode::SharedUSM;
     bool initialized = false;
-#if PGACCEL_HAS_SYCL
     sycl::queue* queue = nullptr; // owned by pool, created lazily
-#endif
 };
 
 static Pool g_pool;
@@ -58,88 +53,66 @@ static size_t align_up(size_t n, size_t align) {
     return (n + align - 1) & ~(align - 1);
 }
 
-#if PGACCEL_HAS_SYCL
 static sycl::queue& get_queue() {
     // SAFETY: only called after ensure_pool_initialized() which sets up the
     // queue. Pool is per-backend (single PG process), no thread safety needed.
     return *g_pool.queue;
 }
-#endif
 
 static void* raw_alloc(size_t bytes) {
+    if (!g_pool.queue) {
+        // Unreachable by construction — ensure_pool_initialized() aborts if
+        // the SYCL queue cannot be created. If the queue is still null here,
+        // something removed the queue out from under the pool. No host-memory
+        // backing: SYCL is the only supported allocator.
+        return nullptr;
+    }
     switch (g_pool.mode) {
-#if PGACCEL_HAS_SYCL
         case AllocMode::SharedUSM:
             return sycl::malloc_shared(bytes, get_queue());
         case AllocMode::DeviceUSM:
             return sycl::malloc_device(bytes, get_queue());
-#else
-        case AllocMode::SharedUSM:
-        case AllocMode::DeviceUSM:
-            // Should not happen when compiled without SYCL; fall through to CPU.
-            break;
-#endif
-        case AllocMode::CPU:
-            return std::malloc(bytes);
     }
-    return std::malloc(bytes);
+    return nullptr;
 }
 
 static void raw_free(void* ptr) {
     if (!ptr) return;
+    if (!g_pool.queue) return;
     switch (g_pool.mode) {
-#if PGACCEL_HAS_SYCL
         case AllocMode::SharedUSM:
         case AllocMode::DeviceUSM:
             sycl::free(ptr, get_queue());
             return;
-#else
-        case AllocMode::SharedUSM:
-        case AllocMode::DeviceUSM:
-            break;
-#endif
-        case AllocMode::CPU:
-            std::free(ptr);
-            return;
     }
-    std::free(ptr);
 }
 
 static void ensure_pool_initialized() {
     if (g_pool.initialized) return;
     g_pool.initialized = true;
 
-#if PGACCEL_HAS_SYCL
     // Query the device manager's public API to determine platform capabilities.
     // The device manager owns the primary queue (static linkage), so we create
     // our own queue targeting the same default device for USM allocations.
     pgaccel_platform_caps caps = pgaccel_get_caps();
-    bool sycl_active = (std::strcmp(caps.backend_name, "cpu") != 0);
 
-    if (sycl_active) {
-        try {
-            // SAFETY: pgaccel_init() must have been called before any alloc.
-            // We create a queue on the default device, which should match the
-            // device manager's selection (highest-scored device).
-            g_pool.queue = new sycl::queue{sycl::default_selector_v,
-                                           sycl::property::queue::in_order{}};
+    try {
+        // SAFETY: pgaccel_init() must have been called before any alloc.
+        // We create a queue on the default device, which should match the
+        // device manager's selection (highest-scored device).
+        g_pool.queue = new sycl::queue{sycl::default_selector_v,
+                                       sycl::property::queue::in_order{}};
 
-            if (caps.is_unified_memory) {
-                g_pool.mode = AllocMode::SharedUSM;
-            } else {
-                g_pool.mode = AllocMode::DeviceUSM;
-            }
-        } catch (...) {
-            // SYCL queue creation failed; fall back to CPU.
-            g_pool.mode = AllocMode::CPU;
-            g_pool.queue = nullptr;
+        if (caps.is_unified_memory) {
+            g_pool.mode = AllocMode::SharedUSM;
+        } else {
+            g_pool.mode = AllocMode::DeviceUSM;
         }
-    } else {
-        g_pool.mode = AllocMode::CPU;
+    } catch (...) {
+        // SYCL queue creation failed. No CPU fallback: subsequent raw_alloc
+        // calls will return nullptr, propagating allocation failure to callers.
+        g_pool.queue = nullptr;
     }
-#else
-    g_pool.mode = AllocMode::CPU;
-#endif
 }
 
 static Block allocate_block(size_t capacity) {
@@ -231,14 +204,9 @@ extern "C" size_t pgaccel_pool_bytes_used() {
 extern "C" void pgaccel_prefetch(void* ptr, size_t bytes) {
     if (!ptr || bytes == 0) return;
 
-#if PGACCEL_HAS_SYCL
     ensure_pool_initialized();
     // Prefetch is only meaningful on discrete GPUs with device memory.
-    if (g_pool.mode == AllocMode::DeviceUSM) {
+    if (g_pool.mode == AllocMode::DeviceUSM && g_pool.queue) {
         get_queue().prefetch(ptr, bytes);
     }
-#else
-    (void)ptr;
-    (void)bytes;
-#endif
 }
