@@ -400,9 +400,8 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
     let mut result: f64 = 0.0;
     if device_has_fp64_cached() {
         // SAFETY: data is a valid slice, result is a valid pointer.
-        let status = unsafe {
-            bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result)
-        };
+        let status =
+            unsafe { bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result) };
         if status.is_ok() {
             return Some(result);
         }
@@ -428,9 +427,8 @@ pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
     let mut result: f64 = 0.0;
     if device_has_fp64_cached() {
         // SAFETY: data is a valid slice, result is a valid pointer.
-        let status = unsafe {
-            bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result)
-        };
+        let status =
+            unsafe { bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result) };
         if status.is_ok() {
             return Some(result);
         }
@@ -445,9 +443,8 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
     let mut result: f64 = 0.0;
     if device_has_fp64_cached() {
         // SAFETY: data is a valid slice, result is a valid pointer.
-        let status = unsafe {
-            bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result)
-        };
+        let status =
+            unsafe { bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result) };
         if status.is_ok() {
             return Some(result);
         }
@@ -1169,11 +1166,7 @@ pub fn window_row_number(partition_starts: &[u8], results: &mut [i64]) -> Option
     }
     // SAFETY: slices are valid and count is within bounds.
     let status = unsafe {
-        bridge::pgaccel_window_row_number(
-            partition_starts.as_ptr(),
-            count,
-            results.as_mut_ptr(),
-        )
+        bridge::pgaccel_window_row_number(partition_starts.as_ptr(), count, results.as_mut_ptr())
     };
     status.is_ok().then_some(())
 }
@@ -1717,5 +1710,4 @@ mod mod_tests {
         assert!(format!("{:?}", GeomType::Polygon).contains("Polygon"));
         assert!(format!("{:?}", GeomType::Unknown).contains("Unknown"));
     }
-
 }

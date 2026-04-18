@@ -34,10 +34,10 @@ mod explain;
 mod private_data;
 
 use explain::{explain_custom_scan, resolve_thread_count};
-pub use private_data::serialize_preagg_private;
-use private_data::{deserialize_custom_private, deserialize_preagg_private};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
+pub use private_data::serialize_preagg_private;
+use private_data::{deserialize_custom_private, deserialize_preagg_private};
 
 // ---------------------------------------------------------------------------
 // Strategy constants (used in custom_private serialization + EXPLAIN)

@@ -732,7 +732,7 @@ mod tests {
     fn test_reset_stats_all_fields_zero() {
         Spi::run("SELECT pg_accel_reset_stats()").expect("reset_stats should succeed");
         let row = Spi::get_one::<i64>(
-            "SELECT rows_dispatched + batches_executed + fallback_count \
+            "SELECT rows_dispatched + batches_executed + stock_exec_count \
              + gpu_rows_processed + gpu_uncertain_count \
              + thread_budget_exhausted_count \
              FROM pg_accel_stats()",

@@ -265,7 +265,7 @@ impl ScanExecState {
             // GPU unavailable — materialize all and use scalar qual.
             // This is a real fallback from a GPU path into PG's expression
             // evaluator; record it for diagnostics.
-            stats::record_fallback();
+            stats::record_stock_exec();
             for i in 0..count {
                 let (offset, t_len) = entries[i];
                 let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };

@@ -20,7 +20,7 @@ pub struct AccelStats {
     pub batches_executed: u64,
     /// Cumulative dispatch wall-clock time in microseconds.
     pub total_dispatch_us: u64,
-    pub fallback_count: u64,
+    pub stock_exec_count: u64,
     pub gpu_rows_processed: u64,
     /// Rows that required CPU recheck after GPU evaluation.
     pub gpu_uncertain_count: u64,
@@ -85,9 +85,9 @@ pub fn record_batch(rows: u64, dispatch_us: u64) {
 }
 
 /// Record a fallback to the standard PostgreSQL executor.
-pub fn record_fallback() {
+pub fn record_stock_exec() {
     STATS.with(|s| {
-        s.borrow_mut().fallback_count += 1;
+        s.borrow_mut().stock_exec_count += 1;
     });
 }
 
@@ -269,7 +269,7 @@ fn pg_accel_stats() -> TableIterator<
         name!(rows_dispatched, i64),
         name!(batches_executed, i64),
         name!(total_dispatch_us, i64),
-        name!(fallback_count, i64),
+        name!(stock_exec_count, i64),
         name!(gpu_rows_processed, i64),
         name!(gpu_uncertain_count, i64),
         name!(thread_budget_exhausted_count, i64),
@@ -297,7 +297,7 @@ fn pg_accel_stats() -> TableIterator<
             st.rows_dispatched as i64,
             st.batches_executed as i64,
             st.total_dispatch_us as i64,
-            st.fallback_count as i64,
+            st.stock_exec_count as i64,
             st.gpu_rows_processed as i64,
             st.gpu_uncertain_count as i64,
             st.thread_budget_exhausted_count as i64,
@@ -374,13 +374,13 @@ mod tests {
         assert_eq!(s.total_dispatch_us, 2000);
     }
 
-    // -- record_fallback ------------------------------------------------------
+    // -- record_stock_exec ------------------------------------------------------
 
     #[test]
     fn fallback_increments() {
         reset();
-        record_fallback();
-        assert_eq!(snapshot().fallback_count, 1);
+        record_stock_exec();
+        assert_eq!(snapshot().stock_exec_count, 1);
     }
 
     // -- record_gpu_batch -----------------------------------------------------
@@ -413,7 +413,7 @@ mod tests {
         reset();
         record_query_accelerated();
         record_batch(100, 50);
-        record_fallback();
+        record_stock_exec();
         record_gpu_batch(200, 10);
         record_budget_exhausted();
 
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(after.rows_dispatched, 0);
         assert_eq!(after.batches_executed, 0);
         assert_eq!(after.total_dispatch_us, 0);
-        assert_eq!(after.fallback_count, 0);
+        assert_eq!(after.stock_exec_count, 0);
         assert_eq!(after.gpu_rows_processed, 0);
         assert_eq!(after.gpu_uncertain_count, 0);
         assert_eq!(after.thread_budget_exhausted_count, 0);
@@ -446,7 +446,7 @@ mod tests {
         record_batch(1024, 500);
         record_gpu_batch(1024, 3);
         record_batch(512, 250);
-        record_fallback();
+        record_stock_exec();
         record_budget_exhausted();
 
         let s = snapshot();
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(s.total_dispatch_us, 750);
         assert_eq!(s.gpu_rows_processed, 1024);
         assert_eq!(s.gpu_uncertain_count, 3);
-        assert_eq!(s.fallback_count, 1);
+        assert_eq!(s.stock_exec_count, 1);
         assert_eq!(s.thread_budget_exhausted_count, 1);
     }
 
@@ -484,7 +484,7 @@ mod tests {
             after_first.total_dispatch_us,
             after_second.total_dispatch_us
         );
-        assert_eq!(after_first.fallback_count, after_second.fallback_count);
+        assert_eq!(after_first.stock_exec_count, after_second.stock_exec_count);
         assert_eq!(
             after_first.gpu_rows_processed,
             after_second.gpu_rows_processed
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(s.queries_accelerated, 1);
         assert_eq!(s.rows_dispatched, 0);
         assert_eq!(s.batches_executed, 0);
-        assert_eq!(s.fallback_count, 0);
+        assert_eq!(s.stock_exec_count, 0);
         assert_eq!(s.gpu_rows_processed, 0);
     }
 
@@ -535,7 +535,7 @@ mod tests {
             rows_dispatched: 1000,
             batches_executed: 2,
             total_dispatch_us: 500,
-            fallback_count: 1,
+            stock_exec_count: 1,
             gpu_rows_processed: 800,
             gpu_uncertain_count: 3,
             thread_budget_exhausted_count: 0,
@@ -559,7 +559,7 @@ mod tests {
         assert_eq!(s.rows_dispatched, 0);
         assert_eq!(s.batches_executed, 0);
         assert_eq!(s.total_dispatch_us, 0);
-        assert_eq!(s.fallback_count, 0);
+        assert_eq!(s.stock_exec_count, 0);
         assert_eq!(s.gpu_rows_processed, 0);
         assert_eq!(s.gpu_uncertain_count, 0);
         assert_eq!(s.thread_budget_exhausted_count, 0);
