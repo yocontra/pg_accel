@@ -1,21 +1,19 @@
 //! Build script for `pg_accel`.
 //!
-//! When the `gpu` feature is enabled, invokes `CMake` to build `libpgaccel_kernels`
-//! from the sibling `pgaccel-kernels/` directory and emits the appropriate
+//! Invokes `CMake` to build `libpgaccel_kernels` from the sibling
+//! `pgaccel-kernels/` directory and emits the appropriate
 //! `cargo:rustc-link-*` directives so the Rust FFI bridge can find it.
-//!
-//! When the `gpu` feature is **not** enabled, this script is a no-op — there is
-//! no C++ dependency at all.
+//! GPU linkage is unconditional — AdaptiveCpp/SYCL is the only supported
+//! backend and there is no CPU-fallback build mode.
 
 // Build scripts are not library code — panicking on missing env vars or
 // cmake failures is the correct behaviour.
 #![allow(clippy::expect_used)]
 
 fn main() {
-    // Re-run if the feature set changes.
+    // Re-run if the build script changes.
     println!("cargo::rerun-if-changed=build.rs");
 
-    #[cfg(feature = "gpu")]
     gpu_build::build_kernels();
 
     // macOS Sequoia+ (26.x) eagerly resolves undefined symbols in flat
@@ -245,7 +243,6 @@ mod pg_stub {
     }
 }
 
-#[cfg(feature = "gpu")]
 mod gpu_build {
     use std::path::{Path, PathBuf};
     use std::process::Command;
