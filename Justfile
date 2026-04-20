@@ -91,10 +91,8 @@ setup-gpu-acpp:
     ACPP_SRC="${ACPP_SRC:-$HOME/Projects/AdaptiveCpp}"
     REQUIRED_BRANCH="fork-safe-metal"
     if [ ! -d "$ACPP_SRC/.git" ]; then
-        echo "ERROR: $ACPP_SRC is not a git checkout."
-        echo "Clone the fork-safe-metal branch manually, e.g.:"
-        echo "  git clone -b $REQUIRED_BRANCH <fork-url> $ACPP_SRC"
-        exit 1
+        echo "$ACPP_SRC not found; cloning fork-safe-metal from yocontra/AdaptiveCpp"
+        git clone -b "$REQUIRED_BRANCH" https://github.com/yocontra/AdaptiveCpp.git "$ACPP_SRC"
     fi
     BRANCH=$(cd "$ACPP_SRC" && git branch --show-current)
     if [ "$BRANCH" != "$REQUIRED_BRANCH" ]; then
