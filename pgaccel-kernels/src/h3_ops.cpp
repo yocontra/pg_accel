@@ -559,23 +559,188 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
     if (resolution < 0 || resolution > H3_MAX_RESOLUTION) {
         return PGACCEL_ERROR_UNSUPPORTED;
     }
-    // fp64 requested at high resolution but device is fp32-only (e.g. Metal).
-    // With CPU fallbacks removed we cannot satisfy this — surface it loudly.
-    if (use_fp64 && resolution >= 12) {
-        pgaccel_platform_caps caps = pgaccel_get_caps();
-        if (!caps.has_fp64) {
-            return PGACCEL_ERROR_UNSUPPORTED;
-        }
-    }
 
     // Cast void* to double* — the caller is responsible for providing
-    // correctly typed arrays. The GPU kernel down-converts to fp32.
+    // correctly typed arrays.
     const auto *lats = static_cast<const double *>(lat_array);
     const auto *lngs = static_cast<const double *>(lng_array);
 
-    // Trig-heavy — excellent GPU candidate. Use fp32 on device (Metal constraint).
+    const pgaccel_platform_caps caps = pgaccel_get_caps();
+    const bool want_fp64 = (use_fp64 != 0) && (resolution >= 12);
+
+    // Resolutions >= 12 need fp64 precision on the projection math; fp32
+    // cannot represent the sub-metre grid spacing. On Metal this path uses
+    // AdaptiveCpp's soft-fp64 emulation when `ACPP_METAL_ENABLE_SOFT_FP64=1`
+    // is set at runtime; on CUDA/ROCm/L0 it uses native fp64 hardware.
+    // Either way, the device probe reports `has_fp64 = true`, so the flip
+    // key is the single aspect lookup in `populate_caps()`.
+    if (want_fp64 && !caps.has_fp64) {
+        // No fp64 path available — no CPU fallback exists. Surface it so
+        // callers know to either lower resolution or enable soft-fp64.
+        return PGACCEL_ERROR_UNSUPPORTED;
+    }
+
+    // Trig-heavy — excellent GPU candidate. The fp32 kernel below rejects
+    // res >= 12 in-kernel because precision is insufficient. The fp64 branch
+    // (handled via a separate kernel dispatched when `want_fp64` is set)
+    // handles the high-resolution case.
     try {
         sycl::queue q{sycl::default_selector_v};
+
+        if (want_fp64) {
+            // ---- fp64 path (res >= 12) -------------------------------------
+            // Soft-fp64 on Metal, native fp64 on CUDA/ROCm/L0. Performance
+            // on Metal's software emulation is ~10-30x slower than native —
+            // acceptable for correctness-critical res >= 12 queries, which
+            // are rare in practice.
+            double* d_lats = sycl::malloc_device<double>(count, q);
+            double* d_lngs = sycl::malloc_device<double>(count, q);
+            uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+            uint8_t* d_valid = sycl::malloc_device<uint8_t>(count, q);
+            double* d_fc_lat = sycl::malloc_device<double>(20, q);
+            double* d_fc_lng = sycl::malloc_device<double>(20, q);
+
+            if (!d_lats || !d_lngs || !d_cells || !d_valid ||
+                !d_fc_lat || !d_fc_lng) {
+                sycl::free(d_lats, q); sycl::free(d_lngs, q);
+                sycl::free(d_cells, q); sycl::free(d_valid, q);
+                sycl::free(d_fc_lat, q); sycl::free(d_fc_lng, q);
+                return PGACCEL_ERROR_OOM;
+            }
+
+            q.memcpy(d_lats, lats, count * sizeof(double));
+            q.memcpy(d_lngs, lngs, count * sizeof(double));
+            q.memcpy(d_fc_lat, FACE_CENTER_LAT, 20 * sizeof(double));
+            q.memcpy(d_fc_lng, FACE_CENTER_LNG, 20 * sizeof(double));
+            q.wait_and_throw();
+
+            const int res = resolution;
+            const double deg2rad = DEG_TO_RAD;
+
+            const int f2bc[20] = {
+                1,  2,  3,  4,  5,  6,  7,  8,  9, 10,
+                11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+            };
+
+            q.submit([&](sycl::handler& h) {
+                h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+                    const size_t i = id[0];
+                    double lat_deg = d_lats[i];
+                    double lng_deg = d_lngs[i];
+
+                    if (res < 0 || res > 15) {
+                        d_valid[i] = 0;
+                        d_cells[i] = 0;
+                        return;
+                    }
+                    if (lat_deg < -90.0 || lat_deg > 90.0 ||
+                        lng_deg < -180.0 || lng_deg > 180.0) {
+                        d_valid[i] = 0;
+                        d_cells[i] = 0;
+                        return;
+                    }
+
+                    double lat_rad = lat_deg * deg2rad;
+                    double lng_rad = lng_deg * deg2rad;
+
+                    double best_dist = -2.0;
+                    int best_face = 0;
+                    double cos_lat = sycl::cos(lat_rad);
+                    double sin_lat = sycl::sin(lat_rad);
+                    for (int f = 0; f < 20; f++) {
+                        double cos_fc = sycl::cos(d_fc_lat[f]);
+                        double sin_fc = sycl::sin(d_fc_lat[f]);
+                        double dlng = lng_rad - d_fc_lng[f];
+                        double cos_d = sin_lat * sin_fc +
+                                       cos_lat * cos_fc * sycl::cos(dlng);
+                        if (cos_d > best_dist) {
+                            best_dist = cos_d;
+                            best_face = f;
+                        }
+                    }
+
+                    double clat = d_fc_lat[best_face];
+                    double clng = d_fc_lng[best_face];
+                    double cos_clat = sycl::cos(clat);
+                    double sin_clat = sycl::sin(clat);
+                    double dlng = lng_rad - clng;
+                    double cos_dlng = sycl::cos(dlng);
+                    double cos_c = sin_clat * sin_lat +
+                                   cos_clat * cos_lat * cos_dlng;
+                    if (cos_c < 1e-10) {
+                        d_valid[i] = 0;
+                        d_cells[i] = 0;
+                        return;
+                    }
+                    double x = (cos_lat * sycl::sin(dlng)) / cos_c;
+                    double y = (cos_clat * sin_lat -
+                                sin_clat * cos_lat * cos_dlng) / cos_c;
+
+                    if (x * x + y * y > 1.5) {
+                        d_valid[i] = 0;
+                        d_cells[i] = 0;
+                        return;
+                    }
+
+                    int base_cell = f2bc[best_face];
+
+                    const double CX[7] = { 0.0, 1.0, 0.5, -0.5,
+                                           -1.0, -0.5, 0.5 };
+                    const double CY[7] = { 0.0, 0.0, 0.866025403784438646,
+                                           0.866025403784438646, 0.0,
+                                          -0.866025403784438646,
+                                          -0.866025403784438646 };
+
+                    int digits[15];
+                    double scale = 1.0;
+                    for (int r = 0; r < res; r++) {
+                        scale /= 2.6457513110645906; // sqrt(7)
+                        double best = 1e30;
+                        int best_d = 0;
+                        for (int d = 0; d < 7; d++) {
+                            double dx = x - CX[d] * scale;
+                            double dy = y - CY[d] * scale;
+                            double dist2 = dx * dx + dy * dy;
+                            if (dist2 < best) {
+                                best = dist2;
+                                best_d = d;
+                            }
+                        }
+                        x -= CX[best_d] * scale;
+                        y -= CY[best_d] * scale;
+                        digits[r] = best_d;
+                    }
+
+                    uint64_t cell = (1ULL << 63);
+                    cell |= (1ULL << 59);
+                    cell |= (static_cast<uint64_t>(res) << 52);
+                    cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
+                    for (int r = 1; r <= 15; r++) {
+                        int shift = (15 - r) * 3 + 1;
+                        if (r <= res) {
+                            cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7)
+                                     << shift);
+                        } else {
+                            cell |= (7ULL << shift);
+                        }
+                    }
+
+                    d_valid[i] = 1;
+                    d_cells[i] = cell;
+                });
+            }).wait_and_throw();
+
+            q.memcpy(cell_ids, d_cells, count * sizeof(uint64_t));
+            q.memcpy(valid, d_valid, count * sizeof(uint8_t));
+            q.wait_and_throw();
+
+            sycl::free(d_lats, q); sycl::free(d_lngs, q);
+            sycl::free(d_cells, q); sycl::free(d_valid, q);
+            sycl::free(d_fc_lat, q); sycl::free(d_fc_lng, q);
+            pgaccel_record_gpu_exec();
+            return PGACCEL_OK;
+        }
+        // ---- fp32 path (res < 12, or caller didn't request fp64) ----------
 
         float* d_lats = sycl::malloc_device<float>(count, q);
         float* d_lngs = sycl::malloc_device<float>(count, q);

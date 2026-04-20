@@ -12,8 +12,9 @@ runtime via `sycl::device::has(...)` probes and `__acpp_if_target_*` branches, n
 compile-time backend switches.
 
 Metal is **one of five supported SYCL targets**, not an alternative to SYCL. It
-has more constraints than CUDA/ROCm/L0 (no fp64, no atomic64, in-order queues
-only) but source code is identical — only runtime kernel selection differs.
+has more constraints than CUDA/ROCm/L0 (soft fp64 at 1/32× perf, atomic64 on
+Apple8+ only, in-order queue default) but source code is identical — only
+runtime kernel selection differs.
 
 ## Compilation Flows
 
@@ -59,28 +60,27 @@ Also settable via `ACPP_TARGETS` env var or `-DACPP_TARGETS=` CMake variable.
 
 | Capability | CUDA (NVIDIA) | ROCm (AMD) | Level Zero (Intel) | Metal (Apple) | CPU |
 |---|---|---|---|---|---|
-| **Status** | Stable (v25.10) | Stable (v25.10) | Stable (v25.10) | experimental, develop | Stable |
-| **FP64** | native | native | varies by GPU | NO (soft-double planned) | native |
-| **Atomic64** | yes | yes | yes | NO | yes |
-| **OOQ queue** | yes | yes | yes | NO (deadlocks) | N/A |
+| **Status** | Stable (v25.10) | Stable (v25.10) | Stable (v25.10) | Stable (fork-safe-metal) | Stable |
+| **FP64** | native | native | varies by GPU | soft (opt-in `ACPP_METAL_ENABLE_SOFT_FP64=1`, ~1/32× perf) | native |
+| **Atomic64** | yes | yes | yes | Apple8+ (load/store/exchange/add/sub/min/max; no cmpxchg/and/or/xor) | yes |
+| **OOQ queue** | yes | yes | yes | yes (cross-queue sync via MTLSharedEvent) | N/A |
 | **USM shared** | yes | yes | yes | yes (zero-copy) | yes |
 | **USM device** | yes | yes | yes | yes | yes |
-| **USM ptr indirection** | yes | yes | yes | NO (flat only) | yes |
-| **Parallel sort lib** | thrust | rocThrust | oneDPL | NONE | std::sort |
+| **USM ptr indirection** | yes | yes | yes | NO (permanent MSL constraint, flatten instead) | yes |
+| **Parallel sort lib** | thrust | rocThrust | oneDPL | bitonic (`acpp::sort_into`) | std::sort |
 | **Memory model** | discrete PCIe | discrete PCIe | discrete/integrated | unified (zero-copy) | host |
 | **sycl::stream / printf** | yes | yes | yes | NO | yes |
-| **PCUDA dialect** | yes | yes | yes | NO | yes |
+| **PCUDA dialect** | yes | yes | yes | yes (experimental, PR #1983 merged) | yes |
 
 ### Metal-only constraints
 
-1. `fp32` only — no `double` in kernel code.
-2. In-order queues only — out-of-order deadlocks.
-3. No `atomic64` — use 32-bit atomics or reduce differently.
-4. No USM pointer indirection — pass flat arrays as kernel args, no nested pointers.
-5. No `-ffast-math` — broken llvm.minnum/maxnum on MSL emitter.
-6. No parallel sort library — bitonic sort in-tree.
-7. No `sycl::stream` / printf.
-8. Must build from `develop` branch of AdaptiveCpp (no Metal in stable yet).
+1. **fp64 via soft-double at 1/32–1/64× fp32 perf.** Enable with `ACPP_METAL_ENABLE_SOFT_FP64=1`. Opt in per-kernel; default stays fp32 for perf-bound paths. Soft-double impl is stubbed today — see "Current status" below.
+2. **Out-of-order queues work** via `MTLSharedEvent` cross-queue synchronization (AdaptiveCpp's `multi_queue_executor` handles this transparently). In-order is still the default for lowest submission latency.
+3. **Atomic64 on Apple8+** (M2 and later). Op coverage: load/store/exchange/add/sub/min/max. NOT supported: cmpxchg/and/or/xor on i64 (hardware limit, not emulatable). Pre-Apple8 GPUs (e.g. M1) fall back to u32 atomics via pg_accel's caps-aware dispatch.
+4. **No USM pointer indirection** — pass pointers as top-level kernel args. **Permanent MSL constraint** (Metal 4 does NOT enable this). Worked example: `pgaccel-kernels/src/expr_eval.cpp`.
+5. **Parallel sort** via `acpp::sort_into` (bitonic, in-tree at `include/hipSYCL/algorithms/sort/`). Power-of-2 sizes recommended; caller pads non-power-of-2 with sentinels. Not stable — use pg_accel's native Metal sort in `src/engine/executor/sort.rs` for stability-critical sorts.
+6. No `sycl::stream` / printf (no MSL `printf`).
+7. Build from the `fork-safe-metal` branch of AdaptiveCpp at `/Users/contra/Projects/AdaptiveCpp` — atomic64, soft-fp64 aspect probes, bitonic sort, and llvm.minnum/maxnum NaN-preserving lowering live there.
 
 ## Environment Variables (runtime)
 
@@ -100,7 +100,7 @@ Also settable via `ACPP_TARGETS` env var or `-DACPP_TARGETS=` CMake variable.
 |---|---|
 | `ACPP_APPDB_DIR` | Override JIT-cache location (default `$HOME/.acpp` on Linux/macOS, `%LOCALAPPDATA%\acpp` on Windows). |
 | `ACPP_ADAPTIVITY_LEVEL` | 0 disable adaptivity, 1 default (convergence at 2nd run), 2 aggressive — detects invariant kernel args and hardwires them as constants. |
-| `ACPP_ALLOCATION_TRACKING` | `1` allows runtime to track allocations for extra JIT optimizations (non-aliasing detection). Default `0` for SYCL in most cases; can reduce kernel launch latency. |
+| `ACPP_ALLOCATION_TRACKING` | `1` allows runtime to track allocations for extra JIT optimizations (non-aliasing detection). **Enabled by default as of AdaptiveCpp 25.10.** Set to `0` to reduce kernel launch latency if you don't need the JIT wins. |
 | `ACPP_JITOPT_HOST_VECTOR_MATH_LIBRARY` | `none`/`libmvec`/`svml`/`sleef`/`armpl` — override vector math library at JIT time. |
 | `ACPP_JITOPT_IADS_RELATIVE_THRESHOLD` | Default 0.8. Fraction of invocations sharing an arg value before that arg gets hardwired. |
 | `ACPP_JITOPT_IADS_RELATIVE_THRESHOLD_MIN_DATA` | Default 1024. Min kernel invocations before threshold is consulted. |
@@ -393,16 +393,19 @@ When a kernel misbehaves on a specific backend:
 5. **Increase runtime verbosity**: `ACPP_DEBUG_LEVEL=4`.
 6. **For fork-related Metal crashes**, see the "MTLBinaryArchive cache" section in the project's top-level CLAUDE.md — archive-builder failures manifest as `MTLCompilerService error 3`.
 
-## Metal-specific: known limitations (develop branch, current)
+## Metal-specific: current status (fork-safe-metal branch)
 
-- **SYCL only** — PCUDA dialect is not supported on Metal.
-- **No `double`** — soft-double planned.
-- **No atomic64** — planned.
-- **No `sycl::stream` / printf**.
+- **PCUDA dialect** — supported on Metal as of PR #1983 (experimental); pg_accel still uses SYCL only.
+- **fp64 via soft-double** — MSL emitter lowers `double` to `struct acpp_f64 { uint lo; uint hi; }` with per-op dispatch to `__acpp_sscp_soft_f64_*` symbols. Gate with `ACPP_METAL_ENABLE_SOFT_FP64=1`. Expected perf: 1/32–1/64× fp32. The libkernel `__acpp_sscp_soft_f64_*` implementations are scaffolded (all 69 symbols declared; vendored `metal-float64` upstream is a stub, so bodies currently `__builtin_trap()`). Runtime-enabled only when real IEEE-754 primitives are wired in — until then, enabling the env var will trap. pg_accel callers gate on `caps.has_fp64` which is still false by default on Metal.
+- **Atomic64 on Apple8+** (M2 and later). Op coverage: load/store/exchange/add/sub/min/max. NOT supported: cmpxchg/and/or/xor on i64 (hardware limit, not emulatable via cmpxchg-loop). Pre-Apple8 GPUs (e.g. M1) keep u32 atomics; pg_accel's `bbox_ops.cpp` dispatches on `caps.has_atomic64`.
+- **llvm.minnum/maxnum** — MSL emitter emits explicit NaN-propagating inline sequence (`isnan(a) ? b : isnan(b) ? a : metal::fmin(a, b)`), matching IEEE 754-2008 semantics regardless of `-ffast-math`. Re-enabling `-ffast-math` in `pgaccel-kernels/CMakeLists.txt` is gated behind verifying the upstream fix is in the installed AdaptiveCpp (currently a TODO).
+- **OOQ queues** — cross-queue sync via `MTLSharedEvent` is already implemented correctly in `src/runtime/metal/metal_queue.cpp:submit_queue_wait_for` and `multi_queue_executor` handles the scheduling. No deadlock in current tree; `tests/metal_ooq.cpp` passes.
+- **Bitonic sort** — `acpp::sort_into` in `include/hipSYCL/algorithms/sort/sort_into.hpp` is a thin facade over the pre-existing `hipsycl::algorithms::sorting::bitonic_sort`. Keys-only + key-value overloads. Not stable — pg_accel's native Metal sort in `sort.rs` remains the primary path.
+- **No `sycl::stream` / printf** — no MSL `printf`, no host callback path. Permanent constraint.
 - **No full USM pointer semantics** — pass flat buffers explicitly. Passing
   `struct Entity { double* data; }` and dereferencing `entity.data` inside the
-  kernel will crash. Full USM semantics planned for Metal 4.
-- **SYCL event perf is suboptimal** — known issue.
+  kernel will crash. **Permanent MSL constraint** — Metal 4 does NOT enable this. `MTL4ArgumentTable` (macOS 15+, WWDC 2025) is a binding-layout redesign, not an MMU. Use pg_accel's flat-array flattening pattern — worked example in `pgaccel-kernels/src/expr_eval.cpp`.
+- **SYCL event perf is suboptimal** — known issue, separate from the above.
 
 ## PostGIS source refs for spatial kernels
 

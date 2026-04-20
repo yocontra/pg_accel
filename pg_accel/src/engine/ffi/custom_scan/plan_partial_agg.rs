@@ -78,7 +78,7 @@ pub(super) unsafe fn plan_partial_custom_path(
 /// # Safety
 /// `raw` must be a valid `List *` of `TargetEntry *`.
 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-unsafe fn build_index_var_tlist(raw: *mut pg_sys::List) -> *mut pg_sys::List {
+pub(super) unsafe fn build_index_var_tlist(raw: *mut pg_sys::List) -> *mut pg_sys::List {
     let mut result: *mut pg_sys::List = std::ptr::null_mut();
     if raw.is_null() {
         return result;

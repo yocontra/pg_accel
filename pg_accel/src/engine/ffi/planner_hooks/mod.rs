@@ -148,7 +148,6 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
                     )
                 };
                 if !partial_rel.is_null() {
-                    // SAFETY: partial_rel is valid upper rel from planner.
                     unsafe { partial_agg::try_inject(root, input_rel, partial_rel) };
                 }
             }
@@ -2062,17 +2061,32 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     unsafe {
         let cpath = pg_sys::palloc0(std::mem::size_of::<CustomPath>()).cast::<CustomPath>();
 
-        let child_copy = {
-            let path_size = path_node_size(cheapest);
-            let copy = pg_sys::palloc(path_size).cast::<Path>();
-            std::ptr::copy_nonoverlapping(cheapest.cast::<u8>(), copy.cast::<u8>(), path_size);
-            copy
-        };
+        // custom_paths[0] holds a direct pointer to the child (no copy). PG's
+        // `create_customscan_plan` just iterates this list and recurses into
+        // `create_plan_recurse`; it does not take ownership. Earlier iterations
+        // palloc'd a shallow copy — but truncating path-subtype storage when
+        // the child is a subclass (AggPath/GatherPath/…) with fields past
+        // `sizeof(Path)` produced Paths whose trailing bytes were uninitialised,
+        // which later surfaced as "unrecognized node type: 0" during
+        // `create_plan_recurse`.
+        let child_copy: *mut Path = cheapest;
 
         (*cpath).path.type_ = NodeTag::T_CustomPath;
         (*cpath).path.pathtype = NodeTag::T_CustomScan;
         (*cpath).path.parent = output_rel;
-        (*cpath).path.pathtarget = (*output_rel).reltarget;
+        // For the partial-agg path, deep-copy the pathtarget so our
+        // CustomPath owns an independent Aggref tree. Aliasing
+        // `output_rel->reltarget` means PG's later
+        // `make_partial_grouping_target` / `prepare_sort_from_pathkeys`
+        // mutations of the shared Aggref sub-tree can leave dangling or
+        // zero-tagged nodes, which surface as "unrecognized node type: 0"
+        // in `create_plan_recurse`. The non-partial branch below keeps the
+        // direct reference because its tlist is never rewritten post-path.
+        (*cpath).path.pathtarget = if is_partial {
+            pg_sys::copy_pathtarget((*output_rel).reltarget)
+        } else {
+            (*output_rel).reltarget
+        };
         (*cpath).path.param_info = std::ptr::null_mut();
         // Partial path must declare parallel_safe=true so PG can place it
         // inside a Gather; we inherit parallel_workers from the chosen
@@ -2145,6 +2159,31 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         (*cpath).custom_private = priv_list;
 
         if is_partial {
+            let child_tag = (*cheapest.cast::<pg_sys::Node>()).type_ as i32;
+            let child_pathtype = (*cheapest).pathtype as i32;
+            let child_parent = (*cheapest).parent;
+            let child_parent_null = child_parent.is_null();
+            let child_pathtarget = (*cheapest).pathtarget;
+            let child_pathtarget_null = child_pathtarget.is_null();
+            let cpath_tag = (*cpath.cast::<pg_sys::Node>()).type_ as i32;
+            let cpath_pathtype = (*cpath).path.pathtype as i32;
+            let n_exprs = if (*output_rel).reltarget.is_null() {
+                -1
+            } else {
+                pg_sys::list_length((*(*output_rel).reltarget).exprs)
+            };
+            pgrx::warning!(
+                "pg_accel partial_agg pre-add: cpath tag={cpath_tag} pathtype={cpath_pathtype} \
+                 psafe={} pworkers={} rows={} \
+                 child tag={child_tag} pathtype={child_pathtype} psafe={} pworkers={} \
+                 parent_null={child_parent_null} pathtarget_null={child_pathtarget_null} \
+                 output_rel n_reltarget_exprs={n_exprs}",
+                (*cpath).path.parallel_safe,
+                (*cpath).path.parallel_workers,
+                (*cpath).path.rows,
+                (*cheapest).parallel_safe,
+                (*cheapest).parallel_workers,
+            );
             pg_sys::add_partial_path(output_rel, cpath.cast());
         } else {
             add_path(output_rel, cpath.cast());

@@ -36,11 +36,14 @@ Offsets are from the start of the detoasted varlena, i.e. bytes
 
 ```
 0..4   varlena header (total_size << 2)
-4..7   srid[3]  (big-endian, 21-bit SRID)
+4..7   srid[3]  (big-endian, 21-bit SRID; low 21 bits of the 24-bit field)
 7      gflags (u8)
-         bit 0 HasZ, bit 1 HasM, bit 2 HasBBox, bit 3 IsGeodetic, bit 6 Version
-8..24  BOX2DF (only if HasBBox): 4 * f32 in order xmin, xmax, ymin, ymax
-              (PostGIS on-disk order — reordered to [xmin,ymin,xmax,ymax] by the extractors)
+         bit 0 Z (0x01), bit 1 M (0x02), bit 2 BBox (0x04), bit 3 Geodetic (0x08),
+         bit 4 Extended/reserved (0x10), bit 5 Solid (0x20, gserialized2 only),
+         bit 6 Version (0x40; 0 = gserialized1 / PostGIS <3.0, 1 = gserialized2 / PostGIS >=3.0)
+8..24  on-disk bbox (only if HasBBox): 4 * f32 in alternating order xmin, xmax, ymin, ymax
+              (this is the gserialized embedded bbox, not BOX2DF — BOX2DF the GiST key
+              is {xmin, ymin, xmax, ymax}; extractors reorder to [xmin,ymin,xmax,ymax])
 geom_start = 8 or 24 depending on HasBBox
   geom_start +0..+4   wkb_type (u32 LE): 1=POINT, 2=LINESTRING, 3=POLYGON
   POINT:      +4..+20  x(f64), y(f64)   (no npoints field — matches gserialized2_from_lwpoint)
@@ -58,6 +61,8 @@ No alignment padding for 2D polygons
 - `HAS_BBOX_BIT = 1 << 26` (`header.rs:11`) — gflags bit 2 after reading bytes 4..8 as u32 LE
 - `BOX2DF_SIZE = 16` (`header.rs:14`)
 - `WKB_POINT_TYPE = 1`, `WKB_LINESTRING_TYPE = 2`, `WKB_POLYGON_TYPE = 3` (`header.rs:17-23`)
+  (OGC/PostGIS WKB also defines 4=MULTIPOINT, 5=MULTILINESTRING, 6=MULTIPOLYGON,
+  7=GEOMETRYCOLLECTION — pg_accel routes these to `GeomType::Unknown` → CPU recheck.)
 
 ## Output Type
 

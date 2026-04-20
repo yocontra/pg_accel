@@ -1,7 +1,15 @@
 // reduce.cpp — GPU reduction kernels (Phase 4 A9)
 //
 // Provides sum, min, max reductions for fp32/fp64/i64, plus mask popcount.
-// fp64 variants return PGACCEL_UNSUPPORTED on Metal (no fp64 hardware).
+// fp64 variants execute natively on CUDA/ROCm/L0. On Metal they execute
+// via AdaptiveCpp's soft-fp64 emulation when `ACPP_METAL_ENABLE_SOFT_FP64=1`
+// is set at process start (or `PGACCEL_FORCE_SOFT_FP64=1` flips the probe
+// for A/B testing). If fp64 is genuinely unavailable, the caps probe
+// reports `has_fp64 = false` and the fp64 entry points return
+// PGACCEL_UNSUPPORTED — there is no CPU fallback.
+//
+// Performance note: Metal soft-fp64 is ~10-30x slower than native fp64.
+// The dispatcher should prefer fp32 reductions when precision allows.
 
 #include "pgaccel_ffi.h"
 #include <cstddef>
@@ -278,7 +286,9 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data,
 }
 
 // ---------------------------------------------------------------------------
-// Public API — fp64 (CUDA/ROCm/Level Zero only)
+// Public API — fp64 (native on CUDA/ROCm/Level Zero, soft-fp64 on Metal
+// when `ACPP_METAL_ENABLE_SOFT_FP64=1`). Gated by the runtime probe
+// `caps.has_fp64`; when false, returns PGACCEL_UNSUPPORTED.
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data,
@@ -739,10 +749,13 @@ pgaccel_status tree_reduce_sumsq_sycl(sycl::queue& q, const T* data,
     return PGACCEL_OK;
 }
 
-// Stats partial parameterized on accumulator type. fp32 variant used on
-// Metal; fp64 variant used on CUDA/ROCm/L0. Count stored as uint32_t in the
-// on-device struct (work-group has at most WG_SIZE elements so 32-bit count
-// is ample even after log2(n) merges within a group); host promotes to u64.
+// Stats partial parameterized on accumulator type. fp32 variant used when
+// `caps.has_fp64 == false` (older Metal / GPUs without soft-fp64 enabled);
+// fp64 variant used natively on CUDA/ROCm/L0 and via AdaptiveCpp's
+// soft-fp64 emulation on Metal when `ACPP_METAL_ENABLE_SOFT_FP64=1`.
+// Count stored as uint32_t in the on-device struct (work-group has at most
+// WG_SIZE elements so 32-bit count is ample even after log2(n) merges
+// within a group); host promotes to u64.
 template <typename Acc, typename CountT>
 struct StatsPartialT {
     Acc sum;
@@ -889,8 +902,9 @@ extern "C" pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data,
     return PGACCEL_ERROR_NO_DEVICE;
 }
 
-// fp64 input: requires device fp64 (returns UNSUPPORTED on Metal).
-// Kernel accumulator is double.
+// fp64 input: requires device fp64 (native on CUDA/ROCm/L0, soft-fp64 on
+// Metal when `ACPP_METAL_ENABLE_SOFT_FP64=1`). Returns UNSUPPORTED only if
+// the runtime probe reports `has_fp64 = false`. Kernel accumulator is double.
 extern "C" pgaccel_status pgaccel_reduce_sum_sq_f64(const double* data,
                                                      size_t count,
                                                      double* result) {

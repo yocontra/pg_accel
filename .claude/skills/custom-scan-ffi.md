@@ -5,6 +5,9 @@ description: How to implement PostgreSQL Custom Scan Provider in Rust via unsafe
 
 # Custom Scan Provider FFI for pg_accel
 
+All struct/callback details below are verified against PG 17 (`REL_17_STABLE`
+`src/include/nodes/extensible.h` and `src/include/executor/nodeCustom.h`).
+
 ## Overview
 
 PG's Custom Scan Provider lets extensions inject custom execution nodes into query plans.
@@ -30,6 +33,11 @@ static GPUACCEL_PATH_METHODS: pg_sys::CustomPathMethods = pg_sys::CustomPathMeth
 
 ### 2. CustomScanMethods (Plan Finalization)
 Set on `CustomScan.methods` inside `PlanCustomPath`.
+
+Plans may travel through `copyObject` / out-in (e.g. parallel workers), so
+`CustomScanMethods` must also be registered by name during `_PG_init`:
+`RegisterCustomScanMethods(&GPUACCEL_SCAN_METHODS)`. The out/readfuncs path
+does `GetCustomScanMethods(CustomName, missing_ok)` on deserialize.
 
 ```rust
 #[repr(C)]
@@ -85,7 +93,29 @@ Query Execution:
   12. If EXPLAIN: PG calls ExplainCustomScan → we output stats
 ```
 
+## CustomPath / CustomScan Flags (PG 17)
+
+Bit mask on `CustomPath.flags` and mirrored on `CustomScan.flags`:
+
+| Flag | Meaning |
+|------|---------|
+| `CUSTOMPATH_SUPPORT_BACKWARD_SCAN` | Node supports backward scan |
+| `CUSTOMPATH_SUPPORT_MARK_RESTORE` | Node supports mark/restore (must supply `MarkPosCustomScan` + `RestrPosCustomScan`) |
+| `CUSTOMPATH_SUPPORT_PROJECTION` | Node can evaluate scalar exprs over scanned Vars; otherwise only Vars of the scanned rel are requested |
+
 ## Planner Hooks
+
+PG 17 signatures (from `src/include/optimizer/paths.h`):
+
+```c
+typedef void (*set_rel_pathlist_hook_type)(
+    PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTblEntry *rte);
+
+typedef void (*set_join_pathlist_hook_type)(
+    PlannerInfo *root, RelOptInfo *joinrel,
+    RelOptInfo *outerrel, RelOptInfo *innerrel,
+    JoinType jointype, JoinPathExtraData *extra);
+```
 
 ```rust
 static mut PREV_REL_HOOK: pg_sys::set_rel_pathlist_hook_type = None;
@@ -114,37 +144,56 @@ unsafe extern "C" fn gpuaccel_rel_pathlist_hook(
 
 1. **All PG allocations happen in PG memory contexts** — use `palloc`/`palloc0`, NOT Rust `Box`
 2. **CustomPath must be allocated via palloc** (it lives in PG's planner memory context)
-3. **custom_private** must be a PG `List` of PG-allocated nodes (typically `Const`)
-4. **Rust state** stored in `CustomScanState` goes in a `Box` that we `Box::leak` into
-   the `custom_ps` field, then reclaim in `EndCustomScan`
+3. **custom_private** must be a `List *` of nodes that `copyObject` can handle
+   (`Const`, `Integer`, etc.) — plan trees get `copyObject`'d.
+4. **custom_ps is RESERVED** — it is `List *custom_ps` (list of child `PlanState`
+   nodes). Do NOT stash Rust pointers there. Store Rust state in an extended
+   struct that embeds `CustomScanState` as its first field and is allocated by
+   `CreateCustomScanState`. Cast `CustomScanState *` back to your struct pointer
+   in later callbacks. Free the Rust box in `EndCustomScan`.
 5. **Never free PG-allocated memory from Rust** — PG's memory context handles it
 
 ```rust
-// Storing Rust state in CustomScanState
-unsafe extern "C" fn create_scan_state(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
-    let state = Box::new(GpuAccelState { /* ... */ });
-    let css = /* allocate CustomScanState via palloc */;
-    (*css).custom_ps = Box::into_raw(state) as *mut _;  // leak into PG node
-    css as *mut pg_sys::Node
+// Extended state that embeds CustomScanState as its first field.
+#[repr(C)]
+struct GpuAccelScanState {
+    css: pg_sys::CustomScanState,   // must be first
+    rust: *mut GpuAccelRust,         // Box::into_raw
 }
 
-// Reclaiming in EndCustomScan
+unsafe extern "C" fn create_scan_state(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
+    // SAFETY: palloc0 zeroes the struct; we fix up type tag + methods below.
+    let ess = pg_sys::palloc0(size_of::<GpuAccelScanState>()) as *mut GpuAccelScanState;
+    (*ess).css.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
+    (*ess).css.methods = &GPUACCEL_EXEC_METHODS;
+    (*ess).rust = Box::into_raw(Box::new(GpuAccelRust::default()));
+    ess as *mut pg_sys::Node
+}
+
 unsafe extern "C" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
-    let state = Box::from_raw((*node).custom_ps as *mut GpuAccelState);
-    // state dropped here, Rust resources freed
-    // PG memory context handles PG allocations
+    let ess = node as *mut GpuAccelScanState;
+    if !(*ess).rust.is_null() {
+        drop(Box::from_raw((*ess).rust));  // Rust resources freed
+        (*ess).rust = core::ptr::null_mut();
+    }
+    // PG memory context reclaims the CustomScanState palloc
 }
 ```
 
-## PG Version Differences (15–18)
+## PG Version Notes
 
-Key struct layout differences to handle via `#[cfg(feature = "pgXX")]`:
-- `CustomPath` field order may vary
-- `CustomExecMethods` may have additional fields in newer versions
-- `RegisterCustomScanMethods` signature
-- `ExplainCustomScan` callback signature for JSON explain
+pg_accel targets PG 17. For reference, PG-version-specific fields in the
+execution-state struct: `CustomScanState.slotOps` (`TupleTableSlotOps *`) was
+added in PG 16 (commit cee1209); `CustomScanState.pscan_len` is the DSM size
+used by the `EstimateDSM` / `InitializeDSM` / `InitializeWorker` parallel
+callbacks. If/when we add back-compat for PG 15/18, the likely drift points are:
 
-Always test on all target PG versions.
+- `CustomExecMethods` gaining new optional callbacks (new fields appended)
+- `CustomPath` / `CustomScan` adding fields (`custom_restrictinfo` was added
+  relatively recently; present in PG 17)
+- `ExplainCustomScan` signature stability across explain format changes
+
+Verify against `src/include/nodes/extensible.h` on the target branch.
 
 ## Common Pitfalls
 

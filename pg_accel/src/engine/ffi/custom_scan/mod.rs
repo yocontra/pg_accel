@@ -599,36 +599,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
 
-        // Use the original tlist expressions so PG's set_customscan_references
-        // can map Sort pathkeys and other upper-level references correctly.
-        // custom_scan_tlist: original expressions define the scan tuple layout
-        //   (ExecTypeFromTL extracts types from Aggref.aggtype / Var.vartype).
-        //   fix_scan_expr adjusts Var offsets during plan finalization.
-        // plan.targetlist: original expressions allow prepare_sort_from_pathkeys
-        //   to find group key Vars for ORDER BY. fix_upper_expr then maps each
-        //   expression to Var(INDEX_VAR, resno) referencing custom_scan_tlist.
-        // copyObject creates independent copies so our lists don't alias
-        // other plan nodes' target lists.
-        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
-        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-
-        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
-        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
-        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
-        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
-        (*cscan).custom_plans = custom_plans;
-        (*cscan).flags = (*best_path).flags;
-        (*cscan).scan.scanrelid = 0;
-        (*cscan).methods = &raw const AGG_SCAN_METHODS.0;
-
-        // Serialize: [strategy=Agg, batch_size, threads, fn_oid=0,
-        //             target_attno=0, accel_strategy=GpuReduce,
-        //             num_aggs, op0, attno0, op1, attno1, ...]
-        let batch_size = gucs::min_batch_size();
-        let expected_threads = resolve_thread_count();
-
-        // Read aggregate descriptors from the path's custom_private.
+        // Read aggregate descriptors + partial flag from the path's custom_private.
         // Path layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...,
         //   has_gk, (gk fields)?, self_scan_relid, is_partial]
         // The two trailing scalars are always present: is_partial is the last
@@ -638,6 +609,48 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         let path_len = pg_sys::list_length(path_priv) as usize;
         let self_scan_relid = list_int_at(path_priv, (path_len - 2) as c_int);
         let is_partial = list_int_at(path_priv, (path_len - 1) as c_int);
+
+        // custom_scan_tlist: original expressions define the scan tuple layout
+        //   (ExecTypeFromTL extracts types from Aggref.aggtype / Var.vartype).
+        //
+        // plan.targetlist shape depends on whether this is a partial-agg path:
+        //   - non-partial: keep the original Aggref-bearing expressions so
+        //     prepare_sort_from_pathkeys can still find group-key Vars for
+        //     upper-level ORDER BY; fix_upper_expr rewrites callers to
+        //     Var(INDEX_VAR, resno) referencing custom_scan_tlist.
+        //   - partial: build an INDEX_VAR-only targetlist NOW so that
+        //     set_plan_references never walks into raw Aggref sub-nodes (which
+        //     would trigger `unrecognized node type: 9 (T_Aggref)` — or,
+        //     after the planner zeroes out Aggref sub-fields in a partial
+        //     context, `unrecognized node type: 0`).
+        //
+        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.targetlist = if is_partial != 0 {
+            plan_partial_agg::build_index_var_tlist(tlist)
+        } else {
+            pg_sys::copyObjectImpl(tlist.cast()).cast()
+        };
+
+        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        (*cscan).custom_plans = custom_plans;
+        (*cscan).flags = (*best_path).flags
+            | if is_partial != 0 {
+                pg_sys::CUSTOMPATH_SUPPORT_PROJECTION
+            } else {
+                0
+            };
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const AGG_SCAN_METHODS.0;
+
+        // Serialize: [strategy=Agg, batch_size, threads, fn_oid=0,
+        //             target_attno=0, accel_strategy=GpuReduce,
+        //             num_aggs, op0, attno0, op1, attno1, ...]
+        let batch_size = gucs::min_batch_size();
+        let expected_threads = resolve_thread_count();
 
         let mut list: *mut pg_sys::List = std::ptr::null_mut();
         list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Agg as c_int).cast());

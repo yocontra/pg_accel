@@ -24,6 +24,17 @@ static constexpr double CLOSE_DIST_M_FP32 = 1.0;   // 1 m
 // ---------------------------------------------------------------------------
 // Helpers — templated for fp32/fp64 dual paths
 // ---------------------------------------------------------------------------
+//
+// The `use_fp64` parameter on each public entry point selects between the
+// fp32 and fp64 instantiations of these templates. No Metal-specific
+// special-casing lives in this file: the fp64 branch is dispatched by the
+// caller whenever `caps.has_fp64` is true, which on Metal is gated by the
+// runtime env var `ACPP_METAL_ENABLE_SOFT_FP64=1` (AdaptiveCpp soft-double)
+// or the in-process override `PGACCEL_FORCE_SOFT_FP64=1`. CUDA/ROCm/L0
+// report `has_fp64 = true` natively. Near-degenerate inputs (antipodal
+// points, colinear segments) depend on the tighter EPS_FP64 thresholds
+// above, so turning on soft-fp64 on Metal materially reduces false
+// "UNCERTAIN" results in the three-layer pipeline.
 
 template <typename T>
 static inline bool is_finite_coord(T x, T y) {

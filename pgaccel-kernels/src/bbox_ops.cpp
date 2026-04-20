@@ -15,8 +15,11 @@ namespace {
 // SYCL kernel — parallel over all (i,j) pairs
 // ---------------------------------------------------------------------------
 
-template <typename T>
-pgaccel_status bbox_intersects_bulk_sycl(
+// Kernel body parametrised over element type `T` and hit-counter type `C`.
+// `C` is `uint64_t` when the device advertises `sycl::aspect::atomic64`,
+// `uint32_t` otherwise.
+template <typename T, typename C>
+pgaccel_status bbox_intersects_bulk_sycl_impl(
     sycl::queue& q,
     const T* boxes_a,
     size_t count_a,
@@ -31,8 +34,7 @@ pgaccel_status bbox_intersects_bulk_sycl(
     T* d_a = sycl::malloc_device<T>(count_a * 4, q);
     T* d_b = sycl::malloc_device<T>(count_b * 4, q);
     uint8_t* d_result = sycl::malloc_device<uint8_t>(total_pairs, q);
-    // Use uint32_t for atomic counter — Metal lacks 64-bit atomics.
-    uint32_t* d_hits = sycl::malloc_device<uint32_t>(1, q);
+    C* d_hits = sycl::malloc_device<C>(1, q);
 
     if (!d_a || !d_b || !d_result || !d_hits) {
         sycl::free(d_a, q);
@@ -46,7 +48,7 @@ pgaccel_status bbox_intersects_bulk_sycl(
         // Copy inputs to device, zero the hit counter
         q.memcpy(d_a, boxes_a, count_a * 4 * sizeof(T));
         q.memcpy(d_b, boxes_b, count_b * 4 * sizeof(T));
-        q.memset(d_hits, 0, sizeof(uint32_t));
+        q.memset(d_hits, 0, sizeof(C));
         q.wait_and_throw();
 
         const size_t cb = count_b; // capture for kernel lambda
@@ -73,22 +75,24 @@ pgaccel_status bbox_intersects_bulk_sycl(
                 d_result[idx] = intersects ? 1 : 0;
 
                 if (intersects) {
-                    // SAFETY: atomic ref to device memory for concurrent increment
+                    // SAFETY: atomic ref to device memory for concurrent
+                    // increment. Counter type `C` is `uint64_t` when the
+                    // device supports `sycl::aspect::atomic64`, else `uint32_t`.
                     sycl::atomic_ref<
-                        uint32_t,
+                        C,
                         sycl::memory_order::relaxed,
                         sycl::memory_scope::device,
                         sycl::access::address_space::global_space
                     > hits_ref(*d_hits);
-                    hits_ref.fetch_add(static_cast<uint32_t>(1));
+                    hits_ref.fetch_add(static_cast<C>(1));
                 }
             });
         }).wait_and_throw();
 
         // Copy results back to host
         q.memcpy(result, d_result, total_pairs * sizeof(uint8_t));
-        uint32_t gpu_hits = 0;
-        q.memcpy(&gpu_hits, d_hits, sizeof(uint32_t));
+        C gpu_hits = 0;
+        q.memcpy(&gpu_hits, d_hits, sizeof(C));
         q.wait_and_throw();
 
         if (hit_count) {
@@ -108,6 +112,29 @@ pgaccel_status bbox_intersects_bulk_sycl(
     sycl::free(d_hits, q);
 
     return PGACCEL_OK;
+}
+
+template <typename T>
+pgaccel_status bbox_intersects_bulk_sycl(
+    sycl::queue& q,
+    const T* boxes_a,
+    size_t count_a,
+    const T* boxes_b,
+    size_t count_b,
+    uint8_t* result,
+    size_t* hit_count
+) {
+    const pgaccel_platform_caps caps = pgaccel_get_caps();
+    if (caps.has_atomic64) {
+        // u64 atomic path — no overflow up to 2^64 pairs.
+        return bbox_intersects_bulk_sycl_impl<T, uint64_t>(
+            q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
+    }
+    // u32 fallback — Metal lacks 64-bit atomics on older devices; counter
+    // overflows at 2^32 pairs (e.g. >4B spatial pair operations in a single
+    // batch). The dispatcher bounds batch size well below this threshold.
+    return bbox_intersects_bulk_sycl_impl<T, uint32_t>(
+        q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
 }
 
 } // anonymous namespace

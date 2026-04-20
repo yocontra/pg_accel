@@ -50,6 +50,22 @@ add_sycl_to_target(TARGET pgaccel_kernels)
 add_sycl_to_target(TARGET pgaccel_kernels_shared)
 message(STATUS "pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp")
 
+# TODO(ffast-math): Re-enable `-ffast-math` as a global compile option once the
+# upstream AdaptiveCpp fix for `llvm.minnum`/`llvm.maxnum` on the Metal SSCP
+# backend lands (PR title: "fix(metal): IEEE-correct llvm.minnum/maxnum").
+# Conditions for re-enabling:
+#   1. AdaptiveCpp main contains the IEEE-correct minnum/maxnum lowering on
+#      Metal — verified by running `just gpu-test` with the flag on and
+#      confirming no NaN-propagation regressions in reduce/spatial tests.
+#   2. `~/local` install picks up the fixed libacpp-rt.dylib (re-run
+#      `just setup-gpu-acpp`).
+#   3. fp64 reduce kernels still pass on CUDA/ROCm/L0 with fast-math on.
+# When all three hold, add:
+#     target_compile_options(pgaccel_kernels        PRIVATE -ffast-math)
+#     target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
+# Kernels with NaN-preservation requirements (currently none — verify at
+# re-enable time) would need a per-kernel `-fno-fast-math` override.
+
 # Standalone test binary
 add_executable(test_device test/test_device.cpp)
 target_link_libraries(test_device PRIVATE pgaccel_kernels_shared)
