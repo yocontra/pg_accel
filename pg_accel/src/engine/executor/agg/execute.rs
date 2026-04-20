@@ -70,6 +70,8 @@ impl AggColumn {
                 min_val: f64::INFINITY,
                 max_val: f64::NEG_INFINITY,
                 has_value: false,
+                bit_acc: 0,
+                bool_acc: false,
             },
             gpu_values: Vec::new(),
             gpu_dispatched: false,
