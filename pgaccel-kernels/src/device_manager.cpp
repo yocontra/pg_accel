@@ -7,7 +7,6 @@
 #include <cstdlib>
 
 #include <sycl/sycl.hpp>
-#include <hipSYCL/runtime/fork_safety.h>
 #include <string>
 #include <algorithm>
 #include <cctype>
@@ -155,15 +154,12 @@ extern "C" pgaccel_status pgaccel_init(void) {
         if (g_init_pid == current_pid) {
             return PGACCEL_OK;
         }
-        // Forked child — release inherited backend state through
-        // AdaptiveCpp's fork-safety entry point, then fall through to a
-        // fresh device pick + queue construction. The reset drops stale
-        // MTL::Device/CommandQueue pointers and the in-memory kernel
-        // cache; compiled .metallib files on disk survive and will be
-        // reloaded without re-entering MTLCompilerService.
+        // Forked child — drop our cached SYCL queue and fall through to a
+        // fresh device pick + queue construction. AdaptiveCpp detects the
+        // fork internally at its dispatch chokepoints and recovers (Metal /
+        // ROCm) or raises a clean error (CUDA / Level Zero) on the next use.
         g_queue = nullptr;
         g_unified_memory = false;
-        hipsycl_rt_reset_after_fork();
         fprintf(stderr, "pgaccel: fork detected (parent=%d, child=%d)"
                         " — attempting fresh GPU init\n",
                 g_init_pid, current_pid);

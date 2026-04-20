@@ -1,131 +1,148 @@
 ---
 name: Benchmark Methodology
-description: How to run and report pg_accel benchmarks with honest three-way comparison and statistical rigor
+description: How to run and report pg_accel benchmarks — two-arm Accel vs PG-parallel comparison, statistical rigor, workload layout, honest reporting rules.
 ---
 
 # pg_accel Benchmark Methodology
 
-## Three-Way Comparison (Always)
+## Hard Rule: Two Arms, Never Three
 
-Every benchmark reports three modes:
-1. **PG single-threaded** — `max_parallel_workers_per_gather = 0`
-2. **PG parallel** — `max_parallel_workers_per_gather = 4`
-3. **pg_accel** — extension enabled with auto thread config
+The only modes the harness measures are:
 
-We claim speedup vs **PG parallel**, not vs single-threaded. This is the honest comparison.
+- `BenchMode::Accel` — extension ON, `max_parallel_workers_per_gather = DEFAULT`
+- `BenchMode::PgParallel` — extension OFF (`SET pg_accel.enabled = off`), `max_parallel_workers_per_gather = DEFAULT`
 
-## Benchmark Framework Usage
+See `pg_accel_bench/src/runner.rs:891` for the enum and `:910` for the per-mode `SET`s. Both arms let PG choose its default worker count — the comparison is always pg_accel vs parallel PG.
+
+There is no `BenchMode::PgSingle`, no `single_ms` field, no "vs Single" column. The rule in top-level `CLAUDE.md` (Benchmark Rule #11) is absolute: comparing against `max_parallel_workers_per_gather = 0` is deceptive because 100% of production PG uses parallel query. Any PR adding a single-threaded arm must be rejected.
+
+## Harness Entrypoints
 
 ```bash
-# Setup test data (deterministic via seed)
-pg_accel_bench setup --rows 1000000 --seed 42
-
-# Run single workload
-pg_accel_bench run --workload spatial_join --mode accel --iterations 10 --warmup 3
-
-# Run all workloads, all modes
-pg_accel_bench run-all --iterations 10 --warmup 3
-
-# Generate report
-pg_accel_bench report --format markdown
+just bench                 # iterations=10 warmup=5, toy GUCs, setup+run
+just bench-rigorous        # iterations=30 warmup=5, realistic GUCs, plan capture
+cargo run -p pg_accel_bench --release -- <subcommand>
 ```
 
-## GUC Configuration for Each Mode
+Subcommands (`pg_accel_bench/src/main.rs:29`): `Setup`, `Run`, `Report`, `Validate`.
 
-### PG Single-Threaded
-```sql
-SET max_parallel_workers_per_gather = 0;
-SET pg_accel.enabled = off;
-```
+Key `Run` flags (`main.rs:54`):
+- `--iterations N` (default 10) / `--warmup N` (default 5, min 5 for warm cache)
+- `--timing raw|explain|both` (default `raw` — `Instant::now()` wall clock)
+- `--cache-mode warm|cold|both` (default `warm`)
+- `--speedup-from median|mean` (default `median`)
+- `--realistic-gucs` — apply `GucProfile::realistic()` (`runner.rs:163`)
+- `--capture-plans` — dump `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` to `benchmarks/plans.txt`
+- `--skip-guc-verify` — dev-only override for `PGC_POSTMASTER` mismatch hard-fail
+- `--workload NAME` / `--category CSV` — filter
 
-### PG Parallel
-```sql
-SET max_parallel_workers_per_gather = 4;
-SET max_parallel_workers = 8;
-SET pg_accel.enabled = off;
-```
+Default connection: `host=localhost port=28817 dbname=postgres` (pgrx default for PG17).
 
-### pg_accel
-```sql
-SET max_parallel_workers_per_gather = 0;  -- let pg_accel handle parallelism
-SET pg_accel.enabled = on;
-SET pg_accel.workers = 0;  -- auto
-SET pg_accel.gpu_enabled = on;
-```
+## Row Scales
 
-## Statistical Requirements
+Fixed constant, not configurable: `ROW_SCALES = [10_000, 100_000, 1_000_000, 10_000_000]` (`runner.rs:23`). Minimum reportable scale is 10K — lower measurements fall below the libpq round-trip noise floor.
 
-- **Minimum iterations:** 10 (after warmup)
-- **Warmup runs:** 3 (excluded from stats)
-- **Report:** mean, median, stddev, min, max, 95% CI
-- **p-value:** two-sample t-test, claim "faster" only when p < 0.01
-- **Variance:** if stddev > 15% of mean, flag and investigate
-- **Outliers:** > 3σ flagged but not removed
+## Timing Model
 
-## Deterministic Data Generation
+`TimingMode` (`runner.rs:43`):
+- `RawWallClock` (default) — `client.simple_query()` wrapped in `Instant::now()`. No `EXPLAIN` instrumentation. Use for any published number.
+- `ExplainAnalyze` — parses `Execution Time:` from `EXPLAIN ANALYZE`. Penalizes parallel plans ~15-25% vs Custom Scan because per-tuple instrumentation fires in every worker. Historical default, kept for audit.
+- `Both` — runs each iteration twice; stats use the raw column.
 
-All data generators use seeded RNG:
+`CacheMode` (`runner.rs:70`):
+- `Warm` (default) — measure after warmup. `DISCARD ALL` between iterations, but OS page cache is retained.
+- `Cold` — `sync && purge` (macOS) or `echo 3 > /proc/sys/vm/drop_caches` (Linux) between every timed iteration; warmup disabled.
+- `Both` — side-by-side columns.
+
+## Order Randomization
+
+Each iteration randomly chooses Accel-first or Parallel-first (`runner.rs:794`). Kills systematic bias from shared-buffer priming and plan-cache carry. `DISCARD ALL` runs between the two timings within an iteration.
+
+## Statistical Methodology
+
+Implemented in `pg_accel_bench/src/stats.rs`:
+
+| Fn | Line | What |
+|---|---|---|
+| `mean` | `:38` | arithmetic mean |
+| `median` | `:49` | = `percentile(xs, 50.0)` |
+| `percentile` | `:57` | linear interpolation (NumPy inclusive) |
+| `stddev` | `:91` | sample stddev |
+| `cv_percent` | `:80` | coefficient of variation (%) |
+| `confidence_interval_95` | `:120` | t-distribution 95% CI |
+| `speedup` | `:140` | `baseline_mean / experiment_mean` |
+| `welch_t_test_p` | `:159` | two-sample Welch's t-test p-value |
+| `paired_t_test_p` | `:201` | paired t-test (uses iteration pairing) |
+| Cohen's d | `:236` | effect size |
+
+Report policy:
+- Headline speedup uses **median-of-parallel / median-of-accel** by default (`SpeedupSource::Median`, `runner.rs:89`) — robust to cold-start jitter.
+- Flag significance when Welch's p < 0.05 AND |Cohen's d| ≥ 0.8.
+- CV > 15% on a cell is surfaced in the report, not silently smoothed.
+- All iterations are kept; no outlier removal. 3σ points are labeled, not dropped.
+
+## Workload Layout
+
+Workloads live in `pg_accel_bench/src/workloads/` and implement the `Workload` trait (`workloads/mod.rs:104`):
+
 ```rust
-let mut rng = StdRng::seed_from_u64(seed);
+pub trait Workload: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn category(&self) -> &'static str { "gpu" }
+    fn setup_sql(&self, rows: usize) -> Vec<String>;
+    fn pre_query_sql(&self) -> Vec<String> { vec![] }
+    fn query_sql(&self) -> String;
+    fn baseline_query_sql(&self) -> Option<String> { None }  // override when accel/baseline SQL must differ
+    fn cleanup_sql(&self) -> Vec<String>;
+}
 ```
 
-Same seed = same data = reproducible results across machines.
+Registration: `all_workloads()` in `workloads/mod.rs:159`.
 
-## Workload Definitions
+Categories (used for `--category`):
 
-| # | Workload | Query Pattern | Target |
-|---|----------|--------------|--------|
-| 1 | spatial_join | `FROM points, polygons WHERE ST_Contains(poly, point)` | ≥5x (CUDA fp64), ≥3x (Metal fp32), ≥2x (CPU) |
-| 2 | proximity | `WHERE ST_DWithin(location, query, 500)` | ≥2x |
-| 3 | h3_bulk | `h3_latlng_to_cell(point, 7) GROUP BY cell` | ≥3x |
-| 4 | aggregate | `GROUP BY dept SUM/AVG/COUNT WHERE selective` | ≥2x |
-| 5 | index_recheck | GiST index `point <@ box` 100K candidates | ≥3x |
-| 6 | join_residual | `ON key AND ts < ts AND interval` | ≥2x |
-| 7 | topk_sort | `ORDER BY expression LIMIT 100` on 5M | ≥3x |
-| 8 | fts_rank | `@@ to_tsquery ORDER BY ts_rank LIMIT 20` | ≥2x |
-| 9 | jsonb_filter | `@> '{"type":"X"}' AND ->>'amount' > 100` | ≥2x |
-| 10 | range_overlap | `time_range && time_range` join | ≥2x |
-| 11 | network_query | `ip_range @> '10.0.1.50'::inet` | ≥2x |
-| 12 | bulk_transform | `ST_Transform(geom, 3857)` on large table | ≥2x |
-| 13 | raster_map_algebra | `ST_MapAlgebra` NDVI on 1024² tiles | ≥10x (GPU) |
-| 14 | raster_clip | `ST_Clip(rast, polygon)` on 1024² tiles | ≥5x (GPU) |
-| 15 | raster_reclass | `ST_Reclass` elevation categories | ≥5x (GPU) |
+- `gpu_reduce`, `gpu_hashagg`, `gpu_sort`, `gpu_hashjoin`
+- `gpu_spatial`, `gpu_window`, `gpu_expr`, `gpu_raster`
+- `ssbm` (Star Schema Benchmark Q1.1–Q4.3)
+- `mixed`
+- `regression` — workloads expected to be ~1.00x (e.g. `OltpPoint`, `SmallTable`). They prove the cost model correctly declines to dispatch. Slowdown here = overhead regression to investigate.
 
-## Report Format
+`baseline_query_sql()` exists because some function names (e.g. `public.h3_latlng_to_cell`) are intercepted by pg_accel's adapters — the baseline arm must call a path pg_accel cannot hook, often a schema-qualified alias or the underlying `h3-pg` function by a different symbol.
 
-```markdown
-# pg_accel Benchmarks v0.1.0
+## GUC Profiles
 
-## Hardware
-- CPU: Apple M3 Max (16 cores)
-- RAM: 36 GB unified
-- GPU: Apple M3 Max (40 cores)
-- OS: macOS 15.x
-- PG: 17.x
-- PostGIS: 3.5.x
-- pg_accel.workers: auto (6)
+`GucProfile` (`runner.rs:111`) has two built-ins:
 
-## Configuration
-- shared_buffers: 4GB
-- work_mem: 256MB
-- max_parallel_workers_per_gather: 4 (PG parallel mode)
-- pg_accel.workers: 0 (auto → 6)
-- pg_accel.gpu_enabled: on
+- `toy()` (`:138`) — pgrx dev defaults: 128MB `shared_buffers`, 4MB `work_mem`, 2 parallel workers. Not publishable.
+- `realistic()` (`:163`) — 16GB `shared_buffers`, 512MB `work_mem`, 48GB `effective_cache_size`, 8 parallel-per-gather / 12 max-parallel, 2GB `maintenance_work_mem`, `jit=off`, `random_page_cost=1.1`.
 
-## Results (1M rows, 10 iterations, 3 warmup)
+`POSTMASTER_SETTINGS` (`runner.rs:132`) lists `shared_buffers` and `max_worker_processes`: these are `PGC_POSTMASTER`, so `ALTER SYSTEM` + `pg_reload_conf()` won't apply them. The harness hard-fails if observed values drift from requested values unless `--skip-guc-verify` is passed. Reported GUCs are always the observed `SHOW` values, not the requested ones.
 
-| Workload | PG Single (ms) | PG Parallel (ms) | pg_accel (ms) | Speedup vs Parallel | p-value |
-|----------|----------------|-------------------|---------------|---------------------|---------|
-| spatial_join | 12400 ± 320 | 4200 ± 180 | 820 ± 45 | 5.1x | < 0.001 |
-| ...
-```
+## Accel Threading Note
+
+pg_accel does **not** use rayon. The accel arm's parallelism is bounded by `src/engine/thread_budget.rs` (shared-memory LWLock budget) plus whatever the GPU dispatch path does internally. Parallel workers in the baseline arm are normal PG parallel query (separate backend processes, not threads). The benchmark does not configure `pg_accel.workers` — it is auto-derived from the hardware profile, same as `DeviceLimits` (`src/engine/cost.rs`).
+
+## Data Generation
+
+Deterministic via `--seed` (default 42). Seed is forwarded to each workload's `setup_sql`. Without a seed flag, reproducibility is not guaranteed because some workloads use PG's `random()` for bulk data.
+
+## Report Outputs
+
+`--format markdown|json|csv`:
+- Markdown — human report with hardware profile, observed GUCs, per-workload rows.
+- JSON — full structured output, suitable for replay via `pg_accel_bench report`.
+- CSV — per-(workload × scale × mode × iteration) row for external analysis.
+
+Plan capture writes `benchmarks/plans.txt` (referenced in `report.rs:879` and `runner.rs:1183`). SQL snippets under `benchmarks/*.sql` are legacy hand-run scripts — they are not what `just bench` executes; the canonical path is the Rust harness above.
 
 ## Honesty Rules
 
-1. Always show PG parallel as the baseline, not single-threaded
-2. Document exact GUC settings for all modes
-3. Include workloads where PG parallel already wins
-4. Report variance — low variance = reliable claim
-5. Anyone must be able to reproduce with documented commands
-6. Test on consumer hardware (MacBook/Mac Mini), not just servers
-7. Don't cherry-pick iteration results — report all
+1. Baseline is always PG parallel with extension loaded but `pg_accel.enabled = off` — measures acceleration, not load overhead.
+2. No single-threaded arm (`BenchMode::PgSingle` does not exist; do not reintroduce it).
+3. Publish observed GUCs, not requested ones.
+4. Keep regression workloads in the headline table — hiding ~1.00x cases is cherry-picking.
+5. Report median-based speedups by default; mean-based only for backwards-compat.
+6. Flag CV > 15% instead of smoothing.
+7. Cold-cache numbers (`--cache-mode cold` or `both`) are required for any externally-published report — `DISCARD ALL` does not clear the OS page cache.
+8. If a regression workload shows speedup, the cost model is wrong, not the win — investigate before publishing.

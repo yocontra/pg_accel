@@ -1,197 +1,165 @@
 ---
 name: pgrx Extension Development
-description: How to build PostgreSQL extensions with pgrx 0.17, including unsafe FFI patterns for Custom Scan Provider
+description: pgrx 0.17 entrypoints for pg_accel — _PG_init ordering, shmem LWLock thread budget, hook registration, GUCs, Custom Scan wiring. GPU-only, forked parallel workers, no threads.
 ---
 
 # pgrx Extension Development for pg_accel
 
-## pgrx Version: 0.17.0
-- Supports PG 14, 15, 16, 17, 18
-- Rust edition 2024
-- `PgHooks` trait was REMOVED in v0.16.0 — all hooks are raw unsafe FFI now
+## Version and crate layout
 
-## Key Commands
-```bash
-cargo pgrx init          # initialize pgrx (downloads + builds PG)
-cargo pgrx run pg17      # start PG 17 with extension loaded
-cargo pgrx test pg17     # run #[pg_test] tests
-cargo pgrx install       # install into system PG
-cargo pgrx package       # create distributable package
-```
+- pgrx 0.17.0 (`pg_accel/Cargo.toml:31`, tests `:41`).
+- Crate root: `pg_accel/src/lib.rs`. Workspace member `pg_accel/` (library cdylib).
+- `pg_module_magic!()` is at `pg_accel/src/lib.rs:66`.
+- `PgHooks` safe trait was removed in pgrx 0.16 — all hooks use raw
+  `pg_sys::*_hook_type` statics plus `unsafe extern "C-unwind"` callbacks.
 
-## Extension Skeleton
-```rust
-use pgrx::prelude::*;
+## `_PG_init` flow (`pg_accel/src/lib.rs:74`)
 
-pg_module_magic!();
+Signature: `pub unsafe extern "C-unwind" fn _PG_init()`, gated with `#[pg_guard]`.
+Steps, in order (any reordering breaks the build or crashes forks):
 
-#[pg_guard]
-pub extern "C" fn _PG_init() {
-    // Register GUCs, shared memory, hooks
-}
+1. `engine::panic_hook::install()` — must be first so subsequent init panics
+   serialize to `$PGDATA/pg_accel_panic.log` before SIGABRT.
+2. `engine::gucs::init_gucs()` — registers all `pg_accel.*` GUCs
+   (`pg_accel/src/engine/gucs.rs:69`). Uses `GucRegistry::define_{bool,int,float,enum}_guc`
+   with `c"..."` CStr literals, `GucContext::Userset`, `GucFlags::default()` or
+   `GucFlags::UNIT_MS`. `PgAccelLogLevel` derives `PostgresGucEnum`
+   (`gucs.rs:48`).
+3. `engine::otel::init()` — tracing-subscriber init, reads `log_level` GUC.
+4. `#[cfg(not(test))]` block — shmem + exit callback (see below).
+5. `engine::ffi::custom_scan::register()` (`pg_accel/src/engine/ffi/custom_scan/mod.rs:274`)
+   — calls `pg_sys::RegisterCustomScanMethods` for all six
+   `CustomScanMethods` vtables (scan, join, sort, agg, window, preagg).
+6. `unsafe { engine::ffi::planner_hooks::install() }`
+   (`pg_accel/src/engine/ffi/planner_hooks/mod.rs:52`) — installs three planner
+   hooks, each saving the previous pointer into `static mut PREV_*`:
+   - `set_rel_pathlist_hook` → `pgaccel_set_rel_pathlist`
+   - `set_join_pathlist_hook` → `pgaccel_set_join_pathlist`
+   - `create_upper_paths_hook` → `pgaccel_create_upper_paths`
+7. `crate::gpu::prefork_warmup()` (`pg_accel/src/gpu/mod.rs:71`) — calls
+   `pgaccel_prefork_warmup` in postmaster so SkyLight/IOKit is initialized
+   before fork. Does NOT spawn threads; full `pgaccel_init` is deferred to
+   each backend's first query (`gpu/mod.rs:39`).
+8. `pgrx::log!` summary.
 
-#[pg_extern]
-fn my_function(input: i32) -> i32 {
-    input * 2
-}
-```
+## Shared memory: thread budget (`pg_accel/src/engine/thread_budget.rs`)
 
-## Custom Scan Provider (UNSAFE FFI)
+Single `PgLwLock<ThreadBudgetData>` registered in `_PG_init`.
 
-pgrx has NO safe wrappers for Custom Scan. Use `pg_sys` directly.
+- Static: `pub static BUDGET: PgLwLock<ThreadBudgetData> = unsafe { PgLwLock::new(c"pg_accel_thread_budget") };`
+  at `thread_budget.rs:68`.
+- `ThreadBudgetData` holds `total_allocated: i32` + `[BackendSlot; 256]`
+  (PID + per-backend allocation). Must `unsafe impl PGRXSharedMemory`
+  (`thread_budget.rs:59`). Only `Copy` primitives — no heap, no pointers.
+- Registration: `pub fn init_shmem() { pg_shmem_init!(BUDGET); }` at
+  `thread_budget.rs:86`, gated `#[cfg(not(test))] #[cfg(not(feature = "pg_test"))]`
+  because the pgrx test binary lacks `shmem_request_hook` symbols; a stub
+  `init_shmem()` exists for `pg_test` (`thread_budget.rs:93`).
+- API: `request_threads(n) -> i32` grants 0..=n; `release_threads(n)`;
+  `cleanup_backend()` drains all slots owned by `MyProcPid`. All under
+  `BUDGET.exclusive()` (exclusive LWLock guard). Dead-slot reclaim probes
+  via `BackendPidGetProc(pid)` under non-test (`thread_budget.rs:234`).
 
-### Registering Planner Hooks
-```rust
-static mut PREV_HOOK: Option<pg_sys::set_rel_pathlist_hook_type> = None;
+### `before_shmem_exit` release (`pg_accel/src/lib.rs:97`)
 
-#[pg_guard]
-pub extern "C" fn _PG_init() {
-    unsafe {
-        PREV_HOOK = pg_sys::set_rel_pathlist_hook;
-        pg_sys::set_rel_pathlist_hook = Some(my_pathlist_hook);
-    }
-}
-
-unsafe extern "C" fn my_pathlist_hook(
-    root: *mut pg_sys::PlannerInfo,
-    rel: *mut pg_sys::RelOptInfo,
-    rti: pg_sys::Index,
-    rte: *mut pg_sys::RangeTblEntry,
-) {
-    // Call previous hook first
-    if let Some(prev) = PREV_HOOK {
-        prev(root, rel, rti, rte);
-    }
-    // Then add our custom paths
-    // ...
-}
-```
-
-### Custom Scan Provider — THREE Separate Vtables
-
-PG's Custom Scan Provider requires **three distinct vtables** for different lifecycle phases:
+In `_PG_init` (non-test only):
 
 ```rust
-// 1. CustomPathMethods — planner phase (path → plan conversion)
-#[repr(C)]
-static GPUACCEL_PATH_METHODS: pg_sys::CustomPathMethods = pg_sys::CustomPathMethods {
-    CustomName: c"GpuAccelScan".as_ptr(),
-    PlanCustomPath: Some(plan_gpuaccel_path),
-    ReparameterizeCustomPathByChild: None,
-};
-
-// 2. CustomScanMethods — plan finalization (create execution state)
-#[repr(C)]
-static GPUACCEL_SCAN_METHODS: pg_sys::CustomScanMethods = pg_sys::CustomScanMethods {
-    CustomName: c"GpuAccelScan".as_ptr(),
-    CreateCustomScanState: Some(create_gpuaccel_scan_state),
-};
-
-// 3. CustomExecMethods — execution phase (all the actual work)
-#[repr(C)]
-static GPUACCEL_EXEC_METHODS: pg_sys::CustomExecMethods = pg_sys::CustomExecMethods {
-    CustomName: c"GpuAccelScan".as_ptr(),
-    BeginCustomScan: Some(begin_gpuaccel_scan),
-    ExecCustomScan: Some(exec_gpuaccel_scan),
-    EndCustomScan: Some(end_gpuaccel_scan),
-    ReScanCustomScan: Some(rescan_gpuaccel_scan),
-    MarkPosCustomScan: None,
-    RestrPosCustomScan: None,
-    EstimateDSMCustomScan: None,    // not needed (we don't use PG parallel)
-    InitializeDSMCustomScan: None,
-    ReInitializeDSMCustomScan: None,
-    InitializeWorkerCustomScan: None,
-    ShutdownCustomScan: None,
-    ExplainCustomScan: Some(explain_gpuaccel_scan),
-};
-```
-
-**Wiring:** `CustomPath.methods = &PATH_METHODS` → planner calls `PlanCustomPath` →
-sets `CustomScan.methods = &SCAN_METHODS` → executor calls `CreateCustomScanState` →
-sets `CustomScanState.methods = &EXEC_METHODS`.
-
-### Adding a Custom Path
-```rust
-unsafe fn add_gpuaccel_path(root: *mut PlannerInfo, rel: *mut RelOptInfo) {
-    // palloc0 a CustomPath (makeNode macro not directly callable from Rust)
-    let size = std::mem::size_of::<pg_sys::CustomPath>();
-    let path = pg_sys::palloc0(size) as *mut pg_sys::CustomPath;
-    (*path).path.type_ = pg_sys::NodeTag::T_CustomPath;
-    (*path).path.pathtype = pg_sys::NodeTag::T_CustomScan;
-    (*path).path.parent = rel;
-    (*path).path.pathtarget = (*rel).reltarget;
-    (*path).path.rows = (*rel).rows;
-    (*path).path.startup_cost = /* our estimate */;
-    (*path).path.total_cost = /* our estimate */;
-    (*path).methods = &GPUACCEL_PATH_METHODS;  // CustomPathMethods, NOT ScanMethods
-    (*path).custom_private = /* strategy info as List */;
-
-    pg_sys::add_path(rel, &mut (*path).path);
-}
-```
-
-## Shared Memory
-```rust
-use pgrx::prelude::*;
-use std::sync::atomic::AtomicI32;
-
-static THREAD_BUDGET: PgLwLock<ThreadBudgetShmem> = PgLwLock::new();
-
-#[derive(Copy, Clone)]
-struct ThreadBudgetShmem {
-    total_active: i32,
-    max_total: i32,
-}
-
-unsafe impl PGRXSharedMemory for ThreadBudgetShmem {}
-
-#[pg_guard]
-pub extern "C" fn _PG_init() {
-    pg_shmem_init!(THREAD_BUDGET);
-}
-```
-
-## GUCs
-```rust
-use pgrx::prelude::*;
-
-static WORKERS: GucSetting<i32> = GucSetting::<i32>::new(0);
-
-#[pg_guard]
-pub extern "C" fn _PG_init() {
-    GucRegistry::define_int_guc(
-        "pg_accel.workers",
-        "Number of rayon threads per backend (0 = auto)",
-        "Set to 0 for automatic detection based on CPU cores and connections",
-        &WORKERS,
-        0,
-        16,
-        GucContext::Userset,
-        GucFlags::default(),
+unsafe {
+    pgrx::pg_sys::before_shmem_exit(
+        Some(pgaccel_shmem_exit),
+        pgrx::pg_sys::Datum::from(0),
     );
 }
 ```
 
-## Testing
-```rust
-#[cfg(any(test, feature = "pg_test"))]
-#[pgrx::pg_schema]
-mod tests {
-    use pgrx::prelude::*;
+The callback (`lib.rs:133`) runs `engine::thread_budget::cleanup_backend()`
+then `engine::otel::flush_tracing()`. `cleanup_backend` wraps its body in
+`std::panic::catch_unwind` so a never-wired shmem (extension loaded without
+`shared_preload_libraries`) cannot abort the exit path (`thread_budget.rs:176`).
 
-    #[pg_test]
-    fn test_function() {
-        let result = Spi::get_one::<i32>("SELECT my_function(21)");
-        assert_eq!(result, Ok(Some(42)));
-    }
-}
-```
+Rule #8 satisfied: every `request_threads` has a matching `release_threads`
+call site, and any leak is reclaimed by `cleanup_backend` at process exit.
 
-## Critical Safety Rules
-1. ALL PG C function calls happen on the main backend thread only (BatchedEval)
-2. rayon threads are for GPU orchestration, sort-key extraction, top-k merge — NEVER for calling PG functions
-3. Only the main backend thread handles PG signals
-4. `CHECK_FOR_INTERRUPTS()` must be called between batches on main thread
-5. All PG memory allocation must happen on main thread
-6. `pg_sys::Datum` stays on main thread — extract to Rust types before GPU/rayon work
-7. Register `before_shmem_exit` callback to clean up thread budget on exit
+## Parallel: processes, not threads (Rule #9)
+
+`PARALLEL SAFE` on a function means PG may run it in a parallel worker —
+which is a **forked process** with its own address space, PGPROC, and
+MyProcPid. There is no shared Rust heap, no `Arc`, no `Mutex` across
+workers; coordination happens through PG's shared memory (`PgLwLock` or
+DSM) or through Gather's `shm_mq` tuple queue.
+
+Implications:
+- Each worker re-runs `_PG_init` effects lazily: on first query it calls
+  `ensure_initialized()` (`gpu/mod.rs:39`) which calls `pgaccel_init()`
+  once per process.
+- `BUDGET` is shared across all backends (postmaster + workers) because it
+  lives in the PG shared-memory segment registered by `pg_shmem_init!`.
+- Rayon is NOT used anywhere. There is no intra-backend thread pool. GPU
+  kernels dispatch from the main backend thread via the AdaptiveCpp/SYCL
+  bridge, which may spawn driver-internal threads outside our control but
+  never calls back into PG.
+- `CustomExecMethods` in `pg_accel/src/engine/ffi/custom_scan/mod.rs:208`
+  implements the PG parallel-worker callbacks (`EstimateDSMCustomScan`,
+  `InitializeDSMCustomScan`, `InitializeWorkerCustomScan`, `ShutdownCustomScan`)
+  — each worker runs an independent instance; partial outputs flow through
+  Gather.
+
+## GUC registration pattern
+
+See `pg_accel/src/engine/gucs.rs:69`. All defaults in the top-level
+`CLAUDE.md` "GUCs" table. Getters are `#[inline] #[must_use] pub fn`
+wrappers over `GucSetting::get()` (e.g. `gucs::enabled()` at `:149`,
+`gucs::min_batch_size()` at `:156`).
+
+## Custom Scan — three vtables (`pg_accel/src/engine/ffi/custom_scan/mod.rs`)
+
+For each executor kind (scan/join/sort/agg/window/preagg) there is:
+
+1. `CustomPathMethods` — planner, sets `PlanCustomPath` (e.g.
+   `plan_custom_path_scan` at `:297`). Accessor: `scan_path_methods()` at `:234`.
+2. `CustomScanMethods` — sets `CreateCustomScanState`. Registered via
+   `RegisterCustomScanMethods` in `register()` at `:274`.
+3. `CustomExecMethods` — execution vtable (`BeginCustomScan`, `ExecCustomScan`,
+   `EndCustomScan`, `ReScanCustomScan`, DSM callbacks for parallel workers,
+   `ExplainCustomScan`). At `mod.rs:208`.
+
+Vtables are stored as `SyncPathMethods` / `SyncScanMethods` / `SyncExecMethods`
+newtype wrappers (to satisfy `Sync` on raw `CustomName: *const c_char`) and
+exposed via `&raw const FOO.0`.
+
+### Adding a `CustomPath`
+
+Allocate via `pg_sys::palloc0(size_of::<CustomPath>())`, set
+`type_ = T_CustomPath`, `pathtype = T_CustomScan`, `parent`, `pathtarget`,
+`rows`, `startup_cost`, `total_cost`, `methods = scan_path_methods()`,
+`custom_private = <List-encoded strategy>`, then `pg_sys::add_path(rel, ...)`.
+See `private_data::serialize_preagg_private` at
+`pg_accel/src/engine/ffi/custom_scan/private_data.rs:389` for the private-data
+serialization pattern.
+
+## Safety rules (`CLAUDE.md` §Critical Safety Rules)
+
+1. Every PG C call on the main backend thread only (Rule #1).
+2. Every `unsafe` block carries a `// SAFETY:` comment (Rule #5). See
+   `lib.rs:96` and `thread_budget.rs:69` for the house style.
+3. No `unwrap()` outside tests (Rule #6) — `cargo clippy` runs
+   `deny(unwrap_used)`. Use `unwrap_or`, `?`, or explicit `match`.
+4. `CHECK_FOR_INTERRUPTS()` between batches on main thread (Rule #7).
+5. Thread budget released in `before_shmem_exit` (Rule #8, above).
+6. `PARALLEL SAFE` != thread-safe — forked processes (Rule #9, above).
+
+## Testing (`#[cfg(feature = "pg_test")]`)
+
+`mod pg_test` at `lib.rs:167` provides `setup()` and `postgresql_conf_options()`
+returning `shared_preload_libraries = 'pg_accel'`. `pg_stubs.rs` is compiled
+only under `#[cfg(all(test, target_os = "macos"))]` (`lib.rs:161`) to provide
+dummy symbols so the standalone test binary links on Sequoia+; it is never
+included in the production cdylib.
+
+## Commands (top-level `Justfile`)
+
+`just test` → `cargo pgrx test pg17`. `just check`, `just lint`, `just fmt`
+for CI. `just package` produces the installable `.so`. Never run
+`cargo pgrx init` in CI — use the Homebrew `pg_config` path (see memory
+reference `reference_pg_install.md`).

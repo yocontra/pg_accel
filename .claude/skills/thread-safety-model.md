@@ -1,193 +1,130 @@
 ---
 name: pg_accel Thread Safety Model
-description: Rules for rayon thread pool interaction with PostgreSQL's process model, signal handling, and thread budget
+description: Single-threaded main-backend execution model, SYCL-side device parallelism, shared-memory thread budget skeleton, fork safety on Apple Silicon, and PG process-model constraints
 ---
 
 # pg_accel Thread Safety Model
 
-## Core Rules
+pg_accel has **no CPU worker threads**. All Rust code runs on the main
+PostgreSQL backend thread. Parallelism comes from:
 
-### Rule 0: NO PG C function calls from rayon threads
-ALL PG/extension C functions are called on the main backend thread only.
-Even trivially cheap functions like `int4abs` aren't worth threading — rayon
-dispatch overhead per item exceeds a single arithmetic instruction. And every
-non-trivial PG function calls `palloc` (unsafe from threads).
+1. **SYCL / AdaptiveCpp device-side work** (CUDA / ROCm / Level Zero / Metal)
+   dispatched synchronously from the main thread via the C++ bridge.
+2. **PG's own parallel workers** (forked processes, not threads) when pg_accel
+   does not replace the plan.
 
-**Two dispatch strategies:**
-1. **BatchedEval** — all C functions on main thread, Custom Scan node batching
-2. **GpuSpatial** — GPU kernel (layers 1+2) + CPU recheck on main thread (layer 3)
+There is no rayon, no `std::thread::spawn`, no crossbeam, no tokio. Verify
+with `rg '\brayon\b|thread::spawn|crossbeam|tokio' pg_accel/src` — no matches.
 
-rayon is used ONLY for:
-- GPU kernel orchestration (launching + collecting GPU work)
-- Parallel sort-key extraction (extracting Rust values from Datums for GPU sort)
-- Top-k merge across partitions
+## Core rules
 
-### Rule 1: rayon threads MUST NOT call PG functions
-rayon worker threads can ONLY:
-- Read from memory set up by the main thread
-- Write results to pre-allocated buffers
-- Do pure Rust computation (sort merging, data extraction, GPU dispatch)
+### R1: Everything Rust runs on the main backend thread
+All `dispatch::*`, all executor nodes (`src/engine/executor/*`), all GPU bridge
+calls (`src/gpu/bridge.rs`), the planner hooks
+(`src/engine/ffi/planner_hooks/`) and Custom Scan callbacks
+(`src/engine/ffi/custom_scan/`) execute on the backend that was handed the
+query. `dispatch` is marked `unsafe` with the contract that it must be called
+on the main backend thread (`src/engine/dispatch/mod.rs:68-73`).
 
-rayon threads MUST NOT:
-- Call ANY PG C function (not even "simple" ones like `int4abs`)
-- Call `palloc`, `pfree`, or any PG memory allocator
-- Access PG catalog (SPI, syscache)
-- Call `elog`, `ereport`
-- Touch PG's memory contexts
-- Call `CHECK_FOR_INTERRUPTS()`
-- Access `CurrentMemoryContext` or any thread-local PG state
+### R2: SYCL work blocks the main thread
+GPU kernels are enqueued + awaited synchronously; the main thread waits on the
+SYCL queue. There is no background GPU polling thread. This means PG FFI
+(`palloc`, `FunctionCallInvoke`, `ereport`, `CurrentMemoryContext`, SPI,
+syscache, elog) is always safe to call before/after a GPU dispatch — there is
+no thread boundary to respect.
 
-### Rule 2: Signal masking
-PG uses signals for cancellation and communication. rayon threads MUST mask:
-- `SIGINT` (cancel)
-- `SIGTERM` (terminate)
-- `SIGUSR1` (latch)
-- `SIGUSR2`
+### R3: CHECK_FOR_INTERRUPTS between batches
+Cancellation (`pg_cancel_backend`, statement timeout) is only processed when
+the backend calls `CHECK_FOR_INTERRUPTS()`. Executors do this between batches:
 
-```rust
-rayon::ThreadPoolBuilder::new()
-    .start_handler(|_| {
-        unsafe {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::sigaddset(&mut set, libc::SIGINT);
-            libc::sigaddset(&mut set, libc::SIGTERM);
-            libc::sigaddset(&mut set, libc::SIGUSR1);
-            libc::sigaddset(&mut set, libc::SIGUSR2);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        }
-    })
-    .build()
-```
+- `src/engine/executor/scan/exec.rs:68`
+- `src/engine/executor/agg/execute.rs:915` (every 8192 rows)
+- `src/engine/executor/vectorized_scan.rs:138` (every 8192 rows)
+- `src/engine/executor/join/mod.rs:272` (between outer tuples)
+- `src/engine/executor/preagg/mod.rs:477`
 
-### Rule 3: CHECK_FOR_INTERRUPTS between batches
-The main thread (PG backend) must call `CHECK_FOR_INTERRUPTS()` between every batch.
-This is how PG processes cancel requests. If we don't call this, `pg_cancel_backend()`
-will appear to hang.
+The stride between checks lives in `DeviceLimits`
+(`src/engine/cost/device_limits.rs:76`), not as a magic constant.
 
-```rust
-for batch in batches {
-    // Evaluate predicates on main thread (BatchedEval)
-    let results = evaluate_batch(batch, fmgr_info);
+### R4: PARALLEL SAFE labels describe forked processes, not threads
+When the planner marks a Custom Scan parallel-safe, PG may run it inside its
+own parallel workers — each worker is a **forked process** with its own
+address space. Nothing is shared across workers except shared memory. Do not
+treat the parallel marker as permission to spawn threads.
 
-    // CRITICAL: check for cancel between batches
-    unsafe { pg_sys::CHECK_FOR_INTERRUPTS() };
+### R5: Fork safety (Apple Silicon / Metal)
+SYCL queues, Metal devices, and AdaptiveCpp SSCP state cannot survive
+`fork(2)`. `_PG_init` runs in the postmaster before fork; heavy GPU init is
+deferred to each backend's first query (see `src/lib.rs:107-113`,
+`src/gpu/mod.rs:68-74`). The only thing done pre-fork is `prefork_warmup`
+(`pgaccel_prefork_warmup` FFI, `src/gpu/bridge.rs:37-39`) which touches
+SkyLight / IOKit so `MTLCreateSystemDefaultDevice` in the forked child does
+not crash. `prefork_warmup` explicitly **does not spawn threads**.
 
-    emit_results(results);
-}
-```
+The `.metallib` + `.metalar` cache in `~/.acpp/apps/global/jit-cache/` is how
+kernel dispatch works in a forked backend without `MTLCompilerService`; see
+top-level CLAUDE.md "MTLBinaryArchive cache" for diagnostics.
 
-### Rule 4: Datum stays on main thread
-`pg_sys::Datum` contains raw pointers that may reference PG backend-local memory.
-Since all function dispatch is on the main thread (BatchedEval), Datums never
-cross thread boundaries for function calls.
+## Shared-memory thread budget (skeleton)
 
-For GPU sort/reduce, extract to Rust values first:
-```rust
-// Extract sort keys on main thread
-let keys: Vec<f64> = datums.iter().map(|d| extract_f64(*d)).collect();
-// GPU sort operates on extracted Rust values, not Datums
-let sorted_indices = gpu_sort(&keys);
-```
+`src/engine/thread_budget.rs` defines a `PgLwLock<ThreadBudgetData>` that
+tracks per-backend thread allocations in shared memory (256 backend slots).
+The API:
 
-### Rule 5: All function dispatch is BatchedEval
-Every PG/extension C function call goes through `FunctionCallInvoke` on the main
-thread. The Custom Scan node provides speedup via late materialization and predicate
-reordering — not via parallelizing function calls. GPU kernels provide parallelism
-for spatial predicates only.
+- `request_threads(n) -> i32` — `src/engine/thread_budget.rs:105`
+- `release_threads(n)` — `src/engine/thread_budget.rs:142`
+- `cleanup_backend()` — `src/engine/thread_budget.rs:169`, wired to
+  `before_shmem_exit` via `pgaccel_shmem_exit` in `src/lib.rs:131-138`
+- `init_shmem()` — called from `_PG_init` (`src/lib.rs:92`)
+- `reclaim_dead_backends()` — probes tracked PIDs with
+  `BackendPidGetProc` under the exclusive lock
+  (`src/engine/thread_budget.rs:219`) and frees slots for gone backends.
 
-## Thread Budget System
+**Current status:** the budget is a vestigial skeleton.
+`request_threads` hardcodes `max = 0` (`thread_budget.rs:110`, comment
+"GPU-only mode: no CPU worker thread budget") so every request is
+granted without bound and nothing in the executor actually calls
+`request_threads`/`release_threads` today — grep confirms the only
+references are inside `thread_budget.rs` itself. The LwLock, shmem init
+and `before_shmem_exit` wiring are kept so reintroducing a CPU thread
+budget later is cheap. Do not delete them.
 
-### Architecture
-```
-Shared Memory (via LWLock):
-┌──────────────────────────────────┐
-│ total_active_threads: i32        │
-│ max_total: i32 (from GUC)       │
-│ per_backend_slots: [(pid, n)]    │
-└──────────────────────────────────┘
+## Signal masking
 
-Per-Backend:
-┌──────────────────────────────────┐
-│ rayon::ThreadPool (lazily init)  │
-│ my_thread_count: usize           │
-│ my_slot_index: usize             │
-└──────────────────────────────────┘
-```
+Not applicable. There are no worker threads to mask signals on.
+`pthread_sigmask` is never called in Rust code (`rg pthread_sigmask
+pg_accel/src` → no matches). Signals are handled by PG on the backend
+process as normal.
 
-### Lifecycle
-```
-Query starts:
-  1. request_threads(wanted) → granted (may be < wanted)
-  2. rayon pool available for GPU orchestration + sort-key extraction
-  3. Execute batches (C function calls on main thread, GPU work via rayon)
+## Interaction with PG parallel query
 
-Query ends (normal):
-  4. release_threads(granted) → counter decremented
+- If pg_accel injects a Custom Scan, PG's Gather / parallel workers are
+  typically replaced — GPU provides the parallelism.
+- If pg_accel runs underneath a Gather (partial aggregate path,
+  `src/engine/ffi/planner_hooks/partial_agg.rs`), each forked worker has
+  its own backend, its own SYCL queue (created lazily after fork), and
+  its own `BackendSlot`. No coordination between workers at the pg_accel
+  layer — PG handles the partial→final aggregation.
 
-Backend exits (normal):
-  5. before_shmem_exit callback → release_threads(my_count)
+## Cleanup checklist
 
-Backend crashes (kill -9):
-  6. Other backends detect stale PID on next request_threads()
-     → reclaim dead backend's budget
-```
+- Normal query end → Custom Scan `End` node path runs.
+- Error / statement timeout / cancel → PG runs `End` paths via
+  `AbortTransaction`.
+- Backend exit (normal or `pg_terminate_backend`) →
+  `pgaccel_shmem_exit` fires, calling `thread_budget::cleanup_backend`
+  and `otel::flush_tracing` (`src/lib.rs:133-138`).
+- `kill -9` → other backends' next `request_threads` detects the dead
+  PID via `BackendPidGetProc` and reclaims the slot
+  (`thread_budget.rs:234`).
 
-### Budget Exhaustion
-When `request_threads()` returns 0:
-- GpuSpatial downgrades to BatchedEval (CPU recheck for all rows)
-- GPU sort/reduce falls back to main-thread sequential
-- Query still returns correct results
-- No error, no retry
+## What must still be done on the main thread
 
-### Interaction with PG Parallel
-
-When GpuAccelScan REPLACES a Gather + parallel workers plan:
-- PG's workers DON'T spawn (our Custom Scan replaces the parallel plan)
-- GPU provides parallelism instead of PG's forked workers
-
-When pg_accel accelerates WITHIN a PG parallel plan:
-- Both our rayon pool AND PG's workers may be active
-- Budget auto-calc subtracts max_parallel_workers to avoid oversubscription
-
-### Auto Thread Calculation
-```
-available_cores = cpu_cores - max_parallel_workers
-expected_active_backends = max(max_connections / 4, 1)
-per_backend = clamp(available_cores / expected_active_backends, 1, min(cpu_cores, 16))
-```
-
-## Error Handling
-
-Errors in rayon threads cannot use PG's ereport. Strategy:
-
-```rust
-// In rayon thread: capture error as Result
-let results: Vec<Result<f64, PgAccelError>> = batch
-    .par_iter()
-    .map(|v| -> Result<f64, PgAccelError> {
-        // ... computation that might fail
-        Ok(result)
-    })
-    .collect();
-
-// On main thread: check for errors, then use PG's error reporting
-for result in &results {
-    if let Err(e) = result {
-        // Now safe to call ereport on main thread
-        ereport!(ERROR, PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
-                 "pg_accel: batch dispatch error: {}", e);
-    }
-}
-```
-
-## Cleanup Checklist
-
-Every code path that acquires thread budget MUST have a corresponding release:
-- [ ] Normal query completion → EndCustomScan releases budget
-- [ ] LIMIT early termination → EndCustomScan releases budget
-- [ ] Error/exception → EndCustomScan releases budget (PG calls End on error)
-- [ ] Statement timeout → EndCustomScan releases budget
-- [ ] pg_cancel_backend → EndCustomScan releases budget
-- [ ] pg_terminate_backend → before_shmem_exit callback releases budget
-- [ ] kill -9 → other backends detect stale PID and reclaim
+Even though there are no worker threads, executors still obey the
+"PG-C-functions-on-main-backend-only" invariant because code paths that
+look like they could be parallelized (predicate eval, tuple build,
+`heap_getnext`, `ExecEvalExpr`, `FunctionCallInvoke`) are all in PG C
+and all called from the executor node's `Next` callback on the main
+backend. Do not introduce a thread pool to "help" any of these — the
+project has repeatedly chosen SYCL-side parallelism over CPU threading
+(see `CLAUDE.md` rules #1, #7, #8, #9).

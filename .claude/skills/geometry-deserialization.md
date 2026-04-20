@@ -1,140 +1,102 @@
 ---
 name: Geometry Deserialization Guide
-description: How to read PostGIS GSERIALIZED format in Rust for bbox extraction and vertex array extraction without liblwgeom
+description: How to read PostGIS GSERIALIZED v2 in pure Rust for bbox / point / linestring / polygon extraction without liblwgeom, as implemented in pg_accel/src/adapters/extractors/geometry/
 ---
 
-# PostGIS Geometry Deserialization for pg_accel
+# PostGIS GSERIALIZED Deserialization (pg_accel)
 
-## GSERIALIZED Format (PostGIS 3.x)
+Pure-Rust extractors live under
+`pg_accel/src/adapters/extractors/geometry/`. There is no liblwgeom link;
+unsupported WKB types produce `GeomType::Unknown` with empty coords and the
+three-layer pipeline routes them to CPU recheck.
 
-PostGIS stores geometries as `GSERIALIZED` — a versioned binary format.
-We read this in **pure Rust** for simple types (POINT, bbox) to avoid liblwgeom dependency.
-Complex types fall back to PostGIS C functions on the main thread.
+Entry points (all `pgrx::pg_sys::Datum` in):
 
-### Header Layout (GSERIALIZED v2, PostGIS 3.1+)
+- `extract_geometry(datum) -> Option<ExtractedGeometry>` (`geometry/mod.rs:65`)
+- `extract_bbox(datum) -> Option<(f32,f32,f32,f32)>` (`geometry/bbox.rs:20`)
+- `extract_point(datum) -> Option<(f64,f64)>` (`geometry/point.rs:23`)
+- `extract_point_xy_f32(datum) -> Option<(f32,f32)>` (`geometry/point.rs:94`, zero-alloc, reads detoasted pointer in place)
+- `has_bbox_flag(bytes) -> bool` (`geometry/header.rs:28`)
+
+Internal per-type helpers (byte-slice in, called from `extract_geometry`):
+
+- `extract_point_geom` (`geometry/point.rs:184`)
+- `extract_linestring_geom` (`geometry/linestring.rs:8`)
+- `extract_polygon_geom` (`geometry/polygon.rs:18`)
+
+Detoast helper: `datum_to_gserialized_bytes` in `geometry/wkb.rs:10` — calls
+`pg_detoast_datum` then copies `VARSIZE` bytes into an owned `Vec<u8>`
+(main-backend-thread only). In `cfg(test)` it bypasses the pgrx thread guard
+via a raw extern; non-TOAST flat varlenas only.
+
+## Byte Layout (GSERIALIZED v2)
+
+Offsets are from the start of the detoasted varlena, i.e. bytes
+`[0..VARSIZE]`, as copied by `datum_to_gserialized_bytes`:
 
 ```
-Byte offset  Field
-0-3          varlena header (standard PG, includes total size)
-4-7          srid (20 bits) + flags (12 bits)
-             flags: has_z(1), has_m(1), is_geodetic(1), has_bbox(1), ...
-
-If has_bbox:
-  8-23       BOX2DF: xmin(f32), xmax(f32), ymin(f32), ymax(f32)  [16 bytes]
-  (or 8-39 for 3D bbox: adds zmin(f32), zmax(f32))
-
-After bbox (or at offset 8 if no bbox):
-  type(u32)  geometry type enum
-  Then:      coordinate data as flat doubles (x,y pairs or x,y,z triples)
+0..4   varlena header (total_size << 2)
+4..7   srid[3]  (big-endian, 21-bit SRID)
+7      gflags (u8)
+         bit 0 HasZ, bit 1 HasM, bit 2 HasBBox, bit 3 IsGeodetic, bit 6 Version
+8..24  BOX2DF (only if HasBBox): 4 * f32 in order xmin, xmax, ymin, ymax
+              (PostGIS on-disk order — reordered to [xmin,ymin,xmax,ymax] by the extractors)
+geom_start = 8 or 24 depending on HasBBox
+  geom_start +0..+4   wkb_type (u32 LE): 1=POINT, 2=LINESTRING, 3=POLYGON
+  POINT:      +4..+20  x(f64), y(f64)   (no npoints field — matches gserialized2_from_lwpoint)
+  LINESTRING: +4..+8   npoints(u32), then npoints * (x f64, y f64)
+  POLYGON:    +4..+8   nrings(u32), then nrings * npoints(u32), then all rings concatenated as (x f64, y f64)
 ```
 
-### Geometry Type Enum
-```
-1  = POINT
-2  = LINESTRING
-3  = POLYGON
-4  = MULTIPOINT
-5  = MULTILINESTRING
-6  = MULTIPOLYGON
-7  = GEOMETRYCOLLECTION
-```
+No alignment padding for 2D polygons
+(`geometry/polygon.rs:14`). 3D/4D not supported.
 
-## Extracting in Rust
+## Constants (`geometry/header.rs`)
 
-### Bbox Extraction (fast path — all geometry types)
+- `MIN_HEADER_LEN = 8` (`header.rs:4`)
+- `SRID_FLAGS_OFFSET = 4` (`header.rs:7`)
+- `HAS_BBOX_BIT = 1 << 26` (`header.rs:11`) — gflags bit 2 after reading bytes 4..8 as u32 LE
+- `BOX2DF_SIZE = 16` (`header.rs:14`)
+- `WKB_POINT_TYPE = 1`, `WKB_LINESTRING_TYPE = 2`, `WKB_POLYGON_TYPE = 3` (`header.rs:17-23`)
+
+## Output Type
+
+`ExtractedGeometry` in `pg_accel/src/gpu/three_layer.rs:67`:
+
 ```rust
-/// Extract BOX2DF from GSERIALIZED header (if present)
-/// PostGIS stores bbox as f32 — no precision loss for Layer 1
-unsafe fn extract_bbox(datum: pg_sys::Datum) -> Option<[f32; 4]> {
-    let ptr = datum.cast_mut_ptr::<pg_sys::varlena>();
-    let data = pg_sys::VARDATA_ANY(ptr) as *const u8;
-    let size = pg_sys::VARSIZE_ANY_EXHDR(ptr);
-
-    if size < 8 { return None; }  // too small
-
-    // Read SRID + flags at offset 0-3 of data
-    let flags = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    let has_bbox = (flags >> 8) & 1 == 1;  // check has_bbox flag bit
-
-    if !has_bbox { return None; }
-
-    // BOX2DF starts at offset 4 of data (after srid+flags)
-    let bbox_ptr = data.add(4) as *const f32;
-    Some([
-        *bbox_ptr,          // xmin
-        *bbox_ptr.add(1),   // xmax
-        *bbox_ptr.add(2),   // ymin
-        *bbox_ptr.add(3),   // ymax
-    ])
+pub struct ExtractedGeometry {
+    pub bbox: [f32; 4],          // [xmin, ymin, xmax, ymax]
+    pub coords: Vec<f32>,        // flat [x,y,x,y,...] (f64 downcast to f32)
+    pub coord_count: usize,      // number of (x,y) pairs
+    pub geom_type: GeomType,     // Point | LineString | Polygon | Unknown
+    pub ring_offsets: Vec<u32>,  // polygon ring start indices in *pairs*, empty otherwise
 }
 ```
 
-**WARNING:** The exact flag bit positions and offsets depend on GSERIALIZED version.
-Verify against PostGIS `liblwgeom/gserialized2.c` for your target PostGIS versions.
+`GeomType` at `three_layer.rs:38`.
 
-### Point Extraction (simple — fixed layout)
-```rust
-/// Extract x,y from POINT GSERIALIZED
-unsafe fn extract_point(datum: pg_sys::Datum) -> Option<(f64, f64)> {
-    let ptr = datum.cast_mut_ptr::<pg_sys::varlena>();
-    let data = pg_sys::VARDATA_ANY(ptr) as *const u8;
-    let size = pg_sys::VARSIZE_ANY_EXHDR(ptr);
+## Usage Notes
 
-    // Parse flags to find coordinate offset
-    let flags = u32::from_le_bytes(/* ... */);
-    let has_bbox = /* ... */;
-    let has_z = /* ... */;
+1. Always call from the main backend thread — detoast touches PG memory.
+2. `extract_geometry` is the one-shot path used by the three-layer pipeline;
+   coords are always downcast `f64 -> f32` for the GPU kernels.
+3. BOX2DF on-disk order is `xmin, xmax, ymin, ymax`; all extractors reorder to
+   `[xmin, ymin, xmax, ymax]` before returning (`mod.rs:75-104`, `bbox.rs:35`).
+4. When HasBBox is absent, `extract_*_geom` compute the bbox from scanned
+   coords (polygon: `polygon.rs:47-77`, linestring: `linestring.rs:27-43`,
+   point: `point.rs:202`).
+5. `ring_offsets` values are coord-pair indices, not byte offsets
+   (`three_layer.rs:72`).
+6. Unknown WKB types (MULTI*, COLLECTION, CURVE, TIN, ...) return
+   `GeomType::Unknown` with empty `coords` (`mod.rs:134-141`) — the three-layer
+   layer is responsible for CPU recheck.
+7. Endianness: little-endian only. No byte swap.
+8. SRID is in bytes 4..7 big-endian (21-bit); no extractor currently decodes
+   it — add if SRID-mismatch checking is needed.
+9. GSERIALIZED v1 is not handled. v2 only (PostGIS 3.x).
 
-    let coord_offset = 4  // srid+flags
-        + if has_bbox { 16 } else { 0 }  // BOX2DF
-        + 4;  // geometry type u32
+## Tests
 
-    if size < coord_offset + 16 { return None; }  // need at least x,y (2 × f64)
-
-    let coords = data.add(coord_offset) as *const f64;
-    Some((*coords, *coords.add(1)))
-}
-```
-
-### Vertex Array Extraction (for GPU kernels)
-For polygons/linestrings, extract all vertices as a flat f32 or f64 array:
-
-```rust
-/// Extract ring vertices as flat [x,y,x,y,...] array for GPU kernel
-unsafe fn extract_ring_vertices(
-    datum: pg_sys::Datum,
-    use_fp64: bool,
-) -> Option<Vec<u8>> {
-    // Parse GSERIALIZED header to find coordinate data
-    // For POLYGON: first ring is exterior ring
-    // Read vertex count, then copy coordinate pairs
-
-    // If use_fp64: copy f64 pairs directly
-    // If !use_fp64: convert f64 → f32 pairs for Metal GPU path
-    // ...
-}
-```
-
-## Important Notes
-
-1. **Always validate size before reading** — malformed geometries can have truncated data
-2. **GSERIALIZED v1 vs v2** — PostGIS 3.x uses v2 by default, but v1 may exist in old data.
-   Check the version flag. For simplicity, support v2 only and fall back to PostGIS C function for v1.
-3. **Empty geometries** — have has_bbox=false and no coordinate data. Return None.
-4. **Multipart geometries** — for GpuSpatial, extract bbox from header (always available),
-   then for Layer 2, either extract first part only (approximation → UNCERTAIN) or
-   iterate all parts. Start with bbox-only for multi-* types.
-5. **SRID extraction** — SRID is in the first 20 bits of the flags field (masked).
-   Needed for SRID mismatch checking.
-6. **Endianness** — GSERIALIZED stores in native byte order (little-endian on x86/ARM).
-   No byte swapping needed on Mac/Linux.
-
-## When to Fall Back to PostGIS C Functions
-
-For anything complex, call PostGIS's own functions on the main thread:
-- `LWGEOM_in` / deserialization of complex types
-- `ST_Equals` for round-trip verification
-- `Box2D()` if our bbox extraction is uncertain
-- Any geometry type we don't handle (CURVE, TIN, etc.)
-
-The fallback is always safe — it's just slower (main thread, one at a time).
+`pg_accel/src/adapters/extractors/geometry/tests.rs` (gated on
+`feature = "pg_test"`, wired in `mod.rs:31-32`) covers round-trips for point,
+linestring, polygon, and bbox paths.

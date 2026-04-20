@@ -1,259 +1,173 @@
 ---
 name: Adapter Development Guide
-description: How to write pg_accel adapters for PostgreSQL extensions (PostGIS, h3-pg, pgvector, etc.)
+description: How to add a new extension adapter (PostGIS, h3-pg, raster, etc.) to pg_accel — registration, strategy selection, type extractors, and dispatch wiring.
 ---
 
 # pg_accel Adapter Development
 
-## What is an Adapter?
+An adapter is a tiny Rust module that declares the SQL functions pg_accel can accelerate and tags each with an [`AccelStrategy`]. Adapters produce data only; all execution (GPU dispatch, planner hooks, Custom Scan nodes) is already wired up and strategy-driven.
 
-An adapter connects a PostgreSQL extension's functions to pg_accel's acceleration engine.
-Each adapter is typically 20–50 lines of Rust declaring which functions to accelerate and how.
+## File Layout
 
-## Adapter Structure
+| Path | Role |
+| --- | --- |
+| `pg_accel/src/adapters/mod.rs` | Declares each adapter module (`pub mod postgis;` etc.). |
+| `pg_accel/src/adapters/postgis.rs` | PostGIS vector adapter — `GpuSpatial`. |
+| `pg_accel/src/adapters/postgis_raster.rs` | PostGIS raster — `GpuRaster`. |
+| `pg_accel/src/adapters/h3.rs` | h3-pg — `GpuH3`. |
+| `pg_accel/src/adapters/extractors/` | Binary decoders for custom types (`GSERIALIZED`, raster). |
+| `pg_accel/src/engine/registry.rs` | `AccelStrategy`, `FunctionAccelEntry`, `ExtensionAdapter`, `AdapterRegistry`, `lazy_init`, `global_registry`. |
+| `pg_accel/src/engine/function_matcher.rs` | `FunctionPattern` + `discover_functions` (SPI catalog scan). |
+| `pg_accel/src/engine/type_extractor.rs` | `TypeExtractor` trait + built-in extractors for primitive OIDs. |
+| `pg_accel/src/engine/dispatch/mod.rs` | `dispatch()` router + `DispatchResult`. |
+| `pg_accel/src/engine/dispatch/{spatial,h3,raster}.rs` | Per-strategy per-datum dispatch entry points. |
+
+## Core Types (`engine/registry.rs`)
 
 ```rust
-// adapters/myext.rs
+pub enum AccelStrategy {
+    GpuSpatial = 1, GpuRaster = 2, GpuH3 = 3,
+    GpuSort = 4,    GpuReduce = 5, GpuExpr = 6,
+    GpuHashJoin = 7, GpuWindow = 8,
+}
 
+pub struct FunctionAccelEntry {
+    pub schema: &'static str,   // e.g. "public"
+    pub name: &'static str,     // lower-case pg_proc name
+    pub strategy: AccelStrategy,
+}
+
+pub struct ExtensionAdapter {
+    pub name: &'static str,           // matches pg_extension.extname
+    pub version_query: &'static str,  // kept for introspection (extension presence
+                                      // is probed via pg_extension, not this query)
+    pub functions: Vec<FunctionAccelEntry>,
+}
+```
+
+There is no `BatchedEval` strategy. There is no CPU path. `AccelStrategy` is an integer-coded enum with a conservative `from_i32` default (see `registry.rs:46`).
+
+## Minimal Adapter
+
+```rust
+// pg_accel/src/adapters/myext.rs
 use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
 
+#[must_use]
 pub fn adapter() -> ExtensionAdapter {
+    const NAMES: &[&str] = &["myext_fast_pred"];
+    let functions = NAMES.iter().map(|&name| FunctionAccelEntry {
+        schema: "public",
+        name,
+        strategy: AccelStrategy::GpuSpatial,
+    }).collect();
+
     ExtensionAdapter {
         name: "myext",
-        version_query: "SELECT extversion FROM pg_extension WHERE extname = 'myext'",
-        functions: gpu_entries()
-            .into_iter()
-            .chain(batched_entries())
-            .collect(),
-    }
-}
-
-fn gpu_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &["my_spatial_predicate"];
-    NAMES
-        .iter()
-        .map(|&name| FunctionAccelEntry {
-            schema: "public",
-            name,
-            strategy: AccelStrategy::GpuSpatial,
-        })
-        .collect()
-}
-
-fn batched_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &["my_expensive_func", "my_other_func"];
-    NAMES
-        .iter()
-        .map(|&name| FunctionAccelEntry {
-            schema: "public",
-            name,
-            strategy: AccelStrategy::BatchedEval,
-        })
-        .collect()
-}
-```
-
-## Key Types
-
-### FunctionAccelEntry
-
-Flat struct with three fields — no nested `FunctionPattern`:
-
-```rust
-pub struct FunctionAccelEntry {
-    pub schema: &'static str,   // e.g. "public", "pg_catalog"
-    pub name: &'static str,     // lower-case function name
-    pub strategy: AccelStrategy, // how to accelerate it
-}
-```
-
-### FunctionPattern (internal)
-
-Used internally by the registry during OID resolution (querying `pg_proc`).
-Adapters don't construct these directly — the registry builds them from
-`FunctionAccelEntry` fields.
-
-```rust
-pub struct FunctionPattern {
-    pub schema: Option<String>,
-    pub name: String,
-    pub arg_types: Option<Vec<pg_sys::Oid>>,  // OIDs, not strings
-    pub return_type: Option<pg_sys::Oid>,      // OID, not string
-}
-```
-
-## AccelStrategy Options
-
-### BatchedEval (default — all C functions)
-Calls the function via normal `FunctionCallInvoke` on the main PG backend thread.
-NOT parallelized via rayon — threading individual function calls is not worthwhile
-(dispatch overhead exceeds computation for cheap functions, and all non-trivial
-functions call palloc which is unsafe from threads).
-
-The speedup comes from the Custom Scan node's batched evaluation:
-- **Late materialization**: skip expensive column deserialization for filtered rows
-- **Predicate reordering**: evaluate cheapest/most-selective predicate first
-- **Column-at-a-time deserialization**: cache-friendly batch processing
-
-Requirements:
-- Function must be marked PARALLEL SAFE in `pg_proc` (needed for Custom Scan costing)
-- Function must be STRICT (for NULL passthrough) or we handle NULLs explicitly
-
-### GpuSpatial (spatial predicates only)
-Three-layer GPU acceleration:
-1. GPU bbox filter (Layer 1)
-2. GPU geometric fast-path (Layer 2)
-3. CPU recheck via original function (Layer 3 — for UNCERTAIN results)
-
-Requirements:
-- Must have a corresponding GPU kernel in `libpgaccel_kernels`
-- Geometry types must have a TypeExtractor for bbox and vertex extraction
-- CPU recheck must use the original PostGIS function (correctness guarantee)
-
-### GpuH3 (H3 cell computation)
-GPU-accelerated H3 index functions — pure integer/trig math.
-
-### GpuRaster (raster map-algebra)
-GPU-accelerated raster operations.
-
-### GpuSort / GpuReduce (aggregates and sorts)
-GPU-accelerated sort and reduction for numeric types.
-
-### GpuExpr / GpuHashJoin / GpuWindow
-GPU expression evaluator, hash joins, and window functions.
-
-## Type Extractors
-
-If the extension uses custom types (geometry, vector, etc.), you need a TypeExtractor:
-
-```rust
-pub struct VectorExtractor;
-
-impl TypeExtractor for VectorExtractor {
-    fn oid(&self) -> pg_sys::Oid {
-        // Resolve at init time by querying pg_type
-        resolve_type_oid("vector")
-    }
-
-    fn extract(&self, datum: pg_sys::Datum, is_null: bool) -> GpuRepr {
-        if is_null { return GpuRepr::Null; }
-
-        unsafe {
-            // pgvector stores as varlena: header + float32 array
-            let ptr = datum.cast_mut_ptr::<pg_sys::varlena>();
-            let data = pg_sys::VARDATA_ANY(ptr) as *const f32;
-            let len = (pg_sys::VARSIZE_ANY_EXHDR(ptr)) / std::mem::size_of::<f32>();
-            let slice = std::slice::from_raw_parts(data, len);
-            GpuRepr::Bytes(slice.iter().flat_map(|f| f.to_le_bytes()).collect())
-        }
-    }
-
-    fn pack(&self, repr: &GpuRepr) -> pg_sys::Datum {
-        // Reconstruct the varlena from bytes
-        // ... (allocate in CurrentMemoryContext on main thread)
+        version_query: "SELECT myext_version()",
+        functions,
     }
 }
 ```
 
-## PostGIS Adapter Reference
+## Registration (two edits)
 
-The PostGIS adapter (`adapters/postgis.rs`) is the most complete example.
-4 GPU spatial + 16 batched eval = 20 functions total:
+1. Declare the module in `pg_accel/src/adapters/mod.rs`:
+   ```rust
+   pub mod myext;
+   ```
+2. Append the constructor to `init_adapters` in `pg_accel/src/engine/registry.rs:113`:
+   ```rust
+   let all_adapters = vec![
+       crate::adapters::postgis::adapter(),
+       crate::adapters::postgis_raster::adapter(),
+       crate::adapters::h3::adapter(),
+       crate::adapters::myext::adapter(),  // add here
+   ];
+   ```
 
-```rust
-pub fn adapter() -> ExtensionAdapter {
-    ExtensionAdapter {
-        name: "postgis",
-        version_query: "SELECT postgis_version()",
-        functions: gpu_spatial_entries()
-            .into_iter()
-            .chain(batched_eval_entries())
-            .collect(),
-    }
-}
+Extension presence is checked via `SELECT 1 FROM pg_extension WHERE extname = '<adapter.name>'` in `check_extension_installed` (`registry.rs:241`). Adapter `name` must equal the extension's `extname`. OID resolution runs through `FunctionPattern` → `function_matcher::discover_functions` via SPI (`registry.rs:156`).
 
-fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &["st_intersects", "st_contains", "st_within", "st_dwithin"];
-    NAMES.iter().map(|&name| FunctionAccelEntry {
-        schema: "public", name, strategy: AccelStrategy::GpuSpatial,
-    }).collect()
-}
+The registry is populated lazily on the first planner hook call (`lazy_init`, `registry.rs:274`). `_PG_init` is too early — SPI is unavailable there.
 
-fn batched_eval_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &[
-        "st_distance", "st_buffer", "st_transform", "st_simplify",
-        "st_union", "st_centroid", "st_asmvtgeom",
-        "st_area", "st_length",
-        "st_crosses", "st_overlaps", "st_touches",
-        "st_x", "st_y", "st_srid", "st_geometrytype",
-    ];
-    NAMES.iter().map(|&name| FunctionAccelEntry {
-        schema: "public", name, strategy: AccelStrategy::BatchedEval,
-    }).collect()
-}
-```
+## Choosing a Strategy
 
-## Testing an Adapter
+Strategy determines which execution path the planner/dispatcher routes to. Per-datum (row-wise) dispatch is only implemented for `GpuSpatial`, `GpuH3`, and `GpuRaster` — see `engine/dispatch/mod.rs:82`. The remaining strategies are handled by dedicated Custom Scan executor nodes (`engine/executor/{sort,agg,join,window,preagg,sort_scan,vectorized_scan}`), which consume rows independently of the adapter dispatch interface and return `DispatchResult::Deferred` if fed through `dispatch()`.
 
-Every adapter function must pass the identity test:
+| Strategy | When to use | Execution path |
+| --- | --- | --- |
+| `GpuSpatial` | Spatial predicate (bool result, geometric relation). Requires a matching kernel in `pgaccel-kernels` and an `extract_geometry` path. | 3-layer pipeline: bbox → fast-path kernel → PG recheck for uncertain pairs. `dispatch/spatial.rs`. |
+| `GpuH3` | Pure integer/trig H3 cell math. | `dispatch/h3.rs` — extracts H3 cell IDs or points, calls kernels in `crate::gpu::h3_*`. |
+| `GpuRaster` | Per-pixel raster map algebra / clip / reclass. | `dispatch/raster.rs`. |
+| `GpuSort`, `GpuReduce`, `GpuHashJoin`, `GpuWindow`, `GpuExpr` | Full-plan-node offload; the planner swaps in a Custom Scan. | Dedicated executor; adapter-declared functions surface through plan-level recognition. |
+
+If your function does not fit any strategy, **do not add a "BatchedEval" fallback** — it no longer exists and CPU fallbacks are a compile-time rule violation (top-level `CLAUDE.md` rule 11/12). Either write the GPU kernel or leave the function unregistered so PG's native path runs.
+
+## Type Extractors (`engine/type_extractor.rs`)
+
+Primitive scalar types are already covered by the built-ins (`Float8Extractor`, `Float4Extractor`, `Int8Extractor`, `Int4Extractor`, `BoolExtractor`, `TimestampExtractor`, `TextExtractor`, `ByteaExtractor`). Look them up with `extractor_for_oid(oid: pg_sys::Oid) -> Option<Box<dyn TypeExtractor>>`.
 
 ```rust
-#[pg_test]
-fn test_st_intersects_identity() {
-    // Setup: create test data
-    Spi::run("CREATE TABLE test_polys AS SELECT ST_Buffer(ST_MakePoint(random()*100, random()*100), random()*10) as geom FROM generate_series(1,1000)");
-    Spi::run("CREATE TABLE test_points AS SELECT ST_MakePoint(random()*100, random()*100) as geom FROM generate_series(1,1000)");
+pub enum GpuRepr {
+    Float8(f64), Float4(f32), Int8(i64), Int4(i32),
+    Bool(bool), Timestamp(i64), Text(Vec<u8>), Bytes(Vec<u8>), Null,
+}
 
-    // Run with pg_accel ON
-    let on_results = Spi::get_one::<i64>(
-        "SELECT COUNT(*) FROM test_points p, test_polys g WHERE ST_Intersects(p.geom, g.geom)"
-    );
-
-    // Run with pg_accel OFF
-    Spi::run("SET pg_accel.enabled = off");
-    let off_results = Spi::get_one::<i64>(
-        "SELECT COUNT(*) FROM test_points p, test_polys g WHERE ST_Intersects(p.geom, g.geom)"
-    );
-
-    assert_eq!(on_results, off_results, "ST_Intersects results differ with pg_accel on vs off");
+pub trait TypeExtractor: Send + Sync {
+    fn oid(&self) -> pg_sys::Oid;
+    unsafe fn extract(&self, datum: pg_sys::Datum, is_null: bool) -> GpuRepr;
+    unsafe fn pack(&self, repr: &GpuRepr) -> Option<pg_sys::Datum>;
 }
 ```
 
-## Decision Tree: Which Strategy?
+`Send + Sync` is a trait bound; it does **not** mean the extractor runs off-thread. All PG datum work must stay on the main backend thread (`CLAUDE.md` rule 1). pg_accel uses SYCL device-side parallelism for data crunching — there is no rayon, tokio, or `std::thread::spawn` in any adapter/dispatch path. Shared-memory LWLock-governed thread budgeting (`engine/thread_budget.rs`) is a bookkeeping facility, not a work-stealing pool.
 
-```
-Is the function a spatial predicate (returns boolean for geometric relationship)?
-├── YES: Can the fast-path be computed with < 30 lines of fp32 arithmetic?
-│   ├── YES → GpuSpatial (write GPU kernel + CPU recheck)
-│   └── NO → BatchedEval (batched Custom Scan, main thread)
-└── NO → BatchedEval (batched Custom Scan, main thread)
+### Custom-type extractors
 
-Is it called on enough rows to justify Custom Scan overhead?
-├── YES (> min_batch_size) → use chosen strategy above
-└── NO → Don't accelerate (vanilla PG path)
-```
+For opaque varlenas (PostGIS geometry, raster), bypass `TypeExtractor` and use the dedicated decoders:
 
-## Registration
+- `adapters/extractors/geometry/mod.rs` — `extract_geometry(datum) -> Option<ExtractedGeometry>` returns bbox + coords for POINT / LINESTRING / POLYGON. Other WKB types yield `GeomType::Unknown` which routes to PG recheck.
+- `adapters/extractors/raster.rs` — raster header + band decoding.
 
-Add your adapter module to `adapters/mod.rs` and wire it into the registry's
-`init_adapters()` method in `engine/registry.rs`:
+To add a new custom-type extractor (e.g. pgvector), create `adapters/extractors/<type>.rs`, expose a function returning a GPU-shaped struct (`Vec<f32>`, etc.), and call it from your strategy's dispatch site. Do not add a new `TypeExtractor` impl for it unless the value fits one of the existing `GpuRepr` variants (`Bytes` can hold arbitrary binary).
+
+## Dispatch Wiring (only for GpuSpatial/GpuH3/GpuRaster)
+
+The router in `engine/dispatch/mod.rs:74`:
 
 ```rust
-// adapters/mod.rs — add your module
-pub mod myext;
-
-// engine/registry.rs — add to init_adapters()
-pub fn init_adapters(&mut self) {
-    let all_adapters = vec![
-        crate::adapters::postgis::adapter(),
-        crate::adapters::postgis_raster::adapter(),
-        crate::adapters::h3::adapter(),
-        crate::adapters::pg_builtins::adapter(),
-        crate::adapters::myext::adapter(),  // ADD HERE
-    ];
-    // ...
-}
+pub unsafe fn dispatch(
+    strategy: AccelStrategy,
+    batch: &[(pg_sys::Datum, bool)],
+    fn_info: &pg_sys::FmgrInfo,
+    is_strict: bool,
+    qual_datum: Option<(pg_sys::Datum, bool)>,
+    skip_bbox: bool,
+) -> DispatchResult // Accelerated(Vec<(Datum, bool)>) | Deferred
 ```
 
-The init pipeline will automatically check if your extension is installed
-and register its functions only if found.
+`DispatchResult::Deferred` means "let PG's native path run these tuples" — it is **not** a CPU fallback.
+
+If your adapter introduces a function that needs a new per-datum dispatch handler, extend the matching `dispatch/*.rs` file. For H3, that means name-based routing inside `dispatch_gpu_h3` (`dispatch/h3.rs:32` uses `registry::global_registry().lookup(fn_oid).map(|e| e.name)` to pick the kernel).
+
+## Test Pattern
+
+Adapters carry pure-data unit tests under `#[cfg(feature = "pg_test")]`. See `adapters/postgis.rs:39` for the full template. Verify:
+
+- `adapter().name` matches `pg_extension.extname`.
+- No duplicate function names; all lowercase; all non-empty.
+- Schema is consistent (`"public"` for most extensions).
+- All entries use the expected strategy variant.
+- Adapter construction is deterministic.
+
+End-to-end correctness (GPU vs PG native) is covered by the integration suites in `pg_accel/src/tests/` — not the adapter module.
+
+## Checklist for a New Adapter
+
+1. Pick a strategy the codebase already supports; otherwise add the GPU kernel first.
+2. Create `adapters/<name>.rs` with an `adapter()` constructor.
+3. Add `pub mod <name>;` to `adapters/mod.rs`.
+4. Append the constructor to `init_adapters` in `engine/registry.rs:113`.
+5. If the extension uses custom types, add a decoder under `adapters/extractors/` and call it from the relevant `dispatch/*.rs`.
+6. Add the unit tests (schema, strategy, determinism) under `#[cfg(feature = "pg_test")]`.
+7. `just lint && just check && just test` — CI enforces `clippy::pedantic`, `deny(unwrap_used)`, and formatting.

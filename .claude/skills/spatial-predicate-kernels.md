@@ -1,226 +1,74 @@
 ---
 name: Spatial Predicate Kernel Guide
-description: How to port PostGIS spatial predicate fast-paths to GPU kernels with conservative UNCERTAIN fallback
+description: GPU spatial predicate kernels (point_in_ring, sphere_distance, segment_intersects, bbox_intersects) and the DEFINITE/UNCERTAIN result contract that defers ambiguous rows to PG's native PostGIS predicate
 ---
 
-# Spatial Predicate Kernel Development
+# Spatial Predicate Kernels
 
-## The Three-Layer Model
+## Files
 
-```
-Layer 1 — GPU bbox filter         4 float comparisons/pair (kills 90-95%)
-                ↓ survivors
-Layer 2 — GPU geometric fast-path  10-20 lines arithmetic/pair
-                │                  fp64 (CUDA/ROCm): resolves 99.9% → ~0.1% UNCERTAIN
-                │                  fp32 (Metal):     resolves ~98%  → ~2% UNCERTAIN
-                ↓ UNCERTAIN
-Layer 3 — CPU recheck             existing PostGIS C function via fmgr_info (bit-identical)
-```
+- `pgaccel-kernels/src/spatial_predicates.cpp` — templated fp32/fp64 kernels: `pgaccel_point_in_ring_bulk`, `pgaccel_sphere_distance_bulk`, `pgaccel_segment_intersects_bulk` (`spatial_predicates.cpp:200`, `:240`, `:293`).
+- `pgaccel-kernels/src/bbox_ops.cpp` — SYCL bbox intersect over all (i,j) pairs: `pgaccel_bbox_intersects_bulk_f32`, `pgaccel_bbox_intersects_bulk_f64` (`bbox_ops.cpp:119`, `:149`). f64 variant returns `PGACCEL_UNSUPPORTED` on devices without `sycl::aspect::fp64`.
+- `pgaccel-kernels/src/spatial_dispatch.cpp` — bulk point-in-polygon (inline bbox + PIP): `pgaccel_point_in_polygon_bulk` (`spatial_dispatch.cpp:688`), with two SYCL strategies `sycl_point_in_polygon_simple` (`:279`) and `sycl_point_in_polygon_coop` (`:363`).
+- `pgaccel-kernels/include/pgaccel_ffi.h:216` — FFI result model and prototypes.
+- `pg_accel/src/gpu/bridge.rs:54-127` — `extern "C"` declarations.
+- `pg_accel/src/gpu/three_layer.rs` — `ExtractedGeometry`, `GeomType`, `SpatialPredicate`, `PredicateResult`, `spatial_eval` (`three_layer.rs:108`, `:131`, `:158`).
+- `pg_accel/src/engine/dispatch/spatial.rs` — `GpuSpatial` strategy entry, bulk PIP fast path (`spatial.rs:42`).
+- `pg_accel/src/engine/executor/scan/arena_scan.rs:211-263` — consumer that reads the `int8_t` result code and calls `cpu_recheck_tuple` for `UNCERTAIN` rows.
 
-**Platform impact:** On CUDA/ROCm with fp64, Layer 3 is nearly unused (~0.1% of rows).
-On Metal with fp32, Layer 3 handles ~2% — still a massive win since 98% ran on GPU.
+## Result Contract (FFI)
 
-## Correctness Contract
+Defined at `pgaccel_ffi.h:216`:
 
 ```
-For every (geom_a, geom_b) pair:
-    gpu_result = gpu_fast_path(geom_a, geom_b)
-
-    if gpu_result == DEFINITE_TRUE:
-        return true    // We are 100% certain this is correct
-    if gpu_result == DEFINITE_FALSE:
-        return false   // We are 100% certain this is correct
-    if gpu_result == UNCERTAIN:
-        return cpu_postgis(geom_a, geom_b)  // Let PostGIS decide
+ 1 = DEFINITE TRUE   (inside / intersects / within distance)
+-1 = DEFINITE FALSE  (outside / no-intersect / out of range)
+ 0 = UNCERTAIN       (caller must recheck via PG's native predicate)
 ```
 
-**RULE: When in doubt, return UNCERTAIN.** A false DEFINITE is a correctness bug.
-An unnecessary UNCERTAIN is just a performance miss.
+For `pgaccel_sphere_distance_bulk`, the result is a `(distance, uncertain)` pair written into two parallel output buffers.
 
-## Result Codes
-```cpp
-enum PgAccelSpatialResult : int8_t {
-    DEFINITE_FALSE = -1,
-    UNCERTAIN = 0,
-    DEFINITE_TRUE = 1,
-};
+## UNCERTAIN = PG Recheck, Not CPU Fallback
+
+There is no CPU SYCL kernel, no CPU fast-path kernel, and no CPU fallback build (rules #11, #12 in `CLAUDE.md`). "UNCERTAIN" means the GPU kernel declined to commit to a definite answer for that row. The caller materializes the row and lets PG evaluate the original qual (PostGIS C function) on it — see `arena_scan.rs:229-244` (`cpu_recheck_tuple`). This is PG's normal expression evaluator running the same operator that would have run without pg_accel. It is not a GPU→CPU port of the kernel.
+
+Uncertainty-counting lives in `stats.rs:95` (`record_gpu_batch(rows, uncertain)`) and surfaces as `gpu_uncertain_count` in `pg_accel_stats()`.
+
+## Correctness Rule
+
+A false DEFINITE is a ship-blocking bug. An unnecessary UNCERTAIN is a perf miss. When in doubt, return 0.
+
+UNCERTAIN is required when:
+- Degenerate ring (< 4 vertices) or ring not closed within epsilon (`spatial_predicates.cpp:66-74`).
+- Point within epsilon of any edge (`spatial_predicates.cpp:85-94`).
+- Zero-length segment in `segment_intersects` (`:170-171`).
+- Any cross-product magnitude below epsilon in `segment_intersects` (`:183-186`).
+- NaN / Inf coordinate (checked in the bulk wrappers, e.g. `:217-220`).
+- Antipodal pair in `sphere_distance` (`a > antipodal_thresh`, `:135`), sub-threshold distance (`:149`), or polar input.
+
+## Dual Precision (fp32 / fp64)
+
+Each kernel is a function template over `T ∈ {float, double}`. The bulk wrappers dispatch on the `bool use_fp64` argument — see `spatial_predicates.cpp:211` and the mirror `:251`, `:303`. Epsilons are tightened for fp64:
+
+```
+EPS_FP64                = 1e-12        (spatial_predicates.cpp:14)
+EPS_FP32                = 1e-5         (spatial_predicates.cpp:15)
+ANTIPODAL_COS_FP64      = 1 - 1e-10    (:17)
+ANTIPODAL_COS_FP32      = 1 - 1e-4     (:18)
+CLOSE_DIST_M_FP64       = 0.001  (1 mm) (:21)
+CLOSE_DIST_M_FP32       = 1.0    (1 m)  (:22)
 ```
 
-## Point-in-Ring (Ray Casting)
+Backend selection is resolved by `device_has_fp64_cached()` in `pg_accel/src/gpu/mod.rs:117`. Metal reports `has_fp64 == false` and the Rust wrappers pick the fp32 kernel. CUDA / ROCm / Level Zero take the fp64 path. On fp32 the UNCERTAIN band is wider, which means PG runs the recheck on a higher fraction of rows — still a large net win because the GPU cleared the rest.
 
-Ported from PostGIS `lwgeom_geos.c` → `point_in_ring()`.
+Bbox is exact in both paths because PostGIS `BOX2DF` is already float32; `pgaccel_bbox_intersects_bulk_f64` exists only for PG's native `box` type and explicitly refuses to run on non-fp64 devices (`bbox_ops.cpp:168-171`, `:176-178`).
 
-Algorithm: cast a horizontal ray from point to the right. Count edge crossings.
-Odd = inside, even = outside. Templated for fp32 (Metal) and fp64 (CUDA/ROCm).
+## Testing
 
-```cpp
-// SYCL kernel for point-in-ring test — dual precision
-// Source: PostGIS lwgeom_geos.c:point_in_ring()
-template<typename T>
-PgAccelSpatialResult point_in_ring_kernel(
-    T px, T py,                   // test point
-    const T* ring_xy,             // ring vertices [V*2]
-    int vertex_count              // number of vertices
-) {
-    if (vertex_count < 4) return UNCERTAIN;
-
-    // Epsilon adapts to precision:
-    //   fp64 (CUDA/ROCm): 1e-12 → resolves 99.9%+ as DEFINITE
-    //   fp32 (Metal):     1e-5  → resolves ~95-98% as DEFINITE
-    constexpr T EPSILON = std::is_same_v<T, double> ? T(1e-12) : T(1e-5);
-
-    int crossings = 0;
-    for (int i = 0; i < vertex_count - 1; i++) {
-        T x1 = ring_xy[i * 2];
-        T y1 = ring_xy[i * 2 + 1];
-        T x2 = ring_xy[(i + 1) * 2];
-        T y2 = ring_xy[(i + 1) * 2 + 1];
-
-        T dx = x2 - x1;
-        T dy = y2 - y1;
-        T len_sq = dx * dx + dy * dy;
-        if (len_sq < EPSILON * EPSILON) continue;
-
-        T t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
-        t = sycl::clamp(t, T(0), T(1));
-        T closest_x = x1 + t * dx;
-        T closest_y = y1 + t * dy;
-        T dist_sq = (px - closest_x) * (px - closest_x) +
-                    (py - closest_y) * (py - closest_y);
-
-        if (dist_sq < EPSILON * EPSILON) return UNCERTAIN;
-
-        if ((y1 <= py && y2 > py) || (y2 <= py && y1 > py)) {
-            T x_intersect = x1 + (py - y1) / (y2 - y1) * (x2 - x1);
-            if (px < x_intersect) crossings++;
-        }
-    }
-
-    return (crossings % 2 == 1) ? DEFINITE_TRUE : DEFINITE_FALSE;
-}
-```
-
-### When to return UNCERTAIN
-- Ring has < 4 vertices (degenerate)
-- Point within EPSILON of any edge (tighter on fp64, wider on fp32)
-- Zero-length edge in ring
-- Any NaN or Inf coordinate
-- Self-intersecting ring (hard to detect cheaply — may skip this check)
-
-## Sphere Distance (Haversine)
-
-Ported from PostGIS `lwgeom_sphere.c` → `sphere_distance()`. Templated for dual precision.
-
-```cpp
-// Source: PostGIS lwgeom_sphere.c:sphere_distance()
-template<typename T>
-struct DistanceResult {
-    T distance_meters;
-    bool uncertain;
-};
-
-template<typename T>
-DistanceResult<T> sphere_distance_kernel(
-    T lon1_deg, T lat1_deg,
-    T lon2_deg, T lat2_deg
-) {
-    constexpr T EARTH_RADIUS = T(6371008.8);
-    constexpr T DEG2RAD = T(M_PI) / T(180);
-    // fp64: sub-millimeter threshold. fp32: 1 meter threshold.
-    constexpr T CLOSE_THRESHOLD = std::is_same_v<T, double> ? T(0.001) : T(1.0);
-
-    if (!sycl::isfinite(lon1_deg) || !sycl::isfinite(lat1_deg) ||
-        !sycl::isfinite(lon2_deg) || !sycl::isfinite(lat2_deg)) {
-        return {T(0), true};
-    }
-
-    T lat1 = lat1_deg * DEG2RAD;
-    T lat2 = lat2_deg * DEG2RAD;
-    T dlat = (lat2_deg - lat1_deg) * DEG2RAD;
-    T dlon = (lon2_deg - lon1_deg) * DEG2RAD;
-
-    T a = sycl::sin(dlat / T(2)) * sycl::sin(dlat / T(2)) +
-          sycl::cos(lat1) * sycl::cos(lat2) *
-          sycl::sin(dlon / T(2)) * sycl::sin(dlon / T(2));
-    T c = T(2) * sycl::atan2(sycl::sqrt(a), sycl::sqrt(T(1) - a));
-    T dist = EARTH_RADIUS * c;
-
-    if (a > T(0.99)) return {dist, true};           // Antipodal
-    if (dist < CLOSE_THRESHOLD) return {dist, true}; // Too close for precision
-    if (sycl::fabs(lat1_deg) > T(89.9) ||
-        sycl::fabs(lat2_deg) > T(89.9)) return {dist, true};  // Poles
-
-    return {dist, false};  // DEFINITE
-}
-```
-
-## Segment Intersection (Cross Product)
-
-Ported from PostGIS `lwalgorithm.c` → `lw_segment_intersects()`. Templated for dual precision.
-
-```cpp
-// Source: PostGIS lwalgorithm.c:lw_segment_intersects()
-template<typename T>
-PgAccelSpatialResult segment_intersects_kernel(
-    T ax1, T ay1, T ax2, T ay2,  // segment A
-    T bx1, T by1, T bx2, T by2   // segment B
-) {
-    constexpr T EPSILON = std::is_same_v<T, double> ? T(1e-12) : T(1e-5);
-
-    T a_len_sq = (ax2-ax1)*(ax2-ax1) + (ay2-ay1)*(ay2-ay1);
-    T b_len_sq = (bx2-bx1)*(bx2-bx1) + (by2-by1)*(by2-by1);
-    if (a_len_sq < EPSILON * EPSILON || b_len_sq < EPSILON * EPSILON) {
-        return UNCERTAIN;
-    }
-
-    T d1 = (bx2-bx1) * (ay1-by1) - (by2-by1) * (ax1-bx1);
-    T d2 = (bx2-bx1) * (ay2-by1) - (by2-by1) * (ax2-bx1);
-    T d3 = (ax2-ax1) * (by1-ay1) - (ay2-ay1) * (bx1-ax1);
-    T d4 = (ax2-ax1) * (by2-ay1) - (ay2-ay1) * (bx2-ax1);
-
-    if (sycl::fabs(d1) < EPSILON || sycl::fabs(d2) < EPSILON ||
-        sycl::fabs(d3) < EPSILON || sycl::fabs(d4) < EPSILON) {
-        return UNCERTAIN;
-    }
-
-    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-        ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
-        return DEFINITE_TRUE;
-    }
-
-    return DEFINITE_FALSE;
-}
-```
-
-## Bbox Overlap (Layer 1)
-
-Simplest kernel — 4 float32 comparisons. PostGIS already stores BOX2DF as float32.
-
-```cpp
-// Source: PostGIS gserialized_gist_2d.c:box2df_overlaps()
-bool bbox_overlaps(float a_xmin, float a_ymin, float a_xmax, float a_ymax,
-                   float b_xmin, float b_ymin, float b_xmax, float b_ymax) {
-    return (a_xmin <= b_xmax && a_xmax >= b_xmin &&
-            a_ymin <= b_ymax && a_ymax >= b_ymin);
-}
-```
-
-No UNCERTAIN needed for bbox — it's exact at float32 (PostGIS uses float32 for bbox already).
-For PG's built-in `box` type (float64), use the fp64 bbox path on CUDA/ROCm.
-
-## Testing Strategy
-
-For every kernel, on EVERY available platform:
-1. Generate N random inputs (N ≥ 100K)
-2. Run on GPU → get DEFINITE/UNCERTAIN results
-3. Run PostGIS reference on CPU for ALL inputs → get ground truth
-4. Verify: every DEFINITE_TRUE matches ground truth TRUE
-5. Verify: every DEFINITE_FALSE matches ground truth FALSE
-6. Log: UNCERTAIN rate per platform:
-   - fp64 (CUDA/ROCm): expect < 0.5%
-   - fp32 (Metal): expect < 2-5%
-7. Verify: DEFINITE results AGREE across platforms (same answer on CUDA and Metal)
-8. Edge cases: NaN, Inf, degenerate, boundary, empty, zero-length — all platforms
-
-**The only acceptable failure mode is UNCERTAIN.** A false DEFINITE is a ship-blocking bug.
-**UNCERTAIN rates differ by platform** — this is expected, not a bug. fp32 is more conservative.
+For each kernel, at every available platform:
+1. Generate ≥ 100K random inputs covering degenerate cases (NaN, Inf, boundary-close, zero-length, antipodal, polar).
+2. Run GPU → collect DEFINITE / UNCERTAIN.
+3. Run PostGIS reference in PG as ground truth.
+4. Assert: every DEFINITE_TRUE matches ground truth TRUE; every DEFINITE_FALSE matches FALSE.
+5. Assert: DEFINITE results agree across platforms (CUDA fp64 answer == Metal fp32 answer when both say DEFINITE).
+6. Log UNCERTAIN rate per platform — fp64 should be well under 0.5%, fp32 under a few percent. A spiking rate is a kernel regression, not a correctness failure.
