@@ -111,25 +111,43 @@ pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(A
         | pg_sys::F_STDDEV_SAMP_FLOAT4
         | pg_sys::F_STDDEV_SAMP_FLOAT8
         | pg_sys::F_STDDEV_SAMP_NUMERIC
-        | pg_sys::F_STDDEV_POP_INT2
-        | pg_sys::F_STDDEV_POP_INT4
-        | pg_sys::F_STDDEV_POP_INT8
-        | pg_sys::F_STDDEV_POP_FLOAT4
-        | pg_sys::F_STDDEV_POP_FLOAT8
-        | pg_sys::F_STDDEV_POP_NUMERIC
         | pg_sys::F_STDDEV_INT2
         | pg_sys::F_STDDEV_INT4
         | pg_sys::F_STDDEV_INT8
         | pg_sys::F_STDDEV_FLOAT4
         | pg_sys::F_STDDEV_FLOAT8
-        | pg_sys::F_STDDEV_NUMERIC
-        | pg_sys::F_VAR_SAMP_INT2
+        | pg_sys::F_STDDEV_NUMERIC => {
+            // SAFETY: caller contract.
+            let aggfnoid = unsafe { (*aggref).aggfnoid };
+            let serialize_fn = unsafe { super::super::syscache::agg_serialize_fn(aggfnoid) }
+                .unwrap_or(pg_sys::InvalidOid);
+            Some((AggOp::StddevSamp, AggClass::Float8Stats { serialize_fn }))
+        }
+        pg_sys::F_STDDEV_POP_INT2
+        | pg_sys::F_STDDEV_POP_INT4
+        | pg_sys::F_STDDEV_POP_INT8
+        | pg_sys::F_STDDEV_POP_FLOAT4
+        | pg_sys::F_STDDEV_POP_FLOAT8
+        | pg_sys::F_STDDEV_POP_NUMERIC => {
+            // SAFETY: caller contract.
+            let aggfnoid = unsafe { (*aggref).aggfnoid };
+            let serialize_fn = unsafe { super::super::syscache::agg_serialize_fn(aggfnoid) }
+                .unwrap_or(pg_sys::InvalidOid);
+            Some((AggOp::StddevPop, AggClass::Float8Stats { serialize_fn }))
+        }
+        pg_sys::F_VAR_SAMP_INT2
         | pg_sys::F_VAR_SAMP_INT4
         | pg_sys::F_VAR_SAMP_INT8
         | pg_sys::F_VAR_SAMP_FLOAT4
         | pg_sys::F_VAR_SAMP_FLOAT8
-        | pg_sys::F_VAR_SAMP_NUMERIC
-        | pg_sys::F_VAR_POP_INT2
+        | pg_sys::F_VAR_SAMP_NUMERIC => {
+            // SAFETY: caller contract.
+            let aggfnoid = unsafe { (*aggref).aggfnoid };
+            let serialize_fn = unsafe { super::super::syscache::agg_serialize_fn(aggfnoid) }
+                .unwrap_or(pg_sys::InvalidOid);
+            Some((AggOp::VarSamp, AggClass::Float8Stats { serialize_fn }))
+        }
+        pg_sys::F_VAR_POP_INT2
         | pg_sys::F_VAR_POP_INT4
         | pg_sys::F_VAR_POP_INT8
         | pg_sys::F_VAR_POP_FLOAT4
@@ -139,11 +157,7 @@ pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(A
             let aggfnoid = unsafe { (*aggref).aggfnoid };
             let serialize_fn = unsafe { super::super::syscache::agg_serialize_fn(aggfnoid) }
                 .unwrap_or(pg_sys::InvalidOid);
-            // AggOp doesn't yet carry dedicated StddevSamp / VarSamp variants;
-            // route through Passthrough on the executor side until the frozen
-            // contract lands. The classifier still flags the class so callers
-            // can distinguish INTERNAL-transtype aggregates at plan time.
-            Some((AggOp::Passthrough, AggClass::Float8Stats { serialize_fn }))
+            Some((AggOp::VarPop, AggClass::Float8Stats { serialize_fn }))
         }
 
         // --- BIT_AND / BIT_OR -------------------------------------------
