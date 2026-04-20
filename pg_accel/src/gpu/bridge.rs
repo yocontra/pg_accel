@@ -242,6 +242,39 @@ unsafe extern "C" {
         out_count: *mut i64,
     ) -> PgaccelStatus;
 
+    // -- sum_sq and fused stats (count, sum, sum_sq) for partial-agg AVG/STDDEV --
+    //
+    // sum_sq accumulates Σ(x²) in double regardless of input element type.
+    // stats fuses count, sum, sum_sq into a single kernel launch.
+
+    pub fn pgaccel_reduce_sum_sq_f32(
+        data: *const f32,
+        count: usize,
+        result: *mut f64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_sum_sq_f64(
+        data: *const f64,
+        count: usize,
+        result: *mut f64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_stats_f32(
+        data: *const f32,
+        count: usize,
+        out_count: *mut u64,
+        out_sum: *mut f64,
+        out_sum_sq: *mut f64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_stats_f64(
+        data: *const f64,
+        count: usize,
+        out_count: *mut u64,
+        out_sum: *mut f64,
+        out_sum_sq: *mut f64,
+    ) -> PgaccelStatus;
+
     // -- H3 cell operations --
 
     pub fn pgaccel_h3_get_resolution_bulk(

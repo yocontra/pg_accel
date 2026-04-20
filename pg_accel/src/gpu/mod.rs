@@ -612,6 +612,109 @@ pub fn reduce_count(mask: &[u8]) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// sum_sq and fused stats (count, sum, sum_sq) — partial-agg AVG/STDDEV/VARIANCE
+// ---------------------------------------------------------------------------
+//
+// sum_sq accumulates Σ(x²) in double regardless of input element type so a
+// large fp32 buffer still returns a numerically useful aggregate.
+//
+// stats fuses count + sum + sum_sq into one kernel launch over one buffer
+// so partial-agg STDDEV/VARIANCE doesn't pay three reduce passes.
+//
+// On devices lacking fp64 (Metal), the f64 wrappers cast the input down to
+// f32 and dispatch the f32 kernel — this is the GPU fp32 path, not a CPU
+// fallback (mirrors the pattern used by `reduce_sum_f64`).
+
+/// GPU-accelerated Σ(x²) reduction with f32 input and f64 accumulator.
+/// Returns `None` if GPU is unavailable.
+#[must_use]
+pub fn reduce_sum_sq_f32(data: &[f32]) -> Option<f64> {
+    let _span = tracing::trace_span!("gpu.reduce_sum_sq_f32", n = data.len()).entered();
+    let mut result: f64 = 0.0;
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_sum_sq_f32(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result)
+}
+
+/// GPU-accelerated Σ(x²) reduction with f64 input and f64 accumulator.
+/// On devices lacking fp64, casts to f32 and dispatches the f32 kernel.
+#[must_use]
+pub fn reduce_sum_sq_f64(data: &[f64]) -> Option<f64> {
+    let _span = tracing::trace_span!("gpu.reduce_sum_sq_f64", n = data.len()).entered();
+    let mut result: f64 = 0.0;
+    if device_has_fp64_cached() {
+        // SAFETY: data is a valid slice, result is a valid pointer.
+        let status = unsafe {
+            bridge::pgaccel_reduce_sum_sq_f64(data.as_ptr(), data.len(), &raw mut result)
+        };
+        if status.is_ok() {
+            return Some(result);
+        }
+    }
+    // fp32-only device (Metal): cast to f32 and use f32 kernel.
+    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    reduce_sum_sq_f32(&f32_data)
+}
+
+/// GPU-accelerated fused (count, sum, sum_sq) reduction — single pass.
+/// Input is f32; accumulator is f64 inside the kernel.
+/// Returns `Some((count, sum, sum_sq))` or `None` on GPU failure.
+#[must_use]
+pub fn reduce_stats_f32(data: &[f32]) -> Option<(u64, f64, f64)> {
+    let _span = tracing::trace_span!("gpu.reduce_stats_f32", n = data.len()).entered();
+    if data.is_empty() {
+        return Some((0, 0.0, 0.0));
+    }
+    let mut out_count: u64 = 0;
+    let mut out_sum: f64 = 0.0;
+    let mut out_sum_sq: f64 = 0.0;
+    // SAFETY: data is a valid slice; out_* are valid pointers.
+    let status = unsafe {
+        bridge::pgaccel_reduce_stats_f32(
+            data.as_ptr(),
+            data.len(),
+            &raw mut out_count,
+            &raw mut out_sum,
+            &raw mut out_sum_sq,
+        )
+    };
+    status.is_ok().then_some((out_count, out_sum, out_sum_sq))
+}
+
+/// GPU-accelerated fused (count, sum, sum_sq) reduction — single pass.
+/// Input is f64. On devices lacking fp64, casts to f32 and dispatches the
+/// f32 kernel (Metal fp32 path).
+#[must_use]
+pub fn reduce_stats_f64(data: &[f64]) -> Option<(u64, f64, f64)> {
+    let _span = tracing::trace_span!("gpu.reduce_stats_f64", n = data.len()).entered();
+    if data.is_empty() {
+        return Some((0, 0.0, 0.0));
+    }
+    let mut out_count: u64 = 0;
+    let mut out_sum: f64 = 0.0;
+    let mut out_sum_sq: f64 = 0.0;
+    if device_has_fp64_cached() {
+        // SAFETY: data is a valid slice; out_* are valid pointers.
+        let status = unsafe {
+            bridge::pgaccel_reduce_stats_f64(
+                data.as_ptr(),
+                data.len(),
+                &raw mut out_count,
+                &raw mut out_sum,
+                &raw mut out_sum_sq,
+            )
+        };
+        if status.is_ok() {
+            return Some((out_count, out_sum, out_sum_sq));
+        }
+    }
+    // fp32-only device (Metal): cast to f32 and use f32 kernel.
+    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+    reduce_stats_f32(&f32_data)
+}
+
+// ---------------------------------------------------------------------------
 // H3 wrappers
 // ---------------------------------------------------------------------------
 

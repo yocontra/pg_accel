@@ -84,6 +84,9 @@ target_link_libraries(test_fork_warmed PRIVATE pgaccel_kernels_shared)
 add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
 target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_reduce_stats test/test_reduce_stats.cpp)
+target_link_libraries(test_reduce_stats PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_exec_gpu test/test_exec_gpu.cpp)
 target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
 

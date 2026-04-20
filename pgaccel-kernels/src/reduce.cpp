@@ -651,3 +651,339 @@ extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
 
     return PGACCEL_ERROR_NO_DEVICE;
 }
+
+// ---------------------------------------------------------------------------
+// sum_sq and stats (count, sum, sum_sq) — for partial-agg AVG/STDDEV/VARIANCE.
+//
+// Both kernels accumulate in double regardless of input element type so that
+// a 10M-row fp32 sum_sq stays numerically useful. The f64 public entrypoints
+// require device fp64; the f32 public entrypoints accumulate in double inside
+// the kernel but take a float input buffer.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Template parameters:
+//   T — element type of input buffer (float or double).
+//   Acc — on-device accumulator scalar (float for Metal, double elsewhere).
+// Partials are stored in an Acc array, then host sums them into a double
+// result for better-than-kernel-precision final output.
+template <typename T, typename Acc>
+pgaccel_status tree_reduce_sumsq_sycl(sycl::queue& q, const T* data,
+                                      size_t count, double* result) {
+    T* d_data = sycl::malloc_device<T>(count, q);
+    if (!d_data) return PGACCEL_OOM;
+
+    size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
+
+    Acc* partials = sycl::malloc_shared<Acc>(num_groups, q);
+    if (!partials) {
+        sycl::free(d_data, q);
+        return PGACCEL_OOM;
+    }
+
+    try {
+        q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
+        q.submit([&](sycl::handler& h) {
+            sycl::local_accessor<Acc, 1> local_mem(WG_SIZE, h);
+
+            h.parallel_for(
+                sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    size_t gid = item.get_global_id(0);
+                    size_t lid = item.get_local_id(0);
+                    size_t group_id = item.get_group(0);
+
+                    Acc v = (gid < count)
+                        ? static_cast<Acc>(d_data[gid])
+                        : Acc{0};
+                    local_mem[lid] = v * v;
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    for (size_t stride = WG_SIZE / 2; stride > 0;
+                         stride >>= 1) {
+                        if (lid < stride) {
+                            local_mem[lid] += local_mem[lid + stride];
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+                    }
+
+                    if (lid == 0) {
+                        partials[group_id] = local_mem[0];
+                    }
+                });
+        }).wait_and_throw();
+
+        // Final sum in double regardless of Acc — Metal still returns floats
+        // but the host side promotes to double for the final accumulation.
+        double final_val = 0.0;
+        for (size_t i = 0; i < num_groups; ++i) {
+            final_val += static_cast<double>(partials[i]);
+        }
+        *result = final_val;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: SYCL tree_reduce_sumsq failed: %s\n",
+                e.what());
+        sycl::free(d_data, q);
+        sycl::free(partials, q);
+        return PGACCEL_ERROR;
+    } catch (...) {
+        fprintf(stderr, "pgaccel: SYCL tree_reduce_sumsq failed (unknown)\n");
+        sycl::free(d_data, q);
+        sycl::free(partials, q);
+        return PGACCEL_ERROR;
+    }
+
+    sycl::free(d_data, q);
+    sycl::free(partials, q);
+    return PGACCEL_OK;
+}
+
+// Stats partial parameterized on accumulator type. fp32 variant used on
+// Metal; fp64 variant used on CUDA/ROCm/L0. Count stored as uint32_t in the
+// on-device struct (work-group has at most WG_SIZE elements so 32-bit count
+// is ample even after log2(n) merges within a group); host promotes to u64.
+template <typename Acc, typename CountT>
+struct StatsPartialT {
+    Acc sum;
+    Acc sum_sq;
+    CountT count;
+};
+
+template <typename Acc, typename CountT>
+static inline StatsPartialT<Acc, CountT> stats_identity_t() {
+    return StatsPartialT<Acc, CountT>{Acc{0}, Acc{0}, CountT{0}};
+}
+
+template <typename Acc, typename CountT>
+static inline StatsPartialT<Acc, CountT>
+stats_combine_t(StatsPartialT<Acc, CountT> a, StatsPartialT<Acc, CountT> b) {
+    StatsPartialT<Acc, CountT> r;
+    r.sum = a.sum + b.sum;
+    r.sum_sq = a.sum_sq + b.sum_sq;
+    r.count = a.count + b.count;
+    return r;
+}
+
+template <typename T, typename Acc, typename CountT>
+pgaccel_status tree_reduce_stats_sycl(sycl::queue& q, const T* data,
+                                       size_t count,
+                                       uint64_t* out_count,
+                                       double* out_sum,
+                                       double* out_sum_sq) {
+    using Partial = StatsPartialT<Acc, CountT>;
+
+    T* d_data = sycl::malloc_device<T>(count, q);
+    if (!d_data) return PGACCEL_OOM;
+
+    size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
+
+    Partial* partials = sycl::malloc_shared<Partial>(num_groups, q);
+    if (!partials) {
+        sycl::free(d_data, q);
+        return PGACCEL_OOM;
+    }
+
+    try {
+        q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
+        q.submit([&](sycl::handler& h) {
+            sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
+
+            h.parallel_for(
+                sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE),
+                [=](sycl::nd_item<1> item) {
+                    size_t gid = item.get_global_id(0);
+                    size_t lid = item.get_local_id(0);
+                    size_t group_id = item.get_group(0);
+
+                    Partial p;
+                    if (gid < count) {
+                        Acc v = static_cast<Acc>(d_data[gid]);
+                        p.sum = v;
+                        p.sum_sq = v * v;
+                        p.count = CountT{1};
+                    } else {
+                        p.sum = Acc{0};
+                        p.sum_sq = Acc{0};
+                        p.count = CountT{0};
+                    }
+                    local_mem[lid] = p;
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    for (size_t stride = WG_SIZE / 2; stride > 0;
+                         stride >>= 1) {
+                        if (lid < stride) {
+                            local_mem[lid] = stats_combine_t<Acc, CountT>(
+                                local_mem[lid], local_mem[lid + stride]);
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+                    }
+
+                    if (lid == 0) {
+                        partials[group_id] = local_mem[0];
+                    }
+                });
+        }).wait_and_throw();
+
+        // Host-side final merge promotes to double + u64 for output.
+        double final_sum = 0.0;
+        double final_sum_sq = 0.0;
+        uint64_t final_count = 0;
+        for (size_t i = 0; i < num_groups; ++i) {
+            final_sum += static_cast<double>(partials[i].sum);
+            final_sum_sq += static_cast<double>(partials[i].sum_sq);
+            final_count += static_cast<uint64_t>(partials[i].count);
+        }
+        *out_count = final_count;
+        *out_sum = final_sum;
+        *out_sum_sq = final_sum_sq;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: SYCL tree_reduce_stats failed: %s\n",
+                e.what());
+        sycl::free(d_data, q);
+        sycl::free(partials, q);
+        return PGACCEL_ERROR;
+    } catch (...) {
+        fprintf(stderr, "pgaccel: SYCL tree_reduce_stats failed (unknown)\n");
+        sycl::free(d_data, q);
+        sycl::free(partials, q);
+        return PGACCEL_ERROR;
+    }
+
+    sycl::free(d_data, q);
+    sycl::free(partials, q);
+    return PGACCEL_OK;
+}
+
+} // anonymous namespace
+
+// fp32 input: kernel accumulates in float (Metal-safe); host promotes to
+// double for the final merge. This preserves better-than-single-float
+// precision on the final sum of a few thousand partials without requiring
+// fp64 inside kernel code.
+extern "C" pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data,
+                                                     size_t count,
+                                                     double* result) {
+    if (!result) return PGACCEL_ERROR;
+    if (count == 0) { *result = 0.0; return PGACCEL_OK; }
+    if (!data) return PGACCEL_ERROR;
+    if (count == 1) {
+        double v = static_cast<double>(data[0]);
+        *result = v * v;
+        return PGACCEL_OK;
+    }
+
+    try {
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = tree_reduce_sumsq_sycl<float, float>(
+                *q, data, count, result);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: reduce_sum_sq_f32 SYCL failed: %s\n",
+                e.what());
+    } catch (...) {
+    }
+
+    return PGACCEL_ERROR_NO_DEVICE;
+}
+
+// fp64 input: requires device fp64 (returns UNSUPPORTED on Metal).
+// Kernel accumulator is double.
+extern "C" pgaccel_status pgaccel_reduce_sum_sq_f64(const double* data,
+                                                     size_t count,
+                                                     double* result) {
+    if (!result) return PGACCEL_ERROR;
+    if (count == 0) { *result = 0.0; return PGACCEL_OK; }
+    if (!data) return PGACCEL_ERROR;
+    if (count == 1) {
+        double v = data[0];
+        *result = v * v;
+        return PGACCEL_OK;
+    }
+
+    pgaccel_platform_caps caps = pgaccel_get_caps();
+    if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
+
+    try {
+        sycl::queue* q = get_queue();
+        if (q && q->get_device().has(sycl::aspect::fp64)) {
+            pgaccel_status st = tree_reduce_sumsq_sycl<double, double>(
+                *q, data, count, result);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: reduce_sum_sq_f64 SYCL failed: %s\n",
+                e.what());
+    } catch (...) {
+    }
+
+    return PGACCEL_ERROR_NO_DEVICE;
+}
+
+// fp32 input stats: float accumulator, uint32_t per-group count.
+extern "C" pgaccel_status pgaccel_reduce_stats_f32(const float* data,
+                                                    size_t count,
+                                                    uint64_t* out_count,
+                                                    double* out_sum,
+                                                    double* out_sum_sq) {
+    if (!out_count || !out_sum || !out_sum_sq) return PGACCEL_ERROR;
+    if (count == 0) {
+        *out_count = 0ULL;
+        *out_sum = 0.0;
+        *out_sum_sq = 0.0;
+        return PGACCEL_OK;
+    }
+    if (!data) return PGACCEL_ERROR;
+
+    try {
+        sycl::queue* q = get_queue();
+        if (q) {
+            pgaccel_status st = tree_reduce_stats_sycl<float, float, uint32_t>(
+                *q, data, count, out_count, out_sum, out_sum_sq);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: reduce_stats_f32 SYCL failed: %s\n",
+                e.what());
+    } catch (...) {
+    }
+
+    return PGACCEL_ERROR_NO_DEVICE;
+}
+
+// fp64 input stats: double accumulator, uint64_t count (fp64 device only).
+extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data,
+                                                    size_t count,
+                                                    uint64_t* out_count,
+                                                    double* out_sum,
+                                                    double* out_sum_sq) {
+    if (!out_count || !out_sum || !out_sum_sq) return PGACCEL_ERROR;
+    if (count == 0) {
+        *out_count = 0ULL;
+        *out_sum = 0.0;
+        *out_sum_sq = 0.0;
+        return PGACCEL_OK;
+    }
+    if (!data) return PGACCEL_ERROR;
+
+    pgaccel_platform_caps caps = pgaccel_get_caps();
+    if (!caps.has_fp64) return PGACCEL_UNSUPPORTED;
+
+    try {
+        sycl::queue* q = get_queue();
+        if (q && q->get_device().has(sycl::aspect::fp64)) {
+            pgaccel_status st =
+                tree_reduce_stats_sycl<double, double, uint64_t>(
+                    *q, data, count, out_count, out_sum, out_sum_sq);
+            if (st == PGACCEL_OK) { pgaccel_record_gpu_exec(); return st; }
+        }
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: reduce_stats_f64 SYCL failed: %s\n",
+                e.what());
+    } catch (...) {
+    }
+
+    return PGACCEL_ERROR_NO_DEVICE;
+}

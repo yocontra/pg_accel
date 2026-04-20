@@ -268,7 +268,8 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_fork \
     && ./pgaccel-kernels/build/test_fork_warmed \
     && ./pgaccel-kernels/build/test_fork_cold \
-    && ./pgaccel-kernels/build/test_sycl_basic
+    && ./pgaccel-kernels/build/test_sycl_basic \
+    && ./pgaccel-kernels/build/test_reduce_stats
 
 # === CI ===
 

@@ -185,6 +185,34 @@ pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data,
                                          int64_t* out_max,
                                          int64_t* out_count);
 
+/* ── sum_sq and fused stats (count, sum, sum_sq) — partial-agg AVG/STDDEV ─── */
+/*
+ * sum_sq accumulates Σ(x²) in double regardless of input element type so a
+ * large fp32 buffer stays numerically useful.
+ *
+ * stats fuses count, sum, sum_sq into a single kernel launch over one buffer
+ * so the executor doesn't reduce the same buffer three times for STDDEV/VAR.
+ */
+pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data,
+                                          size_t count,
+                                          double* result);
+
+pgaccel_status pgaccel_reduce_sum_sq_f64(const double* data,
+                                          size_t count,
+                                          double* result);
+
+pgaccel_status pgaccel_reduce_stats_f32(const float* data,
+                                         size_t count,
+                                         uint64_t* out_count,
+                                         double* out_sum,
+                                         double* out_sum_sq);
+
+pgaccel_status pgaccel_reduce_stats_f64(const double* data,
+                                         size_t count,
+                                         uint64_t* out_count,
+                                         double* out_sum,
+                                         double* out_sum_sq);
+
 /* ── Spatial Predicate Kernels ────────────────────────────────────── */
 /*
  * Three-result model:
