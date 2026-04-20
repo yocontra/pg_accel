@@ -20,6 +20,7 @@ mod execute;
 pub(crate) mod ffi_bridge;
 mod keys;
 mod ops;
+pub mod partial;
 pub(crate) mod values;
 
 #[cfg(feature = "pg_test")]
@@ -28,6 +29,7 @@ mod tests;
 pub use execute::AggExecState;
 pub use keys::GroupKeyInfo;
 pub use ops::AggOp;
+pub use partial::{ColumnAccumulator, PartialAggSpec, PartialColumn, PartialEmitter};
 
 use pgrx::pg_sys;
 

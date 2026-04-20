@@ -31,6 +31,7 @@ use crate::engine::stats;
 use crate::gpu::PgaccelKeyType;
 
 mod explain;
+mod plan_partial_agg;
 mod private_data;
 
 use explain::{explain_custom_scan, resolve_thread_count};

@@ -20,7 +20,10 @@ use crate::engine::gucs;
 use crate::engine::registry;
 use crate::engine::stats;
 
+mod agg;
+mod agg_common;
 mod join_pathlist;
+mod partial_agg;
 mod rel_pathlist;
 
 use join_pathlist::pgaccel_set_join_pathlist;
