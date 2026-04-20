@@ -134,23 +134,17 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // 3) Partial / parallel GpuAgg path.
             //
             // PG 17 doesn't fire the upper_paths hook for
-            // `UPPERREL_PARTIAL_GROUP_AGG` directly, so we fetch that rel
-            // from inside the `UPPERREL_GROUP_AGG` branch and hand it to the
-            // partial injector.
-            let grouped_ref = unsafe { &*output_rel };
-            if grouped_ref.consider_parallel {
-                // SAFETY: fetch_upper_rel is a standard planner helper.
-                let partial_rel = unsafe {
-                    pg_sys::fetch_upper_rel(
-                        root,
-                        pg_sys::UpperRelationKind::UPPERREL_PARTIAL_GROUP_AGG,
-                        grouped_ref.relids,
-                    )
-                };
-                if !partial_rel.is_null() {
-                    unsafe { partial_agg::try_inject(root, input_rel, partial_rel) };
-                }
-            }
+            // `UPPERREL_PARTIAL_GROUP_AGG` directly, and by the time the
+            // `UPPERREL_GROUP_AGG` hook fires, core has already run
+            // `gather_grouping_paths` + `add_paths_to_grouping_rel`. Adding
+            // a partial CustomPath to `partially_grouped_rel->partial_pathlist`
+            // here would be orphaned (no Gather, no Finalize Agg).
+            //
+            // `partial_agg::try_inject` instead builds the full
+            // Finalize Agg → Gather → GpuAccel(partial) chain itself and
+            // adds the Finalize AggPath directly to `grouped_rel->pathlist`.
+            // SAFETY: All pointers are valid planner arguments.
+            unsafe { partial_agg::try_inject(root, input_rel, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
             // SAFETY: All pointers are valid planner arguments.
@@ -2159,31 +2153,6 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         (*cpath).custom_private = priv_list;
 
         if is_partial {
-            let child_tag = (*cheapest.cast::<pg_sys::Node>()).type_ as i32;
-            let child_pathtype = (*cheapest).pathtype as i32;
-            let child_parent = (*cheapest).parent;
-            let child_parent_null = child_parent.is_null();
-            let child_pathtarget = (*cheapest).pathtarget;
-            let child_pathtarget_null = child_pathtarget.is_null();
-            let cpath_tag = (*cpath.cast::<pg_sys::Node>()).type_ as i32;
-            let cpath_pathtype = (*cpath).path.pathtype as i32;
-            let n_exprs = if (*output_rel).reltarget.is_null() {
-                -1
-            } else {
-                pg_sys::list_length((*(*output_rel).reltarget).exprs)
-            };
-            pgrx::warning!(
-                "pg_accel partial_agg pre-add: cpath tag={cpath_tag} pathtype={cpath_pathtype} \
-                 psafe={} pworkers={} rows={} \
-                 child tag={child_tag} pathtype={child_pathtype} psafe={} pworkers={} \
-                 parent_null={child_parent_null} pathtarget_null={child_pathtarget_null} \
-                 output_rel n_reltarget_exprs={n_exprs}",
-                (*cpath).path.parallel_safe,
-                (*cpath).path.parallel_workers,
-                (*cpath).path.rows,
-                (*cheapest).parallel_safe,
-                (*cheapest).parallel_workers,
-            );
             pg_sys::add_partial_path(output_rel, cpath.cast());
         } else {
             add_path(output_rel, cpath.cast());

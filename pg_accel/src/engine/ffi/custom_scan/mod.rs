@@ -626,11 +626,17 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         //
         // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
         (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-        (*cscan).scan.plan.targetlist = if is_partial != 0 {
-            plan_partial_agg::build_index_var_tlist(tlist)
-        } else {
-            pg_sys::copyObjectImpl(tlist.cast()).cast()
-        };
+        // For partial paths, the Aggrefs in `tlist` are AGGSPLIT_INITIAL_SERIAL
+        // (produced by make_partial_grouping_target on partially_grouped_rel's
+        // reltarget). The Finalize Agg node above our Gather runs
+        // `convert_combining_aggrefs` on its own tlist to build a matching
+        // INITIAL_SERIAL Aggref; fix_upper_expr then looks up that Aggref in
+        // our plan.targetlist via `equal()`. So partial mode needs the Aggref
+        // itself in plan.targetlist — not an INDEX_VAR wrapper — otherwise
+        // set_upper_references errors with "variable not found in subplan
+        // target list".
+        let _ = &plan_partial_agg::build_index_var_tlist; // still used by separate partial planner
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
 
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
