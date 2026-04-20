@@ -22,9 +22,14 @@ use crate::engine::stats;
 
 mod agg;
 mod agg_common;
+mod hashjoin;
 mod join_pathlist;
 mod partial_agg;
+mod preagg_partial;
 mod rel_pathlist;
+mod scan;
+mod sort;
+mod window;
 
 use join_pathlist::pgaccel_set_join_pathlist;
 use rel_pathlist::pgaccel_set_rel_pathlist;
@@ -117,43 +122,34 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     // Dispatch by upper relation stage.
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
-            // Try fused star-join pre-aggregation first (most benefit).
+            // 1) Fused star-join pre-aggregation (most benefit when it matches).
             // SAFETY: All pointers are valid planner arguments.
+            unsafe { preagg_partial::try_inject(root, input_rel, output_rel) };
             unsafe { pgaccel_inject_gpu_preagg(root, input_rel, output_rel) };
 
-            // Inject standard (non-partial) GpuAgg path unless the diagnostic
-            // env var forces partial-only evaluation.
-            if std::env::var_os("PGACCEL_FORCE_PARTIAL_ONLY").is_none() {
-                // SAFETY: All pointers are valid planner arguments.
-                unsafe { pgaccel_inject_gpu_agg(root, input_rel, output_rel, false) };
-            }
+            // 2) Standard (non-parallel) GpuAgg path.
+            // SAFETY: All pointers are valid planner arguments.
+            unsafe { agg::inject(root, input_rel, output_rel) };
 
-            // Partial-aggregate injection: PG 17 never fires the hook for
-            // UPPERREL_PARTIAL_GROUP_AGG directly, so we fetch the partial
-            // rel from within the GROUP_AGG branch. Gated on debug env var
-            // while we investigate plan-build errors observed previously.
-            if std::env::var_os("PGACCEL_PARTIAL_AGG").is_some() {
-                // SAFETY: output_rel is the grouped rel; its relids identify
-                // the partial grouping rel. fetch_upper_rel returns the
-                // already-populated partial rel if PG created one during
-                // create_partial_grouping_paths, or NULL/empty otherwise.
-                let grouped_ref = unsafe { &*output_rel };
-                if grouped_ref.consider_parallel {
-                    let partial_rel = unsafe {
-                        pg_sys::fetch_upper_rel(
-                            root,
-                            pg_sys::UpperRelationKind::UPPERREL_PARTIAL_GROUP_AGG,
-                            grouped_ref.relids,
-                        )
-                    };
-                    if !partial_rel.is_null() {
-                        pgrx::warning!(
-                            "pg_accel: attempting partial-agg injection on partial_rel={:p}",
-                            partial_rel,
-                        );
-                        // SAFETY: partial_rel is valid upper rel from planner.
-                        unsafe { pgaccel_inject_gpu_agg(root, input_rel, partial_rel, true) };
-                    }
+            // 3) Partial / parallel GpuAgg path.
+            //
+            // PG 17 doesn't fire the upper_paths hook for
+            // `UPPERREL_PARTIAL_GROUP_AGG` directly, so we fetch that rel
+            // from inside the `UPPERREL_GROUP_AGG` branch and hand it to the
+            // partial injector.
+            let grouped_ref = unsafe { &*output_rel };
+            if grouped_ref.consider_parallel {
+                // SAFETY: fetch_upper_rel is a standard planner helper.
+                let partial_rel = unsafe {
+                    pg_sys::fetch_upper_rel(
+                        root,
+                        pg_sys::UpperRelationKind::UPPERREL_PARTIAL_GROUP_AGG,
+                        grouped_ref.relids,
+                    )
+                };
+                if !partial_rel.is_null() {
+                    // SAFETY: partial_rel is valid upper rel from planner.
+                    unsafe { partial_agg::try_inject(root, input_rel, partial_rel) };
                 }
             }
         }
@@ -1478,7 +1474,7 @@ unsafe fn find_equi_join_from_restrictinfo(
     clippy::similar_names,
     clippy::cast_ptr_alignment
 )]
-unsafe fn pgaccel_inject_gpu_agg(
+pub(super) unsafe fn pgaccel_inject_gpu_agg(
     root: *mut PlannerInfo,
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,

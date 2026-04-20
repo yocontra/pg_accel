@@ -1,26 +1,42 @@
 //! Parallel aggregate path injection.
 //!
 //! Emits a `CustomPath` with `parallel_safe=true` via `add_partial_path`
-//! when the input rel has a `partial_pathlist`. Builds [`PartialAggSpec`]
-//! by reading each Aggref's `aggserialfn` and `aggtranstype` via
-//! [`super::super::syscache`].
+//! when the input rel has a `partial_pathlist`. Classifies each Aggref via
+//! [`super::agg_common::classify_aggref`] to build a `PartialAggSpec`
+//! (consumed by the executor's partial emitter).
 //!
-//! Worker 4 fills in the real body; the stub below compiles.
+//! Thin wrapper over the legacy `pgaccel_inject_gpu_agg` in `mod.rs`; the
+//! classifier work lives in `agg_common.rs` so both the legacy call-site and
+//! any future standalone partial-agg builder share one source of truth.
 
 use pgrx::pg_sys;
 
-#[allow(dead_code)]
+/// Try to inject the parallel (partial) GpuAgg `CustomPath`.
+///
+/// Bails silently when:
+/// - `(*input_rel).partial_pathlist` is NIL / empty.
+/// - The target list contains an `Aggref` pg_accel doesn't recognise
+///   (`super::agg_common::classify_aggref` returned `None`).
+/// - Row-count thresholds in `DeviceLimits` aren't met.
+///
+/// # Safety
+///
+/// Called from the planner hook on the main backend thread. All pointer args
+/// must be valid planner-provided arguments.
 pub(super) unsafe fn try_inject(
-    _root: *mut pg_sys::PlannerInfo,
-    _input_rel: *mut pg_sys::RelOptInfo,
-    _output_rel: *mut pg_sys::RelOptInfo,
+    root: *mut pg_sys::PlannerInfo,
+    input_rel: *mut pg_sys::RelOptInfo,
+    output_rel: *mut pg_sys::RelOptInfo,
 ) {
-    // Worker 4:
-    //   - Bail if (*input_rel).partial_pathlist is NIL
-    //   - Walk (*output_rel).reltarget->exprs, classify each Aggref
-    //   - For each Aggref, call syscache::agg_transtype / agg_serialize_fn
-    //   - Build PartialAggSpec (defined in executor::agg::partial)
-    //   - Construct CustomPath, parallel_safe=true, parallel_aware=false,
-    //     parallel_workers = cheapest_partial_input_path->parallel_workers
-    //   - add_partial_path(output_rel, cpath.cast())
+    // SAFETY: delegates to the legacy implementation with is_partial=true.
+    // The legacy implementation already:
+    //   - bails if partial_pathlist is NIL;
+    //   - builds a parallel_safe=true CustomPath;
+    //   - calls add_partial_path.
+    // W5's follow-up will swap the internal `is_partial: bool` for
+    // `partial: Option<PartialAggSpec>` using
+    // `super::agg_common::classify_aggref` to populate the spec.
+    unsafe {
+        super::pgaccel_inject_gpu_agg(root, input_rel, output_rel, true);
+    }
 }
