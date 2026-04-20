@@ -8,6 +8,7 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::{GpuStrategy, list_int_at};
+use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
 use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
@@ -47,10 +48,10 @@ pub(super) struct CustomPrivateData {
     /// When > 0, the executor opens its own heap scan instead of pulling
     /// tuples through ExecProcNode. Used by Agg and Sort strategies.
     pub(super) self_scan_relid: u32,
-    /// True when this is a partial aggregate (worker-side of a Gather plan).
-    /// Emits transition-state tuples instead of final aggregate values.
-    /// Only meaningful when `gpu_strategy == Agg`.
-    pub(super) is_partial: bool,
+    /// Partial-aggregate spec (worker-side of a Gather plan). `Some` means the
+    /// executor emits transition-state tuples instead of final aggregate values.
+    /// `None` on non-parallel paths. Only meaningful when `gpu_strategy == Agg`.
+    pub(super) partial: Option<PartialAggSpec>,
 }
 
 /// Deserialize strategy, batch size, accel context, and sort keys from
@@ -86,7 +87,7 @@ pub(super) unsafe fn deserialize_custom_private(
             window_specs: vec![],
             window_scan_relid: 0,
             self_scan_relid: 0,
-            is_partial: false,
+            partial: None,
         };
     }
 
@@ -306,23 +307,56 @@ pub(super) unsafe fn deserialize_custom_private(
         (0, 0)
     };
 
-    // For Agg strategy, the last two elements of custom_private are
-    // self_scan_relid (list_len - 2) and is_partial (list_len - 1).
-    let (self_scan_relid, is_partial) = if matches!(gpu_strategy, GpuStrategy::Agg) {
+    // For Agg strategy, find `self_scan_relid` (immediately follows the
+    // group-key block) and optionally a PartialAggSpec sentinel block.
+    //
+    // Layout (Agg):
+    //   [..., num_aggs, (op,attno,rtype)*N,
+    //    has_gk, (gk_attno, gk_type_oid, gk_key_type)?,
+    //    self_scan_relid,
+    //    (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?]
+    //
+    // The partial block is optional: non-parallel plans omit it entirely.
+    let (self_scan_relid, partial) = if matches!(gpu_strategy, GpuStrategy::Agg) {
         let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        if list_len >= 2 {
-            // SAFETY: custom_private is a valid List; indices checked.
-            let relid =
-                (unsafe { list_int_at(custom_private, (list_len - 2) as c_int) }) as pg_sys::Index;
-            let partial = unsafe { list_int_at(custom_private, (list_len - 1) as c_int) } != 0;
-            (relid, partial)
+        // The self_scan_relid index is derived from group-key positioning.
+        let num_aggs = unsafe { list_int_at(custom_private, 6) } as usize;
+        let gk_base = 7 + num_aggs * 3;
+        let relid_idx = if gk_base < list_len {
+            let has_gk = unsafe { list_int_at(custom_private, gk_base as c_int) };
+            if has_gk != 0 {
+                // has_gk + 3 payload ints + 1 (relid slot)
+                gk_base + 4
+            } else {
+                gk_base + 1
+            }
         } else {
-            (0, false)
-        }
+            // Defensive: fall back to prior layout (second-to-last int).
+            list_len.saturating_sub(1)
+        };
+        let relid = if relid_idx < list_len {
+            (unsafe { list_int_at(custom_private, relid_idx as c_int) }) as pg_sys::Index
+        } else {
+            0
+        };
+        // Partial sentinel starts at relid_idx + 1 (if present).
+        let partial_idx = relid_idx + 1;
+        let partial_spec = if partial_idx < list_len {
+            let sentinel = unsafe { list_int_at(custom_private, partial_idx as c_int) };
+            if sentinel == PARTIAL_SENTINEL {
+                // SAFETY: indices bounds-checked via partial_idx + needed offsets.
+                unsafe { deserialize_partial_spec(custom_private, partial_idx + 1) }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        (relid, partial_spec)
     } else if matches!(gpu_strategy, GpuStrategy::Sort) {
-        (sort_self_scan_relid, false)
+        (sort_self_scan_relid, None)
     } else {
-        (0, false)
+        (0, None)
     };
 
     CustomPrivateData {
@@ -341,8 +375,101 @@ pub(super) unsafe fn deserialize_custom_private(
         window_specs,
         window_scan_relid,
         self_scan_relid,
-        is_partial,
+        partial,
     }
+}
+
+// ---------------------------------------------------------------------------
+// PartialAggSpec serialization / deserialization
+// ---------------------------------------------------------------------------
+
+/// Magic marker preceding a serialized [`PartialAggSpec`] in `custom_private`.
+/// Chosen to be distinct from any plausible scalar field so mistaken layouts
+/// don't silently deserialize as partial-agg metadata.
+pub(super) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAAG"
+
+/// Append a [`PartialAggSpec`] onto `list` using the sentinel-prefixed
+/// layout consumed by `deserialize_partial_spec`.
+///
+/// Layout: `[PARTIAL_SENTINEL, n_cols, (op, attno, transtype_oid, serialize_fn_oid)*n_cols]`
+/// where `serialize_fn_oid == 0` encodes `None`.
+///
+/// # Safety
+/// Must be called in a valid PG memory context on the main backend thread.
+#[allow(clippy::cast_possible_wrap)]
+pub(super) unsafe fn append_partial_spec(
+    mut list: *mut pg_sys::List,
+    spec: &PartialAggSpec,
+) -> *mut pg_sys::List {
+    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
+    unsafe {
+        list = pg_sys::lappend(list, pg_sys::makeInteger(PARTIAL_SENTINEL).cast());
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(spec.per_column.len() as c_int).cast(),
+        );
+        for col in &spec.per_column {
+            list = pg_sys::lappend(list, pg_sys::makeInteger(col.op.to_i32()).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(col.attno).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(u32::from(col.transtype_oid) as c_int).cast(),
+            );
+            let ser_oid = col
+                .serialize_fn_oid
+                .map_or(0_i32, |o| u32::from(o) as c_int);
+            list = pg_sys::lappend(list, pg_sys::makeInteger(ser_oid).cast());
+        }
+    }
+    list
+}
+
+/// Deserialize a [`PartialAggSpec`] from `list` starting at `start_idx`
+/// (the position of `n_cols`). Returns `None` when the list is too short
+/// or `n_cols` is zero.
+///
+/// # Safety
+/// `list` must be a valid PG `List` of `Integer` nodes.
+#[allow(clippy::cast_sign_loss)]
+pub(super) unsafe fn deserialize_partial_spec(
+    list: *mut pg_sys::List,
+    start_idx: usize,
+) -> Option<PartialAggSpec> {
+    // SAFETY: list_length safe on the null-guarded list from caller.
+    let list_len = unsafe { pg_sys::list_length(list) } as usize;
+    if start_idx >= list_len {
+        return None;
+    }
+    let n_cols = unsafe { list_int_at(list, start_idx as c_int) } as usize;
+    if n_cols == 0 {
+        return Some(PartialAggSpec {
+            per_column: Vec::new(),
+        });
+    }
+    let base = start_idx + 1;
+    if base + n_cols * 4 > list_len {
+        return None;
+    }
+    let mut per_column = Vec::with_capacity(n_cols);
+    for k in 0..n_cols {
+        let off = base + k * 4;
+        let op = AggOp::from_i32(unsafe { list_int_at(list, off as c_int) });
+        let attno = unsafe { list_int_at(list, (off + 1) as c_int) };
+        let transtype_raw = unsafe { list_int_at(list, (off + 2) as c_int) } as u32;
+        let ser_raw = unsafe { list_int_at(list, (off + 3) as c_int) } as u32;
+        let serialize_fn_oid = if ser_raw == 0 {
+            None
+        } else {
+            Some(pg_sys::Oid::from(ser_raw))
+        };
+        per_column.push(PartialColumn {
+            op,
+            attno,
+            transtype_oid: pg_sys::Oid::from(transtype_raw),
+            serialize_fn_oid,
+        });
+    }
+    Some(PartialAggSpec { per_column })
 }
 
 // ---------------------------------------------------------------------------

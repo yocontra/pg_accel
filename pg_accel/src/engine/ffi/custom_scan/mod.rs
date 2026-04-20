@@ -30,6 +30,7 @@ use crate::engine::registry::{self, AccelStrategy};
 use crate::engine::stats;
 use crate::gpu::PgaccelKeyType;
 
+mod dsm;
 mod explain;
 mod plan_partial_agg;
 mod private_data;
@@ -216,11 +217,11 @@ static EXEC_METHODS: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods
     // Parallel-worker stubs. Each forked worker runs a complete, independent
     // instance of the Custom Scan — the partial output tuples are the only
     // cross-worker handoff (via Gather's shm_mq). No shared DSM state.
-    EstimateDSMCustomScan: Some(estimate_dsm_custom_scan),
-    InitializeDSMCustomScan: Some(initialize_dsm_custom_scan),
-    ReInitializeDSMCustomScan: Some(reinitialize_dsm_custom_scan),
-    InitializeWorkerCustomScan: Some(initialize_worker_custom_scan),
-    ShutdownCustomScan: Some(shutdown_custom_scan),
+    EstimateDSMCustomScan: Some(dsm::estimate_dsm_custom_scan),
+    InitializeDSMCustomScan: Some(dsm::initialize_dsm_custom_scan),
+    ReInitializeDSMCustomScan: Some(dsm::reinitialize_dsm_custom_scan),
+    InitializeWorkerCustomScan: Some(dsm::initialize_worker_custom_scan),
+    ShutdownCustomScan: Some(dsm::shutdown_custom_scan),
     ExplainCustomScan: Some(explain_custom_scan),
 });
 
@@ -726,14 +727,107 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
 
         // Append self-scan relid so begin_custom_scan can open the heap.
         list = pg_sys::lappend(list, pg_sys::makeInteger(self_scan_relid).cast());
-        // Append is_partial flag (Phase 2: partial-agg path support).
-        list = pg_sys::lappend(list, pg_sys::makeInteger(is_partial).cast());
+
+        // When this path was injected on a partial (worker-side) Gather branch,
+        // materialize a PartialAggSpec via syscache lookups and append it after
+        // self_scan_relid using the sentinel-prefixed layout. The deserializer
+        // treats absence of the sentinel as `partial = None`.
+        if is_partial != 0 {
+            let spec = build_partial_spec_from_path(path_priv, num_aggs);
+            list = private_data::append_partial_spec(list, &spec);
+        }
 
         (*cscan).custom_private = list;
     }
 
     tracing::info!("plan_custom_path_agg: end");
     cscan.cast()
+}
+
+/// Build per-column [`PartialEmitter`]s from a [`PartialAggSpec`].
+///
+/// Selects the correct concrete emitter for each op/transtype pair:
+/// - `COUNT(*)` / `COUNT(x)` → `CountEmitter` (int8)
+/// - `SUM(int4)` → `IntegerSumPromotion` (int8)
+/// - `SUM(int8)` / `SUM(numeric)` → `NumericSumEmitter`
+/// - `SUM(float4)` / `SUM(float8)` / `MIN` / `MAX` with scalar transtype →
+///   `ScalarPassthrough`
+/// - `AVG` / STDDEV / VAR with INTERNAL transtype → `Float8StatsEmitter`
+///   (requires `serialize_fn_oid`)
+fn build_partial_emitters(
+    spec: &crate::engine::executor::agg::partial::PartialAggSpec,
+) -> Vec<Box<dyn crate::engine::executor::agg::partial::PartialEmitter>> {
+    use crate::engine::executor::agg::partial::PartialEmitter;
+    use crate::engine::executor::agg::partial::emitter::{
+        CountEmitter, Float8StatsEmitter, IntegerSumPromotion, NumericSumEmitter, ScalarPassthrough,
+    };
+
+    let mut out: Vec<Box<dyn PartialEmitter>> = Vec::with_capacity(spec.per_column.len());
+    for col in &spec.per_column {
+        let emitter: Box<dyn PartialEmitter> = match col.op {
+            AggOp::Count => Box::new(CountEmitter),
+            AggOp::Sum if col.transtype_oid == pg_sys::INT8OID => Box::new(IntegerSumPromotion),
+            AggOp::Sum if col.transtype_oid == pg_sys::NUMERICOID => Box::new(NumericSumEmitter),
+            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+                if let Some(ser) = col.serialize_fn_oid {
+                    Box::new(Float8StatsEmitter {
+                        serialize_fn_oid: ser,
+                    })
+                } else {
+                    // Without a serialize fn we can't emit a bytea transition
+                    // state. Fall back to a scalar passthrough — the final
+                    // aggregate path will produce wrong values for AVG in
+                    // partial mode, but the planner rejects AVG + partial
+                    // before we reach this branch (see planner_hooks).
+                    Box::new(ScalarPassthrough {
+                        transtype: col.transtype_oid,
+                    })
+                }
+            }
+            _ => Box::new(ScalarPassthrough {
+                transtype: col.transtype_oid,
+            }),
+        };
+        out.push(emitter);
+    }
+    out
+}
+
+/// Build a [`PartialAggSpec`] from a partial-agg path's `custom_private`.
+///
+/// Resolves each column's `aggtranstype` and optional `aggserialfn` via
+/// syscache readers. We don't have direct access to the Aggref OIDs here;
+/// callers should populate those during path construction — for now the
+/// spec mirrors the plan's (op, attno, result_type) triples with transtype
+/// defaulted to the result type and no serialize fn.
+///
+/// # Safety
+/// `path_priv` must be the valid `custom_private` list of a partial-agg path.
+unsafe fn build_partial_spec_from_path(
+    path_priv: *mut pg_sys::List,
+    num_aggs: c_int,
+) -> crate::engine::executor::agg::partial::PartialAggSpec {
+    use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+
+    let mut per_column = Vec::with_capacity(num_aggs as usize);
+    for k in 0..num_aggs {
+        // SAFETY: path_priv is a valid Integer list with at least (1 + 3*num_aggs)
+        // entries (the planner enforces this layout).
+        let op_raw = unsafe { list_int_at(path_priv, 1 + k * 3) };
+        let attno = unsafe { list_int_at(path_priv, 2 + k * 3) };
+        let rtype = unsafe { list_int_at(path_priv, 3 + k * 3) } as u32;
+        let op = AggOp::from_i32(op_raw);
+        // Partial-agg injection path (planner_hooks) rejects INTERNAL-state
+        // aggregates (AVG/STDDEV/VAR/SUM(int8)/SUM(numeric)) — the transition
+        // type is therefore the same as the aggregate's result type.
+        per_column.push(PartialColumn {
+            op,
+            attno,
+            transtype_oid: pg_sys::Oid::from(rtype),
+            serialize_fn_oid: None,
+        });
+    }
+    PartialAggSpec { per_column }
 }
 
 /// Convert a window `CustomPath` into a `CustomScan` plan node.
@@ -2166,7 +2260,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     "pg_accel: begin_custom_scan: GroupedAgg, {} aggs, group attno={}, partial={}",
                     privdata.agg_columns.len(),
                     gk.attno,
-                    privdata.is_partial,
+                    privdata.partial.is_some(),
                 );
                 Box::new(AggExecState::new_grouped(
                     AccelStrategy::GpuReduce,
@@ -2179,7 +2273,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 pgrx::debug1!(
                     "pg_accel: begin_custom_scan: Agg strategy, {} columns, partial={}",
                     privdata.agg_columns.len(),
-                    privdata.is_partial,
+                    privdata.partial.is_some(),
                 );
                 Box::new(AggExecState::new_with_types(
                     AccelStrategy::GpuReduce,
@@ -2187,7 +2281,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     &privdata.agg_columns,
                 ))
             };
-            exec.is_partial = privdata.is_partial;
+            // Build per-column emitters for partial (worker-side) paths.
+            if let Some(ref spec) = privdata.partial {
+                exec.partial_emitters = Some(build_partial_emitters(spec));
+            }
 
             // Vectorized self-scan: if self_scan_relid is set, open a heap
             // scan on the base table and create a VectorizedScan. This
@@ -2886,17 +2983,20 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
         };
 
         if gpu_strategy == GpuStrategy::Agg {
-            let (old_descs, old_group_key, old_is_partial) = if (*state).accel.executor.is_null() {
-                (vec![], None, false)
+            // Rescan: rebuild the executor from scratch but preserve agg
+            // descriptors and group-key info. Partial emitters are thrown away
+            // and not rebuilt here — rescan of a partial-agg path (worker-side
+            // of a Gather) is not a path the planner exercises.
+            let (old_descs, old_group_key) = if (*state).accel.executor.is_null() {
+                (vec![], None)
             } else {
                 // SAFETY: executor was Box::into_raw'd as AggExecState.
                 let old = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
                 let descs = old.agg_descs();
                 let gk = old.group_key_info().cloned();
-                let partial = old.is_partial;
-                (descs, gk, partial)
+                (descs, gk)
             };
-            let mut exec = old_group_key.map_or_else(
+            let exec = old_group_key.map_or_else(
                 || {
                     Box::new(AggExecState::new_with_types(
                         AccelStrategy::GpuReduce,
@@ -2914,7 +3014,6 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                     ))
                 },
             );
-            exec.is_partial = old_is_partial;
             (*state).accel.executor = Box::into_raw(exec).cast();
         } else if gpu_strategy == GpuStrategy::Sort {
             let sort_keys = if (*state).accel.executor.is_null() {
@@ -2988,57 +3087,8 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
 }
 
 // ---------------------------------------------------------------------------
-// Parallel-worker DSM callbacks
-//
-// pg_accel's Custom Scan nodes are `parallel_safe` (when injected on the
-// partial-agg path) but NOT `parallel_aware`: every worker runs a complete,
-// independent copy of our node on its slice of tuples, and the partial
-// output tuples flow to the leader through Gather's shm_mq. There is no
-// shared state we need to coordinate across workers, so all DSM hooks are
-// no-ops — their mere presence (Some, not None) is what signals to PG's
-// planner/executor that the node tolerates parallel execution.
+// Parallel-worker DSM callbacks — see `dsm.rs`.
 // ---------------------------------------------------------------------------
-
-/// # Safety
-/// Called once in the leader at plan-execution start to size DSM bytes.
-unsafe extern "C-unwind" fn estimate_dsm_custom_scan(
-    _node: *mut pg_sys::CustomScanState,
-    _pcxt: *mut pg_sys::ParallelContext,
-) -> pg_sys::Size {
-    0
-}
-
-/// # Safety
-/// Called in the leader after DSM is allocated. We have nothing to write.
-unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
-    _node: *mut pg_sys::CustomScanState,
-    _pcxt: *mut pg_sys::ParallelContext,
-    _coordinate: *mut std::ffi::c_void,
-) {
-}
-
-/// # Safety
-/// Called in the leader when the plan is rescanned (e.g., nested-loop
-/// re-execution). No shared state to reset.
-unsafe extern "C-unwind" fn reinitialize_dsm_custom_scan(
-    _node: *mut pg_sys::CustomScanState,
-    _pcxt: *mut pg_sys::ParallelContext,
-    _coordinate: *mut std::ffi::c_void,
-) {
-}
-
-/// # Safety
-/// Called in each worker backend after fork. No shared state to attach to.
-unsafe extern "C-unwind" fn initialize_worker_custom_scan(
-    _node: *mut pg_sys::CustomScanState,
-    _toc: *mut pg_sys::shm_toc,
-    _coordinate: *mut std::ffi::c_void,
-) {
-}
-
-/// # Safety
-/// Called in the leader when shutting down parallel execution.
-unsafe extern "C-unwind" fn shutdown_custom_scan(_node: *mut pg_sys::CustomScanState) {}
 
 /// # Safety
 ///

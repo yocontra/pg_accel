@@ -64,7 +64,8 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
             let time_ms = (*state).accel.dispatch_time_us as f64 / 1000.0;
             pg_sys::ExplainPropertyFloat(c"Dispatch Time".as_ptr(), c"ms".as_ptr(), time_ms, 3, es);
 
-            // For Agg strategy, report whether GPU reduce was used.
+            // For Agg strategy, report whether GPU reduce was used and
+            // whether this is a partial (worker-side) aggregate path.
             if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {
                 // SAFETY: executor was Box::into_raw'd as AggExecState.
                 let agg_state = &*(*state).accel.executor.cast::<AggExecState>();
@@ -73,6 +74,9 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     agg_state.gpu_dispatched,
                     es,
                 );
+                if agg_state.partial_emitters.is_some() {
+                    pg_sys::ExplainPropertyBool(c"Partial".as_ptr(), true, es);
+                }
             }
 
             // For PreAgg strategy, report fused pipeline metrics.

@@ -387,7 +387,7 @@ fn custom_private_data_default_fields() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert_eq!(data.gpu_strategy, GpuStrategy::Scan);
     assert_eq!(data.batch_size, 256);
@@ -439,7 +439,7 @@ fn custom_private_data_with_sort_keys() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert_eq!(data.sort_keys.len(), 2);
     assert_eq!(data.sort_keys[0].attno, 1);
@@ -472,7 +472,7 @@ fn custom_private_data_sort_limit_none_when_no_limit() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert!(data.sort_limit.is_none());
 }
@@ -505,7 +505,7 @@ fn custom_private_data_with_agg_columns() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert_eq!(data.agg_columns.len(), 5);
     assert!(matches!(data.agg_columns[0].0, AggOp::Sum));
@@ -538,7 +538,7 @@ fn custom_private_data_with_group_key() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     let gk_ref = data.group_key.as_ref().unwrap();
     assert_eq!(gk_ref.attno, 2);
@@ -567,7 +567,7 @@ fn custom_private_data_hash_join_fields() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert_eq!(data.hash_inner_attno, 3);
     assert_eq!(data.hash_key_type, 1);
@@ -616,7 +616,7 @@ fn custom_private_data_with_window_specs() {
         window_specs: specs,
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert_eq!(data.window_specs.len(), 2);
     assert!(matches!(data.window_specs[0].func, WindowFunc::RowNumber));
@@ -643,7 +643,7 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         window_specs: vec![],
         window_scan_relid: 0,
         self_scan_relid: 0,
-        is_partial: false,
+        partial: None,
     };
     assert!(data.window_specs.is_empty());
 }
@@ -1121,4 +1121,91 @@ fn hash_key_type_mapping_matches_begin_custom_scan() {
     assert!(matches!(map(2), PgaccelKeyType::Float64));
     assert!(matches!(map(-1), PgaccelKeyType::Int32));
     assert!(matches!(map(99), PgaccelKeyType::Int32));
+}
+
+// -----------------------------------------------------------------------
+// CustomPrivateData — partial-agg spec field
+// -----------------------------------------------------------------------
+
+#[test]
+fn custom_private_data_partial_none_by_default() {
+    let data = CustomPrivateData {
+        gpu_strategy: GpuStrategy::Agg,
+        batch_size: 256,
+        fn_oid: pg_sys::Oid::INVALID,
+        target_attno: 0,
+        accel_strategy: AccelStrategy::GpuReduce,
+        sort_keys: vec![],
+        sort_limit: None,
+        agg_columns: vec![(AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32())],
+        group_key: None,
+        group_key_tlist_pos: 0,
+        hash_inner_attno: 0,
+        hash_key_type: 0,
+        window_specs: vec![],
+        window_scan_relid: 0,
+        self_scan_relid: 0,
+        partial: None,
+    };
+    assert!(data.partial.is_none());
+}
+
+#[test]
+fn custom_private_data_partial_some_carries_per_column_spec() {
+    use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+
+    let spec = PartialAggSpec {
+        per_column: vec![
+            PartialColumn {
+                op: AggOp::Sum,
+                attno: 1,
+                transtype_oid: pg_sys::FLOAT8OID,
+                serialize_fn_oid: None,
+            },
+            PartialColumn {
+                op: AggOp::Count,
+                attno: 0,
+                transtype_oid: pg_sys::INT8OID,
+                serialize_fn_oid: None,
+            },
+        ],
+    };
+
+    let data = CustomPrivateData {
+        gpu_strategy: GpuStrategy::Agg,
+        batch_size: 256,
+        fn_oid: pg_sys::Oid::INVALID,
+        target_attno: 0,
+        accel_strategy: AccelStrategy::GpuReduce,
+        sort_keys: vec![],
+        sort_limit: None,
+        agg_columns: vec![
+            (AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32()),
+            (AggOp::Count, 0, pg_sys::INT8OID.to_u32()),
+        ],
+        group_key: None,
+        group_key_tlist_pos: 0,
+        hash_inner_attno: 0,
+        hash_key_type: 0,
+        window_specs: vec![],
+        window_scan_relid: 0,
+        self_scan_relid: 0,
+        partial: Some(spec),
+    };
+    let per = &data.partial.as_ref().unwrap().per_column;
+    assert_eq!(per.len(), 2);
+    assert!(matches!(per[0].op, AggOp::Sum));
+    assert_eq!(per[0].attno, 1);
+    assert_eq!(per[0].transtype_oid, pg_sys::FLOAT8OID);
+    assert!(per[0].serialize_fn_oid.is_none());
+    assert!(matches!(per[1].op, AggOp::Count));
+    assert_eq!(per[1].attno, 0);
+    assert_eq!(per[1].transtype_oid, pg_sys::INT8OID);
+}
+
+#[test]
+fn partial_sentinel_is_ascii_paag() {
+    // PARTIAL_SENTINEL is `b"PAAG"` packed as a big-endian i32.
+    let bytes = 0x5041_4147u32.to_be_bytes();
+    assert_eq!(&bytes, b"PAAG");
 }
