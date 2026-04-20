@@ -324,7 +324,7 @@ static pgaccel_status sycl_point_in_polygon_simple(
             d_results[i] = device_point_in_polygon(
                 px, py, d_poly, vc,
                 has_rings ? d_rings : nullptr, rc);
-        }).wait();
+        }).wait_and_throw();
 
         pgaccel_d2h(*q, results, d_results, surv_count);
 
@@ -529,7 +529,7 @@ static pgaccel_status sycl_point_in_polygon_coop(
                     res_ptr[pi] = result;
                 }
             });
-        }).wait();
+        }).wait_and_throw();
 
         pgaccel_d2h(*q, results, d_results, surv_count);
 

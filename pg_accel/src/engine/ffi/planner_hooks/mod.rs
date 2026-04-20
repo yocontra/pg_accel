@@ -118,9 +118,12 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // SAFETY: All pointers are valid planner arguments.
             unsafe { pgaccel_inject_gpu_preagg(root, input_rel, output_rel) };
 
-            // Inject standard (non-partial) GpuAgg path.
-            // SAFETY: All pointers are valid planner arguments.
-            unsafe { pgaccel_inject_gpu_agg(root, input_rel, output_rel, false) };
+            // Inject standard (non-partial) GpuAgg path unless the diagnostic
+            // env var forces partial-only evaluation.
+            if std::env::var_os("PGACCEL_FORCE_PARTIAL_ONLY").is_none() {
+                // SAFETY: All pointers are valid planner arguments.
+                unsafe { pgaccel_inject_gpu_agg(root, input_rel, output_rel, false) };
+            }
 
             // Partial-aggregate injection: PG 17 never fires the hook for
             // UPPERREL_PARTIAL_GROUP_AGG directly, so we fetch the partial
@@ -690,7 +693,7 @@ unsafe fn pgaccel_inject_gpu_preagg(
     use crate::engine::ffi::custom_scan;
 
     // Gate: GPU must be available and enabled.
-    if !cfg!(feature = "gpu") || !cost::gpu_is_usable() {
+    if !cost::gpu_is_usable() {
         return;
     }
 
@@ -1479,7 +1482,7 @@ unsafe fn pgaccel_inject_gpu_agg(
     is_partial: bool,
 ) {
     // Gate: GPU must be available and enabled.
-    if !cfg!(feature = "gpu") || !cost::gpu_is_usable() {
+    if !cost::gpu_is_usable() {
         pgrx::debug1!("pg_accel: gpu_agg rejected: gpu not available or disabled");
         return;
     }

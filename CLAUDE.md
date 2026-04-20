@@ -125,8 +125,32 @@ Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to
 5. **Common crash patterns:**
    - `apply_tlist_labeling` assert → target list mismatch in `PlanCustomPath` callback
    - `ExceptionalCondition` in planner → Custom Scan path metadata issue
-   - AdaptiveCpp SSCP JIT failure → check `ACPP_TARGETS` and that the `develop` branch is installed to `~/local`
-   - `crashed on child side of fork` → AdaptiveCpp SSCP caches compiled kernels per-backend, avoiding fork+exec recompilation
+   - AdaptiveCpp SSCP JIT failure → check `ACPP_TARGETS` and that the `fork-safe-metal` branch is installed to `~/local` (run `just setup-gpu-acpp`)
+   - `Unable to reach MTLCompilerService ... error 3 - No such process` in a forked backend → the `.metalar` archive path didn't run. See "MTLBinaryArchive cache" below.
+
+### MTLBinaryArchive cache (fork-safety on Apple Silicon)
+
+Metal kernel dispatch in forked PG backends goes through a two-stage cache at
+`~/.acpp/apps/global/jit-cache/`:
+
+| File | Produced by | Loaded via | Why it exists |
+|------|-------------|------------|---------------|
+| `<id>.metallib` | `xcrun metal` + `xcrun metallib` subprocess | `device->newLibrary(url)` | Library load must not require `MTLCompilerService` — file load is pure I/O |
+| `<id>.metalar` | `acpp-metal-archive-build` subprocess | `device->newBinaryArchive(url)` | Pre-compiled AGX pipeline states; passed with `MTLPipelineOptionFailOnBinaryArchiveMiss` so pipeline creation has zero XPC dependency |
+
+**Diagnostic flow when a forked backend crashes at kernel dispatch:**
+
+1. `ls ~/.acpp/apps/global/jit-cache/*.metalar` — if empty after a child dispatch,
+   the archive builder silently failed. Check that `~/local/bin/acpp-metal-archive-build`
+   exists and is on the runtime's derived lookup path (dladdr of libacpp-rt.dylib
+   → `../bin/` or `../../bin/`).
+2. Run the helper manually: `~/local/bin/acpp-metal-archive-build <metallib> /tmp/x.metalar <kernel_name>` —
+   exit codes: `2`=bad args, `3`=no device, `4`=newLibrary failed, `5`=newBinaryArchive failed,
+   `6`=addComputePipelineFunctions failed, `7`=no kernels added, `8`=serializeToURL failed.
+3. Override with `ACPP_METAL_ARCHIVE_BUILD=/abs/path/to/helper` if the dladdr
+   lookup guesses wrong (e.g. non-standard install layout).
+4. `test_fork` asserts a `.metalar` exists after a successful forked dispatch;
+   if that assertion starts failing, the archive path broke before the crash did.
 
 ### GUCs
 

@@ -242,33 +242,23 @@ impl JoinExecState {
             let outer_count = outer_tuples.len();
             self.rows_dispatched += outer_count as u64;
 
-            // If hash table build failed, the planner should not have
-            // injected this GpuHashJoin path. Log a warning and skip
-            // these outer tuples — no CPU nested-loop fallback.
+            // Per CLAUDE.md rule 11: no CPU fallback on GPU kernel failure.
+            // Previously we silently dropped all outer tuples when the hash
+            // table build failed, producing an empty join result. Raise a PG
+            // ERROR so the failure is surfaced instead.
             let Some(ht) = &self.hash_table else {
-                {
-                    pgrx::warning!(
-                        "pg_accel: GPU hash table build failed; \
-                         planner should not have injected GpuHashJoin path"
-                    );
-
-                    // Free outer tuples — no matches produced.
-                    for mt in outer_tuples {
-                        if !mt.is_null() {
-                            // SAFETY: Free owned copy.
-                            unsafe { pg_sys::pfree(mt.cast()) };
-                        }
+                // Free outer tuples before erroring so they don't leak on
+                // error-context teardown (PG will clean the MemoryContext,
+                // but be explicit).
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        // SAFETY: Free owned copy.
+                        unsafe { pg_sys::pfree(mt.cast()) };
                     }
-
-                    let elapsed_us = start.elapsed().as_micros() as u64;
-                    self.dispatch_time_us += elapsed_us;
-                    self.batches_executed += 1;
-                    // Hash-join batch with no hash table: record only the
-                    // batch-level counters (no GPU rows consumed).
-                    stats::record_batch(outer_count as u64, elapsed_us);
-                    pgrx::check_for_interrupts!();
-                    continue;
                 }
+                pgrx::error!(
+                    "pg_accel: GPU hash-join build failed; refusing to fall back to CPU (rule 11)"
+                );
             };
 
             // Extract outer keys for GPU probe.
@@ -344,13 +334,12 @@ impl JoinExecState {
                     }
                 }
             } else {
-                // GPU probe failed. No CPU fallback — log warning.
-                // The planner should not inject GpuHashJoin if GPU is
-                // unavailable. Outer tuples for this batch produce no
-                // matches.
-                pgrx::warning!(
-                    "pg_accel: GPU hash probe failed; \
-                     dropping batch of {} outer tuples",
+                // Per CLAUDE.md rule 11: no CPU fallback on GPU kernel
+                // failure. Previously we silently dropped the outer batch,
+                // producing missing join rows. Raise a PG ERROR so the
+                // failure is surfaced instead of yielding wrong results.
+                pgrx::error!(
+                    "pg_accel: GPU hash-join probe kernel failed on batch of {} outer tuples; refusing to fall back to CPU (rule 11)",
                     outer_tuples.len(),
                 );
             }

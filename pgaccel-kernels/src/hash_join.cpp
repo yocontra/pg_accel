@@ -287,7 +287,7 @@ static pgaccel_status probe_sort_merge_sycl(
 
     // Pass 1: count matches per outer key via parallel binary search.
     uint32_t* d_counts = nullptr;
-    bool owns_counts = false;
+    [[maybe_unused]] bool owns_counts = false;
     if (g_unified_memory) {
         d_counts = static_cast<uint32_t*>(
             sycl::malloc_shared<uint32_t>(outer_count, *q));
@@ -297,8 +297,11 @@ static pgaccel_status probe_sort_merge_sycl(
     }
     if (d_counts == nullptr) return PGACCEL_OOM;
 
+    uint32_t* d_offsets = nullptr;
+
+    try {
     // Zero-initialize counts.
-    q->memset(d_counts, 0, outer_count * sizeof(uint32_t)).wait();
+    q->memset(d_counts, 0, outer_count * sizeof(uint32_t)).wait_and_throw();
 
     // Each work-item binary-searches for its outer key in sorted_keys,
     // then scans adjacent entries for duplicates.
@@ -359,7 +362,7 @@ static pgaccel_status probe_sort_merge_sycl(
                 cnt++;
             }
             d_counts[oi] = cnt;
-        }).wait();
+        }).wait_and_throw();
 
     // Compute prefix sum of counts on host to get write offsets.
     // (outer_count elements — not worth a GPU kernel)
@@ -369,7 +372,7 @@ static pgaccel_status probe_sort_merge_sycl(
                     outer_count * sizeof(uint32_t));
     } else {
         q->memcpy(h_counts.data(), d_counts,
-                  outer_count * sizeof(uint32_t)).wait();
+                  outer_count * sizeof(uint32_t)).wait_and_throw();
     }
 
     std::vector<uint32_t> offsets(outer_count);
@@ -386,7 +389,6 @@ static pgaccel_status probe_sort_merge_sycl(
     }
 
     // Upload offsets for pass 2.
-    uint32_t* d_offsets = nullptr;
     if (g_unified_memory) {
         d_offsets = static_cast<uint32_t*>(
             sycl::malloc_shared<uint32_t>(outer_count, *q));
@@ -402,7 +404,7 @@ static pgaccel_status probe_sort_merge_sycl(
                     outer_count * sizeof(uint32_t));
     } else {
         q->memcpy(d_offsets, offsets.data(),
-                  outer_count * sizeof(uint32_t)).wait();
+                  outer_count * sizeof(uint32_t)).wait_and_throw();
     }
 
     // Pass 2: write match pairs at computed offsets.
@@ -442,11 +444,23 @@ static pgaccel_status probe_sort_merge_sycl(
                 match_pairs[write_pos * 2] = static_cast<uint32_t>(oi);
                 match_pairs[write_pos * 2 + 1] = sorted_indices[lo + k];
             }
-        }).wait();
+        }).wait_and_throw();
 
     sycl::free(d_counts, *q);
     sycl::free(d_offsets, *q);
     return PGACCEL_OK;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "pgaccel: SYCL probe_sort_merge failed: %s\n",
+                e.what());
+        if (d_counts) sycl::free(d_counts, *q);
+        if (d_offsets) sycl::free(d_offsets, *q);
+        return PGACCEL_ERROR;
+    } catch (...) {
+        fprintf(stderr, "pgaccel: SYCL probe_sort_merge failed (unknown)\n");
+        if (d_counts) sycl::free(d_counts, *q);
+        if (d_offsets) sycl::free(d_offsets, *q);
+        return PGACCEL_ERROR;
+    }
 }
 
 // ---------------------------------------------------------------------------

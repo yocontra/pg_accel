@@ -124,8 +124,9 @@ pub unsafe fn dispatch_gpu_raster(
         );
 
         if gpu_ok.is_none() {
-            // GPU failed for this raster — defer to PG.
-            return DispatchResult::Deferred;
+            pgrx::error!(
+                "pg_accel: raster map_algebra GPU kernel failed; refusing CPU fallback (rule 11)"
+            );
         }
 
         // Interpret output_buf as f32 slice and patch back into original WKB.

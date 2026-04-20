@@ -348,7 +348,7 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
             return PGACCEL_ERROR_OOM;
         }
 
-        q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait();
+        q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
 
         q.submit([&](sycl::handler& h) {
             h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
@@ -360,9 +360,9 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(
                     d_res[i] = static_cast<int32_t>((d_cells[i] >> 52) & 0xF);
                 }
             });
-        }).wait();
+        }).wait_and_throw();
 
-        q.memcpy(resolutions, d_res, count * sizeof(int32_t)).wait();
+        q.memcpy(resolutions, d_res, count * sizeof(int32_t)).wait_and_throw();
 
         sycl::free(d_cells, q);
         sycl::free(d_res, q);
@@ -398,7 +398,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
             return PGACCEL_ERROR_OOM;
         }
 
-        q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait();
+        q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
 
         const int p_res = parent_res;
         const uint64_t unused_digit = H3_UNUSED_DIGIT;
@@ -435,9 +435,9 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(
                 }
                 d_parents[i] = result;
             });
-        }).wait();
+        }).wait_and_throw();
 
-        q.memcpy(parents, d_parents, count * sizeof(uint64_t)).wait();
+        q.memcpy(parents, d_parents, count * sizeof(uint64_t)).wait_and_throw();
 
         sycl::free(d_cells, q);
         sycl::free(d_parents, q);
@@ -476,7 +476,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
 
         q.memcpy(d_a, cells_a, count * sizeof(uint64_t));
         q.memcpy(d_b, cells_b, count * sizeof(uint64_t));
-        q.wait();
+        q.wait_and_throw();
 
         const int max_res = H3_MAX_RESOLUTION;
         const uint64_t digit_mask = H3_DIGIT_MASK;
@@ -528,9 +528,9 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(
                 if (dk > d) d = dk;
                 d_dist[i] = static_cast<int32_t>(d);
             });
-        }).wait();
+        }).wait_and_throw();
 
-        q.memcpy(distances, d_dist, count * sizeof(int32_t)).wait();
+        q.memcpy(distances, d_dist, count * sizeof(int32_t)).wait_and_throw();
 
         sycl::free(d_a, q);
         sycl::free(d_b, q);
@@ -607,7 +607,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
 
         q.memcpy(d_lats, h_lats_f32, count * sizeof(float));
         q.memcpy(d_lngs, h_lngs_f32, count * sizeof(float));
-        q.wait();
+        q.wait_and_throw();
 
         delete[] h_lats_f32;
         delete[] h_lngs_f32;
@@ -631,7 +631,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
         }
         q.memcpy(d_fc_lat, h_fc_lat, 20 * sizeof(float));
         q.memcpy(d_fc_lng, h_fc_lng, 20 * sizeof(float));
-        q.wait();
+        q.wait_and_throw();
 
         // Face-to-base-cell mapping
         const int f2bc[20] = {
@@ -745,11 +745,11 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(
                 d_valid[i] = 1;
                 d_cells[i] = cell;
             });
-        }).wait();
+        }).wait_and_throw();
 
         q.memcpy(cell_ids, d_cells, count * sizeof(uint64_t));
         q.memcpy(valid, d_valid, count * sizeof(uint8_t));
-        q.wait();
+        q.wait_and_throw();
 
         sycl::free(d_lats, q);
         sycl::free(d_lngs, q);

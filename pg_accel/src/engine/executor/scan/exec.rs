@@ -489,9 +489,9 @@ impl ScanExecState {
                         }
                     }
                     None => {
-                        // GPU unavailable — fall back to scalar.
-                        // SAFETY: Caller guarantees main backend thread.
-                        unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+                        pgrx::error!(
+                            "pg_accel: template qual GPU kernel failed; refusing CPU fallback (rule 11)"
+                        );
                     }
                 }
             }

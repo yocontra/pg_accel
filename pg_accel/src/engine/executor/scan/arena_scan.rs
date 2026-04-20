@@ -262,21 +262,9 @@ impl ScanExecState {
             stats::record_batch(count as u64, elapsed_us);
             stats::record_gpu_batch(count as u64, recheck_count);
         } else {
-            // GPU unavailable — materialize all and use scalar qual.
-            // This is a real fallback from a GPU path into PG's expression
-            // evaluator; record it for diagnostics.
-            stats::record_stock_exec();
-            for i in 0..count {
-                let (offset, t_len) = entries[i];
-                let mt = unsafe { self.materialize_from_arena(&arena, offset, t_len) };
-                self.tuple_buffer.push(mt);
-            }
-            // Restore mcxt before scalar qual (which may allocate).
-            if !old_mcxt.is_null() {
-                unsafe { pg_sys::MemoryContextSwitchTo(old_mcxt) };
-            }
-            unsafe { self.dispatch_scalar_qual(scan_slot, count) };
-            return;
+            pgrx::error!(
+                "pg_accel: arena-scan template qual GPU kernel failed; refusing CPU fallback (rule 11)"
+            );
         }
 
         self.dispatch_time_us += start_us.elapsed().as_micros() as u64;

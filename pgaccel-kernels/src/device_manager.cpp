@@ -209,8 +209,39 @@ extern "C" pgaccel_status pgaccel_init(void) {
             g_unified_memory = g_caps.is_unified_memory;
             populate_device_info(best, backend);
 
+            // Async exception handler: AdaptiveCpp's Metal backend (and
+            // other backends) report kernel-launch failures asynchronously
+            // through the queue's exception list instead of throwing
+            // synchronously from submit().  Without this handler, a
+            // failed dispatch (e.g. MTLCompilerService unreachable) logs
+            // "[AdaptiveCpp Error] ... metal: Failed to create compute
+            // pipeline state" to stderr but q.submit(...).wait() returns
+            // silently and the caller reads a zero-initialized output
+            // buffer as if the kernel had succeeded.
+            //
+            // By installing a handler that rethrows every sycl::exception
+            // it sees, callers that use wait_and_throw() (on either the
+            // queue or the returned event) will surface these async
+            // errors as synchronous exceptions at the wait site.
+            auto async_handler = [](sycl::exception_list exceptions) {
+                for (std::exception_ptr const& e : exceptions) {
+                    try {
+                        std::rethrow_exception(e);
+                    } catch (const sycl::exception& ex) {
+                        fprintf(stderr,
+                                "pgaccel: async SYCL error: %s\n", ex.what());
+                        throw;
+                    } catch (const std::exception& ex) {
+                        fprintf(stderr,
+                                "pgaccel: async error: %s\n", ex.what());
+                        throw;
+                    }
+                }
+            };
+
             g_queue = new sycl::queue(
-                best, sycl::property_list{sycl::property::queue::in_order{}});
+                best, async_handler,
+                sycl::property_list{sycl::property::queue::in_order{}});
 
             // Silent success: backend init fires per-forked-backend, so
             // logging here produces O(queries) log lines. See Justfile

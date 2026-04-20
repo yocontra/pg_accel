@@ -94,11 +94,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // Var = Var conditions usable for GPU hash join. This enables GPU-
     // accelerated joins for standard OLAP patterns like fact×dim joins
     // even when no extension adapters are installed.
-    #[cfg(feature = "gpu")]
     let equi = unsafe { find_equi_join_key(extra_ref.restrictlist, outerrel, innerrel) };
-
-    #[cfg(not(feature = "gpu"))]
-    let equi: Option<EquiJoinKey> = None;
 
     // Extension-function match: requires adapter registry (PostGIS, H3,
     // raster). Only initialise when equi-join didn't match.

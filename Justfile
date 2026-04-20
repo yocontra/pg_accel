@@ -83,22 +83,28 @@ setup-gpu-metal-headers:
     rm -rf /tmp/metal-cpp /tmp/metal-cpp.zip
     echo "metal-cpp headers installed to ~/local/include"
 
-# Build and install AdaptiveCpp from source
+# Build and install AdaptiveCpp from the local fork-safe-metal checkout at $ACPP_SRC
 setup-gpu-acpp:
     #!/usr/bin/env bash
     set -euo pipefail
     ACPP_PREFIX="$HOME/local"
-    if [ -f "$ACPP_PREFIX/bin/acpp-info" ]; then
-        echo "AdaptiveCpp already installed at $ACPP_PREFIX"
-        "$ACPP_PREFIX/bin/acpp-info" | head -8
-        exit 0
+    ACPP_SRC="${ACPP_SRC:-$HOME/Projects/AdaptiveCpp}"
+    REQUIRED_BRANCH="fork-safe-metal"
+    if [ ! -d "$ACPP_SRC/.git" ]; then
+        echo "ERROR: $ACPP_SRC is not a git checkout."
+        echo "Clone the fork-safe-metal branch manually, e.g.:"
+        echo "  git clone -b $REQUIRED_BRANCH <fork-url> $ACPP_SRC"
+        exit 1
     fi
-    echo "Building AdaptiveCpp (this takes a few minutes)..."
-    cd /tmp
-    rm -rf AdaptiveCpp
-    git clone --depth 1 --branch develop https://github.com/AdaptiveCpp/AdaptiveCpp.git
-    mkdir -p AdaptiveCpp/build && cd AdaptiveCpp/build
+    BRANCH=$(cd "$ACPP_SRC" && git branch --show-current)
+    if [ "$BRANCH" != "$REQUIRED_BRANCH" ]; then
+        echo "WARNING: $ACPP_SRC is on branch '$BRANCH', not '$REQUIRED_BRANCH'."
+        echo "Metal fork-safety lives on $REQUIRED_BRANCH; proceed only if"
+        echo "you have intentionally rebased or cherry-picked the work."
+    fi
     LLVM_PREFIX=$(brew --prefix llvm@20)
+    mkdir -p "$ACPP_SRC/build"
+    cd "$ACPP_SRC/build"
     cmake \
         -DCMAKE_INSTALL_PREFIX="$ACPP_PREFIX" \
         -DWITH_METAL_BACKEND=ON \
@@ -107,6 +113,7 @@ setup-gpu-acpp:
         -DWITH_CUDA_BACKEND=OFF \
         -DWITH_ROCM_BACKEND=OFF \
         -DWITH_SSCP_COMPILER=ON \
+        -DBUILD_CLANG_PLUGIN=ON \
         -DMETAL_INCLUDE_DIR="$ACPP_PREFIX/include" \
         -DACPP_LLD_PATH=$(brew --prefix lld@20)/bin/ld64.lld \
         -DCLANG_EXECUTABLE_PATH="$LLVM_PREFIX/bin/clang++" \
@@ -116,11 +123,20 @@ setup-gpu-acpp:
         -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
         '-DDEFAULT_TARGETS=omp;metal' \
         ..
-    make -j1
+    make -j4
     make install
-    rm -rf /tmp/AdaptiveCpp
-    echo "AdaptiveCpp installed to $ACPP_PREFIX"
+    echo "AdaptiveCpp ($BRANCH) installed to $ACPP_PREFIX from $ACPP_SRC"
     "$ACPP_PREFIX/bin/acpp-info" | head -8
+    # Confirm SSCP + archive helper are in place — without these the fork
+    # path breaks silently. Better to fail here than at first bench crash.
+    "$ACPP_PREFIX/bin/acpp" --acpp-version | grep -q "plugin-with-sscp-compiler: true" || {
+        echo "ERROR: acpp was built without SSCP; pg_accel requires --acpp-targets=generic"
+        exit 1
+    }
+    [ -x "$ACPP_PREFIX/bin/acpp-metal-archive-build" ] || {
+        echo "ERROR: acpp-metal-archive-build helper missing; fork-safety fix did not install"
+        exit 1
+    }
 
 # === Development ===
 
@@ -250,6 +266,8 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_correctness \
     && ./pgaccel-kernels/build/test_exec_gpu \
     && ./pgaccel-kernels/build/test_fork \
+    && ./pgaccel-kernels/build/test_fork_warmed \
+    && ./pgaccel-kernels/build/test_fork_cold \
     && ./pgaccel-kernels/build/test_sycl_basic
 
 # === CI ===

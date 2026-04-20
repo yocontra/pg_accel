@@ -76,7 +76,13 @@ pgaccel_status sycl_fused_filter_reduce_f32(
         d_filter = sycl::malloc_device<float>(count, q);
         if (!d_filter) return PGACCEL_OOM;
         owns_filter = true;
-        q.memcpy(d_filter, filter_col, count * sizeof(float)).wait();
+        try {
+            q.memcpy(d_filter, filter_col,
+                     count * sizeof(float)).wait_and_throw();
+        } catch (...) {
+            sycl::free(d_filter, q);
+            throw;
+        }
     }
 
     // Prepare device-accessible agg column (not needed for COUNT)
@@ -92,7 +98,14 @@ pgaccel_status sycl_fused_filter_reduce_f32(
                 return PGACCEL_OOM;
             }
             owns_agg = true;
-            q.memcpy(d_agg, agg_col, count * sizeof(float)).wait();
+            try {
+                q.memcpy(d_agg, agg_col,
+                         count * sizeof(float)).wait_and_throw();
+            } catch (...) {
+                sycl::free(d_agg, q);
+                if (owns_filter) sycl::free(d_filter, q);
+                throw;
+            }
         }
     }
 
@@ -163,21 +176,22 @@ pgaccel_status sycl_fused_filter_reduce_f32(
                     ref.fetch_max(d_agg[i]);
                     break;
             }
-        }).wait();
+        }).wait_and_throw();
+
+        // Read back result, cast f32 -> f64.  Only safe after
+        // wait_and_throw() confirmed the kernel succeeded.
+        if (*d_match_count == 0 &&
+            (agg_op == PGACCEL_FUSED_MIN || agg_op == PGACCEL_FUSED_MAX)) {
+            *out_result = 0.0;
+        } else {
+            *out_result = static_cast<double>(*d_result);
+        }
     } catch (...) {
         sycl::free(d_result, q);
         sycl::free(d_match_count, q);
         if (owns_filter) sycl::free(d_filter, q);
         if (owns_agg) sycl::free(d_agg, q);
         throw;  // Re-throw so the outer catch in the public API triggers fallback
-    }
-
-    // Read back result, cast f32 -> f64
-    if (*d_match_count == 0 &&
-        (agg_op == PGACCEL_FUSED_MIN || agg_op == PGACCEL_FUSED_MAX)) {
-        *out_result = 0.0;
-    } else {
-        *out_result = static_cast<double>(*d_result);
     }
 
     // Cleanup
@@ -206,7 +220,13 @@ pgaccel_status sycl_fused_filter_count_f32(
         d_filter = sycl::malloc_device<float>(count, q);
         if (!d_filter) return PGACCEL_OOM;
         owns_filter = true;
-        q.memcpy(d_filter, filter_col, count * sizeof(float)).wait();
+        try {
+            q.memcpy(d_filter, filter_col,
+                     count * sizeof(float)).wait_and_throw();
+        } catch (...) {
+            sycl::free(d_filter, q);
+            throw;
+        }
     }
 
     uint32_t* d_count = sycl::malloc_shared<uint32_t>(1, q);
@@ -229,14 +249,14 @@ pgaccel_status sycl_fused_filter_count_f32(
                     sycl::access::address_space::global_space> ref(*d_count);
                 ref.fetch_add(1u);
             }
-        }).wait();
+        }).wait_and_throw();
+
+        *out_count = static_cast<int64_t>(*d_count);
     } catch (...) {
         sycl::free(d_count, q);
         if (owns_filter) sycl::free(d_filter, q);
         throw;  // Re-throw so the outer catch in the public API triggers fallback
     }
-
-    *out_count = static_cast<int64_t>(*d_count);
 
     sycl::free(d_count, q);
     if (owns_filter) sycl::free(d_filter, q);

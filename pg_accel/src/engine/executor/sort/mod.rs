@@ -857,7 +857,12 @@ impl SortExecState {
             let limits = cost::device_limits();
             let do_inline = matches!(key_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
 
-            let gpu_done = if do_inline
+            enum SortOutcome {
+                InputGate, // key type / row count / empty keys — defer
+                Dispatched,
+            }
+
+            let outcome = if do_inline
                 && n >= limits.gpu_sort_min_rows
                 && n <= limits.gpu_sort_max_elements
             {
@@ -867,58 +872,63 @@ impl SortExecState {
                     FLOAT4OID => {
                         let mut f32_keys = f32_keys;
                         if f32_keys.is_empty() {
-                            false
+                            SortOutcome::InputGate
                         } else {
                             let mut gpu_idx: Vec<u32> = (0..f32_keys.len() as u32).collect();
-                            let ok = gpu::sort_kv_f32(&mut f32_keys, &mut gpu_idx).is_some();
-                            if ok {
-                                self.apply_gpu_sort_result(
-                                    &key,
-                                    &non_null_indices,
-                                    &null_indices,
-                                    &gpu_idx,
-                                    n,
+                            if gpu::sort_kv_f32(&mut f32_keys, &mut gpu_idx).is_none() {
+                                pgrx::error!(
+                                    "pg_accel: sort_kv_f32 GPU kernel failed; refusing CPU fallback (rule 11)"
                                 );
                             }
-                            ok
+                            self.apply_gpu_sort_result(
+                                &key,
+                                &non_null_indices,
+                                &null_indices,
+                                &gpu_idx,
+                                n,
+                            );
+                            SortOutcome::Dispatched
                         }
                     }
                     FLOAT8OID | INT4OID | INT8OID => {
                         let mut f64_keys = f64_keys;
                         if f64_keys.is_empty() {
-                            false
+                            SortOutcome::InputGate
                         } else {
                             let mut gpu_idx: Vec<u32> = (0..f64_keys.len() as u32).collect();
-                            let ok = gpu::sort_kv_f64(&mut f64_keys, &mut gpu_idx).is_some();
-                            if ok {
-                                self.apply_gpu_sort_result(
-                                    &key,
-                                    &non_null_indices,
-                                    &null_indices,
-                                    &gpu_idx,
-                                    n,
+                            if gpu::sort_kv_f64(&mut f64_keys, &mut gpu_idx).is_none() {
+                                pgrx::error!(
+                                    "pg_accel: sort_kv_f64 GPU kernel failed; refusing CPU fallback (rule 11)"
                                 );
                             }
-                            ok
+                            self.apply_gpu_sort_result(
+                                &key,
+                                &non_null_indices,
+                                &null_indices,
+                                &gpu_idx,
+                                n,
+                            );
+                            SortOutcome::Dispatched
                         }
                     }
-                    _ => false,
+                    _ => SortOutcome::InputGate,
                 }
             } else {
-                false
+                SortOutcome::InputGate
             };
 
-            if gpu_done {
-                gpu_rows_sorted = n as u64;
-            } else {
-                pgrx::warning!(
-                    "pg_accel: GPU sort unavailable for {} rows (vscan); \
-                     deferring to PG SortSupport",
-                    n,
-                );
-                // SAFETY: scratch_slot has base relation's TupleDesc.
-                unsafe {
-                    self.sort_tuples(scratch_slot, n);
+            match outcome {
+                SortOutcome::Dispatched => {
+                    gpu_rows_sorted = n as u64;
+                }
+                SortOutcome::InputGate => {
+                    // Unsupported key type or out-of-range row count — defer
+                    // to PG SortSupport. This is input gating, not a GPU
+                    // kernel failure (which would error above).
+                    // SAFETY: scratch_slot has base relation's TupleDesc.
+                    unsafe {
+                        self.sort_tuples(scratch_slot, n);
+                    }
                 }
             }
         }

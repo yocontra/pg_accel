@@ -541,6 +541,15 @@ impl WindowExecState {
                 gpu_specs_ok += 1;
             } else {
                 stats::record_window_gpu_failure();
+                // Per CLAUDE.md rule 11: GPU window kernel must succeed.
+                // The `results` buffer was zero-filled before dispatch, so a
+                // silent failure emits wrong results (e.g. SUM = 0). Raise a
+                // PG ERROR instead of producing fake output.
+                pgrx::error!(
+                    "pg_accel: GPU window kernel failed for {:?} on {} rows; refusing to fall back to CPU (rule 11)",
+                    spec.func,
+                    n,
+                );
             }
             pgrx::check_for_interrupts!();
         }
@@ -715,6 +724,15 @@ impl WindowExecState {
                 gpu_specs_ok += 1;
             } else {
                 stats::record_window_gpu_failure();
+                // Per CLAUDE.md rule 11: GPU window kernel must succeed.
+                // The `results` buffer was zero-filled before dispatch, so a
+                // silent failure emits wrong results (e.g. SUM = 0). Raise a
+                // PG ERROR instead of producing fake output.
+                pgrx::error!(
+                    "pg_accel: GPU window kernel failed for {:?} on {} rows; refusing to fall back to CPU (rule 11)",
+                    spec.func,
+                    n,
+                );
             }
             pgrx::check_for_interrupts!();
         }

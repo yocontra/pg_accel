@@ -286,7 +286,7 @@ static pgaccel_status map_algebra_gpu(
             } else {
                 q.memset(d_mask, 0, pixel_count);
             }
-            q.wait();
+            q.wait_and_throw();
 
             // Copy band pointers to device — we only support up to 8
             // bands in the kernel (fits in a fixed-size array, avoids
@@ -415,13 +415,13 @@ static pgaccel_status map_algebra_gpu(
                         d_out[i] = r;
                     }
                 });
-            }).wait();
+            }).wait_and_throw();
 
             q.memcpy(output_pixels, d_out, pixel_count * sizeof(float));
             if (nodata_mask) {
                 q.memcpy(nodata_mask, d_mask, pixel_count);
             }
-            q.wait();
+            q.wait_and_throw();
 
             for (auto* p : d_bands) sycl::free(p, q);
             sycl::free(d_out, q);
@@ -594,10 +594,10 @@ extern "C" pgaccel_status pgaccel_raster_clip(
         } else {
             q.memset(d_mask, 0, total * sizeof(uint8_t));
         }
-        q.wait();
+        q.wait_and_throw();
 
         // Copy raster pixels to output buffer on device
-        q.memcpy(d_out, d_rast, total * psz).wait();
+        q.memcpy(d_out, d_rast, total * psz).wait_and_throw();
 
         const size_t w = width;
         const size_t vc = vertex_count;
@@ -634,11 +634,11 @@ extern "C" pgaccel_status pgaccel_raster_clip(
 
                 d_mask[idx] = inside ? 0 : 1;
             });
-        }).wait();
+        }).wait_and_throw();
 
         q.memcpy(output_pixels, d_out, total * psz);
         q.memcpy(nodata_mask, d_mask, total * sizeof(uint8_t));
-        q.wait();
+        q.wait_and_throw();
 
         sycl::free(d_rast, q);
         sycl::free(d_out, q);
@@ -717,7 +717,7 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
 
         q.memcpy(d_in, h_in, pixel_count * sizeof(float));
         q.memcpy(d_rules, h_rules_flat, rule_alloc * sizeof(float));
-        q.wait();
+        q.wait_and_throw();
 
         delete[] h_in;
         delete[] h_rules_flat;
@@ -742,7 +742,7 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
 
                 d_out[i] = out_val;
             });
-        }).wait();
+        }).wait_and_throw();
 
         // Read back and convert to output pixel type
         auto* h_out = new (std::nothrow) float[pixel_count];
@@ -752,7 +752,7 @@ extern "C" pgaccel_status pgaccel_raster_reclass(
             return PGACCEL_ERROR_OOM;
         }
 
-        q.memcpy(h_out, d_out, pixel_count * sizeof(float)).wait();
+        q.memcpy(h_out, d_out, pixel_count * sizeof(float)).wait_and_throw();
 
         for (size_t i = 0; i < pixel_count; i++) {
             write_pixel(output_pixels, i, output_type,

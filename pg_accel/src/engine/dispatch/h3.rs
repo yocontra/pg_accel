@@ -75,17 +75,18 @@ pub unsafe fn dispatch_gpu_h3(
 
         log_h3_timeout(timeout_ms, &start);
 
-        if let Some(cell_ids) = gpu_result {
-            let mut results = vec![(pgrx::pg_sys::Datum::from(0), true); batch.len()];
-            for (gi, &batch_idx) in valid_indices.iter().enumerate() {
-                if gi < cell_ids.len() && cell_ids[gi] != 0 {
-                    results[batch_idx] = (pgrx::pg_sys::Datum::from(cell_ids[gi] as i64), false);
-                }
+        let Some(cell_ids) = gpu_result else {
+            pgrx::error!(
+                "pg_accel: h3_lat_lng_to_cell GPU kernel failed; refusing CPU fallback (rule 11)"
+            );
+        };
+        let mut results = vec![(pgrx::pg_sys::Datum::from(0), true); batch.len()];
+        for (gi, &batch_idx) in valid_indices.iter().enumerate() {
+            if gi < cell_ids.len() && cell_ids[gi] != 0 {
+                results[batch_idx] = (pgrx::pg_sys::Datum::from(cell_ids[gi] as i64), false);
             }
-            return DispatchResult::Accelerated(results);
         }
-
-        return DispatchResult::Deferred;
+        return DispatchResult::Accelerated(results);
     }
 
     // Extract H3 cell indices from the batch datums.
@@ -141,22 +142,46 @@ pub unsafe fn dispatch_gpu_h3(
 
     log_h3_timeout(timeout_ms, &start);
 
-    // If GPU returned results, map them back to batch indices.
-    if let Some(gpu_res) = gpu_results {
-        let mut results = vec![(pgrx::pg_sys::Datum::from(0), true); batch.len()];
-        for (gi, &batch_idx) in valid_indices.iter().enumerate() {
-            let datum = match &gpu_res {
-                GpuH3Result::I32(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi]),
-                GpuH3Result::U64(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi] as i64),
-                _ => continue,
-            };
-            results[batch_idx] = (datum, false);
+    // Unsupported function → defer (input gate, not kernel failure).
+    // Supported function + missing qual arg → defer (input gate).
+    // Supported function + present args → GPU kernel MUST succeed (rule 11).
+    let Some(gpu_res) = gpu_results else {
+        match fn_name {
+            Some("h3_get_resolution") => {
+                pgrx::error!(
+                    "pg_accel: h3_get_resolution GPU kernel failed; refusing CPU fallback (rule 11)"
+                );
+            }
+            Some("h3_cell_to_parent") => {
+                if qual_datum.is_some_and(|(_, n)| !n) {
+                    pgrx::error!(
+                        "pg_accel: h3_cell_to_parent GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }
+                return DispatchResult::Deferred;
+            }
+            Some("h3_grid_distance") => {
+                if qual_datum.is_some_and(|(_, n)| !n) {
+                    pgrx::error!(
+                        "pg_accel: h3_grid_distance GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }
+                return DispatchResult::Deferred;
+            }
+            _ => return DispatchResult::Deferred,
         }
-        return DispatchResult::Accelerated(results);
-    }
+    };
 
-    // GPU unavailable or unsupported function — fall back to standard executor.
-    DispatchResult::Deferred
+    let mut results = vec![(pgrx::pg_sys::Datum::from(0), true); batch.len()];
+    for (gi, &batch_idx) in valid_indices.iter().enumerate() {
+        let datum = match &gpu_res {
+            GpuH3Result::I32(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi]),
+            GpuH3Result::U64(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi] as i64),
+            _ => continue,
+        };
+        results[batch_idx] = (datum, false);
+    }
+    DispatchResult::Accelerated(results)
 }
 
 /// Tagged union for H3 GPU kernel results — some return i32, others u64.

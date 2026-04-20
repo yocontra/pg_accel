@@ -49,7 +49,6 @@ pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count,
     // Always copy via malloc_device.
     T* d_data = sycl::malloc_device<T>(count, q);
     if (!d_data) return PGACCEL_OOM;
-    q.memcpy(d_data, data, count * sizeof(T)).wait();
 
     size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
@@ -61,6 +60,7 @@ pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count,
     }
 
     try {
+        q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
         q.submit([&](sycl::handler& h) {
             sycl::local_accessor<T, 1> local_mem(WG_SIZE, h);
 
@@ -89,7 +89,15 @@ pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count,
                         partials[group_id] = local_mem[0];
                     }
                 });
-        }).wait();
+        }).wait_and_throw();
+
+        // Final reduction of partial results on host — only after
+        // wait_and_throw() confirms the kernel completed successfully.
+        T final_val = identity;
+        for (size_t i = 0; i < num_groups; ++i) {
+            final_val = op(final_val, partials[i]);
+        }
+        *result = final_val;
     } catch (const std::exception& e) {
         fprintf(stderr, "pgaccel: SYCL tree_reduce failed: %s\n", e.what());
         sycl::free(d_data, q);
@@ -101,13 +109,6 @@ pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count,
         sycl::free(partials, q);
         return PGACCEL_ERROR;
     }
-
-    // Final reduction of partial results on host.
-    T final_val = identity;
-    for (size_t i = 0; i < num_groups; ++i) {
-        final_val = op(final_val, partials[i]);
-    }
-    *result = final_val;
 
     sycl::free(d_data, q);
     sycl::free(partials, q);
@@ -145,7 +146,6 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
     // load-and-convert approach to avoid an extra allocation.
     uint8_t* d_mask = sycl::malloc_device<uint8_t>(count, q);
     if (!d_mask) return PGACCEL_OOM;
-    q.memcpy(d_mask, mask, count * sizeof(uint8_t)).wait();
 
     size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
@@ -156,6 +156,7 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
     }
 
     try {
+        q.memcpy(d_mask, mask, count * sizeof(uint8_t)).wait_and_throw();
         q.submit([&](sycl::handler& h) {
             sycl::local_accessor<size_t, 1> local_mem(WG_SIZE, h);
 
@@ -183,7 +184,11 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
                         partials[group_id] = local_mem[0];
                     }
                 });
-        }).wait();
+        }).wait_and_throw();
+
+        size_t total = 0;
+        for (size_t i = 0; i < num_groups; ++i) total += partials[i];
+        *result = total;
     } catch (const std::exception& e) {
         fprintf(stderr, "pgaccel: SYCL reduce_count failed: %s\n", e.what());
         sycl::free(d_mask, q);
@@ -195,10 +200,6 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask,
         sycl::free(partials, q);
         return PGACCEL_ERROR;
     }
-
-    size_t total = 0;
-    for (size_t i = 0; i < num_groups; ++i) total += partials[i];
-    *result = total;
 
     sycl::free(d_mask, q);
     sycl::free(partials, q);
@@ -471,7 +472,6 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data,
 
     T* d_data = sycl::malloc_device<T>(count, q);
     if (!d_data) return PGACCEL_OOM;
-    q.memcpy(d_data, data, count * sizeof(T)).wait();
 
     size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
@@ -485,6 +485,7 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data,
     Partial identity = multi_identity<T>();
 
     try {
+        q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
         q.submit([&](sycl::handler& h) {
             sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
 
@@ -521,7 +522,16 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data,
                         partials[group_id] = local_mem[0];
                     }
                 });
-        }).wait();
+        }).wait_and_throw();
+
+        Partial final = identity;
+        for (size_t i = 0; i < num_groups; ++i) {
+            final = multi_combine(final, partials[i]);
+        }
+        *out_sum = final.sum;
+        *out_min = final.min;
+        *out_max = final.max;
+        *out_count = final.count;
     } catch (const std::exception& e) {
         fprintf(stderr,
                 "pgaccel: SYCL tree_reduce_multi failed: %s\n", e.what());
@@ -535,15 +545,6 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data,
         sycl::free(partials, q);
         return PGACCEL_ERROR;
     }
-
-    Partial final = identity;
-    for (size_t i = 0; i < num_groups; ++i) {
-        final = multi_combine(final, partials[i]);
-    }
-    *out_sum = final.sum;
-    *out_min = final.min;
-    *out_max = final.max;
-    *out_count = final.count;
 
     sycl::free(d_data, q);
     sycl::free(partials, q);

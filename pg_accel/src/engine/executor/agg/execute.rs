@@ -166,17 +166,15 @@ impl AggColumn {
         if let Some(result) = f32_result {
             self.apply_gpu_result(result);
         } else {
-            // GPU reduce failed for a reducible op. This should not happen
-            // if the planner correctly verified GPU availability. Log a
-            // warning and drain values so the query still completes, but
-            // the result may differ from what a pure GPU path would produce.
-            tracing::warn!(
-                "pg_accel: GPU reduce unavailable for {:?} with {} values; \
-                 planner should not have injected GpuReduce path",
+            // GPU reduce failed for a reducible op. Per CLAUDE.md rule 11,
+            // no CPU fallback — raise a PG ERROR so the caller knows the
+            // query cannot be answered accurately rather than silently
+            // substituting a scalar accumulator (which has produced wrong
+            // results, e.g. SUM=0).
+            pgrx::error!(
+                "pg_accel: GPU reduce kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
                 self.op,
-                n,
             );
-            self.drain_small_batch();
         }
     }
 
@@ -205,19 +203,13 @@ impl AggColumn {
                 self.gpu_dispatched = true;
                 self.accumulate(partial);
             } else {
-                // Planner should not have injected GpuReduce when neither
-                // f64 nor f32 GPU reduce is available. This is a safeguard
-                // for kernel bugs or unknown devices — not a feature
-                // fallback (rule 11).
-                tracing::warn!(
-                    "pg_accel: GPU reduce unavailable for {:?} on {}-row chunk; \
-                     planner should not have injected GpuReduce path",
+                // Per CLAUDE.md rule 11: no CPU fallback on GPU kernel
+                // failure. Raise a PG ERROR instead of silently folding the
+                // chunk into the scalar accumulator.
+                pgrx::error!(
+                    "pg_accel: GPU reduce kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
                     self.op,
-                    chunk.len(),
                 );
-                for &val in chunk {
-                    self.accumulate(val);
-                }
             }
         }
         self.has_value = true;
@@ -1184,8 +1176,11 @@ impl AggExecState {
                 key_type: group_key_info.key_type,
             });
         } else {
-            tracing::debug!(
-                "pg_accel: hash_agg_vectorized: GPU dispatch failed for {} rows",
+            // Per CLAUDE.md rule 11: GPU hash aggregate must succeed. Leaving
+            // `grouped_result = None` silently produced zero rows for the
+            // query. Raise a PG ERROR so the failure surfaces instead.
+            pgrx::error!(
+                "pg_accel: GPU hash-agg kernel failed; refusing to fall back to CPU (rule 11). rows={}",
                 total,
             );
         }
@@ -1992,7 +1987,13 @@ impl AggExecState {
                 key_type: group_key_info.key_type,
             });
         } else {
-            tracing::debug!("pg_accel: hash_agg: GPU dispatch failed, no results");
+            // Per CLAUDE.md rule 11: GPU hash aggregate must succeed. Leaving
+            // `grouped_result = None` silently produced zero rows for the
+            // query. Raise a PG ERROR so the failure surfaces instead.
+            pgrx::error!(
+                "pg_accel: GPU hash-agg kernel failed; refusing to fall back to CPU (rule 11). rows={}",
+                row_count,
+            );
         }
     }
 

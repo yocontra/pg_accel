@@ -42,56 +42,64 @@ pgaccel_status bbox_intersects_bulk_sycl(
         return PGACCEL_OOM;
     }
 
-    // Copy inputs to device, zero the hit counter
-    q.memcpy(d_a, boxes_a, count_a * 4 * sizeof(T));
-    q.memcpy(d_b, boxes_b, count_b * 4 * sizeof(T));
-    q.memset(d_hits, 0, sizeof(uint32_t));
-    q.wait();
+    try {
+        // Copy inputs to device, zero the hit counter
+        q.memcpy(d_a, boxes_a, count_a * 4 * sizeof(T));
+        q.memcpy(d_b, boxes_b, count_b * 4 * sizeof(T));
+        q.memset(d_hits, 0, sizeof(uint32_t));
+        q.wait_and_throw();
 
-    const size_t cb = count_b; // capture for kernel lambda
+        const size_t cb = count_b; // capture for kernel lambda
 
-    q.submit([&](sycl::handler& h) {
-        h.parallel_for(sycl::range<1>(total_pairs), [=](sycl::id<1> id) {
-            const size_t idx = id[0];
-            const size_t i = idx / cb;
-            const size_t j = idx % cb;
+        q.submit([&](sycl::handler& h) {
+            h.parallel_for(sycl::range<1>(total_pairs), [=](sycl::id<1> id) {
+                const size_t idx = id[0];
+                const size_t i = idx / cb;
+                const size_t j = idx % cb;
 
-            const T a_xmin = d_a[i * 4 + 0];
-            const T a_ymin = d_a[i * 4 + 1];
-            const T a_xmax = d_a[i * 4 + 2];
-            const T a_ymax = d_a[i * 4 + 3];
+                const T a_xmin = d_a[i * 4 + 0];
+                const T a_ymin = d_a[i * 4 + 1];
+                const T a_xmax = d_a[i * 4 + 2];
+                const T a_ymax = d_a[i * 4 + 3];
 
-            const T b_xmin = d_b[j * 4 + 0];
-            const T b_ymin = d_b[j * 4 + 1];
-            const T b_xmax = d_b[j * 4 + 2];
-            const T b_ymax = d_b[j * 4 + 3];
+                const T b_xmin = d_b[j * 4 + 0];
+                const T b_ymin = d_b[j * 4 + 1];
+                const T b_xmax = d_b[j * 4 + 2];
+                const T b_ymax = d_b[j * 4 + 3];
 
-            const bool intersects = !(a_xmax < b_xmin || a_xmin > b_xmax ||
-                                      a_ymax < b_ymin || a_ymin > b_ymax);
+                const bool intersects = !(a_xmax < b_xmin || a_xmin > b_xmax ||
+                                          a_ymax < b_ymin || a_ymin > b_ymax);
 
-            d_result[idx] = intersects ? 1 : 0;
+                d_result[idx] = intersects ? 1 : 0;
 
-            if (intersects) {
-                // SAFETY: atomic ref to device memory for concurrent increment
-                sycl::atomic_ref<
-                    uint32_t,
-                    sycl::memory_order::relaxed,
-                    sycl::memory_scope::device,
-                    sycl::access::address_space::global_space
-                > hits_ref(*d_hits);
-                hits_ref.fetch_add(static_cast<uint32_t>(1));
-            }
-        });
-    }).wait();
+                if (intersects) {
+                    // SAFETY: atomic ref to device memory for concurrent increment
+                    sycl::atomic_ref<
+                        uint32_t,
+                        sycl::memory_order::relaxed,
+                        sycl::memory_scope::device,
+                        sycl::access::address_space::global_space
+                    > hits_ref(*d_hits);
+                    hits_ref.fetch_add(static_cast<uint32_t>(1));
+                }
+            });
+        }).wait_and_throw();
 
-    // Copy results back to host
-    q.memcpy(result, d_result, total_pairs * sizeof(uint8_t));
-    uint32_t gpu_hits = 0;
-    q.memcpy(&gpu_hits, d_hits, sizeof(uint32_t));
-    q.wait();
+        // Copy results back to host
+        q.memcpy(result, d_result, total_pairs * sizeof(uint8_t));
+        uint32_t gpu_hits = 0;
+        q.memcpy(&gpu_hits, d_hits, sizeof(uint32_t));
+        q.wait_and_throw();
 
-    if (hit_count) {
-        *hit_count = static_cast<size_t>(gpu_hits);
+        if (hit_count) {
+            *hit_count = static_cast<size_t>(gpu_hits);
+        }
+    } catch (...) {
+        sycl::free(d_a, q);
+        sycl::free(d_b, q);
+        sycl::free(d_result, q);
+        sycl::free(d_hits, q);
+        throw;
     }
 
     sycl::free(d_a, q);

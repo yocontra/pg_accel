@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -119,6 +120,34 @@ int main() {
             fprintf(stderr,
                 "Child: FAIL — GPU exec count is 0. SYCL died post-fork.\n");
             _exit(4);
+        }
+
+        // Assert the AdaptiveCpp archive-population subprocess ran: after a
+        // successful GPU dispatch from a forked child, at least one .metalar
+        // must exist in the AdaptiveCpp JIT cache. If this fires, either the
+        // archive-builder helper failed silently (check acpp-metal-archive-build
+        // stderr) or the pipeline-state path is still using direct compile.
+        const char* home = std::getenv("HOME");
+        if (home) {
+            std::filesystem::path cache =
+                std::filesystem::path{home} / ".acpp" / "apps" / "global" / "jit-cache";
+            std::error_code ec;
+            bool found_metalar = false;
+            if (std::filesystem::is_directory(cache, ec) && !ec) {
+                for (auto& e : std::filesystem::directory_iterator(cache, ec)) {
+                    if (e.path().extension() == ".metalar") {
+                        found_metalar = true;
+                        break;
+                    }
+                }
+            }
+            if (!found_metalar) {
+                fprintf(stderr,
+                    "Child: FAIL — no .metalar files in %s; archive path not "
+                    "exercised, fork-safety is not actually enforced\n",
+                    cache.c_str());
+                _exit(5);
+            }
         }
 
         printf("\nChild: PASS — GPU works after fork.\n");

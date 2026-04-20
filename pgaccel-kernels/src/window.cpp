@@ -122,7 +122,7 @@ static pgaccel_status sycl_window_row_number(
         q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
             size_t i = id[0];
             d_results[i] = static_cast<int64_t>(i - d_part_start[i] + 1);
-        }).wait();
+        }).wait_and_throw();
 
         // Copy results back
         pgaccel_d2h(*q, results, d_results, count);
@@ -227,7 +227,7 @@ static pgaccel_status sycl_window_lag(
                     d_results[i] = d_values[target];
                     if (d_result_nulls) d_result_nulls[i] = 0;
                 }
-            }).wait();
+            }).wait_and_throw();
 
         // Copy results back
         pgaccel_d2h(*q, results, d_results, count);
@@ -337,7 +337,7 @@ static pgaccel_status sycl_window_lead(
                     d_results[i] = d_values[target];
                     if (d_result_nulls) d_result_nulls[i] = 0;
                 }
-            }).wait();
+            }).wait_and_throw();
 
         // Copy results back
         pgaccel_d2h(*q, results, d_results, count);

@@ -109,8 +109,9 @@ unsafe fn try_bulk_point_in_polygon(
     }
 
     let Some(pip_results) = bulk_results else {
-        // GPU bridge unavailable — fall through to generic path.
-        return None;
+        pgrx::error!(
+            "pg_accel: bulk point_in_polygon GPU kernel failed; refusing CPU fallback (rule 11)"
+        );
     };
 
     pgrx::debug1!(
@@ -324,8 +325,7 @@ pub unsafe fn dispatch_gpu_spatial(
     }
 
     let Some((dt_pairs, df_pairs, uc_pairs)) = gpu_result else {
-        // GPU unavailable or kernel unsupported — defer to PostgreSQL.
-        return DispatchResult::Deferred;
+        pgrx::error!("pg_accel: GPU spatial kernel failed; refusing CPU fallback (rule 11)");
     };
 
     pgrx::debug1!(

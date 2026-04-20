@@ -143,13 +143,13 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
             // Direct host-side copy into shared allocation.
             std::memcpy(d_buf, data, count * sizeof(T));
         } else {
-            q->memcpy(d_buf, data, count * sizeof(T)).wait();
+            q->memcpy(d_buf, data, count * sizeof(T)).wait_and_throw();
         }
 
         // Fill padding with sentinel.
         if (padded > count) {
             const T sentinel = pad_value<T>();
-            q->fill(d_buf + count, sentinel, padded - count).wait();
+            q->fill(d_buf + count, sentinel, padded - count).wait_and_throw();
         }
 
         // Bitonic sort network. The queue is in-order, so sequential
@@ -174,13 +174,13 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
             }
         }
         // Single wait after all bitonic steps complete.
-        q->wait();
+        q->wait_and_throw();
 
         // Copy sorted data back (only the original count).
         if (g_unified_memory) {
             std::memcpy(data, d_buf, count * sizeof(T));
         } else {
-            q->memcpy(data, d_buf, count * sizeof(T)).wait();
+            q->memcpy(data, d_buf, count * sizeof(T)).wait_and_throw();
         }
         sycl::free(d_buf, *q);
 
@@ -227,16 +227,18 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
             std::memcpy(d_keys, keys, count * sizeof(K));
             std::memcpy(d_idx, indices, count * sizeof(uint32_t));
         } else {
-            q->memcpy(d_keys, keys, count * sizeof(K)).wait();
-            q->memcpy(d_idx, indices, count * sizeof(uint32_t)).wait();
+            q->memcpy(d_keys, keys, count * sizeof(K)).wait_and_throw();
+            q->memcpy(d_idx, indices,
+                      count * sizeof(uint32_t)).wait_and_throw();
         }
 
         // Pad keys with sentinel, indices with max uint32.
         if (padded > count) {
             const K sentinel = pad_value<K>();
-            q->fill(d_keys + count, sentinel, padded - count).wait();
+            q->fill(d_keys + count, sentinel,
+                    padded - count).wait_and_throw();
             q->fill(d_idx + count, std::numeric_limits<uint32_t>::max(),
-                    padded - count).wait();
+                    padded - count).wait_and_throw();
         }
 
         // Bitonic sort network — stable for equal keys by using index as
@@ -284,15 +286,16 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices,
             }
         }
         // Single wait after all bitonic steps complete.
-        q->wait();
+        q->wait_and_throw();
 
         // Copy back.
         if (g_unified_memory) {
             std::memcpy(keys, d_keys, count * sizeof(K));
             std::memcpy(indices, d_idx, count * sizeof(uint32_t));
         } else {
-            q->memcpy(keys, d_keys, count * sizeof(K)).wait();
-            q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait();
+            q->memcpy(keys, d_keys, count * sizeof(K)).wait_and_throw();
+            q->memcpy(indices, d_idx,
+                      count * sizeof(uint32_t)).wait_and_throw();
         }
 
         sycl::free(d_keys, *q);
@@ -419,7 +422,7 @@ static pgaccel_status sycl_radix_sort_kv_u32(
                         std::numeric_limits<uint32_t>::max(),
                         padded - count);
             }
-            q->wait();
+            q->wait_and_throw();
         }
 
         uint32_t* src_keys = buf_keys_a;
@@ -441,7 +444,7 @@ static pgaccel_status sycl_radix_sort_kv_u32(
             // 256-bin histogram in local memory, then writes it out
             // to d_group_hist at offset (group_id * 256).
             q->memset(d_group_hist, 0,
-                      ngroups * RADIX_BINS * sizeof(uint32_t)).wait();
+                      ngroups * RADIX_BINS * sizeof(uint32_t)).wait_and_throw();
 
             {
                 auto nd = sycl::nd_range<1>(
@@ -486,7 +489,7 @@ static pgaccel_status sycl_radix_sort_kv_u32(
                             group_hist_ptr[gid * RADIX_BINS + b] = lhist[b];
                         }
                     });
-                }).wait();
+                }).wait_and_throw();
             }
 
             // ---- Host-side exclusive scan of group histograms -----
@@ -594,7 +597,7 @@ static pgaccel_status sycl_radix_sort_kv_u32(
                             dst_idx_ptr[pos]  = my_idx;
                         }
                     });
-                }).wait();
+                }).wait_and_throw();
             }
 
             std::swap(src_keys, dst_keys);
@@ -606,8 +609,10 @@ static pgaccel_status sycl_radix_sort_kv_u32(
             std::memcpy(keys, src_keys, count * sizeof(uint32_t));
             std::memcpy(indices, src_idx, count * sizeof(uint32_t));
         } else {
-            q->memcpy(keys, src_keys, count * sizeof(uint32_t)).wait();
-            q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait();
+            q->memcpy(keys, src_keys,
+                      count * sizeof(uint32_t)).wait_and_throw();
+            q->memcpy(indices, src_idx,
+                      count * sizeof(uint32_t)).wait_and_throw();
         }
 
         sycl::free(d_group_hist, *q);
@@ -692,7 +697,7 @@ static pgaccel_status sycl_radix_sort_kv_u64(
                         std::numeric_limits<uint32_t>::max(),
                         padded - count);
             }
-            q->wait();
+            q->wait_and_throw();
         }
 
         uint64_t* src_keys = buf_keys_a;
@@ -707,7 +712,7 @@ static pgaccel_status sycl_radix_sort_kv_u64(
             const uint64_t shift_u = static_cast<uint64_t>(shift);
 
             q->memset(d_group_hist, 0,
-                      ngroups * RADIX_BINS * sizeof(uint32_t)).wait();
+                      ngroups * RADIX_BINS * sizeof(uint32_t)).wait_and_throw();
 
             {
                 auto nd = sycl::nd_range<1>(
@@ -749,7 +754,7 @@ static pgaccel_status sycl_radix_sort_kv_u64(
                             group_hist_ptr[gid * RADIX_BINS + b] = lhist[b];
                         }
                     });
-                }).wait();
+                }).wait_and_throw();
             }
 
             uint32_t bin_total[RADIX_BINS];
@@ -773,7 +778,7 @@ static pgaccel_status sycl_radix_sort_kv_u64(
                 }
             }
             q->memcpy(d_group_hist, scan_buf.data(),
-                      ngroups * RADIX_BINS * sizeof(uint32_t)).wait();
+                      ngroups * RADIX_BINS * sizeof(uint32_t)).wait_and_throw();
 
             {
                 auto nd = sycl::nd_range<1>(
@@ -822,7 +827,7 @@ static pgaccel_status sycl_radix_sort_kv_u64(
                             dst_idx_ptr[pos]  = my_idx;
                         }
                     });
-                }).wait();
+                }).wait_and_throw();
             }
 
             std::swap(src_keys, dst_keys);
@@ -833,8 +838,10 @@ static pgaccel_status sycl_radix_sort_kv_u64(
             std::memcpy(keys, src_keys, count * sizeof(uint64_t));
             std::memcpy(indices, src_idx, count * sizeof(uint32_t));
         } else {
-            q->memcpy(keys, src_keys, count * sizeof(uint64_t)).wait();
-            q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait();
+            q->memcpy(keys, src_keys,
+                      count * sizeof(uint64_t)).wait_and_throw();
+            q->memcpy(indices, src_idx,
+                      count * sizeof(uint32_t)).wait_and_throw();
         }
 
         sycl::free(d_group_hist, *q);
