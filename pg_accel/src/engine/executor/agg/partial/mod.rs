@@ -5,7 +5,7 @@
 //! combines across workers. This module defines the contract:
 //!
 //! - [`ColumnAccumulator`] — per-column state accumulated during the scan
-//!   (sum, count, min/max, `sum_sq` for stats).
+//!   (sum, count, min/max, `sum_sq` for stats, `bit_acc`, `bool_acc`).
 //! - [`PartialEmitter`] — trait that converts a `ColumnAccumulator` into
 //!   the Datum PG's combine function expects.
 //! - [`PartialAggSpec`] — per-plan metadata (op, attno, transtype, serialize fn).
@@ -16,27 +16,13 @@ use pgrx::pg_sys;
 
 use super::AggOp;
 
+pub mod accumulator;
 pub mod emitter;
 
 #[cfg(feature = "pg_test")]
 mod tests;
 
-// ---------------------------------------------------------------------------
-// ColumnAccumulator
-// ---------------------------------------------------------------------------
-
-/// Per-column accumulator populated as rows flow through the scan.
-/// Consumed by [`PartialEmitter`] at finalize time.
-#[derive(Debug, Default, Clone)]
-pub struct ColumnAccumulator {
-    pub sum: f64,
-    pub sum_comp: f64,
-    pub sum_sq: f64,
-    pub count: u64,
-    pub min_val: f64,
-    pub max_val: f64,
-    pub has_value: bool,
-}
+pub use accumulator::ColumnAccumulator;
 
 // ---------------------------------------------------------------------------
 // PartialEmitter trait
