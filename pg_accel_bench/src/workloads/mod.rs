@@ -53,7 +53,7 @@ mod ssbm;
 mod filtered_grouped_agg;
 mod mixed_variants;
 // --- Parallel stress (8-worker Gather assurance) ---
-pub(crate) mod parallel_stress;
+pub mod parallel_stress;
 // scale_sweep retired per action_items W9 (Reviewer 1 Sin #7) — the 5
 // identical rows at every scale were padding from a fixed fixture that
 // didn't actually vary with `rows`.

@@ -357,7 +357,7 @@ impl AggColumn {
                 if self.acc.count > 0 {
                     let n = self.acc.count as f64;
                     let mean = self.acc.sum / n;
-                    (self.acc.sum_sq / n) - (mean * mean)
+                    mean.mul_add(-mean, self.acc.sum_sq / n)
                 } else {
                     0.0
                 }
@@ -366,7 +366,7 @@ impl AggColumn {
                 if self.acc.count > 1 {
                     let n = self.acc.count as f64;
                     let mean = self.acc.sum / n;
-                    let var_pop = (self.acc.sum_sq / n) - (mean * mean);
+                    let var_pop = mean.mul_add(-mean, self.acc.sum_sq / n);
                     var_pop * (n / (n - 1.0))
                 } else {
                     return (pg_sys::Datum::from(0), true);
@@ -376,7 +376,7 @@ impl AggColumn {
                 if self.acc.count > 0 {
                     let n = self.acc.count as f64;
                     let mean = self.acc.sum / n;
-                    ((self.acc.sum_sq / n) - (mean * mean)).max(0.0).sqrt()
+                    mean.mul_add(-mean, self.acc.sum_sq / n).max(0.0).sqrt()
                 } else {
                     0.0
                 }
@@ -385,7 +385,7 @@ impl AggColumn {
                 if self.acc.count > 1 {
                     let n = self.acc.count as f64;
                     let mean = self.acc.sum / n;
-                    let var_pop = ((self.acc.sum_sq / n) - (mean * mean)).max(0.0);
+                    let var_pop = mean.mul_add(-mean, self.acc.sum_sq / n).max(0.0);
                     (var_pop * (n / (n - 1.0))).sqrt()
                 } else {
                     return (pg_sys::Datum::from(0), true);

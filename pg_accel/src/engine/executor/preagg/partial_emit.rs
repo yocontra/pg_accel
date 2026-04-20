@@ -47,7 +47,9 @@ pub(super) struct PreaggPartialState {
     /// One emitter per output agg column, picked by `build_emitters`.
     pub emitters: Vec<Box<dyn PartialEmitter>>,
     /// Per-group key Datums — `Vec<group_idx> -> Vec<key_attr_datum>`.
-    /// Empty for plain (ungrouped) aggregation.
+    /// Empty for plain (ungrouped) aggregation. Populated by the grouped
+    /// preagg integration (see `finalize_partial`'s `group_col_offset`).
+    #[allow(dead_code)]
     pub group_key_values: Vec<Vec<pg_sys::Datum>>,
 }
 
@@ -66,8 +68,10 @@ impl PreaggPartialState {
     }
 
     /// Fold one fact-side value into the column accumulator for
-    /// aggregate index `col_idx`.
+    /// aggregate index `col_idx`. Invoked by the fact-scan loop once the
+    /// preagg grouped/ungrouped dispatch is wired to the partial-state path.
     #[inline]
+    #[allow(dead_code)]
     pub(super) fn accumulate(&mut self, col_idx: usize, op: AggOp, val: f64) {
         let Some(acc) = self.per_column_accumulators.get_mut(col_idx) else {
             return;

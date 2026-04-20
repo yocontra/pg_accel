@@ -19,7 +19,7 @@ use super::Workload;
 /// Create-if-missing SQL for the 10M-row f32 fixture used by parallel bench
 /// and plan-shape tests. Kept in one place so both `ParallelStress` and
 /// `plan_shape_test` stay in sync.
-pub(crate) fn bench_f32_10m_setup_sql() -> Vec<String> {
+pub fn bench_f32_10m_setup_sql() -> Vec<String> {
     vec![
         "CREATE UNLOGGED TABLE IF NOT EXISTS bench_f32_10m (\
            id bigint, \

@@ -50,7 +50,8 @@ fn run_stress<W: Workload + ?Sized>(wl: &W) {
         b.simple_query("SET pg_accel.enabled = off")
             .expect("disable pg_accel");
         for stmt in wl.pre_query_sql() {
-            b.simple_query(&stmt).unwrap();
+            b.simple_query(&stmt)
+                .unwrap_or_else(|e| panic!("baseline pre-query `{stmt}` failed: {e}"));
         }
         b.simple_query(&wl.query_sql())
             .unwrap_or_else(|e| panic!("baseline `{}` failed: {e}", wl.name()))
@@ -58,9 +59,13 @@ fn run_stress<W: Workload + ?Sized>(wl: &W) {
 
     // --- 20 iterations with pg_accel enabled. ---
     let mut client = connect();
-    client.simple_query("SET pg_accel.enabled = on").unwrap();
+    client
+        .simple_query("SET pg_accel.enabled = on")
+        .unwrap_or_else(|e| panic!("enable pg_accel failed: {e}"));
     for stmt in wl.pre_query_sql() {
-        client.simple_query(&stmt).unwrap();
+        client
+            .simple_query(&stmt)
+            .unwrap_or_else(|e| panic!("pre-query `{stmt}` failed: {e}"));
     }
 
     for i in 0..ITERATIONS {
@@ -98,32 +103,25 @@ fn assert_result_close(
     }
     let base_row = &base_rows[0];
     let actual_row = &actual_rows[0];
-    if base_row.len() != actual_row.len() {
-        // Schema mismatch between baseline and accel paths — this is a
-        // correctness failure in itself.
-        panic!(
-            "{workload}[{iter}] column count mismatch: baseline={} accel={}",
-            base_row.len(),
-            actual_row.len()
-        );
-    }
+    assert!(
+        base_row.len() == actual_row.len(),
+        "{workload}[{iter}] column count mismatch: baseline={} accel={}",
+        base_row.len(),
+        actual_row.len()
+    );
     for (col, (b, a)) in base_row.iter().zip(actual_row.iter()).enumerate() {
-        match (
+        if let (Some(bf), Some(af)) = (
             b.as_deref().and_then(|s| s.parse::<f64>().ok()),
             a.as_deref().and_then(|s| s.parse::<f64>().ok()),
         ) {
-            (Some(bf), Some(af)) => {
-                let denom = bf.abs().max(1.0);
-                let rel = (af - bf).abs() / denom;
-                assert!(
-                    rel <= FP_TOLERANCE,
-                    "{workload}[{iter}] col{col} mismatch: baseline={bf} accel={af} rel={rel:.4e}"
-                );
-            }
-            _ => {
-                // Non-numeric column — skip.
-            }
+            let denom = bf.abs().max(1.0);
+            let rel = (af - bf).abs() / denom;
+            assert!(
+                rel <= FP_TOLERANCE,
+                "{workload}[{iter}] col{col} mismatch: baseline={bf} accel={af} rel={rel:.4e}"
+            );
         }
+        // Non-numeric columns are skipped.
     }
 }
 
