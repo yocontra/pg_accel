@@ -34,8 +34,10 @@ use pgrx::pg_sys::{self, CustomPath, List, NodeTag, Path, lappend};
 
 use crate::engine::cost;
 use crate::engine::executor::agg::AggOp;
+use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::gucs;
 
+use super::agg_common::{self, AggClass};
 use super::custom_scan;
 
 /// Try to inject the parallel (partial → gather → finalize) GpuAgg path chain
@@ -147,6 +149,7 @@ pub(super) unsafe fn try_inject(
     }
 
     let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::with_capacity(n_exprs as usize);
+    let mut partial_cols: Vec<PartialColumn> = Vec::with_capacity(n_exprs as usize);
     for i in 0..n_exprs {
         // SAFETY: i is in [0, n_exprs).
         let expr = unsafe { pg_sys::list_nth(partial_exprs, i).cast::<pg_sys::Expr>() };
@@ -161,21 +164,30 @@ pub(super) unsafe fn try_inject(
         }
         let aggref = expr.cast::<pg_sys::Aggref>();
         // SAFETY: classify_aggref accepts a valid Aggref pointer.
-        let Some((op, _class)) = (unsafe { super::agg_common::classify_aggref(aggref) }) else {
+        let Some((op, class)) = (unsafe { agg_common::classify_aggref(aggref) }) else {
             pgrx::debug1!("pg_accel partial_agg: unrecognized Aggref");
             return;
         };
-        // Reject INTERNAL transtype + AVG for now (mirrors the legacy gate).
         // SAFETY: aggref is valid.
         let aggref_ref = unsafe { &*aggref };
+
+        // INTERNAL-state aggregates can't ride the Float8StatsEmitter path:
+        // `numeric_accum` / `int8_accum` carry an opaque `NumericAggState*`
+        // whose aggserialfn expects that exact struct shape, NOT our generic
+        // [N, Sx, Sxx] float8[3]. Passing the wrong bytes is UB.
+        //
+        // For Phase A, only float4/float8 stats (transtype = `_float8`) are
+        // supported. Integer / numeric stats fall back to PG's native plan.
         if aggref_ref.aggtranstype == pg_sys::INTERNALOID {
-            pgrx::debug1!("pg_accel partial_agg: INTERNAL transtype not yet supported");
+            pgrx::debug1!(
+                "pg_accel partial_agg: INTERNAL transtype (numeric-family) — bail, \
+                 not yet supported in partial path"
+            );
             return;
         }
-        if matches!(op, AggOp::Avg) {
-            pgrx::debug1!("pg_accel partial_agg: AVG requires serialize path (deferred)");
-            return;
-        }
+        // `class` is still only used for the `_` binding above; keep a no-op
+        // to silence unused-variable linting in case the enum grows.
+        let _ = &class;
 
         // Extract attno from first arg (or 0 for COUNT(*)).
         let (attno, rtype) = if op == AggOp::Count && aggref_ref.aggstar {
@@ -199,7 +211,20 @@ pub(super) unsafe fn try_inject(
             (extracted, u32::from(aggref_ref.aggtype))
         };
 
+        let serialize_fn_oid = match class {
+            AggClass::Float8Stats { serialize_fn } if serialize_fn != pg_sys::InvalidOid => {
+                Some(serialize_fn)
+            }
+            _ => None,
+        };
+
         agg_descs.push((op, attno, rtype));
+        partial_cols.push(PartialColumn {
+            op,
+            attno,
+            transtype_oid: aggref_ref.aggtranstype,
+            serialize_fn_oid,
+        });
     }
 
     if agg_descs.is_empty() {
@@ -268,8 +293,16 @@ pub(super) unsafe fn try_inject(
         priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
         // No self-scan (child is PG's parallel seq scan).
         priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
-        // is_partial = 1 (last element).
+        // is_partial = 1.
         priv_list = lappend(priv_list, pg_sys::makeInteger(1).cast());
+
+        // Append full PartialAggSpec (transtype + serialize_fn per column) so
+        // plan_custom_path_agg can materialize Float8StatsEmitter for
+        // AVG/STDDEV/VAR without re-walking Aggrefs.
+        let spec = PartialAggSpec {
+            per_column: partial_cols.clone(),
+        };
+        priv_list = custom_scan::append_partial_spec(priv_list, &spec);
 
         (*cpath).custom_private = priv_list;
         cpath

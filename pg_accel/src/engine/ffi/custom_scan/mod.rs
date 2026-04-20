@@ -39,6 +39,7 @@ use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
 pub use private_data::serialize_preagg_private;
+pub(super) use private_data::{PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec};
 use private_data::{deserialize_custom_private, deserialize_preagg_private};
 
 // ---------------------------------------------------------------------------
@@ -600,15 +601,41 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
 
         // Read aggregate descriptors + partial flag from the path's custom_private.
-        // Path layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...,
-        //   has_gk, (gk fields)?, self_scan_relid, is_partial]
-        // The two trailing scalars are always present: is_partial is the last
-        // element, self_scan_relid is the second-to-last.
+        // Path layout:
+        //   [num_aggs, (op, attno, rtype)*N,
+        //    has_gk, (gk_attno, gk_type_oid, gk_key_type)?  (3 payload ints when has_gk=1),
+        //    self_scan_relid,
+        //    is_partial,
+        //    (PARTIAL_SENTINEL, n_cols, (op, attno, transtype, ser)*n_cols)?]
+        //
+        // The trailing PAAG sentinel block is optional — only present when
+        // `partial_agg::try_inject` injected this path. Structural walk (vs
+        // "last-1 / last-2") is required so the optional block doesn't shift
+        // the positions of self_scan_relid / is_partial.
         let path_priv = (*best_path).custom_private;
         let num_aggs = list_int_at(path_priv, 0);
         let path_len = pg_sys::list_length(path_priv) as usize;
-        let self_scan_relid = list_int_at(path_priv, (path_len - 2) as c_int);
-        let is_partial = list_int_at(path_priv, (path_len - 1) as c_int);
+        let gk_base = 1 + (num_aggs as usize) * 3;
+        let has_gk = if gk_base < path_len {
+            list_int_at(path_priv, gk_base as c_int)
+        } else {
+            0
+        };
+        let self_scan_idx = gk_base + if has_gk != 0 { 4 } else { 1 };
+        let is_partial_idx = self_scan_idx + 1;
+        let self_scan_relid = if self_scan_idx < path_len {
+            list_int_at(path_priv, self_scan_idx as c_int)
+        } else {
+            0
+        };
+        let is_partial = if is_partial_idx < path_len {
+            list_int_at(path_priv, is_partial_idx as c_int)
+        } else {
+            0
+        };
+        let sentinel_idx = is_partial_idx + 1;
+        let has_sentinel_block = sentinel_idx < path_len
+            && list_int_at(path_priv, sentinel_idx as c_int) == PARTIAL_SENTINEL;
 
         // custom_scan_tlist: original expressions define the scan tuple layout
         //   (ExecTypeFromTL extracts types from Aggref.aggtype / Var.vartype).
@@ -626,6 +653,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         //
         // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
         (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+
         // For partial paths, the Aggrefs in `tlist` are AGGSPLIT_INITIAL_SERIAL
         // (produced by make_partial_grouping_target on partially_grouped_rel's
         // reltarget). The Finalize Agg node above our Gather runs
@@ -748,12 +776,26 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         list = pg_sys::lappend(list, pg_sys::makeInteger(self_scan_relid).cast());
 
         // When this path was injected on a partial (worker-side) Gather branch,
-        // materialize a PartialAggSpec via syscache lookups and append it after
-        // self_scan_relid using the sentinel-prefixed layout. The deserializer
-        // treats absence of the sentinel as `partial = None`.
+        // propagate the PartialAggSpec into the plan's custom_private using
+        // the sentinel-prefixed layout. The deserializer treats absence of the
+        // sentinel as `partial = None`.
+        //
+        // Prefer the path-attached sentinel block (carries transtype + serialize_fn
+        // per column — needed for INTERNAL-state aggregates like AVG / STDDEV /
+        // VAR). Fall back to the legacy triple-based reconstruction for paths
+        // that predate the sentinel layout.
         if is_partial != 0 {
-            let spec = build_partial_spec_from_path(path_priv, num_aggs);
-            list = private_data::append_partial_spec(list, &spec);
+            // sentinel @ sentinel_idx, n_cols @ sentinel_idx + 1
+            let spec_from_sentinel = if has_sentinel_block {
+                deserialize_partial_spec(path_priv, sentinel_idx + 1)
+            } else {
+                None
+            };
+            let spec = match spec_from_sentinel {
+                Some(s) => s,
+                None => build_partial_spec_from_path(path_priv, num_aggs),
+            };
+            list = append_partial_spec(list, &spec);
         }
 
         (*cscan).custom_private = list;
@@ -788,20 +830,18 @@ fn build_partial_emitters(
             AggOp::Sum if col.transtype_oid == pg_sys::INT8OID => Box::new(IntegerSumPromotion),
             AggOp::Sum if col.transtype_oid == pg_sys::NUMERICOID => Box::new(NumericSumEmitter),
             AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
-                if let Some(ser) = col.serialize_fn_oid {
-                    Box::new(Float8StatsEmitter {
-                        serialize_fn_oid: ser,
-                    })
-                } else {
-                    // Without a serialize fn we can't emit a bytea transition
-                    // state. Fall back to a scalar passthrough — the final
-                    // aggregate path will produce wrong values for AVG in
-                    // partial mode, but the planner rejects AVG + partial
-                    // before we reach this branch (see planner_hooks).
-                    Box::new(ScalarPassthrough {
-                        transtype: col.transtype_oid,
-                    })
-                }
+                // Float8StatsEmitter handles both transtype shapes:
+                //  - INTERNAL transtype (numeric_accum, int8_accum) → serialize_fn
+                //    wraps the float8[3] in a bytea, aggtype=BYTEAOID.
+                //  - `_float8` transtype (float4_accum, float8_accum) → no
+                //    serialize fn, emits the float8[3] array directly,
+                //    aggtype=`_float8`.
+                // In both cases the TupleDesc type (set by mark_partial_aggref)
+                // matches the emitter output type.
+                let ser = col.serialize_fn_oid.unwrap_or(pg_sys::InvalidOid);
+                Box::new(Float8StatsEmitter {
+                    serialize_fn_oid: ser,
+                })
             }
             _ => Box::new(ScalarPassthrough {
                 transtype: col.transtype_oid,
@@ -2303,6 +2343,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // Build per-column emitters for partial (worker-side) paths.
             if let Some(ref spec) = privdata.partial {
                 exec.partial_emitters = Some(build_partial_emitters(spec));
+                exec.enable_full_stats_for_avg();
             }
 
             // Vectorized self-scan: if self_scan_relid is set, open a heap

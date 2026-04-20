@@ -49,6 +49,14 @@ pub(super) struct AggColumn {
     pub(super) gpu_values: Vec<f64>,
     /// Whether GPU reduce was successfully used.
     pub(super) gpu_dispatched: bool,
+    /// When true, Avg columns accumulate the full `[N, Sx, Sxx]` state
+    /// (not just sum). Set by the partial-agg path because PG's Finalize
+    /// shares one `pertrans` across aggregates that share `aggtransno`
+    /// (AVG and STDDEV over the same column both use `float4_accum`/
+    /// `float8_accum`), so every emitted column must carry a complete
+    /// transition state — otherwise the Finalize's STDDEV reads AVG's
+    /// column and sees Sxx=0.
+    pub(super) needs_full_stats: bool,
 }
 
 impl AggColumn {
@@ -75,6 +83,7 @@ impl AggColumn {
             },
             gpu_values: Vec::new(),
             gpu_dispatched: false,
+            needs_full_stats: false,
         }
     }
 
@@ -94,6 +103,9 @@ impl AggColumn {
                 let t = self.acc.sum + y;
                 self.acc.sum_comp = (t - self.acc.sum) - y;
                 self.acc.sum = t;
+                if self.op == AggOp::Avg && self.needs_full_stats {
+                    self.acc.sum_sq += val * val;
+                }
             }
             AggOp::Min => {
                 if val < self.acc.min_val {
@@ -146,13 +158,22 @@ impl AggColumn {
         }
 
         // Try f64 GPU path first (CUDA/ROCm with fp64 support).
+        let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
         let gpu_result = match self.op {
-            AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f64(&self.gpu_values),
+            AggOp::Sum => gpu::reduce_sum_f64(&self.gpu_values),
+            AggOp::Avg if !use_stats_for_avg => gpu::reduce_sum_f64(&self.gpu_values),
             AggOp::Min => gpu::reduce_min_f64(&self.gpu_values),
             AggOp::Max => gpu::reduce_max_f64(&self.gpu_values),
-            AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+            AggOp::Avg
+            | AggOp::StddevSamp
+            | AggOp::StddevPop
+            | AggOp::VarSamp
+            | AggOp::VarPop => {
                 // Stats ops use reduce_stats kernel which returns
                 // (count, sum, sum_sq). Dispatch separately and short-circuit.
+                // AVG shares this path when running under a partial-agg plan
+                // (see AggColumn.needs_full_stats) because PG's Finalize shares
+                // one pertrans between AVG and STDDEV on the same column.
                 if let Some((c, s, ss)) = gpu::reduce_stats_f64(&self.gpu_values) {
                     self.gpu_dispatched = true;
                     self.acc.sum = s;
@@ -229,6 +250,7 @@ impl AggColumn {
     pub(super) fn dispatch_gpu_reduce_chunked(&mut self) {
         let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
         let values = std::mem::take(&mut self.gpu_values);
+        let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
         for chunk in values.chunks(max_chunk) {
             // The f64 wrappers in `gpu::` auto-cast to f32 on devices
             // without fp64 (Metal), so we always call the f64 entry point
@@ -236,10 +258,15 @@ impl AggColumn {
             // fp32-only devices the per-chunk partial is folded into the
             // outer Kahan accumulator, bounding the drift.
             let gpu_result = match self.op {
-                AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f64(chunk),
+                AggOp::Sum => gpu::reduce_sum_f64(chunk),
+                AggOp::Avg if !use_stats_for_avg => gpu::reduce_sum_f64(chunk),
                 AggOp::Min => gpu::reduce_min_f64(chunk),
                 AggOp::Max => gpu::reduce_max_f64(chunk),
-                AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+                AggOp::Avg
+                | AggOp::StddevSamp
+                | AggOp::StddevPop
+                | AggOp::VarSamp
+                | AggOp::VarPop => {
                     // Stats kernel returns (count, sum, sum_sq) per chunk;
                     // fold chunk partials into the accumulator directly.
                     if let Some((c, s, ss)) = gpu::reduce_stats_f64(chunk) {
@@ -270,10 +297,14 @@ impl AggColumn {
             if let Some(partial) = gpu_result {
                 self.gpu_dispatched = true;
                 self.accumulate(partial);
-            } else if matches!(self.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max) {
+            } else if !use_stats_for_avg
+                && matches!(self.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max)
+            {
                 // Per CLAUDE.md rule 11: no CPU fallback on GPU kernel
                 // failure. Raise a PG ERROR instead of silently folding the
-                // chunk into the scalar accumulator.
+                // chunk into the scalar accumulator. (Stats-variant Avg lives
+                // in the stats branch above and raises its own error on
+                // failure, so skip the duplicate.)
                 pgrx::error!(
                     "pg_accel: GPU reduce kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
                     self.op,
@@ -854,6 +885,22 @@ impl AggExecState {
             .iter()
             .map(|c| (c.op, c.attno, u32::from(c.result_type_oid)))
             .collect()
+    }
+
+    /// Enable full `[N, Sx, Sxx]` state accumulation on every Avg column.
+    ///
+    /// Required for partial-agg plans: PG's Finalize Aggregate shares one
+    /// `pertrans` slot between AVG and STDDEV/VAR on the same column (see
+    /// `prepagg.c::find_compatible_trans` — they share `aggtransfn`,
+    /// `aggcombinefn`, `aggtranstype`, and `agginitval`). The partial output
+    /// for each shared-transno column must therefore carry the complete
+    /// `float8_accum` state, even when the local aggregate is only AVG.
+    pub fn enable_full_stats_for_avg(&mut self) {
+        for col in &mut self.columns {
+            if col.op == AggOp::Avg {
+                col.needs_full_stats = true;
+            }
+        }
     }
 
     // -- Pipeline fusion (scan+agg) ------------------------------------------
@@ -1697,7 +1744,12 @@ impl AggExecState {
         let mut groups: std::collections::HashMap<i32, Vec<usize>> =
             std::collections::HashMap::new();
         for (i, c) in self.columns.iter().enumerate() {
+            // reduce_multi_f64 returns sum/min/max/count only — no sum_sq.
+            // Avg columns running under a partial plan need the full stats
+            // state, so they stay on the per-column reduce_stats path.
+            let avg_needs_stats = c.op == AggOp::Avg && c.needs_full_stats;
             if !c.gpu_values.is_empty()
+                && !avg_needs_stats
                 && matches!(c.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max)
             {
                 groups.entry(c.attno).or_default().push(i);

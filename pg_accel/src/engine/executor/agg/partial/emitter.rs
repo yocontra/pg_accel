@@ -172,12 +172,14 @@ impl PartialEmitter for Float8StatsEmitter {
         if acc.count == 0 {
             return (pg_sys::Datum::from(0u64), true);
         }
-        // Build Datum[3] = [N, sum, sum_sq] as float8 bit-patterns.
-        let mut elems: [pg_sys::Datum; 3] = [
-            f64_datum(acc.count as f64),
-            f64_datum(acc.sum),
-            f64_datum(acc.sum_sq),
-        ];
+        // PG's `float8_accum` / `float8_combine` transition state is
+        // [N, Sx, Sxx] where Sxx = Σ(x-μ)² — NOT Σx². We accumulate Σx²
+        // for simplicity, so convert at emit time:
+        //   Sxx = Σx² − Sx² / N
+        // which is algebraically equivalent (modulo numerical drift).
+        let n = acc.count as f64;
+        let sxx = (acc.sum_sq - (acc.sum * acc.sum) / n).max(0.0);
+        let mut elems: [pg_sys::Datum; 3] = [f64_datum(n), f64_datum(acc.sum), f64_datum(sxx)];
         // SAFETY: construct_array copies the Datum slice into a palloc'd
         // ArrayType; `elems` is a 3-element stack array of f64 Datums.
         // FLOAT8OID: pass-by-value=true, length=8, alignment 'd' (double).

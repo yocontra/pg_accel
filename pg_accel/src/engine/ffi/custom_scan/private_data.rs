@@ -386,7 +386,7 @@ pub(super) unsafe fn deserialize_custom_private(
 /// Magic marker preceding a serialized [`PartialAggSpec`] in `custom_private`.
 /// Chosen to be distinct from any plausible scalar field so mistaken layouts
 /// don't silently deserialize as partial-agg metadata.
-pub(super) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAAG"
+pub(in crate::engine::ffi) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAAG"
 
 /// Append a [`PartialAggSpec`] onto `list` using the sentinel-prefixed
 /// layout consumed by `deserialize_partial_spec`.
@@ -397,7 +397,7 @@ pub(super) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAAG"
 /// # Safety
 /// Must be called in a valid PG memory context on the main backend thread.
 #[allow(clippy::cast_possible_wrap)]
-pub(super) unsafe fn append_partial_spec(
+pub(in crate::engine::ffi) unsafe fn append_partial_spec(
     mut list: *mut pg_sys::List,
     spec: &PartialAggSpec,
 ) -> *mut pg_sys::List {
@@ -431,7 +431,7 @@ pub(super) unsafe fn append_partial_spec(
 /// # Safety
 /// `list` must be a valid PG `List` of `Integer` nodes.
 #[allow(clippy::cast_sign_loss)]
-pub(super) unsafe fn deserialize_partial_spec(
+pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
     list: *mut pg_sys::List,
     start_idx: usize,
 ) -> Option<PartialAggSpec> {
