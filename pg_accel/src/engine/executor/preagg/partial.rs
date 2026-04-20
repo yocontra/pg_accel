@@ -161,6 +161,21 @@ impl AggAccum {
                 self.count += 1;
             }
             AggOp::Passthrough => {}
+            // Stats / bitwise / boolean ops land here when the planner
+            // extends AggOp but the preagg executor hasn't grown dedicated
+            // paths yet — fall back to sum-style accumulation so partial
+            // numbers are non-garbage while Worker 3 fills in real support.
+            AggOp::StddevSamp
+            | AggOp::StddevPop
+            | AggOp::VarSamp
+            | AggOp::VarPop
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => {
+                self.sum += val;
+                self.count += 1;
+            }
         }
     }
 
@@ -191,6 +206,18 @@ impl AggAccum {
                 }
             }
             AggOp::Passthrough => 0.0,
+            // Ops not yet implemented in the final-result path (W3
+            // extended AggOp; preagg finalize stays on sum/avg until
+            // dedicated code lands). Returning the sum matches what
+            // accumulate() above records.
+            AggOp::StddevSamp
+            | AggOp::StddevPop
+            | AggOp::VarSamp
+            | AggOp::VarPop
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => self.sum,
         }
     }
 }

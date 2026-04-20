@@ -7,6 +7,8 @@
     clippy::too_many_lines
 )]
 
+mod parallel_stress_test;
+mod plan_shape_test;
 mod report;
 mod runner;
 mod stats;

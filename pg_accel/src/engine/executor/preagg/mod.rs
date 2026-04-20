@@ -15,6 +15,7 @@
 
 mod finalize;
 mod partial;
+mod partial_emit;
 
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use pgrx::pg_sys;
 
 use crate::engine::cost;
 use crate::engine::executor::agg::AggOp;
+use crate::engine::executor::agg::partial::PartialAggSpec;
 use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
 
@@ -29,6 +31,7 @@ pub use partial::{DimColumn, DimFilter, DimHashTable};
 
 use finalize::encode_agg_result;
 use partial::{AggAccum, fused_eval_cmp, heap_read_f64, heap_read_i64};
+use partial_emit::PreaggPartialState;
 
 // ---------------------------------------------------------------------------
 // Join depth descriptor (deserialized from custom_private)
@@ -134,6 +137,12 @@ pub struct PreAggExecState {
     pub batches_executed: u64,
     /// Dispatch time in microseconds.
     pub dispatch_time_us: u64,
+
+    /// Worker-side partial-state emitter. `Some` when the plan was injected
+    /// via `add_partial_path` (parallel Gather) — each output row is a
+    /// transition-state tuple for PG's Finalize Aggregate. `None` on the
+    /// serial path, which emits final aggregate Datums as before.
+    partial: Option<PreaggPartialState>,
 }
 
 impl PreAggExecState {
@@ -166,7 +175,16 @@ impl PreAggExecState {
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
+            partial: None,
         }
+    }
+
+    /// Enable worker-side partial-state emission for a parallel plan.
+    /// Construct the per-column accumulators + emitters from `spec` and
+    /// stash them on the executor; `next()` will then emit transition-state
+    /// tuples instead of final aggregate Datums.
+    pub fn enable_partial(&mut self, spec: &PartialAggSpec) {
+        self.partial = Some(PreaggPartialState::new(spec));
     }
 
     /// Set the heap scan descriptor for the fact table.
@@ -349,8 +367,13 @@ impl PreAggExecState {
                 return std::ptr::null_mut();
             }
             self.result_idx = 1;
-            // SAFETY: result_slot is valid.
-            unsafe { self.emit_plain_result(result_slot) }
+            if self.partial.is_some() {
+                // SAFETY: result_slot is valid.
+                unsafe { self.emit_plain_partial(result_slot) }
+            } else {
+                // SAFETY: result_slot is valid.
+                unsafe { self.emit_plain_result(result_slot) }
+            }
         } else {
             // Grouped aggregate: emit one row per group.
             if self.result_idx >= self.group_key_order.len() {
@@ -358,8 +381,13 @@ impl PreAggExecState {
             }
             let idx = self.result_idx;
             self.result_idx += 1;
-            // SAFETY: result_slot is valid.
-            unsafe { self.emit_grouped_result(result_slot, idx) }
+            if self.partial.is_some() {
+                // SAFETY: result_slot is valid.
+                unsafe { self.emit_grouped_partial(result_slot, idx) }
+            } else {
+                // SAFETY: result_slot is valid.
+                unsafe { self.emit_grouped_result(result_slot, idx) }
+            }
         }
     }
 
@@ -770,6 +798,85 @@ impl PreAggExecState {
         }
 
         // SAFETY: ExecStoreVirtualTuple marks the slot as containing a virtual tuple.
+        unsafe { pg_sys::ExecStoreVirtualTuple(result_slot) };
+        result_slot
+    }
+
+    /// Emit the one partial-state plain-aggregate row — used when the plan
+    /// was injected as a partial path under Gather. PG's Finalize Aggregate
+    /// node on the leader combines these across workers.
+    ///
+    /// # Safety
+    ///
+    /// `result_slot` must be a valid `TupleTableSlot`. Must be called on
+    /// the main backend thread.
+    unsafe fn emit_plain_partial(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: ExecClearTuple on a valid slot.
+        unsafe { pg_sys::ExecClearTuple(result_slot) };
+
+        if let Some(p) = self.partial.as_mut() {
+            p.mirror_plain(&self.plain_accums);
+            // SAFETY: slot is valid; emitters run on main thread.
+            unsafe { p.finalize_partial(result_slot, 0) };
+        }
+
+        // SAFETY: ExecStoreVirtualTuple on a valid slot.
+        unsafe { pg_sys::ExecStoreVirtualTuple(result_slot) };
+        result_slot
+    }
+
+    /// Emit one partial-state grouped-aggregate row — used when the plan
+    /// was injected as a partial path under Gather with GROUP BY.
+    ///
+    /// Layout matches the serial grouped emit: `[group_keys..., agg_cols...]`.
+    ///
+    /// # Safety
+    ///
+    /// `result_slot` must be a valid `TupleTableSlot`.
+    unsafe fn emit_grouped_partial(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+        group_idx: usize,
+    ) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: ExecClearTuple on a valid slot.
+        unsafe { pg_sys::ExecClearTuple(result_slot) };
+
+        let group_key = match self.group_key_order.get(group_idx) {
+            Some(k) => k.clone(),
+            None => return std::ptr::null_mut(),
+        };
+        let accums = match self.grouped_accums.get(&group_key) {
+            Some(a) => a.clone(),
+            None => return std::ptr::null_mut(),
+        };
+
+        // Write group-key columns.
+        // SAFETY: slot attr arrays are sized by the planner.
+        let values = unsafe { (*result_slot).tts_values };
+        let isnull = unsafe { (*result_slot).tts_isnull };
+        for (i, key_val) in group_key.iter().enumerate() {
+            // SAFETY: writing the i-th group-key attribute.
+            unsafe {
+                *isnull.add(i) = false;
+                #[allow(clippy::cast_sign_loss)]
+                {
+                    *values.add(i) = pg_sys::Datum::from(*key_val as u64);
+                }
+            }
+        }
+
+        // Mirror this group's accumulators into the partial-emit scratch,
+        // then emit partial-state Datums past the group-key columns.
+        if let Some(p) = self.partial.as_mut() {
+            p.mirror_plain(&accums);
+            // SAFETY: slot valid; emitters main-thread-only.
+            unsafe { p.finalize_partial(result_slot, group_key.len()) };
+        }
+
+        // SAFETY: ExecStoreVirtualTuple on a valid slot.
         unsafe { pg_sys::ExecStoreVirtualTuple(result_slot) };
         result_slot
     }

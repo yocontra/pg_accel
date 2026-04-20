@@ -52,6 +52,8 @@ mod ssbm;
 // --- Mixed ---
 mod filtered_grouped_agg;
 mod mixed_variants;
+// --- Parallel stress (8-worker Gather assurance) ---
+pub(crate) mod parallel_stress;
 // scale_sweep retired per action_items W9 (Reviewer 1 Sin #7) — the 5
 // identical rows at every scale were padding from a fixed fixture that
 // didn't actually vary with `rows`.
@@ -83,6 +85,9 @@ pub use hash_join::HashJoin;
 pub use index_recheck::IndexRecheck;
 pub use large_sort::LargeSort;
 pub use oltp_point::OltpPoint;
+pub use parallel_stress::{
+    ParallelStress, ParallelStressGrouped, ParallelStressSort, ParallelStressWindow,
+};
 pub use proximity::Proximity;
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
@@ -362,6 +367,11 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SsbmQ4_1),
         Box::new(SsbmQ4_2),
         Box::new(SsbmQ4_3),
+        // --- Parallel stress (fork-safety regression, 8 workers) ---
+        Box::new(ParallelStress),
+        Box::new(ParallelStressGrouped),
+        Box::new(ParallelStressSort),
+        Box::new(ParallelStressWindow),
         // --- Mixed workloads (original) ---
         Box::new(SpatialAgg),
         Box::new(SpatialSort),
