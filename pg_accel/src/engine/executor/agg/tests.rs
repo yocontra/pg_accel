@@ -56,14 +56,14 @@ fn agg_descs_roundtrip() {
 #[test]
 fn count_starts_at_zero() {
     let state = AggExecState::new(AccelStrategy::GpuReduce, 1024, &[(AggOp::Count, 0)]);
-    assert_eq!(state.columns[0].count, 0);
+    assert_eq!(state.columns[0].acc.count, 0);
 }
 
 #[test]
 fn min_max_initial_values() {
     let state = AggExecState::new(AccelStrategy::GpuReduce, 256, &[(AggOp::Min, 1)]);
-    assert_eq!(state.columns[0].min_val, f64::INFINITY);
-    assert_eq!(state.columns[0].max_val, f64::NEG_INFINITY);
+    assert_eq!(state.columns[0].acc.min_val, f64::INFINITY);
+    assert_eq!(state.columns[0].acc.max_val, f64::NEG_INFINITY);
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn all_agg_ops_constructible() {
 #[test]
 fn has_value_false_initially() {
     let state = AggExecState::new(AccelStrategy::GpuReduce, 256, &[(AggOp::Avg, 1)]);
-    assert!(!state.columns[0].has_value);
+    assert!(!state.columns[0].acc.has_value);
 }
 
 #[test]
@@ -110,14 +110,14 @@ fn counters_zero_on_init() {
 #[test]
 fn kahan_compensation_starts_zero() {
     let state = AggExecState::new(AccelStrategy::GpuReduce, 256, &[(AggOp::Avg, 1)]);
-    assert_eq!(state.columns[0].sum_comp, 0.0);
+    assert_eq!(state.columns[0].acc.sum_comp, 0.0);
 }
 
 #[test]
 fn min_max_boundary_values() {
     let state = AggExecState::new(AccelStrategy::GpuReduce, 256, &[(AggOp::Min, 1)]);
-    assert!(state.columns[0].min_val.is_infinite() && state.columns[0].min_val > 0.0);
-    assert!(state.columns[0].max_val.is_infinite() && state.columns[0].max_val < 0.0);
+    assert!(state.columns[0].acc.min_val.is_infinite() && state.columns[0].acc.min_val > 0.0);
+    assert!(state.columns[0].acc.max_val.is_infinite() && state.columns[0].acc.max_val < 0.0);
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn accumulate_sum_basic() {
     col.accumulate(1.0);
     col.accumulate(2.0);
     col.accumulate(3.0);
-    assert!((col.sum - 6.0).abs() < f64::EPSILON);
+    assert!((col.acc.sum - 6.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -182,9 +182,9 @@ fn accumulate_sum_kahan_precision() {
     }
     col.accumulate(-1e16);
     assert!(
-        (col.sum - 10_000.0).abs() < 1.0,
+        (col.acc.sum - 10_000.0).abs() < 1.0,
         "Kahan sum should be ~10000, got {}",
-        col.sum
+        col.acc.sum
     );
 }
 
@@ -194,7 +194,7 @@ fn accumulate_min() {
     col.accumulate(5.0);
     col.accumulate(2.0);
     col.accumulate(8.0);
-    assert!((col.min_val - 2.0).abs() < f64::EPSILON);
+    assert!((col.acc.min_val - 2.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -203,7 +203,7 @@ fn accumulate_max() {
     col.accumulate(5.0);
     col.accumulate(2.0);
     col.accumulate(8.0);
-    assert!((col.max_val - 8.0).abs() < f64::EPSILON);
+    assert!((col.acc.max_val - 8.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -217,8 +217,8 @@ fn finalize_count_no_values() {
 #[test]
 fn finalize_count_with_values() {
     let mut col = tcol(AggOp::Count, 0);
-    col.count = 42;
-    col.has_value = true;
+    col.acc.count = 42;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     assert_eq!(datum.value(), 42);
@@ -236,7 +236,7 @@ fn finalize_sum_with_values() {
     let mut col = tcol(AggOp::Sum, 1);
     col.accumulate(3.0);
     col.accumulate(7.0);
-    col.has_value = true;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let val = f64::from_bits(datum.value() as u64);
@@ -249,8 +249,8 @@ fn finalize_avg_with_values() {
     col.accumulate(2.0);
     col.accumulate(4.0);
     col.accumulate(6.0);
-    col.count = 3;
-    col.has_value = true;
+    col.acc.count = 3;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let val = f64::from_bits(datum.value() as u64);
@@ -262,7 +262,7 @@ fn finalize_min_with_values() {
     let mut col = tcol(AggOp::Min, 1);
     col.accumulate(10.0);
     col.accumulate(3.0);
-    col.has_value = true;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let val = f64::from_bits(datum.value() as u64);
@@ -289,9 +289,9 @@ fn gpu_values_empty_initially() {
 fn drain_small_batch_sum() {
     let mut col = tcol(AggOp::Sum, 1);
     col.gpu_values = vec![1.0, 2.0, 3.0];
-    col.has_value = true;
+    col.acc.has_value = true;
     col.drain_small_batch();
-    assert!((col.sum - 6.0).abs() < f64::EPSILON);
+    assert!((col.acc.sum - 6.0).abs() < f64::EPSILON);
     assert!(col.gpu_values.is_empty());
 }
 
@@ -299,28 +299,28 @@ fn drain_small_batch_sum() {
 fn drain_small_batch_min() {
     let mut col = tcol(AggOp::Min, 1);
     col.gpu_values = vec![5.0, 2.0, 8.0];
-    col.has_value = true;
+    col.acc.has_value = true;
     col.drain_small_batch();
-    assert!((col.min_val - 2.0).abs() < f64::EPSILON);
+    assert!((col.acc.min_val - 2.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn drain_small_batch_max() {
     let mut col = tcol(AggOp::Max, 1);
     col.gpu_values = vec![5.0, 2.0, 8.0];
-    col.has_value = true;
+    col.acc.has_value = true;
     col.drain_small_batch();
-    assert!((col.max_val - 8.0).abs() < f64::EPSILON);
+    assert!((col.acc.max_val - 8.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn dispatch_gpu_reduce_below_threshold_falls_back() {
     let mut col = tcol(AggOp::Sum, 1);
     col.gpu_values = vec![1.0, 2.0, 3.0];
-    col.has_value = true;
+    col.acc.has_value = true;
     col.dispatch_gpu_reduce();
     assert!(!col.gpu_dispatched);
-    assert!((col.sum - 6.0).abs() < f64::EPSILON);
+    assert!((col.acc.sum - 6.0).abs() < f64::EPSILON);
     assert!(col.gpu_values.is_empty());
 }
 
@@ -329,14 +329,14 @@ fn dispatch_gpu_reduce_above_threshold_attempts_gpu() {
     let mut col = tcol(AggOp::Sum, 1);
     let n = (cost::device_limits().gpu_reduce_min_rows) + 100;
     col.gpu_values = vec![1.0; n];
-    col.has_value = true;
+    col.acc.has_value = true;
     col.dispatch_gpu_reduce();
     #[cfg(not(feature = "gpu"))]
     {
         assert!(!col.gpu_dispatched);
         #[allow(clippy::cast_precision_loss)]
         let expected = n as f64;
-        assert!((col.sum - expected).abs() < 1.0);
+        assert!((col.acc.sum - expected).abs() < 1.0);
     }
     assert!(col.gpu_values.is_empty());
 }
@@ -348,12 +348,12 @@ fn dispatch_gpu_reduce_min_above_threshold() {
     let mut vals = vec![100.0; n];
     vals[n / 2] = -42.0;
     col.gpu_values = vals;
-    col.has_value = true;
+    col.acc.has_value = true;
     col.dispatch_gpu_reduce();
     #[cfg(not(feature = "gpu"))]
     {
         assert!(!col.gpu_dispatched);
-        assert!((col.min_val - (-42.0)).abs() < f64::EPSILON);
+        assert!((col.acc.min_val - (-42.0)).abs() < f64::EPSILON);
     }
 }
 
@@ -364,12 +364,12 @@ fn dispatch_gpu_reduce_max_above_threshold() {
     let mut vals = vec![1.0; n];
     vals[n / 3] = 9999.0;
     col.gpu_values = vals;
-    col.has_value = true;
+    col.acc.has_value = true;
     col.dispatch_gpu_reduce();
     #[cfg(not(feature = "gpu"))]
     {
         assert!(!col.gpu_dispatched);
-        assert!((col.max_val - 9999.0).abs() < f64::EPSILON);
+        assert!((col.acc.max_val - 9999.0).abs() < f64::EPSILON);
     }
 }
 
@@ -377,11 +377,11 @@ fn dispatch_gpu_reduce_max_above_threshold() {
 fn dispatch_gpu_reduce_avg_uses_sum_path() {
     let mut col = tcol(AggOp::Avg, 1);
     col.gpu_values = vec![2.0, 4.0, 6.0];
-    col.count = 3;
-    col.has_value = true;
+    col.acc.count = 3;
+    col.acc.has_value = true;
     col.dispatch_gpu_reduce();
     assert!(!col.gpu_dispatched);
-    assert!((col.sum - 12.0).abs() < f64::EPSILON);
+    assert!((col.acc.sum - 12.0).abs() < f64::EPSILON);
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let avg = f64::from_bits(datum.value() as u64);
@@ -404,7 +404,7 @@ fn dispatch_gpu_reduce_passthrough_does_not_buffer() {
 fn drain_small_batch_empty_buffer_is_noop() {
     let mut col = tcol(AggOp::Sum, 1);
     col.drain_small_batch();
-    assert!((col.sum - 0.0).abs() < f64::EPSILON);
+    assert!((col.acc.sum - 0.0).abs() < f64::EPSILON);
     assert!(col.gpu_values.is_empty());
 }
 
@@ -486,8 +486,8 @@ fn finalize_empty_input_all_agg_types() {
 #[test]
 fn finalize_passthrough_with_values_still_null() {
     let mut col = tcol(AggOp::Passthrough, 1);
-    col.has_value = true;
-    col.count = 5;
+    col.acc.has_value = true;
+    col.acc.count = 5;
     let (_, is_null) = col.finalize();
     assert!(is_null, "Passthrough should always return NULL");
 }
@@ -496,8 +496,8 @@ fn finalize_passthrough_with_values_still_null() {
 fn avg_single_row_no_division_by_zero() {
     let mut col = tcol(AggOp::Avg, 1);
     col.accumulate(42.0);
-    col.count = 1;
-    col.has_value = true;
+    col.acc.count = 1;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let val = f64::from_bits(datum.value() as u64);
@@ -509,9 +509,9 @@ fn avg_zero_count_with_has_value_returns_zero() {
     // Edge: has_value is true but count is 0 (shouldn't happen normally,
     // but finalize must not panic).
     let mut col = tcol(AggOp::Avg, 1);
-    col.has_value = true;
-    col.sum = 100.0;
-    col.count = 0;
+    col.acc.has_value = true;
+    col.acc.sum = 100.0;
+    col.acc.count = 0;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let val = f64::from_bits(datum.value() as u64);
@@ -529,7 +529,7 @@ fn sum_alternating_positive_negative_cancellation() {
         }
     }
     assert!(
-        col.sum.abs() < f64::EPSILON,
+        col.acc.sum.abs() < f64::EPSILON,
         "500 pairs of +1/-1 should cancel to 0"
     );
 }
@@ -543,9 +543,9 @@ fn sum_large_alternating_values() {
     }
     // Kahan summation should keep this close to zero.
     assert!(
-        col.sum.abs() < 1.0,
+        col.acc.sum.abs() < 1.0,
         "Kahan sum of large alternating values should be ~0, got {}",
-        col.sum
+        col.acc.sum
     );
 }
 
@@ -569,7 +569,7 @@ fn min_with_negative_values() {
     col.accumulate(-100.0);
     col.accumulate(-200.0);
     col.accumulate(-50.0);
-    assert!((col.min_val - (-200.0)).abs() < f64::EPSILON);
+    assert!((col.acc.min_val - (-200.0)).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -578,31 +578,31 @@ fn max_with_negative_values() {
     col.accumulate(-100.0);
     col.accumulate(-200.0);
     col.accumulate(-50.0);
-    assert!((col.max_val - (-50.0)).abs() < f64::EPSILON);
+    assert!((col.acc.max_val - (-50.0)).abs() < f64::EPSILON);
 }
 
 #[test]
 fn min_max_single_value() {
     let mut min_col = tcol(AggOp::Min, 1);
     min_col.accumulate(7.5);
-    assert!((min_col.min_val - 7.5).abs() < f64::EPSILON);
+    assert!((min_col.acc.min_val - 7.5).abs() < f64::EPSILON);
 
     let mut max_col = tcol(AggOp::Max, 1);
     max_col.accumulate(7.5);
-    assert!((max_col.max_val - 7.5).abs() < f64::EPSILON);
+    assert!((max_col.acc.max_val - 7.5).abs() < f64::EPSILON);
 }
 
 #[test]
 fn accumulate_count_and_passthrough_are_noops() {
     let mut count_col = tcol(AggOp::Count, 0);
     count_col.accumulate(999.0);
-    assert!((count_col.sum - 0.0).abs() < f64::EPSILON);
-    assert_eq!(count_col.min_val, f64::INFINITY);
-    assert_eq!(count_col.max_val, f64::NEG_INFINITY);
+    assert!((count_col.acc.sum - 0.0).abs() < f64::EPSILON);
+    assert_eq!(count_col.acc.min_val, f64::INFINITY);
+    assert_eq!(count_col.acc.max_val, f64::NEG_INFINITY);
 
     let mut pt_col = tcol(AggOp::Passthrough, 0);
     pt_col.accumulate(999.0);
-    assert!((pt_col.sum - 0.0).abs() < f64::EPSILON);
+    assert!((pt_col.acc.sum - 0.0).abs() < f64::EPSILON);
 }
 
 // -- GroupKeyInfo tests ----------------------------------------------------
@@ -740,7 +740,7 @@ fn oid_to_val_tag_unknown_returns_zero() {
 fn finalize_encodes_float4_result_type() {
     let mut col = AggColumn::with_result_type(AggOp::Sum, 1, pg_sys::Oid::from(700_u32)); // FLOAT4OID
     col.accumulate(3.14);
-    col.has_value = true;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     let bits = datum.value() as u32;
@@ -752,7 +752,7 @@ fn finalize_encodes_float4_result_type() {
 fn finalize_encodes_int4_result_type() {
     let mut col = AggColumn::with_result_type(AggOp::Sum, 1, pg_sys::Oid::from(23_u32)); // INT4OID
     col.accumulate(42.0);
-    col.has_value = true;
+    col.acc.has_value = true;
     let (datum, is_null) = col.finalize();
     assert!(!is_null);
     assert_eq!(datum.value() as i32, 42);
@@ -766,7 +766,7 @@ fn apply_gpu_result_sum() {
     col.gpu_values = vec![1.0, 2.0]; // will be cleared
     col.apply_gpu_result(99.0);
     assert!(col.gpu_dispatched);
-    assert!((col.sum - 99.0).abs() < f64::EPSILON);
+    assert!((col.acc.sum - 99.0).abs() < f64::EPSILON);
     assert!(col.gpu_values.is_empty());
 }
 
@@ -775,7 +775,7 @@ fn apply_gpu_result_min() {
     let mut col = tcol(AggOp::Min, 1);
     col.apply_gpu_result(-5.0);
     assert!(col.gpu_dispatched);
-    assert!((col.min_val - (-5.0)).abs() < f64::EPSILON);
+    assert!((col.acc.min_val - (-5.0)).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -783,5 +783,5 @@ fn apply_gpu_result_max() {
     let mut col = tcol(AggOp::Max, 1);
     col.apply_gpu_result(123.0);
     assert!(col.gpu_dispatched);
-    assert!((col.max_val - 123.0).abs() < f64::EPSILON);
+    assert!((col.acc.max_val - 123.0).abs() < f64::EPSILON);
 }

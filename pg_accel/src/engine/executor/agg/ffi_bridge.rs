@@ -5,11 +5,23 @@ use crate::gpu::PgaccelAggFunc;
 use super::ops::AggOp;
 
 /// Map `AggOp` to the FFI `PgaccelAggFunc` enum.
+///
+/// Stats/bitwise/bool aggregates do not have direct FFI counterparts in the
+/// current `PgaccelAggFunc` enum; they route through the `reduce_stats_*`
+/// kernels in `gpu/mod.rs`. Map them conservatively to `Sum` so that any
+/// code path that still calls through `agg_op_to_ffi` treats them as
+/// reducible; callers that need stats-specific dispatch branch on
+/// `AggOp` directly before calling FFI.
 pub const fn agg_op_to_ffi(op: AggOp) -> PgaccelAggFunc {
     match op {
-        AggOp::Sum | AggOp::Avg => PgaccelAggFunc::Sum,
-        AggOp::Min => PgaccelAggFunc::Min,
-        AggOp::Max => PgaccelAggFunc::Max,
+        AggOp::Sum
+        | AggOp::Avg
+        | AggOp::StddevSamp
+        | AggOp::StddevPop
+        | AggOp::VarSamp
+        | AggOp::VarPop => PgaccelAggFunc::Sum,
+        AggOp::Min | AggOp::BitAnd | AggOp::BoolAnd => PgaccelAggFunc::Min,
+        AggOp::Max | AggOp::BitOr | AggOp::BoolOr => PgaccelAggFunc::Max,
         AggOp::Count | AggOp::Passthrough => PgaccelAggFunc::Count,
     }
 }

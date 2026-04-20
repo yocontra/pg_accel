@@ -17,6 +17,7 @@ use crate::gpu::{PgaccelAggCol, PgaccelAggFunc};
 use super::ffi_bridge::agg_op_to_ffi;
 use super::keys::{GroupKeyInfo, append_key_bytes};
 use super::ops::AggOp;
+use super::partial::{ColumnAccumulator, PartialEmitter};
 use super::values::{append_value_bytes, oid_to_val_tag};
 
 /// PostgreSQL NUMERIC type OID (1700). `SUM(bigint)` and `SUM(int4)` return
@@ -42,18 +43,8 @@ pub(super) struct AggColumn {
     pub(super) type_oid: pg_sys::Oid,
     /// Result type OID (from Aggref.aggtype). Determines datum format in finalize.
     pub(super) result_type_oid: pg_sys::Oid,
-    /// Running sum (Kahan compensated).
-    pub(super) sum: f64,
-    /// Kahan compensation term.
-    pub(super) sum_comp: f64,
-    /// Running count.
-    pub(super) count: u64,
-    /// Running min.
-    pub(super) min_val: f64,
-    /// Running max.
-    pub(super) max_val: f64,
-    /// Whether any non-null value has been seen.
-    pub(super) has_value: bool,
+    /// Running per-column accumulator (sum, count, min/max, `sum_sq`, …).
+    pub(super) acc: ColumnAccumulator,
     /// Buffer for GPU reduce dispatch.
     pub(super) gpu_values: Vec<f64>,
     /// Whether GPU reduce was successfully used.
@@ -71,12 +62,15 @@ impl AggColumn {
             attno,
             type_oid: pg_sys::InvalidOid,
             result_type_oid,
-            sum: 0.0,
-            sum_comp: 0.0,
-            count: 0,
-            min_val: f64::INFINITY,
-            max_val: f64::NEG_INFINITY,
-            has_value: false,
+            acc: ColumnAccumulator {
+                sum: 0.0,
+                sum_comp: 0.0,
+                sum_sq: 0.0,
+                count: 0,
+                min_val: f64::INFINITY,
+                max_val: f64::NEG_INFINITY,
+                has_value: false,
+            },
             gpu_values: Vec::new(),
             gpu_dispatched: false,
         }
@@ -94,22 +88,35 @@ impl AggColumn {
     pub(super) fn accumulate(&mut self, val: f64) {
         match self.op {
             AggOp::Sum | AggOp::Avg => {
-                let y = val - self.sum_comp;
-                let t = self.sum + y;
-                self.sum_comp = (t - self.sum) - y;
-                self.sum = t;
+                let y = val - self.acc.sum_comp;
+                let t = self.acc.sum + y;
+                self.acc.sum_comp = (t - self.acc.sum) - y;
+                self.acc.sum = t;
             }
             AggOp::Min => {
-                if val < self.min_val {
-                    self.min_val = val;
+                if val < self.acc.min_val {
+                    self.acc.min_val = val;
                 }
             }
             AggOp::Max => {
-                if val > self.max_val {
-                    self.max_val = val;
+                if val > self.acc.max_val {
+                    self.acc.max_val = val;
                 }
             }
-            AggOp::Count | AggOp::Passthrough => {}
+            AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+                // Kahan-compensated sum, plus sum-of-squares for stats.
+                let y = val - self.acc.sum_comp;
+                let t = self.acc.sum + y;
+                self.acc.sum_comp = (t - self.acc.sum) - y;
+                self.acc.sum = t;
+                self.acc.sum_sq += val * val;
+            }
+            AggOp::Count
+            | AggOp::Passthrough
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => {}
         }
     }
 
@@ -141,8 +148,33 @@ impl AggColumn {
             AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f64(&self.gpu_values),
             AggOp::Min => gpu::reduce_min_f64(&self.gpu_values),
             AggOp::Max => gpu::reduce_max_f64(&self.gpu_values),
-            AggOp::Count | AggOp::Passthrough => {
-                // Count/Passthrough never need GPU — drain directly.
+            AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+                // Stats ops use reduce_stats kernel which returns
+                // (count, sum, sum_sq). Dispatch separately and short-circuit.
+                if let Some((c, s, ss)) = gpu::reduce_stats_f64(&self.gpu_values) {
+                    self.gpu_dispatched = true;
+                    self.acc.sum = s;
+                    self.acc.sum_sq = ss;
+                    if self.acc.count == 0 {
+                        self.acc.count = c;
+                    }
+                    self.acc.has_value = true;
+                    self.gpu_values = Vec::new();
+                } else {
+                    pgrx::error!(
+                        "pg_accel: GPU reduce_stats kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                        self.op,
+                    );
+                }
+                return;
+            }
+            AggOp::Count
+            | AggOp::Passthrough
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => {
+                // Count/Passthrough/bitwise/bool never need GPU — drain directly.
                 self.drain_small_batch();
                 return;
             }
@@ -160,7 +192,16 @@ impl AggColumn {
             AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f32(&f32_values).map(f64::from),
             AggOp::Min => gpu::reduce_min_f32(&f32_values).map(f64::from),
             AggOp::Max => gpu::reduce_max_f32(&f32_values).map(f64::from),
-            AggOp::Count | AggOp::Passthrough => None,
+            AggOp::StddevSamp
+            | AggOp::StddevPop
+            | AggOp::VarSamp
+            | AggOp::VarPop
+            | AggOp::Count
+            | AggOp::Passthrough
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => None,
         };
 
         if let Some(result) = f32_result {
@@ -196,13 +237,38 @@ impl AggColumn {
                 AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f64(chunk),
                 AggOp::Min => gpu::reduce_min_f64(chunk),
                 AggOp::Max => gpu::reduce_max_f64(chunk),
-                AggOp::Count | AggOp::Passthrough => None,
+                AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+                    // Stats kernel returns (count, sum, sum_sq) per chunk;
+                    // fold chunk partials into the accumulator directly.
+                    if let Some((c, s, ss)) = gpu::reduce_stats_f64(chunk) {
+                        self.gpu_dispatched = true;
+                        // Kahan-fold the chunk's sum into the running sum.
+                        let y = s - self.acc.sum_comp;
+                        let t = self.acc.sum + y;
+                        self.acc.sum_comp = (t - self.acc.sum) - y;
+                        self.acc.sum = t;
+                        self.acc.sum_sq += ss;
+                        self.acc.count = self.acc.count.saturating_add(c);
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU reduce_stats kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                    None
+                }
+                AggOp::Count
+                | AggOp::Passthrough
+                | AggOp::BitAnd
+                | AggOp::BitOr
+                | AggOp::BoolAnd
+                | AggOp::BoolOr => None,
             };
 
             if let Some(partial) = gpu_result {
                 self.gpu_dispatched = true;
                 self.accumulate(partial);
-            } else {
+            } else if matches!(self.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max) {
                 // Per CLAUDE.md rule 11: no CPU fallback on GPU kernel
                 // failure. Raise a PG ERROR instead of silently folding the
                 // chunk into the scalar accumulator.
@@ -212,16 +278,25 @@ impl AggColumn {
                 );
             }
         }
-        self.has_value = true;
+        self.acc.has_value = true;
     }
 
     pub(super) fn apply_gpu_result(&mut self, result: f64) {
         self.gpu_dispatched = true;
         match self.op {
-            AggOp::Sum | AggOp::Avg => self.sum = result,
-            AggOp::Min => self.min_val = result,
-            AggOp::Max => self.max_val = result,
-            AggOp::Count | AggOp::Passthrough => {}
+            AggOp::Sum | AggOp::Avg => self.acc.sum = result,
+            AggOp::Min => self.acc.min_val = result,
+            AggOp::Max => self.acc.max_val = result,
+            AggOp::StddevSamp
+            | AggOp::StddevPop
+            | AggOp::VarSamp
+            | AggOp::VarPop
+            | AggOp::Count
+            | AggOp::Passthrough
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => {}
         }
         self.gpu_values = Vec::new();
     }
@@ -257,7 +332,7 @@ impl AggColumn {
     /// the datum according to that type, so we must encode it correctly.
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub(super) fn finalize(&self) -> (pg_sys::Datum, bool) {
-        if !self.has_value {
+        if !self.acc.has_value {
             return match self.op {
                 AggOp::Count => (pg_sys::Datum::from(0_i64), false),
                 _ => (pg_sys::Datum::from(0), true),
@@ -265,18 +340,58 @@ impl AggColumn {
         }
 
         let raw_f64 = match self.op {
-            AggOp::Count => return (pg_sys::Datum::from(self.count as i64), false),
-            AggOp::Sum => self.sum,
+            AggOp::Count => return (pg_sys::Datum::from(self.acc.count as i64), false),
+            AggOp::Sum => self.acc.sum,
             AggOp::Avg => {
-                if self.count > 0 {
-                    self.sum / self.count as f64
+                if self.acc.count > 0 {
+                    self.acc.sum / self.acc.count as f64
                 } else {
                     0.0
                 }
             }
-            AggOp::Min => self.min_val,
-            AggOp::Max => self.max_val,
-            AggOp::Passthrough => return (pg_sys::Datum::from(0), true),
+            AggOp::Min => self.acc.min_val,
+            AggOp::Max => self.acc.max_val,
+            AggOp::VarPop => {
+                if self.acc.count > 0 {
+                    let n = self.acc.count as f64;
+                    let mean = self.acc.sum / n;
+                    (self.acc.sum_sq / n) - (mean * mean)
+                } else {
+                    0.0
+                }
+            }
+            AggOp::VarSamp => {
+                if self.acc.count > 1 {
+                    let n = self.acc.count as f64;
+                    let mean = self.acc.sum / n;
+                    let var_pop = (self.acc.sum_sq / n) - (mean * mean);
+                    var_pop * (n / (n - 1.0))
+                } else {
+                    return (pg_sys::Datum::from(0), true);
+                }
+            }
+            AggOp::StddevPop => {
+                if self.acc.count > 0 {
+                    let n = self.acc.count as f64;
+                    let mean = self.acc.sum / n;
+                    ((self.acc.sum_sq / n) - (mean * mean)).max(0.0).sqrt()
+                } else {
+                    0.0
+                }
+            }
+            AggOp::StddevSamp => {
+                if self.acc.count > 1 {
+                    let n = self.acc.count as f64;
+                    let mean = self.acc.sum / n;
+                    let var_pop = ((self.acc.sum_sq / n) - (mean * mean)).max(0.0);
+                    (var_pop * (n / (n - 1.0))).sqrt()
+                } else {
+                    return (pg_sys::Datum::from(0), true);
+                }
+            }
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BoolAnd | AggOp::BoolOr | AggOp::Passthrough => {
+                return (pg_sys::Datum::from(0), true);
+            }
         };
 
         // Encode the f64 result into the correct datum format for the
@@ -408,12 +523,15 @@ pub struct AggExecState {
     /// from a child plan via `ExecProcNode`.
     vscan: Option<VectorizedScan>,
 
-    /// When `true`, this executor is the worker-side of a parallel plan
+    /// When `Some`, this executor is the worker-side of a parallel plan
     /// (`Finalize Aggregate → Gather → pg_accel CustomScan`). Partial mode
     /// emits transition-state tuples (types match `aggtranstype`) instead
     /// of finalized aggregate values — the Finalize Aggregate combines
     /// them across workers and runs `aggfinalfn`.
-    pub is_partial: bool,
+    ///
+    /// Populated from [`super::partial::PartialAggSpec`] at
+    /// `begin_custom_scan`. `None` on non-parallel paths.
+    pub partial_emitters: Option<Vec<Box<dyn PartialEmitter>>>,
 }
 
 impl AggExecState {
@@ -448,7 +566,7 @@ impl AggExecState {
             fused_filter_infos: None,
             fused_agg_infos: None,
             vscan: None,
-            is_partial: false,
+            partial_emitters: None,
         }
     }
 
@@ -538,9 +656,9 @@ impl AggExecState {
             // Handle columns that don't need extraction (COUNT(*), attno <= 0).
             for col in &mut self.columns {
                 if col.attno <= 0 {
-                    col.count += batch_count;
+                    col.acc.count += batch_count;
                     if batch_count > 0 {
-                        col.has_value = true;
+                        col.acc.has_value = true;
                     }
                 }
             }
@@ -566,8 +684,8 @@ impl AggExecState {
                             continue;
                         }
 
-                        col.count += 1;
-                        col.has_value = true;
+                        col.acc.count += 1;
+                        col.acc.has_value = true;
 
                         if gpu_flags[i] {
                             col.gpu_values.push(val);
@@ -608,18 +726,13 @@ impl AggExecState {
 
         self.result_returned = true;
 
-        // Build a virtual tuple with all aggregate results.
-        // SAFETY: result_slot is a valid TupleTableSlot pointer.
+        // Build a virtual tuple with all aggregate results. Dispatches
+        // through `finalize_result` so partial-agg paths (worker-side of
+        // parallel plans) emit transition-state datums via the
+        // `PartialEmitter` trait.
+        // SAFETY: main backend thread; result_slot valid per caller.
         unsafe {
-            pg_sys::ExecClearTuple(result_slot);
-            let values = (*result_slot).tts_values;
-            let isnull = (*result_slot).tts_isnull;
-            for (i, col) in self.columns.iter().enumerate() {
-                let (datum, null) = col.finalize();
-                *values.add(i) = datum;
-                *isnull.add(i) = null;
-            }
-            pg_sys::ExecStoreVirtualTuple(result_slot);
+            self.finalize_result(result_slot);
         }
 
         result_slot
@@ -674,7 +787,7 @@ impl AggExecState {
             fused_filter_infos: None,
             fused_agg_infos: None,
             vscan: None,
-            is_partial: false,
+            partial_emitters: None,
         }
     }
 
@@ -716,7 +829,7 @@ impl AggExecState {
             fused_filter_infos: None,
             fused_agg_infos: None,
             vscan: None,
-            is_partial: false,
+            partial_emitters: None,
         }
     }
 
@@ -870,8 +983,8 @@ impl AggExecState {
             for (i, (col, info)) in self.columns.iter_mut().zip(infos.iter()).enumerate() {
                 if col.attno <= 0 {
                     // COUNT(*)
-                    col.count += 1;
-                    col.has_value = true;
+                    col.acc.count += 1;
+                    col.acc.has_value = true;
                     continue;
                 }
 
@@ -902,8 +1015,8 @@ impl AggExecState {
                 };
 
                 if let Some(v) = val {
-                    col.count += 1;
-                    col.has_value = true;
+                    col.acc.count += 1;
+                    col.acc.has_value = true;
                     if gpu_flags[i] {
                         col.gpu_values.push(v);
                     } else {
@@ -1195,6 +1308,22 @@ impl AggExecState {
         &self,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        if self.partial_emitters.is_some() {
+            // SAFETY: main backend thread; result_slot valid per caller.
+            unsafe { self.finalize_partial(result_slot) };
+        } else {
+            // SAFETY: main backend thread; result_slot valid per caller.
+            unsafe { self.finalize_simple(result_slot) };
+        }
+        result_slot
+    }
+
+    /// Emit finalized aggregate values (non-parallel path).
+    ///
+    /// # Safety
+    /// Must be called on the main backend thread. `result_slot` must be a
+    /// valid `TupleTableSlot` pointer.
+    unsafe fn finalize_simple(&self, result_slot: *mut pg_sys::TupleTableSlot) {
         // SAFETY: result_slot is a valid TupleTableSlot pointer.
         unsafe {
             pg_sys::ExecClearTuple(result_slot);
@@ -1207,7 +1336,31 @@ impl AggExecState {
             }
             pg_sys::ExecStoreVirtualTuple(result_slot);
         }
-        result_slot
+    }
+
+    /// Emit per-column partial-state datums for the Finalize Aggregate node
+    /// to combine across workers.
+    ///
+    /// # Safety
+    /// Must be called on the main backend thread. `result_slot` must be a
+    /// valid `TupleTableSlot` pointer. Requires `partial_emitters` to be
+    /// `Some` — the caller in [`finalize_result`] guards this.
+    unsafe fn finalize_partial(&self, scan_slot: *mut pg_sys::TupleTableSlot) {
+        // SAFETY: callers hold the main backend thread invariant.
+        let emitters = self
+            .partial_emitters
+            .as_ref()
+            .expect("finalize_partial called with None emitters");
+        // SAFETY: scan_slot is a valid TupleTableSlot pointer.
+        unsafe {
+            pg_sys::ExecClearTuple(scan_slot);
+            for (i, (col, emitter)) in self.columns.iter().zip(emitters.iter()).enumerate() {
+                let (datum, isnull) = emitter.emit(&col.acc);
+                (*scan_slot).tts_values.add(i).write(datum);
+                (*scan_slot).tts_isnull.add(i).write(isnull);
+            }
+            pg_sys::ExecStoreVirtualTuple(scan_slot);
+        }
     }
 
     /// Fused scan+agg: walk the heap directly, apply the filter predicate
@@ -1414,8 +1567,8 @@ impl AggExecState {
             for (i, col) in self.columns.iter_mut().enumerate() {
                 if col.attno <= 0 {
                     // COUNT(*): just increment.
-                    col.count += 1;
-                    col.has_value = true;
+                    col.acc.count += 1;
+                    col.acc.has_value = true;
                     continue;
                 }
 
@@ -1454,8 +1607,8 @@ impl AggExecState {
                     continue;
                 };
 
-                col.count += 1;
-                col.has_value = true;
+                col.acc.count += 1;
+                col.acc.has_value = true;
 
                 if gpu_flags[i] {
                     col.gpu_values.push(v);
@@ -1490,18 +1643,13 @@ impl AggExecState {
             stats::record_gpu_batch(row_count, 0);
         }
 
-        // Build a virtual tuple with all aggregate results.
-        // SAFETY: result_slot is a valid TupleTableSlot pointer.
+        // Build a virtual tuple with all aggregate results. Dispatches
+        // through `finalize_result` so partial-agg paths (worker-side of
+        // parallel plans) emit transition-state datums via the
+        // `PartialEmitter` trait.
+        // SAFETY: main backend thread; result_slot valid per caller.
         unsafe {
-            pg_sys::ExecClearTuple(result_slot);
-            let values = (*result_slot).tts_values;
-            let isnull = (*result_slot).tts_isnull;
-            for (i, col) in self.columns.iter().enumerate() {
-                let (datum, null) = col.finalize();
-                *values.add(i) = datum;
-                *isnull.add(i) = null;
-            }
-            pg_sys::ExecStoreVirtualTuple(result_slot);
+            self.finalize_result(result_slot);
         }
 
         tracing::debug!(
@@ -1596,21 +1744,21 @@ impl AggExecState {
             for &col_idx in &col_indices {
                 let col = &mut self.columns[col_idx];
                 match col.op {
-                    AggOp::Sum | AggOp::Avg => col.sum = result.sum,
-                    AggOp::Min => col.min_val = result.min,
-                    AggOp::Max => col.max_val = result.max,
+                    AggOp::Sum | AggOp::Avg => col.acc.sum = result.sum,
+                    AggOp::Min => col.acc.min_val = result.min,
+                    AggOp::Max => col.acc.max_val = result.max,
                     _ => {}
                 }
                 // Ensure count is correct for AVG finalize.
                 if matches!(col.op, AggOp::Avg) {
                     #[allow(clippy::cast_sign_loss)]
                     let c = result.count.max(0) as u64;
-                    if col.count == 0 {
-                        col.count = c;
+                    if col.acc.count == 0 {
+                        col.acc.count = c;
                     }
                 }
                 col.gpu_dispatched = true;
-                col.has_value = true;
+                col.acc.has_value = true;
                 col.gpu_values.clear();
             }
             self.gpu_dispatched = true;
