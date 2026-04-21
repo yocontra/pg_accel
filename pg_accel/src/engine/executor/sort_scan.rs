@@ -47,6 +47,12 @@ pub struct SortScan {
     /// Inline-extracted f64 sort keys (one per non-null tuple).
     keys_f64: Vec<f64>,
 
+    /// Inline-extracted i32 sort keys (one per non-null tuple).
+    keys_i32: Vec<i32>,
+
+    /// Inline-extracted i64 sort keys (one per non-null tuple).
+    keys_i64: Vec<i64>,
+
     /// Indices of tuples with non-null sort keys (into `arena`).
     non_null_indices: Vec<usize>,
 
@@ -92,6 +98,8 @@ impl SortScan {
             arena: Vec::new(),
             keys_f32: Vec::new(),
             keys_f64: Vec::new(),
+            keys_i32: Vec::new(),
+            keys_i64: Vec::new(),
             non_null_indices: Vec::new(),
             null_indices: Vec::new(),
             key_typid,
@@ -116,10 +124,12 @@ impl SortScan {
         let est = 4096;
         self.arena.reserve(est);
         if do_inline {
-            if self.key_typid == FLOAT4OID {
-                self.keys_f32.reserve(est);
-            } else {
-                self.keys_f64.reserve(est);
+            match self.key_typid {
+                FLOAT4OID => self.keys_f32.reserve(est),
+                FLOAT8OID => self.keys_f64.reserve(est),
+                INT4OID => self.keys_i32.reserve(est),
+                INT8OID => self.keys_i64.reserve(est),
+                _ => {}
             }
             self.non_null_indices.reserve(est);
         }
@@ -161,12 +171,10 @@ impl SortScan {
                                 self.keys_f64.push(f64::from_bits(datum.value() as u64));
                             }
                             INT4OID => {
-                                self.keys_f64.push(f64::from(datum.value() as i32));
+                                self.keys_i32.push(datum.value() as i32);
                             }
                             INT8OID => {
-                                // i64 -> f64 is lossless for |v| <= 2^53.
-                                #[allow(clippy::cast_precision_loss)]
-                                self.keys_f64.push(datum.value() as i64 as f64);
+                                self.keys_i64.push(datum.value() as i64);
                             }
                             _ => {} // unreachable due to do_inline guard
                         }
@@ -222,6 +230,30 @@ impl SortScan {
     /// Take ownership of the f64 keys.
     pub fn take_keys_f64(&mut self) -> Vec<f64> {
         std::mem::take(&mut self.keys_f64)
+    }
+
+    /// Access inline-extracted i32 keys (only valid after `scan_all`
+    /// when key type is INT4).
+    #[must_use]
+    pub fn keys_i32(&self) -> &[i32] {
+        &self.keys_i32
+    }
+
+    /// Take ownership of the i32 keys.
+    pub fn take_keys_i32(&mut self) -> Vec<i32> {
+        std::mem::take(&mut self.keys_i32)
+    }
+
+    /// Access inline-extracted i64 keys (only valid after `scan_all`
+    /// when key type is INT8).
+    #[must_use]
+    pub fn keys_i64(&self) -> &[i64] {
+        &self.keys_i64
+    }
+
+    /// Take ownership of the i64 keys.
+    pub fn take_keys_i64(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.keys_i64)
     }
 
     /// Access non-null key indices.

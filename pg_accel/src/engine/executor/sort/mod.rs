@@ -833,7 +833,17 @@ impl SortExecState {
 
         // Extract everything from vscan in one block to release the borrow
         // before calling self methods (apply_gpu_sort_result, sort_tuples).
-        let (n, key_typid, scratch_slot, non_null_indices, null_indices, f32_keys, f64_keys) = {
+        let (
+            n,
+            key_typid,
+            scratch_slot,
+            non_null_indices,
+            null_indices,
+            f32_keys,
+            f64_keys,
+            i32_keys,
+            i64_keys,
+        ) = {
             let vscan = self.vscan.as_mut().expect("vscan must be set");
             // SAFETY: vscan has its own scan slot and valid scan_desc.
             let n = unsafe { vscan.scan_all() };
@@ -844,9 +854,21 @@ impl SortExecState {
             let null_idx = vscan.take_null_indices();
             let f32k = vscan.take_keys_f32();
             let f64k = vscan.take_keys_f64();
+            let i32k = vscan.take_keys_i32();
+            let i64k = vscan.take_keys_i64();
             // Move arena into sorted_tuples (vscan no longer owns them).
             self.sorted_tuples = arena;
-            (n, key_typid, scratch_slot, non_null, null_idx, f32k, f64k)
+            (
+                n,
+                key_typid,
+                scratch_slot,
+                non_null,
+                null_idx,
+                f32k,
+                f64k,
+                i32k,
+                i64k,
+            )
         };
 
         self.rows_dispatched = n as u64;
@@ -890,15 +912,59 @@ impl SortExecState {
                             SortOutcome::Dispatched
                         }
                     }
-                    FLOAT8OID | INT4OID | INT8OID => {
+                    FLOAT8OID => {
                         let mut f64_keys = f64_keys;
-                        if f64_keys.is_empty() {
+                        if f64_keys.is_empty() || !gpu::device_has_fp64_cached() {
+                            // No fp64 on device (e.g. Metal without external
+                            // soft-fp64 dep) — defer to PG SortSupport.
                             SortOutcome::InputGate
                         } else {
                             let mut gpu_idx: Vec<u32> = (0..f64_keys.len() as u32).collect();
                             if gpu::sort_kv_f64(&mut f64_keys, &mut gpu_idx).is_none() {
                                 pgrx::error!(
                                     "pg_accel: sort_kv_f64 GPU kernel failed; refusing CPU fallback (rule 11)"
+                                );
+                            }
+                            self.apply_gpu_sort_result(
+                                &key,
+                                &non_null_indices,
+                                &null_indices,
+                                &gpu_idx,
+                                n,
+                            );
+                            SortOutcome::Dispatched
+                        }
+                    }
+                    INT4OID => {
+                        let mut i32_keys = i32_keys;
+                        if i32_keys.is_empty() {
+                            SortOutcome::InputGate
+                        } else {
+                            let mut gpu_idx: Vec<u32> = (0..i32_keys.len() as u32).collect();
+                            if gpu::sort_kv_i32(&mut i32_keys, &mut gpu_idx).is_none() {
+                                pgrx::error!(
+                                    "pg_accel: sort_kv_i32 GPU kernel failed; refusing CPU fallback (rule 11)"
+                                );
+                            }
+                            self.apply_gpu_sort_result(
+                                &key,
+                                &non_null_indices,
+                                &null_indices,
+                                &gpu_idx,
+                                n,
+                            );
+                            SortOutcome::Dispatched
+                        }
+                    }
+                    INT8OID => {
+                        let mut i64_keys = i64_keys;
+                        if i64_keys.is_empty() {
+                            SortOutcome::InputGate
+                        } else {
+                            let mut gpu_idx: Vec<u32> = (0..i64_keys.len() as u32).collect();
+                            if gpu::sort_kv_i64(&mut i64_keys, &mut gpu_idx).is_none() {
+                                pgrx::error!(
+                                    "pg_accel: sort_kv_i64 GPU kernel failed; refusing CPU fallback (rule 11)"
                                 );
                             }
                             self.apply_gpu_sort_result(

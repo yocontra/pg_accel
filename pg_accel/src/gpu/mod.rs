@@ -114,7 +114,19 @@ pub fn get_caps() -> PgaccelPlatformCaps {
 /// Resolved after `ensure_init`, so a zero-initialised caps struct (before
 /// init) appears as `has_fp64 == false`, which matches Metal's behaviour
 /// and keeps callers on the safe f32 path until the device is real.
-fn device_has_fp64_cached() -> bool {
+///
+/// # Integration with the external soft-fp64 dep (Metal)
+///
+/// Apple GPUs lack hardware fp64. The AdaptiveCpp Metal libkernel can link
+/// an external soft-fp64 implementation via the
+/// `ACPP_METAL_EXTERNAL_FP64_DIR` CMake option (see
+/// `AdaptiveCpp/src/libkernel/sscp/metal/float64/README.md`). When that
+/// path is active, the device caps struct reports `has_fp64 = true`, and
+/// every `if device_has_fp64_cached()` branch in this module begins
+/// dispatching the real fp64 kernel instead of the cast-down fp32
+/// fallback. No call-site logic change needed — the gate flips
+/// transparently.
+pub fn device_has_fp64_cached() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
     // 0 = not queried, 1 = no fp64, 2 = has fp64.
     static CACHED: AtomicU8 = AtomicU8::new(0);
@@ -347,6 +359,30 @@ pub fn sort_kv_f64(keys: &mut [f64], indices: &mut [u32]) -> Option<()> {
     // SAFETY: keys and indices are valid mutable slices.
     let status =
         unsafe { bridge::pgaccel_sort_kv_f64(keys.as_mut_ptr(), indices.as_mut_ptr(), count) };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated key-value sort for i32 keys.
+/// Sorts `keys` in place and permutes `indices` to match.
+/// Returns `None` if GPU is unavailable.
+pub fn sort_kv_i32(keys: &mut [i32], indices: &mut [u32]) -> Option<()> {
+    let count = keys.len().min(indices.len());
+    let _span = tracing::debug_span!("gpu.sort_kv_i32", n = count).entered();
+    // SAFETY: keys and indices are valid mutable slices.
+    let status =
+        unsafe { bridge::pgaccel_sort_kv_i32(keys.as_mut_ptr(), indices.as_mut_ptr(), count) };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated key-value sort for i64 keys.
+/// Sorts `keys` in place and permutes `indices` to match.
+/// Returns `None` if GPU is unavailable.
+pub fn sort_kv_i64(keys: &mut [i64], indices: &mut [u32]) -> Option<()> {
+    let count = keys.len().min(indices.len());
+    let _span = tracing::debug_span!("gpu.sort_kv_i64", n = count).entered();
+    // SAFETY: keys and indices are valid mutable slices.
+    let status =
+        unsafe { bridge::pgaccel_sort_kv_i64(keys.as_mut_ptr(), indices.as_mut_ptr(), count) };
     status.is_ok().then_some(())
 }
 

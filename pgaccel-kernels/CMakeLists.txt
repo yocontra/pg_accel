@@ -50,21 +50,27 @@ add_sycl_to_target(TARGET pgaccel_kernels)
 add_sycl_to_target(TARGET pgaccel_kernels_shared)
 message(STATUS "pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp")
 
-# TODO(ffast-math): Re-enable `-ffast-math` as a global compile option once the
-# upstream AdaptiveCpp fix for `llvm.minnum`/`llvm.maxnum` on the Metal SSCP
-# backend lands (PR title: "fix(metal): IEEE-correct llvm.minnum/maxnum").
-# Conditions for re-enabling:
-#   1. AdaptiveCpp main contains the IEEE-correct minnum/maxnum lowering on
-#      Metal — verified by running `just gpu-test` with the flag on and
-#      confirming no NaN-propagation regressions in reduce/spatial tests.
-#   2. `~/local` install picks up the fixed libacpp-rt.dylib (re-run
-#      `just setup-gpu-acpp`).
-#   3. fp64 reduce kernels still pass on CUDA/ROCm/L0 with fast-math on.
-# When all three hold, add:
-#     target_compile_options(pgaccel_kernels        PRIVATE -ffast-math)
-#     target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
-# Kernels with NaN-preservation requirements (currently none — verify at
-# re-enable time) would need a per-kernel `-fno-fast-math` override.
+# -ffast-math enables vectorizer-friendly float math (reciprocal throughput,
+# FMA contraction, reassociation) across all kernels. IEEE 754-2008 NaN +
+# signed-zero semantics for fmin/fmax are preserved by the AdaptiveCpp
+# Metal libkernel (src/libkernel/sscp/metal/math.cpp) and the emitter's
+# inline NaN sequence (Emitter.cpp, __acpp_sscp_fmin/fmax_f32 branch), so
+# fast-math here does not silently drop those contracts.
+target_compile_options(pgaccel_kernels        PRIVATE -ffast-math)
+target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
+
+# Files that rely on IEEE NaN/Inf semantics opt out of -ffast-math:
+#   raster_ops         — isnan/isinf drive NODATA propagation
+#   spatial_predicates — isfinite gates NaN/Inf → UNCERTAIN
+#   sort               — pad_value<float>() uses +infinity as the bitonic
+#                         sentinel; -ffast-math's no-infinities assumption
+#                         makes pad elements leak into the output with
+#                         index = UINT32_MAX.
+set_source_files_properties(
+    src/raster_ops.cpp
+    src/spatial_predicates.cpp
+    src/sort.cpp
+    PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
 # Standalone test binary
 add_executable(test_device test/test_device.cpp)

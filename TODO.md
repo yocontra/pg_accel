@@ -229,3 +229,58 @@ of PG" claim:
   explicit (not a silent skip).
 - `pg_accel_stats()` sanity after a workload: hook-injection count >
   skip-by-gate count; GPU failure counter == 0.
+
+## GPU / Metal (fork-safe-metal branch)
+
+- **Soft-fp64 for Metal: external dep integration.** Math bodies live in a
+  separate repo and are consumed via `find_package(acpp_metal_fp64)`, gated
+  on `ACPP_METAL_EXTERNAL_FP64` in
+  `AdaptiveCpp/src/libkernel/sscp/metal/CMakeLists.txt`. ABI contract in
+  `AdaptiveCpp/src/libkernel/sscp/metal/float64/README.md`. Once the dep
+  ships: install it, configure AdaptiveCpp with `-DACPP_METAL_EXTERNAL_FP64=ON`,
+  rebuild, reinstall to `~/local`. pg_accel fp64 gates
+  (`caps.has_fp64`/`platform_has_fp64()`, 7 call sites marked with
+  `ACPP_METAL_EXTERNAL_FP64` pointer comments) flip automatically.
+
+- **Atomic64 on Metal: re-enable after MSL-2.4+ emitter fix.** Currently
+  advertised as `false` in
+  `AdaptiveCpp/src/runtime/metal/metal_hardware_manager.cpp` because the
+  SSCP MSL emitter emits program-scope simdgroup builtins that `xcrun metal`
+  only accepts under its permissive default dialect — which rejects
+  `atomic_fetch_add_explicit` on `device atomic<ulong>*`. Fix: move the
+  `__simd_size [[threads_per_simdgroup]]` declarations into kernel function
+  signatures (MSL 2.4+-compliant), then flip `_supports_atomic64 = true` for
+  Apple8+ at runtime. pg_accel's `bbox_ops.cpp` u32 fallback remains until
+  that lands.
+
+- **Compensated-fp32 gate audit — deferred in favor of external fp64 dep.**
+  If soft-fp64 perf is insufficient (~1/32× fp32 on Metal), replace each
+  f64-gated path with an f32 alternative: reduce (sum/sum_sq/stats/multi),
+  sort f64 keys (u64 bit-pattern), hash-join f64 keys (u64 bit-pattern),
+  spatial (Shewchuk adaptive), bbox (fp32+ε-pad), h3 res≥12 (recentered
+  projection). Estimated ~5 new kernel files, ~800 LOC.
+
+- **OOQ executor overlap for sort / window.**
+  `src/engine/executor/sort.rs` and `window.rs` force in-order Metal
+  queues; per-DAG dispatch could overlap submit+exec via
+  `submit_queue_wait_for` + `MTLSharedEvent`. Perf win, not correctness.
+
+- **-ffast-math per-file opt-outs (pgaccel-kernels/CMakeLists.txt).**
+  `raster_ops.cpp`, `spatial_predicates.cpp`, and `sort.cpp` compile with
+  `-fno-fast-math` because they depend on IEEE NaN/Inf semantics
+  (NODATA propagation, UNCERTAIN gates, bitonic-sort `+infinity` sentinel).
+  Before adding new kernels that call `isnan`/`isinf`/`isfinite` or rely
+  on `+infinity` as a sort sentinel, add them to that opt-out list — the
+  global default is fast-math.
+
+- **Cold-cache fork crash on sort_kv_i32 / sort_kv_i64.** Fresh backend +
+  fresh JIT cache crashes in `-[_MTLFunction newArgumentEncoderWithBuffer
+  Index:]` the first time the int-kv radix kernel is dispatched post-fork
+  (`asi: crashed on child side of fork pre-exec`). Second run warms the
+  `.metalar` archive and the dispatch succeeds (sort_int4 @ 100K = 1.70x
+  WIN, sort_int8 @ 100K = 1.47x WIN after warmup). The f32 / f64 paths
+  compile into the same `sycl_radix_sort_kv_u32` kernel but their SSCP
+  caller-hash differs, so each type needs its own archive build. Fix:
+  warm every radix specialization (u32, i32, i64, u64, f32+f64 bit-cast
+  variants) at `_PG_init` via a tiny dry-run dispatch on 16 elements, so
+  the archive builder runs before any user query can fork.

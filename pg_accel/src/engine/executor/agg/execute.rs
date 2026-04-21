@@ -164,11 +164,7 @@ impl AggColumn {
             AggOp::Avg if !use_stats_for_avg => gpu::reduce_sum_f64(&self.gpu_values),
             AggOp::Min => gpu::reduce_min_f64(&self.gpu_values),
             AggOp::Max => gpu::reduce_max_f64(&self.gpu_values),
-            AggOp::Avg
-            | AggOp::StddevSamp
-            | AggOp::StddevPop
-            | AggOp::VarSamp
-            | AggOp::VarPop => {
+            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
                 // Stats ops use reduce_stats kernel which returns
                 // (count, sum, sum_sq). Dispatch separately and short-circuit.
                 // AVG shares this path when running under a partial-agg plan

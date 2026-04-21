@@ -42,6 +42,13 @@ static HAS_FP64: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// Whether the GPU supports native fp64 (double-precision) arithmetic.
 ///
 /// Result is cached via [`OnceLock`] so the GPU runtime is only probed once.
+///
+/// On Apple GPUs fp64 is emulated via soft-float — flipped to `true` when
+/// AdaptiveCpp is built with `ACPP_METAL_EXTERNAL_FP64_DIR` pointing at the
+/// external soft-fp64 implementation (see
+/// `AdaptiveCpp/src/libkernel/sscp/metal/float64/README.md`). Absent that,
+/// this returns `false` on Metal and planner gates route f64 paths to
+/// fp32 fallbacks.
 #[must_use]
 pub fn platform_has_fp64() -> bool {
     *HAS_FP64.get_or_init(|| PlatformProfile::detect().has_fp64)

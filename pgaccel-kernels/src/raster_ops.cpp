@@ -137,8 +137,12 @@ static constexpr size_t GPU_TILE_THRESHOLD = 65536;
 /* ── SYCL GPU implementations ────────────────────────────────── */
 
 static sycl::queue& get_queue() {
-    static sycl::queue q{sycl::default_selector_v};
-    return q;
+    // Leak on purpose: the AdaptiveCpp Metal runtime has atexit teardown
+    // ordering that throws from ~queue() after its allocator/mutex has
+    // already been destroyed, which terminates the process. Matches the
+    // `g_queue` pointer pattern used elsewhere in this library.
+    static sycl::queue* q = new sycl::queue(sycl::default_selector_v);
+    return *q;
 }
 
 /* Per-row map_algebra fast path.
