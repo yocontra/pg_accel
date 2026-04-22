@@ -1,0 +1,258 @@
+# pg_accel pre-commit config (run via prek — https://github.com/j178/prek)
+#
+#   brew install prek          # or: cargo install prek
+#   prek install                # installs .git/hooks/{pre-commit,commit-msg,pre-push}
+#   prek run --all-files        # one-off scan
+#   prek run --hook-stage pre-push
+#
+# Format is vanilla pre-commit spec. prek is a drop-in replacement that runs
+# the hooks in parallel with a Rust-native engine (~10–50x faster).
+
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+default_stages: [pre-commit]
+fail_fast: false
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Hygiene
+  # ─────────────────────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+        exclude: '\.(ipynb|snap)$'
+      - id: end-of-file-fixer
+        exclude: '\.(snap|patch)$'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: check-symlinks
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+        # Rust inner attributes (`#![cfg(test)]`, `#![allow(...)]`) trip the
+        # shebang detector. Real Rust scripts would live in `/usr/bin/env run-cargo-script`
+        # files, not `.rs` modules.
+        exclude: '\.rs$'
+      - id: destroyed-symlinks
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Spellchecker — fast, low-false-positive (cargo-native)
+  # ─────────────────────────────────────────────────────────────────────────
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.28.4
+    hooks:
+      - id: typos
+        # Upstream hook defaults to [--write-changes, --force-exclude] which
+        # silently rewrote `sycl::nd_range` → `sycl::and_range` across kernel
+        # files on first run. Report-only is the sane default; authors can run
+        # `typos --write-changes` manually once they've verified the fixes.
+        args: [--force-exclude]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Conventional commits (feat/fix/perf/... per CLAUDE.md)
+  # ─────────────────────────────────────────────────────────────────────────
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v4.0.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args:
+          - --strict
+          - --force-scope
+          - feat
+          - fix
+          - perf
+          - refactor
+          - test
+          - chore
+          - docs
+          - ci
+          - build
+          - style
+          - revert
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TOML formatting (Cargo.toml, deny.toml, etc.)
+  # ─────────────────────────────────────────────────────────────────────────
+  - repo: https://github.com/ComPWA/taplo-pre-commit
+    rev: v0.9.3
+    hooks:
+      - id: taplo-format
+      - id: taplo-lint
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Shell scripts
+  # ─────────────────────────────────────────────────────────────────────────
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning]
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Local hooks (Rust toolchain + project-specific anti-cheat rails)
+  # ─────────────────────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      # --- Rust: fast checks run on every commit ----------------------------
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types_or: [rust]
+        pass_filenames: false
+
+      # --- Rust: slow checks deferred to pre-push ---------------------------
+      - id: cargo-check
+        name: cargo check --features pg17
+        entry: cargo check --features pg17 --all-targets
+        language: system
+        types_or: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-clippy
+        name: cargo clippy -D warnings
+        # Match `just lint` exactly. The bench binary has 42 pre-existing clippy
+        # errors under `--all-targets`; scoping to the default lib/bin target set
+        # keeps the hook green while still catching regressions on the hot path.
+        entry: cargo clippy -- -D warnings
+        language: system
+        types_or: [rust]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-deny
+        name: cargo deny (licenses + advisories)
+        entry: cargo deny check
+        language: system
+        files: '^(Cargo\.(toml|lock)|deny\.toml|.*/Cargo\.toml)$'
+        pass_filenames: false
+
+      # --- C++/SYCL kernels -------------------------------------------------
+      - id: clang-format
+        name: clang-format (C++/SYCL kernels)
+        entry: clang-format --dry-run --Werror --style=file
+        language: system
+        files: '^pgaccel-kernels/.*\.(cpp|cc|cxx|hpp|h|hh)$'
+
+      # --- Python (Claude hooks + helper scripts) ---------------------------
+      - id: ruff-format
+        name: ruff format --check (.claude hooks)
+        entry: bash -c 'command -v ruff >/dev/null 2>&1 && ruff format --check "$@" || echo "ruff not installed, skipping" >&2' --
+        language: system
+        files: '\.py$'
+
+      # ─────────────────────────────────────────────────────────────────────
+      # Anti-cheat mirrors — .claude/hooks block Claude; these block humans.
+      # Patterns from .claude/rules/anti-cheat.md. Bypass with a same/prior
+      # line `// anti-cheat-allow: <issue or concrete blocker>` comment.
+      # ─────────────────────────────────────────────────────────────────────
+      - id: anti-cheat-ignore
+        name: "anti-cheat #2: no #[ignore] without justification"
+        description: "#[ignore] disables tests. Fix the bug, not the test. Bypass with `// anti-cheat-allow: <reason>`."
+        entry: |
+          bash -c '
+          set -eu
+          fail=0
+          for f in "$@"; do
+            awk -v file="$f" "
+              /^[[:space:]]*#\[ignore(\([^)]*\))?(\s*=\s*\"[^\"]*\")?\]/ {
+                prev_ok = (prev ~ /anti-cheat-allow:/ || \$0 ~ /anti-cheat-allow:/)
+                if (!prev_ok) { printf \"%s:%d: #[ignore] without anti-cheat-allow\\n\", file, NR; bad=1 }
+              }
+              { prev = \$0 }
+              END { exit bad+0 }
+            " "$f" || fail=1
+          done
+          exit $fail
+          ' --
+        language: system
+        files: '\.rs$'
+
+      - id: anti-cheat-stubs
+        name: "anti-cheat #7: no todo!() / unimplemented!() outside tests"
+        description: "Stubs ship as runtime panics. Say 'I am stuck' instead of landing a stub."
+        entry: |
+          bash -c '
+          set -eu
+          if grep -n -E "\b(todo|unimplemented)!\(\)" "$@" | grep -v "anti-cheat-allow"; then
+            echo "^-- todo!() / unimplemented!() is a runtime panic. Rule .claude/rules/anti-cheat.md #7." >&2
+            exit 1
+          fi
+          ' --
+        language: system
+        files: '\.rs$'
+        exclude: '(^|/)tests?/|_test\.rs$|#\[cfg\(test\)\]'
+
+      - id: anti-cheat-silent-errors
+        name: "anti-cheat #4: no unwrap_or(Vec::new()) / .ok() swallowing GPU errors"
+        description: "Empty result from a failed kernel silently corrupts query output. Propagate with ? or tracing::error!."
+        entry: |
+          bash -c '
+          set -eu
+          if grep -n -E "\.unwrap_or\(\s*(Vec::new\(\)|vec!\[\s*\]|Default::default\(\))\s*\)" "$@" | grep -v "anti-cheat-allow"; then
+            echo "^-- swallowing a Result into empty Vec hides GPU failures. Rule .claude/rules/anti-cheat.md #4." >&2
+            exit 1
+          fi
+          ' --
+        language: system
+        files: '\.rs$'
+        exclude: '(^|/)tests?/|_test\.rs$'
+
+      - id: anti-cheat-pg-single
+        name: "anti-cheat #3 / bench rule #11: no max_parallel_workers_per_gather = 0"
+        description: "Benchmarking vs single-threaded PG is banned — compare to PG parallel only."
+        entry: |
+          bash -c '
+          set -eu
+          if grep -n -i -E "max_parallel_workers_per_gather\s*=\s*0" "$@" | grep -v "anti-cheat-allow"; then
+            echo "^-- see CLAUDE.md Benchmark Rule #11 and anti-cheat.md #3." >&2
+            exit 1
+          fi
+          ' --
+        language: system
+        # Skip the rules/skills docs that discuss the banned pattern as documentation.
+        exclude: '^\.claude/|^CLAUDE\.md$|\.pre-commit-config\.yaml$'
+
+      - id: anti-cheat-no-verify
+        name: "anti-cheat #8: no --no-verify in scripts / justfile / CI"
+        description: "Bypassing hooks hides real failures. Fix the underlying issue."
+        entry: |
+          bash -c '
+          set -eu
+          if grep -n --include="*.sh" --include="*.yaml" --include="*.yml" --include="justfile" --include="Justfile" -E "\-\-no-verify\b" "$@" | grep -v "anti-cheat-allow"; then
+            echo "^-- --no-verify bypasses the build. Rule .claude/rules/anti-cheat.md #8." >&2
+            exit 1
+          fi
+          ' --
+        language: system
+        files: '\.(sh|ya?ml)$|(^|/)[Jj]ustfile$'
+        exclude: '^\.claude/(rules|hooks)/|\.pre-commit-config\.yaml$'
+
+      - id: anti-cheat-raw-metal
+        name: "SYCL-only rule: no raw Metal / CoreML #import|#include"
+        description: "AdaptiveCpp dispatches to Metal transparently — pg_accel never imports raw Metal. CLAUDE.md rule #12."
+        entry: |
+          bash -c '
+          set -eu
+          # Only flag actual #import/#include of Metal/CoreML headers. MTL* symbol
+          # names appear in diagnostic comments explaining AdaptiveCpp internals
+          # (see pgaccel-kernels/src/device_manager.cpp) and those are legitimate.
+          if grep -n -E "^[[:space:]]*#[[:space:]]*(import|include)[[:space:]]*[<\"](Metal|CoreML)/" "$@" | grep -v "anti-cheat-allow"; then
+            echo "^-- raw Metal / CoreML header import forbidden. Use SYCL via AdaptiveCpp. CLAUDE.md rule #12." >&2
+            exit 1
+          fi
+          ' --
+        language: system
+        files: '\.(cpp|cc|cxx|hpp|h|hh|mm|m)$'
+        exclude: '^\.claude/|^CLAUDE\.md$|\.pre-commit-config\.yaml$'
