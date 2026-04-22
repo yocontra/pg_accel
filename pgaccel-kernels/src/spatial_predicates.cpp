@@ -1,67 +1,64 @@
-#include "pgaccel_ffi.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 
+#include "pgaccel_ffi.h"
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-static constexpr double EARTH_RADIUS_M = 6371008.8; // WGS84 mean radius
-static constexpr double DEG_TO_RAD     = M_PI / 180.0;
+static constexpr double EARTH_RADIUS_M = 6371008.8;  // WGS84 mean radius
+static constexpr double DEG_TO_RAD = M_PI / 180.0;
 
 static constexpr double EPS_FP64 = 1e-12;
-static constexpr float  EPS_FP32 = 1e-5f;
+static constexpr float EPS_FP32 = 1e-5f;
 
 static constexpr double ANTIPODAL_COS_THRESH_FP64 = 1.0 - 1e-10;
-static constexpr float  ANTIPODAL_COS_THRESH_FP32 = 1.0f - 1e-4f;
+static constexpr float ANTIPODAL_COS_THRESH_FP32 = 1.0f - 1e-4f;
 
 // Distance thresholds for "too close" uncertainty
-static constexpr double CLOSE_DIST_M_FP64 = 0.001; // 1 mm
-static constexpr double CLOSE_DIST_M_FP32 = 1.0;   // 1 m
+static constexpr double CLOSE_DIST_M_FP64 = 0.001;  // 1 mm
+static constexpr double CLOSE_DIST_M_FP32 = 1.0;    // 1 m
 
 // ---------------------------------------------------------------------------
 // Helpers — templated for fp32/fp64 dual paths
 // ---------------------------------------------------------------------------
 //
 // The `use_fp64` parameter on each public entry point selects between the
-// fp32 and fp64 instantiations of these templates. No Metal-specific
-// special-casing lives in this file: the fp64 branch is dispatched by the
-// caller whenever `caps.has_fp64` is true, which on Metal is gated by the
-// runtime env var `ACPP_METAL_ENABLE_SOFT_FP64=1` (AdaptiveCpp soft-double)
-// or the in-process override `PGACCEL_FORCE_SOFT_FP64=1`. CUDA/ROCm/L0
-// report `has_fp64 = true` natively. Near-degenerate inputs (antipodal
-// points, colinear segments) depend on the tighter EPS_FP64 thresholds
-// above, so turning on soft-fp64 on Metal materially reduces false
-// "UNCERTAIN" results in the three-layer pipeline.
+// fp32 and fp64 instantiations of these templates. fp64 is always available:
+// native on CUDA/ROCm/Level Zero, soft-fp64 on Metal via AdaptiveCpp SSCP.
+// The planner uses `has_native_fp64` as a cost signal (soft-fp64 is slower)
+// but not as a gate. Near-degenerate inputs (antipodal points, colinear
+// segments) benefit from the tighter EPS_FP64 thresholds above.
 
 template <typename T>
 static inline bool is_finite_coord(T x, T y) {
-    return std::isfinite(x) && std::isfinite(y);
+  return std::isfinite(x) && std::isfinite(y);
 }
 
 // Perpendicular distance from point (px,py) to segment (ax,ay)-(bx,by)
 template <typename T>
 static inline T perp_distance(T px, T py, T ax, T ay, T bx, T by) {
-    T dx = bx - ax;
-    T dy = by - ay;
-    T len_sq = dx * dx + dy * dy;
-    if (len_sq == T(0)) {
-        // Degenerate segment — distance to the single point
-        T ex = px - ax;
-        T ey = py - ay;
-        return std::sqrt(ex * ex + ey * ey);
-    }
-    // |cross| / len
-    T cross = (px - ax) * dy - (py - ay) * dx;
-    return std::abs(cross) / std::sqrt(len_sq);
+  T dx = bx - ax;
+  T dy = by - ay;
+  T len_sq = dx * dx + dy * dy;
+  if (len_sq == T(0)) {
+    // Degenerate segment — distance to the single point
+    T ex = px - ax;
+    T ey = py - ay;
+    return std::sqrt(ex * ex + ey * ey);
+  }
+  // |cross| / len
+  T cross = (px - ax) * dy - (py - ay) * dx;
+  return std::abs(cross) / std::sqrt(len_sq);
 }
 
 // 2D cross product of vectors (b-a) and (c-a)
 template <typename T>
 static inline T cross2d(T ax, T ay, T bx, T by, T cx, T cy) {
-    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
 }
 
 // ---------------------------------------------------------------------------
@@ -69,53 +66,51 @@ static inline T cross2d(T ax, T ay, T bx, T by, T cx, T cy) {
 // ---------------------------------------------------------------------------
 
 template <typename T>
-static int8_t point_in_ring_one(
-    T px, T py,
-    const T* ring, size_t vertex_count, T eps
-) {
-    // Degenerate ring check: need at least 4 vertices (closed ring: first == last)
-    if (vertex_count < 4) return 0; // UNCERTAIN
+static int8_t point_in_ring_one(T px, T py, const T* ring, size_t vertex_count, T eps) {
+  // Degenerate ring check: need at least 4 vertices (closed ring: first == last)
+  if (vertex_count < 4)
+    return 0;  // UNCERTAIN
 
-    // Check ring is closed
-    T first_x = ring[0], first_y = ring[1];
-    T last_x  = ring[(vertex_count - 1) * 2];
-    T last_y  = ring[(vertex_count - 1) * 2 + 1];
-    if (std::abs(first_x - last_x) > eps || std::abs(first_y - last_y) > eps) {
-        return 0; // UNCERTAIN — ring not closed
+  // Check ring is closed
+  T first_x = ring[0], first_y = ring[1];
+  T last_x = ring[(vertex_count - 1) * 2];
+  T last_y = ring[(vertex_count - 1) * 2 + 1];
+  if (std::abs(first_x - last_x) > eps || std::abs(first_y - last_y) > eps) {
+    return 0;  // UNCERTAIN — ring not closed
+  }
+
+  int crossings = 0;
+  for (size_t i = 0; i < vertex_count - 1; ++i) {
+    T ax = ring[i * 2];
+    T ay = ring[i * 2 + 1];
+    T bx = ring[(i + 1) * 2];
+    T by = ring[(i + 1) * 2 + 1];
+
+    // Check if point is within epsilon of this edge
+    T dist = perp_distance(px, py, ax, ay, bx, by);
+    if (dist < eps) {
+      // Also check point is in the bounding box of the segment (extended by eps)
+      T min_x = std::min(ax, bx) - eps;
+      T max_x = std::max(ax, bx) + eps;
+      T min_y = std::min(ay, by) - eps;
+      T max_y = std::max(ay, by) + eps;
+      if (px >= min_x && px <= max_x && py >= min_y && py <= max_y) {
+        return 0;  // UNCERTAIN — point is near an edge
+      }
     }
 
-    int crossings = 0;
-    for (size_t i = 0; i < vertex_count - 1; ++i) {
-        T ax = ring[i * 2];
-        T ay = ring[i * 2 + 1];
-        T bx = ring[(i + 1) * 2];
-        T by = ring[(i + 1) * 2 + 1];
-
-        // Check if point is within epsilon of this edge
-        T dist = perp_distance(px, py, ax, ay, bx, by);
-        if (dist < eps) {
-            // Also check point is in the bounding box of the segment (extended by eps)
-            T min_x = std::min(ax, bx) - eps;
-            T max_x = std::max(ax, bx) + eps;
-            T min_y = std::min(ay, by) - eps;
-            T max_y = std::max(ay, by) + eps;
-            if (px >= min_x && px <= max_x && py >= min_y && py <= max_y) {
-                return 0; // UNCERTAIN — point is near an edge
-            }
-        }
-
-        // Ray casting: horizontal ray from (px, py) to +x infinity
-        // Check if edge crosses the ray
-        if ((ay > py) != (by > py)) {
-            // Compute x-intersection of edge with y = py
-            T x_intersect = ax + (py - ay) * (bx - ax) / (by - ay);
-            if (px < x_intersect) {
-                crossings++;
-            }
-        }
+    // Ray casting: horizontal ray from (px, py) to +x infinity
+    // Check if edge crosses the ray
+    if ((ay > py) != (by > py)) {
+      // Compute x-intersection of edge with y = py
+      T x_intersect = ax + (py - ay) * (bx - ax) / (by - ay);
+      if (px < x_intersect) {
+        crossings++;
+      }
     }
+  }
 
-    return (crossings % 2 == 1) ? int8_t(1) : int8_t(-1);
+  return (crossings % 2 == 1) ? int8_t(1) : int8_t(-1);
 }
 
 // ---------------------------------------------------------------------------
@@ -123,48 +118,46 @@ static int8_t point_in_ring_one(
 // ---------------------------------------------------------------------------
 
 template <typename T>
-static void sphere_distance_one(
-    T lon1_deg, T lat1_deg, T lon2_deg, T lat2_deg,
-    T eps, T close_dist, T antipodal_thresh,
-    T* out_distance, uint8_t* out_uncertain
-) {
-    T lat1 = lat1_deg * T(DEG_TO_RAD);
-    T lon1 = lon1_deg * T(DEG_TO_RAD);
-    T lat2 = lat2_deg * T(DEG_TO_RAD);
-    T lon2 = lon2_deg * T(DEG_TO_RAD);
+static void sphere_distance_one(T lon1_deg, T lat1_deg, T lon2_deg, T lat2_deg, T eps, T close_dist,
+                                T antipodal_thresh, T* out_distance, uint8_t* out_uncertain) {
+  T lat1 = lat1_deg * T(DEG_TO_RAD);
+  T lon1 = lon1_deg * T(DEG_TO_RAD);
+  T lat2 = lat2_deg * T(DEG_TO_RAD);
+  T lon2 = lon2_deg * T(DEG_TO_RAD);
 
-    T dlat = lat2 - lat1;
-    T dlon = lon2 - lon1;
+  T dlat = lat2 - lat1;
+  T dlon = lon2 - lon1;
 
-    T sin_dlat = std::sin(dlat / T(2));
-    T sin_dlon = std::sin(dlon / T(2));
+  T sin_dlat = std::sin(dlat / T(2));
+  T sin_dlon = std::sin(dlon / T(2));
 
-    T a = sin_dlat * sin_dlat +
-          std::cos(lat1) * std::cos(lat2) * sin_dlon * sin_dlon;
+  T a = sin_dlat * sin_dlat + std::cos(lat1) * std::cos(lat2) * sin_dlon * sin_dlon;
 
-    // Antipodal check: a near 1.0 means atan2 is unstable
-    if (a > antipodal_thresh) {
-        *out_distance = T(0);
-        *out_uncertain = 1;
-        return;
-    }
+  // Antipodal check: a near 1.0 means atan2 is unstable
+  if (a > antipodal_thresh) {
+    *out_distance = T(0);
+    *out_uncertain = 1;
+    return;
+  }
 
-    // Clamp a to [0, 1] for safety
-    if (a < T(0)) a = T(0);
-    if (a > T(1)) a = T(1);
+  // Clamp a to [0, 1] for safety
+  if (a < T(0))
+    a = T(0);
+  if (a > T(1))
+    a = T(1);
 
-    T c = T(2) * std::atan2(std::sqrt(a), std::sqrt(T(1) - a));
-    T d = T(EARTH_RADIUS_M) * c;
+  T c = T(2) * std::atan2(std::sqrt(a), std::sqrt(T(1) - a));
+  T d = T(EARTH_RADIUS_M) * c;
 
-    // Very close points: precision loss
-    if (d < close_dist) {
-        *out_distance = d;
-        *out_uncertain = 1;
-        return;
-    }
-
+  // Very close points: precision loss
+  if (d < close_dist) {
     *out_distance = d;
-    *out_uncertain = 0;
+    *out_uncertain = 1;
+    return;
+  }
+
+  *out_distance = d;
+  *out_uncertain = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,180 +165,160 @@ static void sphere_distance_one(
 // ---------------------------------------------------------------------------
 
 template <typename T>
-static int8_t segment_intersects_one(
-    T p1x, T p1y, T p2x, T p2y,
-    T p3x, T p3y, T p4x, T p4y,
-    T eps
-) {
-    // Degenerate segment check: zero-length segments
-    if (std::abs(p1x - p2x) < eps && std::abs(p1y - p2y) < eps) return 0;
-    if (std::abs(p3x - p4x) < eps && std::abs(p3y - p4y) < eps) return 0;
+static int8_t segment_intersects_one(T p1x, T p1y, T p2x, T p2y, T p3x, T p3y, T p4x, T p4y,
+                                     T eps) {
+  // Degenerate segment check: zero-length segments
+  if (std::abs(p1x - p2x) < eps && std::abs(p1y - p2y) < eps)
+    return 0;
+  if (std::abs(p3x - p4x) < eps && std::abs(p3y - p4y) < eps)
+    return 0;
 
-    // d1 = cross(p3p4, p3p1)
-    T d1 = cross2d(p3x, p3y, p4x, p4y, p1x, p1y);
-    // d2 = cross(p3p4, p3p2)
-    T d2 = cross2d(p3x, p3y, p4x, p4y, p2x, p2y);
-    // d3 = cross(p1p2, p1p3)
-    T d3 = cross2d(p1x, p1y, p2x, p2y, p3x, p3y);
-    // d4 = cross(p1p2, p1p4)
-    T d4 = cross2d(p1x, p1y, p2x, p2y, p4x, p4y);
+  // d1 = cross(p3p4, p3p1)
+  T d1 = cross2d(p3x, p3y, p4x, p4y, p1x, p1y);
+  // d2 = cross(p3p4, p3p2)
+  T d2 = cross2d(p3x, p3y, p4x, p4y, p2x, p2y);
+  // d3 = cross(p1p2, p1p3)
+  T d3 = cross2d(p1x, p1y, p2x, p2y, p3x, p3y);
+  // d4 = cross(p1p2, p1p4)
+  T d4 = cross2d(p1x, p1y, p2x, p2y, p4x, p4y);
 
-    // Check if any cross product is near zero — collinear or endpoint touch
-    if (std::abs(d1) < eps || std::abs(d2) < eps ||
-        std::abs(d3) < eps || std::abs(d4) < eps) {
-        return 0; // UNCERTAIN
-    }
+  // Check if any cross product is near zero — collinear or endpoint touch
+  if (std::abs(d1) < eps || std::abs(d2) < eps || std::abs(d3) < eps || std::abs(d4) < eps) {
+    return 0;  // UNCERTAIN
+  }
 
-    // Proper intersection: segments straddle each other
-    if (((d1 > T(0)) != (d2 > T(0))) && ((d3 > T(0)) != (d4 > T(0)))) {
-        return 1; // DEFINITE intersects
-    }
+  // Proper intersection: segments straddle each other
+  if (((d1 > T(0)) != (d2 > T(0))) && ((d3 > T(0)) != (d4 > T(0)))) {
+    return 1;  // DEFINITE intersects
+  }
 
-    return -1; // DEFINITE no intersection
+  return -1;  // DEFINITE no intersection
 }
 
 // ---------------------------------------------------------------------------
 // Public API — extern "C"
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_point_in_ring_bulk(
-    const void* points_xy,
-    size_t point_count,
-    const void* ring_xy,
-    size_t vertex_count,
-    bool use_fp64,
-    int8_t* results
-) {
-    if (point_count == 0) return PGACCEL_OK;
-    if (!points_xy || !ring_xy || !results) return PGACCEL_ERROR_INIT;
-
-    if (use_fp64) {
-        const double* pts  = static_cast<const double*>(points_xy);
-        const double* ring = static_cast<const double*>(ring_xy);
-        for (size_t i = 0; i < point_count; ++i) {
-            double px = pts[i * 2];
-            double py = pts[i * 2 + 1];
-            if (!is_finite_coord(px, py)) {
-                results[i] = 0; // UNCERTAIN — NaN/Inf
-                continue;
-            }
-            results[i] = point_in_ring_one<double>(px, py, ring, vertex_count, EPS_FP64);
-        }
-    } else {
-        const float* pts  = static_cast<const float*>(points_xy);
-        const float* ring = static_cast<const float*>(ring_xy);
-        for (size_t i = 0; i < point_count; ++i) {
-            float px = pts[i * 2];
-            float py = pts[i * 2 + 1];
-            if (!is_finite_coord(px, py)) {
-                results[i] = 0; // UNCERTAIN — NaN/Inf
-                continue;
-            }
-            results[i] = point_in_ring_one<float>(px, py, ring, vertex_count, EPS_FP32);
-        }
-    }
-
+extern "C" pgaccel_status pgaccel_point_in_ring_bulk(const void* points_xy, size_t point_count,
+                                                     const void* ring_xy, size_t vertex_count,
+                                                     bool use_fp64, int8_t* results) {
+  if (point_count == 0)
     return PGACCEL_OK;
+  if (!points_xy || !ring_xy || !results)
+    return PGACCEL_ERROR_INIT;
+
+  if (use_fp64) {
+    const double* pts = static_cast<const double*>(points_xy);
+    const double* ring = static_cast<const double*>(ring_xy);
+    for (size_t i = 0; i < point_count; ++i) {
+      double px = pts[i * 2];
+      double py = pts[i * 2 + 1];
+      if (!is_finite_coord(px, py)) {
+        results[i] = 0;  // UNCERTAIN — NaN/Inf
+        continue;
+      }
+      results[i] = point_in_ring_one<double>(px, py, ring, vertex_count, EPS_FP64);
+    }
+  } else {
+    const float* pts = static_cast<const float*>(points_xy);
+    const float* ring = static_cast<const float*>(ring_xy);
+    for (size_t i = 0; i < point_count; ++i) {
+      float px = pts[i * 2];
+      float py = pts[i * 2 + 1];
+      if (!is_finite_coord(px, py)) {
+        results[i] = 0;  // UNCERTAIN — NaN/Inf
+        continue;
+      }
+      results[i] = point_in_ring_one<float>(px, py, ring, vertex_count, EPS_FP32);
+    }
+  }
+
+  return PGACCEL_OK;
 }
 
-extern "C" pgaccel_status pgaccel_sphere_distance_bulk(
-    const void* points_a,
-    const void* points_b,
-    size_t count,
-    bool use_fp64,
-    void* distances,
-    uint8_t* uncertain
-) {
-    if (count == 0) return PGACCEL_OK;
-    if (!points_a || !points_b || !distances || !uncertain) return PGACCEL_ERROR_INIT;
-
-    if (use_fp64) {
-        const double* a = static_cast<const double*>(points_a);
-        const double* b = static_cast<const double*>(points_b);
-        double* dist     = static_cast<double*>(distances);
-        for (size_t i = 0; i < count; ++i) {
-            double lon1 = a[i * 2], lat1 = a[i * 2 + 1];
-            double lon2 = b[i * 2], lat2 = b[i * 2 + 1];
-            if (!is_finite_coord(lon1, lat1) || !is_finite_coord(lon2, lat2)) {
-                dist[i] = 0.0;
-                uncertain[i] = 1;
-                continue;
-            }
-            sphere_distance_one<double>(
-                lon1, lat1, lon2, lat2,
-                EPS_FP64, CLOSE_DIST_M_FP64, ANTIPODAL_COS_THRESH_FP64,
-                &dist[i], &uncertain[i]
-            );
-        }
-    } else {
-        const float* a = static_cast<const float*>(points_a);
-        const float* b = static_cast<const float*>(points_b);
-        float* dist     = static_cast<float*>(distances);
-        for (size_t i = 0; i < count; ++i) {
-            float lon1 = a[i * 2], lat1 = a[i * 2 + 1];
-            float lon2 = b[i * 2], lat2 = b[i * 2 + 1];
-            if (!is_finite_coord(lon1, lat1) || !is_finite_coord(lon2, lat2)) {
-                dist[i] = 0.0f;
-                uncertain[i] = 1;
-                continue;
-            }
-            sphere_distance_one<float>(
-                lon1, lat1, lon2, lat2,
-                EPS_FP32, static_cast<float>(CLOSE_DIST_M_FP32),
-                ANTIPODAL_COS_THRESH_FP32,
-                &dist[i], &uncertain[i]
-            );
-        }
-    }
-
+extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, const void* points_b,
+                                                       size_t count, bool use_fp64, void* distances,
+                                                       uint8_t* uncertain) {
+  if (count == 0)
     return PGACCEL_OK;
+  if (!points_a || !points_b || !distances || !uncertain)
+    return PGACCEL_ERROR_INIT;
+
+  if (use_fp64) {
+    const double* a = static_cast<const double*>(points_a);
+    const double* b = static_cast<const double*>(points_b);
+    double* dist = static_cast<double*>(distances);
+    for (size_t i = 0; i < count; ++i) {
+      double lon1 = a[i * 2], lat1 = a[i * 2 + 1];
+      double lon2 = b[i * 2], lat2 = b[i * 2 + 1];
+      if (!is_finite_coord(lon1, lat1) || !is_finite_coord(lon2, lat2)) {
+        dist[i] = 0.0;
+        uncertain[i] = 1;
+        continue;
+      }
+      sphere_distance_one<double>(lon1, lat1, lon2, lat2, EPS_FP64, CLOSE_DIST_M_FP64,
+                                  ANTIPODAL_COS_THRESH_FP64, &dist[i], &uncertain[i]);
+    }
+  } else {
+    const float* a = static_cast<const float*>(points_a);
+    const float* b = static_cast<const float*>(points_b);
+    float* dist = static_cast<float*>(distances);
+    for (size_t i = 0; i < count; ++i) {
+      float lon1 = a[i * 2], lat1 = a[i * 2 + 1];
+      float lon2 = b[i * 2], lat2 = b[i * 2 + 1];
+      if (!is_finite_coord(lon1, lat1) || !is_finite_coord(lon2, lat2)) {
+        dist[i] = 0.0f;
+        uncertain[i] = 1;
+        continue;
+      }
+      sphere_distance_one<float>(lon1, lat1, lon2, lat2, EPS_FP32,
+                                 static_cast<float>(CLOSE_DIST_M_FP32), ANTIPODAL_COS_THRESH_FP32,
+                                 &dist[i], &uncertain[i]);
+    }
+  }
+
+  return PGACCEL_OK;
 }
 
-extern "C" pgaccel_status pgaccel_segment_intersects_bulk(
-    const void* segs_a,
-    const void* segs_b,
-    size_t count,
-    bool use_fp64,
-    int8_t* results
-) {
-    if (count == 0) return PGACCEL_OK;
-    if (!segs_a || !segs_b || !results) return PGACCEL_ERROR_INIT;
-
-    if (use_fp64) {
-        const double* a = static_cast<const double*>(segs_a);
-        const double* b = static_cast<const double*>(segs_b);
-        for (size_t i = 0; i < count; ++i) {
-            double p1x = a[i * 4], p1y = a[i * 4 + 1];
-            double p2x = a[i * 4 + 2], p2y = a[i * 4 + 3];
-            double p3x = b[i * 4], p3y = b[i * 4 + 1];
-            double p4x = b[i * 4 + 2], p4y = b[i * 4 + 3];
-            if (!is_finite_coord(p1x, p1y) || !is_finite_coord(p2x, p2y) ||
-                !is_finite_coord(p3x, p3y) || !is_finite_coord(p4x, p4y)) {
-                results[i] = 0;
-                continue;
-            }
-            results[i] = segment_intersects_one<double>(
-                p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y, EPS_FP64
-            );
-        }
-    } else {
-        const float* a = static_cast<const float*>(segs_a);
-        const float* b = static_cast<const float*>(segs_b);
-        for (size_t i = 0; i < count; ++i) {
-            float p1x = a[i * 4], p1y = a[i * 4 + 1];
-            float p2x = a[i * 4 + 2], p2y = a[i * 4 + 3];
-            float p3x = b[i * 4], p3y = b[i * 4 + 1];
-            float p4x = b[i * 4 + 2], p4y = b[i * 4 + 3];
-            if (!is_finite_coord(p1x, p1y) || !is_finite_coord(p2x, p2y) ||
-                !is_finite_coord(p3x, p3y) || !is_finite_coord(p4x, p4y)) {
-                results[i] = 0;
-                continue;
-            }
-            results[i] = segment_intersects_one<float>(
-                p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y, EPS_FP32
-            );
-        }
-    }
-
+extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, const void* segs_b,
+                                                          size_t count, bool use_fp64,
+                                                          int8_t* results) {
+  if (count == 0)
     return PGACCEL_OK;
+  if (!segs_a || !segs_b || !results)
+    return PGACCEL_ERROR_INIT;
+
+  if (use_fp64) {
+    const double* a = static_cast<const double*>(segs_a);
+    const double* b = static_cast<const double*>(segs_b);
+    for (size_t i = 0; i < count; ++i) {
+      double p1x = a[i * 4], p1y = a[i * 4 + 1];
+      double p2x = a[i * 4 + 2], p2y = a[i * 4 + 3];
+      double p3x = b[i * 4], p3y = b[i * 4 + 1];
+      double p4x = b[i * 4 + 2], p4y = b[i * 4 + 3];
+      if (!is_finite_coord(p1x, p1y) || !is_finite_coord(p2x, p2y) || !is_finite_coord(p3x, p3y) ||
+          !is_finite_coord(p4x, p4y)) {
+        results[i] = 0;
+        continue;
+      }
+      results[i] = segment_intersects_one<double>(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y, EPS_FP64);
+    }
+  } else {
+    const float* a = static_cast<const float*>(segs_a);
+    const float* b = static_cast<const float*>(segs_b);
+    for (size_t i = 0; i < count; ++i) {
+      float p1x = a[i * 4], p1y = a[i * 4 + 1];
+      float p2x = a[i * 4 + 2], p2y = a[i * 4 + 3];
+      float p3x = b[i * 4], p3y = b[i * 4 + 1];
+      float p4x = b[i * 4 + 2], p4y = b[i * 4 + 3];
+      if (!is_finite_coord(p1x, p1y) || !is_finite_coord(p2x, p2y) || !is_finite_coord(p3x, p3y) ||
+          !is_finite_coord(p4x, p4y)) {
+        results[i] = 0;
+        continue;
+      }
+      results[i] = segment_intersects_one<float>(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y, EPS_FP32);
+    }
+  }
+
+  return PGACCEL_OK;
 }

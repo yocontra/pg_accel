@@ -23,16 +23,19 @@
 //   - Quirk tables for specific GPU models / driver versions
 
 extern "C" bool pgaccel_fp64_available(void) {
-    pgaccel_platform_caps caps = pgaccel_get_caps();
-    return caps.has_fp64;
+  // fp64 always works post-adapter (native on CUDA/ROCm/L0, soft-fp64 on Metal).
+  // Kept for ABI compatibility with older callers; always returns true when a
+  // device is initialized.
+  (void)pgaccel_get_caps();
+  return true;
 }
 
 extern "C" bool pgaccel_unified_memory(void) {
-    pgaccel_platform_caps caps = pgaccel_get_caps();
-    return caps.is_unified_memory;
+  pgaccel_platform_caps caps = pgaccel_get_caps();
+  return caps.is_unified_memory;
 }
 
 extern "C" bool pgaccel_ooo_queue_available(void) {
-    pgaccel_platform_caps caps = pgaccel_get_caps();
-    return caps.has_ooo_queue;
+  pgaccel_platform_caps caps = pgaccel_get_caps();
+  return caps.has_ooo_queue;
 }

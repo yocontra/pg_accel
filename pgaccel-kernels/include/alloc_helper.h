@@ -10,6 +10,7 @@
 #pragma once
 
 #include <sycl/sycl.hpp>
+
 #include <cstring>
 
 // Set during pgaccel_init() from g_caps.is_unified_memory.
@@ -22,10 +23,10 @@ extern bool g_unified_memory;
 /// Allocate device or shared memory depending on unified memory support.
 template <typename T>
 T* pgaccel_alloc(size_t count, sycl::queue& q) {
-    if (g_unified_memory) {
-        return sycl::malloc_shared<T>(count, q);
-    }
-    return sycl::malloc_device<T>(count, q);
+  if (g_unified_memory) {
+    return sycl::malloc_shared<T>(count, q);
+  }
+  return sycl::malloc_device<T>(count, q);
 }
 
 // ---------------------------------------------------------------------------
@@ -36,15 +37,15 @@ T* pgaccel_alloc(size_t count, sycl::queue& q) {
 /// host pointer directly — zero allocation, zero copy.
 template <typename T>
 T* pgaccel_alloc_input(size_t count, sycl::queue& q, const T* host_data) {
-    if (g_unified_memory) {
-        return const_cast<T*>(host_data);
-    }
-    T* d = sycl::malloc_device<T>(count, q);
-    if (d) {
-        q.memcpy(d, host_data, count * sizeof(T));
-        q.wait();
-    }
-    return d;
+  if (g_unified_memory) {
+    return const_cast<T*>(host_data);
+  }
+  T* d = sycl::malloc_device<T>(count, q);
+  if (d) {
+    q.memcpy(d, host_data, count * sizeof(T));
+    q.wait();
+  }
+  return d;
 }
 
 // ---------------------------------------------------------------------------
@@ -55,24 +56,26 @@ T* pgaccel_alloc_input(size_t count, sycl::queue& q, const T* host_data) {
 /// allocation, this is a plain memcpy (or no-op if pointers match).
 template <typename T>
 void pgaccel_h2d(sycl::queue& q, T* dst, const T* src, size_t count) {
-    if (g_unified_memory) {
-        if (dst != src) std::memcpy(dst, src, count * sizeof(T));
-    } else {
-        q.memcpy(dst, src, count * sizeof(T));
-        q.wait();
-    }
+  if (g_unified_memory) {
+    if (dst != src)
+      std::memcpy(dst, src, count * sizeof(T));
+  } else {
+    q.memcpy(dst, src, count * sizeof(T));
+    q.wait();
+  }
 }
 
 /// Copy device data to host buffer. On unified memory with shared
 /// allocation, this is a plain memcpy (or no-op if pointers match).
 template <typename T>
 void pgaccel_d2h(sycl::queue& q, T* dst, const T* src, size_t count) {
-    if (g_unified_memory) {
-        if (dst != src) std::memcpy(dst, src, count * sizeof(T));
-    } else {
-        q.memcpy(dst, src, count * sizeof(T));
-        q.wait();
-    }
+  if (g_unified_memory) {
+    if (dst != src)
+      std::memcpy(dst, src, count * sizeof(T));
+  } else {
+    q.memcpy(dst, src, count * sizeof(T));
+    q.wait();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +86,7 @@ void pgaccel_d2h(sycl::queue& q, T* dst, const T* src, size_t count) {
 /// is the original host pointer (zero-copy path on unified memory).
 template <typename T>
 void pgaccel_free_input(T* ptr, sycl::queue& q, const T* host_data) {
-    if (ptr != host_data) {
-        sycl::free(ptr, q);
-    }
+  if (ptr != host_data) {
+    sycl::free(ptr, q);
+  }
 }

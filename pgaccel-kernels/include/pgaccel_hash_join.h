@@ -25,9 +25,9 @@ extern "C" {
 /* ── Key type tags ──────────────────────────────────────────────── */
 
 typedef enum {
-    PGACCEL_KEY_INT32   = 0,
-    PGACCEL_KEY_INT64   = 1,
-    PGACCEL_KEY_FLOAT64 = 2,
+  PGACCEL_KEY_INT32 = 0,
+  PGACCEL_KEY_INT64 = 1,
+  PGACCEL_KEY_FLOAT64 = 2,
 } pgaccel_key_type;
 
 /* ── Hash table handle ──────────────────────────────────────────── */
@@ -45,13 +45,10 @@ typedef struct pgaccel_hash_table pgaccel_hash_table;
 /// alongside keys so probe results can map back to inner tuples.
 ///
 /// Returns a hash table handle, or NULL on failure.
-pgaccel_hash_table* pgaccel_hash_join_build(
-    const void*      keys,
-    const uint8_t*   null_mask,     /* [count] 1=null, 0=non-null */
-    const uint32_t*  indices,       /* [count] original row index */
-    size_t           count,
-    pgaccel_key_type key_type
-);
+pgaccel_hash_table*
+pgaccel_hash_join_build(const void* keys, const uint8_t* null_mask, /* [count] 1=null, 0=non-null */
+                        const uint32_t* indices,                    /* [count] original row index */
+                        size_t count, pgaccel_key_type key_type);
 
 /// Free a hash table built by pgaccel_hash_join_build.
 void pgaccel_hash_join_free(pgaccel_hash_table* ht);
@@ -68,14 +65,11 @@ void pgaccel_hash_join_free(pgaccel_hash_table* ht);
 ///
 /// Returns PGACCEL_OK on success. `match_count` receives the number
 /// of matching pairs found.
-pgaccel_status pgaccel_hash_join_probe(
-    const pgaccel_hash_table* ht,
-    const void*               outer_keys,
-    const uint8_t*            outer_null_mask,
-    size_t                    outer_count,
-    uint32_t*                 match_pairs,   /* [max_matches*2] output */
-    size_t                    max_matches,
-    size_t*                   match_count    /* output: actual matches */
+pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void* outer_keys,
+                                       const uint8_t* outer_null_mask, size_t outer_count,
+                                       uint32_t* match_pairs, /* [max_matches*2] output */
+                                       size_t max_matches,
+                                       size_t* match_count /* output: actual matches */
 );
 
 #ifdef __cplusplus
