@@ -27,9 +27,9 @@ fswatch -r -l "$DEBOUNCE" "$WATCHED_DIR" | while read -r _; do
     if [ -n "$SO_PATH" ]; then
         docker cp "$SO_PATH" "$CONTAINER_NAME:/usr/local/lib/postgresql/"
         # Also copy extension control + SQL files
-        for f in $(find "$PKG_DIR" -path "*/extension/pg_accel*" 2>/dev/null); do
+        while IFS= read -r -d '' f; do
             docker cp "$f" "$CONTAINER_NAME:/usr/local/share/postgresql/extension/"
-        done
+        done < <(find "$PKG_DIR" -path "*/extension/pg_accel*" -print0 2>/dev/null)
         docker exec -u postgres "$CONTAINER_NAME" pg_ctl restart -D /var/lib/postgresql/data -m fast -w
         echo "[$(date +%H:%M:%S)] Reloaded successfully"
     else

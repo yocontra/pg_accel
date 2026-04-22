@@ -205,7 +205,7 @@ stats_available=false
 
 # Try common stats view/function names
 for stats_source in "pg_accel_stats" "pg_accel.stats" "pg_accel_get_stats()"; do
-    result=$($PSQL -c "SELECT * FROM $stats_source LIMIT 1;" 2>/dev/null) && {
+    if $PSQL -c "SELECT * FROM $stats_source LIMIT 1;" >/dev/null 2>&1; then
         stats_available=true
         echo "Stats from $stats_source:"
         $PSQL -c "SELECT * FROM $stats_source;" 2>/dev/null || true
@@ -218,7 +218,7 @@ for stats_source in "pg_accel_stats" "pg_accel.stats" "pg_accel_get_stats()"; do
             echo "  WARNING: Stats counters appear to be all zero"
         fi
         break
-    }
+    fi
 done
 
 if [ "$stats_available" = false ]; then

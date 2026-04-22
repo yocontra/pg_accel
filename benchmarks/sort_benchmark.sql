@@ -94,10 +94,6 @@ ANALYZE int_5m;
 
 \echo 'Setup complete.'
 \echo ''
-
--- Disable parallel workers: compare single-backend sort only
-SET max_parallel_workers_per_gather = 0;
-
 -- ============================================================================
 -- BENCHMARK 1: Narrow rows, work_mem=4MB (PG spills to disk)
 -- ============================================================================

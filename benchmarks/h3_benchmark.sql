@@ -86,10 +86,6 @@ ANALYZE h3_cells_1m;
 
 \echo 'Setup complete.'
 \echo ''
-
--- Disable parallel workers for consistent comparison
-SET max_parallel_workers_per_gather = 0;
-
 -- ============================================================================
 -- BENCHMARK 1: h3_latlng_to_cell — coordinate to cell conversion (GpuH3)
 -- Bulk lat/lng → H3 cell index. The primary GPU-accelerated H3 operation.

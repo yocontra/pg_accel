@@ -403,7 +403,7 @@ impl PreAggExecState {
         // Guard: begin_custom_scan may refuse to open the fact-table scan if
         // its RTE didn't survive setrefs (non-RTE_RELATION or InvalidOid).
         // In that case scan_desc is null and we produce zero rows rather
-        // than derefencing and SIGSEGV'ing.
+        // than dereferencing and SIGSEGV'ing.
         if self.scan_desc.is_null() {
             return;
         }

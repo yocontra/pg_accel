@@ -67,10 +67,6 @@ ANALYZE agg_data_5m;
 
 \echo 'Setup complete.'
 \echo ''
-
--- Disable parallel workers for consistent comparison
-SET max_parallel_workers_per_gather = 0;
-
 -- ============================================================================
 -- BENCHMARK 1: Simple full-table aggregates (GPU path eligible)
 -- Planner injects CustomPath for plain aggs >= 50K rows on numeric types.

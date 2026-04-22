@@ -81,10 +81,6 @@ ANALYZE join_fact_5m;
 
 \echo 'Setup complete.'
 \echo ''
-
--- Disable parallel workers for consistent comparison
-SET max_parallel_workers_per_gather = 0;
-
 -- ============================================================================
 -- BENCHMARK 1: Hash join — fact × dim (deferred)
 -- ============================================================================

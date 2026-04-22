@@ -92,10 +92,6 @@ ANALYZE spatial_lines;
 
 \echo 'Setup complete.'
 \echo ''
-
--- Disable parallel workers for consistent comparison
-SET max_parallel_workers_per_gather = 0;
-
 -- ============================================================================
 -- BENCHMARK 1: ST_Intersects — point-in-polygon (GpuSpatial)
 -- Core GPU-accelerated predicate. Points against a fixed bounding box.

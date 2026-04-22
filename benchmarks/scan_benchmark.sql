@@ -70,10 +70,6 @@ ANALYZE scan_5m;
 
 \echo 'Setup complete.'
 \echo ''
-
--- Disable parallel workers for consistent comparison
-SET max_parallel_workers_per_gather = 0;
-
 -- ============================================================================
 -- BENCHMARK 1: Simple numeric WHERE (deferred — comparison ops not registered)
 -- ============================================================================

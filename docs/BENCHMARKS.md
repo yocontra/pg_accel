@@ -41,9 +41,10 @@
 
 All benchmarks use the `pg_accel_bench` harness (`pg_accel_bench/`). The harness:
 
-1. **Three-way comparison** — each query is measured under three modes:
-   - **PG Single**: `pg_accel.enabled = off`, `max_parallel_workers_per_gather = 0`
-   - **PG Parallel**: `pg_accel.enabled = off`, PG parallel workers enabled
+1. **Two-way comparison** — each query is measured under two modes. Comparing
+   against single-threaded PG is banned (see CLAUDE.md Benchmark Rule #11) because
+   100% of production PG uses parallel query; a PG-single arm is deceptive marketing.
+   - **PG Parallel**: `pg_accel.enabled = off`, PG parallel workers at default
    - **pg_accel**: `pg_accel.enabled = on` (GPU + batched eval acceleration)
 
 2. **Randomized ordering** — measurement order (accel-first vs baseline-first) is
