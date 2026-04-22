@@ -5,8 +5,26 @@ default:
 # === Setup ===
 
 # Install all dependencies (run once on fresh clone)
-setup: setup-tools setup-brew setup-pgrx
+setup: setup-tools setup-brew setup-pgrx setup-hooks
     @echo "Setup complete. Run 'just setup-gpu' if you want GPU acceleration."
+
+# Install prek (Rust-native pre-commit drop-in) and wire up its git hooks
+# from .pre-commit-config.yaml. Idempotent — safe to re-run.
+setup-hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v prek >/dev/null 2>&1; then
+        echo "Installing prek via Homebrew..."
+        brew install prek
+    fi
+    # prek refuses to install when core.hooksPath points anywhere other than
+    # the default. Clear a stale local override (set by some editors/tools)
+    # so prek can manage .git/hooks.
+    if git config --get --local core.hooksPath >/dev/null 2>&1; then
+        git config --unset-all --local core.hooksPath
+    fi
+    prek install
+    echo "prek hooks installed (pre-commit + commit-msg + pre-push)."
 
 # Install asdf-managed tools (rust, cmake)
 setup-tools:
