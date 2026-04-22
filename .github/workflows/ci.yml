@@ -14,6 +14,41 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  prek:
+    name: prek (pre-commit hooks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # prek's anti-cheat grep hooks scan working-tree files; they do not
+          # need git history. Shallow checkout keeps the job fast.
+          fetch-depth: 1
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # prek only needs `cargo fmt`; don't churn the full build cache.
+          shared-key: prek
+          cache-targets: false
+      - uses: astral-sh/setup-uv@v5
+      - name: Install prek
+        run: uv tool install prek
+      - name: Cache prek hook installs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/prek
+          key: prek-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: prek-${{ runner.os }}-
+      - name: Run prek
+        # SKIP the hooks already covered by dedicated jobs: cargo-deny runs
+        # in the `deny` job, cargo-fmt runs in the `lint` job.
+        env:
+          SKIP: cargo-deny,cargo-fmt
+        run: prek run --all-files --show-diff-on-failure
+
   lint:
     name: Lint
     # macOS runners are required because the default `gpu` feature triggers
