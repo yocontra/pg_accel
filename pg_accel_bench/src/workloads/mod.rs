@@ -718,9 +718,15 @@ mod tests {
     fn test_every_workload_setup_creates_tables() {
         for w in &all_workloads() {
             let setup = w.setup_sql(100);
-            let has_create = setup
-                .iter()
-                .any(|s| s.to_lowercase().contains("create table"));
+            // Match `CREATE TABLE`, `CREATE UNLOGGED TABLE`, `CREATE TEMP TABLE`,
+            // and `CREATE TEMPORARY TABLE` — all legal PG table-creation forms.
+            let has_create = setup.iter().any(|s| {
+                let lower = s.to_lowercase();
+                lower.contains("create table")
+                    || lower.contains("create unlogged table")
+                    || lower.contains("create temp table")
+                    || lower.contains("create temporary table")
+            });
             assert!(
                 has_create,
                 "workload '{}' setup_sql does not create any tables",

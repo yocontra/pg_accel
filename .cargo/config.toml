@@ -6,6 +6,6 @@
 # fixups (`-no_fixup_chains`) to restore the pre-Sequoia behavior where
 # unresolved symbols are only checked on first use.
 rustflags = [
-    "-Clink-arg=-Wl,-undefined,dynamic_lookup",
-    "-Clink-arg=-Wl,-no_fixup_chains",
+  "-Clink-arg=-Wl,-undefined,dynamic_lookup",
+  "-Clink-arg=-Wl,-no_fixup_chains",
 ]

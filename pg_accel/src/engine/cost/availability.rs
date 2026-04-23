@@ -37,7 +37,7 @@ pub fn gpu_is_usable() -> bool {
 }
 
 /// Cached result of fp64 hardware detection.
-static HAS_FP64: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static HAS_NATIVE_FP64: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Whether the GPU supports native fp64 (double-precision) arithmetic.
 ///
@@ -50,6 +50,6 @@ static HAS_FP64: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// this returns `false` on Metal and planner gates route f64 paths to
 /// fp32 fallbacks.
 #[must_use]
-pub fn platform_has_fp64() -> bool {
-    *HAS_FP64.get_or_init(|| PlatformProfile::detect().has_fp64)
+pub fn platform_has_native_fp64() -> bool {
+    *HAS_NATIVE_FP64.get_or_init(|| PlatformProfile::detect().has_native_fp64)
 }

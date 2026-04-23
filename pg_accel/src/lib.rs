@@ -61,9 +61,74 @@
     clippy::let_unit_value
 )]
 
+use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 use pgrx::prelude::*;
 
 pg_module_magic!();
+
+// ---------------------------------------------------------------------------
+// Local GUCs registered in `_PG_init` below.
+// ---------------------------------------------------------------------------
+
+/// Master switch for fp64 (double-precision) dispatch. When `false`, the
+/// planner hooks (W4 wave) will skip injecting Custom Scan paths for any
+/// query that needs fp64 on this device. Default `true` — soft-fp64 on
+/// Metal is correct and always available now, so fp64 is never a hard
+/// error; this GUC exists for A/B testing soft-fp64 costing and for a
+/// clean kill-switch if a regression lands.
+static FP64_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
+
+/// Planner cost multiplier applied to per-row GPU fp64 op cost when the
+/// device reports `has_native_fp64 == false` (Apple Silicon / Metal with
+/// soft-fp64 compiled in). Default 32.0 — soft-fp64 on Metal runs f64
+/// arithmetic at ~1/32 of native fp32 throughput (measured via AdaptiveCpp
+/// micro-benchmarks on M2 Max). Bounded [1.0, 64.0]; values above the
+/// upper bound require explicit profiler confirmation (see plan).
+///
+/// At the default, a fp64-heavy reduce on a soft-fp64 GPU costs ~32x its
+/// fp32 sibling in the planner's cost equation, so the planner naturally
+/// prefers PG native for small-to-medium fp64 aggregates where the GPU
+/// win wouldn't overcome the emulation penalty.
+static SOFT_FP64_COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(32.0);
+
+/// Hard cap on `pg_accel.soft_fp64_cost_multiplier`. Values past this are
+/// clamped with a `tracing::warn!`. Raising this constant requires
+/// profiler-confirmed evidence that the soft-fp64 throughput ratio on the
+/// target GPU is worse than 64x.
+const SOFT_FP64_COST_MULTIPLIER_HARD_CAP: f64 = 64.0;
+
+/// Whether fp64 dispatch is currently enabled (read from the
+/// `pg_accel.fp64_enabled` GUC).
+#[inline]
+#[must_use]
+pub fn fp64_enabled() -> bool {
+    FP64_ENABLED.get()
+}
+
+/// Soft-fp64 cost multiplier (see [`SOFT_FP64_COST_MULTIPLIER`]).
+///
+/// Clamped to `[1.0, 64.0]`. Values above the cap trigger a one-line
+/// `tracing::warn!` and are clamped to 64.0 so the planner never sees an
+/// unbounded multiplier.
+#[inline]
+#[must_use]
+pub fn soft_fp64_cost_multiplier() -> f64 {
+    let raw = SOFT_FP64_COST_MULTIPLIER.get();
+    if raw > SOFT_FP64_COST_MULTIPLIER_HARD_CAP {
+        tracing::warn!(
+            raw = raw,
+            cap = SOFT_FP64_COST_MULTIPLIER_HARD_CAP,
+            "pg_accel.soft_fp64_cost_multiplier value past plan hard-cap; clamped to 64.0 — \
+             raise `pg_accel.soft_fp64_cost_multiplier`'s upper bound only after profiler \
+             confirmation"
+        );
+        SOFT_FP64_COST_MULTIPLIER_HARD_CAP
+    } else if raw < 1.0 {
+        1.0
+    } else {
+        raw
+    }
+}
 
 /// Called when the extension is loaded by PostgreSQL.
 ///
@@ -79,6 +144,33 @@ pub unsafe extern "C-unwind" fn _PG_init() {
 
     // 1. Register GUC variables.
     engine::gucs::init_gucs();
+
+    // 1a. Register local GUCs owned by this module.
+    //     Leave a blank line below — W4 will register a sibling GUC here
+    //     alongside `pg_accel.fp64_enabled`.
+    GucRegistry::define_bool_guc(
+        c"pg_accel.fp64_enabled",
+        c"Enable or disable fp64 (double-precision) GPU dispatch.",
+        c"When false, the planner skips Custom Scan injection for any query \
+          that needs fp64. Default true — soft-fp64 on Metal is correct and \
+          always available; this is a kill-switch, not a correctness gate.",
+        &FP64_ENABLED,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    GucRegistry::define_float_guc(
+        c"pg_accel.soft_fp64_cost_multiplier",
+        c"Per-row GPU fp64 op cost multiplier when the device lacks native fp64.",
+        c"Applied to GPU fp64 strategies (reduce/sort/hashagg/spatial/h3) when the \
+          device reports has_native_fp64=false (Apple Silicon / Metal with soft-fp64). \
+          Default 32.0, bounded [1.0, 64.0]. Raise only with profiler evidence.",
+        &SOFT_FP64_COST_MULTIPLIER,
+        1.0,
+        SOFT_FP64_COST_MULTIPLIER_HARD_CAP,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 
     // 1b. Initialize OTel tracing (must be after GUCs so log_level is available).
     engine::otel::init();

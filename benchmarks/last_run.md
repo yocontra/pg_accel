@@ -8660,4 +8660,3 @@ The following workload/scale combinations crashed the PostgreSQL backend and wer
 | mixed_megapoly_agg | 10M | connection closed |
 | mixed_expr_agg | 1M | connection closed |
 | mixed_spatial_sort | 100K | connection closed |
-

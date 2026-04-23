@@ -182,12 +182,43 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // spatial predicates even on large tables.
     let rows = rel_ref.tuples.max(rel_ref.rows) as usize;
     let min_batch = gucs::min_batch_size().max(1) as usize;
-    let per_row_cost = match strategy {
+    let per_row_cost_base = match strategy {
         registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
         registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
         registry::AccelStrategy::GpuExpr => cost::GPU_EXPR_PER_ROW_COST,
         _ => cost::GPU_SPATIAL_PER_ROW_COST,
     };
+    // fp64 classification via the adapter helper (`adapters::uses_fp64`).
+    // Spatial always uses fp64 (recheck path); H3 uses fp64 only for
+    // `h3_latlng_to_cell`; raster/expr report false. For strategies where
+    // the function name can't be resolved (e.g. fn_oid = InvalidOid on a
+    // synthetic GpuExpr match), default to `false`. The helper centralises
+    // the per-function classification so it's consistent with the adapters'
+    // own declarations in `pg_accel/src/adapters/*.rs`.
+    let fn_uses_fp64: bool = {
+        let fn_oid = accel.fn_oid;
+        if fn_oid == pg_sys::Oid::INVALID {
+            false
+        } else {
+            // SAFETY: get_func_name is a catalog lookup safe on the main
+            // backend thread. Returns null for unknown OIDs, caller frees
+            // via pfree (but we don't free here — pstrdup-backed pointer
+            // lives for the current memory context).
+            let name_ptr = unsafe { pg_sys::get_func_name(fn_oid) };
+            if name_ptr.is_null() {
+                false
+            } else {
+                // SAFETY: name_ptr is a null-terminated C string from pg_proc.
+                let name_cstr = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+                match name_cstr.to_str() {
+                    Ok(s) => crate::adapters::uses_fp64(strategy, s),
+                    Err(_) => false,
+                }
+            }
+        }
+    };
+    let per_row_cost =
+        cost::apply_fp64_penalty(per_row_cost_base, fn_uses_fp64, cost::device_limits());
     if !cost::should_batch(rows, per_row_cost, min_batch) {
         pgrx::debug1!(
             "pg_accel: set_rel_pathlist: batch rejected tuples={} min_batch={}",
@@ -368,8 +399,19 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         | registry::AccelStrategy::GpuH3 => cost::GPU_COST_SAFETY_MARGIN * 0.5,
         _ => cost::GPU_COST_SAFETY_MARGIN,
     };
-    let raw_total = (base.total_cost.mul_add(cost_margin, batch_overhead) + gpu_overhead)
-        * gucs::cost_multiplier();
+    // Soft-fp64 per-row overhead: when the classified function uses fp64
+    // and the device lacks native fp64, add a per-row penalty equal to the
+    // unpenalised per-row cost multiplied by `(multiplier - 1.0)`. This is
+    // the extra work the emulation performs vs native fp32. Zero when
+    // `fn_uses_fp64 == false` or the device has native fp64 (the penalty
+    // simplifies to `per_row_cost_base * (multiplier - 1.0)` only when the
+    // penalty was actually applied above; otherwise per_row_cost equals
+    // per_row_cost_base and the delta is zero).
+    #[allow(clippy::cast_precision_loss)]
+    let soft_fp64_overhead = rows as f64 * (per_row_cost - per_row_cost_base);
+    let raw_total =
+        (base.total_cost.mul_add(cost_margin, batch_overhead) + gpu_overhead + soft_fp64_overhead)
+            * gucs::cost_multiplier();
 
     // Let PG's native cost comparison decide — add_path() discards
     // paths that are strictly dominated by cheaper alternatives.
@@ -569,9 +611,14 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Gate: Skip float8 sort when GPU lacks native fp64 support.
-    if var_typid == SORT_FLOAT8OID && !cost::platform_has_fp64() {
-        pgrx::debug1!("pg_accel sort: float8 sort skipped — GPU lacks fp64");
+    // Gate: User-facing escape valve. `pg_accel.fp64_enabled=false` fully
+    // bypasses GPU injection for fp64 sort keys — PG native plan runs
+    // untouched. Soft-fp64 on Metal is otherwise always correct; the
+    // planner's soft-fp64 cost multiplier (see DeviceLimits) steers
+    // cost-based decisions at runtime.
+    let uses_fp64 = var_typid == SORT_FLOAT8OID;
+    if uses_fp64 && !crate::fp64_enabled() {
+        pgrx::debug1!("pg_accel sort: float8 sort skipped — fp64_enabled=false");
         return;
     }
 
@@ -602,10 +649,11 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
     let base = unsafe { &*cheapest };
     #[allow(clippy::cast_precision_loss)]
     let n = base.rows;
-    let sort_scan_cost = cost::self_scan_cost(
+    let sort_scan_cost = cost::self_scan_cost_fp64_aware(
         n,
         1, // single sort key column
         cost::device_limits().gpu_op_cost_sort,
+        uses_fp64,
     );
     let startup_cost = base.startup_cost + cost::GPU_LAUNCH_OVERHEAD;
     // Honest cost — no cost_multiplier. Let add_path() decide.

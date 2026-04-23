@@ -243,7 +243,22 @@ pub(super) unsafe fn try_inject(
 
     // Cost: mirror the non-partial formula but use the partial base's costs.
     let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
-    let agg_per_row = 0.005_f64;
+    // Soft-fp64 classification: any partial column using a float8 transition
+    // state (SUM(float8), SUM(float4) (promotes to float8), AVG/STDDEV/VAR
+    // which carry the accumulator in f64) triggers the soft-fp64 multiplier
+    // when the device lacks native fp64. Mirrors the classification in the
+    // non-parallel body (mod.rs::pgaccel_inject_gpu_agg); both sites must
+    // agree or the planner will prefer the wrong split.
+    let float8_u32 = u32::from(pg_sys::FLOAT8OID);
+    let agg_uses_fp64 = partial_cols
+        .iter()
+        .any(|c| u32::from(c.transtype_oid) == float8_u32)
+        || agg_descs
+            .iter()
+            .any(|(op, _, rtype)| matches!(op, AggOp::Avg) || *rtype == float8_u32);
+    let agg_per_row_base = 0.005_f64;
+    let agg_per_row =
+        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits());
     let reduce_cost = base.rows * agg_per_row;
     let startup_cost = base.total_cost + gpu_overhead;
     let total_cost = (base.total_cost + reduce_cost)

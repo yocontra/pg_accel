@@ -52,6 +52,29 @@ just gpu-test         # Run standalone GPU kernel tests
     - Policy still forbids raw Metal (no `#import <Metal/Metal.h>`, no `.metal` shaders, no `.metallib` files period, no `MTLDevice`/`MTLCommandQueue`, no `.mm` Objective-C++ GPU files, no binary archives, no metallib compilation/loading) and raw CoreML. AdaptiveCpp dispatches to CUDA / ROCm / Level Zero / Metal transparently from one source.
     - If an agent reaches for a CPU fallback, the correct response is to fix the GPU path (kernel, bridge, dispatch). The build is the enforcement mechanism.
 
+## Anti-Cheat Rails
+
+This is a hard problem space and agents cheat when stuck. Deterministic hooks in
+`.claude/hooks/` block the worst patterns at Edit/Write/Bash time (exit 2 = blocked,
+no negotiation). Full rule list, bypass mechanism, and reviewer-enforced rules in
+`.claude/rules/anti-cheat.md` — read it before marking work done, editing code in
+`src/` or `pgaccel-kernels/src/`, or citing benchmark numbers.
+
+TL;DR: no fake success, no weakening tests, no hiding regressions, no silent error
+swallowing on GPU paths, no fabricated evidence, no guessed APIs, no stubs as done,
+no bypassing the build, say "I'm stuck" when stuck, cite `file:line` for code claims.
+
+## Cross-Verification Protocol
+
+After non-trivial changes (cited benchmarks, crash/correctness fixes, new or
+rewritten GPU kernels, planner strategy changes, diffs spanning >1 of {kernel,
+bridge, executor, planner}), spawn 2–3 fresh verifier agents in parallel with
+disjoint briefs and block on their reports before reporting done. Full protocol,
+verifier roles (A: re-run, B: audit diff, C: trace check), and prompt requirements
+in `.claude/rules/cross-verification.md`.
+
+`FAIL` from a verifier is ground truth. Fix and re-verify, or escalate honestly.
+
 ## Linting (enforced by CI, don't configure manually)
 
 - `cargo fmt` — rustfmt with `.rustfmt.toml` (style_edition 2024, max_width 100)

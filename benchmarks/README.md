@@ -1719,4 +1719,3 @@ The following workload/scale combinations crashed the PostgreSQL backend and wer
 | h3_latlng_res15 | 10K | db error |
 | h3_latlng_res15 | 100K | db error |
 | h3_latlng_res15 | 1M | db error |
-

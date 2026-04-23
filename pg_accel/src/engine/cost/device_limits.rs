@@ -164,6 +164,18 @@ pub struct DeviceLimits {
     pub expr_min_predicate_complexity_x_rows: u64,
     /// Minimum inner build-side rows for GPU hash join dispatch.
     pub hashjoin_min_build_rows: usize,
+
+    // -- fp64 emulation cost gate -------------------------------------------
+    /// Whether the GPU device reports native hardware fp64. Drives the
+    /// `soft_fp64_cost_multiplier` in cost functions — when false, fp64 ops
+    /// are soft-emulated (via soft-fp64 on Metal) at ~1/32 native throughput.
+    pub has_native_fp64: bool,
+    /// Cost multiplier applied to GPU fp64 op cost when `has_native_fp64 == false`.
+    /// Default 32.0 (micro-bench throughput ratio). Empirically tuned by the
+    /// bench harness. Bounded [1.0, 64.0]; values past 64.0 require explicit
+    /// user sign-off (see plan). Read from
+    /// [`crate::soft_fp64_cost_multiplier`] at `from_profile` time.
+    pub soft_fp64_cost_multiplier: f64,
 }
 
 impl DeviceLimits {
@@ -379,6 +391,17 @@ impl DeviceLimits {
             // Used as (program.instructions * rows) lower bound.
             expr_min_predicate_complexity_x_rows: 50_000,
             hashjoin_min_build_rows: cu_scale(5_000).clamp(1_000, 50_000),
+
+            // fp64 emulation cost gate. `from_profile` is the only entry
+            // that sees the detected hardware, so the multiplier is latched
+            // here. `#[cfg(test)]` builds skip the GUC lookup (GUCs need a
+            // running backend); tests instantiate DeviceLimits directly and
+            // set the multiplier manually.
+            has_native_fp64: profile.has_native_fp64,
+            #[cfg(not(test))]
+            soft_fp64_cost_multiplier: crate::soft_fp64_cost_multiplier(),
+            #[cfg(test)]
+            soft_fp64_cost_multiplier: 32.0,
         }
     }
 
@@ -434,6 +457,12 @@ impl DeviceLimits {
             window_min_partition_rows: 10_000,
             expr_min_predicate_complexity_x_rows: 50_000,
             hashjoin_min_build_rows: 5_000,
+
+            // No GPU → no native fp64. The multiplier is unused (fp64
+            // strategies never dispatch without GPU), but set it to the
+            // default so tests that read the field see a sane value.
+            has_native_fp64: false,
+            soft_fp64_cost_multiplier: 32.0,
         }
     }
 }

@@ -12,7 +12,7 @@ fn profile_no_gpu() -> PlatformProfile {
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
         gpu_max_alloc_bytes: 0,
-        has_fp64: false,
+        has_native_fp64: false,
     }
 }
 
@@ -24,7 +24,7 @@ fn profile_with_gpu() -> PlatformProfile {
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024, // 256 MB
-        has_fp64: false,
+        has_native_fp64: false,
     }
 }
 
@@ -154,7 +154,7 @@ fn threads_at_least_one() {
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
         gpu_max_alloc_bytes: 0,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     assert_eq!(estimate_threads(&p, 0), 1);
 }
@@ -168,7 +168,7 @@ fn threads_single_core_with_budget() {
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
         gpu_max_alloc_bytes: 0,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     // cpu_cores - 1 = 0, max(0,1) = 1, min(5,1) = 1, max(1,1) = 1
     assert_eq!(estimate_threads(&p, 5), 1);
@@ -214,7 +214,7 @@ fn baseline_gpu_matches_defaults() {
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     let l = DeviceLimits::from_profile(&p);
     assert_eq!(l.gpu_min_rows, 10_000);
@@ -232,7 +232,7 @@ fn unified_memory_halves_thresholds() {
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     let unified = PlatformProfile {
         unified_memory: true,
@@ -253,7 +253,7 @@ fn high_cu_gpu_lowers_thresholds() {
         estimated_gpu_gflops: 500.0,
         compute_units: 8,
         gpu_max_alloc_bytes: 64 * 1024 * 1024,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     let high = PlatformProfile {
         compute_units: 128,
@@ -416,7 +416,7 @@ fn preagg_unified_memory_cheaper_probe() {
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     let discrete = PlatformProfile {
         unified_memory: false,
@@ -437,7 +437,7 @@ fn limits_are_clamped() {
         estimated_gpu_gflops: 50000.0,
         compute_units: 10000,
         gpu_max_alloc_bytes: 64 * 1024 * 1024 * 1024, // 64 GB
-        has_fp64: true,
+        has_native_fp64: true,
     };
     let l = DeviceLimits::from_profile(&p);
     assert!(l.gpu_min_rows >= 1_000);
@@ -473,7 +473,7 @@ fn unified_memory_lowers_gpu_op_costs() {
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_fp64: false,
+        has_native_fp64: false,
     };
     let unified = PlatformProfile {
         unified_memory: true,

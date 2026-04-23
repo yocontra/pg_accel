@@ -31,16 +31,17 @@ unsafe extern "C" {
     /// Return information about the selected compute device.
     ///
     /// Exposed as `pgaccel_get_device_info_raw` so the public wrapper
-    /// below can apply process-wide overrides (e.g. `PGACCEL_FORCE_SOFT_FP64`)
-    /// before the struct reaches the rest of the crate.
+    /// below can apply process-wide overrides (e.g.
+    /// `PGACCEL_FORCE_SOFT_FP64_COST`) before the struct reaches the rest
+    /// of the crate.
     #[link_name = "pgaccel_get_device_info"]
     fn pgaccel_get_device_info_raw() -> PgaccelDeviceInfo;
 
     /// Return platform-level capability flags.
     ///
     /// Exposed as `pgaccel_get_caps_raw` so the public wrapper below can
-    /// apply process-wide overrides (e.g. `PGACCEL_FORCE_SOFT_FP64`) before
-    /// the caps struct reaches the rest of the crate.
+    /// apply process-wide overrides (e.g. `PGACCEL_FORCE_SOFT_FP64_COST`)
+    /// before the caps struct reaches the rest of the crate.
     #[link_name = "pgaccel_get_caps"]
     fn pgaccel_get_caps_raw() -> PgaccelPlatformCaps;
 
@@ -568,15 +569,17 @@ unsafe extern "C" {
 // Capability-probe wrappers (env-var overrides)
 // ---------------------------------------------------------------------------
 
-/// Returns `true` if `PGACCEL_FORCE_SOFT_FP64=1` was set in the environment
-/// at process start. Soft-double on Metal (`ACPP_METAL_ENABLE_SOFT_FP64=1`)
-/// reports `has_fp64=true` from the AdaptiveCpp probe natively; this override
-/// lets users A/B test soft-double in scenarios where the probe is stale or
-/// the user wants to force the fp64 code path without changing device caps.
+/// Returns `true` if `PGACCEL_FORCE_SOFT_FP64_COST=1` was set in the
+/// environment at process start. Test-only knob: forces
+/// `has_native_fp64 = false` on the device info / caps structs so the
+/// cost model exercises the soft-fp64 costing path even on hardware that
+/// has native fp64 (CUDA/ROCm/L0). No effect on kernel selection — fp64
+/// dispatch is unconditional now that the AdaptiveCpp soft-fp64 libkernel
+/// is always available.
 ///
 /// Read once at first call, then cached for the lifetime of the process —
 /// env changes after startup are ignored on purpose.
-fn force_soft_fp64() -> bool {
+fn force_soft_fp64_cost() -> bool {
     use std::sync::atomic::{AtomicU8, Ordering};
     // 0 = not queried, 1 = false, 2 = true.
     static CACHED: AtomicU8 = AtomicU8::new(0);
@@ -584,7 +587,7 @@ fn force_soft_fp64() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let forced = std::env::var("PGACCEL_FORCE_SOFT_FP64")
+            let forced = std::env::var("PGACCEL_FORCE_SOFT_FP64_COST")
                 .ok()
                 .is_some_and(|v| v == "1");
             CACHED.store(if forced { 2 } else { 1 }, Ordering::Relaxed);
@@ -594,24 +597,25 @@ fn force_soft_fp64() -> bool {
 }
 
 /// Return information about the selected compute device, applying any
-/// process-wide capability overrides (e.g. `PGACCEL_FORCE_SOFT_FP64`).
+/// process-wide capability overrides (e.g. `PGACCEL_FORCE_SOFT_FP64_COST`).
 ///
 /// # Safety
 /// `pgaccel_init` must have been called. If not, the returned struct is
-/// zeroed and `has_fp64` may still be flipped on by the force env var.
+/// zeroed and `has_native_fp64` may still be flipped off by the force env
+/// var (to exercise slow-path costing).
 #[must_use]
 pub unsafe fn pgaccel_get_device_info() -> PgaccelDeviceInfo {
     // SAFETY: forwards to the underlying C FFI symbol; caller's safety
     // contract already requires pgaccel_init() to have been called.
     let mut info = unsafe { pgaccel_get_device_info_raw() };
-    if force_soft_fp64() {
-        info.has_fp64 = true;
+    if force_soft_fp64_cost() {
+        info.has_native_fp64 = false;
     }
     info
 }
 
 /// Return platform-level capability flags, applying any process-wide
-/// capability overrides (e.g. `PGACCEL_FORCE_SOFT_FP64`).
+/// capability overrides (e.g. `PGACCEL_FORCE_SOFT_FP64_COST`).
 ///
 /// `has_atomic64` comes straight from the AdaptiveCpp device probe
 /// (`sycl::aspect::atomic64`) — it's set by `populate_caps()` in
@@ -619,14 +623,15 @@ pub unsafe fn pgaccel_get_device_info() -> PgaccelDeviceInfo {
 ///
 /// # Safety
 /// `pgaccel_init` must have been called. If not, the returned struct is
-/// zeroed and `has_fp64` may still be flipped on by the force env var.
+/// zeroed and `has_native_fp64` may still be flipped off by the force env
+/// var (to exercise slow-path costing).
 #[must_use]
 pub unsafe fn pgaccel_get_caps() -> PgaccelPlatformCaps {
     // SAFETY: forwards to the underlying C FFI symbol; caller's safety
     // contract already requires pgaccel_init() to have been called.
     let mut caps = unsafe { pgaccel_get_caps_raw() };
-    if force_soft_fp64() {
-        caps.has_fp64 = true;
+    if force_soft_fp64_cost() {
+        caps.has_native_fp64 = false;
     }
     caps
 }
@@ -946,12 +951,12 @@ mod tests {
             backend_name: [0; 64],
             compute_units: 8,
             max_alloc_bytes: 1024,
-            has_fp64: true,
+            has_native_fp64: true,
             has_atomic64: false,
             is_unified_memory: false,
         };
         let cloned = info.clone();
-        assert!(cloned.has_fp64);
+        assert!(cloned.has_native_fp64);
         assert_eq!(cloned.max_alloc_bytes, 1024);
         assert_eq!(cloned.compute_units, 8);
         let dbg = format!("{info:?}");
@@ -961,7 +966,7 @@ mod tests {
     #[test]
     fn platform_caps_debug_clone() {
         let caps = PgaccelPlatformCaps {
-            has_fp64: false,
+            has_native_fp64: false,
             has_atomic64: true,
             has_ooo_queue: false,
             is_unified_memory: true,

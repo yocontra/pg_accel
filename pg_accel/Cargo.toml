@@ -35,7 +35,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = [
+  "fmt",
+  "env-filter",
+  "json",
+] }
 
 [dev-dependencies]
 pgrx-tests = "0.17.0"

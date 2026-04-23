@@ -1,286 +1,1419 @@
 # TODO
 
-Goal: pg_accel accelerates **every** GPU-tractable part of a PostgreSQL query,
-inside parallel workers, using Metal via AdaptiveCpp. Items below are the work
-remaining to hit that. Line references are against `pg_accel/src/...` unless
-noted; grep for the symbol if numbers drift.
+This is the pre-1.0 punchlist for pg_accel — a PostgreSQL 17 extension that offloads
+spatial, h3, reduce, sort, hashagg, and raster workloads to Metal GPU on Apple Silicon
+(CUDA / ROCm / Level Zero elsewhere) via AdaptiveCpp. AdaptiveCpp fork pin:
+`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `792d045e8b218241ef54af74244bf5fa92b2f80f`.
+"Done" / ship-ready means: every planner-injected GPU path is bit-correct, benchmarks
+never fall below PG-parallel parity on any (workload, size) cell, zero crashes on the
+verification matrix, clean `just ci`, and documentation matches reality. File-line
+citations below are against `pg_accel/src/...` unless noted; grep the symbol if
+numbers drift.
 
-## Correctness
+**Ownership / freshness rule.** When an item lands, replace its header with
+`✅ <title>` and add `Resolved: <commit-sha> — <one-line>` on a single line. Do not
+delete items — the audit trail is load-bearing. Every `file:line` citation must
+resolve in the source tree at commit time; CI enforces this (see Phase 10
+"Documentation parity test").
 
-- **GPU bytecode expression evaluator returns wrong results — disabled at
-  exec time.** `engine/ffi/custom_scan/mod.rs:1654-1666` short-circuits every
-  compiled expression to `CompiledExpr::DeferToPg` (compilation still runs;
-  execution falls through to PG's scalar qual). Only template-matched
-  predicates (single `cmp`, `BETWEEN`, `IN`, `IS NULL`, two-cmp `AND`) reach
-  the GPU today. Fix: debug the interpreter against the opcodes in
-  `engine/adapters/expr_compiler.rs:25-127` (ADD/SUB/MUL/DIV, cmp family,
-  AND/OR/NOT, casts, date-part), add a golden-diff test matrix, then remove
-  the `DeferToPg` short-circuit. Without this, complex `WHERE` / projections
-  force CPU eval and negate scan speedups.
+## Completion order
 
-- **NUMERIC aggregates lose precision above ~2^53.** `engine/executor/agg/
-  partial/emitter.rs:123-126` notes the f64 accumulator path. Arbitrary-
-  precision NUMERIC needs either a custom multi-limb accumulator kernel or a
-  classification gate that forces NUMERIC columns through PG. Today we
-  silently return imprecise results.
+The phases below are ordered strictly by dependency. Phase N+1 cannot start until
+Phase N's critical-path items have landed. Phase 1 (end-to-end fp64 on Metal) is the
+single biggest blocker — six of the seven compile-time blockers on the current
+`fork-safe-metal` tree fan out of it, and until `test_oom_invariant` flips every fp64
+family to PASS we cannot even measure fp64 parity honestly. Phase 2 closes the
+known wrong-answer bugs. Phase 3 unlocks parallel-worker coverage for AVG/STDDEV/VAR
+and grouped HashAgg. Phases 4–5 widen operator/type coverage and calibrate the
+planner. Phase 6 chases remaining perf ceilings. Phase 7 merges the AdaptiveCpp fork
+work upstream. Phase 8 polishes the build. Phases 9–10 gate the 1.0 tag. **Phase 9
+items are re-run at each phase gate; the Phase 9 entry at end is the final
+consolidated sign-off.** A "Post-1.0 (deferred)" section after Phase 10 catches
+items explicitly descoped from the ship bar.
 
-## Parallel-path coverage
+## Phase 1 — Make fp64 work end-to-end on Metal
 
-Partial-agg parallel execution works for plain `SUM`/`MIN`/`MAX`/`COUNT` on
-scalar types (transtype == rtype). Emitter/accumulator machinery in
-`engine/executor/agg/partial/{accumulator,emitter}.rs` is ready. Remaining
-round-trip work:
+Single biggest pre-1.0 blocker. Metal has no native fp64, so every fp64 kernel
+(reduce_f64, sort_f64, sort_kv_f64, stats_f64, sum_sq_f64, multi_f64,
+`h3_latlng_to_cell@res≥12`, bbox_f64, spatial recheck) routes through AdaptiveCpp's
+soft-fp64 adapter. Substantial integration work already landed on the
+`fork-safe-metal` fork — the Metal shader now emits ~5000 lines with all soft-fp64
+bodies present — but MSL compile still rejects specific opcode translations. Until
+every family flips from status=-5 to PASS, fp64 cost calibration, benches, and
+`just gpu-test` are all blocked.
 
-- **AVG / STDDEV / VAR parallel.** `planner_hooks/partial_agg.rs:171-178`
-  still bails on `INTERNALOID` transtype and `AggOp::Avg`.
-  `Float8StatsEmitter` (bytea via `aggserialfn`) and `build_partial_emitters`
-  already handle `op ∈ {Avg, StddevSamp, StddevPop, VarSamp, VarPop}` once
-  `serialize_fn_oid.is_some()`. Gap is path-level serialization: the injector
-  writes `(op, attno, rtype)` triples with `serialize_fn_oid=None`, so the
-  spec reconstructed by `build_partial_spec_from_path`
-  (`ffi/custom_scan/mod.rs:825`) can never carry the real serialize OID.
-  Steps:
-    1. In `partial_agg.rs`, build a full `PartialAggSpec` via
-       `classify_aggref` + `syscache::agg_serialize_fn`.
-    2. Append the spec with the `PAAG` sentinel block (`append_partial_spec`).
-    3. In `plan_custom_path_agg` (`ffi/custom_scan/mod.rs:611`), switch the
-       `is_partial` reader from `path_len - 1` to a structural lookup and
-       call `deserialize_partial_spec`.
-    4. Delete the `INTERNALOID` / `AggOp::Avg` early-bails at lines 171-178.
+### Metal Emitter: FCmp `acpp_f64` vs `int` operand mismatch
 
-- **Grouped HashAgg parallel.** `planner_hooks/partial_agg.rs:82` still
-  bails on `query.groupClause`. Unblock: propagate groupClause through the
-  partial path, remap group-key attnos, build `Partial Gather + Final
-  HashAgg` (PG's `add_paths_to_grouping_rel` pattern).
+- **What**: Emitted Metal shaders for soft-fp64 kernels fail MSL compile with
+  `incompatible operand types ('acpp_f64' and 'int')` at every FCmp site where one
+  operand is a `ConstantFP` double (e.g. zero) and the Emitter renders it as an int
+  literal rather than `acpp_f64{0u, 0u}`. Location:
+  `~/Projects/AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`,
+  `emitFCmpInstruction` / `emitExpr` ConstantFP path. BLOCKER.
+- **Why**: Every fp64 kernel (reduce_f64, sort_f64, stats_f64, spatial recheck, h3
+  res≥12) contains fp64 comparisons. Without this, all fp64 kernels return
+  `PGACCEL_ERROR (-5)` at first dispatch and the planner must decline GPU fp64 paths.
+- **How**:
+  - Audit every `ConstantFP` materialization in `emitExpr` — when the LLVM type is
+    `double`, emit `acpp_f64{lo, hi}` rather than a scalar literal.
+  - Apply same pattern as the already-landed undef-PHI fix
+    (`acpp_f64{0u, 0u}` / `T{}` for aggregate placeholders).
+  - Spot-check emitted shader: generate with `ACPP_METAL_KEEP_SOURCE=1`, grep for
+    bare `0` literals adjacent to `acpp_f64` typed operands.
+- **Done when**: `xcrun metal` compiles the shader emitted by `reduce_sum_f64`
+  without the "incompatible operand types" diagnostic.
 
-- **Preagg parallel.** `planner_hooks/mod.rs:1016` still hardcodes
-  `parallel_safe=false` on the preagg `CustomPath`. Counterpart
-  `planner_hooks/preagg_partial.rs` is a stub with a no-op `try_inject` and
-  `#[allow(dead_code)]`. Unblock: add a partial-state emit path in
-  `executor/preagg/` (serialize per-group transvalue instead of finalfn
-  output), implement `preagg_partial::try_inject` per its module comment
-  (steps 1-4 are spelled out there), then flip the flag at mod.rs:1016 to
-  `true` whenever all fused Aggrefs classify into the partial-capable set.
+### Metal Emitter: bool-vector vs bool assignment in fcmp-on-vector
 
-- **Scan-level injectors still single-path.** `planner_hooks/rel_pathlist.
-  rs:414` (GpuExpr scan) and the GPU-sort branch further down call only
-  `add_path`, not `add_partial_path`. Same for hashjoin in
-  `planner_hooks/join_pathlist.rs:258`. Upper-path agg/window in
-  `planner_hooks/mod.rs` already branch on `is_partial`, so replicate that
-  pattern: for each injector, iterate `rel->partial_pathlist`, build a
-  parallel-safe `CustomPath` wrapping the parallel child, and call
-  `add_partial_path(rel, cpath)` in addition to the non-parallel `add_path`.
+- **What**: `emitFCmpInstruction` emits element-wise comparisons for
+  `fcmp <N x double>`, but the enclosing LHS is declared as scalar `bool`, producing
+  `assigning to 'bool' from incompatible type 'bool __attribute__((ext_vector_type(4)))'`.
+  Location: `AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`, the
+  fixed-width-vector branch of `emitFCmpInstruction` and `mapType` for `<N x i1>`.
+  BLOCKER.
+- **Why**: Vectorized fp64 fcmp appears in multiple soft-fp64 bodies and in
+  auto-vectorized user kernels. Without this, a parallel `.metal` source compile
+  fails before soft-fp64 arithmetic is even exercised.
+- **How**:
+  - In `mapType`, map LLVM `<N x i1>` to MSL `bool2` / `bool4` / etc., not `bool`.
+  - Ensure `emitFCmpInstruction` declares its LHS with the mapped vector type.
+  - Forward-decl emitter must honor the vector bool type too (prototype-side).
+- **Done when**: Shader with vectorized fp64 fcmp compiles without the bool-vector
+  assignment diagnostic.
 
-- **Window executor has no partial path.** `executor/window.rs` doesn't
-  expose a parallel-safe wrapping; `ROW_NUMBER` / `RANK` over a Gather-child
-  currently runs the window on the leader after collecting worker output.
-  Add an explicit parallel_safe hook per-spec (partitioned window functions
-  are naturally parallel when PARTITION BY aligns with worker distribution).
+### AdaptiveCpp JIT retry-loop infinite-hang
 
-## Operator coverage (inject a Custom Scan for more of PG)
+- **What**: `pgaccel_h3_lat_lng_to_cell_bulk(..., resolution=12, use_fp64=1, N=1)`
+  wedges the test process for 5+ minutes at 99% CPU because the Metal queue retries
+  failed JIT compiles indefinitely. Fast-failing paths (reduce_sum_f64 etc.) return
+  in ~1s because they don't go through the retry. Location:
+  `~/Projects/AdaptiveCpp/src/runtime/metal/metal_queue.cpp:904`
+  (`submit_sscp_kernel_from_code_object`). Also affects forked backend tests.
+  BLOCKER — must land FIRST so Emitter debug cycles aren't 5-minute hangs.
+- **Why**: Makes compile-time failures look like runtime hangs, masks the real
+  Emitter diagnostics, and forces `test_h3` res≥12 to be gated behind
+  `PGACCEL_W5_FP64_RUN=1` (`pgaccel-kernels/test/test_h3.cpp:284-298`). The
+  Emitter work below is iterative (compile → diagnose → patch → recompile); a
+  5-minute hang per cycle makes that iteration unworkable.
+- **How**:
+  - Add early-out: on first compile failure, mark the cache key as poisoned so
+    subsequent dispatches fail fast instead of retrying.
+  - Return a structured error up through `submit_sscp_kernel_from_code_object` so
+    callers can distinguish "kernel failed compile" from "kernel crashed at run".
+  - After landing, drop the `PGACCEL_W5_FP64_RUN` env-gate on
+    `test_lat_lng_to_cell_fp64_bulk` and the res=12 `test_lat_lng_to_cell` call.
+- **Done when**: A failing fp64 kernel JIT returns an error within 5 seconds, no
+  CPU spin, no multi-minute hang; `test_h3` res=12 runs under `just gpu-test`
+  unconditionally.
+
+### Metal Emitter: audit all instruction handlers for `acpp_f64`-awareness
+
+- **What**: Additional sites in `emitBinaryOperator`, `emitUnaryOperator`,
+  `emitCastInstruction`, `emitCallInstruction`, and `emitExpr` (ConstantFP /
+  UndefValue / PoisonValue) emit scalar `0` literals or plain int casts when the
+  operand is `acpp_f64`. Same class of bug as the FCmp fix above, but scattered.
+  Location: `AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`. BLOCKER.
+- **Why**: Any one unfixed site reintroduces the fp64 compile failure for a subset
+  of kernels; whack-a-mole if not swept systematically.
+- **How**:
+  - Grep every case in the binary/unary/cast switch for fp64-result branches; for
+    each, ensure result and operand types use type-matching constructors.
+  - Audit `emitFunction` prototype + body for vector bool return types (e.g.
+    `bool4`-returning helpers).
+  - Cross-reference with the emitter diffs already landed in
+    `792d045e8b218241ef54af74244bf5fa92b2f80f` to not re-break fp32 paths.
+- Depends on: AdaptiveCpp JIT retry-loop infinite-hang (Phase 1) — fast failure
+  is required for this iterative debug cycle to be tractable.
+- Depends on: FCmp `acpp_f64` vs `int` operand mismatch (Phase 1).
+- **Done when**: Each of the following kernels individually compiles via
+  `xcrun metal` with zero diagnostics, and the compile log is recorded in the
+  commit message or a companion artifact: `reduce_f64`, `sort_f64`,
+  `sort_kv_f64`, `stats_f64`, `sum_sq_f64`, `multi_f64`,
+  `h3_latlng_to_cell@res≥12`, `bbox_f64`, `spatial_f64`. No "incompatible
+  operand types" or vector-vs-scalar diagnostics on any of the nine.
+
+### Promote `pgaccel_point_in_ring_bulk` fp64 to a SYCL kernel
+
+- **What**: `pgaccel-kernels/src/spatial_predicates.cpp:210-221` currently iterates
+  in host code when `use_fp64=true`, so the fp64 spatial recheck never reaches the
+  GPU. Soft-fp64 coverage tests exercise the host impl, not the Metal soft-fp64
+  lowering. Spatial dispatch (`pgaccel-kernels/src/spatial_dispatch.cpp`) also does
+  not wire fp64 recheck to the device. MAJOR.
+- **Why**: The planner's soft-fp64 cost multiplier assumes the fp64 path is actual
+  GPU work. With a host-scalar loop, the cost model is a lie, and fp64 spatial
+  queries quietly miss GPU acceleration.
+- **How**:
+  - Promote the fp64 branch in `spatial_predicates.cpp:202-234` to a SYCL kernel
+    (mirror the fp32 `pgaccel_point_in_ring_bulk` structure, just swap the scalar
+    types to `double` and let AdaptiveCpp lower via soft-fp64 on Metal).
+  - Wire `spatial_dispatch.cpp` to route fp64 rechecks through the new kernel.
+  - Extend `test_spatial` to exercise the GPU fp64 recheck path, not just the
+    host loop.
+- Depends on: Metal Emitter fixes (Phase 1) — new fp64 kernel needs Emitter to emit
+  valid MSL.
+- **Done when**: `test_spatial` fp64 recheck passes on Metal, `otel-tui` shows
+  `gpu.spatial.pip_recheck` spans with `use_fp64=1`, and planner's fp64 cost
+  multiplier observably shifts dispatch decisions on fp64 spatial queries.
+
+### `test_oom_invariant`: flip every fp64 family to PASS
+
+- **What**: On device-exceeding input, `reduce_f64` and `sort_f64` currently return
+  `status=-5` (peak RSS stays under the 125 GB ceiling because the kernel never runs
+  — not a streaming bug, same upstream soft-fp64 prelude bug as above).
+  `hashagg_f64` / `spatial_f64` / `h3_f64@res=7` PASS because they hit host-side or
+  fp32 paths. BLOCKER.
+- **Why**: This is the single concrete unit-test criterion for "fp64 unlock done
+  end-to-end." If any family still returns -5 after Emitter fixes, that indicates
+  a real streaming / chunking bug and warrants separate investigation.
+- **How**:
+  - After Emitter and spatial fp64 items land, re-run
+    `./pgaccel-kernels/build/test_oom_invariant`.
+  - For any family that still fails, investigate streaming / dispatch chunking
+    (would warrant its own Phase 6 entry).
+- Depends on: Emitter audit, spatial fp64 promotion (all Phase 1).
+- **Done when**: `test_oom_invariant` reports PASS for every fp64 family
+  (reduce_f64, sort_f64, sort_kv_f64, stats_f64, sum_sq_f64, multi_f64,
+  h3_latlng_to_cell@res=12, bbox_f64, spatial_f64).
+
+### `just gpu-test` full green on M-series with fp64 paths unblocked
+
+- **What**: Includes `test_reduce_stats`, `test_sort`, `test_h3` with res=12
+  ungated, `test_spatial` with fp64 recheck, `test_correctness`, `test_fork`,
+  `test_fork_warmed`, `test_fork_cold`. BLOCKER.
+- **Why**: Entry gate for every downstream phase — no fp64 bench calibration, no
+  correctness sweep, no release work can honestly run until kernel tests pass.
+- **How**:
+  - Run `just gpu-test` after each Phase 1 item lands; treat any red test as a hard
+    stop.
+  - For each fp64 kernel dispatched from a forked backend, verify the `.metalar`
+    binary-archive compat with `noinline`+`optnone`-attributed functions (i.e. the
+    archive builder preserves every preserved function).
+  - Check no fp32 regression: the already-landed emitter diffs must not break
+    `test_device`, `test_bbox`, `test_sycl_basic`, `test_spatial` fp32 paths.
+- Depends on: all prior Phase 1 items.
+- **Done when**: `just gpu-test` is green on an M-series machine with no env-gates,
+  no `#[ignore]`, no manual skips.
+
+### Cost-model empirical calibration of `soft_fp64_cost_multiplier`
+
+- **What**: `pg_accel.soft_fp64_cost_multiplier` seed default is `32.0` (the
+  micro-bench throughput ratio). Real-query ratios differ due to cache / memory /
+  dispatch overhead and need per-workload calibration. Hard cap `64.0` unless user
+  sign-off raises it. MAJOR.
+- **Why**: Mis-tuned multiplier either over-routes to GPU (fp64 query regresses
+  vs PG parallel — violates Benchmark Rule #11) or under-routes (PG wins queries
+  GPU should win). Parity-floor rule forbids the former.
+- **How**:
+  - After `just gpu-test` green, run `just bench fp64_matrix` — 7 workloads × 5
+    sizes (100k / 1M / 10M / 100M / 1B) with `speedup_x ≥ 1.0` via Custom Scan
+    selection (not planner-decline-as-parity).
+  - **Sweep methodology.** Fixed grid: `{16, 24, 32, 40, 48, 56, 64}`. For each
+    multiplier value, run the full 7×5 matrix and record `speedup_x` per cell.
+    **Objective**: maximise `geomean(speedup_x)` across the 35-cell matrix,
+    **subject to the constraint** that no cell has `speedup_x < 1.0`. **Tie-break**:
+    on ties, pick the smallest multiplier (minimises false-negative GPU declines
+    as hardware evolves). Multipliers that violate the `< 1.0` constraint on any
+    cell are disqualified before the geomean tie-break runs.
+  - Document final value in CLAUDE.md and CHANGELOG.md with the winning geomean,
+    the runner-up, and which cells were parity-close (≤ 1.1×).
+  - Verify `pg_accel.fp64_enabled=false` cleanly routes all fp64 strategies to
+    PG native with no Custom Scan injection (escape-valve GUC check happens in
+    `planner_hooks.rs` before Custom Scan path creation — verify via EXPLAIN).
+- Depends on: `just gpu-test` green (Phase 1).
+- **Done when**: `just bench fp64_matrix` has `speedup_x ≥ 1.0` across every cell
+  under the winning multiplier; geomean + runner-up table committed to
+  CHANGELOG.md; `fp64_enabled=false` confirmed via EXPLAIN trace.
+
+## Phase 2 — Correctness: silent wrong-answer bugs
+
+Two known wrong-result paths. Both must be closed before ship — they corrupt query
+output invisibly, which is the worst possible failure mode for an OLTP extension.
+
+### GPU bytecode expression evaluator is disabled
+
+- **What**: `engine/ffi/custom_scan/mod.rs:1654-1666` short-circuits every
+  compiled expression to `CompiledExpr::DeferToPg`. Compilation still runs;
+  execution falls through to PG's scalar qual. Only template-matched predicates
+  (single `cmp`, `BETWEEN`, `IN`, `IS NULL`, two-cmp `AND`) reach the GPU today.
+  BLOCKER (perf + correctness claim mismatch).
+- **Why**: Complex `WHERE` / projections force CPU eval and negate scan speedups.
+  Users reading CLAUDE.md expect GPU expression evaluation; reality is CPU eval.
+- **How**:
+  - Debug the interpreter against the opcodes in
+    `engine/adapters/expr_compiler.rs:25-127` (ADD/SUB/MUL/DIV, cmp family,
+    AND/OR/NOT, casts, date-part).
+  - Add a golden-diff test matrix at `pg_accel-bench/src/bytecode_correctness.rs`
+    covering every opcode × every supported type (int2/4/8, float4/8, bool, date)
+    × every shape in `{unary, binary, AND, OR, NOT, cast}`.
+  - Once diff is clean, remove the `DeferToPg` short-circuit at lines 1654-1666.
+- **Done when**: Golden-diff matrix committed at
+  `pg_accel-bench/src/bytecode_correctness.rs` covering every opcode in
+  `engine/adapters/expr_compiler.rs:25-127` × every supported type (int2/4/8,
+  float4/8, bool, date) × `{unary, binary, AND, OR, NOT, cast}`; all cells
+  zero-diff vs PG native; PR diff pasted in the landing commit message.
+
+### NUMERIC aggregates lose precision above ~2^53
+
+- **What**: `engine/executor/agg/partial/emitter.rs:123-126` uses an f64
+  accumulator path. Arbitrary-precision NUMERIC silently loses precision above
+  ~2^53. BLOCKER.
+- **Why**: Wrong answers on `SUM(numeric)` / `AVG(numeric)` for any workload
+  touching currency, scientific data, or large counts. No diagnostic, no warning.
+- **How**:
+  - Option A (preferred long-term): custom multi-limb accumulator kernel. Matches
+    PG's NUMERIC on-disk representation; maintainability cost is real.
+  - Option B (ship-now): classification gate that forces NUMERIC columns through
+    PG. Add to the adapter classifier; document as explicit policy in CLAUDE.md
+    Type Coverage.
+  - Ship Option B for 1.0; file Option A as post-1.0 work (see "Post-1.0
+    (deferred)" section).
+- **Done when**: NUMERIC columns never reach the f64 accumulator path — either
+  via multi-limb kernel, or via hard classification gate that routes to PG.
+  **Negative test**: `EXPLAIN VERBOSE SELECT SUM(n::numeric) FROM t` shows no
+  `CustomScan` tag in the plan output; regression test committed alongside the
+  gate.
+
+## Phase 3 — Parallel-path coverage
+
+Partial-agg parallel execution works today for plain `SUM`/`MIN`/`MAX`/`COUNT` on
+scalar types. Emitter/accumulator machinery in
+`engine/executor/agg/partial/{accumulator,emitter}.rs` is ready. Round-trip work
+needed to cover the aggregates users actually write.
+
+### AVG / STDDEV / VAR parallel path
+
+- **What**: `planner_hooks/partial_agg.rs:171-178` still bails on `INTERNALOID`
+  transtype and `AggOp::Avg`. `Float8StatsEmitter` (bytea via `aggserialfn`) and
+  `build_partial_emitters` already handle `op ∈ {Avg, StddevSamp, StddevPop,
+  VarSamp, VarPop}` once `serialize_fn_oid.is_some()`. Gap is path-level
+  serialization: the injector writes `(op, attno, rtype)` triples with
+  `serialize_fn_oid=None`, so the spec reconstructed by
+  `build_partial_spec_from_path` (`ffi/custom_scan/mod.rs:825`) can never carry
+  the real serialize OID. MAJOR.
+- **Why**: AVG / STDDEV / VAR are among the most common aggregates in analytics
+  workloads; losing parallel workers on them kneecaps the value prop.
+- **How**:
+  1. In `partial_agg.rs`, build a full `PartialAggSpec` via `classify_aggref` +
+     `syscache::agg_serialize_fn`.
+  2. Append the spec with the `PAAG` sentinel block (`append_partial_spec`).
+  3. In `plan_custom_path_agg` (`ffi/custom_scan/mod.rs:611`), switch the
+     `is_partial` reader from `path_len - 1` to a structural lookup and call
+     `deserialize_partial_spec`.
+  4. Delete the `INTERNALOID` / `AggOp::Avg` early-bails at lines 171-178.
+- **Done when**: Parallel `AVG(x) FROM bench_f32_10m` and siblings show GPU
+  Custom Scan inside a Gather node in `EXPLAIN (VERBOSE)` and produce
+  bit-identical results.
+
+### Grouped HashAgg parallel path
+
+- **What**: `planner_hooks/partial_agg.rs:82` still bails on `query.groupClause`.
+  MAJOR.
+- **Why**: `GROUP BY` is as common as aggregates themselves. Without parallel
+  grouped HashAgg, most real queries fall back to leader-only aggregation.
+- **How**:
+  - Propagate `groupClause` through the partial path; remap group-key attnos
+    across the partial-to-final boundary.
+  - Build `Partial Gather + Final HashAgg` following PG's
+    `add_paths_to_grouping_rel` pattern.
+- Depends on: AVG/STDDEV/VAR parallel (Phase 3) — same spec round-trip
+  machinery.
+- **Done when**: `SELECT k, SUM(v) FROM t GROUP BY k` with parallel workers
+  shows GPU Custom Scan inside a Gather and produces identical results.
+
+### Preagg parallel path
+
+- **What**: `planner_hooks/mod.rs:1016` hardcodes `parallel_safe=false` on the
+  preagg `CustomPath`. Counterpart `planner_hooks/preagg_partial.rs` is a stub
+  with a no-op `try_inject` and `#[allow(dead_code)]`. MAJOR.
+- **Why**: Preagg fusion is one of the bigger per-batch wins; confining it to
+  the leader leaves a lot of perf on the table for parallel queries.
+- **How**:
+  - Add a partial-state emit path in `executor/preagg/` (serialize per-group
+    transvalue instead of finalfn output).
+  - Implement `preagg_partial::try_inject` per its module comment (steps 1–4
+    spelled out there).
+  - Flip the flag at `planner_hooks/mod.rs:1016` to `true` whenever all fused
+    Aggrefs classify into the partial-capable set.
+- Depends on: Grouped HashAgg parallel (Phase 3).
+- **Done when**: A preagg-fused aggregation plan runs inside parallel workers
+  and EXPLAIN confirms `parallel_safe=true` on the preagg CustomPath.
+
+### Scan-level injectors still single-path
+
+- **What**: `planner_hooks/rel_pathlist.rs:414` (GpuExpr scan) and the GPU-sort
+  branch further down call only `add_path`, not `add_partial_path`. Same for
+  hashjoin in `planner_hooks/join_pathlist.rs:258`. Upper-path agg/window in
+  `planner_hooks/mod.rs` already branch on `is_partial`. MAJOR.
+- **Why**: Any query whose optimal plan uses `Gather ∘ Parallel Scan` skips the
+  GPU path because we never registered a partial variant.
+- **How**:
+  - For each injector (GpuExpr scan, GPU sort, GPU hashjoin), iterate
+    `rel->partial_pathlist`, build a parallel-safe `CustomPath` wrapping the
+    parallel child, and call `add_partial_path(rel, cpath)` in addition to the
+    non-parallel `add_path`.
+  - Mirror the pattern from the upper-path injectors that already handle
+    `is_partial`.
+- **Done when**: `EXPLAIN (VERBOSE, ANALYZE)` on parallel-enabled scan / sort /
+  hashjoin queries shows GPU CustomScan inside Gather / Parallel Append.
+
+### Window executor has no partial path
+
+- **What**: `executor/window.rs` doesn't expose a parallel-safe wrapping;
+  `ROW_NUMBER` / `RANK` over a Gather child currently runs the window on the
+  leader after collecting worker output. MINOR.
+- **Why**: Partitioned window functions (PARTITION BY aligned with worker
+  distribution) are naturally parallel; leaving them leader-only wastes cores.
+- **How**:
+  - Add an explicit parallel_safe hook per-spec.
+  - Inject a partial-window CustomPath when PARTITION BY aligns with the
+    underlying parallel scan.
+- **Done when**: `ROW_NUMBER() OVER (PARTITION BY k ORDER BY v)` runs inside
+  workers per EXPLAIN, not on the leader.
+
+## Phase 4 — Operator coverage expansion
 
 pg_accel today injects at `set_rel_pathlist_hook` (seqscan / indexscan) and at
-upper paths (agg, sort, hashjoin, window). The following PG nodes never reach
-a GPU path:
+upper paths (agg, sort, hashjoin, window). The following PG nodes never reach a
+GPU path — each unblocks a class of real-world queries.
 
-- **BitmapHeapScan.** `planner_hooks/rel_pathlist.rs` only considers the
-  `RelOptInfo`'s own pathlist; bitmap-index-driven scans over selective
-  predicates never see a GPU qual. Add a second inject site that wraps
-  `T_BitmapHeapPath` children or emits a GpuExpr+Scan path with the bitmap
-  predicate preserved.
-- **IncrementalSort.** No injection — large ORDER BY with partial prefix
-  keys falls back. Extend the sort injector to recognize
-  `root->sort_pathkeys` ⊃ existing pathkeys and emit a partial-sort variant.
-- **MergeJoin.** `planner_hooks/join_pathlist.rs:125` only accepts
-  `T_HashJoin`. Add merge-join recognition (useful when both inputs are
-  already sorted; GPU merge-join is a straight parallel-friendly kernel).
-- **NestedLoop (scalar).** Only spatial nested-loop is wired (via bbox+
-  predicate fusion). Scalar nested loops with indexable quals are not
-  accelerated; consider a GpuHashJoin rewrite for correlated inequality
-  joins that PG can't hash.
-- **Append / MergeAppend.** Partitioned tables produce these at the top.
-  `mod.rs:3368-3369` recognizes the node tag but no injection occurs. The
-  fix is to push a CustomPath into each child relation's `pathlist` and let
-  PG's Append/MergeAppend wrap them.
-- **SetOp / RecursiveUnion.** Tagged as recognized at `mod.rs:3384-3385`;
-  no GPU handling. Low priority.
-- **GatherMerge.** Sort injector emits `pathkeys` so PG can pick
-  GatherMerge, but we never verify that path survives — add an explicit
-  `EXPLAIN` assertion in the verification suite.
+### BitmapHeapScan injection
 
-## Spatial / H3 / Raster registration gaps
+- **What**: `planner_hooks/rel_pathlist.rs` only considers the `RelOptInfo`'s own
+  pathlist; bitmap-index-driven scans over selective predicates never see a GPU
+  qual. MINOR.
+- **Why**: Many OLTP queries with selective predicates resolve to BitmapHeapScan;
+  missing GPU injection here means no acceleration for a large query class.
+- **How**:
+  - Add a second inject site that wraps `T_BitmapHeapPath` children — mirror
+    how `IndexScan` is wrapped today in `planner_hooks/rel_pathlist.rs` (grep
+    for the `IndexPath` recognition branch to locate the exact insertion point).
+  - Alternative (GpuExpr+Scan path with the bitmap predicate preserved) is
+    explicitly deferred to post-1.0 to constrain scope.
+- **Done when**: A bitmap-driven query with a complex predicate shows GPU
+  CustomScan in EXPLAIN.
 
-GPU kernels exist for many predicates, but the adapter only registers a few.
+### IncrementalSort injection
 
-- **PostGIS (`src/adapters/postgis.rs`).** Only `st_intersects` is wired
-  for GpuSpatial. Missing registrations (kernels or stubs exist in
+- **What**: No injection — large ORDER BY with partial prefix keys falls back.
+  MINOR.
+- **Why**: IncrementalSort is common in large-ORDER-BY + LIMIT queries.
+- **How**:
+  - Extend the sort injector to recognise `root->sort_pathkeys ⊃ existing
+    pathkeys` and emit a partial-sort variant.
+- **Done when**: A query with pre-sorted prefix + additional sort keys picks the
+  GPU partial-sort path.
+
+### MergeJoin recognition
+
+- **What**: `planner_hooks/join_pathlist.rs:125` only accepts `T_HashJoin`.
+  MINOR.
+- **Why**: Merge-join is optimal when both inputs are already sorted; GPU merge
+  join is a straight parallel-friendly kernel.
+- **How**: Add merge-join recognition; reuse the hashjoin injection scaffolding.
+- **Done when**: A merge-join plan with sorted inputs shows GPU CustomScan.
+
+### NestedLoop (scalar) recognition
+
+- **What**: Only spatial nested-loop is wired (via bbox + predicate fusion).
+  Scalar nested loops with indexable quals are not accelerated. MINOR.
+- **Why**: Correlated inequality joins PG can't hash still appear in real
+  workloads.
+- **How**: Consider a GpuHashJoin rewrite for correlated inequality joins.
+- **Done when**: A correlated inequality join measurably accelerates under GPU
+  injection.
+
+### Append / MergeAppend injection
+
+- **What**: Partitioned tables produce Append / MergeAppend at the top.
+  `planner_hooks/mod.rs:3368-3369` recognises the node tag but no injection
+  occurs. MINOR.
+- **Why**: Modern PG heavy users rely on partitioning; missing injection here
+  disables GPU for any partitioned table.
+- **How**: Push a CustomPath into each child relation's `pathlist` and let PG's
+  Append / MergeAppend wrap them.
+- **Done when**: A partitioned-table query shows GPU CustomScan on each
+  partition child.
+
+### SetOp / RecursiveUnion (low priority)
+
+- **What**: Tagged as recognised at `planner_hooks/mod.rs:3384-3385`; no GPU
+  handling. MINOR / low priority.
+- **Why**: Niche; leave until higher-priority coverage is in.
+- **How**: Defer to post-1.0 unless a concrete user need surfaces.
+- **Done when**: Deferred, or concrete kernel plan written.
+
+### GatherMerge EXPLAIN verification
+
+- **What**: Sort injector emits `pathkeys` so PG can pick GatherMerge, but we
+  never verify that path survives. MINOR.
+- **Why**: Silent mis-plans would regress sorted parallel queries.
+- **How**: Add an explicit `EXPLAIN` assertion in the verification suite that
+  the GatherMerge-eligible sort keeps its GPU CustomScan children.
+- **Done when**: Verification harness asserts GatherMerge + GPU CustomScan on
+  the relevant query.
+
+### PostGIS operator registrations
+
+- **What**: `src/adapters/postgis.rs` wires only `st_intersects` for
+  GpuSpatial. Missing registrations (kernels or stubs exist in
   `pgaccel-kernels/src/spatial_*.cpp`): `st_contains`, `st_within`,
   `st_dwithin`, `st_distance`, `st_area`, `st_length`, `st_equals`,
-  `st_disjoint`, `st_touches`, `st_crosses`, `st_overlaps`, plus geometry
-  constructors `st_buffer`, `st_union`, `st_intersection` (these need
-  output-allocation plumbing that doesn't exist yet — file a separate
-  kernel-design task).
-- **PostGIS raster (`src/adapters/postgis_raster.rs`).** Three registered
-  (`st_mapalgebra`, `st_clip`, `st_reclass`). Common operations still
-  missing: `st_resample`, `st_slope`, `st_aspect`, `st_hillshade`,
-  `st_value`, `st_summarystats`.
-- **H3 (`src/adapters/h3.rs`).** Four registered. Grid-generation
+  `st_disjoint`, `st_touches`, `st_crosses`, `st_overlaps`. MINOR.
+- **Why**: Any real PostGIS workload uses more than `st_intersects`; missing
+  registrations mean GPU is mostly off.
+- **How**:
+  - For each predicate with an existing kernel, add the registration entry in
+    `postgis.rs` following the `st_intersects` pattern.
+- **Done when**: All listed predicates register successfully; a query using any
+  of them shows GPU CustomScan.
+
+### PostGIS geometry constructors: output-allocation kernel design
+
+- **What**: Geometry constructors `st_buffer`, `st_union`, `st_intersection`
+  need output-allocation plumbing that doesn't exist yet — GPU kernels that
+  return variable-sized `GSERIALIZED` output to the executor. Currently no
+  registration; no kernel design. MINOR.
+- **Why**: These are the three most common constructors in real PostGIS
+  workloads after the predicate set above. Without them, any query that
+  constructs new geometry falls back to CPU.
+- **How**:
+  - Design the output-allocation protocol: two-pass kernel (sizing pass +
+    emission pass) vs bounded-worst-case preallocation vs streaming append
+    with `MTLHeap`.
+  - Extend `pgaccel-kernels/src/spatial_*.cpp` with constructor kernels
+    following the chosen protocol.
+  - Register in `src/adapters/postgis.rs` with a `GpuSpatialConstructor`
+    variant (new strategy tag).
+  - Write adapter-level tests that exercise varying output geometry sizes.
+- **Done when**: Each of `st_buffer` / `st_union` / `st_intersection` has a
+  working GPU kernel, registered adapter, and golden-diff test against
+  PostGIS native.
+
+### PostGIS raster registrations
+
+- **What**: `src/adapters/postgis_raster.rs` has 3 registered
+  (`st_mapalgebra`, `st_clip`, `st_reclass`). Common operations still missing:
+  `st_resample`, `st_slope`, `st_aspect`, `st_hillshade`, `st_value`,
+  `st_summarystats`. MINOR.
+- **Why**: Raster workloads need these; without them, GPU is a partial-coverage
+  acceleration only.
+- **How**: Add adapter registrations matching existing kernel signatures; write
+  golden-diff tests against PostGIS's raster output.
+- **Done when**: Each of the 6 listed operators registers successfully and
+  passes golden-diff test.
+
+### H3 operator registrations
+
+- **What**: `src/adapters/h3.rs` has 4 registered. Grid-generation
   (`h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`), hierarchy
   (`h3_cell_to_children`, `h3_cell_to_center_child`), and geometry
-  (`h3_cell_to_boundary`, `h3_cells_to_multi_polygon`) are unregistered.
-- **Spatial dispatch gaps.** `pgaccel-kernels/src/spatial_dispatch.cpp:20`
-  calls out unimplemented geometry-type combinations (e.g. Polygon vs
-  LineString). Enumerate the missing pairs and either implement or
-  explicitly Deferred-classify at the adapter layer.
+  (`h3_cell_to_boundary`, `h3_cells_to_multi_polygon`) are unregistered. MINOR.
+- **Why**: Any serious H3 workload needs grid gen and hierarchy walks.
+- **How**: Register each, reusing the existing registration pattern; extend
+  tests.
+- **Done when**: Listed operators all register and pass correctness tests.
 
-## Type coverage
+### Spatial dispatch gaps
 
-GPU path currently handles int2 / int4 / int8 / float4 / float8 / bool and
-extracts (but doesn't GPU-process) text / timestamp / timestamptz. Everything
-below forces CPU:
+- **What**: `pgaccel-kernels/src/spatial_dispatch.cpp:20` calls out unimplemented
+  geometry-type combinations (e.g. Polygon vs LineString). MINOR.
+- **Why**: Silent Deferred classification hides real gaps.
+- **How**: Enumerate missing pairs; either implement or explicitly
+  Deferred-classify at the adapter layer with a comment.
+- **Done when**: No silent skips in spatial dispatch — every geometry-pair
+  combination is either handled or explicitly rejected.
 
-- **NUMERIC / DECIMAL.** No extractor; see Correctness §NUMERIC — either a
-  multi-limb kernel or a hard classification gate.
-- **DATE / INTERVAL.** `date` is extracted as int32 in `mod.rs:1428` but
-  date-arithmetic opcodes are disabled by the bytecode gate. `interval` has
-  no extractor at all.
-- **UUID, INET, CIDR.** No extractor; used heavily for partitioning keys
-  and joins.
-- **JSON / JSONB.** No extractor; GPU `jsonb_path_exists` / `->>` would be
-  a significant win for analytical workloads.
-- **ARRAY types.** No GPU support — forces per-row unnest on CPU.
-- **Custom types (domains, composites).** Immediate reject in the
-  classifier; document this as explicit policy rather than a silent skip.
+### Type coverage expansion
 
-## Device limits / cost model
+- **What**: GPU path currently handles int2 / int4 / int8 / float4 / float8 /
+  bool and extracts (but doesn't GPU-process) text / timestamp / timestamptz.
+  Forcing CPU: NUMERIC / DECIMAL (see Phase 2), DATE / INTERVAL (date is
+  extracted as int32 in `mod.rs:1428` but date-arithmetic opcodes are disabled
+  by the bytecode gate; `interval` has no extractor at all), UUID / INET /
+  CIDR (no extractor; used heavily for partitioning keys and joins), JSON /
+  JSONB (no extractor; GPU `jsonb_path_exists` / `->>` would be a major win),
+  ARRAY types (no GPU support — forces per-row unnest on CPU), custom types
+  (domains, composites — immediate reject in the classifier). MINOR.
+- **Why**: Any workload touching one of these types falls back to CPU, which
+  silently reduces acceleration coverage.
+- **How**:
+  - Prioritise DATE arithmetic (re-enable post Phase 2 bytecode work), then
+    UUID / INET / CIDR extractors (hash-join use case), then JSON / JSONB
+    (analytics win), then ARRAY (unnest on GPU).
+  - For custom types, document as explicit policy rather than a silent skip.
+- Depends on: GPU bytecode expression evaluator re-enabled (Phase 2) for DATE.
+- **Done when**: Each type has an extractor + test, or an explicit documented
+  rejection; no silent CPU fallbacks.
 
-- `engine/cost/device_limits.rs` now derives every threshold from the
-  hardware profile in `from_profile()`:
-  - `gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000)` (201)
-  - `gpu_sort_max_elements` scales with GPU memory (232-243)
-  - `gpu_join_max_output_rows` scales dynamically (243-268)
-  Values 25_000 / 2_000_000 / 100_000 are the zero-profile **fallbacks**
-  (395, 399-400), not active defaults. When benchmarking, dump
-  `device_limits()` for the machine under test; don't compare against the
-  fallback constants.
-- **`gpu_multi_key_sort_max_keys` is live** in the planner gate
+## Phase 5 — Cost model / planner tuning
+
+### Multi-key sort: resolve executor-limit gap
+
+- **What**: `gpu_multi_key_sort_max_keys` is live in the planner gate
   (`rel_pathlist.rs:463`) but the executor only handles a single key
-  (`rel_pathlist.rs:470-474` bails on `num_pathkeys != 1`). Either
-  implement cascaded stable multi-key sort in `executor/sort/` or lower
-  the limit to 1 and delete the unused configurability.
+  (`rel_pathlist.rs:470-474` bails on `num_pathkeys != 1`). MAJOR.
+- **Why**: Planner advertises multi-key sort support the executor can't honour —
+  either undocumented regression or dead config.
+- **How**: Either implement cascaded stable multi-key sort in `executor/sort/`,
+  or lower the limit to 1 and delete the unused configurability.
+- **Done when**: Planner-advertised `gpu_multi_key_sort_max_keys` matches what
+  the executor actually dispatches.
 
-## Custom Scan FFI / DSM
+### Document DeviceLimits derivation vs fallback constants
 
-DSM callbacks in `engine/ffi/custom_scan/dsm.rs` are all present
-(`EstimateDSMCustomScan`, `InitializeDSMCustomScan`,
-`ReInitializeDSMCustomScan`, `InitializeWorkerCustomScan`,
-`ShutdownCustomScan`). Two gaps:
+- **What**: `engine/cost/device_limits.rs` derives every threshold from the
+  hardware profile in `from_profile()` (e.g.
+  `gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000)` at :201;
+  `gpu_sort_max_elements` scales with GPU memory at :232-243;
+  `gpu_join_max_output_rows` scales dynamically at :243-268). Values 25_000 /
+  2_000_000 / 100_000 are the zero-profile fallbacks (:395, :399-400), not
+  active defaults. INVESTIGATE / doc bug.
+- **Why**: When benchmarking, people compare against the fallback constants and
+  reach wrong conclusions.
+- **How**:
+  - Add documentation pointing to `device_limits()` for the machine under test.
+  - Add a CLI helper (`pg_accel_stats()`) that dumps effective limits.
+- **Done when**: CLAUDE.md or ARCHITECTURE.md clearly distinguishes "fallback"
+  vs "active" device-limit values.
 
-- **No worker-side `ExecCustomScanRecheck`.** The spatial three-layer
-  pipeline (bbox → GPU predicate → CPU recheck) always runs recheck on the
-  leader. For parallel spatial scans, workers should recheck their own
-  candidate tuples; without this, leader becomes the bottleneck.
-- **`src/gpu/{mod,bridge,types,three_layer}.rs` carry
-  `#![allow(dead_code)]`.** Audit which wrappers are genuinely unused vs
-  waiting on callers. Dead code in the GPU bridge is a smell — remove or
-  wire up.
+### Worker-side `ExecCustomScanRecheck` for spatial
 
-## Perf (open after 2026-04-20 baseline)
+- **What**: DSM callbacks in `engine/ffi/custom_scan/dsm.rs` are all present
+  (`EstimateDSMCustomScan`, `InitializeDSMCustomScan`,
+  `ReInitializeDSMCustomScan`, `InitializeWorkerCustomScan`,
+  `ShutdownCustomScan`) but the spatial three-layer pipeline (bbox → GPU
+  predicate → CPU recheck) always runs recheck on the leader. MAJOR.
+- **Why**: For parallel spatial scans, the leader becomes the bottleneck —
+  workers should recheck their own candidate tuples.
+- **How**: Implement a `ExecCustomScanRecheck` that runs on the worker; plumb
+  the state through DSM.
+- **Done when**: Parallel spatial EXPLAIN ANALYZE shows recheck time distributed
+  across workers, not pinned to leader.
 
-- **Per-batch GPU dispatch dominates parallel SUM.** 10M `SUM(v) FROM
-  bench_f32_10m`: pg_accel parallel 177ms vs PG parallel 88ms. Each worker
-  runs ~52 batches × 65k rows × ~5.5ms dispatch. JIT cache is populated
-  (`~/.acpp/apps/global/jit-cache/` has .metallib + .metalar). This is
-  pure dispatch cost. Directions:
-  - Raise `pg_accel.min_batch_size` floor (today `DeviceLimits` caps at
-    65536; chunk size is one scan tuple batch — evaluate 256k-512k).
-  - Command-buffer reuse across batches in the Metal bridge.
-  - Kernel fusion: scan + reduce as a single dispatch.
-  - Buffered accumulation at executor layer so the GPU sees fewer, larger
-    batches per worker.
-- **Per-fork JIT ~290ms cold+warm.** See `project_metal_fork_issue.md`.
-  Separate from dispatch overhead. The `kernel_configuration` hash misses
-  the on-disk cache on some paths — narrow down which dispatches miss,
-  compare hash inputs.
-- **Metal pipeline-state XPC edge case.** Per `project_metal_fork_issue`
-  memory, rare forks still hit `MTLCompilerService` after the `.metalar`
-  archive path landed. Instrument `acpp-metal-archive-build` return codes
-  under stress to isolate.
+### GPU bridge dead-code audit
 
-## Verification matrix (blocks declaring "done")
+- **What**: `src/gpu/{mod,bridge,types,three_layer}.rs` carry
+  `#![allow(dead_code)]`. MINOR.
+- **Why**: Dead code in the GPU bridge is a smell — either wiring an API that
+  was planned and abandoned, or masking an unused wrapper.
+- **How**: Audit each wrapper; remove what's genuinely unused; wire up the
+  rest; then remove the module-scope `#![allow(dead_code)]`.
+- **Done when**: No `#![allow(dead_code)]` on the GPU bridge; every wrapper has
+  a caller or is deleted.
 
-Not yet run end-to-end; required gate before any "pg_accel accelerates all
-of PG" claim:
+### Window planner path does not apply soft-fp64 cost multiplier
 
-- `EXPLAIN (VERBOSE)` shows `Gather`/`Gather Merge` with pg_accel
-  CustomScan inside for: plain `SUM`, `AVG + STDDEV`, `GROUP BY`,
+- **What**: `engine/ffi/planner_hooks/mod.rs:567` builds `window_scan_cost` via
+  the plain `cost::self_scan_cost`, which cannot see per-spec column types
+  (WindowFuncSpec order/value Oids aren't extracted at the cost-computing
+  site). fp64 ORDER BY / value columns run through the native cost equation and
+  over-estimate the GPU win on soft-fp64 devices. MAJOR.
+- **Why**: Over-estimates shift soft-fp64 window queries to GPU when PG
+  parallel would be faster — parity-floor violation risk.
+- **How**:
+  - Thread per-spec type Oids through WindowFuncSpec / the costing site.
+  - Set `uses_fp64 = any spec has a float8 order_attno or value_attno`.
+  - Call `cost::self_scan_cost_fp64_aware(..., uses_fp64)`.
+- Depends on: Phase 1 fp64 kernels actually dispatching.
+- Surfaced by: W4 during fp64-unlock plan.
+- **Done when**: fp64 window queries on soft-fp64 devices cost-model with the
+  multiplier applied; planner declines GPU when PG parallel wins.
+
+### `soft_fp64_cost_multiplier` hard-cap enforcement in code
+
+- **What**: `pg_accel.soft_fp64_cost_multiplier` GUC has a documented hard cap
+  of `64.0` (raising past it requires user sign-off with a documented reason —
+  see `project_metal_fork_issue.md` cross-ref and the fp64-unlock plan R2 §3
+  cheat defense). The cap is currently prose-only; nothing in the GUC
+  registration code actually clamps it, so a misconfigured `postgresql.conf`
+  or `ALTER SYSTEM` can silently set it to any value. MAJOR.
+- **Why**: Prose-only rules are violated in production. An unclamped multiplier
+  allows someone to set `soft_fp64_cost_multiplier = 1000` to "fix" a failing
+  bench, which is exactly the cheat pattern the rule exists to prevent
+  (feedback_dont_disable_gpu.md).
+- **How**:
+  - At GUC registration (search for `soft_fp64_cost_multiplier` in `src/gucs/`
+    or equivalent), set `min_val=1.0` and `max_val=64.0` on the GUC
+    definition.
+  - Add a unit test that constructs a mock GUC context with a value above 64
+    and asserts the GUC system clamps or rejects it.
+  - If the GUC system silently clamps without a warning, add an
+    `ereport(WARNING, ...)` in the assign hook when input > 64.
+- **Done when**: Setting `soft_fp64_cost_multiplier = 100` in `postgresql.conf`
+  either rejects the config or clamps to 64 and emits a warning; test covers
+  both the in-range and above-cap cases.
+
+### HashJoin fp64 key path skips the soft-fp64 multiplier
+
+- **What**: `engine/ffi/planner_hooks/hashjoin.rs` injects GPU hash join paths
+  but does not thread `uses_fp64 == (key_type == 2)` into its cost calculation.
+  A fp64-keyed hash join on a soft-fp64 device cost-models as if the keys were
+  fp32. MAJOR.
+- **Why**: Same parity-floor risk as the window case.
+- **How**: When the join key is Float64 (key_type == 2) and injecting, pass
+  `uses_fp64=true` through the hashjoin cost helper (parallel to how
+  `rel_pathlist`'s sort path now calls `self_scan_cost_fp64_aware`).
+- Depends on: Phase 1 fp64 kernels dispatching.
+- Surfaced by: W4 during fp64-unlock plan.
+- **Done when**: fp64-keyed hashjoin declines GPU injection when soft-fp64 cost
+  exceeds PG parallel.
+
+## Phase 6 — Performance investigation
+
+### Per-batch GPU dispatch dominates parallel SUM
+
+- **What**: 10M `SUM(v) FROM bench_f32_10m`: pg_accel parallel 177 ms vs PG
+  parallel 88 ms. Each worker runs ~52 batches × 65k rows × ~5.5 ms dispatch.
+  JIT cache is populated (`~/.acpp/apps/global/jit-cache/` has .metallib +
+  .metalar). Pure dispatch cost. MAJOR (performance-parity risk).
+- **Why**: Current 10M reduce loses to PG parallel. Benchmark Rule #11 says this
+  must never happen in a released (workload, size) cell.
+- **How** (directions in priority order; each must beat or match PG parallel
+  across the full sweep before the next is considered):
+  1. **Command-buffer reuse across batches in the Metal bridge.** Highest
+     expected value; the per-batch cost is dominated by command-buffer setup /
+     submit, not GPU compute. Reuse across a worker's batch stream.
+  2. **Kernel fusion: scan + reduce as a single dispatch.** Collapses the
+     batch boundary entirely for common patterns.
+  3. **Buffered accumulation at executor layer** so the GPU sees fewer, larger
+     batches per worker.
+  4. **Last resort, documented fallback only**: raise `pg_accel.min_batch_size`
+     floor (today `DeviceLimits` caps at 65536; chunk size is one scan tuple
+     batch). WARNING: per Benchmark Rule #11 / feedback_dont_disable_gpu.md,
+     raising to skip the failing size is a bug-hiding pattern, not a fix. Only
+     take this step if 1–3 are exhausted AND the underlying dispatch cost is
+     provably unavoidable; document the decision in CHANGELOG.md with the
+     measured lower-bound.
+- **Done when**: The full sweep (`benches/reduce_sum_bench.rs` row-count
+  matrix `[100k, 1M, 10M, 100M, 1B]`) shows every cell ≥ PG parallel via
+  Custom Scan selection, trace spans confirm reduced batch count per worker,
+  and `min_batch_size` default is unchanged vs prior release (or a
+  CHANGELOG.md entry justifies the raise).
+
+### Per-fork JIT ~290 ms cold+warm
+
+- **What**: Per `project_metal_fork_issue.md`, per-fork JIT is ~290 ms. The
+  `kernel_configuration` hash misses the on-disk cache on some paths. MAJOR.
+- **Why**: Adds latency to every first-dispatch after fork; compounds per
+  parallel worker startup.
+- **Hypothesis**: Metal SSCP jit-cache hash miss because pointer-width-dependent
+  hash keys (pointer values baked into the config hash, TLS addresses,
+  `_PG_init`-time globals that differ between parent and fork child) change
+  across forks. Secondary hypothesis: hash is stable but metallib reload from
+  disk is what costs ~290ms regardless of hit/miss.
+- **How**:
+  1. Dump `kernel_configuration` hash inputs pre-fork (parent) and post-fork
+     (child) for the same logical kernel dispatch; diff byte-for-byte.
+  2. If hash differs, fix the inputs to be fork-stable (strip
+     pointer-width-dependent fields; canonicalise TLS-sensitive values).
+  3. If hash is stable but metallib reload is the cost, investigate
+     memory-mapped metallib cache (load once in `_PG_init` on the parent,
+     rely on CoW-mapped pages post-fork).
+- **Done when**: 10-child-fork stress test shows per-fork JIT wall time
+  `≤ 50ms` (vs 290ms baseline), measured via `otel-tui` span durations on
+  the first post-fork dispatch; hypothesis confirmed or falsified in the
+  landing commit message.
+
+### Metal pipeline-state XPC edge case
+
+- **What**: Per `project_metal_fork_issue` memory, rare forks still hit
+  `MTLCompilerService` after the `.metalar` archive path landed. INVESTIGATE.
+- **Why**: Flaky crashes in parallel workers — hard to reproduce, hard to debug.
+- **How**:
+  - Instrument `acpp-metal-archive-build` return codes under stress.
+  - Log every archive-build-and-load cycle to isolate the miss.
+- **Done when**: Either the edge case is reproducible on demand (then fixable),
+  or the stress run over 8 workers × 20 iterations shows zero
+  `MTLCompilerService` errors.
+
+### Cold-cache fork crash on sort_kv_i32 / sort_kv_i64
+
+- **What**: Fresh backend + fresh JIT cache crashes in
+  `-[_MTLFunction newArgumentEncoderWithBufferIndex:]` the first time the
+  int-kv radix kernel is dispatched post-fork (`asi: crashed on child side of
+  fork pre-exec`). Second run warms the `.metalar` archive and the dispatch
+  succeeds (sort_int4 @ 100K = 1.70x WIN, sort_int8 @ 100K = 1.47x WIN after
+  warmup). The f32 / f64 paths compile into the same
+  `sycl_radix_sort_kv_u32` kernel but their SSCP caller-hash differs, so each
+  type needs its own archive build. MAJOR (fork-safety regression).
+- **Why**: Violates the "zero crashes on verification matrix" ship bar.
+- **How**: Warm every radix specialisation (u32, i32, i64, u64, f32 + f64
+  bit-cast variants) at `_PG_init` via a tiny dry-run dispatch on 16 elements,
+  so the archive builder runs before any user query can fork.
+- **Done when**: 100 iterations × fresh JIT cache × every radix specialisation
+  (u32 / i32 / i64 / u64 / f32 / f64); zero crashes, zero
+  `MTLCompilerService` errors across the matrix.
+
+### Out-of-order executor overlap for sort / window
+
+- **What**: `src/engine/executor/sort.rs` and `window.rs` force in-order Metal
+  queues; per-DAG dispatch could overlap submit+exec via
+  `submit_queue_wait_for` + `MTLSharedEvent`. MINOR (perf win, not
+  correctness).
+- **Why**: Fills GPU pipeline bubbles — incremental win.
+- **How**: Build a per-DAG scheduler that tracks dependencies via
+  `MTLSharedEvent`; dispatch overlapping submits.
+- **Done when**: Trace spans show overlapping `gpu.sort.*` and downstream
+  spans; wall-time reduction confirmed via bench.
+
+## Phase 7 — Upstream AdaptiveCpp work
+
+The `fork-safe-metal` branch at `792d045e8b218241ef54af74244bf5fa92b2f80f` is
+the ship pin. Items below are fork-local maintenance burden that eventually needs
+to merge upstream (or rebase onto it). **Shipping 1.0 does not require upstream
+merge** — the fork SHA pin is sufficient. Items explicitly flagged "post-1.0" in
+this phase are tracked for hygiene but do not gate the 1.0 tag; they live in the
+"Post-1.0 (deferred)" section cross-referenced below.
+
+### Metal Emitter performance/robustness polish
+
+- **What**: Several Emitter items are correct-but-suboptimal after the Phase 1
+  fixes land:
+  - **uint4 shift decomposition fast paths**: current code always emits a
+    4-lane OR-of-shifts expression. For shift amounts that are multiples of 32,
+    re-add lane-rearrangement special cases inside the new loop for MSL
+    compiler efficiency (not correctness).
+  - **Forward-declaration volume**: emitter emits forward decls for every
+    non-kernel function, which bloats small kernels. Optimize: only emit
+    forward decls for functions referenced from other functions' bodies (not
+    the function that contains them).
+  - **`optnone` performance cost on soft-fp64 bodies**: every
+    `__acpp_sscp_soft_f64_*` / `sf64_*` function is marked `optnone` to
+    prevent InstCombine pattern-matching that would create self-referential
+    `llvm.copysign.f64` calls. Better alternative: find the specific
+    InstCombine pass / sub-pass and disable only it via fine-grained
+    attributes or a custom pre-InstCombine pass that adds `nobuiltin` to every
+    call site. Unlocks the full O3 pipeline for soft-fp64 bodies.
+  - **Third `ReplaceIntrinsics` pass explicit ordering**: the added third
+    `ReplaceIntrinsics` pass runs after `AlwaysInlinerPass`. Verify no
+    subsequent pass can re-introduce LLVM intrinsics. Could formalize with a
+    loop: `while (ReplaceIntrinsics changed) { InstCombine; }` until fixpoint.
+  - **Preservation-pass name-matching robustness**: matches on
+    `__acpp_sscp_soft_f64_*`, `__acpp_sscp_*_f64`, `sf64_*` prefixes. Audit
+    soft-fp64's `src/` for non-prefixed internal C++ names that get through
+    clang's name mangling.
+  MINOR.
+- **Why**: Each item incrementally reduces shader size / compile time / runtime
+  cost. None blocks ship, all are worth landing for a clean upstream PR.
+- **How**: Tackle one item per commit on `fork-safe-metal`; keep each rebaseable.
+- Depends on: Phase 1 Emitter correctness fixes landed.
+- **Done when**: Each item has a dedicated commit; shader size / compile time
+  measured before and after.
+
+### Metal backend fork-safety with fp64 kernels
+
+- **What**: Once Phase 1 Emitter gaps close, every fp64 kernel dispatched from a
+  forked backend must cold-compile without crashing. The `.metalar` binary-archive
+  compat with new `noinline`+`optnone`-attributed functions needs verification.
+  MAJOR.
+- **Why**: If the archive builder misses any preserved function, forked
+  backends could fail pipeline-state creation — same class as the sort_kv
+  crash in Phase 6.
+- **How**:
+  - Run `test_fork`, `test_fork_warmed`, `test_fork_cold` with each fp64
+    kernel under stress after Phase 1 is green.
+  - Confirm `.metalar` archives contain every preserved function.
+- Depends on: Phase 1 Emitter fixes, `just gpu-test` green.
+- **Done when**: 8-worker × 20-iteration fork stress on fp64 kernels shows zero
+  crashes and zero `MTLCompilerService` errors.
+
+### Metal shader compile warnings under `-Wall` / `-Wextra`
+
+- **What**: Current emitter uses `-Wno-unused-function` but doesn't pass
+  `-Wall`. With `optnone` bodies carrying dead stores / redundant loads that
+  the MSL compiler might flag as warnings, a `-Wall` sweep would surface
+  Emitter-level polish work. MINOR.
+- **Why**: Clean warnings matter for upstream submission.
+- **How**: Enable `-Wall` in the MSL compile invocation; triage each warning
+  class.
+- **Done when**: Emitted MSL compiles clean under `-Wall`.
+
+### soft-fp64 adapter coverage matrix
+
+- **What**: The forwarder list in `acpp_metal_math.cpp` has dozens of entries
+  (trig, exp, log, pow, erf, gamma, rounding, hypot, fmod, fract / frexp /
+  modf / ldexp / ilogb, pown / rootn, classification predicates). MAJOR.
+- **Why**: Preservation-pass bugs that escape the name-match rule silently
+  break individual math forwarders; users see `NaN` or link failures at
+  runtime.
+- **How**:
+  - Test each forwarder via a small SYCL kernel that calls it; confirm the
+    body reaches MSL source.
+  - Add a coverage matrix test to the AdaptiveCpp test suite.
+- **Done when**: Every `__acpp_sscp_*_f64` forwarder has a positive-coverage
+  test.
+
+### SLEEF-based math precision validation
+
+- **What**: Once every math forwarder dispatches, cross-check results against
+  CPU soft-fp64 (and MPFR 200-bit oracle) at the ULP tolerances documented in
+  soft-fp64 v1.0 (0 ULP bit-exact for arithmetic / compare, ≤4 ULP u10
+  transcendentals, ≤8 ULP u35 accumulations). MAJOR.
+- **Why**: Gates pg_accel's fp64 matrix bench on bit-correctness.
+- **How**:
+  - Add ULP-diff tests driven by MPFR.
+  - Gate `just bench fp64_matrix` on this suite passing.
+- Depends on: soft-fp64 adapter coverage matrix (Phase 7).
+- **Done when**: Every soft-fp64 math forwarder passes its ULP tolerance test.
+
+### soft-fp64 polish items (non-blocking)
+
+- **What**:
+  - **fenv mode: expose `sf64_fe_*` host-side flag read-back.** Metal
+    libkernel compiles with `-DSOFT_FP64_FENV_MODE=0` (disabled) so no TLS.
+    Exceptions raised inside a GPU kernel are discarded. For parity with host
+    soft-fp64's IEEE flag surface, consider a host-side `sf64_fe_*` API that
+    reads back accumulated flags from a GPU-side buffer (not TLS). pg_accel
+    doesn't need this today; soft-fp64 upstream may want it for other
+    consumers.
+  - **Kernel-signature ABI flags.** Check if `ACPP_METAL_FP64_EXPORT` needs
+    any additional attributes for Metal-mode bitcode — e.g. `uniform`
+    address-space hints, or `AS0` pointer types.
+  MINOR.
+- **Why**: Not blockers; relevant if other consumers of soft-fp64 emerge.
+- **How**: File upstream issues; implement only when asked.
+- **Done when**: Filed or explicitly deferred.
+
+### Metal runtime pg_accel-facing polish
+
+- **What**:
+  - **Drop `ACPP_METAL_KEEP_SOURCE` env gate** once the debug story matures,
+    or promote to a permanent `HIPSYCL_DEBUG_LEVEL=N` behaviour.
+  - **`ACPP_METAL_DUMP_IR` env var**: introduced in the fork commit for
+    dumping the Metal-flavored LLVM IR just before MetalEmitter runs. Keep as
+    a permanent debug knob; consider gating by `HIPSYCL_DEBUG_LEVEL` instead
+    of its own env.
+  - **Metal `-fno-fast-math` semantics**: AdaptiveCpp's base class has a
+    `setFastMathFunctionAttribs` call (`LLVMToBackend.cpp:411`) that the
+    Metal backend inherits. Verify fp64 bodies get `fast=false` so soft-fp64
+    correctness isn't broken by contraction / reassociation.
+  - **Metal buffer-argument indexing**: with arg-struct mode triggered above
+    `maxArgsForFlatMode`, forwarders that chain through many args may hit the
+    Metal 31-buffer limit. Not observed yet; flag for scale testing.
+  MINOR.
+- **Why**: Debug UX + scale-test resilience.
+- **How**: Address one per commit; gate any env-var rename behind a deprecation
+  warning.
+- **Done when**: Debug env vars consolidated, fp64 fast-math verified, Metal
+  buffer limit measured at scale.
+
+### Cross-backend parity: CUDA / ROCm / L0
+
+- **What**: The soft-fp64 integration targets Metal, but AdaptiveCpp's
+  Metal-specific CMake + Emitter changes must not affect other backends.
+  MAJOR (regression risk).
+- **Why**: Shipping a Metal fix that silently corrupts CUDA results is a
+  disaster.
+- **How**: Run `test_reduce_stats` on a native-fp64 device (e.g. an NVIDIA or
+  AMD box) and confirm bit-for-bit equivalence with pre-changes output.
+- **Done when**: CUDA / ROCm / L0 CI (or a manual run on each) shows no
+  regression vs the pre-fork-safe-metal baseline.
+
+### Rebasing onto AdaptiveCpp upstream (post-1.0)
+
+- **What**: `fork-safe-metal` is based on `c86d474a` from 2026-04. Upstream
+  has moved; periodic rebase needed. Blockers: upstream may have refactored
+  `GlobalInliningAttributorPass` or `ReplaceIntrinsics` in ways that conflict
+  with the diffs. MINOR (hygiene). **Post-1.0.**
+- **Why**: Fork-local maintenance burden grows with each upstream commit. Not
+  a ship blocker — the pinned SHA is frozen for 1.0.
+- **How**: Maintain a rebase-diary in `fork-safe-metal` commit history; rebase
+  once per quarter, or when upstream ships a relevant feature.
+- **Done when**: Rebased onto current upstream; conflicts resolved and tested.
+
+### Submit Emitter fixes back upstream (post-1.0)
+
+- **What**: The struct-order fix (`emitEarlyFp64Helpers`), the arbitrary
+  i128-shift support, the forward-decl emission, and the Emitter
+  undef-placeholder fix are generally useful — not Metal-specific. MINOR
+  (hygiene). **Post-1.0.**
+- **Why**: Stops them being fork-local maintenance burden. Not a ship blocker
+  — pg_accel ships against the fork SHA.
+- **How**: Write individual PRs against upstream AdaptiveCpp for each item.
+- **Done when**: PRs submitted; either merged or upstream triage complete.
+
+## Phase 8 — Build / toolchain polish
+
+Non-blocking build / toolchain items surfaced during the fp64-unlock plan.
+None gates ship but each is a papercut that adds up for new contributors.
+
+### AdaptiveCpp `default-targets` JSON generator drops list separators
+
+- **What**: AdaptiveCpp's cmake template substitutes `${DEFAULT_TARGETS}`
+  directly into a JSON string (`"default-targets" : "${DEFAULT_TARGETS}"`) at
+  `AdaptiveCpp/CMakeLists.txt:672`; a CMake list value like `omp;metal`
+  expands to `"ompmetal"` in `$HOME/local/etc/AdaptiveCpp/acpp-core.json`,
+  which acpp then rejects with `Unknown backend: ompmetal`. Additionally,
+  `acpp` only accepts `omp|cuda|hip|sscp|generic` as target names — `metal`
+  is not a compile-time target; Metal runs via `generic` SSCP + runtime JIT.
+  Current workaround in `Justfile:139` passed `'-DDEFAULT_TARGETS=omp;metal'`
+  which both mis-escaped and used the wrong name. Current fix: pass
+  `-DDEFAULT_TARGETS=generic` (matches the existing `--acpp-targets=generic`
+  reference in `Justfile:149`). MINOR.
+  Surfaced by: W1 during fp64-unlock plan.
+- **Why**: Any dev rebuilding AdaptiveCpp with a multi-backend config hits
+  this; current fix works around it but the upstream bug is real.
+- **How**: Patch AdaptiveCpp's template to use `string(REPLACE ";" "\";\""
+  ...)` before JSON substitution; upstream a fix so semicolon-lists serialize
+  correctly.
+- **Done when**: Upstream AdaptiveCpp accepts `-DDEFAULT_TARGETS=omp;metal`
+  (or equivalent multi-target) without mis-escaping.
+
+### `just setup-gpu-acpp` SIGPIPE under `set -euo pipefail`
+
+- **What**: `"$ACPP_PREFIX/bin/acpp-info" | head -8` triggers SIGPIPE 141
+  because `acpp-info` writes more than 8 lines and `head` closes stdin early;
+  under the recipe's `set -euo pipefail` this fails the entire
+  `setup-gpu-acpp`. Location: `Justfile:145`. MINOR.
+  Surfaced by: W1 during fp64-unlock plan.
+- **Why**: Broken setup recipe on a clean machine.
+- **How**: Use `awk 'NR<=8'` (reads all input) instead of `head -8`, or wrap
+  with `|| true`.
+- **Done when**: `just setup-gpu-acpp` runs clean on a fresh machine.
+
+### Stale "Metal has no fp64" comment in fused_ops.cpp
+
+- **What**: Comment claims Metal has no fp64 but post-adapter this is false
+  (AdaptiveCpp soft-fp64). Location: `pgaccel-kernels/src/fused_ops.cpp:67`.
+  MINOR.
+  Surfaced by: W2 during fp64-unlock plan.
+- **Why**: Misleads readers.
+- **How**: Delete or rephrase — say the fp32 path is used for speed when
+  soft-fp64 overhead isn't worth the precision gain.
+- **Done when**: Comment reflects reality.
+
+### Test files still reference renamed `has_fp64` field
+
+- **What**: `test_device.cpp` and `test_fork_cold.cpp` reference the struct
+  field `has_fp64` which was renamed to `has_native_fp64` under W2's owned
+  header. Leaving them would break the C++ test build, so W2 renamed the
+  field uses in both test files even though `pgaccel-kernels/test/` was not
+  explicitly in the owned list. Locations:
+  `pgaccel-kernels/test/test_device.cpp`,
+  `pgaccel-kernels/test/test_fork_cold.cpp`. MINOR / process note.
+  Surfaced by: W2 during fp64-unlock plan.
+- **Why**: Future ABI renames should include test/ in the owned-file set.
+- **How**: Add `pgaccel-kernels/test/` to the owned list for ABI-rename tasks
+  in future dispatcher briefs.
+- **Done when**: Dispatcher convention documented; no action needed on the
+  file itself (already renamed).
+
+### ✅ Cost-model re-export rename for availability helper
+
+- **What**: `engine::cost::mod` re-exported `platform_has_fp64`, which no
+  longer exists after `availability.rs` renamed the fn to
+  `platform_has_native_fp64`. Location: `engine/cost/mod.rs:14`. BLOCKER
+  (compile-time).
+  Surfaced by: W3 during fp64-unlock plan.
+- **Why**: Crate didn't compile until fixed.
+- **How**: Rename the re-export to `platform_has_native_fp64`.
+- Resolved: W4 fp64-unlock follow-up.
+
+### ✅ Planner hook callers for `cost::platform_has_fp64`
+
+- **What**: Two planner sites called the old name; both would fail to compile
+  after the W3 rename. Locations:
+  `engine/ffi/planner_hooks/rel_pathlist.rs:573`,
+  `engine/ffi/planner_hooks/mod.rs:3030`. BLOCKER (compile-time).
+  Surfaced by: W3 during fp64-unlock plan.
+- **Why**: Same compile block as the mod.rs re-export.
+- **How**: Rename call sites to `cost::platform_has_native_fp64()`. Broader
+  open question (W4's job): whether these fp64-skip gates should be deleted in
+  favour of the new `pg_accel.fp64_enabled` GUC + soft-fp64 unconditional
+  dispatch.
+- Resolved: W4 fp64-unlock follow-up.
+
+### ✅ Sort executor Rust-side fp64 skip-gate
+
+- **What**: `executor/sort/mod.rs:917` called the deleted
+  `gpu::device_has_fp64_cached()` to bail out of f64-key GPU sort. The helper
+  is gone as of W3. Location: `engine/executor/sort/mod.rs:917`. BLOCKER
+  (compile-time).
+  Surfaced by: W3 during fp64-unlock plan.
+- **Why**: Same compile block.
+- **How**: Delete the `!gpu::device_has_fp64_cached()` branch entirely —
+  f64-key sort dispatches unconditionally (soft-fp64 on Metal handles double
+  comparisons correctly).
+- Resolved: W4 fp64-unlock follow-up.
+
+### ✅ Reduce / HashAgg planner paths compute `uses_fp64` from agg Oid
+
+- **What**: `engine/ffi/planner_hooks/partial_agg.rs:245` and sibling
+  non-parallel agg paths computed GPU cost without checking whether the
+  accumulator was fp64 (SUM/AVG/STDDEV over `FLOAT8OID`, AVG over any type
+  that uses f64 transtype). On soft-fp64 GPUs this under-estimated GPU cost
+  and routed fp64 aggregates to the slow path. Location:
+  `engine/ffi/planner_hooks/partial_agg.rs:245`. MAJOR.
+  Surfaced by: W4 during fp64-unlock plan.
+- **Why**: Parity-floor violation on soft-fp64 agg queries.
+- **How**: Inspect the AggOp list, set `uses_fp64 = any agg uses f64
+  transtype`, multiply per-row gpu_cost by `soft_fp64_cost_multiplier` when
+  `!limits.has_native_fp64`.
+- Resolved: W4 fp64-unlock follow-up wired `agg_uses_fp64` classification
+  into both cost sites. Non-parallel / grouped agg body:
+  `engine/ffi/planner_hooks/mod.rs:1770-1930` collects `agg_uses_fp64` from
+  `aggref_ref.aggtranstype == FLOAT8OID || typid == FLOAT8OID ||
+  aggref_ref.aggtype == FLOAT8OID || op == AggOp::Avg` and applies
+  `cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, limits)` before
+  computing `reduce_cost`. Parallel partial-agg site:
+  `engine/ffi/planner_hooks/partial_agg.rs:253` classifies via
+  `partial_cols.iter().any(|c| transtype_oid == FLOAT8OID) ||
+  agg_descs.iter().any(|(op, _, rtype)| op == Avg || rtype == FLOAT8OID)` and
+  applies the same penalty. Verified by
+  `reduce_f64_multiplier_ratio_is_32x`.
+
+### ✅ Adapter `uses_fp64` helper wired into scan path
+
+- **What**: `pg_accel/src/adapters/mod.rs` exposed `uses_fp64(strategy, name)`
+  for per-function fp64 classification (GpuSpatial → true, GpuH3 depends on
+  name, GpuRaster → false). The strategy-level planner hooks didn't call it;
+  spatial / h3 dispatch was decided before the cost model ran and the cost
+  expression hadn't been wired through the multiplier. MAJOR.
+  Surfaced by: W4 during fp64-unlock plan.
+- **Why**: Parity-floor violation on soft-fp64 spatial / h3 queries.
+- **How**: At the GpuSpatial / GpuH3 cost-computing sites in planner_hooks,
+  call `crate::adapters::uses_fp64(strategy, fn_name)` and feed it into the
+  cost equation via `apply_fp64_penalty`.
+- Resolved: W4 fp64-unlock follow-up wired the helper into
+  `engine/ffi/planner_hooks/rel_pathlist.rs` scan path. The site resolves
+  `accel.fn_oid → fn_name` via `pg_sys::get_func_name`, calls
+  `crate::adapters::uses_fp64(strategy, fn_name)`, feeds the bool into
+  `cost::apply_fp64_penalty(per_row_cost_base, fn_uses_fp64, limits)` for the
+  `should_batch` gate, and adds a `rows * (per_row_cost - per_row_cost_base)`
+  overhead term to `raw_total` so the planner sees the soft-fp64 penalty as a
+  higher total_cost. Verified by `spatial_uses_fp64_and_gets_multiplier` and
+  `h3_latlng_uses_fp64_and_gets_multiplier`.
+
+### `-ffast-math` per-file opt-outs
+
+- **What**: `raster_ops.cpp`, `spatial_predicates.cpp`, and `sort.cpp`
+  compile with `-fno-fast-math` because they depend on IEEE NaN / Inf
+  semantics (NODATA propagation, UNCERTAIN gates, bitonic-sort `+infinity`
+  sentinel). The global default is fast-math. Location:
+  `pgaccel-kernels/CMakeLists.txt`. MINOR (documentation / maintenance).
+- **Why**: Any new kernel that uses `isnan` / `isinf` / `isfinite` or
+  `+infinity` as a sort sentinel will silently break if added without the
+  opt-out.
+- **How**: When adding new kernels with NaN/Inf dependencies, add them to the
+  opt-out list; document the rule in CLAUDE.md or kernel header.
+- **Done when**: Documented in CLAUDE.md kernel skill; audit added to
+  code-review checklist.
+
+## Phase 9 — Verification matrix
+
+Not yet run end-to-end; required gate before any "pg_accel accelerates all of
+PG" claim. Each item here maps to one or more phases above — complete those
+first, then the check here moves to PASS.
+
+### EXPLAIN (VERBOSE) audit
+
+- **What**: `EXPLAIN (VERBOSE)` must show `Gather` / `Gather Merge` with
+  pg_accel CustomScan inside for: plain `SUM`, `AVG + STDDEV`, `GROUP BY`,
   `ORDER BY`, `ROW_NUMBER() OVER ...`, plain JOIN, JOIN + GROUP BY,
   `IncrementalSort`, `Append` over partitioned tables.
-- Correctness diff (pg_accel on vs off) — identical rows, float aggregates
-  to fp tolerance — for every query in the matrix above.
-- `cargo run -p pg_accel_bench --release -- run --iterations 5 --warmup 2`
-  at 100K / 1M / 10M / 100M. Monotonic perf curve; no regressions vs PG
-  parallel baseline.
-- 8-worker × 20-iteration fork stress on `bench_f32_10m` across
-  {SUM, AVG, STDDEV, grouped HashAgg, sort, window, hashjoin}. Zero
+- **Why**: Without EXPLAIN confirmation, we don't know the planner is actually
+  picking GPU paths.
+- **How**: Build the query matrix in `pg_accel_bench`; assert CustomScan tag
+  in the plan output for each.
+- Depends on: Phases 3, 4 (parallel-path + operator coverage).
+- **Done when**: Every query in the matrix shows CustomScan inside Gather /
+  Gather Merge.
+
+### Correctness diff sweep
+
+- **What**: Correctness diff (pg_accel on vs off) — identical rows, float
+  aggregates to fp tolerance — for every query in the EXPLAIN matrix above.
+- **Why**: GPU-injected plans must be bit-correct vs native PG.
+- **How**: Run each query twice (pg_accel off, on); diff result sets; fp
+  aggregates within tolerance.
+- Depends on: Phases 1, 2, 3.
+- **Done when**: Every query diffs to zero (or within documented tolerance).
+
+### Benchmark sweep
+
+- **What**: `cargo run -p pg_accel_bench --release -- run --iterations 5
+  --warmup 2` at 100K / 1M / 10M / 100M. Monotonic perf curve; no regressions
+  vs PG parallel baseline.
+- **Why**: Benchmark Rule #11 — no regression disguised as parity, no cell
+  below PG parallel, no planner-decline-as-parity cheat.
+- **How**: Run the bench; compare vs prior baseline; investigate any
+  regression. For each cell, capture the `EXPLAIN VERBOSE` output AND the
+  `pg_accel_stats()` counter delta around the query — both must confirm GPU
+  dispatch.
+- Depends on: Phases 1, 2, 3, 4, 5, 6.
+- **Done when**: Every (workload, size) cell ≥ PG parallel **via Custom Scan
+  selection**, verified by (a) `EXPLAIN VERBOSE` showing a `CustomScan` tag in
+  the plan output and (b) `pg_accel_stats()` hook-injection counter
+  incrementing across the query; no cell below baseline; no
+  `min_batch_size` raised vs prior release; no monotonicity violations.
+  Bench driver captures all three signals (wall time, EXPLAIN snippet, stats
+  delta) per cell into a report artifact.
+
+### 8-worker × 20-iteration fork stress
+
+- **What**: 8-worker × 20-iteration fork stress on `bench_f32_10m` across
+  `{SUM, AVG, STDDEV, grouped HashAgg, sort, window, hashjoin}`. Zero
   crashes, zero `MTLCompilerService` errors.
-- `grep -r "CPU fallback\|Deferred"` — zero kernel-failure Deferred
+- **Why**: Validates fork-safety end-to-end.
+- **How**: Build bench recipe; run; aggregate crash + XPC-error counts.
+- Depends on: Phases 1, 6, 7.
+- **Done when**: Zero crashes, zero XPC errors across the stress run.
+
+### No silent kernel-failure Deferred paths
+
+- **What**: `grep -r "CPU fallback\|Deferred"` — zero kernel-failure Deferred
   results; input-gate Deferred for unsupported types is OK but must be
-  explicit (not a silent skip).
-- `pg_accel_stats()` sanity after a workload: hook-injection count >
-  skip-by-gate count; GPU failure counter == 0.
+  explicit.
+- **Why**: Silent kernel-failure Deferred violates CLAUDE.md Critical Safety
+  Rule #11 (no CPU fallbacks).
+- **How**: Audit every `Deferred` / fallback site; each must have a comment
+  explaining why (and for input-gate cases, a test).
+- **Done when**: Grep shows every Deferred is input-gate with a comment;
+  kernel-failure Deferreds are all resolved into either proper errors or
+  kernel fixes.
 
-## GPU / Metal (fork-safe-metal branch)
+### `pg_accel_stats()` sanity
 
-- **Soft-fp64 for Metal: external dep integration.** Math bodies live in a
-  separate repo and are consumed via `find_package(acpp_metal_fp64)`, gated
-  on `ACPP_METAL_EXTERNAL_FP64` in
-  `AdaptiveCpp/src/libkernel/sscp/metal/CMakeLists.txt`. ABI contract in
-  `AdaptiveCpp/src/libkernel/sscp/metal/float64/README.md`. Once the dep
-  ships: install it, configure AdaptiveCpp with `-DACPP_METAL_EXTERNAL_FP64=ON`,
-  rebuild, reinstall to `~/local`. pg_accel fp64 gates
-  (`caps.has_fp64`/`platform_has_fp64()`, 7 call sites marked with
-  `ACPP_METAL_EXTERNAL_FP64` pointer comments) flip automatically.
+- **What**: After a workload run, `pg_accel_stats()` shows hook-injection
+  count > skip-by-gate count; GPU failure counter == 0.
+- **Why**: Cheap automated smoke test that the planner hooks fired and no
+  kernels errored.
+- **How**: Add to bench harness post-run assertion.
+- **Done when**: Assertion passes after every bench sweep.
 
-- **Atomic64 on Metal: re-enable after MSL-2.4+ emitter fix.** Currently
-  advertised as `false` in
-  `AdaptiveCpp/src/runtime/metal/metal_hardware_manager.cpp` because the
-  SSCP MSL emitter emits program-scope simdgroup builtins that `xcrun metal`
-  only accepts under its permissive default dialect — which rejects
-  `atomic_fetch_add_explicit` on `device atomic<ulong>*`. Fix: move the
-  `__simd_size [[threads_per_simdgroup]]` declarations into kernel function
-  signatures (MSL 2.4+-compliant), then flip `_supports_atomic64 = true` for
-  Apple8+ at runtime. pg_accel's `bbox_ops.cpp` u32 fallback remains until
-  that lands.
+## Phase 10 — Release prep (1.0 tag)
 
-- **Compensated-fp32 gate audit — deferred in favor of external fp64 dep.**
-  If soft-fp64 perf is insufficient (~1/32× fp32 on Metal), replace each
-  f64-gated path with an f32 alternative: reduce (sum/sum_sq/stats/multi),
-  sort f64 keys (u64 bit-pattern), hash-join f64 keys (u64 bit-pattern),
-  spatial (Shewchuk adaptive), bbox (fp32+ε-pad), h3 res≥12 (recentered
-  projection). Estimated ~5 new kernel files, ~800 LOC.
+Final items that block the 1.0 tag once all prior phases are green. Create
+this in the release commit; do not land piecemeal.
 
-- **OOQ executor overlap for sort / window.**
-  `src/engine/executor/sort.rs` and `window.rs` force in-order Metal
-  queues; per-DAG dispatch could overlap submit+exec via
-  `submit_queue_wait_for` + `MTLSharedEvent`. Perf win, not correctness.
+### CHANGELOG.md update
 
-- **-ffast-math per-file opt-outs (pgaccel-kernels/CMakeLists.txt).**
-  `raster_ops.cpp`, `spatial_predicates.cpp`, and `sort.cpp` compile with
-  `-fno-fast-math` because they depend on IEEE NaN/Inf semantics
-  (NODATA propagation, UNCERTAIN gates, bitonic-sort `+infinity` sentinel).
-  Before adding new kernels that call `isnan`/`isinf`/`isfinite` or rely
-  on `+infinity` as a sort sentinel, add them to that opt-out list — the
-  global default is fast-math.
+- **What**: Populate `[Unreleased]` section with the full set of changes since
+  `[0.1.0] - 2026-03-28`. Keep-a-Changelog format.
+- **Why**: Users need a readable change summary.
+- **How**: Walk `git log` since 0.1.0; bucket commits by fix/feat/perf/chore;
+  summarise user-visible changes, breaking changes, upgrade notes.
+- **Done when**: CHANGELOG.md `[Unreleased]` section reviewed and ready to
+  rename to `[1.0.0]` at tag time.
 
-- **Cold-cache fork crash on sort_kv_i32 / sort_kv_i64.** Fresh backend +
-  fresh JIT cache crashes in `-[_MTLFunction newArgumentEncoderWithBuffer
-  Index:]` the first time the int-kv radix kernel is dispatched post-fork
-  (`asi: crashed on child side of fork pre-exec`). Second run warms the
-  `.metalar` archive and the dispatch succeeds (sort_int4 @ 100K = 1.70x
-  WIN, sort_int8 @ 100K = 1.47x WIN after warmup). The f32 / f64 paths
-  compile into the same `sycl_radix_sort_kv_u32` kernel but their SSCP
-  caller-hash differs, so each type needs its own archive build. Fix:
-  warm every radix specialization (u32, i32, i64, u64, f32+f64 bit-cast
-  variants) at `_PG_init` via a tiny dry-run dispatch on 16 elements, so
-  the archive builder runs before any user query can fork.
+### ARCHITECTURE.md update
+
+- **What**: Sync with current reality. Known-stale sections per the plan:
+  `ARCHITECTURE.md:203, 358, 379` — fp32-fast-path + fp64-CPU-recheck story
+  no longer true post soft-fp64 adapter; AdaptiveCpp backend list should
+  reflect the `fork-safe-metal` pin.
+- **Why**: Docs that lie about the architecture are worse than no docs.
+- **How**: Read each stale line; rewrite to match post-fp64-unlock reality.
+- Depends on: Phase 1 (soft-fp64 path actually working).
+- **Done when**: ARCHITECTURE.md matches current code; every section cited
+  checks out against `file:line` in the repo.
+
+### CLAUDE.md update
+
+- **What**: Sync Skill Router, GUC table, critical safety rules with any
+  changes landed during Phase 1–9.
+- **Why**: Agents rely on CLAUDE.md; drift causes bad suggestions.
+- **How**: Full pass after Phase 9 green; update GUC defaults, kernel lists,
+  Skill Router entries.
+- **Done when**: CLAUDE.md reviewed top-to-bottom; every claim verifiable
+  from the code.
+
+### Documentation parity test
+
+- **What**: CI step that greps every `file:line` citation in CLAUDE.md,
+  ARCHITECTURE.md, and TODO.md and fails if any is missing, off-by-more-than-a-few,
+  or moved in the source tree. MAJOR.
+- **Why**: The reviewer-enforced "cite `file:line` for code claims" rule
+  (anti-cheat §10) is only as good as the staleness check. Unverified citations
+  rot silently and turn the docs into confident-sounding fiction.
+- **How**:
+  - Add a `just doc-parity` recipe that shells to a small Rust (or shell)
+    script: extract every `<path>:<line>` pattern from the three doc files,
+    run `sed -n "<line>p" <path>" | grep -qE '<expected-symbol>'` where the
+    expected symbol is pulled from the context of the citation (prefix word
+    / function name adjacent in the doc).
+  - Wire it into `just ci`.
+  - First run: fix or update every stale citation found; baseline from there.
+- **Done when**: `just doc-parity` is part of `just ci`; zero stale
+  citations on `main`.
+
+### License audit + NOTICE
+
+- **What**: Ship a NOTICE file that attributes every bundled third-party
+  license, and a `cargo deny` + `cargo audit` run that passes against the
+  `fork-safe-metal` SHA pin. BLOCKER (legal).
+- **Why**: soft-fp64 is MIT-licensed; AdaptiveCpp is BSD-2; SLEEF (inside
+  soft-fp64's transcendental bodies) is Boost-1.0. Shipping binaries that
+  bundle these requires attribution — the soft-fp64 dependency is a new
+  addition vs 0.1.0 and creates a legal obligation that didn't exist before.
+- **How**:
+  - Create `NOTICE` at repo root listing every bundled third-party license:
+    - soft-fp64 (MIT) — bodies compiled into the `.metallib` cache
+    - AdaptiveCpp (BSD-2) — runtime + compiler toolchain
+    - SLEEF (Boost-1.0) — transcendental math bodies inside soft-fp64
+    - PostgreSQL (PostgreSQL License) for FFI headers
+    - pgrx (MIT / Apache-2.0) — extension framework
+  - Extend `deny.toml` with explicit allow entries for MIT, BSD-2-Clause,
+    Boost-1.0, PostgreSQL, Apache-2.0; fail on anything else.
+  - Add a `cargo audit` step to `just ci` for vulnerability scanning
+    (separate from `cargo deny`'s licence + advisory check).
+  - Verify `cargo deny check` passes against the current fork pin.
+- **Done when**: `cargo deny check` passes on the fork-safe-metal pin;
+  `cargo audit` reports no known vulnerabilities; NOTICE lists every
+  bundled third-party license with its SPDX identifier and source location.
+
+### GitHub Actions / cross-platform CI workflow
+
+- **What**: GHA workflow: `macos-14` arm64 runner executes full `just ci`
+  (fmt, clippy, deny, audit, pgrx tests, doc-parity, gpu-test, bench
+  smoke); `ubuntu-latest` x86_64 runner executes `build + check` without GPU
+  tests; CUDA smoke tests gated on self-hosted-runner availability (not
+  required for 1.0 green). BLOCKER.
+- **Why**: The "clean `just ci`" ship bar is local-only today. Any agent or
+  contributor can assert it passes without anyone else verifying. Cross-platform
+  CI is the baseline gate that makes "just ci green" enforceable.
+- **How**:
+  - Add `.github/workflows/ci.yml` with two jobs:
+    - `mac-arm64`: `runs-on: macos-14`, installs brew deps + AdaptiveCpp pin,
+      runs `just ci`, uploads bench smoke artifact.
+    - `linux-x86`: `runs-on: ubuntu-latest`, installs PG17 + Rust, runs
+      `cargo check --all-features` and `cargo test` (skipping GPU tests via
+      an env gate).
+    - `cuda-smoke`: optional, `runs-on: [self-hosted, cuda]`, skipped if
+      runner unavailable.
+  - Wire branch-protection to require `mac-arm64` and `linux-x86` green.
+  - Cache Rust target dir, AdaptiveCpp build, pgrx data dir between runs.
+- **Done when**: `ci.yml` lives in `.github/workflows/`; a clean push to
+  `main` runs both required jobs green; branch protection blocks merges on
+  red.
+
+### Extension SQL + control-file parity for 1.0.0
+
+- **What**: Bump extension version from `0.1.0` → `1.0.0` in the control
+  file, write the `pg_accel--0.1.0--1.0.0.sql` migration script, and verify
+  `ALTER EXTENSION pg_accel UPDATE` works end-to-end against an installed
+  0.1.0. BLOCKER.
+- **Why**: The current "smoke test" says `just package` but doesn't verify
+  that installed users can upgrade in place. Shipping a breaking SQL schema
+  without a migration script is a wire-protocol break for anyone on 0.1.0.
+- **How**:
+  - Update `pg_accel.control` with `default_version = '1.0.0'`.
+  - Generate `pg_accel--1.0.0.sql` (fresh install schema) via `cargo pgrx
+    schema`.
+  - Hand-write `pg_accel--0.1.0--1.0.0.sql` migration covering every
+    `CREATE FUNCTION` / `DROP FUNCTION` / signature change between the two
+    versions. Walk `git log pg_accel--0.1.0.sql` for the diff.
+  - Add a CI step: install the 0.1.0 `.so` + SQL into a throwaway cluster,
+    create the extension, then install the 1.0.0 `.so` and run
+    `ALTER EXTENSION pg_accel UPDATE`; assert no errors.
+  - Add a matching downgrade path only if feasible (often isn't — that's OK,
+    but document it).
+- **Done when**: `ALTER EXTENSION pg_accel UPDATE` against a live 0.1.0
+  cluster lands at `1.0.0` with no errors; fresh `CREATE EXTENSION
+  pg_accel` against the 1.0.0 `.so` also succeeds; CI step runs both paths.
+
+### CI infrastructure
+
+- **What**: Ensure `just ci` is green on a fresh machine: fmt, clippy
+  `-D warnings`, cargo deny, cargo audit, pgrx test suite, cargo check
+  all-features, doc-parity, gpu-test.
+- **Why**: The ship bar.
+- **How**: Run `just ci` on a clean checkout; fix every failure. Cross-check
+  via the GHA workflow.
+- Depends on: Every prior phase; GitHub Actions workflow (Phase 10).
+- **Done when**: `just ci` green locally AND on GHA with no warnings, no
+  skips, no `#[ignore]`.
+
+### Smoke test on fresh machine
+
+- **What**: Clean clone → `just setup-gpu-acpp` → `just package` → install →
+  `just bench`. No manual intervention, no missing-dep errors.
+- **Why**: Catches environment assumptions we've been cheating on locally.
+- **How**: Spin up a fresh M-series VM or reset `~/local`; run the sequence.
+- Depends on: Phase 8 (Justfile / toolchain fixes); Extension SQL parity
+  (Phase 10).
+- **Done when**: Fresh-machine sequence runs clean end-to-end including
+  `CREATE EXTENSION pg_accel` and a representative bench.
+
+### Release checklist / pre-flight gate
+
+- **What**: Consolidated checklist requiring every `✅` across Phases 1–10
+  and every item in the ship bar before the tag is cut. BLOCKER (process).
+- **Why**: Release discipline. Prevents accidentally shipping with a yellow
+  Phase 2 or a skipped Phase 9 item.
+- **How**: Maintain a checklist at `docs/release-checklist-1.0.md` mirroring
+  the phase structure. Before tagging, every item must have either a ✅
+  header in TODO.md or an explicit "not required for 1.0" annotation. The
+  tag PR description pastes the checklist with each box ticked, linking to
+  the commit SHA that closed it.
+- Depends on: every prior phase.
+- **Done when**: Every item in `docs/release-checklist-1.0.md` is ticked
+  with a commit SHA; checklist pasted into the tag PR; maintainer sign-off
+  in the PR body.
+
+### Pre-1.0 tag
+
+- **What**: Cut `v1.0.0-rc1` tag; if no critical bugs surface in 1 week,
+  promote to `v1.0.0`.
+- **Why**: Release discipline.
+- **How**: Tag, push, announce, monitor bug tracker.
+- Depends on: Release checklist (Phase 10).
+- **Done when**: `v1.0.0` tag exists on `main`; release notes published;
+  GHA release workflow uploads the `.so` + SQL artifacts.
+
+## Post-1.0 (deferred)
+
+Items explicitly descoped from the 1.0 ship bar. Tracked here so the audit
+trail isn't broken; do not gate 1.0 on any of them.
+
+### NUMERIC multi-limb accumulator kernel (Option A)
+
+- **What**: The ship-now fix in Phase 2 routes NUMERIC columns through PG via a
+  classification gate. The long-term fix is a custom multi-limb accumulator
+  kernel that matches PG's NUMERIC on-disk representation.
+- **Why deferred**: Correctness is already handled by the gate. Kernel is
+  significant work with maintainability cost; premature for 1.0.
+- **Expected trigger**: Demand from a user workload that can't afford the
+  CPU-route penalty on NUMERIC aggregates.
+
+### SetOp / RecursiveUnion GPU handling
+
+- **What**: Tagged at `planner_hooks/mod.rs:3384-3385` but no GPU handling.
+- **Why deferred**: Niche; no user demand surfaced. Low expected win.
+- **Expected trigger**: Concrete user query where SetOp / RecursiveUnion is
+  the bottleneck.
+
+### GpuExpr+Scan for BitmapHeapScan
+
+- **What**: Phase 4's BitmapHeapScan item picks the `T_BitmapHeapPath`-wrapping
+  approach. The alternative — emit a GpuExpr+Scan path with the bitmap
+  predicate preserved — is deferred.
+- **Why deferred**: Scope constraint on 1.0; the simpler approach lands the
+  coverage win.
+- **Expected trigger**: Measured cases where bitmap-predicate preservation
+  outperforms the wrapping path.
+
+### AdaptiveCpp upstream rebase
+
+- **What**: Phase 7 "Rebasing onto AdaptiveCpp upstream" — periodic rebase of
+  `fork-safe-metal` onto moving upstream HEAD.
+- **Why deferred**: 1.0 pins the fork SHA. Rebase is hygiene, not a ship
+  blocker.
+- **Expected trigger**: Upstream AdaptiveCpp ships a feature or fix pg_accel
+  wants to pick up.
+
+### AdaptiveCpp upstream PRs
+
+- **What**: Phase 7 "Submit Emitter fixes back upstream" — individual upstream
+  PRs for the generally-useful Emitter fixes.
+- **Why deferred**: 1.0 ships against the fork SHA. Upstreaming is a hygiene
+  step that reduces long-term fork burden.
+- **Expected trigger**: Post-1.0 maintenance cycle.
+
+### soft-fp64 polish items (fenv read-back, ABI flags)
+
+- **What**: See Phase 7 "soft-fp64 polish items (non-blocking)" — host-side
+  `sf64_fe_*` flag read-back, `ACPP_METAL_FP64_EXPORT` attribute audit.
+- **Why deferred**: pg_accel doesn't need either today; relevant only if
+  other soft-fp64 consumers emerge.
+- **Expected trigger**: External consumer request or documented need.

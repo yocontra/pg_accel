@@ -1770,6 +1770,11 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::with_capacity(tlist_len as usize);
     // Track 0-based position of group key Var(s) in the target list.
     let mut group_key_tlist_pos: i32 = -1;
+    // fp64 classification for the soft-fp64 cost multiplier: set to true if
+    // any aggregate in the tlist uses a float8 transition state or operates
+    // on a float8 input column. AVG/STDDEV/VAR all use f64 accumulators,
+    // so they count even when the result isn't FLOAT8OID.
+    let mut agg_uses_fp64 = false;
 
     // SAFETY: tlist is a valid List of TargetEntry (non-partial) or Expr (partial).
     for i in 0..tlist_len {
@@ -1915,9 +1920,20 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         {
             return;
         }
-        // Note: float8 aggregates on non-fp64 GPU (Metal) fall back to CPU
-        // Kahan summation in the agg executor. This is still faster than PG's
-        // per-tuple transition functions thanks to batch columnar extraction.
+        // fp64 classification: this aggregate uses fp64 machinery if either
+        //   (a) its transition state is FLOAT8OID (SUM(float8), SUM(float4),
+        //       AVG/STDDEV/VAR on any numeric type — all of which store f64
+        //       accumulators);
+        //   (b) its input Var / expression produces FLOAT8OID; or
+        //   (c) the aggregate's result type is FLOAT8OID (float8 AVG, etc.).
+        // Any one triggers the soft-fp64 multiplier in the cost equation.
+        let this_agg_f64 = u32::from(aggref_ref.aggtranstype) == AGG_FLOAT8OID
+            || typid == AGG_FLOAT8OID
+            || u32::from(aggref_ref.aggtype) == AGG_FLOAT8OID
+            || matches!(op, AggOp::Avg);
+        if this_agg_f64 {
+            agg_uses_fp64 = true;
+        }
         agg_descs.push((op, attno, u32::from(aggref_ref.aggtype)));
     }
 
@@ -2007,10 +2023,21 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // Per-row cost: vectorized paths (self-scan or fused GpuExpr child)
     // do direct heap walk + columnar extract, eliminating ExecProcNode
     // and MinimalTuple overhead. Same architecture as hash join.
-    let agg_per_row = if is_vectorized { 0.001 } else { 0.005 };
+    let agg_per_row_base = if is_vectorized { 0.001 } else { 0.005 };
+    // Apply the soft-fp64 cost multiplier when any aggregate in the tlist
+    // uses fp64 accumulation and the device lacks native fp64 (Apple
+    // Silicon / Metal without hardware fp64). The emulated fp64 arithmetic
+    // runs ~1/32 native fp32 throughput, so the per-row GPU cost scales up
+    // accordingly. Applied to the reduce (agg) component; launch overhead
+    // is unchanged. Both plain `GpuReduce` and `GpuHashAgg` paths go
+    // through this site — one fix covers both.
+    let agg_per_row =
+        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits());
     // For grouped agg, add hash table build + probe + per-group
     // accumulation cost per row. GPU batched hash reduction is cheap
-    // (bitonic partition + segmented reduce), so this is low.
+    // (bitonic partition + segmented reduce), so this is low. The hash
+    // overhead itself is integer work (probe + compare), so it is NOT
+    // subject to the fp64 penalty — only the value accumulation is.
     let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
     let reduce_cost = base.rows * (agg_per_row + hash_overhead);
     // For self-scanning paths, compute our own scan cost instead of
@@ -3026,9 +3053,14 @@ pub(super) unsafe fn find_equi_join_key(
             _ => continue,  // Unsupported key type
         };
 
-        // Gate: Skip Float64 join keys when GPU lacks native fp64.
-        if key_type == 2 && !cost::platform_has_fp64() {
-            pgrx::debug1!("pg_accel join: float64 key skipped — GPU lacks fp64");
+        // User-facing escape valve: `pg_accel.fp64_enabled=false` fully
+        // bypasses GPU injection for fp64 join keys. Soft-fp64 on Metal is
+        // otherwise always correct; the cost model penalises fp64 op cost
+        // on devices without native fp64 (see
+        // DeviceLimits::soft_fp64_cost_multiplier) so the planner naturally
+        // prefers PG when the soft-fp64 penalty wipes out the GPU win.
+        if key_type == 2 && !crate::fp64_enabled() {
+            pgrx::debug1!("pg_accel join: float64 key skipped — fp64_enabled=false");
             continue;
         }
 

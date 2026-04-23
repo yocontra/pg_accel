@@ -108,39 +108,12 @@ pub fn get_caps() -> PgaccelPlatformCaps {
     unsafe { bridge::pgaccel_get_caps() }
 }
 
-/// Cached per-process answer to "does the selected GPU support fp64?".
-///
-/// Queried once at first call — subsequent calls are a relaxed atomic load.
-/// Resolved after `ensure_init`, so a zero-initialised caps struct (before
-/// init) appears as `has_fp64 == false`, which matches Metal's behaviour
-/// and keeps callers on the safe f32 path until the device is real.
-///
-/// # Integration with the external soft-fp64 dep (Metal)
-///
-/// Apple GPUs lack hardware fp64. The AdaptiveCpp Metal libkernel can link
-/// an external soft-fp64 implementation via the
-/// `ACPP_METAL_EXTERNAL_FP64_DIR` CMake option (see
-/// `AdaptiveCpp/src/libkernel/sscp/metal/float64/README.md`). When that
-/// path is active, the device caps struct reports `has_fp64 = true`, and
-/// every `if device_has_fp64_cached()` branch in this module begins
-/// dispatching the real fp64 kernel instead of the cast-down fp32
-/// fallback. No call-site logic change needed — the gate flips
-/// transparently.
-pub fn device_has_fp64_cached() -> bool {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    // 0 = not queried, 1 = no fp64, 2 = has fp64.
-    static CACHED: AtomicU8 = AtomicU8::new(0);
-    match CACHED.load(Ordering::Relaxed) {
-        1 => false,
-        2 => true,
-        _ => {
-            let caps = get_caps();
-            let tag = if caps.has_fp64 { 2 } else { 1 };
-            CACHED.store(tag, Ordering::Relaxed);
-            caps.has_fp64
-        }
-    }
-}
+// Historical note: two helpers used to gate every f64 dispatch on native-fp64
+// hardware and have been deleted. fp64 is always available via the
+// AdaptiveCpp soft-fp64 libkernel on Metal, and natively on CUDA/ROCm/L0;
+// `has_native_fp64` on `PgaccelPlatformCaps` / `PgaccelDeviceInfo` is now a
+// cost-model signal only, not a dispatch skip-gate. Call sites below dispatch
+// the fp64 kernel unconditionally.
 
 // ---------------------------------------------------------------------------
 // GPU execution observability
@@ -387,16 +360,6 @@ pub fn sort_kv_i64(keys: &mut [i64], indices: &mut [u32]) -> Option<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Device capability helpers
-// ---------------------------------------------------------------------------
-
-/// Metal has no fp64 support. Always returns `false`.
-#[allow(dead_code)]
-const fn device_has_fp64() -> bool {
-    false
-}
-
-// ---------------------------------------------------------------------------
 // Reduce wrappers
 // ---------------------------------------------------------------------------
 
@@ -434,17 +397,10 @@ pub fn reduce_max_f32(data: &[f32]) -> Option<f32> {
 pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_sum_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
-    if device_has_fp64_cached() {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status =
-            unsafe { bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result) };
-        if status.is_ok() {
-            return Some(result);
-        }
-    }
-    // fp32-only device (Metal): cast to f32 and use f32 kernel.
-    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    reduce_sum_f32(&f32_data).map(f64::from)
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_sum_f64(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result)
 }
 
 /// GPU-accelerated i64 sum reduction.
@@ -461,32 +417,20 @@ pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
 pub fn reduce_min_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_min_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
-    if device_has_fp64_cached() {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status =
-            unsafe { bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result) };
-        if status.is_ok() {
-            return Some(result);
-        }
-    }
-    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    reduce_min_f32(&f32_data).map(f64::from)
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_min_f64(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result)
 }
 
 /// GPU-accelerated f64 max reduction.
 pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::debug_span!("gpu.reduce_max_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
-    if device_has_fp64_cached() {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status =
-            unsafe { bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result) };
-        if status.is_ok() {
-            return Some(result);
-        }
-    }
-    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    reduce_max_f32(&f32_data).map(f64::from)
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_max_f64(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -571,34 +515,22 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
     let mut out_min = 0.0f64;
     let mut out_max = 0.0f64;
     let mut out_count: i64 = 0;
-    if device_has_fp64_cached() {
-        // SAFETY: data is a valid slice; out_* are valid pointers.
-        let status = unsafe {
-            bridge::pgaccel_reduce_multi_f64(
-                data.as_ptr(),
-                data.len(),
-                &raw mut out_sum,
-                &raw mut out_min,
-                &raw mut out_max,
-                &raw mut out_count,
-            )
-        };
-        if status.is_ok() {
-            return Some(ReduceMultiF64 {
-                sum: out_sum,
-                min: out_min,
-                max: out_max,
-                count: out_count,
-            });
-        }
-    }
-    // fp32-only device: cast and use f32 kernel.
-    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    reduce_multi_f32(&f32_data).map(|r| ReduceMultiF64 {
-        sum: f64::from(r.sum),
-        min: f64::from(r.min),
-        max: f64::from(r.max),
-        count: r.count,
+    // SAFETY: data is a valid slice; out_* are valid pointers.
+    let status = unsafe {
+        bridge::pgaccel_reduce_multi_f64(
+            data.as_ptr(),
+            data.len(),
+            &raw mut out_sum,
+            &raw mut out_min,
+            &raw mut out_max,
+            &raw mut out_count,
+        )
+    };
+    status.is_ok().then_some(ReduceMultiF64 {
+        sum: out_sum,
+        min: out_min,
+        max: out_max,
+        count: out_count,
     })
 }
 
@@ -657,9 +589,10 @@ pub fn reduce_count(mask: &[u8]) -> Option<usize> {
 // stats fuses count + sum + sum_sq into one kernel launch over one buffer
 // so partial-agg STDDEV/VARIANCE doesn't pay three reduce passes.
 //
-// On devices lacking fp64 (Metal), the f64 wrappers cast the input down to
-// f32 and dispatch the f32 kernel — this is the GPU fp32 path, not a CPU
-// fallback (mirrors the pattern used by `reduce_sum_f64`).
+// fp64 dispatch is unconditional: on devices without native fp64 (Metal),
+// the AdaptiveCpp soft-fp64 libkernel provides correct IEEE-754 double
+// arithmetic transparently inside the kernel. `has_native_fp64` is now a
+// cost signal only (see `PgaccelPlatformCaps::has_native_fp64`).
 
 /// GPU-accelerated Σ(x²) reduction with f32 input and f64 accumulator.
 /// Returns `None` if GPU is unavailable.
@@ -674,23 +607,14 @@ pub fn reduce_sum_sq_f32(data: &[f32]) -> Option<f64> {
 }
 
 /// GPU-accelerated Σ(x²) reduction with f64 input and f64 accumulator.
-/// On devices lacking fp64, casts to f32 and dispatches the f32 kernel.
 #[must_use]
 pub fn reduce_sum_sq_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::trace_span!("gpu.reduce_sum_sq_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
-    if device_has_fp64_cached() {
-        // SAFETY: data is a valid slice, result is a valid pointer.
-        let status = unsafe {
-            bridge::pgaccel_reduce_sum_sq_f64(data.as_ptr(), data.len(), &raw mut result)
-        };
-        if status.is_ok() {
-            return Some(result);
-        }
-    }
-    // fp32-only device (Metal): cast to f32 and use f32 kernel.
-    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    reduce_sum_sq_f32(&f32_data)
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_sum_sq_f64(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result)
 }
 
 /// GPU-accelerated fused (count, sum, sum_sq) reduction — single pass.
@@ -719,8 +643,7 @@ pub fn reduce_stats_f32(data: &[f32]) -> Option<(u64, f64, f64)> {
 }
 
 /// GPU-accelerated fused (count, sum, sum_sq) reduction — single pass.
-/// Input is f64. On devices lacking fp64, casts to f32 and dispatches the
-/// f32 kernel (Metal fp32 path).
+/// Input is f64.
 #[must_use]
 pub fn reduce_stats_f64(data: &[f64]) -> Option<(u64, f64, f64)> {
     let _span = tracing::trace_span!("gpu.reduce_stats_f64", n = data.len()).entered();
@@ -730,24 +653,17 @@ pub fn reduce_stats_f64(data: &[f64]) -> Option<(u64, f64, f64)> {
     let mut out_count: u64 = 0;
     let mut out_sum: f64 = 0.0;
     let mut out_sum_sq: f64 = 0.0;
-    if device_has_fp64_cached() {
-        // SAFETY: data is a valid slice; out_* are valid pointers.
-        let status = unsafe {
-            bridge::pgaccel_reduce_stats_f64(
-                data.as_ptr(),
-                data.len(),
-                &raw mut out_count,
-                &raw mut out_sum,
-                &raw mut out_sum_sq,
-            )
-        };
-        if status.is_ok() {
-            return Some((out_count, out_sum, out_sum_sq));
-        }
-    }
-    // fp32-only device (Metal): cast to f32 and use f32 kernel.
-    let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    reduce_stats_f32(&f32_data)
+    // SAFETY: data is a valid slice; out_* are valid pointers.
+    let status = unsafe {
+        bridge::pgaccel_reduce_stats_f64(
+            data.as_ptr(),
+            data.len(),
+            &raw mut out_count,
+            &raw mut out_sum,
+            &raw mut out_sum_sq,
+        )
+    };
+    status.is_ok().then_some((out_count, out_sum, out_sum_sq))
 }
 
 // ---------------------------------------------------------------------------

@@ -914,9 +914,7 @@ impl SortExecState {
                     }
                     FLOAT8OID => {
                         let mut f64_keys = f64_keys;
-                        if f64_keys.is_empty() || !gpu::device_has_fp64_cached() {
-                            // No fp64 on device (e.g. Metal without external
-                            // soft-fp64 dep) — defer to PG SortSupport.
+                        if f64_keys.is_empty() {
                             SortOutcome::InputGate
                         } else {
                             let mut gpu_idx: Vec<u32> = (0..f64_keys.len() as u32).collect();

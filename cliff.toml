@@ -21,15 +21,15 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_parsers = [
-    { message = "^feat", group = "Features" },
-    { message = "^fix", group = "Bug Fixes" },
-    { message = "^perf", group = "Performance" },
-    { message = "^refactor", group = "Refactor" },
-    { message = "^test", group = "Testing" },
-    { message = "^doc", group = "Documentation" },
-    { message = "^ci", group = "CI" },
-    { message = "^chore", skip = true },
-    { message = "^build", skip = true },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^test", group = "Testing" },
+  { message = "^doc", group = "Documentation" },
+  { message = "^ci", group = "CI" },
+  { message = "^chore", skip = true },
+  { message = "^build", skip = true },
 ]
 protect_breaking_commits = false
 filter_commits = false

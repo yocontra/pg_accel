@@ -18,7 +18,7 @@ pub struct PlatformProfile {
     /// Maximum single allocation size on the GPU in bytes (0 when no GPU).
     pub gpu_max_alloc_bytes: usize,
     /// Whether the GPU supports native fp64 (double-precision) arithmetic.
-    pub has_fp64: bool,
+    pub has_native_fp64: bool,
 }
 
 impl PlatformProfile {
@@ -71,7 +71,7 @@ impl PlatformProfile {
             estimated_gpu_gflops: estimated_gflops,
             compute_units: device.compute_units,
             gpu_max_alloc_bytes: device.max_alloc_bytes,
-            has_fp64: device.has_fp64,
+            has_native_fp64: device.has_native_fp64,
         }
     }
 }

@@ -112,13 +112,30 @@ setup-gpu-acpp:
         echo "$ACPP_SRC not found; cloning fork-safe-metal from yocontra/AdaptiveCpp"
         git clone -b "$REQUIRED_BRANCH" https://github.com/yocontra/AdaptiveCpp.git "$ACPP_SRC"
     fi
-    BRANCH=$(cd "$ACPP_SRC" && git branch --show-current)
-    if [ "$BRANCH" != "$REQUIRED_BRANCH" ]; then
-        echo "WARNING: $ACPP_SRC is on branch '$BRANCH', not '$REQUIRED_BRANCH'."
-        echo "Metal fork-safety lives on $REQUIRED_BRANCH; proceed only if"
-        echo "you have intentionally rebased or cherry-picked the work."
+    ACPP_REQUIRED_SHA="792d045e8b218241ef54af74244bf5fa92b2f80f"
+    if ! git -C "$ACPP_SRC" merge-base --is-ancestor "$ACPP_REQUIRED_SHA" HEAD 2>/dev/null; then
+        echo "error: AdaptiveCpp at $ACPP_SRC must include SHA $ACPP_REQUIRED_SHA"
+        echo "       run: git -C $ACPP_SRC fetch origin fork-safe-metal && git -C $ACPP_SRC checkout fork-safe-metal && git -C $ACPP_SRC pull --ff-only"
+        exit 1
     fi
     LLVM_PREFIX=$(brew --prefix llvm@20)
+    SOFT_FP64_SRC="${SOFT_FP64_SRC:-$HOME/Projects/soft-fp64}"
+    SOFT_FP64_REQUIRED_TAG="v1.0.0"
+    if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
+        git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" \
+            https://github.com/yocontra/soft-fp64.git "$SOFT_FP64_SRC"
+    fi
+    SOFT_FP64_DESC="$(git -C "$SOFT_FP64_SRC" describe --tags --always)"
+    if [ "$SOFT_FP64_DESC" != "$SOFT_FP64_REQUIRED_TAG" ]; then
+        echo "warning: soft-fp64 at '$SOFT_FP64_DESC', expected '$SOFT_FP64_REQUIRED_TAG' — wiping stale build"
+        rm -rf "$SOFT_FP64_SRC/build"
+    fi
+    cmake -S "$SOFT_FP64_SRC" -B "$SOFT_FP64_SRC/build" \
+        -DCMAKE_BUILD_TYPE=Release -DSOFT_FP64_BUILD_ACPP_METAL_ADAPTER=ON
+    cmake --build "$SOFT_FP64_SRC/build" --target soft_fp64_acpp_metal_stage
+    SOFT_FP64_STAGED_DIR="$SOFT_FP64_SRC/build/adapters/acpp_metal/staged"
+    test -d "$SOFT_FP64_STAGED_DIR" || { echo "soft-fp64 staging dir missing at $SOFT_FP64_STAGED_DIR"; exit 1; }
+    ls "$SOFT_FP64_STAGED_DIR"/*.cpp >/dev/null 2>&1 || { echo "soft-fp64 staged dir empty"; exit 1; }
     mkdir -p "$ACPP_SRC/build"
     cd "$ACPP_SRC/build"
     cmake \
@@ -137,12 +154,13 @@ setup-gpu-acpp:
         -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang" \
         -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
         -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
-        '-DDEFAULT_TARGETS=omp;metal' \
+        -DDEFAULT_TARGETS=generic \
+        -DACPP_METAL_EXTERNAL_FP64_DIR="$SOFT_FP64_STAGED_DIR" \
         ..
     make -j4
     make install
-    echo "AdaptiveCpp ($BRANCH) installed to $ACPP_PREFIX from $ACPP_SRC"
-    "$ACPP_PREFIX/bin/acpp-info" | head -8
+    echo "AdaptiveCpp ($REQUIRED_BRANCH) installed to $ACPP_PREFIX from $ACPP_SRC"
+    "$ACPP_PREFIX/bin/acpp-info" | awk 'NR<=8'
     # Confirm SSCP + archive helper are in place — without these the fork
     # path breaks silently. Better to fail here than at first bench crash.
     "$ACPP_PREFIX/bin/acpp" --acpp-version | grep -q "plugin-with-sscp-compiler: true" || {
@@ -307,4 +325,3 @@ traces:
 # View last N trace entries
 traces-last n="20":
     tail -{{n}} ~/.pgrx/data-17/pg_accel_traces.jsonl | python3 -m json.tool --no-ensure-ascii
-

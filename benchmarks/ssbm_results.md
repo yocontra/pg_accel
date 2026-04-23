@@ -1330,4 +1330,3 @@ All comparisons are against PostgreSQL with parallel workers enabled (the defaul
 | 100K | 0.39 +/- 0.02 | 0.39 +/- 0.01 | **0.99x** | no |
 | 1M | 5.33 +/- 0.15 | 5.42 +/- 0.19 | **1.02x** | no |
 | 10M | 10.46 +/- 0.26 | 10.31 +/- 0.21 | **0.99x** | no |
-

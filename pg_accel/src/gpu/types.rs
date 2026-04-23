@@ -44,6 +44,12 @@ impl PgaccelStatus {
 // ---------------------------------------------------------------------------
 
 /// Per-device information (mirrors `pgaccel_device_info`).
+///
+/// `has_native_fp64` is a pure cost signal: `true` means the device has
+/// hardware fp64 (CUDA/ROCm/L0 tier-1), `false` means fp64 runs via the
+/// AdaptiveCpp soft-fp64 libkernel (e.g. Apple Silicon Metal). Both paths
+/// produce correct IEEE-754 double results — the flag only tells the
+/// planner/cost model that one of them is noticeably slower than fp32.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct PgaccelDeviceInfo {
@@ -51,16 +57,19 @@ pub struct PgaccelDeviceInfo {
     pub backend_name: [c_char; 64],
     pub compute_units: u32,
     pub max_alloc_bytes: usize,
-    pub has_fp64: bool,
+    pub has_native_fp64: bool,
     pub has_atomic64: bool,
     pub is_unified_memory: bool,
 }
 
 /// Platform-level capability summary (mirrors `pgaccel_platform_caps`).
+///
+/// See [`PgaccelDeviceInfo::has_native_fp64`] for the semantics of
+/// `has_native_fp64`: cost hint only, not a skip-gate.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct PgaccelPlatformCaps {
-    pub has_fp64: bool,
+    pub has_native_fp64: bool,
     pub has_atomic64: bool,
     pub has_ooo_queue: bool,
     pub is_unified_memory: bool,
@@ -68,6 +77,12 @@ pub struct PgaccelPlatformCaps {
     pub compute_units: u32,
     pub backend_name: [c_char; 64],
 }
+
+// ABI pins: these sizes must match the C side (`pgaccel_ffi.h`). If either
+// assert fires, the C struct drifted — do NOT bump the numbers here; fix
+// the C struct to match or escalate.
+const _: () = assert!(std::mem::size_of::<PgaccelPlatformCaps>() == 88);
+const _: () = assert!(std::mem::size_of::<PgaccelDeviceInfo>() == 216);
 
 // ---------------------------------------------------------------------------
 // Expression evaluator types (mirrors pgaccel_expr.h).
