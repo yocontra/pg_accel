@@ -138,6 +138,10 @@ Resolved: AdaptiveCpp ea355d63f5f56a7c14a9fe5b8c30393893814985 — poison map in
   `h3_latlng_to_cell@res≥12`, `bbox_f64`, `spatial_f64`. No "incompatible
   operand types" or vector-vs-scalar diagnostics on any of the nine.
 
+### ✅ Metal AS-inference: `device` vs `thread` on intra-module pointer params
+
+Resolved: AdaptiveCpp 579ee8256bae7dba05161158b61a0f586759e762 — pointer-parameter soft-fp64 helpers (frexp, modf, fract, lgamma_r, sincos) now carry `alwaysinline` instead of `noinline`, so the AlwaysInlinerPass eliminates the call boundary; a third `AddressSpaceInferencePass` run after inlining then propagates the caller's concrete AS (thread / device) through the inlined load/store instructions. All fp64 kernels now MSL-compile and launch on the GPU.
+
 ### Metal AS-inference: `device` vs `thread` on intra-module pointer params
 
 - **What**: After the AdaptiveCpp 0992997c emitter fixes (i128 lowering,
