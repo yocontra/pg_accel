@@ -9,9 +9,9 @@ CUDA / ROCm / Level Zero / Metal).
 ## Bundled dependencies
 
 The build links against a forked AdaptiveCpp: `yocontra/AdaptiveCpp` branch
-`fork-safe-metal` at commit `792d045e8b218241ef54af74244bf5fa92b2f80f` (plus
-later fixes tracked in `TODO.md` Phase 1: `667338f74`, `0992997c`,
-`579ee8256`, `ea355d63`). See `NOTICE` for the full third-party
+`fork-safe-metal` at commit `ceb641a535b4706f71ded2690baedaf8cf711b30` (plus
+earlier fixes tracked in `TODO.md` Phase 1: `667338f74`, `0992997c`,
+`579ee8256`, `ea355d63`, `792d045e8b218241ef54af74244bf5fa92b2f80f`). See `NOTICE` for the full third-party
 attribution list (AdaptiveCpp BSD-2-Clause, soft-fp64 MIT, SLEEF BSL-1.0,
 PostgreSQL headers, pgrx MIT/Apache-2.0).
 

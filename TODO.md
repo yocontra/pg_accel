@@ -3,7 +3,7 @@
 This is the pre-1.0 punchlist for pg_accel — a PostgreSQL 17 extension that offloads
 spatial, h3, reduce, sort, hashagg, and raster workloads to Metal GPU on Apple Silicon
 (CUDA / ROCm / Level Zero elsewhere) via AdaptiveCpp. AdaptiveCpp fork pin:
-`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `792d045e8b218241ef54af74244bf5fa92b2f80f`.
+`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `ceb641a535b4706f71ded2690baedaf8cf711b30`.
 "Done" / ship-ready means: every planner-injected GPU path is bit-correct, benchmarks
 never fall below PG-parallel parity on any (workload, size) cell, zero crashes on the
 verification matrix, clean `just ci`, and documentation matches reality. File-line
@@ -741,7 +741,7 @@ tests). Two items remain.
 
 ## Phase 7 — Upstream AdaptiveCpp work
 
-The `fork-safe-metal` branch at `792d045e8b218241ef54af74244bf5fa92b2f80f`
+The `fork-safe-metal` branch at `ceb641a535b4706f71ded2690baedaf8cf711b30`
 is the ship pin. Items below are fork-local maintenance burden that
 eventually needs to merge upstream (or rebase onto it). **Shipping 1.0 does
 not require upstream merge** — the fork SHA pin is sufficient. Rebase +
