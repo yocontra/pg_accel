@@ -42,7 +42,9 @@ bodies present — but MSL compile still rejects specific opcode translations. U
 every family flips from status=-5 to PASS, fp64 cost calibration, benches, and
 `just gpu-test` are all blocked.
 
-### Metal Emitter: FCmp `acpp_f64` vs `int` operand mismatch
+### ✅ Metal Emitter: FCmp `acpp_f64` vs `int` operand mismatch
+
+Resolved: AdaptiveCpp 667338f74ef27b997714365ea4155d9d024bcb5f — `emitExpr` undef/poison branch now returns `acpp_f64 { 0u, 0u }` for `isDoubleTy()` and a lane-typed brace-init for `<N x double>`. `incompatible operand types ('acpp_f64' and 'int')` errors drop to zero in the fp64 kernel suite.
 
 - **What**: Emitted Metal shaders for soft-fp64 kernels fail MSL compile with
   `incompatible operand types ('acpp_f64' and 'int')` at every FCmp site where one
@@ -63,7 +65,9 @@ every family flips from status=-5 to PASS, fp64 cost calibration, benches, and
 - **Done when**: `xcrun metal` compiles the shader emitted by `reduce_sum_f64`
   without the "incompatible operand types" diagnostic.
 
-### Metal Emitter: bool-vector vs bool assignment in fcmp-on-vector
+### ✅ Metal Emitter: bool-vector vs bool assignment in fcmp-on-vector
+
+Resolved: AdaptiveCpp 667338f74ef27b997714365ea4155d9d024bcb5f — root cause was not vectorized `fcmp <N x double>` (that path was already correct) but `emitICmpInstruction` on `i128`, which mapType lowers to `uint4`. MSL vector-scalar comparison returns `bool4`; LLVM's `icmp` mandates scalar `i1`. Fix wraps EQ/NE on i128 in `all()`/`any()` and rejects ordered i128 comparisons with an explicit errorMsg. `bool from bool4` errors drop to zero across the fp64 kernel suite.
 
 - **What**: `emitFCmpInstruction` emits element-wise comparisons for
   `fcmp <N x double>`, but the enclosing LHS is declared as scalar `bool`, producing
@@ -133,6 +137,51 @@ Resolved: AdaptiveCpp ea355d63f5f56a7c14a9fe5b8c30393893814985 — poison map in
   `sort_kv_f64`, `stats_f64`, `sum_sq_f64`, `multi_f64`,
   `h3_latlng_to_cell@res≥12`, `bbox_f64`, `spatial_f64`. No "incompatible
   operand types" or vector-vs-scalar diagnostics on any of the nine.
+
+### soft-fp64 runtime: kernels launch but return 0 / GPU-hang
+
+- **What**: With the Metal emitter MSL-compile blockers fixed (JIT retry-loop
+  ea355d63, FCmp undef / i128 icmp 667338f7), every fp64 kernel in the suite
+  now JIT-compiles and launches. But at runtime: `reduce_sum_f64 N=1024`
+  returns `got 0 expected -11708.99…`, and `N=65536` triggers Metal's GPU
+  watchdog: `Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)`.
+  Same pattern reproduces on `reduce_sum_sq_f64`, `reduce_stats_f64`,
+  `sort_f64`, `bbox_f64`. Fp32 paths are fully green (test_spatial 55/55,
+  test_device, test_sycl_basic, test_bbox fp32 24/24). BLOCKER.
+- **Why**: The emitter emits valid MSL for soft-fp64 kernels (verified:
+  loads render as `*((device acpp_f64*)ptr)`, ICmp/FCmp predicates route
+  through `__acpp_sscp_soft_f64_fcmp`). A consistent `got 0` on a first
+  dispatch with no MSL-compile error suggests either (a) soft-fp64 helper
+  ABI mismatch — emitted kernel passes `acpp_f64` by value but the adapter
+  `acpp_metal_primitives.cpp` expects a different layout, (b) the reduce
+  accumulator never gets written back (output buffer zero-inited and
+  kernel's final store is a no-op), or (c) the soft-fp64 prelude body has
+  an optimization-invariant bug that Metal's compiler folds to zero. The
+  GPU hang at larger N is a separate symptom — likely an infinite-loop
+  path in `sf64_div` / `sf64_sqrt` that trips Metal's command-buffer
+  watchdog (~2s).
+- **How**:
+  - Pick one small failing kernel (`reduce_sum_f64 N=1024` is smallest),
+    enable `ACPP_METAL_KEEP_SOURCE=1 ACPP_METAL_DUMP_IR=1`, read the
+    emitted MSL at `~/.acpp/apps/global/jit-cache/*.metal` for the kernel.
+    Walk the kernel body from input load through reduce to output store
+    and confirm that the accumulated value flows through `__acpp_sscp_soft_f64_add`
+    calls without any path that zeros the value.
+  - Compare the soft-fp64 adapter's `acpp_metal_primitives.cpp` helper
+    signatures against what the kernel calls (names + arg types + return
+    type). The adapter's job is to forward `__acpp_sscp_soft_f64_*` to
+    `sf64_*`; any signature drift silently produces zero returns.
+  - For the GPU hang: bisect N between 1024 (returns 0) and 65536 (hangs)
+    to find the transition — a hang-threshold that scales with N points
+    at an `O(N)`-loop-per-thread pattern; a hang at fixed N points at a
+    specific kernel that only gets invoked at that size.
+  - Consider running the soft-fp64 library's own test suite against the
+    Metal build to isolate whether the bug is in soft-fp64 (fix upstream)
+    or in AdaptiveCpp's adapter (fix in acpp_metal_primitives.cpp).
+- Depends on: FCmp + bool-vector emitter fixes (Phase 1, landed).
+- **Done when**: `reduce_sum_f64`, `reduce_sum_sq_f64`, `reduce_stats_f64`
+  return correct values at N=1024 and N=65536 without GPU hangs;
+  `test_oom_invariant` reports PASS for every fp64 family.
 
 ### Promote `pgaccel_point_in_ring_bulk` fp64 to a SYCL kernel
 
