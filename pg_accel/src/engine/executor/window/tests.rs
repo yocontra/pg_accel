@@ -16,6 +16,7 @@ fn spec(func: WindowFunc) -> WindowFuncSpec {
         offset: 1,
         default_val: 0.0,
         result_type_oid: 0,
+        uses_fp64: false,
     }
 }
 
@@ -29,6 +30,7 @@ fn spec_with_offset(func: WindowFunc, offset: i32, default_val: f64) -> WindowFu
         offset,
         default_val,
         result_type_oid: 23, // INT4 OID
+        uses_fp64: false,
     }
 }
 
@@ -202,6 +204,7 @@ fn spec_sum_with_value_attno() {
         offset: 0,
         default_val: 0.0,
         result_type_oid: 701, // FLOAT8
+        uses_fp64: true,
     };
     assert_eq!(s.func, WindowFunc::Sum);
     assert_eq!(s.value_attno, 3);
@@ -545,8 +548,8 @@ fn rescan_preserves_spec_count() {
 // =======================================================================
 
 #[test]
-fn window_spec_ints_is_seven() {
-    assert_eq!(WINDOW_SPEC_INTS, 7);
+fn window_spec_ints_is_eight() {
+    assert_eq!(WINDOW_SPEC_INTS, 8);
 }
 
 // =======================================================================
@@ -788,6 +791,7 @@ fn spec_all_fields_set() {
         offset: 7,
         default_val: -999.5,
         result_type_oid: 701,
+        uses_fp64: true,
     };
     assert_eq!(s.func, WindowFunc::Lead);
     assert_eq!(s.partition_attno, 2);

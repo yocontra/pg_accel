@@ -198,8 +198,26 @@ check-gpu:
 deny:
     cargo deny check
 
-# Pre-commit checks: fmt, lint, type-check, deny
-pre-commit: fmt-check lint check deny
+# Run cargo-audit for RustSec vulnerability scan (separate from cargo-deny's
+# advisory check: audit uses the full RustSec DB directly). Fails with a clear
+# message on machines that don't have cargo-audit installed — `cargo install
+# cargo-audit --locked` fixes it.
+audit:
+    @command -v cargo-audit >/dev/null 2>&1 || { \
+      echo "error: cargo-audit not installed. Run: cargo install cargo-audit --locked" >&2; \
+      exit 1; \
+    }
+    cargo audit
+
+# Validate file:line citations in CLAUDE.md / ARCHITECTURE.md / TODO.md.
+# Anti-cheat §10 requires citations to be verifiable; this catches drift
+# (files moved, line numbers out of range) in CI before reviewers waste
+# time chasing dead references.
+doc-parity:
+    ./scripts/doc_parity.sh
+
+# Pre-commit checks: fmt, lint, type-check, deny, audit, doc-parity
+pre-commit: fmt-check lint check deny audit doc-parity
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against PG 17

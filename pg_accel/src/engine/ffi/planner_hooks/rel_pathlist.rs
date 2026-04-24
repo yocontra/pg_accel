@@ -5,8 +5,8 @@
 //! - `try_inject_gpu_sort_path` — scan-level GPU sort injection helper
 
 use pgrx::pg_sys::{
-    self, CustomPath, List, NodeTag, Path, PlannerInfo, RangeTblEntry, RelOptInfo, add_path,
-    lappend,
+    self, CustomPath, List, NodeTag, Path, PlannerInfo, RangeTblEntry, RelOptInfo,
+    add_partial_path, add_path, lappend,
 };
 
 use super::super::custom_scan;
@@ -455,6 +455,93 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
         add_path(rel, cpath.cast());
     }
+
+    // Mirror the non-parallel injection into the partial pathlist so queries
+    // whose optimal plan is `Gather ∘ Parallel Scan` pick up the GPU path.
+    // For each parallel-safe child in `rel->partial_pathlist`, wrap it in a
+    // parallel-safe CustomPath and register via `add_partial_path`. The
+    // costing is reused (same strategy, same rows) — PG's own add_partial_path
+    // discards dominated entries.
+    // SAFETY: rel_ref.partial_pathlist is a valid List pointer (possibly null).
+    unsafe {
+        inject_gpu_expr_partial_paths(rel, rel_ref.partial_pathlist, &accel, startup_cost);
+    }
+}
+
+/// Inject a parallel-safe GpuExpr CustomPath for every entry in
+/// `partial_pathlist`. Mirrors the non-parallel body of
+/// `pgaccel_set_rel_pathlist` but wraps each partial child individually so
+/// PG can place the CustomScan inside a `Gather`.
+///
+/// # Safety
+///
+/// `rel` and `partial_pathlist` must be valid planner-provided pointers.
+unsafe fn inject_gpu_expr_partial_paths(
+    rel: *mut RelOptInfo,
+    partial_pathlist: *mut List,
+    accel: &super::AccelMatch,
+    startup_cost_base: pg_sys::Cost,
+) {
+    if partial_pathlist.is_null() {
+        return;
+    }
+    // SAFETY: partial_pathlist is a valid List.
+    let n = unsafe { pg_sys::list_length(partial_pathlist) };
+    if n == 0 {
+        return;
+    }
+
+    for i in 0..n {
+        // SAFETY: i < list_length.
+        let child = unsafe { pg_sys::list_nth(partial_pathlist, i).cast::<Path>() };
+        if child.is_null() {
+            continue;
+        }
+        // Child from partial_pathlist is parallel-safe by construction, but
+        // double-check defensively.
+        // SAFETY: child is a valid Path node.
+        let child_ref = unsafe { &*child };
+        if !child_ref.parallel_safe {
+            continue;
+        }
+
+        // Recompute cost against THIS child (partial paths split rows across
+        // workers; use the child's own rows estimate so add_partial_path's
+        // dominance check sees an honest total).
+        let batch_size = cost::optimal_batch_size(child_ref.rows as usize) as f64;
+        let num_batches = (child_ref.rows / batch_size).ceil();
+        let batch_overhead = num_batches * 2.0;
+        let total_cost = child_ref.total_cost + batch_overhead;
+
+        // SAFETY: palloc-based construction + inheritance from child via
+        // `create_custom_path`, then overriding parallel fields explicitly.
+        unsafe {
+            let cpath = create_custom_path(
+                rel,
+                child,
+                startup_cost_base,
+                total_cost,
+                child_ref.rows,
+                custom_scan::scan_path_methods(),
+            );
+            // Upgrade to parallel-safe; inherit child's worker count.
+            (*cpath).path.parallel_aware = false;
+            (*cpath).path.parallel_safe = true;
+            (*cpath).path.parallel_workers = child_ref.parallel_workers.max(1);
+
+            // Same custom_private layout as the non-partial variant.
+            let mut priv_list: *mut List = std::ptr::null_mut();
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(u32::from(accel.fn_oid) as i32).cast(),
+            );
+            priv_list = lappend(priv_list, pg_sys::makeInteger(accel.target_attno).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(accel.strategy as i32).cast());
+            (*cpath).custom_private = priv_list;
+
+            add_partial_path(rel, cpath.cast());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +553,125 @@ pub(super) const SORT_INT4OID: u32 = 23;
 pub(super) const SORT_INT8OID: u32 = 20;
 pub(super) const SORT_FLOAT4OID: u32 = 700;
 pub(super) const SORT_FLOAT8OID: u32 = 701;
+
+/// Maximum number of pathkeys the GPU sort executor supports.
+///
+/// Pinned to 1: the executor in `engine/executor/sort/` only dispatches a
+/// single-key GPU sort. Multi-key sort requires cascaded stable passes
+/// (sort by last key first, then prior keys) and is tracked as post-1.0
+/// work. Planner + executor MUST agree on this bound — otherwise the
+/// planner injects paths the executor bails on, wasting a plan.
+pub(super) const GPU_SORT_MAX_PATHKEYS: i32 = 1;
+
+/// Classification of how `root->sort_pathkeys` relates to the pathkeys of
+/// paths already attached to the base relation.
+///
+/// Used by [`try_inject_gpu_sort_path`] to decide between full-sort
+/// injection, a no-op (PG sees the sort as free), and an IncrementalSort
+/// opportunity we currently decline (tracked in TODO.md Phase 4
+/// "IncrementalSort injection").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SortShape {
+    /// No existing child path has any pathkey prefix of `sort_pathkeys`.
+    /// `total` is `list_length(sort_pathkeys)`.
+    FullSort { total: i32 },
+    /// Some existing path's pathkeys already cover the full `sort_pathkeys`.
+    /// No injection needed; PG treats it as free. `total` is carried for
+    /// observability.
+    AlreadySorted { total: i32 },
+    /// Some existing path has a non-empty pathkey prefix of
+    /// `sort_pathkeys` but does NOT cover it — an IncrementalSort
+    /// opportunity. `presorted` is the matching prefix length, `suffix`
+    /// is the remainder (`total - presorted`).
+    IncrementalOpportunity {
+        presorted: i32,
+        suffix: i32,
+        total: i32,
+    },
+}
+
+/// Pure classifier for [`SortShape`] given list lengths.
+///
+/// Separated from the FFI wrapper so it can be unit-tested without a live
+/// planner. `presorted` is the longest common prefix length between some
+/// child path's pathkeys and `sort_pathkeys`. `total` is
+/// `list_length(sort_pathkeys)`.
+///
+/// Preconditions (caller-enforced): `total >= 1`, `0 <= presorted <= total`.
+pub(super) const fn classify_sort_shape(presorted: i32, total: i32) -> SortShape {
+    if presorted >= total {
+        SortShape::AlreadySorted { total }
+    } else if presorted > 0 {
+        SortShape::IncrementalOpportunity {
+            presorted,
+            suffix: total - presorted,
+            total,
+        }
+    } else {
+        SortShape::FullSort { total }
+    }
+}
+
+/// Walk `rel->pathlist` and return the longest pathkey prefix of
+/// `sort_pathkeys` shared by any attached path.
+///
+/// Uses PG's own [`pg_sys::pathkeys_count_contained_in`] — the same helper
+/// `create_incremental_sort_path` uses in `src/backend/optimizer/util/pathkeys.c`
+/// to decide the presorted-prefix length. A byte-wise list compare would
+/// be wrong because PG canonicalises pathkeys and semantically equal keys
+/// may be different `PathKey*` pointers.
+///
+/// Returns 0 when `pathlist` is empty or no path shares any prefix.
+///
+/// # Safety
+///
+/// `pathlist` and `sort_pathkeys` must be valid planner-provided `List*`
+/// (possibly null for `pathlist`). `total_keys` must equal
+/// `list_length(sort_pathkeys)`.
+unsafe fn longest_presorted_prefix(
+    pathlist: *mut List,
+    sort_pathkeys: *mut List,
+    total_keys: i32,
+) -> i32 {
+    if pathlist.is_null() || sort_pathkeys.is_null() || total_keys <= 0 {
+        return 0;
+    }
+    // SAFETY: pathlist is a valid List.
+    let n = unsafe { pg_sys::list_length(pathlist) };
+    if n == 0 {
+        return 0;
+    }
+    let mut best: i32 = 0;
+    for i in 0..n {
+        // SAFETY: i < list_length(pathlist).
+        let p = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if p.is_null() {
+            continue;
+        }
+        // SAFETY: p is a valid Path node.
+        let pk = unsafe { (*p).pathkeys };
+        if pk.is_null() {
+            continue;
+        }
+        // Ask PG how many leading keys of sort_pathkeys are covered by
+        // this path's pathkeys. The return value is the "fully contained"
+        // bool (true iff the entire sort is covered); we only use the
+        // out-parameter.
+        let mut n_common: i32 = 0;
+        // SAFETY: both lists are valid List* of PathKey*; n_common ptr is
+        // a stack local writable i32.
+        let _fully_contained = unsafe {
+            pg_sys::pathkeys_count_contained_in(sort_pathkeys, pk, std::ptr::addr_of_mut!(n_common))
+        };
+        if n_common > best {
+            best = n_common;
+        }
+        if best >= total_keys {
+            break;
+        }
+    }
+    best
+}
 
 /// Inject a GPU sort `CustomPath` at the scan level when `root->sort_pathkeys`
 /// has a single numeric key and the relation has enough rows.
@@ -499,19 +705,61 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
     // SAFETY: sort_pathkeys is a valid List.
     let num_pathkeys = unsafe { pg_sys::list_length(sort_pathkeys) };
     pgrx::debug1!("pg_accel sort: num_pathkeys={num_pathkeys}");
-    // GPU sort supports up to gpu_multi_key_sort_max_keys keys. Currently
-    // the executor only handles single-key; the limit is configurable via
-    // DeviceLimits for future multi-key cascaded stable sort support.
-    let max_keys = cost::device_limits().gpu_multi_key_sort_max_keys;
-    if num_pathkeys < 1 || num_pathkeys > max_keys as i32 {
-        pgrx::debug1!("pg_accel sort: {num_pathkeys} keys exceeds max={max_keys}, skipping");
-        return;
+
+    // Classify the sort shape BEFORE gating on GPU_SORT_MAX_PATHKEYS so
+    // IncrementalSort opportunities and already-sorted paths are visible
+    // in the trace / planner-rejected counter even when we decline. This
+    // lets us measure real-world incidence of multi-key sorts with a
+    // presorted prefix — the work item to actually exploit them is
+    // tracked in TODO.md Phase 4 "IncrementalSort injection" and blocked
+    // on cascaded multi-key GPU sort (post-1.0).
+    // SAFETY: rel_ref.pathlist is a valid List provided by the planner.
+    let presorted =
+        unsafe { longest_presorted_prefix(rel_ref.pathlist, sort_pathkeys, num_pathkeys) };
+    let shape = classify_sort_shape(presorted, num_pathkeys);
+    match shape {
+        SortShape::AlreadySorted { total } => {
+            // PG already sees this as free — no Sort node will be planned,
+            // so there is nothing for us to accelerate. Distinct from the
+            // FullSort/Incremental decline so logs aren't misleading.
+            pgrx::debug1!(
+                "pg_accel sort: ORDER BY ({total} keys) already satisfied by an existing \
+                 path; no Sort node to inject"
+            );
+            return;
+        }
+        SortShape::IncrementalOpportunity {
+            presorted: p,
+            suffix: s,
+            total,
+        } => {
+            // Observability only. The GPU sort executor is single-key
+            // (see GPU_SORT_MAX_PATHKEYS) and cannot do per-group sort on
+            // the suffix. Record the rejection so we can count how often
+            // real workloads hit this shape, then fall through to the
+            // standard multi-key decline below.
+            pgrx::debug1!(
+                "pg_accel sort: IncrementalSort opportunity skipped: {p} presorted keys, \
+                 {s} suffix keys (total={total}); deferred to cascaded multi-key GPU sort"
+            );
+            #[allow(clippy::cast_sign_loss)]
+            let n_rows_est = rel_ref.rows.max(0.0) as u64;
+            stats::increment_planner_rejected("sort_incremental_opportunity", n_rows_est);
+        }
+        SortShape::FullSort { .. } => {
+            // Fall through to the standard full-sort path.
+        }
     }
-    // Executor currently only supports single-key sort. Multi-key requires
-    // cascaded stable sorts (sort by last key first, then by prior keys).
-    // TODO: implement multi-key sort executor support.
-    if num_pathkeys != 1 {
-        pgrx::debug1!("pg_accel sort: multi-key sort not yet implemented, skipping");
+
+    // GPU sort executor currently only supports single-key sort. Multi-key
+    // would require cascaded stable sorts (sort by last key first, then by
+    // prior keys) — post-1.0 work. Gate planner + executor on the same
+    // constant so the advertised capability matches what actually dispatches.
+    // See `GPU_SORT_MAX_PATHKEYS` below.
+    if num_pathkeys < 1 || num_pathkeys > GPU_SORT_MAX_PATHKEYS {
+        pgrx::debug1!(
+            "pg_accel sort: {num_pathkeys} keys outside supported range 1..={GPU_SORT_MAX_PATHKEYS}, skipping"
+        );
         return;
     }
 
@@ -748,5 +996,287 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
             var_attno,
             rows
         );
+    }
+
+    // Mirror into partial pathlist so `Gather Merge ∘ Parallel Sort` can pick
+    // up the GPU sort. Each parallel-safe child (e.g. Parallel Seq Scan) gets
+    // its own parallel-safe CustomPath wrapper with the same sort pathkeys so
+    // PG can emit a Gather Merge on top.
+    // SAFETY: rel_ref.partial_pathlist is a valid List (possibly null).
+    unsafe {
+        inject_gpu_sort_partial_paths(
+            rel,
+            rel_ref.partial_pathlist,
+            sort_pathkeys,
+            &sort_key,
+            limit_tuples,
+            uses_fp64,
+        );
+    }
+}
+
+/// Inject a parallel-safe GpuSort CustomPath for every entry in
+/// `partial_pathlist`. Sets `pathkeys` so PG can place a `Gather Merge` on
+/// top and preserve the sort order across workers.
+///
+/// # Safety
+///
+/// All pointers must be valid planner-provided args.
+#[allow(clippy::too_many_arguments)]
+unsafe fn inject_gpu_sort_partial_paths(
+    rel: *mut RelOptInfo,
+    partial_pathlist: *mut List,
+    sort_pathkeys: *mut List,
+    sort_key: &SortKeyDesc,
+    limit_tuples: f64,
+    uses_fp64: bool,
+) {
+    if partial_pathlist.is_null() {
+        return;
+    }
+    // SAFETY: partial_pathlist is a valid List.
+    let n = unsafe { pg_sys::list_length(partial_pathlist) };
+    if n == 0 {
+        return;
+    }
+
+    for i in 0..n {
+        // SAFETY: i < list_length.
+        let child = unsafe { pg_sys::list_nth(partial_pathlist, i).cast::<Path>() };
+        if child.is_null() {
+            continue;
+        }
+        // SAFETY: child is a valid Path node.
+        let child_ref = unsafe { &*child };
+        if !child_ref.parallel_safe {
+            continue;
+        }
+
+        // Per-worker cost: workers see fewer rows, so use the child's own row
+        // estimate (already partitioned by PG's parallel cost model).
+        let per_worker_n = child_ref.rows;
+        let sort_scan_cost = cost::self_scan_cost_fp64_aware(
+            per_worker_n,
+            1,
+            cost::device_limits().gpu_op_cost_sort,
+            uses_fp64,
+        );
+        let startup_cost = child_ref.startup_cost + cost::GPU_LAUNCH_OVERHEAD;
+        let total_cost = child_ref.total_cost + sort_scan_cost;
+
+        // SAFETY: palloc-based construction + explicit parallel field override.
+        unsafe {
+            let cpath = create_custom_path(
+                rel,
+                child,
+                startup_cost,
+                total_cost,
+                per_worker_n,
+                custom_scan::scan_path_methods(),
+            );
+
+            // Output is sorted per worker; pathkeys enable Gather Merge.
+            (*cpath).path.pathkeys = sort_pathkeys;
+            (*cpath).path.parallel_aware = false;
+            (*cpath).path.parallel_safe = true;
+            (*cpath).path.parallel_workers = child_ref.parallel_workers.max(1);
+
+            // Same custom_private layout as the non-partial variant.
+            let mut priv_list: *mut List = std::ptr::null_mut();
+            priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // fn_oid
+            priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // target_attno
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(registry::AccelStrategy::GpuSort as i32).cast(),
+            );
+            // Sort key data: [num_keys, attno, sort_op, collation, nulls_first]
+            priv_list = lappend(priv_list, pg_sys::makeInteger(1).cast());
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(i32::from(sort_key.attno)).cast(),
+            );
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(u32::from(sort_key.sort_op) as i32).cast(),
+            );
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(u32::from(sort_key.collation) as i32).cast(),
+            );
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(i32::from(sort_key.nulls_first)).cast(),
+            );
+            // limit_tuples (0 = no limit).
+            #[allow(clippy::cast_possible_truncation)]
+            let limit_int = if limit_tuples > 0.0 {
+                limit_tuples as i32
+            } else {
+                0
+            };
+            priv_list = lappend(priv_list, pg_sys::makeInteger(limit_int).cast());
+
+            // self_scan_relid detection mirrors the non-partial branch: a
+            // plain Path on a base relation is the only shape the vectorized
+            // scan supports. Parallel Seq Scan is still a T_Path with a
+            // relation parent, so this holds here too.
+            let self_scan_relid = {
+                let parent = (*child).parent;
+                if !parent.is_null()
+                    && (*parent).rtekind == pg_sys::RTEKind::RTE_RELATION
+                    && (*parent).relid > 0
+                {
+                    (*parent).relid as i32
+                } else {
+                    0
+                }
+            };
+            priv_list = lappend(priv_list, pg_sys::makeInteger(self_scan_relid).cast());
+            (*cpath).custom_private = priv_list;
+
+            add_partial_path(rel, cpath.cast());
+
+            pgrx::debug1!(
+                "pg_accel: injected GpuSort PARTIAL path, attno={}, rows={}",
+                sort_key.attno,
+                per_worker_n as usize
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape};
+
+    /// Regression guard: the planner sort gate and the executor sort
+    /// dispatcher must agree on the supported pathkey count. The executor
+    /// in `engine/executor/sort/` bails on anything other than a single
+    /// key (see `exec_gpu_sort`'s `sort_keys().len() == 1` path). If this
+    /// constant grows above 1 without cascaded stable-sort support being
+    /// landed in the executor, the planner will inject paths that bail
+    /// at execution, wasting a plan. Pin it until the executor work lands.
+    #[test]
+    fn gpu_sort_max_pathkeys_matches_executor_support() {
+        assert_eq!(
+            GPU_SORT_MAX_PATHKEYS, 1,
+            "executor only supports single-key GPU sort; see comment above GPU_SORT_MAX_PATHKEYS"
+        );
+    }
+
+    // -- classify_sort_shape ------------------------------------------------
+    //
+    // The classifier is a pure function on (presorted, total) list lengths
+    // so it can be unit-tested without a live planner. The IncrementalSort
+    // FFI wrapper feeds the output of pathkeys_count_contained_in into this
+    // classifier; mocking the FFI side requires a live planner (see the
+    // #[pg_test] coverage).
+
+    #[test]
+    fn classify_full_sort_when_no_presorted_prefix() {
+        assert_eq!(classify_sort_shape(0, 1), SortShape::FullSort { total: 1 });
+        assert_eq!(classify_sort_shape(0, 3), SortShape::FullSort { total: 3 });
+    }
+
+    #[test]
+    fn classify_already_sorted_when_prefix_covers_total() {
+        assert_eq!(
+            classify_sort_shape(2, 2),
+            SortShape::AlreadySorted { total: 2 }
+        );
+        // Defensive: presorted > total (shouldn't happen in practice
+        // since PG returns n_common <= list_length(keys1), but classify
+        // should not panic).
+        assert_eq!(
+            classify_sort_shape(5, 3),
+            SortShape::AlreadySorted { total: 3 }
+        );
+    }
+
+    #[test]
+    fn classify_incremental_opportunity_when_strict_prefix() {
+        let shape = classify_sort_shape(1, 3);
+        assert_eq!(
+            shape,
+            SortShape::IncrementalOpportunity {
+                presorted: 1,
+                suffix: 2,
+                total: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_incremental_opportunity_covers_multi_key_suffix() {
+        // The 4-key / 3-presorted case: one trailing key left to sort.
+        let shape = classify_sort_shape(3, 4);
+        assert_eq!(
+            shape,
+            SortShape::IncrementalOpportunity {
+                presorted: 3,
+                suffix: 1,
+                total: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_is_const_eval_compatible() {
+        // const fn guarantee: calling at compile time must succeed.
+        const SHAPE: SortShape = classify_sort_shape(1, 2);
+        assert_eq!(
+            SHAPE,
+            SortShape::IncrementalOpportunity {
+                presorted: 1,
+                suffix: 1,
+                total: 2,
+            }
+        );
+    }
+
+    /// The partial-path injectors must be early-exit-safe on a null
+    /// `partial_pathlist` — PG passes null when parallelism is disabled
+    /// for this rel, and we must not dereference it.
+    ///
+    /// We can't construct a real `RelOptInfo` in a unit test (dozens of
+    /// PG-internal fields), but we can confirm the null-list short-circuit
+    /// doesn't touch `rel`. Passing `rel = null_mut()` is invariant-breaking
+    /// for `create_custom_path`, but we short-circuit BEFORE calling it.
+    ///
+    /// This test intentionally exercises only the null-list branch; any
+    /// non-null list requires a live planner and belongs in `#[pg_test]`.
+    #[test]
+    fn inject_partial_paths_null_list_is_safe() {
+        use super::{inject_gpu_expr_partial_paths, inject_gpu_sort_partial_paths};
+        use crate::engine::executor::sort::SortKeyDesc;
+        use crate::engine::registry::AccelStrategy;
+        use pgrx::pg_sys;
+
+        let accel = super::super::AccelMatch {
+            strategy: AccelStrategy::GpuExpr,
+            fn_oid: pg_sys::Oid::INVALID,
+            target_attno: 0,
+        };
+        // SAFETY: Both callees null-check `partial_pathlist` before any deref.
+        unsafe {
+            inject_gpu_expr_partial_paths(std::ptr::null_mut(), std::ptr::null_mut(), &accel, 0.0);
+        }
+        let sort_key = SortKeyDesc {
+            attno: 1,
+            sort_op: pg_sys::Oid::INVALID,
+            collation: pg_sys::Oid::INVALID,
+            nulls_first: false,
+        };
+        // SAFETY: same — early exit on null list.
+        unsafe {
+            inject_gpu_sort_partial_paths(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &sort_key,
+                0.0,
+                false,
+            );
+        }
     }
 }

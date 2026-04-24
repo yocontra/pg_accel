@@ -18,7 +18,7 @@ pub use constants::{
     GPU_SPATIAL_PER_ROW_COST, PER_DATUM_EXTRACT_COST, PREAGG_FIXED_OVERHEAD,
     SPATIAL_INDEX_COST_RATIO_THRESHOLD, SPATIAL_INDEX_SELECTIVITY_THRESHOLD,
 };
-pub use device_limits::{DeviceLimits, device_limits};
+pub use device_limits::{DeviceLimits, DeviceLimitsSource, device_limits, device_limits_source};
 pub use formulas::{
     apply_fp64_penalty, estimate_threads, optimal_batch_size, self_scan_cost,
     self_scan_cost_fp64_aware, should_batch, should_use_gpu,

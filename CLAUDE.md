@@ -186,6 +186,101 @@ Metal kernel dispatch in forked PG backends goes through a two-stage cache at
 | `pg_accel.kernel_timeout_ms` | `5000` | GPU kernel timeout |
 | `pg_accel.cost_multiplier` | `1.0` | Cost estimate multiplier (>1 = more conservative) |
 
+## Effective Device Limits (hardware-derived vs fallback)
+
+Dispatch thresholds (`min_rows`, `max_chunk`, cost ratios, break-even points)
+are **not** module-level constants. They live in the `DeviceLimits` struct at
+`pg_accel/src/engine/cost/device_limits.rs` and are produced by one of two
+paths, decided once per backend at `device_limits()` init
+(`pg_accel/src/engine/cost/device_limits.rs:505-522`):
+
+| Source tag | Produced by | Used when |
+|------------|-------------|-----------|
+| `hardware_derived` | `DeviceLimits::from_profile(&PlatformProfile)` at `pg_accel/src/engine/cost/device_limits.rs:186` | GPU detected (`profile.has_gpu == true`) |
+| `fallback_cpu_only` | `DeviceLimits::cpu_only()` at `pg_accel/src/engine/cost/device_limits.rs:404` | No GPU detected, or `#[cfg(test)]` builds |
+
+**The constants in `cpu_only()` (e.g. `gpu_reduce_min_rows: 25_000` at
+`pg_accel/src/engine/cost/device_limits.rs:412`, `gpu_sort_max_elements:
+2_000_000` at `:416`, `gpu_join_max_output_rows: 100_000` at `:417`) are NOT
+the runtime defaults on a GPU-equipped machine.** When a GPU is present,
+every threshold is recomputed from the detected profile. Benchmarks that
+quote these values without calling `pg_accel_device_limits()` are reporting
+the no-GPU fallback, not what the current session is actually using.
+
+### How `from_profile()` derives each limit
+
+The two scale factors are `cu_scale` (at
+`pg_accel/src/engine/cost/device_limits.rs:193-197`) and the `unified_memory`
+branch inside it. `cu_scale(base)` computes
+`base × BASELINE_CUS (32) / compute_units`, halved again if the profile
+reports unified memory. Higher CU count or unified memory → lower threshold.
+
+Representative formulas (cite `pg_accel/src/engine/cost/device_limits.rs:<line>`):
+
+- `gpu_min_rows = cu_scale(10_000).clamp(1_000, 100_000)` — `:199`
+- `gpu_sort_min_rows = cu_scale(100_000).clamp(10_000, 1_000_000)` — `:200`
+- `gpu_window_min_rows = cu_scale(100_000).clamp(50_000, 500_000)` — `:206`
+- `gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000)` — `:210`
+- `gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000)` — `:211`
+- `gpu_hash_agg_max_groups = (mem / 256 / 64).clamp(1_000, 100_000)` — `:216-220`
+- `gpu_reduce_max_chunk`: unified → `100_000_000`; discrete → `(mem / 32 / 8).clamp(64_000, 256_000)` — `:228-234`
+- `gpu_sort_max_elements = (mem / 32 / 12).clamp(64_000, 4_000_000)` — `:241-245`
+- `gpu_join_max_output_rows = (100_000 × cus / 32).clamp(50_000, 500_000)` — `:252-256`
+- `gpu_spatial_min_vertices = cu_scale(100).clamp(32, 1_000)` — `:291`
+- `gpu_expr_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000)` — `:295`
+- `gpu_hash_join_build_max_rows = (mem / 64 / 64).clamp(10_000, 1_000_000)` — `:298-302`
+- `reduce_f32_break_even_rows = cu_scale(25_000).clamp(4_000, 250_000)` — `:364`
+- `reduce_f64_break_even_rows = cu_scale(50_000).clamp(8_000, 500_000)` — `:365`
+- `reduce_i64_break_even_rows = cu_scale(75_000).clamp(10_000, 750_000)` — `:366`
+- `sort_break_even_rows_int = cu_scale(100_000).clamp(20_000, 1_000_000)` — `:374`
+- `sort_break_even_rows_float = cu_scale(80_000).clamp(16_000, 800_000)` — `:375`
+- `window_min_partition_rows = cu_scale(10_000).clamp(2_000, 100_000)` — `:383`
+- `hashjoin_min_build_rows = cu_scale(5_000).clamp(1_000, 50_000)` — `:387`
+- `soft_fp64_cost_multiplier = crate::soft_fp64_cost_multiplier()` — `:396` (unused when `has_native_fp64`)
+
+#### Worked example — Apple M2 Max (32 CUs, unified memory, 64 GiB max alloc)
+
+With `cus = 32` (== `BASELINE_CUS`) and `unified = true`, `cu_scale(base) =
+(base × 32 / 32) / 2 = base / 2`. The effective values on an M2 Max become:
+
+| Field | `from_profile` value |
+|-------|----------------------|
+| `gpu_reduce_min_rows` | `25_000 / 2 = 12_500`, clamped to `[5_000, 200_000]` → **12_500** |
+| `gpu_hash_agg_min_rows` | `250_000 / 2 = 125_000`, clamped → **125_000** |
+| `gpu_sort_min_rows` | `100_000 / 2 = 50_000`, clamped → **50_000** |
+| `gpu_expr_min_rows` | `250_000 / 2 = 125_000`, clamped → **125_000** |
+| `reduce_f32_break_even_rows` | `25_000 / 2 = 12_500`, clamped to `[4_000, 250_000]` → **12_500** |
+
+All of these are below the `cpu_only()` fallback values (25_000 / 250_000 /
+etc.), which is the point: the fallback is conservative so a machine without
+a detected GPU never dispatches borderline workloads.
+
+### Dumping the effective limits
+
+On any PG session, as SQL:
+
+```sql
+-- Full dump: one row per DeviceLimits field.
+SELECT name, value, source FROM pg_accel_device_limits() ORDER BY name;
+
+-- Check the source tag for the current session.
+SELECT DISTINCT source FROM pg_accel_device_limits();
+-- → 'hardware_derived' or 'fallback_cpu_only'
+
+-- Look up a specific threshold.
+SELECT value FROM pg_accel_device_limits()
+WHERE name = 'gpu_reduce_min_rows';
+```
+
+`pg_accel_device_limits()` is defined at
+`pg_accel/src/engine/stats.rs:349` and reads the cached `DeviceLimits`
+via `engine::cost::device_limits()`; the `source` column is populated from
+`engine::cost::device_limits_source()`
+(`pg_accel/src/engine/cost/device_limits.rs:531`). When citing a
+threshold in a benchmark report, paste the row from this SRF rather than the
+fallback constant — otherwise you are citing a value that was never active
+on the test machine.
+
 ## Agent Coordination
 
 - **Agents are partitioned by file ownership.** Each worker owns a disjoint file set — no two agents edit the same file in a single phase.

@@ -262,6 +262,7 @@ pub(super) unsafe fn deserialize_custom_private(
             let lag_offset = unsafe { list_int_at(custom_private, (offset + 4) as c_int) };
             let default_bits = unsafe { list_int_at(custom_private, (offset + 5) as c_int) };
             let result_type = unsafe { list_int_at(custom_private, (offset + 6) as c_int) } as u32;
+            let uses_fp64_raw = unsafe { list_int_at(custom_private, (offset + 7) as c_int) };
             window_specs.push(WindowFuncSpec {
                 func,
                 partition_attno: part_attno,
@@ -270,6 +271,7 @@ pub(super) unsafe fn deserialize_custom_private(
                 offset: lag_offset,
                 default_val: f64::from_bits(default_bits as u64),
                 result_type_oid: result_type,
+                uses_fp64: uses_fp64_raw != 0,
             });
         }
     }

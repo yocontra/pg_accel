@@ -17,6 +17,29 @@ use crate::engine::registry::{self, AccelStrategy};
 use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 
+/// Resolve the PostGIS function name registered in the adapter to a
+/// concrete [`three_layer::SpatialPredicate`].
+///
+/// This is an explicit **allowlist**: only function names we have wired
+/// through the three-layer GPU pipeline return `Some`. Unknown or
+/// unregistered names return `None`, and the caller must bail to PG's
+/// scalar qual path (PostGIS). Silently defaulting an unknown name to
+/// `Intersects` — the previous behaviour — would return wrong results
+/// for predicates like `ST_Touches`, `ST_Equals`, `ST_Disjoint`, etc.,
+/// and is banned per `CLAUDE.md` anti-cheat rule #4 (no silent
+/// misdispatch) and the Phase 4 spatial-dispatch-gap work.
+#[must_use]
+pub(super) fn resolve_spatial_predicate(
+    fn_name: Option<&str>,
+) -> Option<three_layer::SpatialPredicate> {
+    match fn_name {
+        Some("st_intersects") => Some(three_layer::SpatialPredicate::Intersects),
+        Some("st_contains") => Some(three_layer::SpatialPredicate::Contains),
+        Some("st_within") => Some(three_layer::SpatialPredicate::Within),
+        _ => None,
+    }
+}
+
 /// A buffered join match waiting to be returned by `next()`.
 pub(super) struct PendingMatch {
     /// Owned copy of the outer tuple. Must be `pfree`d when no longer needed.
@@ -492,15 +515,46 @@ impl JoinExecState {
                             vec![geom_b; geoms_a.len()];
 
                         // Determine the spatial predicate from the function OID.
-                        let predicate = {
-                            let fn_name = registry::global_registry()
-                                .lookup(self.fn_oid)
-                                .map(|e| e.name);
-                            match fn_name {
-                                Some("st_contains") => three_layer::SpatialPredicate::Contains,
-                                Some("st_within") => three_layer::SpatialPredicate::Within,
-                                _ => three_layer::SpatialPredicate::Intersects,
+                        //
+                        // The match is an explicit allowlist, NOT a fall-through.
+                        // Per TODO.md Phase 4: silently treating an unknown
+                        // spatial function as `Intersects` is a correctness bug
+                        // (wrong results for ST_Touches, ST_Equals, etc.). The
+                        // adapter registry (adapters/postgis.rs) only registers
+                        // predicates with a functionally-complete GPU path, so
+                        // any `None` / unrecognised name here means the planner
+                        // has diverged from the adapter and we must NOT guess.
+                        let fn_name = registry::global_registry()
+                            .lookup(self.fn_oid)
+                            .map(|e| e.name);
+                        let predicate = resolve_spatial_predicate(fn_name);
+
+                        let Some(predicate) = predicate else {
+                            // Unknown spatial predicate: route the whole batch
+                            // through PostGIS via PG's scalar qual path so we
+                            // return correct results instead of silently
+                            // misdispatching as Intersects.
+                            if !self.qual.is_null() && !self.econtext.is_null() {
+                                // SAFETY: Caller guarantees main backend thread.
+                                unsafe {
+                                    self.eval_batch_scalar_qual(&inner_tuples, result_slot);
+                                }
+                            } else {
+                                // No qual installed — free the batch and move on.
+                                for mt in inner_tuples {
+                                    // SAFETY: Free owned copies.
+                                    unsafe { pg_sys::pfree(mt.cast()) };
+                                }
                             }
+                            let elapsed_us = start.elapsed().as_micros() as u64;
+                            self.dispatch_time_us += elapsed_us;
+                            self.batches_executed += 1;
+                            stats::record_batch(inner_count as u64, elapsed_us);
+                            if inner_count < self.batch_size {
+                                self.current_outer = std::ptr::null_mut();
+                                pgrx::check_for_interrupts!();
+                            }
+                            continue;
                         };
 
                         // Run the three-layer GPU pipeline.

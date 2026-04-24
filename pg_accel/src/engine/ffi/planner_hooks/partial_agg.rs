@@ -171,17 +171,33 @@ pub(super) unsafe fn try_inject(
         // SAFETY: aggref is valid.
         let aggref_ref = unsafe { &*aggref };
 
-        // INTERNAL-state aggregates can't ride the Float8StatsEmitter path:
-        // `numeric_accum` / `int8_accum` carry an opaque `NumericAggState*`
-        // whose aggserialfn expects that exact struct shape, NOT our generic
-        // [N, Sx, Sxx] float8[3]. Passing the wrong bytes is UB.
+        // Per-column transtype gate.
         //
-        // For Phase A, only float4/float8 stats (transtype = `_float8`) are
-        // supported. Integer / numeric stats fall back to PG's native plan.
-        if aggref_ref.aggtranstype == pg_sys::INTERNALOID {
+        // INTERNAL-state aggregates (AVG/STDDEV/VAR on int8/numeric/interval)
+        // can't ride the Float8StatsEmitter path: `numeric_avg_accum` /
+        // `int8_avg_accum` carry an opaque `NumericAggState*` /
+        // `PolyNumAggState*` whose aggserialfn expects that exact struct
+        // shape, NOT our generic [N, Sx, Sxx] float8[3]. Passing the wrong
+        // bytes to `numeric_avg_serialize` would be UB.
+        //
+        // Integer AVG (int2/int4 → transtype `_int8`) carries a two-element
+        // int8[] transition state; the emitter produces a 3-element float8[]
+        // with different element type, so the final agg's combine function
+        // would see a type-mismatched array.
+        //
+        // Supported today: AVG / STDDEV(_POP|_SAMP) / VAR(_POP|_SAMP) on
+        // float4/float8 — PG resolves those to `float4_accum`/`float8_accum`
+        // whose transtype is `_float8` (= `FLOAT8ARRAYOID`). Matches the
+        // `Float8StatsEmitter` no-serialize branch exactly.
+        let float_stats_op = matches!(
+            op,
+            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop
+        );
+        if float_stats_op && aggref_ref.aggtranstype != pg_sys::FLOAT8ARRAYOID {
             pgrx::debug1!(
-                "pg_accel partial_agg: INTERNAL transtype (numeric-family) — bail, \
-                 not yet supported in partial path"
+                "pg_accel partial_agg: AVG/STDDEV/VAR with transtype={} not `_float8` \
+                 (INTERNAL / int8[] / numeric-family) — bail, not yet supported",
+                u32::from(aggref_ref.aggtranstype),
             );
             return;
         }

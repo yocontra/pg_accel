@@ -28,10 +28,24 @@ pub struct WindowFuncSpec {
     pub default_val: f64,
     /// Result type OID for the output column.
     pub result_type_oid: u32,
+    /// Whether this spec's ORDER BY or value column is float8 (fp64).
+    ///
+    /// Computed at spec-build time in the planner from the ORDER BY Var's
+    /// `vartype` and the value column Var's `vartype`. Consumed at the cost
+    /// site to route the window path through the fp64-aware cost helper so
+    /// soft-fp64 devices (Metal via AdaptiveCpp lowering) see the ~32x
+    /// throughput penalty and do not over-estimate the GPU win.
+    ///
+    /// Not used by the executor itself — kernel selection still uses
+    /// `result_type_oid` / per-function dispatch.
+    pub uses_fp64: bool,
 }
 
 /// Number of integers per window func spec in `custom_private`.
-pub const WINDOW_SPEC_INTS: usize = 7;
+///
+/// Fields: func, partition_attno, order_attno, value_attno, offset,
+/// default_bits, result_type_oid, uses_fp64 (0/1).
+pub const WINDOW_SPEC_INTS: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Executor state

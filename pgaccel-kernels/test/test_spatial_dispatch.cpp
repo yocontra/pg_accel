@@ -310,6 +310,92 @@ TEST(total_partitioning) {
 }
 
 /* ----------------------------------------------------------------
+ * Test: unsupported geometry-type pairs must be UNCERTAIN, never
+ * silently DEFINITE_TRUE or DEFINITE_FALSE from the predicate layer.
+ *
+ * These pairs are listed as UNSUPPORTED in the evaluate_predicate
+ * comment in spatial_dispatch.cpp and correspond to missing kernels:
+ *   - Point × LineString            — no pgaccel_point_on_linestring_bulk
+ *   - LineString × Polygon          — no pgaccel_linestring_polygon_intersects_bulk
+ *   - Polygon × Polygon             — no pgaccel_polygon_polygon_intersects_bulk
+ *
+ * All bboxes overlap so the Layer-1 bbox filter cannot prune them;
+ * every pair must therefore reach Layer-2 and land in UNCERTAIN.
+ * Future kernels that close one of these gaps must add a scalar check
+ * helper and an explicit branch in evaluate_predicate — never remove
+ * the UNCERTAIN fallback silently.
+ * ---------------------------------------------------------------- */
+TEST(unsupported_pairs_are_uncertain) {
+  /* Shared bbox that every geometry below overlaps. */
+  float bb[] = {0.0f, 0.0f, 2.0f, 2.0f};
+
+  float pt_coords[] = {1.0f, 1.0f};
+  float line_coords[] = {0.0f, 0.0f, 2.0f, 2.0f};
+  float poly_coords[] = {0.0f, 0.0f, 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f};
+  uint32_t poly_rings[] = {0};
+
+  pgaccel_geometry pt = {PGACCEL_GEOM_POINT, bb, pt_coords, 1, nullptr, 0};
+  pgaccel_geometry line = {PGACCEL_GEOM_LINESTRING, bb, line_coords, 2, nullptr, 0};
+  pgaccel_geometry poly = {PGACCEL_GEOM_POLYGON, bb, poly_coords, 5, poly_rings, 1};
+
+  /* Point × LineString (both orders). */
+  {
+    DispatchResult r(1);
+    pgaccel_status s =
+        pgaccel_spatial_intersects(&pt, 1, &line, 1, r.dt.data(), &r.dt_count, r.df.data(),
+                                   &r.df_count, r.unc.data(), &r.unc_count);
+    ASSERT_EQ(s, PGACCEL_OK);
+    ASSERT_EQ(r.unc_count, 1u);
+    ASSERT_EQ(r.dt_count, 0u);
+    ASSERT_EQ(r.df_count, 0u);
+  }
+  {
+    DispatchResult r(1);
+    pgaccel_status s =
+        pgaccel_spatial_intersects(&line, 1, &pt, 1, r.dt.data(), &r.dt_count, r.df.data(),
+                                   &r.df_count, r.unc.data(), &r.unc_count);
+    ASSERT_EQ(s, PGACCEL_OK);
+    ASSERT_EQ(r.unc_count, 1u);
+    ASSERT_EQ(r.dt_count, 0u);
+    ASSERT_EQ(r.df_count, 0u);
+  }
+
+  /* LineString × Polygon (both orders). */
+  {
+    DispatchResult r(1);
+    pgaccel_status s =
+        pgaccel_spatial_intersects(&line, 1, &poly, 1, r.dt.data(), &r.dt_count, r.df.data(),
+                                   &r.df_count, r.unc.data(), &r.unc_count);
+    ASSERT_EQ(s, PGACCEL_OK);
+    ASSERT_EQ(r.unc_count, 1u);
+    ASSERT_EQ(r.dt_count, 0u);
+    ASSERT_EQ(r.df_count, 0u);
+  }
+  {
+    DispatchResult r(1);
+    pgaccel_status s =
+        pgaccel_spatial_intersects(&poly, 1, &line, 1, r.dt.data(), &r.dt_count, r.df.data(),
+                                   &r.df_count, r.unc.data(), &r.unc_count);
+    ASSERT_EQ(s, PGACCEL_OK);
+    ASSERT_EQ(r.unc_count, 1u);
+    ASSERT_EQ(r.dt_count, 0u);
+    ASSERT_EQ(r.df_count, 0u);
+  }
+
+  /* Polygon × Polygon. */
+  {
+    DispatchResult r(1);
+    pgaccel_status s =
+        pgaccel_spatial_intersects(&poly, 1, &poly, 1, r.dt.data(), &r.dt_count, r.df.data(),
+                                   &r.df_count, r.unc.data(), &r.unc_count);
+    ASSERT_EQ(s, PGACCEL_OK);
+    ASSERT_EQ(r.unc_count, 1u);
+    ASSERT_EQ(r.dt_count, 0u);
+    ASSERT_EQ(r.df_count, 0u);
+  }
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 int main() {
@@ -322,6 +408,7 @@ int main() {
   run_line_vs_line();
   run_unknown_geom_type();
   run_total_partitioning();
+  run_unsupported_pairs_are_uncertain();
 
   printf("\n%d passed, %d failed\n", g_tests_passed, g_tests_failed);
   return g_tests_failed > 0 ? 1 : 0;

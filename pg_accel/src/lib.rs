@@ -105,15 +105,21 @@ pub fn fp64_enabled() -> bool {
     FP64_ENABLED.get()
 }
 
-/// Soft-fp64 cost multiplier (see [`SOFT_FP64_COST_MULTIPLIER`]).
+/// Pure clamp for a raw `soft_fp64_cost_multiplier` value, split out from
+/// [`soft_fp64_cost_multiplier`] so the clamp rule is unit-testable
+/// without a live PG backend.
 ///
-/// Clamped to `[1.0, 64.0]`. Values above the cap trigger a one-line
-/// `tracing::warn!` and are clamped to 64.0 so the planner never sees an
-/// unbounded multiplier.
+/// Belt-and-suspenders defense in depth: PG's `DefineCustomRealVariable`
+/// (wired via pgrx `define_float_guc` at `_PG_init`) already rejects
+/// out-of-range `SET` / `ALTER SYSTEM` / `postgresql.conf` values with an
+/// ERROR using the `min_val=1.0, max_val=64.0` bounds passed at
+/// registration. This runtime clamp catches pathological cases where the
+/// atomic backing [`GucSetting`] was somehow seeded out of range (e.g. a
+/// startup-time race, or a future code path that bypasses PG's range
+/// check) and guarantees the planner never sees an unbounded multiplier.
 #[inline]
 #[must_use]
-pub fn soft_fp64_cost_multiplier() -> f64 {
-    let raw = SOFT_FP64_COST_MULTIPLIER.get();
+fn clamp_soft_fp64_cost_multiplier(raw: f64) -> f64 {
     if raw > SOFT_FP64_COST_MULTIPLIER_HARD_CAP {
         tracing::warn!(
             raw = raw,
@@ -128,6 +134,17 @@ pub fn soft_fp64_cost_multiplier() -> f64 {
     } else {
         raw
     }
+}
+
+/// Soft-fp64 cost multiplier (see [`SOFT_FP64_COST_MULTIPLIER`]).
+///
+/// Clamped to `[1.0, 64.0]`. Values above the cap trigger a one-line
+/// `tracing::warn!` and are clamped to 64.0 so the planner never sees an
+/// unbounded multiplier.
+#[inline]
+#[must_use]
+pub fn soft_fp64_cost_multiplier() -> f64 {
+    clamp_soft_fp64_cost_multiplier(SOFT_FP64_COST_MULTIPLIER.get())
 }
 
 /// Called when the extension is loaded by PostgreSQL.
@@ -262,5 +279,61 @@ pub mod pg_test {
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
         vec!["shared_preload_libraries = 'pg_accel'"]
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Pure-Rust unit tests for the `soft_fp64_cost_multiplier` hard cap.
+//
+// These run without a PG backend and guard the clamp helper against future
+// edits (e.g. silently raising the cap constant, removing the warn!, or
+// inverting the comparison). The in-PG SET/SHOW tests live in
+// `src/tests/mod.rs` and cover the pgrx/PG registration path.
+// -----------------------------------------------------------------------------
+#[cfg(test)]
+mod soft_fp64_cap_tests {
+    use super::{SOFT_FP64_COST_MULTIPLIER_HARD_CAP, clamp_soft_fp64_cost_multiplier};
+
+    #[test]
+    fn hard_cap_constant_is_64() {
+        // The cap is documented in CLAUDE.md / TODO.md / feedback memory as
+        // `64.0`. Raising it requires explicit user sign-off and profiler
+        // evidence (feedback_dont_disable_gpu.md). This test makes the
+        // "don't silently bump the cap" rule a compile-time-checked fact.
+        assert!(
+            (SOFT_FP64_COST_MULTIPLIER_HARD_CAP - 64.0).abs() < f64::EPSILON,
+            "SOFT_FP64_COST_MULTIPLIER_HARD_CAP must stay at 64.0 — raising it \
+             is a parity-floor cheat vector; see feedback_dont_disable_gpu.md"
+        );
+    }
+
+    #[test]
+    fn clamp_passes_through_in_range_values() {
+        // Floor, default, and ceiling must all pass through unchanged.
+        assert!((clamp_soft_fp64_cost_multiplier(1.0) - 1.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(32.0) - 32.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(64.0) - 64.0).abs() < f64::EPSILON);
+        // Any value inside (1.0, 64.0) must also pass through.
+        assert!((clamp_soft_fp64_cost_multiplier(5.5) - 5.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn clamp_caps_values_above_hard_cap() {
+        // Belt-and-suspenders: even if a future code path bypasses PG's
+        // range check (or seeds the atomic GucSetting out of bounds), the
+        // planner must never see a value > 64.0.
+        assert!((clamp_soft_fp64_cost_multiplier(64.0001) - 64.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(100.0) - 64.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(1000.0) - 64.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(f64::INFINITY) - 64.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn clamp_lifts_values_below_floor() {
+        // A multiplier < 1.0 would model soft-fp64 as *faster* than fp32,
+        // which is physically impossible. Lift to 1.0.
+        assert!((clamp_soft_fp64_cost_multiplier(0.5) - 1.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(0.0) - 1.0).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(-10.0) - 1.0).abs() < f64::EPSILON);
     }
 }

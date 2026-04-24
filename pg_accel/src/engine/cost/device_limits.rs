@@ -52,9 +52,6 @@ pub struct DeviceLimits {
     /// Below this, the fusion setup overhead exceeds the savings
     /// from eliminating ExecProcNode calls.
     pub gpu_pipeline_fusion_min_rows: usize,
-    /// Maximum sort keys for GPU multi-key sort.
-    /// Each additional key requires a separate stable sort pass.
-    pub gpu_multi_key_sort_max_keys: usize,
     /// Minimum fact table rows for PreAgg (fused star-join + agg) injection.
     pub gpu_preagg_min_fact_rows: usize,
     /// Maximum dimension table rows (per dimension) for PreAgg.
@@ -306,9 +303,6 @@ impl DeviceLimits {
             // Pipeline fusion: setup has overhead (scan_desc open, template
             // compile). Needs enough rows to amortize.
             gpu_pipeline_fusion_min_rows: cu_scale(10_000).clamp(5_000, 100_000),
-            // Multi-key sort: each key is a separate stable sort pass.
-            // Diminishing returns beyond 4 keys on GPU.
-            gpu_multi_key_sort_max_keys: 4,
             // PreAgg (star-join fusion): needs enough fact rows to amortize
             // dimension materialization and hash table build.
             gpu_preagg_min_fact_rows: cu_scale(50_000).clamp(10_000, 500_000),
@@ -425,7 +419,6 @@ impl DeviceLimits {
             gpu_expr_min_rows: 250_000,
             gpu_hash_join_build_max_rows: 100_000,
             gpu_pipeline_fusion_min_rows: 10_000,
-            gpu_multi_key_sort_max_keys: 4,
             gpu_preagg_min_fact_rows: 50_000,
             gpu_preagg_max_dim_rows: 100_000,
             preagg_dim_materialize_cost: 0.01,
@@ -470,6 +463,39 @@ impl DeviceLimits {
 /// Cached device limits, initialised on first access after GPU init.
 static DEVICE_LIMITS: std::sync::OnceLock<DeviceLimits> = std::sync::OnceLock::new();
 
+/// Source of the cached [`DeviceLimits`] — `HardwareDerived` means
+/// [`DeviceLimits::from_profile`] ran against a detected GPU profile;
+/// `FallbackCpuOnly` means [`DeviceLimits::cpu_only`] was used because no GPU
+/// was detected.
+///
+/// Diagnostic consumers (see `pg_accel_device_limits` SRF) use this to tell
+/// users which set of values their session is actually seeing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceLimitsSource {
+    /// Derived from a detected [`PlatformProfile`] via
+    /// [`DeviceLimits::from_profile`].
+    HardwareDerived,
+    /// Hard-coded fallback from [`DeviceLimits::cpu_only`] — used when no GPU
+    /// was detected at `device_limits()` init time.
+    FallbackCpuOnly,
+}
+
+impl DeviceLimitsSource {
+    /// Short tag suitable for a SQL column (stable, matches CLAUDE.md doc).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HardwareDerived => "hardware_derived",
+            Self::FallbackCpuOnly => "fallback_cpu_only",
+        }
+    }
+}
+
+/// Cached source tag for [`device_limits`] — set once alongside
+/// `DEVICE_LIMITS` so diagnostics can report which branch produced the
+/// effective limits.
+static DEVICE_LIMITS_SOURCE: std::sync::OnceLock<DeviceLimitsSource> = std::sync::OnceLock::new();
+
 /// Get the cached device limits, initialising from the current platform
 /// profile on first call.
 ///
@@ -480,16 +506,34 @@ pub fn device_limits() -> &'static DeviceLimits {
     DEVICE_LIMITS.get_or_init(|| {
         #[cfg(test)]
         {
+            let _ = DEVICE_LIMITS_SOURCE.set(DeviceLimitsSource::FallbackCpuOnly);
             DeviceLimits::cpu_only()
         }
         #[cfg(not(test))]
         {
             let profile = PlatformProfile::detect();
             if profile.has_gpu {
+                let _ = DEVICE_LIMITS_SOURCE.set(DeviceLimitsSource::HardwareDerived);
                 DeviceLimits::from_profile(&profile)
             } else {
+                let _ = DEVICE_LIMITS_SOURCE.set(DeviceLimitsSource::FallbackCpuOnly);
                 DeviceLimits::cpu_only()
             }
         }
     })
+}
+
+/// Returns the source of the cached device limits, forcing init if it hasn't
+/// run yet. Used by the `pg_accel_device_limits` SRF so callers can tell
+/// whether they're looking at hardware-derived values or the zero-profile
+/// fallback constants.
+#[must_use]
+pub fn device_limits_source() -> DeviceLimitsSource {
+    // Touch `device_limits()` to guarantee the OnceLock is populated; the
+    // initialiser always sets the source.
+    let _ = device_limits();
+    DEVICE_LIMITS_SOURCE
+        .get()
+        .copied()
+        .unwrap_or(DeviceLimitsSource::FallbackCpuOnly)
 }

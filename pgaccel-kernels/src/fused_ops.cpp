@@ -64,7 +64,9 @@ static inline bool eval_cmp_f32_device(float val, pgaccel_cmp_op op, float ref) 
 // ---------------------------------------------------------------------------
 // Metal/AdaptiveCpp does not reliably support sycl::reduction, so we use
 // atomic_ref on shared memory for all agg types.  All GPU work uses f32
-// (Metal has no fp64); the result is cast to f64 on the host side.
+// for speed — AdaptiveCpp's soft-fp64 lowering does run on Metal now, but
+// the emulation overhead isn't worth the precision gain for this reduce;
+// the f32 result is promoted to f64 on the host side.
 // ---------------------------------------------------------------------------
 
 pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_col,

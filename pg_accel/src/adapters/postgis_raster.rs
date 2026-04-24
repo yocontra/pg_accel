@@ -18,6 +18,28 @@ pub fn adapter() -> ExtensionAdapter {
 }
 
 /// GPU-accelerated raster operations.
+///
+/// Only operators with a real backing kernel in `pgaccel-kernels/src/raster_ops.cpp`
+/// are registered. The current kernel set is:
+///
+/// - `pgaccel_map_algebra`    → `st_mapalgebra`  (`raster_ops.cpp:460`)
+/// - `pgaccel_raster_clip`    → `st_clip`        (`raster_ops.cpp:517`)
+/// - `pgaccel_raster_reclass` → `st_reclass`     (`raster_ops.cpp:627`)
+///
+/// TODO Phase 4 lists additional candidates (`st_resample`, `st_slope`,
+/// `st_aspect`, `st_hillshade`, `st_value`, `st_summarystats`). These are
+/// **NOT** registered here because no corresponding `extern "C" pgaccel_*`
+/// kernel exists in `pgaccel-kernels/src/`. Registering them would route
+/// matching queries to a strategy with no executor implementation — i.e.
+/// a stub-as-done pattern explicitly banned by `.claude/rules/anti-cheat.md`
+/// #7 and the "no fabrication" clause of the task brief.
+///
+/// Additionally, `st_summarystats` returns multiple scalars (min / max /
+/// mean / stddev / count). The current `FunctionAccelEntry` / `GpuRaster`
+/// plumbing assumes a single raster output per call — multi-scalar return
+/// plumbing is not yet in place. Even once a kernel exists, adapter /
+/// dispatch changes beyond this file are required before it can be
+/// registered.
 fn gpu_raster_entries() -> Vec<FunctionAccelEntry> {
     const NAMES: &[&str] = &["st_mapalgebra", "st_clip", "st_reclass"];
     NAMES
@@ -197,6 +219,50 @@ mod tests {
     #[test]
     fn contains_st_reclass() {
         assert!(adapter().functions.iter().any(|f| f.name == "st_reclass"));
+    }
+
+    // -- Non-registration of kernel-less candidates ---------------------------
+    //
+    // These names appear in TODO.md Phase 4 ("PostGIS raster registrations")
+    // but have no backing `extern "C" pgaccel_*` kernel in
+    // `pgaccel-kernels/src/raster_ops.cpp`. Registering any of them without
+    // a kernel would be a stub-as-done pattern (anti-cheat.md #7). This test
+    // prevents a future edit from accidentally fabricating a registration
+    // before the kernel lands.
+
+    #[test]
+    fn does_not_register_kernelless_raster_candidates() {
+        const UNBACKED: &[&str] = &[
+            "st_resample",
+            "st_slope",
+            "st_aspect",
+            "st_hillshade",
+            "st_value",
+            "st_summarystats",
+        ];
+        let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
+        for name in UNBACKED {
+            assert!(
+                !registered.contains(name),
+                "{name} registered without a backing kernel in pgaccel-kernels/src/raster_ops.cpp"
+            );
+        }
+    }
+
+    #[test]
+    fn registered_set_matches_kernel_set() {
+        // Real kernel symbols in pgaccel-kernels/src/raster_ops.cpp:
+        //   pgaccel_map_algebra    (line 460)
+        //   pgaccel_raster_clip    (line 517)
+        //   pgaccel_raster_reclass (line 627)
+        let expected: HashSet<&str> = ["st_mapalgebra", "st_clip", "st_reclass"]
+            .into_iter()
+            .collect();
+        let actual: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
+        assert_eq!(
+            actual, expected,
+            "registered raster set must match the 3 real kernel symbols"
+        );
     }
 
     // -- gpu_raster_entries helper --------------------------------------------

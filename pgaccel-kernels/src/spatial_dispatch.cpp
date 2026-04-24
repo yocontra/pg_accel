@@ -154,7 +154,33 @@ static int8_t points_equal_check(const float* a, const float* b) {
   return -1;
 }
 
-/* Top-level predicate dispatch for a single pair. */
+/* Top-level predicate dispatch for a single pair.
+ *
+ * Supported geometry-type pairs (handled by a dedicated scalar check):
+ *   - Point × Polygon (and reverse)     → point_in_polygon_check
+ *   - LineString × LineString           → linestring_intersect_check
+ *   - Point × Point                     → points_equal_check
+ *
+ * UNSUPPORTED pairs that currently return UNCERTAIN (grep "UNSUPPORTED"
+ * to find every gap). These fall through to PG's exact recheck via
+ * PostGIS; the caller never observes a silent skip — the pair is routed
+ * to the uncertain bucket, which the executor's Layer 3 always rechecks.
+ * Adding a kernel here means adding both a <pair>_check() helper and an
+ * explicit branch above.
+ *
+ *   - Point × LineString (and reverse)  — UNSUPPORTED: no
+ *       point_on_linestring_check() helper. A future kernel symbol
+ *       `pgaccel_point_on_linestring_bulk` would plug in here.
+ *   - LineString × Polygon (and reverse) — UNSUPPORTED: no
+ *       linestring_polygon_check() helper. A future kernel symbol
+ *       `pgaccel_linestring_polygon_intersects_bulk` would plug in here.
+ *   - Polygon × Polygon                 — UNSUPPORTED: no
+ *       polygon_polygon_check() helper. A future kernel symbol
+ *       `pgaccel_polygon_polygon_intersects_bulk` would plug in here.
+ *   - anything involving PGACCEL_GEOM_UNKNOWN — UNSUPPORTED by design:
+ *       we don't know the layout, so we cannot evaluate. Routed to
+ *       uncertain so PostGIS parses it.
+ */
 static int8_t evaluate_predicate(const pgaccel_geometry& a, const pgaccel_geometry& b) {
   /* Point vs Polygon */
   if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POLYGON) {
@@ -172,7 +198,27 @@ static int8_t evaluate_predicate(const pgaccel_geometry& a, const pgaccel_geomet
   if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POINT) {
     return points_equal_check(a.coords, b.coords);
   }
-  /* Unknown or unsupported combination — UNCERTAIN */
+
+  /* UNSUPPORTED: Point × LineString — no kernel for
+   * pgaccel_point_on_linestring_bulk. Route to UNCERTAIN so PG rechecks. */
+  if ((a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_LINESTRING) ||
+      (a.type == PGACCEL_GEOM_LINESTRING && b.type == PGACCEL_GEOM_POINT)) {
+    return 0;
+  }
+  /* UNSUPPORTED: LineString × Polygon — no kernel for
+   * pgaccel_linestring_polygon_intersects_bulk. Route to UNCERTAIN. */
+  if ((a.type == PGACCEL_GEOM_LINESTRING && b.type == PGACCEL_GEOM_POLYGON) ||
+      (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_LINESTRING)) {
+    return 0;
+  }
+  /* UNSUPPORTED: Polygon × Polygon — no kernel for
+   * pgaccel_polygon_polygon_intersects_bulk. Route to UNCERTAIN. */
+  if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POLYGON) {
+    return 0;
+  }
+  /* UNSUPPORTED: any pair involving PGACCEL_GEOM_UNKNOWN (MultiPoint,
+   * MultiLineString, MultiPolygon, GeometryCollection, CurvePolygon,
+   * Triangle, etc.). We can't decode the layout here — PostGIS handles. */
   return 0;
 }
 

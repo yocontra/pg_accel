@@ -20,10 +20,50 @@ pub fn adapter() -> ExtensionAdapter {
 
 /// GPU-accelerated spatial predicate functions.
 ///
-/// Only functions with working GPU kernels are registered. `st_contains`,
-/// `st_within`, and `st_dwithin` have no GPU kernel — the three-layer
-/// pipeline returns `all_uncertain()` for them, so registering them adds
-/// Custom Scan overhead with zero benefit.
+/// Only functions with a functionally-complete GPU kernel path are
+/// registered. The full TODO.md Phase 4 candidate list was audited against
+/// `pgaccel-kernels/src/spatial_*.cpp` and `src/gpu/three_layer.rs`; the
+/// results (as of this revision):
+///
+/// # Geometry-pair coverage inside `st_intersects`
+///
+/// Within the one registered predicate `st_intersects`, the Layer-2 scalar
+/// dispatcher in `spatial_dispatch.cpp:evaluate_predicate` handles the
+/// following geometry-type pairs directly, and explicitly routes every
+/// other pair to `UNCERTAIN` so PG's Layer-3 recheck runs via PostGIS. No
+/// pair is silently skipped; each UNSUPPORTED branch is grep-able in
+/// `spatial_dispatch.cpp`. Closing a gap means adding a scalar helper
+/// **and** a concrete branch in `evaluate_predicate` — never suppressing
+/// the UNCERTAIN fallback:
+///
+/// | Pair (A × B)                 | Status      | Missing kernel symbol |
+/// |------------------------------|-------------|------------------------|
+/// | Point × Polygon / reverse    | handled     | — |
+/// | LineString × LineString      | handled     | — |
+/// | Point × Point                | handled     | — |
+/// | Point × LineString / reverse | UNSUPPORTED | `pgaccel_point_on_linestring_bulk` |
+/// | LineString × Polygon / rev.  | UNSUPPORTED | `pgaccel_linestring_polygon_intersects_bulk` |
+/// | Polygon × Polygon            | UNSUPPORTED | `pgaccel_polygon_polygon_intersects_bulk` |
+/// | anything × PGACCEL_GEOM_UNKNOWN | UNSUPPORTED | n/a (PostGIS parses) |
+///
+/// | Predicate        | Registered? | Reason |
+/// |------------------|-------------|--------|
+/// | `st_intersects`  | YES         | `pgaccel_spatial_intersects` (spatial_dispatch.cpp:536) wired through `three_layer::spatial_intersects`. |
+/// | `st_contains`    | no          | `three_layer::spatial_contains` returns `all_uncertain()` — no GPU containment kernel exists. Registering adds Custom Scan overhead with zero benefit. |
+/// | `st_within`      | no          | Same as `st_contains` (args swapped). |
+/// | `st_dwithin`     | no          | `three_layer::spatial_dwithin` returns `all_uncertain()` — `pgaccel_sphere_distance_bulk` exists (spatial_predicates.cpp:239) but the dispatch path is not wired. |
+/// | `st_distance`    | no          | No distance-returning kernel wired; `pgaccel_sphere_distance_bulk` is point-only and not exposed to the three-layer pipeline. |
+/// | `st_area`        | no          | No GPU kernel in `spatial_*.cpp`. |
+/// | `st_length`      | no          | No GPU kernel in `spatial_*.cpp`. |
+/// | `st_equals`      | no          | No GPU kernel. Executor would fall through the `_ => Intersects` match in `executor/join/mod.rs:502` and return wrong results. |
+/// | `st_disjoint`    | no          | Same fall-through correctness hazard as `st_equals`. A future `SpatialPredicate::Disjoint` variant could invert `Intersects`, but no such path exists today. |
+/// | `st_touches`     | no          | Same as `st_equals`. |
+/// | `st_crosses`     | no          | Same as `st_equals`. |
+/// | `st_overlaps`    | no          | Same as `st_equals`. |
+///
+/// Per `CLAUDE.md` anti-cheat ban #7 ("no stubs masquerading as done"),
+/// predicates whose kernel paths are absent or return
+/// `all_uncertain()` are left unregistered rather than padded in.
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
     const NAMES: &[&str] = &["st_intersects"];
     NAMES
@@ -208,6 +248,52 @@ mod tests {
     #[test]
     fn does_not_contain_st_dwithin() {
         assert!(!adapter().functions.iter().any(|f| f.name == "st_dwithin"));
+    }
+
+    // The predicates below have no GPU kernel path today. They must NOT be
+    // registered — doing so either (a) adds Custom Scan overhead with zero
+    // benefit (all_uncertain stub path) or (b) causes wrong results via
+    // the `_ => Intersects` fall-through in executor/join/mod.rs. See the
+    // audit table in `gpu_spatial_entries` for the full rationale.
+
+    #[test]
+    fn does_not_contain_st_distance() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_distance"));
+    }
+
+    #[test]
+    fn does_not_contain_st_area() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_area"));
+    }
+
+    #[test]
+    fn does_not_contain_st_length() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_length"));
+    }
+
+    #[test]
+    fn does_not_contain_st_equals() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_equals"));
+    }
+
+    #[test]
+    fn does_not_contain_st_disjoint() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_disjoint"));
+    }
+
+    #[test]
+    fn does_not_contain_st_touches() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_touches"));
+    }
+
+    #[test]
+    fn does_not_contain_st_crosses() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_crosses"));
+    }
+
+    #[test]
+    fn does_not_contain_st_overlaps() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_overlaps"));
     }
 
     // -- gpu_spatial_entries helper -------------------------------------------

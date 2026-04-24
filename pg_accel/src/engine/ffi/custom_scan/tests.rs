@@ -589,6 +589,7 @@ fn custom_private_data_with_window_specs() {
             offset: 0,
             default_val: 0.0,
             result_type_oid: pg_sys::INT8OID.to_u32(),
+            uses_fp64: false,
         },
         WindowFuncSpec {
             func: WindowFunc::Lag,
@@ -598,6 +599,7 @@ fn custom_private_data_with_window_specs() {
             offset: 1,
             default_val: f64::from_bits(0),
             result_type_oid: pg_sys::FLOAT8OID.to_u32(),
+            uses_fp64: true,
         },
     ];
     let data = CustomPrivateData {
@@ -862,9 +864,10 @@ fn sort_key_ints_matches_sort_key_desc_field_count() {
 
 #[test]
 fn window_spec_ints_matches_window_func_spec_field_count() {
-    // WindowFuncSpec has 7 fields: func, partition_attno, order_attno,
-    // value_attno, offset, default_val, result_type_oid.
-    assert_eq!(WINDOW_SPEC_INTS, 7);
+    // WindowFuncSpec has 8 serialized fields: func, partition_attno,
+    // order_attno, value_attno, offset, default_val, result_type_oid,
+    // uses_fp64.
+    assert_eq!(WINDOW_SPEC_INTS, 8);
 }
 
 // -----------------------------------------------------------------------
@@ -1040,6 +1043,7 @@ fn window_func_spec_default_val_zero_bits() {
         offset: 1,
         default_val: f64::from_bits(0),
         result_type_oid: pg_sys::FLOAT8OID.to_u32(),
+        uses_fp64: true,
     };
     assert_eq!(spec.default_val.to_bits(), 0);
     assert!((spec.default_val - 0.0).abs() < f64::EPSILON);

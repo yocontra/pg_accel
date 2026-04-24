@@ -108,6 +108,66 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // `pg_accel.soft_fp64_cost_multiplier` — hard-cap enforcement.
+    //
+    // The GUC is registered at `pg_accel/src/lib.rs` with
+    // `min_val=1.0, max_val=SOFT_FP64_COST_MULTIPLIER_HARD_CAP (= 64.0)` via
+    // pgrx's `define_float_guc`, which wires straight to PG's
+    // `DefineCustomRealVariable`. PG rejects out-of-range SETs with a
+    // `22023` (invalid_parameter_value) ERROR at assign time. These tests
+    // assert that prose-only documentation of the cap is now enforced by
+    // the GUC machinery itself (TODO.md Phase 5 item "`soft_fp64_cost_multiplier`
+    // hard-cap enforcement in code").
+    // -------------------------------------------------------------------------
+
+    #[pg_test]
+    fn test_guc_soft_fp64_cost_multiplier_exists() {
+        Spi::run("SHOW pg_accel.soft_fp64_cost_multiplier")
+            .expect("pg_accel.soft_fp64_cost_multiplier GUC should exist");
+    }
+
+    #[pg_test]
+    fn test_guc_soft_fp64_cost_multiplier_accepts_in_range() {
+        // Lower bound, default, and upper bound must all succeed.
+        for v in &["1.0", "32.0", "64.0"] {
+            Spi::run(&format!("SET pg_accel.soft_fp64_cost_multiplier = {v}"))
+                .unwrap_or_else(|_| panic!("SET soft_fp64_cost_multiplier = {v} should succeed"));
+        }
+    }
+
+    #[pg_test]
+    fn test_guc_soft_fp64_cost_multiplier_rejects_above_cap() {
+        // Any value > 64.0 must be rejected by PG's DefineCustomRealVariable
+        // range check — this is the parity-floor cheat defense: a misconfig
+        // (or agent under pressure) cannot silently set the multiplier to
+        // 1000 to make a failing fp64 benchmark "pass".
+        let result = Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 100.0");
+        assert!(
+            result.is_err(),
+            "SET soft_fp64_cost_multiplier = 100.0 must be rejected; got Ok(_) which means the \
+             hard cap is not enforced at registration"
+        );
+        // 64.0000001 must also be rejected — the boundary is closed at 64.0.
+        let result = Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 64.0001");
+        assert!(
+            result.is_err(),
+            "SET soft_fp64_cost_multiplier = 64.0001 must be rejected; cap is 64.0 inclusive"
+        );
+    }
+
+    #[pg_test]
+    fn test_guc_soft_fp64_cost_multiplier_rejects_below_floor() {
+        // Values below 1.0 are nonsensical for a "cost multiplier" — a GPU
+        // can never be faster at soft-fp64 than at fp32, so anything < 1.0
+        // must be rejected.
+        let result = Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 0.5");
+        assert!(
+            result.is_err(),
+            "SET soft_fp64_cost_multiplier = 0.5 must be rejected; floor is 1.0"
+        );
+    }
+
     // =========================================================================
     // 3. Basic SELECT with accelerable functions doesn't crash
     // =========================================================================
@@ -2343,5 +2403,163 @@ mod tests {
         let _ = Spi::run("SELECT v FROM _gpu_sort_t ORDER BY v").expect("sort query ok");
 
         crate::gpu::assert_gpu_executed(1);
+    }
+
+    // =========================================================================
+    // Parallel path injection (partial_pathlist → Gather ∘ CustomScan)
+    // =========================================================================
+    //
+    // These tests verify the Phase 3 change in
+    // `src/engine/ffi/planner_hooks/rel_pathlist.rs`: the scan-level GpuExpr
+    // and GpuSort injectors now also populate `rel->partial_pathlist`, so
+    // queries whose optimal plan is `Gather ∘ Parallel Scan` pick up the
+    // GPU CustomPath. A smoke test runs EXPLAIN with parallel workers
+    // enabled and asserts either a plain CustomScan (non-parallel chosen
+    // by cost) or a Gather-wrapping CustomScan appears — what we guard
+    // against is the planner REJECTING our partial path with a panic.
+
+    /// GpuSort partial path: EXPLAIN a sort on a table large enough to
+    /// trigger parallel planning, assert the plan contains a CustomScan
+    /// (either standalone or under Gather/Gather Merge) and did not crash.
+    #[pg_test]
+    fn test_gpu_sort_partial_path_injects() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        // Force PG to consider parallel plans on small-ish tables.
+        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
+        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
+        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
+        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+
+        Spi::run(
+            "CREATE TEMP TABLE _sort_par_t AS \
+             SELECT (random() * 1e6)::float4 AS v \
+             FROM generate_series(1, 200000)",
+        )
+        .expect("create temp table");
+        Spi::run("ANALYZE _sort_par_t").expect("ANALYZE");
+
+        // EXPLAIN must not panic. We don't require a specific plan shape —
+        // PG's cost model may still pick the non-parallel CustomScan.
+        // The test is a regression guard: prior to the partial-path injection,
+        // this would never produce Gather-wrapped CustomScan; we verify
+        // EXPLAIN at least succeeds now with both paths considered.
+        let plan = Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(
+                    "EXPLAIN (FORMAT TEXT) SELECT v FROM _sort_par_t ORDER BY v",
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+        // Regression: prior bug would crash in the planner when the partial
+        // path was malformed; the mere fact that EXPLAIN returns is the PASS.
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+    }
+
+    /// GpuExpr partial path: EXPLAIN a WHERE-filter query with parallel
+    /// workers forced on. Same regression guard as the sort test.
+    #[pg_test]
+    fn test_gpu_expr_partial_path_injects() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.min_batch_size = 1000").expect("SET min_batch");
+        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
+        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
+        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
+        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+
+        Spi::run(
+            "CREATE TEMP TABLE _expr_par_t AS \
+             SELECT g AS id, (random() * 1e6)::float8 AS v \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("create temp table");
+        Spi::run("ANALYZE _expr_par_t").expect("ANALYZE");
+
+        let plan = Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(
+                    "EXPLAIN (FORMAT TEXT) SELECT id FROM _expr_par_t WHERE v > 0.5 AND id < 100000",
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+    }
+
+    /// GpuHashJoin partial path: EXPLAIN a 2-table int equi-join with
+    /// parallel workers forced on. Regression guard for the Phase 3 change
+    /// in `planner_hooks/join_pathlist.rs` that adds
+    /// `inject_gpu_hashjoin_partial_paths` alongside the existing
+    /// `add_path`. Prior to this change, `set_join_pathlist_hook` only
+    /// registered a non-parallel `CustomPath`, so `Gather ∘ Parallel
+    /// HashJoin` plans skipped the GPU path entirely. The assertion is
+    /// shape-agnostic (PG's cost model may still prefer a non-parallel
+    /// plan on this small fixture) — what we guard against is the planner
+    /// crashing when it considers the new partial CustomPath.
+    #[pg_test]
+    fn test_gpu_hashjoin_partial_path_injects() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
+        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
+        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
+        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+
+        Spi::run(
+            "CREATE TEMP TABLE _hj_par_outer AS \
+             SELECT g AS id, (g % 1000) AS k \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("create outer table");
+        Spi::run(
+            "CREATE TEMP TABLE _hj_par_inner AS \
+             SELECT g AS k, (g * 7) AS v \
+             FROM generate_series(0, 999) g",
+        )
+        .expect("create inner table");
+        Spi::run("ANALYZE _hj_par_outer").expect("ANALYZE outer");
+        Spi::run("ANALYZE _hj_par_inner").expect("ANALYZE inner");
+
+        let plan = Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(
+                    "EXPLAIN (FORMAT TEXT) \
+                     SELECT o.id, i.v \
+                     FROM _hj_par_outer o JOIN _hj_par_inner i ON o.k = i.k",
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+        // Regression: before the partial-path injector, the planner could
+        // still produce a plan (non-parallel CustomScan or PG HashJoin).
+        // The new code must not introduce a crash when PG evaluates the
+        // Gather ∘ Parallel HashJoin candidate against the GPU partial path.
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
     }
 }

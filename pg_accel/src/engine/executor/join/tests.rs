@@ -409,3 +409,85 @@ fn default_hash_key_type_is_int32() {
     let state = make_state(AccelStrategy::GpuHashJoin, 256);
     assert!(matches!(state.hash_key_type, PgaccelKeyType::Int32));
 }
+
+// -- Spatial predicate allowlist (Phase 4: spatial dispatch gaps) -----------
+//
+// These tests pin down the adapter-layer invariant that only function names
+// with a wired three-layer GPU path resolve to a `SpatialPredicate`, and
+// every unknown / unregistered name is rejected (returns `None`). The
+// previous `_ => Intersects` fall-through silently misdispatched any
+// non-matching name — see `spatial_dispatch.cpp:evaluate_predicate` for the
+// UNSUPPORTED geometry-pair table and `adapters/postgis.rs:gpu_spatial_entries`
+// for the registered-function table that mirrors this allowlist.
+
+#[test]
+fn resolve_st_intersects_is_intersects() {
+    assert_eq!(
+        resolve_spatial_predicate(Some("st_intersects")),
+        Some(three_layer::SpatialPredicate::Intersects)
+    );
+}
+
+#[test]
+fn resolve_st_contains_is_contains() {
+    assert_eq!(
+        resolve_spatial_predicate(Some("st_contains")),
+        Some(three_layer::SpatialPredicate::Contains)
+    );
+}
+
+#[test]
+fn resolve_st_within_is_within() {
+    assert_eq!(
+        resolve_spatial_predicate(Some("st_within")),
+        Some(three_layer::SpatialPredicate::Within)
+    );
+}
+
+#[test]
+fn resolve_none_is_none() {
+    assert_eq!(resolve_spatial_predicate(None), None);
+}
+
+#[test]
+fn resolve_unknown_predicates_are_none_not_intersects() {
+    // These are the predicates the adapter deliberately does NOT register
+    // because no GPU path exists. The executor must NOT silently treat them
+    // as `Intersects`. See adapters/postgis.rs:gpu_spatial_entries audit
+    // table and the Phase 4 TODO entry.
+    for name in [
+        "st_dwithin",
+        "st_distance",
+        "st_area",
+        "st_length",
+        "st_equals",
+        "st_disjoint",
+        "st_touches",
+        "st_crosses",
+        "st_overlaps",
+        "st_covers",
+        "st_coveredby",
+        "st_relate",
+    ] {
+        assert_eq!(
+            resolve_spatial_predicate(Some(name)),
+            None,
+            "predicate {name} must not resolve — it has no wired GPU path",
+        );
+    }
+}
+
+#[test]
+fn resolve_case_sensitive() {
+    // Registry stores lowercase names; case-mismatched lookups must not
+    // silently succeed.
+    assert_eq!(resolve_spatial_predicate(Some("ST_Intersects")), None);
+    assert_eq!(resolve_spatial_predicate(Some("ST_INTERSECTS")), None);
+}
+
+#[test]
+fn resolve_empty_and_garbage() {
+    assert_eq!(resolve_spatial_predicate(Some("")), None);
+    assert_eq!(resolve_spatial_predicate(Some("not_a_spatial_fn")), None);
+    assert_eq!(resolve_spatial_predicate(Some("st_")), None);
+}

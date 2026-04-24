@@ -74,7 +74,23 @@ pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(A
         pg_sys::F_SUM_INT4 | pg_sys::F_SUM_INT2 => {
             Some((AggOp::Sum, AggClass::IntegerSumPromotion))
         }
-        pg_sys::F_SUM_INT8 | pg_sys::F_SUM_NUMERIC => Some((AggOp::Sum, AggClass::NumericSum)),
+        // SUM(int8) promotes to NUMERIC result but its transition state is still a
+        // plain scalar sum we can accumulate. Route it through NumericSum.
+        pg_sys::F_SUM_INT8 => Some((AggOp::Sum, AggClass::NumericSum)),
+        // SUM(numeric) is rejected at classification: PG NUMERIC is arbitrary-precision,
+        // but the partial-agg accumulator (`ColumnAccumulator.sum`) is f64 and silently
+        // loses precision above 2^53. Returning None here forces the partial-agg planner
+        // (partial_agg::try_inject) to bail, so PG handles SUM(numeric) natively.
+        //
+        // Option A (full fidelity multi-limb accumulator kernel) is tracked in TODO.md
+        // "Post-1.0 (deferred)" under "NUMERIC multi-limb accumulator kernel".
+        //
+        // Defense in depth: the f64 accumulator path in
+        // `engine/executor/agg/partial/emitter.rs::NumericSumEmitter` is left intact
+        // for SUM(int8) (whose i64 values fit in f64 up to 2^53 with identical
+        // semantics to PG's own int8_sum until overflow, which PG handles via NUMERIC
+        // promotion too — see `int8_sum` in src/backend/utils/adt/numeric.c).
+        pg_sys::F_SUM_NUMERIC => None,
         pg_sys::F_SUM_FLOAT4 => Some((
             AggOp::Sum,
             AggClass::ScalarPassthrough {

@@ -199,7 +199,6 @@ fn cpu_only_limits_match_previous_defaults() {
     assert_eq!(l.gpu_expr_min_rows, 250_000);
     assert_eq!(l.gpu_hash_join_build_max_rows, 100_000);
     assert_eq!(l.gpu_pipeline_fusion_min_rows, 10_000);
-    assert_eq!(l.gpu_multi_key_sort_max_keys, 4);
     assert_eq!(l.optimal_batch_min, 256);
     assert_eq!(l.optimal_batch_max, 8192);
 }

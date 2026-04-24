@@ -333,6 +333,217 @@ fn pg_accel_reset_stats() {
     });
 }
 
+/// Returns the effective [`DeviceLimits`](crate::engine::cost::DeviceLimits)
+/// for this backend as one row per field.
+///
+/// The `source` column is either `hardware_derived` (values came from
+/// [`DeviceLimits::from_profile`](crate::engine::cost::DeviceLimits::from_profile)
+/// applied to the detected platform profile) or `fallback_cpu_only` (no GPU
+/// was detected so [`DeviceLimits::cpu_only`](crate::engine::cost::DeviceLimits::cpu_only)
+/// was used). Benchmarks and dispatch tracing should use this function to
+/// discover the real thresholds on the current machine — the constants listed
+/// in the `cpu_only()` fallback at `engine/cost/device_limits.rs` are only
+/// active when there is no GPU.
+#[pg_extern]
+#[allow(clippy::type_complexity, clippy::too_many_lines)]
+fn pg_accel_device_limits() -> TableIterator<
+    'static,
+    (
+        name!(name, String),
+        name!(value, String),
+        name!(source, String),
+    ),
+> {
+    let limits = crate::engine::cost::device_limits();
+    let source = crate::engine::cost::device_limits_source()
+        .as_str()
+        .to_owned();
+
+    // Keep ordering aligned with the struct declaration in
+    // `engine/cost/device_limits.rs` so readers can cross-reference.
+    let rows: Vec<(String, String)> = vec![
+        ("gpu_min_rows".into(), limits.gpu_min_rows.to_string()),
+        (
+            "gpu_sort_min_rows".into(),
+            limits.gpu_sort_min_rows.to_string(),
+        ),
+        (
+            "gpu_sort_planner_min_rows".into(),
+            limits.gpu_sort_planner_min_rows.to_string(),
+        ),
+        (
+            "gpu_window_min_rows".into(),
+            limits.gpu_window_min_rows.to_string(),
+        ),
+        (
+            "gpu_reduce_min_rows".into(),
+            limits.gpu_reduce_min_rows.to_string(),
+        ),
+        (
+            "gpu_hash_agg_min_rows".into(),
+            limits.gpu_hash_agg_min_rows.to_string(),
+        ),
+        (
+            "gpu_hash_agg_max_groups".into(),
+            limits.gpu_hash_agg_max_groups.to_string(),
+        ),
+        (
+            "gpu_reduce_max_chunk".into(),
+            limits.gpu_reduce_max_chunk.to_string(),
+        ),
+        (
+            "gpu_sort_max_elements".into(),
+            limits.gpu_sort_max_elements.to_string(),
+        ),
+        (
+            "gpu_join_max_output_rows".into(),
+            limits.gpu_join_max_output_rows.to_string(),
+        ),
+        (
+            "gpu_spatial_min_vertices".into(),
+            limits.gpu_spatial_min_vertices.to_string(),
+        ),
+        (
+            "gpu_expr_min_rows".into(),
+            limits.gpu_expr_min_rows.to_string(),
+        ),
+        (
+            "gpu_hash_join_build_max_rows".into(),
+            limits.gpu_hash_join_build_max_rows.to_string(),
+        ),
+        (
+            "gpu_pipeline_fusion_min_rows".into(),
+            limits.gpu_pipeline_fusion_min_rows.to_string(),
+        ),
+        (
+            "gpu_preagg_min_fact_rows".into(),
+            limits.gpu_preagg_min_fact_rows.to_string(),
+        ),
+        (
+            "gpu_preagg_max_dim_rows".into(),
+            limits.gpu_preagg_max_dim_rows.to_string(),
+        ),
+        (
+            "preagg_dim_materialize_cost".into(),
+            limits.preagg_dim_materialize_cost.to_string(),
+        ),
+        (
+            "preagg_fact_scan_cost".into(),
+            limits.preagg_fact_scan_cost.to_string(),
+        ),
+        (
+            "preagg_probe_cost".into(),
+            limits.preagg_probe_cost.to_string(),
+        ),
+        ("preagg_agg_cost".into(), limits.preagg_agg_cost.to_string()),
+        (
+            "preagg_yield_cost".into(),
+            limits.preagg_yield_cost.to_string(),
+        ),
+        (
+            "optimal_batch_min".into(),
+            limits.optimal_batch_min.to_string(),
+        ),
+        (
+            "optimal_batch_max".into(),
+            limits.optimal_batch_max.to_string(),
+        ),
+        (
+            "fused_interrupt_interval".into(),
+            limits.fused_interrupt_interval.to_string(),
+        ),
+        (
+            "gpu_op_cost_reduce".into(),
+            limits.gpu_op_cost_reduce.to_string(),
+        ),
+        (
+            "gpu_op_cost_hash_agg".into(),
+            limits.gpu_op_cost_hash_agg.to_string(),
+        ),
+        (
+            "gpu_op_cost_sort".into(),
+            limits.gpu_op_cost_sort.to_string(),
+        ),
+        (
+            "gpu_op_cost_window".into(),
+            limits.gpu_op_cost_window.to_string(),
+        ),
+        (
+            "gpu_op_cost_filter".into(),
+            limits.gpu_op_cost_filter.to_string(),
+        ),
+        (
+            "gpu_agg_cost_ratio".into(),
+            limits.gpu_agg_cost_ratio.to_string(),
+        ),
+        (
+            "gpu_window_cost_ratio".into(),
+            limits.gpu_window_cost_ratio.to_string(),
+        ),
+        (
+            "gpu_preagg_cost_ratio".into(),
+            limits.gpu_preagg_cost_ratio.to_string(),
+        ),
+        (
+            "reduce_f32_break_even_rows".into(),
+            limits.reduce_f32_break_even_rows.to_string(),
+        ),
+        (
+            "reduce_f64_break_even_rows".into(),
+            limits.reduce_f64_break_even_rows.to_string(),
+        ),
+        (
+            "reduce_i64_break_even_rows".into(),
+            limits.reduce_i64_break_even_rows.to_string(),
+        ),
+        (
+            "hashagg_min_rows_per_group".into(),
+            limits.hashagg_min_rows_per_group.to_string(),
+        ),
+        (
+            "hashagg_max_state_bytes_per_group".into(),
+            limits.hashagg_max_state_bytes_per_group.to_string(),
+        ),
+        (
+            "sort_break_even_rows_int".into(),
+            limits.sort_break_even_rows_int.to_string(),
+        ),
+        (
+            "sort_break_even_rows_float".into(),
+            limits.sort_break_even_rows_float.to_string(),
+        ),
+        (
+            "spatial_point_in_ring_break_even_verts_x_rows".into(),
+            limits
+                .spatial_point_in_ring_break_even_verts_x_rows
+                .to_string(),
+        ),
+        (
+            "spatial_point_in_ring_max_verts_x_rows".into(),
+            limits.spatial_point_in_ring_max_verts_x_rows.to_string(),
+        ),
+        (
+            "window_min_partition_rows".into(),
+            limits.window_min_partition_rows.to_string(),
+        ),
+        (
+            "expr_min_predicate_complexity_x_rows".into(),
+            limits.expr_min_predicate_complexity_x_rows.to_string(),
+        ),
+        (
+            "hashjoin_min_build_rows".into(),
+            limits.hashjoin_min_build_rows.to_string(),
+        ),
+        ("has_native_fp64".into(), limits.has_native_fp64.to_string()),
+        (
+            "soft_fp64_cost_multiplier".into(),
+            limits.soft_fp64_cost_multiplier.to_string(),
+        ),
+    ];
+
+    TableIterator::new(rows.into_iter().map(move |(n, v)| (n, v, source.clone())))
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -600,5 +811,71 @@ mod tests {
         increment_gpu_cache_miss();
         assert!(read_gpu_cache_hits() >= hits_before + 1);
         assert!(read_gpu_cache_misses() >= misses_before + 1);
+    }
+
+    // -- pg_accel_device_limits SRF -----------------------------------------
+    //
+    // `device_limits()` returns `cpu_only()` under `#[cfg(test)]` (see
+    // `engine/cost/device_limits.rs:474-478`), so the limit values checked
+    // here are the documented fallback constants, not hardware-derived.
+    // The bounds match the clamp ranges in `from_profile` so the asserts
+    // stay valid on any hardware that runs the pg_test SRF variant.
+
+    /// Asserts the fallback `gpu_reduce_min_rows` respects the documented
+    /// clamp bounds from `DeviceLimits::from_profile`
+    /// (`engine/cost/device_limits.rs:210`: `.clamp(5_000, 200_000)`).
+    #[test]
+    fn device_limits_fallback_reduce_min_rows_in_clamp_bounds() {
+        let limits = crate::engine::cost::device_limits();
+        assert!(
+            (5_000..=200_000).contains(&limits.gpu_reduce_min_rows),
+            "gpu_reduce_min_rows ({}) must lie within from_profile clamp \
+             bounds [5_000, 200_000] even in the cpu_only fallback",
+            limits.gpu_reduce_min_rows
+        );
+    }
+
+    /// Asserts `device_limits_source()` reports `fallback_cpu_only` under
+    /// `#[cfg(test)]` — cross-checks the documentation claim that tests see
+    /// the fallback constants, not hardware-derived values.
+    #[test]
+    fn device_limits_source_is_fallback_under_cfg_test() {
+        assert_eq!(
+            crate::engine::cost::device_limits_source().as_str(),
+            "fallback_cpu_only"
+        );
+    }
+
+    /// End-to-end `#[pg_test]`: run the SQL SRF and verify it returns at
+    /// least one row with a non-empty `source` column and the
+    /// `gpu_reduce_min_rows` row falls inside the clamp bounds.
+    #[pg_test]
+    fn pg_accel_device_limits_returns_rows() {
+        let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
+            .expect("pg_accel_device_limits() should succeed")
+            .expect("pg_accel_device_limits() should return a row count");
+        assert!(count > 40, "expected >40 limit rows, got {count}");
+
+        let source = Spi::get_one::<String>("SELECT source FROM pg_accel_device_limits() LIMIT 1")
+            .expect("source column query should succeed")
+            .expect("source column should be non-NULL");
+        assert!(
+            source == "hardware_derived" || source == "fallback_cpu_only",
+            "unexpected source value: {source}"
+        );
+
+        let reduce_min = Spi::get_one::<String>(
+            "SELECT value FROM pg_accel_device_limits() \
+             WHERE name = 'gpu_reduce_min_rows'",
+        )
+        .expect("gpu_reduce_min_rows lookup should succeed")
+        .expect("gpu_reduce_min_rows row should exist");
+        let n: usize = reduce_min
+            .parse()
+            .expect("gpu_reduce_min_rows value should parse as usize");
+        assert!(
+            (5_000..=200_000).contains(&n),
+            "gpu_reduce_min_rows = {n} out of documented clamp bounds"
+        );
     }
 }

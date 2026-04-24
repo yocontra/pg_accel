@@ -1,4 +1,16 @@
 [licenses]
+# Explicit allow list. Any license NOT listed here is denied by default
+# (cargo-deny schema v2+: there is no separate `deny = [...]` field — unlisted
+# licenses fail the check). See NOTICE for attribution of bundled binaries.
+#
+# Required by bundled binary artifacts (see NOTICE for full attribution):
+#   MIT           — soft-fp64, pgrx (dual), majority of transitive crates
+#   BSD-2-Clause  — AdaptiveCpp runtime + compiler toolchain
+#   BSL-1.0       — SLEEF transcendental bodies (Boost Software License 1.0)
+#   PostgreSQL    — PostgreSQL headers (build-time FFI)
+#   Apache-2.0    — pgrx (dual), many transitive crates
+#
+# Other entries cover transitive deps flagged by `cargo deny list`.
 allow = [
   "MIT",
   "Apache-2.0",

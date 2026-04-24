@@ -348,7 +348,11 @@ unsafe fn pgaccel_inject_gpu_window(
             attno
         };
 
-        // Extract ORDER BY attno.
+        // Extract ORDER BY attno AND its Var's vartype.
+        // The vartype feeds `uses_fp64` so the cost site can apply the
+        // soft-fp64 penalty on devices without native fp64 (see
+        // `cost::apply_fp64_penalty`).
+        let mut order_attno_type: u32 = 0;
         let order_attno = if wc_ref.orderClause.is_null() {
             0 // no ORDER BY — only valid for row_number with partition
         } else {
@@ -372,7 +376,9 @@ unsafe fn pgaccel_inject_gpu_window(
                     if !te_expr.is_null()
                         && unsafe { (*te_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var
                     {
-                        attno = i32::from(unsafe { (*te_expr.cast::<pg_sys::Var>()).varattno });
+                        let var = te_expr.cast::<pg_sys::Var>();
+                        attno = i32::from(unsafe { (*var).varattno });
+                        order_attno_type = u32::from(unsafe { (*var).vartype });
                     }
                     break;
                 }
@@ -384,8 +390,11 @@ unsafe fn pgaccel_inject_gpu_window(
             attno
         };
 
-        // Extract value column attno for aggregate-like window funcs.
+        // Extract value column attno AND its Var's vartype for aggregate-like
+        // window funcs. The vartype feeds `uses_fp64` alongside the ORDER BY
+        // vartype above.
         let mut value_attno = 0i32;
+        let mut value_attno_type: u32 = 0;
         let mut lag_offset = 1i32;
         let mut default_val = 0.0f64;
 
@@ -409,6 +418,7 @@ unsafe fn pgaccel_inject_gpu_window(
                         return;
                     }
                     value_attno = i32::from(unsafe { (*var).varattno });
+                    value_attno_type = typid;
                 }
             }
             // LAG/LEAD offset (second argument, if present and constant).
@@ -449,6 +459,13 @@ unsafe fn pgaccel_inject_gpu_window(
 
         let result_type_oid = u32::from(wf.wintype);
 
+        // fp64 classification: set when either the ORDER BY column or the
+        // value column is float8 (FLOAT8OID = 701). The cost site feeds this
+        // into `cost::self_scan_cost_fp64_aware` so soft-fp64 devices see the
+        // penalty. float4 stays false because AdaptiveCpp lowers float4 ops
+        // natively on Metal; only float8 hits the soft-fp64 path.
+        let spec_uses_fp64 = order_attno_type == WIN_FLOAT8OID || value_attno_type == WIN_FLOAT8OID;
+
         specs.push(WindowFuncSpec {
             func: wfunc_enum,
             partition_attno,
@@ -457,6 +474,7 @@ unsafe fn pgaccel_inject_gpu_window(
             offset: lag_offset,
             default_val,
             result_type_oid,
+            uses_fp64: spec_uses_fp64,
         });
     }
 
@@ -564,10 +582,18 @@ unsafe fn pgaccel_inject_gpu_window(
         })
         .sum::<usize>()
         .max(1);
-    let window_scan_cost = cost::self_scan_cost(
+    // fp64 aggregation across specs: if any spec's ORDER BY / value column
+    // is float8, route through the fp64-aware cost helper. On soft-fp64
+    // devices this multiplies the per-row GPU op cost by
+    // `DeviceLimits::soft_fp64_cost_multiplier` (~32x on Metal) so the
+    // planner does not over-estimate the GPU win and pick Custom Scan for a
+    // workload that would lose to PG's vectorised CPU path.
+    let window_uses_fp64 = specs.iter().any(|s| s.uses_fp64);
+    let window_scan_cost = cost::self_scan_cost_fp64_aware(
         base.rows,
         num_extract_cols,
         cost::device_limits().gpu_op_cost_window * specs.len() as f64,
+        window_uses_fp64,
     );
     let startup_cost = base.total_cost + cost::GPU_LAUNCH_OVERHEAD;
     let total_cost = base.total_cost + window_scan_cost;
@@ -621,6 +647,10 @@ unsafe fn pgaccel_inject_gpu_window(
             priv_list = lappend(
                 priv_list,
                 pg_sys::makeInteger(spec.result_type_oid as i32).cast(),
+            );
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(i32::from(spec.uses_fp64)).cast(),
             );
         }
 
@@ -873,6 +903,18 @@ unsafe fn pgaccel_inject_gpu_preagg(
             let op = agg_op_from_oid(aggfnoid);
             if matches!(op, AggOp::Passthrough) {
                 pgrx::debug1!("pg_accel: preagg rejected: unsupported agg function");
+                return;
+            }
+            // Reject SUM(numeric): the partial-emit path in
+            // engine/executor/preagg/partial_emit.rs maps NUMERICOID → NumericSumEmitter
+            // which accumulates through the f64 `ColumnAccumulator.sum`, silently
+            // losing precision above 2^53. Route NUMERIC arguments back to PG.
+            // Paired with the gate in agg_common::classify_aggref for the partial-agg
+            // path; both sites must agree.
+            if u32::from(aggfnoid) == pg_sys::F_SUM_NUMERIC {
+                pgrx::debug1!(
+                    "pg_accel: preagg rejected: SUM(numeric) would lose precision above 2^53"
+                );
                 return;
             }
 
