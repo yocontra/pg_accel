@@ -196,50 +196,73 @@ Resolved: AdaptiveCpp 579ee8256bae7dba05161158b61a0f586759e762 — pointer-param
   each fp64 family cleanly through the launch boundary (runtime
   correctness still tracked separately in the item below).
 
-### soft-fp64 runtime: kernels launch but return 0 / GPU-hang
+### MetalEmitter HL extraction loses happy-path phi defaults in densely-branched fp64 helpers
 
-- **What**: With the Metal emitter MSL-compile blockers fixed (JIT retry-loop
-  ea355d63, FCmp undef / i128 icmp 667338f7), every fp64 kernel in the suite
-  now JIT-compiles and launches. But at runtime: `reduce_sum_f64 N=1024`
-  returns `got 0 expected -11708.99…`, and `N=65536` triggers Metal's GPU
-  watchdog: `Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)`.
-  Same pattern reproduces on `reduce_sum_sq_f64`, `reduce_stats_f64`,
-  `sort_f64`, `bbox_f64`. Fp32 paths are fully green (test_spatial 55/55,
-  test_device, test_sycl_basic, test_bbox fp32 24/24). BLOCKER.
-- **Why**: The emitter emits valid MSL for soft-fp64 kernels (verified:
-  loads render as `*((device acpp_f64*)ptr)`, ICmp/FCmp predicates route
-  through `__acpp_sscp_soft_f64_fcmp`). A consistent `got 0` on a first
-  dispatch with no MSL-compile error suggests either (a) soft-fp64 helper
-  ABI mismatch — emitted kernel passes `acpp_f64` by value but the adapter
-  `acpp_metal_primitives.cpp` expects a different layout, (b) the reduce
-  accumulator never gets written back (output buffer zero-inited and
-  kernel's final store is a no-op), or (c) the soft-fp64 prelude body has
-  an optimization-invariant bug that Metal's compiler folds to zero. The
-  GPU hang at larger N is a separate symptom — likely an infinite-loop
-  path in `sf64_div` / `sf64_sqrt` that trips Metal's command-buffer
-  watchdog (~2s).
-- **How**:
-  - Pick one small failing kernel (`reduce_sum_f64 N=1024` is smallest),
-    enable `ACPP_METAL_KEEP_SOURCE=1 ACPP_METAL_DUMP_IR=1`, read the
-    emitted MSL at `~/.acpp/apps/global/jit-cache/*.metal` for the kernel.
-    Walk the kernel body from input load through reduce to output store
-    and confirm that the accumulated value flows through `__acpp_sscp_soft_f64_add`
-    calls without any path that zeros the value.
-  - Compare the soft-fp64 adapter's `acpp_metal_primitives.cpp` helper
-    signatures against what the kernel calls (names + arg types + return
-    type). The adapter's job is to forward `__acpp_sscp_soft_f64_*` to
-    `sf64_*`; any signature drift silently produces zero returns.
-  - For the GPU hang: bisect N between 1024 (returns 0) and 65536 (hangs)
-    to find the transition — a hang-threshold that scales with N points
-    at an `O(N)`-loop-per-thread pattern; a hang at fixed N points at a
-    specific kernel that only gets invoked at that size.
-  - Consider running the soft-fp64 library's own test suite against the
-    Metal build to isolate whether the bug is in soft-fp64 (fix upstream)
-    or in AdaptiveCpp's adapter (fix in acpp_metal_primitives.cpp).
-- Depends on: FCmp + bool-vector emitter fixes (Phase 1, landed).
-- **Done when**: `reduce_sum_f64`, `reduce_sum_sq_f64`, `reduce_stats_f64`
-  return correct values at N=1024 and N=65536 without GPU hangs;
-  `test_oom_invariant` reports PASS for every fp64 family.
+- **What**: With every Metal-emitter compile blocker fixed (JIT retry,
+  FCmp undef, i128 icmp/shifts/casts, math forwarder anchors, global
+  constants AS, string-constant peeling, alwaysinline pointer-param
+  helpers, post-inline AS inference), every fp64 kernel JIT-compiles
+  and MSL-compiles cleanly and launches on the GPU. But the GPU
+  command buffer aborts (`kIOGPUCommandBufferCallbackErrorHang` /
+  `kIOGPUCommandBufferCallbackErrorInnocentVictim` from
+  `metal_queue.cpp:244`) on every reduce-shaped fp64 kernel.
+  The "got 0" symptom is the un-touched malloc_shared output buffer;
+  the kernel never reached the final store. BLOCKER.
+- **Why**: Three parallel investigation agents (soft-fp64 host
+  divergence, threadgroup-memory layout, op-type bisection)
+  converged on a MetalEmitter HL/StructurizeCFG bug. Specifically,
+  `sf64_add`'s LLVM IR has 87 basic blocks and 128 phi nodes after
+  `optimizeFlavoredIR`. The critical i1 phi at IR line 2353
+  `%29 = phi i1 [ true, %2 ], [ false, %Flow88 ], [ false, %37 ],
+  [ false, %Flow85 ], [ false, %Flow91 ]` selects between
+  return-NaN-tagged-garbage (true, entry %2) and
+  return-computed-sum (false, four reconvergence edges). MetalEmitter
+  emits `t29_in = true; t28_in = acpp_f64{0u, 0u};` as the entry
+  default and reassigns to `false` on the four reconvergence edges,
+  but on a normal finite-add input control never visits Flow88/37/
+  Flow85/Flow91 in the emitted MSL — `t29_in` stays `true` from the
+  entry default and the function returns
+  `bitcast(bits(x) | 0x8000000000000)` (NaN-tagged garbage). For
+  `x = 0.5` that's `0.75`; for `x = 0.0` it's a quiet NaN.
+  NaN-contaminated sums propagate through the reduce tree and crash
+  the GPU (Metal watchdog) instead of completing. Affects every
+  fp64 op that uses sf64_add internally (sum, max, min, sum_sq,
+  multi, stats, sort, bbox).
+- Soft-fp64 host tests pass (19/19 ctest), so the source library
+  is correct. Threadgroup memory sizing is verified correct
+  (test_sycl_basic test 5 passes the same SLM pattern for fp32).
+  Op-type bisection ruled out sf64_div / sf64_sqrt — neither is
+  used in any failing kernel body.
+- **How** (two paths, increasing scope):
+  1. **Band-aid (likely not safe)**: in MetalEmitter's PHI-default
+     emission for an `i1` phi where one incoming is `true` from the
+     entry block and the rest are `false`, invert the polarity:
+     emit `t29_in = false` as the entry default and only set `true`
+     on the entry-aliased edge. This swaps which path requires
+     reconvergence visit but doesn't fix the underlying CFG-traversal
+     gap, so the same bug surfaces on the inverted patterns elsewhere.
+  2. **Proper fix**: audit
+     `AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`
+     `emitNode` + `emitBasicBlock` + `HLExtractionPass` (see
+     `acpp-clang/HLExtractionPass.cpp`). The structurized CFG has
+     synthetic `%Flow*` reconvergence blocks that the emitter must
+     visit on every path; on the normal arithmetic path the
+     happy-path block does fall through to a Flow block in the IR,
+     but the MSL HL-tree extraction is collapsing or skipping it.
+     Repro: dump LLVM IR with `ACPP_METAL_DUMP_IR=/tmp/ir_post_emit`,
+     find sf64_add (line ~2313 in current dump), trace one
+     happy-path arithmetic chain (e.g. block %47 → %56 → %59 → %66
+     → ...) and verify each block's reconvergence target. Then
+     check the corresponding MSL emission for any `t29_in = false`
+     write on that chain. The missing write is the bug.
+- Depends on: every preceding Metal-emitter fix (Phase 1, landed
+  via AdaptiveCpp ea355d63 / 667338f7 / 0992997c / 579ee825).
+- **Done when**: `test_reduce_stats` runs to completion with
+  `reduce_sum_f64 / reduce_min_f64 / reduce_max_f64 / reduce_multi_f64
+  / reduce_sum_sq_f64 / reduce_stats_f64` all returning correct
+  values at N=1024..1048576 without GPU hangs; `test_correctness`
+  fp64 sort passes; `test_oom_invariant` reports PASS for every
+  fp64 family.
 
 ### Promote `pgaccel_point_in_ring_bulk` fp64 to a SYCL kernel
 
