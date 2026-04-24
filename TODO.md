@@ -138,6 +138,60 @@ Resolved: AdaptiveCpp ea355d63f5f56a7c14a9fe5b8c30393893814985 — poison map in
   `h3_latlng_to_cell@res≥12`, `bbox_f64`, `spatial_f64`. No "incompatible
   operand types" or vector-vs-scalar diagnostics on any of the nine.
 
+### Metal AS-inference: `device` vs `thread` on intra-module pointer params
+
+- **What**: After the AdaptiveCpp 0992997c emitter fixes (i128 lowering,
+  global-constant AS re-run, math-forwarder anchors, etc.), MSL compile
+  produces exactly two classes of remaining error on the fp64 suite:
+  (a) `no matching function for call to 'sf64_frexp'` — the `int* exp`
+  output parameter lands at `device void*` in the emitted signature
+  because `addressSpaceMap[0] = "device"`, but callers pass a pointer
+  into a caller-stack alloca (AS 5, "thread"); MSL has no cross-AS
+  coercion. Same applies to every soft-fp64 helper with an `int* exp`
+  output (frexp, modf, fract, lgamma_r, frexp inside SLEEF).
+  (b) `cannot assign resource locations to '__args'` — kernel signature
+  buffer-binding on a pointer type ends up inconsistent with what MSL
+  expects for the `[[buffer(N)]]` attribute, likely a downstream of
+  the same AS-0 confusion.
+  BLOCKER.
+- **Why**: LLVM IR uses AS 0 as a "generic" pointer AS with no
+  concrete backing. MSL has no such thing — every pointer type must
+  name an AS. `AddressSpaceInferencePass` moves allocas to AS 5 and
+  constant globals to AS 4, but leaves AS 0 in the signatures of
+  non-kernel functions, where it could mean "accepts a thread
+  pointer" OR "accepts a device pointer" depending on the caller.
+  The current `addressSpaceMap[0] = "device"` was correct for kernel
+  entry-point buffer args but wrong for intra-module helpers.
+  Attempting a straight `addressSpaceMap[0] = "thread"` flip broke
+  kernel entries; scoping the override to non-kernel param printers
+  broke the internal GEPs/loads inside those helpers (still using
+  AS 0 → "device" for the cast keyword).
+- **How**: The proper fix is an AS-inference sweep strong enough that
+  no pointer — parameter, instruction, or use — stays in AS 0 after
+  the pass runs. Candidate approaches, rough order:
+  1. Run LLVM's `InferAddressSpacesPass` with a more aggressive entry
+     point set after the second `linkBitcodeFile`, treating AS 0 as
+     flat-generic and letting it propagate AS 5 (thread) backwards
+     from alloca-rooted pointer chains and AS 1 (device) backwards
+     from kernel-arg pointer chains.
+  2. If `InferAddressSpacesPass` leaves any AS-0 pointers standing,
+     synthesise explicit `addrspacecast` at the remaining call sites
+     so the emitter sees concrete per-use AS.
+  3. As a fallback, add a small MetalEmitter pass that renames each
+     non-kernel function's AS-0 pointer params into an explicit AS
+     inferred from use-counts (thread for majority-caller-stack vs
+     device for majority-kernel-arg). Only if the LLVM-level pass
+     above is insufficient.
+  4. Verify with `test_reduce_stats`, `test_h3` res=12, and a
+     standalone MSL compile of each emitted kernel.
+- Depends on: AdaptiveCpp 0992997c landed (emitter lowering + linker
+  anchors).
+- **Done when**: `test_reduce_stats` fp64 paths MSL-compile without
+  `cannot pass pointer to default address space` or `cannot assign
+  resource locations` errors. `test_oom_invariant` re-runs against
+  each fp64 family cleanly through the launch boundary (runtime
+  correctness still tracked separately in the item below).
+
 ### soft-fp64 runtime: kernels launch but return 0 / GPU-hang
 
 - **What**: With the Metal emitter MSL-compile blockers fixed (JIT retry-loop
