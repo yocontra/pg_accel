@@ -81,7 +81,9 @@ every family flips from status=-5 to PASS, fp64 cost calibration, benches, and
 - **Done when**: Shader with vectorized fp64 fcmp compiles without the bool-vector
   assignment diagnostic.
 
-### AdaptiveCpp JIT retry-loop infinite-hang
+### ✅ AdaptiveCpp JIT retry-loop infinite-hang
+
+Resolved: AdaptiveCpp ea355d63f5f56a7c14a9fe5b8c30393893814985 — poison map in `kernel_cache::get_or_construct_jit_code_object` keyed by `id_of_binary`; records reason on `jit_compile` or code-object-constructor failure and fast-fails subsequent lookups. test_h3 full suite now 3.59s with W5 gate removed (21 passed, 85 fail-fast); previously wedged for 5+ minutes on the first fp64 res=12 dispatch.
 
 - **What**: `pgaccel_h3_lat_lng_to_cell_bulk(..., resolution=12, use_fp64=1, N=1)`
   wedges the test process for 5+ minutes at 99% CPU because the Metal queue retries

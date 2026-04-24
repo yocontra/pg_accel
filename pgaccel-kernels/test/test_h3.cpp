@@ -283,21 +283,9 @@ static void test_lat_lng_to_cell() {
   // fp64 at high res: post fp64-unlock (W1/W2/W3/W4), every backend
   // (including Metal via soft-fp64) must dispatch fp64 paths. An
   // UNSUPPORTED status here means the soft-fp64 lowering broke.
-  //
-  // Gated behind PGACCEL_W5_FP64_RUN=1: on hosts where the upstream
-  // AdaptiveCpp Metal Emitter soft-fp64 prelude-injection bug is
-  // unresolved, invoking this kernel enters a multi-minute Metal JIT
-  // retry loop that doesn't fail fast. Dispatcher runs with the env
-  // flag set once the upstream fix lands. See TODO.md "Upstream
-  // soft-fp64 prelude-injection bug" for status.
-  if (const char* env = std::getenv("PGACCEL_W5_FP64_RUN"); env && env[0] == '1') {
-    s = pgaccel_h3_lat_lng_to_cell_bulk(&lat, &lng, 1, 12, true, &cell_id, &valid);
-    ASSERT_STATUS_OK("fp64 res 12 status", s);
-    ASSERT_TRUE("fp64 res 12 valid", valid == 1);
-  } else {
-    printf("  (skipping fp64 res 12 — blocked on upstream AdaptiveCpp bug; "
-           "set PGACCEL_W5_FP64_RUN=1 to force)\n");
-  }
+  s = pgaccel_h3_lat_lng_to_cell_bulk(&lat, &lng, 1, 12, true, &cell_id, &valid);
+  ASSERT_STATUS_OK("fp64 res 12 status", s);
+  ASSERT_TRUE("fp64 res 12 valid", valid == 1);
 
   // Invalid lat/lng
   double bad_lat = 100.0, bad_lng = 0.0;
@@ -393,21 +381,6 @@ static void test_lat_lng_to_cell_fp64_bulk() {
   // (per h3_ops.cpp:587 `want_fp64 = use_fp64 && resolution >= 12`). Use
   // resolution 12 here so the soft-fp64 kernel actually runs. Size list
   // kept at 1k/64k/256k/1M per W5 fp64-unlock plan.
-  //
-  // Upstream-block caveat (2026-04-22, W5): calling the fp64 h3 kernel
-  // at resolution >= 12 on this host enters a multi-minute Metal JIT
-  // retry loop due to an upstream AdaptiveCpp Metal Emitter
-  // prelude-injection bug (see TODO.md "Upstream soft-fp64 prelude-
-  // injection bug"). Unlike the fp64 reduce path (which fails fast
-  // with status=-5), the h3 path doesn't fail fast — it wedges the
-  // test suite. Gate the entire 4-size sweep behind PGACCEL_W5_FP64_RUN=1
-  // so the test binary stays runnable. When the upstream fix lands
-  // the dispatcher sets the env and this block runs automatically.
-  if (const char* env = std::getenv("PGACCEL_W5_FP64_RUN"); !env || env[0] != '1') {
-    printf("  (skipping all 4 sizes — blocked on upstream AdaptiveCpp JIT "
-           "infinite-retry; set PGACCEL_W5_FP64_RUN=1 to force)\n");
-    return;
-  }
   std::vector<size_t> sizes = {1024, 65536, 262144, 1048576};
   for (size_t N : sizes) {
     std::vector<double> lats(N), lngs(N);
