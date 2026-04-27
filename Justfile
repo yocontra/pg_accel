@@ -123,7 +123,7 @@ setup-gpu-acpp:
     SOFT_FP64_REQUIRED_TAG="v1.2.0"
     if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
         git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" \
-            https://github.com/yocontra/soft-fp64.git "$SOFT_FP64_SRC"
+            https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"
     fi
     SOFT_FP64_DESC="$(git -C "$SOFT_FP64_SRC" describe --tags --always)"
     if [ "$SOFT_FP64_DESC" != "$SOFT_FP64_REQUIRED_TAG" ]; then
