@@ -120,7 +120,7 @@ setup-gpu-acpp:
     fi
     LLVM_PREFIX=$(brew --prefix llvm@20)
     SOFT_FP64_SRC="${SOFT_FP64_SRC:-$HOME/Projects/soft-fp64}"
-    SOFT_FP64_REQUIRED_TAG="v1.0.0"
+    SOFT_FP64_REQUIRED_TAG="v1.2.0"
     if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
         git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" \
             https://github.com/yocontra/soft-fp64.git "$SOFT_FP64_SRC"
