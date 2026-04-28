@@ -112,13 +112,19 @@ setup-gpu-acpp:
         echo "$ACPP_SRC not found; cloning fork-safe-metal from yocontra/AdaptiveCpp"
         git clone -b "$REQUIRED_BRANCH" https://github.com/yocontra/AdaptiveCpp.git "$ACPP_SRC"
     fi
-    ACPP_REQUIRED_SHA="ceb641a535b4706f71ded2690baedaf8cf711b30"
+    ACPP_REQUIRED_SHA="79ef8c5bcfad8e65bbe888b68c8e674d84af6b70"
     if ! git -C "$ACPP_SRC" merge-base --is-ancestor "$ACPP_REQUIRED_SHA" HEAD 2>/dev/null; then
         echo "error: AdaptiveCpp at $ACPP_SRC must include SHA $ACPP_REQUIRED_SHA"
         echo "       run: git -C $ACPP_SRC fetch origin fork-safe-metal && git -C $ACPP_SRC checkout fork-safe-metal && git -C $ACPP_SRC pull --ff-only"
         exit 1
     fi
     LLVM_PREFIX=$(brew --prefix llvm@20)
+    # soft-fp64 is consumed directly from its source tree by AdaptiveCpp's
+    # libkernel build (no flatten-and-stage step — the staging adapter was
+    # removed in soft-fp64 v1.2.0 and absorbed into AdaptiveCpp's own
+    # `src/libkernel/sscp/metal/float64/`). All we need is a checkout at
+    # the pinned tag — AdaptiveCpp's CMake reads `src/`, `src/sleef/`,
+    # `include/` directly via `ACPP_SOFT_FP64_SRC_DIR`.
     SOFT_FP64_SRC="${SOFT_FP64_SRC:-$HOME/Projects/soft-fp64}"
     SOFT_FP64_REQUIRED_TAG="v1.2.0"
     if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
@@ -127,15 +133,12 @@ setup-gpu-acpp:
     fi
     SOFT_FP64_DESC="$(git -C "$SOFT_FP64_SRC" describe --tags --always)"
     if [ "$SOFT_FP64_DESC" != "$SOFT_FP64_REQUIRED_TAG" ]; then
-        echo "warning: soft-fp64 at '$SOFT_FP64_DESC', expected '$SOFT_FP64_REQUIRED_TAG' — wiping stale build"
-        rm -rf "$SOFT_FP64_SRC/build"
+        echo "error: soft-fp64 at '$SOFT_FP64_DESC', expected '$SOFT_FP64_REQUIRED_TAG'"
+        echo "       run: git -C $SOFT_FP64_SRC fetch --tags && git -C $SOFT_FP64_SRC checkout $SOFT_FP64_REQUIRED_TAG"
+        exit 1
     fi
-    cmake -S "$SOFT_FP64_SRC" -B "$SOFT_FP64_SRC/build" \
-        -DCMAKE_BUILD_TYPE=Release -DSOFT_FP64_BUILD_ACPP_METAL_ADAPTER=ON
-    cmake --build "$SOFT_FP64_SRC/build" --target soft_fp64_acpp_metal_stage
-    SOFT_FP64_STAGED_DIR="$SOFT_FP64_SRC/build/adapters/acpp_metal/staged"
-    test -d "$SOFT_FP64_STAGED_DIR" || { echo "soft-fp64 staging dir missing at $SOFT_FP64_STAGED_DIR"; exit 1; }
-    ls "$SOFT_FP64_STAGED_DIR"/*.cpp >/dev/null 2>&1 || { echo "soft-fp64 staged dir empty"; exit 1; }
+    test -f "$SOFT_FP64_SRC/include/soft_fp64/soft_f64.h" \
+        || { echo "soft-fp64 src layout broken at $SOFT_FP64_SRC"; exit 1; }
     mkdir -p "$ACPP_SRC/build"
     cd "$ACPP_SRC/build"
     cmake \
@@ -155,7 +158,7 @@ setup-gpu-acpp:
         -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
         -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
         -DDEFAULT_TARGETS=generic \
-        -DACPP_METAL_EXTERNAL_FP64_DIR="$SOFT_FP64_STAGED_DIR" \
+        -DACPP_SOFT_FP64_SRC_DIR="$SOFT_FP64_SRC" \
         ..
     make -j4
     make install

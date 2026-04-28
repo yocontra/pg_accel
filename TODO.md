@@ -3,165 +3,157 @@
 This is the pre-1.0 punchlist for pg_accel — a PostgreSQL 17 extension that offloads
 spatial, h3, reduce, sort, hashagg, and raster workloads to Metal GPU on Apple Silicon
 (CUDA / ROCm / Level Zero elsewhere) via AdaptiveCpp. AdaptiveCpp fork pin:
-`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `ceb641a535b4706f71ded2690baedaf8cf711b30`.
+`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `79ef8c5bcfad8e65bbe888b68c8e674d84af6b70`.
 "Done" / ship-ready means: every planner-injected GPU path is bit-correct, benchmarks
 never fall below PG-parallel parity on any (workload, size) cell, zero crashes on the
 verification matrix, clean `just ci`, and documentation matches reality. File-line
 citations below are against `pg_accel/src/...` unless noted; grep the symbol if
 numbers drift. CI enforces citation freshness via `just doc-parity`.
 
-Mark resolved items with `✅ <title>` + a one-line Resolved note; batch-prune ✅
-entries into git history at each release-prep milestone. The CHANGELOG
-`[Unreleased]` section + `git log` carry the audit trail between prunings.
+When an item ships, drop it from this file — `git log` and the
+CHANGELOG `[Unreleased]` section carry the audit trail. Don't leave
+"Resolved" entries behind.
 
 ## Phases
 
-Phase 1 (end-to-end fp64 on Metal) remains the single biggest blocker. Every
-fp64 kernel JIT-compiles, MSL-compiles, and launches, but all four reduce
-shapes (sum, max, sum_sq, multi) return `got 0` and eventually hang the Metal
-command buffer. Root cause is NOT what the prior diagnosis said — see the
-reopened blocker below. Phase 2 closes the one remaining wrong-answer bug.
-Phase 3 extends parallel coverage; Phases 4-5 widen operator/type coverage
-and calibrate the planner. Phase 6 chases remaining perf ceilings. Phase 7
-merges fork-local AdaptiveCpp work. Phase 8 polishes the build. Phases 9-10
-gate the 1.0 tag. A "Post-1.0 (deferred)" section after Phase 10 catches
-items explicitly descoped from the ship bar.
+Phase 1 (end-to-end fp64 on Metal) is no longer hang-blocked: fp64
+kernels run on AGX, and `reduce_min_f64 / reduce_max_f64 /
+reduce_stats_f64 count` are bit-exact across N. What remains in Phase 1
+is a small set of correctness gaps the hang was masking (sum/sum_sq
+ULP drift, stats derived fields, one large-N MSL compile error) and
+end-to-end coverage of the other fp64 surfaces (sort, h3@res≥12,
+bbox, spatial recheck) which haven't been re-smoke-tested on the
+migrated stack. Phase 2 closes the one remaining wrong-answer bug.
+Phase 3 extends parallel coverage; Phases 4-5 widen operator/type
+coverage and calibrate the planner. Phase 6 chases remaining perf
+ceilings. Phase 7 merges fork-local AdaptiveCpp work. Phase 8 polishes
+the build. Phases 9-10 gate the 1.0 tag. A "Post-1.0 (deferred)"
+section after Phase 10 catches items explicitly descoped from the
+ship bar.
 
 ## Phase 1 — Make fp64 work end-to-end on Metal
 
 Metal has no native fp64, so every fp64 kernel (reduce_f64, sort_f64,
 sort_kv_f64, stats_f64, sum_sq_f64, multi_f64, `h3_latlng_to_cell@res≥12`,
-bbox_f64, spatial recheck) routes through AdaptiveCpp's soft-fp64 adapter.
-Every kernel now JIT-compiles and MSL-compiles cleanly and launches on the
-GPU, but the command buffer aborts on every fp64 reduce shape — including
-`reduce_max_f64` (which has no `sf64_add`/`sf64_mul` arithmetic, only
-`sf64_fmax_precise` comparison). Until that hang is fixed, fp64 cost
-calibration, benches, and `just gpu-test` are all blocked.
+bbox_f64, spatial recheck) routes through soft-fp64 v1.2.0. The
+integration model: AdaptiveCpp's Metal libkernel (`fork-safe-metal`)
+consumes soft-fp64's `src/`, `src/sleef/`, `include/` directly via
+`-DACPP_SOFT_FP64_SRC_DIR=$HOME/Projects/soft-fp64`. The two
+`__acpp_sscp_*_f64` adapter TUs live in
+`AdaptiveCpp/src/libkernel/sscp/metal/float64/`; soft-fp64 itself
+ships no AdaptiveCpp-aware code (it knows nothing about its
+consumer). MetalEmitter has a per-function `ModuleSlotTracker` cache
+to keep emit O(N), a reachability prune to keep `.metal` size sane
+(unused SLEEF transcendentals get DCE'd before emit), `ExpandIntrinsics`
+lowers `llvm.is.fpclass.f{32,64}` inline, and cycle-guard logic in
+`ReplaceIntrinsics` + `emitUnaryOperator` (FNeg) +
+`emitFCmpInstruction` prevents InstCombine from creating
+sf64_X ↔ `__acpp_sscp_*_f64` mutual recursion. End-to-end:
+`test_reduce_stats` reduce_min/max/stats-count are bit-exact at
+N ∈ {1024, 65536, 262144, 1048576}; zero GPU hangs; clean MSL compile;
+JIT completes ~80s on cold cache. Open items below are what's left
+before Phase 1 is fully green.
 
-### ✅ `acpp_f64` struct emitted without `alignas(8)` — caused SLM UB on 8-byte stores
+### `reduce_sum_f64` / `reduce_sum_sq_f64` — ~16 ULP drift vs CPU oracle
 
-- **Resolved (2026-04-24)**: `AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp:474`
-  now emits `struct alignas(8) acpp_f64 { uint lo; uint hi; };`. Every
-  LLVM fp64 load/store is IR-annotated `align 8` (`tbaa !36`), but the
-  previous emission gave the struct MSL-default 4-byte alignment (max of
-  member alignments). 8-byte stores through a 4-byte-aligned SLM slot
-  were UB on AGX — a latent correctness hazard independent of the reduce
-  hang. Comment at Emitter.cpp:464-471 explains why the two-uint layout
-  (vs `ulong`) plus `alignas(8)` is the right pair: the two-uint form
-  sidesteps MSL alignment quirks on `ulong`, the `alignas(8)` satisfies
-  the IR-level alignment annotation. fp32 reduce kernels unaffected
-  (native `float` is 4-byte aligned, matches IR `align 4`).
-
-### fp64 reduce kernels hang — root cause open, original phi-default diagnosis WRONG
-
-- **What**: `reduce_sum_f64 / reduce_min_f64 / reduce_max_f64 /
-  reduce_multi_f64 / reduce_sum_sq_f64 / reduce_stats_f64` all return
-  `got 0` (malloc_shared output buffer untouched) and Metal reports
-  `kIOGPUCommandBufferCallbackErrorHang` /
-  `kIOGPUCommandBufferCallbackErrorInnocentVictim` from
-  `metal_queue.cpp:244`. `reduce_max_f64` is the first to error on a
-  fresh JIT-cache-purged run — meaning the bug is NOT in `sf64_add`
-  arithmetic, because max doesn't call it. fp32 equivalents
-  (`test_reduce_minimal`) all pass. BLOCKER.
-- **What the original diagnosis claimed (now DISPROVEN)**: earlier
-  investigations pointed at the i1 phi at IR line ~2353 in `sf64_add`
-  (`%29 = phi i1 [ true, %2 ], [ false, %Flow88 ], ...`), alleging
-  MetalEmitter left `t29_in = true` stuck on the happy path. Repro
-  (2026-04-24) opened the regenerated MSL for the sum_f64 /
-  sum_sq_f64 / max_f64 kernels at `~/.acpp/apps/global/jit-cache/*.metal`
-  and confirmed the happy path in `sf64_add` **does** unconditionally
-  write `t29_in = false` — see `~/.acpp/apps/global/jit-cache/1249383468002383832.2482201177528916889.metal`
-  line 1402 of the extracted `sf64_add` body (top of `// block %Flow91`,
-  outside the `if (t19)` inner guard). That phi is correctly lowered.
-  NaN-poisoning through `sf64_add` is NOT the trigger of the hang; the
-  TODO entry that survived through to this point was based on an
-  investigation that was subsequently disproven. Additionally, a
-  related hypothesis (acpp_f64 struct alignment) was fixed in the
-  Resolved item above, and the hang still reproduces identically after
-  that fix lands — so alignment is also not the trigger, just a
-  separate latent bug that happened to surface during triage.
-- **What is still consistent with the symptom**: all four failing
-  reduce shapes (sum / max / sum_sq / multi) share (a) `acpp_f64`
-  passed by value to a soft-fp64 helper function
-  (`__acpp_sscp_soft_f64_add`, `__acpp_sscp_fmax_f64`, etc.), (b) a
-  barrier-separated reduce ladder reading from threadgroup SLM, and
-  (c) AGX execution of Metal MSL generated from LLVM IR via
-  MetalEmitter. fp32 reduces have (b) and (c) but not (a) and work;
-  scalar fp32 ops trivially work. So the suspect surface is specifically
-  the `acpp_f64`-by-value call path when invoked from a kernel under
-  the reduce shape — but the boundary (call ABI vs. function body vs.
-  AGX codegen on pathological branch density) is not yet pinned.
-- **How (from empty-evidence state)**:
-  - **First**: isolate the call-ABI hypothesis. Write a minimal SYCL
-    kernel that does: load two `double`s from global, call
-    `sf64_add` once, store result. No SLM, no barriers, no reduce
-    ladder. If it still hangs, the bug is in the call ABI or in the
-    soft-fp64 function body's MSL; if it works, the bug is in the
-    interaction with SLM/barriers/multi-iteration dispatch.
-  - **If minimal case hangs**: audit the call-site emission in
-    `AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`
-    around `emitCallInstruction` / `emitFunction`. Check argument
-    passing and return for `acpp_f64`: is it by-value (struct copy)
-    or coerced to something else? Compare emitted prototypes against
-    what the called body expects.
-  - **If minimal case passes**: audit the reduce-kernel body MSL for
-    the specific pattern that breaks. Focus on how barriers interact
-    with SLM-read/modify/write sequences where the write goes
-    through a soft-fp64 call.
-  - **Also try**: disable SSCP inlining for `sf64_*` functions and
-    force them to stay as function calls (may already be the case);
-    alternatively, force them to inline and see whether the failure
-    mode changes.
-  - **If a fix site is identified**: apply, rebuild AdaptiveCpp
-    (`cmake --build ~/Projects/AdaptiveCpp/build -j`; install
-    `libllvm-to-metal.dylib` to `~/local/lib/hipSYCL/llvm-to-backend/`),
-    purge JIT cache (`find ~/.acpp/apps/global/jit-cache -type f
-    -delete`), rerun `test_reduce_stats`.
-- **Adjacent toolchain blocker (must fix before full `just setup-gpu-acpp`
-  rebuild works)**: `soft-fp64/src/internal_arith.h` is untracked
-  (`git status` shows `??`) but the adapter-staged copies of
-  `arithmetic.cpp` / `sqrt_fma.cpp` / etc. reference it, so the
-  Metal bitcode libraries (`libkernel-sscp-metal-arithmetic.bc`,
-  `libkernel-sscp-metal-sqrt_fma.bc`, `libkernel-sscp-metal-sleef_*.bc`)
-  fail with `fatal error: 'internal_arith.h' file not found`. This was
-  left mid-work by an earlier branchless-rewrite effort that was
-  abandoned. Resolution: either commit the header to soft-fp64 and
-  re-run the adapter-staging step, or revert the adapter-staged cpp
-  files to their previous form. Incremental AdaptiveCpp builds of
-  `libllvm-to-metal.dylib` complete fine without the bitcode libs, so
-  emitter iteration isn't blocked, but `just gpu-test` from a clean
-  tree is.
-- **Done when**: `test_reduce_stats` runs to completion with
-  `reduce_sum_f64 / reduce_min_f64 / reduce_max_f64 / reduce_multi_f64
-  / reduce_sum_sq_f64 / reduce_stats_f64` all returning correct
-  values at N=1024..1048576 without GPU hangs; `test_correctness`
-  fp64 sort passes; `test_oom_invariant` reports PASS for every
-  fp64 family.
-
-### Metal Emitter: audit all instruction handlers for `acpp_f64`-awareness
-
-- **What**: Additional sites in `emitBinaryOperator`, `emitUnaryOperator`,
-  `emitCastInstruction`, `emitCallInstruction`, and `emitExpr` (ConstantFP /
-  UndefValue / PoisonValue) may emit scalar `0` literals or plain int casts
-  when the operand is `acpp_f64`. Same class of bug as the already-landed
-  FCmp fix, but potentially scattered. Location:
-  `AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`. MAJOR.
-- **Why**: Any one unfixed site reintroduces the fp64 compile failure for a
-  subset of kernels; whack-a-mole if not swept systematically. Less urgent
-  now that the HL extraction blocker dominates — but still needed before
-  `just gpu-test` goes fully green.
+- **What**: `test_reduce_stats` at the larger N (262144 / 1048576)
+  reports `FAIL reduce_sum_f64: ... ulp_dist=16, budget=8` (and the
+  same shape for `sum_sq`). Result is finite and close — the GPU
+  tree-reduce sums in a different order than the CPU sequential
+  oracle, and at 1M+ summands the rounding drift exceeds the u35
+  tolerance budget.
+- **Why**: the kernel is bit-correct under its own algorithm; the
+  oracle just sums sequentially in fp64. With soft-fp64 in
+  round-to-nearest-even, the difference is order-dependent rounding,
+  not a soft-fp64 bug.
 - **How**:
-  - Grep every case in the binary/unary/cast switch for fp64-result branches;
-    for each, ensure result and operand types use type-matching constructors.
-  - Audit `emitFunction` prototype + body for vector bool return types (e.g.
-    `bool4`-returning helpers).
-  - Cross-reference with the already-landed emitter diffs to not re-break
-    fp32 paths.
-- **Done when**: Each of the following kernels individually compiles via
-  `xcrun metal` with zero diagnostics: `reduce_f64`, `sort_f64`,
-  `sort_kv_f64`, `stats_f64`, `sum_sq_f64`, `multi_f64`,
-  `h3_latlng_to_cell@res≥12`, `bbox_f64`, `spatial_f64`. No "incompatible
-  operand types" or vector-vs-scalar diagnostics on any of the nine.
+  - Either widen the test budget for `reduce_sum_f64` /
+    `reduce_sum_sq_f64` to a tree-reduce-aware bound (≈ `log2(N) *
+    eps * |sum|`, capped at ~64 ULP for N ≤ 1M), OR
+  - Switch the kernel to a Kahan/Neumaier compensated tree reduction
+    so the result matches the sequential oracle to ≤8 ULP.
+- **Done when**: `test_reduce_stats` reports `OK` for `reduce_sum_f64`
+  and `reduce_sum_sq_f64` at every N currently exercised, with the
+  chosen tolerance documented in the test header.
+
+### `reduce_stats_f64` derived `var_*` / `stddev_*` — ~2× off
+
+- **What**: `var_pop`, `var_samp`, `stddev_pop`, `stddev_samp` from
+  `reduce_stats_f64` are roughly half the expected magnitude across
+  every N (e.g. `got 1855.40 expected 3348.10` at N=1024). Sum and
+  count from the same fused kernel are correct, so the bug is in the
+  variance formula or the `sum_sq` tap of the multi-output reduce.
+- **Why**: scale errors this large aren't floating-point drift; one
+  of the partials is being either summed twice, halved, or divided by
+  `N` in the wrong unit. Likely candidates: the multi-output reduce
+  path in `pgaccel-kernels/src/reduce.cpp` (`tree_reduce_multi_sycl`
+  / `tree_reduce_stats_sycl`) using `sum_sq / N - (sum / N)^2` with
+  an off-by-one denominator, or the host-side derived field
+  computation pulling the wrong partial.
+- **How**: add a CPU-equivalent reference inside the test that
+  computes `var_pop = E[x²] - E[x]²` and `var_samp = (Σx² -
+  N·mean²) / (N - 1)` directly from the GPU-returned `sum` and
+  `sum_sq`. If those match, the bug is in the host derivation; if
+  they don't, it's in the kernel's `sum_sq` tap.
+- **Done when**: `var_*` / `stddev_*` are within 64 ULP of the CPU
+  reference at every N currently exercised.
+
+### `reduce_stats_f64` MSL compile error at large N — `cannot assign resource locations to '__args'`
+
+- **What**: at N=1048576 a fused stats kernel fails `xcrun metal`
+  with `error: cannot assign resource locations to '__args'`,
+  surfacing as `[AdaptiveCpp Error] from metal_code_object.cpp:181 @
+  build_metal_library_from_source(): metal_code_object: Shader
+  compilation failed`. Other shapes at the same N compile fine.
+- **Why**: the fused-stats kernel has more captured arguments than
+  the smaller reduce shapes. AdaptiveCpp's MetalEmitter packs more
+  than `maxArgsForFlatMode` (default 6) args into a single
+  `[[buffer(0)]]` argument-buffer struct. The argument-buffer struct
+  layout / `[[id(N)]]` resource indices probably collide with one of
+  the implicit `[[threadgroup(0)]]` / dynamic-local-mem-size buffer
+  bindings.
+- **How**: confirm by setting
+  `kernel_build_option::metal_max_args_for_flat_mode` higher (so the
+  argbuffer path is skipped), reproduce with the argbuffer path on,
+  diff the two emitted prototypes, fix the `[[id]]` / `[[buffer]]`
+  numbering in `MetalEmitter::emitArgStruct` /
+  `MetalEmitter::emitSignature`.
+- **Done when**: the offending `reduce_stats_f64` kernel
+  MSL-compiles at every N currently exercised; a regression test
+  asserts the kernel's emitted prototype.
+
+### fp64 surfaces beyond reduce — smoke + correctness on the migrated stack
+
+- **What**: only `reduce_*_f64` has been verified end-to-end on the
+  current AdaptiveCpp `79ef8c5b` + soft-fp64 v1.2.0 stack. The other
+  fp64 surfaces are nominally wired but haven't been re-run after the
+  architectural migration: `sort_f64`, `sort_kv_f64`,
+  `h3_latlng_to_cell@res≥12`, `bbox_f64`, and the spatial recheck
+  path (see "Promote `pgaccel_point_in_ring_bulk` fp64 to a SYCL
+  kernel" below). Each may surface its own InstCombine pattern that
+  needs new emitter handling, or a new fcmp predicate inside
+  `sf64_fcmp` not in the current cycle-guard list (currently
+  OEQ/ORD/UNE/UNO).
+- **How**:
+  - Run each kernel's correctness test on a clean JIT cache:
+    `test_correctness` (sort + sort_kv), `test_h3` at high res,
+    `test_bbox`, `test_spatial`. Confirm zero `kIOGPUCommand`
+    GPU-hang lines in stderr, zero `use of undeclared identifier`
+    or unmapped `llvm.*` MSL errors.
+  - For any new `llvm.<name>.f64` intrinsic that surfaces and isn't
+    in `LLVMToMetal.cpp` `remapped_llvm_math_builtins` /
+    `ExpandIntrinsics`, either add a remap entry pointing at an
+    existing `__acpp_sscp_*_f64` forwarder (preferred — soft-fp64
+    has wide coverage) or add an inline expansion alongside
+    `expandIsFPClass`.
+  - For any new `fcmp <pred> double` leaking inside `sf64_fcmp` (a
+    cycle), extend the cycle-guard predicate list in
+    `MetalEmitter::emitFCmpInstruction`.
+- **Done when**: every fp64 test (`test_correctness` fp64 sort +
+  sort_kv, `test_h3` res 12-15, `test_bbox` fp64, `test_spatial`
+  fp64, `test_oom_invariant` for every fp64 family, `test_reduce_stats`
+  with the open ULP/var items below resolved) reports `OK` on cold
+  cache with zero shader-compile or runtime errors.
 
 ### Promote `pgaccel_point_in_ring_bulk` fp64 to a SYCL kernel
 
@@ -741,7 +733,7 @@ tests). Two items remain.
 
 ## Phase 7 — Upstream AdaptiveCpp work
 
-The `fork-safe-metal` branch at `ceb641a535b4706f71ded2690baedaf8cf711b30`
+The `fork-safe-metal` branch at `79ef8c5bcfad8e65bbe888b68c8e674d84af6b70`
 is the ship pin. Items below are fork-local maintenance burden that
 eventually needs to merge upstream (or rebase onto it). **Shipping 1.0 does
 not require upstream merge** — the fork SHA pin is sufficient. Rebase +
