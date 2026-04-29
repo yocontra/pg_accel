@@ -345,44 +345,50 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 - **Done when**: A correlated inequality join measurably accelerates under
   GPU injection.
 
-### Combined `AVG + STDDEV` falls through to PG partial agg
+### Combined `AVG + STDDEV`: partial-agg path injected but discarded
 
-- **What**: EXPLAIN audit harness (`pg_accel_bench/src/explain_audit.rs`)
-  flagged `SELECT AVG(v), STDDEV(v) FROM t` parallel as `RequiredToday
-  FAIL`: plan shows `Gather → Partial Aggregate → Parallel Seq Scan`
-  with no pg_accel CustomScan inside. The single-aggregate AVG and
-  STDDEV partial paths landed (see git log for `AVG/STDDEV/VAR
-  parallel path`), but the **combined** form is not recognised by
-  the partial-agg classifier. MAJOR.
-- **Why**: Combined `AVG + STDDEV` is one of the most common
-  analytics shapes (mean+spread together). Falling back to PG's stock
-  partial agg negates the fp64-stats acceleration on this workload.
-- **How**: Audit `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs`
-  and the AVG/STDDEV transtype gate at `:170-203` — confirm the gate
-  accepts a multi-aggregate target list where each Aggref classifies
-  separately. Add a regression test that asserts the combined form
-  produces a CustomScan inside Gather.
-- **Done when**: `pg_accel_bench explain-audit` row
-  `parallel_avg_stddev` reports `[PASS]` (CustomScan inside Gather).
-
-### `ORDER BY ... LIMIT` skips pg_accel under Gather Merge
-
-- **What**: EXPLAIN audit harness flagged `SELECT * FROM t ORDER BY v
-  LIMIT 100` parallel as `RequiredToday FAIL`: plan shows `Limit →
-  Gather Merge → Sort → Parallel Seq Scan`, no GPU CustomScan
-  injected anywhere in the tree. MAJOR.
-- **Why**: Sort+Limit is a top-N pattern; we land Sort injection
-  separately but it doesn't survive when wrapped in `Limit` over
-  `GatherMerge`. The pathkey-emitting sort injector is supposed to
-  let PG pick GatherMerge with our CustomScan as the child — that's
-  not happening on this shape.
-- **How**: Trace what GatherMerge picks today: enable
-  `pg_accel.log_level=debug` and inspect the planner.* spans on the
-  `ORDER BY v LIMIT 100` query. Expected: a `planner.injected_sort`
-  span with `parallel_safe=true`. If absent, the Sort injector is
-  short-circuiting before the Limit-wrapping path.
-- **Done when**: `parallel_orderby` row in
+- **What**: Investigation (commit pending) shows pgaccel's
+  `partial_agg::try_inject` DOES inject a `Finalize(Agg) → Gather →
+  GpuAccel(partial)` chain for combined `SELECT AVG(v), STDDEV(v)`.
+  Debug log line: `pg_accel partial_agg: injected Finalize(Agg) ->
+  Gather -> GpuAccel(partial) chain (n_aggs=2, ...)`. PG's
+  `add_path()` then discards the path because the GpuAccel-side
+  per-row Custom-Scan yield cost dominates. Single STDDEV alone
+  wins (its arith cost amortises yield); single AVG alone loses
+  (cheap in PG); combined falls in the lose camp. Same root cause
+  as Phase 4 plain-JOIN entry below. MAJOR.
+- **Why**: One of the most common analytics shapes (mean+spread).
+- **How**: Same as plain JOIN — measure real per-row yield cost or
+  restructure cost shape to amortise over batch yield instead of
+  per-tuple. The audit row was reclassified
+  `RequiredToday` → `RequiredAfterPhase("6 yield-cost reduction
+  (partial-agg path injected but add_path discards on cost)")`.
+- **Done when**: `parallel_avg_stddev` row in
   `pg_accel_bench explain-audit` reports `[PASS]`.
+
+### `ORDER BY v LIMIT 100` correctly defers — fixture issue, not gap
+
+- **What**: EXPLAIN audit `parallel_orderby` row was misframed.
+  pgaccel's sort injector deliberately defers to PG's top-N
+  heapsort when LIMIT is small relative to N (debug:
+  `pg_accel sort: LIMIT 100 << 10000000 rows, deferring to PG
+  top-N heapsort`). This is correct cost-aware behavior — top-N
+  heapsort is O(N log K) for K=100, dominating a full GPU sort.
+  No planner gap; the audit fixture is GPU-unfavorable by design.
+- **Why**: We don't want to over-inject onto small-K top-K shapes
+  where PG's algorithm is genuinely better.
+- **How**: Either (a) keep the audit row deferred and rewrite the
+  fixture to use a larger LIMIT (e.g. LIMIT N/10) so the GpuSort
+  path is genuinely the planner's preferred choice, or (b) drop
+  the row and add a separate row for the bare `ORDER BY v` (no
+  LIMIT) shape that exercises full GpuSort. The audit row was
+  reclassified to
+  `RequiredAfterPhase("audit fixture rewrite (LIMIT 100 << 10M
+  defers to PG top-N heapsort by design — small-K is GPU-
+  unfavorable)")`.
+- **Done when**: A new audit row exercising the full-sort path
+  reports `[PASS]`, and the LIMIT-100 row is either deleted or
+  documented as expected-deferred.
 
 ### Plain JOIN: GpuHashJoin path injected but discarded by add_path()
 
