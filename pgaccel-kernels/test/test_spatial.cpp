@@ -517,17 +517,72 @@ static void test_point_in_ring_fp64_bulk() {
 }
 
 // ---------------------------------------------------------------------------
+// fp64 GPU dispatch coverage — proves the SYCL kernel actually runs.
+//
+// Before the Phase 1 promotion, the fp64 branch of pgaccel_point_in_ring_bulk
+// was a host scalar loop (spatial_predicates.cpp:210-221). This test wraps a
+// known-correct fp64 batch in pgaccel_reset_gpu_exec_count() /
+// pgaccel_gpu_exec_count() and asserts the counter ticks upward — i.e. the
+// kernel reached pgaccel_record_gpu_exec(), which only fires after a
+// successful SYCL dispatch.
+// ---------------------------------------------------------------------------
+static void test_point_in_ring_fp64_gpu_dispatch() {
+  printf("--- point_in_ring: fp64 GPU dispatch counter ---\n");
+
+  if (pgaccel_init() != PGACCEL_OK) {
+    fprintf(stderr, "  SKIP: no SYCL device available for fp64 GPU dispatch test\n");
+    return;
+  }
+
+  const size_t N = 4096;
+  std::mt19937_64 rng(0xC0FFEEULL);
+  std::uniform_real_distribution<double> d(-2.0, 3.0);
+  std::vector<double> pts(N * 2);
+  for (size_t i = 0; i < N; ++i) {
+    pts[2 * i] = d(rng);
+    pts[2 * i + 1] = d(rng);
+  }
+  std::vector<int8_t> results(N, 99);
+
+  pgaccel_reset_gpu_exec_count();
+  uint64_t before = pgaccel_gpu_exec_count();
+
+  pgaccel_status s = pgaccel_point_in_ring_bulk(pts.data(), N, square_ring, square_verts,
+                                                /*use_fp64=*/true, results.data());
+  ASSERT_EQ("fp64 GPU dispatch status OK", s, PGACCEL_OK);
+
+  uint64_t after = pgaccel_gpu_exec_count();
+  ASSERT_EQ("fp64 GPU dispatch counter advanced", (int)(after > before), 1);
+
+  size_t still_placeholder = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (results[i] == 99)
+      ++still_placeholder;
+  }
+  ASSERT_EQ("fp64 GPU dispatch wrote all results", still_placeholder, (size_t)0);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
 int main() {
   printf("=== pgaccel spatial predicate tests ===\n\n");
 
+  // pgaccel_point_in_ring_bulk fp64 is a SYCL kernel (Phase 1 promotion);
+  // it requires an initialized SYCL queue. Init is idempotent across the
+  // process lifetime, so calling here is safe.
+  if (pgaccel_init() != PGACCEL_OK) {
+    fprintf(stderr, "FATAL: pgaccel_init() failed; cannot run spatial tests\n");
+    return 1;
+  }
+
   test_point_in_ring_basic();
   test_point_in_ring_edge_cases();
   test_point_in_ring_fp32();
   test_point_in_ring_triangle();
   test_point_in_ring_fp64_bulk();
+  test_point_in_ring_fp64_gpu_dispatch();
 
   test_sphere_distance_basic();
   test_sphere_distance_edge_cases();

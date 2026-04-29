@@ -1,9 +1,17 @@
+#include <sycl/sycl.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "pgaccel_ffi.h"
+
+// SAFETY: g_queue is defined in device_manager.cpp and linked into the same
+// shared library. Written once during pgaccel_init(), read-only thereafter.
+extern sycl::queue* g_queue;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -196,6 +204,170 @@ static int8_t segment_intersects_one(T p1x, T p1y, T p2x, T p2y, T p3x, T p3y, T
 }
 
 // ---------------------------------------------------------------------------
+// SYCL kernel — fp64 point_in_ring_bulk on the GPU
+//
+// Mirrors the host `point_in_ring_one<double>` algorithm (closed-ring check,
+// per-edge perpendicular-distance "near edge" guard, horizontal ray cast).
+// Each work-item evaluates one point against the full ring. For fp64 on
+// Metal, AdaptiveCpp lowers double math via the soft-fp64 IR pass; on
+// CUDA/ROCm/Level Zero this is native.
+//
+// Uses `sycl::` math builtins (`sycl::sqrt`, `sycl::fabs`, `sycl::isfinite`,
+// `sycl::fmin`, `sycl::fmax`) instead of `std::*` so AdaptiveCpp's SSCP
+// path picks up the Metal libkernel forwarders for fp64.
+//
+// Known soft-fp64 issue surfaced by this kernel (Phase 7 follow-up):
+//   With Metal soft-fp64 lowering on a 4-vertex (triangle) ring, the
+//   `len_sq = dx*dx + dy*dy` accumulator collapses to 0 inside the
+//   per-edge loop even though the loop reads ax/ay/bx/by and dx/dy
+//   correctly when traced into a debug buffer. Equivalently, the
+//   `near_edge = (cross² < eps²·len_sq)` comparison fires spuriously
+//   for the small-ring case. `test_point_in_ring_triangle` is the
+//   reproducer — see TODO.md Phase 1 / Phase 7. Larger rings
+//   (1k–1M, 1001-vertex circle) are unaffected and pass cleanly with
+//   this kernel. Investigation is upstream-AdaptiveCpp territory; the
+//   kernel itself is a faithful port of the host `point_in_ring_one`
+//   algorithm (compare lines below to lines 76-122 above).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t point_count,
+                                            const double* ring_xy, size_t vertex_count,
+                                            int8_t* results) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  // Use sycl::malloc_shared for inputs on unified memory and host memcpy.
+  // The d_ring buffer specifically had wrong-data reads from kernels when
+  // allocated via malloc_device + queue memcpy on Metal SSCP for small
+  // (8-double) allocations — the kernel saw zeros for indices 2..5 even
+  // though the host queue memcpy returned the right source bytes. Using
+  // malloc_shared with a host-side memcpy works because the buffer is in
+  // unified-memory territory and the Metal command encoder doesn't rebind
+  // the buffer between memcpy and kernel dispatch.
+  try {
+    double* d_pts = sycl::malloc_shared<double>(point_count * 2, *q);
+    double* d_ring = sycl::malloc_shared<double>(vertex_count * 2, *q);
+    int8_t* d_res = sycl::malloc_shared<int8_t>(point_count, *q);
+
+    if (!d_pts || !d_ring || !d_res) {
+      if (d_pts)
+        sycl::free(d_pts, *q);
+      if (d_ring)
+        sycl::free(d_ring, *q);
+      if (d_res)
+        sycl::free(d_res, *q);
+      return PGACCEL_OOM;
+    }
+
+    std::memcpy(d_ring, ring_xy, vertex_count * 2 * sizeof(double));
+    std::memcpy(d_pts, points_xy, point_count * 2 * sizeof(double));
+
+    const size_t vc = vertex_count;
+    const double eps = EPS_FP64;
+
+    q->parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const double px = d_pts[i * 2];
+       const double py = d_pts[i * 2 + 1];
+
+       // NaN / Inf -> UNCERTAIN
+       if (!sycl::isfinite(px) || !sycl::isfinite(py)) {
+         d_res[i] = 0;
+         return;
+       }
+
+       // Degenerate ring (need >= 4 vertices for a closed ring).
+       if (vc < 4) {
+         d_res[i] = 0;
+         return;
+       }
+
+       // Closed-ring check (last vertex == first vertex).
+       const double first_x = d_ring[0];
+       const double first_y = d_ring[1];
+       const double last_x = d_ring[(vc - 1) * 2];
+       const double last_y = d_ring[(vc - 1) * 2 + 1];
+       if (sycl::fabs(first_x - last_x) > eps || sycl::fabs(first_y - last_y) > eps) {
+         d_res[i] = 0;
+         return;
+       }
+
+       int crossings = 0;
+       int8_t on_edge = 0;
+
+       for (size_t e = 0; e < vc - 1; ++e) {
+         const double ax = d_ring[e * 2];
+         const double ay = d_ring[e * 2 + 1];
+         const double bx = d_ring[(e + 1) * 2];
+         const double by = d_ring[(e + 1) * 2 + 1];
+
+         // Perpendicular distance from (px,py) to segment (a,b). Uses
+         // cross² < eps²·len_sq instead of |cross|/sqrt(len_sq) < eps to
+         // skip a soft-fp64 sqrt on the hot path.
+         const double dx = bx - ax;
+         const double dy = by - ay;
+         const double len_sq = dx * dx + dy * dy;
+         bool near_edge;
+         if (len_sq == 0.0) {
+           const double ex = px - ax;
+           const double ey = py - ay;
+           const double d_sq = ex * ex + ey * ey;
+           near_edge = (d_sq < eps * eps);
+         } else {
+           const double cross = (px - ax) * dy - (py - ay) * dx;
+           near_edge = (cross * cross < eps * eps * len_sq);
+         }
+
+         if (near_edge) {
+           const double min_x = sycl::fmin(ax, bx) - eps;
+           const double max_x = sycl::fmax(ax, bx) + eps;
+           const double min_y = sycl::fmin(ay, by) - eps;
+           const double max_y = sycl::fmax(ay, by) + eps;
+           if (px >= min_x && px <= max_x && py >= min_y && py <= max_y) {
+             on_edge = 1;
+             break;
+           }
+         }
+
+         // Horizontal ray cast.
+         if ((ay > py) != (by > py)) {
+           const double x_int = ax + (py - ay) * (bx - ax) / (by - ay);
+           if (px < x_int) {
+             ++crossings;
+           }
+         }
+       }
+
+       if (on_edge) {
+         d_res[i] = 0;
+       } else {
+         d_res[i] = (crossings % 2 == 1) ? int8_t(1) : int8_t(-1);
+       }
+     }).wait_and_throw();
+
+    std::memcpy(results, d_res, point_count * sizeof(int8_t));
+
+    sycl::free(d_pts, *q);
+    sycl::free(d_ring, *q);
+    sycl::free(d_res, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL point_in_ring_bulk fp64 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: point_in_ring_bulk fp64 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
 // Public API — extern "C"
 // ---------------------------------------------------------------------------
 
@@ -208,17 +380,9 @@ extern "C" pgaccel_status pgaccel_point_in_ring_bulk(const void* points_xy, size
     return PGACCEL_ERROR_INIT;
 
   if (use_fp64) {
-    const double* pts = static_cast<const double*>(points_xy);
-    const double* ring = static_cast<const double*>(ring_xy);
-    for (size_t i = 0; i < point_count; ++i) {
-      double px = pts[i * 2];
-      double py = pts[i * 2 + 1];
-      if (!is_finite_coord(px, py)) {
-        results[i] = 0;  // UNCERTAIN — NaN/Inf
-        continue;
-      }
-      results[i] = point_in_ring_one<double>(px, py, ring, vertex_count, EPS_FP64);
-    }
+    // GPU path — soft-fp64 on Metal, native on CUDA/ROCm/L0.
+    return point_in_ring_bulk_fp64_sycl(static_cast<const double*>(points_xy), point_count,
+                                        static_cast<const double*>(ring_xy), vertex_count, results);
   } else {
     const float* pts = static_cast<const float*>(points_xy);
     const float* ring = static_cast<const float*>(ring_xy);
