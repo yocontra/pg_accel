@@ -2516,8 +2516,15 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             if privdata.window_scan_relid > 0 {
                 // SAFETY: estate is valid; scan_relid is a valid RT index.
                 let estate = (*node).ss.ps.state;
+                // Guard: the RTE must be a real heap relation. Non-relation
+                // RTEs (function, VALUES, CTE, subquery, or entries
+                // invalidated by setrefs) passed to ExecOpenScanRelation
+                // raise ERROR → SIGABRT.
                 let rt_entry = pg_sys::exec_rt_fetch(privdata.window_scan_relid, estate);
-                if !rt_entry.is_null() {
+                if !rt_entry.is_null()
+                    && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
+                    && (*rt_entry).relid != pg_sys::InvalidOid
+                {
                     // SAFETY: estate and scan_relid are valid; main backend thread.
                     let rel =
                         pg_sys::ExecOpenScanRelation(estate, privdata.window_scan_relid, eflags);
@@ -2550,8 +2557,18 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // The enclosing block is already unsafe.
             if privdata.self_scan_relid > 0 {
                 let estate = (*node).ss.ps.state;
+                // Guard: the RTE must be a real heap relation. Non-relation
+                // RTEs (function, VALUES, CTE, subquery, or entries
+                // invalidated by setrefs) passed to ExecOpenScanRelation
+                // raise ERROR → SIGABRT. Reproduces with `count(*) FROM
+                // (SELECT k FROM t ORDER BY k) sq` when the planner picks
+                // GpuSort under the count subquery — the outer plan's RTE
+                // doesn't survive into the inner scan's range table.
                 let rt_entry = pg_sys::exec_rt_fetch(privdata.self_scan_relid, estate);
-                if !rt_entry.is_null() {
+                if !rt_entry.is_null()
+                    && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
+                    && (*rt_entry).relid != pg_sys::InvalidOid
+                {
                     let rel =
                         pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
                     let snap = (*estate).es_snapshot;
