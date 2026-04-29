@@ -52,6 +52,8 @@ mod ssbm;
 // --- Mixed ---
 mod filtered_grouped_agg;
 mod mixed_variants;
+// --- fp64 matrix (Phase 1 calibration grid: 8 workloads x 5 sizes) ---
+mod fp64_matrix;
 // --- Parallel stress (8-worker Gather assurance) ---
 pub mod parallel_stress;
 // scale_sweep retired per action_items W9 (Reviewer 1 Sin #7) — the 5
@@ -399,6 +401,15 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(OltpPoint),
         Box::new(SmallTable),
         Box::new(TopkWide),
+        // --- fp64 matrix (Phase 1 calibration grid) ---
+        Box::new(fp64_matrix::ReduceF64Sum),
+        Box::new(fp64_matrix::ReduceF64MinMax),
+        Box::new(fp64_matrix::ReduceF64Stats),
+        Box::new(fp64_matrix::SortF64Keys),
+        Box::new(fp64_matrix::HashaggF64Keys),
+        Box::new(fp64_matrix::HashaggF64Aggs),
+        Box::new(fp64_matrix::SpatialFp64Recheck),
+        Box::new(fp64_matrix::H3Fp64Ops),
     ]
 }
 
