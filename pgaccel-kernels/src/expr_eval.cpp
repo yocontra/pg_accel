@@ -16,9 +16,13 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "pgaccel_expr.h"
+#include "pgaccel_ffi.h"
+
+extern sycl::queue* g_queue;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -834,6 +838,206 @@ static eval_result eval_row(const pgaccel_expr_program* prog, const pgaccel_batc
 }
 
 // ===========================================================================
+// SYCL staging + kernel dispatch
+// ===========================================================================
+//
+// The bytecode interpreter `eval_row` is per-row pure compute — every
+// row evaluates the same program against its own slice of column data.
+// That makes the row loop a textbook `sycl::parallel_for`: one
+// work-item per row, each with its own MAX_STACK-deep local stack.
+//
+// Per CLAUDE.md rules #11/#12 — the previous host for-loop in the
+// public entry points is replaced with a SYCL kernel. All inputs are
+// staged into sycl::malloc_shared so the kernel has device-accessible
+// pointers; PG's column data lives in palloc memory which is host-only
+// on the Metal SSCP target. After the kernel completes we memcpy the
+// staged result buffer back to the caller's output.
+
+namespace {
+
+// Owning bundle of staged shared-memory buffers for one
+// (program, batch) dispatch. RAII-frees in destructor.
+struct StagedExprDispatch {
+  sycl::queue* q;
+  pgaccel_expr_instruction* d_inst;  // staged instructions
+  pgaccel_val* d_const_pool;         // staged constants (or nullptr)
+  pgaccel_val_tag* d_col_types;      // staged column type tags
+  void** d_col_data;                 // staged array of per-column data pointers
+  uint8_t** d_col_nulls;   // staged array of per-column null mask pointers (or nullptr if no nulls
+                           // anywhere)
+  pgaccel_batch* d_batch;  // staged batch struct (with d_col_* pointers)
+  pgaccel_expr_program* d_prog;  // staged program struct (with d_inst / d_const_pool)
+  void** d_data_buffers;         // [num_cols] shared-mem copies of column data
+  uint8_t** d_null_buffers;      // [num_cols] shared-mem copies of null masks
+  size_t num_cols;
+
+  ~StagedExprDispatch() {
+    if (q == nullptr)
+      return;
+    if (d_data_buffers != nullptr) {
+      for (size_t c = 0; c < num_cols; ++c) {
+        if (d_data_buffers[c] != nullptr)
+          sycl::free(d_data_buffers[c], *q);
+      }
+      std::free(d_data_buffers);
+    }
+    if (d_null_buffers != nullptr) {
+      for (size_t c = 0; c < num_cols; ++c) {
+        if (d_null_buffers[c] != nullptr)
+          sycl::free(d_null_buffers[c], *q);
+      }
+      std::free(d_null_buffers);
+    }
+    if (d_inst)
+      sycl::free(d_inst, *q);
+    if (d_const_pool)
+      sycl::free(d_const_pool, *q);
+    if (d_col_types)
+      sycl::free(d_col_types, *q);
+    if (d_col_data)
+      sycl::free(static_cast<void*>(d_col_data), *q);
+    if (d_col_nulls)
+      sycl::free(static_cast<void*>(d_col_nulls), *q);
+    if (d_batch)
+      sycl::free(d_batch, *q);
+    if (d_prog)
+      sycl::free(d_prog, *q);
+  }
+};
+
+// Element size in bytes for a column type tag. Returns 0 for tags
+// without a fixed-width device representation (we treat those as null).
+static inline size_t elem_size_for_tag(pgaccel_val_tag tag) {
+  switch (tag) {
+    case PGACCEL_VAL_BOOL:
+      return sizeof(bool);
+    case PGACCEL_VAL_INT32:
+    case PGACCEL_VAL_DATE:
+      return sizeof(int32_t);
+    case PGACCEL_VAL_INT64:
+    case PGACCEL_VAL_TIMESTAMP:
+      return sizeof(int64_t);
+    case PGACCEL_VAL_FLOAT32:
+      return sizeof(float);
+    case PGACCEL_VAL_FLOAT64:
+      return sizeof(double);
+    default:
+      return 0;
+  }
+}
+
+// Stage program + batch into shared memory. Returns a heap-allocated
+// StagedExprDispatch owning all the buffers (or nullptr on OOM /
+// invalid input). Caller must `delete` the returned pointer.
+static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_program* program,
+                                          const pgaccel_batch* batch) {
+  auto* s = new (std::nothrow) StagedExprDispatch();
+  if (s == nullptr)
+    return nullptr;
+  s->q = &q;
+  s->num_cols = batch->num_cols;
+
+  // Stage instruction stream.
+  s->d_inst = sycl::malloc_shared<pgaccel_expr_instruction>(program->inst_count, q);
+  if (s->d_inst == nullptr) {
+    delete s;
+    return nullptr;
+  }
+  std::memcpy(s->d_inst, program->instructions,
+              program->inst_count * sizeof(pgaccel_expr_instruction));
+
+  // Stage constant pool.
+  if (program->const_count > 0) {
+    s->d_const_pool = sycl::malloc_shared<pgaccel_val>(program->const_count, q);
+    if (s->d_const_pool == nullptr) {
+      delete s;
+      return nullptr;
+    }
+    std::memcpy(s->d_const_pool, program->const_pool, program->const_count * sizeof(pgaccel_val));
+  }
+
+  // Stage program struct itself (with shared-mem pointers).
+  s->d_prog = sycl::malloc_shared<pgaccel_expr_program>(1, q);
+  if (s->d_prog == nullptr) {
+    delete s;
+    return nullptr;
+  }
+  s->d_prog->instructions = s->d_inst;
+  s->d_prog->inst_count = program->inst_count;
+  s->d_prog->const_pool = s->d_const_pool;
+  s->d_prog->const_count = program->const_count;
+  s->d_prog->max_stack = program->max_stack;
+  s->d_prog->num_cols = program->num_cols;
+
+  // Stage per-column type tags + data pointers + null pointers.
+  if (batch->num_cols > 0) {
+    s->d_col_types = sycl::malloc_shared<pgaccel_val_tag>(batch->num_cols, q);
+    s->d_col_data = sycl::malloc_shared<void*>(batch->num_cols, q);
+    s->d_col_nulls = sycl::malloc_shared<uint8_t*>(batch->num_cols, q);
+    s->d_data_buffers = static_cast<void**>(std::calloc(batch->num_cols, sizeof(void*)));
+    s->d_null_buffers = static_cast<uint8_t**>(std::calloc(batch->num_cols, sizeof(uint8_t*)));
+    if (s->d_col_types == nullptr || s->d_col_data == nullptr || s->d_col_nulls == nullptr ||
+        s->d_data_buffers == nullptr || s->d_null_buffers == nullptr) {
+      delete s;
+      return nullptr;
+    }
+
+    for (size_t c = 0; c < batch->num_cols; ++c) {
+      s->d_col_types[c] = batch->col_types[c];
+
+      // Stage column data, sized by the type tag.
+      size_t esz = elem_size_for_tag(batch->col_types[c]);
+      if (batch->col_data[c] != nullptr && esz > 0 && batch->num_rows > 0) {
+        void* buf = sycl::malloc_shared(batch->num_rows * esz, q);
+        if (buf == nullptr) {
+          // OOM — leave column null, kernel returns NULL for accesses.
+          s->d_col_data[c] = nullptr;
+          s->d_data_buffers[c] = nullptr;
+        } else {
+          std::memcpy(buf, batch->col_data[c], batch->num_rows * esz);
+          s->d_col_data[c] = buf;
+          s->d_data_buffers[c] = buf;
+        }
+      } else {
+        s->d_col_data[c] = nullptr;
+        s->d_data_buffers[c] = nullptr;
+      }
+
+      // Stage null mask if present.
+      if (batch->col_nulls != nullptr && batch->col_nulls[c] != nullptr && batch->num_rows > 0) {
+        uint8_t* nbuf = sycl::malloc_shared<uint8_t>(batch->num_rows, q);
+        if (nbuf == nullptr) {
+          s->d_col_nulls[c] = nullptr;
+          s->d_null_buffers[c] = nullptr;
+        } else {
+          std::memcpy(nbuf, batch->col_nulls[c], batch->num_rows);
+          s->d_col_nulls[c] = nbuf;
+          s->d_null_buffers[c] = nbuf;
+        }
+      } else {
+        s->d_col_nulls[c] = nullptr;
+        s->d_null_buffers[c] = nullptr;
+      }
+    }
+  }
+
+  // Stage batch struct itself.
+  s->d_batch = sycl::malloc_shared<pgaccel_batch>(1, q);
+  if (s->d_batch == nullptr) {
+    delete s;
+    return nullptr;
+  }
+  s->d_batch->num_rows = batch->num_rows;
+  s->d_batch->num_cols = batch->num_cols;
+  s->d_batch->col_data = s->d_col_data;
+  s->d_batch->col_nulls = s->d_col_nulls;
+  s->d_batch->col_types = s->d_col_types;
+  return s;
+}
+
+}  // namespace
+
+// ===========================================================================
 // Public C API
 // ===========================================================================
 
@@ -841,43 +1045,96 @@ extern "C" {
 
 pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
                                            const pgaccel_batch* batch, int8_t* results) {
-  if (program == nullptr || batch == nullptr || results == nullptr) {
+  if (program == nullptr || batch == nullptr || results == nullptr)
     return PGACCEL_ERROR;
+  if (batch->num_rows == 0)
+    return PGACCEL_OK;
+
+  pgaccel_init();
+  sycl::queue* q = g_queue;
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  StagedExprDispatch* s = stage_dispatch(*q, program, batch);
+  if (s == nullptr)
+    return PGACCEL_OOM;
+
+  int8_t* d_results = sycl::malloc_shared<int8_t>(batch->num_rows, *q);
+  if (d_results == nullptr) {
+    delete s;
+    return PGACCEL_OOM;
   }
 
-  for (size_t row = 0; row < batch->num_rows; row++) {
-    eval_result er = eval_row(program, batch, row);
+  pgaccel_expr_program* d_prog = s->d_prog;
+  pgaccel_batch* d_batch = s->d_batch;
 
-    if (er.uncertain) {
-      results[row] = PGACCEL_EXPR_UNCERTAIN;
-    } else if (is_null(er.value)) {
-      // NULL in a WHERE context is false (row does not pass)
-      results[row] = PGACCEL_EXPR_FALSE;
-    } else if (val_to_bool(er.value)) {
-      results[row] = PGACCEL_EXPR_TRUE;
-    } else {
-      results[row] = PGACCEL_EXPR_FALSE;
-    }
-  }
+  q->parallel_for(sycl::range<1>(batch->num_rows), [=](sycl::id<1> id) {
+     const size_t row = id[0];
+     eval_result er = eval_row(d_prog, d_batch, row);
+     if (er.uncertain) {
+       d_results[row] = PGACCEL_EXPR_UNCERTAIN;
+     } else if (is_null(er.value)) {
+       d_results[row] = PGACCEL_EXPR_FALSE;
+     } else if (val_to_bool(er.value)) {
+       d_results[row] = PGACCEL_EXPR_TRUE;
+     } else {
+       d_results[row] = PGACCEL_EXPR_FALSE;
+     }
+   }).wait();
 
+  std::memcpy(results, d_results, batch->num_rows * sizeof(int8_t));
+  sycl::free(d_results, *q);
+  delete s;
+  pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
 
 pgaccel_status pgaccel_expr_eval_project(const pgaccel_expr_program* program,
                                          const pgaccel_batch* batch, pgaccel_val* output,
                                          uint8_t* uncertain_mask) {
-  if (program == nullptr || batch == nullptr || output == nullptr) {
+  if (program == nullptr || batch == nullptr || output == nullptr)
     return PGACCEL_ERROR;
+  if (batch->num_rows == 0)
+    return PGACCEL_OK;
+
+  pgaccel_init();
+  sycl::queue* q = g_queue;
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  StagedExprDispatch* s = stage_dispatch(*q, program, batch);
+  if (s == nullptr)
+    return PGACCEL_OOM;
+
+  pgaccel_val* d_output = sycl::malloc_shared<pgaccel_val>(batch->num_rows, *q);
+  uint8_t* d_uncertain = sycl::malloc_shared<uint8_t>(batch->num_rows, *q);
+  if (d_output == nullptr || d_uncertain == nullptr) {
+    if (d_output)
+      sycl::free(d_output, *q);
+    if (d_uncertain)
+      sycl::free(d_uncertain, *q);
+    delete s;
+    return PGACCEL_OOM;
   }
 
-  for (size_t row = 0; row < batch->num_rows; row++) {
-    eval_result er = eval_row(program, batch, row);
-    output[row] = er.value;
-    if (uncertain_mask != nullptr) {
-      uncertain_mask[row] = er.uncertain ? 1 : 0;
-    }
-  }
+  pgaccel_expr_program* d_prog = s->d_prog;
+  pgaccel_batch* d_batch = s->d_batch;
 
+  q->parallel_for(sycl::range<1>(batch->num_rows), [=](sycl::id<1> id) {
+     const size_t row = id[0];
+     eval_result er = eval_row(d_prog, d_batch, row);
+     d_output[row] = er.value;
+     d_uncertain[row] = er.uncertain ? 1 : 0;
+   }).wait();
+
+  std::memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val));
+  if (uncertain_mask != nullptr)
+    std::memcpy(uncertain_mask, d_uncertain, batch->num_rows);
+
+  sycl::free(d_output, *q);
+  sycl::free(d_uncertain, *q);
+  delete s;
+  pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
 
