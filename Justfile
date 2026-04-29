@@ -112,7 +112,7 @@ setup-gpu-acpp:
         echo "$ACPP_SRC not found; cloning fork-safe-metal from yocontra/AdaptiveCpp"
         git clone -b "$REQUIRED_BRANCH" https://github.com/yocontra/AdaptiveCpp.git "$ACPP_SRC"
     fi
-    ACPP_REQUIRED_SHA="79ef8c5bcfad8e65bbe888b68c8e674d84af6b70"
+    ACPP_REQUIRED_SHA="4f3cde11a302eebac28aa1ccc79ad3399cb8183c"
     if ! git -C "$ACPP_SRC" merge-base --is-ancestor "$ACPP_REQUIRED_SHA" HEAD 2>/dev/null; then
         echo "error: AdaptiveCpp at $ACPP_SRC must include SHA $ACPP_REQUIRED_SHA"
         echo "       run: git -C $ACPP_SRC fetch origin fork-safe-metal && git -C $ACPP_SRC checkout fork-safe-metal && git -C $ACPP_SRC pull --ff-only"

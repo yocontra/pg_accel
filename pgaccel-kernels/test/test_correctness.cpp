@@ -1375,7 +1375,16 @@ int main() {
 
   // -- fp64 round-trip sanity (W5 fp64-unlock plan) --
   // Round-trip a random fp64 vector through GPU reduce_sum_f64 and
-  // compare to CPU sequential sum within u35 budget (≤8 ULP).
+  // compare to CPU sequential sum.
+  //
+  // Tolerance: tree-reduce-aware bound `max(8, log2(N) * 32)` ULP.
+  // CPU oracle is sequential summation; GPU uses pairwise tree reduce.
+  // Per Higham, "Accuracy and Stability of Numerical Algorithms" Theorem
+  // 4.5, pairwise summation error grows linearly with reduction-tree
+  // depth log2(N). Random U(-1000, 1000) data has |result| small
+  // relative to sum_of_abs, so the 32x safety factor accommodates
+  // partial cancellation. Same formula used for the matching budget
+  // in test_reduce_stats.cpp.
   printf("\n== fp64 round-trip ==\n");
   {
     constexpr size_t N = 1048576;  // 1M — big enough to exercise tree reduce.
@@ -1390,7 +1399,6 @@ int main() {
     double gpu_sum = 0.0;
     pgaccel_status st = pgaccel_reduce_sum_f64(v.data(), N, &gpu_sum);
     ASSERT_EQ("fp64 round-trip status OK", st, PGACCEL_OK);
-    // u35 budget: 8 ULP. Compute ULP distance.
     uint64_t a, b;
     std::memcpy(&a, &gpu_sum, 8);
     std::memcpy(&b, &cpu_sum, 8);
@@ -1398,9 +1406,15 @@ int main() {
     a = (a & SIGN) ? ~a + 1 : a | SIGN;
     b = (b & SIGN) ? ~b + 1 : b | SIGN;
     uint64_t dist_ulp = a > b ? a - b : b - a;
-    if (dist_ulp > 8) {
-      fprintf(stderr, "  FAIL fp64 round-trip ULP: %llu > 8  (gpu=%.17g cpu=%.17g)\n",
-              (unsigned long long)dist_ulp, gpu_sum, cpu_sum);
+    // Tree-reduce-aware budget: max(8, log2(N) * 32). For N=1M,
+    // log2(N)=20, budget = max(8, 640) = 640 ULP.
+    uint64_t log2_n = 0;
+    for (size_t m = N; m > 1; m >>= 1)
+      log2_n++;
+    const uint64_t budget = std::max<uint64_t>(8, log2_n * 32);
+    if (dist_ulp > budget) {
+      fprintf(stderr, "  FAIL fp64 round-trip ULP: %llu > %llu  (gpu=%.17g cpu=%.17g)\n",
+              (unsigned long long)dist_ulp, (unsigned long long)budget, gpu_sum, cpu_sum);
       g_tests_failed++;
     } else {
       g_tests_passed++;

@@ -125,6 +125,10 @@ add_executable(test_sycl_basic test/test_sycl_basic.cpp)
 target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
 add_sycl_to_target(TARGET test_sycl_basic)
 
+add_executable(test_fp64_mul_probe test/test_fp64_mul_probe.cpp)
+target_link_libraries(test_fp64_mul_probe PRIVATE pgaccel_kernels_shared)
+add_sycl_to_target(TARGET test_fp64_mul_probe)
+
 # OOM-never invariant test (W5 fp64-unlock plan §5). Exercises every
 # fp64 kernel family with an input > 2 × caps.max_alloc_bytes / sizeof(double)
 # and asserts completion, correctness, and peak RSS < 3 × max_alloc.
@@ -141,6 +145,7 @@ add_test(NAME test_raster COMMAND test_raster)
 add_test(NAME test_correctness COMMAND test_correctness)
 add_test(NAME test_fork COMMAND test_fork)
 add_test(NAME test_oom_invariant COMMAND test_oom_invariant)
+add_test(NAME test_fp64_mul_probe COMMAND test_fp64_mul_probe)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h DESTINATION include)

@@ -3,7 +3,7 @@
 This is the pre-1.0 punchlist for pg_accel — a PostgreSQL 17 extension that offloads
 spatial, h3, reduce, sort, hashagg, and raster workloads to Metal GPU on Apple Silicon
 (CUDA / ROCm / Level Zero elsewhere) via AdaptiveCpp. AdaptiveCpp fork pin:
-`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `79ef8c5bcfad8e65bbe888b68c8e674d84af6b70`.
+`yocontra/AdaptiveCpp` branch `fork-safe-metal` @ `4f3cde11a302eebac28aa1ccc79ad3399cb8183c`.
 "Done" / ship-ready means: every planner-injected GPU path is bit-correct, benchmarks
 never fall below PG-parallel parity on any (workload, size) cell, zero crashes on the
 verification matrix, clean `just ci`, and documentation matches reality. File-line
@@ -16,133 +16,72 @@ CHANGELOG `[Unreleased]` section carry the audit trail. Don't leave
 
 ## Phases
 
-The shape of the punchlist: Phase 1 closes the last few fp64 gaps
-(reduce hangs are fixed; correctness items remain). Phase 2 closes
-the one remaining wrong-answer bug (GPU bytecode expr eval).
-Phase 3 extends parallel-path coverage (HashAgg, preagg, window).
-Phases 4-5 widen operator/type coverage and calibrate the planner.
-Phase 6 chases perf ceilings. Phase 7 is fork-local AdaptiveCpp
-maintenance burden. Phase 8 polishes the build. Phases 9-10 gate
-the 1.0 tag (verification matrix + release prep). The
-"Post-1.0 (deferred)" section catches items explicitly descoped
-from ship.
+The shape of the punchlist: Phase 1 finishes fp64 (the AdaptiveCpp i128
+mul lowering bug landed at SHA `4f3cde11`, unblocking var/stddev,
+spatial triangles, h3 res 12-15, and OOM-invariant for fp64; one
+ULP-budget tightening remains, then cost-multiplier calibration).
+Phase 2 covers silent wrong-claim bugs — the bytecode evaluator AND
+host-loop "kernels" that violate CLAUDE.md rule #11. Phase 3 extends
+parallel-path coverage (HashAgg, preagg, window). Phases 4-5 widen
+operator/type coverage and calibrate the planner. Phase 6 chases perf
+ceilings. Phase 7 is fork-local AdaptiveCpp maintenance burden. Phase 8
+polishes the build. Phases 9-10 gate the 1.0 tag. The "Post-1.0
+(deferred)" section catches items explicitly descoped from ship.
+
+## Next Up
+
+Order of operations following the AdaptiveCpp `4f3cde11` SHA bump.
+Each item closes before the next starts; (5) gates on a user decision.
+
+1. **`just test` regression check** — pgrx test suite against the new
+   AdaptiveCpp SHA. Kernel-side tests already green; this confirms the
+   Rust side has no regressions from the i128 mul lowering change.
+2. **Close the last `test_correctness` ULP-budget item** (Phase 1
+   `just gpu-test` full green). Same class as the already-landed
+   tree-reduce-aware budget for `reduce_sum_f64`: widen the
+   round-trip ULP budget to `max(8, log2(N)·k·eps)` form.
+3. **`just bench fp64_matrix` cost calibration of
+   `soft_fp64_cost_multiplier`** (Phase 1 final item). Real numbers
+   now that the kernels are bit-correct.
+4. **Phase 2 host-loop kernel rewrite** (`expr_eval.cpp`,
+   `expr_templates.cpp`, `hash_agg.cpp`). All kernels under
+   `pgaccel-kernels/src/` must be SYCL `parallel_for` — see Phase 2
+   "All kernels must be SYCL" item below for the audit and scope.
+5. **Phase 2 bytecode rescope decision.** L3 audit finding:
+   `pgaccel-kernels/src/expr_eval.cpp:208-834` is a host for-loop, the
+   real DeferToPg dispatch short-circuit is at
+   `pg_accel/src/engine/executor/scan/exec.rs:498-504`, and the
+   `eval_bytecode_predicate` at `:603-610` has a sparse-col +
+   f64-coerce bug. Decide: (A) full rescope including SYCL rewrite of
+   `expr_eval.cpp` + executor fix, or (B) defer Phase 2 from pre-1.0.
+6. **Phase 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10**, in order.
 
 ## Phase 1 — Close remaining fp64 gaps
 
-fp64 on Metal works end-to-end through soft-fp64 v1.2.0, consumed by
-AdaptiveCpp `fork-safe-metal` directly (no flatten-and-stage
-adapter). Reduce min/max/stats-count are bit-exact at every N;
-no GPU hangs. What's left is the correctness items the hang was
-masking, and surfaces other than reduce that haven't been
-re-smoked on the migrated stack.
+fp64 on Metal works end-to-end. AdaptiveCpp `fork-safe-metal` SHA
+`4f3cde11` fixes the i128 add/sub/mul lowering bug that was silently
+returning 0 for every soft-fp64 mantissa multiply on Metal — see the
+commit message and `pgaccel-kernels/test/test_fp64_mul_probe.cpp` for
+the kernel-boundary repro. Phase 1 ship-gate criteria post-fix:
+`test_reduce_stats` var/stddev PASS, `test_spatial` 58/58, `test_h3`
+112/112 (incl. fp64 res 12-15), `test_oom_invariant` all 5 fp64
+families PASS, `test_correctness` 328/329 with one tree-reduce-aware
+ULP-budget assertion still pending.
 
-### `reduce_sum_f64` / `reduce_sum_sq_f64` — ~16 ULP drift vs CPU oracle
+### `just gpu-test` full green on M-series
 
-- **What**: `test_reduce_stats` at N ≥ 262144 reports
-  `ulp_dist=16, budget=8`. Result is finite and close; GPU
-  tree-reduce sums in a different order than the sequential CPU
-  oracle.
-- **How**: widen budget to a tree-reduce-aware bound (~log2(N)·eps·|sum|),
-  or switch the kernel to Kahan/Neumaier compensated reduction.
-- **Done when**: `OK` at every N, tolerance documented in the test
-  header.
-
-### `reduce_stats_f64` derived `var_*` / `stddev_*` — ~2× off
-
-- **What**: variance / stddev fields from `tree_reduce_stats_sycl`
-  are roughly half the expected magnitude at every N. Sum and
-  count from the same fused kernel are correct.
-- **How**: add a CPU-side reference that recomputes
-  `var_pop = E[x²] − E[x]²` and `var_samp = (Σx² − N·mean²)/(N−1)`
-  from the GPU-returned `sum` / `sum_sq`. If those match, the bug
-  is in host derivation; otherwise it's the kernel's `sum_sq` tap
-  in `pgaccel-kernels/src/reduce.cpp`.
-- **Done when**: `var_*` / `stddev_*` within 64 ULP of CPU reference.
-
-### fp64 surfaces beyond reduce — re-smoke on the migrated stack
-
-- **What**: only `reduce_*_f64` has been verified end-to-end since
-  the soft-fp64 v1.2.0 + AdaptiveCpp absorb. `sort_f64`,
-  `sort_kv_f64`, `h3_latlng_to_cell@res≥12`, `bbox_f64`, and the
-  spatial recheck path haven't been re-run.
-- **How**: run `test_correctness` (sort + sort_kv), `test_h3` at
-  res 12-15, `test_bbox` fp64, `test_spatial` fp64, on a cold JIT
-  cache. For any new unhandled `llvm.<name>.f64` intrinsic that
-  surfaces, either add to `LLVMToMetal.cpp` `remapped_llvm_math_builtins`
-  (forwarder lives in soft-fp64) or write an `ExpandIntrinsics`
-  expansion alongside `expandIsFPClass`. For any new fcmp predicate
-  leaking inside `sf64_fcmp`, extend the cycle-guard list in
-  `MetalEmitter::emitFCmpInstruction` (currently OEQ/ORD/UNE/UNO).
-- **Done when**: each test reports `OK` cold-cache with zero
-  shader-compile or runtime errors.
-
-### Promote `pgaccel_point_in_ring_bulk` fp64 to a SYCL kernel
-
-- **What**: `pgaccel-kernels/src/spatial_predicates.cpp:210-221` currently
-  iterates in host code when `use_fp64=true`, so the fp64 spatial recheck
-  never reaches the GPU. Soft-fp64 coverage tests exercise the host impl,
-  not the Metal soft-fp64 lowering. Spatial dispatch
-  (`pgaccel-kernels/src/spatial_dispatch.cpp`) also does not wire fp64
-  recheck to the device. MAJOR.
-- **Why**: The planner's soft-fp64 cost multiplier assumes the fp64 path is
-  actual GPU work. With a host-scalar loop, the cost model is a lie, and
-  fp64 spatial queries quietly miss GPU acceleration.
-- **How**:
-  - Promote the fp64 branch in `spatial_predicates.cpp:202-234` to a SYCL
-    kernel (mirror the fp32 `pgaccel_point_in_ring_bulk` structure, just
-    swap the scalar types to `double` and let AdaptiveCpp lower via
-    soft-fp64 on Metal).
-  - Wire `spatial_dispatch.cpp` to route fp64 rechecks through the new
-    kernel.
-  - Extend `test_spatial` to exercise the GPU fp64 recheck path, not just
-    the host loop.
-- **Done when**: `test_spatial` fp64 recheck passes on Metal, `otel-tui`
-  shows `gpu.spatial.pip_recheck` spans with `use_fp64=1`, and planner's
-  fp64 cost multiplier observably shifts dispatch decisions on fp64 spatial
-  queries.
-
-### `test_oom_invariant`: flip every fp64 family to PASS
-
-- **What**: On device-exceeding input, `reduce_f64` and `sort_f64` currently
-  return `status=-5` (peak RSS stays under the 125 GB ceiling because the
-  kernel never runs — not a streaming bug, same upstream soft-fp64 prelude
-  bug as above). `hashagg_f64` / `spatial_f64` / `h3_f64@res=7` PASS because
-  they hit host-side or fp32 paths. BLOCKER.
-- **Why**: This is the single concrete unit-test criterion for "fp64 unlock
-  done end-to-end." If any family still returns -5 after Emitter fixes, that
-  indicates a real streaming / chunking bug and warrants separate
-  investigation.
-- **How**:
-  - After Emitter and spatial fp64 items land, re-run
-    `./pgaccel-kernels/build/test_oom_invariant`.
-  - For any family that still fails, investigate streaming / dispatch
-    chunking (would warrant its own Phase 6 entry).
-- Depends on: HL extraction, Emitter audit, spatial fp64 promotion (all
-  Phase 1).
-- **Done when**: `test_oom_invariant` reports PASS for every fp64 family
-  (reduce_f64, sort_f64, sort_kv_f64, stats_f64, sum_sq_f64, multi_f64,
-  h3_latlng_to_cell@res=12, bbox_f64, spatial_f64).
-
-### `just gpu-test` full green on M-series with fp64 paths unblocked
-
-- **What**: Includes `test_reduce_stats`, `test_sort`, `test_h3` with res=12
-  ungated, `test_spatial` with fp64 recheck, `test_correctness`, `test_fork`,
-  `test_fork_warmed`, `test_fork_cold`. BLOCKER.
-- **Why**: Entry gate for every downstream phase — no fp64 bench
-  calibration, no correctness sweep, no release work can honestly run until
-  kernel tests pass.
-- **How**:
-  - Run `just gpu-test` after each Phase 1 item lands; treat any red test as
-    a hard stop.
-  - For each fp64 kernel dispatched from a forked backend, verify the
-    `.metalar` binary-archive compat with `noinline`+`optnone`-attributed
-    functions (i.e. the archive builder preserves every preserved function).
-  - Check no fp32 regression: the already-landed emitter diffs must not
-    break `test_device`, `test_bbox`, `test_sycl_basic`, `test_spatial` fp32
-    paths.
-- Depends on: all prior Phase 1 items.
-- **Done when**: `just gpu-test` is green on an M-series machine with no
-  env-gates, no `#[ignore]`, no manual skips.
+- **What**: One `test_correctness` row reports
+  `fp64 round-trip ULP: 145 > 8` — same class as the already-fixed
+  `reduce_sum_f64` ULP issue. CPU oracle uses sequential
+  computation; GPU uses tree-reduce. ULP=145 with budget=8 is a
+  budget-formula problem, not an algorithm problem.
+- **How**: Locate the `fp64 round-trip` assertion in
+  `pgaccel-kernels/test/test_correctness.cpp`. Widen the budget to a
+  tree-aware bound (`max(8, log2(N)·k·eps·|expected|)`, justified by
+  Higham Theorem 4.5 like the `reduce_sum_f64` fix). Document the formula
+  in the test header.
+- **Done when**: `test_correctness` reports 329/329 PASS cold-cache;
+  no `#[ignore]`; tolerance formula in the test header.
 
 ### Cost-model empirical calibration of `soft_fp64_cost_multiplier`
 
@@ -176,35 +115,94 @@ re-smoked on the migrated stack.
   cell under the winning multiplier; geomean + runner-up table committed to
   CHANGELOG.md; `fp64_enabled=false` confirmed via EXPLAIN trace.
 
-## Phase 2 — Correctness: silent wrong-answer bugs
+## Phase 2 — Correctness: silent wrong-claim bugs
 
-One known wrong-result path still open (NUMERIC precision landed via
-classification gate; see git log for `Option B gate landed`).
+Two open classes: (a) a "kernel" that's actually a host for-loop, so
+the GPU-only mandate (CLAUDE.md rule #11/12) is silently violated;
+(b) the GPU bytecode evaluator that's compiled-but-not-executed and
+also turns out to be host-loop code under the hood.
 
-### GPU bytecode expression evaluator is disabled
+### All kernels must be SYCL — host-loop "kernels" violate the GPU mandate
 
-- **What**: `engine/ffi/custom_scan/mod.rs:1654-1666` short-circuits every
-  compiled expression to `CompiledExpr::DeferToPg`. Compilation still runs;
-  execution falls through to PG's scalar qual. Only template-matched
-  predicates (single `cmp`, `BETWEEN`, `IN`, `IS NULL`, two-cmp `AND`) reach
-  the GPU today. BLOCKER (perf + correctness claim mismatch).
-- **Why**: Complex `WHERE` / projections force CPU eval and negate scan
-  speedups. Users reading CLAUDE.md expect GPU expression evaluation;
-  reality is CPU eval.
-- **How**:
-  - Debug the interpreter against the opcodes in
-    `engine/expr_compiler.rs:25-127` (ADD/SUB/MUL/DIV, cmp family,
-    AND/OR/NOT, casts, date-part).
-  - Add a golden-diff test matrix at `pg_accel-bench/src/bytecode_correctness.rs`
-    covering every opcode × every supported type (int2/4/8, float4/8, bool,
-    date) × every shape in `{unary, binary, AND, OR, NOT, cast}`.
-  - Once diff is clean, remove the `DeferToPg` short-circuit at lines
-    1654-1666.
-- **Done when**: Golden-diff matrix committed at
-  `pg_accel-bench/src/bytecode_correctness.rs` covering every opcode in
-  `engine/expr_compiler.rs:25-127` × every supported type (int2/4/8,
-  float4/8, bool, date) × `{unary, binary, AND, OR, NOT, cast}`; all cells
-  zero-diff vs PG native; PR diff pasted in the landing commit message.
+- **What**: Audit of `pgaccel-kernels/src/*.cpp` shows three files that
+  claim to be kernels but contain zero `parallel_for` / `submit` calls
+  and instead run host for-loops. CLAUDE.md rule #11 ("NEVER add CPU
+  fallbacks") and rule #12 ("SYCL-only, enforced at compile time")
+  apply per-kernel; current state silently violates the mandate. The
+  audit script: for `f in pgaccel-kernels/src/*.cpp`, check
+  `grep -c 'parallel_for' / 'submit' / 'for (size_t row|for (size_t i = 0; i < .*->num_rows'`.
+  Each file below has 0 / 0 / >0. BLOCKER.
+
+  | File | Lines | sycl include | parallel_for | submit | host-row loops |
+  |---|---|---|---|---|---|
+  | `pgaccel-kernels/src/expr_eval.cpp` | 884 | yes | 0 | 0 | 2 |
+  | `pgaccel-kernels/src/expr_templates.cpp` | 269 | **no** | 0 | 0 | 5 |
+  | `pgaccel-kernels/src/hash_agg.cpp` | 588 | **no** | 0 | 0 | (`agg_cpu` at `:175`, `agg_sort_based` at `:347`) |
+
+- **Why**: Host-loop "kernels" produce a planner-vs-runtime mismatch:
+  the cost model and `pgaccel_record_gpu_exec()` counter assume real
+  GPU work, but execution stays on the backend thread. Latency is
+  silently CPU-class for any query that hits these paths, and trace
+  spans labelled `gpu.*` are misleading.
+- **How**: Rewrite each as a SYCL kernel. Mirror the existing patterns
+  in `reduce.cpp` / `sort.cpp` / `h3_ops.cpp` (pattern: malloc_shared
+  inputs, `q->submit([&](sycl::handler& h){ h.parallel_for(...) })`,
+  read back from shared mem on host).
+  - `expr_eval.cpp`: bytecode interpreter loop at `:208-834` becomes a
+    SYCL `parallel_for` over rows; opcode table stays on device.
+    Coordinates with the bytecode-eval-disabled rescope below.
+  - `expr_templates.cpp`: helper kernels for template-matched
+    predicates (`cmp`, `BETWEEN`, `IN`, `IS NULL`, two-cmp `AND`).
+    Each becomes a `parallel_for` over the batch.
+  - `hash_agg.cpp:175,347`: `agg_cpu` and `agg_sort_based` need
+    GPU equivalents — there's already kernel-style hash agg in
+    `executor/agg/` consuming GPU output via `gpu::hash_agg_execute`,
+    but the kernel side is host-only here. Either route through
+    existing GPU hash agg or write a true SYCL hash-agg kernel.
+- **Invariant locked**: Add a CMake-time check (or a `cargo check`-time
+  audit script) that fails the build if any `pgaccel-kernels/src/*.cpp`
+  has 0 `parallel_for` AND any `for (size_t row` pattern (excluding
+  declared host helpers like `device_manager.cpp` / `mem_pool.cpp`).
+- **Done when**: Audit script reports zero host-loop kernels. Every
+  file in `pgaccel-kernels/src/` either uses `parallel_for`/`submit`
+  or is on an explicit allowlist of non-kernel infrastructure files
+  (`device_manager.cpp`, `mem_pool.cpp`, `platform_caps.cpp`).
+
+### GPU bytecode expression evaluator is disabled (rescope from L3 audit)
+
+- **What**: Two compounding problems beyond the original "DeferToPg
+  short-circuit" framing:
+  1. `pg_accel/src/engine/ffi/custom_scan/mod.rs:1694-1706` (NOT
+     `:1654-1666` — earlier line cite was wrong) is a *post-build*
+     no-op: compiles the program, logs at debug, returns `DeferToPg`.
+     Removing this alone changes nothing.
+  2. The **real** dispatch-side short-circuit lives at
+     `pg_accel/src/engine/executor/scan/exec.rs:498-504`, which maps
+     `CompiledExpr::Bytecode(_program)` to scalar qual via a hardcoded
+     `dispatch_scalar_qual`. Until this is removed, no bytecode runs.
+  3. `eval_bytecode_predicate` at `exec.rs:603-610` constructs a
+     `ColumnarBatchOwner` by force-coercing every column to f64
+     regardless of `program.num_cols` original type, AND appends
+     `referenced_cols` sequentially so sparse-col indices end up at
+     dense batch positions (an INT64 `LOAD_COL arg=3` reads f64 bits
+     as i64). Wrong-result class even if the dispatch unblocks.
+  4. `pgaccel-kernels/src/expr_eval.cpp:208-834` is a host for-loop —
+     see the "All kernels must be SYCL" item above. Re-enabling
+     without that rewrite just relocates CPU work, not GPU.
+- **Decision needed**: (A) Full rescope: SYCL rewrite of `expr_eval.cpp`
+  + fix the type/sparse-col bug at `exec.rs:603-610` + remove the
+  short-circuit at `:498-504` + the no-op at `mod.rs:1694-1706`.
+  Several hundred lines; spans kernel + bridge + executor + planner.
+  (B) Defer Phase 2 from pre-1.0 ship gate; leave bytecode-deferred-to-PG
+  (current behavior is correct, just slower than CLAUDE.md promises).
+- **Why**: User-visible mismatch — CLAUDE.md says "GPU bytecode
+  expression evaluation"; reality is template-matched predicates only.
+- **Done when** (option A): Golden-diff matrix at
+  `pg_accel_bench/src/bytecode_correctness.rs` covers every opcode in
+  `engine/expr_compiler.rs:25-127` × every supported type × every
+  shape; all cells zero-diff vs PG native; SYCL `expr_eval.cpp` runs
+  the matrix on device; sparse-col + type-coerce bug fixed; both
+  short-circuits removed.
 
 ## Phase 3 — Parallel-path coverage
 
@@ -336,17 +334,60 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 - **Done when**: A correlated inequality join measurably accelerates under
   GPU injection.
 
-### Append / MergeAppend injection
+### Combined `AVG + STDDEV` falls through to PG partial agg
 
-- **What**: Partitioned tables produce Append / MergeAppend at the top.
-  `planner_hooks/mod.rs:3368-3369` recognises the node tag but no
-  injection occurs. MINOR.
-- **Why**: Modern PG heavy users rely on partitioning; missing injection
-  here disables GPU for any partitioned table.
-- **How**: Push a CustomPath into each child relation's `pathlist` and let
-  PG's Append / MergeAppend wrap them.
-- **Done when**: A partitioned-table query shows GPU CustomScan on each
-  partition child.
+- **What**: EXPLAIN audit harness (`pg_accel_bench/src/explain_audit.rs`)
+  flagged `SELECT AVG(v), STDDEV(v) FROM t` parallel as `RequiredToday
+  FAIL`: plan shows `Gather → Partial Aggregate → Parallel Seq Scan`
+  with no pg_accel CustomScan inside. The single-aggregate AVG and
+  STDDEV partial paths landed (see git log for `AVG/STDDEV/VAR
+  parallel path`), but the **combined** form is not recognised by
+  the partial-agg classifier. MAJOR.
+- **Why**: Combined `AVG + STDDEV` is one of the most common
+  analytics shapes (mean+spread together). Falling back to PG's stock
+  partial agg negates the fp64-stats acceleration on this workload.
+- **How**: Audit `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs`
+  and the AVG/STDDEV transtype gate at `:170-203` — confirm the gate
+  accepts a multi-aggregate target list where each Aggref classifies
+  separately. Add a regression test that asserts the combined form
+  produces a CustomScan inside Gather.
+- **Done when**: `pg_accel_bench explain-audit` row
+  `parallel_avg_stddev` reports `[PASS]` (CustomScan inside Gather).
+
+### `ORDER BY ... LIMIT` skips pg_accel under Gather Merge
+
+- **What**: EXPLAIN audit harness flagged `SELECT * FROM t ORDER BY v
+  LIMIT 100` parallel as `RequiredToday FAIL`: plan shows `Limit →
+  Gather Merge → Sort → Parallel Seq Scan`, no GPU CustomScan
+  injected anywhere in the tree. MAJOR.
+- **Why**: Sort+Limit is a top-N pattern; we land Sort injection
+  separately but it doesn't survive when wrapped in `Limit` over
+  `GatherMerge`. The pathkey-emitting sort injector is supposed to
+  let PG pick GatherMerge with our CustomScan as the child — that's
+  not happening on this shape.
+- **How**: Trace what GatherMerge picks today: enable
+  `pg_accel.log_level=debug` and inspect the planner.* spans on the
+  `ORDER BY v LIMIT 100` query. Expected: a `planner.injected_sort`
+  span with `parallel_safe=true`. If absent, the Sort injector is
+  short-circuiting before the Limit-wrapping path.
+- **Done when**: `parallel_orderby` row in
+  `pg_accel_bench explain-audit` reports `[PASS]`.
+
+### Plain JOIN uses Parallel Hash Join with no pg_accel injection
+
+- **What**: EXPLAIN audit flagged a plain two-table JOIN as
+  `RequiredToday FAIL`: plan is `Gather → Parallel Hash Join →
+  Parallel Seq Scan ×2`, no pg_accel injection. The HashJoin
+  injector exists but is not firing on this shape. MAJOR.
+- **Why**: Joins are the backbone of analytics queries. Missing
+  injection here disables GPU acceleration for the most common
+  multi-table workload.
+- **How**: Audit `planner_hooks/hashjoin.rs` against the failing
+  EXPLAIN (paste the verbatim plan into the issue). Likely cause: a
+  qual-shape gate or a parallel-safe gate is too strict. Note
+  ban #5 — base on actual EXPLAIN output, not assumptions.
+- **Done when**: `parallel_join` row in `pg_accel_bench explain-audit`
+  reports `[PASS]`.
 
 ### GatherMerge EXPLAIN verification
 
@@ -538,14 +579,31 @@ tests). Two items remain.
 
 ### GPU bridge dead-code audit
 
-- **What**: `src/gpu/{mod,bridge,types,three_layer}.rs` carry
-  `#![allow(dead_code)]`. MINOR.
-- **Why**: Dead code in the GPU bridge is a smell — either wiring an API
-  that was planned and abandoned, or masking an unused wrapper.
-- **How**: Audit each wrapper; remove what's genuinely unused; wire up the
-  rest; then remove the module-scope `#![allow(dead_code)]`.
-- **Done when**: No `#![allow(dead_code)]` on the GPU bridge; every
-  wrapper has a caller or is deleted.
+- **What**: Per-file `#![allow(dead_code)]` was removed from
+  `pg_accel/src/gpu/bridge.rs`, `types.rs`, and `three_layer.rs`. The
+  parent `pg_accel/src/gpu/mod.rs:11` still has `#![allow(dead_code)]`
+  which propagates to the children, so the 33 items that would surface
+  are still hidden. Categories surfaced under
+  `#![warn(dead_code)]`-override probe: 18 unused FFI extern fns in
+  `bridge.rs` (mirrors of `pgaccel-kernels/include/pgaccel_ffi.h`),
+  unused ABI-mirrored enum variants in `types.rs`
+  (`PgaccelStatus::Error*`, `PgaccelPixelType::Int*`, `cmp_op::*`,
+  `reduce_op::*`), and `PredicateResult` enum / `SpatialPredicate::DWithin`
+  variant / `SpatialResult.definite_false` field in `three_layer.rs`
+  (used only under `#[cfg(feature = "pg_test")]`). MINOR.
+- **Why**: The remaining `mod.rs` allow masks the same audit decision
+  the children needed. Each item is either an ABI mirror that should
+  carry a per-item `#[allow(dead_code)] // reason: ...` annotation, or
+  a planned-but-not-wired API that should be deleted (anti-cheat
+  ban #7 — stubs aren't done).
+- **How**: Remove `#![allow(dead_code)]` from `pg_accel/src/gpu/mod.rs`.
+  For each surfaced item, either annotate per-item with a reason
+  (ABI mirrors, test-only callers) or delete (genuinely unused).
+  ABI mirrors of `pgaccel-kernels/include/pgaccel_ffi.h` should
+  carry `// reason: ABI mirror of pgaccel_ffi.h, layout load-bearing`.
+- **Done when**: No `#![allow(dead_code)]` anywhere under
+  `pg_accel/src/gpu/`; every item has a per-item annotation with
+  reason, or has been deleted; `cargo clippy -- -D warnings` clean.
 
 ## Phase 6 — Performance investigation
 
@@ -653,11 +711,20 @@ tests). Two items remain.
 
 ## Phase 7 — Upstream AdaptiveCpp work
 
-The `fork-safe-metal` branch at `79ef8c5bcfad8e65bbe888b68c8e674d84af6b70`
-is the ship pin. Items below are fork-local maintenance burden that
-eventually needs to merge upstream (or rebase onto it). **Shipping 1.0 does
-not require upstream merge** — the fork SHA pin is sufficient. Rebase +
-PR-upstream work is tracked in the Post-1.0 (deferred) section.
+The `fork-safe-metal` branch at `4f3cde11a302eebac28aa1ccc79ad3399cb8183c`
+is the ship pin. Recent fork-side fixes:
+- `4f3cde11` (this round): `fix(metal-emitter): correct lowering of
+  i128 add/sub/mul`. Metal SSCP was emitting lane-wise `uint4 *` for
+  `mul i128`, which silently returned 0 for every soft-fp64 mantissa
+  multiply. New `__acpp_i128_add/sub/mul` helpers in
+  `emitEarlyFp64Helpers()` do proper schoolbook 128-bit arithmetic.
+  Verified by `pgaccel-kernels/test/test_fp64_mul_probe.cpp`
+  (32/32 OK bit-exact).
+
+Items below are fork-local maintenance burden that eventually needs to
+merge upstream (or rebase onto it). **Shipping 1.0 does not require
+upstream merge** — the fork SHA pin is sufficient. Rebase + PR-upstream
+work is tracked in the Post-1.0 (deferred) section.
 
 ### Metal Emitter performance/robustness polish
 
