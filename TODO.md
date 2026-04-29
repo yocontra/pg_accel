@@ -31,30 +31,41 @@ polishes the build. Phases 9-10 gate the 1.0 tag. The "Post-1.0
 ## Next Up
 
 Order of operations following the AdaptiveCpp `4f3cde11` SHA bump.
-Each item closes before the next starts; (5) gates on a user decision.
 
-1. **`just test` regression check** — pgrx test suite against the new
-   AdaptiveCpp SHA. Kernel-side tests already green; this confirms the
-   Rust side has no regressions from the i128 mul lowering change.
-2. **Close the last `test_correctness` ULP-budget item** (Phase 1
-   `just gpu-test` full green). Same class as the already-landed
-   tree-reduce-aware budget for `reduce_sum_f64`: widen the
-   round-trip ULP budget to `max(8, log2(N)·k·eps)` form.
-3. **`just bench fp64_matrix` cost calibration of
-   `soft_fp64_cost_multiplier`** (Phase 1 final item). Real numbers
-   now that the kernels are bit-correct.
-4. **Phase 2 host-loop kernel rewrite** (`expr_eval.cpp`,
+1. **`just test` regression check** — DONE. 1164 passed; 34 failed
+   (pre-existing pgrx fork-test framework cascade); 0 regressions
+   vs baseline.
+2. **`test_correctness` ULP-budget tightening** — DONE. 329/329 PASS
+   after applying `max(8, log2(N)·32)` Higham bound to fp64 round-trip.
+3. **`just bench fp64_matrix` first calibration run** — DONE; results
+   in `benchmarks/runs/fp64_matrix_1m_post-i128-fix.md`. Geomean 8.47x
+   across 7 dispatched workloads. **Calibration BLOCKED**: 2 cells
+   below 1.0x (`hashagg_f64_keys @ 1M+` 0.20x, `spatial_fp64_recheck
+   @ 1M` 0.46x). Investigation found these are NOT fp64-multiplier-
+   tuning targets — both are the **Phase 6 per-batch GPU dispatch
+   issue** (single-thread `GpuAccelAgg` losing to PG's parallel hash
+   agg at 1M+). The `spatial_fp64_recheck` workload doesn't even
+   exercise the new fp64 spatial SYCL kernel — its query has a small
+   envelope that PG resolves via PostGIS scalar before any GPU
+   recheck would dispatch. Needs Phase 6 dispatch optimisation OR a
+   workload redesign that actually hits the fp64 GPU path.
+4. **GpuSort + VectorizedScan crash** — found while investigating (3).
+   Backend SIGSEGV at
+   `pg_accel/src/engine/ffi/custom_scan/mod.rs:2556` inside
+   `pg_sys::ExecOpenScanRelation` when `count(*) FROM (SELECT k_f64
+   FROM t ORDER BY k_f64) sq` plan picks `Custom Scan (GpuAccelScan)
+   Strategy: GpuSort` with `self_scan_relid > 0`. Pre-existing
+   VectorizedScan integration bug exposed now that the i128 mul fix
+   lets the planner pick GpuSort for fp64 (previously masked by
+   wrong-result corruption). New Phase 6 entry below.
+5. **Phase 2 host-loop kernel rewrite** (`expr_eval.cpp`,
    `expr_templates.cpp`, `hash_agg.cpp`). All kernels under
    `pgaccel-kernels/src/` must be SYCL `parallel_for` — see Phase 2
-   "All kernels must be SYCL" item below for the audit and scope.
-5. **Phase 2 bytecode rescope decision.** L3 audit finding:
-   `pgaccel-kernels/src/expr_eval.cpp:208-834` is a host for-loop, the
-   real DeferToPg dispatch short-circuit is at
-   `pg_accel/src/engine/executor/scan/exec.rs:498-504`, and the
-   `eval_bytecode_predicate` at `:603-610` has a sparse-col +
-   f64-coerce bug. Decide: (A) full rescope including SYCL rewrite of
-   `expr_eval.cpp` + executor fix, or (B) defer Phase 2 from pre-1.0.
-6. **Phase 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10**, in order.
+   "All kernels must be SYCL" item below.
+6. **Phase 2 bytecode rescope decision.** Decide: (A) full SYCL
+   rewrite of `expr_eval.cpp` + executor fix, or (B) defer Phase 2
+   from pre-1.0.
+7. **Phase 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10**, in order.
 
 ## Phase 1 — Close remaining fp64 gaps
 
@@ -607,13 +618,51 @@ tests). Two items remain.
 
 ## Phase 6 — Performance investigation
 
-### Per-batch GPU dispatch dominates parallel SUM
+### GpuSort + VectorizedScan crash on `count(*) FROM (SELECT k ORDER BY k)`
+
+- **What**: Backend SIGSEGV at
+  `pg_accel/src/engine/ffi/custom_scan/mod.rs:2556` inside
+  `pg_sys::ExecOpenScanRelation`. Reproduces with:
+  ```sql
+  SELECT count(*) FROM (SELECT k_f64 FROM bench_fp64_num ORDER BY k_f64) sq;
+  ```
+  Plan picks `Custom Scan (GpuAccelScan) Strategy: GpuSort` with
+  `self_scan_relid > 0` (VectorizedScan path); when wrapped in a
+  count() subquery the ExecOpenScanRelation call panics. Captured in
+  `~/.pgrx/data-17/pg_accel_panic.log` at PID 80458, ts 1777439573.
+  Postmaster log shows `signal 11: Segmentation fault` + recovery
+  cycle.
+- **Why**: This was masked before the AdaptiveCpp i128 mul fix
+  because fp64 GpuSort returned wrong results, so the planner never
+  picked it for fp64 work. With the fix landed, the planner now
+  prefers GpuSort + Partial GroupAggregate for fp64 GROUP BY queries
+  with ORDER BY pathkeys, exposing the latent VectorizedScan +
+  count() subquery integration bug. MAJOR (crash class).
+- **How**: The crash is at the `pg_sys::ExecOpenScanRelation(estate,
+  privdata.self_scan_relid, eflags)` call inside
+  `ExecInitCustomScan`. Hypothesis: the relid is valid in the outer
+  estate but stale/missing in the subquery's estate when the
+  CustomScan is initialised under a count() wrapper. Either guard
+  against the missing-relid case or move the heap-scan-open down
+  into the executor next() path so it runs against the actual
+  execution-time estate.
+- **Done when**: The reproducer SQL completes without crash and
+  returns the correct count; `test_correctness` adds a regression
+  test for the count-over-sort-subquery shape.
+
+### Per-batch GPU dispatch dominates parallel SUM / GROUP BY
 
 - **What**: 10M `SUM(v) FROM bench_f32_10m`: pg_accel parallel 177 ms vs PG
   parallel 88 ms. Each worker runs ~52 batches × 65k rows × ~5.5 ms
   dispatch. JIT cache is populated (`~/.acpp/apps/global/jit-cache/` has
-  .metallib + .metalar). Pure dispatch cost. MAJOR (performance-parity
-  risk).
+  .metallib + .metalar). Pure dispatch cost. **Same class** observed in
+  `fp64_matrix` first calibration run
+  (`benchmarks/runs/fp64_matrix_1m_post-i128-fix.md`):
+  `hashagg_f64_keys @ 1M` 0.41x, `@ 10M` 0.20x — single-thread
+  `GpuAccelAgg` losing to PG's parallel HashAggregate. Same root
+  cause: per-batch dispatch dominates at large N when the GPU work
+  per batch is cheap (count(*), simple agg). MAJOR (performance-parity
+  risk; blocks Phase 1 cost-multiplier calibration).
 - **Why**: Current 10M reduce loses to PG parallel. Benchmark Rule #11 says
   this must never happen in a released (workload, size) cell.
 - **How** (directions in priority order; each must beat or match PG
