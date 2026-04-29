@@ -262,16 +262,51 @@ impl ExprProgramBuilder {
     }
 
     /// Build the final program. Returns `None` if stack depth exceeds limit.
+    ///
+    /// Remaps every `LOAD_COL` instruction's `arg` from its absolute
+    /// source-column index to its dense index inside `referenced_cols`,
+    /// and rewrites `num_cols` to match. This makes the program safe to
+    /// execute against a dense batch that contains only the referenced
+    /// columns (the executor's `eval_bytecode_predicate` builds exactly
+    /// such a batch via `ColumnarBatchOwner`). Without the remap, sparse
+    /// references like `LOAD_COL arg=7` on a 2-element batch read the
+    /// wrong column or out-of-range, which the L3 audit identified as
+    /// the wrong-result bug at `executor/scan/exec.rs:603-610`.
     #[must_use]
-    pub fn build(self) -> Option<ExprProgram> {
+    pub fn build(mut self) -> Option<ExprProgram> {
         if self.max_stack > MAX_STACK_DEPTH {
             return None;
         }
+
+        // Sort referenced_cols for deterministic dense indexing. The
+        // executor iterates this Vec in order when filling the batch,
+        // so the kernel's LOAD_COL must use the same ordering.
+        self.referenced_cols.sort_unstable();
+
+        // Build absolute -> dense index map.
+        let mut remap = std::collections::HashMap::<usize, u32>::new();
+        for (dense, &abs) in self.referenced_cols.iter().enumerate() {
+            remap.insert(abs, dense as u32);
+        }
+
+        // Rewrite each LOAD_COL instruction's arg.
+        for inst in &mut self.instructions {
+            if inst.opcode == opcode::LOAD_COL {
+                let abs = inst.arg as usize;
+                if let Some(&dense) = remap.get(&abs) {
+                    inst.arg = dense;
+                }
+            }
+        }
+
         Some(ExprProgram {
             instructions: self.instructions,
             const_pool: self.const_pool,
             max_stack: self.max_stack,
-            num_cols: self.num_cols,
+            // num_cols is now the dense count: the batch the executor
+            // builds will have exactly this many slots and the kernel's
+            // load_column will index into them correctly.
+            num_cols: self.referenced_cols.len(),
             referenced_cols: self.referenced_cols,
         })
     }

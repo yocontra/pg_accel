@@ -495,12 +495,31 @@ impl ScanExecState {
                     }
                 }
             }
-            CompiledExpr::Bytecode(_program) => {
-                // TODO: GPU bytecode evaluator produces incorrect results.
-                // Fall back to scalar qual until the bytecode interpreter is
-                // debugged. The scalar qual path is proven correct.
+            CompiledExpr::Bytecode(program) => {
+                // Phase 2 dispatch re-enable: with the SYCL kernel for
+                // pgaccel_expr_eval_predicate (pgaccel-kernels/src/
+                // expr_eval.cpp) and the LOAD_COL dense-index remap in
+                // expr_compiler::build(), the bytecode path now produces
+                // correct results for the supported opcode set.
                 // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+                let result = self.eval_bytecode_predicate(program, scan_slot, batch_len);
+                match result {
+                    Some(results) => {
+                        // SAFETY: Caller guarantees main backend thread;
+                        // scalar recheck for uncertain rows uses PG functions.
+                        unsafe {
+                            self.apply_three_val_results(&results, scan_slot, batch_len);
+                        }
+                    }
+                    None => {
+                        // GPU unavailable / dispatch failed: error per
+                        // rule 11 (no CPU fallback) — same policy as the
+                        // template path above.
+                        pgrx::error!(
+                            "pg_accel: bytecode qual GPU kernel failed; refusing CPU fallback (rule 11)"
+                        );
+                    }
+                }
             }
         }
     }
@@ -579,11 +598,11 @@ impl ScanExecState {
 
     /// Evaluate a bytecode predicate on the current batch.
     ///
-    /// Builds a columnar batch with all referenced columns and calls
-    /// the GPU bytecode interpreter.
+    /// Builds a columnar batch with all referenced columns (in the
+    /// dense order produced by `expr_compiler::build()`'s LOAD_COL
+    /// remap) and calls the GPU bytecode interpreter.
     ///
     /// Returns `None` if the GPU is unavailable.
-    #[allow(dead_code)]
     fn eval_bytecode_predicate(
         &self,
         program: &expr_compiler::ExprProgram,

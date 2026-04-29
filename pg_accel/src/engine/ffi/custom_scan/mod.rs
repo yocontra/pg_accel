@@ -1691,17 +1691,20 @@ unsafe fn compile_qual_list(
         first = false;
     }
 
-    // Bytecode path disabled: the GPU bytecode evaluator produces incorrect
-    // results (see scan.rs TODO). Until the interpreter is fixed, defer
-    // complex expressions to PG's native qual evaluation. Only template
-    // kernels (CmpConst, Between, TwoPredAnd) use the GPU path.
+    // Phase 2 dispatch re-enable: the SYCL kernel for
+    // pgaccel_expr_eval_predicate (pgaccel-kernels/src/expr_eval.cpp)
+    // is now wired through the executor's dispatch_gpu_expr path. The
+    // LOAD_COL dense-index remap in expr_compiler::build() ensures the
+    // kernel sees a batch indexed by `referenced_cols.len()` (matching
+    // the executor's ColumnarBatchOwner shape).
     if let Some(program) = builder.build() {
         pgrx::debug1!(
-            "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} cols (deferred — bytecode evaluator disabled)",
+            "pg_accel: compiled {} qual nodes → {} bytecode instructions, {} dense cols",
             len,
             program.instructions.len(),
             program.referenced_cols.len(),
         );
+        return CompiledExpr::Bytecode(program);
     }
     CompiledExpr::DeferToPg
 }
