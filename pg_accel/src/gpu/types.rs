@@ -8,8 +8,6 @@
 //! discriminants, or change underlying integer widths. Any drift corrupts
 //! every GPU call.
 
-#![allow(dead_code)]
-
 use std::ffi::c_char;
 
 // ---------------------------------------------------------------------------

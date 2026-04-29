@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Three-layer spatial predicate pipeline.
 //!
 //! The pipeline evaluates spatial predicates in three layers:

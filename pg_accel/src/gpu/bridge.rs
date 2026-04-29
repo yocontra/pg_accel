@@ -4,8 +4,6 @@
 //! exactly. The kernel library is linked unconditionally; there is no
 //! no-GPU build and no CPU fallback.
 
-#![allow(dead_code)]
-
 pub use super::types::{
     PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
     PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelGeomType, PgaccelGeometry,
