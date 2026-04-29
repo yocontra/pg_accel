@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+mod explain_audit;
 mod parallel_stress_test;
 mod plan_shape_test;
 mod report;
@@ -160,6 +161,19 @@ enum Command {
         /// Number of rows (used for setup_sql generation).
         #[arg(long, default_value_t = 1_000_000)]
         rows: usize,
+    },
+
+    /// Run the Phase 9 EXPLAIN (VERBOSE) audit matrix.
+    ///
+    /// For every row, run `EXPLAIN (VERBOSE) <query>` and assert that a
+    /// `Custom Scan (GpuAccel...)` node appears underneath a `Gather` /
+    /// `Gather Merge`. Rows ratchet by phase — see
+    /// `pg_accel_bench/src/explain_audit.rs` and `TODO.md` Phase 9.
+    /// Exits non-zero iff any `RequiredToday` row fails.
+    ExplainAudit {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
     },
 }
 
@@ -377,6 +391,16 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             category,
             rows,
         } => cmd_validate(workload.as_deref(), category.as_deref(), rows),
+        Command::ExplainAudit { connection } => cmd_explain_audit(&connection),
+    }
+}
+
+fn cmd_explain_audit(connection: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let all_passed = explain_audit::run_audit(connection)?;
+    if all_passed {
+        Ok(())
+    } else {
+        Err("explain-audit: at least one RequiredToday row failed".into())
     }
 }
 
