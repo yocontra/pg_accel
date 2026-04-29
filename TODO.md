@@ -384,21 +384,39 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 - **Done when**: `parallel_orderby` row in
   `pg_accel_bench explain-audit` reports `[PASS]`.
 
-### Plain JOIN uses Parallel Hash Join with no pg_accel injection
+### Plain JOIN: GpuHashJoin path injected but discarded by add_path()
 
-- **What**: EXPLAIN audit flagged a plain two-table JOIN as
-  `RequiredToday FAIL`: plan is `Gather → Parallel Hash Join →
-  Parallel Seq Scan ×2`, no pg_accel injection. The HashJoin
-  injector exists but is not firing on this shape. MAJOR.
-- **Why**: Joins are the backbone of analytics queries. Missing
-  injection here disables GPU acceleration for the most common
-  multi-table workload.
-- **How**: Audit `planner_hooks/hashjoin.rs` against the failing
-  EXPLAIN (paste the verbatim plan into the issue). Likely cause: a
-  qual-shape gate or a parallel-safe gate is too strict. Note
-  ban #5 — base on actual EXPLAIN output, not assumptions.
+- **What**: EXPLAIN audit's "no pg_accel injection on plain JOIN" was
+  half-right. Investigation (commit pending) confirmed the
+  `set_join_pathlist_hook` DOES fire and pgaccel's GpuHashJoin path
+  IS injected via `add_path()`. PG's `add_path()` then discards the
+  path because the cost model assigns a per-output-row Custom Scan
+  yield cost of `0.03 / row` (`planner_hooks/join_pathlist.rs:254`).
+  For a fact×dim 10M-row output that's 300K cost units — enough to
+  put pgaccel's path above PG's native parallel hash join (≈291K).
+  MAJOR (cost-model + Phase 6 dispatch-perf intersection).
+- **Why**: Joins are the backbone of analytics queries. The hook
+  is correct; the cost is honest. Either the yield cost is
+  over-conservative (real `ExecForceStoreMinimalTuple +
+  slot_getattr` is faster than 3μs/row in practice) or the GPU
+  hash-join build/probe under-cost compensates somewhere else and
+  we need a different cost shape.
+- **How**:
+  - Empirically measure per-row yield cost (`ExecForceStoreMinimalTuple
+    + slot_getattr`) on a 10M-output join. If it's <3μs/row in
+    practice, lower the constant in `join_pathlist.rs:254` with the
+    measurement cited in the commit.
+  - OR change the cost model to charge yield only for rows produced
+    by the GPU probe (i.e. `joinrel_ref.rows`) AFTER batch-yield
+    overhead amortisation, which Phase 6 dispatch-perf optimisations
+    will reduce.
+  - The audit row in `pg_accel_bench/src/explain_audit.rs` was
+    re-classified from `RequiredToday` to
+    `RequiredAfterPhase("6 yield-cost reduction ...")` so the
+    harness ratchets cleanly when Phase 6 lands.
 - **Done when**: `parallel_join` row in `pg_accel_bench explain-audit`
-  reports `[PASS]`.
+  reports `[PASS]` (i.e. PG picks pgaccel's GpuHashJoin path over
+  its native parallel hash join for this workload).
 
 ### GatherMerge EXPLAIN verification
 
