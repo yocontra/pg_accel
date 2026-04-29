@@ -2419,6 +2419,48 @@ pub(super) unsafe fn find_cheapest_seqscan_cost(pathlist: *mut List) -> f64 {
     if best == f64::MAX { 0.0 } else { best }
 }
 
+/// Find the cheapest `T_BitmapHeapPath` in the pathlist.
+///
+/// Used by `set_rel_pathlist_hook` (TODO.md Phase 4 "BitmapHeapScan
+/// injection") to wrap a bitmap-driven path as the child of a GPU
+/// CustomPath when PG has pruned the seq scan in favour of a bitmap
+/// path. Selective WHERE predicates routinely produce this shape (an
+/// index pre-filter + heap recheck), and without this branch the
+/// CustomPath wrapper never sees them.
+///
+/// Returns null if no `BitmapHeapPath` exists in the pathlist.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid `List` pointer from the planner, or null.
+pub(super) unsafe fn find_cheapest_bitmap_heap_path(pathlist: *mut List) -> *mut Path {
+    if pathlist.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: pathlist is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let mut best: *mut Path = std::ptr::null_mut();
+    let mut best_cost = f64::MAX;
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a valid pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+        // SAFETY: reading node tag from valid Path pointer.
+        let tag = unsafe { (*path).type_ };
+        if tag == NodeTag::T_BitmapHeapPath {
+            // SAFETY: path is a valid Path pointer.
+            let cost = unsafe { (*path).total_cost };
+            if cost < best_cost {
+                best_cost = cost;
+                best = path;
+            }
+        }
+    }
+    best
+}
+
 /// GiST access method OID.
 const GIST_AM_OID: u32 = 783;
 /// SP-GiST access method OID.

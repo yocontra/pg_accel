@@ -89,9 +89,19 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let _span =
         tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
-    // Gate 2: Only base table relations — cheap field checks before
-    // any registry or clause work.
-    if rel_ref.reloptkind != pg_sys::RelOptKind::RELOPT_BASEREL {
+    // Gate 2: Only base relations or partition children — cheap field
+    // checks before any registry or clause work.
+    //
+    // RELOPT_OTHER_MEMBER_REL is the kind PG assigns to each partition
+    // child of a partitioned table after `expand_inherited_rtentry`.
+    // Allowing it through lets `add_paths_to_append_rel` collect any
+    // GPU CustomPath we inject into the child's pathlist when it
+    // composes the final Append / MergeAppend over the partition set
+    // (TODO.md Phase 4 "Append / MergeAppend injection").
+    if !matches!(
+        rel_ref.reloptkind,
+        pg_sys::RelOptKind::RELOPT_BASEREL | pg_sys::RelOptKind::RELOPT_OTHER_MEMBER_REL
+    ) {
         return;
     }
     if rte_ref.rtekind != pg_sys::RTEKind::RTE_RELATION {
@@ -343,21 +353,50 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         }
     }
 
-    // Gate 5: Find the sequential scan path as cost baseline.
-    // The Custom Scan always does a full sequential heap scan, so its cost
-    // must be derived from the seq scan cost — NOT from index/bitmap paths.
-    // Using an index path as baseline + discount makes the Custom Scan appear
-    // cheaper than the index scan it was based on, causing regressions when
-    // an index scan would be far faster (e.g., GiST at 10M rows).
+    // Gate 5: Find the path to wrap as the CustomScan child.
     //
-    // If PG pruned the seq scan from the pathlist, that means index/bitmap
-    // paths dominate it. Since our Custom Scan is fundamentally a seq scan,
-    // it would also be dominated — skip injection entirely.
+    // Default baseline is the cheapest sequential scan: the Custom Scan
+    // always does a full heap walk, so the seq scan cost is the honest
+    // baseline. Using an index path as baseline + discount makes the
+    // Custom Scan appear cheaper than the index scan it was based on,
+    // causing regressions when the index scan would be far faster.
+    //
+    // BitmapHeapScan fallback (TODO.md Phase 4 "BitmapHeapScan
+    // injection"): when PG has pruned the seq scan in favour of a
+    // bitmap-driven plan (typical for selective predicates), try
+    // wrapping the cheapest `T_BitmapHeapPath` instead. The bitmap
+    // child still pre-filters via the index, and the GPU then evaluates
+    // the full qual on the bitmap-filtered rows. The recheck qual
+    // PG would normally re-run on the heap is stripped in
+    // `make_custom_scan_plan` (custom_scan/mod.rs) because the GPU
+    // evaluates the same predicate.
+    //
+    // GpuExpr is excluded from the bitmap fallback because its plan
+    // shape requires `scanrelid > 0` with no child plan
+    // (custom_scan/mod.rs around the `is_gpu_expr` branch); injecting
+    // a GpuExpr CustomPath whose child is a BitmapHeapPath would be
+    // dropped on the floor at PlanCustomPath time. Non-GpuExpr
+    // strategies (GpuSpatial / GpuH3 / GpuRaster) use `scanrelid=0`
+    // and consume the child via `ExecProcNode`, which works for any
+    // child plan node including BitmapHeapScan.
     // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
-    let cheapest = unsafe { find_cheapest_seqscan_path(rel_ref.pathlist) };
+    let mut cheapest = unsafe { find_cheapest_seqscan_path(rel_ref.pathlist) };
+    let mut wrapped_bitmap = false;
+    if cheapest.is_null() && strategy != registry::AccelStrategy::GpuExpr {
+        // SAFETY: rel_ref.pathlist is a valid List pointer.
+        let bitmap = unsafe { super::find_cheapest_bitmap_heap_path(rel_ref.pathlist) };
+        if !bitmap.is_null() {
+            pgrx::debug1!(
+                "pg_accel: scan hook: no seq scan path; wrapping cheapest \
+                 BitmapHeapPath as CustomScan child"
+            );
+            cheapest = bitmap;
+            wrapped_bitmap = true;
+        }
+    }
     if cheapest.is_null() {
         pgrx::debug1!(
-            "pg_accel: scan hook: no seq scan path in pathlist, \
+            "pg_accel: scan hook: no seq scan or bitmap path in pathlist, \
              index paths dominate — skipping Custom Scan injection"
         );
         return;
@@ -454,6 +493,99 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         (*cpath).custom_private = priv_list;
 
         add_path(rel, cpath.cast());
+    }
+
+    // Observability for the new injection sites added in TODO.md Phase 4.
+    // `wrapped_bitmap` fires when the cheapest seq scan was pruned and we
+    // fell back to wrapping a `T_BitmapHeapPath` child; `partition_child`
+    // fires when the planner hook was invoked on a `RELOPT_OTHER_MEMBER_REL`
+    // (i.e. a partition of a partitioned table).
+    if wrapped_bitmap {
+        tracing::info!(
+            target: "pg_accel::planner",
+            relid = u32::from(rte_ref.relid),
+            strategy = ?strategy,
+            rows = base.rows,
+            "planner.wrapped_bitmap_heap_path"
+        );
+    }
+
+    // Second inject site for bitmap-driven plans (TODO.md Phase 4
+    // "BitmapHeapScan injection"): when a BitmapHeapPath also exists
+    // alongside the seq scan we just wrapped, add a parallel CustomPath
+    // wrapping the bitmap path too. PG's `add_path` cost-compares the two
+    // and keeps whichever is cheaper, so a selective bitmap subset
+    // (e.g. `WHERE indexed_col = const AND ...`) gets a GPU CustomScan
+    // child that pre-filters via the index instead of doing a full
+    // sequential heap walk.
+    //
+    // Skip when:
+    //   * `wrapped_bitmap` is already true (we already wrapped the
+    //     bitmap path because seqscan was pruned).
+    //   * Strategy is GpuExpr (requires `scanrelid > 0` with no child;
+    //     a BitmapHeap child would be dropped at PlanCustomPath time).
+    if !wrapped_bitmap && strategy != registry::AccelStrategy::GpuExpr {
+        // SAFETY: rel_ref.pathlist is a valid List pointer.
+        let bitmap_alt = unsafe { super::find_cheapest_bitmap_heap_path(rel_ref.pathlist) };
+        if !bitmap_alt.is_null() {
+            // SAFETY: bitmap_alt is non-null and is a valid Path*.
+            let bbase = unsafe { &*bitmap_alt };
+            // Recompute cost against the bitmap baseline so add_path's
+            // dominance check sees an honest total. Bitmap paths read
+            // fewer heap pages, so the wrapped cost is typically lower
+            // than the seqscan-wrapped CustomPath cost.
+            #[allow(clippy::cast_precision_loss)]
+            let b_batch_size = cost::optimal_batch_size(rows) as f64;
+            let b_num_batches = (bbase.rows / b_batch_size).ceil();
+            let b_batch_overhead = b_num_batches * 2.0;
+            let b_startup = bbase.startup_cost + 1.0 + gpu_overhead;
+            #[allow(clippy::cast_precision_loss)]
+            let b_soft_fp64 = rows as f64 * (per_row_cost - per_row_cost_base);
+            let b_total = (bbase.total_cost.mul_add(cost_margin, b_batch_overhead)
+                + gpu_overhead
+                + b_soft_fp64)
+                * gucs::cost_multiplier();
+
+            // SAFETY: Allocating via palloc, building valid CustomPath.
+            unsafe {
+                let bcpath = create_custom_path(
+                    rel,
+                    bitmap_alt,
+                    b_startup,
+                    b_total,
+                    bbase.rows,
+                    custom_scan::scan_path_methods(),
+                );
+                // Same custom_private layout as the seqscan injection.
+                let mut bpriv: *mut List = std::ptr::null_mut();
+                bpriv = lappend(
+                    bpriv,
+                    pg_sys::makeInteger(u32::from(accel.fn_oid) as i32).cast(),
+                );
+                bpriv = lappend(bpriv, pg_sys::makeInteger(accel.target_attno).cast());
+                bpriv = lappend(bpriv, pg_sys::makeInteger(accel.strategy as i32).cast());
+                (*bcpath).custom_private = bpriv;
+                add_path(rel, bcpath.cast());
+            }
+
+            tracing::info!(
+                target: "pg_accel::planner",
+                relid = u32::from(rte_ref.relid),
+                strategy = ?strategy,
+                rows = bbase.rows,
+                "planner.injected_bitmap_heap_alt"
+            );
+        }
+    }
+
+    if rel_ref.reloptkind == pg_sys::RelOptKind::RELOPT_OTHER_MEMBER_REL {
+        tracing::info!(
+            target: "pg_accel::planner",
+            relid = u32::from(rte_ref.relid),
+            strategy = ?strategy,
+            rows = base.rows,
+            "planner.injected_partition_child"
+        );
     }
 
     // Mirror the non-parallel injection into the partial pathlist so queries

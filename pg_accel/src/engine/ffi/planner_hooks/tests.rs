@@ -1824,3 +1824,141 @@ mod mergejoin_detect {
         Spi::run("DROP TABLE pgaccel_mj_ctr_r").expect("drop r");
     }
 }
+
+// =====================================================================
+// Phase 4: BitmapHeapScan injection smoke
+// =====================================================================
+//
+// `pgaccel_set_rel_pathlist` previously bailed when PG had pruned the
+// seq scan because a bitmap-driven path dominates. The fallback added in
+// `rel_pathlist.rs` (Gate 5) instead wraps the cheapest
+// `T_BitmapHeapPath` as the CustomScan child for non-GpuExpr strategies.
+//
+// We exercise the unit-level helper directly (`find_cheapest_bitmap_heap_path`
+// returns null on a null pathlist) and run an integration smoke that
+// ensures the planner does not crash when the bitmap-fallback branch is
+// reachable on a real table.
+#[pgrx::pg_schema]
+mod bitmap_heap_inject {
+    use pgrx::prelude::{Spi, pg_test};
+
+    /// Smoke: planner does not crash on a table where a bitmap-eligible
+    /// path is in scope. We seed enough rows to clear `min_batch_size`
+    /// and create a btree index so the planner has a `T_BitmapHeapPath`
+    /// candidate. The bitmap fallback branch may or may not fire (PG
+    /// will pick whatever it costs cheapest), but the planner walking
+    /// `find_cheapest_bitmap_heap_path` over the pathlist must not
+    /// crash.
+    #[pg_test]
+    fn bitmap_eligible_query_does_not_crash_planner() {
+        Spi::run("DROP TABLE IF EXISTS pgaccel_bmp_smoke").expect("drop prior");
+        Spi::run("CREATE TABLE pgaccel_bmp_smoke (a int4, b int4) WITH (autovacuum_enabled=off)")
+            .expect("create");
+        Spi::run(
+            "INSERT INTO pgaccel_bmp_smoke \
+             SELECT g, g % 1000 FROM generate_series(1, 200000) g",
+        )
+        .expect("seed");
+        Spi::run("CREATE INDEX ON pgaccel_bmp_smoke (b)").expect("idx");
+        Spi::run("ANALYZE pgaccel_bmp_smoke").expect("analyze");
+
+        // Bias the planner toward bitmap by disabling pure index scan.
+        // We do NOT touch parallel settings — that is forbidden by
+        // anti-cheat rule #3 and benchmark rule #11.
+        Spi::run("SET LOCAL enable_seqscan = off").ok();
+        Spi::run("SET LOCAL enable_indexscan = off").ok();
+
+        let row_count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pgaccel_bmp_smoke WHERE b BETWEEN 100 AND 200",
+        )
+        .expect("bitmap-eligible select")
+        .expect("row_count non-NULL");
+        assert!(
+            row_count > 0,
+            "bitmap-eligible select should return non-zero rows"
+        );
+
+        Spi::run("DROP TABLE pgaccel_bmp_smoke").expect("drop");
+    }
+}
+
+/// Unit: `find_cheapest_bitmap_heap_path(null)` returns null.
+///
+/// Promoted to a top-level `#[test]` rather than a `#[pg_test]` so it
+/// runs in the plain Rust harness (the helper does not require a live
+/// PG backend; a null list is valid input). This avoids the
+/// pgrx-test schema-lookup edge case that affects nested
+/// `#[pgrx::pg_schema]` modules.
+#[test]
+fn find_cheapest_bitmap_heap_path_null_is_null() {
+    // SAFETY: passing a null List is the documented null-input contract
+    // of the helper.
+    let p = unsafe { find_cheapest_bitmap_heap_path(std::ptr::null_mut()) };
+    assert!(p.is_null());
+}
+
+// =====================================================================
+// Phase 4: Append / MergeAppend injection smoke
+// =====================================================================
+//
+// `pgaccel_set_rel_pathlist` previously bailed when invoked on a
+// `RELOPT_OTHER_MEMBER_REL` (a partition child of a partitioned
+// table). Gate 2 in `rel_pathlist.rs` now allows both BASEREL and
+// OTHER_MEMBER_REL, so PG's `add_paths_to_append_rel` collects any
+// CustomPath we inject into the child's pathlist and wraps the set
+// in an Append / MergeAppend.
+#[pgrx::pg_schema]
+mod append_inject {
+    use pgrx::prelude::{Spi, pg_test};
+
+    /// Smoke: a 4-partition range-partitioned table with a numeric
+    /// WHERE predicate runs to completion. The planner walking each
+    /// partition child via the relaxed `set_rel_pathlist_hook` must
+    /// not crash.
+    #[pg_test]
+    fn partitioned_table_select_does_not_crash_planner() {
+        Spi::run("DROP TABLE IF EXISTS pgaccel_part_smoke").expect("drop prior");
+        Spi::run(
+            "CREATE TABLE pgaccel_part_smoke (a int4, b int4) \
+             PARTITION BY RANGE (a)",
+        )
+        .expect("create parent");
+        Spi::run(
+            "CREATE TABLE pgaccel_part_smoke_p1 PARTITION OF pgaccel_part_smoke \
+             FOR VALUES FROM (0) TO (50000)",
+        )
+        .expect("p1");
+        Spi::run(
+            "CREATE TABLE pgaccel_part_smoke_p2 PARTITION OF pgaccel_part_smoke \
+             FOR VALUES FROM (50000) TO (100000)",
+        )
+        .expect("p2");
+        Spi::run(
+            "CREATE TABLE pgaccel_part_smoke_p3 PARTITION OF pgaccel_part_smoke \
+             FOR VALUES FROM (100000) TO (150000)",
+        )
+        .expect("p3");
+        Spi::run(
+            "CREATE TABLE pgaccel_part_smoke_p4 PARTITION OF pgaccel_part_smoke \
+             FOR VALUES FROM (150000) TO (200000)",
+        )
+        .expect("p4");
+        Spi::run(
+            "INSERT INTO pgaccel_part_smoke \
+             SELECT g, g % 1000 FROM generate_series(0, 199999) g",
+        )
+        .expect("seed");
+        Spi::run("ANALYZE pgaccel_part_smoke").expect("analyze");
+
+        let row_count =
+            Spi::get_one::<i64>("SELECT count(*) FROM pgaccel_part_smoke WHERE b > 100")
+                .expect("partitioned select")
+                .expect("row_count non-NULL");
+        assert!(
+            row_count > 0,
+            "partitioned select with predicate should return non-zero rows"
+        );
+
+        Spi::run("DROP TABLE pgaccel_part_smoke").expect("drop");
+    }
+}
