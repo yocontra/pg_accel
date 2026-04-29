@@ -618,37 +618,36 @@ tests). Two items remain.
 
 ## Phase 6 — Performance investigation
 
-### GpuSort + VectorizedScan crash on `count(*) FROM (SELECT k ORDER BY k)`
+### GpuSort returns 0 rows when consumed via subquery wrapper
 
-- **What**: Backend SIGSEGV at
-  `pg_accel/src/engine/ffi/custom_scan/mod.rs:2556` inside
-  `pg_sys::ExecOpenScanRelation`. Reproduces with:
+- **What**: Crash fixed by `98a8cfc` (RTE_RELATION guard added to
+  Sort + Window paths, mirroring the pattern already in PreAgg + Agg
+  paths). New finding exposed by the fix: when the guard correctly
+  bypasses VectorizedScan setup (because the outer query wraps Sort
+  in a subquery and the original relid is no longer at the same RT
+  index), the executor falls through to
+  `SortExecState::exec -> self.next(child_ps, ...)` consumption of
+  the child plan. That fall-through path returns **0 rows** for the
+  reproducer:
   ```sql
-  SELECT count(*) FROM (SELECT k_f64 FROM bench_fp64_num ORDER BY k_f64) sq;
+  SELECT count(*) FROM (SELECT k_f64 FROM t ORDER BY k_f64) sq;
   ```
-  Plan picks `Custom Scan (GpuAccelScan) Strategy: GpuSort` with
-  `self_scan_relid > 0` (VectorizedScan path); when wrapped in a
-  count() subquery the ExecOpenScanRelation call panics. Captured in
-  `~/.pgrx/data-17/pg_accel_panic.log` at PID 80458, ts 1777439573.
-  Postmaster log shows `signal 11: Segmentation fault` + recovery
-  cycle.
-- **Why**: This was masked before the AdaptiveCpp i128 mul fix
-  because fp64 GpuSort returned wrong results, so the planner never
-  picked it for fp64 work. With the fix landed, the planner now
-  prefers GpuSort + Partial GroupAggregate for fp64 GROUP BY queries
-  with ORDER BY pathkeys, exposing the latent VectorizedScan +
-  count() subquery integration bug. MAJOR (crash class).
-- **How**: The crash is at the `pg_sys::ExecOpenScanRelation(estate,
-  privdata.self_scan_relid, eflags)` call inside
-  `ExecInitCustomScan`. Hypothesis: the relid is valid in the outer
-  estate but stale/missing in the subquery's estate when the
-  CustomScan is initialised under a count() wrapper. Either guard
-  against the missing-relid case or move the heap-scan-open down
-  into the executor next() path so it runs against the actual
-  execution-time estate.
-- **Done when**: The reproducer SQL completes without crash and
-  returns the correct count; `test_correctness` adds a regression
-  test for the count-over-sort-subquery shape.
+  Plain `SELECT k_f64 ORDER BY k_f64 LIMIT 5` (no subquery wrapping)
+  still works. MAJOR (wrong-result class).
+- **Why**: This was masked before the AdaptiveCpp i128 mul fix —
+  fp64 GpuSort returned bit-corrupted output so the planner avoided
+  it for fp64 work. With the fix landed, the planner now prefers
+  GpuSort under fp64 ORDER BY pathkeys, exposing the latent issue.
+- **How**: Either (a) detect at plan time that the Sort will be
+  wrapped in a subquery and leave `self_scan_relid = 0`, or (b)
+  ensure the child-plan consumption path
+  (`consume_and_sort(child_ps, ...)` in
+  `pg_accel/src/engine/executor/sort/mod.rs:198`) actually pulls
+  rows from the child plan in this case. Likely (b) — check whether
+  `child_plan_state(css, 0)` returns a valid PlanState when
+  `self_scan_relid > 0` was set at plan time.
+- **Done when**: The reproducer returns 10000000; `test_correctness`
+  adds a count-over-sort-subquery regression test.
 
 ### Per-batch GPU dispatch dominates parallel SUM / GROUP BY
 
