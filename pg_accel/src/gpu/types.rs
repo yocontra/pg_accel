@@ -20,6 +20,7 @@ use std::ffi::c_char;
 /// `pgaccel_ffi.h`.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_status; all variants must exist for FFI parity
 pub enum PgaccelStatus {
     Ok = 0,
     ErrorInit = -1,
@@ -263,6 +264,7 @@ pub struct PgaccelGeometry {
 /// Pixel type tag (mirrors `pgaccel_pixel_type` in `pgaccel_ffi.h`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_pixel_type; discriminants must match the C enum
 pub enum PgaccelPixelType {
     Int8 = 0,
     Int16 = 1,
@@ -274,6 +276,7 @@ pub enum PgaccelPixelType {
 /// Map-algebra opcode (mirrors `pgaccel_op` in `pgaccel_ffi.h`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_op; discriminants must match the C enum
 pub enum PgaccelOp {
     LoadBand = 0,
     LoadConst = 1,
@@ -318,6 +321,7 @@ pub struct PgaccelExpr {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 #[allow(clippy::struct_field_names)]
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_reclass_rule; struct layout load-bearing
 pub struct PgaccelReclassRule {
     pub min_val: f64,
     pub max_val: f64,
@@ -330,6 +334,7 @@ pub struct PgaccelReclassRule {
 
 /// Comparison operator for fused filter predicates.
 /// Values must stay in sync with `pgaccel_cmp_op` in `pgaccel_fused.h`.
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_cmp_op; constants must match the C enum
 pub mod cmp_op {
     pub const EQ: i32 = 0;
     pub const NE: i32 = 1;
@@ -342,6 +347,7 @@ pub mod cmp_op {
 
 /// Reduce operation tag for fused multi-reduce.
 /// Values must stay in sync with `pgaccel_reduce_op` in `pgaccel_fused.h`.
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_reduce_op; constants must match the C enum
 pub mod reduce_op {
     pub const SUM: i32 = 0;
     pub const MIN: i32 = 1;
@@ -352,6 +358,7 @@ pub mod reduce_op {
 /// Per-column reduce descriptor (mirrors `pgaccel_reduce_col`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_reduce_col; struct layout load-bearing
 pub struct PgaccelReduceCol {
     pub op: i32,
     pub data: *const f32,

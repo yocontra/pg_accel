@@ -173,7 +173,6 @@ pub struct ExprProgram {
 pub struct ExprProgramBuilder {
     instructions: Vec<PgaccelExprInstruction>,
     const_pool: Vec<PgaccelVal>,
-    num_cols: usize,
     referenced_cols: Vec<usize>,
     stack_depth: usize,
     max_stack: usize,
@@ -181,12 +180,16 @@ pub struct ExprProgramBuilder {
 
 impl ExprProgramBuilder {
     /// Create a new builder for an expression over `num_cols` input columns.
+    ///
+    /// The `num_cols` argument is informational at construction time —
+    /// the final program's `num_cols` is derived from the referenced
+    /// columns (see `build()`'s LOAD_COL dense-index remap), so this
+    /// argument is no longer stored as a field.
     #[must_use]
-    pub fn new(num_cols: usize) -> Self {
+    pub fn new(_num_cols: usize) -> Self {
         Self {
             instructions: Vec::new(),
             const_pool: Vec::new(),
-            num_cols,
             referenced_cols: Vec::new(),
             stack_depth: 0,
             max_stack: 0,

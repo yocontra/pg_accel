@@ -14,10 +14,22 @@ pub use super::types::{
 // ---------------------------------------------------------------------------
 // Extern declarations — linked at load time against libpgaccel_kernels.
 // ---------------------------------------------------------------------------
-
+//
+// The declarations below mirror `pgaccel-kernels/include/pgaccel_ffi.h`
+// exactly. The full surface is declared even when individual symbols
+// have no current Rust caller — this is the ABI contract, not a list
+// of "currently used" symbols. Future Rust executors / dispatch
+// strategies pick from the same surface; truncating it would mean
+// reconstructing the FFI declarations every time a new caller lands.
+//
+// `#[allow(dead_code)]` on the extern block is intentional and narrow
+// (per anti-cheat ban #8 — not a module-scope blanket): it covers
+// only the FFI mirror, with the reason documented above.
+//
 // SAFETY: These are the C FFI bindings to libpgaccel_kernels. The functions
 // are implemented in C++ and linked at load time. Caller must ensure
 // pgaccel_init() is called before other functions.
+#[allow(dead_code)] // reason: ABI mirror of pgaccel_ffi.h, layout + symbol set are load-bearing
 unsafe extern "C" {
     /// Initialise the GPU runtime.  Must be called once before any other
     /// `pgaccel_*` function.

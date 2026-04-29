@@ -25,6 +25,7 @@
 
 /// Result of a spatial predicate evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: pg_test-only consumer (three_layer_tests.rs); kept for the test harness shape
 pub enum PredicateResult {
     True,
     False,
@@ -54,6 +55,7 @@ pub enum SpatialPredicate {
     /// (Equivalent to `Contains` with swapped arguments.)
     Within,
     /// `ST_DWithin` — are the geometries within the given distance (metres)?
+    #[allow(dead_code)] // reason: pg_test-only consumer until DWithin three-layer kernel lands
     DWithin(f64),
 }
 
@@ -78,6 +80,8 @@ pub struct SpatialResult {
     /// Indices of pairs that are definitely intersecting.
     pub definite_true: Vec<usize>,
     /// Indices of pairs that definitely do **not** intersect.
+    #[allow(dead_code)]
+    // reason: pg_test-only consumer (three_layer_tests.rs); the dispatch path uses `definite_true` + `uncertain` and skips the explicit `definite_false` slot
     pub definite_false: Vec<usize>,
     /// Indices of pairs the GPU marked numerically ambiguous. The caller
     /// rechecks these via PostGIS on the main backend thread (Layer 3

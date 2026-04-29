@@ -8,7 +8,12 @@
 //! There is no CPU fallback: if AdaptiveCpp cannot target a device at
 //! runtime, the planner refuses to inject Custom Scan paths and queries
 //! run through the stock PostgreSQL executor unchanged.
-#![allow(dead_code)]
+//!
+//! Per CLAUDE.md anti-cheat ban #8 ("no broad `#[allow(...)]` at module
+//! scope"), every dead_code item in `bridge.rs` / `types.rs` /
+//! `three_layer.rs` carries a per-item `#[allow(dead_code)] // reason:
+//! ...` annotation explaining why it's preserved (ABI mirror, test-only
+//! caller, etc.) rather than a blanket allow.
 
 pub mod types;
 
@@ -75,6 +80,7 @@ pub fn prefork_warmup() {
 }
 
 /// Tear down the GPU runtime.
+#[allow(dead_code)] // reason: Rust wrapper for pgaccel_shutdown FFI; called at extension teardown
 pub fn shutdown() -> PgaccelStatus {
     // SAFETY: pgaccel_shutdown is safe if init was called.
     unsafe { bridge::pgaccel_shutdown() }
@@ -87,6 +93,7 @@ pub fn get_device_info() -> PgaccelDeviceInfo {
 }
 
 /// Human-readable device name for log messages.
+#[allow(dead_code)] // reason: diagnostic API; used by future log/EXPLAIN VERBOSE callers
 pub fn device_name() -> String {
     let info = get_device_info();
     let name = info
@@ -103,6 +110,7 @@ pub fn device_name() -> String {
 }
 
 /// Return platform-level capability flags.
+#[allow(dead_code)] // reason: Rust wrapper for pgaccel_get_caps FFI; preserved as stable surface
 pub fn get_caps() -> PgaccelPlatformCaps {
     // SAFETY: pgaccel_get_caps returns a zeroed struct if not initialised.
     unsafe { bridge::pgaccel_get_caps() }
@@ -126,6 +134,7 @@ pub fn gpu_exec_count() -> u64 {
 }
 
 /// Reset the GPU execution counter to zero.
+#[allow(dead_code)] // reason: Rust wrapper; reset is invoked by tests via pg_test cfg below
 pub fn reset_gpu_exec_count() {
     // SAFETY: pgaccel_reset_gpu_exec_count resets a thread-local counter.
     unsafe { bridge::pgaccel_reset_gpu_exec_count() }
@@ -276,10 +285,17 @@ pub fn point_in_polygon_bulk(
 
 // ---------------------------------------------------------------------------
 // Sort wrappers
+//
+// Key-only sort variants. The active sort path through the executor is
+// `sort_kv_*` (which sorts (key, index) pairs and returns the permutation
+// for tuple emission). These key-only variants are preserved as a stable
+// API surface for future direct-sort callers (e.g. an in-place sort node
+// whose output discards the source row order).
 // ---------------------------------------------------------------------------
 
 /// GPU-accelerated in-place sort for f32 data.
 /// Returns `None` if GPU is unavailable.
+#[allow(dead_code)] // reason: key-only sort wrapper; executor uses sort_kv_f32 today
 pub fn sort_f32(data: &mut [f32]) -> Option<()> {
     let _span = tracing::debug_span!("gpu.sort_f32", n = data.len()).entered();
     // SAFETY: data is a valid mutable slice.
@@ -288,6 +304,7 @@ pub fn sort_f32(data: &mut [f32]) -> Option<()> {
 }
 
 /// GPU-accelerated in-place sort for f64 data.
+#[allow(dead_code)] // reason: key-only sort wrapper; executor uses sort_kv_f64 today
 pub fn sort_f64(data: &mut [f64]) -> Option<()> {
     let _span = tracing::debug_span!("gpu.sort_f64", n = data.len()).entered();
     // SAFETY: data is a valid mutable slice.
@@ -296,6 +313,7 @@ pub fn sort_f64(data: &mut [f64]) -> Option<()> {
 }
 
 /// GPU-accelerated in-place sort for i32 data.
+#[allow(dead_code)] // reason: key-only sort wrapper; executor uses sort_kv_i32 today
 pub fn sort_i32(data: &mut [i32]) -> Option<()> {
     let _span = tracing::debug_span!("gpu.sort_i32", n = data.len()).entered();
     // SAFETY: data is a valid mutable slice.
@@ -304,6 +322,7 @@ pub fn sort_i32(data: &mut [i32]) -> Option<()> {
 }
 
 /// GPU-accelerated in-place sort for i64 data.
+#[allow(dead_code)] // reason: key-only sort wrapper; executor uses sort_kv_i64 today
 pub fn sort_i64(data: &mut [i64]) -> Option<()> {
     let _span = tracing::debug_span!("gpu.sort_i64", n = data.len()).entered();
     // SAFETY: data is a valid mutable slice.
@@ -404,6 +423,7 @@ pub fn reduce_sum_f64(data: &[f64]) -> Option<f64> {
 }
 
 /// GPU-accelerated i64 sum reduction.
+#[allow(dead_code)] // reason: i64 reduce wrapper; executor uses f64 path for SUM(int8)
 pub fn reduce_sum_i64(data: &[i64]) -> Option<i64> {
     let _span = tracing::debug_span!("gpu.reduce_sum_i64", n = data.len()).entered();
     let mut result: i64 = 0;
@@ -439,6 +459,7 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 
 /// Result of a fused f32 multi-aggregate reduce.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // reason: result struct paired with reduce_multi_f32; not yet wired into executor
 pub struct ReduceMultiF32 {
     pub sum: f32,
     pub min: f32,
@@ -457,6 +478,7 @@ pub struct ReduceMultiF64 {
 
 /// Result of a fused i64 multi-aggregate reduce.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // reason: result struct paired with reduce_multi_i64; not yet wired into executor
 pub struct ReduceMultiI64 {
     pub sum: i64,
     pub min: i64,
@@ -466,6 +488,7 @@ pub struct ReduceMultiI64 {
 
 /// GPU-accelerated fused f32 SUM+MIN+MAX+COUNT in a single pass.
 #[must_use]
+#[allow(dead_code)] // reason: f32 fused multi-reduce; executor uses individual reduce_* paths today
 pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
     if data.is_empty() {
@@ -536,6 +559,7 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
 
 /// GPU-accelerated fused i64 SUM+MIN+MAX+COUNT in a single pass.
 #[must_use]
+#[allow(dead_code)] // reason: i64 fused multi-reduce; executor uses individual reduce_* paths today
 pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
     if data.is_empty() {
@@ -570,6 +594,7 @@ pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
 }
 
 /// GPU-accelerated mask popcount.
+#[allow(dead_code)] // reason: mask popcount wrapper; future use for COUNT(*) FILTER (...) bitmap
 pub fn reduce_count(mask: &[u8]) -> Option<usize> {
     let _span = tracing::debug_span!("gpu.reduce_count", n = mask.len()).entered();
     let mut result: usize = 0;
@@ -597,6 +622,7 @@ pub fn reduce_count(mask: &[u8]) -> Option<usize> {
 /// GPU-accelerated Σ(x²) reduction with f32 input and f64 accumulator.
 /// Returns `None` if GPU is unavailable.
 #[must_use]
+#[allow(dead_code)] // reason: f32 sum_sq wrapper; executor uses reduce_stats_f32 fused path
 pub fn reduce_sum_sq_f32(data: &[f32]) -> Option<f64> {
     let _span = tracing::trace_span!("gpu.reduce_sum_sq_f32", n = data.len()).entered();
     let mut result: f64 = 0.0;
@@ -608,6 +634,7 @@ pub fn reduce_sum_sq_f32(data: &[f32]) -> Option<f64> {
 
 /// GPU-accelerated Σ(x²) reduction with f64 input and f64 accumulator.
 #[must_use]
+#[allow(dead_code)] // reason: f64 sum_sq wrapper; executor uses reduce_stats_f64 fused path
 pub fn reduce_sum_sq_f64(data: &[f64]) -> Option<f64> {
     let _span = tracing::trace_span!("gpu.reduce_sum_sq_f64", n = data.len()).entered();
     let mut result: f64 = 0.0;
@@ -621,6 +648,7 @@ pub fn reduce_sum_sq_f64(data: &[f64]) -> Option<f64> {
 /// Input is f32; accumulator is f64 inside the kernel.
 /// Returns `Some((count, sum, sum_sq))` or `None` on GPU failure.
 #[must_use]
+#[allow(dead_code)] // reason: f32 stats wrapper; executor uses partial_emitters f64 path for STDDEV/VAR
 pub fn reduce_stats_f32(data: &[f32]) -> Option<(u64, f64, f64)> {
     let _span = tracing::trace_span!("gpu.reduce_stats_f32", n = data.len()).entered();
     if data.is_empty() {
@@ -818,6 +846,7 @@ pub fn map_algebra(
 ///
 /// Returns `None` if the GPU is unavailable.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // reason: kernel registered but not yet wired through dispatch (TODO Phase 4 raster registrations)
 pub fn raster_clip(
     rast_pixels: *const std::ffi::c_void,
     width: usize,
@@ -862,6 +891,7 @@ pub fn raster_clip(
 ///
 /// Applies a set of value-range rules to reclassify pixel values.
 /// Returns `None` if the GPU is unavailable.
+#[allow(dead_code)] // reason: kernel registered but not yet wired through dispatch (TODO Phase 4 raster registrations)
 pub fn raster_reclass(
     input_pixels: *const std::ffi::c_void,
     pixel_count: usize,
@@ -920,6 +950,7 @@ pub fn expr_eval_predicate(
 /// Evaluate a projection expression on a columnar batch via GPU.
 ///
 /// Returns `(output_values, uncertain_mask)` or `None` if GPU unavailable.
+#[allow(dead_code)] // reason: projection wrapper paired with predicate; executor only consumes predicate today
 pub fn expr_eval_project(
     program: &PgaccelExprProgram,
     batch: &PgaccelBatch,
@@ -1027,6 +1058,7 @@ impl HashAggResult {
     ///
     /// Returns `None` if the pointer is null.
     #[must_use]
+    #[allow(dead_code)] // reason: per-group COUNT(*) accessor; executor reads results() today, counts() is for future GROUP BY+COUNT shapes
     pub fn counts(&self) -> Option<&[i64]> {
         let count = self.group_count();
         if count == 0 {
@@ -1428,6 +1460,7 @@ pub fn window_lead(
 ///
 /// Returns `(results_vec, pass_count)` or `None` on GPU failure.
 #[must_use]
+#[allow(dead_code)] // reason: fused filter+multi-reduce wrapper; executor uses separate filter + reduce passes today
 pub fn fused_filter_multi_reduce_f32(
     filter_data: Option<&[f32]>,
     n: usize,
