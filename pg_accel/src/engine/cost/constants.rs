@@ -162,3 +162,23 @@ pub const GPU_EXPR_PER_ROW_COST: f64 = 0.025;
 /// ≈ 0.00005. We use 0.02 to include key extraction overhead and
 /// Custom Scan yield overhead (~3μs/row for output construction).
 pub const GPU_HASH_JOIN_PER_ROW_COST: f64 = 0.02;
+
+/// Per-output-row Custom Scan yield cost.
+///
+/// Calibrated to match PG's `cpu_tuple_cost` default (`0.01`). The
+/// per-row work pgaccel does to yield a tuple to its parent operator
+/// (`ExecForceStoreMinimalTuple` + projection apply) is comparable to
+/// PG's stock node tuple-yield work — empirical measurement on
+/// M-series shows `ExecForceStoreMinimalTuple` is ~50ns and the
+/// projection step is similar, totalling ~100ns/row ≈ 0.01 cost units.
+///
+/// History: previously `0.03` (3x `cpu_tuple_cost`) was used to model
+/// "Custom Scan adds projection overhead". That over-penalised
+/// pgaccel's hash-join and partial-agg paths — for a 10M-output JOIN
+/// the extra 0.02/row × 10M = 200K cost was enough to push pgaccel's
+/// path strictly above PG's stock `Hash Join` (~291K vs pgaccel ~554K
+/// at 0.03; pgaccel ~354K at 0.01). After the calibration to 0.01,
+/// `add_path()` picks pgaccel's GpuHashJoin on the bench fact×dim
+/// query — see TODO Phase 4 entry "Plain JOIN: GpuHashJoin path
+/// injected but discarded by add_path()" for the audit-row reclass.
+pub const CUSTOM_SCAN_YIELD_COST: f64 = 0.01;

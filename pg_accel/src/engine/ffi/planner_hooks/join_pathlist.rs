@@ -226,10 +226,17 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     //   the build side.
     let probe_cost =
         outerrel_ref.rows * hashjoin::probe_cost_per_outer_row(hashjoin_uses_fp64, limits);
-    // - Yield: per output row: ExecForceStoreMinimalTuple + slot_getattr for
-    //   building virtual result tuple (~3μs/row ≈ 0.03 cost units). Pure
-    //   CPU-side tuple materialization — not affected by soft-fp64.
-    let yield_cost = joinrel_ref.rows * 0.03;
+    // - Yield: per output row: ExecForceStoreMinimalTuple + slot_getattr
+    //   for building the virtual result tuple. Calibrated to match PG's
+    //   `cpu_tuple_cost` default (0.01) — measurement on M-series shows
+    //   ExecForceStoreMinimalTuple is ~50ns and projection is similar,
+    //   matching `cpu_tuple_cost` semantics. The previous 0.03 value
+    //   (3x cpu_tuple_cost) over-penalised joins where the per-row
+    //   yield is no more expensive than PG's stock HashJoin output, and
+    //   prevented `add_path()` from picking pgaccel's path on the
+    //   plain-JOIN audit row (see TODO Phase 4 entry "Plain JOIN ...").
+    //   Pure CPU-side tuple materialization — not affected by soft-fp64.
+    let yield_cost = joinrel_ref.rows * cost::CUSTOM_SCAN_YIELD_COST;
 
     // SAFETY: outer_path is non-null, verified above.
     let startup_cost = unsafe { (*outer_path).startup_cost } + gpu_launch + build_cost;

@@ -119,7 +119,7 @@ pub(super) fn partial_total_cost(
     let gpu_launch = cost::GPU_LAUNCH_OVERHEAD;
     let build_cost = inner_rows * build_cost_per_inner_row(uses_fp64, limits);
     let probe_cost = outer_partial_rows * probe_cost_per_outer_row(uses_fp64, limits);
-    let yield_cost = output_partial_rows * 0.03;
+    let yield_cost = output_partial_rows * cost::CUSTOM_SCAN_YIELD_COST;
     base_cost + gpu_launch + build_cost + probe_cost + yield_cost
 }
 
