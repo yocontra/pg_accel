@@ -66,10 +66,15 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #                         sentinel; -ffast-math's no-infinities assumption
 #                         makes pad elements leak into the output with
 #                         index = UINT32_MAX.
+#   hash_agg           — sort-based path uses +infinity as the NULL-key
+#                         sentinel (sorts NULLs to the end); MIN/MAX
+#                         accumulators initialise to ±infinity so the
+#                         first real value supersedes the sentinel.
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
     src/sort.cpp
+    src/hash_agg.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
 # Standalone test binary
