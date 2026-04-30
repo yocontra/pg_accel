@@ -17,55 +17,55 @@ CHANGELOG `[Unreleased]` section carry the audit trail. Don't leave
 ## Phases
 
 The shape of the punchlist: Phase 1 finishes fp64 (the AdaptiveCpp i128
-mul lowering bug landed at SHA `4f3cde11`, unblocking var/stddev,
-spatial triangles, h3 res 12-15, and OOM-invariant for fp64; one
-ULP-budget tightening remains, then cost-multiplier calibration).
-Phase 2 covers silent wrong-claim bugs — the bytecode evaluator AND
-host-loop "kernels" that violate CLAUDE.md rule #11. Phase 3 extends
-parallel-path coverage (HashAgg, preagg, window). Phases 4-5 widen
-operator/type coverage and calibrate the planner. Phase 6 chases perf
-ceilings. Phase 7 is fork-local AdaptiveCpp maintenance burden. Phase 8
-polishes the build. Phases 9-10 gate the 1.0 tag. The "Post-1.0
-(deferred)" section catches items explicitly descoped from ship.
+mul lowering bug landed at SHA `4f3cde11`; ULP budget tightened;
+calibration blocked on Phase 6 dispatch perf, not on more multiplier
+tuning). **Phase 2 closed** — the SYCL kernel rewrites
+(`expr_templates.cpp` `5f1c3db`, `hash_agg.cpp` `8938269`,
+`expr_eval.cpp` `923739f`) and bytecode dispatch re-enable (`f37c67b`)
+all landed; one open follow-up (`hash_agg`'s 2-level pointer kernel
+hits a Metal SSCP edge case on small batches) is tracked in Phase 6.
+Phase 3 extends parallel-path coverage (HashAgg, preagg, window).
+Phase 4 widens operator/type coverage. Phase 5 tunes the planner
+(GPU-bridge dead-code cleanup `b231ce0` landed). Phase 6 chases perf
+ceilings + the small-N hash_agg kernel bug. Phase 7 is fork-local
+AdaptiveCpp maintenance burden. Phase 8 polishes the build. Phases
+9-10 gate the 1.0 tag. The "Post-1.0 (deferred)" section catches
+items explicitly descoped from ship.
 
 ## Next Up
 
-Order of operations following the AdaptiveCpp `4f3cde11` SHA bump.
+Phase 1 + Phase 2 + Phase 5 dead-code are closed. Open work in TODO
+order:
 
-1. **`just test` regression check** — DONE. 1164 passed; 34 failed
-   (pre-existing pgrx fork-test framework cascade); 0 regressions
-   vs baseline.
-2. **`test_correctness` ULP-budget tightening** — DONE. 329/329 PASS
-   after applying `max(8, log2(N)·32)` Higham bound to fp64 round-trip.
-3. **`just bench fp64_matrix` first calibration run** — DONE; results
-   in `benchmarks/runs/fp64_matrix_1m_post-i128-fix.md`. Geomean 8.47x
-   across 7 dispatched workloads. **Calibration BLOCKED**: 2 cells
-   below 1.0x (`hashagg_f64_keys @ 1M+` 0.20x, `spatial_fp64_recheck
-   @ 1M` 0.46x). Investigation found these are NOT fp64-multiplier-
-   tuning targets — both are the **Phase 6 per-batch GPU dispatch
-   issue** (single-thread `GpuAccelAgg` losing to PG's parallel hash
-   agg at 1M+). The `spatial_fp64_recheck` workload doesn't even
-   exercise the new fp64 spatial SYCL kernel — its query has a small
-   envelope that PG resolves via PostGIS scalar before any GPU
-   recheck would dispatch. Needs Phase 6 dispatch optimisation OR a
-   workload redesign that actually hits the fp64 GPU path.
-4. **GpuSort + VectorizedScan crash** — found while investigating (3).
-   Backend SIGSEGV at
-   `pg_accel/src/engine/ffi/custom_scan/mod.rs:2556` inside
-   `pg_sys::ExecOpenScanRelation` when `count(*) FROM (SELECT k_f64
-   FROM t ORDER BY k_f64) sq` plan picks `Custom Scan (GpuAccelScan)
-   Strategy: GpuSort` with `self_scan_relid > 0`. Pre-existing
-   VectorizedScan integration bug exposed now that the i128 mul fix
-   lets the planner pick GpuSort for fp64 (previously masked by
-   wrong-result corruption). New Phase 6 entry below.
-5. **Phase 2 host-loop kernel rewrite** (`expr_eval.cpp`,
-   `expr_templates.cpp`, `hash_agg.cpp`). All kernels under
-   `pgaccel-kernels/src/` must be SYCL `parallel_for` — see Phase 2
-   "All kernels must be SYCL" item below.
-6. **Phase 2 bytecode rescope decision.** Decide: (A) full SYCL
-   rewrite of `expr_eval.cpp` + executor fix, or (B) defer Phase 2
-   from pre-1.0.
-7. **Phase 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10**, in order.
+1. **Phase 1 cost-multiplier calibration** — blocked on Phase 6 (the
+   `fp64_matrix` 2-cell shortfall is Phase 6 dispatch perf, not
+   `soft_fp64_cost_multiplier` tuning). See `Phase 6 →
+   Per-batch GPU dispatch dominates parallel SUM / GROUP BY` for the
+   unblocker plan.
+2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
+   kernel + bridge + executor. Largest single chunk in the punchlist.
+3. **Phase 4 type coverage** — UUID / INET / CIDR extractors next
+   (hash-join workload), then JSON / JSONB. DATE works post Phase 2.
+4. **Phase 4 PostGIS / raster / H3 kernel backlog** — kernel-heavy.
+5. **Phase 5 worker-side spatial recheck** — DSM plumbing.
+6. **Phase 6 GpuSort+subquery wrong-result** — task #21 still open.
+7. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
+   pointer kernel returns 0 on tiny batches (`test_fork hashagg_f64`
+   N=64 reads as 0 instead of 2048). Tried flat-buffer + packed-args
+   refactor; each angle uncovered a deeper Metal SSCP edge case
+   (argbuffer rejection, 9-arg capture limit). Reverted. Needs root-
+   cause fix in either the kernel pointer chain OR upstream SSCP
+   emitter, not a workaround. Sort-based path is correct for N >=
+   100k (verified at 10M).
+8. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
+   calibrated `0.03 -> 0.01` (`4144ac8`), cuts 200K cost units off the
+   plain-JOIN audit. Probe cost (`0.01/row`) is now the next-largest
+   term; closing it unlocks the AVG+STDDEV / plain-JOIN audit rows.
+9. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
+   approach was tried, made things worse, reverted. Same root cause
+   as (7); needs the SSCP investigation.
+10. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+11. **Phase 3-10 in order** for everything else.
 
 ## Phase 1 — Close remaining fp64 gaps
 
@@ -125,95 +125,6 @@ ULP-budget assertion still pending.
 - **Done when**: `just bench fp64_matrix` has `speedup_x ≥ 1.0` across every
   cell under the winning multiplier; geomean + runner-up table committed to
   CHANGELOG.md; `fp64_enabled=false` confirmed via EXPLAIN trace.
-
-## Phase 2 — Correctness: silent wrong-claim bugs
-
-Two open classes: (a) a "kernel" that's actually a host for-loop, so
-the GPU-only mandate (CLAUDE.md rule #11/12) is silently violated;
-(b) the GPU bytecode evaluator that's compiled-but-not-executed and
-also turns out to be host-loop code under the hood.
-
-### All kernels must be SYCL — host-loop "kernels" violate the GPU mandate
-
-- **What**: Audit of `pgaccel-kernels/src/*.cpp` shows three files that
-  claim to be kernels but contain zero `parallel_for` / `submit` calls
-  and instead run host for-loops. CLAUDE.md rule #11 ("NEVER add CPU
-  fallbacks") and rule #12 ("SYCL-only, enforced at compile time")
-  apply per-kernel; current state silently violates the mandate. The
-  audit script: for `f in pgaccel-kernels/src/*.cpp`, check
-  `grep -c 'parallel_for' / 'submit' / 'for (size_t row|for (size_t i = 0; i < .*->num_rows'`.
-  Each file below has 0 / 0 / >0. BLOCKER.
-
-  | File | Lines | sycl include | parallel_for | submit | host-row loops |
-  |---|---|---|---|---|---|
-  | `pgaccel-kernels/src/expr_eval.cpp` | 884 | yes | 0 | 0 | 2 |
-  | `pgaccel-kernels/src/expr_templates.cpp` | 269 | **no** | 0 | 0 | 5 |
-  | `pgaccel-kernels/src/hash_agg.cpp` | 588 | **no** | 0 | 0 | (`agg_cpu` at `:175`, `agg_sort_based` at `:347`) |
-
-- **Why**: Host-loop "kernels" produce a planner-vs-runtime mismatch:
-  the cost model and `pgaccel_record_gpu_exec()` counter assume real
-  GPU work, but execution stays on the backend thread. Latency is
-  silently CPU-class for any query that hits these paths, and trace
-  spans labelled `gpu.*` are misleading.
-- **How**: Rewrite each as a SYCL kernel. Mirror the existing patterns
-  in `reduce.cpp` / `sort.cpp` / `h3_ops.cpp` (pattern: malloc_shared
-  inputs, `q->submit([&](sycl::handler& h){ h.parallel_for(...) })`,
-  read back from shared mem on host).
-  - `expr_eval.cpp`: bytecode interpreter loop at `:208-834` becomes a
-    SYCL `parallel_for` over rows; opcode table stays on device.
-    Coordinates with the bytecode-eval-disabled rescope below.
-  - `expr_templates.cpp`: helper kernels for template-matched
-    predicates (`cmp`, `BETWEEN`, `IN`, `IS NULL`, two-cmp `AND`).
-    Each becomes a `parallel_for` over the batch.
-  - `hash_agg.cpp:175,347`: `agg_cpu` and `agg_sort_based` need
-    GPU equivalents — there's already kernel-style hash agg in
-    `executor/agg/` consuming GPU output via `gpu::hash_agg_execute`,
-    but the kernel side is host-only here. Either route through
-    existing GPU hash agg or write a true SYCL hash-agg kernel.
-- **Invariant locked**: Add a CMake-time check (or a `cargo check`-time
-  audit script) that fails the build if any `pgaccel-kernels/src/*.cpp`
-  has 0 `parallel_for` AND any `for (size_t row` pattern (excluding
-  declared host helpers like `device_manager.cpp` / `mem_pool.cpp`).
-- **Done when**: Audit script reports zero host-loop kernels. Every
-  file in `pgaccel-kernels/src/` either uses `parallel_for`/`submit`
-  or is on an explicit allowlist of non-kernel infrastructure files
-  (`device_manager.cpp`, `mem_pool.cpp`, `platform_caps.cpp`).
-
-### GPU bytecode expression evaluator is disabled (rescope from L3 audit)
-
-- **What**: Two compounding problems beyond the original "DeferToPg
-  short-circuit" framing:
-  1. `pg_accel/src/engine/ffi/custom_scan/mod.rs:1694-1706` (NOT
-     `:1654-1666` — earlier line cite was wrong) is a *post-build*
-     no-op: compiles the program, logs at debug, returns `DeferToPg`.
-     Removing this alone changes nothing.
-  2. The **real** dispatch-side short-circuit lives at
-     `pg_accel/src/engine/executor/scan/exec.rs:498-504`, which maps
-     `CompiledExpr::Bytecode(_program)` to scalar qual via a hardcoded
-     `dispatch_scalar_qual`. Until this is removed, no bytecode runs.
-  3. `eval_bytecode_predicate` at `exec.rs:603-610` constructs a
-     `ColumnarBatchOwner` by force-coercing every column to f64
-     regardless of `program.num_cols` original type, AND appends
-     `referenced_cols` sequentially so sparse-col indices end up at
-     dense batch positions (an INT64 `LOAD_COL arg=3` reads f64 bits
-     as i64). Wrong-result class even if the dispatch unblocks.
-  4. `pgaccel-kernels/src/expr_eval.cpp:208-834` is a host for-loop —
-     see the "All kernels must be SYCL" item above. Re-enabling
-     without that rewrite just relocates CPU work, not GPU.
-- **Decision needed**: (A) Full rescope: SYCL rewrite of `expr_eval.cpp`
-  + fix the type/sparse-col bug at `exec.rs:603-610` + remove the
-  short-circuit at `:498-504` + the no-op at `mod.rs:1694-1706`.
-  Several hundred lines; spans kernel + bridge + executor + planner.
-  (B) Defer Phase 2 from pre-1.0 ship gate; leave bytecode-deferred-to-PG
-  (current behavior is correct, just slower than CLAUDE.md promises).
-- **Why**: User-visible mismatch — CLAUDE.md says "GPU bytecode
-  expression evaluation"; reality is template-matched predicates only.
-- **Done when** (option A): Golden-diff matrix at
-  `pg_accel_bench/src/bytecode_correctness.rs` covers every opcode in
-  `engine/expr_compiler.rs:25-127` × every supported type × every
-  shape; all cells zero-diff vs PG native; SYCL `expr_eval.cpp` runs
-  the matrix on device; sparse-col + type-coerce bug fixed; both
-  short-circuits removed.
 
 ## Phase 3 — Parallel-path coverage
 
@@ -316,24 +227,6 @@ detect-and-decline with `planner_rejected` counters; full injection is
 tracked in Post-1.0 (deferred) because both require kernels that don't
 exist yet (cascaded multi-key sort; merge-join kernel).
 
-### BitmapHeapScan injection
-
-- **What**: `planner_hooks/rel_pathlist.rs` only considers the
-  `RelOptInfo`'s own pathlist; bitmap-index-driven scans over selective
-  predicates never see a GPU qual. MINOR.
-- **Why**: Many OLTP queries with selective predicates resolve to
-  BitmapHeapScan; missing GPU injection here means no acceleration for a
-  large query class.
-- **How**:
-  - Add a second inject site that wraps `T_BitmapHeapPath` children —
-    mirror how `IndexScan` is wrapped today in
-    `planner_hooks/rel_pathlist.rs` (grep for the `IndexPath` recognition
-    branch to locate the exact insertion point).
-  - Alternative (GpuExpr+Scan path with the bitmap predicate preserved) is
-    explicitly deferred to post-1.0 to constrain scope.
-- **Done when**: A bitmap-driven query with a complex predicate shows GPU
-  CustomScan in EXPLAIN.
-
 ### NestedLoop (scalar) recognition
 
 - **What**: Only spatial nested-loop is wired (via bbox + predicate
@@ -423,16 +316,6 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 - **Done when**: `parallel_join` row in `pg_accel_bench explain-audit`
   reports `[PASS]` (i.e. PG picks pgaccel's GpuHashJoin path over
   its native parallel hash join for this workload).
-
-### GatherMerge EXPLAIN verification
-
-- **What**: Sort injector emits `pathkeys` so PG can pick GatherMerge, but
-  we never verify that path survives. MINOR.
-- **Why**: Silent mis-plans would regress sorted parallel queries.
-- **How**: Add an explicit `EXPLAIN` assertion in the verification suite
-  that the GatherMerge-eligible sort keeps its GPU CustomScan children.
-- **Done when**: Verification harness asserts GatherMerge + GPU CustomScan
-  on the relevant query.
 
 ### PostGIS operator registrations — bottleneck is kernels + dispatch, not adapters
 
@@ -569,26 +452,36 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 ### Type coverage expansion
 
-- **What**: GPU path currently handles int2 / int4 / int8 / float4 / float8
-  / bool and extracts (but doesn't GPU-process) text / timestamp /
-  timestamptz. Forcing CPU: NUMERIC / DECIMAL (handled by Phase 2
-  classification gate), DATE / INTERVAL (date is extracted as int32 but
-  date-arithmetic opcodes are disabled by the bytecode gate; `interval` has
-  no extractor at all), UUID / INET / CIDR (no extractor; used heavily for
-  partitioning keys and joins), JSON / JSONB (no extractor; GPU
-  `jsonb_path_exists` / `->>` would be a major win), ARRAY types (no GPU
-  support — forces per-row unnest on CPU), custom types (domains,
-  composites — immediate reject in the classifier). MINOR.
-- **Why**: Any workload touching one of these types falls back to CPU,
-  which silently reduces acceleration coverage.
+- **What**: GPU path handles int2 / int4 / int8 / float4 / float8 / bool /
+  date (filter+arith, since Phase 2 bytecode commit `f37c67b`) and extracts
+  (but doesn't GPU-process) text / timestamp / timestamptz. Forcing CPU
+  qual eval: INTERVAL (no extractor), UUID / INET / CIDR (no extractor;
+  used heavily for partitioning keys and joins), JSON / JSONB (no
+  extractor; GPU `jsonb_path_exists` / `->>` would be a major win), ARRAY
+  types (no GPU support — forces per-row unnest on CPU), custom types
+  (domains, composites — immediate reject in the classifier). NUMERIC /
+  DECIMAL are already handled by the Phase 2 classification gate. MINOR.
+- **Why**: Any workload touching one of these types falls back to PG's
+  scalar qual evaluator. That's correct (results match PG bit-for-bit)
+  but silently reduces GPU coverage on partition-keyed / IP / JSON
+  workloads.
+- **Status note**: After Phase 2 bytecode dispatch landed, DATE arithmetic
+  in WHERE compiles correctly to bytecode and produces bit-identical
+  results to PG (verified with `WHERE dt + 30 > '2026-06-01'` on a 1M-row
+  fixture). The plan may show the filter on `Parallel Seq Scan` rather
+  than `GpuAccelScan` because PG's parallel scan + scalar qual is cheaper
+  than 1-thread `GpuAccelScan` at this size — that's a planner cost
+  decision, not a coverage gap.
 - **How**:
-  - Prioritise DATE arithmetic (re-enable post Phase 2 bytecode work), then
-    UUID / INET / CIDR extractors (hash-join use case), then JSON / JSONB
-    (analytics win), then ARRAY (unnest on GPU).
-  - For custom types, document as explicit policy rather than a silent
-    skip.
-- Depends on: GPU bytecode expression evaluator re-enabled (Phase 2) for
-  DATE.
+  - UUID / INET / CIDR extractors next (hash-join use case): each is a
+    16-byte / 4-byte / variable struct that needs a typed extractor in
+    `pg_accel/src/engine/materialize/tuple_extract.rs` plus a hash key
+    type added to `pgaccel_hash_agg`/`pgaccel_hash_join` kernel ABIs.
+  - JSON / JSONB last (analytics win): the GPU side needs a JSONB
+    binary-format parser kernel; substantial work.
+  - ARRAY: unnest-on-GPU is a separate kernel-design item.
+  - Custom types (domains, composites): document as explicit policy
+    rather than a silent skip.
 - **Done when**: Each type has an extractor + test, or an explicit
   documented rejection; no silent CPU fallbacks.
 
@@ -611,34 +504,6 @@ tests). Two items remain.
   plumb the state through DSM.
 - **Done when**: Parallel spatial EXPLAIN ANALYZE shows recheck time
   distributed across workers, not pinned to leader.
-
-### GPU bridge dead-code audit
-
-- **What**: Per-file `#![allow(dead_code)]` was removed from
-  `pg_accel/src/gpu/bridge.rs`, `types.rs`, and `three_layer.rs`. The
-  parent `pg_accel/src/gpu/mod.rs:11` still has `#![allow(dead_code)]`
-  which propagates to the children, so the 33 items that would surface
-  are still hidden. Categories surfaced under
-  `#![warn(dead_code)]`-override probe: 18 unused FFI extern fns in
-  `bridge.rs` (mirrors of `pgaccel-kernels/include/pgaccel_ffi.h`),
-  unused ABI-mirrored enum variants in `types.rs`
-  (`PgaccelStatus::Error*`, `PgaccelPixelType::Int*`, `cmp_op::*`,
-  `reduce_op::*`), and `PredicateResult` enum / `SpatialPredicate::DWithin`
-  variant / `SpatialResult.definite_false` field in `three_layer.rs`
-  (used only under `#[cfg(feature = "pg_test")]`). MINOR.
-- **Why**: The remaining `mod.rs` allow masks the same audit decision
-  the children needed. Each item is either an ABI mirror that should
-  carry a per-item `#[allow(dead_code)] // reason: ...` annotation, or
-  a planned-but-not-wired API that should be deleted (anti-cheat
-  ban #7 — stubs aren't done).
-- **How**: Remove `#![allow(dead_code)]` from `pg_accel/src/gpu/mod.rs`.
-  For each surfaced item, either annotate per-item with a reason
-  (ABI mirrors, test-only callers) or delete (genuinely unused).
-  ABI mirrors of `pgaccel-kernels/include/pgaccel_ffi.h` should
-  carry `// reason: ABI mirror of pgaccel_ffi.h, layout load-bearing`.
-- **Done when**: No `#![allow(dead_code)]` anywhere under
-  `pg_accel/src/gpu/`; every item has a per-item annotation with
-  reason, or has been deleted; `cargo clippy -- -D warnings` clean.
 
 ## Phase 6 — Performance investigation
 
@@ -1297,11 +1162,11 @@ trail isn't broken; do not gate 1.0 on any of them.
 
 ### GpuExpr+Scan for BitmapHeapScan
 
-- **What**: Phase 4's BitmapHeapScan item picks the
+- **What**: Bitmap injection landed via `ba32a4a` using the
   `T_BitmapHeapPath`-wrapping approach. The alternative — emit a
   GpuExpr+Scan path with the bitmap predicate preserved — is deferred.
-- **Why deferred**: Scope constraint on 1.0; the simpler approach lands
-  the coverage win.
+- **Why deferred**: Scope constraint on 1.0; the wrapping approach already
+  lands the coverage win.
 - **Expected trigger**: Measured cases where bitmap-predicate
   preservation outperforms the wrapping path.
 
