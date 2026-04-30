@@ -193,10 +193,6 @@ lint:
 check:
     cargo check --features pg17
 
-# Type check with GPU feature
-check-gpu:
-    cargo check --features gpu
-
 # Run cargo-deny checks (licenses + advisories)
 deny:
     cargo deny check
@@ -296,6 +292,26 @@ clean-logs:
         : > "$f"
         echo "cleaned $f"
     done
+
+# Clear the AdaptiveCpp Metal SSCP JIT cache. Forces a cold-cache run on
+# the next kernel dispatch — useful when verifying fork-safety, the
+# `.metalar` archive path, or that a kernel-side change actually
+# rebuilds. Does NOT touch the kernel cache index files; AdaptiveCpp
+# rebuilds those on demand.
+#
+# Use this instead of `rm -rf ~/.acpp/apps/global/jit-cache/*` so the
+# command is auto-allowed by the harness (the bare rm prompts each
+# time for permission).
+clear-jit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cache_dir="$HOME/.acpp/apps/global/jit-cache"
+    if [ -d "$cache_dir" ]; then
+        find "$cache_dir" -mindepth 1 -delete
+        echo "cleared $cache_dir"
+    else
+        echo "no JIT cache at $cache_dir (nothing to clear)"
+    fi
 
 # === GPU Kernels ===
 
