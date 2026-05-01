@@ -2405,6 +2405,38 @@ mod tests {
         crate::gpu::assert_gpu_executed(1);
     }
 
+    /// Regression: GpuSort wrapped in a subquery scan must emit every input
+    /// row. The outer plan rebuilds the range table during setrefs, so the
+    /// RTE that `self_scan_relid` pointed to at plan time is no longer at
+    /// the same index at exec time. The RTE_RELATION guard at
+    /// `custom_scan/mod.rs:2497` correctly bypasses VectorizedScan setup
+    /// in that case, and the executor must fall through to consuming rows
+    /// from the child plan via `ExecProcNode`. A prior bug in this path
+    /// returned 0 rows; this test guards against silent regression.
+    #[pg_test]
+    fn test_gpu_sort_via_subquery_returns_all_rows() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        Spi::run(
+            "CREATE TEMP TABLE _sort_subq_t AS \
+             SELECT (random() * 1000.0)::float8 AS k_f64 \
+             FROM generate_series(1, 200000)",
+        )
+        .expect("create temp table");
+        Spi::run("ANALYZE _sort_subq_t").expect("ANALYZE");
+
+        let n = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (SELECT k_f64 FROM _sort_subq_t ORDER BY k_f64) sq",
+        )
+        .expect("count over sort-subquery should not error")
+        .expect("count returned a value");
+        assert_eq!(
+            n, 200_000,
+            "GpuSort wrapped in subquery must emit every input row"
+        );
+    }
+
     // =========================================================================
     // Parallel path injection (partial_pathlist → Gather ∘ CustomScan)
     // =========================================================================
