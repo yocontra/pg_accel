@@ -830,21 +830,6 @@ work is tracked in the Post-1.0 (deferred) section.
   `-DDEFAULT_TARGETS=omp;metal` (or equivalent multi-target) without
   mis-escaping.
 
-### `-ffast-math` per-file opt-outs
-
-- **What**: `raster_ops.cpp`, `spatial_predicates.cpp`, and `sort.cpp`
-  compile with `-fno-fast-math` because they depend on IEEE NaN / Inf
-  semantics (NODATA propagation, UNCERTAIN gates, bitonic-sort `+infinity`
-  sentinel). The global default is fast-math. Location:
-  `pgaccel-kernels/CMakeLists.txt`. MINOR (documentation / maintenance).
-- **Why**: Any new kernel that uses `isnan` / `isinf` / `isfinite` or
-  `+infinity` as a sort sentinel will silently break if added without the
-  opt-out.
-- **How**: When adding new kernels with NaN/Inf dependencies, add them to
-  the opt-out list; document the rule in CLAUDE.md or kernel header.
-- **Done when**: Documented in CLAUDE.md kernel skill; audit added to
-  code-review checklist.
-
 ## Phase 9 — Verification matrix
 
 Not yet run end-to-end; required gate before any "pg_accel accelerates all

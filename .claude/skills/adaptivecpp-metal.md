@@ -398,10 +398,24 @@ When a kernel misbehaves on a specific backend:
 - **PCUDA dialect** — supported on Metal as of PR #1983 (experimental); pg_accel still uses SYCL only.
 - **fp64 via soft-double** — MSL emitter lowers `double` to `struct acpp_f64 { uint lo; uint hi; }` with per-op dispatch to `__acpp_sscp_soft_f64_*` symbols. Math bodies come from the external `acpp_metal_fp64` CMake package (separate repo); AdaptiveCpp's `src/libkernel/sscp/metal/CMakeLists.txt` consumes it via `find_package(acpp_metal_fp64)` when built with `-DACPP_METAL_EXTERNAL_FP64=ON`. Symbol / target / define contract: `src/libkernel/sscp/metal/float64/README.md`. With the option OFF (default), bodies trap (`__builtin_trap()`), and Metal's `sycl::aspect::fp64` probe returns false — pg_accel's fp64-gated paths stay disabled. Once the external dep + option ship together, `caps.has_fp64` flips true automatically.
 - **Atomic64 — currently disabled on Metal.** Apple8+ hardware (M2 and later) supports 64-bit device atomics per MSL 2.4+, but AdaptiveCpp's SSCP Metal emitter still emits program-scope simdgroup builtins (`__simd_size [[threads_per_simdgroup]]`) that only parse under `xcrun metal`'s permissive default dialect — a dialect that rejects `atomic_fetch_add_explicit(device atomic<ulong>*, ulong, …)` via `_valid_fetch_add_type` SFINAE. `metal_hardware_manager` advertises `atomic64 = false` on all Metal devices until the emitter produces MSL 2.4+-compliant source. pg_accel's `bbox_ops.cpp` uses the u32 atomics fallback; pre-Apple8 GPUs (M1) are unchanged.
-- **llvm.minnum/maxnum** — IEEE 754-2008 NaN + signed-zero semantics are preserved in two layers: (1) the Metal SSCP libkernel body for `__acpp_sscp_fmin_f32` / `__acpp_sscp_fmax_f32` in `src/libkernel/sscp/metal/math.cpp` implements the NaN-propagating + `(−0, +0)` signed-zero-preserving sequence directly (always-inlined before MetalEmitter runs); (2) `Emitter.cpp` emits a defensive NaN-only fallback for any call that survives inlining. `-ffast-math` is therefore safe and **enabled globally** in `pgaccel-kernels/CMakeLists.txt`, with per-file `-fno-fast-math` opt-outs for the three kernels that depend on NaN/Inf propagation:
+- **llvm.minnum/maxnum** — IEEE 754-2008 NaN + signed-zero semantics are preserved in two layers: (1) the Metal SSCP libkernel body for `__acpp_sscp_fmin_f32` / `__acpp_sscp_fmax_f32` in `src/libkernel/sscp/metal/math.cpp` implements the NaN-propagating + `(−0, +0)` signed-zero-preserving sequence directly (always-inlined before MetalEmitter runs); (2) `Emitter.cpp` emits a defensive NaN-only fallback for any call that survives inlining. `-ffast-math` is therefore safe and **enabled globally** in `pgaccel-kernels/CMakeLists.txt`, with per-file `-fno-fast-math` opt-outs for the kernels that depend on NaN/Inf propagation:
   - `raster_ops.cpp` — `isnan` / `isinf` drive NODATA propagation for div-by-zero, sqrt(-x), log(0/-x).
   - `spatial_predicates.cpp` — `isfinite` gates NaN/Inf coordinates to UNCERTAIN.
   - `sort.cpp` — `pad_value<float>()` returns `+infinity` as the bitonic-sort sentinel; the no-infinities assumption otherwise lets pad elements leak into the output with `index = UINT32_MAX`.
+  - `hash_agg.cpp` — sort-based path uses `+infinity` as the NULL-key sentinel (sorts NULLs to the end); MIN/MAX accumulators initialise to `±infinity` so the first real value supersedes the sentinel.
+
+  **Rule for new kernels.** Any new `pgaccel-kernels/src/*.cpp` that uses
+  `isnan` / `isinf` / `isfinite`, relies on a `+/-infinity` or NaN sentinel,
+  or expects IEEE-correct fmin/fmax NaN propagation **must** be added to the
+  opt-out list in `pgaccel-kernels/CMakeLists.txt`'s
+  `set_source_files_properties(... -fno-fast-math -fhonor-nans
+  -fhonor-infinities)` block in the same commit. Skipping this makes the
+  kernel silently miscompile under the global `-ffast-math` (NaN folded to
+  zero, infinities collapsed, `isnan` returning false). The opt-out comment
+  block immediately above the `set_source_files_properties` call is the
+  audit trail — extend it with one line per added file describing the
+  NaN/Inf invariant. Reviewers should reject any kernel PR that touches
+  IEEE-special floats without updating the list.
 - **OOQ queues** — cross-queue sync via `MTLSharedEvent` is already implemented correctly in `src/runtime/metal/metal_queue.cpp:submit_queue_wait_for` and `multi_queue_executor` handles the scheduling. No deadlock in current tree; `tests/metal_ooq.cpp` passes.
 - **Bitonic sort** — `acpp::sort_into` in `include/hipSYCL/algorithms/sort/sort_into.hpp` is a thin facade over the pre-existing `hipsycl::algorithms::sorting::bitonic_sort`. Keys-only + key-value overloads. Not stable — pg_accel's native Metal sort in `sort.rs` remains the primary path.
 - **No `sycl::stream` / printf** — no MSL `printf`, no host callback path. Permanent constraint.
