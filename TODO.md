@@ -75,23 +75,10 @@ commit message and `pgaccel-kernels/test/test_fp64_mul_probe.cpp` for
 the kernel-boundary repro. Phase 1 ship-gate criteria post-fix:
 `test_reduce_stats` var/stddev PASS, `test_spatial` 58/58, `test_h3`
 112/112 (incl. fp64 res 12-15), `test_oom_invariant` all 5 fp64
-families PASS, `test_correctness` 328/329 with one tree-reduce-aware
-ULP-budget assertion still pending.
-
-### `just gpu-test` full green on M-series
-
-- **What**: One `test_correctness` row reports
-  `fp64 round-trip ULP: 145 > 8` — same class as the already-fixed
-  `reduce_sum_f64` ULP issue. CPU oracle uses sequential
-  computation; GPU uses tree-reduce. ULP=145 with budget=8 is a
-  budget-formula problem, not an algorithm problem.
-- **How**: Locate the `fp64 round-trip` assertion in
-  `pgaccel-kernels/test/test_correctness.cpp`. Widen the budget to a
-  tree-aware bound (`max(8, log2(N)·k·eps·|expected|)`, justified by
-  Higham Theorem 4.5 like the `reduce_sum_f64` fix). Document the formula
-  in the test header.
-- **Done when**: `test_correctness` reports 329/329 PASS cold-cache;
-  no `#[ignore]`; tolerance formula in the test header.
+families PASS, `test_correctness` 329/329 (tree-reduce-aware
+ULP budget landed in `aab2ead` at `pgaccel-kernels/test/test_correctness.cpp:1414`).
+The only open Phase 1 item is the cost-multiplier calibration below,
+blocked on Phase 6 dispatch perf.
 
 ### Cost-model empirical calibration of `soft_fp64_cost_multiplier`
 
@@ -285,29 +272,27 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 ### Plain JOIN: GpuHashJoin path injected but discarded by add_path()
 
 - **What**: EXPLAIN audit's "no pg_accel injection on plain JOIN" was
-  half-right. Investigation (commit pending) confirmed the
+  half-right. Investigation confirmed the
   `set_join_pathlist_hook` DOES fire and pgaccel's GpuHashJoin path
-  IS injected via `add_path()`. PG's `add_path()` then discards the
-  path because the cost model assigns a per-output-row Custom Scan
-  yield cost of `0.03 / row` (`planner_hooks/join_pathlist.rs:254`).
-  For a fact×dim 10M-row output that's 300K cost units — enough to
-  put pgaccel's path above PG's native parallel hash join (≈291K).
-  MAJOR (cost-model + Phase 6 dispatch-perf intersection).
+  IS injected via `add_path()`. PG's `add_path()` still discards the
+  path on cost. After yield calibration `0.03 → 0.01` in `4144ac8`
+  (`pg_accel/src/engine/cost/constants.rs:184` —
+  `CUSTOM_SCAN_YIELD_COST = 0.01`), the yield term dropped from 300K
+  to ~100K cost units on a 10M-output join, but the path is still
+  discarded — the per-row build + probe cost (`0.01/row each`,
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:239`) is now
+  the dominant pgaccel-side cost. MAJOR (cost-model + Phase 6
+  dispatch-perf intersection).
 - **Why**: Joins are the backbone of analytics queries. The hook
-  is correct; the cost is honest. Either the yield cost is
-  over-conservative (real `ExecForceStoreMinimalTuple +
-  slot_getattr` is faster than 3μs/row in practice) or the GPU
-  hash-join build/probe under-cost compensates somewhere else and
-  we need a different cost shape.
+  is correct; the cost is honest. Closing the per-row probe cost
+  needs Phase 6 dispatch-perf reductions or a cost-shape change that
+  amortises over batch yield instead of per-tuple.
 - **How**:
-  - Empirically measure per-row yield cost (`ExecForceStoreMinimalTuple
-    + slot_getattr`) on a 10M-output join. If it's <3μs/row in
-    practice, lower the constant in `join_pathlist.rs:254` with the
-    measurement cited in the commit.
-  - OR change the cost model to charge yield only for rows produced
-    by the GPU probe (i.e. `joinrel_ref.rows`) AFTER batch-yield
-    overhead amortisation, which Phase 6 dispatch-perf optimisations
-    will reduce.
+  - Phase 6 dispatch-perf wins (command-buffer reuse, kernel fusion)
+    will lower the per-row probe contribution naturally; calibrate
+    once those land.
+  - OR change the cost model to charge build/probe per-batch (not
+    per-row) once batch dispatch is amortised by Phase 6 work.
   - The audit row in `pg_accel_bench/src/explain_audit.rs` was
     re-classified from `RequiredToday` to
     `RequiredAfterPhase("6 yield-cost reduction ...")` so the
@@ -488,7 +473,7 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 Core cost-model items landed this round (multi-key sort limit, Window fp64
 multiplier, HashJoin fp64 multiplier, DeviceLimits docs + SRF, GUC hard-cap
-tests). Two items remain.
+tests). One item remains.
 
 ### Worker-side `ExecCustomScanRecheck` for spatial
 
@@ -505,6 +490,28 @@ tests). Two items remain.
   distributed across workers, not pinned to leader.
 
 ## Phase 6 — Performance investigation
+
+### `hash_agg` 2-level pointer kernel returns 0 on small batches
+
+- **What**: `agg_hash`'s 2-level pointer kernel reads as 0 instead of the
+  expected accumulation on tiny batches (`test_fork hashagg_f64` N=64
+  reads 0 instead of 2048). The sort-based path
+  (`pgaccel-kernels/src/hash_agg.cpp:790`) is correct for N ≥ 100k —
+  verified at 10M. Only affects small-N (≪ `gpu_hash_agg_min_rows`),
+  which is below the planner's GPU dispatch floor on a GPU-equipped
+  machine, but the kernel-level bug is real. MAJOR (correctness).
+- **Why**: Wrong-result class at any size violates the ship bar; the
+  sort-based path masks it in real workloads but the underlying kernel
+  is bit-corrupting on small input.
+- **How**: Tried flat-buffer + packed-args refactor; each angle
+  uncovered a deeper Metal SSCP edge case (argbuffer rejection, 9-arg
+  capture limit). Reverted. Same root-cause class as the cold-cache
+  fork crash on `sort_kv` below — needs the SSCP investigation, not
+  a workaround in `hash_agg.cpp`.
+- **Done when**: `test_fork hashagg_f64` N=64 returns 2048; SSCP
+  investigation lands a root-cause fix (in either the kernel pointer
+  chain or upstream SSCP emitter) and a regression test pins the
+  small-N case.
 
 ### Per-batch GPU dispatch dominates parallel SUM / GROUP BY
 
@@ -595,9 +602,10 @@ tests). Two items remain.
   `sycl_radix_sort_kv_u32` kernel but their SSCP caller-hash differs, so
   each type needs its own archive build. MAJOR (fork-safety regression).
 - **Why**: Violates the "zero crashes on verification matrix" ship bar.
-- **How**: Warm every radix specialisation (u32, i32, i64, u64, f32 + f64
-  bit-cast variants) at `_PG_init` via a tiny dry-run dispatch on 16
-  elements, so the archive builder runs before any user query can fork.
+- **How**: Warmup-at-`_PG_init` dry-run dispatch was tried and made things
+  worse (reverted). Same root cause as the small-N hash_agg kernel bug
+  (Next Up #6) — a Metal SSCP edge case that needs investigation in either
+  the kernel pointer chain or the upstream SSCP emitter, not a workaround.
 - **Done when**: 100 iterations × fresh JIT cache × every radix
   specialisation (u32 / i32 / i64 / u64 / f32 / f64); zero crashes, zero
   `MTLCompilerService` errors across the matrix.
