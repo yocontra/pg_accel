@@ -48,8 +48,7 @@ order:
    (hash-join workload), then JSON / JSONB. DATE works post Phase 2.
 4. **Phase 4 PostGIS / raster / H3 kernel backlog** — kernel-heavy.
 5. **Phase 5 worker-side spatial recheck** — DSM plumbing.
-6. **Phase 6 GpuSort+subquery wrong-result** — task #21 still open.
-7. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
+6. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
    pointer kernel returns 0 on tiny batches (`test_fork hashagg_f64`
    N=64 reads as 0 instead of 2048). Tried flat-buffer + packed-args
    refactor; each angle uncovered a deeper Metal SSCP edge case
@@ -57,15 +56,15 @@ order:
    cause fix in either the kernel pointer chain OR upstream SSCP
    emitter, not a workaround. Sort-based path is correct for N >=
    100k (verified at 10M).
-8. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
+7. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
    calibrated `0.03 -> 0.01` (`4144ac8`), cuts 200K cost units off the
    plain-JOIN audit. Probe cost (`0.01/row`) is now the next-largest
    term; closing it unlocks the AVG+STDDEV / plain-JOIN audit rows.
-9. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
+8. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
    approach was tried, made things worse, reverted. Same root cause
-   as (7); needs the SSCP investigation.
-10. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
-11. **Phase 3-10 in order** for everything else.
+   as (6); needs the SSCP investigation.
+9. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+10. **Phase 3-10 in order** for everything else.
 
 ## Phase 1 — Close remaining fp64 gaps
 
@@ -506,37 +505,6 @@ tests). Two items remain.
   distributed across workers, not pinned to leader.
 
 ## Phase 6 — Performance investigation
-
-### GpuSort returns 0 rows when consumed via subquery wrapper
-
-- **What**: Crash fixed by `98a8cfc` (RTE_RELATION guard added to
-  Sort + Window paths, mirroring the pattern already in PreAgg + Agg
-  paths). New finding exposed by the fix: when the guard correctly
-  bypasses VectorizedScan setup (because the outer query wraps Sort
-  in a subquery and the original relid is no longer at the same RT
-  index), the executor falls through to
-  `SortExecState::exec -> self.next(child_ps, ...)` consumption of
-  the child plan. That fall-through path returns **0 rows** for the
-  reproducer:
-  ```sql
-  SELECT count(*) FROM (SELECT k_f64 FROM t ORDER BY k_f64) sq;
-  ```
-  Plain `SELECT k_f64 ORDER BY k_f64 LIMIT 5` (no subquery wrapping)
-  still works. MAJOR (wrong-result class).
-- **Why**: This was masked before the AdaptiveCpp i128 mul fix —
-  fp64 GpuSort returned bit-corrupted output so the planner avoided
-  it for fp64 work. With the fix landed, the planner now prefers
-  GpuSort under fp64 ORDER BY pathkeys, exposing the latent issue.
-- **How**: Either (a) detect at plan time that the Sort will be
-  wrapped in a subquery and leave `self_scan_relid = 0`, or (b)
-  ensure the child-plan consumption path
-  (`consume_and_sort(child_ps, ...)` in
-  `pg_accel/src/engine/executor/sort/mod.rs:198`) actually pulls
-  rows from the child plan in this case. Likely (b) — check whether
-  `child_plan_state(css, 0)` returns a valid PlanState when
-  `self_scan_relid > 0` was set at plan time.
-- **Done when**: The reproducer returns 10000000; `test_correctness`
-  adds a count-over-sort-subquery regression test.
 
 ### Per-batch GPU dispatch dominates parallel SUM / GROUP BY
 
