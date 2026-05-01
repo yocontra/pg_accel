@@ -1,7 +1,7 @@
 # Thin wrapper around Justfile for make users.
 # All logic lives in Justfile — this just delegates.
 
-.PHONY: pre-commit test test-unit test-integration bench fmt lint check
+.PHONY: pre-commit test test-unit bench fmt lint check
 
 pre-commit:
 	just pre-commit
@@ -11,9 +11,6 @@ test:
 
 test-unit:
 	just test-unit
-
-test-integration:
-	just test-integration
 
 bench:
 	just bench

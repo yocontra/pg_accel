@@ -331,13 +331,10 @@ fn dispatch_gpu_reduce_above_threshold_attempts_gpu() {
     col.gpu_values = vec![1.0; n];
     col.acc.has_value = true;
     col.dispatch_gpu_reduce();
-    #[cfg(not(feature = "gpu"))]
-    {
-        assert!(!col.gpu_dispatched);
-        #[allow(clippy::cast_precision_loss)]
-        let expected = n as f64;
-        assert!((col.acc.sum - expected).abs() < 1.0);
-    }
+    assert!(!col.gpu_dispatched);
+    #[allow(clippy::cast_precision_loss)]
+    let expected = n as f64;
+    assert!((col.acc.sum - expected).abs() < 1.0);
     assert!(col.gpu_values.is_empty());
 }
 
@@ -350,11 +347,8 @@ fn dispatch_gpu_reduce_min_above_threshold() {
     col.gpu_values = vals;
     col.acc.has_value = true;
     col.dispatch_gpu_reduce();
-    #[cfg(not(feature = "gpu"))]
-    {
-        assert!(!col.gpu_dispatched);
-        assert!((col.acc.min_val - (-42.0)).abs() < f64::EPSILON);
-    }
+    assert!(!col.gpu_dispatched);
+    assert!((col.acc.min_val - (-42.0)).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -366,11 +360,8 @@ fn dispatch_gpu_reduce_max_above_threshold() {
     col.gpu_values = vals;
     col.acc.has_value = true;
     col.dispatch_gpu_reduce();
-    #[cfg(not(feature = "gpu"))]
-    {
-        assert!(!col.gpu_dispatched);
-        assert!((col.acc.max_val - 9999.0).abs() < f64::EPSILON);
-    }
+    assert!(!col.gpu_dispatched);
+    assert!((col.acc.max_val - 9999.0).abs() < f64::EPSILON);
 }
 
 #[test]

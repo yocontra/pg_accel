@@ -631,20 +631,6 @@ impl ScanExecState {
         gpu::expr_eval_predicate(&c_program, &batch, batch_len)
     }
 
-    /// Build a single-column f64 columnar batch for a template kernel.
-    #[allow(dead_code)]
-    fn build_columnar_f64(
-        &self,
-        col_idx: u32,
-        scan_slot: *mut pg_sys::TupleTableSlot,
-        batch_len: usize,
-    ) -> ColumnarBatchOwner {
-        let (values, nulls) = self.extract_col_f64(col_idx, scan_slot, batch_len);
-        let mut owner = ColumnarBatchOwner::new(batch_len, 1);
-        owner.add_col_f64(values, nulls);
-        owner
-    }
-
     /// Extract a column as f64 values from the buffered MinimalTuples.
     ///
     /// Uses bulk direct `MinimalTuple` reads when possible to avoid

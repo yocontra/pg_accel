@@ -419,75 +419,6 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
     cscan.cast()
 }
 
-/// Deserialize sort key descriptors from a path's `custom_private`.
-///
-/// Path layout: `[num_sort_keys, attno1, sort_op1, collation1, nulls_first1, ...]`
-///
-/// # Safety
-///
-/// `custom_private` must be null or a valid PG `List`.
-#[allow(dead_code)]
-unsafe fn deserialize_path_sort_keys(custom_private: *mut pg_sys::List) -> Vec<SortKeyDesc> {
-    let mut sort_keys = vec![];
-    if custom_private.is_null() {
-        return sort_keys;
-    }
-    // SAFETY: custom_private is a valid List of Integer nodes.
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-    if list_len == 0 {
-        return sort_keys;
-    }
-    let num_keys = unsafe { list_int_at(custom_private, 0) } as usize;
-    let base = 1usize;
-    for k in 0..num_keys {
-        let offset = base + k * SORT_KEY_INTS;
-        if offset + SORT_KEY_INTS > list_len {
-            break;
-        }
-        // SAFETY: Indices are within bounds (checked above).
-        let attno = unsafe { list_int_at(custom_private, offset as c_int) } as i16;
-        let sort_op_raw = unsafe { list_int_at(custom_private, (offset + 1) as c_int) } as u32;
-        let collation_raw = unsafe { list_int_at(custom_private, (offset + 2) as c_int) } as u32;
-        let nulls_first = unsafe { list_int_at(custom_private, (offset + 3) as c_int) } != 0;
-        sort_keys.push(SortKeyDesc {
-            attno,
-            sort_op: pg_sys::Oid::from(sort_op_raw),
-            collation: pg_sys::Oid::from(collation_raw),
-            nulls_first,
-        });
-    }
-    sort_keys
-}
-
-/// Extract limit_tuples from the path's `custom_private`.
-///
-/// The limit is serialized after sort key data:
-/// `[num_keys, ...sort_key_data..., limit_tuples]`
-///
-/// Returns 0 if no limit is present.
-///
-/// # Safety
-///
-/// `custom_private` must be null or a valid PG `List`.
-#[allow(dead_code)]
-unsafe fn deserialize_path_limit(
-    custom_private: *mut pg_sys::List,
-    sort_keys: &[SortKeyDesc],
-) -> c_int {
-    if custom_private.is_null() {
-        return 0;
-    }
-    // SAFETY: custom_private is a valid List.
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-    // limit is at index: 1 (num_keys) + num_keys * SORT_KEY_INTS
-    let limit_idx = 1 + sort_keys.len() * SORT_KEY_INTS;
-    if limit_idx >= list_len {
-        return 0;
-    }
-    // SAFETY: Index is within bounds (checked above).
-    unsafe { list_int_at(custom_private, limit_idx as c_int) }
-}
-
 /// Extract limit_tuples from the path's `custom_private` with a base offset.
 ///
 /// The limit is serialized after sort key data:
@@ -2509,11 +2440,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 privdata.window_specs.len(),
                 privdata.window_scan_relid
             );
-            let mut exec = Box::new(WindowExecState::new(
-                AccelStrategy::GpuWindow,
-                batch_size,
-                privdata.window_specs,
-            ));
+            let mut exec = Box::new(WindowExecState::new(batch_size, privdata.window_specs));
 
             // Open direct heap scan when scan_relid > 0 (vectorized path).
             if privdata.window_scan_relid > 0 {
@@ -3118,11 +3045,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                 let old = Box::from_raw((*state).accel.executor.cast::<WindowExecState>());
                 old.specs().to_vec()
             };
-            let exec = Box::new(WindowExecState::new(
-                AccelStrategy::GpuWindow,
-                batch_size,
-                window_specs,
-            ));
+            let exec = Box::new(WindowExecState::new(batch_size, window_specs));
             (*state).accel.executor = Box::into_raw(exec).cast();
         } else if gpu_strategy == GpuStrategy::Join {
             // Hash join / spatial join: preserve key config, drop hash table.

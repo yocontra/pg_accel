@@ -35,21 +35,3 @@ pub fn gpu_hardware_available() -> bool {
 pub fn gpu_is_usable() -> bool {
     gucs::gpu_enabled() && gpu_hardware_available()
 }
-
-/// Cached result of fp64 hardware detection.
-static HAS_NATIVE_FP64: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-/// Whether the GPU supports native fp64 (double-precision) arithmetic.
-///
-/// Result is cached via [`OnceLock`] so the GPU runtime is only probed once.
-///
-/// On Apple GPUs fp64 is emulated via soft-float — flipped to `true` when
-/// AdaptiveCpp is built with `ACPP_METAL_EXTERNAL_FP64_DIR` pointing at the
-/// external soft-fp64 implementation (see
-/// `AdaptiveCpp/src/libkernel/sscp/metal/float64/README.md`). Absent that,
-/// this returns `false` on Metal and planner gates route f64 paths to
-/// fp32 fallbacks.
-#[must_use]
-pub fn platform_has_native_fp64() -> bool {
-    *HAS_NATIVE_FP64.get_or_init(|| PlatformProfile::detect().has_native_fp64)
-}

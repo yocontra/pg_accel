@@ -64,7 +64,7 @@ fn build_partition_starts_pure(keys: &[f64], nulls: &[bool]) -> Vec<u8> {
 
 /// Create a `WindowExecState` with given specs. Does NOT allocate PG tuples.
 fn make_state(specs: Vec<WindowFuncSpec>) -> WindowExecState {
-    WindowExecState::new(AccelStrategy::GpuWindow, 1024, specs)
+    WindowExecState::new(1024, specs)
 }
 
 // =======================================================================
@@ -301,19 +301,19 @@ fn new_state_result_vectors_initially_empty() {
 
 #[test]
 fn new_state_batch_size_stored() {
-    let state = WindowExecState::new(AccelStrategy::GpuWindow, 2048, vec![]);
+    let state = WindowExecState::new(2048, vec![]);
     assert_eq!(state.batch_size, 2048);
 }
 
 #[test]
 fn new_state_single_batch_size() {
-    let state = WindowExecState::new(AccelStrategy::GpuWindow, 1, vec![]);
+    let state = WindowExecState::new(1, vec![]);
     assert_eq!(state.batch_size, 1);
 }
 
 #[test]
 fn new_state_large_batch_size() {
-    let state = WindowExecState::new(AccelStrategy::GpuWindow, 1_000_000, vec![]);
+    let state = WindowExecState::new(1_000_000, vec![]);
     assert_eq!(state.batch_size, 1_000_000);
 }
 
@@ -481,7 +481,7 @@ fn rescan_resets_emit_pos() {
     state.emit_pos = 42;
     // Simulate rescan by reconstructing state, preserving specs.
     let specs = state.specs().to_vec();
-    let new_state = WindowExecState::new(AccelStrategy::GpuWindow, 1024, specs);
+    let new_state = WindowExecState::new(1024, specs);
     assert_eq!(new_state.emit_pos, 0);
 }
 
@@ -490,7 +490,7 @@ fn rescan_resets_compute_done() {
     let mut state = make_state(vec![spec(WindowFunc::Sum)]);
     state.compute_done = true;
     let specs = state.specs().to_vec();
-    let new_state = WindowExecState::new(AccelStrategy::GpuWindow, 1024, specs);
+    let new_state = WindowExecState::new(1024, specs);
     assert!(!new_state.compute_done);
 }
 
@@ -499,7 +499,7 @@ fn rescan_resets_child_exhausted() {
     let mut state = make_state(vec![spec(WindowFunc::Count)]);
     state.child_exhausted = true;
     let specs = state.specs().to_vec();
-    let new_state = WindowExecState::new(AccelStrategy::GpuWindow, 1024, specs);
+    let new_state = WindowExecState::new(1024, specs);
     assert!(!new_state.child_exhausted);
 }
 
@@ -510,7 +510,7 @@ fn rescan_resets_counters() {
     state.batches_executed = 10;
     state.dispatch_time_us = 5000;
     let specs = state.specs().to_vec();
-    let new_state = WindowExecState::new(AccelStrategy::GpuWindow, 1024, specs);
+    let new_state = WindowExecState::new(1024, specs);
     assert_eq!(new_state.rows_dispatched, 0);
     assert_eq!(new_state.batches_executed, 0);
     assert_eq!(new_state.dispatch_time_us, 0);
@@ -522,7 +522,7 @@ fn rescan_clears_result_vectors() {
     state.i64_results[0] = vec![1, 2, 3];
     state.f64_results[1] = vec![1.0, 2.0, 3.0];
     let specs = state.specs().to_vec();
-    let new_state = WindowExecState::new(AccelStrategy::GpuWindow, 1024, specs);
+    let new_state = WindowExecState::new(1024, specs);
     assert!(new_state.i64_results[0].is_empty());
     assert!(new_state.f64_results[1].is_empty());
 }
@@ -536,7 +536,7 @@ fn rescan_preserves_spec_count() {
     ];
     let state = make_state(specs);
     let preserved_specs = state.specs().to_vec();
-    let new_state = WindowExecState::new(AccelStrategy::GpuWindow, 1024, preserved_specs);
+    let new_state = WindowExecState::new(1024, preserved_specs);
     assert_eq!(new_state.specs().len(), 3);
     assert_eq!(new_state.specs()[0].func, WindowFunc::RowNumber);
     assert_eq!(new_state.specs()[1].func, WindowFunc::Rank);
@@ -767,13 +767,13 @@ fn partition_starts_inf_keys() {
 
 #[test]
 fn state_constructible_with_gpu_window_empty_specs() {
-    let state = WindowExecState::new(AccelStrategy::GpuWindow, 512, vec![]);
+    let state = WindowExecState::new(512, vec![]);
     assert!(state.specs().is_empty());
 }
 
 #[test]
 fn state_constructible_with_gpu_window() {
-    let state = WindowExecState::new(AccelStrategy::GpuWindow, 512, vec![spec(WindowFunc::Sum)]);
+    let state = WindowExecState::new(512, vec![spec(WindowFunc::Sum)]);
     assert_eq!(state.specs().len(), 1);
 }
 

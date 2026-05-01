@@ -37,20 +37,12 @@ use super::partial::AggAccum;
 /// emits transition-state tuples instead of final aggregate values.
 ///
 /// The vector lengths are all equal to `agg_descs.len()` in the parent
-/// `PreAggExecState` — one entry per output aggregate column. For grouped
-/// aggregation, `group_key_values` stores the per-group key Datums so the
-/// final `finalize_partial` call can project the group keys into the output
-/// slot alongside the partial-state Datums.
+/// `PreAggExecState` — one entry per output aggregate column.
 pub(super) struct PreaggPartialState {
     /// One accumulator per output agg column.
     pub per_column_accumulators: Vec<ColumnAccumulator>,
     /// One emitter per output agg column, picked by `build_emitters`.
     pub emitters: Vec<Box<dyn PartialEmitter>>,
-    /// Per-group key Datums — `Vec<group_idx> -> Vec<key_attr_datum>`.
-    /// Empty for plain (ungrouped) aggregation. Populated by the grouped
-    /// preagg integration (see `finalize_partial`'s `group_col_offset`).
-    #[allow(dead_code)]
-    pub group_key_values: Vec<Vec<pg_sys::Datum>>,
 }
 
 impl PreaggPartialState {
@@ -63,50 +55,6 @@ impl PreaggPartialState {
         Self {
             per_column_accumulators,
             emitters,
-            group_key_values: Vec::new(),
-        }
-    }
-
-    /// Fold one fact-side value into the column accumulator for
-    /// aggregate index `col_idx`. Invoked by the fact-scan loop once the
-    /// preagg grouped/ungrouped dispatch is wired to the partial-state path.
-    #[inline]
-    #[allow(dead_code)]
-    pub(super) fn accumulate(&mut self, col_idx: usize, op: AggOp, val: f64) {
-        let Some(acc) = self.per_column_accumulators.get_mut(col_idx) else {
-            return;
-        };
-        match op {
-            AggOp::Sum
-            | AggOp::Avg
-            | AggOp::StddevSamp
-            | AggOp::StddevPop
-            | AggOp::VarSamp
-            | AggOp::VarPop => {
-                acc.sum += val;
-                acc.sum_sq += val * val;
-                acc.count += 1;
-                acc.has_value = true;
-            }
-            AggOp::Count | AggOp::BitAnd | AggOp::BitOr | AggOp::BoolAnd | AggOp::BoolOr => {
-                acc.count += 1;
-                acc.has_value = true;
-            }
-            AggOp::Min => {
-                if !acc.has_value || val < acc.min_val {
-                    acc.min_val = val;
-                }
-                acc.count += 1;
-                acc.has_value = true;
-            }
-            AggOp::Max => {
-                if !acc.has_value || val > acc.max_val {
-                    acc.max_val = val;
-                }
-                acc.count += 1;
-                acc.has_value = true;
-            }
-            AggOp::Passthrough => {}
         }
     }
 

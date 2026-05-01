@@ -5,7 +5,6 @@ mod functions;
 
 use pgrx::pg_sys;
 
-use crate::engine::registry::AccelStrategy;
 use crate::engine::stats;
 use crate::gpu;
 
@@ -53,10 +52,6 @@ pub const WINDOW_SPEC_INTS: usize = 8;
 
 /// Rust-side window function executor state.
 pub struct WindowExecState {
-    /// Acceleration strategy (should be `GpuWindow`).
-    #[allow(dead_code)]
-    strategy: AccelStrategy,
-
     /// Batch size for input accumulation.
     batch_size: usize,
 
@@ -100,10 +95,9 @@ impl WindowExecState {
 
     /// Create a new window executor state.
     #[must_use]
-    pub fn new(strategy: AccelStrategy, batch_size: usize, specs: Vec<WindowFuncSpec>) -> Self {
+    pub fn new(batch_size: usize, specs: Vec<WindowFuncSpec>) -> Self {
         let num_specs = specs.len();
         Self {
-            strategy,
             batch_size,
             specs,
             tuples: Vec::new(),

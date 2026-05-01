@@ -5,7 +5,7 @@
 // eliminates all host-to-device / device-to-host copy overhead.
 //
 // Usage: replace sycl::malloc_device/q.memcpy/sycl::free patterns with
-// pgaccel_alloc/pgaccel_h2d/pgaccel_d2h/pgaccel_free_input helpers.
+// pgaccel_alloc/pgaccel_d2h/pgaccel_free_input helpers.
 
 #pragma once
 
@@ -51,19 +51,6 @@ T* pgaccel_alloc_input(size_t count, sycl::queue& q, const T* host_data) {
 // ---------------------------------------------------------------------------
 // Data transfer
 // ---------------------------------------------------------------------------
-
-/// Copy host data to device buffer. On unified memory with shared
-/// allocation, this is a plain memcpy (or no-op if pointers match).
-template <typename T>
-void pgaccel_h2d(sycl::queue& q, T* dst, const T* src, size_t count) {
-  if (g_unified_memory) {
-    if (dst != src)
-      std::memcpy(dst, src, count * sizeof(T));
-  } else {
-    q.memcpy(dst, src, count * sizeof(T));
-    q.wait();
-  }
-}
 
 /// Copy device data to host buffer. On unified memory with shared
 /// allocation, this is a plain memcpy (or no-op if pointers match).

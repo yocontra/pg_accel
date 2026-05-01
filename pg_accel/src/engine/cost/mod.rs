@@ -11,7 +11,7 @@ pub mod platform;
 #[cfg(feature = "pg_test")]
 mod tests;
 
-pub use availability::{gpu_hardware_available, gpu_is_usable, platform_has_native_fp64};
+pub use availability::{gpu_hardware_available, gpu_is_usable};
 pub use constants::{
     CUSTOM_SCAN_YIELD_COST, GPU_COST_SAFETY_MARGIN, GPU_EXPR_PER_ROW_COST, GPU_H3_PER_ROW_COST,
     GPU_HASH_JOIN_PER_ROW_COST, GPU_LAUNCH_OVERHEAD, GPU_RASTER_PER_ROW_COST,

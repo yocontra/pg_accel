@@ -324,43 +324,6 @@ pgaccel_status sycl_fused_filter_multi_reduce_f32(sycl::queue& q, const float* f
 
 extern "C" {
 
-pgaccel_status pgaccel_fused_filter_reduce_f32(const float* filter_col, pgaccel_cmp_op cmp_op,
-                                               float filter_val, const float* agg_col,
-                                               pgaccel_fused_agg_op agg_op, size_t count,
-                                               double* out_result) {
-  if (!out_result)
-    return PGACCEL_ERROR;
-  if (!filter_col)
-    return PGACCEL_ERROR;
-  if (agg_op != PGACCEL_FUSED_COUNT && !agg_col)
-    return PGACCEL_ERROR;
-
-  if (count == 0) {
-    *out_result = (agg_op == PGACCEL_FUSED_SUM || agg_op == PGACCEL_FUSED_COUNT)
-                      ? 0.0
-                      : 0.0;  // MIN/MAX on empty = 0 (caller handles SQL NULL)
-    return PGACCEL_OK;
-  }
-
-  if (count >= GPU_FUSED_THRESHOLD) {
-    try {
-      sycl::queue* q = get_queue();
-      if (q) {
-        pgaccel_status st = sycl_fused_filter_reduce_f32(*q, filter_col, cmp_op, filter_val,
-                                                         agg_col, agg_op, count, out_result);
-        if (st == PGACCEL_OK) {
-          pgaccel_record_gpu_exec();
-          return st;
-        }
-      }
-    } catch (const std::exception& e) {
-      fprintf(stderr, "pgaccel: fused_filter_reduce SYCL failed: %s\n", e.what());
-    } catch (...) {}
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
-}
-
 pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, pgaccel_cmp_op cmp_op,
                                                      float filter_val, const float* const* agg_cols,
                                                      const pgaccel_fused_agg_op* agg_ops,
@@ -388,35 +351,6 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, pg
       if (q) {
         pgaccel_status st = sycl_fused_filter_multi_reduce_f32(
             *q, filter_col, cmp_op, filter_val, agg_cols, agg_ops, num_aggs, count, out_results);
-        if (st == PGACCEL_OK) {
-          pgaccel_record_gpu_exec();
-          return st;
-        }
-      }
-    } catch (const std::exception&) {
-    } catch (...) {}
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
-}
-
-pgaccel_status pgaccel_fused_filter_count_f32(const float* filter_col, pgaccel_cmp_op cmp_op,
-                                              float filter_val, size_t count, int64_t* out_count) {
-  if (!out_count)
-    return PGACCEL_ERROR;
-  if (count == 0) {
-    *out_count = 0;
-    return PGACCEL_OK;
-  }
-  if (!filter_col)
-    return PGACCEL_ERROR;
-
-  if (count >= GPU_FUSED_THRESHOLD) {
-    try {
-      sycl::queue* q = get_queue();
-      if (q) {
-        pgaccel_status st =
-            sycl_fused_filter_count_f32(*q, filter_col, cmp_op, filter_val, count, out_count);
         if (st == PGACCEL_OK) {
           pgaccel_record_gpu_exec();
           return st;
