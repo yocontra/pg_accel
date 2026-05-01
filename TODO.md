@@ -133,7 +133,7 @@ Executor gap:
   group. Only reached from `finalize_result` on the non-grouped path.
 - Grouped path (`execute.rs:2008-2196` → `emit_grouped_tuple` at `:1886` →
   `gpu::hash_agg_execute`) returns **finalized** per-group f64 scalars via
-  `HashAggResult::results()` (`gpu/mod.rs:1009-1024`) — not the partial
+  `HashAggResult::results()` (`gpu/mod.rs:1040-1058`) — not the partial
   transition state. For AVG/STDDEV/VAR, PG's `float8_accum` transtype is
   float8[3] `[N, sum, sum_sq]`; a single f64 per group is not a valid
   partial to pass to `numeric_avg_combine`.
@@ -170,7 +170,7 @@ shows GPU Custom Scan inside a Gather and produces identical results.
 
 ### Preagg parallel path
 
-- **What**: `planner_hooks/mod.rs:1016` hardcodes `parallel_safe=false` on
+- **What**: `planner_hooks/mod.rs:1058` hardcodes `parallel_safe=false` on
   the preagg `CustomPath`. Counterpart `planner_hooks/preagg_partial.rs` is
   a stub with a no-op `try_inject` and `#[allow(dead_code)]`. MAJOR.
 - **Why**: Preagg fusion is one of the bigger per-batch wins; confining it
@@ -180,7 +180,7 @@ shows GPU Custom Scan inside a Gather and produces identical results.
     transvalue instead of finalfn output).
   - Implement `preagg_partial::try_inject` per its module comment (steps 1–4
     spelled out there).
-  - Flip the flag at `planner_hooks/mod.rs:1016` to `true` whenever all
+  - Flip the flag at `planner_hooks/mod.rs:1058` to `true` whenever all
     fused Aggrefs classify into the partial-capable set.
 - Depends on: Grouped HashAgg parallel path (Phase 3b executor work).
 - **Done when**: A preagg-fused aggregation plan runs inside parallel
@@ -189,7 +189,7 @@ shows GPU Custom Scan inside a Gather and produces identical results.
 
 ### Window executor has no partial path
 
-- **What**: `executor/window.rs` doesn't expose a parallel-safe wrapping;
+- **What**: `executor/window/mod.rs` doesn't expose a parallel-safe wrapping;
   `ROW_NUMBER` / `RANK` over a Gather child currently runs the window on
   the leader after collecting worker output. MINOR.
 - **Why**: Partitioned window functions (PARTITION BY aligned with worker
@@ -309,12 +309,22 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   `pgaccel-kernels/src/spatial_dispatch.cpp:536` →
   `src/gpu/three_layer.rs:108`). Other predicates audited:
   - `st_contains`, `st_within`: enum variants exist but
-    `three_layer::spatial_contains` (`src/gpu/three_layer.rs:158`) returns
+    `three_layer::spatial_contains` (`src/gpu/three_layer.rs:160`) returns
     `all_uncertain()` — stub only.
   - `st_dwithin`, `st_distance`: `three_layer::spatial_dwithin`
-    (`src/gpu/three_layer.rs:174`) returns `all_uncertain()`.
-    `pgaccel_sphere_distance_bulk` (`spatial_predicates.cpp:239`) exists
-    but isn't wired into three-layer and is point-only.
+    (`src/gpu/three_layer.rs:176`) returns `all_uncertain()`.
+    `pgaccel_sphere_distance_bulk` (`spatial_predicates.cpp:403`) exists
+    but is **a host-side CPU loop, not a SYCL kernel** — there is no
+    `q.submit` / `parallel_for` in its body, only a templated
+    `sphere_distance_one<T>()` host function called in a `for` loop.
+    Wiring it through `three_layer::spatial_dwithin` as-is would route
+    a "GPU strategy" through CPU code, violating CLAUDE.md rule 11
+    ("NEVER add CPU fallbacks") / rule 12 (SYCL-only). The correct
+    sequencing is: (a) write a real `sphere_distance_bulk_sycl_*`
+    kernel mirroring the `point_in_ring_bulk_fp{32,64}_sycl` pattern at
+    `spatial_predicates.cpp:235-401`, then (b) wire it through
+    `three_layer::spatial_dwithin`. The existing host-loop
+    implementation is point-only regardless.
   - `st_area`, `st_length`: no kernel.
   - `st_equals`, `st_disjoint`, `st_touches`, `st_crosses`, `st_overlaps`:
     no kernel AND no `SpatialPredicate` enum variant. The unknown-name
@@ -327,7 +337,7 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   implementation + bridge + dispatch wiring.
 - **How**:
   - For `st_contains` / `st_within` / `st_dwithin`: replace the
-    `all_uncertain()` stubs in `src/gpu/three_layer.rs:158,174` with real
+    `all_uncertain()` stubs in `src/gpu/three_layer.rs:160,176` with real
     GPU pipelines (bbox gate → predicate kernel → recheck) before
     registration.
   - For `st_area` / `st_length` / `st_distance` polygonal: land new kernels
@@ -461,6 +471,35 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     16-byte / 4-byte / variable struct that needs a typed extractor in
     `pg_accel/src/engine/materialize/tuple_extract.rs` plus a hash key
     type added to `pgaccel_hash_agg`/`pgaccel_hash_join` kernel ABIs.
+    **Honest scope (audited 2026-05-01).** UUID alone is *not* a
+    sub-100-line patch. Real touch surface (~7 files, ~220 LOC):
+    1. `pgaccel-kernels/include/pgaccel_hash_join.h:27-31` — extend the
+       `pgaccel_key_type` enum with a new variant. **Slot `3` is taken**
+       by the Rust planner's `CompositeInt4x2`
+       (`planner_hooks/mod.rs:1651`); use `PGACCEL_KEY_UUID = 4` to keep
+       the C↔Rust ABI aligned (kernel never receives `3` because the
+       executor packs the composite into i64 before dispatch).
+    2. `pgaccel-kernels/src/hash_agg.cpp:121` (`read_key_u64`) +
+       `:146` (`key_size_for_type`) — add UUID arms (16-byte key,
+       hash via two `hash64()` mixes XORed together).
+    3. `pgaccel-kernels/src/hash_join.cpp` — same arms.
+    4. `pg_accel/src/gpu/bridge.rs:445,471,850` — add UUID variant to
+       `PgaccelKeyType` and update `key_type_discriminant_values_match_c`
+       test.
+    5. `pg_accel/src/engine/materialize/tuple_extract.rs:264` — extend
+       the generic `extract_typed` family with `extract_uuid` (returns
+       `Vec<[u8; 16]>` + null mask).
+    6. `pg_accel/src/engine/executor/agg/execute.rs:1186` — add UUID arm
+       in the key-type dispatch match; `:1915` — add UUID datum
+       reconstruction (palloc 16-byte `pg_uuid_t`, return as Datum
+       pointer).
+    7. `pg_accel/src/engine/ffi/planner_hooks/mod.rs:3130` — add
+       `UUIDOID` (= 2950) → `PgaccelKeyType::Uuid` in
+       `GroupKeyInfo::key_type_from_oid` and the join-key classifier.
+    Scope across both Rust + C++ ABI + planner classifier requires the
+    full cross-verification protocol (see
+    `.claude/rules/cross-verification.md`) — A: end-to-end test, B:
+    diff audit, C: kernel hash-collision rate sanity check.
   - JSON / JSONB last (analytics win): the GPU side needs a JSONB
     binary-format parser kernel; substantial work.
   - ARRAY: unnest-on-GPU is a separate kernel-design item.
@@ -1146,7 +1185,7 @@ trail isn't broken; do not gate 1.0 on any of them.
 
 - **What**: `st_contains` / `st_within` / `st_dwithin`: replace
   `three_layer::spatial_contains` / `spatial_dwithin` stubs at
-  `src/gpu/three_layer.rs:158,174` with real GPU pipelines.
+  `src/gpu/three_layer.rs:160,176` with real GPU pipelines.
   `st_area` / `st_length` / `st_distance` polygonal: new kernels in
   `pgaccel-kernels/src/spatial_*.cpp` + bridge + dispatch + enum-extend.
   `st_equals` / `st_disjoint` / `st_touches` / `st_crosses` /
