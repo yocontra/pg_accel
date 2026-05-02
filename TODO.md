@@ -400,15 +400,29 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   `extern "C" pgaccel_*` raster kernels exist in
   `pgaccel-kernels/src/raster_ops.cpp`: `pgaccel_map_algebra` (:460),
   `pgaccel_raster_clip` (:517), `pgaccel_raster_reclass` (:627). All three
-  are already registered at `pg_accel/src/adapters/postgis_raster.rs:43-53`
-  and wired through `pg_accel/src/gpu/bridge.rs:323,333,348` +
-  `pg_accel/src/gpu/mod.rs:801,843,880`. The 6 Phase 4 candidates
+  are registered at `pg_accel/src/adapters/postgis_raster.rs:43-53` and
+  bridged via `pg_accel/src/gpu/bridge.rs` + `pg_accel/src/gpu/mod.rs`.
+  **Dispatch state (refreshed 2026-05-01, commit `d3124c8`):** only
+  `st_mapalgebra` has end-to-end dispatch wired in
+  `pg_accel/src/engine/dispatch/raster.rs`; `st_clip` and `st_reclass`
+  defer to PG native via `fn_name` routing because their executor-side
+  argument extraction (polygon ring; reclass-rule text parsing) is not
+  yet plumbed. Prior to that fix, `dispatch_gpu_raster` ran `map_algebra`
+  unconditionally — silent stub-as-done. The 6 Phase 4 candidates
   (`st_resample`, `st_slope`, `st_aspect`, `st_hillshade`, `st_value`,
-  `st_summarystats`) have no backing kernel. `st_summarystats` additionally
-  needs multi-scalar return plumbing beyond the adapter. MINOR.
+  `st_summarystats`) have no backing kernel. `st_summarystats`
+  additionally needs multi-scalar return plumbing beyond the adapter.
+  MINOR.
 - **Why**: Registering without a kernel is a stub-as-done cheat (anti-cheat
   ban #7). Real work is kernel implementation + bridge + dispatch wiring.
 - **How**:
+  - For `st_clip` end-to-end: extract the polygon ring qual (geometry
+    arg) per-row via the spatial extractor, build the clip ring, call
+    `gpu::raster_clip`, patch the band back into the WKB output. The
+    kernel side already exists.
+  - For `st_reclass` end-to-end: parse the SQL reclass-rule text into
+    `PgaccelReclassRule[]`, call `gpu::raster_reclass`, patch back. The
+    kernel side already exists; rule-text parsing is the missing piece.
   - For each missing kernel (`pgaccel_raster_resample`, `pgaccel_slope`,
     `pgaccel_aspect`, `pgaccel_hillshade`, `pgaccel_raster_value`,
     `pgaccel_raster_summarystats`): write SYCL kernel in `raster_ops.cpp`,
