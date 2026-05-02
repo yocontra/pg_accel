@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- PostGIS predicates: `st_dwithin` Point×Point fp32 via `pgaccel_sphere_distance_bulk` SYCL kernel (a2793c4)
+- PostGIS predicates: `st_contains` / `st_within` Polygon⊇Point fp32 via `pgaccel_point_in_ring_bulk` (e804376)
+- PostGIS predicates: `st_disjoint` as inversion of `st_intersects` — no extra kernel (a52e565)
+- PostGIS predicates: `st_covers` / `st_coveredby` aliasing contains/within (PG Layer-3 recheck handles boundary semantics) (43dd575)
+- UUID group-key support for hash_agg via `PGACCEL_KEY_UUID = 4` end-to-end (kernel ABI + Rust bridge + extractor + planner classifier + executor dispatch + datum reconstruction) (243fa1f)
+- H3 `pgaccel_h3_cell_to_center_child_bulk` SYCL kernel + bridge + dispatch + adapter registration (fb0a6d9)
+- `just gpu-test-cold <name> [timeout_s]` recipe: wipe JIT cache then run a single named test binary in one allowlistable invocation, eliminating the prompt-on-every-rm pattern that broke autonomous loops (91b9c35)
 - Zero-IPC GPU architecture: direct in-process Metal dispatch from PG backends, replacing the background-worker IPC path (4a3ed86)
 - Native Metal backend with zero-IPC reduce kernels, fork-safe via pre-built `.metalar` binary archives (ec065f7, 88e5d81)
 - Native Metal sort and window kernels (16 compiled pipelines) (71c44de)
@@ -51,6 +58,12 @@
 - `real_boundary` benchmark workload (bc9e63f)
 
 ### Fixed
+- 7-cheat audit (2026-05-02): every `extern "C" pgaccel_*` symbol previously hosting a host-side `for` loop was either converted to a real SYCL kernel or surfaced as `PGACCEL_ERROR_NO_DEVICE` so the planner declines.
+  - `pgaccel_sphere_distance_bulk` host loop → fp32 SYCL kernel; fp64 returns NO_DEVICE pending soft-fp64 trig fix (6ea0a51).
+  - `pgaccel_point_in_ring_bulk` fp32 path host loop → templated `point_in_ring_bulk_sycl<T>` (91b9c35).
+  - `pgaccel_segment_intersects_bulk` fp32+fp64 host loops → templated `segment_intersects_bulk_sycl<T>` (9aa65bb).
+  - `pgaccel_map_algebra` and `pgaccel_raster_clip` small-N CPU branches deleted; non-FP32 inputs return UNSUPPORTED (no fraudulent `pgaccel_record_gpu_exec()` for CPU work) (a44ea0b).
+  - `pgaccel_window_rank` / `dense_rank` / `sum` / `count` host loops → SYCL per-row independent scan kernels (22210b0).
 - AdaptiveCpp emitter tracking for fp64 MSL compilation on Apple GPUs: tracks upstream commits `667338f7`, `0992997c`, and `579ee825`, unblocking the intra-module fp64 path and all fp64 kernels (a5a6c44, e6e5a98, 455c7ea)
 - H3 resolution >=5 fp64 run now ungated after JIT retry-loop fix (2ff7103)
 - Post-fork Metal crash routed through BGW as interim fix before zero-IPC rewrite (c26bfb4)
