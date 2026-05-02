@@ -293,6 +293,35 @@ impl VectorizedScan {
         (values, nulls)
     }
 
+    /// Extract a column as 16-byte UUID values (host byte order).
+    ///
+    /// # Safety
+    ///
+    /// `info` must match the schema. Column must be UUID (`pg_uuid_t`,
+    /// `typlen = 16`, `typbyval = false`).
+    #[must_use]
+    pub unsafe fn extract_uuid(&self, info: &AttExtractInfo) -> (Vec<[u8; 16]>, Vec<u8>) {
+        let n = self.row_count;
+        let mut values = Vec::with_capacity(n);
+        let mut nulls = Vec::with_capacity(n);
+
+        for i in 0..n {
+            // SAFETY: i < row_count, arena is finalized.
+            let hdr = unsafe { self.header(i) };
+            let val: Option<[u8; 16]> =
+                unsafe { tuple_extract::try_fast_read_heap_pub::<[u8; 16]>(hdr, info) };
+            if let Some(v) = val {
+                values.push(v);
+                nulls.push(0);
+            } else {
+                values.push([0u8; 16]);
+                nulls.push(1);
+            }
+        }
+
+        (values, nulls)
+    }
+
     /// Extract raw `u8` bytes for a column (for hash agg key extraction).
     ///
     /// Returns the byte buffer and null mask. Each value is `typlen` bytes.

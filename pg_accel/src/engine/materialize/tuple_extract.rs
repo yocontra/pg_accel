@@ -375,6 +375,83 @@ pub unsafe fn extract_f32(
     }
 }
 
+/// Extract a column of UUID values (16-byte fixed-width) from a batch of
+/// `MinimalTuple`s.
+///
+/// PG storage: `pg_uuid_t` is 16 bytes, `typbyval = false`, so the Datum
+/// returned by the slow path is a pointer to the 16-byte payload. Fast
+/// path reads the inline 16 bytes directly at the attribute offset.
+///
+/// Hash-key shape for the GPU: each UUID is treated as host-order bytes
+/// (the kernel reads them as two u64 halves and XORs `hash64()` mixes —
+/// see `pgaccel_hash_agg.cpp::read_key_u64`). We therefore preserve raw
+/// byte order rather than canonicalising to little-endian.
+///
+/// # Safety
+///
+/// Same requirements as [`extract_i32`].
+pub unsafe fn extract_uuid(
+    tuples: &[pg_sys::MinimalTuple],
+    info: &AttExtractInfo,
+    fallback_slot: *mut pg_sys::TupleTableSlot,
+) -> (Vec<[u8; 16]>, Vec<u8>) {
+    let n = tuples.len();
+    let mut values = Vec::with_capacity(n);
+    let mut nulls = Vec::with_capacity(n);
+    let attno = (info.att_index + 1) as i32;
+
+    for &mt in tuples {
+        if mt.is_null() {
+            values.push([0u8; 16]);
+            nulls.push(1);
+            continue;
+        }
+
+        // SAFETY: mt is a valid MinimalTuple per caller contract.
+        let mt_ref = unsafe { &*mt };
+        let has_null_flag = (mt_ref.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
+
+        if has_null_flag {
+            // SAFETY: t_bits is valid when HEAP_HASNULL is set.
+            if unsafe { att_is_null(mt_ref.t_bits.as_ptr(), info.att_index) } {
+                values.push([0u8; 16]);
+                nulls.push(1);
+                continue;
+            }
+        }
+
+        // SAFETY: mt is valid, info matches schema. UUID is 16-byte
+        // fixed-width — try_fast_read::<[u8; 16]> reads at the
+        // attribute offset directly when none of the predecessor
+        // columns are NULL or variable-length.
+        if let Some(val) = unsafe { try_fast_read::<[u8; 16]>(mt, info, has_null_flag) } {
+            values.push(val);
+            nulls.push(0);
+        } else {
+            // SAFETY: fallback_slot is valid, on main thread.
+            let (datum, is_null) = unsafe { slow_getattr(mt, fallback_slot, attno) };
+            if is_null {
+                values.push([0u8; 16]);
+                nulls.push(1);
+            } else {
+                // SAFETY: UUID is `typbyval = false`, so the Datum is a
+                // pointer to a 16-byte pg_uuid_t payload owned by the
+                // tuple. Copy the bytes out so the caller doesn't hold
+                // a dangling reference once the tuple is freed.
+                let p = datum.value() as *const u8;
+                let mut bytes = [0u8; 16];
+                unsafe {
+                    std::ptr::copy_nonoverlapping(p, bytes.as_mut_ptr(), 16);
+                }
+                values.push(bytes);
+                nulls.push(0);
+            }
+        }
+    }
+
+    (values, nulls)
+}
+
 /// Diagnostic: compare fast-path vs slow-path extraction for first N tuples.
 ///
 /// # Safety

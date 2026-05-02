@@ -1208,6 +1208,14 @@ impl AggExecState {
                     key_null_mask.push(nulls[j]);
                 }
             }
+            4 => {
+                // UUID key (16 bytes per value, host byte order).
+                let (vals, nulls) = unsafe { vscan.extract_uuid(&gk_extract_info) };
+                for (j, v) in vals.iter().enumerate() {
+                    key_buf.extend_from_slice(v);
+                    key_null_mask.push(nulls[j]);
+                }
+            }
             _ => return,
         }
 
@@ -1933,6 +1941,23 @@ impl AggExecState {
                             pg_sys::FLOAT4OID => pg_sys::Datum::from((key as f32).to_bits()),
                             _ => pg_sys::Datum::from(key.to_bits()),
                         }
+                    }
+                    4 => {
+                        // UUID key — keys_ptr is a contiguous buffer of
+                        // group_count * 16 bytes. PG stores `pg_uuid_t`
+                        // as a 16-byte struct passed by reference, so
+                        // the result Datum must point at a 16-byte
+                        // payload. palloc copies the bytes into the
+                        // current memory context (CurrentMemoryContext
+                        // = the executor per-tuple context owned by
+                        // the slot).
+                        // SAFETY: keys_ptr is non-null (checked above)
+                        // and references group_count * 16 bytes of
+                        // valid UUID data owned by the GPU result.
+                        let src = (keys_ptr.cast::<u8>()).add(gidx * 16);
+                        let dst = pg_sys::palloc(16) as *mut u8;
+                        std::ptr::copy_nonoverlapping(src, dst, 16);
+                        pg_sys::Datum::from(dst as u64)
                     }
                     _ => pg_sys::Datum::from(0),
                 };

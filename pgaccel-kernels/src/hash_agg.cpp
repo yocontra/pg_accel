@@ -138,6 +138,16 @@ static inline uint64_t read_key_u64(const void* keys, size_t row, int key_type) 
       memcpy(&bits, &k, sizeof(bits));
       return hash64(bits);
     }
+    case 4: {  // UUID (16 bytes)
+      // Read both u64 halves, mix each through hash64, XOR. Byte-equal
+      // UUIDs map to identical hashes; any single bit flip propagates
+      // through hash64's full diffusion.
+      const uint8_t* p = static_cast<const uint8_t*>(keys) + row * 16;
+      uint64_t lo, hi;
+      memcpy(&lo, p, 8);
+      memcpy(&hi, p + 8, 8);
+      return hash64(lo) ^ hash64(hi);
+    }
     default:
       return 0;
   }
@@ -151,6 +161,8 @@ static inline size_t key_size_for_type(int key_type) {
       return sizeof(int64_t);
     case 2:
       return sizeof(double);
+    case 4:
+      return 16; /* UUID */
     default:
       return 0;
   }

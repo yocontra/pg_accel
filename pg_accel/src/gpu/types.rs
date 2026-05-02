@@ -218,13 +218,24 @@ pub enum PgaccelAggState {}
 // Hash join types (mirrors pgaccel_hash_join.h).
 // ---------------------------------------------------------------------------
 
-/// Key type for hash join operations.
+/// Key type for hash join / hash agg operations.
+///
+/// Discriminant values must match the C `pgaccel_key_type` enum in
+/// `pgaccel-kernels/include/pgaccel_hash_join.h`. Slot 3 is reserved
+/// on the planner side for `CompositeInt4x2` (two int4 columns packed
+/// into one int8); the executor unpacks composites to int8 before
+/// kernel dispatch, so the kernel never sees `key_type == 3`. UUID
+/// occupies slot 4 to keep the kernel-facing values one-to-one with
+/// what the kernel actually receives.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PgaccelKeyType {
     Int32 = 0,
     Int64 = 1,
     Float64 = 2,
+    /// 16-byte UUID, host byte order. Hashed via two `hash64()` mixes
+    /// XORed together inside the kernel.
+    Uuid = 4,
 }
 
 /// Opaque handle to a GPU-side hash table.

@@ -28,6 +28,13 @@ typedef enum {
   PGACCEL_KEY_INT32 = 0,
   PGACCEL_KEY_INT64 = 1,
   PGACCEL_KEY_FLOAT64 = 2,
+  /* Slot 3 is reserved on the Rust planner side for CompositeInt4x2
+   * (two int4 columns packed into one int8). The composite key is
+   * unpacked to int8 by the executor before kernel dispatch, so the
+   * kernel never sees key_type == 3. Keep slot 3 empty here so the
+   * Rust↔C ABI alignment stays one-to-one for every key type the
+   * kernel actually receives. */
+  PGACCEL_KEY_UUID = 4, /* 16-byte UUID, host order */
 } pgaccel_key_type;
 
 /* ── Hash table handle ──────────────────────────────────────────── */

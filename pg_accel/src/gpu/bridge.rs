@@ -851,6 +851,9 @@ mod tests {
         assert_eq!(PgaccelKeyType::Int32 as i32, 0);
         assert_eq!(PgaccelKeyType::Int64 as i32, 1);
         assert_eq!(PgaccelKeyType::Float64 as i32, 2);
+        // Slot 3 reserved for CompositeInt4x2 (planner-only, never
+        // sent to kernel — see PgaccelKeyType doc comment).
+        assert_eq!(PgaccelKeyType::Uuid as i32, 4);
     }
 
     #[test]
