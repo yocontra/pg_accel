@@ -44,10 +44,12 @@ order:
    unblocker plan.
 2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
    kernel + bridge + executor. Largest single chunk in the punchlist.
-3. **Phase 4 type coverage** — UUID extractor landed end-to-end
-   (hash_agg only — hash_join templated build/probe needs more
-   work). INET / CIDR extractors next, then JSON / JSONB. DATE
-   works post Phase 2.
+3. **Phase 4 type coverage** — UUID end-to-end (hash_agg only).
+   INET / CIDR groundwork landed (`PGACCEL_KEY_INET = 5`, kernel
+   hash arms, Rust extractor + planner classifier + 4 unit tests);
+   the agg dispatch defers to PG until VectorizedScan grows varlena
+   extraction (see `Phase 4 type coverage` section for the
+   architecture gap). JSON / JSONB next; DATE works post Phase 2.
 4. **Phase 4 PostGIS / raster / H3 kernel backlog** — kernel-heavy.
 5. **Phase 5 worker-side spatial recheck** — DSM plumbing.
 6. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
@@ -492,12 +494,24 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     as a follow-up; the executor stub at `executor/join/probe.rs` raises
     `pgrx::error!` if the planner ever emits Uuid for a join key
     (planner classifier today only emits Uuid for hash_agg).
-  - INET / CIDR extractors next (hash-join use case): each is a 4-byte
-    (IPv4) / 16-byte (IPv6) struct with a 1-byte family discriminator,
-    `inet_struct` layout in `src/include/utils/inet.h`. Network-byte
-    order is preserved; canonical hashing must canonicalise IPv4 vs
-    IPv6 to avoid colliding semantically-distinct addresses. ~150 LOC
-    extractor + planner classifier + kernel hash arm.
+  - INET / CIDR groundwork: SHIPPED in commit `c4134d5` —
+    `PGACCEL_KEY_INET = 5` C ABI, 24-byte canonical key (family + bits
+    + 16-byte ipaddr + 6-byte u64-alignment pad), kernel hash arms
+    (`hash_agg.cpp::read_key_u64` case 5), Rust bridge variant,
+    `tuple_extract::extract_inet` (MinimalTuple-based, with varlena
+    detoasting), `keys.rs` planner classifier (INETOID 869 + CIDROID
+    650 → key_type=5), 4 unit tests. **Gap to close**: VectorizedScan
+    has no varlena-aware extraction path (the arena-based scan stores
+    raw heap bytes but has no TupleTableSlot for `slot_getattr`-based
+    detoasting). The agg dispatch at `agg/execute.rs` checks for
+    key_type=5 and short-circuits to PG when reached, so the
+    classifier accepting INET cannot produce wrong results — just
+    leaves performance on the table for INET-keyed GROUP BY until
+    that gap closes. Two paths to close it: (a) thread a
+    fallback_slot through the executor and call
+    `tuple_extract::extract_inet`; (b) hand-roll inline-varlena
+    parsing in `VectorizedScan::extract_inet` against the heap bytes
+    directly.
   - JSON / JSONB last (analytics win): the GPU side needs a JSONB
     binary-format parser kernel; substantial work.
   - ARRAY: unnest-on-GPU is a separate kernel-design item.
