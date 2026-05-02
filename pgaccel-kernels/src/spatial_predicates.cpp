@@ -232,24 +232,26 @@ static int8_t segment_intersects_one(T p1x, T p1y, T p2x, T p2y, T p3x, T p3y, T
 
 namespace {
 
-pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t point_count,
-                                            const double* ring_xy, size_t vertex_count,
-                                            int8_t* results) {
+// Templated SYCL kernel for point_in_ring_bulk on fp32 or fp64. Math is
+// open-coded — no trig / sqrt / atan2 — so the soft-fp64 instantiation
+// compiles cleanly on Metal SSCP (no SLEEF transcendental dependency,
+// distinct from the sphere_distance fp64 hang).
+//
+// malloc_shared + memcpy pattern is required for Metal SSCP: a previous
+// malloc_device + queue.memcpy variant produced wrong-data reads for the
+// d_ring buffer when ring sizes were small (8 doubles), where the kernel
+// observed zeros at indices 2..5 even though the host memcpy completed.
+// Shared allocation with host-side memcpy avoids the rebind issue.
+template <typename T>
+pgaccel_status point_in_ring_bulk_sycl(const T* points_xy, size_t point_count, const T* ring_xy,
+                                       size_t vertex_count, int8_t* results) {
   sycl::queue* q = g_queue;
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  // Use sycl::malloc_shared for inputs on unified memory and host memcpy.
-  // The d_ring buffer specifically had wrong-data reads from kernels when
-  // allocated via malloc_device + queue memcpy on Metal SSCP for small
-  // (8-double) allocations — the kernel saw zeros for indices 2..5 even
-  // though the host queue memcpy returned the right source bytes. Using
-  // malloc_shared with a host-side memcpy works because the buffer is in
-  // unified-memory territory and the Metal command encoder doesn't rebind
-  // the buffer between memcpy and kernel dispatch.
   try {
-    double* d_pts = sycl::malloc_shared<double>(point_count * 2, *q);
-    double* d_ring = sycl::malloc_shared<double>(vertex_count * 2, *q);
+    T* d_pts = sycl::malloc_shared<T>(point_count * 2, *q);
+    T* d_ring = sycl::malloc_shared<T>(vertex_count * 2, *q);
     int8_t* d_res = sycl::malloc_shared<int8_t>(point_count, *q);
 
     if (!d_pts || !d_ring || !d_res) {
@@ -262,16 +264,21 @@ pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t poin
       return PGACCEL_OOM;
     }
 
-    std::memcpy(d_ring, ring_xy, vertex_count * 2 * sizeof(double));
-    std::memcpy(d_pts, points_xy, point_count * 2 * sizeof(double));
+    std::memcpy(d_ring, ring_xy, vertex_count * 2 * sizeof(T));
+    std::memcpy(d_pts, points_xy, point_count * 2 * sizeof(T));
 
     const size_t vc = vertex_count;
-    const double eps = EPS_FP64;
+    // eps as `const T` capture — see sphere_distance_bulk_sycl notes for
+    // why constexpr-double captures may collide with Metal arg-buffer
+    // limits. T = float / double both work here because eps participates
+    // in plain compare/multiply, not soft-fp64 trig.
+    const T eps =
+        std::is_same<T, double>::value ? static_cast<T>(EPS_FP64) : static_cast<T>(EPS_FP32);
 
     q->parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
        const size_t i = id[0];
-       const double px = d_pts[i * 2];
-       const double py = d_pts[i * 2 + 1];
+       const T px = d_pts[i * 2];
+       const T py = d_pts[i * 2 + 1];
 
        // NaN / Inf -> UNCERTAIN
        if (!sycl::isfinite(px) || !sycl::isfinite(py)) {
@@ -286,10 +293,10 @@ pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t poin
        }
 
        // Closed-ring check (last vertex == first vertex).
-       const double first_x = d_ring[0];
-       const double first_y = d_ring[1];
-       const double last_x = d_ring[(vc - 1) * 2];
-       const double last_y = d_ring[(vc - 1) * 2 + 1];
+       const T first_x = d_ring[0];
+       const T first_y = d_ring[1];
+       const T last_x = d_ring[(vc - 1) * 2];
+       const T last_y = d_ring[(vc - 1) * 2 + 1];
        if (sycl::fabs(first_x - last_x) > eps || sycl::fabs(first_y - last_y) > eps) {
          d_res[i] = 0;
          return;
@@ -299,33 +306,33 @@ pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t poin
        int8_t on_edge = 0;
 
        for (size_t e = 0; e < vc - 1; ++e) {
-         const double ax = d_ring[e * 2];
-         const double ay = d_ring[e * 2 + 1];
-         const double bx = d_ring[(e + 1) * 2];
-         const double by = d_ring[(e + 1) * 2 + 1];
+         const T ax = d_ring[e * 2];
+         const T ay = d_ring[e * 2 + 1];
+         const T bx = d_ring[(e + 1) * 2];
+         const T by = d_ring[(e + 1) * 2 + 1];
 
          // Perpendicular distance from (px,py) to segment (a,b). Uses
          // cross² < eps²·len_sq instead of |cross|/sqrt(len_sq) < eps to
          // skip a soft-fp64 sqrt on the hot path.
-         const double dx = bx - ax;
-         const double dy = by - ay;
-         const double len_sq = dx * dx + dy * dy;
+         const T dx = bx - ax;
+         const T dy = by - ay;
+         const T len_sq = dx * dx + dy * dy;
          bool near_edge;
-         if (len_sq == 0.0) {
-           const double ex = px - ax;
-           const double ey = py - ay;
-           const double d_sq = ex * ex + ey * ey;
+         if (len_sq == T(0)) {
+           const T ex = px - ax;
+           const T ey = py - ay;
+           const T d_sq = ex * ex + ey * ey;
            near_edge = (d_sq < eps * eps);
          } else {
-           const double cross = (px - ax) * dy - (py - ay) * dx;
+           const T cross = (px - ax) * dy - (py - ay) * dx;
            near_edge = (cross * cross < eps * eps * len_sq);
          }
 
          if (near_edge) {
-           const double min_x = sycl::fmin(ax, bx) - eps;
-           const double max_x = sycl::fmax(ax, bx) + eps;
-           const double min_y = sycl::fmin(ay, by) - eps;
-           const double max_y = sycl::fmax(ay, by) + eps;
+           const T min_x = sycl::fmin(ax, bx) - eps;
+           const T max_x = sycl::fmax(ax, bx) + eps;
+           const T min_y = sycl::fmin(ay, by) - eps;
+           const T max_y = sycl::fmax(ay, by) + eps;
            if (px >= min_x && px <= max_x && py >= min_y && py <= max_y) {
              on_edge = 1;
              break;
@@ -334,7 +341,7 @@ pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t poin
 
          // Horizontal ray cast.
          if ((ay > py) != (by > py)) {
-           const double x_int = ax + (py - ay) * (bx - ax) / (by - ay);
+           const T x_int = ax + (py - ay) * (bx - ax) / (by - ay);
            if (px < x_int) {
              ++crossings;
            }
@@ -357,10 +364,10 @@ pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t poin
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
-    fprintf(stderr, "pgaccel: SYCL point_in_ring_bulk fp64 failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: SYCL point_in_ring_bulk failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: point_in_ring_bulk fp64 failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: point_in_ring_bulk failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
 }
@@ -517,25 +524,18 @@ extern "C" pgaccel_status pgaccel_point_in_ring_bulk(const void* points_xy, size
   if (!points_xy || !ring_xy || !results)
     return PGACCEL_ERROR_INIT;
 
+  // GPU dispatch only (CLAUDE.md rules 11/12). Both fp32 and fp64 go
+  // through the same templated SYCL kernel — soft-fp64 on Metal, native
+  // on CUDA / ROCm / Level Zero. The kernel uses no trig, so the fp64
+  // instantiation is unaffected by the soft-fp64 trig hang documented in
+  // sphere_distance_bulk_sycl.
   if (use_fp64) {
-    // GPU path — soft-fp64 on Metal, native on CUDA/ROCm/L0.
-    return point_in_ring_bulk_fp64_sycl(static_cast<const double*>(points_xy), point_count,
-                                        static_cast<const double*>(ring_xy), vertex_count, results);
-  } else {
-    const float* pts = static_cast<const float*>(points_xy);
-    const float* ring = static_cast<const float*>(ring_xy);
-    for (size_t i = 0; i < point_count; ++i) {
-      float px = pts[i * 2];
-      float py = pts[i * 2 + 1];
-      if (!is_finite_coord(px, py)) {
-        results[i] = 0;  // UNCERTAIN — NaN/Inf
-        continue;
-      }
-      results[i] = point_in_ring_one<float>(px, py, ring, vertex_count, EPS_FP32);
-    }
+    return point_in_ring_bulk_sycl<double>(static_cast<const double*>(points_xy), point_count,
+                                           static_cast<const double*>(ring_xy), vertex_count,
+                                           results);
   }
-
-  return PGACCEL_OK;
+  return point_in_ring_bulk_sycl<float>(static_cast<const float*>(points_xy), point_count,
+                                        static_cast<const float*>(ring_xy), vertex_count, results);
 }
 
 extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, const void* points_b,

@@ -342,6 +342,40 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_sycl_basic \
     && ./pgaccel-kernels/build/test_reduce_stats
 
+# Wipe the AdaptiveCpp Metal SSCP JIT cache, then run a single named
+# kernel test binary with a 5-minute timeout. Use this from the
+# autonomous loop / agents instead of stringing together a bare
+# `rm -rf ~/.acpp/...` and `./test_X` — those forms each prompt the
+# harness for permission separately and break the loop. This recipe is
+# allowlisted as a single `just gpu-test-cold` invocation.
+#
+# Usage:
+#   just gpu-test-cold spatial         # runs test_spatial cold
+#   just gpu-test-cold correctness     # runs test_correctness cold
+#   just gpu-test-cold spatial 60      # custom timeout in seconds
+#
+# Output is teed to /tmp/gpu-test-cold-<name>.log and the FAIL/Results
+# summary is grep'd at the end so you can see pass/fail without
+# scrolling through JIT compile warnings.
+gpu-test-cold name timeout_s="300":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just clear-jit
+    log="/tmp/gpu-test-cold-{{name}}.log"
+    cd pgaccel-kernels/build
+    timeout {{timeout_s}} ./test_{{name}} >"$log" 2>&1 || rc=$?
+    echo "--- summary (last 15 + Results/FAIL) ---"
+    tail -15 "$log" || true
+    echo "---"
+    grep -E "Results:|FAIL:" "$log" || echo "(no Results/FAIL lines found)"
+    exit "${rc:-0}"
+
+# Wipe JIT cache and run the full standalone GPU test suite cold.
+# Same single-invocation, single-prompt benefit as gpu-test-cold for the
+# whole suite. Use this for "is the kernel layer healthy" checks
+# between large changes.
+gpu-test-cold-all: clear-jit gpu-test
+
 # === CI ===
 
 # Run full CI locally (pre-commit checks + all tests)
