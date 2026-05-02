@@ -201,9 +201,6 @@ pub(super) unsafe fn try_inject(
             );
             return;
         }
-        // `class` is still only used for the `_` binding above; keep a no-op
-        // to silence unused-variable linting in case the enum grows.
-        let _ = &class;
 
         // Extract attno from first arg (or 0 for COUNT(*)).
         let (attno, rtype) = if op == AggOp::Count && aggref_ref.aggstar {
