@@ -1217,18 +1217,17 @@ impl AggExecState {
                 }
             }
             5 => {
-                // INET / CIDR key (24-byte canonical form). Not yet
-                // wired through VectorizedScan — extraction needs a
-                // TupleTableSlot for varlena detoasting that the
-                // arena-based scan doesn't carry. The planner
-                // classifier emits key_type = 5 (INETOID / CIDROID
-                // are accepted), but the executor declines here and
-                // PG handles the GROUP BY natively. Tracked under
-                // Phase 4 type coverage in TODO.
-                pgrx::debug1!(
-                    "pg_accel: INET/CIDR group key dispatched but vectorized extractor not wired; deferring to PG"
-                );
-                return;
+                // INET / CIDR key (24-byte canonical form). Inline-
+                // varlena fast path via vscan.extract_inet. Rows that
+                // need full detoast (TOAST pointer / compressed
+                // varlena) come back as null in the mask; the kernel
+                // hash table treats null keys as a single bucket
+                // (matches PG's hashinet null semantics).
+                let (vals, nulls) = unsafe { vscan.extract_inet(&gk_extract_info) };
+                for (j, v) in vals.iter().enumerate() {
+                    key_buf.extend_from_slice(v);
+                    key_null_mask.push(nulls[j]);
+                }
             }
             _ => return,
         }

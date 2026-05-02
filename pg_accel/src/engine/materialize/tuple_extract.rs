@@ -860,6 +860,142 @@ unsafe fn try_fast_read_heap<T: Copy>(
 ///
 /// All entries in `headers` must be valid `HeapTupleHeader` pointers.
 /// `info` must match the schema of these tuples.
+/// Extract 24-byte canonical INET / CIDR keys from a batch of HeapTuple
+/// headers (vectorized scan path).
+///
+/// INET is varlena. The inline layout at the attribute offset is:
+///   byte 0  : varlena header (1-byte short OR start of 4-byte long)
+///   byte 1+ : `inet_struct` payload — family + bits + ipaddr
+///
+/// Header parsing:
+///   - if `(byte_0 & 0x01) == 1` AND `byte_0 != 0x01`: short header,
+///     payload starts at byte 1, length = `byte_0 >> 1`
+///   - else if `(byte_0 & 0x03) == 0`: long header (4 bytes),
+///     payload starts at byte 4, length = `(u32_le(byte_0..3) >> 2)`
+///   - other forms (TOAST pointer / compressed) require detoasting —
+///     marked NULL in the output mask so the caller's slow path
+///     handles them.
+///
+/// Returns `(values, nulls)` where `values[i]` is the canonical
+/// 24-byte form (matches `PGACCEL_KEY_INET` layout) and `nulls[i] = 1`
+/// for rows that need slow-path extraction.
+///
+/// # Safety
+///
+/// All entries in `headers` must be valid `HeapTupleHeader` pointers.
+/// `info` must match the schema of these tuples (column must be
+/// INETOID or CIDROID).
+pub unsafe fn extract_inet_from_heap_headers(
+    headers: &[pg_sys::HeapTupleHeader],
+    info: &AttExtractInfo,
+) -> (Vec<[u8; 24]>, Vec<u8>) {
+    let n = headers.len();
+    let mut values = Vec::with_capacity(n);
+    let mut nulls = Vec::with_capacity(n);
+
+    for &hdr in headers {
+        if hdr.is_null() {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+        // SAFETY: hdr is valid per caller.
+        let h = unsafe { &*hdr };
+        let has_null_flag = (h.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
+
+        // Variable-length predecessors invalidate the precomputed
+        // data_offset; mark NULL so caller falls back to slow path.
+        if !info.can_fast_extract {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+        if has_null_flag && unsafe { has_preceding_null(h.t_bits.as_ptr(), info.att_index) } {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+        if has_null_flag && unsafe { att_is_null(h.t_bits.as_ptr(), info.att_index) } {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+
+        // SAFETY: t_hoff + data_offset addresses the attribute byte.
+        let attr_ptr = unsafe { (hdr as *const u8).add(h.t_hoff as usize + info.data_offset) };
+        // SAFETY: attr_ptr is in-bounds for the heap tuple data area.
+        let header_byte = unsafe { *attr_ptr };
+        // Detect TOAST pointer (1-byte external) — fall through to slow path.
+        if header_byte == 0x01 {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+        let (payload_offset, payload_len): (usize, usize) = if (header_byte & 0x01) == 1 {
+            // Short header: total = byte_0 >> 1, payload = total - 1.
+            let total = (header_byte >> 1) as usize;
+            (1, total.saturating_sub(1))
+        } else if header_byte.trailing_zeros() >= 2 {
+            // Long header: 4-byte little-endian, length in bits 2..31.
+            // SAFETY: attr_ptr + 0..3 is in-bounds (we already read +0).
+            let h0 = header_byte as u32;
+            let h1 = unsafe { *attr_ptr.add(1) } as u32;
+            let h2 = unsafe { *attr_ptr.add(2) } as u32;
+            let h3 = unsafe { *attr_ptr.add(3) } as u32;
+            let raw = h0 | (h1 << 8) | (h2 << 16) | (h3 << 24);
+            let total = (raw >> 2) as usize;
+            (4, total.saturating_sub(4))
+        } else {
+            // Compressed varlena (1-byte header with bit pattern 0b00000010
+            // / external indirect / etc.) — needs full detoast on the
+            // slow path.
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        };
+
+        // Need at least family + bits + 4 ipv4 bytes.
+        if payload_len < 6 {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+
+        // SAFETY: payload bytes are in-bounds.
+        let payload = unsafe { attr_ptr.add(payload_offset) };
+        let family = unsafe { *payload };
+        let bits = unsafe { *payload.add(1) };
+        let mut canon = [0u8; 24];
+        canon[0] = family;
+        canon[1] = bits;
+        match family {
+            2 => {
+                // IPv4: copy 4 ipaddr bytes; remaining stays zero.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(payload.add(2), canon.as_mut_ptr().add(2), 4);
+                }
+            }
+            3 if payload_len >= 18 => {
+                // IPv6: copy all 16 ipaddr bytes.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(payload.add(2), canon.as_mut_ptr().add(2), 16);
+                }
+            }
+            _ => {
+                // Unknown family / short payload → mark null so
+                // caller's slow path can recover.
+                values.push([0u8; 24]);
+                nulls.push(1);
+                continue;
+            }
+        }
+        values.push(canon);
+        nulls.push(0);
+    }
+
+    (values, nulls)
+}
+
 pub unsafe fn extract_f64_from_heap_headers(
     headers: &[pg_sys::HeapTupleHeader],
     info: &AttExtractInfo,

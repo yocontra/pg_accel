@@ -322,22 +322,33 @@ impl VectorizedScan {
         (values, nulls)
     }
 
-    // INET / CIDR group-key extraction is intentionally NOT exposed
-    // here. INET is varlena (1- or 4-byte header + inet_struct
-    // payload) and the arena-based VectorizedScan only stores raw
-    // heap-tuple bytes — extracting the payload safely needs either
-    // (a) PG's slot_getattr / heap_deform_tuple machinery (which the
-    // VectorizedScan doesn't carry a TupleTableSlot for), or (b)
-    // hand-rolled varlena-header parsing on the inline bytes.
-    //
-    // The agg dispatch path at `engine/executor/agg/execute.rs` will
-    // route INET group keys through a follow-up code path that uses
-    // tuple_extract::extract_inet (MinimalTuple-based) once the
-    // executor wires a fallback_slot through. For now,
-    // `pg_accel_keys_classifier` accepts INETOID + CIDROID and
-    // produces a key_type=5; the agg dispatch checks for key_type=5
-    // and short-circuits if no INET-capable extractor is available,
-    // letting PG handle the GROUP BY.
+    /// Extract a column as 24-byte canonical INET / CIDR keys.
+    ///
+    /// Inline-varlena fast path via
+    /// `tuple_extract::extract_inet_from_heap_headers`: parses the
+    /// 1-byte short OR 4-byte long varlena header on the inline bytes
+    /// at the attribute offset, then canonicalises to 24 bytes
+    /// (matches `PGACCEL_KEY_INET` layout). Rows that need full
+    /// detoast (TOAST pointer / compressed varlena / variable-length
+    /// predecessor that invalidates `data_offset`) are returned with
+    /// `nulls[i] = 1` so the caller can fall back.
+    ///
+    /// # Safety
+    ///
+    /// `info` must match the schema. Column must be INETOID (869) or
+    /// CIDROID (650) — both share the `inet_struct` payload shape.
+    #[must_use]
+    pub unsafe fn extract_inet(&self, info: &AttExtractInfo) -> (Vec<[u8; 24]>, Vec<u8>) {
+        let n = self.row_count;
+        let mut headers: Vec<pgrx::pg_sys::HeapTupleHeader> = Vec::with_capacity(n);
+        for i in 0..n {
+            // SAFETY: i < row_count, arena is finalized.
+            headers.push(unsafe { self.header(i) });
+        }
+        // SAFETY: headers come from the arena which lives until the
+        // next clear(); info matches the schema per caller.
+        unsafe { tuple_extract::extract_inet_from_heap_headers(&headers, info) }
+    }
 
     /// Extract raw `u8` bytes for a column (for hash agg key extraction).
     ///
