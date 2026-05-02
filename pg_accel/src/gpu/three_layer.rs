@@ -55,7 +55,17 @@ pub enum SpatialPredicate {
     /// (Equivalent to `Contains` with swapped arguments.)
     Within,
     /// `ST_DWithin` — are the geometries within the given distance (metres)?
-    #[allow(dead_code)] // reason: pg_test-only consumer until DWithin three-layer kernel lands
+    /// Routes through `pgaccel_sphere_distance_bulk` (fp32 SYCL kernel)
+    /// for Point × Point pairs; non-Point pairs short-circuit to
+    /// UNCERTAIN. fp64 returns NO_DEVICE pending the soft-fp64 trig
+    /// hang fix tracked in TODO Phase 7.
+    ///
+    /// `dead_code` allow: only constructed by the pg_test integration
+    /// suite today. `resolve_spatial_predicate` doesn't emit DWithin
+    /// because the threshold parameter has to flow through the
+    /// function-call args (separate dispatch path); the JOIN executor
+    /// uses spatial_eval directly only via the test harness.
+    #[allow(dead_code)]
     DWithin(f64),
     /// `ST_Disjoint` — do the geometries share NO space?
     /// Implemented as the negation of `Intersects` (every Intersects
@@ -86,8 +96,9 @@ pub struct SpatialResult {
     /// Indices of pairs that are definitely intersecting.
     pub definite_true: Vec<usize>,
     /// Indices of pairs that definitely do **not** intersect.
-    #[allow(dead_code)]
-    // reason: pg_test-only consumer (three_layer_tests.rs); the dispatch path uses `definite_true` + `uncertain` and skips the explicit `definite_false` slot
+    /// Used by `SpatialPredicate::Disjoint` (which inverts the
+    /// definite_true / definite_false buckets from `spatial_intersects`)
+    /// and by the pg_test integration tests in `three_layer_tests.rs`.
     pub definite_false: Vec<usize>,
     /// Indices of pairs the GPU marked numerically ambiguous. The caller
     /// rechecks these via PostGIS on the main backend thread (Layer 3
