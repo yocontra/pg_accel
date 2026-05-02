@@ -234,40 +234,44 @@ static void test_point_in_ring_bulk_1_point() {
 // sphere_distance edge cases
 // ---------------------------------------------------------------------------
 
+// fp32 path is the supported acceleration today; fp64 currently returns
+// PGACCEL_ERROR_NO_DEVICE because instantiating the soft-fp64 SYCL kernel
+// hangs Metal SSCP JIT. See sphere_distance_bulk_sycl<T> notes in
+// spatial_predicates.cpp and TODO Phase 7 (soft-fp64 trig coverage).
 static void test_sphere_distance_identical() {
   printf("--- sphere_distance: identical points (distance=0) ---\n");
-  double a[] = {10.0, 20.0};
-  double b[] = {10.0, 20.0};
-  double dist = -1;
+  float a[] = {10.0f, 20.0f};
+  float b[] = {10.0f, 20.0f};
+  float dist = -1;
   uint8_t unc = 0;
-  pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+  pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
   // Identical points produce uncertain (near-zero threshold)
   ASSERT_EQ("identical points -> uncertain", unc, 1);
 }
 
 static void test_sphere_distance_antipodal() {
   printf("--- sphere_distance: antipodal points ---\n");
-  double a[] = {0.0, 0.0};
-  double b[] = {180.0, 0.0};
-  double dist = 0;
+  float a[] = {0.0f, 0.0f};
+  float b[] = {180.0f, 0.0f};
+  float dist = 0;
   uint8_t unc = 0;
-  pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+  pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
   ASSERT_EQ("antipodal -> uncertain", unc, 1);
 }
 
 static void test_sphere_distance_near_antipodal() {
   printf("--- sphere_distance: near-antipodal points ---\n");
-  double a[] = {0.0, 0.0};
-  double b[] = {179.99, 0.0};
-  double dist = 0;
+  float a[] = {0.0f, 0.0f};
+  float b[] = {179.99f, 0.0f};
+  float dist = 0;
   uint8_t unc = 0;
-  pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+  pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
   // Near-antipodal: could be uncertain due to numerical instability
   // or definite with a large distance. Either is acceptable.
   ASSERT_TRUE("near-antipodal no crash", true);
   if (unc == 0) {
     // If definite, distance should be close to half circumference (~20015 km)
-    ASSERT_NEAR("near-antipodal ~20000km", dist / 1000.0, 20015.0, 100.0);
+    ASSERT_NEAR("near-antipodal ~20000km", dist / 1000.0f, 20015.0f, 100.0f);
   }
 }
 
@@ -275,24 +279,24 @@ static void test_sphere_distance_poles() {
   printf("--- sphere_distance: points at poles ---\n");
   // North pole to south pole
   {
-    double a[] = {0.0, 90.0};
-    double b[] = {0.0, -90.0};
-    double dist = 0;
+    float a[] = {0.0f, 90.0f};
+    float b[] = {0.0f, -90.0f};
+    float dist = 0;
     uint8_t unc = 0;
-    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     // Pole to pole is antipodal
     ASSERT_EQ("pole-to-pole -> uncertain", unc, 1);
   }
   // North pole to equator
   {
-    double a[] = {0.0, 90.0};
-    double b[] = {0.0, 0.0};
-    double dist = 0;
+    float a[] = {0.0f, 90.0f};
+    float b[] = {0.0f, 0.0f};
+    float dist = 0;
     uint8_t unc = 0;
-    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("pole-to-equator definite", unc, 0);
     // Quarter circumference ~10008 km
-    ASSERT_NEAR("pole-to-equator ~10008km", dist / 1000.0, 10008.0, 50.0);
+    ASSERT_NEAR("pole-to-equator ~10008km", dist / 1000.0f, 10008.0f, 50.0f);
   }
 }
 
@@ -1045,24 +1049,24 @@ static void test_sphere_distance_fp32_close() {
 
 static void test_sphere_distance_batch_mixed() {
   printf("--- sphere_distance: batch with mixed definite/uncertain ---\n");
-  double a[] = {
-      -74.006, 40.7128,  // NYC
-      0.0,     0.0,      // origin
-      0.0,     90.0,     // north pole
+  float a[] = {
+      -74.006f, 40.7128f,  // NYC
+      0.0f,     0.0f,      // origin
+      0.0f,     90.0f,     // north pole
   };
-  double b[] = {
-      -0.1278, 51.5074,  // London
-      0.0,     0.0,      // same as origin -> uncertain
-      0.0,     -90.0,    // south pole -> antipodal -> uncertain
+  float b[] = {
+      -0.1278f, 51.5074f,  // London
+      0.0f,     0.0f,      // same as origin -> uncertain
+      0.0f,     -90.0f,    // south pole -> antipodal -> uncertain
   };
-  double dists[3] = {0};
+  float dists[3] = {0};
   uint8_t uncs[3] = {0};
-  pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 3, true, dists, uncs);
+  pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 3, false, dists, uncs);
   ASSERT_STATUS_OK("batch mixed status", s);
   ASSERT_EQ("NYC-London definite", uncs[0], 0);
   ASSERT_EQ("same point uncertain", uncs[1], 1);
   ASSERT_EQ("pole-to-pole uncertain", uncs[2], 1);
-  ASSERT_NEAR("NYC-London ~5570km", dists[0] / 1000.0, 5570.0, 50.0);
+  ASSERT_NEAR("NYC-London ~5570km", dists[0] / 1000.0f, 5570.0f, 50.0f);
 }
 
 static void test_segment_intersects_T_junction() {

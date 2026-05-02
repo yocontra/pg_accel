@@ -365,6 +365,144 @@ pgaccel_status point_in_ring_bulk_fp64_sycl(const double* points_xy, size_t poin
   }
 }
 
+// ---------------------------------------------------------------------------
+// SYCL kernel — sphere_distance_bulk on the GPU (fp32 + fp64)
+//
+// Mirrors the host `sphere_distance_one<T>` algorithm: degree → radian
+// conversion, Haversine `a` term, antipodal check, atan2-based central
+// angle, multiply by Earth radius. Each work-item evaluates one
+// (lon_a, lat_a) × (lon_b, lat_b) pair.
+//
+// Math is open-coded with `sycl::sin / cos / atan2 / sqrt / fabs / isfinite`
+// so AdaptiveCpp's SSCP path picks up the Metal libkernel forwarders for
+// fp64 (soft-fp64 on Metal, native on CUDA / ROCm / Level Zero). The
+// malloc_shared + memcpy pattern matches `point_in_ring_bulk_fp64_sycl`
+// above — required to avoid the Metal SSCP small-buffer rebind issue
+// that drops trailing bytes when the kernel reads via malloc_device.
+// ---------------------------------------------------------------------------
+template <typename T>
+static pgaccel_status sphere_distance_bulk_sycl(const T* points_a, const T* points_b, size_t count,
+                                                T* distances, uint8_t* uncertain) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  try {
+    T* d_a = sycl::malloc_shared<T>(count * 2, *q);
+    T* d_b = sycl::malloc_shared<T>(count * 2, *q);
+    T* d_dist = sycl::malloc_shared<T>(count, *q);
+    uint8_t* d_unc = sycl::malloc_shared<uint8_t>(count, *q);
+
+    if (!d_a || !d_b || !d_dist || !d_unc) {
+      if (d_a)
+        sycl::free(d_a, *q);
+      if (d_b)
+        sycl::free(d_b, *q);
+      if (d_dist)
+        sycl::free(d_dist, *q);
+      if (d_unc)
+        sycl::free(d_unc, *q);
+      return PGACCEL_OOM;
+    }
+
+    std::memcpy(d_a, points_a, count * 2 * sizeof(T));
+    std::memcpy(d_b, points_b, count * 2 * sizeof(T));
+
+    // Math constants stay constexpr so Metal SSCP folds them into kernel IR
+    // as immediates rather than lambda captures. Promoting both to `const T`
+    // pushes the kernel past Metal's flat-args limit and the SSCP emitter
+    // spins forever compiling argbuffer layout — same class as the
+    // `__args` MSL compile error tracked in TODO Phase 7. Per-T predicates
+    // (antipodal_thresh, close_dist) need a runtime branch on
+    // `std::is_same<T, double>`, so they remain `const T` and ride as
+    // captures.
+    constexpr T deg_to_rad = static_cast<T>(M_PI / 180.0);
+    constexpr T earth_radius = static_cast<T>(EARTH_RADIUS_M);
+    const T antipodal_thresh = std::is_same<T, double>::value
+                                   ? static_cast<T>(ANTIPODAL_COS_THRESH_FP64)
+                                   : static_cast<T>(ANTIPODAL_COS_THRESH_FP32);
+    const T close_dist = std::is_same<T, double>::value ? static_cast<T>(CLOSE_DIST_M_FP64)
+                                                        : static_cast<T>(CLOSE_DIST_M_FP32);
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const T lon1_deg = d_a[i * 2];
+       const T lat1_deg = d_a[i * 2 + 1];
+       const T lon2_deg = d_b[i * 2];
+       const T lat2_deg = d_b[i * 2 + 1];
+
+       // NaN / Inf -> UNCERTAIN with zero distance.
+       if (!sycl::isfinite(lon1_deg) || !sycl::isfinite(lat1_deg) || !sycl::isfinite(lon2_deg) ||
+           !sycl::isfinite(lat2_deg)) {
+         d_dist[i] = T(0);
+         d_unc[i] = 1;
+         return;
+       }
+
+       const T lat1 = lat1_deg * deg_to_rad;
+       const T lon1 = lon1_deg * deg_to_rad;
+       const T lat2 = lat2_deg * deg_to_rad;
+       const T lon2 = lon2_deg * deg_to_rad;
+
+       const T dlat = lat2 - lat1;
+       const T dlon = lon2 - lon1;
+
+       const T sin_dlat = sycl::sin(dlat / T(2));
+       const T sin_dlon = sycl::sin(dlon / T(2));
+
+       T a = sin_dlat * sin_dlat + sycl::cos(lat1) * sycl::cos(lat2) * sin_dlon * sin_dlon;
+
+       // Antipodal check: a near 1.0 means the asin-form below loses precision.
+       if (a > antipodal_thresh) {
+         d_dist[i] = T(0);
+         d_unc[i] = 1;
+         return;
+       }
+
+       // Clamp a to [0, 1] for numerical safety before sqrt.
+       if (a < T(0))
+         a = T(0);
+       if (a > T(1))
+         a = T(1);
+
+       // c = 2*asin(sqrt(a)). Mathematically equivalent to the
+       // 2*atan2(sqrt(a), sqrt(1-a)) form on the same domain a ∈ [0,1] —
+       // chosen because Metal soft-fp64 emits asin/sqrt forwarders cleanly
+       // (kAsinMinimax in the JIT cache), while atan2 lowering pulled in
+       // additional soft-fp64 helpers that hung Metal SSCP compilation.
+       const T c = T(2) * sycl::asin(sycl::sqrt(a));
+       const T d = earth_radius * c;
+
+       // Very close points: precision loss flag.
+       if (d < close_dist) {
+         d_dist[i] = d;
+         d_unc[i] = 1;
+         return;
+       }
+
+       d_dist[i] = d;
+       d_unc[i] = 0;
+     }).wait_and_throw();
+
+    std::memcpy(distances, d_dist, count * sizeof(T));
+    std::memcpy(uncertain, d_unc, count * sizeof(uint8_t));
+
+    sycl::free(d_a, *q);
+    sycl::free(d_b, *q);
+    sycl::free(d_dist, *q);
+    sycl::free(d_unc, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL sphere_distance_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: sphere_distance_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -408,40 +546,29 @@ extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, con
   if (!points_a || !points_b || !distances || !uncertain)
     return PGACCEL_ERROR_INIT;
 
+  // GPU dispatch only — no CPU host loop (CLAUDE.md rules 11/12).
+  //
+  // fp32 path runs the SYCL kernel on every backend (Metal native fp32,
+  // CUDA / ROCm / Level Zero native).
+  //
+  // fp64 path is currently deferred (returns PGACCEL_ERROR_NO_DEVICE so
+  // the caller's three-layer recheck routes the row to PG via PostGIS).
+  // Reason: with AdaptiveCpp `fork-safe-metal` @ 4f3cde11, instantiating
+  // `sphere_distance_bulk_sycl<double>` registers a kernel whose Metal
+  // SSCP soft-fp64 JIT hangs the compiler at .dylib load — and because
+  // AdaptiveCpp prepares all kernels in the dylib together, an unrelated
+  // (e.g. `point_in_ring_bulk_fp64_sycl`) dispatch then blocks forever
+  // waiting on the same compile barrier. Reproduces deterministically with
+  // `sycl::sin / cos / sqrt / atan2 / asin` on `double`. Same class as the
+  // `__args` MSL compile error tracked in TODO.md Phase 7. fp32 SYCL is
+  // unaffected. Re-enable fp64 once soft-fp64 trig coverage stabilises in
+  // the AdaptiveCpp fork.
   if (use_fp64) {
-    const double* a = static_cast<const double*>(points_a);
-    const double* b = static_cast<const double*>(points_b);
-    double* dist = static_cast<double*>(distances);
-    for (size_t i = 0; i < count; ++i) {
-      double lon1 = a[i * 2], lat1 = a[i * 2 + 1];
-      double lon2 = b[i * 2], lat2 = b[i * 2 + 1];
-      if (!is_finite_coord(lon1, lat1) || !is_finite_coord(lon2, lat2)) {
-        dist[i] = 0.0;
-        uncertain[i] = 1;
-        continue;
-      }
-      sphere_distance_one<double>(lon1, lat1, lon2, lat2, EPS_FP64, CLOSE_DIST_M_FP64,
-                                  ANTIPODAL_COS_THRESH_FP64, &dist[i], &uncertain[i]);
-    }
-  } else {
-    const float* a = static_cast<const float*>(points_a);
-    const float* b = static_cast<const float*>(points_b);
-    float* dist = static_cast<float*>(distances);
-    for (size_t i = 0; i < count; ++i) {
-      float lon1 = a[i * 2], lat1 = a[i * 2 + 1];
-      float lon2 = b[i * 2], lat2 = b[i * 2 + 1];
-      if (!is_finite_coord(lon1, lat1) || !is_finite_coord(lon2, lat2)) {
-        dist[i] = 0.0f;
-        uncertain[i] = 1;
-        continue;
-      }
-      sphere_distance_one<float>(lon1, lat1, lon2, lat2, EPS_FP32,
-                                 static_cast<float>(CLOSE_DIST_M_FP32), ANTIPODAL_COS_THRESH_FP32,
-                                 &dist[i], &uncertain[i]);
-    }
+    return PGACCEL_ERROR_NO_DEVICE;
   }
-
-  return PGACCEL_OK;
+  return sphere_distance_bulk_sycl<float>(static_cast<const float*>(points_a),
+                                          static_cast<const float*>(points_b), count,
+                                          static_cast<float*>(distances), uncertain);
 }
 
 extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, const void* segs_b,

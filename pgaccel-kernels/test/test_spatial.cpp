@@ -188,38 +188,42 @@ static void test_point_in_ring_fp32() {
 static void test_sphere_distance_basic() {
   printf("--- sphere_distance: basic ---\n");
 
+  // fp32 path is the supported acceleration today; fp64 currently returns
+  // PGACCEL_ERROR_NO_DEVICE because instantiating the soft-fp64 SYCL kernel
+  // hangs Metal SSCP JIT. See sphere_distance_bulk_sycl<T> notes in
+  // spatial_predicates.cpp and TODO Phase 7 (soft-fp64 trig coverage).
+
   // New York to London (known ~5570 km)
   {
-    double a[] = {-74.006, 40.7128};  // NYC
-    double b[] = {-0.1278, 51.5074};  // London
-    double dist = 0;
+    float a[] = {-74.006f, 40.7128f};
+    float b[] = {-0.1278f, 51.5074f};
+    float dist = 0;
     uint8_t unc = 1;
-    pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("status OK", s, PGACCEL_OK);
     ASSERT_EQ("NYC-London definite", unc, 0);
-    // Haversine gives ~5570 km, allow 50 km tolerance
-    ASSERT_NEAR("NYC-London ~5570km", dist / 1000.0, 5570.0, 50.0);
+    ASSERT_NEAR("NYC-London ~5570km", dist / 1000.0f, 5570.0f, 50.0f);
   }
 
   // Same point — should be uncertain (very close)
   {
-    double a[] = {0.0, 0.0};
-    double b[] = {0.0, 0.0};
-    double dist = 0;
+    float a[] = {0.0f, 0.0f};
+    float b[] = {0.0f, 0.0f};
+    float dist = 0;
     uint8_t unc = 0;
-    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("same point -> uncertain", unc, 1);
   }
 
   // Equator distance: 1 degree longitude at equator ~ 111.195 km
   {
-    double a[] = {0.0, 0.0};
-    double b[] = {1.0, 0.0};
-    double dist = 0;
+    float a[] = {0.0f, 0.0f};
+    float b[] = {1.0f, 0.0f};
+    float dist = 0;
     uint8_t unc = 0;
-    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("equator 1deg definite", unc, 0);
-    ASSERT_NEAR("equator 1deg ~111km", dist / 1000.0, 111.195, 1.0);
+    ASSERT_NEAR("equator 1deg ~111km", dist / 1000.0f, 111.195f, 1.0f);
   }
 }
 
@@ -228,35 +232,45 @@ static void test_sphere_distance_edge_cases() {
 
   // Antipodal points (0,0) to (180,0)
   {
-    double a[] = {0.0, 0.0};
-    double b[] = {180.0, 0.0};
-    double dist = 0;
+    float a[] = {0.0f, 0.0f};
+    float b[] = {180.0f, 0.0f};
+    float dist = 0;
     uint8_t unc = 0;
-    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("antipodal -> uncertain", unc, 1);
   }
 
   // NaN input
   {
-    double nan_val = std::numeric_limits<double>::quiet_NaN();
-    double a[] = {nan_val, 0.0};
-    double b[] = {0.0, 0.0};
-    double dist = 0;
+    float nan_val = std::numeric_limits<float>::quiet_NaN();
+    float a[] = {nan_val, 0.0f};
+    float b[] = {0.0f, 0.0f};
+    float dist = 0;
     uint8_t unc = 0;
-    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("NaN -> uncertain", unc, 1);
   }
 
   // Null pointers
   {
-    pgaccel_status s = pgaccel_sphere_distance_bulk(nullptr, nullptr, 1, true, nullptr, nullptr);
+    pgaccel_status s = pgaccel_sphere_distance_bulk(nullptr, nullptr, 1, false, nullptr, nullptr);
     ASSERT_EQ("null -> error", s, PGACCEL_ERROR_INIT);
   }
 
   // Zero count
   {
-    pgaccel_status s = pgaccel_sphere_distance_bulk(nullptr, nullptr, 0, true, nullptr, nullptr);
+    pgaccel_status s = pgaccel_sphere_distance_bulk(nullptr, nullptr, 0, false, nullptr, nullptr);
     ASSERT_EQ("zero count OK", s, PGACCEL_OK);
+  }
+
+  // fp64 path currently returns NO_DEVICE; caller routes to PG recheck.
+  {
+    double a[] = {-74.006, 40.7128};
+    double b[] = {-0.1278, 51.5074};
+    double dist = 0;
+    uint8_t unc = 0;
+    pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    ASSERT_EQ("fp64 -> NO_DEVICE (deferred)", s, PGACCEL_ERROR_NO_DEVICE);
   }
 }
 

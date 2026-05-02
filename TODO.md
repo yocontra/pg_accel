@@ -312,19 +312,18 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     `three_layer::spatial_contains` (`src/gpu/three_layer.rs:160`) returns
     `all_uncertain()` — stub only.
   - `st_dwithin`, `st_distance`: `three_layer::spatial_dwithin`
-    (`src/gpu/three_layer.rs:176`) returns `all_uncertain()`.
-    `pgaccel_sphere_distance_bulk` (`spatial_predicates.cpp:403`) exists
-    but is **a host-side CPU loop, not a SYCL kernel** — there is no
-    `q.submit` / `parallel_for` in its body, only a templated
-    `sphere_distance_one<T>()` host function called in a `for` loop.
-    Wiring it through `three_layer::spatial_dwithin` as-is would route
-    a "GPU strategy" through CPU code, violating CLAUDE.md rule 11
-    ("NEVER add CPU fallbacks") / rule 12 (SYCL-only). The correct
-    sequencing is: (a) write a real `sphere_distance_bulk_sycl_*`
-    kernel mirroring the `point_in_ring_bulk_fp{32,64}_sycl` pattern at
-    `spatial_predicates.cpp:235-401`, then (b) wire it through
-    `three_layer::spatial_dwithin`. The existing host-loop
-    implementation is point-only regardless.
+    (`src/gpu/three_layer.rs:176`) returns `all_uncertain()`. The
+    underlying SYCL kernel `sphere_distance_bulk_sycl<T>` exists at
+    `spatial_predicates.cpp:383` (fp32 path real GPU; fp64 currently
+    returns `PGACCEL_ERROR_NO_DEVICE` pending the soft-fp64 trig JIT
+    fix tracked in Phase 7). Wiring `spatial_dwithin` through it
+    requires extracting one (lon, lat) pair per geometry endpoint,
+    calling `pgaccel_sphere_distance_bulk` (point-only today; polygon
+    centroids would need a separate kernel), and threshold-comparing
+    `distance ≤ threshold_m` to produce `definite_true / definite_false
+    / uncertain`. Limitation: kernel is point-only — for non-point
+    inputs, the dispatch must short-circuit to `all_uncertain()` so
+    PG handles via PostGIS recheck.
   - `st_area`, `st_length`: no kernel.
   - `st_equals`, `st_disjoint`, `st_touches`, `st_crosses`, `st_overlaps`:
     no kernel AND no `SpatialPredicate` enum variant. The unknown-name
@@ -716,6 +715,41 @@ work is tracked in the Post-1.0 (deferred) section.
 - Depends on: Phase 1 Emitter correctness fixes landed.
 - **Done when**: Each item has a dedicated commit; shader size / compile
   time measured before and after.
+
+### Metal SSCP soft-fp64 trig JIT hang on `sphere_distance_bulk_sycl<double>`
+
+- **What**: Instantiating `sphere_distance_bulk_sycl<double>` (with
+  `sycl::sin / cos / asin / sqrt` on `double`) causes the Metal SSCP JIT
+  to hang at first dispatch on macOS Metal — and because AdaptiveCpp
+  prepares all kernels in the dylib together, *unrelated* kernels (e.g.
+  `point_in_ring_bulk_fp64_sycl`) then block forever waiting on the same
+  compile barrier. Reproduces with the asin form and the atan2 form.
+  Workaround landed: `pgaccel_sphere_distance_bulk` returns
+  `PGACCEL_ERROR_NO_DEVICE` when `use_fp64=true`, so only the fp32 SYCL
+  kernel is instantiated. fp32 path runs fine on every backend. Same
+  class as the `__args` MSL compile error below — both surface as
+  Metal SSCP / soft-fp64 emitter bugs. MAJOR (blocks fp64 acceleration
+  of `st_dwithin` and any future polygonal `st_distance`). Repro:
+  remove the `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;` guard at
+  `spatial_predicates.cpp:540`, rebuild, run `test_spatial` — first
+  point_in_ring sub-test hangs indefinitely.
+- **Why**: Without fp64 GPU, `st_dwithin` precision tops out at fp32 on
+  Metal (~10⁻⁵ deg ≈ 1m at equator). PostGIS-grade precision (sub-mm)
+  needs the fp64 path.
+- **How**:
+  - Diff the SSCP-emitted MSL for the fp32 vs fp64 instantiations of
+    the same kernel; identify which soft-fp64 helper / forwarder is
+    missing or mis-emitted (likely sin/cos/asin/sqrt path).
+  - Cross-check whether `h3_ops.cpp:630-694` (which uses `sycl::sin /
+    cos` on `double` successfully under soft-fp64) hits the same path
+    — if not, what does sphere_distance do differently?
+  - Likely upstream-AdaptiveCpp territory. Track in the fork-safe-metal
+    branch.
+- Depends on: Metal Emitter performance/robustness polish (Phase 7).
+- **Done when**: The `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;`
+  guard at `spatial_predicates.cpp:540` is removed, `test_spatial` and
+  `test_correctness` pass with `use_fp64=true` for sphere_distance, and
+  no kernels in the dylib hang.
 
 ### `__args` MSL compile error on fused stats kernels at large N
 

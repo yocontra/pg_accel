@@ -28,7 +28,14 @@
       "Bash(cmake --build . --target test_correctness -j4)",
       "Bash(./test_correctness)",
       "Bash(./test_fork)",
-      "Bash(cmake --build . -j4)"
+      "Bash(cmake --build . -j4)",
+      "Bash(timeout 180 ./test_spatial)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(cmake --build . --target test_spatial -j4)",
+      "Bash(timeout 90 ./test_spatial)",
+      "Bash(timeout 120 ./test_spatial)",
+      "Read(//private/tmp/**)",
+      "Bash(timeout 60 ./test_spatial)"
     ]
   }
 }
