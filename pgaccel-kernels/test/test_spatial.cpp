@@ -577,6 +577,185 @@ static void test_point_in_ring_fp64_gpu_dispatch() {
 }
 
 // ---------------------------------------------------------------------------
+// st_area_bulk tests — Shoelace formula on flat [x,y,x,y,...] CSR layout
+// ---------------------------------------------------------------------------
+//
+// Kernel signature (`pgaccel_st_area_bulk`): single-ring polygons only;
+// dispatcher must short-circuit multi-ring / hole shapes to UNCERTAIN
+// before invoking. Result returned in coordinate-system units squared.
+// Both fp32 and fp64 paths are SYCL kernels.
+
+static void test_st_area_bulk_basic_fp32() {
+  printf("--- st_area_bulk: basic fp32 ---\n");
+
+  // Three single-ring polygons packed CSR-style:
+  //   row 0: unit square at origin  → area = 1
+  //   row 1: 3-4 right triangle     → area = 6
+  //   row 2: 10×10 square           → area = 100
+  const float coords[] = {
+      // Unit square (5 verts, last == first to close ring is OK but
+      // not required by Shoelace; kernel handles either)
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      // 3-4-5 triangle
+      0.0f,
+      0.0f,
+      3.0f,
+      0.0f,
+      0.0f,
+      4.0f,
+      // 10×10 square
+      0.0f,
+      0.0f,
+      10.0f,
+      0.0f,
+      10.0f,
+      10.0f,
+      0.0f,
+      10.0f,
+  };
+  // CSR offsets count COORDINATES (not vertices): unit square has
+  // 4 verts × 2 = 8 coords; triangle 3 × 2 = 6; large square 4 × 2 = 8.
+  const uint32_t offsets[] = {0, 8, 14, 22};
+  float areas[3] = {-1.0f, -1.0f, -1.0f};
+  pgaccel_status s = pgaccel_st_area_bulk(coords, offsets, 3, false, areas);
+  ASSERT_EQ("st_area_bulk fp32 status OK", s, PGACCEL_OK);
+  ASSERT_NEAR("st_area_bulk unit square = 1", areas[0], 1.0f, 1e-5f);
+  ASSERT_NEAR("st_area_bulk 3-4 triangle = 6", areas[1], 6.0f, 1e-5f);
+  ASSERT_NEAR("st_area_bulk 10×10 square = 100", areas[2], 100.0f, 1e-3f);
+}
+
+static void test_st_area_bulk_orientation_fp32() {
+  printf("--- st_area_bulk: orientation invariance ---\n");
+
+  // Same triangle, CCW vs CW order — Shoelace returns |area|, so both
+  // should give the same magnitude.
+  const float coords[] = {
+      // CCW: (0,0) → (3,0) → (0,4)
+      0.0f,
+      0.0f,
+      3.0f,
+      0.0f,
+      0.0f,
+      4.0f,
+      // CW: (0,0) → (0,4) → (3,0)
+      0.0f,
+      0.0f,
+      0.0f,
+      4.0f,
+      3.0f,
+      0.0f,
+  };
+  const uint32_t offsets[] = {0, 6, 12};
+  float areas[2] = {-1.0f, -1.0f};
+  pgaccel_status s = pgaccel_st_area_bulk(coords, offsets, 2, false, areas);
+  ASSERT_EQ("st_area_bulk orientation status OK", s, PGACCEL_OK);
+  ASSERT_NEAR("st_area_bulk CCW triangle = 6", areas[0], 6.0f, 1e-5f);
+  ASSERT_NEAR("st_area_bulk CW triangle = 6 (|.|)", areas[1], 6.0f, 1e-5f);
+}
+
+static void test_st_area_bulk_empty() {
+  printf("--- st_area_bulk: empty input ---\n");
+  // row_count = 0 → OK no-op (per FFI contract).
+  pgaccel_status s = pgaccel_st_area_bulk(nullptr, nullptr, 0, false, nullptr);
+  ASSERT_EQ("st_area_bulk empty input is OK", s, PGACCEL_OK);
+}
+
+// ---------------------------------------------------------------------------
+// st_length_bulk tests — Euclidean edge-length sum (fp32 only today)
+// ---------------------------------------------------------------------------
+
+static void test_st_length_bulk_closed_ring() {
+  printf("--- st_length_bulk: closed ring (Polygon perimeter) ---\n");
+
+  // Unit square closed: 4 edges × 1 = 4
+  // 3-4-5 right triangle closed: 3 + 4 + 5 = 12
+  const float coords[] = {
+      // Unit square
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      // 3-4-5 triangle: (0,0) (3,0) (0,4) — closed adds wrap-around 5
+      0.0f,
+      0.0f,
+      3.0f,
+      0.0f,
+      0.0f,
+      4.0f,
+  };
+  const uint32_t offsets[] = {0, 8, 14};
+  float lengths[2] = {-1.0f, -1.0f};
+  pgaccel_status s = pgaccel_st_length_bulk(coords, offsets, 2, false, true, lengths);
+  ASSERT_EQ("st_length_bulk closed status OK", s, PGACCEL_OK);
+  ASSERT_NEAR("unit-square perimeter = 4", lengths[0], 4.0f, 1e-5f);
+  ASSERT_NEAR("3-4-5 triangle perimeter = 12", lengths[1], 12.0f, 1e-4f);
+}
+
+static void test_st_length_bulk_open_path() {
+  printf("--- st_length_bulk: open path (LineString) ---\n");
+
+  // Open path (closed_ring = false):
+  //   (0,0) → (3,0) → (0,4): two edges of length 3 and 5 → total 8
+  //   (0,0) → (3,0): single edge of length 3
+  const float coords[] = {
+      0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 4.0f, 0.0f, 0.0f, 3.0f, 0.0f,
+  };
+  const uint32_t offsets[] = {0, 6, 10};
+  float lengths[2] = {-1.0f, -1.0f};
+  pgaccel_status s = pgaccel_st_length_bulk(coords, offsets, 2, false, false, lengths);
+  ASSERT_EQ("st_length_bulk open status OK", s, PGACCEL_OK);
+  // Two edges: (0,0)→(3,0) length 3; (3,0)→(0,4) length 5. Total 8.
+  ASSERT_NEAR("open 3-edge path length = 8", lengths[0], 8.0f, 1e-4f);
+  ASSERT_NEAR("open 1-edge path length = 3", lengths[1], 3.0f, 1e-5f);
+}
+
+static void test_st_length_bulk_degenerate() {
+  printf("--- st_length_bulk: degenerate inputs ---\n");
+
+  // Single-vertex path → length 0 (vertex_count < 2 sentinel).
+  // Two coincident vertices → length 0.
+  const float coords[] = {
+      // Single vertex
+      5.0f,
+      5.0f,
+      // Two coincident vertices
+      2.0f,
+      2.0f,
+      2.0f,
+      2.0f,
+  };
+  const uint32_t offsets[] = {0, 2, 6};
+  float lengths[2] = {-1.0f, -1.0f};
+  pgaccel_status s = pgaccel_st_length_bulk(coords, offsets, 2, false, false, lengths);
+  ASSERT_EQ("st_length_bulk degenerate status OK", s, PGACCEL_OK);
+  ASSERT_NEAR("single vertex → length 0", lengths[0], 0.0f, 1e-6f);
+  ASSERT_NEAR("coincident vertices → length 0", lengths[1], 0.0f, 1e-6f);
+}
+
+static void test_st_length_bulk_fp64_defers() {
+  printf("--- st_length_bulk: fp64 returns NO_DEVICE (Phase 7) ---\n");
+  // fp64 path is gated off pending soft-fp64 sqrt fix; confirm the
+  // public entry actually surfaces NO_DEVICE so the dispatcher routes
+  // to PG instead of computing wrong-type results.
+  const double coords[] = {0.0, 0.0, 3.0, 0.0};
+  const uint32_t offsets[] = {0, 4};
+  double lengths[1] = {-1.0};
+  pgaccel_status s = pgaccel_st_length_bulk(coords, offsets, 1, true, false, lengths);
+  ASSERT_EQ("fp64 path returns NO_DEVICE", s, PGACCEL_ERROR_NO_DEVICE);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -605,6 +784,15 @@ int main() {
   test_segment_intersects_basic();
   test_segment_intersects_edge_cases();
   test_segment_intersects_fp32();
+
+  test_st_area_bulk_basic_fp32();
+  test_st_area_bulk_orientation_fp32();
+  test_st_area_bulk_empty();
+
+  test_st_length_bulk_closed_ring();
+  test_st_length_bulk_open_path();
+  test_st_length_bulk_degenerate();
+  test_st_length_bulk_fp64_defers();
 
   printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
   if (g_tests_failed > 0) {
