@@ -59,90 +59,15 @@ static void write_pixel(void* data, size_t idx, int pt, double val) {
   }
 }
 
-/* ── Bytecode expression evaluator ────────────────────────────── */
-
-static double eval_expr(const pgaccel_expr* expr, const double* band_values) {
-  double stack[16];
-  int sp = 0;
-
-  for (size_t i = 0; i < expr->inst_count; i++) {
-    const pgaccel_expr_inst* inst = &expr->instructions[i];
-    switch (inst->op) {
-      case PGACCEL_OP_LOAD_BAND:
-        stack[sp++] = band_values[inst->arg.band_index];
-        break;
-      case PGACCEL_OP_LOAD_CONST:
-        stack[sp++] = inst->arg.constant;
-        break;
-      case PGACCEL_OP_ADD: {
-        double b = stack[--sp];
-        stack[sp - 1] += b;
-        break;
-      }
-      case PGACCEL_OP_SUB: {
-        double b = stack[--sp];
-        stack[sp - 1] -= b;
-        break;
-      }
-      case PGACCEL_OP_MUL: {
-        double b = stack[--sp];
-        stack[sp - 1] *= b;
-        break;
-      }
-      case PGACCEL_OP_DIV: {
-        double b = stack[--sp];
-        if (b == 0.0) {
-          stack[sp - 1] = std::nan("");
-        } else {
-          stack[sp - 1] /= b;
-        }
-        break;
-      }
-      case PGACCEL_OP_SQRT:
-        stack[sp - 1] = std::sqrt(stack[sp - 1]);
-        break;
-      case PGACCEL_OP_ABS:
-        stack[sp - 1] = std::fabs(stack[sp - 1]);
-        break;
-      case PGACCEL_OP_LOG:
-        stack[sp - 1] = (stack[sp - 1] > 0.0) ? std::log(stack[sp - 1]) : std::nan("");
-        break;
-      case PGACCEL_OP_POW: {
-        double b = stack[--sp];
-        stack[sp - 1] = std::pow(stack[sp - 1], b);
-        break;
-      }
-      case PGACCEL_OP_GT: {
-        double b = stack[--sp];
-        stack[sp - 1] = (stack[sp - 1] > b) ? 1.0 : 0.0;
-        break;
-      }
-      case PGACCEL_OP_LT: {
-        double b = stack[--sp];
-        stack[sp - 1] = (stack[sp - 1] < b) ? 1.0 : 0.0;
-        break;
-      }
-      case PGACCEL_OP_EQ: {
-        double b = stack[--sp];
-        stack[sp - 1] = (stack[sp - 1] == b) ? 1.0 : 0.0;
-        break;
-      }
-      case PGACCEL_OP_SELECT: {
-        double fb = stack[--sp];
-        double tb = stack[--sp];
-        double cond = stack[--sp];
-        stack[sp++] = (cond != 0.0) ? tb : fb;
-        break;
-      }
-    }
-  }
-  return (sp > 0) ? stack[0] : 0.0;
-}
-
-// Threshold below which inline CPU evaluation beats a GPU kernel launch.
-static constexpr size_t GPU_TILE_THRESHOLD = 65536;
-
 /* ── SYCL GPU implementations ────────────────────────────────── */
+//
+// CLAUDE.md rules 11/12 — kernels execute on GPU via SYCL. The
+// host-side `eval_expr` interpreter and `eval_expr_f32_inline`
+// scalar fast-path that previously ran small tiles on CPU (and
+// fraudulently called `pgaccel_record_gpu_exec()` afterwards) were
+// deleted in the 2026-05-02 cheat audit. The real device-side
+// bytecode evaluator lives inside `map_algebra_gpu`'s parallel_for
+// kernel body.
 
 static sycl::queue& get_queue() {
   // Leak on purpose: the AdaptiveCpp Metal runtime has atexit teardown
@@ -153,58 +78,19 @@ static sycl::queue& get_queue() {
   return *q;
 }
 
-/* Per-row map_algebra fast path.
+/* map_algebra GPU dispatcher.
  *
- * The PG executor calls this once per raster tuple. Rasters in
- * benchmarks are tiny (8×8 – 64×64 = 64 – 4096 pixels). A true
- * GPU kernel launch for 64 pixels is dominated by kernel-launch
- * overhead (~100 us per launch on Metal); kernel compute would be
- * <1 us for 64 pixel evaluations.
+ * Per CLAUDE.md rules 11/12 there is no host-loop fast-path or
+ * non-FP32 host fallback: every pixel goes through the SYCL kernel.
+ * The previous small-tile inline evaluator and the post-SYCL host
+ * fallthrough loop both called pgaccel_record_gpu_exec() while
+ * computing on CPU — that fraudulent stats reporting is gone.
  *
- * For small tiles we evaluate inline on the host without any device
- * allocation. This is NOT a CPU "fallback" — it is the correct
- * mapping of a 64-element problem onto the CPU SIMD/cache pipeline,
- * which is simply faster than a GPU at this granularity. The GPU
- * queue is still the scheduling primitive: the data lives in
- * pg_accel's query batch and the C++ host code runs on the PG
- * backend thread that owns the query.
- *
- * For very large rasters (>= GPU_TILE_THRESHOLD pixels, e.g. a single
- * huge raster), we go to a real SYCL kernel launch. */
-
-/// Inline evaluator specialised for float32 pixels — the common case
-/// from PostGIS rasters. Avoids the per-pixel switch in read_pixel.
-static void eval_expr_f32_inline(const float* const* bands, size_t pixel_count,
-                                 const pgaccel_expr* expr, float* out, uint8_t* nodata_mask) {
-  // Stack scratch for band values (up to 64 bands, matches the
-  // eval_expr stack size above). If caller exceeds this we fall
-  // back to heap.
-  double stack_band_vals[64];
-  double* band_vals = stack_band_vals;
-  std::vector<double> heap_bands;
-  if (expr->band_count > 64) {
-    heap_bands.resize(expr->band_count);
-    band_vals = heap_bands.data();
-  }
-
-  for (size_t p = 0; p < pixel_count; ++p) {
-    if (nodata_mask != nullptr && nodata_mask[p] != 0) {
-      out[p] = 0.0f;
-      continue;
-    }
-    for (size_t b = 0; b < expr->band_count; ++b) {
-      band_vals[b] = static_cast<double>(bands[b][p]);
-    }
-    double r = eval_expr(expr, band_vals);
-    if (std::isnan(r)) {
-      if (nodata_mask != nullptr)
-        nodata_mask[p] = 1;
-      out[p] = 0.0f;
-    } else {
-      out[p] = static_cast<float>(r);
-    }
-  }
-}
+ * Only PGACCEL_PT_FLOAT32 inputs are accelerated today (Metal is
+ * fp32-only, and the kernel body uses float throughout). Other pixel
+ * types return PGACCEL_ERROR_UNSUPPORTED so the caller routes through
+ * PG (the documented escape hatch for unsupported input shapes).
+ */
 
 static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pixel_count,
                                       int pixel_type, const pgaccel_expr* expr, void* output_pixels,
@@ -216,36 +102,17 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
   if (psz == 0)
     return PGACCEL_ERROR_UNSUPPORTED;
 
-  // Fast path: small tile, float32 pixels (by far the dominant case
-  // in PostGIS raster benchmarks). Evaluate inline, no heap alloc,
-  // no device dispatch.
-  if (pixel_count < GPU_TILE_THRESHOLD && pixel_type == PGACCEL_PT_FLOAT32) {
-    // Reinterpret the const void** as const float* per band.
-    // We know layout because pixel_type == FLOAT32.
-    const size_t bc = expr->band_count;
-    // Stack array for up to 64 bands; heap if more.
-    const float* stack_bands[64];
-    const float** bands = stack_bands;
-    std::vector<const float*> heap_bands;
-    if (bc > 64) {
-      heap_bands.resize(bc);
-      bands = heap_bands.data();
-    }
-    for (size_t b = 0; b < bc; ++b) {
-      bands[b] = static_cast<const float*>(band_pixels[b]);
-    }
-    eval_expr_f32_inline(bands, pixel_count, expr, static_cast<float*>(output_pixels), nodata_mask);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
+  // FP32 is the only pixel type the kernel handles. Non-FP32 inputs
+  // are explicitly declined (caller falls back to PG via the standard
+  // unsupported-input route, NOT a silent CPU compute path).
+  if (pixel_type != PGACCEL_PT_FLOAT32) {
+    return PGACCEL_ERROR_UNSUPPORTED;
   }
 
-  // Generic path: mixed pixel types, or large tiles that benefit
-  // from real GPU dispatch. We dispatch to SYCL for large tiles;
-  // otherwise fall through to the typed host loop.
   size_t band_count = expr->band_count;
 
-  // Real GPU path for large rasters.
-  if (pixel_count >= GPU_TILE_THRESHOLD && pixel_type == PGACCEL_PT_FLOAT32) {
+  // Real GPU path — single dispatch through SYCL parallel_for.
+  {
     try {
       auto& q = get_queue();
 
@@ -425,34 +292,14 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
       pgaccel_record_gpu_exec();
       return PGACCEL_OK;
     } catch (const std::exception& e) {
-      fprintf(stderr, "pgaccel: SYCL map_algebra large failed: %s\n", e.what());
-      // Fall through to typed host loop.
+      fprintf(stderr, "pgaccel: SYCL map_algebra failed: %s\n", e.what());
+      // No CPU fallback (CLAUDE.md rule 11). Surface the kernel failure
+      // to the caller so the planner / executor can route to PG instead
+      // of silently miscomputing on CPU. Suppress the stats counter so
+      // EXPLAIN ANALYZE doesn't credit a failed dispatch.
+      return PGACCEL_ERROR;
     }
   }
-
-  // Generic typed host loop — used for non-f32 pixel types and
-  // small tiles where even this loop runs in a few microseconds.
-  double band_values[64];
-  for (size_t px = 0; px < pixel_count; px++) {
-    if (nodata_mask != nullptr && nodata_mask[px] != 0) {
-      write_pixel(output_pixels, px, pixel_type, 0.0);
-      continue;
-    }
-    for (size_t b = 0; b < band_count; b++) {
-      band_values[b] = read_pixel(band_pixels[b], px, pixel_type);
-    }
-    double result = eval_expr(expr, band_values);
-    if (std::isnan(result)) {
-      if (nodata_mask != nullptr)
-        nodata_mask[px] = 1;
-      write_pixel(output_pixels, px, pixel_type, 0.0);
-    } else {
-      write_pixel(output_pixels, px, pixel_type, result);
-    }
-  }
-
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -470,50 +317,6 @@ extern "C" pgaccel_status pgaccel_map_algebra(const void* const* band_pixels, si
   return map_algebra_gpu(band_pixels, pixel_count, pixel_type, expr, output_pixels, nodata_mask);
 }
 
-/// Small-tile raster_clip fast path: runs the same ray-cast
-/// point-in-ring logic inline without touching the GPU queue.
-///
-/// As with map_algebra, this is NOT a CPU fallback — it is the
-/// correct mapping of a 64–4096 pixel problem onto host execution.
-/// Kernel-launch overhead alone would be > 100× the actual compute.
-static void raster_clip_inline_f32(const void* rast_pixels, size_t width, size_t height,
-                                   double origin_x, double origin_y, double scale_x, double scale_y,
-                                   const float* ring, size_t vc, void* output_pixels,
-                                   uint8_t* nodata_mask) {
-  const float* in = static_cast<const float*>(rast_pixels);
-  float* out = static_cast<float*>(output_pixels);
-  const size_t total = width * height;
-  const float ox = static_cast<float>(origin_x);
-  const float oy = static_cast<float>(origin_y);
-  const float sx = static_cast<float>(scale_x);
-  const float sy = static_cast<float>(scale_y);
-
-  // Copy pixels through (clip sets the mask, not the values).
-  if (in != out)
-    std::memcpy(out, in, total * sizeof(float));
-
-  for (size_t idx = 0; idx < total; ++idx) {
-    const size_t row = idx / width;
-    const size_t col = idx % width;
-    float px = ox + (static_cast<float>(col) + 0.5f) * sx;
-    float py = oy + (static_cast<float>(row) + 0.5f) * sy;
-
-    bool inside = false;
-    size_t j = vc - 1;
-    for (size_t vi = 0; vi < vc; ++vi) {
-      float xi = ring[vi * 2];
-      float yi = ring[vi * 2 + 1];
-      float xj = ring[j * 2];
-      float yj = ring[j * 2 + 1];
-      if (((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
-        inside = !inside;
-      }
-      j = vi;
-    }
-    nodata_mask[idx] = inside ? 0 : 1;
-  }
-}
-
 extern "C" pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t width, size_t height,
                                               double origin_x, double origin_y, double scale_x,
                                               double scale_y, int pixel_type,
@@ -529,16 +332,12 @@ extern "C" pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t wi
     return PGACCEL_OK;
   }
 
-  // Small tile fast path: skip device allocation entirely.
-  // Launching a Metal kernel for 64 pixels costs ~100 us; the
-  // inline loop finishes in < 5 us on an M-series core.
-  const size_t total_pixels = width * height;
-  if (total_pixels < GPU_TILE_THRESHOLD && pixel_type == PGACCEL_PT_FLOAT32 && vertex_count >= 3) {
-    raster_clip_inline_f32(rast_pixels, width, height, origin_x, origin_y, scale_x, scale_y,
-                           clip_ring_xy, vertex_count, output_pixels, nodata_mask);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  }
+  // No host fast-path: the previous small-tile branch called
+  // raster_clip_inline_f32 (CPU loop) AND pgaccel_record_gpu_exec()
+  // afterwards, fraudulently crediting the GPU stats counter for CPU
+  // work. CLAUDE.md rules 11/12 — every dispatch goes through SYCL.
+  // Per-batch dispatch latency is the Phase 6 problem, not a problem
+  // to bypass via cheating here.
 
   try {
     auto& q = get_queue();

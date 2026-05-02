@@ -139,7 +139,13 @@ static void test_map_algebra_two_band() {
 }
 
 /* ── Test: map algebra with int32 pixel type ──────────────────── */
-
+//
+// As of the 2026-05-02 cheat audit, only FP32 pixels are accelerated.
+// The previous "int32 support" was a host-side bytecode interpreter
+// loop that called pgaccel_record_gpu_exec() while computing on CPU
+// (CLAUDE.md rule 11/12 violation). Int32 inputs now return
+// PGACCEL_ERROR_UNSUPPORTED so the caller routes through PG via the
+// standard unsupported-input path.
 static void test_map_algebra_int32() {
   const size_t N = 100;
   std::vector<int32_t> band0(N);
@@ -165,14 +171,9 @@ static void test_map_algebra_int32() {
 
   pgaccel_status st =
       pgaccel_map_algebra(bands, N, PGACCEL_PT_INT32, &expr, output.data(), nodata.data());
-  ASSERT_EQ(st, PGACCEL_OK, "map_algebra int32 status");
+  ASSERT_EQ(st, PGACCEL_ERROR_UNSUPPORTED, "map_algebra int32 returns UNSUPPORTED");
 
-  for (size_t i = 0; i < N; i++) {
-    int32_t expected = static_cast<int32_t>(i * 10) + 5;
-    ASSERT_EQ(output[i], expected, "map_algebra int32 pixel value");
-  }
-
-  PASS("map_algebra: int32 pixel type");
+  PASS("map_algebra: int32 declined (FP32-only kernel)");
 }
 
 /* ── Test: NODATA pixels are preserved ────────────────────────── */
