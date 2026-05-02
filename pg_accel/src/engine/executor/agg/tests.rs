@@ -420,7 +420,9 @@ fn agg_op_roundtrip() {
 #[test]
 fn agg_op_from_i32_unknown_maps_to_passthrough() {
     assert_eq!(AggOp::from_i32(-1), AggOp::Passthrough);
-    assert_eq!(AggOp::from_i32(6), AggOp::Passthrough);
+    // 0..13 are all valid AggOp variants today (Sum..BoolOr); 14+ are
+    // out of range and must fall through to Passthrough.
+    assert_eq!(AggOp::from_i32(14), AggOp::Passthrough);
     assert_eq!(AggOp::from_i32(i32::MAX), AggOp::Passthrough);
     assert_eq!(AggOp::from_i32(i32::MIN), AggOp::Passthrough);
 }

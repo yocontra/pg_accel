@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn gpu_spatial_entries_returns_correct_count() {
-        assert_eq!(gpu_spatial_entries().len(), 1);
+        assert_eq!(gpu_spatial_entries().len(), 7);
     }
 
     #[test]
