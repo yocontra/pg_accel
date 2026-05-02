@@ -453,6 +453,25 @@ fn resolve_st_disjoint_is_disjoint() {
 }
 
 #[test]
+fn resolve_st_covers_aliases_contains() {
+    // st_covers reuses the Contains kernel partition; PG's Layer-3
+    // recheck applies the boundary-inclusive semantics on UNCERTAIN
+    // pairs.
+    assert_eq!(
+        resolve_spatial_predicate(Some("st_covers")),
+        Some(three_layer::SpatialPredicate::Contains)
+    );
+}
+
+#[test]
+fn resolve_st_coveredby_aliases_within() {
+    assert_eq!(
+        resolve_spatial_predicate(Some("st_coveredby")),
+        Some(three_layer::SpatialPredicate::Within)
+    );
+}
+
+#[test]
 fn resolve_none_is_none() {
     assert_eq!(resolve_spatial_predicate(None), None);
 }
@@ -464,9 +483,9 @@ fn resolve_unknown_predicates_are_none_not_intersects() {
     // as `Intersects`. See adapters/postgis.rs:gpu_spatial_entries audit
     // table and the Phase 4 TODO entry.
     //
-    // st_dwithin and st_disjoint were moved out of this list in commits
-    // a2793c4 and the st_disjoint commit respectively — both have wired
-    // GPU paths now.
+    // st_dwithin / st_disjoint / st_covers / st_coveredby moved out of
+    // this list as their wired GPU paths landed (Phase 4 PostGIS
+    // backlog).
     for name in [
         "st_distance",
         "st_area",
@@ -475,8 +494,6 @@ fn resolve_unknown_predicates_are_none_not_intersects() {
         "st_touches",
         "st_crosses",
         "st_overlaps",
-        "st_covers",
-        "st_coveredby",
         "st_relate",
     ] {
         assert_eq!(

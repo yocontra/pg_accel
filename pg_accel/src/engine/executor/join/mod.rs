@@ -37,6 +37,17 @@ pub(super) fn resolve_spatial_predicate(
         Some("st_contains") => Some(three_layer::SpatialPredicate::Contains),
         Some("st_within") => Some(three_layer::SpatialPredicate::Within),
         Some("st_disjoint") => Some(three_layer::SpatialPredicate::Disjoint),
+        // st_covers / st_coveredby differ from contains / within only at
+        // boundary touches: PostGIS contains rejects boundary points,
+        // PostGIS covers accepts them. point_in_ring_bulk returns
+        // 0 (UNCERTAIN) for points near a ring edge — those rows go
+        // to PG's Layer-3 recheck which calls back the *original*
+        // SQL function (st_covers vs st_contains) and gets the
+        // correct boundary semantics. Strictly-interior and
+        // strictly-exterior partitioning is identical, so reusing
+        // the Contains / Within enum variants is sound.
+        Some("st_covers") => Some(three_layer::SpatialPredicate::Contains),
+        Some("st_coveredby") => Some(three_layer::SpatialPredicate::Within),
         _ => None,
     }
 }

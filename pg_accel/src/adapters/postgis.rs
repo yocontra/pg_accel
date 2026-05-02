@@ -57,6 +57,8 @@ pub fn adapter() -> ExtensionAdapter {
 /// | `st_length`      | no          | No GPU kernel in `spatial_*.cpp`. |
 /// | `st_equals`      | no          | No GPU kernel. Executor would fall through the `_ => Intersects` match in `executor/join/mod.rs:502` and return wrong results. |
 /// | `st_disjoint`    | YES (negation of intersects) | `SpatialPredicate::Disjoint` (`three_layer.rs`) routes to `spatial_intersects` and swaps definite_true / definite_false. Free given the existing kernel; no separate dispatch. |
+/// | `st_covers`      | YES (alias of contains) | Reuses `pgaccel_point_in_ring_bulk` via `SpatialPredicate::Contains` — boundary-touching points fall in UNCERTAIN where PG's Layer-3 recheck applies the boundary-inclusive semantics that distinguishes covers from contains. |
+/// | `st_coveredby`   | YES (alias of within) | Same kernel as `st_covers` with args swapped via `SpatialPredicate::Within`. |
 /// | `st_touches`     | no          | Same as `st_equals`. |
 /// | `st_crosses`     | no          | Same as `st_equals`. |
 /// | `st_overlaps`    | no          | Same as `st_equals`. |
@@ -71,6 +73,8 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         "st_contains",
         "st_within",
         "st_disjoint",
+        "st_covers",
+        "st_coveredby",
     ];
     NAMES
         .iter()
@@ -115,7 +119,17 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 5);
+        assert_eq!(adapter().functions.len(), 7);
+    }
+
+    #[test]
+    fn contains_st_covers() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_covers"));
+    }
+
+    #[test]
+    fn contains_st_coveredby() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_coveredby"));
     }
 
     #[test]
