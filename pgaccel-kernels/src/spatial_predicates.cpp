@@ -510,6 +510,123 @@ static pgaccel_status sphere_distance_bulk_sycl(const T* points_a, const T* poin
   }
 }
 
+// ---------------------------------------------------------------------------
+// SYCL kernel — segment_intersects_bulk on the GPU (fp32 + fp64)
+//
+// Mirrors the host `segment_intersects_one<T>` algorithm: zero-length
+// segment guard, four cross-product evaluations, near-zero / sign tests
+// to classify each pair as DEFINITE / UNCERTAIN / NO-INTERSECT. Each
+// work-item evaluates one segment pair (4 + 4 coords).
+//
+// Math is open-coded with multiplies / adds / `sycl::fabs` /
+// `sycl::isfinite` only — no trig / sqrt — so the soft-fp64
+// instantiation compiles cleanly on Metal SSCP (distinct from the
+// sphere_distance fp64 hang that uses sin / cos / asin / sqrt). Same
+// malloc_shared + memcpy pattern as point_in_ring_bulk_sycl to avoid
+// the small-buffer rebind issue on Metal.
+// ---------------------------------------------------------------------------
+template <typename T>
+pgaccel_status segment_intersects_bulk_sycl(const T* segs_a, const T* segs_b, size_t count,
+                                            int8_t* results) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  try {
+    T* d_a = sycl::malloc_shared<T>(count * 4, *q);
+    T* d_b = sycl::malloc_shared<T>(count * 4, *q);
+    int8_t* d_res = sycl::malloc_shared<int8_t>(count, *q);
+
+    if (!d_a || !d_b || !d_res) {
+      if (d_a)
+        sycl::free(d_a, *q);
+      if (d_b)
+        sycl::free(d_b, *q);
+      if (d_res)
+        sycl::free(d_res, *q);
+      return PGACCEL_OOM;
+    }
+
+    std::memcpy(d_a, segs_a, count * 4 * sizeof(T));
+    std::memcpy(d_b, segs_b, count * 4 * sizeof(T));
+
+    // eps as `const T` capture — see point_in_ring_bulk_sycl notes for
+    // why this works under Metal arg-buffer limits while constexpr-T
+    // captures of trig-pulling math constants do not.
+    const T eps =
+        std::is_same<T, double>::value ? static_cast<T>(EPS_FP64) : static_cast<T>(EPS_FP32);
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const T p1x = d_a[i * 4 + 0];
+       const T p1y = d_a[i * 4 + 1];
+       const T p2x = d_a[i * 4 + 2];
+       const T p2y = d_a[i * 4 + 3];
+       const T p3x = d_b[i * 4 + 0];
+       const T p3y = d_b[i * 4 + 1];
+       const T p4x = d_b[i * 4 + 2];
+       const T p4y = d_b[i * 4 + 3];
+
+       // NaN / Inf -> DEFINITE no-intersect (matches host CPU behavior
+       // which set results[i] = 0 for non-finite inputs; here we use 0
+       // for UNCERTAIN to be consistent with the rest of the layer).
+       if (!sycl::isfinite(p1x) || !sycl::isfinite(p1y) || !sycl::isfinite(p2x) ||
+           !sycl::isfinite(p2y) || !sycl::isfinite(p3x) || !sycl::isfinite(p3y) ||
+           !sycl::isfinite(p4x) || !sycl::isfinite(p4y)) {
+         d_res[i] = 0;
+         return;
+       }
+
+       // Zero-length segment guard.
+       if (sycl::fabs(p1x - p2x) < eps && sycl::fabs(p1y - p2y) < eps) {
+         d_res[i] = 0;
+         return;
+       }
+       if (sycl::fabs(p3x - p4x) < eps && sycl::fabs(p3y - p4y) < eps) {
+         d_res[i] = 0;
+         return;
+       }
+
+       // Four cross products. Inlines cross2d so the kernel body
+       // doesn't depend on a host-side template instantiated only on
+       // the host side.
+       const T d1 = (p4x - p3x) * (p1y - p3y) - (p4y - p3y) * (p1x - p3x);
+       const T d2 = (p4x - p3x) * (p2y - p3y) - (p4y - p3y) * (p2x - p3x);
+       const T d3 = (p2x - p1x) * (p3y - p1y) - (p2y - p1y) * (p3x - p1x);
+       const T d4 = (p2x - p1x) * (p4y - p1y) - (p2y - p1y) * (p4x - p1x);
+
+       // Near-zero -> UNCERTAIN (collinear or endpoint touch).
+       if (sycl::fabs(d1) < eps || sycl::fabs(d2) < eps || sycl::fabs(d3) < eps ||
+           sycl::fabs(d4) < eps) {
+         d_res[i] = 0;
+         return;
+       }
+
+       // Proper intersection: segments straddle each other.
+       if (((d1 > T(0)) != (d2 > T(0))) && ((d3 > T(0)) != (d4 > T(0)))) {
+         d_res[i] = 1;
+       } else {
+         d_res[i] = -1;
+       }
+     }).wait_and_throw();
+
+    std::memcpy(results, d_res, count * sizeof(int8_t));
+
+    sycl::free(d_a, *q);
+    sycl::free(d_b, *q);
+    sycl::free(d_res, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL segment_intersects_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: segment_intersects_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -579,37 +696,15 @@ extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, co
   if (!segs_a || !segs_b || !results)
     return PGACCEL_ERROR_INIT;
 
+  // GPU dispatch only (CLAUDE.md rules 11/12). Both fp32 and fp64 go
+  // through segment_intersects_bulk_sycl<T> — soft-fp64 on Metal,
+  // native on CUDA / ROCm / Level Zero. The kernel uses no trig, so
+  // the fp64 instantiation is unaffected by the soft-fp64 trig hang
+  // documented in sphere_distance_bulk_sycl.
   if (use_fp64) {
-    const double* a = static_cast<const double*>(segs_a);
-    const double* b = static_cast<const double*>(segs_b);
-    for (size_t i = 0; i < count; ++i) {
-      double p1x = a[i * 4], p1y = a[i * 4 + 1];
-      double p2x = a[i * 4 + 2], p2y = a[i * 4 + 3];
-      double p3x = b[i * 4], p3y = b[i * 4 + 1];
-      double p4x = b[i * 4 + 2], p4y = b[i * 4 + 3];
-      if (!is_finite_coord(p1x, p1y) || !is_finite_coord(p2x, p2y) || !is_finite_coord(p3x, p3y) ||
-          !is_finite_coord(p4x, p4y)) {
-        results[i] = 0;
-        continue;
-      }
-      results[i] = segment_intersects_one<double>(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y, EPS_FP64);
-    }
-  } else {
-    const float* a = static_cast<const float*>(segs_a);
-    const float* b = static_cast<const float*>(segs_b);
-    for (size_t i = 0; i < count; ++i) {
-      float p1x = a[i * 4], p1y = a[i * 4 + 1];
-      float p2x = a[i * 4 + 2], p2y = a[i * 4 + 3];
-      float p3x = b[i * 4], p3y = b[i * 4 + 1];
-      float p4x = b[i * 4 + 2], p4y = b[i * 4 + 3];
-      if (!is_finite_coord(p1x, p1y) || !is_finite_coord(p2x, p2y) || !is_finite_coord(p3x, p3y) ||
-          !is_finite_coord(p4x, p4y)) {
-        results[i] = 0;
-        continue;
-      }
-      results[i] = segment_intersects_one<float>(p1x, p1y, p2x, p2y, p3x, p3y, p4x, p4y, EPS_FP32);
-    }
+    return segment_intersects_bulk_sycl<double>(static_cast<const double*>(segs_a),
+                                                static_cast<const double*>(segs_b), count, results);
   }
-
-  return PGACCEL_OK;
+  return segment_intersects_bulk_sycl<float>(static_cast<const float*>(segs_a),
+                                             static_cast<const float*>(segs_b), count, results);
 }
