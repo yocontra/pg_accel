@@ -63,6 +63,7 @@ pub fn adapter() -> ExtensionAdapter {
         "h3_latlng_to_cell", // bulk lat/lng -> cell index (pgaccel_h3_lat_lng_to_cell_bulk)
         "h3_grid_distance",  // pairwise integer distance (pgaccel_h3_grid_distance_bulk)
         "h3_cell_to_parent", // bit shift               (pgaccel_h3_cell_to_parent_bulk)
+        "h3_cell_to_center_child", // bit shift             (pgaccel_h3_cell_to_center_child_bulk)
         "h3_get_resolution", // bit mask                (pgaccel_h3_get_resolution_bulk)
     ];
 
@@ -115,7 +116,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 4);
+        assert_eq!(adapter().functions.len(), 5);
     }
 
     #[test]
@@ -312,7 +313,8 @@ mod tests {
             "h3_grid_ring_unsafe",
             "h3_polyfill",
             "h3_cell_to_children",
-            "h3_cell_to_center_child",
+            // h3_cell_to_center_child landed in the same commit that
+            // registered it; tracked in registered_ops_match_kernel_set_exactly.
             "h3_cell_to_boundary",
             "h3_cells_to_multi_polygon",
         ];
@@ -330,7 +332,7 @@ mod tests {
 
     #[test]
     fn registered_ops_match_kernel_set_exactly() {
-        // The adapter must register exactly the four operators that have real
+        // The adapter must register exactly the operators that have real
         // kernels. Drift in either direction — adding a name without a kernel,
         // or dropping a name that still has a kernel — is caught here.
         let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
@@ -338,6 +340,7 @@ mod tests {
             "h3_latlng_to_cell",
             "h3_grid_distance",
             "h3_cell_to_parent",
+            "h3_cell_to_center_child",
             "h3_get_resolution",
         ]
         .into_iter()
@@ -345,6 +348,16 @@ mod tests {
         assert_eq!(
             registered, expected,
             "adapter registrations drifted from real kernel set",
+        );
+    }
+
+    #[test]
+    fn contains_h3_cell_to_center_child() {
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_cell_to_center_child")
         );
     }
 }

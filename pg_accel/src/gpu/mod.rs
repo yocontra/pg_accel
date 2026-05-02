@@ -735,6 +735,30 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
     status.is_ok().then_some(parents)
 }
 
+/// GPU-accelerated bulk H3 cell-to-center-child.
+///
+/// For each input cell, returns the canonical center child at the
+/// requested finer `child_res`. Center child convention: each new
+/// digit (positions input_res+1 .. child_res) is set to 0. Returns
+/// 0 for invalid inputs (cell == 0 or child_res < input_res).
+pub fn h3_cell_to_center_child_bulk(cells: &[u64], child_res: i32) -> Option<Vec<u64>> {
+    let mut children = vec![0u64; cells.len()];
+    // SAFETY: cells and children are valid slices of matching length.
+    let status = unsafe {
+        bridge::pgaccel_h3_cell_to_center_child_bulk(
+            cells.as_ptr(),
+            cells.len(),
+            child_res,
+            children.as_mut_ptr(),
+        )
+    };
+    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    unsafe {
+        bridge::pgaccel_pool_reset();
+    }
+    status.is_ok().then_some(children)
+}
+
 /// GPU-accelerated bulk H3 grid distance.
 pub fn h3_grid_distance_bulk(cells_a: &[u64], cells_b: &[u64]) -> Option<Vec<i32>> {
     let count = cells_a.len().min(cells_b.len());

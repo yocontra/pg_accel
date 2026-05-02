@@ -264,6 +264,13 @@ pgaccel_status pgaccel_h3_get_resolution_bulk(const uint64_t* cells, size_t coun
 pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count, int parent_res,
                                               uint64_t* parents);
 
+/* For each input cell, return the center child at `child_res` (must be
+ * >= input cell's resolution). The center child is the unique
+ * canonical descendant whose new digits are all 0. Outputs 0 for invalid
+ * inputs (cell == 0 or child_res < cell.res or child_res > 15). */
+pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* cells, size_t count,
+                                                    int child_res, uint64_t* children);
+
 pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a, const uint64_t* cells_b,
                                              size_t count, int32_t* distances);
 

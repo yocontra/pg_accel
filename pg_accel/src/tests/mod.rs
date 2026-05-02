@@ -996,14 +996,14 @@ mod tests {
     fn test_adapter_h3_structure() {
         let a = crate::adapters::h3::adapter();
         assert_eq!(a.name, "h3");
-        assert_eq!(a.functions.len(), 4, "4 GPU H3");
+        assert_eq!(a.functions.len(), 5, "5 GPU H3");
 
         let gpu_count = a
             .functions
             .iter()
             .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuH3)
             .count();
-        assert_eq!(gpu_count, 4);
+        assert_eq!(gpu_count, 5);
 
         let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
         assert!(names.contains(&"h3_latlng_to_cell"));

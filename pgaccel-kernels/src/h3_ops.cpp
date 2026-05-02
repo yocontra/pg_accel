@@ -446,6 +446,85 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, 
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
+extern "C" pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* cells, size_t count,
+                                                               int child_res, uint64_t* children) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (cells == nullptr || children == nullptr)
+    return PGACCEL_ERROR_INIT;
+  if (child_res < 0 || child_res > H3_MAX_RESOLUTION)
+    return PGACCEL_ERROR_UNSUPPORTED;
+
+  try {
+    sycl::queue q{sycl::default_selector_v};
+
+    // SAFETY: USM device allocations freed at end of scope
+    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+    uint64_t* d_children = sycl::malloc_device<uint64_t>(count, q);
+
+    if (!d_cells || !d_children) {
+      sycl::free(d_cells, q);
+      sycl::free(d_children, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
+
+    const int c_res = child_res;
+    const uint64_t unused_digit = H3_UNUSED_DIGIT;
+    const int max_res = H3_MAX_RESOLUTION;
+    const uint64_t res_mask = H3_RES_MASK;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const uint64_t cell = d_cells[i];
+
+         if (cell == 0) {
+           d_children[i] = 0;
+           return;
+         }
+
+         const int res = static_cast<int>((cell >> 52) & 0xF);
+         if (c_res < res) {
+           // Cannot navigate to a coarser resolution from a finer cell.
+           d_children[i] = 0;
+           return;
+         }
+         if (c_res == res) {
+           d_children[i] = cell;
+           return;
+         }
+
+         // Set resolution field to child_res.
+         uint64_t result = (cell & ~res_mask) | (static_cast<uint64_t>(c_res) << 52);
+         // Clear digit slots in (res, c_res] — these are the "new" digits
+         // for the descent path. Center child convention: each new digit
+         // is 0. We set them by clearing their existing 7 (unused) value.
+         for (int r = res + 1; r <= c_res; r++) {
+           const int shift = (max_res - r) * 3 + 1;
+           // First clear the 3 bits at this position (they currently
+           // hold H3_UNUSED_DIGIT = 7), leaving 0 (= center child digit).
+           result &= ~(uint64_t{0x7} << shift);
+         }
+         // Positions (c_res, max_res] keep their existing H3_UNUSED_DIGIT
+         // value, matching the parent cell's encoding.
+         (void)unused_digit;
+         d_children[i] = result;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(children, d_children, count * sizeof(uint64_t)).wait_and_throw();
+
+    sycl::free(d_cells, q);
+    sycl::free(d_children, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception&) {
+  } catch (...) {}
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
 extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a,
                                                         const uint64_t* cells_b, size_t count,
                                                         int32_t* distances) {

@@ -311,6 +311,13 @@ unsafe extern "C" {
         parents: *mut u64,
     ) -> PgaccelStatus;
 
+    pub fn pgaccel_h3_cell_to_center_child_bulk(
+        cells: *const u64,
+        count: usize,
+        child_res: i32,
+        children: *mut u64,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_h3_grid_distance_bulk(
         cells_a: *const u64,
         cells_b: *const u64,

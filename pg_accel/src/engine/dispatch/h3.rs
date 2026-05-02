@@ -127,6 +127,15 @@ pub unsafe fn dispatch_gpu_h3(
                 crate::gpu::h3_cell_to_parent_bulk(&cells, parent_res).map(GpuH3Result::U64)
             })
         }
+        // 2-arg: cell + resolution constant → center child cell (u64)
+        Some("h3_cell_to_center_child") => {
+            let res = qual_datum
+                .filter(|(_, is_null)| !is_null)
+                .map(|(d, _)| d.value() as i32);
+            res.and_then(|child_res| {
+                crate::gpu::h3_cell_to_center_child_bulk(&cells, child_res).map(GpuH3Result::U64)
+            })
+        }
         // 2-arg: cell_a + cell_b constant → distance (i32)
         Some("h3_grid_distance") => {
             let other_cell = qual_datum
@@ -156,6 +165,14 @@ pub unsafe fn dispatch_gpu_h3(
                 if qual_datum.is_some_and(|(_, n)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_cell_to_parent GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }
+                return DispatchResult::Deferred;
+            }
+            Some("h3_cell_to_center_child") => {
+                if qual_datum.is_some_and(|(_, n)| !n) {
+                    pgrx::error!(
+                        "pg_accel: h3_cell_to_center_child GPU kernel failed; refusing CPU fallback (rule 11)"
                     );
                 }
                 return DispatchResult::Deferred;
