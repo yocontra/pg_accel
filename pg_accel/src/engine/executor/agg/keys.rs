@@ -41,16 +41,38 @@ const CIDROID_RAW: u32 = 650;
 
 impl GroupKeyInfo {
     /// Map a PG type OID to an FFI key type tag.
+    ///
+    /// **UUID and INET / CIDR are temporarily disabled** at the
+    /// classifier level (return `None`) — the SUM-accumulation kernel
+    /// hits a Metal SSCP MSL emitter bug for these wider key types
+    /// (`device device void**` cross-address-space cast → `xcrun metal`
+    /// fails) that silently leaves the result buffer at zero. Routing
+    /// these queries to PG native via the `None` short-circuit is the
+    /// honest behavior until either:
+    ///
+    /// - the upstream AdaptiveCpp Emitter address-space-cast fix lands, OR
+    /// - the kernel is rewritten to use a flat-buffer aggregation path
+    ///   that doesn't trigger the emitter bug.
+    ///
+    /// Both options are tracked in TODO Phase 6 ("hash_agg value-
+    /// aggregation pass returns 0 for UUID and INET key types").
+    /// Reproducer: `pgaccel-kernels/test/test_hash_agg_keys.cpp`.
+    ///
+    /// All downstream support code (kernel dispatch arms in
+    /// `agg/execute.rs`, `append_key_bytes`, `key_size`, the kernel-side
+    /// `read_key_u64` arms) is left in place so re-enabling is a
+    /// one-line change here once the kernel returns correct sums.
     #[must_use]
     pub fn key_type_from_oid(type_oid: pg_sys::Oid) -> Option<i32> {
         match type_oid {
             pg_sys::INT2OID | pg_sys::INT4OID => Some(0), // Int32
             pg_sys::INT8OID => Some(1),                   // Int64
             pg_sys::FLOAT4OID | pg_sys::FLOAT8OID => Some(2), // Float64
-            oid if u32::from(oid) == UUIDOID_RAW => Some(4), // UUID
-            oid if u32::from(oid) == INETOID_RAW || u32::from(oid) == CIDROID_RAW => {
-                Some(5) // INET / CIDR (24-byte canonical key)
-            }
+            // UUID, INET, CIDR — disabled pending Metal SSCP emitter fix.
+            // See doc comment above. DO NOT re-enable without confirming
+            // `test_hash_agg_keys` reports 10/10 PASS cold-cache.
+            oid if u32::from(oid) == UUIDOID_RAW => None,
+            oid if u32::from(oid) == INETOID_RAW || u32::from(oid) == CIDROID_RAW => None,
             _ => None,
         }
     }
@@ -189,10 +211,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_type_from_oid_uuid() {
-        // Verify UUIDOID (raw 2950) maps to key_type tag 4.
+    fn key_type_from_oid_uuid_disabled() {
+        // UUID classification is intentionally disabled (returns None) until
+        // the Metal SSCP emitter bug for the SUM accumulation kernel is
+        // fixed — see classifier doc comment + TODO Phase 6 entry. When
+        // `test_hash_agg_keys` reports 10/10 PASS cold-cache, flip the
+        // classifier arm back to `Some(4)` and update this test to assert
+        // `Some(4)` again.
         let oid = pg_sys::Oid::from(UUIDOID_RAW);
-        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), Some(4));
+        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), None);
     }
 
     #[test]
@@ -245,15 +272,18 @@ mod tests {
     }
 
     #[test]
-    fn key_type_from_oid_inet() {
+    fn key_type_from_oid_inet_disabled() {
+        // Same gating as UUID — see key_type_from_oid_uuid_disabled
+        // comment. Re-enable in lockstep with the UUID arm.
         let oid = pg_sys::Oid::from(INETOID_RAW);
-        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), Some(5));
+        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), None);
     }
 
     #[test]
-    fn key_type_from_oid_cidr() {
+    fn key_type_from_oid_cidr_disabled() {
+        // CIDR shares the INET 24-byte canonical key shape; same gating.
         let oid = pg_sys::Oid::from(CIDROID_RAW);
-        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), Some(5));
+        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), None);
     }
 
     #[test]

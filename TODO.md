@@ -626,20 +626,24 @@ tests). One item remains.
   bug in commits ea230cf → 56b770d).
 
 - **How**:
-  - **Local mitigation**: planner classifier could refuse to emit
-    UUID/INET key types until upstream AdaptiveCpp lands the emitter
-    fix. This would route those queries to PG native — correct
-    results but no GPU acceleration. Not implemented yet; would
-    need an `emit_uuid_key`/`emit_inet_key` GUC plus classifier
-    short-circuits in `engine/executor/agg/keys.rs`.
-  - **Upstream fix**: the MSL emitter cast pattern needs an
-    address-space-aware cast (`metal::address_space_cast` or the
-    `__metal_pointer_cast` builtin) instead of the bare C-style cast
-    that hits the duplicate-qualifier path. Diff the SSCP-emitted
-    LLVM IR for INT64 vs UUID instantiations to identify which
-    Emitter pass is producing the duplicate `device device` qualifier
-    chain. Same emitter file as the `__args` MSL compile error in
-    Phase 7 (`AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`).
+  - **Local mitigation (LANDED)**: `GroupKeyInfo::key_type_from_oid`
+    at `pg_accel/src/engine/executor/agg/keys.rs:45` returns `None`
+    for UUID, INET, and CIDR until the kernel bug is fixed. This
+    routes those queries to PG native — correct (though
+    unaccelerated) results — instead of silently returning zero
+    sums. All downstream support (kernel dispatch arms in
+    `agg/execute.rs:1186`, `append_key_bytes`, `key_size`,
+    `read_key_u64` arms) is left in place so re-enabling is a
+    one-line classifier flip once the kernel is fixed.
+  - **Upstream fix (still needed for full acceleration)**: the MSL
+    emitter cast pattern needs an address-space-aware cast
+    (`metal::address_space_cast` or the `__metal_pointer_cast`
+    builtin) instead of the bare C-style cast that hits the
+    duplicate-qualifier path. Diff the SSCP-emitted LLVM IR for INT64
+    vs UUID instantiations to identify which Emitter pass is
+    producing the duplicate `device device` qualifier chain. Same
+    emitter file as the `__args` MSL compile error in Phase 7
+    (`AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`).
 
 - **Reproducer**: `pgaccel-kernels/test/test_hash_agg_keys.cpp`
   (intentionally not wired into `just gpu-test` until the bug
