@@ -169,18 +169,116 @@ pub fn spatial_contains(
 /// Evaluate `ST_DWithin(A, B, threshold)` — are A and B within `threshold_m`
 /// metres of each other?
 ///
-/// No GPU DWithin kernel exists yet. All pairs are returned as `Uncertain`
-/// for PG exact recheck via PostGIS. A future GPU distance kernel can be
-/// wired in here.
+/// Routes Point × Point pairs through `pgaccel_sphere_distance_bulk` (real
+/// SYCL Haversine kernel, fp32 path). Other geometry pairs short-circuit
+/// the whole batch to `Uncertain` so PG handles them via PostGIS recheck —
+/// the kernel today is point-only, and `pgaccel_sphere_distance_bulk` fp64
+/// is deferred (returns NO_DEVICE per the soft-fp64 trig hang documented
+/// in TODO Phase 7), so we only ever invoke the fp32 path.
 #[must_use]
 fn spatial_dwithin(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
-    _threshold_m: f64,
+    threshold_m: f64,
     _skip_bbox: bool,
 ) -> SpatialResult {
-    // No GPU distance kernel — defer all pairs to PG recheck.
-    all_uncertain(geoms_a.len().min(geoms_b.len()))
+    let n = geoms_a.len().min(geoms_b.len());
+    if n == 0 {
+        return SpatialResult {
+            definite_true: Vec::new(),
+            definite_false: Vec::new(),
+            uncertain: Vec::new(),
+        };
+    }
+
+    // Point-only kernel: any non-Point pair short-circuits the entire
+    // batch to Uncertain. Mixing Point + non-Point inside a single batch
+    // would require splitting; doing that here is more complex than the
+    // win, so let PG handle non-Point pairs.
+    let all_points = geoms_a[..n]
+        .iter()
+        .zip(geoms_b[..n].iter())
+        .all(|(a, b)| a.geom_type == GeomType::Point && b.geom_type == GeomType::Point);
+    if !all_points {
+        return all_uncertain(n);
+    }
+
+    // Each Point's coords vector holds [x, y] (interleaved per-vertex
+    // doubles in PostGIS layout). Degenerate points without at least 2
+    // coords also short-circuit to Uncertain.
+    let degenerate = geoms_a[..n]
+        .iter()
+        .chain(geoms_b[..n].iter())
+        .any(|g| g.coord_count == 0 || g.coords.len() < 2);
+    if degenerate {
+        return all_uncertain(n);
+    }
+
+    // Build flat fp32 lon/lat pairs. Sphere-distance treats the first
+    // coord as lon (x) and the second as lat (y) — matches PostGIS
+    // `ST_DWithin(geography, geography, d)` and the `pgaccel_sphere_distance_bulk`
+    // contract documented at `pgaccel-kernels/src/spatial_predicates.cpp:540-571`.
+    // ExtractedGeometry.coords is already Vec<f32>, so the kernel
+    // payload is just a pair-of-pairs copy. No precision conversion.
+    let mut a_xy = Vec::<f32>::with_capacity(n * 2);
+    let mut b_xy = Vec::<f32>::with_capacity(n * 2);
+    for i in 0..n {
+        a_xy.push(geoms_a[i].coords[0]);
+        a_xy.push(geoms_a[i].coords[1]);
+        b_xy.push(geoms_b[i].coords[0]);
+        b_xy.push(geoms_b[i].coords[1]);
+    }
+
+    let mut distances = vec![0.0f32; n];
+    let mut uncertain_flags = vec![0u8; n];
+
+    use super::bridge::{self, PgaccelStatus};
+    // SAFETY: All pointers reference live Rust-owned slices of the
+    // declared lengths; the kernel is point-only and reads exactly
+    // `count * 2` floats from each input. fp64=false routes through the
+    // working SYCL fp32 path (fp64 returns NO_DEVICE today).
+    let status = unsafe {
+        bridge::pgaccel_sphere_distance_bulk(
+            a_xy.as_ptr(),
+            b_xy.as_ptr(),
+            n,
+            false,
+            distances.as_mut_ptr(),
+            uncertain_flags.as_mut_ptr(),
+        )
+    };
+
+    if !matches!(status, PgaccelStatus::Ok) {
+        // Kernel reported failure — surface as Uncertain so PG recheck
+        // handles every pair. NOT a CPU fallback (CLAUDE.md rule 11):
+        // we are not recomputing on CPU, we are deferring to PG's
+        // PostGIS implementation which is the documented escape hatch.
+        return all_uncertain(n);
+    }
+
+    // Distances come back as f32; comparing to a f64 threshold would
+    // round-trip through f64 -> f32 anyway. Truncate explicitly to make
+    // the precision contract obvious in the diff.
+    #[allow(clippy::cast_possible_truncation)]
+    let threshold_f32 = threshold_m as f32;
+    let mut definite_true = Vec::new();
+    let mut definite_false = Vec::new();
+    let mut uncertain = Vec::new();
+    for i in 0..n {
+        if uncertain_flags[i] != 0 {
+            uncertain.push(i);
+        } else if distances[i] <= threshold_f32 {
+            definite_true.push(i);
+        } else {
+            definite_false.push(i);
+        }
+    }
+
+    SpatialResult {
+        definite_true,
+        definite_false,
+        uncertain,
+    }
 }
 
 /// Dispatch spatial intersection to the GPU kernel library.

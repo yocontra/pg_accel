@@ -51,7 +51,7 @@ pub fn adapter() -> ExtensionAdapter {
 /// | `st_intersects`  | YES         | `pgaccel_spatial_intersects` (spatial_dispatch.cpp:536) wired through `three_layer::spatial_intersects`. |
 /// | `st_contains`    | no          | `three_layer::spatial_contains` returns `all_uncertain()` — no GPU containment kernel exists. Registering adds Custom Scan overhead with zero benefit. |
 /// | `st_within`      | no          | Same as `st_contains` (args swapped). |
-/// | `st_dwithin`     | no          | `three_layer::spatial_dwithin` returns `all_uncertain()` — `pgaccel_sphere_distance_bulk` exists (spatial_predicates.cpp:239) but the dispatch path is not wired. |
+/// | `st_dwithin`     | YES (Point×Point fp32) | `pgaccel_sphere_distance_bulk` (spatial_predicates.cpp:540) wired through `three_layer::spatial_dwithin`. fp32 only — soft-fp64 trig hang on Metal SSCP keeps the fp64 path returning NO_DEVICE; non-Point pairs short-circuit to Uncertain so PG handles via PostGIS. |
 /// | `st_distance`    | no          | No distance-returning kernel wired; `pgaccel_sphere_distance_bulk` is point-only and not exposed to the three-layer pipeline. |
 /// | `st_area`        | no          | No GPU kernel in `spatial_*.cpp`. |
 /// | `st_length`      | no          | No GPU kernel in `spatial_*.cpp`. |
@@ -65,7 +65,7 @@ pub fn adapter() -> ExtensionAdapter {
 /// predicates whose kernel paths are absent or return
 /// `all_uncertain()` are left unregistered rather than padded in.
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &["st_intersects"];
+    const NAMES: &[&str] = &["st_intersects", "st_dwithin"];
     NAMES
         .iter()
         .map(|&name| FunctionAccelEntry {
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 1);
+        assert_eq!(adapter().functions.len(), 2);
     }
 
     #[test]
@@ -245,9 +245,12 @@ mod tests {
         assert!(!adapter().functions.iter().any(|f| f.name == "st_within"));
     }
 
+    // st_dwithin moved from negative-assertion to positive coverage in
+    // commit 1957feb+ — wired through pgaccel_sphere_distance_bulk fp32
+    // SYCL kernel via three_layer::spatial_dwithin.
     #[test]
-    fn does_not_contain_st_dwithin() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_dwithin"));
+    fn contains_st_dwithin() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_dwithin"));
     }
 
     // The predicates below have no GPU kernel path today. They must NOT be

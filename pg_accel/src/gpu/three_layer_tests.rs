@@ -7,7 +7,9 @@
 //! numeric precision — uncertain pairs are handed to PostGIS for an exact
 //! recheck on the main backend thread (Layer 3).
 
-use crate::gpu::three_layer::{ExtractedGeometry, GeomType, spatial_intersects};
+use crate::gpu::three_layer::{
+    ExtractedGeometry, GeomType, SpatialPredicate, spatial_eval, spatial_intersects,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,6 +176,99 @@ fn pipeline_point_with_no_coords() {
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     let result = spatial_intersects(&[bad_pt], &[poly], false);
     assert_eq!(result.uncertain, vec![0]);
+}
+
+// ===========================================================================
+// spatial_dwithin pipeline — integration scenarios
+// ===========================================================================
+//
+// `spatial_eval(SpatialPredicate::DWithin(...))` routes through the
+// fp32 SYCL `pgaccel_sphere_distance_bulk` kernel. In a unit-test
+// process the kernel library may not be initialised (no g_queue), so
+// the dispatch returns `PGACCEL_ERROR_NO_DEVICE` and `spatial_dwithin`
+// short-circuits the batch to `uncertain`. The tests below verify the
+// partition arithmetic (every input pair lands in exactly one bucket)
+// and the geometry-shape gating (non-Point inputs short-circuit to
+// uncertain).
+
+#[test]
+fn dwithin_empty_inputs() {
+    let result = spatial_eval(SpatialPredicate::DWithin(1000.0), &[], &[], false);
+    assert!(result.definite_true.is_empty());
+    assert!(result.definite_false.is_empty());
+    assert!(result.uncertain.is_empty());
+}
+
+#[test]
+fn dwithin_point_pair_partitioned() {
+    let a = make_point(0.0, 0.0);
+    let b = make_point(0.001, 0.0); // ~111 m at equator
+    let result = spatial_eval(SpatialPredicate::DWithin(1000.0), &[a], &[b], false);
+    assert_eq!(
+        result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+        1
+    );
+}
+
+#[test]
+fn dwithin_non_point_short_circuits_to_uncertain() {
+    // Polygon × Polygon: kernel is point-only, so the whole batch must
+    // land in uncertain (PG handles via PostGIS recheck).
+    let poly = make_polygon(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]);
+    let result = spatial_eval(
+        SpatialPredicate::DWithin(100.0),
+        &[poly.clone()],
+        &[poly],
+        false,
+    );
+    assert_eq!(result.uncertain, vec![0]);
+    assert!(result.definite_true.is_empty());
+    assert!(result.definite_false.is_empty());
+}
+
+#[test]
+fn dwithin_mixed_point_and_polygon_short_circuits() {
+    // Single non-Point pair forces the whole batch to uncertain.
+    let pt = make_point(0.0, 0.0);
+    let poly = make_polygon(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]);
+    let result = spatial_eval(
+        SpatialPredicate::DWithin(100.0),
+        &[pt.clone()],
+        &[poly],
+        false,
+    );
+    assert_eq!(result.uncertain, vec![0]);
+}
+
+#[test]
+fn dwithin_degenerate_point_short_circuits() {
+    // Point with zero coords (coord_count == 0 OR coords.len() < 2)
+    // short-circuits the entire batch to uncertain.
+    let bad = ExtractedGeometry {
+        bbox: [0.0, 0.0, 0.0, 0.0],
+        coords: Vec::new(),
+        coord_count: 0,
+        geom_type: GeomType::Point,
+        ring_offsets: Vec::new(),
+    };
+    let good = make_point(0.0, 0.0);
+    let result = spatial_eval(SpatialPredicate::DWithin(100.0), &[bad], &[good], false);
+    assert_eq!(result.uncertain, vec![0]);
+}
+
+#[test]
+fn dwithin_large_batch_all_partitioned() {
+    let pts_a: Vec<_> = (0..100)
+        .map(|i| make_point(i as f32 * 0.001, 0.0))
+        .collect();
+    let pts_b: Vec<_> = (0..100)
+        .map(|i| make_point(i as f32 * 0.001, 0.0))
+        .collect();
+    let result = spatial_eval(SpatialPredicate::DWithin(1000.0), &pts_a, &pts_b, false);
+    assert_eq!(
+        result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+        100
+    );
 }
 
 #[test]
