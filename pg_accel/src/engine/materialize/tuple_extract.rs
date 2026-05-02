@@ -452,6 +452,160 @@ pub unsafe fn extract_uuid(
     (values, nulls)
 }
 
+/// PG `inet_struct` family byte values.
+const PGSQL_AF_INET: u8 = 2; // IPv4 — uses 4 bytes of ipaddr
+const PGSQL_AF_INET6: u8 = 3; // IPv6 — uses 16 bytes of ipaddr
+
+/// Build a 24-byte canonical INET key from the inet_struct payload pointer.
+///
+/// Layout (matches `PGACCEL_KEY_INET` in `pgaccel_hash_join.h`):
+///   byte 0      = family
+///   byte 1      = bits   (netmask)
+///   bytes 2-17  = ipaddr (16 bytes; IPv4 zero-padded after first 4)
+///   bytes 18-23 = zero padding (u64 alignment)
+///
+/// IPv4 inputs zero-pad bytes 6-17 because PG storage leaves those
+/// uninitialised — without canonicalisation, two semantically-equal
+/// IPv4 addresses with different padding garbage would hash to
+/// different buckets and miss equality.
+///
+/// # Safety
+///
+/// `vardata` must point to at least `min_payload_bytes` (≥ 6 for
+/// IPv4, ≥ 18 for IPv6) of valid `inet_struct` payload.
+unsafe fn canonicalize_inet_payload(vardata: *const u8, payload_len: usize) -> Option<[u8; 24]> {
+    if payload_len < 6 {
+        // Need at least family + bits + 4 bytes of IPv4 address.
+        return None;
+    }
+    // SAFETY: caller guarantees ≥ payload_len readable bytes.
+    let family = unsafe { *vardata };
+    let bits = unsafe { *vardata.add(1) };
+    let mut out = [0u8; 24];
+    out[0] = family;
+    out[1] = bits;
+    match family {
+        PGSQL_AF_INET => {
+            // Copy 4 IPv4 bytes; bytes 6-17 stay zero from initialiser.
+            unsafe {
+                std::ptr::copy_nonoverlapping(vardata.add(2), out.as_mut_ptr().add(2), 4);
+            }
+        }
+        PGSQL_AF_INET6 => {
+            if payload_len < 18 {
+                return None;
+            }
+            // Copy 16 IPv6 bytes verbatim.
+            unsafe {
+                std::ptr::copy_nonoverlapping(vardata.add(2), out.as_mut_ptr().add(2), 16);
+            }
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+/// Extract a column of INET / CIDR values as 24-byte canonical hash
+/// keys (see [`canonicalize_inet_payload`] for layout).
+///
+/// Variable-length input (varlena), so the fast-path tries to read the
+/// inet_struct directly from the heap-tuple data area; on a slow read
+/// we fall back to `slow_getattr` which detoasts via PG.
+///
+/// # Safety
+///
+/// Same requirements as [`extract_i32`].
+pub unsafe fn extract_inet(
+    tuples: &[pg_sys::MinimalTuple],
+    info: &AttExtractInfo,
+    fallback_slot: *mut pg_sys::TupleTableSlot,
+) -> (Vec<[u8; 24]>, Vec<u8>) {
+    let n = tuples.len();
+    let mut values = Vec::with_capacity(n);
+    let mut nulls = Vec::with_capacity(n);
+    let attno = (info.att_index + 1) as i32;
+
+    for &mt in tuples {
+        if mt.is_null() {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+
+        // SAFETY: mt is a valid MinimalTuple per caller contract.
+        let mt_ref = unsafe { &*mt };
+        let has_null_flag = (mt_ref.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
+
+        if has_null_flag {
+            // SAFETY: t_bits is valid when HEAP_HASNULL is set.
+            if unsafe { att_is_null(mt_ref.t_bits.as_ptr(), info.att_index) } {
+                values.push([0u8; 24]);
+                nulls.push(1);
+                continue;
+            }
+        }
+
+        // INET is varlena — always go through slow_getattr so PG handles
+        // detoast / short header. The fast path used elsewhere reads
+        // fixed-width inline data; mirroring it for varlena is fragile.
+        // SAFETY: fallback_slot is valid, on main thread.
+        let (datum, is_null) = unsafe { slow_getattr(mt, fallback_slot, attno) };
+        if is_null || datum.value() == 0 {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+
+        // Detoast and read inet_struct payload.
+        // SAFETY: datum is a valid varlena pointer per the slot's tupdesc.
+        // In `cfg(test)` builds, libtest spawns a fresh thread per test
+        // and pgrx's guarded wrapper panics with "postgres FFI may not
+        // be called from multiple threads"; the identity stub in
+        // `src/pg_stubs.rs` is what the linker resolves
+        // `pg_detoast_datum` against on macOS, so calling the raw extern
+        // directly gives us a safe passthrough without the thread guard.
+        // Tests only use non-TOAST flat varlenas, so identity is correct.
+        #[cfg(not(test))]
+        let detoasted = unsafe {
+            pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
+        };
+        #[cfg(test)]
+        let detoasted = {
+            unsafe extern "C" {
+                fn pg_detoast_datum(
+                    datum: *mut pgrx::pg_sys::varlena,
+                ) -> *mut pgrx::pg_sys::varlena;
+            }
+            unsafe { pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) }
+        };
+        if detoasted.is_null() {
+            values.push([0u8; 24]);
+            nulls.push(1);
+            continue;
+        }
+
+        // SAFETY: detoasted is a valid flat varlena. vardata_any
+        // returns a pointer to the inet_struct (1 family + 1 bits +
+        // up to 16 ipaddr bytes); varsize_any_exhdr is the payload
+        // length excluding the varlena header.
+        let payload_len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
+        let vardata = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
+
+        // SAFETY: vardata is non-null when detoasted is non-null;
+        // payload_len is the bytes beyond the header. canonicalize_inet_payload
+        // re-checks payload_len against the family-specific minimum.
+        if let Some(canon) = unsafe { canonicalize_inet_payload(vardata, payload_len) } {
+            values.push(canon);
+            nulls.push(0);
+        } else {
+            values.push([0u8; 24]);
+            nulls.push(1);
+        }
+    }
+
+    (values, nulls)
+}
+
 /// Diagnostic: compare fast-path vs slow-path extraction for first N tuples.
 ///
 /// # Safety

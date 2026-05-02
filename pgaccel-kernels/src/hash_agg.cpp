@@ -148,6 +148,17 @@ static inline uint64_t read_key_u64(const void* keys, size_t row, int key_type) 
       memcpy(&hi, p + 8, 8);
       return hash64(lo) ^ hash64(hi);
     }
+    case 5: {  // INET / CIDR (24-byte canonical key)
+      // Layout: family(1) + bits(1) + ipaddr(16, IPv4 zero-padded) +
+      //         pad(6) = 24 bytes = 3 uint64_t. Mix each via hash64
+      //         and XOR for full diffusion.
+      const uint8_t* p = static_cast<const uint8_t*>(keys) + row * 24;
+      uint64_t a, b, c;
+      memcpy(&a, p, 8);
+      memcpy(&b, p + 8, 8);
+      memcpy(&c, p + 16, 8);
+      return hash64(a) ^ hash64(b) ^ hash64(c);
+    }
     default:
       return 0;
   }
@@ -163,6 +174,8 @@ static inline size_t key_size_for_type(int key_type) {
       return sizeof(double);
     case 4:
       return 16; /* UUID */
+    case 5:
+      return 24; /* INET / CIDR canonical key (see pgaccel_hash_join.h) */
     default:
       return 0;
   }

@@ -236,6 +236,12 @@ pub enum PgaccelKeyType {
     /// 16-byte UUID, host byte order. Hashed via two `hash64()` mixes
     /// XORed together inside the kernel.
     Uuid = 4,
+    /// 24-byte canonical INET / CIDR key (family + bits + 16-byte
+    /// ipaddr + 6-byte u64-alignment pad). Hashed via three
+    /// `hash64()` mixes XORed together. CIDR shares the slot — the
+    /// planner classifier maps both INETOID (869) and CIDROID (650)
+    /// to this variant.
+    Inet = 5,
 }
 
 /// Opaque handle to a GPU-side hash table.

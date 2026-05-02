@@ -133,16 +133,16 @@ impl JoinExecState {
                     double_keys = k;
                     null_mask = n;
                 }
-                PgaccelKeyType::Uuid => {
-                    // UUID keys are supported in hash_agg but not in
-                    // hash_join's templated build/probe path yet (the
+                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    // UUID and INET keys are supported in hash_agg but not
+                    // in hash_join's templated build/probe path yet (the
                     // build_cpu<T> / probe_cpu<T> templates assume an
-                    // arithmetic T). The planner classifier rejects
-                    // UUID for join keys, so this arm should be
-                    // unreachable in practice. Surface the bug
-                    // explicitly per CLAUDE.md rule 11 if reached.
+                    // arithmetic T). The planner classifier rejects both
+                    // for join keys, so this arm should be unreachable in
+                    // practice. Surface the bug explicitly per CLAUDE.md
+                    // rule 11 if reached.
                     pgrx::error!(
-                        "pg_accel: hash_join UUID keys not implemented; planner should have declined"
+                        "pg_accel: hash_join UUID/INET keys not implemented; planner should have declined"
                     );
                 }
             }
@@ -152,8 +152,8 @@ impl JoinExecState {
                 PgaccelKeyType::Int32 => int32_keys.as_ptr().cast(),
                 PgaccelKeyType::Int64 => long_keys.as_ptr().cast(),
                 PgaccelKeyType::Float64 => double_keys.as_ptr().cast(),
-                PgaccelKeyType::Uuid => {
-                    pgrx::error!("pg_accel: hash_join UUID keys not implemented")
+                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!("pg_accel: hash_join UUID/INET keys not implemented")
                 }
             };
 
@@ -316,9 +316,9 @@ impl JoinExecState {
                     o_double_keys = k;
                     o_null_mask = n;
                 }
-                PgaccelKeyType::Uuid => {
+                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
                     pgrx::error!(
-                        "pg_accel: hash_join UUID outer keys not implemented; planner should have declined"
+                        "pg_accel: hash_join UUID/INET outer keys not implemented; planner should have declined"
                     );
                 }
             }
@@ -327,8 +327,8 @@ impl JoinExecState {
                 PgaccelKeyType::Int32 => o_int32_keys.as_ptr().cast(),
                 PgaccelKeyType::Int64 => o_long_keys.as_ptr().cast(),
                 PgaccelKeyType::Float64 => o_double_keys.as_ptr().cast(),
-                PgaccelKeyType::Uuid => {
-                    pgrx::error!("pg_accel: hash_join UUID outer keys not implemented")
+                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!("pg_accel: hash_join UUID/INET outer keys not implemented")
                 }
             };
 

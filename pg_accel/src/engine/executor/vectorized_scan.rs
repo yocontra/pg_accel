@@ -322,6 +322,23 @@ impl VectorizedScan {
         (values, nulls)
     }
 
+    // INET / CIDR group-key extraction is intentionally NOT exposed
+    // here. INET is varlena (1- or 4-byte header + inet_struct
+    // payload) and the arena-based VectorizedScan only stores raw
+    // heap-tuple bytes — extracting the payload safely needs either
+    // (a) PG's slot_getattr / heap_deform_tuple machinery (which the
+    // VectorizedScan doesn't carry a TupleTableSlot for), or (b)
+    // hand-rolled varlena-header parsing on the inline bytes.
+    //
+    // The agg dispatch path at `engine/executor/agg/execute.rs` will
+    // route INET group keys through a follow-up code path that uses
+    // tuple_extract::extract_inet (MinimalTuple-based) once the
+    // executor wires a fallback_slot through. For now,
+    // `pg_accel_keys_classifier` accepts INETOID + CIDROID and
+    // produces a key_type=5; the agg dispatch checks for key_type=5
+    // and short-circuits if no INET-capable extractor is available,
+    // letting PG handle the GROUP BY.
+
     /// Extract raw `u8` bytes for a column (for hash agg key extraction).
     ///
     /// Returns the byte buffer and null mask. Each value is `typlen` bytes.

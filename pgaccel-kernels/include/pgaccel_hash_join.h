@@ -35,6 +35,17 @@ typedef enum {
    * Rust↔C ABI alignment stays one-to-one for every key type the
    * kernel actually receives. */
   PGACCEL_KEY_UUID = 4, /* 16-byte UUID, host order */
+  /* 24-byte canonical INET key:
+   *   byte 0      = family (PGSQL_AF_INET=2 or PGSQL_AF_INET6=3)
+   *   byte 1      = bits   (netmask, 0-128)
+   *   bytes 2-17  = ipaddr (16 bytes; IPv4 zero-padded after the
+   *                          first 4 address bytes)
+   *   bytes 18-23 = zero padding (u64 alignment)
+   * 24 bytes = 3 * uint64_t so read_key_u64 can hash via three
+   * hash64() mixes XORed together. CIDR is the same payload
+   * shape — registered separately on the Rust side via the
+   * CIDROID classifier arm. */
+  PGACCEL_KEY_INET = 5,
 } pgaccel_key_type;
 
 /* ── Hash table handle ──────────────────────────────────────────── */

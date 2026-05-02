@@ -1216,6 +1216,20 @@ impl AggExecState {
                     key_null_mask.push(nulls[j]);
                 }
             }
+            5 => {
+                // INET / CIDR key (24-byte canonical form). Not yet
+                // wired through VectorizedScan — extraction needs a
+                // TupleTableSlot for varlena detoasting that the
+                // arena-based scan doesn't carry. The planner
+                // classifier emits key_type = 5 (INETOID / CIDROID
+                // are accepted), but the executor declines here and
+                // PG handles the GROUP BY natively. Tracked under
+                // Phase 4 type coverage in TODO.
+                pgrx::debug1!(
+                    "pg_accel: INET/CIDR group key dispatched but vectorized extractor not wired; deferring to PG"
+                );
+                return;
+            }
             _ => return,
         }
 

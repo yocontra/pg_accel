@@ -32,6 +32,13 @@ pub struct GroupKeyInfo {
 /// the classifier matches by raw u32.
 const UUIDOID_RAW: u32 = 2950;
 
+/// PG type OIDs for `inet` and `cidr`. Both share the
+/// `inet_struct` payload shape (family + bits + 16-byte ipaddr) and
+/// route through the same 24-byte canonical hash key
+/// (`PgaccelKeyType::Inet`, kernel `key_type == 5`).
+const INETOID_RAW: u32 = 869;
+const CIDROID_RAW: u32 = 650;
+
 impl GroupKeyInfo {
     /// Map a PG type OID to an FFI key type tag.
     #[must_use]
@@ -41,6 +48,9 @@ impl GroupKeyInfo {
             pg_sys::INT8OID => Some(1),                   // Int64
             pg_sys::FLOAT4OID | pg_sys::FLOAT8OID => Some(2), // Float64
             oid if u32::from(oid) == UUIDOID_RAW => Some(4), // UUID
+            oid if u32::from(oid) == INETOID_RAW || u32::from(oid) == CIDROID_RAW => {
+                Some(5) // INET / CIDR (24-byte canonical key)
+            }
             _ => None,
         }
     }
@@ -52,6 +62,7 @@ impl GroupKeyInfo {
             0 => 4,     // i32
             1 | 2 => 8, // i64 or f64
             4 => 16,    // UUID
+            5 => 24,    // INET / CIDR canonical key
             _ => 0,
         }
     }
@@ -104,6 +115,70 @@ pub(super) fn append_key_bytes(
                 }
                 buf.extend_from_slice(&bytes);
             }
+        }
+        5 => {
+            // INET / CIDR: varlena-pointer Datum. Detoast, read
+            // family + bits + ipaddr from the inet_struct payload, and
+            // emit the 24-byte canonical key (matches the kernel-side
+            // PGACCEL_KEY_INET layout). NULL pointer or unsupported
+            // family produces all-zero bytes (treated as a NULL key by
+            // the kernel hash table — matches PG's hashinet semantics
+            // for malformed input via the planner-side null-mask gate).
+            let p = raw as *mut pgrx::pg_sys::varlena;
+            if p.is_null() {
+                buf.extend_from_slice(&[0u8; 24]);
+                return;
+            }
+            // SAFETY: p is a valid varlena pointer per the slot's
+            // tupdesc. cfg(test) routes through the identity stub in
+            // src/pg_stubs.rs to avoid pgrx's main-thread guard.
+            #[cfg(not(test))]
+            let detoasted = unsafe { pgrx::pg_sys::pg_detoast_datum(p) };
+            #[cfg(test)]
+            let detoasted = {
+                unsafe extern "C" {
+                    fn pg_detoast_datum(
+                        d: *mut pgrx::pg_sys::varlena,
+                    ) -> *mut pgrx::pg_sys::varlena;
+                }
+                unsafe { pg_detoast_datum(p) }
+            };
+            if detoasted.is_null() {
+                buf.extend_from_slice(&[0u8; 24]);
+                return;
+            }
+            // SAFETY: detoasted is a valid flat varlena.
+            let payload_len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
+            let vardata = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
+            if payload_len < 6 || vardata.is_null() {
+                buf.extend_from_slice(&[0u8; 24]);
+                return;
+            }
+            // SAFETY: payload_len ≥ 6 verified above. canonicalisation
+            // duplicates the inline math from
+            // tuple_extract::canonicalize_inet_payload — they must
+            // match (kernel reads the same 24-byte layout).
+            let family = unsafe { *vardata };
+            let bits = unsafe { *vardata.add(1) };
+            let mut bytes = [0u8; 24];
+            bytes[0] = family;
+            bytes[1] = bits;
+            // family 2 = IPv4 (4 byte addr), family 3 = IPv6 (16 byte).
+            match family {
+                2 => unsafe {
+                    std::ptr::copy_nonoverlapping(vardata.add(2), bytes.as_mut_ptr().add(2), 4);
+                },
+                3 if payload_len >= 18 => unsafe {
+                    std::ptr::copy_nonoverlapping(vardata.add(2), bytes.as_mut_ptr().add(2), 16);
+                },
+                _ => {
+                    // Unknown family or short payload — emit all-zero so
+                    // the bucket is consistent (kernel equality is
+                    // byte-compare).
+                    bytes = [0u8; 24];
+                }
+            }
+            buf.extend_from_slice(&bytes);
         }
         _ => {}
     }
@@ -166,6 +241,37 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         append_key_bytes(&mut buf, datum, 4, pg_sys::Oid::from(UUIDOID_RAW));
         assert_eq!(buf.len(), 16);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn key_type_from_oid_inet() {
+        let oid = pg_sys::Oid::from(INETOID_RAW);
+        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), Some(5));
+    }
+
+    #[test]
+    fn key_type_from_oid_cidr() {
+        let oid = pg_sys::Oid::from(CIDROID_RAW);
+        assert_eq!(GroupKeyInfo::key_type_from_oid(oid), Some(5));
+    }
+
+    #[test]
+    fn key_size_inet_is_24() {
+        let info = GroupKeyInfo {
+            attno: 1,
+            type_oid: pg_sys::Oid::from(INETOID_RAW),
+            key_type: 5,
+        };
+        assert_eq!(info.key_size(), 24);
+    }
+
+    #[test]
+    fn append_key_bytes_inet_null_pointer_emits_24_zeros() {
+        let datum = pg_sys::Datum::from(0_u64);
+        let mut buf: Vec<u8> = Vec::new();
+        append_key_bytes(&mut buf, datum, 5, pg_sys::Oid::from(INETOID_RAW));
+        assert_eq!(buf.len(), 24);
         assert!(buf.iter().all(|&b| b == 0));
     }
 }
