@@ -37,12 +37,23 @@ items explicitly descoped from ship.
 Phase 1 + Phase 2 + Phase 5 dead-code are closed. Open work in TODO
 order:
 
-1. **Phase 1 cost-multiplier calibration** — blocked on Phase 6 (the
+1. **CPU-cheat kernel conversions** — 2026-05-02 audit found 7
+   `extern "C" pgaccel_*` symbols whose body is a host-side `for` loop
+   with no `q.submit` / `q.parallel_for`. Violates CLAUDE.md rules
+   11/12 (these are policy violations that escaped the compile-time
+   gate because the kernels live in `.cpp` files that *do* link
+   against SYCL — the policy gate catches `#if PGACCEL_HAS_SYCL`
+   branches, not host-loop bodies inside SYCL TUs). See "Cheat-list"
+   section directly under Phase 1 for the 7 functions, severity, and
+   fix sketches. Highest priority because the entire
+   "no CPU fallbacks" invariant is currently fiction in these
+   kernels — the audit must be re-run after each fix.
+2. **Phase 1 cost-multiplier calibration** — blocked on Phase 6 (the
    `fp64_matrix` 2-cell shortfall is Phase 6 dispatch perf, not
    `soft_fp64_cost_multiplier` tuning). See `Phase 6 →
    Per-batch GPU dispatch dominates parallel SUM / GROUP BY` for the
    unblocker plan.
-2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
+3. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
    kernel + bridge + executor. Largest single chunk in the punchlist.
 3. **Phase 4 type coverage** — UUID / INET / CIDR extractors next
    (hash-join workload), then JSON / JSONB. DATE works post Phase 2.
@@ -63,8 +74,118 @@ order:
 8. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
    approach was tried, made things worse, reverted. Same root cause
    as (6); needs the SSCP investigation.
-9. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
-10. **Phase 3-10 in order** for everything else.
+10. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+11. **Phase 3-10 in order** for everything else.
+
+## CPU-cheat kernel conversions (2026-05-02 audit)
+
+7 `extern "C" pgaccel_*` symbols whose body is a host-side `for` loop
+with no `q.submit` / `q.parallel_for` — labelled GPU but executing on
+CPU. CLAUDE.md rules 11/12 ban this. The compile-time gate
+(no `#if PGACCEL_HAS_SYCL`, no `gpu` cargo feature, no `stubs.rs`) does
+NOT catch these — all the offending bodies live in `.cpp` files that
+*do* link against SYCL, so the gate sees a SYCL TU and is satisfied
+even when the function body never touches `q`.
+
+**Severity rubric**: HIGH = whole function CPU. MEDIUM = small-N CPU
+branch. LOW = CPU helper not on hot path. After every fix, re-run the
+audit (grep `extern "C" pgaccel_` against `q\.submit\|parallel_for` in
+the same function body).
+
+### Spatial — `pgaccel-kernels/src/spatial_predicates.cpp`
+
+- **HIGH** `pgaccel_point_in_ring_bulk` fp32 path (`:527-535`): the
+  `use_fp64=false` branch is `for (size_t i = 0; ...) results[i] =
+  point_in_ring_one<float>(px, py, ring, vc, EPS_FP32);` — pure CPU.
+  fp64 path is real SYCL via `point_in_ring_bulk_fp64_sycl`. Fix:
+  add `point_in_ring_bulk_fp32_sycl` mirroring the fp64 SYCL kernel
+  (lines 235-366), dispatch through it.
+- **HIGH** `pgaccel_segment_intersects_bulk` (`:583-610`): BOTH
+  fp32 and fp64 branches are host loops calling
+  `segment_intersects_one<T>()`. No SYCL anywhere in the function.
+  Fix: add `segment_intersects_bulk_sycl<T>` template mirroring the
+  newly-landed `sphere_distance_bulk_sycl<T>` pattern at `:383`.
+  Watch out for the soft-fp64 trig hang: `segment_intersects_one` uses
+  only multiplies/adds + cross product (no trig), so the fp64
+  instantiation should compile cleanly under Metal soft-fp64.
+
+### Raster — `pgaccel-kernels/src/raster_ops.cpp`
+
+- **HIGH** `pgaccel_map_algebra` (`:222-241`): the
+  `if (pixel_count < GPU_TILE_THRESHOLD && pixel_type ==
+  PGACCEL_PT_FLOAT32)` branch calls `eval_expr_f32_inline` (host
+  loop) AND THEN `pgaccel_record_gpu_exec()` — fraudulent stats. The
+  `pgaccel_get_caps().gpu_executions` counter increments for CPU work.
+  Fix: delete the small-N CPU fast-path; always dispatch to the SYCL
+  path even for small tiles (the per-batch dispatch cost is the same
+  Phase 6 issue tracked elsewhere — solve it there, not here by
+  cheating).
+- **HIGH** `pgaccel_raster_clip` (`:536`): same pattern — small-N
+  branch calls `raster_clip_inline_f32` (host loop) and reports GPU
+  exec. Same fix: delete the small-N CPU branch.
+
+### Window — `pgaccel-kernels/src/window.cpp`
+
+5 functions — every window kernel today is a host loop. None of them
+have `q.submit` / `q.parallel_for` anywhere in `window.cpp`. Spot-check
+confirmed at `:383, :419, :447, :482, :503`. The conversions are
+non-trivial because rank/dense_rank/sum/count are inherently
+sequential per-partition (each row depends on the previous). GPU
+solution requires segmented parallel scan — a different algorithm,
+not a wrap-in-`parallel_for` rewrite.
+
+- **HIGH** `pgaccel_window_rank` (`:383-415`): `for (size_t i = 0;
+  ...)` carrying `row_num`, `rank`, `prev_key`, `first_in_partition`.
+  Fix: segmented prefix scan over `(partition_starts, sort_keys)` —
+  one work-group per partition, intra-partition rank is
+  `1 + count_of_strict_predecessors_with_different_key`.
+- **HIGH** `pgaccel_window_dense_rank` (`:419-444`): same pattern,
+  rank only increments on key change. Fix: segmented scan with
+  `+= (key != prev_key)` step.
+- **HIGH** `pgaccel_window_sum` (`:447-478`): per-partition Kahan
+  compensated sum, sequential. Fix: segmented parallel inclusive
+  prefix sum (Sklansky / Brent-Kung); Kahan compensation on GPU is
+  doable but precision will diverge from the host-loop baseline —
+  document the tolerance.
+- **HIGH** `pgaccel_window_count` (`:482-501`): per-partition row
+  count with NULL skip. Fix: segmented prefix sum of `!is_null`.
+- **HIGH** `pgaccel_window_lag` (~`:503+`): per-partition lookup
+  `lag_n` rows back. Fix: trivially parallel (each row reads index
+  `i - offset` clamped to partition start). Likely the easiest of the
+  five.
+
+### Done when
+
+- All 7 functions audited: each body contains exactly one
+  `q.submit` / `q.parallel_for` call (or returns
+  `PGACCEL_ERROR_NO_DEVICE` for unsupported configs); no stray
+  `for (size_t i = 0; ...)` loops over `count` doing per-row compute.
+- Tests `test_spatial`, `test_correctness`, `test_raster`,
+  `test_window` all pass on cold-cache JIT (`just clear-jit && ...`).
+- `pgaccel_get_caps().gpu_executions` no longer increments for the
+  raster small-N branches (because they no longer exist).
+- TODO entry deleted, with a one-line note in the commit message
+  pointing at the audit grep query so the next audit can re-run it.
+
+### Audit re-run command
+
+After each fix, re-validate with:
+
+```bash
+# List every extern "C" pgaccel_* symbol in src/, then grep its body
+# for q.submit / q.parallel_for. Anything that calls the symbol but
+# has no SYCL submit is a candidate cheat.
+for f in pgaccel-kernels/src/*.cpp; do
+  awk '/^extern "C" pgaccel_status pgaccel_/{name=$0; in_fn=1; body=""}
+       in_fn { body = body "\n" $0 }
+       in_fn && /^}/{ in_fn=0;
+         if (body !~ /q\.submit|parallel_for|return PGACCEL_ERROR/) {
+           print FILENAME ":" NR " — " name
+         }
+         body=""
+       }' "$f"
+done
+```
 
 ## Phase 1 — Close remaining fp64 gaps
 
@@ -146,9 +267,9 @@ Split into 3a (planner) and 3b (executor, gating):
 - Extend `hash_agg_execute` / `HashAggResult` to return per-group *partial*
   transition states (AVG/STDDEV/VAR need `[N, sum, sum_sq]` per group; SUM /
   MIN / MAX / COUNT need raw accumulator per group). Route via GPU kernel
-  output mode — NOT a CPU `HashMap<Box<[u8]>, Vec<ColumnAccumulator>>`
-  scaffold, which would be closer to a CPU fallback than CLAUDE.md rule 11
-  allows.
+  output mode — NOT a host-side `HashMap<Box<[u8]>, Vec<ColumnAccumulator>>`
+  scaffold (CLAUDE.md rule 11/12 ban CPU compute on the GPU dispatch path,
+  enforced at compile time).
 - ~200-400 line change spanning kernel + bridge + result accessor + emit
   path. Needs a correctness test matrix cross-verified against PG's
   `advance_combine_function` semantics for each emitter shape.
@@ -575,18 +696,15 @@ tests). One item remains.
      batch boundary entirely for common patterns.
   3. **Buffered accumulation at executor layer** so the GPU sees fewer,
      larger batches per worker.
-  4. **Last resort, documented fallback only**: raise
-     `pg_accel.min_batch_size` floor (today `DeviceLimits` caps at 65536;
-     chunk size is one scan tuple batch). WARNING: per Benchmark Rule #11
-     / feedback_dont_disable_gpu.md, raising to skip the failing size is a
-     bug-hiding pattern, not a fix. Only take this step if 1–3 are
-     exhausted AND the underlying dispatch cost is provably unavoidable;
-     document the decision in CHANGELOG.md with the measured lower-bound.
+  4. **Do NOT raise `min_batch_size` to skip the failing sizes.** Per
+     Benchmark Rule #11 / feedback_dont_disable_gpu.md / anti-cheat
+     ban #9, raising the threshold is a bug-hiding pattern, not a fix.
+     If options 1–3 are exhausted, escalate to user with measured
+     dispatch costs — do not silently downgrade GPU coverage.
 - **Done when**: The full sweep (`benches/reduce_sum_bench.rs` row-count
   matrix `[100k, 1M, 10M, 100M, 1B]`) shows every cell ≥ PG parallel via
   Custom Scan selection, trace spans confirm reduced batch count per
-  worker, and `min_batch_size` default is unchanged vs prior release (or a
-  CHANGELOG.md entry justifies the raise).
+  worker, and `min_batch_size` default is unchanged vs prior release.
 
 ### Per-fork JIT ~290 ms cold+warm
 
@@ -967,16 +1085,26 @@ those first, then the check here moves to PASS.
 
 ### No silent kernel-failure Deferred paths
 
-- **What**: `grep -r "CPU fallback\|Deferred"` — zero kernel-failure
-  Deferred results; input-gate Deferred for unsupported types is OK but
-  must be explicit.
+- **What**: Audit `grep -r "Deferred" pg_accel/src/` — every match must
+  be an explicit *input-gate* deferral (caller passed an unsupported
+  type / shape; planner declines, PG runs the scalar qual) with a
+  comment explaining the gate. *Kernel-failure* Deferred (kernel
+  dispatched, returned an error, executor maps to Deferred to silently
+  drop the row or fall through) is banned.
 - **Why**: Silent kernel-failure Deferred violates CLAUDE.md Critical
-  Safety Rule #11 (no CPU fallbacks).
-- **How**: Audit every `Deferred` / fallback site; each must have a
-  comment explaining why (and for input-gate cases, a test).
-- **Done when**: Grep shows every Deferred is input-gate with a comment;
-  kernel-failure Deferreds are all resolved into either proper errors or
-  kernel fixes.
+  Safety Rule #11 / anti-cheat ban #4 (no silent error swallowing on
+  GPU paths). The 2026-05-02 Rust audit (see "CPU-cheat kernel
+  conversions" section) confirmed all Rust `gpu/` and `executor/` GPU
+  paths today either dispatch correctly or `pgrx::error!()` on kernel
+  failure with a "refusing CPU fallback (rule 11)" message — no
+  silent kernel-failure Deferred remains in the Rust tree. Re-run the
+  audit after every kernel change.
+- **How**: After kernel/bridge changes, re-run the audit grep and
+  spot-check any new `Deferred` site for the input-gate-vs-failure
+  distinction; require a one-line comment on each gate.
+- **Done when**: Every `Deferred` in `pg_accel/src/` carries an
+  input-gate justification comment; CI grep gate added so future
+  kernel-failure Deferreds fail at PR time.
 
 ### `pg_accel_stats()` sanity
 
@@ -1036,9 +1164,11 @@ those first, then the check here moves to PASS.
 - **Why**: The current "smoke test" says `just package` but doesn't verify
   that installed users can upgrade in place. Shipping a breaking SQL
   schema without a migration script is a wire-protocol break for anyone
-  on 0.1.0. `pg_accel_stats()` losing its `cpu_fallback_count` column (see
-  CHANGELOG Upgrade notes) is one of the concrete changes that requires
-  migration coverage.
+  on 0.1.0. Walk `git log -- pg_accel--0.1.0.sql` to enumerate the actual
+  signature changes needing migration coverage; `pg_accel_stats()` was
+  one such change in an earlier iteration but its `cpu_fallback_count`
+  column was deleted before any 0.1.0 release shipped, so it does not
+  need migration coverage today.
 - **How**:
   - Update `pg_accel.control` with `default_version = '1.0.0'`.
   - Generate `pg_accel--1.0.0.sql` (fresh install schema) via `cargo pgrx
