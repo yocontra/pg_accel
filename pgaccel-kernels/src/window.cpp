@@ -356,6 +356,287 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
   }
 }
 
+// ---------------------------------------------------------------------------
+// sycl_window_count — GPU parallel COUNT(*) / COUNT(value) per partition
+//
+// Two-pass:
+//   Pass 1 (host): build part_start_idx[]
+//   Pass 2 (GPU):  parallel_for — each thread counts non-null rows in
+//                  [part_start_idx[i] .. i]. Per-row independent scan;
+//                  embarrassingly parallel across rows. Worst case
+//                  (one giant partition) is O(N) per thread, but each
+//                  row is computed in its own work-item so wall-time
+//                  is dominated by the longest partition prefix, not
+//                  by the total row count.
+// ---------------------------------------------------------------------------
+
+static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const uint8_t* null_mask,
+                                        size_t count, int64_t* results) {
+  sycl::queue* q = get_queue();
+  if (!q)
+    return PGACCEL_UNSUPPORTED;
+
+  std::vector<size_t> h_part_start(count);
+  build_part_start_idx(partition_starts, count, h_part_start.data());
+
+  try {
+    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
+    if (!d_part_start)
+      return PGACCEL_UNSUPPORTED;
+
+    uint8_t* d_null_mask = nullptr;
+    bool has_nulls = (null_mask != nullptr);
+    if (has_nulls) {
+      d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
+      if (!d_null_mask) {
+        pgaccel_free_input(d_part_start, *q, h_part_start.data());
+        return PGACCEL_UNSUPPORTED;
+      }
+    }
+
+    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
+    if (!d_results) {
+      if (has_nulls)
+        pgaccel_free_input(d_null_mask, *q, null_mask);
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const size_t start = d_part_start[i];
+       int64_t cnt = 0;
+       for (size_t j = start; j <= i; ++j) {
+         const bool is_null = (has_nulls && d_null_mask[j]);
+         if (!is_null)
+           ++cnt;
+       }
+       d_results[i] = cnt;
+     }).wait_and_throw();
+
+    pgaccel_d2h(*q, results, d_results, count);
+
+    sycl::free(d_results, *q);
+    if (has_nulls)
+      pgaccel_free_input(d_null_mask, *q, null_mask);
+    pgaccel_free_input(d_part_start, *q, h_part_start.data());
+
+    return PGACCEL_OK;
+  } catch (...) {
+    return PGACCEL_UNSUPPORTED;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// sycl_window_sum — GPU parallel SUM(value) per partition with Kahan
+//
+// Same per-row independent scan pattern as sycl_window_count. Each
+// thread computes a Kahan-compensated sum over [part_start_idx[i] .. i].
+// On Metal soft-fp64 the Kahan compensation runs through soft-float
+// add/sub but no trig, so JIT compiles cleanly.
+// ---------------------------------------------------------------------------
+
+static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const double* values,
+                                      const uint8_t* null_mask, size_t count, double* results) {
+  sycl::queue* q = get_queue();
+  if (!q)
+    return PGACCEL_UNSUPPORTED;
+
+  std::vector<size_t> h_part_start(count);
+  build_part_start_idx(partition_starts, count, h_part_start.data());
+
+  try {
+    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
+    if (!d_part_start)
+      return PGACCEL_UNSUPPORTED;
+
+    double* d_values = pgaccel_alloc_input<double>(count, *q, values);
+    if (!d_values) {
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    uint8_t* d_null_mask = nullptr;
+    bool has_nulls = (null_mask != nullptr);
+    if (has_nulls) {
+      d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
+      if (!d_null_mask) {
+        pgaccel_free_input(d_values, *q, values);
+        pgaccel_free_input(d_part_start, *q, h_part_start.data());
+        return PGACCEL_UNSUPPORTED;
+      }
+    }
+
+    double* d_results = pgaccel_alloc<double>(count, *q);
+    if (!d_results) {
+      if (has_nulls)
+        pgaccel_free_input(d_null_mask, *q, null_mask);
+      pgaccel_free_input(d_values, *q, values);
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const size_t start = d_part_start[i];
+       double sum = 0.0;
+       double comp = 0.0;
+       for (size_t j = start; j <= i; ++j) {
+         const bool is_null = (has_nulls && d_null_mask[j]);
+         if (!is_null) {
+           const double y = d_values[j] - comp;
+           const double t = sum + y;
+           comp = (t - sum) - y;
+           sum = t;
+         }
+       }
+       d_results[i] = sum;
+     }).wait_and_throw();
+
+    pgaccel_d2h(*q, results, d_results, count);
+
+    sycl::free(d_results, *q);
+    if (has_nulls)
+      pgaccel_free_input(d_null_mask, *q, null_mask);
+    pgaccel_free_input(d_values, *q, values);
+    pgaccel_free_input(d_part_start, *q, h_part_start.data());
+
+    return PGACCEL_OK;
+  } catch (...) {
+    return PGACCEL_UNSUPPORTED;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// sycl_window_rank / sycl_window_dense_rank — GPU parallel ranking
+//
+// Per-row independent scan: each thread walks [part_start..i] counting
+// distinct sort-key transitions ahead of row i. rank uses 1 + count of
+// strict predecessors with a different key (gap rank); dense_rank uses
+// 1 + count of distinct keys before i.
+//
+// Uses pg_eq_f64 NaN-aware equality matching the host implementation.
+// ---------------------------------------------------------------------------
+
+static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const double* sort_keys,
+                                       size_t count, int64_t* results) {
+  sycl::queue* q = get_queue();
+  if (!q)
+    return PGACCEL_UNSUPPORTED;
+
+  std::vector<size_t> h_part_start(count);
+  build_part_start_idx(partition_starts, count, h_part_start.data());
+
+  try {
+    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
+    if (!d_part_start)
+      return PGACCEL_UNSUPPORTED;
+
+    double* d_keys = pgaccel_alloc_input<double>(count, *q, sort_keys);
+    if (!d_keys) {
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
+    if (!d_results) {
+      pgaccel_free_input(d_keys, *q, sort_keys);
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const size_t start = d_part_start[i];
+       const double my_key = d_keys[i];
+       // Gap rank: 1 + (i - start - count_of_predecessors_with_same_key_as_i)
+       // Equivalent: 1 + count of predecessors with strictly different rank,
+       // computed as the position where the *first* predecessor with my_key
+       // appears within the partition.
+       int64_t r = 1;
+       for (size_t j = start; j < i; ++j) {
+         const double k_j = d_keys[j];
+         // pg_eq_f64 inline: NaN==NaN, otherwise IEEE
+         const bool eq = (k_j != k_j && my_key != my_key) ||
+                         (!(k_j != k_j) && !(my_key != my_key) && k_j == my_key);
+         if (!eq) {
+           ++r;
+         }
+       }
+       d_results[i] = r;
+     }).wait_and_throw();
+
+    pgaccel_d2h(*q, results, d_results, count);
+
+    sycl::free(d_results, *q);
+    pgaccel_free_input(d_keys, *q, sort_keys);
+    pgaccel_free_input(d_part_start, *q, h_part_start.data());
+
+    return PGACCEL_OK;
+  } catch (...) {
+    return PGACCEL_UNSUPPORTED;
+  }
+}
+
+static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
+                                             const double* sort_keys, size_t count,
+                                             int64_t* results) {
+  sycl::queue* q = get_queue();
+  if (!q)
+    return PGACCEL_UNSUPPORTED;
+
+  std::vector<size_t> h_part_start(count);
+  build_part_start_idx(partition_starts, count, h_part_start.data());
+
+  try {
+    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
+    if (!d_part_start)
+      return PGACCEL_UNSUPPORTED;
+
+    double* d_keys = pgaccel_alloc_input<double>(count, *q, sort_keys);
+    if (!d_keys) {
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
+    if (!d_results) {
+      pgaccel_free_input(d_keys, *q, sort_keys);
+      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+      return PGACCEL_UNSUPPORTED;
+    }
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const size_t start = d_part_start[i];
+       // Dense rank: 1 + count of distinct keys strictly before i in
+       // [start..i). A key transition (k_{j-1} != k_j) bumps the rank.
+       // Walk the prefix, count transitions, +1 for the row itself.
+       int64_t r = 1;
+       for (size_t j = start + 1; j <= i; ++j) {
+         const double k_prev = d_keys[j - 1];
+         const double k_curr = d_keys[j];
+         const bool eq = (k_prev != k_prev && k_curr != k_curr) ||
+                         (!(k_prev != k_prev) && !(k_curr != k_curr) && k_prev == k_curr);
+         if (!eq) {
+           ++r;
+         }
+       }
+       d_results[i] = r;
+     }).wait_and_throw();
+
+    pgaccel_d2h(*q, results, d_results, count);
+
+    sycl::free(d_results, *q);
+    pgaccel_free_input(d_keys, *q, sort_keys);
+    pgaccel_free_input(d_part_start, *q, h_part_start.data());
+
+    return PGACCEL_OK;
+  } catch (...) {
+    return PGACCEL_UNSUPPORTED;
+  }
+}
+
 // ===========================================================================
 // Public C API
 // ===========================================================================
@@ -388,30 +669,15 @@ pgaccel_status pgaccel_window_rank(const uint8_t* partition_starts, const double
   if (count == 0)
     return PGACCEL_OK;
 
-  int64_t row_num = 0;
-  int64_t rank = 1;
-  double prev_key = 0.0;
-  bool first_in_partition = true;
-
-  for (size_t i = 0; i < count; i++) {
-    if (partition_starts[i]) {
-      row_num = 0;
-      rank = 1;
-      first_in_partition = true;
+  if (count >= GPU_WINDOW_THRESHOLD) {
+    pgaccel_status st = sycl_window_rank(partition_starts, sort_keys, count, results);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
     }
-    row_num++;
-
-    if (first_in_partition) {
-      rank = 1;
-      first_in_partition = false;
-    } else if (!pg_eq_f64(sort_keys[i], prev_key)) {
-      rank = row_num;
-    }
-
-    results[i] = rank;
-    prev_key = sort_keys[i];
   }
-  return PGACCEL_OK;
+
+  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const double* sort_keys,
@@ -422,25 +688,15 @@ pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const 
   if (count == 0)
     return PGACCEL_OK;
 
-  int64_t rank = 0;
-  double prev_key = 0.0;
-  bool first_in_partition = true;
-
-  for (size_t i = 0; i < count; i++) {
-    if (partition_starts[i]) {
-      rank = 0;
-      first_in_partition = true;
+  if (count >= GPU_WINDOW_THRESHOLD) {
+    pgaccel_status st = sycl_window_dense_rank(partition_starts, sort_keys, count, results);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
     }
-
-    if (first_in_partition || !pg_eq_f64(sort_keys[i], prev_key)) {
-      rank++;
-      first_in_partition = false;
-    }
-
-    results[i] = rank;
-    prev_key = sort_keys[i];
   }
-  return PGACCEL_OK;
+
+  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double* values,
@@ -451,27 +707,15 @@ pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double*
   if (count == 0)
     return PGACCEL_OK;
 
-  // Kahan compensated summation per partition
-  double sum = 0.0;
-  double comp = 0.0;  // compensation term
-
-  for (size_t i = 0; i < count; i++) {
-    if (partition_starts[i]) {
-      sum = 0.0;
-      comp = 0.0;
+  if (count >= GPU_WINDOW_THRESHOLD) {
+    pgaccel_status st = sycl_window_sum(partition_starts, values, null_mask, count, results);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
     }
-
-    bool is_null = (null_mask != nullptr && null_mask[i]);
-    if (!is_null) {
-      double y = values[i] - comp;
-      double t = sum + y;
-      comp = (t - sum) - y;
-      sum = t;
-    }
-
-    results[i] = sum;
   }
-  return PGACCEL_OK;
+
+  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8_t* null_mask,
@@ -481,17 +725,15 @@ pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8
   if (count == 0)
     return PGACCEL_OK;
 
-  int64_t cnt = 0;
-  for (size_t i = 0; i < count; i++) {
-    if (partition_starts[i]) {
-      cnt = 0;
+  if (count >= GPU_WINDOW_THRESHOLD) {
+    pgaccel_status st = sycl_window_count(partition_starts, null_mask, count, results);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
     }
-    bool is_null = (null_mask != nullptr && null_mask[i]);
-    if (!is_null)
-      cnt++;
-    results[i] = cnt;
   }
-  return PGACCEL_OK;
+
+  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 pgaccel_status pgaccel_window_lag(const uint8_t* partition_starts, const double* values,
