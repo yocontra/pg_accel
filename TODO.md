@@ -894,8 +894,26 @@ work is tracked in the Post-1.0 (deferred) section.
   bumped (so the argbuffer path is skipped) and again at default to
   diff the two emitted prototypes; fix the collision in
   `emitArgStruct` / `emitSignature`.
+- **Related kernels caught with the same emitter bug** (refreshed 2026-05-01):
+  - `pgaccel_expr_template_two_pred_and`
+    (`pgaccel-kernels/src/expr_templates.cpp:423`): cold-cache JIT
+    fails with `attribute 'id' set location to 4, but minimum is 5;
+    device void* t4 [[id(4)]];`. **Currently dead code** — no Rust
+    executor path calls it (`scan/exec.rs:558-593`,
+    `agg/execute.rs:1539,1601`, `preagg/mod.rs:457,617` all evaluate
+    the `TwoPredAnd` template variant by calling
+    `pgaccel_expr_template_cmp_const` twice and AND-ing the results
+    in Rust). Two follow-up paths: (a) delete the unused kernel +
+    bridge decl + the planner classifier's `TwoPredAnd::Kernel`
+    enum if any, OR (b) fix the emitter and wire the kernel through
+    so the Rust-side double-dispatch becomes a single-kernel call.
+    Bridge decl at `pg_accel/src/gpu/bridge.rs:484`. Reproducer:
+    `pgaccel-kernels/test/test_expr_templates.cpp` (kernel
+    intentionally NOT exercised by that test until either route lands).
 - **Done when**: pg_accel's `reduce_stats_f64` MSL-compiles at every
-  N; an AdaptiveCpp-side regression test asserts the prototype.
+  N; AND `pgaccel_expr_template_two_pred_and` either compiles cleanly
+  cold-cache OR is deleted; an AdaptiveCpp-side regression test
+  asserts the prototype.
 
 ### Metal backend fork-safety with fp64 kernels
 
