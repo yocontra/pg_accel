@@ -153,17 +153,150 @@ pub fn spatial_eval(
 
 /// Evaluate `ST_Contains(A, B)` — does A fully contain B?
 ///
-/// No GPU containment kernel exists yet. All pairs are returned as
-/// `Uncertain` for PG exact recheck via PostGIS. A future
-/// `pgaccel_spatial_contains` kernel can be wired in here.
+/// Routes `Polygon ⊇ Point` pairs through `pgaccel_point_in_ring_bulk`
+/// (real SYCL kernel, fp32 path). Other geometry-pair shapes
+/// short-circuit the whole batch to `Uncertain` so PG handles them via
+/// PostGIS recheck. `ST_Within(A, B) = ST_Contains(B, A)` is plumbed in
+/// `spatial_eval` via argument swap, so this implementation also serves
+/// the within case (B is the polygon, A is the point on the within
+/// path; here we always treat geoms_a as the polygon and geoms_b as
+/// the point per the contains contract).
+///
+/// Performance note: the kernel processes one ring against many points
+/// in a single dispatch. For batches where every pair has a *different*
+/// polygon (typical of self-joins on disparate geometries), we issue N
+/// kernel calls — one per pair. Batches sharing a constant polygon (a
+/// common shape in spatial JOINs against a fixed area-of-interest) are
+/// fast paths handled by a single dispatch over all points. A future
+/// `pgaccel_polygon_polygon_contains_bulk` kernel could close the per-
+/// pair dispatch overhead but doesn't exist yet.
 #[must_use]
 pub fn spatial_contains(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
     _skip_bbox: bool,
 ) -> SpatialResult {
-    // No GPU containment kernel — defer all pairs to PG recheck.
-    all_uncertain(geoms_a.len().min(geoms_b.len()))
+    let n = geoms_a.len().min(geoms_b.len());
+    if n == 0 {
+        return SpatialResult {
+            definite_true: Vec::new(),
+            definite_false: Vec::new(),
+            uncertain: Vec::new(),
+        };
+    }
+
+    // Containment shape gate: Polygon (A) ⊇ Point (B). Any other shape
+    // short-circuits the entire batch to UNCERTAIN.
+    let shape_ok = geoms_a[..n]
+        .iter()
+        .zip(geoms_b[..n].iter())
+        .all(|(a, b)| a.geom_type == GeomType::Polygon && b.geom_type == GeomType::Point);
+    if !shape_ok {
+        return all_uncertain(n);
+    }
+
+    // Polygon needs >= 3 distinct vertices (>= 6 floats); Point needs
+    // >= 2 floats. Degenerate inputs short-circuit so the kernel never
+    // sees malformed buffers.
+    let degenerate = geoms_a[..n]
+        .iter()
+        .any(|g| g.coord_count < 3 || g.coords.len() < 6)
+        || geoms_b[..n]
+            .iter()
+            .any(|g| g.coord_count == 0 || g.coords.len() < 2);
+    if degenerate {
+        return all_uncertain(n);
+    }
+
+    use super::bridge::{self, PgaccelStatus};
+
+    // Fast path: every polygon shares the same ring (constant
+    // polygon, e.g. a fixed area-of-interest). One kernel dispatch
+    // handles all points. Detected by pointer-eq on the ring slice
+    // — if the planner passed the same Vec<f32> to every row we win.
+    let ring_a0_ptr = geoms_a[0].coords.as_ptr();
+    let ring_a0_len = geoms_a[0].coords.len();
+    let constant_polygon = geoms_a[..n]
+        .iter()
+        .all(|g| g.coords.as_ptr() == ring_a0_ptr && g.coords.len() == ring_a0_len);
+
+    let mut definite_true = Vec::new();
+    let mut definite_false = Vec::new();
+    let mut uncertain = Vec::new();
+
+    if constant_polygon {
+        // Build a flat point buffer.
+        let mut points_xy = Vec::<f32>::with_capacity(n * 2);
+        for g in &geoms_b[..n] {
+            points_xy.push(g.coords[0]);
+            points_xy.push(g.coords[1]);
+        }
+        let mut results = vec![0i8; n];
+        // SAFETY: ring lives in geoms_a[0].coords (Rust-owned for the
+        // duration of this call); points_xy is owned here; results is
+        // owned. vertex_count is `coord_count` which the kernel expects.
+        let status = unsafe {
+            bridge::pgaccel_point_in_ring_bulk(
+                points_xy.as_ptr(),
+                n,
+                geoms_a[0].coords.as_ptr(),
+                geoms_a[0].coord_count,
+                false, // fp32 path; fp64 is fp64 SYCL kernel via the same entry
+                results.as_mut_ptr(),
+            )
+        };
+        if !matches!(status, PgaccelStatus::Ok) {
+            return all_uncertain(n);
+        }
+        for (i, &r) in results.iter().enumerate() {
+            match r {
+                1 => definite_true.push(i),
+                -1 => definite_false.push(i),
+                _ => uncertain.push(i),
+            }
+        }
+        return SpatialResult {
+            definite_true,
+            definite_false,
+            uncertain,
+        };
+    }
+
+    // Slow path: per-pair dispatch. Each pair gets one kernel call
+    // (1 point against 1 polygon ring). Acceptable for small n; the
+    // future pgaccel_polygon_polygon_contains_bulk kernel will collapse
+    // this into one dispatch.
+    for i in 0..n {
+        let pt = [geoms_b[i].coords[0], geoms_b[i].coords[1]];
+        let mut result = [0i8; 1];
+        // SAFETY: pt is a stack-local 2-float array; ring is owned by
+        // geoms_a[i].coords for the call's duration; result is local.
+        let status = unsafe {
+            bridge::pgaccel_point_in_ring_bulk(
+                pt.as_ptr(),
+                1,
+                geoms_a[i].coords.as_ptr(),
+                geoms_a[i].coord_count,
+                false,
+                result.as_mut_ptr(),
+            )
+        };
+        if !matches!(status, PgaccelStatus::Ok) {
+            uncertain.push(i);
+            continue;
+        }
+        match result[0] {
+            1 => definite_true.push(i),
+            -1 => definite_false.push(i),
+            _ => uncertain.push(i),
+        }
+    }
+
+    SpatialResult {
+        definite_true,
+        definite_false,
+        uncertain,
+    }
 }
 
 /// Evaluate `ST_DWithin(A, B, threshold)` — are A and B within `threshold_m`

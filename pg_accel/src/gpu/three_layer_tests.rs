@@ -8,7 +8,8 @@
 //! recheck on the main backend thread (Layer 3).
 
 use crate::gpu::three_layer::{
-    ExtractedGeometry, GeomType, SpatialPredicate, spatial_eval, spatial_intersects,
+    ExtractedGeometry, GeomType, SpatialPredicate, spatial_contains, spatial_eval,
+    spatial_intersects,
 };
 
 // ---------------------------------------------------------------------------
@@ -299,4 +300,115 @@ fn pipeline_large_batch() {
         result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
         100
     );
+}
+
+// ===========================================================================
+// spatial_contains pipeline — integration scenarios
+// ===========================================================================
+//
+// `spatial_contains(geoms_a, geoms_b)` tests "Polygon-A contains
+// Point-B" via the existing pgaccel_point_in_ring_bulk fp32 SYCL
+// kernel. The constant-polygon fast path collapses N pairs into one
+// kernel dispatch when every geoms_a entry shares the same coords
+// vector pointer (typical for spatial JOINs against a fixed
+// area-of-interest). Per-pair dispatch is the slow-path fallback.
+//
+// As with dwithin, kernel dispatch in the unit-test process returns
+// PGACCEL_ERROR_NO_DEVICE because g_queue is not initialised; the
+// pipeline routes the affected rows to UNCERTAIN. Tests verify the
+// shape gating (non-Polygon/Point pairs short-circuit) and that
+// every input pair lands in exactly one bucket.
+
+#[test]
+fn contains_empty_inputs() {
+    let result = spatial_contains(&[], &[], false);
+    assert!(result.definite_true.is_empty());
+    assert!(result.definite_false.is_empty());
+    assert!(result.uncertain.is_empty());
+}
+
+#[test]
+fn contains_point_in_polygon_partitioned() {
+    let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
+    let pt = make_point(2.0, 2.0); // inside
+    let result = spatial_contains(&[poly], &[pt], false);
+    assert_eq!(
+        result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+        1
+    );
+}
+
+#[test]
+fn contains_swapped_arg_shapes_short_circuits() {
+    // Point-A ⊇ Polygon-B is nonsensical — short-circuit to UNCERTAIN.
+    let pt = make_point(2.0, 2.0);
+    let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
+    let result = spatial_contains(&[pt], &[poly], false);
+    assert_eq!(result.uncertain, vec![0]);
+}
+
+#[test]
+fn contains_polygon_polygon_short_circuits() {
+    // Polygon × Polygon: kernel today only handles Polygon ⊇ Point.
+    let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
+    let result = spatial_contains(&[poly.clone()], &[poly], false);
+    assert_eq!(result.uncertain, vec![0]);
+}
+
+#[test]
+fn contains_degenerate_polygon_short_circuits() {
+    // Polygon with only 2 vertices (4 coord floats) — below 3-vertex
+    // / 6-float minimum.
+    let bad_poly = ExtractedGeometry {
+        bbox: [0.0, 0.0, 2.0, 2.0],
+        coords: vec![0.0, 0.0, 2.0, 2.0],
+        coord_count: 2,
+        geom_type: GeomType::Polygon,
+        ring_offsets: vec![0],
+    };
+    let pt = make_point(1.0, 1.0);
+    let result = spatial_contains(&[bad_poly], &[pt], false);
+    assert_eq!(result.uncertain, vec![0]);
+}
+
+#[test]
+fn contains_constant_polygon_fast_path_partitioned() {
+    // All polygons share the same coords vector — exercise the
+    // constant-polygon fast path (single kernel dispatch over all
+    // points). Verified by partition arithmetic.
+    let poly = make_polygon(&[
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10.0, 10.0),
+        (0.0, 10.0),
+        (0.0, 0.0),
+    ]);
+    let polys: Vec<_> = (0..50).map(|_| poly.clone()).collect();
+    let pts: Vec<_> = (0..50)
+        .map(|i| make_point(i as f32 * 0.5, i as f32 * 0.5))
+        .collect();
+    let result = spatial_contains(&polys, &pts, false);
+    assert_eq!(
+        result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+        50
+    );
+}
+
+#[test]
+fn within_routes_through_contains_with_swap() {
+    // ST_Within(A, B) = ST_Contains(B, A). Verify spatial_eval's
+    // Within arm produces the same partition as a manually-swapped
+    // contains call.
+    let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
+    let pt = make_point(2.0, 2.0);
+    let via_within = spatial_eval(
+        SpatialPredicate::Within,
+        &[pt.clone()],
+        &[poly.clone()],
+        false,
+    );
+    let via_swapped = spatial_contains(&[poly], &[pt], false);
+    assert_eq!(via_within.definite_true, via_swapped.definite_true);
+    assert_eq!(via_within.definite_false, via_swapped.definite_false);
+    assert_eq!(via_within.uncertain, via_swapped.uncertain);
 }

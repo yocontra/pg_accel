@@ -49,8 +49,8 @@ pub fn adapter() -> ExtensionAdapter {
 /// | Predicate        | Registered? | Reason |
 /// |------------------|-------------|--------|
 /// | `st_intersects`  | YES         | `pgaccel_spatial_intersects` (spatial_dispatch.cpp:536) wired through `three_layer::spatial_intersects`. |
-/// | `st_contains`    | no          | `three_layer::spatial_contains` returns `all_uncertain()` — no GPU containment kernel exists. Registering adds Custom Scan overhead with zero benefit. |
-/// | `st_within`      | no          | Same as `st_contains` (args swapped). |
+/// | `st_contains`    | YES (Polygon⊇Point fp32) | `pgaccel_point_in_ring_bulk` (spatial_predicates.cpp:512) wired through `three_layer::spatial_contains`. Polygon-A ⊇ Point-B only; non-Polygon/Point pairs short-circuit to UNCERTAIN. Constant-polygon batches collapse to 1 dispatch; varying polygons issue 1 dispatch per pair (future polygon×polygon kernel will close this). |
+/// | `st_within`      | YES (Point⊆Polygon fp32) | Same kernel as `st_contains` with args swapped (`spatial_eval` plumbing at `three_layer.rs:142-146`). |
 /// | `st_dwithin`     | YES (Point×Point fp32) | `pgaccel_sphere_distance_bulk` (spatial_predicates.cpp:540) wired through `three_layer::spatial_dwithin`. fp32 only — soft-fp64 trig hang on Metal SSCP keeps the fp64 path returning NO_DEVICE; non-Point pairs short-circuit to Uncertain so PG handles via PostGIS. |
 /// | `st_distance`    | no          | No distance-returning kernel wired; `pgaccel_sphere_distance_bulk` is point-only and not exposed to the three-layer pipeline. |
 /// | `st_area`        | no          | No GPU kernel in `spatial_*.cpp`. |
@@ -65,7 +65,7 @@ pub fn adapter() -> ExtensionAdapter {
 /// predicates whose kernel paths are absent or return
 /// `all_uncertain()` are left unregistered rather than padded in.
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &["st_intersects", "st_dwithin"];
+    const NAMES: &[&str] = &["st_intersects", "st_dwithin", "st_contains", "st_within"];
     NAMES
         .iter()
         .map(|&name| FunctionAccelEntry {
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 2);
+        assert_eq!(adapter().functions.len(), 4);
     }
 
     #[test]
@@ -236,13 +236,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_contain_st_contains() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_contains"));
+    fn contains_st_contains() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_contains"));
     }
 
     #[test]
-    fn does_not_contain_st_within() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_within"));
+    fn contains_st_within() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_within"));
     }
 
     // st_dwithin moved from negative-assertion to positive coverage in
