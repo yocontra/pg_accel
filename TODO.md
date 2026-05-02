@@ -1223,22 +1223,25 @@ trail isn't broken; do not gate 1.0 on any of them.
 - **Expected trigger**: Benchmarks showing inner-build dominates
   hashjoin time on large inner relations.
 
-### PostGIS predicate kernels beyond `st_intersects`
+### PostGIS predicate kernels beyond the 7 registered
 
-- **What**: `st_contains` / `st_within` / `st_dwithin`: replace
-  `three_layer::spatial_contains` / `spatial_dwithin` stubs at
-  `src/gpu/three_layer.rs:160,176` with real GPU pipelines.
-  `st_area` / `st_length` / `st_distance` polygonal: new kernels in
-  `pgaccel-kernels/src/spatial_*.cpp` + bridge + dispatch + enum-extend.
-  `st_equals` / `st_disjoint` / `st_touches` / `st_crosses` /
-  `st_overlaps`: extend `SpatialPredicate` enum + adapter registrations
-  + kernels. Missing-kernel symbols tracked in the adjacent Phase 4 item.
-- **Why deferred**: Each predicate needs a correctness-validated kernel
-  implementation. 1.0 ships with `st_intersects` acceleration and
-  explicit PG fallback for the rest (via the `resolve_spatial_predicate`
-  allowlist — no silent misdispatch).
-- **Expected trigger**: PostGIS workload demand for predicates beyond
-  `st_intersects`.
+- **What** (refreshed 2026-05-02 after 6 predicates landed this round):
+  Wired today — st_intersects, st_dwithin, st_contains, st_within,
+  st_disjoint, st_covers, st_coveredby (7 in adapter). Still missing:
+  `st_distance` (distance-returning kernel for arbitrary pairs;
+  sphere_distance is point-only and binary-threshold-shaped via
+  st_dwithin), `st_area` / `st_length` (Shoelace / perimeter; pure
+  parallel math, no plumbing blockers — UDF-style single-arg dispatch
+  needs a per-row spatial path that doesn't exist yet),
+  `st_equals` / `st_touches` / `st_crosses` / `st_overlaps` (each
+  needs its own algorithmic kernel + SpatialPredicate enum variant +
+  adapter registration).
+- **Why deferred**: Each remaining predicate needs a kernel + dispatch
+  path that doesn't exist. 1.0 ships with the 7 above; the remaining
+  predicates fall through `resolve_spatial_predicate` to PG (no silent
+  misdispatch).
+- **Expected trigger**: PostGIS workload demand for `st_distance` /
+  `st_area` / `st_length` / the remaining three relational predicates.
 
 ### PostGIS raster kernels beyond the 3 registered
 
@@ -1250,14 +1253,15 @@ trail isn't broken; do not gate 1.0 on any of them.
   `st_mapalgebra`/`st_clip`/`st_reclass` acceleration.
 - **Expected trigger**: Raster workload demand.
 
-### H3 kernels beyond the 4 registered
+### H3 kernels beyond the 5 registered
 
-- **What**: `h3_grid_disk` / `h3_grid_ring_unsafe` / `h3_polyfill` /
-  `h3_cell_to_children` / `h3_cell_to_center_child` / `h3_cell_to_boundary`
-  / `h3_cells_to_multi_polygon`. 6 of 7 require variable-length output
+- **What** (refreshed 2026-05-02 after `h3_cell_to_center_child` landed):
+  Still missing — `h3_grid_disk` / `h3_grid_ring_unsafe` / `h3_polyfill`
+  / `h3_cell_to_children` / `h3_cell_to_boundary` /
+  `h3_cells_to_multi_polygon`. All require variable-length output
   plumbing in `FunctionAccelEntry` — shared design with the PostGIS
-  geometry constructors. See Phase 4 "H3 operator registrations" for the
-  current state.
+  geometry constructors. See Phase 4 "H3 operator registrations" for
+  the current state.
 - **Why deferred**: Kernel work + variable-output adapter plumbing is
   significant. 1.0 ships with the 4-kernel subset.
 - **Expected trigger**: H3 workload demand for grid-gen / hierarchy walks.
