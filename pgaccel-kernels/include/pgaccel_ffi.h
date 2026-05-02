@@ -396,6 +396,10 @@ pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_cou
                                       const pgaccel_reclass_rule* rules, size_t rule_count,
                                       int output_type, void* output_pixels);
 
+/* Window-function declarations live in pgaccel_window.h (separate header
+ * so the dispatcher can include just the window API without the rest of
+ * the FFI surface). */
+
 /* ── ABI pins ─────────────────────────────────────────────────────── */
 /*
  * Pin struct sizes to detect accidental layout changes on either side of

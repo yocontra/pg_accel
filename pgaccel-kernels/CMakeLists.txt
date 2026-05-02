@@ -93,6 +93,9 @@ target_link_libraries(test_spatial_dispatch PRIVATE pgaccel_kernels_shared)
 add_executable(test_h3 test/test_h3.cpp)
 target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_window test/test_window.cpp)
+target_link_libraries(test_window PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_raster test/test_raster.cpp)
 target_link_libraries(test_raster PRIVATE pgaccel_kernels_shared)
 
