@@ -312,27 +312,21 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 ### PostGIS operator registrations — bottleneck is kernels + dispatch, not adapters
 
-- **What**: Audit confirmed the adapter side is appropriately empty. Only
-  `st_intersects` has a functionally-complete GPU path through the
-  three-layer dispatch (`pgaccel_spatial_intersects` at
-  `pgaccel-kernels/src/spatial_dispatch.cpp:536` →
-  `src/gpu/three_layer.rs:108`). Other predicates audited:
+- **What**: Audit (refreshed 2026-05-02) — registered predicates with
+  functionally-complete GPU paths today:
+  - `st_intersects` — `pgaccel_spatial_intersects` at
+    `spatial_dispatch.cpp:536` → `three_layer::spatial_intersects`.
+  - `st_dwithin` — `pgaccel_sphere_distance_bulk` (fp32 SYCL kernel)
+    via `three_layer::spatial_dwithin`. Point × Point pairs only;
+    non-Point pairs short-circuit to UNCERTAIN. fp64 returns NO_DEVICE
+    pending soft-fp64 trig fix (Phase 7).
+  Stubs / unwired:
   - `st_contains`, `st_within`: enum variants exist but
     `three_layer::spatial_contains` (`src/gpu/three_layer.rs:160`) returns
     `all_uncertain()` — stub only.
-  - `st_dwithin`, `st_distance`: `three_layer::spatial_dwithin`
-    (`src/gpu/three_layer.rs:176`) returns `all_uncertain()`. The
-    underlying SYCL kernel `sphere_distance_bulk_sycl<T>` exists at
-    `spatial_predicates.cpp:383` (fp32 path real GPU; fp64 currently
-    returns `PGACCEL_ERROR_NO_DEVICE` pending the soft-fp64 trig JIT
-    fix tracked in Phase 7). Wiring `spatial_dwithin` through it
-    requires extracting one (lon, lat) pair per geometry endpoint,
-    calling `pgaccel_sphere_distance_bulk` (point-only today; polygon
-    centroids would need a separate kernel), and threshold-comparing
-    `distance ≤ threshold_m` to produce `definite_true / definite_false
-    / uncertain`. Limitation: kernel is point-only — for non-point
-    inputs, the dispatch must short-circuit to `all_uncertain()` so
-    PG handles via PostGIS recheck.
+  - `st_distance`: distance-returning kernel for arbitrary geometry
+    pairs not wired (the existing sphere_distance is binary
+    threshold-style, hidden behind `st_dwithin`).
   - `st_area`, `st_length`: no kernel.
   - `st_equals`, `st_disjoint`, `st_touches`, `st_crosses`, `st_overlaps`:
     no kernel AND no `SpatialPredicate` enum variant. The unknown-name
@@ -344,10 +338,12 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 - **Why**: Anti-cheat ban #7 — stubs as done. Real work is kernel
   implementation + bridge + dispatch wiring.
 - **How**:
-  - For `st_contains` / `st_within` / `st_dwithin`: replace the
-    `all_uncertain()` stubs in `src/gpu/three_layer.rs:160,176` with real
-    GPU pipelines (bbox gate → predicate kernel → recheck) before
-    registration.
+  - For `st_contains` / `st_within`: replace the `all_uncertain()` stub
+    at `src/gpu/three_layer.rs:160` with a real GPU pipeline. Simplest
+    first cut: handle `Point ⊆ Polygon` via the existing
+    `pgaccel_point_in_ring_bulk` (each B point against each A polygon
+    ring). Other geometry-pair shapes short-circuit to UNCERTAIN.
+    `st_within(A, B) = st_contains(B, A)` so they share the kernel.
   - For `st_area` / `st_length` / `st_distance` polygonal: land new kernels
     in `pgaccel-kernels/src/spatial_*.cpp`, bridge, dispatch, enum-extend.
   - For `st_equals` / `st_disjoint` / `st_touches` / `st_crosses` /
