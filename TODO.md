@@ -74,9 +74,10 @@ order:
 The 2026-05-02 cheat-audit (7 host-loop kernels in spatial /
 raster / window) is closed — point_in_ring fp32, segment_intersects
 fp32+fp64, map_algebra small-N, raster_clip small-N, and
-window_rank/dense_rank/sum/count are all real SYCL kernels now.
-Audit re-run command lives in the `just gpu-test-cold` recipe block
-of the Justfile; re-run after every kernel change.
+window_rank/dense_rank/sum/count are all real SYCL kernels now. Use
+`just audit-cpu-cheats` to re-validate after every kernel-layer
+change (PASS = clean, FAIL = lists violating symbols with
+`file:line`).
 
 ## Phase 1 — Close remaining fp64 gaps
 

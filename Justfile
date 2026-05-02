@@ -376,6 +376,48 @@ gpu-test-cold name timeout_s="300":
 # between large changes.
 gpu-test-cold-all: clear-jit gpu-test
 
+# Audit pgaccel-kernels/src/*.cpp for `extern "C" pgaccel_*` symbols
+# that are labelled GPU-accelerated but whose body is a host-side
+# `for` loop with no `q.submit` / `parallel_for` / sycl_ helper call.
+# This is the post-cheat-audit hygiene check called out in TODO.md
+# Next Up — re-run after every kernel-layer change.
+#
+# A clean run prints only `pgaccel_shutdown` (queue teardown — not a
+# kernel; whitelist below). Any other match is a CPU cheat that
+# violates CLAUDE.md rules 11 / 12 and must be either converted to
+# SYCL or surfaced as PGACCEL_ERROR_NO_DEVICE.
+audit-cpu-cheats:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    found_any=0
+    for f in pgaccel-kernels/src/*.cpp; do
+        matches=$(awk '
+            /^extern "C" pgaccel_status pgaccel_/ {
+                name = $0; in_fn = 1; body = ""; start_line = NR
+            }
+            in_fn { body = body "\n" $0 }
+            in_fn && /^}/ {
+                in_fn = 0
+                if (body !~ /q\.submit|q->submit|parallel_for|return PGACCEL_ERROR|sycl_/) {
+                    if (name !~ /pgaccel_shutdown/) {
+                        print FILENAME ":" start_line " — " name
+                    }
+                }
+                body = ""
+            }
+        ' "$f")
+        if [ -n "$matches" ]; then
+            echo "$matches"
+            found_any=1
+        fi
+    done
+    if [ "$found_any" -eq 0 ]; then
+        echo "audit-cpu-cheats: PASS — every extern \"C\" pgaccel_* symbol dispatches via SYCL."
+    else
+        echo "audit-cpu-cheats: FAIL — see hits above. CLAUDE.md rules 11/12 violated."
+        exit 1
+    fi
+
 # === CI ===
 
 # Run full CI locally (pre-commit checks + all tests)
