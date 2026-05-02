@@ -16,7 +16,13 @@ use crate::engine::executor::agg::AggOp;
 /// recognised by pg_accel. Drives `PartialColumn` construction in
 /// `partial_agg::try_inject`.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: variant payloads (transtype, serialize_fn, op)
+// are constructed by classify_aggref and form the planner
+// contract. Today partial_agg consumes them only via the
+// `let _ = &class;` no-op placeholder at partial_agg.rs:206
+// — Phase 3a/b will read them out when the executor grows
+// group-keyed partial-state emit. Keep the payloads to
+// avoid an ABI break when that work lands.
 pub(super) enum AggClass {
     /// SUM/MIN/MAX where transtype == rtype (plain numeric scalars).
     ScalarPassthrough { transtype: pg_sys::Oid },
@@ -35,14 +41,18 @@ pub(super) enum AggClass {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: variants are payload of AggClass::BitReduction;
+// both are constructed by classify_aggref but the
+// executor doesn't yet branch on which one — same Phase
+// 3a/b unblock as AggClass.
 pub(super) enum BitOp {
     And,
     Or,
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: variants are payload of AggClass::BoolReduction;
+// see BitOp.
 pub(super) enum BoolOp {
     And,
     Or,
@@ -61,7 +71,6 @@ pub(super) enum BoolOp {
 ///
 /// `aggref` must be a valid non-null `Aggref` pointer on the main backend
 /// thread. May call into syscache.
-#[allow(dead_code)]
 pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(AggOp, AggClass)> {
     if aggref.is_null() {
         return None;
