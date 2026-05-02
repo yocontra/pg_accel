@@ -26,6 +26,16 @@ pub fn adapter() -> ExtensionAdapter {
 /// - `pgaccel_raster_clip`    → `st_clip`        (`raster_ops.cpp:517`)
 /// - `pgaccel_raster_reclass` → `st_reclass`     (`raster_ops.cpp:627`)
 ///
+/// **Dispatch state (refreshed 2026-05-01):** only `st_mapalgebra` has end-
+/// to-end GPU dispatch wired in `src/engine/dispatch/raster.rs`. `st_clip`
+/// and `st_reclass` are registered (so the planner sees them as
+/// `GpuRaster`) but the dispatch routes by `fn_name` and returns
+/// `Deferred` for both — argument extraction (polygon ring for clip;
+/// reclass-rule text parsing for reclass) is not yet plumbed. Per anti-
+/// cheat ban #7, deferral is preferred over silently substituting a
+/// different kernel; PG handles the call natively until executor wiring
+/// lands.
+///
 /// TODO Phase 4 lists additional candidates (`st_resample`, `st_slope`,
 /// `st_aspect`, `st_hillshade`, `st_value`, `st_summarystats`). These are
 /// **NOT** registered here because no corresponding `extern "C" pgaccel_*`

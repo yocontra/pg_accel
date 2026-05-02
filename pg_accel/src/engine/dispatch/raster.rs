@@ -13,13 +13,14 @@ use super::DispatchResult;
 
 /// GPU raster dispatch for `ST_MapAlgebra`, `ST_Clip`, and `ST_Reclass`.
 ///
-/// Extracts raster WKB data from each datum, parses the header and pixel
-/// data using the raster extractor, then dispatches to the appropriate GPU
-/// kernel.
-///
-/// Currently runs the GPU pipeline as a validation pass (exercising raster
-/// extraction and GPU kernel invocation). Returns `Deferred` when
-/// extraction fails or the pipeline is incomplete.
+/// Routes by function name via the registry. Only `st_mapalgebra` has a
+/// fully-wired GPU pipeline today (raster header parse + band extraction +
+/// `map_algebra` kernel + WKB patch-back). `st_clip` and `st_reclass` have
+/// real backing kernels (`pgaccel_raster_clip`, `pgaccel_raster_reclass`)
+/// but the executor-side argument extraction (polygon ring for clip;
+/// reclass-rule text parsing for reclass) is not yet plumbed; both defer
+/// to PG native rather than silently substituting `map_algebra` (anti-
+/// cheat ban #7 — no stub-as-done).
 ///
 /// # Safety
 ///
@@ -29,8 +30,17 @@ pub unsafe fn dispatch_gpu_raster(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     _fn_info: &pgrx::pg_sys::FmgrInfo,
     _is_strict: bool,
-    _fn_oid: pgrx::pg_sys::Oid,
+    fn_oid: pgrx::pg_sys::Oid,
 ) -> DispatchResult {
+    // Look up the function name to route to the correct GPU kernel.
+    // Only `st_mapalgebra` has end-to-end dispatch today; the other two
+    // registered raster ops (`st_clip`, `st_reclass`) have kernels but
+    // unwired argument extraction — defer to PG native for now.
+    let fn_name = registry::global_registry().lookup(fn_oid).map(|e| e.name);
+    if fn_name != Some("st_mapalgebra") {
+        return DispatchResult::Deferred;
+    }
+
     // Attempt raster extraction from each datum.
     let mut raster_data: Vec<(raster::RasterHeader, Vec<f64>)> = Vec::new();
 
