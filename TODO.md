@@ -312,38 +312,45 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 ### PostGIS operator registrations — bottleneck is kernels + dispatch, not adapters
 
-- **What**: Audit (refreshed 2026-05-02) — registered predicates with
-  functionally-complete GPU paths today:
+- **What**: Audit (refreshed 2026-05-02 after st_dwithin / st_contains /
+  st_within / st_disjoint / st_covers / st_coveredby ship). Registered
+  predicates with functionally-complete GPU paths today:
   - `st_intersects` — `pgaccel_spatial_intersects` at
     `spatial_dispatch.cpp:536` → `three_layer::spatial_intersects`.
   - `st_dwithin` — `pgaccel_sphere_distance_bulk` (fp32 SYCL kernel)
-    via `three_layer::spatial_dwithin`. Point × Point pairs only;
-    non-Point pairs short-circuit to UNCERTAIN. fp64 returns NO_DEVICE
-    pending soft-fp64 trig fix (Phase 7).
-  Stubs / unwired:
-  - `st_contains`, `st_within`: enum variants exist but
-    `three_layer::spatial_contains` (`src/gpu/three_layer.rs:160`) returns
-    `all_uncertain()` — stub only.
+    via `three_layer::spatial_dwithin`. Point × Point only; non-Point
+    short-circuits to UNCERTAIN. fp64 returns NO_DEVICE (Phase 7).
+  - `st_contains` / `st_within` — `pgaccel_point_in_ring_bulk` (fp32
+    SYCL) via `three_layer::spatial_contains`. Polygon ⊇ Point only;
+    constant-polygon batches collapse to one dispatch.
+  - `st_disjoint` — inversion of `st_intersects` (no extra kernel).
+  - `st_covers` / `st_coveredby` — alias of `st_contains` / `st_within`
+    at the kernel level; PG Layer-3 recheck handles boundary semantics.
+  Still unwired:
   - `st_distance`: distance-returning kernel for arbitrary geometry
     pairs not wired (the existing sphere_distance is binary
     threshold-style, hidden behind `st_dwithin`).
   - `st_area`, `st_length`: no kernel.
-  - `st_equals`, `st_disjoint`, `st_touches`, `st_crosses`, `st_overlaps`:
-    no kernel AND no `SpatialPredicate` enum variant. The unknown-name
+  - `st_equals`, `st_touches`, `st_crosses`, `st_overlaps`: no kernel
+    AND no `SpatialPredicate` enum variant. The unknown-name
     fall-through at `src/engine/executor/join/mod.rs` now routes
-    unrecognised names to PG's scalar-qual path via `eval_batch_scalar_qual`
-    (via the `resolve_spatial_predicate` allowlist), so registering
-    without the enum extension no longer silently misdispatches — but it
-    still wouldn't actually accelerate anything until the kernel lands.
+    unrecognised names to PG's scalar-qual path via
+    `resolve_spatial_predicate` allowlist, so registering without the
+    enum extension no longer silently misdispatches — but it still
+    wouldn't actually accelerate anything until the kernel lands.
 - **Why**: Anti-cheat ban #7 — stubs as done. Real work is kernel
   implementation + bridge + dispatch wiring.
 - **How**:
-  - For `st_contains` / `st_within`: replace the `all_uncertain()` stub
-    at `src/gpu/three_layer.rs:160` with a real GPU pipeline. Simplest
-    first cut: handle `Point ⊆ Polygon` via the existing
-    `pgaccel_point_in_ring_bulk` (each B point against each A polygon
-    ring). Other geometry-pair shapes short-circuit to UNCERTAIN.
-    `st_within(A, B) = st_contains(B, A)` so they share the kernel.
+  - For `st_distance`: needs a distance-returning kernel that takes
+    arbitrary geometry pairs (not just Point×Point). Sphere distance
+    on Point pairs is already exposed indirectly via dwithin; a real
+    `st_distance` requires polygonal-distance / nearest-point math.
+  - For `st_area` / `st_length`: ring-area (Shoelace formula) /
+    perimeter sum kernels. Trivially parallel per-ring. No new
+    plumbing required.
+  - For `st_equals` / `st_touches` / `st_crosses` / `st_overlaps`:
+    extend `SpatialPredicate` enum, add adapter registrations, land
+    kernels. Each is a separate algorithmic problem.
   - For `st_area` / `st_length` / `st_distance` polygonal: land new kernels
     in `pgaccel-kernels/src/spatial_*.cpp`, bridge, dispatch, enum-extend.
   - For `st_equals` / `st_disjoint` / `st_touches` / `st_crosses` /
