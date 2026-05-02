@@ -428,23 +428,20 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 ### H3 operator registrations — bottleneck is missing kernels, not adapters
 
-- **What**: Investigation confirmed adapter side is saturated. The 4
-  existing registrations at `pg_accel/src/adapters/h3.rs:62-67` map 1:1 to
-  the 4 real kernels in `pgaccel-kernels/src/h3_ops.cpp`:
-  `pgaccel_h3_get_resolution_bulk` (:332),
-  `pgaccel_h3_cell_to_parent_bulk` (:377),
-  `pgaccel_h3_grid_distance_bulk` (:449),
-  `pgaccel_h3_lat_lng_to_cell_bulk` (:569). Bridge at
-  `src/gpu/bridge.rs:291-317`; dispatch at
-  `src/engine/dispatch/h3.rs:24-166`. The 7 Phase 4 candidates
-  (`h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`,
-  `h3_cell_to_children`, `h3_cell_to_center_child`, `h3_cell_to_boundary`,
-  `h3_cells_to_multi_polygon`) have zero kernel presence. 6 of 7 emit
-  variable-length outputs that the current `FunctionAccelEntry` shape does
-  not express. MINOR.
+- **What** (refreshed 2026-05-01): 7 of 7 fixed-1:1-output H3 ops now wired
+  end-to-end. Adapter `pg_accel/src/adapters/h3.rs:62-69` registers
+  `h3_latlng_to_cell`, `h3_grid_distance`, `h3_cell_to_parent`,
+  `h3_cell_to_center_child`, `h3_get_resolution`, `h3_get_base_cell`,
+  `h3_is_valid_cell` — all backed by real SYCL kernels in
+  `pgaccel-kernels/src/h3_ops.cpp`, bridge in `src/gpu/bridge.rs`,
+  dispatch in `src/engine/dispatch/h3.rs`. The 6 remaining Phase 4
+  candidates (`h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`,
+  `h3_cell_to_children`, `h3_cell_to_boundary`,
+  `h3_cells_to_multi_polygon`) all emit variable-length outputs that the
+  current `FunctionAccelEntry` shape does not express. MINOR.
 - **Why**: Registering without a kernel is a stub-as-done cheat (anti-cheat
-  ban #7). Real work is kernel implementation + bridge + dispatch + (for 6
-  of 7) variable-output adapter plumbing.
+  ban #7). Remaining work is kernel implementation + bridge + dispatch +
+  variable-output adapter plumbing for all 6 unregistered ops.
 - **How**:
   - Land each missing kernel in `pgaccel-kernels/src/h3_ops.cpp` following
     the existing bulk-op pattern.
@@ -452,13 +449,11 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     kernel (size → emit), or bounded preallocation, or heap-appending. This
     mirrors the Phase 4 "PostGIS geometry constructors" item which has the
     same constraint — shared design work.
-  - Only `h3_cell_to_center_child` has fixed 1:1 output; it can skip the
-    plumbing step once its kernel exists.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered set
-  matches the 4-kernel set exactly. Future mismatch fails at test time.
+  matches the 7-kernel set exactly. Future mismatch fails at test time.
 - **Done when**: Each missing kernel landed + bridged + dispatched,
   variable-output plumbing designed and wired, operators registered,
   correctness tests pass.
@@ -1272,9 +1267,10 @@ trail isn't broken; do not gate 1.0 on any of them.
   `st_mapalgebra`/`st_clip`/`st_reclass` acceleration.
 - **Expected trigger**: Raster workload demand.
 
-### H3 kernels beyond the 5 registered
+### H3 kernels beyond the 7 registered
 
-- **What** (refreshed 2026-05-02 after `h3_cell_to_center_child` landed):
+- **What** (refreshed 2026-05-01 after `h3_get_base_cell` +
+  `h3_is_valid_cell` landed):
   Still missing — `h3_grid_disk` / `h3_grid_ring_unsafe` / `h3_polyfill`
   / `h3_cell_to_children` / `h3_cell_to_boundary` /
   `h3_cells_to_multi_polygon`. All require variable-length output
@@ -1282,7 +1278,7 @@ trail isn't broken; do not gate 1.0 on any of them.
   geometry constructors. See Phase 4 "H3 operator registrations" for
   the current state.
 - **Why deferred**: Kernel work + variable-output adapter plumbing is
-  significant. 1.0 ships with the 4-kernel subset.
+  significant. 1.0 ships with the 7-kernel subset (all fixed 1:1 outputs).
 - **Expected trigger**: H3 workload demand for grid-gen / hierarchy walks.
 
 ### SetOp / RecursiveUnion GPU handling
