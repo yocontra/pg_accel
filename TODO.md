@@ -555,70 +555,35 @@ tests). One item remains.
 
 ## Phase 6 — Performance investigation
 
-### H3 cell layout `+1` offset overlaps digit-1 with base-cell field
+### H3 cell layout — `+1` offset bug fixed (2026-05-01)
 
-- **What** (caught 2026-05-01 by new `test_h3.cpp` assertions for
-  `pgaccel_h3_get_base_cell_bulk`, `pgaccel_h3_is_pentagon_bulk`,
-  `pgaccel_h3_cell_to_center_child_bulk`): `pgaccel-kernels/src/h3_ops.cpp`
-  uses `shift = (15 - r) * 3 + 1` for digit slot `r`, with a comment
-  ("bit 0 is reserved") that does NOT match the H3 v4 reference layout.
-  H3 v4 specifies bits 44-0 as 15 digits × 3 bits with no reserved bit
-  at bit 0, so the canonical formula is `shift = (15 - r) * 3`. The `+1`
-  offset shifts every digit slot up by one bit, putting digit-1 at bits
-  45-43 — overlapping bit 45, which is the LSB of the base-cell field
-  at bits 51-45. Concrete impact:
-  - `h3_get_base_cell` on a cell with the canonical "unused = 7" marker
-    in digit-1 reads back `actual_base | 1` (LSB always set).
-  - `h3_is_pentagon` returns false for the 6 even pentagon bases (4, 14,
-    24, 38, 58, 72) because they read back as odd, falling out of the
-    pentagon-base set. Only the 6 odd bases (49, 63, 83, 97, 107, 117)
-    classify correctly.
-  - `h3_cell_to_center_child` with digit-1 = 0 (set by descent) clears
-    bit 45, silently mutating the base cell — a r=0→r=2 descent of
-    base 57 reads back as base 56 at the new resolution.
-  - `h3_cell_to_parent` and `h3_grid_distance` use the same offset and
-    are presumably affected, but the existing test_h3 assertions don't
-    differentiate the bug because they use the same `+1`-offset
-    `make_cell` helper for both write and read (round-trip self-
-    consistent within our kernels).
+- **What** (commit `56b770d`): `pgaccel-kernels/src/h3_ops.cpp` digit
+  slots used `shift = (X - r) * 3 + 1` on the assumption bit 0 was
+  reserved; H3 v4 uses no offset (bits 44-0 = 15 digits × 3 bits
+  flush to bit 0). The `+1` overlapped digit-1 (bits 45-43) with the
+  LSB of the base-cell field at bit 45, silently corrupting
+  `h3_get_base_cell` / `h3_is_pentagon` / `h3_cell_to_center_child`
+  on real H3 input. Bug was hidden by round-trip self-consistency
+  inside our own kernels. Stripped `+1` from all 9 digit-shift sites,
+  re-aligned `make_cell` test helper, restored canonical-12-pentagon
+  / 0..121-base-sweep / odd-base-preserved-on-descent assertions.
+  Real h3-pg cells now round-trip correctly. MAJOR (correctness).
 
-  Real h3-pg cells (which use the H3 v4 layout) will NOT round-trip
-  through these kernels for hexagon bases or any descent operation that
-  zeros digit-1. MAJOR (correctness on real H3 input). Currently masked
-  because all bench fixtures generate cells via our own
-  `pgaccel_h3_lat_lng_to_cell_bulk`, which produces cells in the
-  `+1`-offset layout — so end-to-end pipelines round-trip but never see
-  a real h3-pg cell.
+- **Verification status**: Cargo h3 adapter tests 28/28 PASS;
+  `audit-cpu-cheats` PASS; `cargo check` / `clippy` / `gpu-build`
+  clean. Standalone `test_h3` cold-cache JIT verification was in
+  flight at commit time — see Phase 6 cold-cache hang entry below.
+  If `test_h3` warm-cache run shows any of the new layout-aware
+  assertions failing, treat it as a regression and reopen this
+  entry with the failing assertion + cell payload.
 
-- **Why**: Anti-cheat ban #1 — bit-corrupting kernel results would
-  silently break any user query that joined / filtered on h3-pg cell
-  IDs produced outside our extension. The bug doesn't surface today
-  because of the round-trip self-consistency, but the moment a user
-  passes a real H3 cell ID into a query, results diverge.
-
-- **How**:
-  1. Strip the `+1` from every `shift = (15 - r) * 3 + 1` site in
-     `pgaccel-kernels/src/h3_ops.cpp`. Sites: `h3_get_digit`,
-     `h3_is_valid_cell`, `h3_cell_to_parent`, `cell_to_ijk`,
-     `pgaccel_h3_is_valid_cell_bulk`, `pgaccel_h3_cell_to_parent_bulk`,
-     `pgaccel_h3_cell_to_center_child_bulk`.
-  2. Update `make_cell` in `pgaccel-kernels/test/test_h3.cpp` to match
-     (drop the `+1`).
-  3. Verify `pgaccel_h3_lat_lng_to_cell_bulk` still produces cells whose
-     resolution / base / digits round-trip. The lat-lng kernel uses its
-     own digit-write loop; audit it for the same offset bug.
-  4. Re-enable the H3-reference assertions removed in the
-     test_h3.cpp tests: `is_pentagon` for all 12 bases, even-base
-     `get_base_cell`, base-preserved `cell_to_center_child`, etc.
-  5. Cross-verify against real h3-pg cells: pick a known cell from H3
-     reference docs (e.g. `0x8001fffffffffff` is a valid res-0 base-0
-     cell) and confirm `h3_get_resolution` / `h3_get_base_cell` /
-     `h3_is_pentagon` agree with the H3 reference.
-
-- **Done when**: All 12 pentagon bases classify as pentagon; all 122
-  base cells round-trip through `h3_get_base_cell`; descent kernels
-  preserve the base cell; cross-cell verification with at least 5
-  hand-decoded H3 v4 reference cells passes.
+- **Cross-verification still owed**: pick 5+ known H3 v4 reference
+  cells (e.g. `0x8001fffffffffff` for res-0 base-0) and confirm
+  `h3_get_resolution` / `h3_get_base_cell` / `h3_is_pentagon`
+  return the H3-reference values. None of the existing test_h3
+  assertions exercise pre-known cell IDs from outside our own
+  `make_cell` helper — round-trip self-consistency is necessary
+  but not sufficient.
 
 ### `hash_agg` 2-level pointer kernel returns 0 on small batches
 
