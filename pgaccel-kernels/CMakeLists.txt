@@ -96,6 +96,9 @@ target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
 add_executable(test_window test/test_window.cpp)
 target_link_libraries(test_window PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_hash_agg_keys test/test_hash_agg_keys.cpp)
+target_link_libraries(test_hash_agg_keys PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_raster test/test_raster.cpp)
 target_link_libraries(test_raster PRIVATE pgaccel_kernels_shared)
 

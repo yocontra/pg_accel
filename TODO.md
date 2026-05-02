@@ -586,6 +586,74 @@ tests). One item remains.
   h3-pg cells through the kernels; if those keep passing post-fix,
   that closes the loop.
 
+### `hash_agg` value-aggregation pass returns 0 for UUID and INET key types (Metal MSL emitter bug)
+
+- **What** (caught 2026-05-01 by new `test_hash_agg_keys.cpp`):
+  `pgaccel_hash_agg_execute` with `key_type ∈ {PGACCEL_KEY_UUID,
+  PGACCEL_KEY_INET}` produces correct `group_count` (the sort-based
+  grouping path works) but every per-group SUM reads back as 0.0.
+  Cold-cache JIT shows the underlying cause:
+
+  ```
+  program_source:10744:20: error: C-style cast from 'device void *' to
+    'device void **' converts between mismatching address spaces
+            t25 = &(((device device void**)t3)[t20]);
+  program_source:10750:22: error: C-style cast from 'device void *' to
+    'device void **' converts between mismatching address spaces
+  2 warnings and 2 errors generated.
+  [AdaptiveCpp Warning] metal_code_object: xcrun metal failed for ...
+  ```
+
+  The Metal SSCP MSL emitter generates `device device void**` (duplicate
+  address-space qualifier + cross-address-space cast) for the SUM
+  accumulation kernel template instantiated on UUID/INET key shapes.
+  `xcrun metal` rejects the MSL, the kernel never runs, the result
+  buffer keeps its zero-initialized state, and the user sees zero
+  sums per group with no error surfaced. INT64 key baseline is fine —
+  same code path, smaller key shape, doesn't hit the emitter bug.
+
+  Affects every UUID / INET hash_agg query at any size (sort-based
+  path is reached at row_count >= 100000; the smaller agg_hash path
+  is presumably also affected but is gated to <100k rows — separate
+  small-N kernel bug above). MAJOR (silent correctness — wrong-result
+  class on real production input).
+
+- **Why**: Per anti-cheat ban #1 (no fake success), shipping UUID +
+  INET adapter registrations in commits 243fa1f / c4134d5 / 3fbc03d
+  without exercising the kernel-side value-aggregation pass leaves
+  this latent. Bug surfaced exactly because we added kernel-level
+  test coverage (the same testing pattern that surfaced the H3 layout
+  bug in commits ea230cf → 56b770d).
+
+- **How**:
+  - **Local mitigation**: planner classifier could refuse to emit
+    UUID/INET key types until upstream AdaptiveCpp lands the emitter
+    fix. This would route those queries to PG native — correct
+    results but no GPU acceleration. Not implemented yet; would
+    need an `emit_uuid_key`/`emit_inet_key` GUC plus classifier
+    short-circuits in `engine/executor/agg/keys.rs`.
+  - **Upstream fix**: the MSL emitter cast pattern needs an
+    address-space-aware cast (`metal::address_space_cast` or the
+    `__metal_pointer_cast` builtin) instead of the bare C-style cast
+    that hits the duplicate-qualifier path. Diff the SSCP-emitted
+    LLVM IR for INT64 vs UUID instantiations to identify which
+    Emitter pass is producing the duplicate `device device` qualifier
+    chain. Same emitter file as the `__args` MSL compile error in
+    Phase 7 (`AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`).
+
+- **Reproducer**: `pgaccel-kernels/test/test_hash_agg_keys.cpp`
+  (intentionally not wired into `just gpu-test` until the bug
+  is fixed; runs standalone as `./pgaccel-kernels/build/test_hash_agg_keys`
+  and currently shows `8 passed, 2 failed` with `xcrun metal failed`
+  output and zero-sum results). Once the emitter bug is fixed, both
+  failing assertions will flip to PASS without test changes — that
+  is the verification gate for closing this entry.
+
+- **Done when**: `test_hash_agg_keys` reports 10/10 passed cold-cache;
+  `xcrun metal failed` no longer appears in the JIT log; UUID and
+  INET hash_agg queries produce correct sums on real h3-pg-style
+  workloads through the Custom Scan path.
+
 ### `hash_agg` 2-level pointer kernel returns 0 on small batches
 
 - **What**: `agg_hash`'s 2-level pointer kernel reads as 0 instead of the
