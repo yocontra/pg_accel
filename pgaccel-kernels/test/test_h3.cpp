@@ -56,8 +56,11 @@ static uint64_t make_cell(int base_cell, int resolution, const int* digits) {
   cell |= (1ULL << 59);          // mode = 1
   cell |= ((uint64_t)(resolution & 0xF) << 52);
   cell |= ((uint64_t)(base_cell & 0x7F) << 45);
+  // H3 v4 layout: digit r ∈ [1..15] at bits [(15-r)*3+2 .. (15-r)*3].
+  // No `+1` reserved-bit offset (older revisions of this helper had one,
+  // which silently corrupted base-cell read-back via bit-45 overlap).
   for (int r = 1; r <= 15; r++) {
-    int shift = (15 - r) * 3 + 1;
+    int shift = (15 - r) * 3;
     if (r <= resolution) {
       cell |= ((uint64_t)(digits[r - 1] & 0x7) << shift);
     } else {
@@ -434,41 +437,50 @@ static void test_lat_lng_to_cell_fp64_bulk() {
 // Test: get_base_cell
 // ---------------------------------------------------------------------------
 //
-// **Known kernel bug — read this before adding assertions.** The H3 layout
-// helpers in `pgaccel-kernels/src/h3_ops.cpp` use `shift = (15 - r) * 3 + 1`
-// (a `+1` offset that does NOT exist in the H3 v4 reference, which uses
-// `(15 - r) * 3`). With `+1`, digit-1 occupies bits 45-43, which OVERLAPS
-// with the base-cell field at bits 51-45. The unused-digit value `7` (set
-// for slots beyond the cell's resolution) therefore leaks into bit 45 of
-// the base-cell read, and any base whose LSB is 0 reads back as base|1.
-//
-// Filed in TODO Phase 7 as a layout bug. Until fixed, only ODD base cells
-// round-trip correctly via `make_cell`; even-base assertions catch the
-// overlap. Tests below assert the kernel's actual behavior (not the H3
-// reference) so the failing-base-cell pattern is documented in code.
+// Verifies H3 v4 base-cell extraction now that the `+1` offset bug is
+// fixed (commit 2026-05-01). All 122 base cells (0..121) must round-trip
+// regardless of parity.
 static void test_get_base_cell() {
   printf("--- test_get_base_cell ---\n");
 
   int digits[15] = {0};
 
-  // Single-row sanity: base 57 (odd) round-trips correctly.
+  // Single-row sanity.
   uint64_t cell = make_cell(57, 0, digits);
   int32_t base = -42;
   pgaccel_status s = pgaccel_h3_get_base_cell_bulk(&cell, 1, &base);
   ASSERT_STATUS_OK("get_base_cell single status", s);
-  ASSERT_EQ("get_base_cell single value (odd base round-trips)", base, 57);
+  ASSERT_EQ("get_base_cell single value", base, 57);
 
-  // Bulk: bases 1, 121 (both odd) round-trip; even-base round-trip is
-  // blocked by the kernel layout bug (see header comment).
-  const size_t N = 2;
+  // Bulk over a mix of even and odd bases — both must round-trip post-fix.
+  const size_t N = 5;
   uint64_t cells[N];
-  cells[0] = make_cell(1, 0, digits);
-  cells[1] = make_cell(121, 0, digits);
-  int32_t bases[N] = {-1, -1};
+  cells[0] = make_cell(0, 0, digits);
+  cells[1] = make_cell(1, 0, digits);
+  cells[2] = make_cell(14, 0, digits);
+  cells[3] = make_cell(56, 0, digits);
+  cells[4] = make_cell(121, 0, digits);
+  int32_t bases[N] = {-1, -1, -1, -1, -1};
   s = pgaccel_h3_get_base_cell_bulk(cells, N, bases);
   ASSERT_STATUS_OK("get_base_cell bulk status", s);
-  ASSERT_EQ("get_base_cell bulk[0] (odd)", bases[0], 1);
-  ASSERT_EQ("get_base_cell bulk[1] (odd)", bases[1], 121);
+  ASSERT_EQ("get_base_cell bulk[0]", bases[0], 0);
+  ASSERT_EQ("get_base_cell bulk[1]", bases[1], 1);
+  ASSERT_EQ("get_base_cell bulk[2]", bases[2], 14);
+  ASSERT_EQ("get_base_cell bulk[3]", bases[3], 56);
+  ASSERT_EQ("get_base_cell bulk[4]", bases[4], 121);
+
+  // Sweep every base in 0..121 — full coverage of the parity dimension.
+  bool sweep_ok = true;
+  for (int b = 0; b < 122; b++) {
+    uint64_t c = make_cell(b, 0, digits);
+    int32_t out = -1;
+    pgaccel_h3_get_base_cell_bulk(&c, 1, &out);
+    if (out != b) {
+      fprintf(stderr, "FAIL: get_base_cell sweep base=%d → got %d\n", b, out);
+      sweep_ok = false;
+    }
+  }
+  ASSERT_TRUE("get_base_cell full 0..121 sweep round-trips", sweep_ok);
 
   // Zero cell → kernel sentinels -1 (per FFI contract).
   uint64_t zero = 0;
@@ -530,35 +542,29 @@ static void test_is_valid_cell() {
 // Test: is_pentagon
 // ---------------------------------------------------------------------------
 //
-// **Affected by the same kernel layout bug as test_get_base_cell.** The
-// `+1` digit-shift offset overlaps digit-1 with the base-cell field, so
-// `is_pentagon` reads the base cell as `actual_base | 1`. For pentagon
-// bases that are even (4, 14, 24, 38, 58, 72) the kernel reads back an
-// odd base, falls out of the pentagon-base set, and returns 0. Only the
-// six ODD pentagon bases (49, 63, 83, 97, 107, 117) round-trip
-// correctly via `make_cell`. See test_get_base_cell header comment.
+// Verifies pentagon classification against the canonical 12 base cells
+// from the H3 v4 reference. With the +1-offset bug fixed (commit
+// 2026-05-01), all 12 must classify correctly regardless of parity.
 static void test_is_pentagon() {
   printf("--- test_is_pentagon ---\n");
 
   int digits[15] = {0};
 
-  // Odd pentagon base cells round-trip as pentagons under the +1-offset
-  // layout. Even pentagon bases read back as base|1 — non-pentagon — and
-  // are blocked by the kernel layout bug (TODO Phase 7).
-  static const int PENT_BASES_ODD[6] = {49, 63, 83, 97, 107, 117};
-  for (int i = 0; i < 6; i++) {
-    uint64_t cell = make_cell(PENT_BASES_ODD[i], 0, digits);
+  // The 12 pentagon base cells per the H3 v4 reference.
+  static const int PENT_BASES[12] = {4, 14, 24, 38, 49, 58, 63, 72, 83, 97, 107, 117};
+
+  // Every pentagon base at res=0 → pentagon.
+  for (int i = 0; i < 12; i++) {
+    uint64_t cell = make_cell(PENT_BASES[i], 0, digits);
     uint8_t v = 99;
     pgaccel_status s = pgaccel_h3_is_pentagon_bulk(&cell, 1, &v);
     char buf[80];
-    snprintf(buf, sizeof(buf), "is_pentagon odd base=%d res=0", PENT_BASES_ODD[i]);
+    snprintf(buf, sizeof(buf), "is_pentagon base=%d res=0", PENT_BASES[i]);
     ASSERT_STATUS_OK(buf, s);
     ASSERT_EQ(buf, v, 1);
   }
 
-  // Hexagon base cells are NOT pentagons. Both odd (1, 57) and even
-  // (0, 56) bases read back to non-pentagon bases, so this assertion
-  // is unaffected by the layout bug.
+  // Hexagon bases (mix of even/odd) are NOT pentagons.
   static const int HEX_BASES[4] = {0, 1, 56, 57};
   for (int i = 0; i < 4; i++) {
     uint64_t cell = make_cell(HEX_BASES[i], 0, digits);
@@ -570,19 +576,26 @@ static void test_is_pentagon() {
     ASSERT_EQ(buf, v, 0);
   }
 
-  // res>0 pentagon-with-all-zero-digits assertions are blocked by the
-  // layout bug: digit-1 = 0 at shift 43 clears bit 45, which strips the
-  // LSB of an odd base cell, kicking it out of the pentagon-base set.
-  // Even at res=0 with all-unused-7 digits the assertions only work
-  // because unused-7 OR-sets bit 45 (via the same overlap). When the
-  // kernel layout is fixed (TODO Phase 7) the pentagon test will need
-  // to switch back to the canonical 12-base set + arbitrary-resolution
-  // assertions.
-
-  // Zero cell → not a pentagon. Unaffected by the layout bug.
-  uint64_t zero = 0;
+  // Pentagon base + all-zero sub-resolution digits → still pentagon.
+  int zero_digits[15] = {0};
+  uint64_t cell_p_r3 = make_cell(4, 3, zero_digits);
   uint8_t v = 99;
-  pgaccel_status s = pgaccel_h3_is_pentagon_bulk(&zero, 1, &v);
+  pgaccel_status s = pgaccel_h3_is_pentagon_bulk(&cell_p_r3, 1, &v);
+  ASSERT_STATUS_OK("is_pentagon base=4 res=3 all-zero digits status", s);
+  ASSERT_EQ("is_pentagon base=4 res=3 all-zero digits", v, 1);
+
+  // Pentagon base + non-zero leading digit → NOT pentagon.
+  int mixed_digits[15] = {1, 0, 0};
+  uint64_t cell_p_mixed = make_cell(4, 3, mixed_digits);
+  v = 99;
+  s = pgaccel_h3_is_pentagon_bulk(&cell_p_mixed, 1, &v);
+  ASSERT_STATUS_OK("is_pentagon base=4 res=3 mixed-digit status", s);
+  ASSERT_EQ("is_pentagon base=4 res=3 mixed-digit", v, 0);
+
+  // Zero cell → not a pentagon.
+  uint64_t zero = 0;
+  v = 99;
+  s = pgaccel_h3_is_pentagon_bulk(&zero, 1, &v);
   ASSERT_STATUS_OK("is_pentagon zero status", s);
   ASSERT_EQ("is_pentagon zero value", v, 0);
 }
@@ -634,32 +647,27 @@ static void test_cell_to_center_child() {
   ASSERT_STATUS_OK("center_child same-res status", s);
   ASSERT_TRUE("center_child same-res returns input", child == parent);
 
-  // Descend from res 0 to res 2 → digits [0, 0] populated, base unchanged.
-  // Use base 56 (EVEN) so the resulting cell at r=2 with digit-1=0
-  // round-trips to base 56 — the +1-offset layout bug overlaps
-  // digit-1's high bit with bit 45 of the base field, so an odd base
-  // would lose its LSB on descent. See test_get_base_cell header.
-  uint64_t cell_r0 = make_cell(56, 0, digits);
+  // Descend from res 0 to res 2 → digits [0, 0] populated, base preserved
+  // (post-fix; the prior +1-offset layout would have stripped the LSB of
+  // an odd base on descent — see commit 2026-05-01). Use base 57 (odd)
+  // to exercise the fixed bit-45 boundary.
+  uint64_t cell_r0 = make_cell(57, 0, digits);
   uint64_t cell_r2 = 0;
   s = pgaccel_h3_cell_to_center_child_bulk(&cell_r0, 1, 2, &cell_r2);
   ASSERT_STATUS_OK("center_child r0->r2 status", s);
   int32_t res_out = -1;
   pgaccel_h3_get_resolution_bulk(&cell_r2, 1, &res_out);
   ASSERT_EQ("center_child r0->r2 has res 2", res_out, 2);
-  // After descent with digit-1=0, the kernel's +1-offset bug means the
-  // base reads back as the original even base (no leak from digit-1).
-  // Documents the bug rather than asserting H3-reference behavior.
   int32_t base_out = -1;
   pgaccel_h3_get_base_cell_bulk(&cell_r2, 1, &base_out);
-  ASSERT_EQ("center_child r0->r2 base reads back (even base, digit-1=0)", base_out, 56);
+  ASSERT_EQ("center_child r0->r2 base preserved (odd base)", base_out, 57);
 
   // Invalid: child_res < cell.res → 0.
   s = pgaccel_h3_cell_to_center_child_bulk(&parent, 1, 1, &child);
   ASSERT_STATUS_OK("center_child invalid child_res status", s);
   ASSERT_TRUE("center_child invalid child_res returns 0", child == 0);
 
-  // Out-of-range child_res → 0. Kernel returns OK but writes 0 — the
-  // earlier assertion that this returns non-OK status was wrong.
+  // Out-of-range child_res → kernel returns OK but writes 0.
   s = pgaccel_h3_cell_to_center_child_bulk(&cell_r0, 1, 16, &child);
   ASSERT_TRUE("center_child child_res=16 returns 0", child == 0);
 

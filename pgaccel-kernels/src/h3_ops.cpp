@@ -8,17 +8,22 @@
 // ---------------------------------------------------------------------------
 // H3 bit-layout constants
 // ---------------------------------------------------------------------------
-// Cell ID layout (64 bits, high to low):
-//   [63]    = 1  (high bit, always set for valid cell)
+// Cell ID layout (64 bits, high to low) — matches the H3 v4 reference
+// (h3_internal.h::`H3Index`):
+//   [63]    = high bit, always set for valid cell
 //   [62-59] = mode (4 bits, 1 = cell)
-//   [58-56] = reserved (3 bits, must be 0 for cells — but we ignore on read)
+//   [58-56] = reserved (3 bits, must be 0 for cells)
 //   [55-52] = resolution (4 bits, 0-15)
 //   [51-45] = base cell (7 bits, 0-121)
 //   [44- 0] = 15 digit slots × 3 bits each (digits 0-6; 7 = unused)
 //
-// NOTE: The "+1" offset seen in digit-shift formulas accounts for the fact
-//       that bit 0 is a reserved bit, so digit slot `r` (1-indexed from
-//       resolution 1) starts at bit (15 - r) * 3 + 1.
+// NOTE: digit slot `r` (1-indexed from resolution 1) lives at bits
+//       [(15 - r) * 3 + 2 .. (15 - r) * 3] — i.e. shift = (15 - r) * 3.
+//       Earlier revisions used a `+1` offset on the assumption bit 0 was
+//       reserved; that does NOT match H3 v4 and caused digit-1 to overlap
+//       with bit 45 of the base cell, silently corrupting `get_base_cell`,
+//       `is_pentagon`, and `cell_to_center_child` results on real h3-pg
+//       input. Layout aligned with the H3 reference in commit 2026-05-01.
 // ---------------------------------------------------------------------------
 
 static constexpr int H3_MAX_RESOLUTION = 15;
@@ -72,7 +77,7 @@ static inline int32_t h3_get_base_cell(uint64_t cell) {
 
 static inline int32_t h3_get_digit(uint64_t cell, int res) {
   // res is 1-based resolution index (1..15)
-  int shift = (H3_MAX_RESOLUTION - res) * 3 + 1;
+  int shift = (H3_MAX_RESOLUTION - res) * 3;
   return static_cast<int32_t>((cell >> shift) & H3_DIGIT_MASK);
 }
 
@@ -112,7 +117,7 @@ static inline uint64_t h3_cell_to_parent(uint64_t cell, int parent_res) {
   result = (result & ~H3_RES_MASK) | (static_cast<uint64_t>(parent_res) << 52);
   // Clear child digits — set to 7 (unused)
   for (int r = parent_res + 1; r <= H3_MAX_RESOLUTION; r++) {
-    int shift = (H3_MAX_RESOLUTION - r) * 3 + 1;
+    int shift = (H3_MAX_RESOLUTION - r) * 3;
     result |= (H3_UNUSED_DIGIT << shift);
   }
   return result;
@@ -261,7 +266,7 @@ static inline uint64_t build_cell_id(int base_cell, int resolution,
   cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
   // Digits
   for (int r = 1; r <= H3_MAX_RESOLUTION; r++) {
-    int shift = (H3_MAX_RESOLUTION - r) * 3 + 1;
+    int shift = (H3_MAX_RESOLUTION - r) * 3;
     if (r <= resolution) {
       cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
     } else {
@@ -479,7 +484,7 @@ extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, s
          // Digits beyond resolution must be 7 (unused).
          bool ok = true;
          for (int r = res + 1; r <= max_res; r++) {
-           const int shift = (max_res - r) * 3 + 1;
+           const int shift = (max_res - r) * 3;
            const uint64_t digit = (cell >> shift) & 0x7;
            if (digit != unused_digit) {
              ok = false;
@@ -563,7 +568,7 @@ extern "C" pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, siz
          const int res = static_cast<int>((cell >> 52) & 0xF);
          bool all_zero = true;
          for (int r = 1; r <= res; r++) {
-           const int shift = (max_res - r) * 3 + 1;
+           const int shift = (max_res - r) * 3;
            const uint64_t digit = (cell >> shift) & 0x7;
            if (digit != 0) {
              all_zero = false;
@@ -680,7 +685,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, 
          uint64_t result = (cell & ~res_mask) | (static_cast<uint64_t>(p_res) << 52);
          // Clear child digits — set to 7 (unused)
          for (int r = p_res + 1; r <= max_res; r++) {
-           int shift = (max_res - r) * 3 + 1;
+           int shift = (max_res - r) * 3;
            result |= (unused_digit << shift);
          }
          d_parents[i] = result;
@@ -754,7 +759,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* c
          // for the descent path. Center child convention: each new digit
          // is 0. We set them by clearing their existing 7 (unused) value.
          for (int r = res + 1; r <= c_res; r++) {
-           const int shift = (max_res - r) * 3 + 1;
+           const int shift = (max_res - r) * 3;
            // First clear the 3 bits at this position (they currently
            // hold H3_UNUSED_DIGIT = 7), leaving 0 (= center child digit).
            result &= ~(uint64_t{0x7} << shift);
@@ -847,7 +852,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a,
          int ia = 0, ja = 0, ka = 0;
          int ib = 0, jb = 0, kb = 0;
          for (int r = 1; r <= res_a; r++) {
-           int shift = (max_res - r) * 3 + 1;
+           int shift = (max_res - r) * 3;
            int da = static_cast<int>((a >> shift) & digit_mask);
            int db = static_cast<int>((b >> shift) & digit_mask);
            if (da > 6) {
@@ -1056,7 +1061,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
            cell |= (static_cast<uint64_t>(res) << 52);
            cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
            for (int r = 1; r <= 15; r++) {
-             int shift = (15 - r) * 3 + 1;
+             int shift = (15 - r) * 3;
              if (r <= res) {
                cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
              } else {
@@ -1243,7 +1248,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
          cell |= (static_cast<uint64_t>(res) << 52);
          cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
          for (int r = 1; r <= 15; r++) {
-           int shift = (15 - r) * 3 + 1;
+           int shift = (15 - r) * 3;
            if (r <= res) {
              cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
            } else {
