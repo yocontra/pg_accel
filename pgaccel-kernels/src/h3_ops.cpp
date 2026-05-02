@@ -501,6 +501,131 @@ extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, s
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
+// Pentagon base cells: 12 of the 122 base cells form pentagon hierarchies.
+// Source: H3 v4 reference (baseCells.c). Encoded as a 128-bit bitset split
+// into two uint64_t halves so the kernel can test membership with a shift +
+// AND, no host loop. Indices 0..63 -> low; 64..127 -> high.
+//   set: {4, 14, 24, 38, 49, 58, 63, 72, 83, 97, 107, 117}
+//   low  bits set: 4, 14, 24, 38, 49, 58, 63
+//   high bits set: 72-64=8, 83-64=19, 97-64=33, 107-64=43, 117-64=53
+static constexpr uint64_t H3_PENTAGON_BASE_LOW = (1ULL << 4) | (1ULL << 14) | (1ULL << 24) |
+                                                 (1ULL << 38) | (1ULL << 49) | (1ULL << 58) |
+                                                 (1ULL << 63);
+static constexpr uint64_t H3_PENTAGON_BASE_HIGH =
+    (1ULL << 8) | (1ULL << 19) | (1ULL << 33) | (1ULL << 43) | (1ULL << 53);
+
+extern "C" pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, size_t count,
+                                                      uint8_t* is_pent) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (cells == nullptr || is_pent == nullptr)
+    return PGACCEL_ERROR_INIT;
+
+  try {
+    sycl::queue q{sycl::default_selector_v};
+
+    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+    uint8_t* d_pent = sycl::malloc_device<uint8_t>(count, q);
+
+    if (!d_cells || !d_pent) {
+      sycl::free(d_cells, q);
+      sycl::free(d_pent, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
+
+    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
+    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
+    const int max_res = H3_MAX_RESOLUTION;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const uint64_t cell = d_cells[i];
+
+         if (cell == 0) {
+           d_pent[i] = 0;
+           return;
+         }
+         // Base cell membership test against the 12-pentagon set.
+         const int base = static_cast<int>((cell >> 45) & 0x7F);
+         const bool is_pent_base = (base < 64) ? ((pent_low >> base) & 1ULL) != 0
+                                               : ((pent_high >> (base - 64)) & 1ULL) != 0;
+         if (!is_pent_base) {
+           d_pent[i] = 0;
+           return;
+         }
+         // A cell is a pentagon iff its base cell is a pentagon AND the
+         // leading non-zero digit is 0 — i.e. all sub-resolution digits are
+         // center (digit 0). Mirrors `_h3LeadingNonZeroDigit == 0` in the
+         // H3 reference's `isPentagon`.
+         const int res = static_cast<int>((cell >> 52) & 0xF);
+         bool all_zero = true;
+         for (int r = 1; r <= res; r++) {
+           const int shift = (max_res - r) * 3 + 1;
+           const uint64_t digit = (cell >> shift) & 0x7;
+           if (digit != 0) {
+             all_zero = false;
+             break;
+           }
+         }
+         d_pent[i] = all_zero ? 1 : 0;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(is_pent, d_pent, count * sizeof(uint8_t)).wait_and_throw();
+
+    sycl::free(d_cells, q);
+    sycl::free(d_pent, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception&) {
+  } catch (...) {}
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+extern "C" pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells, size_t count,
+                                                           uint8_t* is_class_iii) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (cells == nullptr || is_class_iii == nullptr)
+    return PGACCEL_ERROR_INIT;
+
+  try {
+    sycl::queue q{sycl::default_selector_v};
+
+    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+    uint8_t* d_out = sycl::malloc_device<uint8_t>(count, q);
+
+    if (!d_cells || !d_out) {
+      sycl::free(d_cells, q);
+      sycl::free(d_out, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         // Class III iff resolution is odd. Resolution lives in bits 55:52.
+         const int res = static_cast<int>((d_cells[i] >> 52) & 0xF);
+         d_out[i] = (res & 1) ? 1 : 0;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(is_class_iii, d_out, count * sizeof(uint8_t)).wait_and_throw();
+
+    sycl::free(d_cells, q);
+    sycl::free(d_out, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception&) {
+  } catch (...) {}
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count,
                                                          int parent_res, uint64_t* parents) {
   if (count == 0)

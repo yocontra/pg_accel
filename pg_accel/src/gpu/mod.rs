@@ -744,6 +744,38 @@ pub fn h3_is_valid_cell_bulk(cells: &[u64]) -> Option<Vec<u8>> {
     status.is_ok().then_some(valid)
 }
 
+/// GPU-accelerated bulk H3 pentagon predicate.
+pub fn h3_is_pentagon_bulk(cells: &[u64]) -> Option<Vec<u8>> {
+    let mut is_pent = vec![0u8; cells.len()];
+    // SAFETY: cells and is_pent are valid slices of matching length.
+    let status = unsafe {
+        bridge::pgaccel_h3_is_pentagon_bulk(cells.as_ptr(), cells.len(), is_pent.as_mut_ptr())
+    };
+    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    unsafe {
+        bridge::pgaccel_pool_reset();
+    }
+    status.is_ok().then_some(is_pent)
+}
+
+/// GPU-accelerated bulk H3 res-class-III predicate (resolution is odd).
+pub fn h3_is_res_class_iii_bulk(cells: &[u64]) -> Option<Vec<u8>> {
+    let mut is_class_iii = vec![0u8; cells.len()];
+    // SAFETY: cells and is_class_iii are valid slices of matching length.
+    let status = unsafe {
+        bridge::pgaccel_h3_is_res_class_iii_bulk(
+            cells.as_ptr(),
+            cells.len(),
+            is_class_iii.as_mut_ptr(),
+        )
+    };
+    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    unsafe {
+        bridge::pgaccel_pool_reset();
+    }
+    status.is_ok().then_some(is_class_iii)
+}
+
 /// GPU-accelerated bulk H3 cell-to-parent.
 pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>> {
     let mut parents = vec![0u64; cells.len()];

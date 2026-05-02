@@ -24,6 +24,8 @@
 //! | `h3_get_resolution`         | `pgaccel_h3_get_resolution_bulk`         | `pgaccel-kernels/src/h3_ops.cpp`                             |
 //! | `h3_get_base_cell`          | `pgaccel_h3_get_base_cell_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
 //! | `h3_is_valid_cell`          | `pgaccel_h3_is_valid_cell_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_is_pentagon`            | `pgaccel_h3_is_pentagon_bulk`            | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_is_res_class_iii`       | `pgaccel_h3_is_res_class_iii_bulk`       | `pgaccel-kernels/src/h3_ops.cpp`                             |
 //!
 //! ## Deliberately NOT registered — no kernel exists
 //!
@@ -66,6 +68,8 @@ pub fn adapter() -> ExtensionAdapter {
         "h3_get_resolution", // bit mask                (pgaccel_h3_get_resolution_bulk)
         "h3_get_base_cell",  // bit mask                (pgaccel_h3_get_base_cell_bulk)
         "h3_is_valid_cell",  // mode + base check       (pgaccel_h3_is_valid_cell_bulk)
+        "h3_is_pentagon",    // pentagon-base + leading-zero (pgaccel_h3_is_pentagon_bulk)
+        "h3_is_res_class_iii", // res odd                 (pgaccel_h3_is_res_class_iii_bulk)
     ];
 
     let functions = GPU_NAMES
@@ -117,7 +121,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 7);
+        assert_eq!(adapter().functions.len(), 9);
     }
 
     #[test]
@@ -346,6 +350,8 @@ mod tests {
             "h3_get_resolution",
             "h3_get_base_cell",
             "h3_is_valid_cell",
+            "h3_is_pentagon",
+            "h3_is_res_class_iii",
         ]
         .into_iter()
         .collect();
@@ -382,6 +388,26 @@ mod tests {
                 .functions
                 .iter()
                 .any(|f| f.name == "h3_is_valid_cell")
+        );
+    }
+
+    #[test]
+    fn contains_h3_is_pentagon() {
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_is_pentagon")
+        );
+    }
+
+    #[test]
+    fn contains_h3_is_res_class_iii() {
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_is_res_class_iii")
         );
     }
 }

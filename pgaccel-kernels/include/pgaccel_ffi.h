@@ -309,6 +309,16 @@ pgaccel_status pgaccel_h3_get_base_cell_bulk(const uint64_t* cells, size_t count
  * digit slots beyond resolution are H3_UNUSED_DIGIT == 7); 0 otherwise. */
 pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, size_t count, uint8_t* valid);
 
+/* For each input cell, write 1 if the cell is a pentagon (its base cell is
+ * one of the 12 pentagon base cells AND all sub-resolution digits are 0 —
+ * the H3 reference's `isPentagon` definition); 0 otherwise. */
+pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, size_t count, uint8_t* is_pent);
+
+/* For each input cell, write 1 if the cell's resolution is in class III
+ * (resolution is odd); 0 otherwise. Mirrors H3 v4 `isResClassIII`. */
+pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells, size_t count,
+                                                uint8_t* is_class_iii);
+
 pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count, int parent_res,
                                               uint64_t* parents);
 

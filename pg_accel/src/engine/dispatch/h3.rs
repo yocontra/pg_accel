@@ -125,6 +125,12 @@ pub unsafe fn dispatch_gpu_h3(
         Some("h3_is_valid_cell") => {
             crate::gpu::h3_is_valid_cell_bulk(&cells).map(GpuH3Result::Bool)
         }
+        // 1-arg: cell → bool pentagon (Bool variant for PG bool Datum)
+        Some("h3_is_pentagon") => crate::gpu::h3_is_pentagon_bulk(&cells).map(GpuH3Result::Bool),
+        // 1-arg: cell → bool resolution-class-III (Bool variant for PG bool Datum)
+        Some("h3_is_res_class_iii") => {
+            crate::gpu::h3_is_res_class_iii_bulk(&cells).map(GpuH3Result::Bool)
+        }
         // 2-arg: cell + resolution constant → parent cell (u64)
         Some("h3_cell_to_parent") => {
             let res = qual_datum
@@ -166,6 +172,26 @@ pub unsafe fn dispatch_gpu_h3(
             Some("h3_get_resolution") => {
                 pgrx::error!(
                     "pg_accel: h3_get_resolution GPU kernel failed; refusing CPU fallback (rule 11)"
+                );
+            }
+            Some("h3_get_base_cell") => {
+                pgrx::error!(
+                    "pg_accel: h3_get_base_cell GPU kernel failed; refusing CPU fallback (rule 11)"
+                );
+            }
+            Some("h3_is_valid_cell") => {
+                pgrx::error!(
+                    "pg_accel: h3_is_valid_cell GPU kernel failed; refusing CPU fallback (rule 11)"
+                );
+            }
+            Some("h3_is_pentagon") => {
+                pgrx::error!(
+                    "pg_accel: h3_is_pentagon GPU kernel failed; refusing CPU fallback (rule 11)"
+                );
+            }
+            Some("h3_is_res_class_iii") => {
+                pgrx::error!(
+                    "pg_accel: h3_is_res_class_iii GPU kernel failed; refusing CPU fallback (rule 11)"
                 );
             }
             Some("h3_cell_to_parent") => {

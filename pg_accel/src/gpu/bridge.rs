@@ -343,6 +343,18 @@ unsafe extern "C" {
         valid: *mut u8,
     ) -> PgaccelStatus;
 
+    pub fn pgaccel_h3_is_pentagon_bulk(
+        cells: *const u64,
+        count: usize,
+        is_pent: *mut u8,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_h3_is_res_class_iii_bulk(
+        cells: *const u64,
+        count: usize,
+        is_class_iii: *mut u8,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_h3_cell_to_parent_bulk(
         cells: *const u64,
         count: usize,
