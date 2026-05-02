@@ -412,3 +412,58 @@ fn within_routes_through_contains_with_swap() {
     assert_eq!(via_within.definite_false, via_swapped.definite_false);
     assert_eq!(via_within.uncertain, via_swapped.uncertain);
 }
+
+// ===========================================================================
+// spatial_disjoint pipeline — integration scenarios
+// ===========================================================================
+//
+// `spatial_eval(SpatialPredicate::Disjoint)` runs spatial_intersects
+// and inverts the definite buckets. uncertain rows stay uncertain
+// because the PG recheck function for st_disjoint is bit-correct.
+
+#[test]
+fn disjoint_empty_inputs() {
+    let result = spatial_eval(SpatialPredicate::Disjoint, &[], &[], false);
+    assert!(result.definite_true.is_empty());
+    assert!(result.definite_false.is_empty());
+    assert!(result.uncertain.is_empty());
+}
+
+#[test]
+fn disjoint_inverts_intersects_buckets() {
+    // Build inputs that exercise both definite-true and definite-false
+    // sides of intersects, then verify disjoint swaps them.
+    let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
+    let pts = vec![
+        make_point(2.0, 2.0),     // inside
+        make_point(100.0, 100.0), // far outside
+    ];
+    let polys = vec![poly.clone(), poly];
+
+    let intersects = spatial_eval(SpatialPredicate::Intersects, &pts, &polys, false);
+    let disjoint = spatial_eval(SpatialPredicate::Disjoint, &pts, &polys, false);
+
+    assert_eq!(disjoint.definite_true, intersects.definite_false);
+    assert_eq!(disjoint.definite_false, intersects.definite_true);
+    assert_eq!(disjoint.uncertain, intersects.uncertain);
+}
+
+#[test]
+fn disjoint_partition_arithmetic_holds() {
+    let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
+    let pts: Vec<_> = (0..50)
+        .map(|i| {
+            if i % 2 == 0 {
+                make_point(2.0, 2.0)
+            } else {
+                make_point(100.0, 100.0)
+            }
+        })
+        .collect();
+    let polys = vec![poly; 50];
+    let result = spatial_eval(SpatialPredicate::Disjoint, &pts, &polys, false);
+    assert_eq!(
+        result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+        50
+    );
+}

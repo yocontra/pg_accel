@@ -36,6 +36,7 @@ pub(super) fn resolve_spatial_predicate(
         Some("st_intersects") => Some(three_layer::SpatialPredicate::Intersects),
         Some("st_contains") => Some(three_layer::SpatialPredicate::Contains),
         Some("st_within") => Some(three_layer::SpatialPredicate::Within),
+        Some("st_disjoint") => Some(three_layer::SpatialPredicate::Disjoint),
         _ => None,
     }
 }

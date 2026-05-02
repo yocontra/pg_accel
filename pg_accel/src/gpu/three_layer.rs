@@ -57,6 +57,12 @@ pub enum SpatialPredicate {
     /// `ST_DWithin` — are the geometries within the given distance (metres)?
     #[allow(dead_code)] // reason: pg_test-only consumer until DWithin three-layer kernel lands
     DWithin(f64),
+    /// `ST_Disjoint` — do the geometries share NO space?
+    /// Implemented as the negation of `Intersects` (every Intersects
+    /// definite_true becomes a Disjoint definite_false and vice
+    /// versa; uncertain pairs stay uncertain since the PostGIS
+    /// recheck is bit-correct either way).
+    Disjoint,
 }
 
 /// Extracted geometry data ready for GPU dispatch.
@@ -147,6 +153,18 @@ pub fn spatial_eval(
         }
         SpatialPredicate::DWithin(threshold) => {
             spatial_dwithin(geoms_a, geoms_b, threshold, skip_bbox)
+        }
+        SpatialPredicate::Disjoint => {
+            // st_disjoint = NOT st_intersects. Run intersects, then
+            // swap the definite buckets. uncertain stays uncertain
+            // because the PG recheck function (st_disjoint vs
+            // st_intersects) is correct in either direction.
+            let r = spatial_intersects(geoms_a, geoms_b, skip_bbox);
+            SpatialResult {
+                definite_true: r.definite_false,
+                definite_false: r.definite_true,
+                uncertain: r.uncertain,
+            }
         }
     }
 }

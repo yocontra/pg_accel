@@ -445,6 +445,14 @@ fn resolve_st_within_is_within() {
 }
 
 #[test]
+fn resolve_st_disjoint_is_disjoint() {
+    assert_eq!(
+        resolve_spatial_predicate(Some("st_disjoint")),
+        Some(three_layer::SpatialPredicate::Disjoint)
+    );
+}
+
+#[test]
 fn resolve_none_is_none() {
     assert_eq!(resolve_spatial_predicate(None), None);
 }
@@ -455,13 +463,15 @@ fn resolve_unknown_predicates_are_none_not_intersects() {
     // because no GPU path exists. The executor must NOT silently treat them
     // as `Intersects`. See adapters/postgis.rs:gpu_spatial_entries audit
     // table and the Phase 4 TODO entry.
+    //
+    // st_dwithin and st_disjoint were moved out of this list in commits
+    // a2793c4 and the st_disjoint commit respectively — both have wired
+    // GPU paths now.
     for name in [
-        "st_dwithin",
         "st_distance",
         "st_area",
         "st_length",
         "st_equals",
-        "st_disjoint",
         "st_touches",
         "st_crosses",
         "st_overlaps",
