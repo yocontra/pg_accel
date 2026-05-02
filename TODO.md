@@ -347,9 +347,12 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     arbitrary geometry pairs (not just Point×Point). Sphere distance
     on Point pairs is already exposed indirectly via dwithin; a real
     `st_distance` requires polygonal-distance / nearest-point math.
-  - For `st_area` / `st_length`: ring-area (Shoelace formula) /
-    perimeter sum kernels. Trivially parallel per-ring. No new
-    plumbing required.
+  - For `st_area` / `st_length`: SHIPPED in commits `0429586` /
+    `14dc649` — pgaccel_st_area_bulk (Shoelace) + pgaccel_st_length_bulk
+    (Euclidean edge sum) SYCL kernels with single-arg dispatch
+    via dispatch_gpu_st_area / dispatch_gpu_st_length. fp32 only;
+    fp64 deferred for st_length pending soft-fp64 sqrt fix
+    (Phase 7).
   - For `st_equals` / `st_touches` / `st_crosses` / `st_overlaps`:
     extend `SpatialPredicate` enum, add adapter registrations, land
     kernels. Each is a separate algorithmic problem.
@@ -1239,17 +1242,17 @@ trail isn't broken; do not gate 1.0 on any of them.
 
 ### PostGIS predicate kernels beyond the 7 registered
 
-- **What** (refreshed 2026-05-02 after 6 predicates landed this round):
+- **What** (refreshed 2026-05-02 after 9 predicates landed this round):
   Wired today — st_intersects, st_dwithin, st_contains, st_within,
-  st_disjoint, st_covers, st_coveredby (7 in adapter). Still missing:
-  `st_distance` (distance-returning kernel for arbitrary pairs;
-  sphere_distance is point-only and binary-threshold-shaped via
-  st_dwithin), `st_area` / `st_length` (Shoelace / perimeter; pure
-  parallel math, no plumbing blockers — UDF-style single-arg dispatch
-  needs a per-row spatial path that doesn't exist yet),
-  `st_equals` / `st_touches` / `st_crosses` / `st_overlaps` (each
-  needs its own algorithmic kernel + SpatialPredicate enum variant +
-  adapter registration).
+  st_disjoint, st_covers, st_coveredby, **st_area** (Polygon
+  Shoelace, fp32, single-arg via new `dispatch_gpu_st_area`),
+  **st_length** (Polygon perimeter / LineString length, fp32, via
+  `dispatch_gpu_st_length` — closed-ring vs open-path batched
+  separately). Still missing: `st_distance` (distance-returning
+  kernel for arbitrary geom pairs; sphere_distance is point-only and
+  hidden behind st_dwithin), `st_equals` / `st_touches` /
+  `st_crosses` / `st_overlaps` (each needs its own algorithmic
+  kernel + SpatialPredicate enum variant + adapter registration).
 - **Why deferred**: Each remaining predicate needs a kernel + dispatch
   path that doesn't exist. 1.0 ships with the 7 above; the remaining
   predicates fall through `resolve_spatial_predicate` to PG (no silent
