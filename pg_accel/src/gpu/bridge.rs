@@ -119,6 +119,19 @@ unsafe extern "C" {
         areas: *mut std::ffi::c_void,
     ) -> PgaccelStatus;
 
+    /// Bulk Euclidean edge-length sum.
+    ///
+    /// `closed_ring` flags whether the wrap-around edge is included
+    /// (Polygon perimeter) or not (open LineString length).
+    pub fn pgaccel_st_length_bulk(
+        coords: *const std::ffi::c_void,
+        row_offsets: *const u32,
+        row_count: usize,
+        use_fp64: bool,
+        closed_ring: bool,
+        lengths: *mut std::ffi::c_void,
+    ) -> PgaccelStatus;
+
     /// Three-layer spatial intersection pipeline.
     ///
     /// Takes arrays of geometry descriptors and partitions pairs into

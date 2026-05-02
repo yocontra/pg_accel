@@ -745,6 +745,113 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
 }
 
 // ---------------------------------------------------------------------------
+// SYCL kernel — st_length_bulk via Euclidean edge-length sum (fp32)
+//
+// CSR layout matches st_area_bulk_sycl. Each work-item walks its
+// row's vertex sequence and sums sqrt(dx² + dy²) over consecutive
+// edges. Polygons are closed rings (sum includes the wrap-around
+// edge); LineStrings are open (sum stops at the last vertex pair).
+// The dispatcher caller sets a flag on the kernel call to choose.
+//
+// fp32 only for now — `sycl::sqrt(double)` on Metal pulls in the
+// SLEEF soft-fp64 sqrt path which hangs SSCP JIT compilation in the
+// same class as the sphere_distance fp64 issue (see TODO Phase 7).
+// fp64 LineString length is deferable: the public entry returns
+// `PGACCEL_ERROR_NO_DEVICE` for use_fp64=true so the caller routes
+// to PG.
+// ---------------------------------------------------------------------------
+namespace {
+pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_offsets,
+                                       size_t row_count, bool closed_ring, float* lengths) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  const uint32_t total_coord_count = row_offsets[row_count];
+
+  try {
+    float* d_coords = sycl::malloc_shared<float>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    float* d_lengths = sycl::malloc_shared<float>(row_count, *q);
+
+    if (!d_coords || !d_offsets || !d_lengths) {
+      if (d_coords)
+        sycl::free(d_coords, *q);
+      if (d_offsets)
+        sycl::free(d_offsets, *q);
+      if (d_lengths)
+        sycl::free(d_lengths, *q);
+      return PGACCEL_OOM;
+    }
+
+    if (total_coord_count > 0) {
+      std::memcpy(d_coords, coords, total_coord_count * sizeof(float));
+    }
+    std::memcpy(d_offsets, row_offsets, (row_count + 1) * sizeof(uint32_t));
+
+    const bool is_closed = closed_ring;
+
+    q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const uint32_t start = d_offsets[i];
+       const uint32_t end = d_offsets[i + 1];
+       const uint32_t vertex_count = (end - start) / 2;
+       if (vertex_count < 2) {
+         d_lengths[i] = 0.0f;
+         return;
+       }
+       float total = 0.0f;
+       const uint32_t edge_count = is_closed ? vertex_count : vertex_count - 1;
+       for (uint32_t k = 0; k < edge_count; ++k) {
+         const uint32_t k_next = is_closed ? (k + 1) % vertex_count : k + 1;
+         const float x_k = d_coords[start + k * 2];
+         const float y_k = d_coords[start + k * 2 + 1];
+         const float x_next = d_coords[start + k_next * 2];
+         const float y_next = d_coords[start + k_next * 2 + 1];
+         const float dx = x_next - x_k;
+         const float dy = y_next - y_k;
+         total += sycl::sqrt(dx * dx + dy * dy);
+       }
+       d_lengths[i] = total;
+     }).wait_and_throw();
+
+    std::memcpy(lengths, d_lengths, row_count * sizeof(float));
+
+    sycl::free(d_coords, *q);
+    sycl::free(d_offsets, *q);
+    sycl::free(d_lengths, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL st_length_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: st_length_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+}  // namespace
+
+extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_offsets,
+                                                 size_t row_count, bool use_fp64, bool closed_ring,
+                                                 void* lengths) {
+  if (row_count == 0)
+    return PGACCEL_OK;
+  if (!coords || !row_offsets || !lengths)
+    return PGACCEL_ERROR_INIT;
+
+  if (use_fp64) {
+    // fp64 path deferred — sycl::sqrt(double) on Metal pulls SLEEF
+    // soft-fp64 sqrt which hangs SSCP JIT. Caller routes to PG via
+    // the standard NO_DEVICE escape hatch.
+    return PGACCEL_ERROR_NO_DEVICE;
+  }
+  return st_length_bulk_sycl_f32(static_cast<const float*>(coords), row_offsets, row_count,
+                                 closed_ring, static_cast<float*>(lengths));
+}
+
+// ---------------------------------------------------------------------------
 // Public API — extern "C"
 // ---------------------------------------------------------------------------
 

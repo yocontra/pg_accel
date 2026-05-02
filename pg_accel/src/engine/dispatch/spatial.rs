@@ -197,12 +197,15 @@ pub unsafe fn dispatch_gpu_spatial(
         let fn_name = registry::global_registry()
             .lookup(fn_info.fn_oid)
             .map(|e| e.name);
-        if fn_name == Some("st_area") {
-            return unsafe { dispatch_gpu_st_area(batch) };
+        match fn_name {
+            Some("st_area") => return unsafe { dispatch_gpu_st_area(batch) },
+            Some("st_length") => return unsafe { dispatch_gpu_st_length(batch) },
+            _ => {
+                // Other single-arg names not yet wired — defer.
+                pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datum, deferring");
+                return DispatchResult::Deferred;
+            }
         }
-        // Other single-arg names not yet wired — defer.
-        pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datum, deferring");
-        return DispatchResult::Deferred;
     }
     // We know qual_datum is Some here (the None branch returned above).
     let Some((qual_d, qual_null)) = qual_datum else {
@@ -522,5 +525,136 @@ unsafe fn dispatch_gpu_st_area(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispatc
         let area_f64 = f64::from(areas[kernel_i]);
         results[batch_i] = (pgrx::pg_sys::Datum::from(area_f64.to_bits()), false);
     }
+    DispatchResult::Accelerated(results)
+}
+
+/// Single-arg `st_length(geom)` dispatch: extract one Polygon (perimeter)
+/// or LineString (open length) per row, run the Euclidean edge-length
+/// SYCL kernel, return one f64 per row.
+///
+/// Same CSR layout as `dispatch_gpu_st_area` — but the kernel needs
+/// to know whether each row is closed (Polygon ring) or open
+/// (LineString). To avoid per-row dispatch, we batch rows by
+/// closed/open flag: collect Polygon rows into one CSR + Linestring
+/// rows into another, and call the kernel twice. Mixed-shape batches
+/// pay one extra dispatch but stay correct.
+///
+/// fp32 only today — fp64 returns NO_DEVICE per the soft-fp64 sqrt
+/// hang documented in `pgaccel_st_length_bulk`.
+///
+/// # Safety
+///
+/// Must be called on the **main backend thread**. Each `batch` datum
+/// must be a valid PostGIS geometry datum (or NULL).
+unsafe fn dispatch_gpu_st_length(batch: &[(pgrx::pg_sys::Datum, bool)]) -> DispatchResult {
+    let n = batch.len();
+    if n == 0 {
+        return DispatchResult::Accelerated(Vec::new());
+    }
+
+    // Two parallel CSRs: one for closed rings (Polygons), one for
+    // open paths (LineStrings). Mixed batches pay two kernel
+    // dispatches; uniform batches pay one.
+    let mut closed_coords: Vec<f32> = Vec::new();
+    let mut closed_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut closed_rows: Vec<usize> = Vec::with_capacity(n);
+    let mut closed_next: u32 = 0;
+    closed_offsets.push(0);
+
+    let mut open_coords: Vec<f32> = Vec::new();
+    let mut open_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut open_rows: Vec<usize> = Vec::with_capacity(n);
+    let mut open_next: u32 = 0;
+    open_offsets.push(0);
+
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        let Some(geom) = extract_geometry(datum) else {
+            continue;
+        };
+        match geom.geom_type {
+            three_layer::GeomType::Polygon => {
+                if geom.coord_count < 3 || geom.coords.len() < 6 {
+                    continue;
+                }
+                if geom.ring_offsets.len() > 1 {
+                    // Multi-ring (with holes) needs perimeter sum
+                    // across all rings — not yet wired. Defer per-row.
+                    continue;
+                }
+                closed_coords.extend_from_slice(&geom.coords);
+                closed_next = closed_next.saturating_add(geom.coords.len() as u32);
+                closed_offsets.push(closed_next);
+                closed_rows.push(i);
+            }
+            three_layer::GeomType::LineString => {
+                if geom.coord_count < 2 || geom.coords.len() < 4 {
+                    continue;
+                }
+                open_coords.extend_from_slice(&geom.coords);
+                open_next = open_next.saturating_add(geom.coords.len() as u32);
+                open_offsets.push(open_next);
+                open_rows.push(i);
+            }
+            _ => continue,
+        }
+    }
+
+    if closed_rows.is_empty() && open_rows.is_empty() {
+        // Nothing to dispatch — every row is NULL or unsupported.
+        return DispatchResult::Deferred;
+    }
+
+    use crate::gpu::bridge::{self, PgaccelStatus};
+    let mut results = vec![(pgrx::pg_sys::Datum::from(0_u64), true); n];
+
+    // Closed-ring (Polygon perimeter) dispatch.
+    if !closed_rows.is_empty() {
+        let mut lengths = vec![0.0f32; closed_rows.len()];
+        // SAFETY: slices are valid Rust-owned of the declared lengths.
+        let status = unsafe {
+            bridge::pgaccel_st_length_bulk(
+                closed_coords.as_ptr().cast(),
+                closed_offsets.as_ptr(),
+                closed_rows.len(),
+                false,
+                true,
+                lengths.as_mut_ptr().cast(),
+            )
+        };
+        if !matches!(status, PgaccelStatus::Ok) {
+            return DispatchResult::Deferred;
+        }
+        for (k, &batch_i) in closed_rows.iter().enumerate() {
+            let len_f64 = f64::from(lengths[k]);
+            results[batch_i] = (pgrx::pg_sys::Datum::from(len_f64.to_bits()), false);
+        }
+    }
+
+    // Open-path (LineString length) dispatch.
+    if !open_rows.is_empty() {
+        let mut lengths = vec![0.0f32; open_rows.len()];
+        // SAFETY: same as above.
+        let status = unsafe {
+            bridge::pgaccel_st_length_bulk(
+                open_coords.as_ptr().cast(),
+                open_offsets.as_ptr(),
+                open_rows.len(),
+                false,
+                false,
+                lengths.as_mut_ptr().cast(),
+            )
+        };
+        if !matches!(status, PgaccelStatus::Ok) {
+            return DispatchResult::Deferred;
+        }
+        for (k, &batch_i) in open_rows.iter().enumerate() {
+            let len_f64 = f64::from(lengths[k]);
+            results[batch_i] = (pgrx::pg_sys::Datum::from(len_f64.to_bits()), false);
+        }
+    }
+
     DispatchResult::Accelerated(results)
 }

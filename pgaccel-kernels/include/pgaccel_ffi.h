@@ -236,6 +236,23 @@ pgaccel_segment_intersects_bulk(const void* segs_a, /* [N * 4] x1,y1,x2,y2 */
 pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_t* row_offsets,
                                     size_t row_count, bool use_fp64, void* areas);
 
+/* Bulk Euclidean edge-length sum.
+ *
+ *   coords         — flat fp32 [x,y,x,y,...]
+ *   row_offsets    — [row_count + 1] CSR offsets into coords
+ *   row_count      — number of rows
+ *   use_fp64       — fp64 path returns PGACCEL_ERROR_NO_DEVICE today
+ *                    (sycl::sqrt(double) hangs Metal SSCP)
+ *   closed_ring    — true: include wrap-around edge (Polygon
+ *                    perimeter); false: open path (LineString length)
+ *   lengths        — [row_count] output fp32 lengths (>= 0)
+ *
+ * Result is in coordinate-system units (degrees for raw lon/lat).
+ */
+pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_offsets,
+                                      size_t row_count, bool use_fp64, bool closed_ring,
+                                      void* lengths);
+
 /* ── Spatial Dispatch (Three-Layer Pipeline) ──────────────────────── */
 
 typedef enum {

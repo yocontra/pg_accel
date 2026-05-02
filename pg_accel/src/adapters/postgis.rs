@@ -54,7 +54,7 @@ pub fn adapter() -> ExtensionAdapter {
 /// | `st_dwithin`     | YES (Point×Point fp32) | `pgaccel_sphere_distance_bulk` (spatial_predicates.cpp:540) wired through `three_layer::spatial_dwithin`. fp32 only — soft-fp64 trig hang on Metal SSCP keeps the fp64 path returning NO_DEVICE; non-Point pairs short-circuit to Uncertain so PG handles via PostGIS. |
 /// | `st_distance`    | no          | No distance-returning kernel wired; `pgaccel_sphere_distance_bulk` is point-only and not exposed to the three-layer pipeline. |
 /// | `st_area`        | YES (single-arg Polygon, fp32) | `pgaccel_st_area_bulk` (Shoelace SYCL kernel) via `dispatch_gpu_st_area` in `engine/dispatch/spatial.rs`. Single-ring Polygon only; multi-ring / non-Polygon rows return NULL so PG handles via `st_area`'s scalar implementation. |
-/// | `st_length`      | no          | No GPU kernel in `spatial_*.cpp`. |
+/// | `st_length`      | YES (LineString / Polygon perimeter, fp32) | `pgaccel_st_length_bulk` (Euclidean edge-length sum SYCL kernel) via `dispatch_gpu_st_length`. fp32 only — fp64 returns NO_DEVICE pending the soft-fp64 sqrt fix (Phase 7). LineString = open-path length; Polygon = closed-ring perimeter; mixed batches dispatch closed and open rows separately. |
 /// | `st_equals`      | no          | No GPU kernel. Executor would fall through the `_ => Intersects` match in `executor/join/mod.rs:502` and return wrong results. |
 /// | `st_disjoint`    | YES (negation of intersects) | `SpatialPredicate::Disjoint` (`three_layer.rs`) routes to `spatial_intersects` and swaps definite_true / definite_false. Free given the existing kernel; no separate dispatch. |
 /// | `st_covers`      | YES (alias of contains) | Reuses `pgaccel_point_in_ring_bulk` via `SpatialPredicate::Contains` — boundary-touching points fall in UNCERTAIN where PG's Layer-3 recheck applies the boundary-inclusive semantics that distinguishes covers from contains. |
@@ -76,6 +76,7 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         "st_covers",
         "st_coveredby",
         "st_area",
+        "st_length",
     ];
     NAMES
         .iter()
@@ -120,12 +121,17 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 8);
+        assert_eq!(adapter().functions.len(), 9);
     }
 
     #[test]
     fn contains_st_area() {
         assert!(adapter().functions.iter().any(|f| f.name == "st_area"));
+    }
+
+    #[test]
+    fn contains_st_length() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_length"));
     }
 
     #[test]
@@ -290,12 +296,8 @@ mod tests {
         assert!(!adapter().functions.iter().any(|f| f.name == "st_distance"));
     }
 
-    // st_area moved to positive coverage above (contains_st_area).
-
-    #[test]
-    fn does_not_contain_st_length() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_length"));
-    }
+    // st_area / st_length moved to positive coverage above
+    // (contains_st_area / contains_st_length).
 
     #[test]
     fn does_not_contain_st_equals() {
@@ -326,7 +328,7 @@ mod tests {
 
     #[test]
     fn gpu_spatial_entries_returns_correct_count() {
-        assert_eq!(gpu_spatial_entries().len(), 8);
+        assert_eq!(gpu_spatial_entries().len(), 9);
     }
 
     #[test]
