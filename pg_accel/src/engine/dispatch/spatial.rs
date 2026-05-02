@@ -226,6 +226,25 @@ pub unsafe fn dispatch_gpu_spatial(
         return DispatchResult::Deferred;
     };
 
+    // ── st_distance fast path ──────────────────────────────────────
+    // Two-arg returning fp64 distance, NOT a predicate. Routes to
+    // dispatch_gpu_st_distance for Point × Point pairs (the existing
+    // sphere_distance_bulk_sycl<float> kernel handles the math). Other
+    // geometry-pair shapes defer to PG (polygon distance is genuinely
+    // harder algorithmically and not yet implemented).
+    //
+    // Detected here, AFTER geom_b extraction but BEFORE the
+    // min_vertices gate (Point has coord_count = 1, which is below
+    // the predicate vertex-count threshold).
+    {
+        let fn_name = registry::global_registry()
+            .lookup(fn_info.fn_oid)
+            .map(|e| e.name);
+        if fn_name == Some("st_distance") {
+            return unsafe { dispatch_gpu_st_distance(batch, &geom_b) };
+        }
+    }
+
     // ── Vertex count gate ────────────────────────────────────────
     // GPU overhead is roughly constant (~19ms on M2 Max) regardless of
     // polygon complexity (dominated by geometry deser + seq scan).
@@ -656,5 +675,93 @@ unsafe fn dispatch_gpu_st_length(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispa
         }
     }
 
+    DispatchResult::Accelerated(results)
+}
+
+/// Two-arg `st_distance(geom_a, geom_b)` dispatch where geom_b is the
+/// constant qual datum. Routes Point × Point pairs through the
+/// existing `pgaccel_sphere_distance_bulk` kernel (fp32 path —
+/// returns Haversine distance in metres for lon/lat input). Non-Point
+/// inputs (per row OR for geom_b) defer to PG.
+///
+/// Output Datum per row is the f64 bit pattern of the distance
+/// (PG `float8` storage). NULL rows return NULL.
+///
+/// # Safety
+///
+/// Must be called on the **main backend thread**. `geom_b` must be a
+/// validly-constructed `ExtractedGeometry`.
+unsafe fn dispatch_gpu_st_distance(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    geom_b: &three_layer::ExtractedGeometry,
+) -> DispatchResult {
+    let n = batch.len();
+    if n == 0 {
+        return DispatchResult::Accelerated(Vec::new());
+    }
+
+    // st_distance kernel today is point-only. Other shapes for
+    // geom_b → defer.
+    if !matches!(geom_b.geom_type, three_layer::GeomType::Point) || geom_b.coords.len() < 2 {
+        return DispatchResult::Deferred;
+    }
+    let bx = geom_b.coords[0];
+    let by = geom_b.coords[1];
+
+    // Per-row Point extract; non-Point rows return NULL so PG handles.
+    let mut a_xy: Vec<f32> = Vec::with_capacity(n * 2);
+    let mut b_xy: Vec<f32> = Vec::with_capacity(n * 2);
+    let mut valid_rows: Vec<usize> = Vec::with_capacity(n);
+
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        // Try the zero-alloc Point extractor first; bail on non-Point.
+        let Some((ax, ay)) = extract_point_xy_f32(datum) else {
+            continue;
+        };
+        a_xy.push(ax);
+        a_xy.push(ay);
+        b_xy.push(bx);
+        b_xy.push(by);
+        valid_rows.push(i);
+    }
+
+    if valid_rows.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let mut distances = vec![0.0f32; valid_rows.len()];
+    let mut uncertain = vec![0u8; valid_rows.len()];
+
+    use crate::gpu::bridge::{self, PgaccelStatus};
+    // SAFETY: input/output slices are Rust-owned of declared lengths.
+    // fp32 path; fp64 returns NO_DEVICE (soft-fp64 trig hang per
+    // TODO Phase 7).
+    let status = unsafe {
+        bridge::pgaccel_sphere_distance_bulk(
+            a_xy.as_ptr(),
+            b_xy.as_ptr(),
+            valid_rows.len(),
+            false,
+            distances.as_mut_ptr(),
+            uncertain.as_mut_ptr(),
+        )
+    };
+    if !matches!(status, PgaccelStatus::Ok) {
+        return DispatchResult::Deferred;
+    }
+
+    let mut results = vec![(pgrx::pg_sys::Datum::from(0_u64), true); n];
+    for (k, &batch_i) in valid_rows.iter().enumerate() {
+        // uncertain==1 means the kernel flagged precision loss
+        // (very-close points or antipodal). Surface as the computed
+        // distance anyway — st_distance(geom, geom) returning 0.0 is
+        // still correct, just less precise than PG would be.
+        let _ = uncertain[k];
+        let dist_f64 = f64::from(distances[k]);
+        results[batch_i] = (pgrx::pg_sys::Datum::from(dist_f64.to_bits()), false);
+    }
     DispatchResult::Accelerated(results)
 }

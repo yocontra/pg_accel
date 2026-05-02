@@ -52,7 +52,7 @@ pub fn adapter() -> ExtensionAdapter {
 /// | `st_contains`    | YES (Polygon⊇Point fp32) | `pgaccel_point_in_ring_bulk` (spatial_predicates.cpp:512) wired through `three_layer::spatial_contains`. Polygon-A ⊇ Point-B only; non-Polygon/Point pairs short-circuit to UNCERTAIN. Constant-polygon batches collapse to 1 dispatch; varying polygons issue 1 dispatch per pair (future polygon×polygon kernel will close this). |
 /// | `st_within`      | YES (Point⊆Polygon fp32) | Same kernel as `st_contains` with args swapped (`spatial_eval` plumbing at `three_layer.rs:142-146`). |
 /// | `st_dwithin`     | YES (Point×Point fp32) | `pgaccel_sphere_distance_bulk` (spatial_predicates.cpp:540) wired through `three_layer::spatial_dwithin`. fp32 only — soft-fp64 trig hang on Metal SSCP keeps the fp64 path returning NO_DEVICE; non-Point pairs short-circuit to Uncertain so PG handles via PostGIS. |
-/// | `st_distance`    | no          | No distance-returning kernel wired; `pgaccel_sphere_distance_bulk` is point-only and not exposed to the three-layer pipeline. |
+/// | `st_distance`    | YES (Point*Point fp32) | `pgaccel_sphere_distance_bulk` (Haversine SYCL kernel) via `dispatch_gpu_st_distance`. Point*Point pairs only — non-Point inputs (per row OR for the constant qual) defer to PG. fp32 only; fp64 returns NO_DEVICE per the soft-fp64 trig hang (Phase 7). Polygon-to-polygon distance is genuinely harder algorithmically and not wired. |
 /// | `st_area`        | YES (single-arg Polygon, fp32) | `pgaccel_st_area_bulk` (Shoelace SYCL kernel) via `dispatch_gpu_st_area` in `engine/dispatch/spatial.rs`. Single-ring Polygon only; multi-ring / non-Polygon rows return NULL so PG handles via `st_area`'s scalar implementation. |
 /// | `st_length`      | YES (LineString / Polygon perimeter, fp32) | `pgaccel_st_length_bulk` (Euclidean edge-length sum SYCL kernel) via `dispatch_gpu_st_length`. fp32 only — fp64 returns NO_DEVICE pending the soft-fp64 sqrt fix (Phase 7). LineString = open-path length; Polygon = closed-ring perimeter; mixed batches dispatch closed and open rows separately. |
 /// | `st_equals`      | no          | No GPU kernel. Executor would fall through the `_ => Intersects` match in `executor/join/mod.rs:502` and return wrong results. |
@@ -77,6 +77,7 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         "st_coveredby",
         "st_area",
         "st_length",
+        "st_distance",
     ];
     NAMES
         .iter()
@@ -121,7 +122,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 9);
+        assert_eq!(adapter().functions.len(), 10);
     }
 
     #[test]
@@ -132,6 +133,11 @@ mod tests {
     #[test]
     fn contains_st_length() {
         assert!(adapter().functions.iter().any(|f| f.name == "st_length"));
+    }
+
+    #[test]
+    fn contains_st_distance() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_distance"));
     }
 
     #[test]
@@ -291,13 +297,8 @@ mod tests {
     // the `_ => Intersects` fall-through in executor/join/mod.rs. See the
     // audit table in `gpu_spatial_entries` for the full rationale.
 
-    #[test]
-    fn does_not_contain_st_distance() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_distance"));
-    }
-
-    // st_area / st_length moved to positive coverage above
-    // (contains_st_area / contains_st_length).
+    // st_area / st_length / st_distance moved to positive coverage above
+    // (contains_st_area / contains_st_length / contains_st_distance).
 
     #[test]
     fn does_not_contain_st_equals() {
@@ -328,7 +329,7 @@ mod tests {
 
     #[test]
     fn gpu_spatial_entries_returns_correct_count() {
-        assert_eq!(gpu_spatial_entries().len(), 9);
+        assert_eq!(gpu_spatial_entries().len(), 10);
     }
 
     #[test]
