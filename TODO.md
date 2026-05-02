@@ -428,17 +428,18 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 ### H3 operator registrations — bottleneck is missing kernels, not adapters
 
-- **What** (refreshed 2026-05-01): 7 of 7 fixed-1:1-output H3 ops now wired
-  end-to-end. Adapter `pg_accel/src/adapters/h3.rs:62-69` registers
+- **What** (refreshed 2026-05-01): 9 fixed-1:1-output H3 ops now wired
+  end-to-end. Adapter `pg_accel/src/adapters/h3.rs:62-71` registers
   `h3_latlng_to_cell`, `h3_grid_distance`, `h3_cell_to_parent`,
   `h3_cell_to_center_child`, `h3_get_resolution`, `h3_get_base_cell`,
-  `h3_is_valid_cell` — all backed by real SYCL kernels in
-  `pgaccel-kernels/src/h3_ops.cpp`, bridge in `src/gpu/bridge.rs`,
-  dispatch in `src/engine/dispatch/h3.rs`. The 6 remaining Phase 4
-  candidates (`h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`,
+  `h3_is_valid_cell`, `h3_is_pentagon`, `h3_is_res_class_iii` — all
+  backed by real SYCL kernels in `pgaccel-kernels/src/h3_ops.cpp`,
+  bridge in `src/gpu/bridge.rs`, dispatch in
+  `src/engine/dispatch/h3.rs`. The 6 remaining Phase 4 candidates
+  (`h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`,
   `h3_cell_to_children`, `h3_cell_to_boundary`,
-  `h3_cells_to_multi_polygon`) all emit variable-length outputs that the
-  current `FunctionAccelEntry` shape does not express. MINOR.
+  `h3_cells_to_multi_polygon`) all emit variable-length outputs that
+  the current `FunctionAccelEntry` shape does not express. MINOR.
 - **Why**: Registering without a kernel is a stub-as-done cheat (anti-cheat
   ban #7). Remaining work is kernel implementation + bridge + dispatch +
   variable-output adapter plumbing for all 6 unregistered ops.
@@ -453,7 +454,7 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered set
-  matches the 7-kernel set exactly. Future mismatch fails at test time.
+  matches the 9-kernel set exactly. Future mismatch fails at test time.
 - **Done when**: Each missing kernel landed + bridged + dispatched,
   variable-output plumbing designed and wired, operators registered,
   correctness tests pass.
@@ -1267,10 +1268,10 @@ trail isn't broken; do not gate 1.0 on any of them.
   `st_mapalgebra`/`st_clip`/`st_reclass` acceleration.
 - **Expected trigger**: Raster workload demand.
 
-### H3 kernels beyond the 7 registered
+### H3 kernels beyond the 9 registered
 
-- **What** (refreshed 2026-05-01 after `h3_get_base_cell` +
-  `h3_is_valid_cell` landed):
+- **What** (refreshed 2026-05-01 after `h3_is_pentagon` +
+  `h3_is_res_class_iii` landed):
   Still missing — `h3_grid_disk` / `h3_grid_ring_unsafe` / `h3_polyfill`
   / `h3_cell_to_children` / `h3_cell_to_boundary` /
   `h3_cells_to_multi_polygon`. All require variable-length output
@@ -1278,7 +1279,7 @@ trail isn't broken; do not gate 1.0 on any of them.
   geometry constructors. See Phase 4 "H3 operator registrations" for
   the current state.
 - **Why deferred**: Kernel work + variable-output adapter plumbing is
-  significant. 1.0 ships with the 7-kernel subset (all fixed 1:1 outputs).
+  significant. 1.0 ships with the 9-kernel subset (all fixed 1:1 outputs).
 - **Expected trigger**: H3 workload demand for grid-gen / hierarchy walks.
 
 ### SetOp / RecursiveUnion GPU handling
