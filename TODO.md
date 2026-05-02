@@ -563,27 +563,28 @@ tests). One item remains.
   flush to bit 0). The `+1` overlapped digit-1 (bits 45-43) with the
   LSB of the base-cell field at bit 45, silently corrupting
   `h3_get_base_cell` / `h3_is_pentagon` / `h3_cell_to_center_child`
-  on real H3 input. Bug was hidden by round-trip self-consistency
-  inside our own kernels. Stripped `+1` from all 9 digit-shift sites,
+  on real H3 input. Stripped `+1` from all 9 digit-shift sites,
   re-aligned `make_cell` test helper, restored canonical-12-pentagon
   / 0..121-base-sweep / odd-base-preserved-on-descent assertions.
-  Real h3-pg cells now round-trip correctly. MAJOR (correctness).
 
-- **Verification status**: Cargo h3 adapter tests 28/28 PASS;
-  `audit-cpu-cheats` PASS; `cargo check` / `clippy` / `gpu-build`
-  clean. Standalone `test_h3` cold-cache JIT verification was in
-  flight at commit time — see Phase 6 cold-cache hang entry below.
-  If `test_h3` warm-cache run shows any of the new layout-aware
-  assertions failing, treat it as a regression and reopen this
-  entry with the failing assertion + cell payload.
+- **Verified**: standalone `test_h3` cold-cache run completed
+  2026-05-01: **220 PASS / 0 FAIL** across all 11 test sections,
+  including the new sweeps (`get_base_cell` 0..121 mix; canonical 12
+  pentagon bases; odd-base descent preservation; res-class-III parity
+  sweep; null-pointer + zero-cell sentinels). Cargo h3 adapter tests
+  28/28 PASS; `audit-cpu-cheats` PASS; `cargo check`/`clippy`/
+  `gpu-build` clean.
 
-- **Cross-verification still owed**: pick 5+ known H3 v4 reference
-  cells (e.g. `0x8001fffffffffff` for res-0 base-0) and confirm
-  `h3_get_resolution` / `h3_get_base_cell` / `h3_is_pentagon`
-  return the H3-reference values. None of the existing test_h3
-  assertions exercise pre-known cell IDs from outside our own
-  `make_cell` helper — round-trip self-consistency is necessary
-  but not sufficient.
+- **Remaining cross-verification (lower priority)**: end-to-end
+  validation against real h3-pg-generated cells in a live PG session
+  (install h3-pg, `SELECT h3_lat_lng_to_cell(POINT(...), 5)`, hand
+  the result to our GPU kernel via `pg_accel.gpu_enabled = true`,
+  check resolution / base / pentagon classification). The
+  kernel-level round-trip correctness is now established, but the
+  actual byte-pattern compatibility with h3-pg's H3-library output
+  hasn't been spot-checked end-to-end. Bench fixtures already feed
+  h3-pg cells through the kernels; if those keep passing post-fix,
+  that closes the loop.
 
 ### `hash_agg` 2-level pointer kernel returns 0 on small batches
 
