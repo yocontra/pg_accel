@@ -44,8 +44,10 @@ order:
    unblocker plan.
 2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
    kernel + bridge + executor. Largest single chunk in the punchlist.
-3. **Phase 4 type coverage** — UUID / INET / CIDR extractors next
-   (hash-join workload), then JSON / JSONB. DATE works post Phase 2.
+3. **Phase 4 type coverage** — UUID extractor landed end-to-end
+   (hash_agg only — hash_join templated build/probe needs more
+   work). INET / CIDR extractors next, then JSON / JSONB. DATE
+   works post Phase 2.
 4. **Phase 4 PostGIS / raster / H3 kernel backlog** — kernel-heavy.
 5. **Phase 5 worker-side spatial recheck** — DSM plumbing.
 6. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
@@ -454,13 +456,15 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 - **What**: GPU path handles int2 / int4 / int8 / float4 / float8 / bool /
   date (filter+arith, since Phase 2 bytecode commit `f37c67b`) and extracts
-  (but doesn't GPU-process) text / timestamp / timestamptz. Forcing CPU
-  qual eval: INTERVAL (no extractor), UUID / INET / CIDR (no extractor;
-  used heavily for partitioning keys and joins), JSON / JSONB (no
-  extractor; GPU `jsonb_path_exists` / `->>` would be a major win), ARRAY
-  types (no GPU support — forces per-row unnest on CPU), custom types
-  (domains, composites — immediate reject in the classifier). NUMERIC /
-  DECIMAL are already handled by the Phase 2 classification gate. MINOR.
+  (but doesn't GPU-process) text / timestamp / timestamptz. UUID lands as
+  a hash_agg group key in commit `243fa1f` (hash_join UUID is a separate
+  follow-up — templated build/probe path). Forcing CPU qual eval:
+  INTERVAL (no extractor), INET / CIDR (no extractor; used heavily for
+  partitioning keys and joins), JSON / JSONB (no extractor; GPU
+  `jsonb_path_exists` / `->>` would be a major win), ARRAY types (no GPU
+  support — forces per-row unnest on CPU), custom types (domains,
+  composites — immediate reject in the classifier). NUMERIC / DECIMAL are
+  already handled by the Phase 2 classification gate. MINOR.
 - **Why**: Any workload touching one of these types falls back to PG's
   scalar qual evaluator. That's correct (results match PG bit-for-bit)
   but silently reduces GPU coverage on partition-keyed / IP / JSON
@@ -473,39 +477,24 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   than 1-thread `GpuAccelScan` at this size — that's a planner cost
   decision, not a coverage gap.
 - **How**:
-  - UUID / INET / CIDR extractors next (hash-join use case): each is a
-    16-byte / 4-byte / variable struct that needs a typed extractor in
-    `pg_accel/src/engine/materialize/tuple_extract.rs` plus a hash key
-    type added to `pgaccel_hash_agg`/`pgaccel_hash_join` kernel ABIs.
-    **Honest scope (audited 2026-05-01).** UUID alone is *not* a
-    sub-100-line patch. Real touch surface (~7 files, ~220 LOC):
-    1. `pgaccel-kernels/include/pgaccel_hash_join.h:27-31` — extend the
-       `pgaccel_key_type` enum with a new variant. **Slot `3` is taken**
-       by the Rust planner's `CompositeInt4x2`
-       (`planner_hooks/mod.rs:1651`); use `PGACCEL_KEY_UUID = 4` to keep
-       the C↔Rust ABI aligned (kernel never receives `3` because the
-       executor packs the composite into i64 before dispatch).
-    2. `pgaccel-kernels/src/hash_agg.cpp:121` (`read_key_u64`) +
-       `:146` (`key_size_for_type`) — add UUID arms (16-byte key,
-       hash via two `hash64()` mixes XORed together).
-    3. `pgaccel-kernels/src/hash_join.cpp` — same arms.
-    4. `pg_accel/src/gpu/bridge.rs:445,471,850` — add UUID variant to
-       `PgaccelKeyType` and update `key_type_discriminant_values_match_c`
-       test.
-    5. `pg_accel/src/engine/materialize/tuple_extract.rs:264` — extend
-       the generic `extract_typed` family with `extract_uuid` (returns
-       `Vec<[u8; 16]>` + null mask).
-    6. `pg_accel/src/engine/executor/agg/execute.rs:1186` — add UUID arm
-       in the key-type dispatch match; `:1915` — add UUID datum
-       reconstruction (palloc 16-byte `pg_uuid_t`, return as Datum
-       pointer).
-    7. `pg_accel/src/engine/ffi/planner_hooks/mod.rs:3130` — add
-       `UUIDOID` (= 2950) → `PgaccelKeyType::Uuid` in
-       `GroupKeyInfo::key_type_from_oid` and the join-key classifier.
-    Scope across both Rust + C++ ABI + planner classifier requires the
-    full cross-verification protocol (see
-    `.claude/rules/cross-verification.md`) — A: end-to-end test, B:
-    diff audit, C: kernel hash-collision rate sanity check.
+  - UUID hash_agg group keys: SHIPPED (`243fa1f`). Touch surface ~7
+    files matching the integration plan that was scoped pre-flight.
+    INET / CIDR remain (4-byte / variable structs with family byte +
+    network-byte-order hashing — see "INET / CIDR extractors" sub-item
+    below).
+  - UUID hash_join keys: deferred. The hash_join build/probe path is
+    templated (`build_cpu<T>` / `probe_cpu<T>`) and assumes T is an
+    arithmetic type with `keys_equal<T>`. UUID would need either a
+    `__uint128_t` slot type or a struct-based instantiation. Tracked
+    as a follow-up; the executor stub at `executor/join/probe.rs` raises
+    `pgrx::error!` if the planner ever emits Uuid for a join key
+    (planner classifier today only emits Uuid for hash_agg).
+  - INET / CIDR extractors next (hash-join use case): each is a 4-byte
+    (IPv4) / 16-byte (IPv6) struct with a 1-byte family discriminator,
+    `inet_struct` layout in `src/include/utils/inet.h`. Network-byte
+    order is preserved; canonical hashing must canonicalise IPv4 vs
+    IPv6 to avoid colliding semantically-distinct addresses. ~150 LOC
+    extractor + planner classifier + kernel hash arm.
   - JSON / JSONB last (analytics win): the GPU side needs a JSONB
     binary-format parser kernel; substantial work.
   - ARRAY: unnest-on-GPU is a separate kernel-design item.
