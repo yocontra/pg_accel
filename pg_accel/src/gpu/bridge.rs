@@ -105,6 +105,20 @@ unsafe extern "C" {
         results: *mut i8,
     ) -> PgaccelStatus;
 
+    /// Bulk Shoelace area for single-ring polygons.
+    ///
+    /// CSR-style input: `coords` is a flat `[x, y, x, y, ...]` buffer
+    /// with each row's vertices concatenated; `row_offsets` is a
+    /// `[row_count + 1]` array of `coords` indices marking each row's
+    /// starting xy pair. Output: one f64 area per row in `areas`.
+    pub fn pgaccel_st_area_bulk(
+        coords: *const std::ffi::c_void,
+        row_offsets: *const u32,
+        row_count: usize,
+        use_fp64: bool,
+        areas: *mut std::ffi::c_void,
+    ) -> PgaccelStatus;
+
     /// Three-layer spatial intersection pipeline.
     ///
     /// Takes arrays of geometry descriptors and partitions pairs into

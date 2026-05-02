@@ -190,10 +190,23 @@ pub unsafe fn dispatch_gpu_spatial(
     qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
     _skip_bbox: bool,
 ) -> DispatchResult {
-    // We need the constant second geometry to form pairs.
-    let Some((qual_d, qual_null)) = qual_datum else {
+    // Single-arg spatial functions (st_area, eventually st_length /
+    // st_x / st_y) — qual_datum is always None because there's no
+    // constant second argument. Branch off before the two-arg gate.
+    if qual_datum.is_none() {
+        let fn_name = registry::global_registry()
+            .lookup(fn_info.fn_oid)
+            .map(|e| e.name);
+        if fn_name == Some("st_area") {
+            return unsafe { dispatch_gpu_st_area(batch) };
+        }
+        // Other single-arg names not yet wired — defer.
         pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datum, deferring");
         return DispatchResult::Deferred;
+    }
+    // We know qual_datum is Some here (the None branch returned above).
+    let Some((qual_d, qual_null)) = qual_datum else {
+        unreachable!("qual_datum is Some after the None branch returned above")
     };
 
     // Strict: if the constant arg is NULL, every result is NULL.
@@ -410,5 +423,104 @@ pub unsafe fn dispatch_gpu_spatial(
         );
     }
 
+    DispatchResult::Accelerated(results)
+}
+
+/// Single-arg `st_area(geom)` dispatch: extract one Polygon per row,
+/// run the Shoelace SYCL kernel, return one f64 per row.
+///
+/// CSR layout: build a flat coords buffer + row_offsets in a single
+/// pass over the batch (skipping NULLs and non-Polygon shapes —
+/// those rows are returned as NULL so PG handles them via st_area's
+/// scalar implementation). The row_offsets[N+1] convention lets the
+/// kernel index each row's coords[start..end] without storing a
+/// separate length per row.
+///
+/// # Safety
+///
+/// Must be called on the **main backend thread**. Each `batch` datum
+/// must be a valid PostGIS geometry datum (or NULL).
+unsafe fn dispatch_gpu_st_area(batch: &[(pgrx::pg_sys::Datum, bool)]) -> DispatchResult {
+    let n = batch.len();
+    if n == 0 {
+        return DispatchResult::Accelerated(Vec::new());
+    }
+
+    // Build CSR coords + offsets. valid_rows tracks which batch
+    // indices fed into the kernel (NULL / non-Polygon rows are
+    // returned as NULL).
+    let mut coords: Vec<f32> = Vec::new();
+    let mut row_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut valid_rows: Vec<usize> = Vec::with_capacity(n);
+    let mut next_offset: u32 = 0;
+    row_offsets.push(0);
+
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        let Some(geom) = extract_geometry(datum) else {
+            continue;
+        };
+        // Single-ring Polygon only — the kernel doesn't yet handle
+        // multipart geometries or polygons with holes.
+        if !matches!(geom.geom_type, three_layer::GeomType::Polygon) {
+            continue;
+        }
+        if geom.coord_count < 3 || geom.coords.len() < 6 {
+            continue;
+        }
+        // ring_offsets stores per-ring starts; len > 1 indicates
+        // multiple rings (outer + holes).
+        if geom.ring_offsets.len() > 1 {
+            continue;
+        }
+        // Append this row's coords; record the offset for the NEXT
+        // row.
+        coords.extend_from_slice(&geom.coords);
+        next_offset = next_offset.saturating_add(geom.coords.len() as u32);
+        row_offsets.push(next_offset);
+        valid_rows.push(i);
+    }
+
+    let kernel_row_count = valid_rows.len();
+    if kernel_row_count == 0 {
+        // Nothing to dispatch — every row is NULL or unsupported.
+        // Return Deferred so PG handles st_area natively.
+        return DispatchResult::Deferred;
+    }
+
+    // Output buffer: one f32 area per kernel row.
+    let mut areas = vec![0.0f32; kernel_row_count];
+
+    use crate::gpu::bridge::{self, PgaccelStatus};
+    // SAFETY: coords / row_offsets / areas are valid Rust-owned slices
+    // of the declared lengths. fp32 path; fp64 instantiation works for
+    // this kernel (no trig) but skipped here because the dispatch
+    // wraps the result back into PG f8 anyway.
+    let status = unsafe {
+        bridge::pgaccel_st_area_bulk(
+            coords.as_ptr().cast(),
+            row_offsets.as_ptr(),
+            kernel_row_count,
+            false,
+            areas.as_mut_ptr().cast(),
+        )
+    };
+    if !matches!(status, PgaccelStatus::Ok) {
+        // Surface as Deferred so PG handles via st_area natively.
+        // NOT a CPU fallback: pg_accel itself does no per-row compute
+        // when it returns Deferred.
+        return DispatchResult::Deferred;
+    }
+
+    // Build the output Datum vector. NULL slots stay NULL; valid rows
+    // get the GPU-computed area as an fp8 datum (PG `float8` storage
+    // is the bit pattern of an fp64 value, so promote fp32 -> fp64).
+    let mut results = vec![(pgrx::pg_sys::Datum::from(0_u64), true); n];
+    for (kernel_i, &batch_i) in valid_rows.iter().enumerate() {
+        let area_f64 = f64::from(areas[kernel_i]);
+        results[batch_i] = (pgrx::pg_sys::Datum::from(area_f64.to_bits()), false);
+    }
     DispatchResult::Accelerated(results)
 }

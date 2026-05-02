@@ -630,6 +630,121 @@ pgaccel_status segment_intersects_bulk_sycl(const T* segs_a, const T* segs_b, si
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// SYCL kernel — st_area_bulk via Shoelace formula (fp32 + fp64)
+//
+// CSR-style input: a flat coords buffer holding every polygon's
+// vertices concatenated, plus a row_offsets array marking each row's
+// starting vertex (in xy pair count). Each work-item computes one
+// polygon's signed Shoelace sum and writes the absolute area to the
+// output buffer.
+//
+// The kernel uses only mul / add / sycl::fabs — no trig, no sqrt — so
+// both fp32 and fp64 instantiations compile cleanly on Metal SSCP
+// (distinct from the sphere_distance fp64 hang).
+//
+// Coordinate-system semantics: the result is in the input's
+// coordinate units squared (degree² for raw lon/lat, meter² for
+// projected). PG's `st_area(geometry)` returns this raw value;
+// `st_area(geography)` requires spheroidal computation that needs trig
+// and is not implemented here.
+//
+// Multi-ring polygons are NOT yet supported — each row must be a
+// single closed ring. The dispatcher caller is responsible for
+// short-circuiting MultiPolygon / Polygon-with-holes inputs to
+// UNCERTAIN before calling this kernel.
+// ---------------------------------------------------------------------------
+namespace {
+template <typename T>
+pgaccel_status st_area_bulk_sycl(const T* coords, const uint32_t* row_offsets, size_t row_count,
+                                 T* areas) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  // Total coords-array length is row_offsets[row_count] (uniform CSR
+  // convention). Read it on the host before allocating device memory.
+  const uint32_t total_coord_count = row_offsets[row_count];
+
+  try {
+    T* d_coords = sycl::malloc_shared<T>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    T* d_areas = sycl::malloc_shared<T>(row_count, *q);
+
+    if (!d_coords || !d_offsets || !d_areas) {
+      if (d_coords)
+        sycl::free(d_coords, *q);
+      if (d_offsets)
+        sycl::free(d_offsets, *q);
+      if (d_areas)
+        sycl::free(d_areas, *q);
+      return PGACCEL_OOM;
+    }
+
+    if (total_coord_count > 0) {
+      std::memcpy(d_coords, coords, total_coord_count * sizeof(T));
+    }
+    std::memcpy(d_offsets, row_offsets, (row_count + 1) * sizeof(uint32_t));
+
+    q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const uint32_t start = d_offsets[i];
+       const uint32_t end = d_offsets[i + 1];
+       // Each vertex is 2 floats; vertex_count = (end - start) / 2.
+       const uint32_t vertex_count = (end - start) / 2;
+       if (vertex_count < 3) {
+         // Need >= 3 distinct vertices for a non-degenerate ring.
+         d_areas[i] = T(0);
+         return;
+       }
+       // Shoelace: 0.5 * |sum_{k=0..n-1} (x_k * y_{k+1} - x_{k+1} * y_k)|
+       // Last vertex wraps to first (PG polygon rings are closed).
+       T signed_area = T(0);
+       for (uint32_t k = 0; k < vertex_count; ++k) {
+         const uint32_t k_next = (k + 1) % vertex_count;
+         const T x_k = d_coords[start + k * 2];
+         const T y_k = d_coords[start + k * 2 + 1];
+         const T x_next = d_coords[start + k_next * 2];
+         const T y_next = d_coords[start + k_next * 2 + 1];
+         signed_area += x_k * y_next - x_next * y_k;
+       }
+       d_areas[i] = sycl::fabs(signed_area) * T(0.5);
+     }).wait_and_throw();
+
+    std::memcpy(areas, d_areas, row_count * sizeof(T));
+
+    sycl::free(d_coords, *q);
+    sycl::free(d_offsets, *q);
+    sycl::free(d_areas, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL st_area_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: st_area_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+}  // namespace
+
+extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_t* row_offsets,
+                                               size_t row_count, bool use_fp64, void* areas) {
+  if (row_count == 0)
+    return PGACCEL_OK;
+  if (!coords || !row_offsets || !areas)
+    return PGACCEL_ERROR_INIT;
+
+  if (use_fp64) {
+    return st_area_bulk_sycl<double>(static_cast<const double*>(coords), row_offsets, row_count,
+                                     static_cast<double*>(areas));
+  }
+  return st_area_bulk_sycl<float>(static_cast<const float*>(coords), row_offsets, row_count,
+                                  static_cast<float*>(areas));
+}
+
+// ---------------------------------------------------------------------------
 // Public API — extern "C"
 // ---------------------------------------------------------------------------
 

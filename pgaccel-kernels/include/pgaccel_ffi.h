@@ -215,6 +215,27 @@ pgaccel_segment_intersects_bulk(const void* segs_a, /* [N * 4] x1,y1,x2,y2 */
                                 int8_t* results /* [N] 1=intersects, -1=no, 0=uncertain */
 );
 
+/* Bulk Shoelace area for single-ring polygons.
+ * CSR-style input: a flat coords buffer of [x,y,x,y,...] floats and a
+ * row_offsets array marking each row's first coord index. Each row
+ * spans coords[row_offsets[i]..row_offsets[i+1]] — must be a single
+ * closed ring with >= 3 distinct vertices.
+ *
+ *   coords         — [row_offsets[row_count]] flat fp32 or fp64
+ *   row_offsets    — [row_count + 1] uint32 indices into coords
+ *   row_count      — number of rows
+ *   use_fp64       — false = fp32 path, true = fp64 path
+ *   areas          — [row_count] output fp32 or fp64 areas (>= 0)
+ *
+ * Result is in coordinate-system units squared (degree² for raw
+ * lon/lat input). Spheroidal `st_area(geography)` is not implemented
+ * here — caller (PG) handles. Multi-ring polygons / polygons with
+ * holes are NOT supported; the dispatcher must short-circuit those
+ * to UNCERTAIN before calling.
+ */
+pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_t* row_offsets,
+                                    size_t row_count, bool use_fp64, void* areas);
+
 /* ── Spatial Dispatch (Three-Layer Pipeline) ──────────────────────── */
 
 typedef enum {
