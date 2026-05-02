@@ -716,6 +716,34 @@ pub fn h3_get_resolution_bulk(cells: &[u64]) -> Option<Vec<i32>> {
     status.is_ok().then_some(resolutions)
 }
 
+/// GPU-accelerated bulk H3 base-cell extraction.
+pub fn h3_get_base_cell_bulk(cells: &[u64]) -> Option<Vec<i32>> {
+    let mut base_cells = vec![0i32; cells.len()];
+    // SAFETY: cells and base_cells are valid slices of matching length.
+    let status = unsafe {
+        bridge::pgaccel_h3_get_base_cell_bulk(cells.as_ptr(), cells.len(), base_cells.as_mut_ptr())
+    };
+    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    unsafe {
+        bridge::pgaccel_pool_reset();
+    }
+    status.is_ok().then_some(base_cells)
+}
+
+/// GPU-accelerated bulk H3 cell validity check.
+pub fn h3_is_valid_cell_bulk(cells: &[u64]) -> Option<Vec<u8>> {
+    let mut valid = vec![0u8; cells.len()];
+    // SAFETY: cells and valid are valid slices of matching length.
+    let status = unsafe {
+        bridge::pgaccel_h3_is_valid_cell_bulk(cells.as_ptr(), cells.len(), valid.as_mut_ptr())
+    };
+    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    unsafe {
+        bridge::pgaccel_pool_reset();
+    }
+    status.is_ok().then_some(valid)
+}
+
 /// GPU-accelerated bulk H3 cell-to-parent.
 pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>> {
     let mut parents = vec![0u64; cells.len()];

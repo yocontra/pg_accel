@@ -374,6 +374,133 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(const uint64_t* cells, 
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
+extern "C" pgaccel_status pgaccel_h3_get_base_cell_bulk(const uint64_t* cells, size_t count,
+                                                        int32_t* base_cells) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (cells == nullptr || base_cells == nullptr)
+    return PGACCEL_ERROR_INIT;
+
+  try {
+    sycl::queue q{sycl::default_selector_v};
+
+    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+    int32_t* d_base = sycl::malloc_device<int32_t>(count, q);
+
+    if (!d_cells || !d_base) {
+      sycl::free(d_cells, q);
+      sycl::free(d_base, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         if (d_cells[i] == 0) {
+           d_base[i] = -1;
+         } else {
+           // Inline base-cell extraction: bits [51:45].
+           d_base[i] = static_cast<int32_t>((d_cells[i] >> 45) & 0x7F);
+         }
+       });
+     }).wait_and_throw();
+
+    q.memcpy(base_cells, d_base, count * sizeof(int32_t)).wait_and_throw();
+
+    sycl::free(d_cells, q);
+    sycl::free(d_base, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception&) {
+  } catch (...) {}
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, size_t count,
+                                                        uint8_t* valid) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (cells == nullptr || valid == nullptr)
+    return PGACCEL_ERROR_INIT;
+
+  try {
+    sycl::queue q{sycl::default_selector_v};
+
+    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
+    uint8_t* d_valid = sycl::malloc_device<uint8_t>(count, q);
+
+    if (!d_cells || !d_valid) {
+      sycl::free(d_cells, q);
+      sycl::free(d_valid, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
+
+    const uint64_t high_bit = H3_HIGH_BIT;
+    const uint64_t mode_cell = H3_MODE_CELL;
+    const int max_res = H3_MAX_RESOLUTION;
+    const uint64_t unused_digit = H3_UNUSED_DIGIT;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const uint64_t cell = d_cells[i];
+
+         if (cell == 0) {
+           d_valid[i] = 0;
+           return;
+         }
+         // High bit must be set.
+         if ((cell & high_bit) == 0) {
+           d_valid[i] = 0;
+           return;
+         }
+         // Mode (bits 62:59) must be 1 = cell.
+         const uint64_t mode = (cell >> 59) & 0xF;
+         if (mode != mode_cell) {
+           d_valid[i] = 0;
+           return;
+         }
+         // Resolution (bits 55:52) in [0, 15].
+         const int res = static_cast<int>((cell >> 52) & 0xF);
+         if (res < 0 || res > max_res) {
+           d_valid[i] = 0;
+           return;
+         }
+         // Base cell (bits 51:45) in [0, 121].
+         const int base = static_cast<int>((cell >> 45) & 0x7F);
+         if (base < 0 || base > 121) {
+           d_valid[i] = 0;
+           return;
+         }
+         // Digits beyond resolution must be 7 (unused).
+         bool ok = true;
+         for (int r = res + 1; r <= max_res; r++) {
+           const int shift = (max_res - r) * 3 + 1;
+           const uint64_t digit = (cell >> shift) & 0x7;
+           if (digit != unused_digit) {
+             ok = false;
+             break;
+           }
+         }
+         d_valid[i] = ok ? 1 : 0;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(valid, d_valid, count * sizeof(uint8_t)).wait_and_throw();
+
+    sycl::free(d_cells, q);
+    sycl::free(d_valid, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception&) {
+  } catch (...) {}
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count,
                                                          int parent_res, uint64_t* parents) {
   if (count == 0)

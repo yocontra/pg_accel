@@ -15,21 +15,21 @@
 //!
 //! ## Currently registered (kernel + bridge + dispatch present)
 //!
-//! | Operator              | Kernel symbol                          | Source                                                       |
-//! |-----------------------|----------------------------------------|--------------------------------------------------------------|
-//! | `h3_latlng_to_cell`   | `pgaccel_h3_lat_lng_to_cell_bulk`      | `pgaccel-kernels/src/h3_ops.cpp:569`                         |
-//! | `h3_grid_distance`    | `pgaccel_h3_grid_distance_bulk`        | `pgaccel-kernels/src/h3_ops.cpp:449`                         |
-//! | `h3_cell_to_parent`   | `pgaccel_h3_cell_to_parent_bulk`       | `pgaccel-kernels/src/h3_ops.cpp:377`                         |
-//! | `h3_get_resolution`   | `pgaccel_h3_get_resolution_bulk`       | `pgaccel-kernels/src/h3_ops.cpp:332`                         |
+//! | Operator                    | Kernel symbol                            | Source                                                       |
+//! |-----------------------------|------------------------------------------|--------------------------------------------------------------|
+//! | `h3_latlng_to_cell`         | `pgaccel_h3_lat_lng_to_cell_bulk`        | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_grid_distance`          | `pgaccel_h3_grid_distance_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_cell_to_parent`         | `pgaccel_h3_cell_to_parent_bulk`         | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_cell_to_center_child`   | `pgaccel_h3_cell_to_center_child_bulk`   | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_get_resolution`         | `pgaccel_h3_get_resolution_bulk`         | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_get_base_cell`          | `pgaccel_h3_get_base_cell_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | `h3_is_valid_cell`          | `pgaccel_h3_is_valid_cell_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
 //!
 //! ## Deliberately NOT registered — no kernel exists
 //!
-//! TODO.md Phase 4 ("H3 operator registrations", `TODO.md:636`) lists seven
-//! additional operators. Each is blocked on a GPU kernel that does not exist
-//! in `pgaccel-kernels/src/h3_ops.cpp`. Registering any of them before the
-//! kernel lands would violate anti-cheat ban #7 (stubs as done); an adjacent
-//! agent is scoped to this file only, so the kernel work is out of scope for
-//! this task.
+//! TODO.md Phase 4 lists additional operators that remain blocked on a GPU
+//! kernel and/or variable-output plumbing. Registering any of them before the
+//! kernel lands would violate anti-cheat ban #7 (stubs as done).
 //!
 //! | Operator                      | Class       | Blocker                                                   |
 //! |-------------------------------|-------------|-----------------------------------------------------------|
@@ -37,7 +37,6 @@
 //! | `h3_grid_ring_unsafe`         | grid-gen    | No kernel; variable-length output                         |
 //! | `h3_polyfill`                 | grid-gen    | No kernel; variable-length output driven by geometry area |
 //! | `h3_cell_to_children`         | hierarchy   | No kernel; fan-out of 7^(child_res - cell_res) cells      |
-//! | `h3_cell_to_center_child`     | hierarchy   | No kernel; fixed 1:1 output, would be easiest first step  |
 //! | `h3_cell_to_boundary`         | geometry    | No kernel; emits PostGIS polygon (GSERIALIZED plumbing)   |
 //! | `h3_cells_to_multi_polygon`   | geometry    | No kernel; emits PostGIS multipolygon                     |
 //!
@@ -65,6 +64,8 @@ pub fn adapter() -> ExtensionAdapter {
         "h3_cell_to_parent", // bit shift               (pgaccel_h3_cell_to_parent_bulk)
         "h3_cell_to_center_child", // bit shift             (pgaccel_h3_cell_to_center_child_bulk)
         "h3_get_resolution", // bit mask                (pgaccel_h3_get_resolution_bulk)
+        "h3_get_base_cell",  // bit mask                (pgaccel_h3_get_base_cell_bulk)
+        "h3_is_valid_cell",  // mode + base check       (pgaccel_h3_is_valid_cell_bulk)
     ];
 
     let functions = GPU_NAMES
@@ -116,7 +117,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 5);
+        assert_eq!(adapter().functions.len(), 7);
     }
 
     #[test]
@@ -313,8 +314,9 @@ mod tests {
             "h3_grid_ring_unsafe",
             "h3_polyfill",
             "h3_cell_to_children",
-            // h3_cell_to_center_child landed in the same commit that
-            // registered it; tracked in registered_ops_match_kernel_set_exactly.
+            // h3_cell_to_center_child, h3_get_base_cell, h3_is_valid_cell
+            // landed with their kernels; tracked in
+            // registered_ops_match_kernel_set_exactly.
             "h3_cell_to_boundary",
             "h3_cells_to_multi_polygon",
         ];
@@ -342,6 +344,8 @@ mod tests {
             "h3_cell_to_parent",
             "h3_cell_to_center_child",
             "h3_get_resolution",
+            "h3_get_base_cell",
+            "h3_is_valid_cell",
         ]
         .into_iter()
         .collect();
@@ -358,6 +362,26 @@ mod tests {
                 .functions
                 .iter()
                 .any(|f| f.name == "h3_cell_to_center_child")
+        );
+    }
+
+    #[test]
+    fn contains_h3_get_base_cell() {
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_get_base_cell")
+        );
+    }
+
+    #[test]
+    fn contains_h3_is_valid_cell() {
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "h3_is_valid_cell")
         );
     }
 }

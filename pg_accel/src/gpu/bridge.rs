@@ -331,6 +331,18 @@ unsafe extern "C" {
         resolutions: *mut i32,
     ) -> PgaccelStatus;
 
+    pub fn pgaccel_h3_get_base_cell_bulk(
+        cells: *const u64,
+        count: usize,
+        base_cells: *mut i32,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_h3_is_valid_cell_bulk(
+        cells: *const u64,
+        count: usize,
+        valid: *mut u8,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_h3_cell_to_parent_bulk(
         cells: *const u64,
         count: usize,

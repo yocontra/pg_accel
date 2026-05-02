@@ -118,6 +118,13 @@ pub unsafe fn dispatch_gpu_h3(
         Some("h3_get_resolution") => {
             crate::gpu::h3_get_resolution_bulk(&cells).map(GpuH3Result::I32)
         }
+        // 1-arg: cell → i32 base cell index
+        Some("h3_get_base_cell") => crate::gpu::h3_get_base_cell_bulk(&cells).map(GpuH3Result::I32),
+        // 1-arg: cell → bool valid; mapped via Bool variant for the
+        // result-emit loop to construct a PG bool Datum.
+        Some("h3_is_valid_cell") => {
+            crate::gpu::h3_is_valid_cell_bulk(&cells).map(GpuH3Result::Bool)
+        }
         // 2-arg: cell + resolution constant → parent cell (u64)
         Some("h3_cell_to_parent") => {
             let res = qual_datum
@@ -194,6 +201,7 @@ pub unsafe fn dispatch_gpu_h3(
         let datum = match &gpu_res {
             GpuH3Result::I32(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi]),
             GpuH3Result::U64(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi] as i64),
+            GpuH3Result::Bool(v) if gi < v.len() => pgrx::pg_sys::Datum::from(v[gi] != 0),
             _ => continue,
         };
         results[batch_idx] = (datum, false);
@@ -201,10 +209,12 @@ pub unsafe fn dispatch_gpu_h3(
     DispatchResult::Accelerated(results)
 }
 
-/// Tagged union for H3 GPU kernel results — some return i32, others u64.
+/// Tagged union for H3 GPU kernel results — some return i32, others u64,
+/// h3_is_valid_cell returns bool (carried as u8 0/1 from the kernel).
 enum GpuH3Result {
     I32(Vec<i32>),
     U64(Vec<u64>),
+    Bool(Vec<u8>),
 }
 
 /// Log a warning if the H3 GPU pipeline exceeded the configured timeout.

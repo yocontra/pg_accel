@@ -299,6 +299,16 @@ pgaccel_status pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_
 pgaccel_status pgaccel_h3_get_resolution_bulk(const uint64_t* cells, size_t count,
                                               int32_t* resolutions);
 
+/* For each input cell, write its base-cell index (bits [51:45], 0..121).
+ * Outputs -1 for cell == 0. */
+pgaccel_status pgaccel_h3_get_base_cell_bulk(const uint64_t* cells, size_t count,
+                                             int32_t* base_cells);
+
+/* For each input cell, write 1 if the cell encoding is well-formed
+ * (high bit set, mode == 1, valid resolution, valid base cell, all
+ * digit slots beyond resolution are H3_UNUSED_DIGIT == 7); 0 otherwise. */
+pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, size_t count, uint8_t* valid);
+
 pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count, int parent_res,
                                               uint64_t* parents);
 
