@@ -44,12 +44,13 @@ order:
    unblocker plan.
 2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
    kernel + bridge + executor. Largest single chunk in the punchlist.
-3. **Phase 4 type coverage** — UUID end-to-end (hash_agg only).
-   INET / CIDR groundwork landed (`PGACCEL_KEY_INET = 5`, kernel
-   hash arms, Rust extractor + planner classifier + 4 unit tests);
-   the agg dispatch defers to PG until VectorizedScan grows varlena
-   extraction (see `Phase 4 type coverage` section for the
-   architecture gap). JSON / JSONB next; DATE works post Phase 2.
+3. **Phase 4 type coverage** — UUID + INET / CIDR end-to-end on
+   hash_agg group keys (commits `243fa1f` + `c4134d5` + `3fbc03d`):
+   inline-varlena fast path through `VectorizedScan::extract_inet`
+   parses the 1-byte short / 4-byte long varlena header on the
+   arena-backed heap bytes and canonicalises to the 24-byte
+   `PGACCEL_KEY_INET` form. JSON / JSONB next (substantial — needs
+   a JSONB binary-format parser kernel); DATE works post Phase 2.
 4. **Phase 4 PostGIS / raster / H3 kernel backlog** — kernel-heavy.
 5. **Phase 5 worker-side spatial recheck** — DSM plumbing.
 6. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
@@ -497,24 +498,21 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     as a follow-up; the executor stub at `executor/join/probe.rs` raises
     `pgrx::error!` if the planner ever emits Uuid for a join key
     (planner classifier today only emits Uuid for hash_agg).
-  - INET / CIDR groundwork: SHIPPED in commit `c4134d5` —
-    `PGACCEL_KEY_INET = 5` C ABI, 24-byte canonical key (family + bits
-    + 16-byte ipaddr + 6-byte u64-alignment pad), kernel hash arms
-    (`hash_agg.cpp::read_key_u64` case 5), Rust bridge variant,
-    `tuple_extract::extract_inet` (MinimalTuple-based, with varlena
-    detoasting), `keys.rs` planner classifier (INETOID 869 + CIDROID
-    650 → key_type=5), 4 unit tests. **Gap to close**: VectorizedScan
-    has no varlena-aware extraction path (the arena-based scan stores
-    raw heap bytes but has no TupleTableSlot for `slot_getattr`-based
-    detoasting). The agg dispatch at `agg/execute.rs` checks for
-    key_type=5 and short-circuits to PG when reached, so the
-    classifier accepting INET cannot produce wrong results — just
-    leaves performance on the table for INET-keyed GROUP BY until
-    that gap closes. Two paths to close it: (a) thread a
-    fallback_slot through the executor and call
-    `tuple_extract::extract_inet`; (b) hand-roll inline-varlena
-    parsing in `VectorizedScan::extract_inet` against the heap bytes
-    directly.
+  - INET / CIDR end-to-end on hash_agg group keys: SHIPPED in
+    commits `c4134d5` (groundwork: ABI + kernel hash arms + Rust
+    extractor + planner classifier + 4 unit tests) and `3fbc03d`
+    (close: `extract_inet_from_heap_headers` inline-varlena fast
+    path through VectorizedScan, no detour through MinimalTuple
+    slot_getattr — short / long header parse + family
+    canonicalisation handled directly on the arena bytes). Agg
+    dispatch at `agg/execute.rs:1186` now packs canonical 24-byte
+    keys per row; rows that need full detoast (TOAST pointer,
+    compressed varlena, variable-length predecessor) come back as
+    null in the mask and the kernel hash table treats them as a
+    single bucket (matches PG hashinet null semantics). Hash join
+    INET keys still pending — same `build_cpu<T>` / `probe_cpu<T>`
+    template constraint as UUID; planner classifier doesn't emit
+    Inet for join keys.
   - JSON / JSONB last (analytics win): the GPU side needs a JSONB
     binary-format parser kernel; substantial work.
   - ARRAY: unnest-on-GPU is a separate kernel-design item.
