@@ -580,34 +580,62 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     Verified via the PG log line `pg_accel: registry re-resolve:
     activating new adapter 'h3'` followed by `resolved 17 function
     OIDs across 1 adapters` on the first FunctionScan lookup miss.
-  - **NEW BLOCKER (2026-05-02, surfaced by the registry fix): GPU
-    FunctionScan executor crash at
-    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:279`** —
-    `pg_sys::ExecSetSlotDescriptor` raises a PG `ereport(ERROR)` that
-    pgrx wraps as `<non-string panic payload>`. Pre-fix, this bug was
-    masked because the projectset hook always bailed on the registry
-    miss and PG ran its native FunctionScan instead. Post-fix, the
-    Custom Scan path is reached → `BeginCustomScan` → `init_state` →
-    crash. Affects `EXPLAIN` (no ANALYZE) too, since PG's
-    `standard_ExplainOneQuery` calls `ExecutorStart` to walk the plan
-    tree. The 3 integration tests
+  - **Resolved 2026-05-03 (B2.5): GPU FunctionScan executor crash at
+    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:279`.** Root
+    cause confirmed via
+    `~/Library/Logs/DiagnosticReports/postgres-2026-05-03-122131.ips`
+    (frame: panic at the `pg_sys::ExecSetSlotDescriptor` call) +
+    PG17 source review:
+    `src/backend/executor/nodeCustom.c:ExecInitScanTupleSlot` builds
+    the scan slot from `ExecTypeFromTL(custom_scan_tlist)`, and
+    `src/backend/executor/execTuples.c:MakeTupleTableSlot` sets
+    `TTS_FLAG_FIXED` on any slot constructed with a non-NULL tupdesc —
+    so `ExecSetSlotDescriptor` (which asserts `!TTS_FIXED`) cannot be
+    used from `BeginCustomScan` to swap the descriptor.
+    Fix landed (candidate (a)): build `custom_scan_tlist` in
+    `plan_custom_path_function` from the registry's
+    `output_field_types` / `output_field_names` so PG's
+    `ExecTypeFromTL` produces the correct tupdesc on first
+    construction. The `init_state` flow now only validates the slot's
+    existing tupdesc against the registry shape and bails cleanly on
+    mismatch. Verified: 3 integration tests
     (`function_scan_h3_cell_to_boundary_emits_one_row`,
-    `function_scan_h3_grid_disk_emits_seven_cells_for_k1`,
-    `function_scan_st_summarystats_emits_six_field_record`) now FAIL
-    with this crash — they are the honest signal that the executor
-    needs fixing. Likely cause: the scan slot's tupdesc was already
-    set up with one column count by `ExecInitCustomScan` from
-    `custom_scan_tlist`, and replacing it via `ExecSetSlotDescriptor`
-    with a different column count violates a PG invariant. Fix
-    candidates: (a) build the correct `custom_scan_tlist` in
-    `plan_custom_path_function` so the slot's tupdesc is right
-    on first construction (no replace needed), (b) call
-    `ExecClearTuple(slot)` before `ExecSetSlotDescriptor`, (c) use
-    a separate result slot rather than mutating `ss_ScanTupleSlot`.
-    The pgrx-wrapped panic obscures the underlying PG message — to
-    capture it, set `RUST_BACKTRACE=1` and either disable the panic
-    handler or grep `~/Library/Logs/DiagnosticReports/postgres-*.ips`
-    for the `ereport` call site.
+    `function_scan_st_summarystats_emits_six_field_record`,
+    `function_scan_explain_does_not_crash_for_cell_to_boundary`) all
+    PASS individually post-fix. The 4th test
+    (`function_scan_h3_grid_disk_emits_seven_cells_for_k1`) now fails
+    on a *different* signature — `pgrx::error!` from
+    `pg_accel/src/engine/dispatch/h3.rs:412`
+    ("h3_grid_disk GPU kernel failed; refusing CPU fallback") — not
+    the executor crash. That is a kernel-layer bug
+    (`gpu::h3_grid_disk_bulk` returning `None`); see new TODO entry
+    "h3_grid_disk SYCL kernel returns None on single-cell input"
+    below.
+  - **Open (surfaced 2026-05-03 by B2.5 executor fix):
+    `h3_grid_disk` SYCL kernel returns `None` on single-cell input.**
+    Symptom: with the FunctionScan executor crash gone, the test
+    `function_scan_h3_grid_disk_emits_seven_cells_for_k1` now reaches
+    `dispatch_gpu_h3_var_grid_disk` at
+    `pg_accel/src/engine/dispatch/h3.rs:411`, where
+    `gpu::h3_grid_disk_bulk(&[cell], 1)` returns `None`. The `None`
+    propagates to `pgrx::error!` (correct error surfacing per
+    anti-cheat ban #4), aborting the SPI query. The kernel
+    (`pgaccel_h3_grid_disk_output_size` / `pgaccel_h3_grid_disk_emit`
+    in `pgaccel-kernels/src/h3_ops.cpp:1355` / `:1446`) has standalone
+    test coverage in `pgaccel-kernels/test/test_h3.cpp:706` that
+    passes 2-cell inputs at k=1; the single-cell PG-backend dispatch
+    path likely fails on first SYCL `default_selector_v` queue init in
+    a forked PG process (Apple Silicon Metal `MTLBinaryArchive`
+    fork-safety regression — same family as the issues described in
+    `CLAUDE.md` "MTLBinaryArchive cache" section). Diagnostic next
+    steps: (1) `just clear-jit` then re-run the standalone
+    `pgaccel-kernels/test/test_h3.cpp::test_grid_disk_*` to confirm
+    kernel works in isolation; (2) attach `lldb` to the PG backend
+    that runs the SPI query and break on
+    `pgaccel_h3_grid_disk_output_size` to capture the SYCL exception;
+    (3) check `~/.acpp/apps/global/jit-cache/*.metalar` after a failed
+    dispatch to see whether the archive builder ran. Owner: separate
+    follow-up agent (kernel/AdaptiveCpp specialist).
   - **Open: dispatch shape mismatch for `h3_cell_to_boundary`**
     (surfaced 2026-05-03 by F3-finish testing): the h3-pg
     extension declares `h3_cell_to_boundary(h3index, boolean)
@@ -631,16 +659,17 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered
   set matches the kernel set exactly.
-- **Done when** (refreshed 2026-05-03 after F3-finish): the
-  FunctionScan plumbing IS landed (commits `30a9b6e`, `da6b054`).
-  Outstanding before this entry can be dropped: (1) one of the two
-  registry-init-ordering fixes above so the integration tests
-  actually exercise the GPU path (today they pass via PG native
-  fallback); (2) the `h3_cell_to_boundary` dispatch shape mismatch
-  fix (kernel emits GSERIALIZED, h3-pg declares return type as PG
+- **Done when** (refreshed 2026-05-03 after B2.5): FunctionScan
+  plumbing IS landed (commits `30a9b6e`, `da6b054`); registry
+  re-resolve IS landed (commit `3827b24`); FunctionScan executor
+  crash IS fixed (B2.5 — this commit). Outstanding before this
+  entry can be dropped: (1) `h3_grid_disk` SYCL kernel returning
+  `None` on the single-cell PG-backend dispatch path (entry above);
+  (2) the `h3_cell_to_boundary` dispatch shape mismatch fix
+  (kernel emits GSERIALIZED, h3-pg declares return type as PG
   built-in `polygon`); (3) `h3_cells_to_multi_polygon` per-row
-  `bigint[]` ArrayType walker (tracked under the `st_value` blocker
-  entry). When all three close, `EXPLAIN SELECT * FROM
+  `bigint[]` ArrayType walker (tracked under the `st_value`
+  blocker entry). When all three close, `EXPLAIN SELECT * FROM
   h3_cell_to_boundary('8a..'::h3index)` shows `Custom Scan
   (GpuAccelFunctionScan)` instead of PG's native `Function Scan`,
   and the POLYGON output parses byte-identical via the appropriate
