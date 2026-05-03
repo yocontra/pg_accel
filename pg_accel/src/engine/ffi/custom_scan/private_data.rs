@@ -900,3 +900,199 @@ pub(super) unsafe fn deserialize_preagg_private(
         partial,
     }
 }
+
+// ---------------------------------------------------------------------------
+// FunctionScan serialization / deserialization (Phase 2 F3)
+// ---------------------------------------------------------------------------
+
+/// Magic marker preceding a serialized [`FunctionScanPrivData`].
+///
+/// Distinct from `PARTIAL_SENTINEL` so the two block formats cannot be
+/// silently confused if a layout regression mis-positions the cursor.
+#[allow(dead_code)] // reason: consumed by pg_test FunctionScan round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
+pub(in crate::engine::ffi) const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // b"FSCA"
+
+/// Plan metadata for a `FunctionScan` Custom-Scan injection (Phase 2 F3).
+///
+/// Carries the registered function OID and the constant arguments captured
+/// from the FunctionScan's `RTE_FUNCTION` `funcexpr`. The args are stored
+/// as serializable triples — pgrx Datum values that fit into a `c_int` —
+/// so that the metadata can survive the planner's `List *` round-trip
+/// alongside other strategies' private data.
+///
+/// **Note (Phase 2 F3 status):** the planner-side hook
+/// (`projectset.rs::pgaccel_set_function_pathlist`) and the executor-side
+/// `begin_custom_scan` arm that consume this struct are escalated per
+/// anti-cheat ban #9; the type + (de)serializers are landed here so the
+/// follow-up wiring agent can plug in without re-touching the
+/// custom_private layout.
+#[allow(dead_code)]
+// reason: consumed by pg_test round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionScanPrivData {
+    /// OID of the registered SRF / record-returning function.
+    pub fn_oid: pg_sys::Oid,
+    /// `OutputShape` discriminant: 0 = Scalar, 1 = Record, 2 = VarLen.
+    /// (Mirrors `OutputShape::from_i32` semantics; serialized as a single
+    /// `c_int` so the variant carries through `List *` round-trip.)
+    pub output_shape_disc: i32,
+    /// `field_count` payload for `Record { field_count }`. Zero for the
+    /// Scalar / VarLen variants.
+    pub output_shape_field_count: u32,
+    /// Captured constant arguments to the FunctionScan's `funcexpr`, in
+    /// positional order. Each entry is `(datum_as_i64, type_oid_as_u32)`.
+    /// Datum is stored as `i64` (PG `usize` on 64-bit) so it fits into
+    /// two `c_int` slots in the List layout.
+    pub args: Vec<(i64, u32)>,
+}
+
+/// Append a [`FunctionScanPrivData`] onto `list` using the
+/// `FUNCTIONSCAN_SENTINEL`-prefixed layout consumed by
+/// [`deserialize_functionscan_priv`].
+///
+/// Layout (after the standard 6-element `[strategy, batch_size,
+/// threads, fn_oid, target_attno, accel_strategy]` prefix that all
+/// scan-strategy plans share):
+///
+/// ```text
+/// [FUNCTIONSCAN_SENTINEL,
+///  fn_oid_low_bits, output_shape_disc, output_shape_field_count,
+///  n_args,
+///  per arg: (datum_hi, datum_lo, type_oid)]
+/// ```
+///
+/// The Datum value is split across two `c_int` slots (high 32 + low 32
+/// bits) because PG's `Integer` node holds a single 32-bit signed int.
+///
+/// # Safety
+///
+/// Must be called in a valid PG memory context on the main backend
+/// thread. `list` may be null or a valid PG `List *`.
+#[allow(clippy::cast_possible_wrap, dead_code)] // reason: consumed by pg_test round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
+pub(in crate::engine::ffi) unsafe fn append_functionscan_priv(
+    mut list: *mut pg_sys::List,
+    priv_data: &FunctionScanPrivData,
+) -> *mut pg_sys::List {
+    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
+    unsafe {
+        list = pg_sys::lappend(list, pg_sys::makeInteger(FUNCTIONSCAN_SENTINEL).cast());
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(u32::from(priv_data.fn_oid) as c_int).cast(),
+        );
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.output_shape_disc).cast(),
+        );
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.output_shape_field_count as c_int).cast(),
+        );
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.args.len() as c_int).cast(),
+        );
+        for &(datum, type_oid) in &priv_data.args {
+            // Split the i64 datum into hi / lo halves.
+            let datum_u = datum as u64;
+            list = pg_sys::lappend(list, pg_sys::makeInteger((datum_u >> 32) as c_int).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(datum_u as u32 as c_int).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(type_oid as c_int).cast());
+        }
+    }
+    list
+}
+
+/// Deserialize a [`FunctionScanPrivData`] from `list` starting at
+/// `start_idx` (the position of the `FUNCTIONSCAN_SENTINEL` marker).
+///
+/// Returns `None` if the sentinel does not match or the list is too
+/// short to hold the declared `n_args` payload.
+///
+/// # Safety
+///
+/// `list` must be a valid PG `List *` of `Integer` nodes.
+#[allow(clippy::cast_sign_loss, dead_code)] // reason: consumed by pg_test round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
+pub(in crate::engine::ffi) unsafe fn deserialize_functionscan_priv(
+    list: *mut pg_sys::List,
+    start_idx: usize,
+) -> Option<FunctionScanPrivData> {
+    if list.is_null() {
+        return None;
+    }
+    // SAFETY: list_length is safe on a non-null List.
+    let list_len = unsafe { pg_sys::list_length(list) } as usize;
+    if start_idx + 4 >= list_len {
+        return None;
+    }
+    let sentinel = unsafe { list_int_at(list, start_idx as c_int) };
+    if sentinel != FUNCTIONSCAN_SENTINEL {
+        return None;
+    }
+    let fn_oid_raw = unsafe { list_int_at(list, (start_idx + 1) as c_int) } as u32;
+    let shape_disc = unsafe { list_int_at(list, (start_idx + 2) as c_int) };
+    let shape_field_count = unsafe { list_int_at(list, (start_idx + 3) as c_int) } as u32;
+    let n_args = unsafe { list_int_at(list, (start_idx + 4) as c_int) } as usize;
+    let payload_base = start_idx + 5;
+    if payload_base + n_args * 3 > list_len {
+        return None;
+    }
+    let mut args = Vec::with_capacity(n_args);
+    for k in 0..n_args {
+        let off = payload_base + k * 3;
+        let hi = unsafe { list_int_at(list, off as c_int) } as u32;
+        let lo = unsafe { list_int_at(list, (off + 1) as c_int) } as u32;
+        let datum = (((hi as u64) << 32) | lo as u64) as i64;
+        let type_oid = unsafe { list_int_at(list, (off + 2) as c_int) } as u32;
+        args.push((datum, type_oid));
+    }
+    Some(FunctionScanPrivData {
+        fn_oid: pg_sys::Oid::from(fn_oid_raw),
+        output_shape_disc: shape_disc,
+        output_shape_field_count: shape_field_count,
+        args,
+    })
+}
+
+#[cfg(feature = "pg_test")]
+#[allow(clippy::unwrap_used)]
+mod functionscan_tests {
+    use pgrx::pg_test;
+
+    use super::*;
+
+    /// Sentinel must be distinct from `PARTIAL_SENTINEL` so the two
+    /// optional-trailer blocks cannot be silently confused if a layout
+    /// regression mis-positions the cursor.
+    #[test]
+    fn functionscan_sentinel_distinct_from_partial() {
+        assert_ne!(FUNCTIONSCAN_SENTINEL, PARTIAL_SENTINEL);
+    }
+
+    /// Round-trip assertion via the in-memory layout: build a small list
+    /// with `append_functionscan_priv`, then read it back with
+    /// `deserialize_functionscan_priv` from the same offset. Uses a
+    /// pgrx-managed memory context so PG `lappend` allocates safely.
+    #[pg_test]
+    fn functionscan_priv_roundtrip() {
+        use pgrx::pg_sys;
+        let original = FunctionScanPrivData {
+            fn_oid: pg_sys::Oid::from(12345_u32),
+            output_shape_disc: 1, // Record
+            output_shape_field_count: 6,
+            args: vec![
+                (0xDEAD_BEEF_DEAD_BEEFu64 as i64, pg_sys::INT8OID.to_u32()),
+                (42i64, pg_sys::INT4OID.to_u32()),
+            ],
+        };
+        // SAFETY: pg_test runs in a real backend, so CurrentMemoryContext is
+        // valid and lappend / makeInteger are safe.
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        unsafe {
+            list = append_functionscan_priv(list, &original);
+        }
+        let decoded = unsafe { deserialize_functionscan_priv(list, 0) }
+            .expect("functionscan priv must round-trip");
+        assert_eq!(decoded, original);
+    }
+}

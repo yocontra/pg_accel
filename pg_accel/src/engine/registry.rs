@@ -681,6 +681,8 @@ mod tests {
             name: "st_summarystats",
             strategy: AccelStrategy::GpuRaster,
             output_shape: OutputShape::Record { field_count: 6 },
+            output_field_types: Vec::new(),
+            output_field_names: Vec::new(),
         };
         assert_eq!(e.output_shape, OutputShape::Record { field_count: 6 });
     }
