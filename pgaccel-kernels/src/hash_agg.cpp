@@ -75,42 +75,15 @@ struct pgaccel_agg_state {
 
 namespace {
 
-// Device-callable typed read. Returns (value, is_null) — kernel-side.
+// Device-callable typed read result. The actual read function lives in
+// the second `namespace { ... }` block below (`device_read_value_addr`),
+// which takes the column-data pointer as a `uint64_t` bit pattern to
+// avoid the `device device void**` argbuffer access pattern that fails
+// Metal MSL validation.
 struct val_read {
   double value;
   bool is_null;
 };
-
-inline val_read device_read_value(const void* col_data, const uint8_t* null_mask, size_t row,
-                                  int val_type) {
-  val_read r = {0.0, true};
-  if (col_data == nullptr)
-    return r;
-  if (null_mask != nullptr && null_mask[row])
-    return r;
-  r.is_null = false;
-  switch (val_type) {
-    case 1:  // BOOL
-      r.value = static_cast<const bool*>(col_data)[row] ? 1.0 : 0.0;
-      break;
-    case 2:  // INT32
-      r.value = static_cast<double>(static_cast<const int32_t*>(col_data)[row]);
-      break;
-    case 3:  // INT64
-      r.value = static_cast<double>(static_cast<const int64_t*>(col_data)[row]);
-      break;
-    case 4:  // FLOAT32
-      r.value = static_cast<double>(static_cast<const float*>(col_data)[row]);
-      break;
-    case 5:  // FLOAT64
-      r.value = static_cast<const double*>(col_data)[row];
-      break;
-    default:
-      r.is_null = true;
-      break;
-  }
-  return r;
-}
 
 }  // namespace
 
@@ -196,6 +169,118 @@ static inline size_t key_size_for_type(int key_type) {
 
 namespace {
 
+// Device-callable typed value read that operates on a SINGLE flat shared
+// buffer carrying all per-agg column data concatenated end-to-end. The
+// per-agg starting byte offset into the flat buffer is in
+// `value_offsets[a]`; rows within an agg's slab live at `byte_offset =
+// value_offsets[a] + row * elem_size_for(val_type)`.
+//
+// Why a flat buffer (vs an array of typed pointers): on Apple Metal the
+// AdaptiveCpp SSCP backend cannot capture an array of device pointers
+// (`const void* const*`) — the resulting argbuffer access pattern emits
+// `device device void**` which fails MSL validation
+// ("C-style cast from 'device void *' to 'device void **' converts between
+// mismatching address spaces", see commit 6de58d6). Capturing a single
+// `const uint8_t*` (1 slot in the argbuffer) and computing offsets
+// inside the kernel avoids the pointer-of-pointer pattern entirely while
+// preserving correct device-address-space tagging on the typed reads.
+//
+// Per-element width is recovered from `val_type` (must match the type
+// used at staging time so offsets line up).
+inline size_t value_elem_size(int val_type) {
+  switch (val_type) {
+    case 1:
+      return sizeof(bool);
+    case 2:
+      return sizeof(int32_t);
+    case 3:
+      return sizeof(int64_t);
+    case 4:
+      return sizeof(float);
+    case 5:
+      return sizeof(double);
+    default:
+      return 0;
+  }
+}
+
+inline val_read device_read_value_flat(const uint8_t* value_data, const uint8_t* null_data,
+                                       size_t value_offset, size_t null_offset, bool null_present,
+                                       size_t row, int val_type) {
+  val_read r = {0.0, true};
+  if (null_present) {
+    if (null_data[null_offset + row])
+      return r;
+  }
+  r.is_null = false;
+  const uint8_t* p = value_data + value_offset;
+  switch (val_type) {
+    case 1:  // BOOL
+      r.value = reinterpret_cast<const bool*>(p)[row] ? 1.0 : 0.0;
+      break;
+    case 2:  // INT32
+      r.value = static_cast<double>(reinterpret_cast<const int32_t*>(p)[row]);
+      break;
+    case 3:  // INT64
+      r.value = static_cast<double>(reinterpret_cast<const int64_t*>(p)[row]);
+      break;
+    case 4:  // FLOAT32
+      r.value = static_cast<double>(reinterpret_cast<const float*>(p)[row]);
+      break;
+    case 5:  // FLOAT64
+      r.value = reinterpret_cast<const double*>(p)[row];
+      break;
+    default:
+      r.is_null = true;
+      break;
+  }
+  return r;
+}
+
+// Captured kernel state for the sorted-input accumulator. Every field is
+// either a single device pointer (1 argbuffer slot) or a u64/size_t
+// scalar (1 slot). No pointer-of-pointer (`void**`), no `acpp_f64` (whose
+// 2-slot Metal layout the AdaptiveCpp emitter mis-counts).
+//
+// `value_data` / `null_data` are flat concatenated shared-mem buffers.
+// `value_offsets[a]` and `null_offsets[a]` give the byte offset where
+// agg `a`'s column starts. `null_present[a]` is non-zero when agg `a`
+// has a non-null `null_data` slab.
+struct SortedAccumParams {
+  size_t n_groups;
+  size_t num_aggs;
+  const uint32_t* indices;
+  const size_t* group_starts;
+  const size_t* group_ends;
+  const uint8_t* value_data;
+  const uint8_t* null_data;
+  const size_t* value_offsets;
+  const size_t* null_offsets;
+  const uint8_t* null_present;
+  const int* value_types;
+  const pgaccel_agg_func* agg_funcs;
+  const size_t* agg_col_idx;
+  double* out_results;
+  int64_t* out_counts;
+};
+
+struct UnsortedAccumParams {
+  size_t n_groups;
+  size_t row_count;
+  size_t num_aggs;
+  const size_t* row_to_group;
+  const uint8_t* value_data;
+  const uint8_t* null_data;
+  const size_t* value_offsets;
+  const size_t* null_offsets;
+  const uint8_t* null_present;
+  const int* value_types;
+  const pgaccel_agg_func* agg_funcs;
+  const size_t* agg_col_idx;
+  double* out_results;
+  int64_t* out_counts;
+};
+
 // Run the accumulation kernel for a sorted-input path.
 // `indices[i]` gives the original row index for sort position `i`.
 // `group_starts[g]` / `group_ends[g]` bracket the sorted positions
@@ -207,23 +292,30 @@ namespace {
 // All input buffers must already live in shared memory.
 void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
                              const uint32_t* indices, const size_t* group_starts,
-                             const size_t* group_ends, const void* const* value_cols,
-                             const uint8_t* const* value_nulls, const int* value_types,
-                             const pgaccel_agg_func* agg_funcs, const size_t* agg_col_idx,
-                             double* out_results, int64_t* out_counts) {
+                             const size_t* group_ends, const uint8_t* value_data,
+                             const uint8_t* null_data, const size_t* value_offsets,
+                             const size_t* null_offsets, const uint8_t* null_present,
+                             const int* value_types, const pgaccel_agg_func* agg_funcs,
+                             const size_t* agg_col_idx, double* out_results, int64_t* out_counts) {
+  const SortedAccumParams p{
+      n_groups,    num_aggs,  indices,       group_starts, group_ends,
+      value_data,  null_data, value_offsets, null_offsets, null_present,
+      value_types, agg_funcs, agg_col_idx,   out_results,  out_counts,
+  };
   q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
      const size_t g = id[0];
-     const size_t start = group_starts[g];
-     const size_t end = group_ends[g];
+     const size_t start = p.group_starts[g];
+     const size_t end = p.group_ends[g];
 
      int64_t cnt = 0;
 
-     for (size_t a = 0; a < num_aggs; ++a) {
-       const pgaccel_agg_func func = agg_funcs[a];
-       const size_t col = agg_col_idx[a];
-       const void* col_data = value_cols[a];
-       const uint8_t* col_nulls = (value_nulls != nullptr) ? value_nulls[a] : nullptr;
-       const int vtype = value_types[a];
+     for (size_t a = 0; a < p.num_aggs; ++a) {
+       const pgaccel_agg_func func = p.agg_funcs[a];
+       const size_t col = p.agg_col_idx[a];
+       const size_t voff = p.value_offsets[a];
+       const size_t noff = p.null_offsets[a];
+       const bool nullable = p.null_present[a] != 0;
+       const int vtype = p.value_types[a];
 
        double acc = 0.0;
        if (func == PGACCEL_AGG_MIN)
@@ -232,7 +324,7 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
          acc = -std::numeric_limits<double>::infinity();
 
        for (size_t i = start; i < end; ++i) {
-         const uint32_t r = indices[i];
+         const uint32_t r = p.indices[i];
          // Bump count once per row (only on the first agg's pass).
          if (a == 0)
            ++cnt;
@@ -242,7 +334,8 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
            continue;
          }
 
-         val_read vr = device_read_value(col_data, col_nulls, r, vtype);
+         val_read vr =
+             device_read_value_flat(p.value_data, p.null_data, voff, noff, nullable, r, vtype);
          if (vr.is_null)
            continue;
 
@@ -263,9 +356,9 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
              break;
          }
        }
-       out_results[a * n_groups + g] = acc;
+       p.out_results[a * p.n_groups + g] = acc;
      }
-     out_counts[g] = cnt;
+     p.out_counts[g] = cnt;
    }).wait();
 }
 
@@ -276,21 +369,29 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
 // when n_groups is small (the hash path runs only when row_count <
 // SORT_AGG_MIN_ROWS = 100k).
 void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count, size_t num_aggs,
-                               const size_t* row_to_group, const void* const* value_cols,
-                               const uint8_t* const* value_nulls, const int* value_types,
-                               const pgaccel_agg_func* agg_funcs, const size_t* agg_col_idx,
-                               double* out_results, int64_t* out_counts) {
+                               const size_t* row_to_group, const uint8_t* value_data,
+                               const uint8_t* null_data, const size_t* value_offsets,
+                               const size_t* null_offsets, const uint8_t* null_present,
+                               const int* value_types, const pgaccel_agg_func* agg_funcs,
+                               const size_t* agg_col_idx, double* out_results,
+                               int64_t* out_counts) {
+  const UnsortedAccumParams p{
+      n_groups,  row_count,     num_aggs,     row_to_group, value_data,
+      null_data, value_offsets, null_offsets, null_present, value_types,
+      agg_funcs, agg_col_idx,   out_results,  out_counts,
+  };
   q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
      const size_t g = id[0];
 
      int64_t cnt = 0;
 
-     for (size_t a = 0; a < num_aggs; ++a) {
-       const pgaccel_agg_func func = agg_funcs[a];
-       const size_t col = agg_col_idx[a];
-       const void* col_data = value_cols[a];
-       const uint8_t* col_nulls = (value_nulls != nullptr) ? value_nulls[a] : nullptr;
-       const int vtype = value_types[a];
+     for (size_t a = 0; a < p.num_aggs; ++a) {
+       const pgaccel_agg_func func = p.agg_funcs[a];
+       const size_t col = p.agg_col_idx[a];
+       const size_t voff = p.value_offsets[a];
+       const size_t noff = p.null_offsets[a];
+       const bool nullable = p.null_present[a] != 0;
+       const int vtype = p.value_types[a];
 
        double acc = 0.0;
        if (func == PGACCEL_AGG_MIN)
@@ -298,8 +399,8 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
        else if (func == PGACCEL_AGG_MAX)
          acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t r = 0; r < row_count; ++r) {
-         if (row_to_group[r] != g)
+       for (size_t r = 0; r < p.row_count; ++r) {
+         if (p.row_to_group[r] != g)
            continue;
          if (a == 0)
            ++cnt;
@@ -309,7 +410,8 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
            continue;
          }
 
-         val_read vr = device_read_value(col_data, col_nulls, r, vtype);
+         val_read vr =
+             device_read_value_flat(p.value_data, p.null_data, voff, noff, nullable, r, vtype);
          if (vr.is_null)
            continue;
 
@@ -330,29 +432,40 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
              break;
          }
        }
-       out_results[a * n_groups + g] = acc;
+       p.out_results[a * p.n_groups + g] = acc;
      }
-     out_counts[g] = cnt;
+     p.out_counts[g] = cnt;
    }).wait();
 }
 
-// Helper: stage a value-column array of pointers (and its corresponding
-// null-mask pointer array) into shared memory so the device kernel can
-// access them. Returns owning pointers (must be sycl::free'd by caller).
+// Helper: stage value-column data and null masks into a SINGLE flat shared
+// buffer per kind (data vs nulls), with per-agg byte offsets. Returns
+// owning pointers (must be sycl::free'd by caller).
+//
+// Per-agg pointers are NOT staged as an array of device pointers
+// (`const void* const*`) because that triggers the AdaptiveCpp Metal SSCP
+// MSL-emitter bug producing `device device void**` casts that fail
+// `xcrun metal` validation (see commit 6de58d6 for the original repro).
+// Instead all per-agg column data lives end-to-end in `d_value_data`
+// and the kernel reads at `value_data + value_offsets[a] + row * elem_size`.
 struct StagedColumnArrays {
-  const void** d_value_cols;      // [num_aggs] device-accessible pointers to col data
-  const uint8_t** d_value_nulls;  // [num_aggs] device-accessible pointers to null masks
-  int* d_value_types;             // [num_aggs] type tags
-  pgaccel_agg_func* d_funcs;      // [num_aggs] agg funcs
-  size_t* d_col_idx;              // [num_aggs] agg col indices
-  void** d_data_buffers;          // [num_aggs] shared-mem copies of column data (or nullptr)
-  uint8_t** d_null_buffers;       // [num_aggs] shared-mem copies of null masks (or nullptr)
+  uint8_t* d_value_data;  // flat: concat of all per-agg column-data slabs
+  uint8_t* d_null_data;   // flat: concat of all per-agg null-mask slabs (per-agg row_count bytes if
+                          // present)
+  size_t* d_value_offsets;    // [num_aggs] byte offset into d_value_data (SIZE_MAX if missing)
+  size_t* d_null_offsets;     // [num_aggs] byte offset into d_null_data (SIZE_MAX if missing)
+  uint8_t* d_null_present;    // [num_aggs] 0/1 flag — does this agg have a null mask
+  int* d_value_types;         // [num_aggs] type tags
+  pgaccel_agg_func* d_funcs;  // [num_aggs] agg funcs
+  size_t* d_col_idx;          // [num_aggs] agg col indices
+  size_t value_data_bytes;    // host bookkeeping for sycl::free
+  size_t null_data_bytes;     // host bookkeeping for sycl::free
 };
 
 // Stage column data and null masks into shared memory. PG's column
 // pointers are host-side palloc memory which may not be device-
-// accessible on Metal SSCP — copy each into a shared-mem buffer of
-// the appropriate size based on the type tag.
+// accessible on Metal SSCP — copy each into a single shared-mem flat
+// buffer of the appropriate cumulative size based on type tags.
 //
 // Returns nullptr on OOM. Caller must free via free_staged_columns().
 StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_aggs,
@@ -361,115 +474,109 @@ StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_a
   auto* s = new (std::nothrow) StagedColumnArrays();
   if (s == nullptr)
     return nullptr;
-  s->d_value_cols = sycl::malloc_shared<const void*>(num_aggs, q);
-  s->d_value_nulls = sycl::malloc_shared<const uint8_t*>(num_aggs, q);
+  s->d_value_data = nullptr;
+  s->d_null_data = nullptr;
+  s->value_data_bytes = 0;
+  s->null_data_bytes = 0;
+
+  s->d_value_offsets = sycl::malloc_shared<size_t>(num_aggs, q);
+  s->d_null_offsets = sycl::malloc_shared<size_t>(num_aggs, q);
+  s->d_null_present = sycl::malloc_shared<uint8_t>(num_aggs, q);
   s->d_value_types = sycl::malloc_shared<int>(num_aggs, q);
   s->d_funcs = sycl::malloc_shared<pgaccel_agg_func>(num_aggs, q);
   s->d_col_idx = sycl::malloc_shared<size_t>(num_aggs, q);
-  s->d_data_buffers = static_cast<void**>(std::calloc(num_aggs, sizeof(void*)));
-  s->d_null_buffers = static_cast<uint8_t**>(std::calloc(num_aggs, sizeof(uint8_t*)));
-  if (!s->d_value_cols || !s->d_value_nulls || !s->d_value_types || !s->d_funcs || !s->d_col_idx ||
-      !s->d_data_buffers || !s->d_null_buffers) {
-    if (s->d_value_cols)
-      sycl::free(static_cast<void*>(s->d_value_cols), q);
-    if (s->d_value_nulls)
-      sycl::free(static_cast<void*>(s->d_value_nulls), q);
+  if (!s->d_value_offsets || !s->d_null_offsets || !s->d_null_present || !s->d_value_types ||
+      !s->d_funcs || !s->d_col_idx) {
+    if (s->d_value_offsets)
+      sycl::free(s->d_value_offsets, q);
+    if (s->d_null_offsets)
+      sycl::free(s->d_null_offsets, q);
+    if (s->d_null_present)
+      sycl::free(s->d_null_present, q);
     if (s->d_value_types)
       sycl::free(s->d_value_types, q);
     if (s->d_funcs)
       sycl::free(s->d_funcs, q);
     if (s->d_col_idx)
       sycl::free(s->d_col_idx, q);
-    std::free(s->d_data_buffers);
-    std::free(s->d_null_buffers);
     delete s;
     return nullptr;
   }
 
+  // Compute per-agg byte offsets and total flat-buffer sizes.
+  size_t value_total = 0;
+  size_t null_total = 0;
   for (size_t a = 0; a < num_aggs; ++a) {
     s->d_value_types[a] = value_types[a];
     s->d_funcs[a] = agg_cols[a].func;
     s->d_col_idx[a] = agg_cols[a].col_idx;
 
-    // Stage value column data.
-    if (value_cols[a] == nullptr) {
-      s->d_value_cols[a] = nullptr;
-      s->d_data_buffers[a] = nullptr;
+    const size_t elem_size = value_elem_size(value_types[a]);
+    if (value_cols[a] == nullptr || elem_size == 0) {
+      s->d_value_offsets[a] = SIZE_MAX;  // sentinel — kernel must not read
     } else {
-      // Determine byte width per row from the type tag.
-      size_t elem_size = 0;
-      switch (value_types[a]) {
-        case 1:
-          elem_size = sizeof(bool);
-          break;
-        case 2:
-          elem_size = sizeof(int32_t);
-          break;
-        case 3:
-          elem_size = sizeof(int64_t);
-          break;
-        case 4:
-          elem_size = sizeof(float);
-          break;
-        case 5:
-          elem_size = sizeof(double);
-          break;
-        default:
-          elem_size = 0;
-          break;
-      }
-      if (elem_size == 0) {
-        s->d_value_cols[a] = nullptr;
-        s->d_data_buffers[a] = nullptr;
-      } else {
-        void* buf = sycl::malloc_shared(row_count * elem_size, q);
-        if (buf == nullptr) {
-          // OOM — leave this column as nullptr; kernel handles it as null.
-          s->d_value_cols[a] = nullptr;
-          s->d_data_buffers[a] = nullptr;
-        } else {
-          std::memcpy(buf, value_cols[a], row_count * elem_size);
-          s->d_value_cols[a] = buf;
-          s->d_data_buffers[a] = buf;
-        }
-      }
+      s->d_value_offsets[a] = value_total;
+      value_total += row_count * elem_size;
     }
 
-    // Stage null mask if present.
     if (value_nulls != nullptr && value_nulls[a] != nullptr) {
-      uint8_t* nbuf = sycl::malloc_shared<uint8_t>(row_count, q);
-      if (nbuf == nullptr) {
-        s->d_value_nulls[a] = nullptr;
-        s->d_null_buffers[a] = nullptr;
-      } else {
-        std::memcpy(nbuf, value_nulls[a], row_count);
-        s->d_value_nulls[a] = nbuf;
-        s->d_null_buffers[a] = nbuf;
-      }
+      s->d_null_present[a] = 1;
+      s->d_null_offsets[a] = null_total;
+      null_total += row_count;  // 1 byte per row
     } else {
-      s->d_value_nulls[a] = nullptr;
-      s->d_null_buffers[a] = nullptr;
+      s->d_null_present[a] = 0;
+      s->d_null_offsets[a] = SIZE_MAX;
+    }
+  }
+
+  // Allocate the flat buffers (1 byte minimum to keep pointers non-null).
+  s->value_data_bytes = value_total > 0 ? value_total : 1;
+  s->null_data_bytes = null_total > 0 ? null_total : 1;
+  s->d_value_data = sycl::malloc_shared<uint8_t>(s->value_data_bytes, q);
+  s->d_null_data = sycl::malloc_shared<uint8_t>(s->null_data_bytes, q);
+  if (!s->d_value_data || !s->d_null_data) {
+    if (s->d_value_data)
+      sycl::free(s->d_value_data, q);
+    if (s->d_null_data)
+      sycl::free(s->d_null_data, q);
+    sycl::free(s->d_value_offsets, q);
+    sycl::free(s->d_null_offsets, q);
+    sycl::free(s->d_null_present, q);
+    sycl::free(s->d_value_types, q);
+    sycl::free(s->d_funcs, q);
+    sycl::free(s->d_col_idx, q);
+    delete s;
+    return nullptr;
+  }
+
+  // Memcpy each per-agg slab into the flat buffer at its offset.
+  for (size_t a = 0; a < num_aggs; ++a) {
+    const size_t voff = s->d_value_offsets[a];
+    if (voff != SIZE_MAX) {
+      const size_t elem_size = value_elem_size(value_types[a]);
+      std::memcpy(s->d_value_data + voff, value_cols[a], row_count * elem_size);
+    }
+    if (s->d_null_present[a]) {
+      std::memcpy(s->d_null_data + s->d_null_offsets[a], value_nulls[a], row_count);
     }
   }
 
   return s;
 }
 
-void free_staged_columns(sycl::queue& q, StagedColumnArrays* s, size_t num_aggs) {
+void free_staged_columns(sycl::queue& q, StagedColumnArrays* s, size_t /*num_aggs*/) {
   if (s == nullptr)
     return;
-  for (size_t a = 0; a < num_aggs; ++a) {
-    if (s->d_data_buffers[a] != nullptr)
-      sycl::free(s->d_data_buffers[a], q);
-    if (s->d_null_buffers[a] != nullptr)
-      sycl::free(s->d_null_buffers[a], q);
-  }
-  std::free(s->d_data_buffers);
-  std::free(s->d_null_buffers);
-  if (s->d_value_cols)
-    sycl::free(static_cast<void*>(s->d_value_cols), q);
-  if (s->d_value_nulls)
-    sycl::free(static_cast<void*>(s->d_value_nulls), q);
+  if (s->d_value_data)
+    sycl::free(s->d_value_data, q);
+  if (s->d_null_data)
+    sycl::free(s->d_null_data, q);
+  if (s->d_value_offsets)
+    sycl::free(s->d_value_offsets, q);
+  if (s->d_null_offsets)
+    sycl::free(s->d_null_offsets, q);
+  if (s->d_null_present)
+    sycl::free(s->d_null_present, q);
   if (s->d_value_types)
     sycl::free(s->d_value_types, q);
   if (s->d_funcs)
@@ -569,8 +676,9 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
     return nullptr;
   }
 
-  run_unsorted_accum_kernel(*q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_cols,
-                            sc->d_value_nulls, sc->d_value_types, sc->d_funcs, sc->d_col_idx,
+  run_unsorted_accum_kernel(*q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data,
+                            sc->d_null_data, sc->d_value_offsets, sc->d_null_offsets,
+                            sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx,
                             d_results, d_counts);
 
   // -- Phase 3: build the result state.
@@ -758,7 +866,8 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
   }
 
   run_sorted_accum_kernel(*q, n_groups, num_aggs, indices, d_group_starts, d_group_ends,
-                          sc->d_value_cols, sc->d_value_nulls, sc->d_value_types, sc->d_funcs,
+                          sc->d_value_data, sc->d_null_data, sc->d_value_offsets,
+                          sc->d_null_offsets, sc->d_null_present, sc->d_value_types, sc->d_funcs,
                           sc->d_col_idx, d_results, d_counts);
 
   // -- Phase 4: build the result state.
