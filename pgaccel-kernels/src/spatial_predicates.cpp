@@ -838,7 +838,7 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
 }
 
 // ---------------------------------------------------------------------------
-// SYCL kernel — st_length_bulk via Euclidean edge-length sum (fp32)
+// SYCL kernel — st_length_bulk via Euclidean edge-length sum (fp32 + fp64)
 //
 // CSR layout matches st_area_bulk_sycl. Each work-item walks its
 // row's vertex sequence and sums sqrt(dx² + dy²) over consecutive
@@ -846,12 +846,12 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
 // edge); LineStrings are open (sum stops at the last vertex pair).
 // The dispatcher caller sets a flag on the kernel call to choose.
 //
-// fp32 only for now — `sycl::sqrt(double)` on Metal pulls in the
-// SLEEF soft-fp64 sqrt path which hangs SSCP JIT compilation in the
-// same class as the sphere_distance fp64 issue (see TODO Phase 7).
-// fp64 LineString length is deferable: the public entry returns
-// `PGACCEL_ERROR_NO_DEVICE` for use_fp64=true so the caller routes
-// to PG.
+// fp32 + fp64 are now distinct non-templated functions — same split
+// rationale as sphere_distance_bulk_sycl_{f32,f64} above (templated
+// SYCL kernels with `T = double` hung Metal SSCP JIT during argbuffer-
+// struct emission). Direct-double `sycl::sqrt` builtins compile cleanly
+// when the functor is non-templated, mirroring the explicit-double
+// pattern at `pgaccel-kernels/src/h3_ops.cpp:972-1019`.
 // ---------------------------------------------------------------------------
 namespace {
 pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_offsets,
@@ -917,10 +917,92 @@ pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
-    fprintf(stderr, "pgaccel: SYCL st_length_bulk failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: SYCL st_length_bulk_f32 failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: st_length_bulk failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: st_length_bulk_f32 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+// fp64 path — non-templated functor wrapped in `q->submit([&](handler& h){...})`
+// per the h3_ops.cpp:972 explicit-double pattern. The previous public
+// entry returned NO_DEVICE on use_fp64=true under the hypothesis that
+// `sycl::sqrt(double)` on Metal soft-fp64 hung SSCP JIT; that hypothesis
+// turned out to be wrong — the hang was in templated functor
+// instantiation through the argbuffer-struct emitter, not in the sqrt
+// builtin itself. Direct-double sqrt compiles cleanly when the kernel
+// is non-templated. Same fix shape as sphere_distance_bulk_sycl_f64.
+pgaccel_status st_length_bulk_sycl_f64(const double* coords, const uint32_t* row_offsets,
+                                       size_t row_count, bool closed_ring, double* lengths) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  const uint32_t total_coord_count = row_offsets[row_count];
+
+  try {
+    double* d_coords =
+        sycl::malloc_shared<double>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    double* d_lengths = sycl::malloc_shared<double>(row_count, *q);
+
+    if (!d_coords || !d_offsets || !d_lengths) {
+      if (d_coords)
+        sycl::free(d_coords, *q);
+      if (d_offsets)
+        sycl::free(d_offsets, *q);
+      if (d_lengths)
+        sycl::free(d_lengths, *q);
+      return PGACCEL_OOM;
+    }
+
+    if (total_coord_count > 0) {
+      std::memcpy(d_coords, coords, total_coord_count * sizeof(double));
+    }
+    std::memcpy(d_offsets, row_offsets, (row_count + 1) * sizeof(uint32_t));
+
+    const bool is_closed = closed_ring;
+
+    q->submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const uint32_t start = d_offsets[i];
+         const uint32_t end = d_offsets[i + 1];
+         const uint32_t vertex_count = (end - start) / 2;
+         if (vertex_count < 2) {
+           d_lengths[i] = 0.0;
+           return;
+         }
+         double total = 0.0;
+         const uint32_t edge_count = is_closed ? vertex_count : vertex_count - 1;
+         for (uint32_t k = 0; k < edge_count; ++k) {
+           const uint32_t k_next = is_closed ? (k + 1) % vertex_count : k + 1;
+           const double x_k = d_coords[start + k * 2];
+           const double y_k = d_coords[start + k * 2 + 1];
+           const double x_next = d_coords[start + k_next * 2];
+           const double y_next = d_coords[start + k_next * 2 + 1];
+           const double dx = x_next - x_k;
+           const double dy = y_next - y_k;
+           total += sycl::sqrt(dx * dx + dy * dy);
+         }
+         d_lengths[i] = total;
+       });
+     }).wait_and_throw();
+
+    std::memcpy(lengths, d_lengths, row_count * sizeof(double));
+
+    sycl::free(d_coords, *q);
+    sycl::free(d_offsets, *q);
+    sycl::free(d_lengths, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL st_length_bulk_f64 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: st_length_bulk_f64 failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
 }
@@ -935,10 +1017,8 @@ extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint3
     return PGACCEL_ERROR_INIT;
 
   if (use_fp64) {
-    // fp64 path deferred — sycl::sqrt(double) on Metal pulls SLEEF
-    // soft-fp64 sqrt which hangs SSCP JIT. Caller routes to PG via
-    // the standard NO_DEVICE escape hatch.
-    return PGACCEL_ERROR_NO_DEVICE;
+    return st_length_bulk_sycl_f64(static_cast<const double*>(coords), row_offsets, row_count,
+                                   closed_ring, static_cast<double*>(lengths));
   }
   return st_length_bulk_sycl_f32(static_cast<const float*>(coords), row_offsets, row_count,
                                  closed_ring, static_cast<float*>(lengths));

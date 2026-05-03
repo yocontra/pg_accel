@@ -790,16 +790,43 @@ static void test_st_length_bulk_degenerate() {
   ASSERT_NEAR("coincident vertices → length 0", lengths[1], 0.0f, 1e-6f);
 }
 
-static void test_st_length_bulk_fp64_defers() {
-  printf("--- st_length_bulk: fp64 returns NO_DEVICE (Phase 7) ---\n");
-  // fp64 path is gated off pending soft-fp64 sqrt fix; confirm the
-  // public entry actually surfaces NO_DEVICE so the dispatcher routes
-  // to PG instead of computing wrong-type results.
-  const double coords[] = {0.0, 0.0, 3.0, 0.0};
-  const uint32_t offsets[] = {0, 4};
-  double lengths[1] = {-1.0};
-  pgaccel_status s = pgaccel_st_length_bulk(coords, offsets, 1, true, false, lengths);
-  ASSERT_EQ("fp64 path returns NO_DEVICE", s, PGACCEL_ERROR_NO_DEVICE);
+static void test_st_length_bulk_fp64() {
+  printf("--- st_length_bulk: fp64 (post-split) ---\n");
+
+  // row 0: open path (3,0) -> (0,4): length sqrt(9+16) = 5
+  // row 1: open path (0,0)->(3,0)->(0,4)->(0,0): 3 + 5 + 4 = 12
+  const double coords[] = {
+      // row 0
+      3.0,
+      0.0,
+      0.0,
+      4.0,
+      // row 1
+      0.0,
+      0.0,
+      3.0,
+      0.0,
+      0.0,
+      4.0,
+      0.0,
+      0.0,
+  };
+  const uint32_t offsets[] = {0, 4, 12};
+
+  // Open mode test
+  double lengths[2] = {-1.0, -1.0};
+  pgaccel_status s = pgaccel_st_length_bulk(coords, offsets, 2, true, false, lengths);
+  ASSERT_EQ("fp64 open path status OK", s, PGACCEL_OK);
+  ASSERT_NEAR("fp64 open row 0 length = 5", lengths[0], 5.0, 1e-9);
+  ASSERT_NEAR("fp64 open row 1 length = 12", lengths[1], 12.0, 1e-9);
+
+  // Closed-ring mode: row 0 is 2 verts so wrap = 5 + 5 = 10;
+  // row 1 wraps (0,0)->(0,0) = +0, total still 12.
+  double lengths2[2] = {-1.0, -1.0};
+  pgaccel_status s2 = pgaccel_st_length_bulk(coords, offsets, 2, true, true, lengths2);
+  ASSERT_EQ("fp64 closed status OK", s2, PGACCEL_OK);
+  ASSERT_NEAR("fp64 closed row 0 = 10 (wrap)", lengths2[0], 10.0, 1e-9);
+  ASSERT_NEAR("fp64 closed row 1 = 12", lengths2[1], 12.0, 1e-9);
 }
 
 // ---------------------------------------------------------------------------
@@ -840,7 +867,7 @@ int main() {
   test_st_length_bulk_closed_ring();
   test_st_length_bulk_open_path();
   test_st_length_bulk_degenerate();
-  test_st_length_bulk_fp64_defers();
+  test_st_length_bulk_fp64();
 
   printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
   if (g_tests_failed > 0) {
