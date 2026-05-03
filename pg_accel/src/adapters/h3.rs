@@ -49,7 +49,7 @@
 //! on the registry entry; landing `h3_cell_to_center_child` only needs the
 //! kernel.
 
-use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
+use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry, OutputShape};
 
 /// Build the `h3-pg` adapter with all supported function entries.
 #[must_use]
@@ -60,7 +60,7 @@ pub fn adapter() -> ExtensionAdapter {
     // `pgaccel-kernels/src/h3_ops.cpp` and a dispatch arm in
     // `src/engine/dispatch/h3.rs`. Do not add entries here without landing
     // both first — see the module doc-comment.
-    const GPU_NAMES: &[&str] = &[
+    const SCALAR_GPU_NAMES: &[&str] = &[
         "h3_latlng_to_cell", // bulk lat/lng -> cell index (pgaccel_h3_lat_lng_to_cell_bulk)
         "h3_grid_distance",  // pairwise integer distance (pgaccel_h3_grid_distance_bulk)
         "h3_cell_to_parent", // bit shift               (pgaccel_h3_cell_to_parent_bulk)
@@ -72,10 +72,33 @@ pub fn adapter() -> ExtensionAdapter {
         "h3_is_res_class_iii", // res odd                 (pgaccel_h3_is_res_class_iii_bulk)
     ];
 
-    let functions = GPU_NAMES
+    // Variable-output ops: each input row produces a CSR-laid-out chunk of
+    // outputs (cell IDs or lat/lng coord pairs). Backed by Agent 5A's
+    // two-pass kernels via `pgaccel_h3_*_output_size` + `_emit`. Cannot use
+    // FunctionAccelEntry::scalar() — that constructor hard-codes
+    // `OutputShape::Scalar`. Construct via the struct literal so the planner
+    // / dispatch layer can pick the AcceleratedVarLen DispatchResult arm.
+    const VARLEN_GPU_NAMES: &[&str] = &[
+        "h3_grid_disk",              // k-ring expansion (Vec<u64> per cell)
+        "h3_grid_ring_unsafe",       // k-th ring only
+        "h3_polyfill",               // polygon -> cells
+        "h3_cell_to_children",       // child cells at child_res
+        "h3_cell_to_boundary",       // hex/pentagon vertex pairs (lat/lng)
+        "h3_cells_to_multi_polygon", // boundary union (lat/lng)
+    ];
+
+    let mut functions: Vec<FunctionAccelEntry> = SCALAR_GPU_NAMES
         .iter()
         .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuH3))
         .collect();
+    for &name in VARLEN_GPU_NAMES {
+        functions.push(FunctionAccelEntry {
+            schema: "public",
+            name,
+            strategy: AccelStrategy::GpuH3,
+            output_shape: OutputShape::VarLen,
+        });
+    }
 
     ExtensionAdapter {
         name: "h3",
@@ -117,7 +140,7 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 9);
+        assert_eq!(adapter().functions.len(), 15);
     }
 
     #[test]
@@ -309,17 +332,11 @@ mod tests {
     // alert the author to update both sides.
     #[test]
     fn unimplemented_ops_are_not_registered() {
-        const UNIMPLEMENTED_H3_OPS: &[&str] = &[
-            "h3_grid_disk",
-            "h3_grid_ring_unsafe",
-            "h3_polyfill",
-            "h3_cell_to_children",
-            // h3_cell_to_center_child, h3_get_base_cell, h3_is_valid_cell
-            // landed with their kernels; tracked in
-            // registered_ops_match_kernel_set_exactly.
-            "h3_cell_to_boundary",
-            "h3_cells_to_multi_polygon",
-        ];
+        // All previously-listed kernel-less operators landed in Phase A
+        // (Agent 5A's two-pass var-output kernels). The list is now empty;
+        // any new candidate operators that lack a kernel must be added here
+        // until both the kernel and the dispatch arm exist.
+        const UNIMPLEMENTED_H3_OPS: &[&str] = &[];
         let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
         for op in UNIMPLEMENTED_H3_OPS {
             assert!(
@@ -348,6 +365,13 @@ mod tests {
             "h3_is_valid_cell",
             "h3_is_pentagon",
             "h3_is_res_class_iii",
+            // Var-output kernels landed in Phase A (Agent 5A).
+            "h3_grid_disk",
+            "h3_grid_ring_unsafe",
+            "h3_polyfill",
+            "h3_cell_to_children",
+            "h3_cell_to_boundary",
+            "h3_cells_to_multi_polygon",
         ]
         .into_iter()
         .collect();
@@ -355,6 +379,35 @@ mod tests {
             registered, expected,
             "adapter registrations drifted from real kernel set",
         );
+    }
+
+    #[test]
+    fn varlen_ops_have_varlen_output_shape() {
+        // Var-output ops MUST carry OutputShape::VarLen so dispatch picks
+        // the AcceleratedVarLen DispatchResult arm. Drift here would route
+        // through the scalar path and emit one-Datum-per-row, silently
+        // dropping all but the first cell.
+        const VARLEN_OPS: &[&str] = &[
+            "h3_grid_disk",
+            "h3_grid_ring_unsafe",
+            "h3_polyfill",
+            "h3_cell_to_children",
+            "h3_cell_to_boundary",
+            "h3_cells_to_multi_polygon",
+        ];
+        let by_name: std::collections::HashMap<&str, OutputShape> = adapter()
+            .functions
+            .iter()
+            .map(|f| (f.name, f.output_shape))
+            .collect();
+        for &op in VARLEN_OPS {
+            let shape = by_name.get(op).copied();
+            assert_eq!(
+                shape,
+                Some(OutputShape::VarLen),
+                "operator `{op}` should have OutputShape::VarLen but has {shape:?}",
+            );
+        }
     }
 
     #[test]

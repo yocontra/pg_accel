@@ -443,19 +443,34 @@ impl ScanExecState {
                     batch_len,
                 );
             }
-            DispatchResult::Deferred
-            | DispatchResult::AcceleratedRecord { .. }
-            | DispatchResult::AcceleratedVarLen { .. } => {
+            DispatchResult::Deferred => {
                 // GPU dispatch deferred — use PG's standard scalar qual.
-                //
+                // SAFETY: Caller guarantees main backend thread.
+                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+            }
+            DispatchResult::AcceleratedRecord { .. } | DispatchResult::AcceleratedVarLen { .. } => {
                 // The Record / VarLen variants exist for record-returning
-                // (e.g. ST_SummaryStats) and var-length (e.g. H3 grid_disk)
-                // ops; the per-row scan path here only consumes scalar
-                // boolean results, so a non-scalar shape coming through this
-                // arm means dispatch picked the wrong route. Defer to PG so
-                // the row still produces a correct (if slower) answer.
-                // Phase B Agent 1B wires record/varlen consumption into the
-                // scan + projection paths that need them.
+                // (e.g. ST_SummaryStats with 6 fp64 fields) and var-length
+                // (e.g. H3 grid_disk emitting many cells per input row)
+                // ops. Reaching this arm means dispatch produced one of those
+                // shapes for a function in a per-row scan filter context —
+                // which can't happen today: the planner only injects
+                // GpuAccelScan with these strategies for predicate / scalar
+                // contexts. SRF and record-returning function calls land in
+                // the projection path (ProjectSet / FunctionScan) which is
+                // a different planner hook entirely.
+                //
+                // If this arm is hit, dispatch routed the wrong way — defer
+                // to PG so the row still produces a correct answer rather
+                // than silently dropping data, and log a warning so the
+                // planner mis-injection is visible.
+                tracing::warn!(
+                    "pg_accel: scan dispatch returned non-scalar shape (Record/VarLen) \
+                     in per-row filter context; deferring to PG. The planner injected \
+                     a GpuAccelScan strategy whose function emits multi-Datum / SRF rows \
+                     — that's a planner-side mis-routing, tracked as the SRF / record \
+                     projection-hook follow-up."
+                );
                 // SAFETY: Caller guarantees main backend thread.
                 unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
             }
@@ -567,40 +582,30 @@ impl ScanExecState {
                 cmp2_opcode,
                 const2_val,
             } => {
-                // Evaluate each predicate via CmpConst template, then AND.
-                let r1 = {
-                    let (values, nulls) = self.extract_col_f64(*col1_idx, scan_slot, batch_len);
-                    let mut bo = ColumnarBatchOwner::new(batch_len, 1);
-                    bo.add_col_f64(values, nulls);
-                    let b = bo.as_batch();
-                    gpu::expr_template_cmp_const(&b, 0, *cmp1_opcode, *const1_val, batch_len)
-                };
-                let r2 = {
-                    let (values, nulls) = self.extract_col_f64(*col2_idx, scan_slot, batch_len);
-                    let mut bo = ColumnarBatchOwner::new(batch_len, 1);
-                    bo.add_col_f64(values, nulls);
-                    let b = bo.as_batch();
-                    gpu::expr_template_cmp_const(&b, 0, *cmp2_opcode, *const2_val, batch_len)
-                };
-                match (r1, r2) {
-                    (Some(a), Some(b)) => {
-                        // AND: both must be true (+1). If either is false (-1),
-                        // result is false. Otherwise uncertain (0).
-                        let combined: Vec<i8> = a
-                            .iter()
-                            .zip(b.iter())
-                            .map(|(&x, &y)| {
-                                if x < 0 || y < 0 {
-                                    -1
-                                } else {
-                                    i8::from(x > 0 && y > 0)
-                                }
-                            })
-                            .collect();
-                        Some(combined)
-                    }
-                    _ => None,
-                }
+                // Single-dispatch fused kernel via Agent 4A's struct-packed
+                // pgaccel_expr_template_two_pred_and. Both columns are
+                // packed into a 2-column batch; the kernel reads them as
+                // `batch.col[0]` (col1) and `batch.col[1]` (col2) — the
+                // col_idx args to the template select which packed slot
+                // each predicate reads. Replaces the previous CmpConst-x2
+                // + Rust-side AND combiner pattern (one kernel launch
+                // instead of two; flat-mode SSCP capture per Phase A).
+                let (v1, n1) = self.extract_col_f64(*col1_idx, scan_slot, batch_len);
+                let (v2, n2) = self.extract_col_f64(*col2_idx, scan_slot, batch_len);
+                let mut bo = ColumnarBatchOwner::new(batch_len, 2);
+                bo.add_col_f64(v1, n1);
+                bo.add_col_f64(v2, n2);
+                let b = bo.as_batch();
+                gpu::expr_template_two_pred_and(
+                    &b,
+                    0,
+                    *cmp1_opcode,
+                    *const1_val,
+                    1,
+                    *cmp2_opcode,
+                    *const2_val,
+                    batch_len,
+                )
             }
             // Other template variants: fall back to scalar qual.
             _ => None,

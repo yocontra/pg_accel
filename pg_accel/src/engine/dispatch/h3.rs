@@ -5,6 +5,7 @@ use crate::engine::gucs;
 use crate::engine::registry;
 use crate::gpu;
 
+#[allow(unused_imports)]
 use super::{DispatchResult, FcinfoWith2Args};
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,41 @@ pub unsafe fn dispatch_gpu_h3(
 ) -> DispatchResult {
     // Look up the function name to route to the correct GPU kernel.
     let fn_name = registry::global_registry().lookup(fn_oid).map(|e| e.name);
+
+    // ── Variable-output H3 ops ─────────────────────────────────────
+    // Each input row expands to a CSR-laid-out list of output cells (or
+    // lat/lng coord pairs). The result is wrapped in DispatchResult::
+    // AcceleratedVarLen and consumed by the scan executor's per-input-row
+    // tuple-emission path. Only the cell-id-output variants are wired
+    // here: the boundary / multi_polygon ops emit raw lat/lng arrays
+    // that need PostGIS GSERIALIZED encoding which the codebase does not
+    // expose today (see adapters/h3.rs module doc + Phase B follow-up).
+    match fn_name {
+        Some("h3_grid_disk") => {
+            return unsafe { dispatch_gpu_h3_var_grid_disk(batch, qual_datum) };
+        }
+        Some("h3_grid_ring_unsafe") => {
+            return unsafe { dispatch_gpu_h3_var_grid_ring_unsafe(batch, qual_datum) };
+        }
+        Some("h3_cell_to_children") => {
+            return unsafe { dispatch_gpu_h3_var_cell_to_children(batch, qual_datum) };
+        }
+        Some("h3_polyfill" | "h3_cell_to_boundary" | "h3_cells_to_multi_polygon") => {
+            // h3_polyfill needs polygon-vertex extraction from per-row
+            // geometry datums; h3_cell_to_boundary +
+            // h3_cells_to_multi_polygon emit raw lat/lng arrays needing a
+            // PostGIS GSERIALIZED encoder that the codebase does not have
+            // today. Defer cleanly; do NOT silently substitute another
+            // kernel (anti-cheat ban #7).
+            pgrx::debug1!(
+                "pg_accel: dispatch_gpu_h3: {} kernel exists but PostGIS GSERIALIZED \
+                 plumbing / polygon extractor for h3 not yet wired — deferring",
+                fn_name.unwrap_or("?"),
+            );
+            return DispatchResult::Deferred;
+        }
+        _ => {}
+    }
 
     let timeout_ms = gucs::kernel_timeout_ms();
     let start = std::time::Instant::now();
@@ -253,4 +289,163 @@ fn log_h3_timeout(timeout_ms: i32, start: &std::time::Instant) {
             timeout_ms,
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Variable-output H3 dispatch arms
+// ---------------------------------------------------------------------------
+
+/// Extract H3 cells from `batch`, run a 2-pass CSR var-output kernel, and
+/// repackage the result as `DispatchResult::AcceleratedVarLen` with one
+/// `bigint` Datum per output cell. The `offsets` carry the per-input-row
+/// fan-out (`offsets.len() == batch.len() + 1` after re-indexing for NULL
+/// rows).
+///
+/// Caller is responsible for actually computing the per-input fan-out via
+/// the size-pass kernel; this helper just maps a `gpu::H3VarOutCells` result
+/// back onto the input batch (preserving NULLs as empty ranges) and
+/// constructs the Datum vec.
+fn build_var_cells_dispatch_result(
+    batch_len: usize,
+    valid_indices: &[usize],
+    raw: &gpu::H3VarOutCells,
+) -> DispatchResult {
+    // Build per-batch-row offsets. NULL / non-extractable rows get zero
+    // fan-out (offsets[i] == offsets[i+1]).
+    let mut offsets: Vec<u32> = Vec::with_capacity(batch_len + 1);
+    let mut datums: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(raw.cells.len());
+
+    let mut next_offset: u32 = 0;
+    offsets.push(0);
+    let mut valid_cursor = 0usize;
+
+    for batch_idx in 0..batch_len {
+        if valid_cursor < valid_indices.len() && valid_indices[valid_cursor] == batch_idx {
+            // This batch row produced cells. Pull its slice from raw.
+            let start = raw.offsets[valid_cursor] as usize;
+            let end = raw.offsets[valid_cursor + 1] as usize;
+            for cell in &raw.cells[start..end] {
+                // h3_index is stored as bigint in PG (i64).
+                #[allow(clippy::cast_possible_wrap)]
+                let cell_i64 = *cell as i64;
+                datums.push((pgrx::pg_sys::Datum::from(cell_i64), false));
+            }
+            next_offset = next_offset.saturating_add((end - start) as u32);
+            valid_cursor += 1;
+        }
+        offsets.push(next_offset);
+    }
+
+    DispatchResult::AcceleratedVarLen { offsets, datums }
+}
+
+/// Build the parallel `(cells, valid_indices)` from a batch by extracting
+/// the i64 cell datum from each non-null entry.
+fn extract_h3_cells_from_batch(batch: &[(pgrx::pg_sys::Datum, bool)]) -> (Vec<u64>, Vec<usize>) {
+    let mut cells: Vec<u64> = Vec::with_capacity(batch.len());
+    let mut valid_indices: Vec<usize> = Vec::with_capacity(batch.len());
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        let cell = datum.value() as u64;
+        if cell != 0 {
+            cells.push(cell);
+            valid_indices.push(i);
+        }
+    }
+    (cells, valid_indices)
+}
+
+/// `h3_grid_disk(cell, k)` — emits all cells within k-ring distance.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread; `qual_datum` comes from the
+/// 2-arg dispatch interface and is the constant `k`.
+unsafe fn dispatch_gpu_h3_var_grid_disk(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+) -> DispatchResult {
+    let Some((k_datum, k_null)) = qual_datum else {
+        return DispatchResult::Deferred;
+    };
+    if k_null {
+        return DispatchResult::Deferred;
+    }
+    let k = k_datum.value() as i32;
+
+    let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
+    if cells.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let Some(raw) = gpu::h3_grid_disk_bulk(&cells, k) else {
+        pgrx::error!("pg_accel: h3_grid_disk GPU kernel failed; refusing CPU fallback (rule 11)");
+    };
+
+    build_var_cells_dispatch_result(batch.len(), &valid_indices, &raw)
+}
+
+/// `h3_grid_ring_unsafe(cell, k)` — emits the k-th ring per input cell.
+///
+/// # Safety
+///
+/// Same as `dispatch_gpu_h3_var_grid_disk`.
+unsafe fn dispatch_gpu_h3_var_grid_ring_unsafe(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+) -> DispatchResult {
+    let Some((k_datum, k_null)) = qual_datum else {
+        return DispatchResult::Deferred;
+    };
+    if k_null {
+        return DispatchResult::Deferred;
+    }
+    let k = k_datum.value() as i32;
+
+    let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
+    if cells.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let Some(raw) = gpu::h3_grid_ring_unsafe_bulk(&cells, k) else {
+        pgrx::error!(
+            "pg_accel: h3_grid_ring_unsafe GPU kernel failed; refusing CPU fallback (rule 11)"
+        );
+    };
+
+    build_var_cells_dispatch_result(batch.len(), &valid_indices, &raw)
+}
+
+/// `h3_cell_to_children(cell, child_res)` — emits child cells at the
+/// requested resolution.
+///
+/// # Safety
+///
+/// Same as `dispatch_gpu_h3_var_grid_disk`.
+unsafe fn dispatch_gpu_h3_var_cell_to_children(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+) -> DispatchResult {
+    let Some((res_datum, res_null)) = qual_datum else {
+        return DispatchResult::Deferred;
+    };
+    if res_null {
+        return DispatchResult::Deferred;
+    }
+    let child_res = res_datum.value() as i32;
+
+    let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
+    if cells.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let Some(raw) = gpu::h3_cell_to_children_bulk(&cells, child_res) else {
+        pgrx::error!(
+            "pg_accel: h3_cell_to_children GPU kernel failed; refusing CPU fallback (rule 11)"
+        );
+    };
+
+    build_var_cells_dispatch_result(batch.len(), &valid_indices, &raw)
 }

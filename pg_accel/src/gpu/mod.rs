@@ -459,13 +459,13 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 
 /// Result of a fused f32 multi-aggregate reduce.
 ///
-/// Returned by [`reduce_multi_f32`]. The fused-agg executor wiring that
-/// consumes this struct lands in Phase B Agent 1B's
-/// `engine/executor/agg/execute.rs` rewrite. Carrying `#[allow(dead_code)]`
-/// until that wiring lands so `just lint` (`cargo clippy -- -D warnings`)
-/// stays green between Phase A merge and Phase B merge.
+/// Returned by [`reduce_multi_f32`]. The agg executor today keeps
+/// `gpu_values` as `Vec<f64>` (uniform accumulator path), so the f64
+/// wrapper [`reduce_multi_f64`] is the one wired into
+/// `agg/execute.rs::try_fused_multi_reduce`. This f32 variant is kept on
+/// the bridge for future executor work that retains a typed f32 buffer.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path so reduce_multi_f64 is the wired entry — see agg/execute.rs:1804
 pub struct ReduceMultiF32 {
     pub sum: f32,
     pub min: f32,
@@ -484,13 +484,13 @@ pub struct ReduceMultiF64 {
 
 /// Result of a fused i64 multi-aggregate reduce.
 ///
-/// Returned by [`reduce_multi_i64`]. The fused-agg executor wiring that
-/// consumes this struct lands in Phase B Agent 1B's
-/// `engine/executor/agg/execute.rs` rewrite. Carrying `#[allow(dead_code)]`
-/// until that wiring lands so `just lint` (`cargo clippy -- -D warnings`)
-/// stays green between Phase A merge and Phase B merge.
+/// Returned by [`reduce_multi_i64`]. Same situation as `ReduceMultiF32`:
+/// the agg executor uses a uniform `Vec<f64>` accumulator path
+/// (`agg/execute.rs:1804`), so wiring i64 fused multi-reduce requires a
+/// parallel typed-i64 path through the executor that doesn't exist yet.
+/// Bridge wrapper kept ready for that future executor work.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path so reduce_multi_f64 is the wired entry — see agg/execute.rs:1804
 pub struct ReduceMultiI64 {
     pub sum: i64,
     pub min: i64,
@@ -500,13 +500,11 @@ pub struct ReduceMultiI64 {
 
 /// GPU-accelerated fused f32 SUM+MIN+MAX+COUNT in a single pass.
 ///
-/// Phase B Agent 1B will route the fused-agg executor (currently three
-/// separate `reduce_sum_f32` / `reduce_min_f32` / `reduce_max_f32` calls)
-/// through this single-pass kernel — exposed here so the wiring change
-/// is the only diff at that layer. Carries `#[allow(dead_code)]` until
-/// then so `just lint` stays green between Phase A and Phase B merges.
+/// Bridge wrapper kept ready for executor work that retains typed-f32
+/// buffers; today the fused-agg executor routes through `reduce_multi_f64`
+/// (uniform Vec<f64> accumulator path) so this entry is unused.
 #[must_use]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path — see agg/execute.rs:1804
 pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
     if data.is_empty() {
@@ -577,13 +575,11 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
 
 /// GPU-accelerated fused i64 SUM+MIN+MAX+COUNT in a single pass.
 ///
-/// Phase B Agent 1B will route the fused-agg executor (currently three
-/// separate `reduce_sum_i64` / `reduce_min_i64` / `reduce_max_i64` calls)
-/// through this single-pass kernel — exposed here so the wiring change
-/// is the only diff at that layer. Carries `#[allow(dead_code)]` until
-/// then so `just lint` stays green between Phase A and Phase B merges.
+/// Bridge wrapper kept ready for executor work that retains typed-i64
+/// buffers; today the fused-agg executor routes through `reduce_multi_f64`
+/// (uniform Vec<f64> accumulator path) so this entry is unused.
 #[must_use]
-#[allow(dead_code)]
+#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path — see agg/execute.rs:1804
 pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
     if data.is_empty() {
@@ -905,6 +901,297 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
 }
 
 // ---------------------------------------------------------------------------
+// H3 variable-output wrappers (Agent 5A kernels via two-pass size+emit)
+// ---------------------------------------------------------------------------
+
+/// Result of an H3 var-output u64 dispatch: cumulative offsets +
+/// concatenated cell IDs. `offsets.len() == count + 1`; row `i`'s outputs
+/// occupy `cells[offsets[i] .. offsets[i+1]]`.
+pub struct H3VarOutCells {
+    pub offsets: Vec<u32>,
+    pub cells: Vec<u64>,
+}
+
+/// Result of an H3 var-output f64 dispatch (lat/lng coord pairs).
+#[allow(dead_code)] // reason: returned by polyfill / boundary / multi_polygon wrappers; dispatch wiring blocked on PostGIS GSERIALIZED encoder + polygon extractor
+pub struct H3VarOutCoords {
+    pub offsets: Vec<u32>,
+    pub coords: Vec<f64>,
+}
+
+fn h3_offsets_total(offsets: &[u32]) -> usize {
+    offsets.last().copied().map_or(0, |v| v as usize)
+}
+
+/// `h3_grid_disk(cell, k)` — outputs all cells within `k`-ring distance of
+/// each input. Two-pass: size then emit. Returns `None` on kernel failure.
+pub fn h3_grid_disk_bulk(cells: &[u64], k: i32) -> Option<H3VarOutCells> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices of the declared lengths.
+    let status = unsafe {
+        bridge::pgaccel_h3_grid_disk_output_size(cells.as_ptr(), count, k, offsets.as_mut_ptr())
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_cells = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: offsets is the buffer the size pass populated; out_cells
+        // has total elements.
+        let status = unsafe {
+            bridge::pgaccel_h3_grid_disk_emit(
+                cells.as_ptr(),
+                count,
+                k,
+                offsets.as_ptr(),
+                out_cells.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_cells,
+    })
+}
+
+/// `h3_grid_ring_unsafe(cell, k)` — outputs the k-th ring per input
+/// (smaller fan-out than `grid_disk`).
+pub fn h3_grid_ring_unsafe_bulk(cells: &[u64], k: i32) -> Option<H3VarOutCells> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices of the declared lengths.
+    let status = unsafe {
+        bridge::pgaccel_h3_grid_ring_unsafe_output_size(
+            cells.as_ptr(),
+            count,
+            k,
+            offsets.as_mut_ptr(),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_cells = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: offsets is from the size pass; out_cells has total elements.
+        let status = unsafe {
+            bridge::pgaccel_h3_grid_ring_unsafe_emit(
+                cells.as_ptr(),
+                count,
+                k,
+                offsets.as_ptr(),
+                out_cells.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_cells,
+    })
+}
+
+/// `h3_polyfill(geom, resolution)` — outputs cells whose centre lies
+/// inside the polygon. `coords` is flat `[x0,y0,...]` in lon/lat degrees;
+/// `ring_offsets` indexes into `coords` for `ring_count` rings.
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on per-row geometry-polygon extractor for h3_polyfill (geom argument)
+pub fn h3_polyfill_bulk(
+    coords: &[f32],
+    ring_offsets: &[u32],
+    ring_count: usize,
+    resolution: i32,
+) -> Option<H3VarOutCells> {
+    if ring_count == 0 {
+        return Some(H3VarOutCells {
+            offsets: vec![0u32; 1],
+            cells: Vec::new(),
+        });
+    }
+    let mut offsets = vec![0u32; ring_count + 1];
+    // SAFETY: coords/ring_offsets/offsets are caller-owned slices.
+    let status = unsafe {
+        bridge::pgaccel_h3_polyfill_output_size(
+            coords.as_ptr(),
+            ring_offsets.as_ptr(),
+            ring_count,
+            resolution,
+            offsets.as_mut_ptr(),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_cells = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: same buffers, plus out_cells of length `total`.
+        let status = unsafe {
+            bridge::pgaccel_h3_polyfill_emit(
+                coords.as_ptr(),
+                ring_offsets.as_ptr(),
+                ring_count,
+                resolution,
+                offsets.as_ptr(),
+                out_cells.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_cells,
+    })
+}
+
+/// `h3_cell_to_children(cell, child_res)` — outputs child cells at the
+/// requested resolution. Output count is deterministic per input (7^Δres
+/// for hexagons).
+pub fn h3_cell_to_children_bulk(cells: &[u64], child_res: i32) -> Option<H3VarOutCells> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices of the declared lengths.
+    let status = unsafe {
+        bridge::pgaccel_h3_cell_to_children_output_size(
+            cells.as_ptr(),
+            count,
+            child_res,
+            offsets.as_mut_ptr(),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_children = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: offsets is the buffer the size pass populated.
+        let status = unsafe {
+            bridge::pgaccel_h3_cell_to_children_emit(
+                cells.as_ptr(),
+                count,
+                child_res,
+                offsets.as_ptr(),
+                out_children.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_children,
+    })
+}
+
+/// `h3_cell_to_boundary(cell)` — emits 6 (hexagon) or 5 (pentagon) lat/lng
+/// vertex pairs per cell. Offsets are in DOUBLE units (2 doubles per
+/// vertex pair × 6 = 12 doubles per hexagon).
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on PostGIS GSERIALIZED polygon encoder for h3 boundary output
+pub fn h3_cell_to_boundary_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices.
+    let status = unsafe {
+        bridge::pgaccel_h3_cell_to_boundary_output_size(cells.as_ptr(), count, offsets.as_mut_ptr())
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_coords = vec![0.0f64; total];
+    if total > 0 {
+        // SAFETY: offsets came from the size pass; out_coords has `total` doubles.
+        let status = unsafe {
+            bridge::pgaccel_h3_cell_to_boundary_emit(
+                cells.as_ptr(),
+                count,
+                offsets.as_ptr(),
+                out_coords.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCoords {
+        offsets,
+        coords: out_coords,
+    })
+}
+
+/// `h3_cells_to_multi_polygon(cells[])` — outputs the union of input cell
+/// boundaries as a CSR over polygon rings. The single executor row is the
+/// entire input array; the output offsets index over rings.
+///
+/// Returns `(ring_offsets, coords)` where `ring_offsets.len() == ring_count + 1`
+/// and `coords.len() == ring_offsets[ring_count]` (in doubles).
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on PostGIS GSERIALIZED multipolygon encoder + bigint[] array-input dispatch carrier
+pub fn h3_cells_to_multi_polygon_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
+    let count = cells.len();
+    if count == 0 {
+        return Some(H3VarOutCoords {
+            offsets: vec![0u32; 1],
+            coords: Vec::new(),
+        });
+    }
+    // Worst case: one ring per cell. Allocate `count + 1` slots; the size
+    // pass writes the realised ring count.
+    let mut ring_offsets = vec![0u32; count + 1];
+    let mut ring_count: u32 = 0;
+    // SAFETY: cells / ring_offsets are caller-owned slices; ring_count is
+    // a stack scalar the kernel writes once.
+    let status = unsafe {
+        bridge::pgaccel_h3_cells_to_multi_polygon_output_size(
+            cells.as_ptr(),
+            count,
+            ring_offsets.as_mut_ptr(),
+            std::ptr::addr_of_mut!(ring_count),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    // Truncate ring_offsets to the realised ring count + 1.
+    let realised = ring_count as usize;
+    if realised + 1 > ring_offsets.len() {
+        return None;
+    }
+    ring_offsets.truncate(realised + 1);
+    let total = h3_offsets_total(&ring_offsets);
+    let mut out_coords = vec![0.0f64; total];
+    if total > 0 {
+        // SAFETY: ring_offsets / out_coords are caller-owned and correctly sized.
+        let status = unsafe {
+            bridge::pgaccel_h3_cells_to_multi_polygon_emit(
+                cells.as_ptr(),
+                count,
+                ring_offsets.as_ptr(),
+                ring_count,
+                out_coords.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCoords {
+        offsets: ring_offsets,
+        coords: out_coords,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Raster wrappers
 // ---------------------------------------------------------------------------
 
@@ -954,7 +1241,6 @@ pub fn map_algebra(
 ///
 /// Returns `None` if the GPU is unavailable.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_clip wiring)
 pub fn raster_clip(
     rast_pixels: *const std::ffi::c_void,
     width: usize,
@@ -999,7 +1285,6 @@ pub fn raster_clip(
 ///
 /// Applies a set of value-range rules to reclassify pixel values.
 /// Returns `None` if the GPU is unavailable.
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_reclass wiring)
 pub fn raster_reclass(
     input_pixels: *const std::ffi::c_void,
     pixel_count: usize,
@@ -1036,7 +1321,7 @@ pub fn raster_reclass(
 ///
 /// Returns `None` if the kernel fails (caller routes to PG fallback).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_resample wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_resample takes target dims as constants)
 pub fn raster_resample(
     src_pixels: &[f32],
     src_w: usize,
@@ -1071,7 +1356,7 @@ pub fn raster_resample(
 }
 
 /// GPU-accelerated slope (Horn's method, output in degrees).
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_slope wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_slope takes per-pixel cell sizes)
 pub fn raster_slope(
     src_pixels: &[f32],
     width: usize,
@@ -1102,7 +1387,7 @@ pub fn raster_slope(
 }
 
 /// GPU-accelerated aspect (compass direction in degrees).
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_aspect wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_aspect 1-arg but pairs with hillshade pipeline)
 pub fn raster_aspect(
     src_pixels: &[f32],
     width: usize,
@@ -1125,7 +1410,7 @@ pub fn raster_aspect(
 
 /// GPU-accelerated hillshade (shaded relief, output [0, 255]).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_hillshade wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_hillshade takes sun_azimuth/altitude/z_factor)
 pub fn raster_hillshade(
     src_pixels: &[f32],
     width: usize,
@@ -1167,7 +1452,7 @@ pub fn raster_hillshade(
 /// must have at least `point_xy.len() / 2` elements. Out-of-bounds
 /// points get NaN.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_value wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_value takes a point geometry array)
 pub fn raster_value(
     rast_pixels: &[f32],
     width: usize,
@@ -1214,7 +1499,6 @@ pub fn raster_value(
 /// laid out as `[row0_count, row0_sum, row0_mean, row0_stddev, row0_min,
 /// row0_max, row1_count, ...]`. When `nodata_masks` is `Some`, mask byte
 /// `1` skips that pixel.
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_summarystats wiring)
 pub fn raster_summarystats(
     rast_pixels: &[f32],
     row_count: usize,
@@ -1319,6 +1603,38 @@ pub fn expr_template_cmp_const(
             col_idx,
             cmp_opcode,
             const_val,
+            results.as_mut_ptr(),
+        )
+    };
+    status.is_ok().then_some(results)
+}
+
+/// Template: evaluate `col1 <cmp1> const1 AND col2 <cmp2> const2` on a
+/// batch via Agent 4A's struct-packed kernel (single dispatch, no Rust-side
+/// AND combiner). Three-valued: `+1=TRUE, -1=FALSE, 0=UNCERTAIN`.
+#[allow(clippy::too_many_arguments)]
+pub fn expr_template_two_pred_and(
+    batch: &PgaccelBatch,
+    col1_idx: u32,
+    cmp1_opcode: u16,
+    const1_val: f64,
+    col2_idx: u32,
+    cmp2_opcode: u16,
+    const2_val: f64,
+    num_rows: usize,
+) -> Option<Vec<i8>> {
+    let mut results = vec![0i8; num_rows];
+    // SAFETY: batch is a valid reference; results is caller-owned with
+    // num_rows capacity.
+    let status = unsafe {
+        bridge::pgaccel_expr_template_two_pred_and(
+            std::ptr::from_ref(batch),
+            col1_idx,
+            cmp1_opcode,
+            const1_val,
+            col2_idx,
+            cmp2_opcode,
+            const2_val,
             results.as_mut_ptr(),
         )
     };

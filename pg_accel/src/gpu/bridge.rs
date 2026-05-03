@@ -438,6 +438,120 @@ unsafe extern "C" {
         valid: *mut u8,
     ) -> PgaccelStatus;
 
+    // -- H3 variable-output kernels (Agent 5A; two-pass size+emit per pgaccel_ffi.h:405) --
+
+    /// Size pass for `h3_grid_disk`: writes cumulative cell-count offsets
+    /// `[0..=count]` so the executor can size the emit buffer.
+    pub fn pgaccel_h3_grid_disk_output_size(
+        cells: *const u64,
+        count: usize,
+        k: i32,
+        out_offsets: *mut u32,
+    ) -> PgaccelStatus;
+
+    /// Emit pass for `h3_grid_disk`: writes neighbour cells into
+    /// `out_cells[out_offsets[count]]` per the size pass.
+    pub fn pgaccel_h3_grid_disk_emit(
+        cells: *const u64,
+        count: usize,
+        k: i32,
+        offsets: *const u32,
+        out_cells: *mut u64,
+    ) -> PgaccelStatus;
+
+    /// Size pass for `h3_grid_ring_unsafe`: outputs only the k-th ring per input.
+    pub fn pgaccel_h3_grid_ring_unsafe_output_size(
+        cells: *const u64,
+        count: usize,
+        k: i32,
+        out_offsets: *mut u32,
+    ) -> PgaccelStatus;
+
+    /// Emit pass for `h3_grid_ring_unsafe`.
+    pub fn pgaccel_h3_grid_ring_unsafe_emit(
+        cells: *const u64,
+        count: usize,
+        k: i32,
+        offsets: *const u32,
+        out_cells: *mut u64,
+    ) -> PgaccelStatus;
+
+    /// Size pass for `h3_polyfill`: writes cumulative cell-count offsets
+    /// for each polygon (one ring per polygon for the first cut).
+    pub fn pgaccel_h3_polyfill_output_size(
+        coords: *const f32,
+        ring_offsets: *const u32,
+        ring_count: usize,
+        resolution: i32,
+        out_offsets: *mut u32,
+    ) -> PgaccelStatus;
+
+    /// Emit pass for `h3_polyfill`.
+    pub fn pgaccel_h3_polyfill_emit(
+        coords: *const f32,
+        ring_offsets: *const u32,
+        ring_count: usize,
+        resolution: i32,
+        offsets: *const u32,
+        out_cells: *mut u64,
+    ) -> PgaccelStatus;
+
+    /// Size pass for `h3_cell_to_children`: writes cumulative child-count
+    /// offsets per input cell at `child_res`.
+    pub fn pgaccel_h3_cell_to_children_output_size(
+        cells: *const u64,
+        count: usize,
+        child_res: i32,
+        out_offsets: *mut u32,
+    ) -> PgaccelStatus;
+
+    /// Emit pass for `h3_cell_to_children`.
+    pub fn pgaccel_h3_cell_to_children_emit(
+        cells: *const u64,
+        count: usize,
+        child_res: i32,
+        offsets: *const u32,
+        out_children: *mut u64,
+    ) -> PgaccelStatus;
+
+    /// Size pass for `h3_cell_to_boundary`: writes cumulative DOUBLE-count
+    /// offsets (12 per hexagon, 10 per pentagon).
+    pub fn pgaccel_h3_cell_to_boundary_output_size(
+        cells: *const u64,
+        count: usize,
+        out_offsets: *mut u32,
+    ) -> PgaccelStatus;
+
+    /// Emit pass for `h3_cell_to_boundary`. Output is interleaved lat/lng
+    /// pairs per the kernel's documented unit (see h3_ops.cpp).
+    pub fn pgaccel_h3_cell_to_boundary_emit(
+        cells: *const u64,
+        count: usize,
+        offsets: *const u32,
+        out_coords: *mut f64,
+    ) -> PgaccelStatus;
+
+    /// Size pass for `h3_cells_to_multi_polygon`. `out_ring_offsets` holds
+    /// `ring_count + 1` cumulative double-count offsets; the kernel writes
+    /// the realised ring count into `*out_ring_count` so the caller can
+    /// correctly size both the offsets buffer and the coord emit buffer.
+    pub fn pgaccel_h3_cells_to_multi_polygon_output_size(
+        cells: *const u64,
+        count: usize,
+        out_ring_offsets: *mut u32,
+        out_ring_count: *mut u32,
+    ) -> PgaccelStatus;
+
+    /// Emit pass for `h3_cells_to_multi_polygon`. `ring_count` must equal
+    /// the value the size pass wrote to `out_ring_count`.
+    pub fn pgaccel_h3_cells_to_multi_polygon_emit(
+        cells: *const u64,
+        count: usize,
+        ring_offsets: *const u32,
+        ring_count: u32,
+        out_coords: *mut f64,
+    ) -> PgaccelStatus;
+
     // -- Raster operations --
 
     pub fn pgaccel_map_algebra(

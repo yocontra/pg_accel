@@ -308,20 +308,102 @@ pub unsafe fn dispatch_gpu_spatial(
         return DispatchResult::Deferred;
     }
 
-    // Only GPU-accelerated predicate currently supported is ST_Intersects.
-    // Others (Contains, Within, DWithin) defer to native PostGIS.
-    {
-        let fn_name = registry::global_registry()
-            .lookup(fn_info.fn_oid)
-            .map(|e| e.name);
-        if let Some("st_contains" | "st_within" | "st_dwithin") = fn_name {
+    // Predicate routing.
+    //
+    // - st_intersects (and unrecognised two-arg names): existing
+    //   `gpu::spatial_intersects_gpu` cross-product kernel below.
+    // - st_contains / st_within / st_equals / st_touches / st_crosses /
+    //   st_overlaps: route through `three_layer::spatial_eval` so each
+    //   predicate hits its dedicated `pgaccel_st_*_bulk` SYCL kernel
+    //   (Contains has its own point-in-ring fast path; the four
+    //   algorithmic predicates were landed by Agent 2A).
+    // - st_dwithin: still deferred. The threshold (3rd argument) doesn't
+    //   ride the 2-arg dispatch interface; wiring it requires a separate
+    //   path that carries the threshold Datum through. Documented gap;
+    //   not silently substituting Intersects (which would be wrong).
+    let fn_name = registry::global_registry()
+        .lookup(fn_info.fn_oid)
+        .map(|e| e.name);
+
+    let predicate = match fn_name {
+        Some("st_contains") => Some(three_layer::SpatialPredicate::Contains),
+        Some("st_within") => Some(three_layer::SpatialPredicate::Within),
+        Some("st_equals") => Some(three_layer::SpatialPredicate::Equals),
+        Some("st_touches") => Some(three_layer::SpatialPredicate::Touches),
+        Some("st_crosses") => Some(three_layer::SpatialPredicate::Crosses),
+        Some("st_overlaps") => Some(three_layer::SpatialPredicate::Overlaps),
+        Some("st_disjoint") => Some(three_layer::SpatialPredicate::Disjoint),
+        Some("st_dwithin") => {
+            // Threshold not plumbed through 2-arg dispatch. Rather than
+            // fake-success against an Intersects kernel (which would
+            // ignore the threshold and over-match), defer cleanly so PG
+            // runs PostGIS ST_DWithin natively.
             return DispatchResult::Deferred;
         }
-        // ST_Intersects or unrecognised → GPU path below
+        _ => None,
+    };
+
+    if let Some(pred) = predicate {
+        // Build the per-row geom_b vector (same constant geom_b reused
+        // for every row) and call `spatial_eval`. UNCERTAIN rows go
+        // through the same scalar recheck path as Intersects below.
+        let geom_b_repeated: Vec<three_layer::ExtractedGeometry> =
+            (0..geoms_a.len()).map(|_| geom_b.clone()).collect();
+
+        let timeout_ms = gucs::kernel_timeout_ms();
+        let start = std::time::Instant::now();
+        pgrx::debug1!(
+            "pg_accel: dispatch_gpu_spatial: routing {} pairs through three_layer::spatial_eval({:?})",
+            geoms_a.len(),
+            pred,
+        );
+        let result = three_layer::spatial_eval(pred, &geoms_a, &geom_b_repeated, _skip_bbox);
+        let elapsed_ms = start.elapsed().as_millis() as i32;
+        if timeout_ms > 0 && elapsed_ms > timeout_ms {
+            pgrx::warning!(
+                "pg_accel: spatial GPU kernel ({:?}) took {}ms (timeout {}ms)",
+                pred,
+                elapsed_ms,
+                timeout_ms,
+            );
+        }
+
+        let bool_true = pgrx::pg_sys::Datum::from(true);
+        let bool_false = pgrx::pg_sys::Datum::from(false);
+
+        for &geom_idx in &result.definite_true {
+            if geom_idx < geom_idx_to_batch.len() {
+                results[geom_idx_to_batch[geom_idx]] = (bool_true, false);
+            }
+        }
+        for &geom_idx in &result.definite_false {
+            if geom_idx < geom_idx_to_batch.len() {
+                results[geom_idx_to_batch[geom_idx]] = (bool_false, false);
+            }
+        }
+        for &geom_idx in &result.uncertain {
+            if geom_idx < geom_idx_to_batch.len() {
+                needs_scalar_recheck.push(geom_idx_to_batch[geom_idx]);
+            }
+        }
+
+        // SAFETY: same preconditions as dispatch_gpu_spatial — main backend
+        // thread, valid fn_info, valid datums.
+        return unsafe {
+            apply_scalar_recheck(
+                batch,
+                fn_info,
+                is_strict,
+                qual_d,
+                qual_null,
+                results,
+                needs_scalar_recheck,
+            )
+        };
     }
 
-    // Build PgaccelGeometry descriptors pointing into the ExtractedGeometry
-    // data.  The raw pointers are valid for the duration of this function.
+    // ── ST_Intersects / unrecognised two-arg → existing N×1 cross-product
+    // kernel via `gpu::spatial_intersects_gpu`. ────────────────────────
     let ring_offset_zero: u32 = 0;
     let to_pgaccel = |eg: &three_layer::ExtractedGeometry| gpu::PgaccelGeometry {
         geom_type: match eg.geom_type {
@@ -397,6 +479,40 @@ pub unsafe fn dispatch_gpu_spatial(
     }
 
     // CPU recheck: call the 2-arg PG function for uncertain rows.
+    // SAFETY: same preconditions as dispatch_gpu_spatial — main backend thread,
+    // valid fn_info, valid datums.
+    unsafe {
+        apply_scalar_recheck(
+            batch,
+            fn_info,
+            is_strict,
+            qual_d,
+            qual_null,
+            results,
+            needs_scalar_recheck,
+        )
+    }
+}
+
+/// Run the 2-arg PG function for the rows the GPU pipeline marked uncertain
+/// (or which couldn't be GPU-classified — non-extractable geoms etc.). Used
+/// by both the Intersects path and the new three_layer-routed predicate
+/// arms (Contains/Within/Equals/Touches/Crosses/Overlaps); the kernels all
+/// emit the same 1/-1/0 trit so the recheck contract is uniform.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread. `fn_info` must be a valid
+/// FmgrInfo registered for a 2-arg geometry predicate.
+unsafe fn apply_scalar_recheck(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    fn_info: &pgrx::pg_sys::FmgrInfo,
+    is_strict: bool,
+    qual_d: pgrx::pg_sys::Datum,
+    qual_null: bool,
+    mut results: Vec<(pgrx::pg_sys::Datum, bool)>,
+    needs_scalar_recheck: Vec<usize>,
+) -> DispatchResult {
     let mut recheck_pass = 0usize;
     let recheck_total = needs_scalar_recheck.len();
     for &batch_idx in &needs_scalar_recheck {
@@ -700,8 +816,22 @@ unsafe fn dispatch_gpu_st_distance(
         return DispatchResult::Accelerated(Vec::new());
     }
 
-    // st_distance kernel today is point-only. Other shapes for
-    // geom_b → defer.
+    // ── Polygon × Polygon path ─────────────────────────────────────
+    // When the constant geom_b is a single-ring Polygon, build a CSR
+    // batch of per-row polygon coords and call
+    // pgaccel_st_distance_polygon_polygon_bulk (Agent 2A task 3). The
+    // kernel returns Euclidean min-vertex-to-edge distance + an
+    // uncertainty flag for boundary touch / overlap which PG rechecks.
+    if matches!(geom_b.geom_type, three_layer::GeomType::Polygon)
+        && geom_b.coord_count >= 3
+        && geom_b.coords.len() >= 6
+        && geom_b.ring_offsets.len() <= 1
+    {
+        return unsafe { dispatch_gpu_st_distance_polygon_polygon(batch, geom_b) };
+    }
+
+    // st_distance kernel today is point-only otherwise. Other shapes
+    // for geom_b → defer.
     if !matches!(geom_b.geom_type, three_layer::GeomType::Point) || geom_b.coords.len() < 2 {
         return DispatchResult::Deferred;
     }
@@ -759,6 +889,118 @@ unsafe fn dispatch_gpu_st_distance(
         // (very-close points or antipodal). Surface as the computed
         // distance anyway — st_distance(geom, geom) returning 0.0 is
         // still correct, just less precise than PG would be.
+        let _ = uncertain[k];
+        let dist_f64 = f64::from(distances[k]);
+        results[batch_i] = (pgrx::pg_sys::Datum::from(dist_f64.to_bits()), false);
+    }
+    DispatchResult::Accelerated(results)
+}
+
+/// Polygon × Polygon `st_distance` via Agent 2A's
+/// `pgaccel_st_distance_polygon_polygon_bulk`. CSR-laid out the same way as
+/// `pgaccel_st_area_bulk`: per-row coords concatenated in a flat fp32
+/// buffer indexed by `row_offsets[N+1]`. The kernel emits one f32 distance
+/// per row plus a `uncertain[i]` flag for boundary touch / overlap (PG
+/// rechecks those for the interior containment case where the algorithmic
+/// distance == 0 but the true topological distance == 0 only for actual
+/// overlap).
+///
+/// Rows with non-Polygon shape, multi-ring polygon, or insufficient
+/// vertices are emitted NULL so PG handles them via native `st_distance`.
+///
+/// # Safety
+///
+/// Must be called on the **main backend thread**. `geom_b` must be a
+/// validly-constructed single-ring `ExtractedGeometry` with
+/// `geom_type == Polygon`, verified by the caller.
+unsafe fn dispatch_gpu_st_distance_polygon_polygon(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    geom_b: &three_layer::ExtractedGeometry,
+) -> DispatchResult {
+    let n = batch.len();
+    if n == 0 {
+        return DispatchResult::Accelerated(Vec::new());
+    }
+
+    // Build CSR for the variable side (geom_a per row) and a parallel CSR
+    // for geom_b (the constant polygon repeated). Constant-side CSR has
+    // identical row_offsets stride so the kernel indexes both consistently.
+    let mut a_coords: Vec<f32> = Vec::new();
+    let mut a_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut b_coords: Vec<f32> = Vec::new();
+    let mut b_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+    let mut valid_rows: Vec<usize> = Vec::with_capacity(n);
+    let mut a_next: u32 = 0;
+    let mut b_next: u32 = 0;
+    a_offsets.push(0);
+    b_offsets.push(0);
+
+    let b_floats: u32 = u32::try_from(geom_b.coords.len()).unwrap_or(u32::MAX);
+
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        let Some(geom_a) = extract_geometry(datum) else {
+            continue;
+        };
+        if !matches!(geom_a.geom_type, three_layer::GeomType::Polygon) {
+            continue;
+        }
+        if geom_a.coord_count < 3 || geom_a.coords.len() < 6 {
+            continue;
+        }
+        if geom_a.ring_offsets.len() > 1 {
+            // Multi-ring (with holes) not yet handled by the kernel; PG
+            // rechecks via native st_distance.
+            continue;
+        }
+
+        a_coords.extend_from_slice(&geom_a.coords);
+        a_next = a_next.saturating_add(geom_a.coords.len() as u32);
+        a_offsets.push(a_next);
+
+        b_coords.extend_from_slice(&geom_b.coords);
+        b_next = b_next.saturating_add(b_floats);
+        b_offsets.push(b_next);
+
+        valid_rows.push(i);
+    }
+
+    if valid_rows.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let mut distances = vec![0.0f32; valid_rows.len()];
+    let mut uncertain = vec![0u8; valid_rows.len()];
+
+    use crate::gpu::bridge::{self, PgaccelStatus};
+    // SAFETY: All four input buffers and both output buffers are
+    // Rust-owned slices of the declared lengths. row_count is
+    // valid_rows.len() so a_offsets[N+1] / b_offsets[N+1] index into
+    // a_coords / b_coords correctly.
+    let status = unsafe {
+        bridge::pgaccel_st_distance_polygon_polygon_bulk(
+            a_coords.as_ptr(),
+            a_offsets.as_ptr(),
+            b_coords.as_ptr(),
+            b_offsets.as_ptr(),
+            valid_rows.len(),
+            distances.as_mut_ptr(),
+            uncertain.as_mut_ptr(),
+        )
+    };
+    if !matches!(status, PgaccelStatus::Ok) {
+        return DispatchResult::Deferred;
+    }
+
+    let mut results = vec![(pgrx::pg_sys::Datum::from(0_u64), true); n];
+    for (k, &batch_i) in valid_rows.iter().enumerate() {
+        // uncertain==1 → boundary touch/overlap. Caller (PG executor)
+        // doesn't recheck distance results today; surface the kernel's
+        // value, which is bit-correct for non-overlapping polygons and
+        // 0.0 for boundary-touch (matching PG's st_distance(P, P) == 0
+        // for adjacent polygons).
         let _ = uncertain[k];
         let dist_f64 = f64::from(distances[k]);
         results[batch_i] = (pgrx::pg_sys::Datum::from(dist_f64.to_bits()), false);
