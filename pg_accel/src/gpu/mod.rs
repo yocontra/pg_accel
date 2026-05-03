@@ -905,6 +905,293 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
 }
 
 // ---------------------------------------------------------------------------
+// H3 variable-output wrappers (Agent 5A kernels via two-pass size+emit)
+// ---------------------------------------------------------------------------
+
+/// Result of an H3 var-output u64 dispatch: cumulative offsets +
+/// concatenated cell IDs. `offsets.len() == count + 1`; row `i`'s outputs
+/// occupy `cells[offsets[i] .. offsets[i+1]]`.
+pub struct H3VarOutCells {
+    pub offsets: Vec<u32>,
+    pub cells: Vec<u64>,
+}
+
+/// Result of an H3 var-output f64 dispatch (lat/lng coord pairs).
+pub struct H3VarOutCoords {
+    pub offsets: Vec<u32>,
+    pub coords: Vec<f64>,
+}
+
+fn h3_offsets_total(offsets: &[u32]) -> usize {
+    offsets.last().copied().map_or(0, |v| v as usize)
+}
+
+/// `h3_grid_disk(cell, k)` — outputs all cells within `k`-ring distance of
+/// each input. Two-pass: size then emit. Returns `None` on kernel failure.
+pub fn h3_grid_disk_bulk(cells: &[u64], k: i32) -> Option<H3VarOutCells> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices of the declared lengths.
+    let status = unsafe {
+        bridge::pgaccel_h3_grid_disk_output_size(cells.as_ptr(), count, k, offsets.as_mut_ptr())
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_cells = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: offsets is the buffer the size pass populated; out_cells
+        // has total elements.
+        let status = unsafe {
+            bridge::pgaccel_h3_grid_disk_emit(
+                cells.as_ptr(),
+                count,
+                k,
+                offsets.as_ptr(),
+                out_cells.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_cells,
+    })
+}
+
+/// `h3_grid_ring_unsafe(cell, k)` — outputs the k-th ring per input
+/// (smaller fan-out than `grid_disk`).
+pub fn h3_grid_ring_unsafe_bulk(cells: &[u64], k: i32) -> Option<H3VarOutCells> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices of the declared lengths.
+    let status = unsafe {
+        bridge::pgaccel_h3_grid_ring_unsafe_output_size(
+            cells.as_ptr(),
+            count,
+            k,
+            offsets.as_mut_ptr(),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_cells = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: offsets is from the size pass; out_cells has total elements.
+        let status = unsafe {
+            bridge::pgaccel_h3_grid_ring_unsafe_emit(
+                cells.as_ptr(),
+                count,
+                k,
+                offsets.as_ptr(),
+                out_cells.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_cells,
+    })
+}
+
+/// `h3_polyfill(geom, resolution)` — outputs cells whose centre lies
+/// inside the polygon. `coords` is flat `[x0,y0,...]` in lon/lat degrees;
+/// `ring_offsets` indexes into `coords` for `ring_count` rings.
+pub fn h3_polyfill_bulk(
+    coords: &[f32],
+    ring_offsets: &[u32],
+    ring_count: usize,
+    resolution: i32,
+) -> Option<H3VarOutCells> {
+    if ring_count == 0 {
+        return Some(H3VarOutCells {
+            offsets: vec![0u32; 1],
+            cells: Vec::new(),
+        });
+    }
+    let mut offsets = vec![0u32; ring_count + 1];
+    // SAFETY: coords/ring_offsets/offsets are caller-owned slices.
+    let status = unsafe {
+        bridge::pgaccel_h3_polyfill_output_size(
+            coords.as_ptr(),
+            ring_offsets.as_ptr(),
+            ring_count,
+            resolution,
+            offsets.as_mut_ptr(),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_cells = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: same buffers, plus out_cells of length `total`.
+        let status = unsafe {
+            bridge::pgaccel_h3_polyfill_emit(
+                coords.as_ptr(),
+                ring_offsets.as_ptr(),
+                ring_count,
+                resolution,
+                offsets.as_ptr(),
+                out_cells.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_cells,
+    })
+}
+
+/// `h3_cell_to_children(cell, child_res)` — outputs child cells at the
+/// requested resolution. Output count is deterministic per input (7^Δres
+/// for hexagons).
+pub fn h3_cell_to_children_bulk(cells: &[u64], child_res: i32) -> Option<H3VarOutCells> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices of the declared lengths.
+    let status = unsafe {
+        bridge::pgaccel_h3_cell_to_children_output_size(
+            cells.as_ptr(),
+            count,
+            child_res,
+            offsets.as_mut_ptr(),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_children = vec![0u64; total];
+    if total > 0 {
+        // SAFETY: offsets is the buffer the size pass populated.
+        let status = unsafe {
+            bridge::pgaccel_h3_cell_to_children_emit(
+                cells.as_ptr(),
+                count,
+                child_res,
+                offsets.as_ptr(),
+                out_children.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCells {
+        offsets,
+        cells: out_children,
+    })
+}
+
+/// `h3_cell_to_boundary(cell)` — emits 6 (hexagon) or 5 (pentagon) lat/lng
+/// vertex pairs per cell. Offsets are in DOUBLE units (2 doubles per
+/// vertex pair × 6 = 12 doubles per hexagon).
+pub fn h3_cell_to_boundary_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
+    let count = cells.len();
+    let mut offsets = vec![0u32; count + 1];
+    // SAFETY: cells / offsets are caller-owned slices.
+    let status = unsafe {
+        bridge::pgaccel_h3_cell_to_boundary_output_size(cells.as_ptr(), count, offsets.as_mut_ptr())
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    let total = h3_offsets_total(&offsets);
+    let mut out_coords = vec![0.0f64; total];
+    if total > 0 {
+        // SAFETY: offsets came from the size pass; out_coords has `total` doubles.
+        let status = unsafe {
+            bridge::pgaccel_h3_cell_to_boundary_emit(
+                cells.as_ptr(),
+                count,
+                offsets.as_ptr(),
+                out_coords.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCoords {
+        offsets,
+        coords: out_coords,
+    })
+}
+
+/// `h3_cells_to_multi_polygon(cells[])` — outputs the union of input cell
+/// boundaries as a CSR over polygon rings. The single executor row is the
+/// entire input array; the output offsets index over rings.
+///
+/// Returns `(ring_offsets, coords)` where `ring_offsets.len() == ring_count + 1`
+/// and `coords.len() == ring_offsets[ring_count]` (in doubles).
+pub fn h3_cells_to_multi_polygon_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
+    let count = cells.len();
+    if count == 0 {
+        return Some(H3VarOutCoords {
+            offsets: vec![0u32; 1],
+            coords: Vec::new(),
+        });
+    }
+    // Worst case: one ring per cell. Allocate `count + 1` slots; the size
+    // pass writes the realised ring count.
+    let mut ring_offsets = vec![0u32; count + 1];
+    let mut ring_count: u32 = 0;
+    // SAFETY: cells / ring_offsets are caller-owned slices; ring_count is
+    // a stack scalar the kernel writes once.
+    let status = unsafe {
+        bridge::pgaccel_h3_cells_to_multi_polygon_output_size(
+            cells.as_ptr(),
+            count,
+            ring_offsets.as_mut_ptr(),
+            std::ptr::addr_of_mut!(ring_count),
+        )
+    };
+    if !status.is_ok() {
+        return None;
+    }
+    // Truncate ring_offsets to the realised ring count + 1.
+    let realised = ring_count as usize;
+    if realised + 1 > ring_offsets.len() {
+        return None;
+    }
+    ring_offsets.truncate(realised + 1);
+    let total = h3_offsets_total(&ring_offsets);
+    let mut out_coords = vec![0.0f64; total];
+    if total > 0 {
+        // SAFETY: ring_offsets / out_coords are caller-owned and correctly sized.
+        let status = unsafe {
+            bridge::pgaccel_h3_cells_to_multi_polygon_emit(
+                cells.as_ptr(),
+                count,
+                ring_offsets.as_ptr(),
+                ring_count,
+                out_coords.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            return None;
+        }
+    }
+    Some(H3VarOutCoords {
+        offsets: ring_offsets,
+        coords: out_coords,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Raster wrappers
 // ---------------------------------------------------------------------------
 
@@ -1319,6 +1606,38 @@ pub fn expr_template_cmp_const(
             col_idx,
             cmp_opcode,
             const_val,
+            results.as_mut_ptr(),
+        )
+    };
+    status.is_ok().then_some(results)
+}
+
+/// Template: evaluate `col1 <cmp1> const1 AND col2 <cmp2> const2` on a
+/// batch via Agent 4A's struct-packed kernel (single dispatch, no Rust-side
+/// AND combiner). Three-valued: `+1=TRUE, -1=FALSE, 0=UNCERTAIN`.
+#[allow(clippy::too_many_arguments)]
+pub fn expr_template_two_pred_and(
+    batch: &PgaccelBatch,
+    col1_idx: u32,
+    cmp1_opcode: u16,
+    const1_val: f64,
+    col2_idx: u32,
+    cmp2_opcode: u16,
+    const2_val: f64,
+    num_rows: usize,
+) -> Option<Vec<i8>> {
+    let mut results = vec![0i8; num_rows];
+    // SAFETY: batch is a valid reference; results is caller-owned with
+    // num_rows capacity.
+    let status = unsafe {
+        bridge::pgaccel_expr_template_two_pred_and(
+            std::ptr::from_ref(batch),
+            col1_idx,
+            cmp1_opcode,
+            const1_val,
+            col2_idx,
+            cmp2_opcode,
+            const2_val,
             results.as_mut_ptr(),
         )
     };
