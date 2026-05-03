@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "pgaccel_ffi.h"
@@ -1101,4 +1102,198 @@ extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, co
   }
   return segment_intersects_bulk_sycl<float>(static_cast<const float*>(segs_a),
                                              static_cast<const float*>(segs_b), count, results);
+}
+
+// ---------------------------------------------------------------------------
+// st_distance polygon-to-polygon (fp32)
+//
+// Computes the minimum Euclidean distance between two polygon boundaries
+// using nearest-vertex-to-edge distance. Each work-item walks the
+// vertices of polygon A against the edges of polygon B (and vice versa)
+// and emits the minimum perpendicular distance.
+//
+// UNCERTAIN policy: this is an *upper bound* on the boundary distance —
+// not the topological distance (which is 0 for overlapping polygons or
+// when one contains the other). The dispatcher tags polygon pairs whose
+// boundaries touch / overlap as UNCERTAIN so PG re-checks via
+// ST_Distance for the containment / overlap cases. Disjoint boundaries
+// get the boundary-distance shortcut directly.
+//
+// CSR layout matches `st_area_bulk_sycl` / `st_length_bulk_sycl_f32`:
+//   coords_a[]: flat fp32 [x,y,...] for all polygon-A rings
+//   row_offsets_a[]: [row_count + 1] coord-pair offsets
+//   coords_b[], row_offsets_b[]: same for polygon-B
+// ---------------------------------------------------------------------------
+
+namespace {
+
+pgaccel_status
+st_distance_polygon_polygon_bulk_sycl_f32(const float* coords_a, const uint32_t* row_offsets_a,
+                                          const float* coords_b, const uint32_t* row_offsets_b,
+                                          size_t row_count, float* distances, uint8_t* uncertain) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  const uint32_t total_a = row_offsets_a[row_count];
+  const uint32_t total_b = row_offsets_b[row_count];
+
+  try {
+    float* d_a = sycl::malloc_shared<float>(total_a > 0 ? total_a : 1, *q);
+    float* d_b = sycl::malloc_shared<float>(total_b > 0 ? total_b : 1, *q);
+    uint32_t* d_off_a = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    uint32_t* d_off_b = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    float* d_dist = sycl::malloc_shared<float>(row_count, *q);
+    uint8_t* d_unc = sycl::malloc_shared<uint8_t>(row_count, *q);
+
+    if (!d_a || !d_b || !d_off_a || !d_off_b || !d_dist || !d_unc) {
+      if (d_a)
+        sycl::free(d_a, *q);
+      if (d_b)
+        sycl::free(d_b, *q);
+      if (d_off_a)
+        sycl::free(d_off_a, *q);
+      if (d_off_b)
+        sycl::free(d_off_b, *q);
+      if (d_dist)
+        sycl::free(d_dist, *q);
+      if (d_unc)
+        sycl::free(d_unc, *q);
+      return PGACCEL_OOM;
+    }
+
+    if (total_a > 0)
+      std::memcpy(d_a, coords_a, total_a * sizeof(float));
+    if (total_b > 0)
+      std::memcpy(d_b, coords_b, total_b * sizeof(float));
+    std::memcpy(d_off_a, row_offsets_a, (row_count + 1) * sizeof(uint32_t));
+    std::memcpy(d_off_b, row_offsets_b, (row_count + 1) * sizeof(uint32_t));
+
+    q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const uint32_t sa = d_off_a[i];
+       const uint32_t ea = d_off_a[i + 1];
+       const uint32_t sb = d_off_b[i];
+       const uint32_t eb = d_off_b[i + 1];
+       const uint32_t va = (ea - sa) / 2;
+       const uint32_t vb = (eb - sb) / 2;
+       if (va < 3 || vb < 3) {
+         d_dist[i] = 0.0f;
+         d_unc[i] = 1;  // degenerate → let PG handle
+         return;
+       }
+
+       float min_dist_sq = std::numeric_limits<float>::infinity();
+       bool overlap = false;
+
+       // Walk vertices of A against edges of B.
+       for (uint32_t va_idx = 0; va_idx < va; ++va_idx) {
+         const float px = d_a[sa + va_idx * 2];
+         const float py = d_a[sa + va_idx * 2 + 1];
+         for (uint32_t vb_idx = 0; vb_idx < vb; ++vb_idx) {
+           const uint32_t next = (vb_idx + 1) % vb;
+           const float ax = d_b[sb + vb_idx * 2];
+           const float ay = d_b[sb + vb_idx * 2 + 1];
+           const float bx = d_b[sb + next * 2];
+           const float by = d_b[sb + next * 2 + 1];
+           const float dx = bx - ax;
+           const float dy = by - ay;
+           const float len_sq = dx * dx + dy * dy;
+           float d_sq;
+           if (len_sq < EPS_FP32 * EPS_FP32) {
+             const float ex = px - ax;
+             const float ey = py - ay;
+             d_sq = ex * ex + ey * ey;
+           } else {
+             // Project (p - a) onto (b - a), clamped to [0, 1].
+             const float t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+             const float tc = sycl::fmin(sycl::fmax(t, 0.0f), 1.0f);
+             const float qx = ax + tc * dx;
+             const float qy = ay + tc * dy;
+             const float ex = px - qx;
+             const float ey = py - qy;
+             d_sq = ex * ex + ey * ey;
+           }
+           if (d_sq < min_dist_sq)
+             min_dist_sq = d_sq;
+           if (d_sq < EPS_FP32 * EPS_FP32) {
+             overlap = true;
+           }
+         }
+       }
+       // Symmetrical sweep: vertices of B against edges of A.
+       for (uint32_t vb_idx = 0; vb_idx < vb; ++vb_idx) {
+         const float px = d_b[sb + vb_idx * 2];
+         const float py = d_b[sb + vb_idx * 2 + 1];
+         for (uint32_t va_idx = 0; va_idx < va; ++va_idx) {
+           const uint32_t next = (va_idx + 1) % va;
+           const float ax = d_a[sa + va_idx * 2];
+           const float ay = d_a[sa + va_idx * 2 + 1];
+           const float bx = d_a[sa + next * 2];
+           const float by = d_a[sa + next * 2 + 1];
+           const float dx = bx - ax;
+           const float dy = by - ay;
+           const float len_sq = dx * dx + dy * dy;
+           float d_sq;
+           if (len_sq < EPS_FP32 * EPS_FP32) {
+             const float ex = px - ax;
+             const float ey = py - ay;
+             d_sq = ex * ex + ey * ey;
+           } else {
+             const float t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+             const float tc = sycl::fmin(sycl::fmax(t, 0.0f), 1.0f);
+             const float qx = ax + tc * dx;
+             const float qy = ay + tc * dy;
+             const float ex = px - qx;
+             const float ey = py - qy;
+             d_sq = ex * ex + ey * ey;
+           }
+           if (d_sq < min_dist_sq)
+             min_dist_sq = d_sq;
+           if (d_sq < EPS_FP32 * EPS_FP32) {
+             overlap = true;
+           }
+         }
+       }
+
+       const float min_dist = sycl::sqrt(min_dist_sq);
+       d_dist[i] = min_dist;
+       // Boundary touch / overlap → UNCERTAIN (interior containment is
+       // not detected by edge-walk alone, so let PG decide).
+       d_unc[i] = overlap ? 1 : 0;
+     }).wait_and_throw();
+
+    std::memcpy(distances, d_dist, row_count * sizeof(float));
+    std::memcpy(uncertain, d_unc, row_count * sizeof(uint8_t));
+
+    sycl::free(d_a, *q);
+    sycl::free(d_b, *q);
+    sycl::free(d_off_a, *q);
+    sycl::free(d_off_b, *q);
+    sycl::free(d_dist, *q);
+    sycl::free(d_unc, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL st_distance_polygon_polygon_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: st_distance_polygon_polygon_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+}  // namespace
+
+extern "C" pgaccel_status
+pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* row_offsets_a,
+                                         const float* coords_b, const uint32_t* row_offsets_b,
+                                         size_t row_count, float* distances, uint8_t* uncertain) {
+  if (row_count == 0)
+    return PGACCEL_OK;
+  if (!coords_a || !row_offsets_a || !coords_b || !row_offsets_b || !distances || !uncertain)
+    return PGACCEL_ERROR_INIT;
+  return st_distance_polygon_polygon_bulk_sycl_f32(coords_a, row_offsets_a, coords_b, row_offsets_b,
+                                                   row_count, distances, uncertain);
 }

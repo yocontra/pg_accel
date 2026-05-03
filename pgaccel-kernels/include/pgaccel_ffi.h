@@ -255,16 +255,30 @@ pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_of
 
 /* ── BEGIN spatial-extensions (Agent 2A insertion zone) ─────────────
  * Agent 2A appends here:
- *   - pgaccel_sphere_distance_bulk_f32 / _f64 (split from templated kernel)
- *   - pgaccel_st_length_bulk_f64
- *   - pgaccel_st_distance_polygon_polygon_bulk
- *   - pgaccel_st_equals_bulk
- *   - pgaccel_st_touches_bulk
- *   - pgaccel_st_crosses_bulk
- *   - pgaccel_st_overlaps_bulk
+ *   - sphere_distance_bulk fp64 split (no signature change — internal)
+ *   - st_length_bulk fp64 split (no signature change — internal)
+ *   - pgaccel_st_distance_polygon_polygon_bulk (new public symbol)
+ *
+ * The sphere_distance / st_length fp64 splits are *internal* — the
+ * pgaccel_sphere_distance_bulk(use_fp64=...) and
+ * pgaccel_st_length_bulk(use_fp64=...) public entries keep the same
+ * shape; they now dispatch internally to non-templated _f32 / _f64
+ * kernels. The fp64 branches no longer return PGACCEL_ERROR_NO_DEVICE.
+ *
  * Keep declarations in this block so the cross-domain header doesn't
  * fragment over time.
  */
+
+/* CSR-style polygon×polygon distance. coords arrays mirror the
+ * pgaccel_st_area_bulk / pgaccel_st_length_bulk shape: flat fp32
+ * [x,y,x,y,...] indexed by row_offsets[row_count + 1]. distances[i]
+ * is the minimum vertex-to-edge Euclidean distance; uncertain[i] = 1
+ * if the boundaries touch / overlap (let PG recheck for interior
+ * containment — boundary-distance alone misses the contains case). */
+pgaccel_status
+pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* row_offsets_a,
+                                         const float* coords_b, const uint32_t* row_offsets_b,
+                                         size_t row_count, float* distances, uint8_t* uncertain);
 /* ── END spatial-extensions ────────────────────────────────────────── */
 
 /* ── Spatial Dispatch (Three-Layer Pipeline) ──────────────────────── */

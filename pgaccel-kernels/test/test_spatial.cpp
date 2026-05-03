@@ -830,6 +830,69 @@ static void test_st_length_bulk_fp64() {
 }
 
 // ---------------------------------------------------------------------------
+// st_distance_polygon_polygon tests
+// ---------------------------------------------------------------------------
+
+static void test_st_distance_polygon_polygon_disjoint() {
+  printf("--- st_distance_polygon_polygon: disjoint pair ---\n");
+  // Polygon A: unit square at origin (0,0)-(1,1). Closed ring:
+  //   (0,0)(1,0)(1,1)(0,1)(0,0)  -> 5 verts
+  // Polygon B: unit square offset by (3,0): (3,0)-(4,1).
+  //   (3,0)(4,0)(4,1)(3,1)(3,0)  -> 5 verts
+  // Boundary distance between right edge of A (x=1) and left edge of B (x=3)
+  // = 2.0. Boundaries do not touch → uncertain = 0 (definite).
+  const float coords_a[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  const float coords_b[] = {
+      3.0f, 0.0f, 4.0f, 0.0f, 4.0f, 1.0f, 3.0f, 1.0f, 3.0f, 0.0f,
+  };
+  const uint32_t off_a[] = {0, 10};
+  const uint32_t off_b[] = {0, 10};
+  float dist[1] = {-1.0f};
+  uint8_t unc[1] = {1};
+  pgaccel_status s =
+      pgaccel_st_distance_polygon_polygon_bulk(coords_a, off_a, coords_b, off_b, 1, dist, unc);
+  ASSERT_EQ("status OK", s, PGACCEL_OK);
+  ASSERT_EQ("disjoint definite", unc[0], 0);
+  ASSERT_NEAR("disjoint distance = 2", dist[0], 2.0f, 1e-4f);
+}
+
+static void test_st_distance_polygon_polygon_touching() {
+  printf("--- st_distance_polygon_polygon: touching boundaries ---\n");
+  // Two unit squares that share an edge at x=1. Right edge of A coincides
+  // with left edge of B. Boundary-distance = 0; mark as UNCERTAIN so PG
+  // re-checks whether they intersect / contain.
+  const float coords_a[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  const float coords_b[] = {
+      1.0f, 0.0f, 2.0f, 0.0f, 2.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f,
+  };
+  const uint32_t off_a[] = {0, 10};
+  const uint32_t off_b[] = {0, 10};
+  float dist[1] = {-1.0f};
+  uint8_t unc[1] = {0};
+  pgaccel_st_distance_polygon_polygon_bulk(coords_a, off_a, coords_b, off_b, 1, dist, unc);
+  ASSERT_EQ("touching → UNCERTAIN flag set", unc[0], 1);
+}
+
+static void test_st_distance_polygon_polygon_degenerate() {
+  printf("--- st_distance_polygon_polygon: degenerate row -> UNCERTAIN ---\n");
+  // Row 0 has < 3 verts (4 floats); kernel should mark UNCERTAIN.
+  const float coords_a[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  const float coords_b[] = {
+      3.0f, 0.0f, 4.0f, 0.0f, 4.0f, 1.0f, 3.0f, 1.0f, 3.0f, 0.0f,
+  };
+  const uint32_t off_a[] = {0, 4};
+  const uint32_t off_b[] = {0, 10};
+  float dist[1] = {-1.0f};
+  uint8_t unc[1] = {0};
+  pgaccel_st_distance_polygon_polygon_bulk(coords_a, off_a, coords_b, off_b, 1, dist, unc);
+  ASSERT_EQ("degenerate → UNCERTAIN", unc[0], 1);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -868,6 +931,10 @@ int main() {
   test_st_length_bulk_open_path();
   test_st_length_bulk_degenerate();
   test_st_length_bulk_fp64();
+
+  test_st_distance_polygon_polygon_disjoint();
+  test_st_distance_polygon_polygon_touching();
+  test_st_distance_polygon_polygon_degenerate();
 
   printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
   if (g_tests_failed > 0) {
