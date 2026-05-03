@@ -913,7 +913,11 @@ pub struct H3VarOutCells {
 }
 
 /// Result of an H3 var-output f64 dispatch (lat/lng coord pairs).
-#[allow(dead_code)] // reason: returned by polyfill / boundary / multi_polygon wrappers; dispatch wiring blocked on PostGIS GSERIALIZED encoder + polygon extractor
+///
+/// Consumed by the boundary / multi_polygon dispatch arms in
+/// `engine/dispatch/h3.rs` (Phase 2 F3). Each pair of doubles encodes
+/// `(lat, lng)` in WGS84 (EPSG:4326); the F2 GSERIALIZED encoder reorders
+/// to PostGIS x=lng / y=lat semantics on encode.
 pub struct H3VarOutCoords {
     pub offsets: Vec<u32>,
     pub coords: Vec<f64>,
@@ -1002,7 +1006,10 @@ pub fn h3_grid_ring_unsafe_bulk(cells: &[u64], k: i32) -> Option<H3VarOutCells> 
 /// `h3_polyfill(geom, resolution)` — outputs cells whose centre lies
 /// inside the polygon. `coords` is flat `[x0,y0,...]` in lon/lat degrees;
 /// `ring_offsets` indexes into `coords` for `ring_count` rings.
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on per-row geometry-polygon extractor for h3_polyfill (geom argument)
+///
+/// Consumed by the `h3_polyfill` dispatch arm in `engine/dispatch/h3.rs`
+/// (Phase 2 F3, replaces the deferred arm that documented the missing
+/// per-row geometry extractor).
 pub fn h3_polyfill_bulk(
     coords: &[f32],
     ring_offsets: &[u32],
@@ -1097,7 +1104,10 @@ pub fn h3_cell_to_children_bulk(cells: &[u64], child_res: i32) -> Option<H3VarOu
 /// `h3_cell_to_boundary(cell)` — emits 6 (hexagon) or 5 (pentagon) lat/lng
 /// vertex pairs per cell. Offsets are in DOUBLE units (2 doubles per
 /// vertex pair × 6 = 12 doubles per hexagon).
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on PostGIS GSERIALIZED polygon encoder for h3 boundary output
+///
+/// Consumed by the `h3_cell_to_boundary` dispatch arm in
+/// `engine/dispatch/h3.rs` (Phase 2 F3, replaces the deferred arm that
+/// documented the missing PostGIS GSERIALIZED encoder).
 pub fn h3_cell_to_boundary_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
     let count = cells.len();
     let mut offsets = vec![0u32; count + 1];
@@ -1136,7 +1146,13 @@ pub fn h3_cell_to_boundary_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
 ///
 /// Returns `(ring_offsets, coords)` where `ring_offsets.len() == ring_count + 1`
 /// and `coords.len() == ring_offsets[ring_count]` (in doubles).
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on PostGIS GSERIALIZED multipolygon encoder + bigint[] array-input dispatch carrier
+///
+/// Phase 2 F3 status: kernel + Rust wrapper are ready; dispatch arm in
+/// `engine/dispatch/h3.rs` is gated on a PG `bigint[]` ArrayType walker
+/// (same blocker as `st_value`'s `geometry[]` arg, see `gpu/mod.rs:1470`).
+/// Kept un-dead-code-allowed so that future ArrayType plumbing can wire
+/// this without re-touching the gpu module.
+#[allow(dead_code)] // reason: kernel ready; dispatch arm in engine/dispatch/h3.rs gated on bigint[] ArrayType extractor (tracked alongside st_value)
 pub fn h3_cells_to_multi_polygon_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
     let count = cells.len();
     if count == 0 {

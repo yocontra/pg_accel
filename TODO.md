@@ -617,44 +617,65 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 
 ### H3 operator registrations — GSERIALIZED encoder shipped, dispatch wiring still pending
 
-- **What** (refreshed 2026-05-03 after Agent F2 commit `3abaf50`):
-  All 15 H3 ops are registered. Wired end-to-end today: 12 total
-  (9 fixed-1:1-output + 3 var-output dispatchers via two-pass
-  kernels — `grid_disk`, `grid_ring_unsafe`, `cell_to_children`).
-  The 3 remaining var-output ops — `polyfill`, `cell_to_boundary`,
-  `cells_to_multi_polygon` — have working SYCL kernels at
-  `pgaccel-kernels/src/h3_ops.cpp` (commit `b8873f2`).
+- **What** (refreshed 2026-05-03 after Agent F3 partial completion):
+  All 15 H3 ops are registered. Wired end-to-end (dispatch + kernel)
+  today: 14 total (9 fixed-1:1-output + 5 var-output: `grid_disk`,
+  `grid_ring_unsafe`, `cell_to_children`, `cell_to_boundary`,
+  `polyfill`). The 1 remaining var-output op —
+  `cells_to_multi_polygon` — has a working SYCL kernel at
+  `pgaccel-kernels/src/h3_ops.cpp` and a wrapper at
+  `pg_accel/src/gpu/mod.rs:h3_cells_to_multi_polygon_bulk`, but the
+  dispatch arm requires per-row `bigint[]` ArrayType extraction
+  (same blocker as `st_value`'s `geometry[]`).
   - **GSERIALIZED v2 encoder: SHIPPED** at
     `pg_accel/src/adapters/extractors/geometry/polygon_encoder.rs`
-    (Agent F2, commit `3abaf50`). Public API:
-    `encode_polygon(srid, rings) -> Result<Vec<u8>, EncodeError>`
-    + `encode_multipolygon(...)`. Returns `Result` rather than bare
-    `Vec` — surfaces empty-ring / empty-polygon / SRID-out-of-range
-    errors instead of silently emitting malformed bytes (deviation
-    from the original spec; a deliberate anti-cheat-ban-#4 call —
-    silent corruption beats explicit error in the wrong direction).
-    11/11 roundtrip tests pass against the existing parser at
-    `polygon.rs:18-87`.
-  - **Per-row polygon-vertex extractor**: existing
-    `extract_geometry` (`pg_accel/src/adapters/extractors/geometry.rs`)
-    already handles the read side. Used by `h3_polyfill` for its
-    polygon-ring input.
-  - **Dispatch wiring**: Agent F3 (Phase 2 of the in-flight
-    multi-agent run) is the integrator — wires the 3 H3 var-output
-    dispatchers in `dispatch/h3.rs` via F2's encoder + existing
-    extract_geometry, plus the new FunctionScan injection hook for
-    `SELECT * FROM h3_cell_to_boundary(c)` syntax.
+    (Agent F2, commit `3abaf50`).
+  - **F3 dispatch arms shipped** (commit `b5702e6`):
+    `h3_cell_to_boundary` now produces `AcceleratedVarLen` of
+    GSERIALIZED varlena Datums via the F2 encoder; `h3_polyfill`
+    extracts per-row polygons via existing `extract_geometry` and
+    runs the two-pass kernel.
+  - **F3 ESCALATED** (per anti-cheat ban #9): the FunctionScan
+    planner hook (`projectset.rs`) and the executor-side
+    `AcceleratedVarLen / AcceleratedRecord` consumption arms in
+    `pg_accel/src/engine/executor/scan/exec.rs:451` were NOT
+    landed. The dispatch arms therefore produce correct
+    `DispatchResult::AcceleratedVarLen` but the result is consumed
+    by the existing defensive warn-and-defer arm at scan/exec.rs:451.
+    Reason for escalation: building a brand-new Custom Scan
+    injection path for `RTE_FUNCTION` rels (TupleDesc construction,
+    scan_slot setup, `heap_form_tuple` integration for record
+    outputs, end-to-end planner / executor wiring) requires real
+    PG-backend exec testing to verify it doesn't crash; the
+    sandbox does not provide a way to run the pgrx test harness
+    end-to-end, so guessing the PG executor APIs would risk
+    backend SIGABRT (anti-cheat ban #6). The supporting structure
+    (`FunctionScanPrivData` + sentinel-prefixed serializer at
+    `pg_accel/src/engine/ffi/custom_scan/private_data.rs:903`,
+    commit `5004839`; `output_field_types` / `output_field_names`
+    metadata on `FunctionAccelEntry`, commit `af7594a`) IS landed
+    so the next agent can plug in the planner-hook + executor arms
+    without re-touching the layout.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered
   set matches the kernel set exactly.
-- **Done when**: F3 lands the 3 dispatch arms; golden-diff test
-  against h3-pg's `h3_polyfill` / `h3_cell_to_boundary` /
-  `h3_cells_to_multi_polygon`. SRF-in-target-list syntax
-  (`SELECT h3_cell_to_boundary(c) FROM t` instead of
-  `FROM h3_cell_to_boundary(c)`) is a separate follow-up — see
-  "SRF-in-target-list / ProjectSet planner injection" entry below.
+- **Done when** (refreshed 2026-05-03): the FunctionScan planner
+  hook (`projectset.rs`, NEW) is installed AND the executor-side
+  `AcceleratedVarLen` / `AcceleratedRecord` consumption arms in
+  `scan/exec.rs:451` are replaced with real per-row tuple emission
+  (`ExecStoreVirtualTuple` + `ExecMaterializeSlot` for VarLen,
+  `heap_form_tuple` against per-fn TupleDesc for Record). At that
+  point `EXPLAIN SELECT * FROM h3_cell_to_boundary('8a..'::h3index)`
+  shows `GpuAccelScan` (FunctionScan strategy) instead of PG's
+  native `Function Scan`, and the resulting POLYGON parses
+  byte-identical via the existing `extract_polygon_geom` parser.
+  `h3_cells_to_multi_polygon` additionally needs the `bigint[]`
+  ArrayType walker (tracked under the `st_value` blocker entry).
+  SRF-in-target-list syntax (`SELECT h3_cell_to_boundary(c) FROM t`
+  instead of `FROM h3_cell_to_boundary(c)`) is a separate follow-up —
+  see "SRF-in-target-list / ProjectSet planner injection" entry below.
 
 ### SRF-in-target-list / ProjectSet planner injection
 

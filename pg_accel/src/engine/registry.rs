@@ -107,6 +107,25 @@ pub struct FunctionAccelEntry {
     /// (1 Datum per row); set explicitly for record-returning or variable-
     /// length-output kernels (e.g. `ST_SummaryStats`, H3 grid expansions).
     pub output_shape: OutputShape,
+    /// PG type OIDs of the output column(s), in tuple-desc order. Required
+    /// for the FunctionScan injection path (Phase 2 F3) so the executor can
+    /// build a `TupleDesc` for record / var-length outputs without having to
+    /// re-derive types via `pg_proc` lookup at exec time.
+    ///
+    /// - For [`OutputShape::Scalar`]: a single-OID Vec is sufficient (the
+    ///   per-row return type) — left empty when the F3 FunctionScan path is
+    ///   not the consumer (predicate / WHERE-clause injection sites read the
+    ///   return type from `pg_proc` via `fmgr_info` instead).
+    /// - For [`OutputShape::Record`] `{ field_count }`: must contain exactly
+    ///   `field_count` entries (e.g. ST_SummaryStats: 6 INT8/FLOAT8 OIDs).
+    /// - For [`OutputShape::VarLen`]: single-entry Vec describing the
+    ///   per-output element type (e.g. `INT8OID` for h3index, `GSERIALIZED`
+    ///   varlena for boundary geometries).
+    pub output_field_types: Vec<u32>,
+    /// Column names matching `output_field_types`, in the same positional
+    /// order. Used by the FunctionScan TupleDesc builder. May be empty when
+    /// `output_field_types` is empty (non-FunctionScan consumers).
+    pub output_field_names: Vec<&'static str>,
 }
 
 impl FunctionAccelEntry {
@@ -114,6 +133,11 @@ impl FunctionAccelEntry {
     /// `output_shape` to [`OutputShape::Scalar`] — used by the bulk of
     /// existing adapters (`ST_Contains`, `h3_get_resolution`, etc.) where
     /// every accelerated function produces exactly one Datum per input row.
+    ///
+    /// `output_field_types` and `output_field_names` are left empty here;
+    /// scalar predicate/qual injection sites do not consume them. Add them
+    /// explicitly via the struct literal when registering an entry that
+    /// participates in the FunctionScan injection path (Phase 2 F3).
     #[must_use]
     pub const fn scalar(schema: &'static str, name: &'static str, strategy: AccelStrategy) -> Self {
         Self {
@@ -121,6 +145,8 @@ impl FunctionAccelEntry {
             name,
             strategy,
             output_shape: OutputShape::Scalar,
+            output_field_types: Vec::new(),
+            output_field_names: Vec::new(),
         }
     }
 }
@@ -237,6 +263,8 @@ impl AdapterRegistry {
                             name: func.name,
                             strategy: func.strategy,
                             output_shape: func.output_shape,
+                            output_field_types: func.output_field_types.clone(),
+                            output_field_names: func.output_field_names.clone(),
                         },
                     );
                 }
@@ -653,6 +681,8 @@ mod tests {
             name: "st_summarystats",
             strategy: AccelStrategy::GpuRaster,
             output_shape: OutputShape::Record { field_count: 6 },
+            output_field_types: Vec::new(),
+            output_field_names: Vec::new(),
         };
         assert_eq!(e.output_shape, OutputShape::Record { field_count: 6 });
     }
@@ -664,7 +694,62 @@ mod tests {
             name: "h3_grid_disk",
             strategy: AccelStrategy::GpuH3,
             output_shape: OutputShape::VarLen,
+            output_field_types: Vec::new(),
+            output_field_names: Vec::new(),
         };
         assert_eq!(e.output_shape, OutputShape::VarLen);
+    }
+
+    // -- output_field_types / output_field_names (Phase 2 F3 metadata) -------
+
+    #[test]
+    fn function_accel_entry_scalar_constructor_leaves_field_metadata_empty() {
+        // The bulk of registered entries (predicate / qual injection sites)
+        // do not consume FunctionScan TupleDesc metadata. The convenience
+        // constructor must therefore default both vectors to empty.
+        let e = FunctionAccelEntry::scalar("public", "st_contains", AccelStrategy::GpuSpatial);
+        assert!(e.output_field_types.is_empty());
+        assert!(e.output_field_names.is_empty());
+    }
+
+    #[test]
+    fn function_accel_entry_record_metadata_round_trips() {
+        // Records the F3 metadata for ST_SummaryStats: 6 fp64 fields named
+        // count / sum / mean / stddev / min / max.
+        let e = FunctionAccelEntry {
+            schema: "public",
+            name: "st_summarystats",
+            strategy: AccelStrategy::GpuRaster,
+            output_shape: OutputShape::Record { field_count: 6 },
+            output_field_types: vec![
+                pgrx::pg_sys::INT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+            ],
+            output_field_names: vec!["count", "sum", "mean", "stddev", "min", "max"],
+        };
+        assert_eq!(e.output_field_types.len(), 6);
+        assert_eq!(e.output_field_names.len(), 6);
+        // Cloning must preserve the vectors.
+        let cloned = e.clone();
+        assert_eq!(cloned.output_field_types, e.output_field_types);
+        assert_eq!(cloned.output_field_names, e.output_field_names);
+    }
+
+    #[test]
+    fn function_accel_entry_varlen_metadata_round_trips() {
+        let e = FunctionAccelEntry {
+            schema: "public",
+            name: "h3_polyfill",
+            strategy: AccelStrategy::GpuH3,
+            output_shape: OutputShape::VarLen,
+            output_field_types: vec![pgrx::pg_sys::INT8OID.to_u32()],
+            output_field_names: vec!["cell"],
+        };
+        assert_eq!(e.output_field_types, vec![pgrx::pg_sys::INT8OID.to_u32()]);
+        assert_eq!(e.output_field_names, vec!["cell"]);
     }
 }
