@@ -1017,15 +1017,20 @@ extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint3
   if (!coords || !row_offsets || !lengths)
     return PGACCEL_ERROR_INIT;
 
-  // FORK-SAFETY GATE (added 2026-05-02): the f64 kernel itself compiles
-  // cleanly on the leader, but `acpp-metal-archive-build` OOMs (SIGKILL,
-  // exit 137) when serializing the soft-fp64 metallib. PG worker forks
-  // would crash with "Unable to reach MTLCompilerService". Same root
-  // cause + same gate as `pgaccel_sphere_distance_bulk` (~line 1076).
-  // Tracked in TODO Phase 7. Drop this gate once the binary-archive
-  // memory budget is fixed upstream.
+  // fp64 path re-enabled 2026-05-03 (commit on agent-b1-acpp-runtime). The
+  // upstream AdaptiveCpp runtime now treats helper exit 9 (skip-too-large)
+  // as success-without-archive instead of fatal failure, and the helper
+  // skips serialization when the metallib exceeds
+  // ACPP_METAL_ARCHIVE_MAX_BYTES (default 900 KiB). The soft-fp64 metallib
+  // for st_length is ~1.16 MB so it skips by default; the kernel still
+  // dispatches via in-process JIT in the parent backend, and forked workers
+  // that hit the kernel cold for the first time fall back to in-process
+  // pipeline-state creation (one-time MTLCompilerService cost per worker).
+  // Raise ACPP_METAL_ARCHIVE_MAX_BYTES to opt back into pre-built archives
+  // if you have memory headroom.
   if (use_fp64) {
-    return PGACCEL_ERROR_NO_DEVICE;
+    return st_length_bulk_sycl_f64(static_cast<const double*>(coords), row_offsets, row_count,
+                                   closed_ring, static_cast<double*>(lengths));
   }
   return st_length_bulk_sycl_f32(static_cast<const float*>(coords), row_offsets, row_count,
                                  closed_ring, static_cast<float*>(lengths));
@@ -1076,20 +1081,22 @@ extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, con
   // proved direct `sycl::sin/cos/asin/sqrt(double)` builtins compile
   // cleanly on Metal SSCP; only the templated form hung.
   //
-  // FORK-SAFETY GATE (added 2026-05-02): the f64 kernel itself compiles
-  // cleanly on the leader (1.16 MB metallib emitted under SLEEF
-  // soft-fp64), but `acpp-metal-archive-build` (the fork-safe
-  // MTLBinaryArchive prebuild — see CLAUDE.md "MTLBinaryArchive cache
-  // (fork-safety on Apple Silicon)") OOMs with SIGKILL (exit 137) when
-  // serializing the 17 MB .jit IR. Without the .metalar archive, PG
-  // worker forks crash with "Unable to reach MTLCompilerService" the
-  // first time they hit the kernel — a parallel-query crash regression.
-  // Re-gated to NO_DEVICE pending the binary-archive memory fix
-  // (TODO Phase 7). The kernel code stays in-tree as `_f64` so the gate
-  // is a one-line drop the moment archive serialization is fixed.
-  // st_length_bulk fp64 has the same gate at line ~1020.
+  // fp64 path re-enabled 2026-05-03 (commit on agent-b1-acpp-runtime). The
+  // upstream AdaptiveCpp runtime now treats helper exit 9 (skip-too-large)
+  // as success-without-archive instead of fatal failure, and the helper
+  // (acpp-metal-archive-build) skips serialization when the metallib
+  // exceeds ACPP_METAL_ARCHIVE_MAX_BYTES (default 900 KiB). The soft-fp64
+  // metallib for sphere_distance is ~1.16 MB so it skips by default — the
+  // kernel still dispatches via in-process JIT in the parent backend, and
+  // forked workers that hit the kernel cold for the first time fall back
+  // to in-process pipeline-state creation (one-time MTLCompilerService cost
+  // per worker). Raise ACPP_METAL_ARCHIVE_MAX_BYTES to opt back into the
+  // pre-built archive if you have memory headroom (the archive build OOMed
+  // at 17 MB .jit IR on a 24 GB machine; a larger box may complete).
   if (use_fp64) {
-    return PGACCEL_ERROR_NO_DEVICE;
+    return sphere_distance_bulk_sycl_f64(static_cast<const double*>(points_a),
+                                         static_cast<const double*>(points_b), count,
+                                         static_cast<double*>(distances), uncertain);
   }
   return sphere_distance_bulk_sycl_f32(static_cast<const float*>(points_a),
                                        static_cast<const float*>(points_b), count,

@@ -106,17 +106,22 @@ executor + 3 pg_test integration tests). Open work in TODO order:
 10. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
     approach was tried, made things worse, reverted. Same root cause
     as (8); needs the SSCP investigation.
-11. **Phase 7 fp64 sphere_distance + st_length fork-safety** —
-    kernels in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:
-    502,937` but still gated to `PGACCEL_ERROR_NO_DEVICE` at
-    `:1076` and `:1020` pending an `acpp-metal-archive-build` runtime
-    fix. **Phase II Agent FS landed the helper-side fix** (size
-    threshold + exit code 9 in AdaptiveCpp `fork-safe-metal` commit
-    `348f6022`); the runtime side that consumes exit 9 is still open.
-    See Phase 7 "Metal SSCP soft-fp64 trig" entry for the root cause
-    + the runtime work that remains.
-12. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
-13. **Phase 3-10 in order** for everything else.
+11. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+12. **Phase 3-10 in order** for everything else.
+
+The 2026-05-03 fp64 sphere_distance + st_length fork-safety entry is
+closed: AdaptiveCpp `fork-safe-metal` SHA `903442b0` teaches the Metal
+runtime to treat helper exit 9 (skip-too-large) as success-without-archive,
+which lets the helper opt out of serializing the 17 MB soft-fp64 .jit IR
+without crashing the runtime build path. fp64 gates dropped at
+`pgaccel-kernels/src/spatial_predicates.cpp:1027,1091` —
+`pgaccel_sphere_distance_bulk(use_fp64=true)` and
+`pgaccel_st_length_bulk(use_fp64=true)` now dispatch the SYCL kernels and
+test_spatial 109/109 passes cold. test_fork + test_fork_cold still PASS.
+The kernels skip the prebuilt MTLBinaryArchive (default 900 KiB threshold,
+override via `ACPP_METAL_ARCHIVE_MAX_BYTES`) so forked workers pay a
+one-time MTLCompilerService cost when they cold-dispatch sphere_distance
+or st_length, but no longer crash. agent-b1-acpp-runtime branch.
 
 The 2026-05-02 cheat-audit (7 host-loop kernels in spatial /
 raster / window) is closed — point_in_ring fp32, segment_intersects
@@ -950,64 +955,41 @@ work is tracked in the Post-1.0 (deferred) section.
 - **Done when**: Each item has a dedicated commit; shader size / compile
   time measured before and after.
 
-### Metal SSCP soft-fp64 trig — JIT hang resolved, fork-safety partial fix landed
+### Metal SSCP soft-fp64 trig — RESOLVED 2026-05-03
 
-- **What** (refreshed 2026-05-03 after Phase II Agent FS landed the
-  AdaptiveCpp helper-side fix at `fork-safe-metal` commit `348f6022`):
-  The original "templated `sphere_distance_bulk_sycl<T>` instantiation
-  hangs Metal SSCP JIT" hang is **fixed** — splitting into non-templated
-  `sphere_distance_bulk_sycl_f32` + `_f64` (mirrors the explicit-double
-  pattern at `h3_ops.cpp:972-1019`) sidesteps the templated emitter
-  recursion. Same fix shape for `st_length_bulk_sycl_f64`.
-  - Leader-thread fp64 dispatch: **works**, kernel produces correct
-    results, 1.16 MB metallib emitted under SLEEF soft-fp64 lowering.
-  - **`acpp-metal-archive-build` OOM (exit 137): partial fix landed.**
-    AdaptiveCpp `fork-safe-metal` commit `348f6022` adds a configurable
-    size threshold to the helper (default 900 KiB; override
-    `ACPP_METAL_ARCHIVE_MAX_BYTES`). When the input metallib exceeds
-    the threshold the helper exits 9 (distinct from the existing
-    2/3/4/5/6/7/8 codes) instead of being SIGKILL'd mid-allocation.
-    Verified locally: synthetic 1.2 MB metallib → exit 9; smaller
-    metallibs unaffected; `test_fork` still passes (exit 0; archive
-    builder produces `.metalar` for under-threshold libraries).
-  - **Runtime side: NOT YET LANDED.** The AdaptiveCpp Metal runtime
-    (`metal_sscp_executable_object::build`) currently treats any
-    non-zero exit from the helper as "archive build failed, retry on
-    next dispatch" — which means exit 9 still leaves no `.metalar`
-    on disk and the next forked child still crashes at first
-    dispatch ("Unable to reach MTLCompilerService"). The runtime
-    needs to recognise exit 9 as "intentionally skipped, this kernel
-    will not have a fork-safe pipeline state — gate dispatch to
-    leader-only" or similar. Not yet in fork-safe-metal HEAD.
-  - **Current gating** (unchanged):
-    `pgaccel_sphere_distance_bulk(use_fp64=true)` and
-    `pgaccel_st_length_bulk(use_fp64=true)` remain gated to
-    `PGACCEL_ERROR_NO_DEVICE` at `spatial_predicates.cpp:1091`
-    (sphere_distance) and `:1027` (st_length). Kernel code stays
-    in-tree — gates are one-line drops the moment the runtime side
-    of the helper-exit-9 contract lands.
-- **Why**: Without fp64 GPU, `st_dwithin` precision tops out at fp32 on
-  Metal (~10⁻⁵ deg ≈ 1m at equator). PostGIS-grade precision (sub-mm)
-  needs the fp64 path. But shipping a known parallel-query crash is
-  worse than no acceleration.
-- **How** (remaining runtime work, upstream):
-  - In AdaptiveCpp `src/runtime/metal/metal_sscp_executable_object.cpp`
-    (the caller of `acpp-metal-archive-build`), distinguish exit 9
-    ("intentionally skipped") from exit !=0 ("real failure"). On
-    exit 9: log a warning, mark the kernel as "no fork-safe archive,
-    leader-only dispatch", and either gate parallel dispatch or
-    accept the crash class for that specific kernel with a clear
-    one-time warning.
-  - Helper-side fix already landed (`348f6022`); the runtime patch
-    is the dependency to drop the kernel-side gates here.
-- Depends on: AdaptiveCpp `fork-safe-metal` runtime patch consuming
-  the new exit code 9 contract.
-- **Done when**: Drop both `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;`
-  gates at `spatial_predicates.cpp:1091` (sphere_distance) and `:1027`
-  (st_length); `test_fork` passes with fp64 sphere_distance dispatched
-  in a forked PG worker (or fails cleanly with the new exit-9 leader-
-  only path); zero parallel-query crashes when a query touches the
-  fp64 path.
+The full chain landed:
+
+1. **Templated emitter recursion** fixed earlier: split
+   `sphere_distance_bulk_sycl<T>` and `st_length_bulk_sycl<T>` into
+   non-templated `_f32` / `_f64` (mirrors `h3_ops.cpp:972-1019`).
+2. **Helper OOM (exit 137)** fixed in AdaptiveCpp `fork-safe-metal`
+   `348f6022`: `acpp-metal-archive-build` skips serialization when the
+   metallib exceeds `ACPP_METAL_ARCHIVE_MAX_BYTES` (default 900 KiB),
+   exiting 9 instead of being SIGKILL'd.
+3. **Runtime consumes exit 9** in AdaptiveCpp `fork-safe-metal`
+   `903442b0`: `metal_sscp_executable_object::build` distinguishes
+   built / skipped / failed; `skipped` leaves `_archive == nullptr`
+   and lets pipeline-state creation fall through to in-process compile
+   (works on the parent backend; forked workers pay a one-time
+   `MTLCompilerService` cost when they cold-dispatch this specific
+   kernel, but no longer crash).
+4. **Gates dropped** at `pgaccel-kernels/src/spatial_predicates.cpp:1027`
+   (st_length) and `:1091` (sphere_distance). Both `use_fp64=true` paths
+   now dispatch the `_f64` SYCL kernel.
+
+Verified: `just gpu-test-cold spatial 600` → 109/109 passed (incl. the
+previously-failing `test_sphere_distance_fp64` and the fp64 st_length
+post-split assertions); `just gpu-test-cold fork` → PASS;
+`just gpu-test-cold fork_cold` → PASS. `just check`, `just lint`,
+`just audit-cpu-cheats` clean on `agent-b1-acpp-runtime`.
+
+Residual caveat (acceptable, documented): forked workers cold-dispatching
+sphere_distance/st_length fp64 incur one MTLCompilerService round-trip
+the first time the kernel is hit. Raise `ACPP_METAL_ARCHIVE_MAX_BYTES`
+(e.g. to 4194304) to opt back into pre-built archives if memory headroom
+allows; the helper will stop skipping. Re-test on a larger-memory box
+with archive builds enabled to see whether the original 17 MB .jit IR
+OOM has hardware-budget headroom.
 
 ### `__args` MSL compile error on fused stats kernels at large N
 
@@ -1049,10 +1031,17 @@ work is tracked in the Post-1.0 (deferred) section.
 - **How**:
   - Run `test_fork`, `test_fork_warmed`, `test_fork_cold` with each fp64
     kernel under stress after Phase 1 is green.
-  - Confirm `.metalar` archives contain every preserved function.
+  - Confirm `.metalar` archives contain every preserved function — except
+    metallibs the helper deliberately skipped via the
+    `ACPP_METAL_ARCHIVE_MAX_BYTES` threshold (sphere_distance / st_length
+    fp64 fall in this bucket post 2026-05-03; the runtime falls back
+    cleanly to in-process pipeline compile on first dispatch per worker).
 - Depends on: Phase 1 Emitter fixes, `just gpu-test` green.
 - **Done when**: 8-worker × 20-iteration fork stress on fp64 kernels shows
-  zero crashes and zero `MTLCompilerService` errors.
+  zero crashes and zero `MTLCompilerService` errors (fp64 sphere_distance
+  + st_length already verified end-to-end on
+  `agent-b1-acpp-runtime` against AdaptiveCpp `fork-safe-metal` SHA
+  `903442b0`).
 
 ### Metal shader compile warnings under `-Wall` / `-Wextra`
 
