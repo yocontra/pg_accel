@@ -858,3 +858,68 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
 
     DispatchResult::AcceleratedVarLen { offsets, datums }
 }
+
+// ---------------------------------------------------------------------------
+// pg_test integration for the Phase 2 B3 h3_cells_to_multi_polygon arm
+// ---------------------------------------------------------------------------
+//
+// **Known dispatch shape mismatch (mirrors function_scan.rs:676-684 for
+// `h3_cell_to_boundary`).** h3-pg declares
+// `h3_cells_to_multi_polygon(h3index[], OUT exterior polygon, OUT holes
+// polygon[])` (PG built-in `polygon` types — see
+// `h3--3.7.2--4.0.0.sql:ALTER FUNCTION h3_set_to_multi_polygon ...
+// RENAME TO h3_cells_to_multi_polygon`). Our Phase 2 B3 dispatch arm
+// instead emits PostGIS GSERIALIZED MULTIPOLYGON varlena bytes via
+// `varlena_from_gserialized`, and the planner-side classifier wires our
+// kernel up regardless of the declared return type. Counting the row
+// exercises the FunctionScan dispatch + tuple emission path without
+// forcing PG to interpret the value bytes; a follow-up bug ticket
+// will retarget the kernel output to the declared return type once
+// the var-output FunctionScan injection chain stabilises.
+//
+// The test asserts the call doesn't crash (count >= 1). It runs only
+// when h3 is installable in the pgrx_tests DB; otherwise it skips
+// silently — same idiom as function_scan.rs:661.
+#[cfg(feature = "pg_test")]
+#[allow(clippy::unwrap_used)]
+#[pgrx::pg_schema]
+mod tests {
+    use pgrx::prelude::{Spi, pg_test};
+
+    fn ensure_extension(name: &str) -> bool {
+        let create_sql = format!("CREATE EXTENSION IF NOT EXISTS {name} CASCADE");
+        if Spi::run(&create_sql).is_err() {
+            return false;
+        }
+        let q = format!("SELECT count(*) FROM pg_extension WHERE extname = '{name}'");
+        Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
+    }
+
+    /// `SELECT count(*) FROM h3_cells_to_multi_polygon(ARRAY[
+    ///   '8a..', '8a..']::h3index[])` returns exactly one row (the
+    /// function declares `OUT exterior polygon, OUT holes polygon[]`).
+    /// Counts rows rather than reading values to avoid the GSERIALIZED
+    /// vs PG-`polygon` shape mismatch (see module-level comment).
+    #[pg_test]
+    fn h3_cells_to_multi_polygon_emits_one_row() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        // Trigger registry init.
+        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
+
+        // Two adjacent resolution-10 cells. h3-pg's
+        // `h3_cells_to_multi_polygon(h3index[])` always emits exactly
+        // one (exterior, holes) row regardless of input cardinality.
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM h3_cells_to_multi_polygon(\
+             ARRAY['8a2a1072b59ffff', '8a2a1072b597fff']::h3index[])",
+        )
+        .expect("count query ok")
+        .expect("count not null");
+        assert_eq!(
+            count, 1,
+            "h3_cells_to_multi_polygon must emit exactly one (exterior, holes) row, got {count}",
+        );
+    }
+}
