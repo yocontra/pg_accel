@@ -1126,6 +1126,86 @@ unsafe extern "C-unwind" fn plan_custom_path_preagg(
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+/// Build a `custom_scan_tlist` for FunctionScan from the registry-derived
+/// output schema. Each registry column becomes a `TargetEntry` wrapping a
+/// `Var(varno = INDEX_VAR, varattno = i+1, type = output_field_types[i])`.
+///
+/// Returns `None` if the registry lookup fails (caller falls back to the
+/// planner's own tlist).
+///
+/// # Safety
+///
+/// Called from the planner on the main backend thread. Allocates Var /
+/// TargetEntry / List nodes via `palloc` in `CurrentMemoryContext`.
+unsafe fn build_function_scan_tlist(
+    priv_data: Option<&FunctionScanPrivData>,
+) -> Option<*mut pg_sys::List> {
+    let priv_data = priv_data?;
+    crate::engine::registry::lazy_init();
+    let entry = crate::engine::registry::global_registry().lookup(priv_data.fn_oid)?;
+    let n = entry.output_field_types.len();
+    if n == 0 || n != entry.output_field_names.len() {
+        return None;
+    }
+
+    // Resolve sentinel type-OID `0` (PostGIS geometry placeholder for H3
+    // boundary ops) via pg_proc.prorettype, mirroring the now-removed
+    // build_tuple_desc helper.
+    let resolved_rettype = if entry.output_field_types.contains(&0) {
+        // SAFETY: get_func_rettype is a catalog lookup safe on the main
+        // backend thread.
+        unsafe { pg_sys::get_func_rettype(priv_data.fn_oid) }
+    } else {
+        pg_sys::InvalidOid
+    };
+
+    let mut list: *mut pg_sys::List = std::ptr::null_mut();
+    for (i, (&t, &name)) in entry
+        .output_field_types
+        .iter()
+        .zip(entry.output_field_names.iter())
+        .enumerate()
+    {
+        let typ_oid = if t == 0 {
+            resolved_rettype
+        } else {
+            pg_sys::Oid::from(t)
+        };
+        if typ_oid == pg_sys::InvalidOid {
+            return None;
+        }
+        // SAFETY: makeVar allocates in CurrentMemoryContext. INDEX_VAR is
+        // the placeholder varno PG expects when the parent will rewrite
+        // Var refs through custom_scan_tlist via INDEX_VAR offsets
+        // (createplan.c:set_customscan_references).
+        let var = unsafe {
+            pg_sys::makeVar(
+                pg_sys::INDEX_VAR as c_int,
+                pg_sys::AttrNumber::from((i + 1) as i16),
+                typ_oid,
+                -1,
+                pg_sys::InvalidOid,
+                0,
+            )
+        };
+        let cname = std::ffi::CString::new(name).ok()?;
+        // SAFETY: var is freshly allocated; makeTargetEntry takes ownership
+        // of the resname pointer (palloc'd via pstrdup).
+        let resname = unsafe { pg_sys::pstrdup(cname.as_ptr()) };
+        let te = unsafe {
+            pg_sys::makeTargetEntry(
+                var.cast::<pg_sys::Expr>(),
+                pg_sys::AttrNumber::from((i + 1) as i16),
+                resname,
+                false,
+            )
+        };
+        // SAFETY: lappend allocates in CurrentMemoryContext.
+        list = unsafe { pg_sys::lappend(list, te.cast()) };
+    }
+    Some(list)
+}
+
 unsafe extern "C-unwind" fn plan_custom_path_function(
     _root: *mut pg_sys::PlannerInfo,
     _rel: *mut pg_sys::RelOptInfo,
@@ -1140,17 +1220,38 @@ unsafe extern "C-unwind" fn plan_custom_path_function(
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
     };
 
+    // Build `custom_scan_tlist` from the registry's full output schema rather
+    // than copying the planner-supplied `tlist`. Rationale: the planner's
+    // `tlist` is pruned to only what the parent expression references — for
+    // `count(*) FROM srf(...)` it is empty (`natts=0`). PG's
+    // `ExecInitCustomScan`
+    // (`src/backend/executor/nodeCustom.c:ExecInitScanTupleSlot`) builds the
+    // scan slot's `TupleDesc` from `ExecTypeFromTL(custom_scan_tlist)` and
+    // marks it `TTS_FLAG_FIXED` (`MakeTupleTableSlot` in
+    // `src/backend/executor/execTuples.c`), so the descriptor MUST be
+    // correct at plan time — `BeginCustomScan` cannot patch it
+    // (`ExecSetSlotDescriptor` asserts `!TTS_FIXED`). The registry-derived
+    // schema (`output_field_types` / `output_field_names`) is the source of
+    // truth for what the dispatcher will emit.
+    //
+    // SAFETY: best_path was validated by the planner; deserialize reads
+    // sentinel-tagged Integer nodes and returns Option.
+    let priv_data = unsafe { deserialize_functionscan_priv((*best_path).custom_private, 0) };
+
     // SAFETY: cscan is freshly palloc'd and zeroed; best_path + tlist are
     // valid planner pointers.
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        // Independent copies for plan.targetlist + custom_scan_tlist; see
-        // plan_custom_path_preagg for the rationale (set_customscan_references
-        // rewrites Vars in plan.targetlist via INDEX_VAR offsets into
-        // custom_scan_tlist; a shared list would alias).
+        // `plan.targetlist` is the planner's own list (parent uses
+        // `INDEX_VAR` offsets into `custom_scan_tlist` to resolve references).
         // SAFETY: copyObjectImpl deep-copies in CurrentMemoryContext.
         (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        // SAFETY: builds TargetEntry/Var nodes from registry metadata. Falls
+        // back to copying the planner tlist if registry lookup fails (which
+        // preserves the previous behaviour for unknown fn_oids and lets
+        // begin_custom_scan validation surface the error).
+        (*cscan).custom_scan_tlist = build_function_scan_tlist(priv_data.as_ref())
+            .unwrap_or_else(|| pg_sys::copyObjectImpl(tlist.cast()).cast());
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
         (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;

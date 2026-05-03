@@ -28,8 +28,6 @@
 //! the scan slot's — the scan slot directly carries the multi-column
 //! descriptor.
 
-use std::ffi::c_int;
-
 use pgrx::pg_sys;
 
 use super::{FunctionScanPrivData, OutputShapeDisc, deserialize_functionscan_priv, list_int_at};
@@ -115,87 +113,6 @@ impl FunctionScanExecState {
     }
 }
 
-/// Build a `TupleDesc` from the registry entry's `output_field_types` /
-/// `output_field_names`. Sentinel type OID `0` is replaced with
-/// `pg_proc.prorettype` of `fn_oid`.
-///
-/// # Safety
-///
-/// Must be called on the main backend thread. Allocates via `palloc`.
-unsafe fn build_tuple_desc(
-    fn_oid: pg_sys::Oid,
-    field_types: &[u32],
-    field_names: &[&'static str],
-) -> *mut pg_sys::TupleDescData {
-    let n = field_types.len();
-    if n == 0 || n != field_names.len() {
-        return std::ptr::null_mut();
-    }
-
-    // Resolve sentinel OID 0 via pg_proc.prorettype.
-    // SAFETY: get_func_rettype is a catalog lookup safe on the main backend
-    // thread. Returns InvalidOid if the function lookup fails.
-    let resolved_rettype = if field_types.contains(&0) {
-        // SAFETY: get_func_rettype is a catalog lookup safe on the main
-        // backend thread.
-        unsafe { pg_sys::get_func_rettype(fn_oid) }
-    } else {
-        pg_sys::InvalidOid
-    };
-
-    // SAFETY: CreateTemplateTupleDesc allocates a TupleDesc in the current
-    // memory context with `n` attribute slots.
-    let tupdesc = unsafe { pg_sys::CreateTemplateTupleDesc(c_int::try_from(n).unwrap_or(0)) };
-    if tupdesc.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    for (i, (&t, &name)) in field_types.iter().zip(field_names.iter()).enumerate() {
-        let typ_oid = if t == 0 {
-            resolved_rettype
-        } else {
-            pg_sys::Oid::from(t)
-        };
-        if typ_oid == pg_sys::InvalidOid {
-            // Type lookup failed — abort tuple-desc construction. Returning
-            // null here causes the caller to skip dispatch (per ban #4 we
-            // surface the failure rather than silently using an empty desc).
-            pgrx::warning!(
-                "pg_accel: function_scan: failed to resolve type OID for column {} (sentinel 0 \
-                 + get_func_rettype returned InvalidOid for fn_oid={})",
-                i,
-                u32::from(fn_oid),
-            );
-            return std::ptr::null_mut();
-        }
-
-        // Convert &str name → CString. We must keep the C-string alive for
-        // the duration of TupleDescInitEntry; the function copies the name
-        // into the TupleDesc's NameData slot, so a stack CString is fine.
-        let cname = match std::ffi::CString::new(name) {
-            Ok(s) => s,
-            Err(_) => return std::ptr::null_mut(),
-        };
-
-        // SAFETY: tupdesc is a freshly allocated TupleDesc with n slots; i is
-        // in [0, n). attno is 1-based per PG convention. typmod=-1 (no
-        // typmod), attdim=0 (scalar, not array). TupleDescInitEntry copies
-        // the name string into the descriptor.
-        unsafe {
-            pg_sys::TupleDescInitEntry(
-                tupdesc,
-                pg_sys::AttrNumber::from((i + 1) as i16),
-                cname.as_ptr(),
-                typ_oid,
-                -1,
-                0,
-            );
-        }
-    }
-
-    tupdesc
-}
-
 /// Initialise the FunctionScan executor state from the plan-priv payload.
 ///
 /// Reads the `FUNCTIONSCAN_SENTINEL`-prefixed block from `cscan.custom_private`,
@@ -245,38 +162,53 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
         return std::ptr::null_mut();
     };
 
-    // Build the TupleDesc and store it on the scan slot. This must happen
-    // before dispatch so the slot has the right column count for tuple
-    // emission downstream.
-    let tupdesc = unsafe {
-        build_tuple_desc(
-            priv_data.fn_oid,
-            &entry.output_field_types,
-            &entry.output_field_names,
-        )
-    };
-    if tupdesc.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    // Replace the scan slot's TupleDesc. PG sets up `ss_ScanTupleSlot` from
-    // `custom_scan_tlist` in ExecInitCustomScan, but our custom_scan_tlist
-    // mirrors the planner-supplied tlist (which is the FunctionScan's
-    // output Vars referencing this rel). We rebuild the slot here using
-    // the registry-derived TupleDesc so per-tuple emission has the right
-    // column count + type OIDs for downstream Var(rti, attno) resolution.
+    // The scan slot's TupleDesc is set up by `ExecInitCustomScan`
+    // (`src/backend/executor/nodeCustom.c:ExecInitScanTupleSlot`) from our
+    // `custom_scan_tlist` (mirrored from the planner-supplied tlist) via
+    // `ExecTypeFromTL`. The slot is created with a non-NULL tupdesc, so
+    // `MakeTupleTableSlot` sets `TTS_FLAG_FIXED`
+    // (`src/backend/executor/execTuples.c:MakeTupleTableSlot`). Calling
+    // `ExecSetSlotDescriptor` on a fixed slot triggers
+    // `Assert(!TTS_FIXED(slot))` in debug builds and pfrees+reallocates
+    // tts_values/tts_isnull that are co-allocated with the slot itself
+    // (corrupting heap on release). Either way, mutating the slot's
+    // descriptor at BeginCustomScan time is forbidden.
     //
-    // SAFETY: ExecInitCustomScan allocated ss_ScanTupleSlot before
-    // BeginCustomScan fires; we replace its descriptor in place.
+    // Instead we validate the slot's existing descriptor against the
+    // registry's expected shape and bail out cleanly on mismatch — PG's
+    // `ExecTypeFromTL(custom_scan_tlist)` already produced the correct
+    // column count + type OIDs because `custom_scan_tlist` mirrors the
+    // parser-resolved tlist for the SRF (each column expanded from the
+    // function's declared output type).
+    //
+    // SAFETY: `node` is a valid CustomScanState; `ss_ScanTupleSlot` and
+    // its `tts_tupleDescriptor` were initialised by ExecInitCustomScan on
+    // the main backend thread before BeginCustomScan fires.
     unsafe {
         let scan_slot = (*node).ss.ss_ScanTupleSlot;
-        if !scan_slot.is_null() {
-            // BlessTupleDesc registers the descriptor as a transient
-            // record-type for downstream consumers (composite-type slots).
-            let blessed = pg_sys::BlessTupleDesc(tupdesc);
-            // Set the slot's tupdesc. ExecSetSlotDescriptor reallocates
-            // tts_values/tts_isnull arrays for the new column count.
-            pg_sys::ExecSetSlotDescriptor(scan_slot, blessed);
+        if scan_slot.is_null() {
+            pgrx::warning!("pg_accel: function_scan init: ss_ScanTupleSlot is null");
+            return std::ptr::null_mut();
+        }
+        let slot_tupdesc = (*scan_slot).tts_tupleDescriptor;
+        if slot_tupdesc.is_null() {
+            pgrx::warning!(
+                "pg_accel: function_scan init: scan slot has null tupdesc; \
+                 ExecInitCustomScan should have populated it from custom_scan_tlist"
+            );
+            return std::ptr::null_mut();
+        }
+        let slot_natts = (*slot_tupdesc).natts;
+        let expected_natts = i32::try_from(entry.output_field_types.len()).unwrap_or(0);
+        if slot_natts != expected_natts {
+            pgrx::warning!(
+                "pg_accel: function_scan init: scan slot natts={} but registry expects {} \
+                 columns for fn_oid={}; declining to dispatch (planner-tlist mismatch)",
+                slot_natts,
+                expected_natts,
+                u32::from(priv_data.fn_oid),
+            );
+            return std::ptr::null_mut();
         }
     }
 
@@ -623,20 +555,21 @@ pub(super) unsafe fn dispatched_ok(executor: *mut std::ffi::c_void) -> bool {
 // now sees the freshly-installed h3 OIDs the second time around within
 // the same planner pass.
 //
-// **Known follow-up (2026-05-02): GPU FunctionScan executor crash.** The
-// fix above unmasked a pre-existing bug in `init_state` at line 279
-// (`pg_sys::ExecSetSlotDescriptor`). Pre-fix, the projectset hook always
-// bailed on a registry miss, so PG ran its native `FunctionScan` and the
-// row-count assertions below passed by coincidence (PG's native h3 path
-// emits the same 7 cells as the GPU path would). Post-fix, the registry
-// retry succeeds — verified by the PG log line
-// `pg_accel: registry re-resolve: activating new adapter 'h3'` —
-// the planner injects the GpuAccelFunctionScan path, but
-// `BeginCustomScan` → `init_state` then crashes via PG `ereport(ERROR)`
-// surfacing as `<non-string panic payload>` in the panic log. The 3
-// existing row-count tests now FAIL with this crash; they are the
-// honest signal that the executor needs fixing. Tracked in `TODO.md`
-// under the "H3 var-output ops — wiring landed" entry.
+// **Resolved 2026-05-03: GPU FunctionScan executor crash.** The
+// `ExecSetSlotDescriptor` call site at the previous line 279 raised a
+// PG `ereport(ERROR)` because `ExecInitCustomScan`
+// (`src/backend/executor/nodeCustom.c`) builds the scan slot from
+// `ExecTypeFromTL(custom_scan_tlist)` and `MakeTupleTableSlot`
+// (`src/backend/executor/execTuples.c`) marks any slot built with a
+// non-NULL tupdesc as `TTS_FLAG_FIXED`; mutating a fixed slot's
+// descriptor from `BeginCustomScan` is forbidden. Fix applied in
+// `plan_custom_path_function`: build `custom_scan_tlist` from the
+// registry's `output_field_types`/`output_field_names` so PG's
+// `ExecTypeFromTL` produces the correct descriptor on first
+// construction, eliminating the need for any `BeginCustomScan`-side
+// patch. The remaining `init_state` flow only validates that the slot
+// descriptor matches the registry's expected column count and bails
+// out cleanly on mismatch.
 
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
@@ -791,6 +724,52 @@ mod tests {
         assert_eq!(
             stats_count, 1,
             "1x1 raster of 42.0 should report ST_SummaryStats.count = 1",
+        );
+    }
+
+    /// `EXPLAIN SELECT count(*) FROM h3_cell_to_boundary(...)` must
+    /// complete successfully without crashing the backend — regression
+    /// guard for the original `ExecSetSlotDescriptor` crash, which also
+    /// affected bare `EXPLAIN` because PG's `standard_ExplainOneQuery`
+    /// calls `ExecutorStart` to walk the plan tree.
+    ///
+    /// We don't strictly assert that the plan contains
+    /// `Custom Scan (GpuAccelFunctionScan)` because PG's planner may
+    /// inline a const-arg single-row SRF as a bare `Result` node
+    /// before the `set_rel_pathlist_hook` ever fires (no FunctionScan
+    /// rel is built). The PASS condition is: EXPLAIN returns a
+    /// non-empty plan without crash. That covers the original crash
+    /// (`signal 6` during `ExecutorStart`) which would manifest as a
+    /// closed connection here.
+    #[pg_test]
+    fn function_scan_explain_does_not_crash_for_cell_to_boundary() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        // Trigger registry init.
+        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
+
+        let plan = Spi::connect(|client| {
+            let mut lines: Vec<String> = Vec::new();
+            let table = client
+                .select(
+                    "EXPLAIN (FORMAT TEXT) SELECT count(*) FROM \
+                     h3_cell_to_boundary('8a2a1072b59ffff'::h3index)",
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN query ok");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+        assert!(
+            !plan.is_empty(),
+            "EXPLAIN returned no rows (likely backend crash); \
+             this regresses the ExecSetSlotDescriptor / TTS_FLAG_FIXED fix",
         );
     }
 }
