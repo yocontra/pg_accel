@@ -223,6 +223,79 @@ fn dispatch_result_accelerated_variant() {
     assert!(matches!(result, DispatchResult::Accelerated(_)));
 }
 
+#[test]
+fn dispatch_result_accelerated_record_variant() {
+    // ST_SummaryStats returns 6 fields per input row: count, sum, mean,
+    // stddev, min, max. Two input rows ⇒ 12 datums.
+    let datums: Vec<(pgrx::pg_sys::Datum, bool)> = (0..12)
+        .map(|i| (pgrx::pg_sys::Datum::from(i), false))
+        .collect();
+    let result = DispatchResult::AcceleratedRecord {
+        fields_per_row: 6,
+        datums,
+    };
+    if let DispatchResult::AcceleratedRecord {
+        fields_per_row,
+        datums,
+    } = result
+    {
+        assert_eq!(fields_per_row, 6);
+        assert_eq!(datums.len(), 12);
+        // Layout: rows are contiguous 6-Datum blocks.
+        assert_eq!(datums[0].0.value(), 0);
+        assert_eq!(datums[6].0.value(), 6);
+    } else {
+        panic!("expected AcceleratedRecord variant");
+    }
+}
+
+#[test]
+fn dispatch_result_accelerated_var_len_variant() {
+    // CSR layout: 3 input rows producing 1, 2, 0 cells respectively.
+    // offsets = [0, 1, 3, 3] ; datums = [c0, c1, c2]
+    let datums: Vec<(pgrx::pg_sys::Datum, bool)> = vec![
+        (pgrx::pg_sys::Datum::from(100_u64), false),
+        (pgrx::pg_sys::Datum::from(101_u64), false),
+        (pgrx::pg_sys::Datum::from(102_u64), false),
+    ];
+    let offsets = vec![0_u32, 1, 3, 3];
+    let result = DispatchResult::AcceleratedVarLen {
+        offsets: offsets.clone(),
+        datums: datums.clone(),
+    };
+    if let DispatchResult::AcceleratedVarLen {
+        offsets: o,
+        datums: d,
+    } = result
+    {
+        assert_eq!(o.len(), datums.len() + 1);
+        assert_eq!(o[0], 0);
+        assert_eq!(*o.last().unwrap(), d.len() as u32);
+        // Row 0 owns d[0..1], row 1 owns d[1..3], row 2 is empty.
+        assert_eq!(o[1] - o[0], 1);
+        assert_eq!(o[2] - o[1], 2);
+        assert_eq!(o[3] - o[2], 0);
+    } else {
+        panic!("expected AcceleratedVarLen variant");
+    }
+}
+
+#[test]
+fn dispatch_result_variants_compile() {
+    // Smoke test that all four variants can be constructed without compile
+    // error — ensures Phase A's contract holds for downstream agents.
+    let _v1 = DispatchResult::Accelerated(vec![]);
+    let _v2 = DispatchResult::AcceleratedRecord {
+        fields_per_row: 1,
+        datums: vec![],
+    };
+    let _v3 = DispatchResult::AcceleratedVarLen {
+        offsets: vec![0],
+        datums: vec![],
+    };
+    let _v4 = DispatchResult::Deferred;
+}
+
 // -- Efficiency metric ---------------------------------------------------
 
 #[test]

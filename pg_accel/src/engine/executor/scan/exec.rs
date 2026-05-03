@@ -443,8 +443,19 @@ impl ScanExecState {
                     batch_len,
                 );
             }
-            DispatchResult::Deferred => {
+            DispatchResult::Deferred
+            | DispatchResult::AcceleratedRecord { .. }
+            | DispatchResult::AcceleratedVarLen { .. } => {
                 // GPU dispatch deferred — use PG's standard scalar qual.
+                //
+                // The Record / VarLen variants exist for record-returning
+                // (e.g. ST_SummaryStats) and var-length (e.g. H3 grid_disk)
+                // ops; the per-row scan path here only consumes scalar
+                // boolean results, so a non-scalar shape coming through this
+                // arm means dispatch picked the wrong route. Defer to PG so
+                // the row still produces a correct (if slower) answer.
+                // Phase B Agent 1B wires record/varlen consumption into the
+                // scan + projection paths that need them.
                 // SAFETY: Caller guarantees main backend thread.
                 unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
             }

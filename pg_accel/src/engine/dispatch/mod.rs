@@ -45,10 +45,44 @@ pub(super) struct FcinfoWith2Args {
 }
 
 /// Outcome of a dispatch attempt.
+///
+/// Three accelerated shapes mirror [`crate::engine::registry::OutputShape`]:
+/// `Accelerated` for 1-Datum-per-row scalars, `AcceleratedRecord` for
+/// multi-scalar / record returns (e.g. `ST_SummaryStats` → 6 fields per row),
+/// and `AcceleratedVarLen` for CSR-style variable-length outputs (e.g. H3
+/// `grid_disk`, `polyfill`, `cell_to_boundary` where each input row produces
+/// a different number of output cells/coords).
 #[derive(Debug)]
 pub enum DispatchResult {
-    /// The batch was evaluated by an accelerated path.
+    /// The batch was evaluated by an accelerated path. One Datum per input
+    /// row — the existing scalar contract.
     Accelerated(Vec<(pgrx::pg_sys::Datum, bool)>),
+    /// Accelerated batch with a fixed number of fields per input row.
+    ///
+    /// `datums.len()` MUST equal `input_row_count * fields_per_row`. The
+    /// executor is responsible for repacking the flat Datum vec into PG
+    /// record/composite tuples. Used by record-returning kernels (the only
+    /// current user is `ST_SummaryStats(rast)` with `fields_per_row = 6`).
+    AcceleratedRecord {
+        /// Number of scalar Datums emitted per input row.
+        fields_per_row: u32,
+        /// Flat Datum vec: `datums[row * fields_per_row + field]`.
+        datums: Vec<(pgrx::pg_sys::Datum, bool)>,
+    },
+    /// Accelerated batch with variable-length per-row output (CSR layout).
+    ///
+    /// `offsets.len() == input_row_count + 1`. Row `i`'s outputs occupy
+    /// `datums[offsets[i] .. offsets[i + 1]]`; an empty range encodes "no
+    /// output for this input". `offsets[0] == 0` and
+    /// `*offsets.last() == datums.len() as u32` MUST hold. Used by H3
+    /// var-output ops (`grid_disk`, `grid_ring_unsafe`, `polyfill`,
+    /// `cell_to_children`, `cell_to_boundary`, `cells_to_multi_polygon`).
+    AcceleratedVarLen {
+        /// CSR offsets indexing `datums`. Length is `input_row_count + 1`.
+        offsets: Vec<u32>,
+        /// Flat Datum vec for all rows' outputs concatenated.
+        datums: Vec<(pgrx::pg_sys::Datum, bool)>,
+    },
     /// The batch could not be accelerated for this strategy.
     ///
     /// This is **deferral**, not CPU fallback: the caller should let
