@@ -30,6 +30,7 @@ pub(super) mod projectset;
 mod rel_pathlist;
 mod scan;
 mod sort;
+mod srf_target_list;
 mod window;
 
 use join_pathlist::pgaccel_set_join_pathlist;
@@ -150,6 +151,15 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
             // SAFETY: All pointers are valid planner arguments.
             unsafe { pgaccel_inject_gpu_window(root, input_rel, output_rel) };
+        }
+        pg_sys::UpperRelationKind::UPPERREL_FINAL => {
+            // SRF-in-target-list detection (Phase 2 follow-up to F3).
+            // Walks the input rel's pathlist for ProjectSetPath nodes
+            // wrapping registered SRFs. Currently planner-side only —
+            // see `srf_target_list.rs` module doc "Status (anti-cheat
+            // ban #9)" for the executor-wiring follow-up.
+            // SAFETY: All pointers are valid planner arguments.
+            unsafe { srf_target_list::try_inject_srf_target_list(root, input_rel, output_rel) };
         }
         _ => {}
     }
