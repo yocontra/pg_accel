@@ -1241,7 +1241,6 @@ pub fn map_algebra(
 ///
 /// Returns `None` if the GPU is unavailable.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_clip wiring)
 pub fn raster_clip(
     rast_pixels: *const std::ffi::c_void,
     width: usize,
@@ -1286,7 +1285,6 @@ pub fn raster_clip(
 ///
 /// Applies a set of value-range rules to reclassify pixel values.
 /// Returns `None` if the GPU is unavailable.
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_reclass wiring)
 pub fn raster_reclass(
     input_pixels: *const std::ffi::c_void,
     pixel_count: usize,
@@ -1323,7 +1321,7 @@ pub fn raster_reclass(
 ///
 /// Returns `None` if the kernel fails (caller routes to PG fallback).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_resample wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_resample takes target dims as constants)
 pub fn raster_resample(
     src_pixels: &[f32],
     src_w: usize,
@@ -1358,7 +1356,7 @@ pub fn raster_resample(
 }
 
 /// GPU-accelerated slope (Horn's method, output in degrees).
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_slope wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_slope takes per-pixel cell sizes)
 pub fn raster_slope(
     src_pixels: &[f32],
     width: usize,
@@ -1389,7 +1387,7 @@ pub fn raster_slope(
 }
 
 /// GPU-accelerated aspect (compass direction in degrees).
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_aspect wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_aspect 1-arg but pairs with hillshade pipeline)
 pub fn raster_aspect(
     src_pixels: &[f32],
     width: usize,
@@ -1412,7 +1410,7 @@ pub fn raster_aspect(
 
 /// GPU-accelerated hillshade (shaded relief, output [0, 255]).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_hillshade wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_hillshade takes sun_azimuth/altitude/z_factor)
 pub fn raster_hillshade(
     src_pixels: &[f32],
     width: usize,
@@ -1454,7 +1452,7 @@ pub fn raster_hillshade(
 /// must have at least `point_xy.len() / 2` elements. Out-of-bounds
 /// points get NaN.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_value wiring)
+#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_value takes a point geometry array)
 pub fn raster_value(
     rast_pixels: &[f32],
     width: usize,
@@ -1501,7 +1499,6 @@ pub fn raster_value(
 /// laid out as `[row0_count, row0_sum, row0_mean, row0_stddev, row0_min,
 /// row0_max, row1_count, ...]`. When `nodata_masks` is `Some`, mask byte
 /// `1` skips that pixel.
-#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_summarystats wiring)
 pub fn raster_summarystats(
     rast_pixels: &[f32],
     row_count: usize,

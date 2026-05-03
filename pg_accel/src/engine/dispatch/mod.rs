@@ -126,7 +126,9 @@ pub unsafe fn dispatch(
         }
         AccelStrategy::GpuRaster => {
             // SAFETY: Caller guarantees main backend thread.
-            unsafe { raster::dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid) }
+            unsafe {
+                raster::dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid, qual_datum)
+            }
         }
         AccelStrategy::GpuExpr
         | AccelStrategy::GpuSort
