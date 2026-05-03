@@ -32,6 +32,7 @@ use crate::gpu::PgaccelKeyType;
 
 mod dsm;
 mod explain;
+mod function_scan;
 mod plan_partial_agg;
 mod private_data;
 
@@ -39,8 +40,51 @@ use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
 pub use private_data::serialize_preagg_private;
+pub use private_data::{
+    FUNCTIONSCAN_SENTINEL, FunctionScanPrivData, append_functionscan_priv,
+    deserialize_functionscan_priv,
+};
 pub(super) use private_data::{PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec};
 use private_data::{deserialize_custom_private, deserialize_preagg_private};
+
+// ---------------------------------------------------------------------------
+// FunctionScan output-shape discriminants
+// ---------------------------------------------------------------------------
+
+/// Mirror of [`crate::engine::registry::OutputShape`] using a flat integer
+/// representation, suitable for [`FunctionScanPrivData::output_shape_disc`].
+///
+/// The mapping is fixed by the `to_i32` / `from_i32` pair below and is the
+/// authoritative wire format for FunctionScan plan-priv data — adding a new
+/// shape requires bumping both ends of the round-trip simultaneously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputShapeDisc {
+    /// One Datum per input row (`OutputShape::Scalar`).
+    Scalar = 0,
+    /// Fixed `field_count` Datums per input row (`OutputShape::Record`).
+    Record = 1,
+    /// CSR-style variable-length per input row (`OutputShape::VarLen`).
+    VarLen = 2,
+}
+
+impl OutputShapeDisc {
+    /// Convert to the integer form used in FunctionScanPrivData.
+    #[must_use]
+    pub const fn to_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// Decode from the integer form. Defaults to `Scalar` for unknown values
+    /// so a malformed plan-priv block doesn't crash deserialization.
+    #[must_use]
+    pub const fn from_i32(v: i32) -> Self {
+        match v {
+            1 => Self::Record,
+            2 => Self::VarLen,
+            _ => Self::Scalar,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Strategy constants (used in custom_private serialization + EXPLAIN)
@@ -57,6 +101,12 @@ pub enum GpuStrategy {
     Window = 4,
     /// Fused star-join pre-aggregation: scan + N joins + aggregate in one node.
     PreAgg = 5,
+    /// FunctionScan injection (Phase 2 F3): replace PG's `FunctionScan` for a
+    /// registered SRF / record-returning function with a Custom Scan that
+    /// dispatches the call through the GPU dispatch interface and emits the
+    /// resulting `AcceleratedVarLen` / `AcceleratedRecord` shapes as scan
+    /// tuples.
+    FunctionScan = 6,
 }
 
 impl GpuStrategy {
@@ -69,6 +119,7 @@ impl GpuStrategy {
             3 => Self::Sort,
             4 => Self::Window,
             5 => Self::PreAgg,
+            6 => Self::FunctionScan,
             _ => Self::Scan,
         }
     }
@@ -83,6 +134,7 @@ impl GpuStrategy {
             Self::Sort => c"GpuSort",
             Self::Window => c"GpuWindow",
             Self::PreAgg => c"GpuPreAgg",
+            Self::FunctionScan => c"GpuFunctionScan",
         }
     }
 }
@@ -207,6 +259,17 @@ static PREAGG_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScan
     CreateCustomScanState: Some(create_custom_scan_state),
 });
 
+static FUNCTION_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
+    CustomName: c"GpuAccelFunctionScan".as_ptr(),
+    PlanCustomPath: Some(plan_custom_path_function),
+    ReparameterizeCustomPathByChild: None,
+});
+
+static FUNCTION_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
+    CustomName: c"GpuAccelFunctionScan".as_ptr(),
+    CreateCustomScanState: Some(create_custom_scan_state),
+});
+
 static EXEC_METHODS: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods {
     CustomName: c"GpuAccelScan".as_ptr(),
     BeginCustomScan: Some(begin_custom_scan),
@@ -272,6 +335,13 @@ pub fn preagg_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const PREAGG_PATH_METHODS.0
 }
 
+/// Pointer to FunctionScan `CustomPathMethods` vtable (Phase 2 F3).
+#[inline]
+#[must_use]
+pub fn function_path_methods() -> *const pg_sys::CustomPathMethods {
+    &raw const FUNCTION_PATH_METHODS.0
+}
+
 /// Register Custom Scan methods with PostgreSQL. Must be called from `_PG_init`.
 pub fn register() {
     // SAFETY: RegisterCustomScanMethods stores pointers to our static vtables
@@ -284,6 +354,7 @@ pub fn register() {
         pg_sys::RegisterCustomScanMethods(&raw const AGG_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const WINDOW_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const PREAGG_SCAN_METHODS.0);
+        pg_sys::RegisterCustomScanMethods(&raw const FUNCTION_SCAN_METHODS.0);
     }
 }
 
@@ -1033,6 +1104,95 @@ unsafe extern "C-unwind" fn plan_custom_path_preagg(
     }
 
     tracing::info!("plan_custom_path_preagg: end");
+    cscan.cast()
+}
+
+/// Convert a FunctionScan `CustomPath` into a `CustomScan` plan node
+/// (Phase 2 F3).
+///
+/// The path's `custom_private` already carries the serialized
+/// [`FunctionScanPrivData`] block (sentinel-prefixed) — we pass it through
+/// to the executor unchanged. Plan-side responsibilities:
+///
+/// 1. Set `scanrelid = 0` so PG treats this as a synthetic scan (no
+///    underlying RTE_RELATION). The executor builds the scan slot from the
+///    registry's `output_field_types` / `output_field_names`.
+/// 2. Use the planner-supplied `tlist` for both `plan.targetlist` and
+///    `custom_scan_tlist` (independent copies) so `setrefs` rewrites Vars
+///    in the targetlist without aliasing the scan-slot descriptor.
+/// 3. No child plan: the FunctionScan's funcexpr is invoked by our
+///    dispatcher directly, not by ExecProcNode.
+///
+/// # Safety
+///
+/// Called by the PostgreSQL planner on the main backend thread.
+unsafe extern "C-unwind" fn plan_custom_path_function(
+    _root: *mut pg_sys::PlannerInfo,
+    _rel: *mut pg_sys::RelOptInfo,
+    best_path: *mut pg_sys::CustomPath,
+    tlist: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
+    _custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_function").entered();
+    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
+    let cscan = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
+    };
+
+    // SAFETY: cscan is freshly palloc'd and zeroed; best_path + tlist are
+    // valid planner pointers.
+    unsafe {
+        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
+        // Independent copies for plan.targetlist + custom_scan_tlist; see
+        // plan_custom_path_preagg for the rationale (set_customscan_references
+        // rewrites Vars in plan.targetlist via INDEX_VAR offsets into
+        // custom_scan_tlist; a shared list would alias).
+        // SAFETY: copyObjectImpl deep-copies in CurrentMemoryContext.
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        (*cscan).custom_plans = std::ptr::null_mut();
+        (*cscan).flags = (*best_path).flags;
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const FUNCTION_SCAN_METHODS.0;
+
+        // Top-level FunctionScan strategy header so deserialize_custom_private
+        // sees a uniform layout. The FunctionScanPrivData payload starts
+        // immediately after.
+        let batch_size = gucs::min_batch_size();
+        let expected_threads = resolve_thread_count();
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(GpuStrategy::FunctionScan as c_int).cast(),
+        );
+        list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // fn_oid placeholder (read from FSCA block)
+        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // target_attno placeholder
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(AccelStrategy::GpuH3 as c_int).cast(), // strategy hint, real one resolved at exec
+        );
+
+        // Copy the FUNCTIONSCAN_SENTINEL-prefixed payload from the path.
+        // The planner hook stored it at index 0 of the path's custom_private.
+        let path_priv = (*best_path).custom_private;
+        if !path_priv.is_null() {
+            let n = pg_sys::list_length(path_priv);
+            for i in 0..n {
+                let cell = pg_sys::list_nth(path_priv, i);
+                list = pg_sys::lappend(list, cell);
+            }
+        }
+
+        (*cscan).custom_private = list;
+    }
+
     cscan.cast()
 }
 
@@ -2168,6 +2328,24 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         (*state).accel.expected_threads = resolve_thread_count();
     }
 
+    // FunctionScan: short-circuit before allocating any of the legacy
+    // executor states (the FunctionScan flow doesn't share their
+    // ScanExecState / AggExecState shapes). init_state builds the TupleDesc,
+    // dispatches once, and stashes the per-row cursor on a dedicated state.
+    if privdata.gpu_strategy == GpuStrategy::FunctionScan {
+        // SAFETY: node is a valid CustomScanState on the main backend thread.
+        let exec = unsafe { function_scan::init_state(node) };
+        // SAFETY: state points to our extended GpuAccelScanState; writing
+        // executor pointer + zero counters.
+        unsafe {
+            (*state).accel.executor = exec;
+            (*state).accel.rows_dispatched = 0;
+            (*state).accel.batches_executed = 0;
+            (*state).accel.dispatch_time_us = 0;
+        }
+        return;
+    }
+
     let batch_size = if privdata.batch_size > 0 {
         privdata.batch_size as usize
     } else {
@@ -2823,6 +3001,22 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         }
     }
 
+    // FunctionScan strategy (Phase 2 F3): one-shot dispatch + per-output-row
+    // tuple emission. Routed through the dedicated function_scan module which
+    // owns the cursor + emitted-Datum buffer.
+    if gpu_strategy == GpuStrategy::FunctionScan {
+        // SAFETY: executor was Box::into_raw'd as FunctionScanExecState in
+        // begin_custom_scan. Per-row counters live on the same struct.
+        let slot = unsafe { function_scan::next_tuple(node, executor) };
+        // Propagate the per-row counter to GpuAccelState so EXPLAIN ANALYZE
+        // sees the right "rows" attribute on the FunctionScan node.
+        // SAFETY: state is our extended GpuAccelScanState, see top of fn.
+        unsafe {
+            (*state).accel.rows_dispatched = function_scan::rows_dispatched(executor);
+        }
+        return slot;
+    }
+
     // Dispatch through the unified ExecutorState trait. Each state owns its
     // internal branching (has_vscan, is_fused, is_grouped, has_scan_desc)
     // rather than leaking those into the ffi layer.
@@ -2838,6 +3032,9 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             GpuStrategy::Sort => &mut *executor.cast::<SortExecState>(),
             GpuStrategy::Window => &mut *executor.cast::<WindowExecState>(),
             GpuStrategy::Join => &mut *executor.cast::<JoinExecState>(),
+            GpuStrategy::FunctionScan => unreachable!(
+                "FunctionScan handled by short-circuit above; dyn ExecutorState match unreachable"
+            ),
         };
         let slot = dyn_state.exec(node);
         // SAFETY: state points to our GpuAccelScanState; writing counters for
@@ -2905,6 +3102,11 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
             if is_hash_join {
                 // SAFETY: executor was Box::into_raw'd as JoinExecState.
                 let _ = Box::from_raw((*state).accel.executor.cast::<JoinExecState>());
+            } else if GpuStrategy::from_i32((*state).accel.strategy) == GpuStrategy::FunctionScan {
+                // FunctionScan owns its own boxed state (FunctionScanExecState);
+                // delegate to the dedicated drop helper.
+                // SAFETY: executor was Box::into_raw'd as FunctionScanExecState.
+                function_scan::drop_state((*state).accel.executor);
             } else {
                 let gpu_strategy = GpuStrategy::from_i32((*state).accel.strategy);
                 if gpu_strategy == GpuStrategy::PreAgg {
@@ -3020,6 +3222,13 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
         } else {
             256
         };
+
+        // FunctionScan: just reset the cursor; do not rebuild the buffered
+        // dispatch (constant args ⇒ same output is correct).
+        if gpu_strategy == GpuStrategy::FunctionScan {
+            function_scan::rescan((*state).accel.executor);
+            return;
+        }
 
         if gpu_strategy == GpuStrategy::Agg {
             // Rescan: rebuild the executor from scratch but preserve agg

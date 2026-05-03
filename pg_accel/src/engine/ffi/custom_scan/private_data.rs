@@ -909,8 +909,7 @@ pub(super) unsafe fn deserialize_preagg_private(
 ///
 /// Distinct from `PARTIAL_SENTINEL` so the two block formats cannot be
 /// silently confused if a layout regression mis-positions the cursor.
-#[allow(dead_code)] // reason: consumed by pg_test FunctionScan round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
-pub(in crate::engine::ffi) const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // b"FSCA"
+pub const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // b"FSCA"
 
 /// Plan metadata for a `FunctionScan` Custom-Scan injection (Phase 2 F3).
 ///
@@ -926,8 +925,6 @@ pub(in crate::engine::ffi) const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // 
 /// anti-cheat ban #9; the type + (de)serializers are landed here so the
 /// follow-up wiring agent can plug in without re-touching the
 /// custom_private layout.
-#[allow(dead_code)]
-// reason: consumed by pg_test round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionScanPrivData {
     /// OID of the registered SRF / record-returning function.
@@ -968,8 +965,8 @@ pub struct FunctionScanPrivData {
 ///
 /// Must be called in a valid PG memory context on the main backend
 /// thread. `list` may be null or a valid PG `List *`.
-#[allow(clippy::cast_possible_wrap, dead_code)] // reason: consumed by pg_test round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
-pub(in crate::engine::ffi) unsafe fn append_functionscan_priv(
+#[allow(clippy::cast_possible_wrap)]
+pub unsafe fn append_functionscan_priv(
     mut list: *mut pg_sys::List,
     priv_data: &FunctionScanPrivData,
 ) -> *mut pg_sys::List {
@@ -1012,8 +1009,8 @@ pub(in crate::engine::ffi) unsafe fn append_functionscan_priv(
 /// # Safety
 ///
 /// `list` must be a valid PG `List *` of `Integer` nodes.
-#[allow(clippy::cast_sign_loss, dead_code)] // reason: consumed by pg_test round-trip + pending Phase 2 F3 planner-hook wiring (escalated; see this commit's task report)
-pub(in crate::engine::ffi) unsafe fn deserialize_functionscan_priv(
+#[allow(clippy::cast_sign_loss)]
+pub unsafe fn deserialize_functionscan_priv(
     list: *mut pg_sys::List,
     start_idx: usize,
 ) -> Option<FunctionScanPrivData> {

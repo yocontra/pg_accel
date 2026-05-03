@@ -89,6 +89,13 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let _span =
         tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
+    // Phase 2 F3: FunctionScan injection. Fires on RTE_FUNCTION rels with a
+    // registered SRF / record-returning function (h3_polyfill,
+    // h3_cell_to_boundary, st_summarystats). The injector itself rejects
+    // other rtekinds, so this is a cheap dispatch.
+    // SAFETY: All pointers are valid planner arguments.
+    unsafe { super::projectset::try_inject_function_scan(root, rel, rti, rte) };
+
     // Gate 2: Only base relations or partition children — cheap field
     // checks before any registry or clause work.
     //

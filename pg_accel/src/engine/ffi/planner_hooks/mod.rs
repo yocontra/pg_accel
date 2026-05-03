@@ -26,6 +26,7 @@ mod hashjoin;
 mod join_pathlist;
 mod partial_agg;
 mod preagg_partial;
+pub(super) mod projectset;
 mod rel_pathlist;
 mod scan;
 mod sort;
