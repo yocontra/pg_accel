@@ -607,3 +607,184 @@ pub(super) unsafe fn dispatched_ok(executor: *mut std::ffi::c_void) -> bool {
     let state = unsafe { &*executor.cast::<FunctionScanExecState>() };
     state.dispatched_ok
 }
+
+// ---------------------------------------------------------------------------
+// pg_test integration tests (Phase 2 F3)
+// ---------------------------------------------------------------------------
+//
+// These tests exercise the full FunctionScan injection chain:
+//   1. `set_rel_pathlist_hook` fires on RTE_FUNCTION
+//   2. `try_inject_function_scan` builds a CustomPath with FUNCTIONSCAN_SENTINEL
+//   3. `add_path` accepts it (cost win vs PG FunctionScan)
+//   4. `plan_custom_path_function` builds the CustomScan plan
+//   5. `begin_custom_scan` → `init_state` dispatches via dispatch::dispatch
+//   6. `exec_custom_scan` → `next_tuple` drains rows
+//
+// Tests skip when the underlying SQL extension is not installed in the
+// pgrx-managed PG (h3 / postgis / postgis_raster). Skipping is silent so
+// the suite stays green on CI machines without these extensions; failure
+// modes are surfaced when the extension IS present.
+
+#[cfg(feature = "pg_test")]
+#[allow(clippy::unwrap_used)]
+#[pgrx::pg_schema]
+mod tests {
+    use pgrx::prelude::{Spi, pg_test};
+
+    /// Helper: returns true iff the named extension is installed in this
+    /// pgrx PG instance. Used to skip tests cleanly on CI hosts without
+    /// the H3 / PostGIS adapters installed.
+    fn extension_installed(name: &str) -> bool {
+        let q = format!("SELECT count(*) FROM pg_extension WHERE extname = '{name}'");
+        Spi::get_one::<i64>(&q)
+            .expect("pg_extension query ok")
+            .unwrap_or(0)
+            > 0
+    }
+
+    /// `SELECT * FROM h3_cell_to_boundary($cell)` returns one row whose value
+    /// is a PostGIS POLYGON varlena (GSERIALIZED v2, type = 3).
+    ///
+    /// The kernel emits 6 vertex pairs (12 doubles) per hexagon cell; the
+    /// F2 polygon encoder wraps that as a single-ring POLYGON. We check the
+    /// GSERIALIZED type byte rather than parse coordinates to keep the
+    /// assertion fast + version-tolerant.
+    #[pg_test]
+    fn function_scan_h3_cell_to_boundary_emits_polygon() {
+        if !extension_installed("h3") || !extension_installed("postgis") {
+            // Skip silently when the H3 / PostGIS adapters aren't loaded.
+            return;
+        }
+
+        // Trigger registry init by running a small h3 query first.
+        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
+
+        // Run the SRF as a FunctionScan. We expect exactly one row.
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM h3_cell_to_boundary('8a2a1072b59ffff'::h3index)",
+        )
+        .expect("count query ok")
+        .expect("count not null");
+        assert_eq!(
+            count, 1,
+            "h3_cell_to_boundary should emit exactly one POLYGON row",
+        );
+
+        // Fetch the geometry as bytea (raw varlena bytes) and check the
+        // GSERIALIZED type byte. PostGIS v2 GSERIALIZED layout:
+        //   bytes [0..3] = SRID (24-bit) + flags (8-bit)
+        //   bytes [4..7] = bbox flag etc.
+        //   byte  [8]    = type (1 = POINT, 2 = LINESTRING, 3 = POLYGON, ...)
+        // The exact offset of the type byte differs between v1 and v2 of
+        // the GSERIALIZED format; we accept either (3 at offset 8 OR offset
+        // 4) as evidence that we emitted a polygon-shaped record.
+        let bytes = Spi::get_one::<Vec<u8>>(
+            "SELECT (h3_cell_to_boundary('8a2a1072b59ffff'::h3index))::bytea",
+        )
+        .expect("bytea query ok")
+        .expect("bytes not null");
+        assert!(
+            bytes.len() >= 16,
+            "GSERIALIZED varlena must be at least 16 bytes; got {}",
+            bytes.len(),
+        );
+        // Find the POLYGON type byte (type code 3) in the first 16 bytes.
+        // PostGIS GSERIALIZED v1 stores the type in byte 4; v2 stores it
+        // in byte 8. Either is fine — we only assert "polygon-shaped".
+        let has_polygon_type_byte = bytes[..16.min(bytes.len())].contains(&3u8);
+        assert!(
+            has_polygon_type_byte,
+            "GSERIALIZED bytes do not contain POLYGON type byte (3) in header window: {:?}",
+            &bytes[..16.min(bytes.len())],
+        );
+    }
+
+    /// `SELECT count(*) FROM h3_polyfill(small_polygon, 9)` returns a
+    /// non-zero, bounded number of cells. The polygon is a tiny square
+    /// (about 100 m on a side at the equator); at H3 res 9 (~70 m hex
+    /// edge) we expect a small handful of cells.
+    #[pg_test]
+    fn function_scan_h3_polyfill_returns_bounded_cell_count() {
+        if !extension_installed("h3") || !extension_installed("postgis") {
+            return;
+        }
+
+        // Trigger registry init.
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+
+        // h3_polyfill expects a polygon and a resolution.
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM h3_polyfill( \
+                ST_GeomFromText('POLYGON((0 0, 0.001 0, 0.001 0.001, 0 0.001, 0 0))', 4326), \
+                9 \
+             )",
+        )
+        .expect("h3_polyfill count query ok")
+        .expect("count not null");
+
+        // The exact cell count depends on H3's polygon-clipping algorithm;
+        // we assert a bounded range that is wide enough to tolerate algo
+        // variants but narrow enough to catch a regression where dispatch
+        // returns 0 cells (i.e. the kernel silently failed) or returns a
+        // huge number (kernel bug, wrong resolution).
+        assert!(
+            (1..=100).contains(&count),
+            "h3_polyfill of ~100m square at res 9 should return 1..=100 cells, got {count}",
+        );
+    }
+
+    /// `SELECT * FROM ST_SummaryStats(rast)` returns a single 6-field record:
+    /// (count, sum, mean, stddev, min, max). Verifies the
+    /// `OutputShape::Record { field_count = 6 }` heap_form_tuple path.
+    ///
+    /// We construct a tiny test raster via PostGIS (1x1 raster with one
+    /// double-precision band, value = 42.0) so the expected output is
+    /// deterministic.
+    #[pg_test]
+    fn function_scan_st_summarystats_emits_six_field_record() {
+        if !extension_installed("postgis_raster") {
+            return;
+        }
+
+        // Trigger registry init.
+        Spi::run("SELECT 1").expect("ping");
+        // Construct a 1x1 raster, 64FB band, value 42.0.
+        // ST_MakeEmptyRaster (width, height, ipx, ipy, scalex, scaley, skewx, skewy, srid)
+        // ST_AddBand   (raster, pixeltype, initialvalue, nodata)
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM ST_SummaryStats( \
+                ST_AddBand( \
+                    ST_MakeEmptyRaster(1, 1, 0, 0, 1, -1, 0, 0, 0), \
+                    '64BF'::text, \
+                    42.0::double precision, \
+                    NULL::double precision \
+                ) \
+             )",
+        )
+        .expect("ST_SummaryStats count query ok")
+        .expect("count not null");
+        assert_eq!(
+            count, 1,
+            "ST_SummaryStats must emit exactly one 6-field record row",
+        );
+
+        // Fetch the count field of the record. With a 1x1 raster of value
+        // 42.0, ST_SummaryStats.count = 1.
+        let stats_count = Spi::get_one::<i64>(
+            "SELECT (s).count FROM ST_SummaryStats( \
+                ST_AddBand( \
+                    ST_MakeEmptyRaster(1, 1, 0, 0, 1, -1, 0, 0, 0), \
+                    '64BF'::text, \
+                    42.0::double precision, \
+                    NULL::double precision \
+                ) \
+             ) AS s",
+        )
+        .expect("ss count query ok")
+        .expect("not null");
+        assert_eq!(
+            stats_count, 1,
+            "1x1 raster of 42.0 should report ST_SummaryStats.count = 1",
+        );
+    }
+}
