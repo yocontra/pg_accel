@@ -615,7 +615,7 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   are dispatched per-row with their full argument set; golden-diff
   test against PostGIS raster output for each.
 
-### H3 operator registrations — GSERIALIZED encoder shipped, dispatch wiring still pending
+### H3 var-output ops — wiring landed; 3 follow-up blockers (registry-init / shape / array walker)
 
 - **What** (refreshed 2026-05-03 after Agent F3 partial completion):
   All 15 H3 ops are registered. Wired end-to-end (dispatch + kernel)
