@@ -95,30 +95,52 @@ pub fn adapter() -> ExtensionAdapter {
         // F3 FunctionScan TupleDesc metadata (Phase 2). The h3index type is
         // an extension-defined SQL type whose OID isn't known at compile
         // time; the value 0 acts as a sentinel meaning "look up the return
-        // type via `pg_proc` at FunctionScan begin time". For
-        // boundary / multi_polygon ops we likewise carry a sentinel for
-        // PostGIS `geometry`. The single-field name matches the SQL
-        // declaration (the unnamed return column of a SETOF function).
-        let (out_types, out_names): (Vec<u32>, Vec<&'static str>) = match name {
-            // SETOF h3index — single bigint-like column.
-            "h3_grid_disk" | "h3_grid_ring_unsafe" | "h3_polyfill" | "h3_cell_to_children" => {
-                // h3index is stored as bigint (INT8) in PG. Hard-coding the
-                // bigint OID is safe because the h3-pg extension declares
-                // h3index as `CREATE TYPE h3index` with bigint storage.
-                (vec![pgrx::pg_sys::INT8OID.to_u32()], vec![name])
-            }
-            // Returns a single PostGIS geometry per call (cell_to_boundary)
-            // or per cell-array (cells_to_multi_polygon). Sentinel 0 means
-            // "resolve at FunctionScan-begin via pg_proc" since the
-            // PostGIS `geometry` type OID is dynamic.
-            "h3_cell_to_boundary" | "h3_cells_to_multi_polygon" => (vec![0u32], vec![name]),
-            _ => (Vec::new(), Vec::new()),
-        };
+        // type via `pg_proc` at FunctionScan begin time".
+        //
+        // Boundary / multi_polygon ops emit PG built-in `polygon` (OID
+        // 604) bytes via the encoders at
+        // `adapters/extractors/geometry/polygon_encoder.rs`. h3-pg
+        // declares the return type as `polygon` (single column) for
+        // cell_to_boundary and `(exterior polygon, holes polygon[])` for
+        // cells_to_multi_polygon (h3--3.7.2--4.0.0.sql:47 and :196), so
+        // we hard-code the well-known OIDs.
+        let (out_shape, out_types, out_names): (OutputShape, Vec<u32>, Vec<&'static str>) =
+            match name {
+                // SETOF h3index — single bigint-like column.
+                "h3_grid_disk" | "h3_grid_ring_unsafe" | "h3_polyfill" | "h3_cell_to_children" => (
+                    OutputShape::VarLen,
+                    // h3index is stored as bigint (INT8) in PG. Hard-coding the
+                    // bigint OID is safe because the h3-pg extension declares
+                    // h3index as `CREATE TYPE h3index` with bigint storage.
+                    vec![pgrx::pg_sys::INT8OID.to_u32()],
+                    vec![name],
+                ),
+                // h3_cell_to_boundary(cell h3index, ...) RETURNS polygon (one
+                // polygon per cell). Single-column varlena output.
+                "h3_cell_to_boundary" => (
+                    OutputShape::VarLen,
+                    vec![pgrx::pg_sys::POLYGONOID.to_u32()],
+                    vec![name],
+                ),
+                // h3_cells_to_multi_polygon(cells h3index[],
+                //                           OUT exterior polygon,
+                //                           OUT holes polygon[])
+                //   RETURNS SETOF record. Two-column record output.
+                "h3_cells_to_multi_polygon" => (
+                    OutputShape::Record { field_count: 2 },
+                    vec![
+                        pgrx::pg_sys::POLYGONOID.to_u32(),
+                        pgrx::pg_sys::POLYGONARRAYOID.to_u32(),
+                    ],
+                    vec!["exterior", "holes"],
+                ),
+                _ => (OutputShape::VarLen, Vec::new(), Vec::new()),
+            };
         functions.push(FunctionAccelEntry {
             schema: "public",
             name,
             strategy: AccelStrategy::GpuH3,
-            output_shape: OutputShape::VarLen,
+            output_shape: out_shape,
             output_field_types: out_types,
             output_field_names: out_names,
         });
@@ -407,17 +429,23 @@ mod tests {
 
     #[test]
     fn varlen_ops_have_varlen_output_shape() {
-        // Var-output ops MUST carry OutputShape::VarLen so dispatch picks
-        // the AcceleratedVarLen DispatchResult arm. Drift here would route
-        // through the scalar path and emit one-Datum-per-row, silently
-        // dropping all but the first cell.
+        // Single-Datum-per-row var-output ops MUST carry
+        // OutputShape::VarLen so dispatch picks the AcceleratedVarLen
+        // DispatchResult arm. Drift here would route through the scalar
+        // path and emit one-Datum-per-row, silently dropping all but the
+        // first cell.
+        //
+        // h3_cells_to_multi_polygon is excluded — it emits a 2-field
+        // record (exterior polygon, holes polygon[]) per the h3-pg
+        // declaration at h3--3.7.2--4.0.0.sql:196 and uses
+        // OutputShape::Record { field_count: 2 }; see the
+        // record_ops_have_record_output_shape test for that case.
         const VARLEN_OPS: &[&str] = &[
             "h3_grid_disk",
             "h3_grid_ring_unsafe",
             "h3_polyfill",
             "h3_cell_to_children",
             "h3_cell_to_boundary",
-            "h3_cells_to_multi_polygon",
         ];
         let by_name: std::collections::HashMap<&str, OutputShape> = adapter()
             .functions
@@ -432,6 +460,56 @@ mod tests {
                 "operator `{op}` should have OutputShape::VarLen but has {shape:?}",
             );
         }
+    }
+
+    #[test]
+    fn h3_cells_to_multi_polygon_has_record_shape() {
+        // h3-pg declares this as `(h3index[], OUT exterior polygon,
+        // OUT holes polygon[]) RETURNS SETOF record`
+        // (h3--3.7.2--4.0.0.sql:196). The accelerated dispatch must emit
+        // OutputShape::Record { field_count: 2 } so the FunctionScan
+        // executor builds a 2-column tuple slot, not a 1-column varlen.
+        let entry = adapter()
+            .functions
+            .iter()
+            .find(|f| f.name == "h3_cells_to_multi_polygon")
+            .cloned()
+            .expect("h3_cells_to_multi_polygon must be registered");
+        assert_eq!(
+            entry.output_shape,
+            OutputShape::Record { field_count: 2 },
+            "h3_cells_to_multi_polygon should be Record(2)",
+        );
+        assert_eq!(
+            entry.output_field_types,
+            vec![
+                pgrx::pg_sys::POLYGONOID.to_u32(),
+                pgrx::pg_sys::POLYGONARRAYOID.to_u32(),
+            ],
+            "field types must be (polygon, polygon[])",
+        );
+        assert_eq!(entry.output_field_names, vec!["exterior", "holes"]);
+    }
+
+    #[test]
+    fn h3_cell_to_boundary_returns_pg_polygon() {
+        // h3-pg declares cell_to_boundary as RETURNS polygon
+        // (h3--3.7.2--4.0.0.sql:47). Our dispatch must advertise the
+        // built-in polygon OID (604) so the executor builds the right
+        // tuple slot — earlier revisions used sentinel 0 + GSERIALIZED
+        // bytes which crashed npoints().
+        let entry = adapter()
+            .functions
+            .iter()
+            .find(|f| f.name == "h3_cell_to_boundary")
+            .cloned()
+            .expect("h3_cell_to_boundary must be registered");
+        assert_eq!(entry.output_shape, OutputShape::VarLen);
+        assert_eq!(
+            entry.output_field_types,
+            vec![pgrx::pg_sys::POLYGONOID.to_u32()],
+            "must declare output type as PG built-in polygon (OID 604)",
+        );
     }
 
     #[test]

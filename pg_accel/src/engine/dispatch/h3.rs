@@ -2,7 +2,7 @@
 
 use crate::adapters::extractors::array::{ParseError as ArrayParseError, parse_array};
 use crate::adapters::extractors::geometry::{
-    encode_multipolygon, encode_polygon, extract_geometry,
+    encode_pg_polygon, encode_pg_polygon_array, extract_geometry,
 };
 use crate::engine::gucs;
 use crate::engine::registry;
@@ -480,20 +480,28 @@ unsafe fn dispatch_gpu_h3_var_cell_to_children(
 /// SRID emitted by H3 boundary kernels. H3 cells are spherical-coordinates
 /// (WGS84 lat/lng), so the standard EPSG:4326 SRID is correct for the
 /// resulting POLYGON / MULTIPOLYGON geometries.
+///
+/// **Note:** PG's built-in `polygon` type does not carry an SRID
+/// (POLYGON struct is `npts + bbox + Point[]` with no SRID slot — see
+/// utils/geo_decls.h:151-157). The SRID is only consumed by the legacy
+/// GSERIALIZED encoders that the h3 dispatch arms used to call; the
+/// active encoders (`encode_pg_polygon` / `encode_pg_polygon_array`)
+/// ignore it.
+#[allow(dead_code)]
 const H3_BOUNDARY_SRID: i32 = 4326;
 
-/// Wrap a bare GSERIALIZED byte buffer in a PG varlena and return the
-/// resulting Datum. Allocates via `palloc` in the current memory context.
+/// Wrap a bare varlena byte buffer in a PG varlena (4-byte header) and
+/// return the resulting Datum. Allocates via `palloc` in the current
+/// memory context.
 ///
 /// # Safety
 ///
 /// Must be called on the main backend thread. The returned Datum points
 /// into the current memory context; the caller is responsible for keeping
 /// the context alive long enough for downstream consumers.
-unsafe fn varlena_from_gserialized(bare: &[u8]) -> pgrx::pg_sys::Datum {
+unsafe fn varlena_from_bare_bytes(bare: &[u8]) -> pgrx::pg_sys::Datum {
     use pgrx::pg_sys;
-    // VARHDRSZ = 4 bytes for the 4-byte varlena length header (short or
-    // long format). For our payloads we always use the 4-byte form.
+    // VARHDRSZ = 4 bytes for the 4-byte varlena length header.
     let varhdrsz = std::mem::size_of::<pg_sys::int32>();
     let total = varhdrsz + bare.len();
     // SAFETY: palloc allocates `total` bytes in CurrentMemoryContext on
@@ -501,23 +509,28 @@ unsafe fn varlena_from_gserialized(bare: &[u8]) -> pgrx::pg_sys::Datum {
     let ptr = unsafe { pg_sys::palloc(total) }.cast::<u8>();
     // SET_VARSIZE_4B-equivalent: write `total << 2` into the first 4
     // bytes (low 2 bits encode the varlena format; 00 = 4B aligned).
-    // pgrx exposes `set_varsize_4b` via the `varatt_*` helpers; use the
-    // raw write to avoid coupling to a specific helper signature.
     let len_word = (total as u32) << 2;
     // SAFETY: ptr is a fresh palloc allocation of `total` bytes.
     unsafe {
         std::ptr::write_unaligned(ptr.cast::<u32>(), len_word);
-        // Copy the bare GSERIALIZED bytes after the varlena header.
+        // Copy the bare bytes after the varlena header.
         std::ptr::copy_nonoverlapping(bare.as_ptr(), ptr.add(varhdrsz), bare.len());
     }
     pg_sys::Datum::from(ptr)
 }
 
-/// `h3_cell_to_boundary(cell)` -> POLYGON geometry per cell.
+/// `h3_cell_to_boundary(cell)` -> PG built-in `polygon` per cell.
 ///
-/// Each input row produces exactly one output Datum (a GSERIALIZED varlena
-/// holding the cell's hex/pentagon vertex ring). NULL / invalid input
-/// rows produce a NULL Datum slot (`is_null = true`).
+/// Each input row produces exactly one output Datum (a `polygon` varlena
+/// holding the cell's hex/pentagon vertex ring per
+/// utils/geo_decls.h:151-157). NULL / invalid input rows produce a NULL
+/// Datum slot (`is_null = true`).
+///
+/// **Output type:** PG built-in `polygon` (OID 604), matching h3-pg's
+/// declaration `h3_cell_to_boundary(cell h3index, ...) RETURNS polygon`
+/// (h3--3.7.2--4.0.0.sql:47). Earlier revisions emitted PostGIS
+/// GSERIALIZED bytes which crashed `npoints()` and other polygon
+/// readers because the byte layout doesn't match.
 ///
 /// # Safety
 ///
@@ -539,7 +552,8 @@ unsafe fn dispatch_gpu_h3_cell_to_boundary(
     // The kernel emits a flat coords vector with `raw.offsets[i+1] -
     // raw.offsets[i]` doubles per cell (always 12 for hexagons, 10 for
     // pentagons - 2 doubles per vertex). Encode each cell's vertex run as
-    // a single-ring POLYGON via the F2 encoder, then wrap as varlena.
+    // a PG built-in `polygon` via `encode_pg_polygon`, then wrap as
+    // varlena.
     //
     // Build the flat output as one Datum per input row in `valid_indices`
     // order. Rows whose cell was filtered out (NULL / cell == 0) get an
@@ -556,7 +570,10 @@ unsafe fn dispatch_gpu_h3_cell_to_boundary(
             let start = raw.offsets[valid_cursor] as usize;
             let end = raw.offsets[valid_cursor + 1] as usize;
             // Each (lat, lng) pair occupies two doubles. The kernel writes
-            // pairs in lat/lng order; PostGIS expects x = lng, y = lat.
+            // pairs in lat/lng order; PG `polygon` expects (x, y) where x
+            // is longitude and y is latitude (matches PostGIS / OGC
+            // convention; PG itself is type-agnostic about coordinate
+            // semantics but every consumer treats the first slot as x).
             let n_doubles = end - start;
             if n_doubles == 0 || !n_doubles.is_multiple_of(2) {
                 // Degenerate / malformed kernel output - emit NULL rather
@@ -571,20 +588,29 @@ unsafe fn dispatch_gpu_h3_cell_to_boundary(
                     let lng = coords[v * 2 + 1];
                     ring.push((lng, lat));
                 }
-                match encode_polygon(H3_BOUNDARY_SRID, &[&ring]) {
+                // PG `polygon` is logically closed by type — first vertex
+                // implicitly equals last. The h3 boundary kernel emits the
+                // distinct vertex sequence already (no duplicate closing
+                // point per h3 docs), so we pass it directly. If a closing
+                // duplicate ever appears, drop it here to keep
+                // `npoints(...)` honest.
+                if ring.len() >= 2 && ring[0] == ring[ring.len() - 1] {
+                    ring.pop();
+                }
+                match encode_pg_polygon(&ring) {
                     Ok(bytes) => {
                         // SAFETY: caller is on the main backend thread (asserted at
-                        // the dispatch entry point); `varlena_from_gserialized`
+                        // the dispatch entry point); `varlena_from_bare_bytes`
                         // calls palloc on the current memory context.
-                        let datum = unsafe { varlena_from_gserialized(&bytes) };
+                        let datum = unsafe { varlena_from_bare_bytes(&bytes) };
                         datums.push((datum, false));
                         next_offset = next_offset.saturating_add(1);
                     }
                     Err(e) => {
-                        // Encoder rejected the kernel-derived ring (e.g. empty
-                        // ring or out-of-range SRID). Surface as a NULL row +
-                        // a debug log; do not fabricate a "default" geometry
-                        // (anti-cheat ban #4).
+                        // Encoder rejected the kernel-derived ring (e.g.
+                        // empty ring after closing-vertex drop). Surface as
+                        // a NULL row + a debug log; do not fabricate a
+                        // "default" geometry (anti-cheat ban #4).
                         pgrx::debug1!("pg_accel: h3_cell_to_boundary encoder rejected ring: {}", e,);
                         datums.push((pgrx::pg_sys::Datum::from(0u32), true));
                     }
@@ -683,15 +709,21 @@ unsafe fn dispatch_gpu_h3_polyfill(
     build_var_cells_dispatch_result(batch.len(), &valid_indices, &raw)
 }
 
-/// `h3_cells_to_multi_polygon(cells bigint[])` -> MULTIPOLYGON geometry.
+/// `h3_cells_to_multi_polygon(cells bigint[],
+///                            OUT exterior polygon, OUT holes polygon[])`
+///                            -> SETOF record.
 ///
-/// Each input row carries a `bigint[]` of H3 cells; per row we walk the
-/// array via [`parse_array`], collect cells into a `Vec<u64>`, run the
-/// two-pass `h3_cells_to_multi_polygon_bulk` kernel (size + emit), and
-/// encode the resulting ring CSR as a single GSERIALIZED MULTIPOLYGON
-/// (one polygon per ring, no holes — matches the kernel's flat ring
-/// emission contract). Multidim arrays escalate cleanly via
-/// `DispatchResult::Deferred` per anti-cheat ban #9.
+/// Per h3-pg's declaration at `h3--3.7.2--4.0.0.sql:196`, this SRF emits
+/// a record with two fields: an exterior `polygon` and a `polygon[]` of
+/// holes. We emit `AcceleratedRecord { fields_per_row: 2, datums }` with
+/// one row per non-null/non-empty input array.
+///
+/// **Ring assignment heuristic**: the kernel emits one ring per coverage
+/// region (no hole semantics — see gpu/mod.rs:1143-1208). We pick the
+/// largest-vertex-count ring as the exterior and the rest as `holes[]`.
+/// Single-ring outputs produce an empty `holes` array.
+///
+/// Multidim arrays escalate cleanly via NULL rows per anti-cheat ban #9.
 ///
 /// # Safety
 ///
@@ -700,22 +732,22 @@ unsafe fn dispatch_gpu_h3_polyfill(
 unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
     batch: &[(pgrx::pg_sys::Datum, bool)],
 ) -> DispatchResult {
-    // One output Datum per input row; constant fan-out 1 in the
-    // AcceleratedVarLen offsets vec (matches dispatch_gpu_h3_cell_to_boundary
-    // upstream).
-    let mut datums: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
-    let mut offsets: Vec<u32> = Vec::with_capacity(batch.len() + 1);
-    offsets.push(0);
-    let mut next_offset: u32 = 0;
+    // Two output fields per input row (exterior, holes). `datums.len()`
+    // must equal `batch.len() * 2`.
+    let mut datums: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len() * 2);
 
     let timeout_ms = gucs::kernel_timeout_ms();
     let start = std::time::Instant::now();
 
+    /// Push a NULL (exterior, holes) record into `datums` for the current row.
+    fn push_null_record(datums: &mut Vec<(pgrx::pg_sys::Datum, bool)>) {
+        datums.push((pgrx::pg_sys::Datum::from(0u32), true));
+        datums.push((pgrx::pg_sys::Datum::from(0u32), true));
+    }
+
     for &(datum, is_null) in batch {
         if is_null {
-            datums.push((pgrx::pg_sys::Datum::from(0u32), true));
-            next_offset = next_offset.saturating_add(1);
-            offsets.push(next_offset);
+            push_null_record(&mut datums);
             continue;
         }
 
@@ -726,18 +758,14 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
                 pgrx::debug1!(
                     "pg_accel: h3_cells_to_multi_polygon: multidim bigint[] (ndim={n}) escalated per ban #9"
                 );
-                datums.push((pgrx::pg_sys::Datum::from(0u32), true));
-                next_offset = next_offset.saturating_add(1);
-                offsets.push(next_offset);
+                push_null_record(&mut datums);
                 continue;
             }
             Err(e) => {
                 pgrx::debug1!(
                     "pg_accel: h3_cells_to_multi_polygon: bigint[] parse failed ({e}); NULL row"
                 );
-                datums.push((pgrx::pg_sys::Datum::from(0u32), true));
-                next_offset = next_offset.saturating_add(1);
-                offsets.push(next_offset);
+                push_null_record(&mut datums);
                 continue;
             }
         };
@@ -763,16 +791,13 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
         }
 
         if cells.is_empty() {
-            datums.push((pgrx::pg_sys::Datum::from(0u32), true));
-            next_offset = next_offset.saturating_add(1);
-            offsets.push(next_offset);
+            push_null_record(&mut datums);
             continue;
         }
 
-        // Two-pass kernel: returns CSR over rings (one ring per polygon
-        // member of the multipolygon). For now, treat each ring as the
-        // outer ring of a stand-alone polygon (no holes), which matches
-        // the kernel's flat emission contract — see gpu/mod.rs:1143-1208.
+        // Two-pass kernel: returns CSR over rings. We treat the
+        // largest-vertex-count ring as the exterior; the rest become the
+        // `holes[]` array per h3-pg's record contract.
         let Some(raw) = gpu::h3_cells_to_multi_polygon_bulk(&cells) else {
             pgrx::error!(
                 "pg_accel: h3_cells_to_multi_polygon GPU kernel failed; refusing CPU fallback (rule 11)"
@@ -781,14 +806,13 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
 
         let ring_count = raw.offsets.len().saturating_sub(1);
         if ring_count == 0 {
-            datums.push((pgrx::pg_sys::Datum::from(0u32), true));
-            next_offset = next_offset.saturating_add(1);
-            offsets.push(next_offset);
+            push_null_record(&mut datums);
             continue;
         }
 
         // Build per-ring (lng, lat) vertex Vecs. Kernel emits coords as
-        // (lat, lng) pairs in WGS84; PostGIS expects x=lng, y=lat.
+        // (lat, lng) pairs in WGS84; PG `polygon` consumers treat the
+        // first coord as x — match PostGIS / OGC convention.
         let mut ring_storage: Vec<Vec<(f64, f64)>> = Vec::with_capacity(ring_count);
         for r in 0..ring_count {
             let s = raw.offsets[r] as usize;
@@ -805,46 +829,63 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
                 let lng = coords[v * 2 + 1];
                 verts.push((lng, lat));
             }
-            ring_storage.push(verts);
+            // PG `polygon` is logically closed; drop any closing duplicate
+            // so npoints() matches the distinct vertex count.
+            if verts.len() >= 2 && verts[0] == verts[verts.len() - 1] {
+                verts.pop();
+            }
+            if !verts.is_empty() {
+                ring_storage.push(verts);
+            }
         }
 
         if ring_storage.is_empty() {
-            datums.push((pgrx::pg_sys::Datum::from(0u32), true));
-            next_offset = next_offset.saturating_add(1);
-            offsets.push(next_offset);
+            push_null_record(&mut datums);
             continue;
         }
 
-        // Each ring becomes a single-ring polygon member of the
-        // multipolygon. The encode_multipolygon API takes
-        // `&[&[&[(f64, f64)]]]`: outer slice = polygons, middle = rings
-        // per polygon (1 here), inner = vertices per ring.
-        let polygon_views: Vec<Vec<&[(f64, f64)]>> = ring_storage
+        // Pick the largest ring (by vertex count) as exterior; the rest
+        // become holes. Tie-break by original index (stable).
+        let exterior_idx = ring_storage
             .iter()
-            .map(|ring| vec![ring.as_slice()])
-            .collect();
-        let polygon_refs: Vec<&[&[(f64, f64)]]> = polygon_views
+            .enumerate()
+            .max_by_key(|(_, r)| r.len())
+            .map_or(0, |(i, _)| i);
+        let exterior_ring = ring_storage[exterior_idx].clone();
+        let holes: Vec<&[(f64, f64)]> = ring_storage
             .iter()
-            .map(<Vec<&[(f64, f64)]> as AsRef<[&[(f64, f64)]]>>::as_ref)
+            .enumerate()
+            .filter(|(i, _)| *i != exterior_idx)
+            .map(|(_, r)| r.as_slice())
             .collect();
 
-        match encode_multipolygon(H3_BOUNDARY_SRID, &polygon_refs) {
-            Ok(bytes) => {
-                // SAFETY: main backend thread; varlena_from_gserialized
-                // palloc's a varlena in the current memory context.
-                let datum_out = unsafe { varlena_from_gserialized(&bytes) };
-                datums.push((datum_out, false));
-            }
+        let exterior_bytes = match encode_pg_polygon(&exterior_ring) {
+            Ok(b) => b,
             Err(e) => {
                 pgrx::debug1!(
-                    "pg_accel: h3_cells_to_multi_polygon encoder rejected rings: {}",
-                    e,
+                    "pg_accel: h3_cells_to_multi_polygon: exterior encode failed ({e}); NULL row"
                 );
-                datums.push((pgrx::pg_sys::Datum::from(0u32), true));
+                push_null_record(&mut datums);
+                continue;
             }
-        }
-        next_offset = next_offset.saturating_add(1);
-        offsets.push(next_offset);
+        };
+        let holes_bytes = match encode_pg_polygon_array(&holes) {
+            Ok(b) => b,
+            Err(e) => {
+                pgrx::debug1!(
+                    "pg_accel: h3_cells_to_multi_polygon: holes[] encode failed ({e}); NULL row"
+                );
+                push_null_record(&mut datums);
+                continue;
+            }
+        };
+
+        // SAFETY: main backend thread; varlena_from_bare_bytes palloc's a
+        // varlena in the current memory context.
+        let exterior_datum = unsafe { varlena_from_bare_bytes(&exterior_bytes) };
+        let holes_datum = unsafe { varlena_from_bare_bytes(&holes_bytes) };
+        datums.push((exterior_datum, false));
+        datums.push((holes_datum, false));
     }
 
     let elapsed_ms = start.elapsed().as_millis() as i32;
@@ -856,30 +897,32 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
         );
     }
 
-    DispatchResult::AcceleratedVarLen { offsets, datums }
+    DispatchResult::AcceleratedRecord {
+        fields_per_row: 2,
+        datums,
+    }
 }
 
 // ---------------------------------------------------------------------------
-// pg_test integration for the Phase 2 B3 h3_cells_to_multi_polygon arm
+// pg_test integration for the Phase 2 boundary / multi_polygon arms
 // ---------------------------------------------------------------------------
 //
-// **Known dispatch shape mismatch (mirrors function_scan.rs:676-684 for
-// `h3_cell_to_boundary`).** h3-pg declares
-// `h3_cells_to_multi_polygon(h3index[], OUT exterior polygon, OUT holes
-// polygon[])` (PG built-in `polygon` types — see
-// `h3--3.7.2--4.0.0.sql:ALTER FUNCTION h3_set_to_multi_polygon ...
-// RENAME TO h3_cells_to_multi_polygon`). Our Phase 2 B3 dispatch arm
-// instead emits PostGIS GSERIALIZED MULTIPOLYGON varlena bytes via
-// `varlena_from_gserialized`, and the planner-side classifier wires our
-// kernel up regardless of the declared return type. Counting the row
-// exercises the FunctionScan dispatch + tuple emission path without
-// forcing PG to interpret the value bytes; a follow-up bug ticket
-// will retarget the kernel output to the declared return type once
-// the var-output FunctionScan injection chain stabilises.
+// h3-pg declares both ops with PG built-in `polygon` types:
+//   h3_cell_to_boundary(cell h3index, ...) RETURNS polygon
+//     (h3--3.7.2--4.0.0.sql:47)
+//   h3_cells_to_multi_polygon(h3index[], OUT exterior polygon, OUT holes
+//     polygon[]) RETURNS SETOF record
+//     (h3--3.7.2--4.0.0.sql:196)
 //
-// The test asserts the call doesn't crash (count >= 1). It runs only
-// when h3 is installable in the pgrx_tests DB; otherwise it skips
-// silently — same idiom as function_scan.rs:661.
+// The dispatch encodes results via `encode_pg_polygon` and
+// `encode_pg_polygon_array` (see polygon_encoder.rs); these tests
+// roundtrip the encoded bytes through PG's polygon parser by calling
+// `npoints(...)` to verify they decode cleanly. Earlier revisions emitted
+// PostGIS GSERIALIZED bytes, which crashed npoints() because the layout
+// doesn't match utils/geo_decls.h:151-157.
+//
+// All tests skip silently if the `h3` extension isn't installable in the
+// pgrx_tests DB — same idiom as function_scan.rs:661.
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 #[pgrx::pg_schema]
@@ -895,11 +938,9 @@ mod tests {
         Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
     }
 
-    /// `SELECT count(*) FROM h3_cells_to_multi_polygon(ARRAY[
-    ///   '8a..', '8a..']::h3index[])` returns exactly one row (the
-    /// function declares `OUT exterior polygon, OUT holes polygon[]`).
-    /// Counts rows rather than reading values to avoid the GSERIALIZED
-    /// vs PG-`polygon` shape mismatch (see module-level comment).
+    /// `h3_cells_to_multi_polygon(ARRAY[cell, cell]::h3index[])` returns
+    /// exactly one (exterior, holes) record per call regardless of input
+    /// array cardinality.
     #[pg_test]
     fn h3_cells_to_multi_polygon_emits_one_row() {
         if !ensure_extension("h3") {
@@ -908,9 +949,6 @@ mod tests {
         // Trigger registry init.
         Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
 
-        // Two adjacent resolution-10 cells. h3-pg's
-        // `h3_cells_to_multi_polygon(h3index[])` always emits exactly
-        // one (exterior, holes) row regardless of input cardinality.
         let count = Spi::get_one::<i64>(
             "SELECT count(*) FROM h3_cells_to_multi_polygon(\
              ARRAY['8a2a1072b59ffff', '8a2a1072b597fff']::h3index[])",
@@ -920,6 +958,53 @@ mod tests {
         assert_eq!(
             count, 1,
             "h3_cells_to_multi_polygon must emit exactly one (exterior, holes) row, got {count}",
+        );
+    }
+
+    /// `npoints(h3_cell_to_boundary('8a..'::h3index, false))` must return
+    /// the cell's distinct vertex count (6 for hexagons, 5 for pentagons).
+    /// This roundtrips the encoded `polygon` bytes through PG's polygon
+    /// parser — replaces the older count(*) coincidence assertion that
+    /// only verified "didn't crash on read".
+    #[pg_test]
+    fn h3_cell_to_boundary_npoints() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
+
+        // Resolution-10 hexagon: 6 distinct vertices.
+        let npts = Spi::get_one::<i32>(
+            "SELECT npoints(h3_cell_to_boundary('8a2a1072b59ffff'::h3index, false))",
+        )
+        .expect("npoints query ok")
+        .expect("npoints not null");
+        assert_eq!(
+            npts, 6,
+            "h3 hexagon cell_to_boundary should yield 6 distinct vertices, got {npts}",
+        );
+    }
+
+    /// `npoints(exterior)` from the multi_polygon record must succeed and
+    /// return a positive vertex count. Verifies the exterior column's
+    /// `polygon` bytes roundtrip through PG's polygon parser.
+    #[pg_test]
+    fn h3_cells_to_multi_polygon_npoints() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
+
+        // Single-cell input: union is one hexagon, so exterior has 6 verts.
+        let npts = Spi::get_one::<i32>(
+            "SELECT npoints(exterior) FROM h3_cells_to_multi_polygon(\
+             ARRAY['8a2a1072b59ffff']::h3index[])",
+        )
+        .expect("npoints query ok")
+        .expect("npoints not null");
+        assert!(
+            npts > 0,
+            "exterior polygon must have a positive vertex count; got {npts}",
         );
     }
 }

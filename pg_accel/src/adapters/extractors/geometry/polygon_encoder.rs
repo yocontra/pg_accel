@@ -483,8 +483,9 @@ pub fn encode_pg_polygon_array(polygons: &[&[(f64, f64)]]) -> Result<Vec<u8>, En
         buf.extend_from_slice(&len_word.to_le_bytes());
         buf.extend_from_slice(body);
         let padded = align_up(elem_total, MAXALIGN);
-        for _ in elem_total..padded {
-            buf.push(0u8);
+        let pad = padded - elem_total;
+        if pad > 0 {
+            buf.extend(std::iter::repeat_n(0u8, pad));
         }
     }
     debug_assert_eq!(buf.len(), total);
