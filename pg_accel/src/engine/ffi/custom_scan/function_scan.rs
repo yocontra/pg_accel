@@ -355,9 +355,6 @@ pub(super) unsafe fn next_tuple(
     node: *mut pg_sys::CustomScanState,
     executor: *mut std::ffi::c_void,
 ) -> *mut pg_sys::TupleTableSlot {
-    // SAFETY: executor was Box::into_raw'd as FunctionScanExecState in
-    // init_state. We reborrow as &mut to advance the cursor.
-    let state = unsafe { &mut *executor.cast::<FunctionScanExecState>() };
     // SAFETY: node is a valid CustomScanState; ss_ScanTupleSlot was set up
     // by ExecInitCustomScan and may have had its descriptor swapped during
     // init_state.
@@ -365,6 +362,21 @@ pub(super) unsafe fn next_tuple(
     if slot.is_null() {
         return std::ptr::null_mut();
     }
+    // init_state returns null on shape/registry mismatch; in that case
+    // emit a clean EOF rather than dereferencing the null state pointer
+    // (otherwise the executor's first ExecScan call segfaults). Per
+    // anti-cheat ban #4 we surface the shape mismatch via the
+    // pgrx::warning! at init_state but do not pretend to dispatch.
+    if executor.is_null() {
+        // SAFETY: ExecClearTuple resets the slot on the main thread.
+        unsafe {
+            pg_sys::ExecClearTuple(slot);
+        }
+        return slot;
+    }
+    // SAFETY: executor was Box::into_raw'd as FunctionScanExecState in
+    // init_state. We reborrow as &mut to advance the cursor.
+    let state = unsafe { &mut *executor.cast::<FunctionScanExecState>() };
 
     // EOF when the cursor has advanced past the buffered row count.
     let n_rows = state.n_rows();
