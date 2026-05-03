@@ -258,6 +258,10 @@ pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_of
  *   - sphere_distance_bulk fp64 split (no signature change — internal)
  *   - st_length_bulk fp64 split (no signature change — internal)
  *   - pgaccel_st_distance_polygon_polygon_bulk (new public symbol)
+ *   - pgaccel_st_equals_bulk
+ *   - pgaccel_st_touches_bulk
+ *   - pgaccel_st_crosses_bulk
+ *   - pgaccel_st_overlaps_bulk
  *
  * The sphere_distance / st_length fp64 splits are *internal* — the
  * pgaccel_sphere_distance_bulk(use_fp64=...) and
@@ -265,9 +269,39 @@ pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_of
  * shape; they now dispatch internally to non-templated _f32 / _f64
  * kernels. The fp64 branches no longer return PGACCEL_ERROR_NO_DEVICE.
  *
+ * The four algorithmic predicates take per-row pgaccel_geometry pairs
+ * and write int8 results matching the three-layer convention:
+ *    1 = DEFINITE TRUE   -1 = DEFINITE FALSE   0 = UNCERTAIN.
+ * UNCERTAIN routes to PG for the full DE-9IM check; the GPU kernels
+ * exercise only the cheap bbox-disjoint and identical-vertex-set
+ * shortcuts (per CLAUDE.md anti-cheat ban #9: "say so when stuck" —
+ * full DE-9IM topology is genuinely complex; UNCERTAIN is the
+ * documented escape hatch, NOT a CPU fallback).
+ *
+ * Forward declaration of pgaccel_geometry so the predicate signatures
+ * below can name it before the full typedef appears in the
+ * "Spatial Dispatch (Three-Layer Pipeline)" section.
+ *
  * Keep declarations in this block so the cross-domain header doesn't
  * fragment over time.
  */
+typedef struct pgaccel_geometry_s pgaccel_geometry;
+
+pgaccel_status pgaccel_st_equals_bulk(const pgaccel_geometry* geoms_a,
+                                      const pgaccel_geometry* geoms_b, size_t count,
+                                      int8_t* results);
+
+pgaccel_status pgaccel_st_touches_bulk(const pgaccel_geometry* geoms_a,
+                                       const pgaccel_geometry* geoms_b, size_t count,
+                                       int8_t* results);
+
+pgaccel_status pgaccel_st_crosses_bulk(const pgaccel_geometry* geoms_a,
+                                       const pgaccel_geometry* geoms_b, size_t count,
+                                       int8_t* results);
+
+pgaccel_status pgaccel_st_overlaps_bulk(const pgaccel_geometry* geoms_a,
+                                        const pgaccel_geometry* geoms_b, size_t count,
+                                        int8_t* results);
 
 /* CSR-style polygon×polygon distance. coords arrays mirror the
  * pgaccel_st_area_bulk / pgaccel_st_length_bulk shape: flat fp32
@@ -290,7 +324,10 @@ typedef enum {
   PGACCEL_GEOM_UNKNOWN = 99,
 } pgaccel_geom_type;
 
-typedef struct {
+/* Tagged so the spatial-extensions block above can forward-declare via
+ * `typedef struct pgaccel_geometry_s pgaccel_geometry;` without
+ * depending on declaration order. */
+typedef struct pgaccel_geometry_s {
   pgaccel_geom_type type;
   const float* bbox;            /* [4] xmin, ymin, xmax, ymax */
   const float* coords;          /* flat coordinate array (x,y pairs) */

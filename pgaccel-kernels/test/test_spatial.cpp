@@ -893,6 +893,165 @@ static void test_st_distance_polygon_polygon_degenerate() {
 }
 
 // ---------------------------------------------------------------------------
+// Algorithmic predicate tests (st_equals / _touches / _crosses / _overlaps).
+//
+// All four kernels classify pairs into DEFINITE TRUE (1), DEFINITE FALSE
+// (-1), or UNCERTAIN (0). The host-side fast-path covers identical
+// Point/Point coords, identical Polygon/Polygon ring vertex sets, and
+// disjoint bboxes. Everything else routes to UNCERTAIN.
+// ---------------------------------------------------------------------------
+
+// Helper: build a Point geometry descriptor from two stored coords.
+static pgaccel_geometry make_point_geom(const float* coords, const float* bbox) {
+  pgaccel_geometry g;
+  g.type = PGACCEL_GEOM_POINT;
+  g.bbox = bbox;
+  g.coords = coords;
+  g.coord_count = 1;
+  g.ring_offsets = nullptr;
+  g.ring_count = 0;
+  return g;
+}
+
+// Helper: build a Polygon geometry descriptor.
+static pgaccel_geometry make_polygon_geom(const float* coords, size_t coord_count,
+                                          const float* bbox) {
+  pgaccel_geometry g;
+  g.type = PGACCEL_GEOM_POLYGON;
+  g.bbox = bbox;
+  g.coords = coords;
+  g.coord_count = coord_count;
+  g.ring_offsets = nullptr;
+  g.ring_count = 0;
+  return g;
+}
+
+static void test_st_equals_bulk() {
+  printf("--- st_equals_bulk ---\n");
+  // Point/Point identical → DEFINITE TRUE
+  // Point/Point disjoint  → DEFINITE FALSE
+  // Polygon/Polygon identical → DEFINITE TRUE
+  // Cross-dim Point/Polygon → DEFINITE FALSE (different dims)
+  const float pt_a_xy[] = {1.0f, 1.0f};
+  const float pt_a_bbox[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  const float pt_b_xy[] = {1.0f, 1.0f};
+  const float pt_b_bbox[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  const float pt_c_xy[] = {99.0f, 99.0f};
+  const float pt_c_bbox[] = {99.0f, 99.0f, 99.0f, 99.0f};
+
+  // Unit square ring (CCW, closed)
+  const float poly_xy[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  const float poly_bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  // Different polygon (offset)
+  const float poly2_xy[] = {
+      10.0f, 10.0f, 11.0f, 10.0f, 11.0f, 11.0f, 10.0f, 11.0f, 10.0f, 10.0f,
+  };
+  const float poly2_bbox[] = {10.0f, 10.0f, 11.0f, 11.0f};
+
+  pgaccel_geometry g_a[4];
+  pgaccel_geometry g_b[4];
+  g_a[0] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[0] = make_point_geom(pt_b_xy, pt_b_bbox);  // identical points
+  g_a[1] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[1] = make_point_geom(pt_c_xy, pt_c_bbox);  // disjoint points
+  g_a[2] = make_polygon_geom(poly_xy, 5, poly_bbox);
+  g_b[2] = make_polygon_geom(poly_xy, 5, poly_bbox);  // identical polygons
+  g_a[3] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[3] = make_polygon_geom(poly2_xy, 5, poly2_bbox);  // mixed dim, disjoint
+
+  int8_t results[4] = {99, 99, 99, 99};
+  pgaccel_status s = pgaccel_st_equals_bulk(g_a, g_b, 4, results);
+  ASSERT_EQ("status OK", s, PGACCEL_OK);
+  ASSERT_EQ("Point=Point identical → 1", results[0], 1);
+  ASSERT_EQ("Point=Point disjoint → -1", results[1], -1);
+  ASSERT_EQ("Polygon=Polygon identical → 1", results[2], 1);
+  ASSERT_EQ("Point/Polygon mixed-dim → -1", results[3], -1);
+}
+
+static void test_st_touches_bulk() {
+  printf("--- st_touches_bulk ---\n");
+  // Disjoint bboxes → DEFINITE FALSE
+  // Identical points → DEFINITE FALSE (interiors overlap)
+  // Anything more complex → UNCERTAIN
+  const float pt_a_xy[] = {0.0f, 0.0f};
+  const float pt_a_bbox[] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float pt_far_xy[] = {99.0f, 99.0f};
+  const float pt_far_bbox[] = {99.0f, 99.0f, 99.0f, 99.0f};
+  const float pt_eq_xy[] = {0.0f, 0.0f};
+  const float pt_eq_bbox[] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  pgaccel_geometry g_a[2];
+  pgaccel_geometry g_b[2];
+  g_a[0] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[0] = make_point_geom(pt_far_xy, pt_far_bbox);  // disjoint
+  g_a[1] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[1] = make_point_geom(pt_eq_xy, pt_eq_bbox);  // identical
+
+  int8_t results[2] = {99, 99};
+  pgaccel_status s = pgaccel_st_touches_bulk(g_a, g_b, 2, results);
+  ASSERT_EQ("status OK", s, PGACCEL_OK);
+  ASSERT_EQ("Disjoint bbox → -1", results[0], -1);
+  ASSERT_EQ("Identical points (interiors overlap) → -1", results[1], -1);
+}
+
+static void test_st_crosses_bulk() {
+  printf("--- st_crosses_bulk ---\n");
+  // Disjoint bboxes → DEFINITE FALSE
+  // Identical points → DEFINITE FALSE
+  const float pt_a_xy[] = {0.0f, 0.0f};
+  const float pt_a_bbox[] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float pt_far_xy[] = {99.0f, 99.0f};
+  const float pt_far_bbox[] = {99.0f, 99.0f, 99.0f, 99.0f};
+
+  pgaccel_geometry g_a[2];
+  pgaccel_geometry g_b[2];
+  g_a[0] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[0] = make_point_geom(pt_far_xy, pt_far_bbox);
+  g_a[1] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[1] = make_point_geom(pt_a_xy, pt_a_bbox);
+
+  int8_t results[2] = {99, 99};
+  pgaccel_status s = pgaccel_st_crosses_bulk(g_a, g_b, 2, results);
+  ASSERT_EQ("status OK", s, PGACCEL_OK);
+  ASSERT_EQ("Disjoint bbox → -1", results[0], -1);
+  ASSERT_EQ("Identical points → -1", results[1], -1);
+}
+
+static void test_st_overlaps_bulk() {
+  printf("--- st_overlaps_bulk ---\n");
+  // Disjoint bboxes → DEFINITE FALSE
+  // Different types → DEFINITE FALSE (same-dim required)
+  // Identical polygons → DEFINITE FALSE (intersection equals input)
+  const float pt_a_xy[] = {0.0f, 0.0f};
+  const float pt_a_bbox[] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float pt_far_xy[] = {99.0f, 99.0f};
+  const float pt_far_bbox[] = {99.0f, 99.0f, 99.0f, 99.0f};
+
+  const float poly_xy[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  const float poly_bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+
+  pgaccel_geometry g_a[3];
+  pgaccel_geometry g_b[3];
+  g_a[0] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[0] = make_point_geom(pt_far_xy, pt_far_bbox);  // disjoint
+  g_a[1] = make_point_geom(pt_a_xy, pt_a_bbox);
+  g_b[1] = make_polygon_geom(poly_xy, 5, poly_bbox);  // mixed dim
+  g_a[2] = make_polygon_geom(poly_xy, 5, poly_bbox);
+  g_b[2] = make_polygon_geom(poly_xy, 5, poly_bbox);  // identical polygons
+
+  int8_t results[3] = {99, 99, 99};
+  pgaccel_status s = pgaccel_st_overlaps_bulk(g_a, g_b, 3, results);
+  ASSERT_EQ("status OK", s, PGACCEL_OK);
+  ASSERT_EQ("Disjoint bbox → -1", results[0], -1);
+  ASSERT_EQ("Mixed dim → -1", results[1], -1);
+  ASSERT_EQ("Identical polygons → -1", results[2], -1);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -935,6 +1094,11 @@ int main() {
   test_st_distance_polygon_polygon_disjoint();
   test_st_distance_polygon_polygon_touching();
   test_st_distance_polygon_polygon_degenerate();
+
+  test_st_equals_bulk();
+  test_st_touches_bulk();
+  test_st_crosses_bulk();
+  test_st_overlaps_bulk();
 
   printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
   if (g_tests_failed > 0) {

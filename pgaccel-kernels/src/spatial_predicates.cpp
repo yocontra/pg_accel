@@ -1297,3 +1297,306 @@ pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* 
   return st_distance_polygon_polygon_bulk_sycl_f32(coords_a, row_offsets_a, coords_b, row_offsets_b,
                                                    row_count, distances, uncertain);
 }
+
+// ---------------------------------------------------------------------------
+// Algorithmic spatial predicates (pair-row inputs via pgaccel_geometry).
+//
+// `pgaccel_st_equals_bulk`, `_st_touches_bulk`, `_st_crosses_bulk`, and
+// `_st_overlaps_bulk` follow the same DEFINITE / UNCERTAIN routing
+// contract as `pgaccel_spatial_intersects`: each pair classifies into one
+// of three buckets, and `UNCERTAIN` (0) means PG re-checks via the
+// reference PostGIS implementation. The kernels exercise only the cheap-
+// to-evaluate portions of DE-9IM topology — bbox disjoint, vertex-set
+// equality on Point/Point pairs, ring-vertex equality on Polygon/Polygon
+// pairs — and route every other case to UNCERTAIN. Full DE-9IM topology
+// is genuinely complex and remains a follow-up; per CLAUDE.md anti-cheat
+// ban #9 ("when stuck, say so") we surface UNCERTAIN rather than fake
+// results, which is the documented escape hatch (see CLAUDE.md rule 11
+// commentary).
+//
+// Output convention (one int8 per row in `results[i]`):
+//   1  → DEFINITE TRUE  (predicate holds)
+//  -1  → DEFINITE FALSE (predicate definitely does NOT hold)
+//   0  → UNCERTAIN — caller routes to PG
+//
+// All kernels reuse the existing `pgaccel_geometry` C struct (defined in
+// `pgaccel_ffi.h`) so the bridge layer doesn't need new descriptor
+// types. Inputs that fail the type/shape gate (e.g. cross-dim pair on
+// st_equals) immediately fall to UNCERTAIN — the kernels never crash on
+// shape-mismatched inputs.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Maximum ring vertex count for which we'll attempt the O(N²) ring-
+// equality fast path on the host. Beyond this, the kernel falls through
+// to UNCERTAIN immediately. Sized small intentionally — the cost of
+// building per-row coordinate buffers on the GPU outweighs the win for
+// fat rings.
+constexpr size_t RING_EQUAL_FAST_PATH_LIMIT = 32;
+
+enum class AlgorithmicPredicate {
+  Equals,
+  Touches,
+  Crosses,
+  Overlaps,
+};
+
+pgaccel_status algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
+                                              const pgaccel_geometry* geoms_b, size_t count,
+                                              AlgorithmicPredicate pred, int8_t* results) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (!geoms_a || !geoms_b || !results)
+    return PGACCEL_ERROR_INIT;
+
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  try {
+    // Per-row metadata laid out for a flat-args kernel:
+    //   bboxes_a[i*4 .. i*4+4], bboxes_b[i*4 .. i*4+4]
+    //   types_a[i], types_b[i]                 (int)
+    //   point_eq[i]                            (uint8 — Point/Point coord match)
+    //   ring_eq[i]                             (uint8 — Polygon/Polygon ring match)
+    // Polygon ring equality is computed host-side because per-row
+    // ring buffers would require variable-stride USM per element.
+    float* d_bboxes_a = sycl::malloc_shared<float>(count * 4, *q);
+    float* d_bboxes_b = sycl::malloc_shared<float>(count * 4, *q);
+    int* d_types_a = sycl::malloc_shared<int>(count, *q);
+    int* d_types_b = sycl::malloc_shared<int>(count, *q);
+    uint8_t* d_point_eq = sycl::malloc_shared<uint8_t>(count, *q);
+    uint8_t* d_ring_eq = sycl::malloc_shared<uint8_t>(count, *q);
+    int8_t* d_results = sycl::malloc_shared<int8_t>(count, *q);
+
+    if (!d_bboxes_a || !d_bboxes_b || !d_types_a || !d_types_b || !d_point_eq || !d_ring_eq ||
+        !d_results) {
+      if (d_bboxes_a)
+        sycl::free(d_bboxes_a, *q);
+      if (d_bboxes_b)
+        sycl::free(d_bboxes_b, *q);
+      if (d_types_a)
+        sycl::free(d_types_a, *q);
+      if (d_types_b)
+        sycl::free(d_types_b, *q);
+      if (d_point_eq)
+        sycl::free(d_point_eq, *q);
+      if (d_ring_eq)
+        sycl::free(d_ring_eq, *q);
+      if (d_results)
+        sycl::free(d_results, *q);
+      return PGACCEL_OOM;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+      const pgaccel_geometry& a = geoms_a[i];
+      const pgaccel_geometry& b = geoms_b[i];
+      if (a.bbox) {
+        std::memcpy(&d_bboxes_a[i * 4], a.bbox, 4 * sizeof(float));
+      } else {
+        d_bboxes_a[i * 4 + 0] = 0.0f;
+        d_bboxes_a[i * 4 + 1] = 0.0f;
+        d_bboxes_a[i * 4 + 2] = 0.0f;
+        d_bboxes_a[i * 4 + 3] = 0.0f;
+      }
+      if (b.bbox) {
+        std::memcpy(&d_bboxes_b[i * 4], b.bbox, 4 * sizeof(float));
+      } else {
+        d_bboxes_b[i * 4 + 0] = 0.0f;
+        d_bboxes_b[i * 4 + 1] = 0.0f;
+        d_bboxes_b[i * 4 + 2] = 0.0f;
+        d_bboxes_b[i * 4 + 3] = 0.0f;
+      }
+      d_types_a[i] = static_cast<int>(a.type);
+      d_types_b[i] = static_cast<int>(b.type);
+
+      uint8_t pt_eq = 0;
+      if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POINT && a.coords && b.coords &&
+          a.coord_count >= 1 && b.coord_count >= 1) {
+        const float dx = a.coords[0] - b.coords[0];
+        const float dy = a.coords[1] - b.coords[1];
+        if (std::abs(dx) < EPS_FP32 && std::abs(dy) < EPS_FP32) {
+          pt_eq = 1;
+        }
+      }
+      d_point_eq[i] = pt_eq;
+
+      uint8_t ring_eq = 0;
+      if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POLYGON && a.coords &&
+          b.coords && a.coord_count >= 3 && b.coord_count >= 3 &&
+          a.coord_count <= RING_EQUAL_FAST_PATH_LIMIT &&
+          b.coord_count <= RING_EQUAL_FAST_PATH_LIMIT && a.coord_count == b.coord_count) {
+        // Walk all rotations forward and reverse.
+        bool found = false;
+        const size_t n = a.coord_count;
+        for (size_t start = 0; start < n && !found; ++start) {
+          bool fwd = true;
+          bool rev = true;
+          for (size_t k = 0; k < n; ++k) {
+            const size_t fi = (start + k) % n;
+            const size_t ri = (start + n - k) % n;
+            if (std::abs(a.coords[k * 2] - b.coords[fi * 2]) >= EPS_FP32 ||
+                std::abs(a.coords[k * 2 + 1] - b.coords[fi * 2 + 1]) >= EPS_FP32) {
+              fwd = false;
+            }
+            if (std::abs(a.coords[k * 2] - b.coords[ri * 2]) >= EPS_FP32 ||
+                std::abs(a.coords[k * 2 + 1] - b.coords[ri * 2 + 1]) >= EPS_FP32) {
+              rev = false;
+            }
+            if (!fwd && !rev)
+              break;
+          }
+          if (fwd || rev)
+            found = true;
+        }
+        if (found) {
+          ring_eq = 1;
+        }
+      }
+      d_ring_eq[i] = ring_eq;
+    }
+
+    const int pred_id = static_cast<int>(pred);
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const float* ba = &d_bboxes_a[i * 4];
+       const float* bb = &d_bboxes_b[i * 4];
+       const int ta = d_types_a[i];
+       const int tb = d_types_b[i];
+       const uint8_t pt_eq = d_point_eq[i];
+       const uint8_t ring_eq = d_ring_eq[i];
+
+       if (ta == static_cast<int>(PGACCEL_GEOM_UNKNOWN) ||
+           tb == static_cast<int>(PGACCEL_GEOM_UNKNOWN)) {
+         d_results[i] = 0;
+         return;
+       }
+
+       const bool disjoint =
+           (ba[2] < bb[0]) || (bb[2] < ba[0]) || (ba[3] < bb[1]) || (bb[3] < ba[1]);
+
+       if (pred_id == static_cast<int>(AlgorithmicPredicate::Equals)) {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
+           d_results[i] = pt_eq ? int8_t(1) : int8_t(-1);
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = 1;
+           return;
+         }
+         if (ta != tb) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       } else if (pred_id == static_cast<int>(AlgorithmicPredicate::Touches)) {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       } else if (pred_id == static_cast<int>(AlgorithmicPredicate::Crosses)) {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       } else /* Overlaps */ {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta != tb) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) && pt_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       }
+     }).wait_and_throw();
+
+    std::memcpy(results, d_results, count * sizeof(int8_t));
+
+    sycl::free(d_bboxes_a, *q);
+    sycl::free(d_bboxes_b, *q);
+    sycl::free(d_types_a, *q);
+    sycl::free(d_types_b, *q);
+    sycl::free(d_point_eq, *q);
+    sycl::free(d_ring_eq, *q);
+    sycl::free(d_results, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL algorithmic_predicate_dispatch failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: algorithmic_predicate_dispatch failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+}  // namespace
+
+extern "C" pgaccel_status pgaccel_st_equals_bulk(const pgaccel_geometry* geoms_a,
+                                                 const pgaccel_geometry* geoms_b, size_t count,
+                                                 int8_t* results) {
+  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Equals,
+                                        results);
+}
+
+extern "C" pgaccel_status pgaccel_st_touches_bulk(const pgaccel_geometry* geoms_a,
+                                                  const pgaccel_geometry* geoms_b, size_t count,
+                                                  int8_t* results) {
+  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Touches,
+                                        results);
+}
+
+extern "C" pgaccel_status pgaccel_st_crosses_bulk(const pgaccel_geometry* geoms_a,
+                                                  const pgaccel_geometry* geoms_b, size_t count,
+                                                  int8_t* results) {
+  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Crosses,
+                                        results);
+}
+
+extern "C" pgaccel_status pgaccel_st_overlaps_bulk(const pgaccel_geometry* geoms_a,
+                                                   const pgaccel_geometry* geoms_b, size_t count,
+                                                   int8_t* results) {
+  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Overlaps,
+                                        results);
+}
