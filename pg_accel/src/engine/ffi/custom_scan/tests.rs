@@ -41,6 +41,7 @@ fn strategy_from_i32_all_valid_values() {
     assert_eq!(GpuStrategy::from_i32(3), GpuStrategy::Sort);
     assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Window);
     assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::PreAgg);
+    assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::FunctionScan);
 }
 
 #[test]
@@ -48,8 +49,8 @@ fn strategy_from_i32_boundary_values() {
     // Negative values default to Scan.
     assert_eq!(GpuStrategy::from_i32(i32::MIN), GpuStrategy::Scan);
     assert_eq!(GpuStrategy::from_i32(-100), GpuStrategy::Scan);
-    // Values above the last variant (PreAgg=5) default to Scan.
-    assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::Scan);
+    // Values above the last variant (FunctionScan=6 since Phase 2 F3) default to Scan.
+    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::Scan);
     assert_eq!(GpuStrategy::from_i32(i32::MAX), GpuStrategy::Scan);
 }
 
@@ -150,9 +151,9 @@ fn strategy_window_debug() {
 }
 
 #[test]
-fn strategy_from_i32_above_preagg_defaults_to_scan() {
-    // 6 and above are not valid GpuStrategy variants (PreAgg=5 is the last).
-    assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::Scan);
+fn strategy_from_i32_above_functionscan_defaults_to_scan() {
+    // Phase 2 F3 added FunctionScan=6. Anything above that is unknown.
+    assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::FunctionScan);
     assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::Scan);
     assert_eq!(GpuStrategy::from_i32(100), GpuStrategy::Scan);
 }
