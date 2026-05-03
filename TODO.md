@@ -635,47 +635,84 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     GSERIALIZED varlena Datums via the F2 encoder; `h3_polyfill`
     extracts per-row polygons via existing `extract_geometry` and
     runs the two-pass kernel.
-  - **F3 ESCALATED** (per anti-cheat ban #9): the FunctionScan
-    planner hook (`projectset.rs`) and the executor-side
-    `AcceleratedVarLen / AcceleratedRecord` consumption arms in
-    `pg_accel/src/engine/executor/scan/exec.rs:451` were NOT
-    landed. The dispatch arms therefore produce correct
-    `DispatchResult::AcceleratedVarLen` but the result is consumed
-    by the existing defensive warn-and-defer arm at scan/exec.rs:451.
-    Reason for escalation: building a brand-new Custom Scan
-    injection path for `RTE_FUNCTION` rels (TupleDesc construction,
-    scan_slot setup, `heap_form_tuple` integration for record
-    outputs, end-to-end planner / executor wiring) requires real
-    PG-backend exec testing to verify it doesn't crash; the
-    sandbox does not provide a way to run the pgrx test harness
-    end-to-end, so guessing the PG executor APIs would risk
-    backend SIGABRT (anti-cheat ban #6). The supporting structure
-    (`FunctionScanPrivData` + sentinel-prefixed serializer at
-    `pg_accel/src/engine/ffi/custom_scan/private_data.rs:903`,
-    commit `5004839`; `output_field_types` / `output_field_names`
-    metadata on `FunctionAccelEntry`, commit `af7594a`) IS landed
-    so the next agent can plug in the planner-hook + executor arms
-    without re-touching the layout.
+  - **F3 FunctionScan plumbing landed** (commits `30a9b6e`,
+    `da6b054`, branch `agent-f3-finish-v2`): the `projectset.rs`
+    planner hook walks `RTE_FUNCTION` rels, looks up the funcexpr
+    in the registry, and builds a `CustomPath` carrying a
+    `FunctionScanPrivData` payload; new `FUNCTION_PATH_METHODS` /
+    `FUNCTION_SCAN_METHODS` vtables are registered; the
+    `function_scan` submodule
+    (`pg_accel/src/engine/ffi/custom_scan/function_scan.rs`)
+    builds a TupleDesc (resolving sentinel OID 0 via
+    `get_func_rettype`), dispatches the SRF once via
+    `dispatch::dispatch`, and emits one row per dispatch output via
+    `ExecStoreVirtualTuple` (Scalar / VarLen) or `heap_form_tuple` +
+    `ExecStoreHeapTuple` (Record). The defensive arm at
+    `scan/exec.rs:451` is correctly left in place — it covers
+    planner mis-routing of `AcceleratedVarLen` / `AcceleratedRecord`
+    onto a per-row predicate filter shape, which doesn't apply to
+    FunctionScan's one-shot dispatch.
+  - **Open: registry init ordering for pgrx_tests harness**
+    (surfaced 2026-05-03 by F3-finish): the integration tests in
+    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs::tests`
+    `CREATE EXTENSION IF NOT EXISTS h3 CASCADE` themselves to bring
+    the SRF into the fresh `pgrx_tests` DB, but
+    `crate::engine::registry::lazy_init` (a one-shot OnceLock)
+    fires on the *first* planner invocation in the backend —
+    typically a SELECT inside the CREATE EXTENSION script — before
+    h3 is fully loaded. Subsequent FunctionScan queries find an
+    empty registry, the projectset hook bails (`fn_oid not in
+    registry`), and PG's native `FunctionScan` runs the query.
+    Row-count assertions still pass because PG native + pg_accel
+    GPU dispatch both produce the same 7 cells, but the tests do
+    NOT exercise the GPU path. Fix needs either (a) a
+    `registry::resolve_oids_again()` API the hook can call when a
+    looked-up `fn_oid` misses, or (b) a `pgrx.toml`
+    `extra_extensions` knob that pre-installs h3 / postgis /
+    postgis_raster in the test-DB skeleton. Until then, the
+    FunctionScan injection chain is verified by manual / external
+    PG (e.g. `just bench`) rather than by `cargo test --features
+    pg_test`.
+  - **Open: dispatch shape mismatch for `h3_cell_to_boundary`**
+    (surfaced 2026-05-03 by F3-finish testing): the h3-pg
+    extension declares `h3_cell_to_boundary(h3index, boolean)
+    RETURNS polygon` (PG's built-in `polygon` type), but the
+    dispatch arm in `pg_accel/src/engine/dispatch/h3.rs:530`
+    (`dispatch_gpu_h3_cell_to_boundary`) emits PostGIS
+    GSERIALIZED varlena bytes via `varlena_from_gserialized` —
+    a different on-disk format. Counting the row works (PG count(*)
+    doesn't deserialize the value), but downstream operations like
+    `npoints(...)` would interpret the bytes as PG `polygon` and
+    likely segfault or return garbage. Fix is one of: (a) emit PG
+    built-in `polygon` bytes (header + n_pts + Point array) from
+    the dispatch arm instead of GSERIALIZED, OR (b) override the
+    SRF's `prorettype` resolution in `function_scan::build_tuple_desc`
+    to force `geometry` so PG calls the right deserializer. Option
+    (a) is the cleaner fix; (b) is a hack that breaks SQL contract
+    (callers who declared their column as `polygon` would get bytes
+    they can't read).
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered
   set matches the kernel set exactly.
-- **Done when** (refreshed 2026-05-03): the FunctionScan planner
-  hook (`projectset.rs`, NEW) is installed AND the executor-side
-  `AcceleratedVarLen` / `AcceleratedRecord` consumption arms in
-  `scan/exec.rs:451` are replaced with real per-row tuple emission
-  (`ExecStoreVirtualTuple` + `ExecMaterializeSlot` for VarLen,
-  `heap_form_tuple` against per-fn TupleDesc for Record). At that
-  point `EXPLAIN SELECT * FROM h3_cell_to_boundary('8a..'::h3index)`
-  shows `GpuAccelScan` (FunctionScan strategy) instead of PG's
-  native `Function Scan`, and the resulting POLYGON parses
-  byte-identical via the existing `extract_polygon_geom` parser.
-  `h3_cells_to_multi_polygon` additionally needs the `bigint[]`
-  ArrayType walker (tracked under the `st_value` blocker entry).
-  SRF-in-target-list syntax (`SELECT h3_cell_to_boundary(c) FROM t`
-  instead of `FROM h3_cell_to_boundary(c)`) is a separate follow-up —
-  see "SRF-in-target-list / ProjectSet planner injection" entry below.
+- **Done when** (refreshed 2026-05-03 after F3-finish): the
+  FunctionScan plumbing IS landed (commits `30a9b6e`, `da6b054`).
+  Outstanding before this entry can be dropped: (1) one of the two
+  registry-init-ordering fixes above so the integration tests
+  actually exercise the GPU path (today they pass via PG native
+  fallback); (2) the `h3_cell_to_boundary` dispatch shape mismatch
+  fix (kernel emits GSERIALIZED, h3-pg declares return type as PG
+  built-in `polygon`); (3) `h3_cells_to_multi_polygon` per-row
+  `bigint[]` ArrayType walker (tracked under the `st_value` blocker
+  entry). When all three close, `EXPLAIN SELECT * FROM
+  h3_cell_to_boundary('8a..'::h3index)` shows `Custom Scan
+  (GpuAccelFunctionScan)` instead of PG's native `Function Scan`,
+  and the POLYGON output parses byte-identical via the appropriate
+  deserializer. SRF-in-target-list syntax (`SELECT
+  h3_cell_to_boundary(c) FROM t` instead of `FROM
+  h3_cell_to_boundary(c)`) is a separate follow-up — see
+  "SRF-in-target-list / ProjectSet planner injection" entry below.
 
 ### SRF-in-target-list / ProjectSet planner injection
 

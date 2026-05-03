@@ -63,9 +63,11 @@ pub(super) unsafe fn try_inject_function_scan(
 ) {
     // Gate: GUC + GPU availability.
     if !gucs::enabled() {
+        pgrx::debug1!("pg_accel: projectset: extension disabled, skipping");
         return;
     }
     if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel: projectset: gpu_is_usable=false, skipping");
         return;
     }
     if rel.is_null() || rte.is_null() {
@@ -77,6 +79,7 @@ pub(super) unsafe fn try_inject_function_scan(
     if rte_ref.rtekind != pg_sys::RTEKind::RTE_FUNCTION {
         return;
     }
+    pgrx::debug1!("pg_accel: projectset: RTE_FUNCTION rel detected");
 
     // SAFETY: rte_ref.functions is a List of RangeTblFunction nodes (or NIL).
     let functions = rte_ref.functions;
@@ -115,10 +118,19 @@ pub(super) unsafe fn try_inject_function_scan(
 
     // Look up the function in the adapter registry.
     registry::lazy_init();
-    let entry = match registry::global_registry().lookup(fn_oid) {
-        Some(e) => e.clone(),
-        None => return,
+    let Some(entry) = registry::global_registry().lookup(fn_oid).cloned() else {
+        pgrx::debug1!(
+            "pg_accel: projectset: fn_oid={} not in registry; skipping",
+            u32::from(fn_oid)
+        );
+        return;
     };
+    pgrx::debug1!(
+        "pg_accel: projectset: matched registered fn_oid={} name={} shape={:?}",
+        u32::from(fn_oid),
+        entry.name,
+        entry.output_shape,
+    );
 
     // Only fire for non-Scalar shapes — Scalar SRFs would emit one row per
     // input row, but a FunctionScan rel has no input row, so a Scalar shape
