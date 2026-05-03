@@ -465,7 +465,7 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 /// `agg/execute.rs::try_fused_multi_reduce`. This f32 variant is kept on
 /// the bridge for future executor work that retains a typed f32 buffer.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path so reduce_multi_f64 is the wired entry — see agg/execute.rs:1804
+#[allow(dead_code)] // reason: retained for future fp32/i64 fast-path executors; current agg path uses uniform Vec<f64> per agg/execute.rs:1804
 pub struct ReduceMultiF32 {
     pub sum: f32,
     pub min: f32,
@@ -490,7 +490,7 @@ pub struct ReduceMultiF64 {
 /// parallel typed-i64 path through the executor that doesn't exist yet.
 /// Bridge wrapper kept ready for that future executor work.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path so reduce_multi_f64 is the wired entry — see agg/execute.rs:1804
+#[allow(dead_code)] // reason: retained for future fp32/i64 fast-path executors; current agg path uses uniform Vec<f64> per agg/execute.rs:1804
 pub struct ReduceMultiI64 {
     pub sum: i64,
     pub min: i64,
@@ -504,7 +504,7 @@ pub struct ReduceMultiI64 {
 /// buffers; today the fused-agg executor routes through `reduce_multi_f64`
 /// (uniform Vec<f64> accumulator path) so this entry is unused.
 #[must_use]
-#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path — see agg/execute.rs:1804
+#[allow(dead_code)] // reason: retained for future fp32/i64 fast-path executors; current agg path uses uniform Vec<f64> per agg/execute.rs:1804
 pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
     if data.is_empty() {
@@ -579,7 +579,7 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
 /// buffers; today the fused-agg executor routes through `reduce_multi_f64`
 /// (uniform Vec<f64> accumulator path) so this entry is unused.
 #[must_use]
-#[allow(dead_code)] // reason: kernel ready; executor uses uniform Vec<f64> accumulator path — see agg/execute.rs:1804
+#[allow(dead_code)] // reason: retained for future fp32/i64 fast-path executors; current agg path uses uniform Vec<f64> per agg/execute.rs:1804
 pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
     if data.is_empty() {
