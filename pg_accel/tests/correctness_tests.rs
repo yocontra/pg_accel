@@ -781,7 +781,7 @@ fn adapter_names_are_unique() {
 
 #[test]
 fn registry_register_all_adapters() {
-    let mut reg = AdapterRegistry::new();
+    let reg = AdapterRegistry::new();
     for adapter in all_adapters() {
         reg.register_adapter(adapter);
     }
@@ -790,7 +790,7 @@ fn registry_register_all_adapters() {
 
 #[test]
 fn registry_adapters_iterable() {
-    let mut reg = AdapterRegistry::new();
+    let reg = AdapterRegistry::new();
     for adapter in all_adapters() {
         reg.register_adapter(adapter);
     }
