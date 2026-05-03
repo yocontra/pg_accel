@@ -34,8 +34,15 @@ items explicitly descoped from ship.
 
 ## Next Up
 
-Phase 1 + Phase 2 + Phase 5 dead-code are closed. Open work in TODO
-order:
+Phase 1 + Phase 2 + Phase 5 dead-code are closed. Phase 4 H3
+layout, hash_agg UUID / INET silent-zero-sum, two_pred_and fusion,
+and a round of Phase 4 operator coverage (4 algorithmic spatial
+predicates + 6 H3 var-output adapters + 6 raster kernels + st_clip /
+st_reclass / st_summarystats wiring + int128 NumericSumEmitter) all
+closed in the 2026-05-02 multi-agent run (commits `309f8c7`,
+`56b770d`, `0c3d5d7` / `9009ef1`, `2c08296`+`433bc21`+`86c8e31`,
+`b8873f2`+`62fbd26`+`47f2d68`+`4f373a5`, `13ec5fa`+`cb2ec8d`+`a6bdf19`+
+`c44ad34`, `dcd0cce`+`9423d11`, `639f6f1`). Open work in TODO order:
 
 1. **Phase 1 cost-multiplier calibration** — blocked on Phase 6 (the
    `fp64_matrix` 2-cell shortfall is Phase 6 dispatch perf, not
@@ -44,32 +51,82 @@ order:
    unblocker plan.
 2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
    kernel + bridge + executor. Largest single chunk in the punchlist.
-3. **Phase 4 type coverage** — UUID + INET / CIDR end-to-end on
-   hash_agg group keys (commits `243fa1f` + `c4134d5` + `3fbc03d`):
-   inline-varlena fast path through `VectorizedScan::extract_inet`
-   parses the 1-byte short / 4-byte long varlena header on the
-   arena-backed heap bytes and canonicalises to the 24-byte
-   `PGACCEL_KEY_INET` form. JSON / JSONB next (substantial — needs
-   a JSONB binary-format parser kernel); DATE works post Phase 2.
-4. **Phase 4 PostGIS / raster / H3 kernel backlog** — kernel-heavy.
-5. **Phase 5 worker-side spatial recheck** — DSM plumbing.
-6. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
+3. **Phase 3 preagg parallel — planner-side path construction.**
+   Executor round-trip for `PartialAggSpec` is wired (`PreAggPrivData`
+   carries `partial`; `begin_custom_scan` calls
+   `exec.enable_partial(spec)` — see commit `be493db` and
+   `pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:14-46`).
+   What remains is the manually-built Finalize → Gather → CustomPath
+   chain mirror of `partial_agg::try_inject` in
+   `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:60-401`
+   (the `add_path(grouped_rel, final_agg.cast::<Path>())` shape at
+   `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:386-389` is
+   the analog `preagg_partial::try_inject` needs to emit). ~100-LOC
+   follow-up.
+4. **Phase 4 multi-arg dispatch carrier (st_dwithin + 5 raster ops +
+   3 H3 var-output ops).** All these have working SYCL kernels but
+   need a richer per-row dispatch carrier than the single
+   `qual_datum` slot the Custom Scan private payload exposes today:
+   - `st_dwithin`: needs threshold (3rd arg) per-row through the
+     2-arg dispatch interface.
+   - `st_resample` / `st_slope` / `st_aspect` / `st_hillshade` /
+     `st_value`: target dims, cell sizes, sun azimuth + altitude,
+     point geom array.
+   - H3 `polyfill` / `cell_to_boundary` / `cells_to_multi_polygon`:
+     need PostGIS GSERIALIZED encoder + per-row polygon-vertex
+     extractor on the dispatch side; the kernels exist
+     (`pgaccel-kernels/src/h3_ops.cpp`).
+   The fix is shared: enrich the `qual_datum` carrier in the custom-
+   scan private payload (currently single-Datum; needs slice / array
+   of constants beyond the qual). See "Multi-arg dispatch carrier"
+   entry in Phase 4 below for the concrete plan.
+5. **Phase 4 type coverage — JSON / JSONB.** UUID + INET / CIDR
+   end-to-end on hash_agg group keys SHIPPED in commits `243fa1f` +
+   `c4134d5` + `3fbc03d`; classifier re-enabled this round (commit
+   `639f6f1`). JSON / JSONB next (substantial — needs a JSONB
+   binary-format parser kernel).
+6. **Phase 4 / executor architectural gap — AcceleratedRecord +
+   AcceleratedVarLen consumption.** Adapters now emit
+   `OutputShape::Record` and `OutputShape::VarLen` (commits
+   `a6bdf19`, `47f2d68`); dispatch returns
+   `DispatchResult::AcceleratedRecord` /
+   `DispatchResult::AcceleratedVarLen`. The scan executor's
+   `dispatch_gpu_path`
+   (`pg_accel/src/engine/executor/scan/exec.rs:451-476`) is a
+   filter-mask machine that defers when it sees these — correct for
+   per-row scalar-qual contexts, but means SRF / record-returning
+   ops belong to `ProjectSet` / `FunctionScan` planner injection
+   points (different hooks). Needs new planner hook + executor node
+   to consume Record / VarLen results end-to-end. Currently Record
+   / VarLen registrations are admissibility-only — the planner
+   doesn't yet inject for these shapes, so no silent
+   wrong-result.
+7. **Phase 5 worker-side spatial recheck** — DSM plumbing.
+8. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
    pointer kernel returns 0 on tiny batches (`test_fork hashagg_f64`
-   N=64 reads as 0 instead of 2048). Tried flat-buffer + packed-args
-   refactor; each angle uncovered a deeper Metal SSCP edge case
-   (argbuffer rejection, 9-arg capture limit). Reverted. Needs root-
-   cause fix in either the kernel pointer chain OR upstream SSCP
-   emitter, not a workaround. Sort-based path is correct for N >=
-   100k (verified at 10M).
-7. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
-   calibrated `0.03 -> 0.01` (`4144ac8`), cuts 200K cost units off the
-   plain-JOIN audit. Probe cost (`0.01/row`) is now the next-largest
-   term; closing it unlocks the AVG+STDDEV / plain-JOIN audit rows.
-8. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
-   approach was tried, made things worse, reverted. Same root cause
-   as (6); needs the SSCP investigation.
-9. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
-10. **Phase 3-10 in order** for everything else.
+   N=64 reads as 0 instead of 2048). Distinct from the UUID / INET
+   silent-zero-sum bug closed this round (small-N is the
+   pointer-chain shape for INT64 keys, not the wider key types).
+   Tried flat-buffer + packed-args refactor; each angle uncovered a
+   deeper Metal SSCP edge case (argbuffer rejection, 9-arg capture
+   limit). Reverted. Needs root-cause fix in either the kernel
+   pointer chain OR upstream SSCP emitter, not a workaround. Sort-
+   based path is correct for N >= 100k (verified at 10M).
+9. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
+   calibrated `0.03 -> 0.01` (`4144ac8`), cuts 200K cost units off
+   the plain-JOIN audit. Probe cost (`0.01/row`) is now the
+   next-largest term; closing it unlocks the AVG+STDDEV / plain-JOIN
+   audit rows.
+10. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
+    approach was tried, made things worse, reverted. Same root cause
+    as (8); needs the SSCP investigation.
+11. **Phase 7 fp64 sphere_distance + st_length fork-safety** — kernels
+    in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:502,937` but
+    re-gated to `PGACCEL_ERROR_NO_DEVICE` (commit `573a60b`) pending
+    `acpp-metal-archive-build` OOM fix. See Phase 7 "Metal SSCP
+    soft-fp64 trig" entry for root cause.
+12. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+13. **Phase 3-10 in order** for everything else.
 
 The 2026-05-02 cheat-audit (7 host-loop kernels in spatial /
 raster / window) is closed — point_in_ring fp32, segment_intersects
@@ -181,39 +238,60 @@ Split into 3a (planner) and 3b (executor, gating):
 **Done when**: `SELECT k, SUM(v) FROM t GROUP BY k` with parallel workers
 shows GPU Custom Scan inside a Gather and produces identical results.
 
-### Preagg parallel path
+### Preagg parallel path — planner-side path construction outstanding
 
-- **What**: `planner_hooks/mod.rs:1058` hardcodes `parallel_safe=false` on
-  the preagg `CustomPath`. Counterpart `planner_hooks/preagg_partial.rs` is
-  a stub with a no-op `try_inject` and `#[allow(dead_code)]`. MAJOR.
-- **Why**: Preagg fusion is one of the bigger per-batch wins; confining it
-  to the leader leaves a lot of perf on the table for parallel queries.
+- **What** (refreshed 2026-05-02): Executor round-trip is wired —
+  `PreAggPrivData` carries `partial: Option<PartialAggSpec>`,
+  `serialize_preagg_private` / `deserialize_preagg_private` accept
+  the optional spec via the existing `PARTIAL_SENTINEL` block, and
+  `begin_custom_scan`'s `GpuStrategy::PreAgg` arm calls
+  `exec.enable_partial(spec)` so workers emit transition-state
+  tuples (commit `be493db`,
+  `pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:14-46`).
+  `preagg_partial::try_inject` validates the gating + builds the
+  `PartialAggSpec`, and stops short of `add_partial_path` because
+  the planner-side Finalize → Gather → CustomPath chain isn't
+  built yet (orphan-path crash documented at `partial_agg.rs`
+  module docs). MAJOR (perf), unblocked by the ~100-LOC follow-up.
+- **Why**: Preagg fusion is one of the bigger per-batch wins;
+  confining it to the leader leaves a lot of perf on the table for
+  parallel queries.
 - **How**:
-  - Add a partial-state emit path in `executor/preagg/` (serialize per-group
-    transvalue instead of finalfn output).
-  - Implement `preagg_partial::try_inject` per its module comment (steps 1–4
-    spelled out there).
-  - Flip the flag at `planner_hooks/mod.rs:1058` to `true` whenever all
-    fused Aggrefs classify into the partial-capable set.
-- Depends on: Grouped HashAgg parallel path (Phase 3b executor work).
-- **Done when**: A preagg-fused aggregation plan runs inside parallel
-  workers and EXPLAIN confirms `parallel_safe=true` on the preagg
-  CustomPath.
+  - Mirror `partial_agg::try_inject` (`pg_accel/src/engine/ffi/
+    planner_hooks/partial_agg.rs:60-401`): build the partial
+    `CustomPath` with `parallel_safe=true`, wrap in `Gather` and
+    `Finalize Agg` paths, then `add_path(grouped_rel,
+    final_agg.cast::<Path>())` (`partial_agg.rs:386-389`).
+  - Flip the flag at `planner_hooks/mod.rs:1058` to `true` whenever
+    all fused Aggrefs classify into the partial-capable set
+    (`agg_common::classify_aggref` returns `Some`).
+- Depends on: Nothing in pg_accel — executor side is wired.
+- **Done when**: A preagg-fused aggregation plan runs inside
+  parallel workers; EXPLAIN confirms `parallel_safe=true` on the
+  preagg CustomPath inside a Gather child of Finalize Agg; the
+  corresponding partial-state tuples reach the Finalize aggregator.
 
 ### Window executor has no partial path
 
-- **What**: `executor/window/mod.rs` doesn't expose a parallel-safe wrapping;
-  `ROW_NUMBER` / `RANK` over a Gather child currently runs the window on
-  the leader after collecting worker output. MINOR.
-- **Why**: Partitioned window functions (PARTITION BY aligned with worker
-  distribution) are naturally parallel; leaving them leader-only wastes
-  cores.
+- **What**: `executor/window/mod.rs` doesn't expose a parallel-safe
+  wrapping; `ROW_NUMBER` / `RANK` over a Gather child currently runs
+  the window on the leader after collecting worker output. MINOR
+  (downgraded 2026-05-02). The PreAgg partial-emit scaffolding has
+  partially landed (`PreAggPrivData.partial`, `enable_partial(spec)`
+  in `begin_custom_scan` — commit `be493db`); the Window executor
+  doesn't yet hook into the same round-trip.
+- **Why**: Partitioned window functions (PARTITION BY aligned with
+  worker distribution) are naturally parallel; leaving them leader-
+  only wastes cores.
 - **How**:
   - Add an explicit parallel_safe hook per-spec.
-  - Inject a partial-window CustomPath when PARTITION BY aligns with the
-    underlying parallel scan.
-- **Done when**: `ROW_NUMBER() OVER (PARTITION BY k ORDER BY v)` runs
-  inside workers per EXPLAIN, not on the leader.
+  - Inject a partial-window CustomPath when PARTITION BY aligns
+    with the underlying parallel scan; mirror
+    `partial_agg::try_inject` for the Finalize → Gather →
+    CustomPath chain (~100 LOC; same shape as the preagg follow-up
+    in Phase 3 above).
+- **Done when**: `ROW_NUMBER() OVER (PARTITION BY k ORDER BY v)`
+  runs inside workers per EXPLAIN, not on the leader.
 
 ## Phase 4 — Operator coverage expansion
 
@@ -314,63 +392,132 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   reports `[PASS]` (i.e. PG picks pgaccel's GpuHashJoin path over
   its native parallel hash join for this workload).
 
-### PostGIS operator registrations — bottleneck is kernels + dispatch, not adapters
+### PostGIS operator registrations — kernels + dispatch closed for the 11 routine predicates
 
-- **What**: Audit (refreshed 2026-05-02 after st_dwithin / st_contains /
-  st_within / st_disjoint / st_covers / st_coveredby ship). Registered
-  predicates with functionally-complete GPU paths today:
-  - `st_intersects` — `pgaccel_spatial_intersects` at
-    `spatial_dispatch.cpp:536` → `three_layer::spatial_intersects`.
-  - `st_dwithin` — `pgaccel_sphere_distance_bulk` (fp32 SYCL kernel)
-    via `three_layer::spatial_dwithin`. Point × Point only; non-Point
-    short-circuits to UNCERTAIN. fp64 returns NO_DEVICE (Phase 7).
+- **What** (refreshed 2026-05-02 after the 4 algorithmic predicates and
+  st_distance polygonal kernel land): Predicates with functionally-
+  complete GPU paths today:
+  - `st_intersects` — `pgaccel_spatial_intersects` →
+    `three_layer::spatial_intersects`.
+  - `st_dwithin` — `pgaccel_sphere_distance_bulk` (fp32 SYCL) via
+    `three_layer::spatial_dwithin`. Point × Point only; non-Point
+    short-circuits to UNCERTAIN. fp64 returns NO_DEVICE — see
+    Phase 7 "Metal SSCP soft-fp64 trig" for the fork-safety reason.
+    Per-row threshold (3rd arg) needs the multi-arg dispatch carrier
+    work tracked under Phase 4 "Multi-arg dispatch carrier" below.
   - `st_contains` / `st_within` — `pgaccel_point_in_ring_bulk` (fp32
     SYCL) via `three_layer::spatial_contains`. Polygon ⊇ Point only;
     constant-polygon batches collapse to one dispatch.
   - `st_disjoint` — inversion of `st_intersects` (no extra kernel).
   - `st_covers` / `st_coveredby` — alias of `st_contains` / `st_within`
     at the kernel level; PG Layer-3 recheck handles boundary semantics.
-  Still unwired:
-  - `st_distance`: distance-returning kernel for arbitrary geometry
-    pairs not wired (the existing sphere_distance is binary
-    threshold-style, hidden behind `st_dwithin`).
-  - `st_area`, `st_length`: no kernel.
-  - `st_equals`, `st_touches`, `st_crosses`, `st_overlaps`: no kernel
-    AND no `SpatialPredicate` enum variant. The unknown-name
-    fall-through at `src/engine/executor/join/mod.rs` now routes
-    unrecognised names to PG's scalar-qual path via
-    `resolve_spatial_predicate` allowlist, so registering without the
-    enum extension no longer silently misdispatches — but it still
-    wouldn't actually accelerate anything until the kernel lands.
-- **Why**: Anti-cheat ban #7 — stubs as done. Real work is kernel
-  implementation + bridge + dispatch wiring.
-- **How**:
-  - For `st_distance`: Point*Point case SHIPPED in `fed07d8` —
-    `dispatch_gpu_st_distance` reuses `pgaccel_sphere_distance_bulk`
-    (Haversine fp32 kernel) for Point*Point pairs. Polygon-to-polygon
-    / arbitrary geometry distance still requires a new kernel
-    (nearest-point math); deferred.
-  - For `st_area` / `st_length`: SHIPPED in commits `0429586` /
-    `14dc649` — pgaccel_st_area_bulk (Shoelace) + pgaccel_st_length_bulk
-    (Euclidean edge sum) SYCL kernels with single-arg dispatch
-    via dispatch_gpu_st_area / dispatch_gpu_st_length. fp32 only;
-    fp64 deferred for st_length pending soft-fp64 sqrt fix
-    (Phase 7).
-  - For `st_equals` / `st_touches` / `st_crosses` / `st_overlaps`:
-    extend `SpatialPredicate` enum, add adapter registrations, land
-    kernels. Each is a separate algorithmic problem.
-  - For `st_area` / `st_length` / `st_distance` polygonal: land new kernels
-    in `pgaccel-kernels/src/spatial_*.cpp`, bridge, dispatch, enum-extend.
-  - For `st_equals` / `st_disjoint` / `st_touches` / `st_crosses` /
-    `st_overlaps`: extend `SpatialPredicate` enum, add adapter
-    registrations, land kernels.
+  - `st_distance` Point × Point — SHIPPED in `fed07d8` reusing
+    `pgaccel_sphere_distance_bulk`.
+  - `st_distance` Polygon × Polygon — SHIPPED 2026-05-02 in
+    `pgaccel-kernels/src/spatial_predicates.cpp` via
+    `pgaccel_st_distance_polygon_polygon_bulk` (commit `676a95d`,
+    Agent 2A). fp32 vertex-pair minimum.
+  - `st_area`, `st_length` (fp32) — SHIPPED in `0429586` / `14dc649`.
+  - `st_equals` / `st_touches` / `st_crosses` / `st_overlaps` —
+    SHIPPED 2026-05-02 in commits `b5e546a` (kernel),
+    `2c08296` (`SpatialPredicate` enum + three-layer dispatch),
+    `433bc21` (adapter registration) — Agent 2A. All 4 wired
+    end-to-end through `three_layer::spatial_eval` with UNCERTAIN
+    fall-through for non-supported geometry shapes.
 - **Invariant locked**: Negative-assertion tests at
-  `pg_accel/src/adapters/postgis.rs:225-268`
-  (`does_not_contain_st_{distance,area,length,equals,disjoint,touches,crosses,overlaps}`)
-  assert none of the unbacked predicates drift into the registered set.
-- **Done when**: Each predicate above has a real kernel + three-layer
-  dispatch + enum variant + registration, AND a correctness test against
-  PostGIS native.
+  `pg_accel/src/adapters/postgis.rs` for the predicates that are
+  *still* not registered (notably the `st_buffer` / `st_union` /
+  `st_intersection` constructors which need the variable-output
+  protocol — see "PostGIS geometry constructors" below).
+- **Done when**: Multi-arg dispatch carrier (Phase 4) lands so
+  `st_dwithin` consumes per-row 3rd-arg thresholds; constructor
+  output-allocation protocol designed (separate item).
+
+### Multi-arg dispatch carrier (st_dwithin + 5 raster + 3 H3 var-output ops)
+
+- **What** (added 2026-05-02): The Custom Scan private payload's
+  `qual_datum` slot exposes a single per-row `Datum` to the
+  dispatch layer (`pg_accel/src/engine/dispatch/`), which is enough
+  for 1- and 2-arg ops with a single qual but not for the 9 ops
+  below whose kernels exist but need per-row constants beyond the
+  qual:
+  - `st_dwithin`: 3rd-arg threshold (one f64 per row, or a
+    constant for the batch).
+  - `st_resample`: target dims (2× i32 or i64).
+  - `st_slope` / `st_aspect`: cell sizes (2× f64).
+  - `st_hillshade`: cell sizes + sun azimuth + sun altitude
+    (2× f64 + 2× f64).
+  - `st_value`: per-row point geom array (variable length).
+  - H3 `polyfill`: per-row polygon-vertex array (variable length;
+    needs the GSERIALIZED → vertex extractor — see "H3 operator
+    registrations" entry above for the adapter-side helper).
+  - H3 `cell_to_boundary` / `cells_to_multi_polygon`: output side
+    needs the GSERIALIZED encoder — same shared helper.
+  MAJOR (unblocks 9 already-built kernels).
+- **Why**: Each of these kernels has been validated standalone
+  (kernel tests under `pgaccel-kernels/test/`) but can't be
+  dispatched from a real PG plan because the per-row constant /
+  array isn't reachable from the executor's per-row dispatch loop.
+- **How**:
+  - Extend the custom-scan private payload's qual carrier from a
+    single `Datum` to a slice / structured payload of per-call
+    constants (and an indirection for variable-length per-row
+    arrays). Keep the single-`Datum` shape as the common-case fast
+    path; widen only when the registered op's `OutputShape` /
+    arg-arity declares it.
+  - Per-row variable-length array carriers (st_value point geom,
+    polyfill polygon vertex) need the same GSERIALIZED encoder /
+    extractor that the H3 var-output dispatchers want — share
+    helpers in `pg_accel/src/adapters/extractors/`.
+  - Wire each of the 9 ops above through the new carrier; flip
+    each from "registered + kernel + UNCERTAIN dispatch" to
+    "registered + kernel + per-row dispatch" with a correctness
+    test.
+- **Done when**: All 9 ops above dispatch end-to-end with their
+  full per-row constant / array; `st_dwithin` 3rd-arg works for
+  non-constant thresholds; raster + H3 var-output ops produce
+  golden-diff results vs PostGIS / h3-pg.
+
+### AcceleratedRecord / AcceleratedVarLen executor consumption gap
+
+- **What** (added 2026-05-02): Adapters now declare
+  `OutputShape::Record` (e.g. `st_summarystats` returning
+  `count + sum + mean + stddev + min + max`) and `OutputShape::VarLen`
+  (e.g. H3 `grid_disk` emitting many cells per input row), and
+  dispatch returns `DispatchResult::AcceleratedRecord` /
+  `DispatchResult::AcceleratedVarLen` with kernel-shaped payloads.
+  The scan executor's `dispatch_gpu_path`
+  (`pg_accel/src/engine/executor/scan/exec.rs:451-476`) is a
+  filter-mask machine: it only consumes scalar predicate results
+  per row and defers Record / VarLen with a `tracing::warn!`
+  rather than emit them — correct for per-row scalar-qual
+  contexts, but means SRF and record-returning function calls
+  belong to `ProjectSet` / `FunctionScan` planner injection points
+  (different hooks entirely from the scan / agg / sort / window /
+  preagg paths the planner currently injects). MINOR (scalar paths
+  unaffected; SRF / record-returning ops fall through to PG, no
+  silent wrong-result).
+- **Why**: Without a new planner hook + executor node for
+  ProjectSet / FunctionScan, the kernels we've built for the H3
+  var-output ops, `st_summarystats` Record output, and the future
+  geometry-constructor variable outputs can dispatch but their
+  results are never consumed by a CustomScan tuple stream.
+- **How**:
+  - Add a planner hook for `set_function_pathlist_hook`
+    (FunctionScan) and / or `T_ProjectSet` upper-rel injection
+    that wraps an SRF / record-returning call in a CustomScan
+    whose execute path consumes
+    `DispatchResult::AcceleratedRecord` /
+    `DispatchResult::AcceleratedVarLen` directly.
+  - Reuse `OutputShape` to gate which functions are eligible.
+  - `dispatch_gpu_path` stays the filter-mask machine for scan-
+    side per-row predicates; the new executor node reuses
+    `dispatch::dispatch()` but routes the Record / VarLen result
+    into a per-row tuple emitter.
+- **Done when**: `SELECT h3_grid_disk(c, 2) FROM cells` and
+  `SELECT (st_summarystats(rast)).* FROM rasters` both show a
+  CustomScan in EXPLAIN and produce identical results to
+  h3-pg / PostGIS native.
 
 ### PostGIS geometry constructors: output-allocation kernel design
 
@@ -394,137 +541,105 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   working GPU kernel, registered adapter, and golden-diff test against
   PostGIS native.
 
-### PostGIS raster registrations — bottleneck is missing kernels, not adapters
+### PostGIS raster — multi-arg dispatch carrier for the 5 new kernels
 
-- **What**: Investigation confirmed adapter side is saturated. Only three
-  `extern "C" pgaccel_*` raster kernels exist in
-  `pgaccel-kernels/src/raster_ops.cpp`: `pgaccel_map_algebra` (:460),
-  `pgaccel_raster_clip` (:517), `pgaccel_raster_reclass` (:627). All three
-  are registered at `pg_accel/src/adapters/postgis_raster.rs:43-53` and
-  bridged via `pg_accel/src/gpu/bridge.rs` + `pg_accel/src/gpu/mod.rs`.
-  **Dispatch state (refreshed 2026-05-01, commit `d3124c8`):** only
-  `st_mapalgebra` has end-to-end dispatch wired in
-  `pg_accel/src/engine/dispatch/raster.rs`; `st_clip` and `st_reclass`
-  defer to PG native via `fn_name` routing because their executor-side
-  argument extraction (polygon ring; reclass-rule text parsing) is not
-  yet plumbed. Prior to that fix, `dispatch_gpu_raster` ran `map_algebra`
-  unconditionally — silent stub-as-done. The 6 Phase 4 candidates
-  (`st_resample`, `st_slope`, `st_aspect`, `st_hillshade`, `st_value`,
-  `st_summarystats`) have no backing kernel. `st_summarystats`
-  additionally needs multi-scalar return plumbing beyond the adapter.
-  MINOR.
-- **Why**: Registering without a kernel is a stub-as-done cheat (anti-cheat
-  ban #7). Real work is kernel implementation + bridge + dispatch wiring.
-- **How**:
-  - For `st_clip` end-to-end: extract the polygon ring qual (geometry
-    arg) per-row via the spatial extractor, build the clip ring, call
-    `gpu::raster_clip`, patch the band back into the WKB output. The
-    kernel side already exists.
-  - For `st_reclass` end-to-end: parse the SQL reclass-rule text into
-    `PgaccelReclassRule[]`, call `gpu::raster_reclass`, patch back. The
-    kernel side already exists; rule-text parsing is the missing piece.
-  - For each missing kernel (`pgaccel_raster_resample`, `pgaccel_slope`,
-    `pgaccel_aspect`, `pgaccel_hillshade`, `pgaccel_raster_value`,
-    `pgaccel_raster_summarystats`): write SYCL kernel in `raster_ops.cpp`,
-    add Rust bridge in `gpu/bridge.rs`, dispatch arm in `gpu/mod.rs`, then
-    adapter registration in `postgis_raster.rs`.
-  - `st_summarystats` multi-scalar output: either one kernel returning 5
-    rasters, or a composite output buffer with adapter-level unpack.
+- **What** (refreshed 2026-05-02 after Agent 3A landed 6 raster
+  kernels and Agent 1B wired `st_clip` + `st_reclass` +
+  `st_summarystats`): All 9 raster ops are registered in
+  `pg_accel/src/adapters/postgis_raster.rs`. Wired end-to-end:
+  `st_mapalgebra` (existing), `st_clip`, `st_reclass`,
+  `st_summarystats` (this last with `OutputShape::Record` returning
+  `count + sum + mean + stddev + min + max`). Kernels exist but
+  dispatch-pending (5): `st_resample`, `st_slope`, `st_aspect`,
+  `st_hillshade`, `st_value` — each needs richer per-row constants
+  than the single `qual_datum` slot the dispatch carrier exposes
+  today. MINOR.
+- **Concrete fix**: enrich the custom-scan private payload to pass an
+  array of per-call constants beyond the qual datum: target
+  dimensions for `st_resample`; cell sizes for slope / aspect; sun
+  azimuth + altitude for hillshade; per-row point-geom array for
+  `st_value`. Same shape change unblocks `st_dwithin` 3rd-arg and the
+  H3 var-output dispatchers — see Phase 4 "Multi-arg dispatch
+  carrier" below for the unified design.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/postgis_raster.rs`
   (`does_not_register_kernelless_raster_candidates`,
-  `registered_set_matches_kernel_set`) assert the registered set matches
-  the kernel set exactly — any future mismatch (either direction) fails at
-  test time.
-- **Done when**: Each missing kernel landed, bridged, dispatched,
-  registered, and passes a golden-diff test against PostGIS's raster
-  output.
+  `registered_set_matches_kernel_set`) assert the registered set
+  matches the kernel set exactly.
+- **Done when**: The multi-arg carrier lands; the 5 kernels above
+  are dispatched per-row with their full argument set; golden-diff
+  test against PostGIS raster output for each.
 
-### H3 operator registrations — bottleneck is missing kernels, not adapters
+### H3 operator registrations — GSERIALIZED encoder + polygon extractor for 3 deferred ops
 
-- **What** (refreshed 2026-05-01): 9 fixed-1:1-output H3 ops now wired
-  end-to-end. Adapter `pg_accel/src/adapters/h3.rs:62-71` registers
-  `h3_latlng_to_cell`, `h3_grid_distance`, `h3_cell_to_parent`,
-  `h3_cell_to_center_child`, `h3_get_resolution`, `h3_get_base_cell`,
-  `h3_is_valid_cell`, `h3_is_pentagon`, `h3_is_res_class_iii` — all
-  backed by real SYCL kernels in `pgaccel-kernels/src/h3_ops.cpp`,
-  bridge in `src/gpu/bridge.rs`, dispatch in
-  `src/engine/dispatch/h3.rs`. The 6 remaining Phase 4 candidates
-  (`h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`,
-  `h3_cell_to_children`, `h3_cell_to_boundary`,
-  `h3_cells_to_multi_polygon`) all emit variable-length outputs that
-  the current `FunctionAccelEntry` shape does not express. MINOR.
-- **Why**: Registering without a kernel is a stub-as-done cheat (anti-cheat
-  ban #7). Remaining work is kernel implementation + bridge + dispatch +
-  variable-output adapter plumbing for all 6 unregistered ops.
-- **How**:
-  - Land each missing kernel in `pgaccel-kernels/src/h3_ops.cpp` following
-    the existing bulk-op pattern.
-  - Design variable-output plumbing in `FunctionAccelEntry`: two-pass
-    kernel (size → emit), or bounded preallocation, or heap-appending. This
-    mirrors the Phase 4 "PostGIS geometry constructors" item which has the
-    same constraint — shared design work.
+- **What** (refreshed 2026-05-02 after Agent 5A landed 6 var-output
+  kernels and Agent 1B wired 3 of them): All 15 H3 ops are
+  registered in `pg_accel/src/adapters/h3.rs`. Wired end-to-end (12
+  total): the 9 fixed-1:1-output ops above plus 3 new var-output
+  dispatchers via two-pass (size → emit) kernels in
+  `pg_accel/src/engine/dispatch/h3.rs`: `grid_disk`,
+  `grid_ring_unsafe`, `cell_to_children`. The 3 remaining
+  var-output ops — `polyfill`, `cell_to_boundary`,
+  `cells_to_multi_polygon` — have working SYCL kernels at
+  `pgaccel-kernels/src/h3_ops.cpp` (commit `b8873f2`) but their
+  dispatchers need:
+  - **PostGIS GSERIALIZED encoder** (per-row, on the dispatch side):
+    `cell_to_boundary` and `cells_to_multi_polygon` emit polygon-
+    boundary lat/lng pairs that must be packed back into a
+    GSERIALIZED varlena before the executor returns them.
+  - **Per-row polygon-vertex extractor**: `polyfill` consumes a
+    polygon ring per call and emits a list of cells covering it;
+    needs the inverse of the GSERIALIZED encoder to feed the kernel.
+  Both helpers also benefit `st_buffer` / `st_union` /
+  `st_intersection` (PostGIS geometry constructors) when those land
+  — the design is shared.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
-  `registered_ops_match_kernel_set_exactly`) assert the registered set
-  matches the 9-kernel set exactly. Future mismatch fails at test time.
-- **Done when**: Each missing kernel landed + bridged + dispatched,
-  variable-output plumbing designed and wired, operators registered,
-  correctness tests pass.
+  `registered_ops_match_kernel_set_exactly`) assert the registered
+  set matches the kernel set exactly.
+- **Done when**: GSERIALIZED encoder + per-row polygon-vertex
+  extractor land in `pg_accel/src/adapters/extractors/`; the 3
+  deferred H3 ops dispatch end-to-end; golden-diff test against
+  h3-pg's `h3_polyfill` / `h3_cell_to_boundary` /
+  `h3_cells_to_multi_polygon` for each.
 
 ### Type coverage expansion
 
-- **What**: GPU path handles int2 / int4 / int8 / float4 / float8 / bool /
-  date (filter+arith, since Phase 2 bytecode commit `f37c67b`) and extracts
-  (but doesn't GPU-process) text / timestamp / timestamptz. UUID lands as
-  a hash_agg group key in commit `243fa1f` (hash_join UUID is a separate
-  follow-up — templated build/probe path). Forcing CPU qual eval:
-  INTERVAL (no extractor), INET / CIDR (no extractor; used heavily for
-  partitioning keys and joins), JSON / JSONB (no extractor; GPU
-  `jsonb_path_exists` / `->>` would be a major win), ARRAY types (no GPU
-  support — forces per-row unnest on CPU), custom types (domains,
-  composites — immediate reject in the classifier). NUMERIC / DECIMAL are
-  already handled by the Phase 2 classification gate. MINOR.
-- **Why**: Any workload touching one of these types falls back to PG's
-  scalar qual evaluator. That's correct (results match PG bit-for-bit)
-  but silently reduces GPU coverage on partition-keyed / IP / JSON
-  workloads.
-- **Status note**: After Phase 2 bytecode dispatch landed, DATE arithmetic
-  in WHERE compiles correctly to bytecode and produces bit-identical
-  results to PG (verified with `WHERE dt + 30 > '2026-06-01'` on a 1M-row
-  fixture). The plan may show the filter on `Parallel Seq Scan` rather
-  than `GpuAccelScan` because PG's parallel scan + scalar qual is cheaper
-  than 1-thread `GpuAccelScan` at this size — that's a planner cost
-  decision, not a coverage gap.
+- **What**: GPU path handles int2 / int4 / int8 / float4 / float8 /
+  bool / date (filter + arith, since Phase 2 bytecode commit
+  `f37c67b`), UUID (`243fa1f`, classifier re-enabled `639f6f1` after
+  Agent 4A's `309f8c7` flat-buffer kernel-staging fix) and INET /
+  CIDR (`c4134d5` + `3fbc03d`, classifier re-enabled `639f6f1`) on
+  hash_agg group keys. Extracts but doesn't GPU-process text /
+  timestamp / timestamptz. Forcing CPU qual eval: INTERVAL (no
+  extractor), JSON / JSONB (no extractor — GPU `jsonb_path_exists`
+  / `->>` would be a major win), ARRAY types (no GPU support —
+  forces per-row unnest on CPU), custom types (domains, composites
+  — immediate reject in the classifier). NUMERIC / DECIMAL are
+  already handled by the Phase 2 classification gate plus int128
+  NumericSumEmitter (commit `dcd0cce`, 38-digit precision). MINOR.
+- **Why**: Any workload touching one of the unsupported types falls
+  back to PG's scalar qual evaluator. That's correct (results match
+  PG bit-for-bit) but silently reduces GPU coverage on JSON / array
+  / interval workloads.
+- **Status note**: After Phase 2 bytecode dispatch landed, DATE
+  arithmetic in WHERE compiles correctly to bytecode and produces
+  bit-identical results to PG (verified with
+  `WHERE dt + 30 > '2026-06-01'` on a 1M-row fixture). The plan may
+  show the filter on `Parallel Seq Scan` rather than `GpuAccelScan`
+  because PG's parallel scan + scalar qual is cheaper than 1-thread
+  `GpuAccelScan` at this size — that's a planner cost decision, not
+  a coverage gap.
 - **How**:
-  - UUID hash_agg group keys: SHIPPED (`243fa1f`). Touch surface ~7
-    files matching the integration plan that was scoped pre-flight.
-    INET / CIDR remain (4-byte / variable structs with family byte +
-    network-byte-order hashing — see "INET / CIDR extractors" sub-item
-    below).
-  - UUID hash_join keys: deferred. The hash_join build/probe path is
-    templated (`build_cpu<T>` / `probe_cpu<T>`) and assumes T is an
-    arithmetic type with `keys_equal<T>`. UUID would need either a
-    `__uint128_t` slot type or a struct-based instantiation. Tracked
-    as a follow-up; the executor stub at `executor/join/probe.rs` raises
-    `pgrx::error!` if the planner ever emits Uuid for a join key
-    (planner classifier today only emits Uuid for hash_agg).
-  - INET / CIDR end-to-end on hash_agg group keys: SHIPPED in
-    commits `c4134d5` (groundwork: ABI + kernel hash arms + Rust
-    extractor + planner classifier + 4 unit tests) and `3fbc03d`
-    (close: `extract_inet_from_heap_headers` inline-varlena fast
-    path through VectorizedScan, no detour through MinimalTuple
-    slot_getattr — short / long header parse + family
-    canonicalisation handled directly on the arena bytes). Agg
-    dispatch at `agg/execute.rs:1186` now packs canonical 24-byte
-    keys per row; rows that need full detoast (TOAST pointer,
-    compressed varlena, variable-length predecessor) come back as
-    null in the mask and the kernel hash table treats them as a
-    single bucket (matches PG hashinet null semantics). Hash join
-    INET keys still pending — same `build_cpu<T>` / `probe_cpu<T>`
-    template constraint as UUID; planner classifier doesn't emit
-    Inet for join keys.
+  - UUID / INET / CIDR hash_join keys: deferred. The hash_join
+    build / probe path is templated (`build_cpu<T>` / `probe_cpu<T>`)
+    and assumes T is an arithmetic type with `keys_equal<T>`. UUID
+    needs either a `__uint128_t` slot type or a struct-based
+    instantiation; INET needs the same plus the canonical 24-byte
+    layout. Planner classifier today only emits Uuid / Inet for
+    hash_agg, so executor stub at `executor/join/probe.rs` raises
+    `pgrx::error!` if a join key ever arrives wrong-typed.
   - JSON / JSONB last (analytics win): the GPU side needs a JSONB
     binary-format parser kernel; substantial work.
   - ARRAY: unnest-on-GPU is a separate kernel-design item.
@@ -555,109 +670,6 @@ tests). One item remains.
 
 ## Phase 6 — Performance investigation
 
-### H3 cell layout — `+1` offset bug fixed (2026-05-01)
-
-- **What** (commit `56b770d`): `pgaccel-kernels/src/h3_ops.cpp` digit
-  slots used `shift = (X - r) * 3 + 1` on the assumption bit 0 was
-  reserved; H3 v4 uses no offset (bits 44-0 = 15 digits × 3 bits
-  flush to bit 0). The `+1` overlapped digit-1 (bits 45-43) with the
-  LSB of the base-cell field at bit 45, silently corrupting
-  `h3_get_base_cell` / `h3_is_pentagon` / `h3_cell_to_center_child`
-  on real H3 input. Stripped `+1` from all 9 digit-shift sites,
-  re-aligned `make_cell` test helper, restored canonical-12-pentagon
-  / 0..121-base-sweep / odd-base-preserved-on-descent assertions.
-
-- **Verified**: standalone `test_h3` cold-cache run completed
-  2026-05-01: **220 PASS / 0 FAIL** across all 11 test sections,
-  including the new sweeps (`get_base_cell` 0..121 mix; canonical 12
-  pentagon bases; odd-base descent preservation; res-class-III parity
-  sweep; null-pointer + zero-cell sentinels). Cargo h3 adapter tests
-  28/28 PASS; `audit-cpu-cheats` PASS; `cargo check`/`clippy`/
-  `gpu-build` clean.
-
-- **Remaining cross-verification (lower priority)**: end-to-end
-  validation against real h3-pg-generated cells in a live PG session
-  (install h3-pg, `SELECT h3_lat_lng_to_cell(POINT(...), 5)`, hand
-  the result to our GPU kernel via `pg_accel.gpu_enabled = true`,
-  check resolution / base / pentagon classification). The
-  kernel-level round-trip correctness is now established, but the
-  actual byte-pattern compatibility with h3-pg's H3-library output
-  hasn't been spot-checked end-to-end. Bench fixtures already feed
-  h3-pg cells through the kernels; if those keep passing post-fix,
-  that closes the loop.
-
-### `hash_agg` value-aggregation pass returns 0 for UUID and INET key types (Metal MSL emitter bug)
-
-- **What** (caught 2026-05-01 by new `test_hash_agg_keys.cpp`):
-  `pgaccel_hash_agg_execute` with `key_type ∈ {PGACCEL_KEY_UUID,
-  PGACCEL_KEY_INET}` produces correct `group_count` (the sort-based
-  grouping path works) but every per-group SUM reads back as 0.0.
-  Cold-cache JIT shows the underlying cause:
-
-  ```
-  program_source:10744:20: error: C-style cast from 'device void *' to
-    'device void **' converts between mismatching address spaces
-            t25 = &(((device device void**)t3)[t20]);
-  program_source:10750:22: error: C-style cast from 'device void *' to
-    'device void **' converts between mismatching address spaces
-  2 warnings and 2 errors generated.
-  [AdaptiveCpp Warning] metal_code_object: xcrun metal failed for ...
-  ```
-
-  The Metal SSCP MSL emitter generates `device device void**` (duplicate
-  address-space qualifier + cross-address-space cast) for the SUM
-  accumulation kernel template instantiated on UUID/INET key shapes.
-  `xcrun metal` rejects the MSL, the kernel never runs, the result
-  buffer keeps its zero-initialized state, and the user sees zero
-  sums per group with no error surfaced. INT64 key baseline is fine —
-  same code path, smaller key shape, doesn't hit the emitter bug.
-
-  Affects every UUID / INET hash_agg query at any size (sort-based
-  path is reached at row_count >= 100000; the smaller agg_hash path
-  is presumably also affected but is gated to <100k rows — separate
-  small-N kernel bug above). MAJOR (silent correctness — wrong-result
-  class on real production input).
-
-- **Why**: Per anti-cheat ban #1 (no fake success), shipping UUID +
-  INET adapter registrations in commits 243fa1f / c4134d5 / 3fbc03d
-  without exercising the kernel-side value-aggregation pass leaves
-  this latent. Bug surfaced exactly because we added kernel-level
-  test coverage (the same testing pattern that surfaced the H3 layout
-  bug in commits ea230cf → 56b770d).
-
-- **How**:
-  - **Local mitigation (LANDED)**: `GroupKeyInfo::key_type_from_oid`
-    at `pg_accel/src/engine/executor/agg/keys.rs:45` returns `None`
-    for UUID, INET, and CIDR until the kernel bug is fixed. This
-    routes those queries to PG native — correct (though
-    unaccelerated) results — instead of silently returning zero
-    sums. All downstream support (kernel dispatch arms in
-    `agg/execute.rs:1186`, `append_key_bytes`, `key_size`,
-    `read_key_u64` arms) is left in place so re-enabling is a
-    one-line classifier flip once the kernel is fixed.
-  - **Upstream fix (still needed for full acceleration)**: the MSL
-    emitter cast pattern needs an address-space-aware cast
-    (`metal::address_space_cast` or the `__metal_pointer_cast`
-    builtin) instead of the bare C-style cast that hits the
-    duplicate-qualifier path. Diff the SSCP-emitted LLVM IR for INT64
-    vs UUID instantiations to identify which Emitter pass is
-    producing the duplicate `device device` qualifier chain. Same
-    emitter file as the `__args` MSL compile error in Phase 7
-    (`AdaptiveCpp/src/compiler/llvm-to-backend/metal/Emitter.cpp`).
-
-- **Reproducer**: `pgaccel-kernels/test/test_hash_agg_keys.cpp`
-  (intentionally not wired into `just gpu-test` until the bug
-  is fixed; runs standalone as `./pgaccel-kernels/build/test_hash_agg_keys`
-  and currently shows `8 passed, 2 failed` with `xcrun metal failed`
-  output and zero-sum results). Once the emitter bug is fixed, both
-  failing assertions will flip to PASS without test changes — that
-  is the verification gate for closing this entry.
-
-- **Done when**: `test_hash_agg_keys` reports 10/10 passed cold-cache;
-  `xcrun metal failed` no longer appears in the JIT log; UUID and
-  INET hash_agg queries produce correct sums on real h3-pg-style
-  workloads through the Custom Scan path.
-
 ### `hash_agg` 2-level pointer kernel returns 0 on small batches
 
 - **What**: `agg_hash`'s 2-level pointer kernel reads as 0 instead of the
@@ -679,6 +691,27 @@ tests). One item remains.
   investigation lands a root-cause fix (in either the kernel pointer
   chain or upstream SSCP emitter) and a regression test pins the
   small-N case.
+
+### `reduce_multi_f32` / `reduce_multi_i64` consumer wiring
+
+- **What** (added 2026-05-02): Bridge wrappers `reduce_multi_f32`
+  (`pg_accel/src/gpu/mod.rs:508`) and `reduce_multi_i64`
+  (`pg_accel/src/gpu/mod.rs:583`) ship behind `#[allow(dead_code)]`
+  with a doc note pointing at the Phase B Agent 1B consumer wiring
+  task. The agg executor today routes everything through
+  `Vec<f64>` (`reduce_multi_f64`); the f32 / i64 wrappers stay
+  unconsumed pending an executor refactor that picks the right
+  width per column type. MINOR.
+- **Why**: Removing the `#[allow(dead_code)]` annotations is
+  blocked on an executor consumer; until a code path calls them,
+  `cargo clippy -- -D warnings` would fail.
+- **How**: Wire the agg executor's per-column accumulator to pick
+  the matching `reduce_multi_*` kernel based on `AggColumn`
+  result_type; drop the `#[allow(dead_code)]` annotations in the
+  same diff.
+- **Done when**: Executor calls `reduce_multi_f32` for f32-typed
+  columns and `reduce_multi_i64` for i64-typed columns; the dead-
+  code annotations are gone; `just lint` clean.
 
 ### Per-batch GPU dispatch dominates parallel SUM / GROUP BY
 
@@ -908,26 +941,16 @@ work is tracked in the Post-1.0 (deferred) section.
   bumped (so the argbuffer path is skipped) and again at default to
   diff the two emitted prototypes; fix the collision in
   `emitArgStruct` / `emitSignature`.
-- **Related kernels caught with the same emitter bug** (refreshed 2026-05-01):
-  - `pgaccel_expr_template_two_pred_and`
-    (`pgaccel-kernels/src/expr_templates.cpp:423`): cold-cache JIT
-    fails with `attribute 'id' set location to 4, but minimum is 5;
-    device void* t4 [[id(4)]];`. **Currently dead code** — no Rust
-    executor path calls it (`scan/exec.rs:558-593`,
-    `agg/execute.rs:1539,1601`, `preagg/mod.rs:457,617` all evaluate
-    the `TwoPredAnd` template variant by calling
-    `pgaccel_expr_template_cmp_const` twice and AND-ing the results
-    in Rust). Two follow-up paths: (a) delete the unused kernel +
-    bridge decl + the planner classifier's `TwoPredAnd::Kernel`
-    enum if any, OR (b) fix the emitter and wire the kernel through
-    so the Rust-side double-dispatch becomes a single-kernel call.
-    Bridge decl at `pg_accel/src/gpu/bridge.rs:484`. Reproducer:
-    `pgaccel-kernels/test/test_expr_templates.cpp` (kernel
-    intentionally NOT exercised by that test until either route lands).
+- **Status note (2026-05-02)**: The previously-tracked
+  `pgaccel_expr_template_two_pred_and` instance of this bug class is
+  closed. Agent 4A's f64-as-u64-bits capture refactor (commit
+  `0c3d5d7`) made the kernel cold-cache MSL-compile, and Agent 1B's
+  fusion (commit `9009ef1`) wired it as a single-kernel call from
+  `scan/exec.rs` instead of the prior Rust-side double-dispatch.
+  `reduce_stats_f64` at N=1048576 still has the underlying bug —
+  separate instantiation, struct-pack hasn't been applied there.
 - **Done when**: pg_accel's `reduce_stats_f64` MSL-compiles at every
-  N; AND `pgaccel_expr_template_two_pred_and` either compiles cleanly
-  cold-cache OR is deleted; an AdaptiveCpp-side regression test
-  asserts the prototype.
+  N; an AdaptiveCpp-side regression test asserts the prototype.
 
 ### Metal backend fork-safety with fp64 kernels
 
@@ -1385,51 +1408,51 @@ trail isn't broken; do not gate 1.0 on any of them.
 - **Expected trigger**: Benchmarks showing inner-build dominates
   hashjoin time on large inner relations.
 
-### PostGIS predicate kernels beyond the 7 registered
+### PostGIS predicate kernels beyond what dispatches today
 
-- **What** (refreshed 2026-05-02 after 10 predicates landed this round):
-  Wired today — st_intersects, st_dwithin, st_contains, st_within,
-  st_disjoint, st_covers, st_coveredby, **st_area** (Polygon
-  Shoelace, fp32, single-arg via `dispatch_gpu_st_area`),
-  **st_length** (Polygon perimeter / LineString length, fp32, via
-  `dispatch_gpu_st_length`), **st_distance** (Point*Point fp32 via
-  `dispatch_gpu_st_distance` — reuses `pgaccel_sphere_distance_bulk`
-  with a new dispatch arm BEFORE the predicate vertex-count gate so
-  Points don't get filtered out). Still missing: `st_equals` /
-  `st_touches` / `st_crosses` / `st_overlaps` (each needs its own
-  algorithmic kernel + SpatialPredicate enum variant + adapter
-  registration); `st_distance` for non-Point geometry pairs
-  (polygon-to-polygon distance is genuinely harder algorithmically).
-- **Why deferred**: Each remaining predicate needs a kernel + dispatch
-  path that doesn't exist. 1.0 ships with the 7 above; the remaining
-  predicates fall through `resolve_spatial_predicate` to PG (no silent
-  misdispatch).
-- **Expected trigger**: PostGIS workload demand for `st_distance` /
-  `st_area` / `st_length` / the remaining three relational predicates.
+- **What** (refreshed 2026-05-02 after 4 algorithmic predicates +
+  st_distance polygonal landed): Wired end-to-end — st_intersects,
+  st_dwithin (Point × Point), st_contains, st_within, st_disjoint,
+  st_covers, st_coveredby, st_area (fp32 Polygon Shoelace),
+  st_length (fp32 Polygon perimeter / LineString), st_distance
+  (Point × Point fp32; Polygon × Polygon fp32 vertex-pair minimum),
+  st_equals, st_touches, st_crosses, st_overlaps (all 4
+  algorithmic, commits `b5e546a` + `2c08296` + `433bc21`). Still
+  missing: per-row 3rd-arg `st_dwithin` thresholds (needs Phase 4
+  multi-arg dispatch carrier), polygon × point and other mixed
+  geometry distance combinations.
+- **Why deferred**: Per-row 3rd-arg + mixed geometry types are
+  carrier work + algorithmic; 1.0 ships with what's wired above.
+- **Expected trigger**: PostGIS workload demand for non-constant
+  `st_dwithin` thresholds or mixed-geometry distance calls.
 
-### PostGIS raster kernels beyond the 3 registered
+### PostGIS raster — multi-arg dispatch carrier
 
-- **What**: `st_resample` / `st_slope` / `st_aspect` / `st_hillshade` /
-  `st_value` / `st_summarystats`. Each needs SYCL kernel + Rust bridge +
-  dispatch + adapter registration. See Phase 4 "PostGIS raster
-  registrations — bottleneck is missing kernels" for the current state.
-- **Why deferred**: Kernel work is significant; 1.0 ships with
-  `st_mapalgebra`/`st_clip`/`st_reclass` acceleration.
+- **What** (refreshed 2026-05-02 after Agent 3A landed 6 raster
+  kernels and Agent 1B wired st_clip + st_reclass + st_summarystats):
+  All 9 raster ops are registered + bridged + 4 dispatched today
+  (st_mapalgebra, st_clip, st_reclass, st_summarystats). 5 awaiting
+  the multi-arg dispatch carrier (st_resample, st_slope, st_aspect,
+  st_hillshade, st_value) — see Phase 4 "Multi-arg dispatch carrier"
+  for the unified plan.
+- **Why deferred**: Multi-arg carrier is the unblocker (shared with
+  st_dwithin and 3 H3 var-output ops); not a 1.0 ship-blocker.
 - **Expected trigger**: Raster workload demand.
 
-### H3 kernels beyond the 9 registered
+### H3 kernels beyond what dispatches today
 
-- **What** (refreshed 2026-05-01 after `h3_is_pentagon` +
-  `h3_is_res_class_iii` landed):
-  Still missing — `h3_grid_disk` / `h3_grid_ring_unsafe` / `h3_polyfill`
-  / `h3_cell_to_children` / `h3_cell_to_boundary` /
-  `h3_cells_to_multi_polygon`. All require variable-length output
-  plumbing in `FunctionAccelEntry` — shared design with the PostGIS
-  geometry constructors. See Phase 4 "H3 operator registrations" for
-  the current state.
-- **Why deferred**: Kernel work + variable-output adapter plumbing is
-  significant. 1.0 ships with the 9-kernel subset (all fixed 1:1 outputs).
-- **Expected trigger**: H3 workload demand for grid-gen / hierarchy walks.
+- **What** (refreshed 2026-05-02 after Agent 5A landed 6 var-output
+  kernels and Agent 1B wired 3): All 15 H3 ops are registered.
+  Wired end-to-end (12): the 9 fixed-1:1-output ops plus
+  grid_disk, grid_ring_unsafe, cell_to_children. 3 deferred
+  (polyfill, cell_to_boundary, cells_to_multi_polygon) need the
+  shared GSERIALIZED encoder + per-row polygon-vertex extractor —
+  see Phase 4 "H3 operator registrations" entry.
+- **Why deferred**: GSERIALIZED encoder + polygon extractor are
+  shared with the PostGIS geometry constructors (st_buffer /
+  st_union / st_intersection); not a 1.0 ship-blocker.
+- **Expected trigger**: H3 workload demand for polygon-fill /
+  boundary serialization paths.
 
 ### SetOp / RecursiveUnion GPU handling
 
