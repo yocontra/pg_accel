@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- PostGIS predicates: 4 algorithmic predicates `st_equals`, `st_touches`, `st_crosses`, `st_overlaps` end-to-end (kernel: b5e546a; SpatialPredicate enum + three-layer dispatch: 2c08296; adapter registration: 433bc21)
+- PostGIS distance: `pgaccel_st_distance_polygon_polygon_bulk` SYCL kernel — fp32 vertex-pair minimum for Polygon × Polygon (676a95d)
+- PostGIS raster: 6 new SYCL kernels — `pgaccel_raster_resample`, `pgaccel_slope`, `pgaccel_aspect`, `pgaccel_hillshade`, `pgaccel_raster_value`, `pgaccel_raster_summarystats` (13ec5fa); Rust bridge wrappers (cb2ec8d); adapter registration with `OutputShape::Record` for `st_summarystats` (a6bdf19)
+- PostGIS raster dispatch: `st_clip` polygon-ring extractor + `st_reclass` rule-text parser + `st_summarystats` Record output wired end-to-end via `pg_accel/src/engine/dispatch/raster.rs` (c487abd, c44ad34)
+- H3: 6 new var-output SYCL kernels — `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`, `h3_cell_to_children`, `h3_cell_to_boundary`, `h3_cells_to_multi_polygon` (b8873f2); Rust bridge wrappers (62fbd26); adapter registration with `OutputShape::VarLen` (47f2d68); 3 dispatched end-to-end via two-pass kernels — `grid_disk`, `grid_ring_unsafe`, `cell_to_children` (4f373a5)
+- Aggregation: int128 `NumericSumEmitter` for NUMERIC SUM with 38-digit precision + PG NUMERIC encoder helpers (dcd0cce, test coverage 9423d11)
+- Adapter framework: `OutputShape` enum + extended `FunctionAccelEntry` for Record / VarLen function shapes (2d7be99); H3 var-output kernel FFI prototypes (0ec4dce); `DispatchResult::AcceleratedRecord` + `DispatchResult::AcceleratedVarLen` variants (e810597)
+- Pre-aggregation: `PartialAggSpec` round-trip executor wiring — `PreAggPrivData` carries `partial: Option<PartialAggSpec>`, serialize/deserialize via `PARTIAL_SENTINEL`, `begin_custom_scan` calls `exec.enable_partial(spec)` so workers emit transition-state tuples for Finalize Aggregate (be493db); `preagg_partial::try_inject` validates pre-conditions + builds the spec (planner-side Finalize → Gather → CustomPath chain construction tracked under TODO Phase 3) (1b990c9)
+- Test coverage: kernel-level test for new predicates + raster + H3 ops — `test_spatial` includes st_equals/touches/crosses/overlaps and polygon×polygon distance (b5e546a, 4dce963); `test_raster` covers 6 new raster kernels + Metal soft-fp64 workarounds (e87b56a); `test_h3` covers 6 var-output ops (4d37031, ea230cf); `test_hash_agg_keys` reproducer for UUID/INET key types (6de58d6); `test_expr_templates` adds 6 assertions for `pgaccel_expr_template_two_pred_and` after the struct-pack fix (8808636)
+- Polygon-ring + reclass-rule parsers under `pg_accel/src/adapters/extractors/raster.rs` for raster dispatch (c487abd)
 - PostGIS predicates: `st_dwithin` Point×Point fp32 via `pgaccel_sphere_distance_bulk` SYCL kernel (a2793c4)
 - PostGIS predicates: `st_contains` / `st_within` Polygon⊇Point fp32 via `pgaccel_point_in_ring_bulk` (e804376)
 - PostGIS predicates: `st_disjoint` as inversion of `st_intersects` — no extra kernel (a52e565)
@@ -40,6 +50,9 @@
 - Integration and SQL correctness test suites, including Phase 8 geometry-extraction edge cases (d0c1cd3, 66a4e73, 41146a9)
 
 ### Changed
+- Scan executor: `TwoPredAnd` template variant consolidated into a single struct-packed kernel call from `pg_accel/src/engine/executor/scan/exec.rs`; previously the scan executor + agg + preagg paths each evaluated `TwoPredAnd` by calling `pgaccel_expr_template_cmp_const` twice and AND-ing the results in Rust (9009ef1)
+- Spatial kernels: `sphere_distance_bulk_sycl` + `st_length_bulk_sycl` split into non-templated `_f32` / `_f64` variants to sidestep the templated emitter recursion that was hanging Metal SSCP JIT (0b176c6, f885523)
+- Algorithmic spatial dispatch helper renamed to `sycl_*` prefix for the four new predicates (1b27908)
 - SYCL-only compile-time enforcement: the `gpu` Cargo feature, `PGACCEL_HAS_SYCL` preprocessor gate, `stubs.rs`, and `cpu_fallback_count` FFI were deleted; the GPU bridge now builds unconditionally (6242acb, 50e2b83, 30320ae, 16734df, 67169cb, 02db2d1)
 - Crate reorganised: god files split, `ExecutorState` trait introduced (be65257)
 - Planner agg injection split into `parallel_safe`-aware modules (509c531)
@@ -58,6 +71,10 @@
 - `real_boundary` benchmark workload (bc9e63f)
 
 ### Fixed
+- `hash_agg` value-aggregation pass returning 0 for UUID and INET / CIDR key types (Metal MSL emitter bug class). Agent 4A's flat-buffer kernel-staging refactor in `pgaccel-kernels/src/hash_agg.cpp` flattens the per-column pointer-of-pointer capture into single-level `device void*` argbuffer slots that AdaptiveCpp's Metal Emitter handles correctly. Cold-cache `pgaccel-kernels/build/test_hash_agg_keys` reports 10/10 PASS (was 8/10 with `xcrun metal failed` and silent zero sums on the 2 UUID + INET tests). Classifier re-enabled in `pg_accel/src/engine/executor/agg/keys.rs`. (309f8c7, 639f6f1)
+- `pgaccel_expr_template_two_pred_and` Metal SSCP JIT failure (`attribute 'id' set location to 4, but minimum is 5`). Agent 4A's f64-as-u64-bits capture refactor in `pgaccel-kernels/src/expr_templates.cpp` makes the kernel cold-cache MSL-compile; the previously-skipped `test_expr_templates` two_pred_and section is now exercised (0c3d5d7)
+- H3 cell layout `+1` digit-shift offset bug — `pgaccel-kernels/src/h3_ops.cpp` digit slots used `shift = (X - r) * 3 + 1` on the assumption bit 0 was reserved; H3 v4 uses no offset (bits 44-0 = 15 digits × 3 bits flush to bit 0). The offset overlapped digit-1 with the LSB of the base-cell field, silently corrupting `h3_get_base_cell` / `h3_is_pentagon` / `h3_cell_to_center_child` on real H3 input. Standalone `test_h3` cold-cache reports 220 PASS / 0 FAIL across 11 sections including new sweeps for canonical 12 pentagons, 0..121 base cells, odd-base descent preservation. (56b770d)
+- fp64 `sphere_distance` + `st_length` re-gated to `PGACCEL_ERROR_NO_DEVICE` (commit 573a60b) pending the `acpp-metal-archive-build` OOM fix tracked under TODO Phase 7 "Metal SSCP soft-fp64 trig". Kernels stay in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:502,937`; gate is a one-line drop the moment archive serialization is fixed
 - 7-cheat audit (2026-05-02): every `extern "C" pgaccel_*` symbol previously hosting a host-side `for` loop was either converted to a real SYCL kernel or surfaced as `PGACCEL_ERROR_NO_DEVICE` so the planner declines.
   - `pgaccel_sphere_distance_bulk` host loop → fp32 SYCL kernel; fp64 returns NO_DEVICE pending soft-fp64 trig fix (6ea0a51).
   - `pgaccel_point_in_ring_bulk` fp32 path host loop → templated `point_in_ring_bulk_sycl<T>` (91b9c35).
