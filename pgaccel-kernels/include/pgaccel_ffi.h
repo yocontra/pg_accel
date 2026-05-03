@@ -253,6 +253,20 @@ pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_of
                                       size_t row_count, bool use_fp64, bool closed_ring,
                                       void* lengths);
 
+/* ── BEGIN spatial-extensions (Agent 2A insertion zone) ─────────────
+ * Agent 2A appends here:
+ *   - pgaccel_sphere_distance_bulk_f32 / _f64 (split from templated kernel)
+ *   - pgaccel_st_length_bulk_f64
+ *   - pgaccel_st_distance_polygon_polygon_bulk
+ *   - pgaccel_st_equals_bulk
+ *   - pgaccel_st_touches_bulk
+ *   - pgaccel_st_crosses_bulk
+ *   - pgaccel_st_overlaps_bulk
+ * Keep declarations in this block so the cross-domain header doesn't
+ * fragment over time.
+ */
+/* ── END spatial-extensions ────────────────────────────────────────── */
+
 /* ── Spatial Dispatch (Three-Layer Pipeline) ──────────────────────── */
 
 typedef enum {
@@ -336,6 +350,120 @@ pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array, const void
                                                size_t count, int resolution, int use_fp64,
                                                uint64_t* cell_ids, uint8_t* valid);
 
+/* ── H3 Variable-Output Kernels (two-pass output-size + emit) ──────── */
+/*
+ * H3 ops whose per-input-row output size is data-dependent
+ * (`grid_disk`, `grid_ring_unsafe`, `polyfill`,
+ * `cell_to_children`, `cell_to_boundary`, `cells_to_multi_polygon`)
+ * use a CSR-style two-pass protocol so the executor can size buffers
+ * without speculating on the maximum fan-out:
+ *
+ *   1. Size pass — `*_output_size(input, params, out_offsets[N+1])`
+ *      writes the cumulative output counts. `out_offsets[0] == 0` and
+ *      `out_offsets[N]` holds the total element count for the emit pass.
+ *   2. Emit pass — `*_emit(input, params, in_offsets, out_buf)` walks
+ *      each input row and writes its outputs to
+ *      `out_buf[in_offsets[i] .. in_offsets[i + 1]]`.
+ *
+ * The `in_offsets` argument to `_emit` is the same buffer produced by
+ * the size pass and MUST not be mutated between calls. Output buffer
+ * type matches `DispatchResult::AcceleratedVarLen` consumers
+ * (`uint64_t*` for cell IDs, `double*` for lat/lng coord pairs).
+ *
+ * Implementation lives in `pgaccel-kernels/src/h3_ops.cpp` (Agent 5A);
+ * this header just publishes the contract every other agent depends on.
+ */
+
+/* h3_grid_disk: outputs all H3 cells within k-ring distance of each input.
+ * Per-cell output count = 1 + sum(6*i for i in 1..=k) for hexagons; pentagons
+ * have one fewer neighbour at each ring. Two-pass:
+ *   size: writes cumulative offsets into `out_offsets[count+1]`.
+ *   emit: writes cells into `out_cells[out_offsets[count]]`. */
+pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells, size_t count, int32_t k,
+                                                uint32_t* out_offsets);
+pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_t count, int32_t k,
+                                         const uint32_t* offsets, uint64_t* out_cells);
+
+/* h3_grid_ring_unsafe: outputs only the cells exactly at distance `k`
+ * from each input cell (the "k-th ring" — no inner cells). Smaller fan-out
+ * than `grid_disk`. Returns PGACCEL_UNSUPPORTED if the input cell is a
+ * pentagon (ring traversal across pentagon distortion is undefined). */
+pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t* cells, size_t count,
+                                                       int32_t k, uint32_t* out_offsets);
+pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells, size_t count, int32_t k,
+                                                const uint32_t* offsets, uint64_t* out_cells);
+
+/* h3_polyfill: outputs all H3 cells whose centre lies inside the input
+ * polygon at the requested resolution. Input is CSR-style polygon coords
+ * (mirrors `pgaccel_st_area_bulk` shape) — a flat float xy array indexed
+ * by `ring_offsets`, plus the target resolution. Output count is bounded
+ * by `polygon_bbox_area / cell_area(resolution)` and computed exactly in
+ * the size pass.
+ *
+ * `coords`        — flat fp32 [x0,y0,x1,y1,...] in lon/lat degrees.
+ * `ring_offsets`  — [ring_count + 1] CSR offsets into coords.
+ * `ring_count`    — number of polygons (one ring per polygon for the
+ *                   first cut; multi-ring polygons land in a follow-up).
+ * `resolution`    — target H3 resolution (0..=15).
+ * `out_offsets`   — [ring_count + 1] cumulative cell counts.
+ * `out_cells`     — output H3 cell IDs.
+ */
+pgaccel_status pgaccel_h3_polyfill_output_size(const float* coords, const uint32_t* ring_offsets,
+                                               size_t ring_count, int32_t resolution,
+                                               uint32_t* out_offsets);
+pgaccel_status pgaccel_h3_polyfill_emit(const float* coords, const uint32_t* ring_offsets,
+                                        size_t ring_count, int32_t resolution,
+                                        const uint32_t* offsets, uint64_t* out_cells);
+
+/* h3_cell_to_children: outputs all child cells of each input at
+ * `child_res`. Child count is deterministic from the input's resolution
+ * and `child_res`: `7^(child_res - cell_res)` for hexagons, with one
+ * fewer leg per intermediate pentagon descent. Two-pass:
+ *   size: walks resolution chain to compute per-input child count.
+ *   emit: writes children in the canonical H3 traversal order. */
+pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t* cells, size_t count,
+                                                       int32_t child_res, uint32_t* out_offsets);
+pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells, size_t count,
+                                                int32_t child_res, const uint32_t* offsets,
+                                                uint64_t* out_children);
+
+/* h3_cell_to_boundary: outputs lat/lng vertex pairs of each input cell's
+ * polygon boundary. Hexagons emit 6 vertex pairs (12 doubles); pentagons
+ * emit 5 vertex pairs (10 doubles). Output buffer type is `double*`
+ * (lat/lng pairs in radians or degrees per the kernel's documented
+ * convention — see h3_ops.cpp for the exact unit).
+ *
+ *   size: writes cumulative DOUBLE offsets (i.e. 12 per hexagon, 10 per
+ *         pentagon) so `out_offsets[count]` is the total fp64 count.
+ *   emit: writes interleaved lat/lng pairs into `out_coords[]`. */
+pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t* cells, size_t count,
+                                                       uint32_t* out_offsets);
+pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells, size_t count,
+                                                const uint32_t* offsets, double* out_coords);
+
+/* h3_cells_to_multi_polygon: outputs the union of input cell boundaries
+ * as a flat polygon-vertex CSR. `cells` is a single multi-cell input;
+ * the output is a CSR over polygon rings.
+ *
+ *   size: walks edge dedup and writes cumulative ring offsets:
+ *         `out_ring_offsets[ring_count + 1]`. `*out_ring_count` returns
+ *         the number of rings the kernel will emit.
+ *   emit: writes interleaved lat/lng pairs into `out_coords[]` indexed
+ *         by `ring_offsets`.
+ *
+ * Coordinate Agent 5A's kernel implementation with this signature; the
+ * caller (Phase B Agent 1B) is responsible for re-encoding the rings as
+ * a PostGIS GSERIALIZED multipolygon. */
+pgaccel_status pgaccel_h3_cells_to_multi_polygon_output_size(const uint64_t* cells, size_t count,
+                                                             uint32_t* out_ring_offsets,
+                                                             uint32_t* out_ring_count);
+pgaccel_status pgaccel_h3_cells_to_multi_polygon_emit(const uint64_t* cells, size_t count,
+                                                      const uint32_t* ring_offsets,
+                                                      uint32_t ring_count, double* out_coords);
+
+/* ── BEGIN h3-var-output-extensions (Agent 5A insertion zone) ─────── */
+/* ── END h3-var-output-extensions ─────────────────────────────────── */
+
 /* ── Raster Operations ───────────────────────────────────────────── */
 
 typedef enum {
@@ -395,6 +523,18 @@ pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t width, size_t
 pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_count, int input_type,
                                       const pgaccel_reclass_rule* rules, size_t rule_count,
                                       int output_type, void* output_pixels);
+
+/* ── BEGIN raster-extensions (Agent 3A insertion zone) ──────────────
+ * Agent 3A appends here:
+ *   - pgaccel_raster_resample (bilinear)
+ *   - pgaccel_raster_slope (Horn's method)
+ *   - pgaccel_raster_aspect (3×3 gradient → compass)
+ *   - pgaccel_raster_hillshade (slope + aspect + sun)
+ *   - pgaccel_raster_value (single-pixel lookup at point geometry)
+ *   - pgaccel_raster_summarystats (count/sum/mean/stddev/min/max)
+ * Keep declarations in this block so dispatch wiring stays grouped.
+ */
+/* ── END raster-extensions ─────────────────────────────────────────── */
 
 /* Window-function declarations live in pgaccel_window.h (separate header
  * so the dispatcher can include just the window API without the rest of
