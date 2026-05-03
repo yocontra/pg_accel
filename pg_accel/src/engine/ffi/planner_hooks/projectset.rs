@@ -118,7 +118,7 @@ pub(super) unsafe fn try_inject_function_scan(
 
     // Look up the function in the adapter registry.
     registry::lazy_init();
-    let Some(entry) = registry::global_registry().lookup(fn_oid).cloned() else {
+    let Some(entry) = registry::global_registry().lookup(fn_oid) else {
         pgrx::debug1!(
             "pg_accel: projectset: fn_oid={} not in registry; skipping",
             u32::from(fn_oid)

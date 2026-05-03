@@ -237,10 +237,7 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
 
     // Look up the registry entry to get the strategy + field metadata.
     registry::lazy_init();
-    let Some(entry) = registry::global_registry()
-        .lookup(priv_data.fn_oid)
-        .cloned()
-    else {
+    let Some(entry) = registry::global_registry().lookup(priv_data.fn_oid) else {
         pgrx::warning!(
             "pg_accel: function_scan init: fn_oid={} not registered",
             u32::from(priv_data.fn_oid),
