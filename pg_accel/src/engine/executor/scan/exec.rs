@@ -567,40 +567,30 @@ impl ScanExecState {
                 cmp2_opcode,
                 const2_val,
             } => {
-                // Evaluate each predicate via CmpConst template, then AND.
-                let r1 = {
-                    let (values, nulls) = self.extract_col_f64(*col1_idx, scan_slot, batch_len);
-                    let mut bo = ColumnarBatchOwner::new(batch_len, 1);
-                    bo.add_col_f64(values, nulls);
-                    let b = bo.as_batch();
-                    gpu::expr_template_cmp_const(&b, 0, *cmp1_opcode, *const1_val, batch_len)
-                };
-                let r2 = {
-                    let (values, nulls) = self.extract_col_f64(*col2_idx, scan_slot, batch_len);
-                    let mut bo = ColumnarBatchOwner::new(batch_len, 1);
-                    bo.add_col_f64(values, nulls);
-                    let b = bo.as_batch();
-                    gpu::expr_template_cmp_const(&b, 0, *cmp2_opcode, *const2_val, batch_len)
-                };
-                match (r1, r2) {
-                    (Some(a), Some(b)) => {
-                        // AND: both must be true (+1). If either is false (-1),
-                        // result is false. Otherwise uncertain (0).
-                        let combined: Vec<i8> = a
-                            .iter()
-                            .zip(b.iter())
-                            .map(|(&x, &y)| {
-                                if x < 0 || y < 0 {
-                                    -1
-                                } else {
-                                    i8::from(x > 0 && y > 0)
-                                }
-                            })
-                            .collect();
-                        Some(combined)
-                    }
-                    _ => None,
-                }
+                // Single-dispatch fused kernel via Agent 4A's struct-packed
+                // pgaccel_expr_template_two_pred_and. Both columns are
+                // packed into a 2-column batch; the kernel reads them as
+                // `batch.col[0]` (col1) and `batch.col[1]` (col2) — the
+                // col_idx args to the template select which packed slot
+                // each predicate reads. Replaces the previous CmpConst-x2
+                // + Rust-side AND combiner pattern (one kernel launch
+                // instead of two; flat-mode SSCP capture per Phase A).
+                let (v1, n1) = self.extract_col_f64(*col1_idx, scan_slot, batch_len);
+                let (v2, n2) = self.extract_col_f64(*col2_idx, scan_slot, batch_len);
+                let mut bo = ColumnarBatchOwner::new(batch_len, 2);
+                bo.add_col_f64(v1, n1);
+                bo.add_col_f64(v2, n2);
+                let b = bo.as_batch();
+                gpu::expr_template_two_pred_and(
+                    &b,
+                    0,
+                    *cmp1_opcode,
+                    *const1_val,
+                    1,
+                    *cmp2_opcode,
+                    *const2_val,
+                    batch_len,
+                )
             }
             // Other template variants: fall back to scalar qual.
             _ => None,
