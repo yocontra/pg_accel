@@ -345,33 +345,6 @@ unsafe fn args_supported(args: *mut pg_sys::List) -> bool {
     var_count == 1
 }
 
-#[cfg(test)]
-mod tests {
-    //! Compile-time smoke checks: the public entrypoint must keep the
-    //! `(root, input_rel, output_rel)` signature so the dispatcher in
-    //! `mod.rs` can route `UPPERREL_FINAL` invocations through it.
-    //! Behavioural coverage requires a live planner + registered SRFs,
-    //! which is exercised by the `pg_test`s below (gated on `pg_test`).
-
-    use super::*;
-
-    #[test]
-    fn entrypoint_has_expected_signature() {
-        // Type-only compile check: keeps drift from sneaking in.
-        let f: unsafe fn(*mut PlannerInfo, *mut RelOptInfo, *mut RelOptInfo) =
-            try_inject_srf_target_list;
-        let _ = f;
-    }
-
-    #[test]
-    fn upper_relation_kind_final_is_seven() {
-        // Sanity: PG17 numerically encodes UPPERREL_FINAL as 7. If the
-        // upstream enum re-orders, the dispatcher's match arm in
-        // mod.rs::pgaccel_create_upper_paths needs to be revisited.
-        assert_eq!(UpperRelationKind::UPPERREL_FINAL, 7);
-    }
-}
-
 /// Integration tests for the SRF-in-target-list planner hook.
 ///
 /// **Scope**: with the executor wiring still pending (see module
@@ -397,9 +370,36 @@ mod tests {
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 #[pgrx::pg_schema]
-mod pg_tests {
-
+mod tests {
     use pgrx::prelude::{Spi, pg_test};
+
+    use super::*;
+
+    // -------------------------------------------------------------------
+    // Pure-Rust compile-time / sanity checks. Run via `cargo test`; do
+    // not require a live PG instance.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn entrypoint_has_expected_signature() {
+        // Type-only compile check: keeps drift from sneaking in.
+        let f: unsafe fn(*mut PlannerInfo, *mut RelOptInfo, *mut RelOptInfo) =
+            try_inject_srf_target_list;
+        let _ = f;
+    }
+
+    #[test]
+    fn upper_relation_kind_final_is_seven() {
+        // Sanity: PG17 numerically encodes UPPERREL_FINAL as 7. If the
+        // upstream enum re-orders, the dispatcher's match arm in
+        // mod.rs::pgaccel_create_upper_paths needs to be revisited.
+        assert_eq!(UpperRelationKind::UPPERREL_FINAL, 7);
+    }
+
+    // -------------------------------------------------------------------
+    // pg_test integration tests. Require a live pgrx PG instance and
+    // the h3 extension installed. Skipped silently when h3 is missing.
+    // -------------------------------------------------------------------
 
     /// Helper: ensure the named extension exists in the test DB; return
     /// `false` if `CREATE EXTENSION` fails (host doesn't have the
@@ -484,22 +484,30 @@ mod pg_tests {
         );
     }
 
-    /// `EXPLAIN SELECT h3_cell_to_boundary(cell) FROM cells` must
-    /// complete without crashing the backend. With the planner hook
-    /// in detect-only mode, EXPLAIN shows a native `ProjectSet ->
-    /// SeqScan` plan; the hook's pathlist walk runs during planning
-    /// and must not raise an error or corrupt path metadata. When
-    /// the executor wiring lands, this assertion grows to require
-    /// `Custom Scan (GpuAccelSrfTargetList)` in the plan text.
+    /// `EXPLAIN SELECT h3_grid_disk(cell, 1) FROM cells` (a real
+    /// SETOF SRF — h3_grid_disk is `RETURNS SETOF h3index` per
+    /// h3-pg `h3--unreleased.sql`) must produce a plan containing a
+    /// `ProjectSet` node and complete without crashing the backend.
+    /// With the planner hook in detect-only mode, EXPLAIN shows a
+    /// native `ProjectSet -> SeqScan` plan; the hook's pathlist walk
+    /// runs during planning and must not raise an error or corrupt
+    /// path metadata. When the executor wiring lands, this assertion
+    /// flips to require `Custom Scan (GpuAccelSrfTargetList)` in
+    /// place of `ProjectSet`.
+    ///
+    /// **Note**: `h3_cell_to_boundary(h3index) RETURNS polygon` is
+    /// NOT a SETOF function (single polygon return), so it does not
+    /// trigger `parse->hasTargetSRFs` — it would not exercise this
+    /// hook at all. Use `h3_grid_disk` for the EXPLAIN sanity check.
     #[pg_test]
     fn srf_target_list_explain_does_not_crash() {
         if !ensure_extension("h3") {
             return;
         }
-        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
         Spi::run(
             "CREATE TEMP TABLE _srf_tlist_explain(id int, cell h3index); \
-             INSERT INTO _srf_tlist_explain VALUES (1, '8a2a1072b59ffff'::h3index)",
+             INSERT INTO _srf_tlist_explain VALUES (1, '8928308280fffff'::h3index)",
         )
         .expect("setup ok");
 
@@ -507,7 +515,7 @@ mod pg_tests {
             let mut lines: Vec<String> = Vec::new();
             let table = client
                 .select(
-                    "EXPLAIN (FORMAT TEXT) SELECT id, h3_cell_to_boundary(cell) \
+                    "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \
                      FROM _srf_tlist_explain",
                     None,
                     &[],
@@ -525,14 +533,14 @@ mod pg_tests {
             "EXPLAIN returned no rows (likely backend crash); the SRF-in-target-list \
              hook must not break native PG planning",
         );
-        // Confirm that the plan contains a ProjectSet node — proves
-        // the hook saw what it expected. When executor wiring lands,
-        // this assertion flips to require the GpuAccel custom scan
-        // label instead.
+        // h3_grid_disk RETURNS SETOF triggers ProjectSet wrapping by
+        // adjust_paths_for_srfs (planner.c:6577). Until the executor
+        // wiring lands, native PG handles expansion — confirms the
+        // hook does not corrupt the path metadata it walks.
         assert!(
-            plan.contains("ProjectSet") || plan.contains("Result"),
-            "Expected EXPLAIN plan to show ProjectSet or Result for \
-             SRF-in-target-list; got:\n{plan}",
+            plan.contains("ProjectSet"),
+            "Expected EXPLAIN plan to show ProjectSet for \
+             SRF-in-target-list h3_grid_disk; got:\n{plan}",
         );
     }
 }
