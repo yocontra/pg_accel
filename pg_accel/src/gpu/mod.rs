@@ -930,7 +930,7 @@ pub fn map_algebra(
 ///
 /// Returns `None` if the GPU is unavailable.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: kernel registered but not yet wired through dispatch (TODO Phase 4 raster registrations)
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_clip wiring)
 pub fn raster_clip(
     rast_pixels: *const std::ffi::c_void,
     width: usize,
@@ -975,7 +975,7 @@ pub fn raster_clip(
 ///
 /// Applies a set of value-range rules to reclassify pixel values.
 /// Returns `None` if the GPU is unavailable.
-#[allow(dead_code)] // reason: kernel registered but not yet wired through dispatch (TODO Phase 4 raster registrations)
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_reclass wiring)
 pub fn raster_reclass(
     input_pixels: *const std::ffi::c_void,
     pixel_count: usize,
@@ -999,6 +999,227 @@ pub fn raster_reclass(
             rules.len(),
             output_type,
             output_pixels.as_mut_ptr().cast::<std::ffi::c_void>(),
+        )
+    };
+    status.is_ok().then_some(())
+}
+
+// ---------------------------------------------------------------------------
+// Raster extension wrappers (Agent 3A — see raster_ops.cpp)
+// ---------------------------------------------------------------------------
+
+/// GPU-accelerated bilinear resample.
+///
+/// Returns `None` if the kernel fails (caller routes to PG fallback).
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_resample wiring)
+pub fn raster_resample(
+    src_pixels: &[f32],
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+    dst_pixels: &mut [f32],
+) -> Option<()> {
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return Some(());
+    }
+    if src_pixels.len() < src_w * src_h {
+        return None;
+    }
+    if dst_pixels.len() < dst_w * dst_h {
+        return None;
+    }
+    // SAFETY: slice lengths checked above; both pointers refer to valid
+    // contiguous fp32 buffers owned by the caller for the duration of
+    // this call.
+    let status = unsafe {
+        bridge::pgaccel_raster_resample(
+            src_pixels.as_ptr(),
+            src_w,
+            src_h,
+            dst_w,
+            dst_h,
+            dst_pixels.as_mut_ptr(),
+        )
+    };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated slope (Horn's method, output in degrees).
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_slope wiring)
+pub fn raster_slope(
+    src_pixels: &[f32],
+    width: usize,
+    height: usize,
+    cell_size_x: f64,
+    cell_size_y: f64,
+    slope_out: &mut [f32],
+) -> Option<()> {
+    if width == 0 || height == 0 {
+        return Some(());
+    }
+    let n = width * height;
+    if src_pixels.len() < n || slope_out.len() < n {
+        return None;
+    }
+    // SAFETY: slice lengths checked above; both buffers are caller-owned.
+    let status = unsafe {
+        bridge::pgaccel_raster_slope(
+            src_pixels.as_ptr(),
+            width,
+            height,
+            cell_size_x,
+            cell_size_y,
+            slope_out.as_mut_ptr(),
+        )
+    };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated aspect (compass direction in degrees).
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_aspect wiring)
+pub fn raster_aspect(
+    src_pixels: &[f32],
+    width: usize,
+    height: usize,
+    aspect_out: &mut [f32],
+) -> Option<()> {
+    if width == 0 || height == 0 {
+        return Some(());
+    }
+    let n = width * height;
+    if src_pixels.len() < n || aspect_out.len() < n {
+        return None;
+    }
+    // SAFETY: slice lengths checked above.
+    let status = unsafe {
+        bridge::pgaccel_raster_aspect(src_pixels.as_ptr(), width, height, aspect_out.as_mut_ptr())
+    };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated hillshade (shaded relief, output [0, 255]).
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_hillshade wiring)
+pub fn raster_hillshade(
+    src_pixels: &[f32],
+    width: usize,
+    height: usize,
+    cell_size_x: f64,
+    cell_size_y: f64,
+    sun_azimuth_deg: f64,
+    sun_altitude_deg: f64,
+    z_factor: f64,
+    shade_out: &mut [f32],
+) -> Option<()> {
+    if width == 0 || height == 0 {
+        return Some(());
+    }
+    let n = width * height;
+    if src_pixels.len() < n || shade_out.len() < n {
+        return None;
+    }
+    // SAFETY: slice lengths checked above.
+    let status = unsafe {
+        bridge::pgaccel_raster_hillshade(
+            src_pixels.as_ptr(),
+            width,
+            height,
+            cell_size_x,
+            cell_size_y,
+            sun_azimuth_deg,
+            sun_altitude_deg,
+            z_factor,
+            shade_out.as_mut_ptr(),
+        )
+    };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated point-in-raster pixel-value lookup.
+///
+/// `point_xy` is interleaved `[x0, y0, x1, y1, ...]`. The output slice
+/// must have at least `point_xy.len() / 2` elements. Out-of-bounds
+/// points get NaN.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_value wiring)
+pub fn raster_value(
+    rast_pixels: &[f32],
+    width: usize,
+    height: usize,
+    origin_x: f64,
+    origin_y: f64,
+    scale_x: f64,
+    scale_y: f64,
+    point_xy: &[f64],
+    output: &mut [f64],
+) -> Option<()> {
+    let point_count = point_xy.len() / 2;
+    if width == 0 || height == 0 || point_count == 0 {
+        return Some(());
+    }
+    if rast_pixels.len() < width * height {
+        return None;
+    }
+    if output.len() < point_count {
+        return None;
+    }
+    // SAFETY: slice lengths checked above.
+    let status = unsafe {
+        bridge::pgaccel_raster_value(
+            rast_pixels.as_ptr(),
+            width,
+            height,
+            origin_x,
+            origin_y,
+            scale_x,
+            scale_y,
+            point_xy.as_ptr(),
+            point_count,
+            output.as_mut_ptr(),
+        )
+    };
+    status.is_ok().then_some(())
+}
+
+/// GPU-accelerated 6-scalar per-row summary stats (count/sum/mean/stddev/min/max).
+///
+/// Pairs with [`crate::engine::registry::OutputShape::Record`]
+/// `{ field_count: 6 }`. Output slice must hold `6 * row_count` `f64`s
+/// laid out as `[row0_count, row0_sum, row0_mean, row0_stddev, row0_min,
+/// row0_max, row1_count, ...]`. When `nodata_masks` is `Some`, mask byte
+/// `1` skips that pixel.
+#[allow(dead_code)] // reason: consumed by Phase B Agent 1B in dispatch/raster.rs (st_summarystats wiring)
+pub fn raster_summarystats(
+    rast_pixels: &[f32],
+    row_count: usize,
+    pixels_per_row: usize,
+    nodata_masks: Option<&[u8]>,
+    output: &mut [f64],
+) -> Option<()> {
+    if row_count == 0 || pixels_per_row == 0 {
+        return Some(());
+    }
+    let n = row_count * pixels_per_row;
+    if rast_pixels.len() < n || output.len() < row_count * 6 {
+        return None;
+    }
+    if let Some(mask) = nodata_masks
+        && mask.len() < n
+    {
+        return None;
+    }
+    let mask_ptr = nodata_masks.map_or(std::ptr::null(), <[u8]>::as_ptr);
+    // SAFETY: slice lengths checked above; mask_ptr is null XOR points to
+    // a buffer of at least `n` bytes (verified above).
+    let status = unsafe {
+        bridge::pgaccel_raster_summarystats(
+            rast_pixels.as_ptr(),
+            row_count,
+            pixels_per_row,
+            mask_ptr,
+            output.as_mut_ptr(),
         )
     };
     status.is_ok().then_some(())
