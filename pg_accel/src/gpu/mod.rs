@@ -1147,12 +1147,9 @@ pub fn h3_cell_to_boundary_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
 /// Returns `(ring_offsets, coords)` where `ring_offsets.len() == ring_count + 1`
 /// and `coords.len() == ring_offsets[ring_count]` (in doubles).
 ///
-/// Phase 2 F3 status: kernel + Rust wrapper are ready; dispatch arm in
-/// `engine/dispatch/h3.rs` is gated on a PG `bigint[]` ArrayType walker
-/// (same blocker as `st_value`'s `geometry[]` arg, see `gpu/mod.rs:1470`).
-/// Kept un-dead-code-allowed so that future ArrayType plumbing can wire
-/// this without re-touching the gpu module.
-#[allow(dead_code)] // reason: kernel ready; dispatch arm in engine/dispatch/h3.rs gated on bigint[] ArrayType extractor (tracked alongside st_value)
+/// Phase 2 B3 status: consumed by
+/// `engine::dispatch::h3::dispatch_gpu_h3_cells_to_multi_polygon` once
+/// the bigint[] ArrayType walker landed in `adapters::extractors::array`.
 pub fn h3_cells_to_multi_polygon_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
     let count = cells.len();
     if count == 0 {
@@ -1482,8 +1479,11 @@ pub fn raster_hillshade(
 /// `point_xy` is interleaved `[x0, y0, x1, y1, ...]`. The output slice
 /// must have at least `point_xy.len() / 2` elements. Out-of-bounds
 /// points get NaN.
+///
+/// Phase 2 B3 status: consumed by
+/// `engine::dispatch::raster::dispatch_st_value` now that the geometry[]
+/// ArrayType walker landed.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: kernel ready; dispatch escalated per anti-cheat ban #9 — st_value takes a `geometry[]` ArrayType varlena and the existing extractors don't walk PG ArrayType bodies; tracked as a Phase 2 follow-up alongside F3's FunctionScan injection.
 pub fn raster_value(
     rast_pixels: &[f32],
     width: usize,
