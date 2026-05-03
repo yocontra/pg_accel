@@ -238,38 +238,67 @@ Split into 3a (planner) and 3b (executor, gating):
 **Done when**: `SELECT k, SUM(v) FROM t GROUP BY k` with parallel workers
 shows GPU Custom Scan inside a Gather and produces identical results.
 
-### Preagg parallel path — planner-side path construction outstanding
+### Preagg parallel path — Agg-strategy chain shipped, true PreAgg parallelisation deferred
 
-- **What** (refreshed 2026-05-02): Executor round-trip is wired —
-  `PreAggPrivData` carries `partial: Option<PartialAggSpec>`,
-  `serialize_preagg_private` / `deserialize_preagg_private` accept
-  the optional spec via the existing `PARTIAL_SENTINEL` block, and
-  `begin_custom_scan`'s `GpuStrategy::PreAgg` arm calls
-  `exec.enable_partial(spec)` so workers emit transition-state
-  tuples (commit `be493db`,
-  `pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:14-46`).
-  `preagg_partial::try_inject` validates the gating + builds the
-  `PartialAggSpec`, and stops short of `add_partial_path` because
-  the planner-side Finalize → Gather → CustomPath chain isn't
-  built yet (orphan-path crash documented at `partial_agg.rs`
-  module docs). MAJOR (perf), unblocked by the ~100-LOC follow-up.
-- **Why**: Preagg fusion is one of the bigger per-batch wins;
-  confining it to the leader leaves a lot of perf on the table for
-  parallel queries.
+- **What** (refreshed 2026-05-03 after Agent P1 commits `e386720` +
+  `5599067`): The Finalize Agg → Gather → CustomPath chain is built
+  and `add_path(grouped_rel, finalize_path)` is called. Mirrors
+  `partial_agg::try_inject` structurally (uses
+  `agg_path_methods()` + `is_partial=1` + PAAG sentinel layout).
+  GROUP BY propagation works via `root.processed_groupClause` +
+  `parse.havingQual` into `pg_sys::create_agg_path` (mirrors PG's
+  own `add_paths_to_grouping_rel`, `planner.c:7253-7263`).
+  `AGG_HASHED` strategy when GROUP BY present, `AGG_PLAIN`
+  otherwise. 16/16 unit tests pass.
+- **Compromise (anti-cheat ban #9)**: P1's chain uses the existing
+  `Agg` strategy (not `PreAgg`) because parallelising the actual
+  `PreAggExecState` would over-aggregate N-fold under workers —
+  see "PreAgg executor refactor for parallel safety" entry below.
+  Agent 1B's `PreAggPrivData::partial` round-trip
+  (`pg_accel/src/engine/ffi/custom_scan/private_data.rs`) is left
+  in place but NOT exercised by the new chain; it activates once
+  the executor refactor lands. So the chain accelerates standard
+  parallel grouped aggregation today but doesn't yet exploit
+  star-join fusion in parallel.
+- **Done when**: A standard parallel-aggregation plan with GROUP BY
+  uses the new chain; EXPLAIN confirms `Finalize Agg → Gather →
+  CustomScan(GpuAccel)` with `parallel_safe=true` on the partial
+  CustomPath. (PreAgg-strategy parallelisation is its own entry.)
+
+### PreAgg executor refactor for parallel safety
+
+- **What** (surfaced 2026-05-03 by Agent P1): `PreAggExecState`
+  opens the fact table directly via `table_open(scan_oid)` (see
+  `pg_accel/src/engine/executor/preagg/mod.rs` and `partial_emit.rs`).
+  Under PG's parallel workers each worker would re-open the same
+  fact relation and re-scan it from row 0 — N workers means N×
+  duplicate input rows, which over-aggregates by exactly N. This
+  is why P1's planner chain falls back to standard `Agg` strategy
+  rather than `PreAgg` (see "Preagg parallel path" entry above).
+  MAJOR (correctness — under parallel, PreAgg as currently coded
+  would silently produce wrong sums).
+- **Why**: To unlock star-join fusion (the original PreAgg value
+  prop) under parallel execution, the executor needs to delegate
+  fact-table scanning to a wrapped child PlanState (a per-worker
+  parallel scan) instead of opening the relation directly.
 - **How**:
-  - Mirror `partial_agg::try_inject` (`pg_accel/src/engine/ffi/
-    planner_hooks/partial_agg.rs:60-401`): build the partial
-    `CustomPath` with `parallel_safe=true`, wrap in `Gather` and
-    `Finalize Agg` paths, then `add_path(grouped_rel,
-    final_agg.cast::<Path>())` (`partial_agg.rs:386-389`).
-  - Flip the flag at `planner_hooks/mod.rs:1058` to `true` whenever
-    all fused Aggrefs classify into the partial-capable set
-    (`agg_common::classify_aggref` returns `Some`).
-- Depends on: Nothing in pg_accel — executor side is wired.
-- **Done when**: A preagg-fused aggregation plan runs inside
-  parallel workers; EXPLAIN confirms `parallel_safe=true` on the
-  preagg CustomPath inside a Gather child of Finalize Agg; the
-  corresponding partial-state tuples reach the Finalize aggregator.
+  - Refactor `PreAggExecState` to take a child PlanState (the
+    fact-table scan) rather than a relation OID + manual table_open.
+  - In `begin_custom_scan` for `GpuStrategy::PreAgg`, wire the
+    child scan through `cscanstate->ss.ps.lefttree` so each worker
+    gets its own portion of the rows via PG's existing parallel-
+    scan partitioning.
+  - Once landed: flip P1's chain in `preagg_partial::try_inject`
+    from `agg_path_methods()` + standard `create_agg_path` over to
+    a true `PreAgg` CustomPath that exploits the
+    `PreAggPrivData::partial` slot already wired by Agent 1B.
+- Depends on: Nothing — pure executor refactor, no upstream
+  dependency.
+- **Done when**: A star-join + GROUP BY query runs PreAgg
+  inside parallel workers without N-fold over-aggregation;
+  `pg_accel/src/engine/executor/preagg/partial_emit.rs::PreaggPartialState`
+  is exercised by an EXPLAIN ANALYZE showing the per-worker row
+  partitioning.
 
 ### Window executor has no partial path
 
@@ -570,39 +599,76 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   are dispatched per-row with their full argument set; golden-diff
   test against PostGIS raster output for each.
 
-### H3 operator registrations — GSERIALIZED encoder + polygon extractor for 3 deferred ops
+### H3 operator registrations — GSERIALIZED encoder shipped, dispatch wiring still pending
 
-- **What** (refreshed 2026-05-02 after Agent 5A landed 6 var-output
-  kernels and Agent 1B wired 3 of them): All 15 H3 ops are
-  registered in `pg_accel/src/adapters/h3.rs`. Wired end-to-end (12
-  total): the 9 fixed-1:1-output ops above plus 3 new var-output
-  dispatchers via two-pass (size → emit) kernels in
-  `pg_accel/src/engine/dispatch/h3.rs`: `grid_disk`,
-  `grid_ring_unsafe`, `cell_to_children`. The 3 remaining
-  var-output ops — `polyfill`, `cell_to_boundary`,
+- **What** (refreshed 2026-05-03 after Agent F2 commit `3abaf50`):
+  All 15 H3 ops are registered. Wired end-to-end today: 12 total
+  (9 fixed-1:1-output + 3 var-output dispatchers via two-pass
+  kernels — `grid_disk`, `grid_ring_unsafe`, `cell_to_children`).
+  The 3 remaining var-output ops — `polyfill`, `cell_to_boundary`,
   `cells_to_multi_polygon` — have working SYCL kernels at
-  `pgaccel-kernels/src/h3_ops.cpp` (commit `b8873f2`) but their
-  dispatchers need:
-  - **PostGIS GSERIALIZED encoder** (per-row, on the dispatch side):
-    `cell_to_boundary` and `cells_to_multi_polygon` emit polygon-
-    boundary lat/lng pairs that must be packed back into a
-    GSERIALIZED varlena before the executor returns them.
-  - **Per-row polygon-vertex extractor**: `polyfill` consumes a
-    polygon ring per call and emits a list of cells covering it;
-    needs the inverse of the GSERIALIZED encoder to feed the kernel.
-  Both helpers also benefit `st_buffer` / `st_union` /
-  `st_intersection` (PostGIS geometry constructors) when those land
-  — the design is shared.
+  `pgaccel-kernels/src/h3_ops.cpp` (commit `b8873f2`).
+  - **GSERIALIZED v2 encoder: SHIPPED** at
+    `pg_accel/src/adapters/extractors/geometry/polygon_encoder.rs`
+    (Agent F2, commit `3abaf50`). Public API:
+    `encode_polygon(srid, rings) -> Result<Vec<u8>, EncodeError>`
+    + `encode_multipolygon(...)`. Returns `Result` rather than bare
+    `Vec` — surfaces empty-ring / empty-polygon / SRID-out-of-range
+    errors instead of silently emitting malformed bytes (deviation
+    from the original spec; a deliberate anti-cheat-ban-#4 call —
+    silent corruption beats explicit error in the wrong direction).
+    11/11 roundtrip tests pass against the existing parser at
+    `polygon.rs:18-87`.
+  - **Per-row polygon-vertex extractor**: existing
+    `extract_geometry` (`pg_accel/src/adapters/extractors/geometry.rs`)
+    already handles the read side. Used by `h3_polyfill` for its
+    polygon-ring input.
+  - **Dispatch wiring**: Agent F3 (Phase 2 of the in-flight
+    multi-agent run) is the integrator — wires the 3 H3 var-output
+    dispatchers in `dispatch/h3.rs` via F2's encoder + existing
+    extract_geometry, plus the new FunctionScan injection hook for
+    `SELECT * FROM h3_cell_to_boundary(c)` syntax.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered
   set matches the kernel set exactly.
-- **Done when**: GSERIALIZED encoder + per-row polygon-vertex
-  extractor land in `pg_accel/src/adapters/extractors/`; the 3
-  deferred H3 ops dispatch end-to-end; golden-diff test against
-  h3-pg's `h3_polyfill` / `h3_cell_to_boundary` /
-  `h3_cells_to_multi_polygon` for each.
+- **Done when**: F3 lands the 3 dispatch arms; golden-diff test
+  against h3-pg's `h3_polyfill` / `h3_cell_to_boundary` /
+  `h3_cells_to_multi_polygon`. SRF-in-target-list syntax
+  (`SELECT h3_cell_to_boundary(c) FROM t` instead of
+  `FROM h3_cell_to_boundary(c)`) is a separate follow-up — see
+  "SRF-in-target-list / ProjectSet planner injection" entry below.
+
+### SRF-in-target-list / ProjectSet planner injection
+
+- **What** (surfaced 2026-05-03 by Phase II planning): pg_accel's
+  Phase 2 F3 agent will land FunctionScan injection
+  (`SELECT * FROM h3_cell_to_boundary(c)` syntax — the function
+  appears in the FROM clause as a base-relation `RTE_FUNCTION`).
+  The complementary syntax — `SELECT h3_cell_to_boundary(c) FROM t`
+  — would be evaluated by PG's `ProjectSet` plan node which is
+  injected post-path-selection by `make_modifytable` /
+  scanjoin-target processing. PG17 has NO planner hook surface for
+  ProjectSet (verified — neither `set_rel_pathlist_hook` nor
+  `create_upper_paths_hook` fires at ProjectSet creation).
+  MINOR (workaround: rewrite query as `FROM h3_cell_to_boundary(c)`).
+- **Why**: PostGIS users typically write SRF-in-target-list syntax;
+  forcing them to refactor to `FROM h3_*(...)` is awkward.
+- **How**: Either (a) install a `create_upper_paths_hook` at
+  `UPPERREL_FINAL` and wrap any ProjectSet whose tlist contains a
+  registered SRF op with a custom path that intercepts the SRF
+  invocation (~150 LOC), OR (b) install a `planner_hook`
+  (whole-query rewrite) that swaps SRF-in-target-list to
+  FROM-clause LATERAL join syntax. Option (a) is more invasive
+  but preserves user query shape; option (b) is a query rewriter
+  that may surprise users when EXPLAIN shows different shape than
+  what they wrote.
+- Depends on: F3's FunctionScan injection landing first (provides
+  the dispatch-side machinery the ProjectSet hook would call).
+- **Done when**: `EXPLAIN SELECT h3_cell_to_boundary(c) FROM cells`
+  shows the cell_to_boundary kernel being invoked (no longer
+  rendered by PG's scalar-fn invocation path).
 
 ### Type coverage expansion
 
