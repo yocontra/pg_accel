@@ -1091,7 +1091,10 @@ unsafe fn pgaccel_inject_gpu_preagg(
             }
         };
 
-        // Serialize PreAgg metadata into custom_private.
+        // Serialize PreAgg metadata into custom_private. `partial` is None
+        // here — this is the serial PreAgg planner hook
+        // (`pgaccel_inject_gpu_preagg`); the parallel preagg path lives in
+        // `planner_hooks/preagg_partial.rs` and passes a `Some(spec)`.
         (*cpath).custom_private = custom_scan::serialize_preagg_private(
             fact_relid,
             fact_oid,
@@ -1099,6 +1102,7 @@ unsafe fn pgaccel_inject_gpu_preagg(
             &agg_descs,
             &group_keys,
             fact_scan_expr.as_ref(),
+            None,
         );
 
         add_path(output_rel, cpath.cast());

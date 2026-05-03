@@ -9,29 +9,30 @@
 //!
 //! ## Status
 //!
-//! **Planner gating implemented; path injection blocked on executor wiring.**
+//! **Executor wiring landed; planner-side path-construction still pending.**
 //!
-//! W6 has shipped [`crate::engine::executor::preagg::partial_emit::PreaggPartialState`]
-//! (executor/preagg/partial_emit.rs:41) and `PreAggExecState::enable_partial(spec)`
-//! (executor/preagg/mod.rs:186), so the worker-side partial-emit primitives
-//! exist. What's still missing is the wiring through the Custom Scan begin
-//! callback:
+//! Phase B Agent 1B wired the round-trip executor plumbing:
 //!
-//!   1. `engine/ffi/custom_scan/private_data.rs::PreAggPrivData` does not yet
-//!      carry a `partial: Option<PartialAggSpec>` field.
-//!   2. `serialize_preagg_private` / `deserialize_preagg_private` therefore
-//!      have no slot to stash the spec across plan-copy.
-//!   3. `engine/ffi/custom_scan/mod.rs::begin_custom_scan` (the
-//!      `GpuStrategy::PreAgg` arm at line 2172) never calls
-//!      `exec.enable_partial(spec)` — even if a partial path were injected,
-//!      the worker would emit final aggregate Datums and PG's Finalize
-//!      Aggregate node on the leader would double-count across workers.
+//!   1. `PreAggPrivData` now carries `partial: Option<PartialAggSpec>`
+//!      (`engine/ffi/custom_scan/private_data.rs`).
+//!   2. `serialize_preagg_private` accepts an optional `&PartialAggSpec` and
+//!      appends it via the existing `PARTIAL_SENTINEL` block;
+//!      `deserialize_preagg_private` reads it back.
+//!   3. `begin_custom_scan`'s `GpuStrategy::PreAgg` arm calls
+//!      `exec.enable_partial(spec)` when the deserialized partial is
+//!      `Some` — workers then emit transition-state tuples for PG's
+//!      Finalize Aggregate.
 //!
-//! Until that wiring lands (planned for Phase B), this function performs the
-//! gating + spec validation but **does not call `add_partial_path`**.
-//! Injecting a path the executor will mistreat as final-aggregate output
-//! would be a silent correctness regression — exactly the kind of "no fake
-//! success" pattern banned by `.claude/rules/anti-cheat.md` #1.
+//! What still blocks `try_inject` from actually calling
+//! `add_partial_path` is the planner-side path construction. PG 17 does
+//! NOT fire `create_upper_paths_hook` for `UPPERREL_PARTIAL_GROUP_AGG`
+//! (see [`super::partial_agg`] module docs for the full analysis), so the
+//! same orphan-path failure mode that bit `partial_agg::try_inject` would
+//! bite here too. The fix is to mirror `partial_agg::try_inject`'s
+//! manually-built Finalize → Gather → CustomPath chain and `add_path` it
+//! to `grouped_rel` (NOT `add_partial_path` — see partial_agg module
+//! docs) — that's a 100+ line addition tracked as a separate follow-up
+//! to keep this PR focused on the executor-side plumbing.
 //!
 //! ## What [`try_inject`] does today
 //!
@@ -43,13 +44,6 @@
 //!      to verify every Aggref is partial-emit-supported.
 //!   5. Logs a debug message naming the blocker and returns without
 //!      mutating the planner state.
-//!
-//! The eventual implementation (once the executor wiring is in place) will
-//! mirror [`super::partial_agg::try_inject`]: build a parallel-safe
-//! CustomPath wrapping the cheapest partial outer, serialize the
-//! `PartialAggSpec` into `custom_private`, and `add_partial_path` it onto
-//! the partially-grouped rel so PG's `gather_grouping_paths` lifts it under
-//! a Gather + Finalize Aggregate.
 
 use pgrx::pg_sys::{self, NodeTag};
 
@@ -231,24 +225,28 @@ pub(super) unsafe fn try_inject(
         per_column: partial_cols,
     };
 
-    // BLOCKER: executor wiring missing. See module docs.
+    // BLOCKER: planner-side path construction missing. See module docs.
     //
-    // The remainder of the implementation — building the parallel CustomPath,
-    // serializing `spec` into `custom_private`, and `add_partial_path`-ing
-    // onto the partially-grouped rel — is intentionally elided. Until the
-    // PreAgg branch in `engine/ffi/custom_scan/mod.rs::begin_custom_scan`
-    // calls `exec.enable_partial(spec)` and `serialize_preagg_private`
-    // round-trips a `PartialAggSpec`, injecting a partial path here would
-    // silently produce wrong results under Gather → Finalize Aggregate.
+    // The executor-side round-trip is now in place
+    // (engine/ffi/custom_scan/private_data.rs::PreAggPrivData carries
+    // `partial`; begin_custom_scan calls enable_partial), so the spec we
+    // build here would correctly drive worker-side transition-state
+    // emission if it were attached to a path. What's still pending is
+    // the manually-built Finalize → Gather → GpuPreAgg(partial) chain
+    // (mirroring partial_agg::try_inject), which a follow-up PR will
+    // land. Until then, injecting a bare partial path via
+    // add_partial_path is the orphan-path crash documented in the
+    // partial_agg module docs.
     pgrx::debug1!(
         "pg_accel preagg_partial: gating passed, {} partial columns ready; \
-         injection blocked on Phase B executor wiring (custom_scan PreAgg \
-         partial spec round-trip + enable_partial call)",
+         path injection still blocked on Finalize → Gather chain build \
+         (executor round-trip is wired, planner-side path construction \
+         pending — tracked separately)",
         spec.per_column.len(),
     );
 
-    // Suppress the unused-variable warning on `spec` once the wiring lands;
-    // for now keep the binding live so a refactor to the PartialAggSpec
-    // shape forces this code to update too.
+    // Suppress the unused-variable warning on `spec` until the planner
+    // path construction lands; the binding stays live so a refactor to
+    // the PartialAggSpec shape forces this code to update too.
     let _ = spec;
 }

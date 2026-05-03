@@ -490,6 +490,13 @@ pub(super) struct PreAggPrivData {
     pub(super) agg_descs: Vec<PreAggColDesc>,
     pub(super) group_keys: Vec<GroupKeyDesc>,
     pub(super) scan_expr: Option<crate::engine::expr_compiler::CompiledExpr>,
+    /// Partial-aggregate spec (worker-side of a Gather plan). `Some` means
+    /// the executor emits transition-state tuples instead of final aggregate
+    /// Datums. Mirrors the same field on `CustomPrivateData` for the Agg
+    /// strategy. Round-tripped via the existing PARTIAL_SENTINEL block
+    /// (`append_partial_spec` / `deserialize_partial_spec`) appended to the
+    /// PreAgg layout.
+    pub(super) partial: Option<PartialAggSpec>,
 }
 
 /// Serialize PreAgg metadata into a PG `List` of `Integer` nodes.
@@ -506,9 +513,16 @@ pub(super) struct PreAggPrivData {
 ///  // Per agg: op_type, attno, type_oid
 ///  n_group_keys,
 ///  // Per group key: source, attno, type_oid
-///  has_scan_expr, (if 1: template_type, ...template_data...)
+///  has_scan_expr, (if 1: template_type, ...template_data...),
+///  // Optional partial-agg sentinel block (worker-side parallel preagg):
+///  (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?
 /// ]
 /// ```
+///
+/// `partial` carries the `PartialAggSpec` for parallel partial-emit paths
+/// (workers emit transition-state tuples for PG's Finalize Agg). `None`
+/// (the serial path) skips the sentinel block entirely so existing
+/// non-parallel plans don't change shape.
 ///
 /// # Safety
 ///
@@ -522,6 +536,7 @@ pub unsafe fn serialize_preagg_private(
     agg_descs: &[PreAggColDesc],
     group_keys: &[GroupKeyDesc],
     scan_expr: Option<&crate::engine::expr_compiler::CompiledExpr>,
+    partial: Option<&PartialAggSpec>,
 ) -> *mut pg_sys::List {
     use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 
@@ -645,6 +660,15 @@ pub unsafe fn serialize_preagg_private(
                 list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // no scan_expr
             }
         }
+
+        // Optional partial-agg sentinel block. Mirrors the Agg-strategy
+        // layout (append_partial_spec writes
+        // `[PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols]`)
+        // so deserialize_partial_spec can read it back. Absent when the
+        // plan is non-parallel (the serial preagg path).
+        if let Some(spec) = partial {
+            list = append_partial_spec(list, spec);
+        }
     }
 
     list
@@ -668,6 +692,7 @@ pub(super) unsafe fn deserialize_preagg_private(
         agg_descs: vec![],
         group_keys: vec![],
         scan_expr: None,
+        partial: None,
     };
     if custom_private.is_null() {
         return empty;
@@ -845,6 +870,23 @@ pub(super) unsafe fn deserialize_preagg_private(
         None
     };
 
+    // Optional PARTIAL_SENTINEL block — present only when the planner
+    // injected a parallel partial-emit path (preagg_partial::try_inject).
+    // Mirrors the Agg-strategy decode at deserialize_custom_private:344-356.
+    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
+    let partial = if (idx as usize) < list_len {
+        let sentinel = unsafe { list_int_at(custom_private, idx) };
+        if sentinel == PARTIAL_SENTINEL {
+            // SAFETY: list bounds checked; deserialize_partial_spec consumes
+            // [n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols].
+            unsafe { deserialize_partial_spec(custom_private, (idx as usize) + 1) }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Suppress unused-assignment warning for idx.
     let _ = idx;
 
@@ -855,5 +897,6 @@ pub(super) unsafe fn deserialize_preagg_private(
         agg_descs,
         group_keys,
         scan_expr,
+        partial,
     }
 }

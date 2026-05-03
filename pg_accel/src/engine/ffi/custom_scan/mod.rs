@@ -2180,6 +2180,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 preagg_info.scan_expr,
             ));
 
+            // Worker-side partial-emit: when the planner injected a parallel
+            // partial path (preagg_partial::try_inject), the serialized
+            // custom_private carries a `PartialAggSpec`. Enable the
+            // PreaggPartialState so `next()` emits transition-state tuples
+            // for PG's Finalize Aggregate on the leader.
+            if let Some(spec) = preagg_info.partial.as_ref() {
+                exec.enable_partial(spec);
+                pgrx::debug1!(
+                    "pg_accel: begin_custom_scan: PreAgg partial-emit enabled, {} cols",
+                    spec.per_column.len(),
+                );
+            }
+
             // Materialize dimension tables from child plan states.
             let custom_ps = (*node).custom_ps;
             if !custom_ps.is_null() {
