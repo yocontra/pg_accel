@@ -443,19 +443,34 @@ impl ScanExecState {
                     batch_len,
                 );
             }
-            DispatchResult::Deferred
-            | DispatchResult::AcceleratedRecord { .. }
-            | DispatchResult::AcceleratedVarLen { .. } => {
+            DispatchResult::Deferred => {
                 // GPU dispatch deferred — use PG's standard scalar qual.
-                //
+                // SAFETY: Caller guarantees main backend thread.
+                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+            }
+            DispatchResult::AcceleratedRecord { .. } | DispatchResult::AcceleratedVarLen { .. } => {
                 // The Record / VarLen variants exist for record-returning
-                // (e.g. ST_SummaryStats) and var-length (e.g. H3 grid_disk)
-                // ops; the per-row scan path here only consumes scalar
-                // boolean results, so a non-scalar shape coming through this
-                // arm means dispatch picked the wrong route. Defer to PG so
-                // the row still produces a correct (if slower) answer.
-                // Phase B Agent 1B wires record/varlen consumption into the
-                // scan + projection paths that need them.
+                // (e.g. ST_SummaryStats with 6 fp64 fields) and var-length
+                // (e.g. H3 grid_disk emitting many cells per input row)
+                // ops. Reaching this arm means dispatch produced one of those
+                // shapes for a function in a per-row scan filter context —
+                // which can't happen today: the planner only injects
+                // GpuAccelScan with these strategies for predicate / scalar
+                // contexts. SRF and record-returning function calls land in
+                // the projection path (ProjectSet / FunctionScan) which is
+                // a different planner hook entirely.
+                //
+                // If this arm is hit, dispatch routed the wrong way — defer
+                // to PG so the row still produces a correct answer rather
+                // than silently dropping data, and log a warning so the
+                // planner mis-injection is visible.
+                tracing::warn!(
+                    "pg_accel: scan dispatch returned non-scalar shape (Record/VarLen) \
+                     in per-row filter context; deferring to PG. The planner injected \
+                     a GpuAccelScan strategy whose function emits multi-Datum / SRF rows \
+                     — that's a planner-side mis-routing, tracked as the SRF / record \
+                     projection-hook follow-up."
+                );
                 // SAFETY: Caller guarantees main backend thread.
                 unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
             }
