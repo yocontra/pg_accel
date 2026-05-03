@@ -35,7 +35,9 @@ mod tests;
 pub use bbox::extract_bbox;
 pub use header::has_bbox_flag;
 pub use point::{extract_point, extract_point_xy_f32};
-pub use polygon_encoder::{EncodeError, encode_multipolygon, encode_polygon};
+pub use polygon_encoder::{
+    EncodeError, encode_multipolygon, encode_pg_polygon, encode_pg_polygon_array, encode_polygon,
+};
 
 use pgrx::pg_sys::Datum;
 
