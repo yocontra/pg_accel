@@ -958,31 +958,36 @@ static void test_cell_to_boundary() {
   ASSERT_TRUE("boundary hex vertices distinct", hex_distinct);
 }
 
-// Test: polyfill — small polygon at low resolution.
+// Test: polyfill — large polygon at low resolution.
 static void test_polyfill() {
   printf("--- test_polyfill ---\n");
 
-  // Define a small triangular polygon near (lng=0, lat=0). Coords are
-  // interleaved [x0,y0, x1,y1, ...] in lon/lat degrees, ring closed.
+  // Define a large rectangular polygon spanning multiple grid steps at the
+  // chosen resolution. Coords are interleaved [x0,y0, x1,y1, ...] in
+  // lon/lat degrees, ring closed.
+  //
+  // At res 4, the kernel's candidate-step is ~60/SQRT7^4 = 60/49 ≈ 1.22°.
+  // Using a 50x50° polygon at res 4 yields ~40x40 candidate points well
+  // inside the bbox, so at least some must land inside the polygon
+  // interior.
   float coords[] = {
-      0.0f, 0.0f, 2.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f,  // close
+      -25.0f, -25.0f, 25.0f, -25.0f, 25.0f, 25.0f, -25.0f, 25.0f, -25.0f, -25.0f,  // close
   };
-  uint32_t ring_offsets[2] = {0, 4};
+  uint32_t ring_offsets[2] = {0, 5};
 
-  // resolution 2 — coarse, expect a small handful of cells inside the
-  // triangle.
   uint32_t out_offsets[2] = {99, 99};
-  pgaccel_status s = pgaccel_h3_polyfill_output_size(coords, ring_offsets, 1, 2, out_offsets);
+  pgaccel_status s = pgaccel_h3_polyfill_output_size(coords, ring_offsets, 1, 4, out_offsets);
   ASSERT_STATUS_OK("polyfill size status", s);
   ASSERT_EQ("polyfill out_offsets[0]", out_offsets[0], 0);
   ASSERT_TRUE("polyfill positive size estimate", out_offsets[1] > 0);
 
   std::vector<uint64_t> out(out_offsets[1], 0);
-  s = pgaccel_h3_polyfill_emit(coords, ring_offsets, 1, 2, out_offsets, out.data());
+  s = pgaccel_h3_polyfill_emit(coords, ring_offsets, 1, 4, out_offsets, out.data());
   ASSERT_STATUS_OK("polyfill emit status", s);
 
   // Some cells should be filled (non-zero). Allow zero-sentinel slots from
-  // the size-pass overestimate.
+  // the size-pass overestimate, but require at least one filled cell to
+  // verify the kernel actually executed and found inside-points.
   uint32_t filled = 0;
   for (uint64_t c : out) {
     if (c != 0)
