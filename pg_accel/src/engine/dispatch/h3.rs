@@ -1,9 +1,10 @@
 //! GPU H3 cell dispatch.
 
-use crate::adapters::extractors::geometry::extract_geometry;
+use crate::adapters::extractors::geometry::{encode_polygon, extract_geometry};
 use crate::engine::gucs;
 use crate::engine::registry;
 use crate::gpu;
+use crate::gpu::three_layer::GeomType;
 
 #[allow(unused_imports)]
 use super::{DispatchResult, FcinfoWith2Args};
@@ -59,19 +60,37 @@ pub unsafe fn dispatch_gpu_h3(
         Some("h3_cell_to_children") => {
             return unsafe { dispatch_gpu_h3_var_cell_to_children(batch, qual_datum) };
         }
-        Some("h3_polyfill" | "h3_cell_to_boundary" | "h3_cells_to_multi_polygon") => {
-            // h3_polyfill needs polygon-vertex extraction from per-row
-            // geometry datums; h3_cell_to_boundary +
-            // h3_cells_to_multi_polygon emit raw lat/lng arrays needing a
-            // PostGIS GSERIALIZED encoder that the codebase does not have
-            // today. Defer cleanly; do NOT silently substitute another
-            // kernel (anti-cheat ban #7).
+        Some("h3_cell_to_boundary") => {
+            // Phase 2 F3: per-cell hexagon/pentagon boundary -> POLYGON
+            // geometry. Single output Datum per input row. The boundary
+            // kernel emits raw lat/lng coord pairs in DOUBLE units; we
+            // encode each cell's vertex run via the F2 GSERIALIZED encoder
+            // and wrap the resulting bytes in a PG varlena.
+            return unsafe { dispatch_gpu_h3_cell_to_boundary(batch) };
+        }
+        Some("h3_cells_to_multi_polygon") => {
+            // Phase 2 F3: per-row cell-array -> MULTIPOLYGON geometry.
+            // Each input row carries a `bigint[]` of cells; the kernel emits
+            // a CSR over rings (one row per array). For now, only the
+            // single-cell path is wired: extracting `bigint[]` array bodies
+            // requires walking PG ArrayType layout which the existing
+            // extractors do not implement (same blocker as st_value, see
+            // gpu/mod.rs:1470). Per anti-cheat ban #9, surface the gap
+            // honestly rather than silently substituting another kernel.
             pgrx::debug1!(
-                "pg_accel: dispatch_gpu_h3: {} kernel exists but PostGIS GSERIALIZED \
-                 plumbing / polygon extractor for h3 not yet wired — deferring",
-                fn_name.unwrap_or("?"),
+                "pg_accel: dispatch_gpu_h3: h3_cells_to_multi_polygon dispatch needs \
+                 per-row bigint[] array extraction (PG ArrayType walker not yet wired) - \
+                 deferring; Phase 2 F3 escalation",
             );
             return DispatchResult::Deferred;
+        }
+        Some("h3_polyfill") => {
+            // Phase 2 F3: polygon geometry -> SETOF h3index. The geometry
+            // arg is a per-row column (NOT a plan-time const); we extract
+            // each row's polygon via `extract_geometry` and call the
+            // two-pass kernel to get cells. Resolution is the constant
+            // `qual_datum`.
+            return unsafe { dispatch_gpu_h3_polyfill(batch, qual_datum) };
         }
         _ => {}
     }
@@ -454,6 +473,216 @@ unsafe fn dispatch_gpu_h3_var_cell_to_children(
         pgrx::error!(
             "pg_accel: h3_cell_to_children GPU kernel failed; refusing CPU fallback (rule 11)"
         );
+    };
+
+    build_var_cells_dispatch_result(batch.len(), &valid_indices, &raw)
+}
+
+// ---------------------------------------------------------------------------
+// Geometry-emitting H3 var-output dispatch arms (Phase 2 F3)
+// ---------------------------------------------------------------------------
+
+/// SRID emitted by H3 boundary kernels. H3 cells are spherical-coordinates
+/// (WGS84 lat/lng), so the standard EPSG:4326 SRID is correct for the
+/// resulting POLYGON / MULTIPOLYGON geometries.
+const H3_BOUNDARY_SRID: i32 = 4326;
+
+/// Wrap a bare GSERIALIZED byte buffer in a PG varlena and return the
+/// resulting Datum. Allocates via `palloc` in the current memory context.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread. The returned Datum points
+/// into the current memory context; the caller is responsible for keeping
+/// the context alive long enough for downstream consumers.
+unsafe fn varlena_from_gserialized(bare: &[u8]) -> pgrx::pg_sys::Datum {
+    use pgrx::pg_sys;
+    // VARHDRSZ = 4 bytes for the 4-byte varlena length header (short or
+    // long format). For our payloads we always use the 4-byte form.
+    let varhdrsz = std::mem::size_of::<pg_sys::int32>();
+    let total = varhdrsz + bare.len();
+    // SAFETY: palloc allocates `total` bytes in CurrentMemoryContext on
+    // the main backend thread. Caller has guaranteed thread context.
+    let ptr = unsafe { pg_sys::palloc(total) }.cast::<u8>();
+    // SET_VARSIZE_4B-equivalent: write `total << 2` into the first 4
+    // bytes (low 2 bits encode the varlena format; 00 = 4B aligned).
+    // pgrx exposes `set_varsize_4b` via the `varatt_*` helpers; use the
+    // raw write to avoid coupling to a specific helper signature.
+    let len_word = (total as u32) << 2;
+    // SAFETY: ptr is a fresh palloc allocation of `total` bytes.
+    unsafe {
+        std::ptr::write_unaligned(ptr.cast::<u32>(), len_word);
+        // Copy the bare GSERIALIZED bytes after the varlena header.
+        std::ptr::copy_nonoverlapping(bare.as_ptr(), ptr.add(varhdrsz), bare.len());
+    }
+    pg_sys::Datum::from(ptr)
+}
+
+/// `h3_cell_to_boundary(cell)` -> POLYGON geometry per cell.
+///
+/// Each input row produces exactly one output Datum (a GSERIALIZED varlena
+/// holding the cell's hex/pentagon vertex ring). NULL / invalid input
+/// rows produce a NULL Datum slot (`is_null = true`).
+///
+/// # Safety
+///
+/// Must be called on the main backend thread.
+unsafe fn dispatch_gpu_h3_cell_to_boundary(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+) -> DispatchResult {
+    let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
+    if cells.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let Some(raw) = gpu::h3_cell_to_boundary_bulk(&cells) else {
+        pgrx::error!(
+            "pg_accel: h3_cell_to_boundary GPU kernel failed; refusing CPU fallback (rule 11)"
+        );
+    };
+
+    // The kernel emits a flat coords vector with `raw.offsets[i+1] -
+    // raw.offsets[i]` doubles per cell (always 12 for hexagons, 10 for
+    // pentagons - 2 doubles per vertex). Encode each cell's vertex run as
+    // a single-ring POLYGON via the F2 encoder, then wrap as varlena.
+    //
+    // Build the flat output as one Datum per input row in `valid_indices`
+    // order. Rows whose cell was filtered out (NULL / cell == 0) get an
+    // is_null = true slot. The `AcceleratedVarLen` offsets carry one
+    // output per input row (constant fan-out 1).
+    let mut datums: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
+    let mut offsets: Vec<u32> = Vec::with_capacity(batch.len() + 1);
+    offsets.push(0);
+    let mut next_offset: u32 = 0;
+    let mut valid_cursor = 0usize;
+
+    for batch_idx in 0..batch.len() {
+        if valid_cursor < valid_indices.len() && valid_indices[valid_cursor] == batch_idx {
+            let start = raw.offsets[valid_cursor] as usize;
+            let end = raw.offsets[valid_cursor + 1] as usize;
+            // Each (lat, lng) pair occupies two doubles. The kernel writes
+            // pairs in lat/lng order; PostGIS expects x = lng, y = lat.
+            let n_doubles = end - start;
+            if n_doubles == 0 || !n_doubles.is_multiple_of(2) {
+                // Degenerate / malformed kernel output - emit NULL rather
+                // than fabricating bytes (anti-cheat ban #4).
+                datums.push((pgrx::pg_sys::Datum::from(0u32), true));
+            } else {
+                let n_vertices = n_doubles / 2;
+                let mut ring: Vec<(f64, f64)> = Vec::with_capacity(n_vertices);
+                let coords = &raw.coords[start..end];
+                for v in 0..n_vertices {
+                    let lat = coords[v * 2];
+                    let lng = coords[v * 2 + 1];
+                    ring.push((lng, lat));
+                }
+                match encode_polygon(H3_BOUNDARY_SRID, &[&ring]) {
+                    Ok(bytes) => {
+                        // SAFETY: caller is on the main backend thread (asserted at
+                        // the dispatch entry point); `varlena_from_gserialized`
+                        // calls palloc on the current memory context.
+                        let datum = unsafe { varlena_from_gserialized(&bytes) };
+                        datums.push((datum, false));
+                        next_offset = next_offset.saturating_add(1);
+                    }
+                    Err(e) => {
+                        // Encoder rejected the kernel-derived ring (e.g. empty
+                        // ring or out-of-range SRID). Surface as a NULL row +
+                        // a debug log; do not fabricate a "default" geometry
+                        // (anti-cheat ban #4).
+                        pgrx::debug1!("pg_accel: h3_cell_to_boundary encoder rejected ring: {}", e,);
+                        datums.push((pgrx::pg_sys::Datum::from(0u32), true));
+                    }
+                }
+            }
+            valid_cursor += 1;
+        } else {
+            // NULL or invalid input row - emit a NULL slot.
+            datums.push((pgrx::pg_sys::Datum::from(0u32), true));
+            next_offset = next_offset.saturating_add(1);
+        }
+        offsets.push(next_offset);
+    }
+
+    DispatchResult::AcceleratedVarLen { offsets, datums }
+}
+
+/// `h3_polyfill(geometry, resolution)` -> SETOF h3index.
+///
+/// Each input row carries a polygon `geometry` column; the kernel returns
+/// one h3index per cell whose centre lies inside the polygon. The output
+/// fan-out per input row varies with polygon area and resolution.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread.
+unsafe fn dispatch_gpu_h3_polyfill(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+) -> DispatchResult {
+    let Some((res_datum, res_null)) = qual_datum else {
+        return DispatchResult::Deferred;
+    };
+    if res_null {
+        return DispatchResult::Deferred;
+    }
+    let resolution = res_datum.value() as i32;
+
+    // Collect per-row polygon rings from each batch entry. We assemble all
+    // rings into one flat coords + offsets buffer and call the kernel
+    // once; the kernel's per-row offsets carry the cell fan-out per ring.
+    //
+    // Each polygon contributes its outer ring only (h3_polyfill in
+    // h3-pg semantics ignores holes for cell coverage; the kernel
+    // matches by ignoring all but ring index 0). Multi-ring polygons fall
+    // through with their first ring; non-polygon geoms produce zero cells
+    // for that row.
+    let mut flat_coords: Vec<f32> = Vec::new();
+    let mut ring_offsets: Vec<u32> = Vec::new();
+    let mut valid_indices: Vec<usize> = Vec::with_capacity(batch.len());
+    ring_offsets.push(0);
+    for (i, &(datum, is_null)) in batch.iter().enumerate() {
+        if is_null {
+            continue;
+        }
+        let Some(geom) = extract_geometry(datum) else {
+            continue;
+        };
+        if geom.geom_type != GeomType::Polygon || geom.coord_count == 0 {
+            continue;
+        }
+        // ExtractedGeometry stores coords as f32 pairs [x0, y0, x1, y1, ...].
+        // For polygons, ring_offsets indexes into the coord-pair stream.
+        // We only forward the outer ring (ring_offsets[0]..end-of-ring-0).
+        let outer_pair_start = geom.ring_offsets.first().copied().unwrap_or(0) as usize;
+        let outer_pair_end = geom
+            .ring_offsets
+            .get(1)
+            .copied()
+            .map_or(geom.coord_count, |v| v as usize);
+        if outer_pair_end <= outer_pair_start {
+            continue;
+        }
+        let n_pairs = outer_pair_end - outer_pair_start;
+        // Append the outer ring's coord pairs (lng, lat in PostGIS order)
+        // to the flat buffer.
+        let coords_flat_start = outer_pair_start * 2;
+        let coords_flat_end = outer_pair_end * 2;
+        flat_coords.extend_from_slice(&geom.coords[coords_flat_start..coords_flat_end]);
+        let next_offset = flat_coords.len() / 2;
+        ring_offsets.push(next_offset as u32);
+        valid_indices.push(i);
+        let _ = n_pairs;
+    }
+
+    if valid_indices.is_empty() {
+        return DispatchResult::Deferred;
+    }
+
+    let ring_count = valid_indices.len();
+    let Some(raw) = gpu::h3_polyfill_bulk(&flat_coords, &ring_offsets, ring_count, resolution)
+    else {
+        pgrx::error!("pg_accel: h3_polyfill GPU kernel failed; refusing CPU fallback (rule 11)");
     };
 
     build_var_cells_dispatch_result(batch.len(), &valid_indices, &raw)

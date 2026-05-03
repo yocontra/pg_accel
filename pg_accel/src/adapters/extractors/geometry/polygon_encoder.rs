@@ -72,6 +72,13 @@
 //! ill-formed PostGIS geometries — empty rings, no rings, no polygons, or an
 //! SRID that overflows the 21-bit on-disk field.
 
+// `encode_polygon` is consumed by `engine::dispatch::h3` (Phase 2 F3
+// `h3_cell_to_boundary` arm); `encode_multipolygon` is kept available
+// for the in-progress `h3_cells_to_multi_polygon` dispatch (gated on a
+// `bigint[]` ArrayType walker — see `gpu/mod.rs:h3_cells_to_multi_polygon_bulk`).
+// `EncodeError` and the `SRID_MAXIMUM` constant remain exported via
+// `mod.rs` but `EncodeError` may be used only via the `Display` trait and
+// pattern matching, so silence the per-variant unused warnings centrally.
 #![allow(dead_code)]
 
 /// Maximum SRID that fits in PostGIS's 21-bit on-disk field.
