@@ -188,10 +188,10 @@ static void test_point_in_ring_fp32() {
 static void test_sphere_distance_basic() {
   printf("--- sphere_distance: basic ---\n");
 
-  // fp32 path is the supported acceleration today; fp64 currently returns
-  // PGACCEL_ERROR_NO_DEVICE because instantiating the soft-fp64 SYCL kernel
-  // hangs Metal SSCP JIT. See sphere_distance_bulk_sycl<T> notes in
-  // spatial_predicates.cpp and TODO Phase 7 (soft-fp64 trig coverage).
+  // fp32 + fp64 paths both supported as of Agent 2A's split (Phase A).
+  // Templated `sphere_distance_bulk_sycl<T>` was replaced with two
+  // non-templated kernels (`_f32` / `_f64`) — see spatial_predicates.cpp
+  // for the Metal-SSCP template-instantiation hang background.
 
   // New York to London (known ~5570 km)
   {
@@ -263,14 +263,19 @@ static void test_sphere_distance_edge_cases() {
     ASSERT_EQ("zero count OK", s, PGACCEL_OK);
   }
 
-  // fp64 path currently returns NO_DEVICE; caller routes to PG recheck.
+  // fp64 path now lives — split from templated kernel to avoid the
+  // Metal SSCP template-instantiation hang (Agent 2A task 1). NYC->London
+  // distance ≈ 5570 km via Haversine. Definite (not uncertain) because
+  // the points are >> 1 mm apart.
   {
     double a[] = {-74.006, 40.7128};
     double b[] = {-0.1278, 51.5074};
     double dist = 0;
-    uint8_t unc = 0;
+    uint8_t unc = 1;
     pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
-    ASSERT_EQ("fp64 -> NO_DEVICE (deferred)", s, PGACCEL_ERROR_NO_DEVICE);
+    ASSERT_EQ("fp64 status OK", s, PGACCEL_OK);
+    ASSERT_EQ("fp64 NYC-London definite", unc, 0);
+    ASSERT_NEAR("fp64 NYC-London ~5570km", dist / 1000.0, 5570.0, 50.0);
   }
 }
 
@@ -296,6 +301,48 @@ static void test_sphere_distance_fp32() {
     uint8_t unc = 0;
     pgaccel_sphere_distance_bulk(a, b, 1, false, &dist, &unc);
     ASSERT_EQ("fp32 very close -> uncertain", unc, 1);
+  }
+}
+
+// fp64 path tests — exercises the split non-templated `_f64` kernel that
+// replaced the templated form (Agent 2A task 1). The fp64 kernel is the
+// one that used to return PGACCEL_ERROR_NO_DEVICE; these assertions
+// confirm it now returns real distances.
+static void test_sphere_distance_fp64() {
+  printf("--- sphere_distance: fp64 (post-split) ---\n");
+
+  // Multiple-pair batch: NYC->London, Berlin->Paris, antipodal sentinel.
+  {
+    double a[] = {
+        -74.006, 40.7128,  // NYC
+        13.405,  52.52,    // Berlin
+        0.0,     0.0,      // antipodal pair
+    };
+    double b[] = {
+        -0.1278, 51.5074,  // London
+        2.3522,  48.8566,  // Paris
+        180.0,   0.0,      // antipode
+    };
+    double dist[3] = {-1.0, -1.0, -1.0};
+    uint8_t unc[3] = {0, 0, 0};
+    pgaccel_status s = pgaccel_sphere_distance_bulk(a, b, 3, true, dist, unc);
+    ASSERT_EQ("fp64 batch status OK", s, PGACCEL_OK);
+    // NYC -> London ≈ 5570 km
+    ASSERT_NEAR("fp64 batch[0] NYC-London km", dist[0] / 1000.0, 5570.0, 50.0);
+    // Berlin -> Paris ≈ 878 km
+    ASSERT_NEAR("fp64 batch[1] Berlin-Paris km", dist[1] / 1000.0, 878.0, 20.0);
+    // Antipodal -> uncertain flag set, distance returned as 0.
+    ASSERT_EQ("fp64 batch[2] antipodal -> uncertain", unc[2], 1);
+  }
+
+  // Very close points → should flag uncertain on fp64 too (1 mm threshold).
+  {
+    double a[] = {0.0, 0.0};
+    double b[] = {1e-10, 0.0};  // sub-mm separation
+    double dist = -1.0;
+    uint8_t unc = 0;
+    pgaccel_sphere_distance_bulk(a, b, 1, true, &dist, &unc);
+    ASSERT_EQ("fp64 sub-mm -> uncertain", unc, 1);
   }
 }
 
@@ -780,6 +827,7 @@ int main() {
   test_sphere_distance_basic();
   test_sphere_distance_edge_cases();
   test_sphere_distance_fp32();
+  test_sphere_distance_fp64();
 
   test_segment_intersects_basic();
   test_segment_intersects_edge_cases();
