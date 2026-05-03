@@ -75,11 +75,11 @@ struct pgaccel_agg_state {
 
 namespace {
 
-// Device-callable typed read result. The actual read function lives in
-// the second `namespace { ... }` block below (`device_read_value_addr`),
-// which takes the column-data pointer as a `uint64_t` bit pattern to
-// avoid the `device device void**` argbuffer access pattern that fails
-// Metal MSL validation.
+// Device-callable typed read result. The actual read function
+// (`device_read_value_flat`) lives in the second `namespace { ... }` block
+// below; it operates on a single flat shared buffer with per-agg byte
+// offsets, sidestepping the `device device void**` argbuffer access
+// pattern that an array of typed pointers would emit on Metal SSCP.
 struct val_read {
   double value;
   bool is_null;
