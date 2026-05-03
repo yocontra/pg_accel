@@ -261,10 +261,11 @@ fn gpu_window_strategy_stored() {
 #[test]
 fn gpu_context_defaults_unconfigured() {
     let state = make_state(AccelStrategy::GpuSpatial, 256);
-    // GPU context not set yet — target_attno=0, fn_oid=InvalidOid.
+    // GPU context not set yet — target_attno=0, fn_oid=InvalidOid,
+    // qual_datums empty (no constants captured).
     assert_eq!(state.target_attno(), 0);
     assert_eq!(state.fn_oid(), pg_sys::InvalidOid);
-    assert!(state.qual_datum().is_none());
+    assert!(state.qual_datums().is_empty());
 }
 
 #[test]
@@ -506,4 +507,112 @@ fn scalar_qual_null_passes_all_for_various_sizes() {
             "null qual should pass all rows for batch_size={size}"
         );
     }
+}
+
+// ── Multi-arg dispatch carrier (Phase II Agent F1) ──────────────────
+//
+// These tests exercise the executor's `qual_datums` carrier directly
+// (the FFI-side `extract_const_datum` ordering is covered by the
+// pg_test integration suite). The load-bearing invariant is that the
+// Vec preserves positional order — st_resample relies on
+// `qual_datums[0]` being target_w (not target_h), st_hillshade relies
+// on `qual_datums[2]` being sun_azimuth (not sun_altitude), etc.
+
+#[test]
+fn qual_datums_default_empty() {
+    let state = make_state(AccelStrategy::GpuRaster, 32);
+    assert!(state.qual_datums().is_empty());
+}
+
+#[test]
+fn set_gpu_context_preserves_qual_datums_order() {
+    // ST_Hillshade(rast, cell_x, cell_y, sun_az, sun_alt) — 4 f64 args
+    // captured from the qual tree in argument order. The raster
+    // dispatcher reads qual_datums[2] for sun_azimuth and [3] for
+    // sun_altitude; swapping them would silently produce wrong shading.
+    let mut state = make_state(AccelStrategy::GpuRaster, 32);
+    let cx_bits = 30.0_f64.to_bits();
+    let cy_bits = 30.0_f64.to_bits();
+    let az_bits = 315.0_f64.to_bits();
+    let alt_bits = 45.0_f64.to_bits();
+    let qual_datums = vec![
+        (
+            pg_sys::Datum::from(cx_bits),
+            false,
+            pg_sys::Oid::from(701_u32),
+        ), // FLOAT8OID
+        (
+            pg_sys::Datum::from(cy_bits),
+            false,
+            pg_sys::Oid::from(701_u32),
+        ),
+        (
+            pg_sys::Datum::from(az_bits),
+            false,
+            pg_sys::Oid::from(701_u32),
+        ),
+        (
+            pg_sys::Datum::from(alt_bits),
+            false,
+            pg_sys::Oid::from(701_u32),
+        ),
+    ];
+
+    // SAFETY: pg_sys::InvalidOid skips the fmgr_info call so we don't
+    // need a live PG backend; only the carrier-Vec assignment runs.
+    unsafe {
+        state.set_gpu_context(pg_sys::InvalidOid, 1, qual_datums);
+    }
+
+    let captured = state.qual_datums();
+    assert_eq!(captured.len(), 4);
+    // Positional invariant: cell_x, cell_y, sun_az, sun_alt.
+    assert_eq!(f64::from_bits(captured[0].0.value() as u64), 30.0);
+    assert_eq!(f64::from_bits(captured[1].0.value() as u64), 30.0);
+    assert_eq!(f64::from_bits(captured[2].0.value() as u64), 315.0);
+    assert_eq!(f64::from_bits(captured[3].0.value() as u64), 45.0);
+    for entry in captured {
+        assert!(!entry.1, "is_null flag should be false for valid args");
+        assert_eq!(u32::from(entry.2), 701, "type_oid preserved (FLOAT8OID)");
+    }
+}
+
+#[test]
+fn set_gpu_context_handles_empty_qual_datums() {
+    // Single-arg ops (ST_Area, ST_Length) have no captured constants.
+    let mut state = make_state(AccelStrategy::GpuSpatial, 32);
+    // SAFETY: InvalidOid skips fmgr_info; only Vec assignment exercised.
+    unsafe {
+        state.set_gpu_context(pg_sys::InvalidOid, 1, Vec::new());
+    }
+    assert!(state.qual_datums().is_empty());
+}
+
+#[test]
+fn set_gpu_context_handles_two_arg_dwithin_layout() {
+    // ST_DWithin(geom_col, $const_geom, $threshold_f64) — Phase II F1
+    // wired this through the new carrier. The dispatcher reads
+    // qual_datums[1] for threshold; verify the f64 round-trips bit-
+    // exactly via the Datum bit pattern (PG stores float8 in Datum bits).
+    let mut state = make_state(AccelStrategy::GpuSpatial, 32);
+    let geom_datum = pg_sys::Datum::from(0xDEAD_BEEF_usize);
+    let threshold = 1234.5_f64;
+    let threshold_bits = threshold.to_bits();
+    let qual_datums = vec![
+        (geom_datum, false, pg_sys::Oid::from(0_u32)),
+        (
+            pg_sys::Datum::from(threshold_bits),
+            false,
+            pg_sys::Oid::from(701_u32),
+        ),
+    ];
+    // SAFETY: InvalidOid skips fmgr_info.
+    unsafe {
+        state.set_gpu_context(pg_sys::InvalidOid, 1, qual_datums);
+    }
+    let captured = state.qual_datums();
+    assert_eq!(captured.len(), 2);
+    assert_eq!(captured[0].0.value(), 0xDEAD_BEEF);
+    let recovered = f64::from_bits(captured[1].0.value() as u64);
+    assert!((recovered - threshold).abs() < f64::EPSILON);
 }

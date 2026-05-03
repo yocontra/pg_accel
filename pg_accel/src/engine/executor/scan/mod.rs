@@ -83,9 +83,14 @@ pub struct ScanExecState {
     /// when `fn_oid != InvalidOid`.
     fn_info_buf: pg_sys::FmgrInfo,
 
-    /// Constant second argument for 2-arg spatial predicates (e.g. the
-    /// constant geometry in `WHERE ST_Intersects(geom_col, $1)`).
-    qual_datum: Option<(pg_sys::Datum, bool)>,
+    /// Every constant argument captured from the accelerated function's
+    /// call site, in positional order. For 2-arg predicates like
+    /// `WHERE ST_Intersects(geom_col, $1)`, this is a single-entry Vec.
+    /// Multi-arg ops (`ST_DWithin(geom, geom, threshold)`,
+    /// `ST_Hillshade(rast, cell_x, cell_y, sun_az, sun_alt)`) carry every
+    /// Const in source-list order so dispatchers can index by position.
+    /// Each tuple is `(datum, is_null, type_oid)`.
+    qual_datums: Vec<(pg_sys::Datum, bool, pg_sys::Oid)>,
 
     /// When `true`, the child plan is a GiST index scan that has already
     /// performed bbox filtering. The GPU spatial pipeline will skip Layer 1
@@ -156,7 +161,7 @@ impl ScanExecState {
             // SAFETY: zero-initialised FmgrInfo is safe — all fields are
             // integers/pointers that accept zero.
             fn_info_buf: unsafe { std::mem::zeroed() },
-            qual_datum: None,
+            qual_datums: Vec::new(),
             gist_recheck: false,
             compiled_expr: None,
             datum_buffer: Vec::with_capacity(batch_size),
@@ -179,11 +184,11 @@ impl ScanExecState {
         &mut self,
         fn_oid: pg_sys::Oid,
         target_attno: i32,
-        qual_datum: Option<(pg_sys::Datum, bool)>,
+        qual_datums: Vec<(pg_sys::Datum, bool, pg_sys::Oid)>,
     ) {
         self.fn_oid = fn_oid;
         self.target_attno = target_attno;
-        self.qual_datum = qual_datum;
+        self.qual_datums = qual_datums;
         if fn_oid != pg_sys::InvalidOid {
             // SAFETY: Caller guarantees fn_oid is valid and we are on the
             // main backend thread.
@@ -297,10 +302,14 @@ impl ScanExecState {
         self.target_attno
     }
 
-    /// Returns the qual datum for 2-arg predicates (e.g. constant geometry).
+    /// Returns the captured constant arguments for the accelerated function
+    /// in positional source-list order. Empty when the call site has no
+    /// `Const` args (every argument was a `Var`). Callers like the spatial
+    /// dispatcher index by position (`[0]` = constant geometry,
+    /// `[1]` = ST_DWithin threshold, etc.).
     #[must_use]
-    pub fn qual_datum(&self) -> Option<(pg_sys::Datum, bool)> {
-        self.qual_datum
+    pub fn qual_datums(&self) -> &[(pg_sys::Datum, bool, pg_sys::Oid)] {
+        &self.qual_datums
     }
 
     /// Returns the qual pointer (for transfer during rescan).

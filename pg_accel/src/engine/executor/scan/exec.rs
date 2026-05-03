@@ -423,7 +423,7 @@ impl ScanExecState {
                 &datum_batch,
                 &self.fn_info_buf,
                 self.fn_info_buf.fn_strict,
-                self.qual_datum,
+                &self.qual_datums,
                 self.gist_recheck,
             )
         };

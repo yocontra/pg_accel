@@ -1320,8 +1320,11 @@ pub fn raster_reclass(
 /// GPU-accelerated bilinear resample.
 ///
 /// Returns `None` if the kernel fails (caller routes to PG fallback).
+///
+/// Wired into `dispatch::raster::dispatch_st_resample` via the multi-arg
+/// dispatch carrier landed in Phase II Agent F1 (target_w / target_h are
+/// captured as `qual_datums[0..2]`).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_resample takes target dims as constants)
 pub fn raster_resample(
     src_pixels: &[f32],
     src_w: usize,
@@ -1356,7 +1359,10 @@ pub fn raster_resample(
 }
 
 /// GPU-accelerated slope (Horn's method, output in degrees).
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_slope takes per-pixel cell sizes)
+///
+/// Wired into `dispatch::raster::dispatch_st_slope` via the multi-arg
+/// dispatch carrier landed in Phase II Agent F1 (cell_x / cell_y are
+/// captured as `qual_datums[0..2]` f64 args).
 pub fn raster_slope(
     src_pixels: &[f32],
     width: usize,
@@ -1387,7 +1393,12 @@ pub fn raster_slope(
 }
 
 /// GPU-accelerated aspect (compass direction in degrees).
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_aspect 1-arg but pairs with hillshade pipeline)
+///
+/// Wired into `dispatch::raster::dispatch_st_aspect` via the multi-arg
+/// dispatch carrier landed in Phase II Agent F1. The kernel itself ignores
+/// cell sizes (aspect is angle-only) but the dispatcher still validates
+/// the cell_x / cell_y args from `qual_datums[0..2]` so mis-typed call
+/// sites surface as deferrals rather than silent corruption.
 pub fn raster_aspect(
     src_pixels: &[f32],
     width: usize,
@@ -1409,8 +1420,12 @@ pub fn raster_aspect(
 }
 
 /// GPU-accelerated hillshade (shaded relief, output [0, 255]).
+///
+/// Wired into `dispatch::raster::dispatch_st_hillshade` via the multi-arg
+/// dispatch carrier landed in Phase II Agent F1
+/// (cell_x / cell_y / sun_azimuth / sun_altitude are
+/// `qual_datums[0..4]`; z_factor is fixed to 1.0 today).
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_hillshade takes sun_azimuth/altitude/z_factor)
 pub fn raster_hillshade(
     src_pixels: &[f32],
     width: usize,
@@ -1452,7 +1467,7 @@ pub fn raster_hillshade(
 /// must have at least `point_xy.len() / 2` elements. Out-of-bounds
 /// points get NaN.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // reason: kernel ready; dispatch wiring blocked on multi-arg dispatch carrier (st_value takes a point geometry array)
+#[allow(dead_code)] // reason: kernel ready; dispatch escalated per anti-cheat ban #9 — st_value takes a `geometry[]` ArrayType varlena and the existing extractors don't walk PG ArrayType bodies; tracked as a Phase 2 follow-up alongside F3's FunctionScan injection.
 pub fn raster_value(
     rast_pixels: &[f32],
     width: usize,

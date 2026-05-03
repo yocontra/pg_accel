@@ -1353,10 +1353,13 @@ struct AccelContext {
     strategy: AccelStrategy,
     /// 1-based attribute number of the Var argument, or 0 if none found.
     target_attno: i32,
-    /// Constant second argument datum (e.g. the constant geometry in
-    /// `WHERE ST_Intersects(geom_col, $const)`). `None` when both args
-    /// are column references or no constant is found.
-    qual_datum: Option<(pg_sys::Datum, bool)>,
+    /// Every constant argument captured from the function's args list, in
+    /// positional order. For 2-arg predicates like
+    /// `ST_Intersects(geom_col, $const)`, this carries one element. Multi-
+    /// arg ops (e.g. `ST_DWithin(g, g, threshold)`,
+    /// `ST_Hillshade(r, cx, cy, az, alt)`) push every Const in the order
+    /// they appeared. Empty when every argument is a `Var`.
+    qual_datums: Vec<(pg_sys::Datum, bool, pg_sys::Oid)>,
 }
 
 /// Walk a list of qual expressions (from `plan.qual`) to find the first
@@ -1412,12 +1415,12 @@ fn find_accel_in_node(
                 let args = unsafe { (*funcexpr).args };
                 let attno = extract_var_attno(args);
                 // SAFETY: args is a valid List; extract_const_datum reads Const nodes.
-                let qual_datum = unsafe { extract_const_datum(args) };
+                let qual_datums = unsafe { extract_const_datum(args) };
                 return Some(AccelContext {
                     fn_oid: oid,
                     strategy: entry.strategy,
                     target_attno: attno,
-                    qual_datum,
+                    qual_datums,
                 });
             }
             // SAFETY: tag confirmed FuncExpr; reading args list.
@@ -1433,12 +1436,12 @@ fn find_accel_in_node(
                 let args = unsafe { (*opexpr).args };
                 let attno = extract_var_attno(args);
                 // SAFETY: args is a valid List; extract_const_datum reads Const nodes.
-                let qual_datum = unsafe { extract_const_datum(args) };
+                let qual_datums = unsafe { extract_const_datum(args) };
                 return Some(AccelContext {
                     fn_oid: oid,
                     strategy: entry.strategy,
                     target_attno: attno,
-                    qual_datum,
+                    qual_datums,
                 });
             }
             // SAFETY: tag confirmed OpExpr; reading args list for recursion.
@@ -1496,16 +1499,23 @@ fn extract_var_attno(args: *mut pg_sys::List) -> i32 {
     0
 }
 
-/// Extract the constant (`Const`) datum from a function's argument list.
-/// For 2-arg spatial predicates like `ST_Contains(geom_col, $const_geom)`,
-/// this returns the constant geometry datum that the GPU pipeline needs as
-/// the second input to form geometry pairs.
+/// Extract every constant (`Const`) datum from a function's argument list,
+/// preserving the positional order in which the args were supplied. For
+/// 2-arg spatial predicates like `ST_Contains(geom_col, $const_geom)`, this
+/// returns a single-element Vec carrying the constant geometry; for
+/// multi-arg ops like `ST_DWithin(geom_col, $const_geom, $threshold)` or
+/// `ST_Hillshade(rast, cell_x, cell_y, sun_az, sun_alt)`, every Const node
+/// is captured in argument order so the dispatcher can index `qual_datums[i]`
+/// by position.
 ///
-/// Returns `None` if no `Const` node is found (e.g. both args are `Var`).
+/// Each entry is `(datum, is_null, type_oid)`. `Var` arguments are skipped
+/// (the `target_attno` extractor handles them). Returns an empty Vec if no
+/// `Const` is present.
 #[allow(clippy::cast_ptr_alignment)]
-unsafe fn extract_const_datum(args: *mut pg_sys::List) -> Option<(pg_sys::Datum, bool)> {
+unsafe fn extract_const_datum(args: *mut pg_sys::List) -> Vec<(pg_sys::Datum, bool, pg_sys::Oid)> {
+    let mut out = Vec::new();
     if args.is_null() {
-        return None;
+        return out;
     }
     // SAFETY: args is a valid List from the planner/executor.
     let len = unsafe { pg_sys::list_length(args) };
@@ -1517,14 +1527,16 @@ unsafe fn extract_const_datum(args: *mut pg_sys::List) -> Option<(pg_sys::Datum,
         }
         // SAFETY: reading the node tag.
         if unsafe { (*node).type_ } == pg_sys::NodeTag::T_Const {
-            // SAFETY: tag confirmed Const; reading constvalue and constisnull.
+            // SAFETY: tag confirmed Const; reading constvalue, constisnull,
+            // and consttype.
             let cst = node.cast::<pg_sys::Const>();
             let datum = unsafe { (*cst).constvalue };
             let is_null = unsafe { (*cst).constisnull };
-            return Some((datum, is_null));
+            let typid = unsafe { (*cst).consttype };
+            out.push((datum, is_null, typid));
         }
     }
-    None
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -2555,37 +2567,43 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // Use fn_oid + target_attno + accel_strategy from custom_private
             // (serialized by the planner hook). Fall back to qual discovery
             // only if the planner didn't serialize them (fn_oid == InvalidOid).
-            // Always scan the qual tree to extract the constant datum
-            // argument (e.g. the fixed geometry in ST_Contains(col, $const)).
+            // Always scan the qual tree to extract every constant datum
+            // argument (e.g. the fixed geometry in ST_Contains(col, $const)
+            // or the threshold in ST_DWithin(col, $const, $threshold)).
             // The planner serializes fn_oid/attno/strategy into custom_private,
-            // but qual_datum cannot be serialized — it must be extracted at
-            // executor init time from the qual expressions.
+            // but qual_datums cannot be serialized — they must be extracted
+            // at executor init time from the qual expressions.
             //
             // SAFETY: cscan is a valid CustomScan; plan.qual was set by
             // make_custom_scan_plan via extract_actual_clauses.
             // GpuExpr doesn't need qual tree discovery (no fn_oid or
-            // qual_datum). Skip find_accel_context_in_qual which calls
+            // qual_datums). Skip find_accel_context_in_qual which calls
             // set_opfuncid on OpExpr nodes and can crash for plain WHERE.
-            let (strategy, fn_oid, target_attno, qual_datum) =
+            let (strategy, fn_oid, target_attno, qual_datums) =
                 if privdata.accel_strategy == AccelStrategy::GpuExpr {
-                    (AccelStrategy::GpuExpr, pg_sys::Oid::INVALID, 0, None)
+                    (AccelStrategy::GpuExpr, pg_sys::Oid::INVALID, 0, Vec::new())
                 } else {
                     let qual_ctx = find_accel_context_in_qual((*cscan).scan.plan.qual);
                     if privdata.fn_oid == pg_sys::Oid::INVALID {
                         // Fallback: discover everything from qual list.
                         qual_ctx.map_or(
-                            (AccelStrategy::GpuSpatial, pg_sys::Oid::INVALID, 0, None),
-                            |ctx| (ctx.strategy, ctx.fn_oid, ctx.target_attno, ctx.qual_datum),
+                            (
+                                AccelStrategy::GpuSpatial,
+                                pg_sys::Oid::INVALID,
+                                0,
+                                Vec::new(),
+                            ),
+                            |ctx| (ctx.strategy, ctx.fn_oid, ctx.target_attno, ctx.qual_datums),
                         )
                     } else {
                         // Use planner-serialized fn_oid/attno/strategy, but take
-                        // qual_datum from the qual tree discovery.
-                        let qd = qual_ctx.and_then(|ctx| ctx.qual_datum);
+                        // qual_datums from the qual tree discovery.
+                        let qds = qual_ctx.map(|ctx| ctx.qual_datums).unwrap_or_default();
                         (
                             privdata.accel_strategy,
                             privdata.fn_oid,
                             privdata.target_attno,
-                            qd,
+                            qds,
                         )
                     }
                 };
@@ -2676,12 +2694,13 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 // SAFETY: fn_oid was looked up in the registry by the
                 // planner hook and is a valid regproc OID. We are on the
                 // main backend thread (called by the executor).
-                exec.set_gpu_context(fn_oid, target_attno, qual_datum);
+                let n_qual = qual_datums.len();
+                exec.set_gpu_context(fn_oid, target_attno, qual_datums);
                 pgrx::debug1!(
-                    "pg_accel: set_gpu_context fn_oid={}, attno={}, has_qual_datum={}",
+                    "pg_accel: set_gpu_context fn_oid={}, attno={}, n_qual_datums={}",
                     u32::from(fn_oid),
                     target_attno,
-                    qual_datum.is_some()
+                    n_qual,
                 );
 
                 // Detect GiST index child for batched recheck.
@@ -3069,7 +3088,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                 (*state).accel.executor = Box::into_raw(old).cast();
             }
         } else {
-            let (qual, econtext, old_strategy, old_fn_oid, old_attno, old_qual_datum) =
+            let (qual, econtext, old_strategy, old_fn_oid, old_attno, old_qual_datums) =
                 if (*state).accel.executor.is_null() {
                     (
                         std::ptr::null_mut(),
@@ -3077,7 +3096,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                         AccelStrategy::GpuSpatial,
                         pg_sys::InvalidOid,
                         0i32,
-                        None,
+                        Vec::new(),
                     )
                 } else {
                     // SAFETY: executor was Box::into_raw'd as ScanExecState.
@@ -3088,14 +3107,14 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                         old.strategy(),
                         old.fn_oid(),
                         old.target_attno(),
-                        old.qual_datum(),
+                        old.qual_datums().to_vec(),
                     )
                 };
             let mut exec = Box::new(ScanExecState::new(old_strategy, batch_size, qual, econtext));
             if old_fn_oid != pg_sys::InvalidOid {
                 // SAFETY: old_fn_oid was validated during the initial
                 // set_gpu_context call. We are on the main backend thread.
-                exec.set_gpu_context(old_fn_oid, old_attno, old_qual_datum);
+                exec.set_gpu_context(old_fn_oid, old_attno, old_qual_datums);
             }
             (*state).accel.executor = Box::into_raw(exec).cast();
         }
