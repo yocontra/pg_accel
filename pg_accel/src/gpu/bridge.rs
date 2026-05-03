@@ -149,6 +149,58 @@ unsafe extern "C" {
         uncertain_count: *mut usize,
     ) -> PgaccelStatus;
 
+    /// `ST_Equals` per-row predicate. Pair `i` writes
+    /// `results[i] = 1 / -1 / 0` for DEFINITE TRUE / DEFINITE FALSE /
+    /// UNCERTAIN. UNCERTAIN routes to PG. Agent 2A task 4.
+    pub fn pgaccel_st_equals_bulk(
+        geoms_a: *const PgaccelGeometry,
+        geoms_b: *const PgaccelGeometry,
+        count: usize,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// `ST_Touches` per-row predicate. Same shape / output convention
+    /// as `pgaccel_st_equals_bulk`.
+    pub fn pgaccel_st_touches_bulk(
+        geoms_a: *const PgaccelGeometry,
+        geoms_b: *const PgaccelGeometry,
+        count: usize,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// `ST_Crosses` per-row predicate. Same shape / output convention
+    /// as `pgaccel_st_equals_bulk`.
+    pub fn pgaccel_st_crosses_bulk(
+        geoms_a: *const PgaccelGeometry,
+        geoms_b: *const PgaccelGeometry,
+        count: usize,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// `ST_Overlaps` per-row predicate. Same shape / output convention
+    /// as `pgaccel_st_equals_bulk`.
+    pub fn pgaccel_st_overlaps_bulk(
+        geoms_a: *const PgaccelGeometry,
+        geoms_b: *const PgaccelGeometry,
+        count: usize,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// Polygon-to-polygon Euclidean distance via vertex-to-edge
+    /// boundary walks. CSR layout matches `pgaccel_st_area_bulk` and
+    /// `pgaccel_st_length_bulk`. `uncertain[i] = 1` when the
+    /// boundaries touch / overlap so PG re-checks for the interior
+    /// containment case. Agent 2A task 3.
+    pub fn pgaccel_st_distance_polygon_polygon_bulk(
+        coords_a: *const f32,
+        row_offsets_a: *const u32,
+        coords_b: *const f32,
+        row_offsets_b: *const u32,
+        row_count: usize,
+        distances: *mut f32,
+        uncertain: *mut u8,
+    ) -> PgaccelStatus;
+
     /// Dedicated bulk point-in-polygon: flat point array vs single polygon.
     pub fn pgaccel_point_in_polygon_bulk(
         points_xy: *const f32,

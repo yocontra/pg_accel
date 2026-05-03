@@ -73,6 +73,31 @@ pub enum SpatialPredicate {
     /// versa; uncertain pairs stay uncertain since the PostGIS
     /// recheck is bit-correct either way).
     Disjoint,
+    /// `ST_Equals` — do the two geometries have the same point set?
+    /// Routes to `pgaccel_st_equals_bulk` (Agent 2A task 4). The
+    /// kernel surfaces DEFINITE for identical Point/Point coords,
+    /// identical Polygon/Polygon ring vertex sets, and disjoint-bbox
+    /// shortcuts; everything else falls to UNCERTAIN so PG re-checks
+    /// via PostGIS `ST_Equals`.
+    #[allow(dead_code)] // Phase B Agent 1B wires per-row dispatch
+    Equals,
+    /// `ST_Touches` — do the boundaries intersect with disjoint interiors?
+    /// Routes to `pgaccel_st_touches_bulk`. Cheap shortcuts: disjoint
+    /// bbox → DEFINITE FALSE; identical Point/Point or identical
+    /// Polygon/Polygon → DEFINITE FALSE (interiors overlap → not
+    /// touches). Everything else → UNCERTAIN.
+    #[allow(dead_code)]
+    Touches,
+    /// `ST_Crosses` — do the interiors intersect with neither contained?
+    /// Routes to `pgaccel_st_crosses_bulk`. Same shortcut pattern as
+    /// the other algorithmic predicates.
+    #[allow(dead_code)]
+    Crosses,
+    /// `ST_Overlaps` — same dim, intersection has same dim, neither
+    /// contained. Routes to `pgaccel_st_overlaps_bulk`. Cross-dim
+    /// pairs and identical inputs short-circuit to DEFINITE FALSE.
+    #[allow(dead_code)]
+    Overlaps,
 }
 
 /// Extracted geometry data ready for GPU dispatch.
@@ -177,6 +202,157 @@ pub fn spatial_eval(
                 uncertain: r.uncertain,
             }
         }
+        SpatialPredicate::Equals => {
+            spatial_algorithmic(geoms_a, geoms_b, AlgorithmicPredicateKind::Equals)
+        }
+        SpatialPredicate::Touches => {
+            spatial_algorithmic(geoms_a, geoms_b, AlgorithmicPredicateKind::Touches)
+        }
+        SpatialPredicate::Crosses => {
+            spatial_algorithmic(geoms_a, geoms_b, AlgorithmicPredicateKind::Crosses)
+        }
+        SpatialPredicate::Overlaps => {
+            spatial_algorithmic(geoms_a, geoms_b, AlgorithmicPredicateKind::Overlaps)
+        }
+    }
+}
+
+/// Internal tag for routing the four algorithmic predicates through a
+/// single dispatch helper. Not exposed in the public API; users go
+/// through `SpatialPredicate` and `spatial_eval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlgorithmicPredicateKind {
+    Equals,
+    Touches,
+    Crosses,
+    Overlaps,
+}
+
+/// Evaluate one of the four algorithmic predicates (`ST_Equals`,
+/// `ST_Touches`, `ST_Crosses`, `ST_Overlaps`) on geometry pairs.
+///
+/// Routes through the matching `pgaccel_st_*_bulk` SYCL kernel. The
+/// kernel returns int8 results matching the three-layer convention
+/// (1 = DEFINITE TRUE, -1 = DEFINITE FALSE, 0 = UNCERTAIN). UNCERTAIN
+/// is the documented escape hatch for full DE-9IM topology, which is
+/// not implemented in the kernel — those pairs route to PG for the
+/// reference PostGIS check (CLAUDE.md rule 11; this is NOT a CPU
+/// fallback).
+#[must_use]
+fn spatial_algorithmic(
+    geoms_a: &[ExtractedGeometry],
+    geoms_b: &[ExtractedGeometry],
+    kind: AlgorithmicPredicateKind,
+) -> SpatialResult {
+    let n = geoms_a.len().min(geoms_b.len());
+    if n == 0 {
+        return SpatialResult {
+            definite_true: Vec::new(),
+            definite_false: Vec::new(),
+            uncertain: Vec::new(),
+        };
+    }
+
+    use super::bridge::{self, PgaccelGeomType, PgaccelGeometry, PgaccelStatus};
+
+    let to_c_type = |gt: GeomType| -> PgaccelGeomType {
+        match gt {
+            GeomType::Point => PgaccelGeomType::Point,
+            GeomType::LineString => PgaccelGeomType::LineString,
+            GeomType::Polygon => PgaccelGeomType::Polygon,
+            GeomType::Unknown => PgaccelGeomType::Unknown,
+        }
+    };
+
+    // Build C geometry descriptors. Borrows pointers from the
+    // ExtractedGeometry buffers — they outlive the kernel call.
+    let c_geoms_a: Vec<PgaccelGeometry> = geoms_a[..n]
+        .iter()
+        .map(|g| PgaccelGeometry {
+            geom_type: to_c_type(g.geom_type),
+            bbox: g.bbox.as_ptr(),
+            coords: g.coords.as_ptr(),
+            coord_count: g.coord_count,
+            ring_offsets: if g.ring_offsets.is_empty() {
+                std::ptr::null()
+            } else {
+                g.ring_offsets.as_ptr()
+            },
+            ring_count: g.ring_offsets.len(),
+        })
+        .collect();
+    let c_geoms_b: Vec<PgaccelGeometry> = geoms_b[..n]
+        .iter()
+        .map(|g| PgaccelGeometry {
+            geom_type: to_c_type(g.geom_type),
+            bbox: g.bbox.as_ptr(),
+            coords: g.coords.as_ptr(),
+            coord_count: g.coord_count,
+            ring_offsets: if g.ring_offsets.is_empty() {
+                std::ptr::null()
+            } else {
+                g.ring_offsets.as_ptr()
+            },
+            ring_count: g.ring_offsets.len(),
+        })
+        .collect();
+
+    let mut results = vec![0i8; n];
+
+    // SAFETY: c_geoms_a / c_geoms_b are owned Vec<PgaccelGeometry> with
+    // borrowed pointers into ExtractedGeometry buffers that live for the
+    // duration of this function. results is owned by this scope. Each
+    // kernel writes exactly n bytes via the count parameter.
+    let status = unsafe {
+        match kind {
+            AlgorithmicPredicateKind::Equals => bridge::pgaccel_st_equals_bulk(
+                c_geoms_a.as_ptr(),
+                c_geoms_b.as_ptr(),
+                n,
+                results.as_mut_ptr(),
+            ),
+            AlgorithmicPredicateKind::Touches => bridge::pgaccel_st_touches_bulk(
+                c_geoms_a.as_ptr(),
+                c_geoms_b.as_ptr(),
+                n,
+                results.as_mut_ptr(),
+            ),
+            AlgorithmicPredicateKind::Crosses => bridge::pgaccel_st_crosses_bulk(
+                c_geoms_a.as_ptr(),
+                c_geoms_b.as_ptr(),
+                n,
+                results.as_mut_ptr(),
+            ),
+            AlgorithmicPredicateKind::Overlaps => bridge::pgaccel_st_overlaps_bulk(
+                c_geoms_a.as_ptr(),
+                c_geoms_b.as_ptr(),
+                n,
+                results.as_mut_ptr(),
+            ),
+        }
+    };
+
+    if !matches!(status, PgaccelStatus::Ok) {
+        // Kernel reported failure — surface every pair as Uncertain so PG
+        // recheck runs on the entire batch. NOT a CPU fallback — the
+        // documented escape hatch when the GPU path can't classify.
+        return all_uncertain(n);
+    }
+
+    let mut definite_true = Vec::new();
+    let mut definite_false = Vec::new();
+    let mut uncertain = Vec::new();
+    for (i, &r) in results.iter().enumerate() {
+        match r {
+            1 => definite_true.push(i),
+            -1 => definite_false.push(i),
+            _ => uncertain.push(i),
+        }
+    }
+    SpatialResult {
+        definite_true,
+        definite_false,
+        uncertain,
     }
 }
 
