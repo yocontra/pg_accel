@@ -462,50 +462,66 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   `st_dwithin` consumes per-row 3rd-arg thresholds; constructor
   output-allocation protocol designed (separate item).
 
-### Multi-arg dispatch carrier (st_dwithin + 5 raster + 3 H3 var-output ops)
+### Multi-arg dispatch carrier — shipped; st_value array extractor still pending
 
-- **What** (added 2026-05-02): The Custom Scan private payload's
-  `qual_datum` slot exposes a single per-row `Datum` to the
-  dispatch layer (`pg_accel/src/engine/dispatch/`), which is enough
-  for 1- and 2-arg ops with a single qual but not for the 9 ops
-  below whose kernels exist but need per-row constants beyond the
-  qual:
-  - `st_dwithin`: 3rd-arg threshold (one f64 per row, or a
-    constant for the batch).
-  - `st_resample`: target dims (2× i32 or i64).
-  - `st_slope` / `st_aspect`: cell sizes (2× f64).
-  - `st_hillshade`: cell sizes + sun azimuth + sun altitude
-    (2× f64 + 2× f64).
-  - `st_value`: per-row point geom array (variable length).
-  - H3 `polyfill`: per-row polygon-vertex array (variable length;
-    needs the GSERIALIZED → vertex extractor — see "H3 operator
-    registrations" entry above for the adapter-side helper).
-  - H3 `cell_to_boundary` / `cells_to_multi_polygon`: output side
-    needs the GSERIALIZED encoder — same shared helper.
-  MAJOR (unblocks 9 already-built kernels).
-- **Why**: Each of these kernels has been validated standalone
-  (kernel tests under `pgaccel-kernels/test/`) but can't be
-  dispatched from a real PG plan because the per-row constant /
-  array isn't reachable from the executor's per-row dispatch loop.
+- **What** (refreshed 2026-05-03 after Agent F1 commit `1795e55`):
+  The scalar multi-arg carrier shipped — `dispatch::dispatch()` now
+  takes `&[(Datum, bool, Oid)]` and `extract_const_datum` collects
+  ALL `Const` nodes from the FuncExpr.args list preserving
+  positional order. 6 of the 9 originally-blocked ops now dispatch
+  end-to-end:
+  - **`st_dwithin`**: threshold from `qual_datums[1]` ✓
+  - **`st_resample`** (target_w, target_h): 2× i32 args ✓
+  - **`st_slope` / `st_aspect`** (cell_x, cell_y): 2× f64 args ✓
+  - **`st_hillshade`** (cell_x, cell_y, sun_az, sun_alt): 4× f64 args ✓
+  166/166 cargo tests pass; clippy clean. The 3 H3 var-output ops
+  (`polyfill`, `cell_to_boundary`, `cells_to_multi_polygon`) move
+  to F3's Phase 2 work — see "H3 operator registrations" entry.
+- **Compromise (anti-cheat ban #9, escalated by F1)**: `st_value
+  (rast, geometry[])` was deliberately NOT shipped. The
+  `geometry[]` arg is a PG `ArrayType` varlena (dim-count +
+  lower-bounds + null bitmap + packed elements layout); existing
+  `pg_accel/src/adapters/extractors/` doesn't walk arrays.
+  Building the walker without rigorous tests risks shipping a
+  silent wrong-result extractor. F1 deferred cleanly — kernel
+  arm logs `tracing::debug!("st_value array extractor not yet
+  implemented")` and the `gpu::raster_value` Rust wrapper retains
+  `#[allow(dead_code)]` with the updated escalation reason. See
+  new entry "Geometry-array extractor for st_value" below.
+- **Done when**: All 9 ops dispatch end-to-end. 6 done; 3 H3
+  var-output land in F3 Phase 2; `st_value` lands when the
+  geometry-array extractor follow-up does.
+
+### Geometry-array extractor for st_value
+
+- **What** (surfaced 2026-05-03 by F1's escalation): The
+  `pgaccel_raster_value(rast, point_array)` kernel is shipped
+  (`pgaccel-kernels/src/raster_ops.cpp`) with full SYCL paths +
+  test coverage. The blocker is purely on the Rust extractor side:
+  PG's `geometry[]` arg type is wrapped in `ArrayType` varlena,
+  and the existing `extract_geometry` (single-geom) doesn't
+  iterate array bodies. MINOR (one of 27 raster ops; can be
+  added independently).
+- **Why**: `ST_Value(rast, ARRAY[point1, point2, ...])` is a
+  recognised PostGIS pattern for pixel-lookup of multiple points
+  in one call (avoids per-point round-trip). Without the
+  extractor we can't dispatch.
 - **How**:
-  - Extend the custom-scan private payload's qual carrier from a
-    single `Datum` to a slice / structured payload of per-call
-    constants (and an indirection for variable-length per-row
-    arrays). Keep the single-`Datum` shape as the common-case fast
-    path; widen only when the registered op's `OutputShape` /
-    arg-arity declares it.
-  - Per-row variable-length array carriers (st_value point geom,
-    polyfill polygon vertex) need the same GSERIALIZED encoder /
-    extractor that the H3 var-output dispatchers want — share
-    helpers in `pg_accel/src/adapters/extractors/`.
-  - Wire each of the 9 ops above through the new carrier; flip
-    each from "registered + kernel + UNCERTAIN dispatch" to
-    "registered + kernel + per-row dispatch" with a correctness
-    test.
-- **Done when**: All 9 ops above dispatch end-to-end with their
-  full per-row constant / array; `st_dwithin` 3rd-arg works for
-  non-constant thresholds; raster + H3 var-output ops produce
-  golden-diff results vs PostGIS / h3-pg.
+  - Add `extract_geometry_array(datum) -> Result<Vec<ExtractedGeom>,
+    ExtractError>` to `pg_accel/src/adapters/extractors/geometry/`
+    walking the ArrayType layout: header (ndim + dataoffset +
+    elemtype) → dim sizes → null bitmap → packed payload (each
+    element is itself a varlena geometry, since geometry is
+    variable-length).
+  - Wire `dispatch_st_value` (currently a tracing::debug!
+    placeholder in `dispatch/raster.rs`) to use the new extractor
+    plus the existing `gpu::raster_value` wrapper (which has
+    `#[allow(dead_code)]` to drop once consumed).
+  - Roundtrip test: `SELECT ST_Value(rast, ARRAY[ST_Point(1,1),
+    ST_Point(2,2)])` against a known 4×4 raster.
+- Depends on: Nothing — extractor is local to pg_accel.
+- **Done when**: `st_value` dispatches end-to-end; `gpu::raster_value`
+  loses its `#[allow(dead_code)]`; integration test green.
 
 ### AcceleratedRecord / AcceleratedVarLen executor consumption gap
 
