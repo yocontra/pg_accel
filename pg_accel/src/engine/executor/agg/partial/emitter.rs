@@ -695,3 +695,188 @@ impl PartialEmitter for BoolReductionEmitter {
         pg_sys::BOOLOID
     }
 }
+// ---------------------------------------------------------------------------
+// Tests for NumericSumEmitter + int128 helpers.
+//
+// `partial/tests.rs` covers the legacy f64 path. These tests exercise the
+// new int128 entry points, including precision boundaries f64 cannot reach.
+//
+// `#[pgrx::pg_schema]` is required so pg_test functions land in the `tests`
+// schema — the pgrx-tests harness invokes them as `tests."<fn_name>"()`
+// (pgrx-tests-0.17.0/src/framework.rs:122). Without this attribute the
+// functions land in the default schema and the harness fails with
+// "function tests.<fn_name>() does not exist".
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod tests {
+    use super::{NumericSumEmitter, int128_to_numeric, pg_numeric_to_scaled_i128};
+    use pgrx::pg_sys;
+    use pgrx::prelude::pg_test;
+
+    /// Convert a Numeric Datum back to its decimal-string form via PG's
+    /// `numeric_out` for assertion.
+    ///
+    /// # Safety
+    /// Test-only. Must run on a live backend.
+    unsafe fn numeric_to_string(datum: pg_sys::Datum) -> String {
+        // numeric_out is fmgr; route via DirectFunctionCall1Coll.
+        // SAFETY: main-thread PG; transmute reconciles Rust-ABI vs C-unwind.
+        let s_ptr = unsafe {
+            let fptr: unsafe extern "C-unwind" fn(
+                *mut pg_sys::FunctionCallInfoBaseData,
+            ) -> pg_sys::Datum = core::mem::transmute(pg_sys::numeric_out as *const ());
+            pg_sys::DirectFunctionCall1Coll(Some(fptr), pg_sys::InvalidOid, datum)
+        };
+        // SAFETY: numeric_out returns a palloc'd cstring.
+        let cstr = unsafe { core::ffi::CStr::from_ptr(s_ptr.cast_mut_ptr() as *const i8) };
+        cstr.to_string_lossy().into_owned()
+    }
+
+    #[pg_test]
+    fn numeric_sum_int8_near_pow2_53() {
+        // A SUM that crosses 2^53 + small offsets — f64 would lose ULPs.
+        // i128 path must give exact result.
+        const POW53: i128 = 1_i128 << 53;
+        // Sum: POW53 + 1 + 2 + 3 + ... + 100 = POW53 + 5050
+        let mut sum: i128 = POW53;
+        for k in 1..=100i128 {
+            sum = sum.checked_add(k).expect("no overflow");
+        }
+        // SAFETY: pg_test runs on a live backend.
+        let datum = unsafe { int128_to_numeric(sum, 0) };
+        let s = unsafe { numeric_to_string(datum) };
+        let expected = (POW53 + 5050).to_string();
+        assert_eq!(
+            s, expected,
+            "i128 sum near 2^53 must be exact (f64 would lose precision)"
+        );
+    }
+
+    #[pg_test]
+    fn numeric_sum_numeric_full_precision() {
+        // 38-digit value — at the edge of i128 range.
+        // i128::MAX = 170_141_183_460_469_231_731_687_303_715_884_105_727 (39 digits)
+        // Use 10^38 - 1 = 99999999999999999999999999999999999999 (38 nines).
+        let mut v: i128 = 0;
+        for _ in 0..38 {
+            v = v.checked_mul(10).expect("no overflow");
+            v = v.checked_add(9).expect("no overflow");
+        }
+        assert_eq!(v.to_string().len(), 38);
+        // SAFETY: live backend.
+        let datum = unsafe { int128_to_numeric(v, 0) };
+        let s = unsafe { numeric_to_string(datum) };
+        assert_eq!(s, v.to_string());
+
+        // Round-trip: parse via pg_numeric_to_scaled_i128 with dscale=0.
+        // SAFETY: datum is a valid Numeric just produced.
+        let parsed = unsafe { pg_numeric_to_scaled_i128(datum, 0) };
+        assert_eq!(parsed, Some(v), "round-trip int128 → Numeric → int128");
+    }
+
+    #[pg_test]
+    fn numeric_sum_null_propagation() {
+        let emitter = NumericSumEmitter;
+        // SAFETY: live backend.
+        let (_d, isnull) = unsafe { emitter.emit_with_i128(0, 0, false) };
+        assert!(isnull, "has_value=false must produce NULL");
+    }
+
+    #[pg_test]
+    fn numeric_sum_negative_values() {
+        // Negative i128 round-trips with correct sign.
+        let v: i128 = -123_456_789_012_345_678_901_i128;
+        // SAFETY: live backend.
+        let datum = unsafe { int128_to_numeric(v, 0) };
+        let s = unsafe { numeric_to_string(datum) };
+        assert_eq!(s, "-123456789012345678901");
+
+        // Round-trip via parser.
+        // SAFETY: just-produced Numeric.
+        let parsed = unsafe { pg_numeric_to_scaled_i128(datum, 0) };
+        assert_eq!(parsed, Some(v));
+    }
+
+    #[pg_test]
+    fn numeric_sum_overflow_saturates_or_nulls() {
+        // Simulate caller that detected overflow and saturated to i128::MAX.
+        // Emitter must produce a real Numeric for the saturated value (not crash,
+        // not silently return 0). This documents the saturate-to-overflow choice.
+        let saturated = i128::MAX;
+        let emitter = NumericSumEmitter;
+        // SAFETY: live backend.
+        let (datum, isnull) = unsafe { emitter.emit_with_i128(saturated, 0, true) };
+        assert!(!isnull);
+        let s = unsafe { numeric_to_string(datum) };
+        assert_eq!(
+            s, "170141183460469231731687303715884105727",
+            "i128::MAX must round-trip exactly through int128_to_numeric"
+        );
+
+        // And i128::MIN — the other saturation bound.
+        let min = i128::MIN;
+        // SAFETY: live backend.
+        let (datum_min, _) = unsafe { emitter.emit_with_i128(min, 0, true) };
+        let s_min = unsafe { numeric_to_string(datum_min) };
+        assert_eq!(
+            s_min, "-170141183460469231731687303715884105728",
+            "i128::MIN must round-trip exactly (negation handled via 0 - |v|)"
+        );
+    }
+
+    #[pg_test]
+    fn numeric_sum_legacy_f64_path_still_works() {
+        // The PartialEmitter::emit path (used by existing wiring) must remain
+        // functional after the int128 refactor. Verify it produces the same
+        // value as PG's own int8 → numeric conversion for an i64-range input.
+        use super::ColumnAccumulator;
+        let emitter = NumericSumEmitter;
+        let acc = ColumnAccumulator {
+            sum: 12345.0,
+            has_value: true,
+            ..Default::default()
+        };
+        // SAFETY: live backend.
+        let (datum, isnull) =
+            unsafe { <NumericSumEmitter as super::PartialEmitter>::emit(&emitter, &acc) };
+        assert!(!isnull);
+        let s = unsafe { numeric_to_string(datum) };
+        assert_eq!(s, "12345");
+    }
+
+    #[pg_test]
+    fn pg_numeric_to_scaled_i128_with_fractional_input() {
+        // Build a NUMERIC '3.14' via numeric_in, parse with target_dscale=2 →
+        // expect scaled integer 314.
+        // SAFETY: live backend; numeric_in is a PG fmgr function.
+        let datum = unsafe {
+            let s = std::ffi::CString::new("3.14").expect("no nul");
+            let fptr: unsafe extern "C-unwind" fn(
+                *mut pg_sys::FunctionCallInfoBaseData,
+            ) -> pg_sys::Datum = core::mem::transmute(pg_sys::numeric_in as *const ());
+            // numeric_in(cstring, oid, typmod) — typmod = -1 (no modifier).
+            pg_sys::DirectFunctionCall3Coll(
+                Some(fptr),
+                pg_sys::InvalidOid,
+                pg_sys::Datum::from(s.as_ptr() as usize),
+                pg_sys::Datum::from(0u64),
+                pg_sys::Datum::from(-1i32 as i64 as usize),
+            )
+        };
+        // SAFETY: just-built Numeric.
+        let parsed = unsafe { pg_numeric_to_scaled_i128(datum, 2) };
+        assert_eq!(parsed, Some(314_i128), "3.14 at dscale=2 → 314");
+
+        // dscale=4 → 31400 (extra zeros).
+        // SAFETY: same datum, re-readable.
+        let parsed4 = unsafe { pg_numeric_to_scaled_i128(datum, 4) };
+        assert_eq!(parsed4, Some(31400_i128));
+
+        // dscale=0 → 3 (truncation).
+        // SAFETY: same.
+        let parsed0 = unsafe { pg_numeric_to_scaled_i128(datum, 0) };
+        assert_eq!(parsed0, Some(3_i128));
+    }
+}
