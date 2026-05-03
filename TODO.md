@@ -842,40 +842,54 @@ work is tracked in the Post-1.0 (deferred) section.
 - **Done when**: Each item has a dedicated commit; shader size / compile
   time measured before and after.
 
-### Metal SSCP soft-fp64 trig JIT hang on `sphere_distance_bulk_sycl<double>`
+### Metal SSCP soft-fp64 trig — JIT hang resolved, fork-safety regression remains
 
-- **What**: Instantiating `sphere_distance_bulk_sycl<double>` (with
-  `sycl::sin / cos / asin / sqrt` on `double`) causes the Metal SSCP JIT
-  to hang at first dispatch on macOS Metal — and because AdaptiveCpp
-  prepares all kernels in the dylib together, *unrelated* kernels (e.g.
-  `point_in_ring_bulk_fp64_sycl`) then block forever waiting on the same
-  compile barrier. Reproduces with the asin form and the atan2 form.
-  Workaround landed: `pgaccel_sphere_distance_bulk` returns
-  `PGACCEL_ERROR_NO_DEVICE` when `use_fp64=true`, so only the fp32 SYCL
-  kernel is instantiated. fp32 path runs fine on every backend. Same
-  class as the `__args` MSL compile error below — both surface as
-  Metal SSCP / soft-fp64 emitter bugs. MAJOR (blocks fp64 acceleration
-  of `st_dwithin` and any future polygonal `st_distance`). Repro:
-  remove the `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;` guard at
-  `spatial_predicates.cpp:540`, rebuild, run `test_spatial` — first
-  point_in_ring sub-test hangs indefinitely.
+- **What** (refreshed 2026-05-02 after Agent 2A landed the kernel split):
+  The original "templated `sphere_distance_bulk_sycl<T>` instantiation
+  hangs Metal SSCP JIT" hang is **fixed** — splitting into non-templated
+  `sphere_distance_bulk_sycl_f32` + `_f64` (mirrors the explicit-double
+  pattern at `h3_ops.cpp:972-1019`) sidesteps the templated emitter
+  recursion. Same fix shape for `st_length_bulk_sycl_f64`.
+  - Leader-thread fp64 dispatch: **works**, kernel produces correct
+    results, 1.16 MB metallib emitted under SLEEF soft-fp64 lowering.
+  - **Fork-safety: BROKEN.** `acpp-metal-archive-build` (the fork-safe
+    MTLBinaryArchive prebuild — see CLAUDE.md "MTLBinaryArchive cache
+    (fork-safety on Apple Silicon)") gets SIGKILL'd (exit 137 — OOM)
+    when serializing the 17 MB `.jit` LLVM IR / pipeline state for the
+    soft-fp64 metallib. Manual `acpp-metal-archive-build` reproducer
+    also exits 137. No `.metalar` archive → PG worker forks crash with
+    "Unable to reach MTLCompilerService" the first time they hit the
+    kernel.
+  - **Current gating** (commit 2026-05-02 follow-up to the agent merge):
+    `pgaccel_sphere_distance_bulk(use_fp64=true)` and
+    `pgaccel_st_length_bulk(use_fp64=true)` re-gated to
+    `PGACCEL_ERROR_NO_DEVICE` to prevent parallel-query crashes.
+    Kernel code stays in-tree (`sphere_distance_bulk_sycl_f64` at
+    `spatial_predicates.cpp:502`, `st_length_bulk_sycl_f64` at `:937`)
+    — gate is a one-line drop the moment archive serialization is fixed.
 - **Why**: Without fp64 GPU, `st_dwithin` precision tops out at fp32 on
   Metal (~10⁻⁵ deg ≈ 1m at equator). PostGIS-grade precision (sub-mm)
-  needs the fp64 path.
-- **How**:
-  - Diff the SSCP-emitted MSL for the fp32 vs fp64 instantiations of
-    the same kernel; identify which soft-fp64 helper / forwarder is
-    missing or mis-emitted (likely sin/cos/asin/sqrt path).
-  - Cross-check whether `h3_ops.cpp:630-694` (which uses `sycl::sin /
-    cos` on `double` successfully under soft-fp64) hits the same path
-    — if not, what does sphere_distance do differently?
-  - Likely upstream-AdaptiveCpp territory. Track in the fork-safe-metal
-    branch.
-- Depends on: Metal Emitter performance/robustness polish (Phase 7).
-- **Done when**: The `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;`
-  guard at `spatial_predicates.cpp:540` is removed, `test_spatial` and
-  `test_correctness` pass with `use_fp64=true` for sphere_distance, and
-  no kernels in the dylib hang.
+  needs the fp64 path. But shipping a known parallel-query crash is
+  worse than no acceleration.
+- **How** (root-cause fix, upstream):
+  - Increase `acpp-metal-archive-build` per-process memory limit
+    (currently SIGKILL'd; needs heap headroom for the soft-fp64 .jit IR
+    serialization — order 64 MB for the full sin/cos/asin/sqrt
+    expansion).
+  - OR: split the .metalar build into per-kernel passes so each
+    serialization is bounded.
+  - OR: skip the binary-archive build for kernels above a size
+    threshold and accept slower forked-cold dispatch (kernel still runs;
+    just no XPC-free pipeline state).
+  - All three live in the AdaptiveCpp fork-safe-metal branch
+    (`~/local/src/AdaptiveCpp` if checked out; helper at
+    `~/local/bin/acpp-metal-archive-build`).
+- Depends on: AdaptiveCpp fork-safe-metal branch fix.
+- **Done when**: Drop both `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;`
+  gates at `spatial_predicates.cpp:1076` (sphere_distance) and `:1020`
+  (st_length); `test_fork` passes with fp64 sphere_distance dispatched
+  in a forked PG worker; cold-cache `acpp-metal-archive-build` exits 0
+  for the soft-fp64 metallib.
 
 ### `__args` MSL compile error on fused stats kernels at large N
 

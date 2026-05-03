@@ -1017,9 +1017,15 @@ extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint3
   if (!coords || !row_offsets || !lengths)
     return PGACCEL_ERROR_INIT;
 
+  // FORK-SAFETY GATE (added 2026-05-02): the f64 kernel itself compiles
+  // cleanly on the leader, but `acpp-metal-archive-build` OOMs (SIGKILL,
+  // exit 137) when serializing the soft-fp64 metallib. PG worker forks
+  // would crash with "Unable to reach MTLCompilerService". Same root
+  // cause + same gate as `pgaccel_sphere_distance_bulk` (~line 1076).
+  // Tracked in TODO Phase 7. Drop this gate once the binary-archive
+  // memory budget is fixed upstream.
   if (use_fp64) {
-    return st_length_bulk_sycl_f64(static_cast<const double*>(coords), row_offsets, row_count,
-                                   closed_ring, static_cast<double*>(lengths));
+    return PGACCEL_ERROR_NO_DEVICE;
   }
   return st_length_bulk_sycl_f32(static_cast<const float*>(coords), row_offsets, row_count,
                                  closed_ring, static_cast<float*>(lengths));
@@ -1068,15 +1074,22 @@ extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, con
   // — `sphere_distance_bulk_sycl_f32` and `_f64` — mirrors the explicit-
   // double pattern at `pgaccel-kernels/src/h3_ops.cpp:972-1019` which
   // proved direct `sycl::sin/cos/asin/sqrt(double)` builtins compile
-  // cleanly on Metal SSCP; only the templated form hung. Both paths are
-  // now live: native fp64 on CUDA/ROCm/Level Zero, soft-fp64 on Metal
-  // (Metal soft-fp64 is ~10-30× slower than native — acceptable for
-  // correctness-critical queries; planner uses `has_native_fp64` as a
-  // cost signal but never as a gate).
+  // cleanly on Metal SSCP; only the templated form hung.
+  //
+  // FORK-SAFETY GATE (added 2026-05-02): the f64 kernel itself compiles
+  // cleanly on the leader (1.16 MB metallib emitted under SLEEF
+  // soft-fp64), but `acpp-metal-archive-build` (the fork-safe
+  // MTLBinaryArchive prebuild — see CLAUDE.md "MTLBinaryArchive cache
+  // (fork-safety on Apple Silicon)") OOMs with SIGKILL (exit 137) when
+  // serializing the 17 MB .jit IR. Without the .metalar archive, PG
+  // worker forks crash with "Unable to reach MTLCompilerService" the
+  // first time they hit the kernel — a parallel-query crash regression.
+  // Re-gated to NO_DEVICE pending the binary-archive memory fix
+  // (TODO Phase 7). The kernel code stays in-tree as `_f64` so the gate
+  // is a one-line drop the moment archive serialization is fixed.
+  // st_length_bulk fp64 has the same gate at line ~1020.
   if (use_fp64) {
-    return sphere_distance_bulk_sycl_f64(static_cast<const double*>(points_a),
-                                         static_cast<const double*>(points_b), count,
-                                         static_cast<double*>(distances), uncertain);
+    return PGACCEL_ERROR_NO_DEVICE;
   }
   return sphere_distance_bulk_sycl_f32(static_cast<const float*>(points_a),
                                        static_cast<const float*>(points_b), count,
