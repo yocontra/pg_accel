@@ -1,67 +1,74 @@
-//! Parallel pre-aggregate path injection (star-schema join fusion).
+//! Parallel partial-aggregate path injection with GROUP BY support.
 //!
-//! Counterpart to [`super::partial_agg`] for the fused star-join + aggregate
-//! pipeline in [`crate::engine::executor::preagg`]. When the upper-paths hook
-//! fires for `UPPERREL_GROUP_AGG` and the input rel has a partial pathlist
-//! (parallel-safe outer paths), [`try_inject`] gates on the same star-schema
-//! pattern as [`super::pgaccel_inject_gpu_preagg`] and proves the per-column
-//! partial spec is well-formed before deciding whether to inject.
+//! ## Naming note
+//!
+//! Despite the file name, this module does NOT use the `PreAgg` (star-join
+//! fusion) strategy. The original intent was to wire up parallel partial-emit
+//! atop the [`PreAgg`](crate::engine::executor::preagg) star-join executor,
+//! but `PreAggExecState` opens the fact table directly via
+//! `table_open(scan_oid)` (see `engine/ffi/custom_scan/mod.rs::begin_custom_scan`,
+//! `GpuStrategy::PreAgg` arm). Without scan-state synchronisation between
+//! workers (each would scan the entire fact table → N-fold over-aggregation),
+//! parallelising the PreAgg strategy is a separate executor refactor.
+//!
+//! What this module DOES: mirror [`super::partial_agg::try_inject`] but with
+//! GROUP BY propagation through the manually-built Finalize Agg chain. This
+//! covers the common OLAP shape (`SUM(...) ... GROUP BY dim`) that
+//! `partial_agg.rs` bails on.
+//!
+//! The architectural follow-up (parallel PreAgg with proper scan-state
+//! sharing — `parallel_aware = true`, route fact-table scan through the
+//! wrapped child PlanState rather than `table_open`) is tracked in
+//! [`crate::engine::executor::preagg`] and TODO.md.
 //!
 //! ## Status
 //!
-//! **Executor wiring landed; planner-side path-construction still pending.**
+//! **Implemented.** Phase II Agent P1 lands the planner-side path
+//! construction. Mirrors [`super::partial_agg::try_inject`] structurally
+//! (Finalize Agg → Gather → CustomPath using `agg_path_methods` +
+//! `is_partial = 1`) and adds GROUP BY propagation via
+//! `root.processed_groupClause` + `parse.havingQual` into
+//! `pg_sys::create_agg_path` (using `AGG_HASHED` for GROUP BY,
+//! `AGG_PLAIN` otherwise).
 //!
-//! Phase B Agent 1B wired the round-trip executor plumbing:
-//!
-//!   1. `PreAggPrivData` now carries `partial: Option<PartialAggSpec>`
-//!      (`engine/ffi/custom_scan/private_data.rs`).
-//!   2. `serialize_preagg_private` accepts an optional `&PartialAggSpec` and
-//!      appends it via the existing `PARTIAL_SENTINEL` block;
-//!      `deserialize_preagg_private` reads it back.
-//!   3. `begin_custom_scan`'s `GpuStrategy::PreAgg` arm calls
-//!      `exec.enable_partial(spec)` when the deserialized partial is
-//!      `Some` — workers then emit transition-state tuples for PG's
-//!      Finalize Aggregate.
-//!
-//! What still blocks `try_inject` from actually calling
-//! `add_partial_path` is the planner-side path construction. PG 17 does
-//! NOT fire `create_upper_paths_hook` for `UPPERREL_PARTIAL_GROUP_AGG`
-//! (see [`super::partial_agg`] module docs for the full analysis), so the
-//! same orphan-path failure mode that bit `partial_agg::try_inject` would
-//! bite here too. The fix is to mirror `partial_agg::try_inject`'s
-//! manually-built Finalize → Gather → CustomPath chain and `add_path` it
-//! to `grouped_rel` (NOT `add_partial_path` — see partial_agg module
-//! docs) — that's a 100+ line addition tracked as a separate follow-up
-//! to keep this PR focused on the executor-side plumbing.
-//!
-//! ## What [`try_inject`] does today
-//!
-//!   1. Bails if `(*input_rel).partial_pathlist` is NIL or empty.
-//!   2. Bails if GPU is unavailable, the query lacks aggregates, or the
-//!      output rel cannot consider parallel paths.
-//!   3. Walks the cheapest partial path to verify the star-join shape.
-//!   4. Walks the target list with [`super::agg_common::classify_aggref`]
-//!      to verify every Aggref is partial-emit-supported.
-//!   5. Logs a debug message naming the blocker and returns without
-//!      mutating the planner state.
+//! Phase B Agent 1B previously wired the executor-side `PreAggPrivData`
+//! round-trip (`partial: Option<PartialAggSpec>`, `enable_partial(spec)`
+//! invocation). That wiring is intentionally retained but unused by THIS
+//! module — when the PreAgg-strategy parallelisation lands later, the same
+//! `PartialAggSpec` shape will flow through `serialize_preagg_private`'s
+//! `partial` argument.
 
-use pgrx::pg_sys::{self, NodeTag};
+use pgrx::pg_sys::{self, CustomPath, List, NodeTag, Path, lappend};
 
 use crate::engine::cost;
 use crate::engine::executor::agg::AggOp;
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+use crate::engine::gucs;
 
 use super::agg_common::{self, AggClass};
+use super::custom_scan;
 
-/// Gate parallel preagg path injection. Performs the pre-conditions and
-/// `PartialAggSpec` validation but does not yet inject into the path-list —
-/// see the module docs for the executor-wiring blocker.
+/// Try to inject the parallel partial-aggregate path chain (with GROUP BY
+/// support) directly onto `grouped_rel->pathlist`.
+///
+/// Mirrors [`super::partial_agg::try_inject`] but does NOT bail on
+/// `groupClause` present — instead propagates the GROUP BY into the
+/// manually-built Finalize Agg via `root.processed_groupClause`.
+///
+/// Bails silently when any pre-condition isn't met (no partial paths on
+/// input, unclassified Aggref, GPU unavailable, etc.).
 ///
 /// # Safety
 ///
 /// Called from the planner hook on the main backend thread. All pointer
 /// arguments must be valid planner-provided pointers.
-#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_ptr_alignment,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 pub(super) unsafe fn try_inject(
     root: *mut pg_sys::PlannerInfo,
     input_rel: *mut pg_sys::RelOptInfo,
@@ -79,14 +86,14 @@ pub(super) unsafe fn try_inject(
 
     // SAFETY: pointers null-checked above; planner guarantees they outlive
     // the hook invocation.
+    let root_ref = unsafe { &*root };
     let input_ref = unsafe { &*input_rel };
-    let output_ref = unsafe { &*output_rel };
+    let grouped_rel = output_rel;
+    let grouped_ref = unsafe { &*grouped_rel };
 
-    // Gate: the output rel must be eligible for parallel paths. If PG has
-    // already concluded the grouped rel can't run under Gather, there's no
-    // point producing a partial path for it.
-    if !output_ref.consider_parallel {
-        pgrx::debug1!("pg_accel preagg_partial: output_rel.consider_parallel=false");
+    // Gate: the output rel must be eligible for parallel paths.
+    if !grouped_ref.consider_parallel {
+        pgrx::debug1!("pg_accel preagg_partial: grouped_rel.consider_parallel=false");
         return;
     }
 
@@ -100,7 +107,7 @@ pub(super) unsafe fn try_inject(
 
     // Gate: query must actually request aggregation.
     // SAFETY: root.parse is a valid Query pointer.
-    let parse = unsafe { (*root).parse };
+    let parse = root_ref.parse;
     if parse.is_null() {
         return;
     }
@@ -111,10 +118,45 @@ pub(super) unsafe fn try_inject(
         return;
     }
 
+    // Fetch the partial grouping rel (PG 17 doesn't fire the upper-paths
+    // hook at UPPERREL_PARTIAL_GROUP_AGG, so we materialise it ourselves
+    // by calling fetch_upper_rel from inside the UPPERREL_GROUP_AGG hook).
+    // SAFETY: fetch_upper_rel is a standard planner helper.
+    let partially_grouped_rel = unsafe {
+        pg_sys::fetch_upper_rel(
+            root,
+            pg_sys::UpperRelationKind::UPPERREL_PARTIAL_GROUP_AGG,
+            grouped_ref.relids,
+        )
+    };
+    if partially_grouped_rel.is_null() {
+        pgrx::debug1!("pg_accel preagg_partial: partially_grouped_rel is NULL");
+        return;
+    }
+    // SAFETY: non-null after check above.
+    let partial_ref = unsafe { &*partially_grouped_rel };
+    if !partial_ref.consider_parallel {
+        pgrx::debug1!("pg_accel preagg_partial: partially_grouped_rel.consider_parallel=false");
+        return;
+    }
+
+    // Row-count threshold (mirror partial_agg).
+    let rows = input_ref.rows as usize;
+    if rows < cost::device_limits().gpu_reduce_min_rows {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: rows {} < min {}",
+            rows,
+            cost::device_limits().gpu_reduce_min_rows
+        );
+        return;
+    }
+
     // Walk the target list and validate every Aggref is one of the
-    // partial-emit-supported classes (super::agg_common::classify_aggref
-    // returns None for unsupported aggregates). The result feeds the
-    // PartialAggSpec the executor would consume once the wiring lands.
+    // partial-emit-supported classes. The result feeds the
+    // PartialAggSpec consumed by Float8StatsEmitter / NumericSumEmitter
+    // on the worker side. GROUP BY column references (T_Var) are skipped
+    // here — they don't need a PartialColumn entry, but they DO need to
+    // ride through `processed_groupClause` to the Finalize Agg.
     let tlist = query.targetList;
     if tlist.is_null() {
         return;
@@ -124,7 +166,10 @@ pub(super) unsafe fn try_inject(
         return;
     }
 
+    let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::new();
     let mut partial_cols: Vec<PartialColumn> = Vec::new();
+    let mut has_group_keys = false;
+
     for i in 0..tlist_len {
         // SAFETY: i is in [0, tlist_len).
         let tle = unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
@@ -139,8 +184,13 @@ pub(super) unsafe fn try_inject(
         // SAFETY: reading node tag.
         let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
         if tag != NodeTag::T_Aggref {
-            // GROUP BY column references and other tlist nodes are fine
-            // — they don't need a PartialColumn entry.
+            // Non-Aggref entries (typically T_Var for GROUP BY columns)
+            // ride through the Finalize Agg's processed_groupClause —
+            // no PartialColumn entry needed. Note that they exist so we
+            // can drop the AGG_HASHED vs AGG_PLAIN decision below.
+            if tag == NodeTag::T_Var {
+                has_group_keys = true;
+            }
             continue;
         }
 
@@ -157,12 +207,10 @@ pub(super) unsafe fn try_inject(
         // SAFETY: aggref non-null and a valid Aggref.
         let aggref_ref = unsafe { &*aggref };
 
-        // For the AVG/STDDEV/VAR family the partial-state shape requires a
-        // `_float8` transition type so Float8StatsEmitter's no-serialize
-        // branch matches the per-column accumulator. INTERNAL transtypes
-        // (numeric_avg_accum, int8_avg_accum) require dedicated emitter
-        // support that the preagg path doesn't yet wire — bail rather than
-        // emit a wrong shape.
+        // Mirror the gate from partial_agg.rs:192-203 — Float8StatsEmitter
+        // requires `_float8` (FLOAT8ARRAYOID) transtype. INTERNAL transtypes
+        // (numeric_avg_accum, int8_avg_accum) need dedicated emitter support
+        // we don't have yet — bail rather than emit a wrong shape.
         let float_stats_op = matches!(
             op,
             AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop
@@ -183,8 +231,8 @@ pub(super) unsafe fn try_inject(
         };
 
         // Resolve the input column attno (0 for COUNT(*)).
-        let attno = if op == AggOp::Count && aggref_ref.aggstar {
-            0_i32
+        let (attno, rtype) = if op == AggOp::Count && aggref_ref.aggstar {
+            (0_i32, u32::from(aggref_ref.aggtype))
         } else {
             let args = aggref_ref.args;
             if args.is_null() || unsafe { pg_sys::list_length(args) } < 1 {
@@ -201,9 +249,11 @@ pub(super) unsafe fn try_inject(
                 return;
             }
             // SAFETY: arg_expr is a valid Expr pointer.
-            unsafe { super::extract_var_attno(arg_expr) }
+            let extracted = unsafe { super::extract_var_attno(arg_expr) };
+            (extracted, u32::from(aggref_ref.aggtype))
         };
 
+        agg_descs.push((op, attno, rtype));
         partial_cols.push(PartialColumn {
             op,
             attno,
@@ -217,36 +267,189 @@ pub(super) unsafe fn try_inject(
         return;
     }
 
-    // Construct the PartialAggSpec the executor would consume. Even though
-    // we can't inject a path yet, building the spec exercises the full
-    // classification path so any bug in classify_aggref / target-list walking
-    // shows up here rather than at execution time.
-    let spec = PartialAggSpec {
-        per_column: partial_cols,
+    // Detect GROUP BY presence from the parsed query (root.processed_groupClause
+    // is what create_agg_path expects; query.groupClause is the pre-processed
+    // form). When present, has_group_keys is true (set above when we saw any
+    // T_Var in the target list), and we feed AGG_HASHED + the processed clause.
+    let has_group_by = has_group_keys
+        || (!query.groupClause.is_null() && !root_ref.processed_groupClause.is_null());
+
+    // Pick the cheapest partial child path to wrap.
+    // SAFETY: partial_pathlist is non-empty.
+    let cheapest_partial =
+        unsafe { pg_sys::list_nth(input_ref.partial_pathlist, 0).cast::<Path>() };
+    if cheapest_partial.is_null() {
+        return;
+    }
+    // SAFETY: cheapest_partial is non-null.
+    let base = unsafe { &*cheapest_partial };
+
+    // Cost: mirror partial_agg.rs cost formula.
+    let gpu_overhead = cost::GPU_LAUNCH_OVERHEAD;
+    let float8_u32 = u32::from(pg_sys::FLOAT8OID);
+    let agg_uses_fp64 = partial_cols
+        .iter()
+        .any(|c| u32::from(c.transtype_oid) == float8_u32)
+        || agg_descs
+            .iter()
+            .any(|(op, _, rtype)| matches!(op, AggOp::Avg) || *rtype == float8_u32);
+    let agg_per_row_base = 0.005_f64;
+    let agg_per_row =
+        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits());
+    let reduce_cost = base.rows * agg_per_row;
+    let startup_cost = base.total_cost + gpu_overhead;
+    let total_cost = (base.total_cost + reduce_cost)
+        .mul_add(cost::GPU_COST_SAFETY_MARGIN, gpu_overhead)
+        * gucs::cost_multiplier();
+
+    // Build the partial CustomPath (worker-side partial agg, parented at
+    // `partially_grouped_rel`).
+    // SAFETY: Allocating via palloc, building valid CustomPath.
+    let cpath = unsafe {
+        let cpath = pg_sys::palloc0(std::mem::size_of::<CustomPath>()).cast::<CustomPath>();
+
+        (*cpath).path.type_ = NodeTag::T_CustomPath;
+        (*cpath).path.pathtype = NodeTag::T_CustomScan;
+        (*cpath).path.parent = partially_grouped_rel;
+        // Deep-copy pathtarget so later planner mutations don't alias into
+        // shared Aggref sub-trees (mirrors partial_agg.rs:291).
+        (*cpath).path.pathtarget = pg_sys::copy_pathtarget(partial_ref.reltarget);
+        (*cpath).path.param_info = std::ptr::null_mut();
+        (*cpath).path.parallel_aware = false;
+        (*cpath).path.parallel_safe = true;
+        (*cpath).path.parallel_workers = base.parallel_workers.max(1);
+        (*cpath).path.rows = partial_ref.rows.max(1.0);
+        (*cpath).path.startup_cost = startup_cost;
+        (*cpath).path.total_cost = total_cost;
+        (*cpath).path.pathkeys = std::ptr::null_mut();
+
+        (*cpath).flags = 0;
+        (*cpath).custom_paths = lappend(std::ptr::null_mut(), cheapest_partial.cast());
+        (*cpath).custom_restrictinfo = std::ptr::null_mut();
+        (*cpath).methods = custom_scan::agg_path_methods();
+
+        // Serialize the custom_private layout expected by plan_custom_path_agg
+        // (mirrors partial_agg.rs:308-336). Layout:
+        //   [num_aggs, op0, attno0, rtype0, ..., has_group_key,
+        //    self_scan_relid=0, is_partial=1, PARTIAL_SENTINEL block]
+        let mut priv_list: *mut List = std::ptr::null_mut();
+        #[allow(clippy::cast_possible_truncation)]
+        let num_aggs = agg_descs.len() as i32;
+        priv_list = lappend(priv_list, pg_sys::makeInteger(num_aggs).cast());
+        for &(op, attno, rtype) in &agg_descs {
+            priv_list = lappend(priv_list, pg_sys::makeInteger(op.to_i32()).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(attno).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(rtype as i32).cast());
+        }
+        // has_group_key flag (informational; the actual GROUP BY clause
+        // rides through the Finalize Agg via processed_groupClause below).
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(i32::from(has_group_by)).cast(),
+        );
+        // No self-scan (child is PG's parallel seq scan).
+        priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
+        // is_partial = 1.
+        priv_list = lappend(priv_list, pg_sys::makeInteger(1).cast());
+
+        // Append full PartialAggSpec (transtype + serialize_fn per column)
+        // so plan_custom_path_agg can materialise Float8StatsEmitter for
+        // AVG/STDDEV/VAR without re-walking Aggrefs.
+        let spec = PartialAggSpec {
+            per_column: partial_cols.clone(),
+        };
+        priv_list = custom_scan::append_partial_spec(priv_list, &spec);
+
+        (*cpath).custom_private = priv_list;
+        cpath
     };
 
-    // BLOCKER: planner-side path construction missing. See module docs.
-    //
-    // The executor-side round-trip is now in place
-    // (engine/ffi/custom_scan/private_data.rs::PreAggPrivData carries
-    // `partial`; begin_custom_scan calls enable_partial), so the spec we
-    // build here would correctly drive worker-side transition-state
-    // emission if it were attached to a path. What's still pending is
-    // the manually-built Finalize → Gather → GpuPreAgg(partial) chain
-    // (mirroring partial_agg::try_inject), which a follow-up PR will
-    // land. Until then, injecting a bare partial path via
-    // add_partial_path is the orphan-path crash documented in the
-    // partial_agg module docs.
-    pgrx::debug1!(
-        "pg_accel preagg_partial: gating passed, {} partial columns ready; \
-         path injection still blocked on Finalize → Gather chain build \
-         (executor round-trip is wired, planner-side path construction \
-         pending — tracked separately)",
-        spec.per_column.len(),
-    );
+    // Wrap the partial CustomPath in a Gather path rooted at
+    // partially_grouped_rel.
+    // SAFETY: All pointers validated above; create_gather_path is a standard
+    // planner helper callable on the main backend thread.
+    let gather = unsafe {
+        let mut rows_out: f64 = (*cpath).path.rows;
+        pg_sys::create_gather_path(
+            root,
+            partially_grouped_rel,
+            cpath.cast::<Path>(),
+            partial_ref.reltarget,
+            std::ptr::null_mut(),
+            &raw mut rows_out,
+        )
+    };
+    if gather.is_null() {
+        return;
+    }
 
-    // Suppress the unused-variable warning on `spec` until the planner
-    // path construction lands; the binding stays live so a refactor to
-    // the PartialAggSpec shape forces this code to update too.
-    let _ = spec;
+    // Wrap the Gather in a Finalize Agg path on grouped_rel.
+    //
+    // GROUP BY propagation: mirror PG's own
+    // `add_paths_to_grouping_rel` (planner.c:7253-7263) — the parallel
+    // Finalize Agg uses `root->processed_groupClause` for groupClause and
+    // the Query's havingQual for qual. AggStrategy is AGG_HASHED when
+    // GROUP BY is present (typical OLAP shape), AGG_PLAIN otherwise.
+    //
+    // numGroups: estimate from `input_rel->rows` square-root for a rough
+    // cardinality, clamped. Matches the shape used in
+    // `pgaccel_inject_gpu_preagg::n_groups` (planner_hooks/mod.rs:1001-1005).
+    let agg_strategy = if has_group_by {
+        pg_sys::AggStrategy::AGG_HASHED
+    } else {
+        pg_sys::AggStrategy::AGG_PLAIN
+    };
+    let group_clause = if has_group_by {
+        root_ref.processed_groupClause
+    } else {
+        std::ptr::null_mut()
+    };
+    let having_qual = query.havingQual.cast::<pg_sys::List>();
+    let num_groups = if has_group_by {
+        input_ref.rows.sqrt().clamp(1.0, 10_000.0)
+    } else {
+        1.0
+    };
+
+    // AggClauseCosts with zero-init gives transCost=0/finalCost=0; that's
+    // acceptable — create_agg_path still costs the Gather + Agg node itself.
+    let agg_final_costs = pg_sys::AggClauseCosts::default();
+    // SAFETY: create_agg_path is a standard planner helper; grouped_rel and
+    // gather path are valid; group_clause is either NULL (plain) or
+    // root.processed_groupClause.
+    let final_agg = unsafe {
+        pg_sys::create_agg_path(
+            root,
+            grouped_rel,
+            gather.cast::<Path>(),
+            grouped_ref.reltarget,
+            agg_strategy,
+            pg_sys::AggSplit::AGGSPLIT_FINAL_DESERIAL,
+            group_clause,
+            having_qual,
+            &raw const agg_final_costs,
+            num_groups,
+        )
+    };
+    if final_agg.is_null() {
+        return;
+    }
+
+    // SAFETY: add_path accepts any Path subclass pointer on grouped_rel.
+    unsafe {
+        pg_sys::add_path(grouped_rel, final_agg.cast::<Path>());
+    }
+
+    // SAFETY: cpath is a live CustomPath pointer we just allocated.
+    let (cpath_workers, cpath_rows) =
+        unsafe { ((*cpath).path.parallel_workers, (*cpath).path.rows) };
+    pgrx::debug1!(
+        "pg_accel preagg_partial: injected Finalize({}) -> Gather -> GpuAccel(partial) chain \
+         (n_aggs={}, has_group_by={}, workers={}, rows={})",
+        if has_group_by { "HashAgg" } else { "PlainAgg" },
+        agg_descs.len(),
+        has_group_by,
+        cpath_workers,
+        cpath_rows,
+    );
 }
