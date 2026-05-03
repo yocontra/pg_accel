@@ -55,11 +55,24 @@ fn gpu_raster_entries() -> Vec<FunctionAccelEntry> {
         FunctionAccelEntry::scalar("public", "st_value", AccelStrategy::GpuRaster),
         // st_summarystats is the only non-scalar output; struct-literal so
         // `output_shape` can be set to Record { field_count: 6 }.
+        // F3 FunctionScan TupleDesc metadata (Phase 2): explicit per-field
+        // type OIDs (count is bigint, the rest are fp64) and the conventional
+        // PostGIS column names, so the FunctionScan injection path can build
+        // a TupleDesc without a per-call pg_proc lookup.
         FunctionAccelEntry {
             schema: "public",
             name: "st_summarystats",
             strategy: AccelStrategy::GpuRaster,
             output_shape: OutputShape::Record { field_count: 6 },
+            output_field_types: vec![
+                pgrx::pg_sys::INT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+                pgrx::pg_sys::FLOAT8OID.to_u32(),
+            ],
+            output_field_names: vec!["count", "sum", "mean", "stddev", "min", "max"],
         },
     ]
 }

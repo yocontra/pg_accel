@@ -92,11 +92,35 @@ pub fn adapter() -> ExtensionAdapter {
         .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuH3))
         .collect();
     for &name in VARLEN_GPU_NAMES {
+        // F3 FunctionScan TupleDesc metadata (Phase 2). The h3index type is
+        // an extension-defined SQL type whose OID isn't known at compile
+        // time; the value 0 acts as a sentinel meaning "look up the return
+        // type via `pg_proc` at FunctionScan begin time". For
+        // boundary / multi_polygon ops we likewise carry a sentinel for
+        // PostGIS `geometry`. The single-field name matches the SQL
+        // declaration (the unnamed return column of a SETOF function).
+        let (out_types, out_names): (Vec<u32>, Vec<&'static str>) = match name {
+            // SETOF h3index — single bigint-like column.
+            "h3_grid_disk" | "h3_grid_ring_unsafe" | "h3_polyfill" | "h3_cell_to_children" => {
+                // h3index is stored as bigint (INT8) in PG. Hard-coding the
+                // bigint OID is safe because the h3-pg extension declares
+                // h3index as `CREATE TYPE h3index` with bigint storage.
+                (vec![pgrx::pg_sys::INT8OID.to_u32()], vec![name])
+            }
+            // Returns a single PostGIS geometry per call (cell_to_boundary)
+            // or per cell-array (cells_to_multi_polygon). Sentinel 0 means
+            // "resolve at FunctionScan-begin via pg_proc" since the
+            // PostGIS `geometry` type OID is dynamic.
+            "h3_cell_to_boundary" | "h3_cells_to_multi_polygon" => (vec![0u32], vec![name]),
+            _ => (Vec::new(), Vec::new()),
+        };
         functions.push(FunctionAccelEntry {
             schema: "public",
             name,
             strategy: AccelStrategy::GpuH3,
             output_shape: OutputShape::VarLen,
+            output_field_types: out_types,
+            output_field_names: out_names,
         });
     }
 
