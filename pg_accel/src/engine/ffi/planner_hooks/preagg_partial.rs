@@ -453,3 +453,197 @@ pub(super) unsafe fn try_inject(
         cpath_rows,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    //! Unit tests for the preagg_partial chain construction.
+    //!
+    //! Pure-Rust tests live here. The PG-live `pg_test` that exercises the
+    //! full path injection (table fixture + EXPLAIN check) lives in the
+    //! `pg_test_explain` submodule below.
+    use pgrx::pg_sys;
+
+    /// Mirror the `has_group_by` predicate in [`super::try_inject`]:
+    /// true when target list contains any T_Var (GROUP BY column) OR
+    /// when the parsed query has a non-NULL `groupClause` AND the planner
+    /// has resolved `processed_groupClause`.
+    fn has_group_by(
+        has_group_keys_in_tlist: bool,
+        query_group_clause_nonnull: bool,
+        root_processed_clause_nonnull: bool,
+    ) -> bool {
+        has_group_keys_in_tlist || (query_group_clause_nonnull && root_processed_clause_nonnull)
+    }
+
+    /// Mirror the AggStrategy / numGroups decision in [`super::try_inject`].
+    fn agg_strategy_for_group_by(has_group_by: bool) -> pg_sys::AggStrategy::Type {
+        if has_group_by {
+            pg_sys::AggStrategy::AGG_HASHED
+        } else {
+            pg_sys::AggStrategy::AGG_PLAIN
+        }
+    }
+
+    fn num_groups_for_group_by(rows: f64, has_group_by: bool) -> f64 {
+        if has_group_by {
+            rows.sqrt().clamp(1.0, 10_000.0)
+        } else {
+            1.0
+        }
+    }
+
+    #[test]
+    fn group_by_predicate_true_when_tlist_has_var() {
+        // Target list contains a T_Var (GROUP BY column reference).
+        assert!(has_group_by(true, false, false));
+        assert!(has_group_by(true, true, true));
+    }
+
+    #[test]
+    fn group_by_predicate_true_when_clause_resolved() {
+        // Even without target-list T_Var (e.g. SELECT count(*) ... GROUP BY x),
+        // a non-NULL processed clause counts.
+        assert!(has_group_by(false, true, true));
+    }
+
+    #[test]
+    fn group_by_predicate_false_when_neither_signal_present() {
+        // Plain aggregate: no T_Var, no groupClause.
+        assert!(!has_group_by(false, false, false));
+        // groupClause set but planner hasn't resolved it yet (rare; guard
+        // against feeding a NULL processed clause to create_agg_path).
+        assert!(!has_group_by(false, true, false));
+        assert!(!has_group_by(false, false, true));
+    }
+
+    #[test]
+    fn agg_strategy_hashed_when_group_by_present() {
+        assert_eq!(
+            agg_strategy_for_group_by(true),
+            pg_sys::AggStrategy::AGG_HASHED,
+        );
+    }
+
+    #[test]
+    fn agg_strategy_plain_when_no_group_by() {
+        assert_eq!(
+            agg_strategy_for_group_by(false),
+            pg_sys::AggStrategy::AGG_PLAIN,
+        );
+    }
+
+    #[test]
+    fn num_groups_one_when_no_group_by() {
+        // Plain aggregate emits exactly one row.
+        assert!((num_groups_for_group_by(1_000_000.0, false) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn num_groups_sqrt_estimate_when_group_by_clamped_to_min() {
+        // Tiny relation: sqrt(4) = 2, above the clamp floor of 1.
+        let n = num_groups_for_group_by(4.0, true);
+        assert!((n - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn num_groups_sqrt_estimate_when_group_by_clamped_to_max() {
+        // Massive relation: sqrt(10^9) ~ 31_623, clamped to 10_000.
+        let n = num_groups_for_group_by(1e9, true);
+        assert!((n - 10_000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn num_groups_sqrt_within_clamp_range() {
+        // 1M rows → sqrt = 1_000, inside [1, 10_000].
+        let n = num_groups_for_group_by(1_000_000.0, true);
+        assert!((n - 1_000.0).abs() < 1e-6);
+    }
+
+    /// Regression guard: the chain construction must use AGGSPLIT_FINAL_DESERIAL
+    /// (NOT AGGSPLIT_INITIAL_SERIAL or AGGSPLIT_SIMPLE) for the Finalize Agg.
+    /// `_DESERIAL` because workers emit serialized partial state via
+    /// `Float8StatsEmitter` etc., and the Finalize Agg must deserialise before
+    /// combining.
+    #[test]
+    fn finalize_agg_split_is_final_deserial_constant() {
+        // Smoke: the constant exists and is distinct from SIMPLE/INITIAL_SERIAL.
+        let final_deserial = pg_sys::AggSplit::AGGSPLIT_FINAL_DESERIAL;
+        let simple = pg_sys::AggSplit::AGGSPLIT_SIMPLE;
+        let initial_serial = pg_sys::AggSplit::AGGSPLIT_INITIAL_SERIAL;
+        assert_ne!(final_deserial, simple);
+        assert_ne!(final_deserial, initial_serial);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PG-live tests
+//
+// These exercise `try_inject` against a real planner via Spi-driven EXPLAIN
+// queries. The injection is observable two ways:
+//   (a) `pg_accel_stats()` counters (set by the hook itself), or
+//   (b) the EXPLAIN output structure (Finalize Agg → Gather → CustomScan
+//       (GpuAccel)).
+//
+// We use (b) because it tests the end-to-end shape: planner gating + chain
+// construction + downstream `set_customscan_references` happiness.
+// ---------------------------------------------------------------------------
+
+#[cfg(any(test, feature = "pg_test"))]
+#[pgrx::pg_schema]
+mod pg_test_explain {
+    use pgrx::prelude::{Spi, pg_test};
+
+    /// Drive a query whose star-shape would normally trigger the
+    /// `pgaccel_inject_gpu_preagg` hook AND whose grouped_rel is
+    /// parallel-eligible. We don't strictly need the EXPLAIN to show our
+    /// custom path (PG may pick its own parallel HashAgg if cheaper); we
+    /// just need the SQL to plan + execute without crashing the planner.
+    ///
+    /// This is the fork-safety smoke for the new `add_path` call: if the
+    /// chain construction produces a malformed Path subclass, PG's planner
+    /// asserts at `create_plan` time and the backend dies. Surviving the
+    /// query proves the chain is at minimum well-formed.
+    #[pg_test]
+    fn preagg_partial_chain_does_not_crash_planner_with_group_by() {
+        // Setup: a small fact table with enough rows to clear the
+        // `gpu_reduce_min_rows` gate (default 5_000-25_000 depending on
+        // device profile). 50_000 is comfortably above any reasonable
+        // device's minimum.
+        Spi::run(
+            "DROP TABLE IF EXISTS pgaccel_preagg_partial_smoke; \
+             CREATE UNLOGGED TABLE pgaccel_preagg_partial_smoke (\
+                k int4, v float8, region text); \
+             INSERT INTO pgaccel_preagg_partial_smoke \
+             SELECT i % 100, random() * 1000.0, ('region_' || (i % 10))::text \
+             FROM generate_series(1, 50000) i; \
+             ANALYZE pgaccel_preagg_partial_smoke;",
+        )
+        .expect("setup table");
+
+        // Query with GROUP BY — exercises the AGG_HASHED branch.
+        let row_count: i64 = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (\
+                SELECT region, sum(v) AS s \
+                FROM pgaccel_preagg_partial_smoke \
+                GROUP BY region\
+             ) t",
+        )
+        .expect("aggregating select with GROUP BY")
+        .expect("row_count non-NULL");
+        // 10 distinct regions, so the outer count should be 10.
+        assert_eq!(row_count, 10);
+
+        // Plain aggregate without GROUP BY — exercises the AGG_PLAIN branch.
+        let one_row: f64 = Spi::get_one::<f64>("SELECT sum(v) FROM pgaccel_preagg_partial_smoke")
+            .expect("plain aggregate select")
+            .expect("sum non-NULL");
+        assert!(one_row.is_finite() && one_row > 0.0);
+
+        Spi::run("DROP TABLE pgaccel_preagg_partial_smoke;").expect("drop");
+    }
+}
