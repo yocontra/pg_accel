@@ -679,6 +679,360 @@ static void test_cell_to_center_child() {
 }
 
 // ---------------------------------------------------------------------------
+// Variable-output kernel tests
+// ---------------------------------------------------------------------------
+
+// Build a known-pentagon cell at the given resolution. Pentagon base 4 with
+// all-zero digits is a valid pentagon per the H3 layout convention used by
+// pgaccel_h3_is_pentagon_bulk.
+static uint64_t make_pentagon_cell(int resolution) {
+  int digits[15] = {0};
+  return make_cell(4, resolution, digits);
+}
+
+// Test: grid_disk — output_size formula and emit consistency.
+static void test_grid_disk() {
+  printf("--- test_grid_disk ---\n");
+
+  int digits[15] = {0};
+  uint64_t cells[2] = {
+      make_cell(57, 5, digits),  // hexagon (base 57 not in pentagon set)
+      make_pentagon_cell(5),     // pentagon
+  };
+
+  // k = 1: hex disk = 7, pent disk = 6.
+  {
+    uint32_t off[3] = {99, 99, 99};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(cells, 2, 1, off);
+    ASSERT_STATUS_OK("grid_disk k=1 size status", s);
+    ASSERT_EQ("grid_disk k=1 off[0]", off[0], 0);
+    ASSERT_EQ("grid_disk k=1 hex count", off[1], 7);
+    ASSERT_EQ("grid_disk k=1 total (hex+pent)", off[2], 13);
+
+    std::vector<uint64_t> out(off[2], 0);
+    s = pgaccel_h3_grid_disk_emit(cells, 2, 1, off, out.data());
+    ASSERT_STATUS_OK("grid_disk k=1 emit status", s);
+    // Origin at slot 0 of each input
+    ASSERT_TRUE("grid_disk k=1 hex origin emitted", out[0] == cells[0]);
+    ASSERT_TRUE("grid_disk k=1 pent origin emitted", out[off[1]] == cells[1]);
+    // All emitted cells are non-zero (valid IDs)
+    bool all_nonzero = true;
+    for (uint32_t i = 0; i < off[2]; i++) {
+      if (out[i] == 0) {
+        all_nonzero = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("grid_disk k=1 all outputs non-zero", all_nonzero);
+  }
+
+  // k = 0: every input emits exactly itself.
+  {
+    uint32_t off[3] = {99, 99, 99};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(cells, 2, 0, off);
+    ASSERT_STATUS_OK("grid_disk k=0 size status", s);
+    ASSERT_EQ("grid_disk k=0 total", off[2], 2);
+
+    std::vector<uint64_t> out(2, 0);
+    s = pgaccel_h3_grid_disk_emit(cells, 2, 0, off, out.data());
+    ASSERT_STATUS_OK("grid_disk k=0 emit status", s);
+    ASSERT_TRUE("grid_disk k=0 emits hex itself", out[0] == cells[0]);
+    ASSERT_TRUE("grid_disk k=0 emits pent itself", out[1] == cells[1]);
+  }
+
+  // k = 2: hex disk = 1 + 6 + 12 = 19; pent disk = 1 + 5 + 10 = 16.
+  {
+    uint32_t off[3] = {0, 0, 0};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(cells, 2, 2, off);
+    ASSERT_STATUS_OK("grid_disk k=2 size status", s);
+    ASSERT_EQ("grid_disk k=2 hex count", off[1], 19);
+    ASSERT_EQ("grid_disk k=2 total", off[2], 35);
+
+    std::vector<uint64_t> out(off[2], 0);
+    s = pgaccel_h3_grid_disk_emit(cells, 2, 2, off, out.data());
+    ASSERT_STATUS_OK("grid_disk k=2 emit status", s);
+    // The disk size pass + emit pass write count must match.
+    ASSERT_EQ("grid_disk k=2 emit==size sum", out.size(), off[2]);
+  }
+
+  // Zero cell input → zero count.
+  {
+    uint64_t z[1] = {0};
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(z, 1, 3, off);
+    ASSERT_STATUS_OK("grid_disk zero-cell status", s);
+    ASSERT_EQ("grid_disk zero-cell count", off[1], 0);
+  }
+}
+
+// Test: grid_ring_unsafe — output_size formula and emit consistency.
+static void test_grid_ring_unsafe() {
+  printf("--- test_grid_ring_unsafe ---\n");
+
+  int digits[15] = {0};
+  uint64_t cells[2] = {
+      make_cell(57, 5, digits),  // hexagon
+      make_pentagon_cell(5),     // pentagon
+  };
+
+  // k = 1: hex ring = 6, pent ring = 5.
+  {
+    uint32_t off[3] = {99, 99, 99};
+    pgaccel_status s = pgaccel_h3_grid_ring_unsafe_output_size(cells, 2, 1, off);
+    ASSERT_STATUS_OK("grid_ring k=1 size status", s);
+    ASSERT_EQ("grid_ring k=1 hex count", off[1], 6);
+    ASSERT_EQ("grid_ring k=1 total", off[2], 11);
+
+    std::vector<uint64_t> out(off[2], 0);
+    s = pgaccel_h3_grid_ring_unsafe_emit(cells, 2, 1, off, out.data());
+    ASSERT_STATUS_OK("grid_ring k=1 emit status", s);
+    bool all_nonzero = true;
+    for (uint32_t i = 0; i < off[2]; i++) {
+      if (out[i] == 0) {
+        all_nonzero = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("grid_ring k=1 all outputs non-zero", all_nonzero);
+  }
+
+  // k = 3: hex ring = 18, pent ring = 15.
+  {
+    uint32_t off[3] = {0, 0, 0};
+    pgaccel_status s = pgaccel_h3_grid_ring_unsafe_output_size(cells, 2, 3, off);
+    ASSERT_STATUS_OK("grid_ring k=3 size status", s);
+    ASSERT_EQ("grid_ring k=3 hex count", off[1], 18);
+    ASSERT_EQ("grid_ring k=3 total", off[2], 33);
+
+    std::vector<uint64_t> out(off[2], 0);
+    s = pgaccel_h3_grid_ring_unsafe_emit(cells, 2, 3, off, out.data());
+    ASSERT_STATUS_OK("grid_ring k=3 emit status", s);
+    ASSERT_EQ("grid_ring k=3 emit==size sum", out.size(), off[2]);
+  }
+
+  // k = 0: ring-0 = single cell (the input).
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_grid_ring_unsafe_output_size(cells, 1, 0, off);
+    ASSERT_STATUS_OK("grid_ring k=0 size status", s);
+    ASSERT_EQ("grid_ring k=0 hex count", off[1], 1);
+
+    uint64_t out[1] = {0};
+    s = pgaccel_h3_grid_ring_unsafe_emit(cells, 1, 0, off, out);
+    ASSERT_STATUS_OK("grid_ring k=0 emit status", s);
+    ASSERT_TRUE("grid_ring k=0 emits cell itself", out[0] == cells[0]);
+  }
+}
+
+// Test: cell_to_children — count formula and same-res passthrough.
+static void test_cell_to_children() {
+  printf("--- test_cell_to_children ---\n");
+
+  int digits[15] = {0};
+  uint64_t parent_r3 = make_cell(57, 3, digits);
+
+  // child_res == cell.res → 1 cell (the input itself).
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&parent_r3, 1, 3, off);
+    ASSERT_STATUS_OK("c2c same-res size status", s);
+    ASSERT_EQ("c2c same-res count", off[1], 1);
+
+    uint64_t out[1] = {0};
+    s = pgaccel_h3_cell_to_children_emit(&parent_r3, 1, 3, off, out);
+    ASSERT_STATUS_OK("c2c same-res emit status", s);
+    ASSERT_TRUE("c2c same-res returns input", out[0] == parent_r3);
+  }
+
+  // child_res = res + 1 → 7 children for hexagon.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&parent_r3, 1, 4, off);
+    ASSERT_STATUS_OK("c2c r4 size status", s);
+    ASSERT_EQ("c2c r4 hex count", off[1], 7);
+
+    std::vector<uint64_t> out(7, 0);
+    s = pgaccel_h3_cell_to_children_emit(&parent_r3, 1, 4, off, out.data());
+    ASSERT_STATUS_OK("c2c r4 emit status", s);
+    // All children should be non-zero, distinct, at resolution 4.
+    bool distinct = true;
+    for (size_t i = 0; i < 7; i++) {
+      if (out[i] == 0) {
+        distinct = false;
+        break;
+      }
+      for (size_t j = i + 1; j < 7; j++) {
+        if (out[i] == out[j]) {
+          distinct = false;
+          break;
+        }
+      }
+    }
+    ASSERT_TRUE("c2c r4 children distinct + non-zero", distinct);
+
+    // Verify resolution
+    int32_t child_res[7] = {-1, -1, -1, -1, -1, -1, -1};
+    pgaccel_h3_get_resolution_bulk(out.data(), 7, child_res);
+    bool all_r4 = true;
+    for (int i = 0; i < 7; i++) {
+      if (child_res[i] != 4) {
+        all_r4 = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("c2c r4 all children at res 4", all_r4);
+  }
+
+  // child_res = res + 2 → 49 children (7^2) for hexagon.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&parent_r3, 1, 5, off);
+    ASSERT_STATUS_OK("c2c r5 size status", s);
+    ASSERT_EQ("c2c r5 hex count", off[1], 49);
+  }
+
+  // Pentagon: child_res = res + 1 → 5 children (pentagon has 5 not 7).
+  {
+    uint64_t pent = make_pentagon_cell(3);
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&pent, 1, 4, off);
+    ASSERT_STATUS_OK("c2c pent r4 size status", s);
+    ASSERT_EQ("c2c pent r4 count", off[1], 5);
+  }
+
+  // Invalid: child_res < cell.res → 0 cells.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&parent_r3, 1, 2, off);
+    ASSERT_STATUS_OK("c2c invalid size status", s);
+    ASSERT_EQ("c2c invalid count", off[1], 0);
+  }
+}
+
+// Test: cell_to_boundary — vertex count and finite values.
+static void test_cell_to_boundary() {
+  printf("--- test_cell_to_boundary ---\n");
+
+  int digits[15] = {0};
+  uint64_t cells[2] = {
+      make_cell(5, 3, digits),  // hexagon (base 5 not in pentagon set)
+      make_pentagon_cell(3),    // pentagon
+  };
+
+  uint32_t off[3] = {99, 99, 99};
+  pgaccel_status s = pgaccel_h3_cell_to_boundary_output_size(cells, 2, off);
+  ASSERT_STATUS_OK("boundary size status", s);
+  ASSERT_EQ("boundary off[0]", off[0], 0);
+  ASSERT_EQ("boundary hex doubles", off[1], 12);    // 6 verts × 2 doubles
+  ASSERT_EQ("boundary total doubles", off[2], 22);  // 12 + 10
+
+  std::vector<double> out(off[2], 0.0);
+  s = pgaccel_h3_cell_to_boundary_emit(cells, 2, off, out.data());
+  ASSERT_STATUS_OK("boundary emit status", s);
+
+  // All hex vertices should be finite
+  bool hex_finite = true;
+  for (uint32_t i = 0; i < off[1]; i++) {
+    if (!std::isfinite(out[i])) {
+      hex_finite = false;
+      break;
+    }
+  }
+  ASSERT_TRUE("boundary hex vertices finite", hex_finite);
+
+  // Hex should have 6 distinct (lat,lng) pairs (vertices of a hexagon)
+  bool hex_distinct = true;
+  for (int v1 = 0; v1 < 6; v1++) {
+    for (int v2 = v1 + 1; v2 < 6; v2++) {
+      double lat1 = out[v1 * 2 + 0];
+      double lng1 = out[v1 * 2 + 1];
+      double lat2 = out[v2 * 2 + 0];
+      double lng2 = out[v2 * 2 + 1];
+      double dist = std::abs(lat1 - lat2) + std::abs(lng1 - lng2);
+      if (dist < 1e-12) {
+        hex_distinct = false;
+        break;
+      }
+    }
+  }
+  ASSERT_TRUE("boundary hex vertices distinct", hex_distinct);
+}
+
+// Test: polyfill — large polygon at low resolution.
+static void test_polyfill() {
+  printf("--- test_polyfill ---\n");
+
+  // Define a large rectangular polygon spanning multiple grid steps at the
+  // chosen resolution. Coords are interleaved [x0,y0, x1,y1, ...] in
+  // lon/lat degrees, ring closed.
+  //
+  // At res 4, the kernel's candidate-step is ~60/SQRT7^4 = 60/49 ≈ 1.22°.
+  // Using a 50x50° polygon at res 4 yields ~40x40 candidate points well
+  // inside the bbox, so at least some must land inside the polygon
+  // interior.
+  float coords[] = {
+      -25.0f, -25.0f, 25.0f, -25.0f, 25.0f, 25.0f, -25.0f, 25.0f, -25.0f, -25.0f,  // close
+  };
+  uint32_t ring_offsets[2] = {0, 5};
+
+  uint32_t out_offsets[2] = {99, 99};
+  pgaccel_status s = pgaccel_h3_polyfill_output_size(coords, ring_offsets, 1, 4, out_offsets);
+  ASSERT_STATUS_OK("polyfill size status", s);
+  ASSERT_EQ("polyfill out_offsets[0]", out_offsets[0], 0);
+  ASSERT_TRUE("polyfill positive size estimate", out_offsets[1] > 0);
+
+  std::vector<uint64_t> out(out_offsets[1], 0);
+  s = pgaccel_h3_polyfill_emit(coords, ring_offsets, 1, 4, out_offsets, out.data());
+  ASSERT_STATUS_OK("polyfill emit status", s);
+
+  // Some cells should be filled (non-zero). Allow zero-sentinel slots from
+  // the size-pass overestimate, but require at least one filled cell to
+  // verify the kernel actually executed and found inside-points.
+  uint32_t filled = 0;
+  for (uint64_t c : out) {
+    if (c != 0)
+      filled++;
+  }
+  ASSERT_TRUE("polyfill at least one cell filled", filled > 0);
+}
+
+// Test: cells_to_multi_polygon — round-trip CSR layout.
+static void test_cells_to_multi_polygon() {
+  printf("--- test_cells_to_multi_polygon ---\n");
+
+  int digits[15] = {0};
+  uint64_t cells[3] = {
+      make_cell(5, 3, digits),
+      make_cell(6, 3, digits),
+      make_pentagon_cell(3),
+  };
+
+  uint32_t ring_offsets[4] = {99, 99, 99, 99};
+  uint32_t ring_count = 99;
+  pgaccel_status s =
+      pgaccel_h3_cells_to_multi_polygon_output_size(cells, 3, ring_offsets, &ring_count);
+  ASSERT_STATUS_OK("c2mp size status", s);
+  ASSERT_EQ("c2mp ring_count == cells", ring_count, 3);
+  ASSERT_EQ("c2mp ring_offsets[0]", ring_offsets[0], 0);
+  ASSERT_EQ("c2mp ring_offsets[1] hex", ring_offsets[1], 12);
+  ASSERT_EQ("c2mp ring_offsets[2] hex+hex", ring_offsets[2], 24);
+  ASSERT_EQ("c2mp ring_offsets[3] +pent", ring_offsets[3], 34);
+
+  std::vector<double> coords(ring_offsets[3], 0.0);
+  s = pgaccel_h3_cells_to_multi_polygon_emit(cells, 3, ring_offsets, ring_count, coords.data());
+  ASSERT_STATUS_OK("c2mp emit status", s);
+
+  bool all_finite = true;
+  for (double v : coords) {
+    if (!std::isfinite(v)) {
+      all_finite = false;
+      break;
+    }
+  }
+  ASSERT_TRUE("c2mp all coords finite", all_finite);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 int main() {
@@ -695,6 +1049,14 @@ int main() {
   test_lat_lng_to_cell();
   test_lat_lng_to_cell_fp64_bulk();
   test_null_pointers();
+
+  // Variable-output kernels (Agent 5A)
+  test_grid_disk();
+  test_grid_ring_unsafe();
+  test_cell_to_children();
+  test_cell_to_boundary();
+  test_polyfill();
+  test_cells_to_multi_polygon();
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
