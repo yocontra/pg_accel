@@ -237,10 +237,7 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
 
     // Look up the registry entry to get the strategy + field metadata.
     registry::lazy_init();
-    let Some(entry) = registry::global_registry()
-        .lookup(priv_data.fn_oid)
-        .cloned()
-    else {
+    let Some(entry) = registry::global_registry().lookup(priv_data.fn_oid) else {
         pgrx::warning!(
             "pg_accel: function_scan init: fn_oid={} not registered",
             u32::from(priv_data.fn_oid),
@@ -613,34 +610,33 @@ pub(super) unsafe fn dispatched_ok(executor: *mut std::ffi::c_void) -> bool {
 // ---------------------------------------------------------------------------
 //
 // These tests exercise the FunctionScan injection chain end-to-end where the
-// supporting SQL extension (h3 / postgis_raster) is **pre-installed** in the
-// pgrx_tests DB.
+// supporting SQL extension (h3 / postgis_raster) is `CREATE EXTENSION`-d
+// inside the test function (the pgrx_tests harness does not pre-install
+// adapters in the test DB).
 //
-// **Known limitation: registry-init ordering.** The pgrx test framework
-// creates a fresh `pgrx_tests` database per `cargo test` run and does not
-// pre-install h3 or postgis. The tests below `CREATE EXTENSION IF NOT
-// EXISTS h3 CASCADE` themselves to bring it in, but
-// `crate::engine::registry::lazy_init` is a one-shot OnceLock that fires
-// on the *first* planner-hook invocation in the backend — typically a
-// SELECT inside the CREATE EXTENSION script, before h3 is fully loaded.
-// Subsequent FunctionScan queries find an empty registry, the projectset
-// hook bails (`fn_oid not in registry`), and PG falls back to its native
-// `FunctionScan` path. The row counts these tests assert still match
-// (PG native h3_grid_disk produces the same 7 cells as the GPU dispatch
-// would), but they do NOT prove the GPU FunctionScan plan was used.
+// **Registry-init ordering: resolved 2026-05-02.** `lazy_init` still fires
+// once per backend (typically on a SELECT inside the CREATE EXTENSION
+// script, before h3 is fully loaded). What changed is that
+// `AdapterRegistry::lookup` now auto-retries via
+// `registry::resolve_oids_again()` on a miss (see
+// `pg_accel/src/engine/registry.rs:374`), so the projectset hook's lookup
+// now sees the freshly-installed h3 OIDs the second time around within
+// the same planner pass.
 //
-// To genuinely prove the injection chain runs, a follow-up patch needs:
-//   - Either a `registry::reset_for_test()` /
-//     `registry::resolve_oids_again()` API that re-runs adapter resolution
-//     on demand, or
-//   - A test fixture that pre-installs h3 in the pgrx-managed PG via
-//     `pgrx.toml` `extra_extensions` (does not exist today).
-//
-// In the interim, these tests serve as **smoke checks**: they exercise
-// the FunctionScan code paths, verify the new vtables don't crash on
-// load, and confirm that PG's native FunctionScan still produces correct
-// rows when our hook bails — i.e., adding `GpuStrategy::FunctionScan`
-// did not regress existing FunctionScan queries.
+// **Known follow-up (2026-05-02): GPU FunctionScan executor crash.** The
+// fix above unmasked a pre-existing bug in `init_state` at line 279
+// (`pg_sys::ExecSetSlotDescriptor`). Pre-fix, the projectset hook always
+// bailed on a registry miss, so PG ran its native `FunctionScan` and the
+// row-count assertions below passed by coincidence (PG's native h3 path
+// emits the same 7 cells as the GPU path would). Post-fix, the registry
+// retry succeeds — verified by the PG log line
+// `pg_accel: registry re-resolve: activating new adapter 'h3'` —
+// the planner injects the GpuAccelFunctionScan path, but
+// `BeginCustomScan` → `init_state` then crashes via PG `ereport(ERROR)`
+// surfacing as `<non-string panic payload>` in the panic log. The 3
+// existing row-count tests now FAIL with this crash; they are the
+// honest signal that the executor needs fixing. Tracked in `TODO.md`
+// under the "H3 var-output ops — wiring landed" entry.
 
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]

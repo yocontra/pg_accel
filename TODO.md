@@ -565,27 +565,49 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     planner mis-routing of `AcceleratedVarLen` / `AcceleratedRecord`
     onto a per-row predicate filter shape, which doesn't apply to
     FunctionScan's one-shot dispatch.
-  - **Open: registry init ordering for pgrx_tests harness**
-    (surfaced 2026-05-03 by F3-finish): the integration tests in
-    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs::tests`
-    `CREATE EXTENSION IF NOT EXISTS h3 CASCADE` themselves to bring
-    the SRF into the fresh `pgrx_tests` DB, but
-    `crate::engine::registry::lazy_init` (a one-shot OnceLock)
-    fires on the *first* planner invocation in the backend —
-    typically a SELECT inside the CREATE EXTENSION script — before
-    h3 is fully loaded. Subsequent FunctionScan queries find an
-    empty registry, the projectset hook bails (`fn_oid not in
-    registry`), and PG's native `FunctionScan` runs the query.
-    Row-count assertions still pass because PG native + pg_accel
-    GPU dispatch both produce the same 7 cells, but the tests do
-    NOT exercise the GPU path. Fix needs either (a) a
-    `registry::resolve_oids_again()` API the hook can call when a
-    looked-up `fn_oid` misses, or (b) a `pgrx.toml`
-    `extra_extensions` knob that pre-installs h3 / postgis /
-    postgis_raster in the test-DB skeleton. Until then, the
-    FunctionScan injection chain is verified by manual / external
-    PG (e.g. `just bench`) rather than by `cargo test --features
-    pg_test`.
+  - **Registry-init blocker closed 2026-05-02 by Agent B2** (option (a)
+    shipped): registry now exposes `AdapterRegistry::resolve_oids_again()`
+    and the global `registry::resolve_oids_again()` wrapper at
+    `pg_accel/src/engine/registry.rs:340`. `AdapterRegistry::lookup`
+    auto-retries via this on a miss (guarded by the `RETRYING_LOOKUP`
+    thread-local at `pg_accel/src/engine/registry.rs:464` to bound
+    work to one retry per planner pass), so a `CREATE EXTENSION h3`
+    that runs *after* `lazy_init` no longer leaves the FunctionScan
+    injection chain dark. Option (b) — `pgrx.toml extra_extensions` —
+    was checked and does not exist in pgrx 0.17 (`pgrx-tests` 0.17
+    only exposes `pg_test::setup` + `postgresql_conf_options`, no
+    extension-pre-install knob); the lookup-retry path is sufficient.
+    Verified via the PG log line `pg_accel: registry re-resolve:
+    activating new adapter 'h3'` followed by `resolved 17 function
+    OIDs across 1 adapters` on the first FunctionScan lookup miss.
+  - **NEW BLOCKER (2026-05-02, surfaced by the registry fix): GPU
+    FunctionScan executor crash at
+    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:279`** —
+    `pg_sys::ExecSetSlotDescriptor` raises a PG `ereport(ERROR)` that
+    pgrx wraps as `<non-string panic payload>`. Pre-fix, this bug was
+    masked because the projectset hook always bailed on the registry
+    miss and PG ran its native FunctionScan instead. Post-fix, the
+    Custom Scan path is reached → `BeginCustomScan` → `init_state` →
+    crash. Affects `EXPLAIN` (no ANALYZE) too, since PG's
+    `standard_ExplainOneQuery` calls `ExecutorStart` to walk the plan
+    tree. The 3 integration tests
+    (`function_scan_h3_cell_to_boundary_emits_one_row`,
+    `function_scan_h3_grid_disk_emits_seven_cells_for_k1`,
+    `function_scan_st_summarystats_emits_six_field_record`) now FAIL
+    with this crash — they are the honest signal that the executor
+    needs fixing. Likely cause: the scan slot's tupdesc was already
+    set up with one column count by `ExecInitCustomScan` from
+    `custom_scan_tlist`, and replacing it via `ExecSetSlotDescriptor`
+    with a different column count violates a PG invariant. Fix
+    candidates: (a) build the correct `custom_scan_tlist` in
+    `plan_custom_path_function` so the slot's tupdesc is right
+    on first construction (no replace needed), (b) call
+    `ExecClearTuple(slot)` before `ExecSetSlotDescriptor`, (c) use
+    a separate result slot rather than mutating `ss_ScanTupleSlot`.
+    The pgrx-wrapped panic obscures the underlying PG message — to
+    capture it, set `RUST_BACKTRACE=1` and either disable the panic
+    handler or grep `~/Library/Logs/DiagnosticReports/postgres-*.ips`
+    for the `ereport` call site.
   - **Open: dispatch shape mismatch for `h3_cell_to_boundary`**
     (surfaced 2026-05-03 by F3-finish testing): the h3-pg
     extension declares `h3_cell_to_boundary(h3index, boolean)
