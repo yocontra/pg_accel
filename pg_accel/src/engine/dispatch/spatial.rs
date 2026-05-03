@@ -179,6 +179,12 @@ unsafe fn try_bulk_point_in_polygon(
 /// for indexed lookups). For truly arbitrary pairs, defers to
 /// `Deferred`.
 ///
+/// `qual_datums` carries every constant argument captured from the call
+/// site in positional order. For 2-arg predicates the constant geometry is
+/// `qual_datums[0]`; for `ST_DWithin(g, g, threshold)` the threshold is
+/// `qual_datums[1]`. Single-arg functions (`ST_Area`, `ST_Length`) pass an
+/// empty slice.
+///
 /// # Safety
 ///
 /// Must be called on the **main backend thread**.
@@ -187,13 +193,13 @@ pub unsafe fn dispatch_gpu_spatial(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     fn_info: &pgrx::pg_sys::FmgrInfo,
     is_strict: bool,
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
     _skip_bbox: bool,
 ) -> DispatchResult {
     // Single-arg spatial functions (st_area, eventually st_length /
-    // st_x / st_y) — qual_datum is always None because there's no
-    // constant second argument. Branch off before the two-arg gate.
-    if qual_datum.is_none() {
+    // st_x / st_y) — qual_datums is empty because there's no constant
+    // second argument. Branch off before the two-arg gate.
+    if qual_datums.is_empty() {
         let fn_name = registry::global_registry()
             .lookup(fn_info.fn_oid)
             .map(|e| e.name);
@@ -202,15 +208,14 @@ pub unsafe fn dispatch_gpu_spatial(
             Some("st_length") => return unsafe { dispatch_gpu_st_length(batch) },
             _ => {
                 // Other single-arg names not yet wired — defer.
-                pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datum, deferring");
+                pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datums, deferring");
                 return DispatchResult::Deferred;
             }
         }
     }
-    // We know qual_datum is Some here (the None branch returned above).
-    let Some((qual_d, qual_null)) = qual_datum else {
-        unreachable!("qual_datum is Some after the None branch returned above")
-    };
+    // We know qual_datums has at least one element (the empty branch
+    // returned above). The first const is the constant geometry.
+    let (qual_d, qual_null, _qual_typid) = qual_datums[0];
 
     // Strict: if the constant arg is NULL, every result is NULL.
     if is_strict && qual_null {
@@ -317,10 +322,11 @@ pub unsafe fn dispatch_gpu_spatial(
     //   predicate hits its dedicated `pgaccel_st_*_bulk` SYCL kernel
     //   (Contains has its own point-in-ring fast path; the four
     //   algorithmic predicates were landed by Agent 2A).
-    // - st_dwithin: still deferred. The threshold (3rd argument) doesn't
-    //   ride the 2-arg dispatch interface; wiring it requires a separate
-    //   path that carries the threshold Datum through. Documented gap;
-    //   not silently substituting Intersects (which would be wrong).
+    // - st_dwithin: 3-arg predicate `ST_DWithin(geom, geom, threshold)`.
+    //   The threshold rides on `qual_datums[1]` (the new multi-arg
+    //   carrier wired by Phase II Agent F1) and is passed into
+    //   `SpatialPredicate::DWithin` so the Haversine kernel uses the
+    //   correct distance gate instead of a wrong Intersects fallback.
     let fn_name = registry::global_registry()
         .lookup(fn_info.fn_oid)
         .map(|e| e.name);
@@ -334,11 +340,32 @@ pub unsafe fn dispatch_gpu_spatial(
         Some("st_overlaps") => Some(three_layer::SpatialPredicate::Overlaps),
         Some("st_disjoint") => Some(three_layer::SpatialPredicate::Disjoint),
         Some("st_dwithin") => {
-            // Threshold not plumbed through 2-arg dispatch. Rather than
-            // fake-success against an Intersects kernel (which would
-            // ignore the threshold and over-match), defer cleanly so PG
-            // runs PostGIS ST_DWithin natively.
-            return DispatchResult::Deferred;
+            // 3-arg `ST_DWithin(geom, geom, threshold)` — the threshold
+            // is captured at position 1 in qual_datums (qual_datums[0]
+            // is the constant geometry already extracted above).
+            let Some(&(threshold_datum, threshold_null, _threshold_typid)) = qual_datums.get(1)
+            else {
+                pgrx::debug1!("pg_accel: st_dwithin: missing threshold qual_datums[1], deferring");
+                return DispatchResult::Deferred;
+            };
+            if threshold_null {
+                // NULL threshold → strict semantics yield NULL per row.
+                return DispatchResult::Accelerated(vec![
+                    (pgrx::pg_sys::Datum::from(0), true);
+                    batch.len()
+                ]);
+            }
+            // PostGIS ST_DWithin's third arg is float8 (Datum carries the
+            // f64 bit pattern). Decode and feed the spatial_eval pipeline.
+            let threshold = f64::from_bits(threshold_datum.value() as u64);
+            if !threshold.is_finite() || threshold < 0.0 {
+                pgrx::debug1!(
+                    "pg_accel: st_dwithin: non-finite or negative threshold {}, deferring",
+                    threshold
+                );
+                return DispatchResult::Deferred;
+            }
+            Some(three_layer::SpatialPredicate::DWithin(threshold))
         }
         _ => None,
     };

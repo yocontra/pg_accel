@@ -99,6 +99,14 @@ pub enum DispatchResult {
 /// Route a batch of `(Datum, is_null)` pairs to the appropriate execution
 /// strategy.
 ///
+/// `qual_datums` carries every constant argument captured from the call
+/// site in positional source-list order. The first element is the original
+/// 2-arg predicate's constant (e.g. the constant geometry); subsequent
+/// elements are the additional args required by multi-arg ops
+/// (`ST_DWithin` threshold, `ST_Resample` target dims,
+/// `ST_Hillshade` sun angles, etc.). Each entry is
+/// `(datum, is_null, type_oid)`.
+///
 /// # Safety
 ///
 /// Must be called on the main backend thread only. PostgreSQL's
@@ -110,24 +118,24 @@ pub unsafe fn dispatch(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     fn_info: &pgrx::pg_sys::FmgrInfo,
     is_strict: bool,
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
     skip_bbox: bool,
 ) -> DispatchResult {
     match strategy {
         AccelStrategy::GpuSpatial => {
             // SAFETY: Caller guarantees main backend thread.
             unsafe {
-                spatial::dispatch_gpu_spatial(batch, fn_info, is_strict, qual_datum, skip_bbox)
+                spatial::dispatch_gpu_spatial(batch, fn_info, is_strict, qual_datums, skip_bbox)
             }
         }
         AccelStrategy::GpuH3 => {
             // SAFETY: Caller guarantees main backend thread.
-            unsafe { h3::dispatch_gpu_h3(batch, fn_info, is_strict, fn_info.fn_oid, qual_datum) }
+            unsafe { h3::dispatch_gpu_h3(batch, fn_info, is_strict, fn_info.fn_oid, qual_datums) }
         }
         AccelStrategy::GpuRaster => {
             // SAFETY: Caller guarantees main backend thread.
             unsafe {
-                raster::dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid, qual_datum)
+                raster::dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid, qual_datums)
             }
         }
         AccelStrategy::GpuExpr

@@ -18,6 +18,10 @@ use super::{DispatchResult, FcinfoWith2Args};
 /// cell values from the batch, dispatches to the appropriate GPU kernel,
 /// and returns GPU-computed results directly.
 ///
+/// `qual_datums` carries every constant argument in positional order. The
+/// 2-arg H3 ops (`h3_grid_disk(cell, k)`, `h3_cell_to_parent(cell, res)`,
+/// etc.) read the second argument from `qual_datums[0]`.
+///
 /// # Safety
 ///
 /// Must be called on the **main backend thread**.
@@ -27,10 +31,15 @@ pub unsafe fn dispatch_gpu_h3(
     _fn_info: &pgrx::pg_sys::FmgrInfo,
     _is_strict: bool,
     fn_oid: pgrx::pg_sys::Oid,
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
 ) -> DispatchResult {
     // Look up the function name to route to the correct GPU kernel.
     let fn_name = registry::global_registry().lookup(fn_oid).map(|e| e.name);
+
+    // First constant arg, if present (most H3 ops take a single scalar
+    // const after the cell column: k for grid_disk, res for parent, etc.).
+    let qual_datum: Option<(pgrx::pg_sys::Datum, bool)> =
+        qual_datums.first().map(|&(d, n, _)| (d, n));
 
     // ── Variable-output H3 ops ─────────────────────────────────────
     // Each input row expands to a CSR-laid-out list of output cells (or

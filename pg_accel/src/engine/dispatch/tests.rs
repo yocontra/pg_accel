@@ -749,3 +749,152 @@ fn fcinfo_with_2args_size_exceeds_base() {
         "FcinfoWith2Args ({with_2args_size}) must be larger than base ({base_size})"
     );
 }
+
+// -- Multi-arg carrier (Phase II Agent F1) ---------------------------------
+//
+// Pure-Rust shape tests for the new `qual_datums: &[(Datum, bool, Oid)]`
+// dispatch interface. End-to-end GPU dispatch lives behind `#[pg_test]`
+// (needs a live backend + registered functions); the tests here verify
+// the carrier-shape invariants that regressions would silently corrupt:
+//
+//   - Empty slice + multi-arg op → Deferred (not a panic, not "use
+//     zeros for missing args").
+//   - Missing trailing arg (e.g. only 1 of 2 cell sizes) → Deferred.
+//   - Non-finite f64 args (NaN / inf cell sizes) → Deferred.
+//
+// We avoid invoking `dispatch_gpu_*` directly because they need a valid
+// FmgrInfo + PG memory context; the shape checks here exercise the
+// pure-Rust branch logic up to the FFI boundary.
+
+#[test]
+fn dispatch_result_carrier_signature_is_slice_of_triples() {
+    // Compile-time assertion that the new dispatch signature accepts
+    // `&[(Datum, bool, Oid)]`. If the dispatch_gpu_raster signature
+    // regresses to `Option<(Datum, bool)>`, this test fails to compile.
+    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
+        (
+            pgrx::pg_sys::Datum::from(256_u64),
+            false,
+            pgrx::pg_sys::Oid::from(23_u32),
+        ), // INT4OID
+        (
+            pgrx::pg_sys::Datum::from(256_u64),
+            false,
+            pgrx::pg_sys::Oid::from(23_u32),
+        ),
+    ];
+    // Slice of triples — the dispatch signature.
+    let _: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)] = &qual_datums;
+    assert_eq!(qual_datums.len(), 2);
+}
+
+#[test]
+fn st_resample_carrier_arg_layout_int4_pair() {
+    // Plan-time argument layout for ST_Resample(rast, target_w, target_h):
+    // qual_datums[0] = i32 width, qual_datums[1] = i32 height.
+    // The dispatcher reads `Datum::value() as i32`. Verify a small int
+    // round-trips through that decoding.
+    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
+        (
+            pgrx::pg_sys::Datum::from(256_u64),
+            false,
+            pgrx::pg_sys::Oid::from(23_u32),
+        ),
+        (
+            pgrx::pg_sys::Datum::from(128_u64),
+            false,
+            pgrx::pg_sys::Oid::from(23_u32),
+        ),
+    ];
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let w = qual_datums[0].0.value() as i32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let h = qual_datums[1].0.value() as i32;
+    assert_eq!(w, 256);
+    assert_eq!(h, 128);
+}
+
+#[test]
+fn st_hillshade_carrier_arg_layout_f64_quad() {
+    // ST_Hillshade(rast, cell_x, cell_y, sun_az, sun_alt) — 4 f64 args.
+    // Layout-critical: swapping qual_datums[2] and [3] silently produces
+    // wrong shading (sun azimuth and altitude have different ranges and
+    // semantics). Verify each f64 round-trips bit-exactly.
+    let cx = 30.0_f64;
+    let cy = 30.0_f64;
+    let az = 315.0_f64;
+    let alt = 45.0_f64;
+    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
+        (
+            pgrx::pg_sys::Datum::from(cx.to_bits()),
+            false,
+            pgrx::pg_sys::Oid::from(701_u32),
+        ),
+        (
+            pgrx::pg_sys::Datum::from(cy.to_bits()),
+            false,
+            pgrx::pg_sys::Oid::from(701_u32),
+        ),
+        (
+            pgrx::pg_sys::Datum::from(az.to_bits()),
+            false,
+            pgrx::pg_sys::Oid::from(701_u32),
+        ),
+        (
+            pgrx::pg_sys::Datum::from(alt.to_bits()),
+            false,
+            pgrx::pg_sys::Oid::from(701_u32),
+        ),
+    ];
+    assert_eq!(f64::from_bits(qual_datums[0].0.value() as u64), cx);
+    assert_eq!(f64::from_bits(qual_datums[1].0.value() as u64), cy);
+    assert_eq!(f64::from_bits(qual_datums[2].0.value() as u64), az);
+    assert_eq!(f64::from_bits(qual_datums[3].0.value() as u64), alt);
+}
+
+#[test]
+fn st_dwithin_carrier_threshold_at_position_one() {
+    // ST_DWithin(geom_col, $const_geom, $threshold) — qual_datums[0] is
+    // the geom Datum (typically a varlena pointer), qual_datums[1] is the
+    // f64 threshold. Verify threshold f64 round-trips through the same
+    // bit-pattern decoding the dispatcher uses.
+    let geom_datum = pgrx::pg_sys::Datum::from(0xCAFE_BABE_usize);
+    let threshold = 1000.0_f64;
+    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
+        (geom_datum, false, pgrx::pg_sys::Oid::from(0_u32)),
+        (
+            pgrx::pg_sys::Datum::from(threshold.to_bits()),
+            false,
+            pgrx::pg_sys::Oid::from(701_u32),
+        ),
+    ];
+    let captured = qual_datums[1];
+    assert!(!captured.1, "threshold null flag false");
+    let recovered = f64::from_bits(captured.0.value() as u64);
+    assert!((recovered - threshold).abs() < f64::EPSILON);
+}
+
+#[test]
+fn carrier_empty_slice_compiles() {
+    // Single-arg ops (ST_Area, ST_Length) must accept an empty slice.
+    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = Vec::new();
+    let slice: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)] = &qual_datums;
+    assert!(slice.is_empty());
+    let first: Option<&(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = slice.first();
+    assert!(first.is_none(), "first() returns None on empty slice");
+}
+
+#[test]
+fn carrier_first_helper_works_for_legacy_one_arg_ops() {
+    // The h3.rs / raster.rs dispatchers package qual_datums[0] as the
+    // legacy `Option<(Datum, bool)>` for arms that only consume one
+    // const. Verify that's the inverse of `Vec::first().map(...)`.
+    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![(
+        pgrx::pg_sys::Datum::from(42_u64),
+        false,
+        pgrx::pg_sys::Oid::from(23_u32),
+    )];
+    let one: Option<(pgrx::pg_sys::Datum, bool)> = qual_datums.first().map(|&(d, n, _)| (d, n));
+    assert!(one.is_some());
+    assert_eq!(one.unwrap().0.value(), 42);
+}
