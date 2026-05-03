@@ -260,40 +260,60 @@ shows GPU Custom Scan inside a Gather and produces identical results.
   CustomScan(GpuAccel)` with `parallel_safe=true` on the partial
   CustomPath. (PreAgg-strategy parallelisation is its own entry.)
 
-### PreAgg executor refactor for parallel safety
+### PreAgg executor refactor for parallel safety — split into B5a + B5b
 
-- **What** (surfaced 2026-05-03 by Agent P1): `PreAggExecState`
-  opens the fact table directly via `table_open(scan_oid)` (see
-  `pg_accel/src/engine/executor/preagg/mod.rs` and `partial_emit.rs`).
-  Under PG's parallel workers each worker would re-open the same
-  fact relation and re-scan it from row 0 — N workers means N×
-  duplicate input rows, which over-aggregates by exactly N. This
-  is why P1's planner chain falls back to standard `Agg` strategy
-  rather than `PreAgg` (see "Preagg parallel path" entry above).
+- **What** (refreshed 2026-05-03 after Agent B5 escalated per ban #9):
+  `PreAggExecState` opens the fact table directly via
+  `table_open(scan_oid)` (see `pg_accel/src/engine/executor/preagg/mod.rs`
+  and `partial_emit.rs`). Under PG's parallel workers each worker would
+  re-open the same fact relation and re-scan it from row 0 — N workers
+  means N× duplicate input rows, which over-aggregates by exactly N.
+  P1's planner chain falls back to standard `Agg` strategy rather than
+  `PreAgg` (see "Preagg parallel path" entry above) as the workaround.
   MAJOR (correctness — under parallel, PreAgg as currently coded
   would silently produce wrong sums).
-- **Why**: To unlock star-join fusion (the original PreAgg value
-  prop) under parallel execution, the executor needs to delegate
-  fact-table scanning to a wrapped child PlanState (a per-worker
-  parallel scan) instead of opening the relation directly.
-- **How**:
-  - Refactor `PreAggExecState` to take a child PlanState (the
-    fact-table scan) rather than a relation OID + manual table_open.
-  - In `begin_custom_scan` for `GpuStrategy::PreAgg`, wire the
-    child scan through `cscanstate->ss.ps.lefttree` so each worker
-    gets its own portion of the rows via PG's existing parallel-
-    scan partitioning.
-  - Once landed: flip P1's chain in `preagg_partial::try_inject`
-    from `agg_path_methods()` + standard `create_agg_path` over to
-    a true `PreAgg` CustomPath that exploits the
-    `PreAggPrivData::partial` slot already wired by Agent 1B.
-- Depends on: Nothing — pure executor refactor, no upstream
-  dependency.
-- **Done when**: A star-join + GROUP BY query runs PreAgg
-  inside parallel workers without N-fold over-aggregation;
-  `pg_accel/src/engine/executor/preagg/partial_emit.rs::PreaggPartialState`
-  is exercised by an EXPLAIN ANALYZE showing the per-worker row
-  partitioning.
+- **Why escalated** (Agent B5 ban-#9 evaluation): single-shot refactor
+  surfaced 3 distinct mismatches that aren't safely committable in one
+  atomic chain:
+  1. PreAgg CustomPath has no `lefttree` to wire — `pgaccel_inject_gpu_preagg`
+     (`pg_accel/src/engine/ffi/planner_hooks/mod.rs:1069-1074`) attaches
+     only `inner_paths` (dimensions) to `custom_paths`. There is no
+     fact-side path attached. Adding one requires re-indexing
+     `materialize_dimensions` to skip it.
+  2. **42 heap-direct call sites** across `preagg/mod.rs` + `preagg/partial.rs`
+     use `HeapTupleHeader` + `try_fast_read_heap_pub` (heap offset math,
+     NULL bitmap walking). All of `heap_read_i64`, `heap_read_f64`,
+     `fused_eval_cmp`, `apply_fact_filter`, `build_group_key`,
+     `extract_fact_group_key`, `scan_and_accumulate`'s extractors, and
+     lazy-init `AttExtractInfo::new` need slot-based equivalents
+     (`slot_getallattrs` + `tts_values[i]` decoding). ~150-line read-side
+     rewrite per call-site type.
+  3. Cost gate at `planner_hooks/mod.rs:1018-1034` compares against PG
+     serial best, not parallel — biases against parallel paths. Verifying
+     parallel correctness requires a GUC override path or carefully sized
+     fixture; easy to ship a test that passes for the wrong reason (PG
+     falling back to its own parallel HashAgg).
+- **How — split into 2 independently-verifiable phases**:
+  - **B5a (planner-side, no exec changes)**: Rework
+    `pgaccel_inject_gpu_preagg` to attach the fact-side path as
+    `custom_paths[0]` behind a feature flag (e.g.
+    `pg_accel.preagg_parallel_safe` GUC, default false). Re-index
+    `materialize_dimensions` to skip slot 0. Mark `parallel_safe = true`
+    only when the flag is on. Keep executor heap-direct (no scan
+    refactor). Verifies the planner chain shape change in isolation.
+  - **B5b (exec-side, gated by the flag)**: Introduce
+    `PreAggExecState::set_fact_child(child_ps)` and a parallel
+    slot-based scan path. Route `scan_and_accumulate` to it when the
+    child is set; falls back to today's heap-direct path otherwise.
+    Add the parallel-correctness test gated on the flag (parallel SUM
+    must match serial SUM exactly). Once verified, flip the GUC default
+    to true and remove the heap-direct path in a separate cleanup PR.
+- Depends on: Nothing — pure pg_accel work, no upstream dependency.
+  But sequencing matters (B5a → B5b).
+- **Done when**: A star-join + GROUP BY query runs PreAgg inside
+  parallel workers without N-fold over-aggregation; the
+  `pg_accel.preagg_parallel_safe = on` GUC is the default;
+  heap-direct fallback path can be removed in a separate cleanup PR.
 
 ### Window executor has no partial path
 
