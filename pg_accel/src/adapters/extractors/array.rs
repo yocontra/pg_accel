@@ -157,6 +157,15 @@ impl<'a> PgArray<'a> {
     }
 }
 
+impl<'a> IntoIterator for &PgArray<'a> {
+    type Item = Option<&'a [u8]>;
+    type IntoIter = PgArrayIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 /// Element iterator produced by [`PgArray::iter`].
 pub struct PgArrayIter<'a> {
     elem_len: i16,
@@ -205,14 +214,11 @@ impl<'a> Iterator for PgArrayIter<'a> {
         }
 
         // Compute element bounds.
-        let align = match typalign_bytes(self.elem_align) {
-            Ok(a) => a,
-            Err(_) => {
-                // Stop iteration on a corrupt align; remaining elements
-                // would be unreliable.
-                self.cursor = self.nelems;
-                return None;
-            }
+        let Ok(align) = typalign_bytes(self.elem_align) else {
+            // Stop iteration on a corrupt align; remaining elements would
+            // be unreliable.
+            self.cursor = self.nelems;
+            return None;
         };
 
         // Each element starts at align_up(offset, align). For varlenas
