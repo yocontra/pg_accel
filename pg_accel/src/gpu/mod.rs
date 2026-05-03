@@ -458,8 +458,14 @@ pub fn reduce_max_f64(data: &[f64]) -> Option<f64> {
 // ---------------------------------------------------------------------------
 
 /// Result of a fused f32 multi-aggregate reduce.
+///
+/// Returned by [`reduce_multi_f32`]. The fused-agg executor wiring that
+/// consumes this struct lands in Phase B Agent 1B's
+/// `engine/executor/agg/execute.rs` rewrite. Carrying `#[allow(dead_code)]`
+/// until that wiring lands so `just lint` (`cargo clippy -- -D warnings`)
+/// stays green between Phase A merge and Phase B merge.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // reason: result struct paired with reduce_multi_f32; not yet wired into executor
+#[allow(dead_code)]
 pub struct ReduceMultiF32 {
     pub sum: f32,
     pub min: f32,
@@ -477,8 +483,14 @@ pub struct ReduceMultiF64 {
 }
 
 /// Result of a fused i64 multi-aggregate reduce.
+///
+/// Returned by [`reduce_multi_i64`]. The fused-agg executor wiring that
+/// consumes this struct lands in Phase B Agent 1B's
+/// `engine/executor/agg/execute.rs` rewrite. Carrying `#[allow(dead_code)]`
+/// until that wiring lands so `just lint` (`cargo clippy -- -D warnings`)
+/// stays green between Phase A merge and Phase B merge.
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // reason: result struct paired with reduce_multi_i64; not yet wired into executor
+#[allow(dead_code)]
 pub struct ReduceMultiI64 {
     pub sum: i64,
     pub min: i64,
@@ -487,8 +499,14 @@ pub struct ReduceMultiI64 {
 }
 
 /// GPU-accelerated fused f32 SUM+MIN+MAX+COUNT in a single pass.
+///
+/// Phase B Agent 1B will route the fused-agg executor (currently three
+/// separate `reduce_sum_f32` / `reduce_min_f32` / `reduce_max_f32` calls)
+/// through this single-pass kernel — exposed here so the wiring change
+/// is the only diff at that layer. Carries `#[allow(dead_code)]` until
+/// then so `just lint` stays green between Phase A and Phase B merges.
 #[must_use]
-#[allow(dead_code)] // reason: f32 fused multi-reduce; executor uses individual reduce_* paths today
+#[allow(dead_code)]
 pub fn reduce_multi_f32(data: &[f32]) -> Option<ReduceMultiF32> {
     let _span = tracing::debug_span!("gpu.reduce_multi_f32", n = data.len()).entered();
     if data.is_empty() {
@@ -558,8 +576,14 @@ pub fn reduce_multi_f64(data: &[f64]) -> Option<ReduceMultiF64> {
 }
 
 /// GPU-accelerated fused i64 SUM+MIN+MAX+COUNT in a single pass.
+///
+/// Phase B Agent 1B will route the fused-agg executor (currently three
+/// separate `reduce_sum_i64` / `reduce_min_i64` / `reduce_max_i64` calls)
+/// through this single-pass kernel — exposed here so the wiring change
+/// is the only diff at that layer. Carries `#[allow(dead_code)]` until
+/// then so `just lint` stays green between Phase A and Phase B merges.
 #[must_use]
-#[allow(dead_code)] // reason: i64 fused multi-reduce; executor uses individual reduce_* paths today
+#[allow(dead_code)]
 pub fn reduce_multi_i64(data: &[i64]) -> Option<ReduceMultiI64> {
     let _span = tracing::debug_span!("gpu.reduce_multi_i64", n = data.len()).entered();
     if data.is_empty() {
