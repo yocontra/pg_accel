@@ -489,6 +489,176 @@ fn write_pixel_at(buf: &mut [u8], offset: usize, pt: PixelType, val: f64, le: bo
 }
 
 // ---------------------------------------------------------------------------
+// PostGIS-extension parsers used by raster dispatch (st_clip, st_reclass)
+// ---------------------------------------------------------------------------
+
+/// Extract the outer ring of a POLYGON GSERIALIZED as a flat
+/// `[x0, y0, x1, y1, ...]` `Vec<f64>`.
+///
+/// Used by `ST_Clip(rast, geom)` to translate the polygon argument into
+/// the flat ring-vertex array consumed by `pgaccel_raster_clip`.
+///
+/// The input is a GSERIALIZED v2 POLYGON; only the first (outer) ring is
+/// returned. Inner rings (holes) are intentionally dropped — clip is
+/// expected to mask pixels outside the outer boundary, and PostGIS
+/// pre-decomposes multi-ring clips on its side.
+///
+/// Returns `None` if the GSERIALIZED header is malformed, the geometry
+/// is not a POLYGON, or the polygon has zero rings.
+#[must_use]
+pub fn extract_polygon_ring(gserialized: &[u8]) -> Option<Vec<f64>> {
+    // GSERIALIZED v2 layout (PostGIS lwgeom/gserialized2.c):
+    //   header (8 bytes)
+    //     - srid:   3 bytes
+    //     - flags:  1 byte (bit 0x01 = HAS_BBOX)
+    //     - varhdr: 4 bytes (already stripped if pgrx detoasts)
+    //   bbox (optional, 32 bytes if BBOX flag set for 2D polygons)
+    //   geometry payload:
+    //     u32 type (POLYGON = 3)
+    //     u32 nrings
+    //     u32[] ring_npoints
+    //     f64[] coords (interleaved x, y, ...)
+    //
+    // Minimum length: 8-byte header + 4 (type) + 4 (nrings) + 4
+    // (one ring's npoints) = 20 bytes for the smallest valid polygon.
+    if gserialized.len() < 20 {
+        return None;
+    }
+
+    // Header byte 3 (zero-indexed) holds the GSERIALIZED v2 flags. Bit
+    // 0 = HAS_BBOX. The bbox is 8 fp32 (32 bytes) when present for 2D.
+    let flags = gserialized.get(3).copied()?;
+    let has_bbox = (flags & 0x01) != 0;
+    let geom_start = if has_bbox { 8 + 32 } else { 8 };
+
+    if gserialized.len() < geom_start + 8 {
+        return None;
+    }
+
+    let type_off = geom_start;
+    let geom_type = u32::from_le_bytes(gserialized[type_off..type_off + 4].try_into().ok()?);
+    // POLYGON = 3 (per PostGIS WKB type codes).
+    if geom_type != 3 {
+        return None;
+    }
+
+    let nrings_off = type_off + 4;
+    let nrings = u32::from_le_bytes(gserialized[nrings_off..nrings_off + 4].try_into().ok()?);
+    if nrings == 0 {
+        return None;
+    }
+
+    let ring_npts_off = nrings_off + 4;
+    if gserialized.len() < ring_npts_off + 4 {
+        return None;
+    }
+    let outer_npts = u32::from_le_bytes(
+        gserialized[ring_npts_off..ring_npts_off + 4]
+            .try_into()
+            .ok()?,
+    ) as usize;
+
+    // No alignment padding for 2D polygons (matches polygon.rs:41).
+    let coords_off = ring_npts_off + (nrings as usize) * 4;
+    let coords_bytes = outer_npts * 16; // 16 bytes per (x, y) fp64 pair
+    if gserialized.len() < coords_off + coords_bytes {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(outer_npts * 2);
+    for i in 0..outer_npts {
+        let off = coords_off + i * 16;
+        let x = f64::from_le_bytes(gserialized[off..off + 8].try_into().ok()?);
+        let y = f64::from_le_bytes(gserialized[off + 8..off + 16].try_into().ok()?);
+        out.push(x);
+        out.push(y);
+    }
+    Some(out)
+}
+
+/// One range -> new-value rule (mirrors `pgaccel_reclass_rule`).
+///
+/// Reproduced here in `f64` form so callers can build the rule list
+/// without touching the FFI struct, then convert before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PgaccelReclassRule {
+    pub min_val: f64,
+    pub max_val: f64,
+    pub new_val: f64,
+}
+
+/// Parse a PostGIS reclass-rule string into `Vec<PgaccelReclassRule>`.
+///
+/// PostGIS `ST_Reclass` rule syntax (subset; see PostGIS docs for the
+/// full grammar):
+///
+/// - Whole-rule string: comma-separated `range:newval` pairs.
+/// - `range`: `[lo-hi)`, `(lo-hi]`, `[lo-hi]`, `(lo-hi)` — bracket type
+///   indicates inclusive (`[]`) vs exclusive (`()`). We treat all
+///   variants as `[lo, hi)` for simplicity (the GPU kernel itself uses
+///   half-open intervals at raster_ops.cpp:505).
+/// - Range without brackets: `lo-hi`. Same half-open treatment.
+/// - Negative numbers and decimals are supported.
+///
+/// Examples:
+/// - `"[0-100):0,[100-200):1"` → 2 rules: `[0,100)→0`, `[100,200)→1`
+/// - `"0-50:99, 50-100:200"` (whitespace tolerated) → 2 rules
+///
+/// Returns `Some(Vec::new())` for an empty input or a string that
+/// contains only commas/whitespace; returns `None` only if a non-empty
+/// rule fails to parse (so callers can disambiguate "no rules" from
+/// "malformed rules").
+#[must_use]
+pub fn parse_reclass_rules(text: &str) -> Option<Vec<PgaccelReclassRule>> {
+    let mut rules = Vec::new();
+    for raw in text.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        rules.push(parse_one_rule(token)?);
+    }
+    Some(rules)
+}
+
+fn parse_one_rule(token: &str) -> Option<PgaccelReclassRule> {
+    // Split on the LAST ':' so embedded negatives in the range work.
+    let colon = token.rfind(':')?;
+    let (range_part, new_part) = token.split_at(colon);
+    let new_str = new_part[1..].trim();
+    let new_val: f64 = new_str.parse().ok()?;
+
+    // Strip optional brackets (always treat as half-open [lo, hi) — see
+    // raster_ops.cpp:505 for the kernel's interval semantics).
+    let r = range_part.trim();
+    let stripped =
+        if (r.starts_with('[') || r.starts_with('(')) && (r.ends_with(']') || r.ends_with(')')) {
+            &r[1..r.len() - 1]
+        } else {
+            r
+        };
+
+    // Find the LAST '-' that is preceded by a digit (so leading negatives
+    // and middle hyphens don't both count as separators).
+    let mut dash_idx: Option<usize> = None;
+    let bytes = stripped.as_bytes();
+    for (i, b) in bytes.iter().enumerate().skip(1) {
+        if *b == b'-' && bytes[i - 1].is_ascii_digit() {
+            dash_idx = Some(i);
+        }
+    }
+    let dash = dash_idx?;
+    let lo: f64 = stripped[..dash].trim().parse().ok()?;
+    let hi: f64 = stripped[dash + 1..].trim().parse().ok()?;
+
+    Some(PgaccelReclassRule {
+        min_val: lo,
+        max_val: hi,
+        new_val,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
@@ -983,6 +1153,135 @@ mod tests {
     fn truncated_at_5_bytes() {
         let buf = vec![1u8, 0, 0, 0, 0]; // LE + partial version
         assert!(parse_header(&buf).is_none());
+    }
+
+    // -- extract_polygon_ring tests ------------------------------------------
+
+    /// Build a minimal GSERIALIZED v2 POLYGON (no bbox flag) with one outer
+    /// ring whose coords are the four corners of a unit square, in the
+    /// canonical CCW orientation (closed: 5th point == 1st).
+    fn build_polygon_unit_square_no_bbox() -> Vec<u8> {
+        let mut buf = Vec::new();
+        // Header: srid (3 bytes) + flags (1 byte) + varlena (4 bytes).
+        buf.extend_from_slice(&[0u8; 3]); // srid bytes (zeroed)
+        buf.push(0u8); // flags: HAS_BBOX = 0
+        buf.extend_from_slice(&[0u8; 4]); // varlena placeholder
+        // type = POLYGON (3) LE u32
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        // nrings = 1
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        // ring_npoints = 5
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        // 5 (x, y) f64 pairs
+        let pts: [(f64, f64); 5] = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
+        for (x, y) in pts {
+            buf.extend_from_slice(&x.to_le_bytes());
+            buf.extend_from_slice(&y.to_le_bytes());
+        }
+        buf
+    }
+
+    #[test]
+    fn extract_polygon_ring_unit_square() {
+        let buf = build_polygon_unit_square_no_bbox();
+        let ring = extract_polygon_ring(&buf).unwrap();
+        assert_eq!(ring.len(), 10, "5 points * 2 coords");
+        assert!((ring[0] - 0.0).abs() < f64::EPSILON);
+        assert!((ring[1] - 0.0).abs() < f64::EPSILON);
+        assert!((ring[2] - 1.0).abs() < f64::EPSILON);
+        assert!((ring[8] - 0.0).abs() < f64::EPSILON, "closing x");
+        assert!((ring[9] - 0.0).abs() < f64::EPSILON, "closing y");
+    }
+
+    #[test]
+    fn extract_polygon_ring_short_input_rejected() {
+        let buf = vec![0u8; 8];
+        assert!(extract_polygon_ring(&buf).is_none());
+    }
+
+    #[test]
+    fn extract_polygon_ring_non_polygon_type_rejected() {
+        // Build a header that claims POINT (type=1), not POLYGON.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0u8; 3]);
+        buf.push(0u8);
+        buf.extend_from_slice(&[0u8; 4]);
+        buf.extend_from_slice(&1u32.to_le_bytes()); // POINT
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 16]); // dummy coord
+        assert!(extract_polygon_ring(&buf).is_none());
+    }
+
+    #[test]
+    fn extract_polygon_ring_truncated_coords() {
+        // POLYGON header claims 3 points but has only 1 worth of bytes.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0u8; 3]);
+        buf.push(0u8);
+        buf.extend_from_slice(&[0u8; 4]);
+        buf.extend_from_slice(&3u32.to_le_bytes()); // POLYGON
+        buf.extend_from_slice(&1u32.to_le_bytes()); // nrings
+        buf.extend_from_slice(&3u32.to_le_bytes()); // npoints
+        buf.extend_from_slice(&[0u8; 16]); // only 1 point
+        assert!(extract_polygon_ring(&buf).is_none());
+    }
+
+    // -- parse_reclass_rules tests --------------------------------------------
+
+    #[test]
+    fn parse_reclass_rules_canonical_form() {
+        let rules = parse_reclass_rules("[0-100):0,[100-200):1,[200-300):2").unwrap();
+        assert_eq!(rules.len(), 3);
+        assert!((rules[0].min_val - 0.0).abs() < f64::EPSILON);
+        assert!((rules[0].max_val - 100.0).abs() < f64::EPSILON);
+        assert!((rules[0].new_val - 0.0).abs() < f64::EPSILON);
+        assert!((rules[1].min_val - 100.0).abs() < f64::EPSILON);
+        assert!((rules[1].max_val - 200.0).abs() < f64::EPSILON);
+        assert!((rules[1].new_val - 1.0).abs() < f64::EPSILON);
+        assert!((rules[2].new_val - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_reclass_rules_no_brackets() {
+        let rules = parse_reclass_rules("0-50:99, 50-100:200").unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!((rules[0].min_val - 0.0).abs() < f64::EPSILON);
+        assert!((rules[0].max_val - 50.0).abs() < f64::EPSILON);
+        assert!((rules[0].new_val - 99.0).abs() < f64::EPSILON);
+        assert!((rules[1].max_val - 100.0).abs() < f64::EPSILON);
+        assert!((rules[1].new_val - 200.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_reclass_rules_decimals_and_negatives() {
+        let rules = parse_reclass_rules("-1.5-2.5:3.0").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!((rules[0].min_val - (-1.5)).abs() < f64::EPSILON);
+        assert!((rules[0].max_val - 2.5).abs() < f64::EPSILON);
+        assert!((rules[0].new_val - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parse_reclass_rules_empty_input() {
+        let rules = parse_reclass_rules("").unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn parse_reclass_rules_only_whitespace_commas() {
+        let rules = parse_reclass_rules(" , , ").unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn parse_reclass_rules_malformed_returns_none() {
+        // Missing colon
+        assert!(parse_reclass_rules("0-100").is_none());
+        // Missing dash
+        assert!(parse_reclass_rules("100:5").is_none());
+        // Non-numeric
+        assert!(parse_reclass_rules("abc-def:0").is_none());
     }
 
     #[test]
