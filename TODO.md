@@ -42,7 +42,18 @@ st_reclass / st_summarystats wiring + int128 NumericSumEmitter) all
 closed in the 2026-05-02 multi-agent run (commits `309f8c7`,
 `56b770d`, `0c3d5d7` / `9009ef1`, `2c08296`+`433bc21`+`86c8e31`,
 `b8873f2`+`62fbd26`+`47f2d68`+`4f373a5`, `13ec5fa`+`cb2ec8d`+`a6bdf19`+
-`c44ad34`, `dcd0cce`+`9423d11`, `639f6f1`). Open work in TODO order:
+`c44ad34`, `dcd0cce`+`9423d11`, `639f6f1`).
+
+The 2026-05-03 Phase II infrastructure round (8 agents → 5 merge
+commits `00e5ac3`, `90eae48`, `f8a3381`, `6dcd882`, `fc9fc6d`)
+shipped: multi-arg dispatch carrier (Vec<(Datum,bool,Oid)>), 4
+raster ops dispatched (st_resample / slope / aspect / hillshade),
+st_dwithin per-row dispatch, GSERIALIZED v2 polygon/multipolygon
+encoder, PreAgg planner chain (Finalize → Gather → CustomPath +
+GROUP BY propagation), 2 H3 var-output dispatch arms
+(cell_to_boundary, polyfill), and full FunctionScan injection
+plumbing (3 vtables + projectset.rs hook + function_scan.rs
+executor + 3 pg_test integration tests). Open work in TODO order:
 
 1. **Phase 1 cost-multiplier calibration** — blocked on Phase 6 (the
    `fp64_matrix` 2-cell shortfall is Phase 6 dispatch perf, not
@@ -51,67 +62,42 @@ closed in the 2026-05-02 multi-agent run (commits `309f8c7`,
    unblocker plan.
 2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
    kernel + bridge + executor. Largest single chunk in the punchlist.
-3. **Phase 3 preagg parallel — planner-side path construction.**
-   Executor round-trip for `PartialAggSpec` is wired (`PreAggPrivData`
-   carries `partial`; `begin_custom_scan` calls
-   `exec.enable_partial(spec)` — see commit `be493db` and
-   `pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:14-46`).
-   What remains is the manually-built Finalize → Gather → CustomPath
-   chain mirror of `partial_agg::try_inject` in
-   `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:60-401`
-   (the `add_path(grouped_rel, final_agg.cast::<Path>())` shape at
-   `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:386-389` is
-   the analog `preagg_partial::try_inject` needs to emit). ~100-LOC
-   follow-up.
-4. **Phase 4 multi-arg dispatch carrier (st_dwithin + 5 raster ops +
-   3 H3 var-output ops).** All these have working SYCL kernels but
-   need a richer per-row dispatch carrier than the single
-   `qual_datum` slot the Custom Scan private payload exposes today:
-   - `st_dwithin`: needs threshold (3rd arg) per-row through the
-     2-arg dispatch interface.
-   - `st_resample` / `st_slope` / `st_aspect` / `st_hillshade` /
-     `st_value`: target dims, cell sizes, sun azimuth + altitude,
-     point geom array.
-   - H3 `polyfill` / `cell_to_boundary` / `cells_to_multi_polygon`:
-     need PostGIS GSERIALIZED encoder + per-row polygon-vertex
-     extractor on the dispatch side; the kernels exist
-     (`pgaccel-kernels/src/h3_ops.cpp`).
-   The fix is shared: enrich the `qual_datum` carrier in the custom-
-   scan private payload (currently single-Datum; needs slice / array
-   of constants beyond the qual). See "Multi-arg dispatch carrier"
-   entry in Phase 4 below for the concrete plan.
-5. **Phase 4 type coverage — JSON / JSONB.** UUID + INET / CIDR
+3. **Phase 3 PreAgg executor refactor for parallel safety** — P1's
+   chain (Phase II) uses standard `Agg` strategy because parallelising
+   `PreAggExecState` as currently coded would over-aggregate N-fold
+   under workers (each worker `table_open()`s the fact relation
+   independently). Chain accelerates standard parallel grouped
+   aggregation today; star-join fusion under parallel needs the
+   executor refactor. See "PreAgg executor refactor for parallel
+   safety" entry below.
+4. **Phase 4 H3 var-output follow-ups** (3 sub-items, tracked in the
+   "H3 var-output ops" entry below):
+   (a) registry-init ordering for pgrx_tests harness so integration
+   tests exercise the GPU path (today they fall through to PG native);
+   (b) `h3_cell_to_boundary` dispatch shape mismatch (kernel emits
+   GSERIALIZED, h3-pg declares `RETURNS polygon` PG built-in);
+   (c) `h3_cells_to_multi_polygon` per-row `bigint[]` ArrayType
+   walker (shares the `geometry[]` walker blocker tracked under
+   "Geometry-array extractor for st_value").
+5. **Phase 4 SRF-in-target-list / ProjectSet planner injection** —
+   Phase II shipped FunctionScan-only (`SELECT * FROM h3_*(c)`).
+   The complementary `SELECT h3_*(c) FROM t` syntax needs a separate
+   `create_upper_paths_hook` at `UPPERREL_FINAL` (~150 LOC) since
+   PG17 has no ProjectSet planner hook surface.
+6. **Phase 4 type coverage — JSON / JSONB.** UUID + INET / CIDR
    end-to-end on hash_agg group keys SHIPPED in commits `243fa1f` +
-   `c4134d5` + `3fbc03d`; classifier re-enabled this round (commit
-   `639f6f1`). JSON / JSONB next (substantial — needs a JSONB
-   binary-format parser kernel).
-6. **Phase 4 / executor architectural gap — AcceleratedRecord +
-   AcceleratedVarLen consumption.** Adapters now emit
-   `OutputShape::Record` and `OutputShape::VarLen` (commits
-   `a6bdf19`, `47f2d68`); dispatch returns
-   `DispatchResult::AcceleratedRecord` /
-   `DispatchResult::AcceleratedVarLen`. The scan executor's
-   `dispatch_gpu_path`
-   (`pg_accel/src/engine/executor/scan/exec.rs:451-476`) is a
-   filter-mask machine that defers when it sees these — correct for
-   per-row scalar-qual contexts, but means SRF / record-returning
-   ops belong to `ProjectSet` / `FunctionScan` planner injection
-   points (different hooks). Needs new planner hook + executor node
-   to consume Record / VarLen results end-to-end. Currently Record
-   / VarLen registrations are admissibility-only — the planner
-   doesn't yet inject for these shapes, so no silent
-   wrong-result.
+   `c4134d5` + `3fbc03d`; classifier re-enabled (commit `639f6f1`).
+   JSON / JSONB next (substantial — needs a JSONB binary-format
+   parser kernel).
 7. **Phase 5 worker-side spatial recheck** — DSM plumbing.
 8. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
    pointer kernel returns 0 on tiny batches (`test_fork hashagg_f64`
-   N=64 reads as 0 instead of 2048). Distinct from the UUID / INET
-   silent-zero-sum bug closed this round (small-N is the
-   pointer-chain shape for INT64 keys, not the wider key types).
-   Tried flat-buffer + packed-args refactor; each angle uncovered a
-   deeper Metal SSCP edge case (argbuffer rejection, 9-arg capture
-   limit). Reverted. Needs root-cause fix in either the kernel
-   pointer chain OR upstream SSCP emitter, not a workaround. Sort-
-   based path is correct for N >= 100k (verified at 10M).
+   N=64 reads as 0 instead of 2048). Tried flat-buffer + packed-args
+   refactor; each angle uncovered a deeper Metal SSCP edge case
+   (argbuffer rejection, 9-arg capture limit). Reverted. Needs
+   root-cause fix in either the kernel pointer chain OR upstream
+   SSCP emitter, not a workaround. Sort-based path is correct for
+   N >= 100k (verified at 10M).
 9. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
    calibrated `0.03 -> 0.01` (`4144ac8`), cuts 200K cost units off
    the plain-JOIN audit. Probe cost (`0.01/row`) is now the
@@ -120,11 +106,15 @@ closed in the 2026-05-02 multi-agent run (commits `309f8c7`,
 10. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
     approach was tried, made things worse, reverted. Same root cause
     as (8); needs the SSCP investigation.
-11. **Phase 7 fp64 sphere_distance + st_length fork-safety** — kernels
-    in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:502,937` but
-    re-gated to `PGACCEL_ERROR_NO_DEVICE` (commit `573a60b`) pending
-    `acpp-metal-archive-build` OOM fix. See Phase 7 "Metal SSCP
-    soft-fp64 trig" entry for root cause.
+11. **Phase 7 fp64 sphere_distance + st_length fork-safety** —
+    kernels in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:
+    502,937` but still gated to `PGACCEL_ERROR_NO_DEVICE` at
+    `:1076` and `:1020` pending an `acpp-metal-archive-build` runtime
+    fix. **Phase II Agent FS landed the helper-side fix** (size
+    threshold + exit code 9 in AdaptiveCpp `fork-safe-metal` commit
+    `348f6022`); the runtime side that consumes exit 9 is still open.
+    See Phase 7 "Metal SSCP soft-fp64 trig" entry for the root cause
+    + the runtime work that remains.
 12. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
 13. **Phase 3-10 in order** for everything else.
 
@@ -462,36 +452,6 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   `st_dwithin` consumes per-row 3rd-arg thresholds; constructor
   output-allocation protocol designed (separate item).
 
-### Multi-arg dispatch carrier — shipped; st_value array extractor still pending
-
-- **What** (refreshed 2026-05-03 after Agent F1 commit `1795e55`):
-  The scalar multi-arg carrier shipped — `dispatch::dispatch()` now
-  takes `&[(Datum, bool, Oid)]` and `extract_const_datum` collects
-  ALL `Const` nodes from the FuncExpr.args list preserving
-  positional order. 6 of the 9 originally-blocked ops now dispatch
-  end-to-end:
-  - **`st_dwithin`**: threshold from `qual_datums[1]` ✓
-  - **`st_resample`** (target_w, target_h): 2× i32 args ✓
-  - **`st_slope` / `st_aspect`** (cell_x, cell_y): 2× f64 args ✓
-  - **`st_hillshade`** (cell_x, cell_y, sun_az, sun_alt): 4× f64 args ✓
-  166/166 cargo tests pass; clippy clean. The 3 H3 var-output ops
-  (`polyfill`, `cell_to_boundary`, `cells_to_multi_polygon`) move
-  to F3's Phase 2 work — see "H3 operator registrations" entry.
-- **Compromise (anti-cheat ban #9, escalated by F1)**: `st_value
-  (rast, geometry[])` was deliberately NOT shipped. The
-  `geometry[]` arg is a PG `ArrayType` varlena (dim-count +
-  lower-bounds + null bitmap + packed elements layout); existing
-  `pg_accel/src/adapters/extractors/` doesn't walk arrays.
-  Building the walker without rigorous tests risks shipping a
-  silent wrong-result extractor. F1 deferred cleanly — kernel
-  arm logs `tracing::debug!("st_value array extractor not yet
-  implemented")` and the `gpu::raster_value` Rust wrapper retains
-  `#[allow(dead_code)]` with the updated escalation reason. See
-  new entry "Geometry-array extractor for st_value" below.
-- **Done when**: All 9 ops dispatch end-to-end. 6 done; 3 H3
-  var-output land in F3 Phase 2; `st_value` lands when the
-  geometry-array extractor follow-up does.
-
 ### Geometry-array extractor for st_value
 
 - **What** (surfaced 2026-05-03 by F1's escalation): The
@@ -523,47 +483,6 @@ exist yet (cascaded multi-key sort; merge-join kernel).
 - **Done when**: `st_value` dispatches end-to-end; `gpu::raster_value`
   loses its `#[allow(dead_code)]`; integration test green.
 
-### AcceleratedRecord / AcceleratedVarLen executor consumption gap
-
-- **What** (added 2026-05-02): Adapters now declare
-  `OutputShape::Record` (e.g. `st_summarystats` returning
-  `count + sum + mean + stddev + min + max`) and `OutputShape::VarLen`
-  (e.g. H3 `grid_disk` emitting many cells per input row), and
-  dispatch returns `DispatchResult::AcceleratedRecord` /
-  `DispatchResult::AcceleratedVarLen` with kernel-shaped payloads.
-  The scan executor's `dispatch_gpu_path`
-  (`pg_accel/src/engine/executor/scan/exec.rs:451-476`) is a
-  filter-mask machine: it only consumes scalar predicate results
-  per row and defers Record / VarLen with a `tracing::warn!`
-  rather than emit them — correct for per-row scalar-qual
-  contexts, but means SRF and record-returning function calls
-  belong to `ProjectSet` / `FunctionScan` planner injection points
-  (different hooks entirely from the scan / agg / sort / window /
-  preagg paths the planner currently injects). MINOR (scalar paths
-  unaffected; SRF / record-returning ops fall through to PG, no
-  silent wrong-result).
-- **Why**: Without a new planner hook + executor node for
-  ProjectSet / FunctionScan, the kernels we've built for the H3
-  var-output ops, `st_summarystats` Record output, and the future
-  geometry-constructor variable outputs can dispatch but their
-  results are never consumed by a CustomScan tuple stream.
-- **How**:
-  - Add a planner hook for `set_function_pathlist_hook`
-    (FunctionScan) and / or `T_ProjectSet` upper-rel injection
-    that wraps an SRF / record-returning call in a CustomScan
-    whose execute path consumes
-    `DispatchResult::AcceleratedRecord` /
-    `DispatchResult::AcceleratedVarLen` directly.
-  - Reuse `OutputShape` to gate which functions are eligible.
-  - `dispatch_gpu_path` stays the filter-mask machine for scan-
-    side per-row predicates; the new executor node reuses
-    `dispatch::dispatch()` but routes the Record / VarLen result
-    into a per-row tuple emitter.
-- **Done when**: `SELECT h3_grid_disk(c, 2) FROM cells` and
-  `SELECT (st_summarystats(rast)).* FROM rasters` both show a
-  CustomScan in EXPLAIN and produce identical results to
-  h3-pg / PostGIS native.
-
 ### PostGIS geometry constructors: output-allocation kernel design
 
 - **What**: Geometry constructors `st_buffer`, `st_union`, `st_intersection`
@@ -586,34 +505,28 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   working GPU kernel, registered adapter, and golden-diff test against
   PostGIS native.
 
-### PostGIS raster — multi-arg dispatch carrier for the 5 new kernels
+### PostGIS raster — st_value array extractor remains; other 4 dispatched
 
-- **What** (refreshed 2026-05-02 after Agent 3A landed 6 raster
-  kernels and Agent 1B wired `st_clip` + `st_reclass` +
-  `st_summarystats`): All 9 raster ops are registered in
+- **What** (refreshed 2026-05-03 after Phase II Agent F1 commit
+  `1795e55`): All 9 raster ops are registered in
   `pg_accel/src/adapters/postgis_raster.rs`. Wired end-to-end:
   `st_mapalgebra` (existing), `st_clip`, `st_reclass`,
-  `st_summarystats` (this last with `OutputShape::Record` returning
-  `count + sum + mean + stddev + min + max`). Kernels exist but
-  dispatch-pending (5): `st_resample`, `st_slope`, `st_aspect`,
-  `st_hillshade`, `st_value` — each needs richer per-row constants
-  than the single `qual_datum` slot the dispatch carrier exposes
-  today. MINOR.
-- **Concrete fix**: enrich the custom-scan private payload to pass an
-  array of per-call constants beyond the qual datum: target
-  dimensions for `st_resample`; cell sizes for slope / aspect; sun
-  azimuth + altitude for hillshade; per-row point-geom array for
-  `st_value`. Same shape change unblocks `st_dwithin` 3rd-arg and the
-  H3 var-output dispatchers — see Phase 4 "Multi-arg dispatch
-  carrier" below for the unified design.
+  `st_summarystats` (`OutputShape::Record` returning
+  `count + sum + mean + stddev + min + max`), plus the 4 dispatched
+  via the multi-arg carrier in Phase II: `st_resample`,
+  `st_slope`, `st_aspect`, `st_hillshade`. Only `st_value` remains
+  dispatch-pending — it takes a `geometry[]` ArrayType varlena and
+  the existing extractors don't walk PG ArrayType bodies. MINOR.
+- **Concrete fix**: see "Geometry-array extractor for st_value"
+  entry above.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/postgis_raster.rs`
   (`does_not_register_kernelless_raster_candidates`,
   `registered_set_matches_kernel_set`) assert the registered set
   matches the kernel set exactly.
-- **Done when**: The multi-arg carrier lands; the 5 kernels above
-  are dispatched per-row with their full argument set; golden-diff
-  test against PostGIS raster output for each.
+- **Done when**: The geometry-array extractor lands; `st_value`
+  dispatches per-row; golden-diff test against PostGIS raster
+  output.
 
 ### H3 var-output ops — wiring landed; 3 follow-up blockers (registry-init / shape / array walker)
 
@@ -1015,9 +928,10 @@ work is tracked in the Post-1.0 (deferred) section.
 - **Done when**: Each item has a dedicated commit; shader size / compile
   time measured before and after.
 
-### Metal SSCP soft-fp64 trig — JIT hang resolved, fork-safety regression remains
+### Metal SSCP soft-fp64 trig — JIT hang resolved, fork-safety partial fix landed
 
-- **What** (refreshed 2026-05-02 after Agent 2A landed the kernel split):
+- **What** (refreshed 2026-05-03 after Phase II Agent FS landed the
+  AdaptiveCpp helper-side fix at `fork-safe-metal` commit `348f6022`):
   The original "templated `sphere_distance_bulk_sycl<T>` instantiation
   hangs Metal SSCP JIT" hang is **fixed** — splitting into non-templated
   `sphere_distance_bulk_sycl_f32` + `_f64` (mirrors the explicit-double
@@ -1025,44 +939,53 @@ work is tracked in the Post-1.0 (deferred) section.
   recursion. Same fix shape for `st_length_bulk_sycl_f64`.
   - Leader-thread fp64 dispatch: **works**, kernel produces correct
     results, 1.16 MB metallib emitted under SLEEF soft-fp64 lowering.
-  - **Fork-safety: BROKEN.** `acpp-metal-archive-build` (the fork-safe
-    MTLBinaryArchive prebuild — see CLAUDE.md "MTLBinaryArchive cache
-    (fork-safety on Apple Silicon)") gets SIGKILL'd (exit 137 — OOM)
-    when serializing the 17 MB `.jit` LLVM IR / pipeline state for the
-    soft-fp64 metallib. Manual `acpp-metal-archive-build` reproducer
-    also exits 137. No `.metalar` archive → PG worker forks crash with
-    "Unable to reach MTLCompilerService" the first time they hit the
-    kernel.
-  - **Current gating** (commit 2026-05-02 follow-up to the agent merge):
+  - **`acpp-metal-archive-build` OOM (exit 137): partial fix landed.**
+    AdaptiveCpp `fork-safe-metal` commit `348f6022` adds a configurable
+    size threshold to the helper (default 900 KiB; override
+    `ACPP_METAL_ARCHIVE_MAX_BYTES`). When the input metallib exceeds
+    the threshold the helper exits 9 (distinct from the existing
+    2/3/4/5/6/7/8 codes) instead of being SIGKILL'd mid-allocation.
+    Verified locally: synthetic 1.2 MB metallib → exit 9; smaller
+    metallibs unaffected; `test_fork` still passes (exit 0; archive
+    builder produces `.metalar` for under-threshold libraries).
+  - **Runtime side: NOT YET LANDED.** The AdaptiveCpp Metal runtime
+    (`metal_sscp_executable_object::build`) currently treats any
+    non-zero exit from the helper as "archive build failed, retry on
+    next dispatch" — which means exit 9 still leaves no `.metalar`
+    on disk and the next forked child still crashes at first
+    dispatch ("Unable to reach MTLCompilerService"). The runtime
+    needs to recognise exit 9 as "intentionally skipped, this kernel
+    will not have a fork-safe pipeline state — gate dispatch to
+    leader-only" or similar. Not yet in fork-safe-metal HEAD.
+  - **Current gating** (unchanged):
     `pgaccel_sphere_distance_bulk(use_fp64=true)` and
-    `pgaccel_st_length_bulk(use_fp64=true)` re-gated to
-    `PGACCEL_ERROR_NO_DEVICE` to prevent parallel-query crashes.
-    Kernel code stays in-tree (`sphere_distance_bulk_sycl_f64` at
-    `spatial_predicates.cpp:502`, `st_length_bulk_sycl_f64` at `:937`)
-    — gate is a one-line drop the moment archive serialization is fixed.
+    `pgaccel_st_length_bulk(use_fp64=true)` remain gated to
+    `PGACCEL_ERROR_NO_DEVICE` at `spatial_predicates.cpp:1091`
+    (sphere_distance) and `:1027` (st_length). Kernel code stays
+    in-tree — gates are one-line drops the moment the runtime side
+    of the helper-exit-9 contract lands.
 - **Why**: Without fp64 GPU, `st_dwithin` precision tops out at fp32 on
   Metal (~10⁻⁵ deg ≈ 1m at equator). PostGIS-grade precision (sub-mm)
   needs the fp64 path. But shipping a known parallel-query crash is
   worse than no acceleration.
-- **How** (root-cause fix, upstream):
-  - Increase `acpp-metal-archive-build` per-process memory limit
-    (currently SIGKILL'd; needs heap headroom for the soft-fp64 .jit IR
-    serialization — order 64 MB for the full sin/cos/asin/sqrt
-    expansion).
-  - OR: split the .metalar build into per-kernel passes so each
-    serialization is bounded.
-  - OR: skip the binary-archive build for kernels above a size
-    threshold and accept slower forked-cold dispatch (kernel still runs;
-    just no XPC-free pipeline state).
-  - All three live in the AdaptiveCpp fork-safe-metal branch
-    (`~/local/src/AdaptiveCpp` if checked out; helper at
-    `~/local/bin/acpp-metal-archive-build`).
-- Depends on: AdaptiveCpp fork-safe-metal branch fix.
+- **How** (remaining runtime work, upstream):
+  - In AdaptiveCpp `src/runtime/metal/metal_sscp_executable_object.cpp`
+    (the caller of `acpp-metal-archive-build`), distinguish exit 9
+    ("intentionally skipped") from exit !=0 ("real failure"). On
+    exit 9: log a warning, mark the kernel as "no fork-safe archive,
+    leader-only dispatch", and either gate parallel dispatch or
+    accept the crash class for that specific kernel with a clear
+    one-time warning.
+  - Helper-side fix already landed (`348f6022`); the runtime patch
+    is the dependency to drop the kernel-side gates here.
+- Depends on: AdaptiveCpp `fork-safe-metal` runtime patch consuming
+  the new exit code 9 contract.
 - **Done when**: Drop both `if (use_fp64) return PGACCEL_ERROR_NO_DEVICE;`
-  gates at `spatial_predicates.cpp:1076` (sphere_distance) and `:1020`
+  gates at `spatial_predicates.cpp:1091` (sphere_distance) and `:1027`
   (st_length); `test_fork` passes with fp64 sphere_distance dispatched
-  in a forked PG worker; cold-cache `acpp-metal-archive-build` exits 0
-  for the soft-fp64 metallib.
+  in a forked PG worker (or fails cleanly with the new exit-9 leader-
+  only path); zero parallel-query crashes when a query touches the
+  fp64 path.
 
 ### `__args` MSL compile error on fused stats kernels at large N
 

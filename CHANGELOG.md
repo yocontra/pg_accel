@@ -2,6 +2,120 @@
 
 ## [Unreleased]
 
+### Phase II infrastructure round (2026-05-03, 8 agents → 5 merge commits)
+
+This round developed the dispatch / planner / executor infrastructure each
+of the previous round's 5 architectural blockers required, so every kernel
+already in `pgaccel-kernels/src/*.cpp` now has an end-to-end injection +
+dispatch path. Source-of-truth merge commits: `00e5ac3` (F2 GSERIALIZED
+encoder), `90eae48` (P1 PreAgg planner chain), `f8a3381` (F1 multi-arg
+dispatch carrier + 4 raster + st_dwithin), `6dcd882` (F3-functionscan
+registry meta + 2 H3 var-output dispatch arms), `fc9fc6d` (F3-finish-v2
+FunctionScan vtables + planner hook + 3 pg_test integrations).
+
+#### Added
+- Multi-arg dispatch carrier: `dispatch::dispatch()` now takes
+  `&[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)]`;
+  `extract_const_datum` collects ALL `Const` nodes from FuncExpr.args
+  preserving positional order; `FunctionScanPrivData` round-trip
+  layout serializes/deserializes the args list (1795e55, 5004839).
+- 4 raster ops dispatched per-row via the new carrier:
+  `st_resample(rast, w, h)` (2× i32), `st_slope(rast, cx, cy)` and
+  `st_aspect(rast, cx, cy)` (2× f64 each), `st_hillshade(rast, cx, cy,
+  sun_az, sun_alt)` (4× f64) (1795e55).
+- `st_dwithin` per-row dispatch: 3rd-arg threshold flows through the
+  multi-arg carrier as `qual_datums[1]` and routes through
+  `three_layer::spatial_dwithin` with `SpatialPredicate::DWithin(t)`
+  (1795e55).
+- Pure-Rust GSERIALIZED v2 encoder for POLYGON and MULTIPOLYGON in
+  `pg_accel/src/adapters/extractors/geometry/polygon_encoder.rs`:
+  `encode_polygon(srid, &[&[(f64, f64)]])` and
+  `encode_multipolygon(srid, &[&[&[(f64, f64)]]])` produce bare
+  GSERIALIZED bytes (caller wraps with `palloc(VARHDRSZ + len)`);
+  roundtrip-tested against the existing parser at
+  `polygon.rs:1-88` (3abaf50).
+- PreAgg planner chain construction: `preagg_partial::try_inject` now
+  builds the Finalize Agg → Gather → CustomPath triple inside the
+  `UPPERREL_GROUP_AGG` callback (PG17 doesn't fire
+  `UPPERREL_PARTIAL_GROUP_AGG`), mirroring `partial_agg::try_inject`
+  structurally (e386720); GROUP BY propagation via
+  `root.processed_groupClause` + `parse.havingQual` into
+  `pg_sys::create_agg_path` matches PG's own
+  `add_paths_to_grouping_rel` (`planner.c:7253-7263`); `AGG_HASHED`
+  when GROUP BY present, `AGG_PLAIN` otherwise; 16/16 unit tests pass
+  including SPI smoke (5599067).
+- 2 H3 var-output dispatch arms: `h3_cell_to_boundary(cell)` produces
+  `AcceleratedVarLen` of GSERIALIZED varlena Datums via the F2
+  encoder; `h3_polyfill(geometry, resolution)` extracts per-row
+  polygons via existing `extract_geometry` and runs the two-pass
+  kernel (b5702e6).
+- `FunctionAccelEntry::output_field_types / output_field_names` +
+  TupleDesc resolution metadata so FunctionScan can build the right
+  TupleDesc; `FunctionScanPrivData` round-trip serialization
+  (af7594a, 5004839).
+- FunctionScan injection plumbing: new `FUNCTION_PATH_METHODS` /
+  `FUNCTION_SCAN_METHODS` Custom Scan vtables; `projectset.rs`
+  planner hook walks `RTE_FUNCTION` rels and builds a `CustomPath`
+  carrying `FunctionScanPrivData`; `function_scan` executor module
+  (`pg_accel/src/engine/ffi/custom_scan/function_scan.rs`, 814 LOC)
+  builds a TupleDesc (resolving sentinel OID 0 via
+  `get_func_rettype`), dispatches the SRF once via
+  `dispatch::dispatch`, and emits one row per dispatch output via
+  `ExecStoreVirtualTuple` (Scalar / VarLen) or `heap_form_tuple` +
+  `ExecStoreHeapTuple` (Record); 3 pg_test integration tests
+  (30a9b6e, da6b054, afaff4b).
+- AdaptiveCpp `fork-safe-metal` helper-side fix for
+  `acpp-metal-archive-build` OOM on soft-fp64 metallibs: configurable
+  size threshold (default 900 KiB; override
+  `ACPP_METAL_ARCHIVE_MAX_BYTES`) with a new exit code 9
+  ("intentionally skipped") distinct from the existing 2/3/4/5/6/7/8
+  failure codes. Helper no longer SIGKILL'd mid-allocation on the
+  ~1.16 MB sphere_distance / st_length f64 metallibs. Verified
+  locally: synthetic 1.2 MB metallib → exit 9; smaller metallibs
+  unaffected; `test_fork` still passes (exit 0; archive builder
+  produces `.metalar` for under-threshold libraries).
+  AdaptiveCpp `fork-safe-metal` commit `348f6022`.
+
+#### Changed
+- `dispatch::dispatch()` signature changed from
+  `qual_datum: Option<(Datum, bool)>` to
+  `qual_datums: &[(Datum, bool, Oid)]`; every existing dispatch arm
+  rewritten in the same atomic commit; no back-compat shim per the
+  user's "no back-compat — update all callsites" directive (1795e55).
+- `pg_test_explain` schema renamed → `preagg_explain` because PG
+  forbids the `pg_` prefix on user-created schemas (fb64b1a).
+- `GpuStrategy::from_i32` boundary tests updated to recognise
+  `FunctionScan = 6` (afaff4b).
+- `reduce_multi_f32 / reduce_multi_i64` wrapper `#[allow(dead_code)]`
+  comments updated to canonical wording: "retained for future fp32/i64
+  fast-path executors; current agg path uses uniform Vec<f64> per
+  agg/execute.rs:1804". Doc-only; no functional change. The bridge
+  wrappers stay as the entry points for a future executor variant
+  that retains typed buffers (avoiding the f64 widening) (dfc4444).
+
+#### Open follow-ups (documented in TODO.md, NOT shipped this round)
+- Registry-init ordering for pgrx_tests harness: integration tests
+  pass via PG native fallback path, not the GPU FunctionScan path.
+  Fix needs `registry::resolve_oids_again()` API or `pgrx.toml`
+  `extra_extensions`.
+- `h3_cell_to_boundary` dispatch shape mismatch: kernel emits
+  GSERIALIZED, h3-pg declares `RETURNS polygon` (PG built-in type).
+- `h3_cells_to_multi_polygon` needs a `bigint[]` ArrayType walker
+  (same root cause as `st_value`'s `geometry[]` blocker).
+- PreAgg executor refactor for parallel safety: P1's chain uses
+  standard `Agg` strategy because parallelising `PreAggExecState`
+  as currently coded would over-aggregate N-fold under workers.
+- SRF-in-target-list / ProjectSet planner injection: PG17 has no
+  ProjectSet planner hook surface; needs a `create_upper_paths_hook`
+  at `UPPERREL_FINAL` (~150 LOC).
+- AdaptiveCpp Metal runtime side of the helper exit-9 contract: the
+  helper-side fix landed (`348f6022`) but the runtime
+  (`metal_sscp_executable_object::build`) still treats any non-zero
+  exit as "real failure". Until the runtime distinguishes exit 9
+  ("skipped, no fork-safe archive") from the others, the kernel-side
+  gates at `pgaccel-kernels/src/spatial_predicates.cpp:1091`
+  (sphere_distance) and `:1027` (st_length) cannot be dropped.
+
 ### Added
 - PostGIS predicates: 4 algorithmic predicates `st_equals`, `st_touches`, `st_crosses`, `st_overlaps` end-to-end (kernel: b5e546a; SpatialPredicate enum + three-layer dispatch: 2c08296; adapter registration: 433bc21)
 - PostGIS distance: `pgaccel_st_distance_polygon_polygon_bulk` SYCL kernel — fp32 vertex-pair minimum for Polygon × Polygon (676a95d)
