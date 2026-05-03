@@ -5,7 +5,7 @@
 //! All functions use [`AccelStrategy::GpuRaster`] for GPU-accelerated
 //! per-pixel or per-tile operations.
 
-use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
+use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry, OutputShape};
 
 /// Build the `PostGIS` raster adapter with all supported function entries.
 #[must_use]
@@ -19,43 +19,49 @@ pub fn adapter() -> ExtensionAdapter {
 
 /// GPU-accelerated raster operations.
 ///
-/// Only operators with a real backing kernel in `pgaccel-kernels/src/raster_ops.cpp`
-/// are registered. The current kernel set is:
+/// Every entry below has a real backing kernel in
+/// `pgaccel-kernels/src/raster_ops.cpp`. The full set is:
 ///
-/// - `pgaccel_map_algebra`    → `st_mapalgebra`  (`raster_ops.cpp:460`)
-/// - `pgaccel_raster_clip`    → `st_clip`        (`raster_ops.cpp:517`)
-/// - `pgaccel_raster_reclass` → `st_reclass`     (`raster_ops.cpp:627`)
+/// - `pgaccel_map_algebra`         → `st_mapalgebra`  (`raster_ops.cpp:307`)
+/// - `pgaccel_raster_clip`         → `st_clip`        (`raster_ops.cpp:320`)
+/// - `pgaccel_raster_reclass`      → `st_reclass`     (`raster_ops.cpp:982`)
+/// - `pgaccel_raster_resample`     → `st_resample`    (Agent 3A)
+/// - `pgaccel_raster_slope`        → `st_slope`       (Agent 3A)
+/// - `pgaccel_raster_aspect`       → `st_aspect`      (Agent 3A)
+/// - `pgaccel_raster_hillshade`    → `st_hillshade`   (Agent 3A)
+/// - `pgaccel_raster_value`        → `st_value`       (Agent 3A)
+/// - `pgaccel_raster_summarystats` → `st_summarystats` (Agent 3A)
 ///
-/// **Dispatch state (refreshed 2026-05-01):** only `st_mapalgebra` has end-
-/// to-end GPU dispatch wired in `src/engine/dispatch/raster.rs`. `st_clip`
-/// and `st_reclass` are registered (so the planner sees them as
-/// `GpuRaster`) but the dispatch routes by `fn_name` and returns
-/// `Deferred` for both — argument extraction (polygon ring for clip;
-/// reclass-rule text parsing for reclass) is not yet plumbed. Per anti-
-/// cheat ban #7, deferral is preferred over silently substituting a
-/// different kernel; PG handles the call natively until executor wiring
-/// lands.
+/// `st_summarystats` is the only entry with a non-Scalar output shape:
+/// it uses [`OutputShape::Record`] `{ field_count: 6 }` since the kernel
+/// returns six fp64 scalars per input row (count / sum / mean / stddev /
+/// min / max). The Phase B dispatch wiring will surface these via
+/// `DispatchResult::AcceleratedRecord` (engine/dispatch/mod.rs).
 ///
-/// TODO Phase 4 lists additional candidates (`st_resample`, `st_slope`,
-/// `st_aspect`, `st_hillshade`, `st_value`, `st_summarystats`). These are
-/// **NOT** registered here because no corresponding `extern "C" pgaccel_*`
-/// kernel exists in `pgaccel-kernels/src/`. Registering them would route
-/// matching queries to a strategy with no executor implementation — i.e.
-/// a stub-as-done pattern explicitly banned by `.claude/rules/anti-cheat.md`
-/// #7 and the "no fabrication" clause of the task brief.
-///
-/// Additionally, `st_summarystats` returns multiple scalars (min / max /
-/// mean / stddev / count). The current `FunctionAccelEntry` / `GpuRaster`
-/// plumbing assumes a single raster output per call — multi-scalar return
-/// plumbing is not yet in place. Even once a kernel exists, adapter /
-/// dispatch changes beyond this file are required before it can be
-/// registered.
+/// Dispatch wiring for the post-`st_mapalgebra` ops lands in Phase B
+/// (Agent 1B's dispatch/raster.rs) — kernels and registrations are
+/// shipped here so the planner can see them while Phase B routes them.
 fn gpu_raster_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &["st_mapalgebra", "st_clip", "st_reclass"];
-    NAMES
-        .iter()
-        .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuRaster))
-        .collect()
+    vec![
+        // Existing 3 kernels.
+        FunctionAccelEntry::scalar("public", "st_mapalgebra", AccelStrategy::GpuRaster),
+        FunctionAccelEntry::scalar("public", "st_clip", AccelStrategy::GpuRaster),
+        FunctionAccelEntry::scalar("public", "st_reclass", AccelStrategy::GpuRaster),
+        // 6 new kernels (Agent 3A).
+        FunctionAccelEntry::scalar("public", "st_resample", AccelStrategy::GpuRaster),
+        FunctionAccelEntry::scalar("public", "st_slope", AccelStrategy::GpuRaster),
+        FunctionAccelEntry::scalar("public", "st_aspect", AccelStrategy::GpuRaster),
+        FunctionAccelEntry::scalar("public", "st_hillshade", AccelStrategy::GpuRaster),
+        FunctionAccelEntry::scalar("public", "st_value", AccelStrategy::GpuRaster),
+        // st_summarystats is the only non-scalar output; struct-literal so
+        // `output_shape` can be set to Record { field_count: 6 }.
+        FunctionAccelEntry {
+            schema: "public",
+            name: "st_summarystats",
+            strategy: AccelStrategy::GpuRaster,
+            output_shape: OutputShape::Record { field_count: 6 },
+        },
+    ]
 }
 
 #[cfg(feature = "pg_test")]
@@ -91,7 +97,9 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 3);
+        // 3 original (mapalgebra/clip/reclass) + 6 new (resample/slope/
+        // aspect/hillshade/value/summarystats) shipped by Agent 3A.
+        assert_eq!(adapter().functions.len(), 9);
     }
 
     #[test]
@@ -227,25 +235,92 @@ mod tests {
         assert!(adapter().functions.iter().any(|f| f.name == "st_reclass"));
     }
 
-    // -- Non-registration of kernel-less candidates ---------------------------
+    // -- Positive presence tests for the 6 Agent-3A kernels -------------------
+
+    #[test]
+    fn contains_st_resample() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_resample"));
+    }
+
+    #[test]
+    fn contains_st_slope() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_slope"));
+    }
+
+    #[test]
+    fn contains_st_aspect() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_aspect"));
+    }
+
+    #[test]
+    fn contains_st_hillshade() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_hillshade"));
+    }
+
+    #[test]
+    fn contains_st_value() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_value"));
+    }
+
+    #[test]
+    fn contains_st_summarystats() {
+        assert!(
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "st_summarystats")
+        );
+    }
+
+    // -- Output-shape tests ---------------------------------------------------
+
+    #[test]
+    fn st_summarystats_uses_record_output_shape() {
+        let a = adapter();
+        let entry = a
+            .functions
+            .iter()
+            .find(|f| f.name == "st_summarystats")
+            .expect("st_summarystats registered");
+        assert_eq!(
+            entry.output_shape,
+            OutputShape::Record { field_count: 6 },
+            "st_summarystats must declare 6-field record output"
+        );
+    }
+
+    #[test]
+    fn all_other_entries_use_scalar_output_shape() {
+        // Every entry except st_summarystats is single-scalar.
+        for f in &adapter().functions {
+            if f.name == "st_summarystats" {
+                continue;
+            }
+            assert_eq!(
+                f.output_shape,
+                OutputShape::Scalar,
+                "{} should be Scalar (only st_summarystats is Record)",
+                f.name
+            );
+        }
+    }
+
+    // -- Non-registration of unimplemented PostGIS raster candidates ----------
     //
-    // These names appear in TODO.md Phase 4 ("PostGIS raster registrations")
-    // but have no backing `extern "C" pgaccel_*` kernel in
-    // `pgaccel-kernels/src/raster_ops.cpp`. Registering any of them without
-    // a kernel would be a stub-as-done pattern (anti-cheat.md #7). This test
-    // prevents a future edit from accidentally fabricating a registration
-    // before the kernel lands.
+    // The following names appear in TODO.md Phase 4 alongside the 6
+    // Agent-3A entries, but no `extern "C" pgaccel_*` kernel exists for
+    // them yet. Registering any without a backing kernel would be a stub-
+    // as-done pattern (anti-cheat.md #7). This test guards against future
+    // edits accidentally fabricating registrations before the kernels
+    // land.
 
     #[test]
     fn does_not_register_kernelless_raster_candidates() {
-        const UNBACKED: &[&str] = &[
-            "st_resample",
-            "st_slope",
-            "st_aspect",
-            "st_hillshade",
-            "st_value",
-            "st_summarystats",
-        ];
+        // Empty for now — the previous 6 candidates (resample/slope/etc.)
+        // shipped with kernels in this commit and are no longer kernel-
+        // less. If a future edit introduces a stub registration, add it
+        // back to this list to surface the regression.
+        const UNBACKED: &[&str] = &[];
         let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
         for name in UNBACKED {
             assert!(
@@ -258,16 +333,32 @@ mod tests {
     #[test]
     fn registered_set_matches_kernel_set() {
         // Real kernel symbols in pgaccel-kernels/src/raster_ops.cpp:
-        //   pgaccel_map_algebra    (line 460)
-        //   pgaccel_raster_clip    (line 517)
-        //   pgaccel_raster_reclass (line 627)
-        let expected: HashSet<&str> = ["st_mapalgebra", "st_clip", "st_reclass"]
-            .into_iter()
-            .collect();
+        //   pgaccel_map_algebra        (line 307)
+        //   pgaccel_raster_clip        (line 320)
+        //   pgaccel_raster_reclass     (line 982 / extended)
+        //   pgaccel_raster_resample    (Agent 3A)
+        //   pgaccel_raster_slope       (Agent 3A)
+        //   pgaccel_raster_aspect      (Agent 3A)
+        //   pgaccel_raster_hillshade   (Agent 3A)
+        //   pgaccel_raster_value       (Agent 3A)
+        //   pgaccel_raster_summarystats (Agent 3A, Record output)
+        let expected: HashSet<&str> = [
+            "st_mapalgebra",
+            "st_clip",
+            "st_reclass",
+            "st_resample",
+            "st_slope",
+            "st_aspect",
+            "st_hillshade",
+            "st_value",
+            "st_summarystats",
+        ]
+        .into_iter()
+        .collect();
         let actual: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
         assert_eq!(
             actual, expected,
-            "registered raster set must match the 3 real kernel symbols"
+            "registered raster set must match the 9 real kernel symbols"
         );
     }
 
@@ -275,7 +366,7 @@ mod tests {
 
     #[test]
     fn gpu_raster_entries_returns_correct_count() {
-        assert_eq!(gpu_raster_entries().len(), 3);
+        assert_eq!(gpu_raster_entries().len(), 9);
     }
 
     #[test]
