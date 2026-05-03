@@ -26,6 +26,7 @@ pub mod header;
 pub mod linestring;
 pub mod point;
 pub mod polygon;
+pub mod polygon_encoder;
 pub mod wkb;
 
 #[cfg(feature = "pg_test")]
@@ -34,6 +35,7 @@ mod tests;
 pub use bbox::extract_bbox;
 pub use header::has_bbox_flag;
 pub use point::{extract_point, extract_point_xy_f32};
+pub use polygon_encoder::{EncodeError, encode_multipolygon, encode_polygon};
 
 use pgrx::pg_sys::Datum;
 
