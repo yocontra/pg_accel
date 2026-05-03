@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "pgaccel_ffi.h"
@@ -376,28 +377,32 @@ pgaccel_status point_in_ring_bulk_sycl(const T* points_xy, size_t point_count, c
 // SYCL kernel — sphere_distance_bulk on the GPU (fp32 + fp64)
 //
 // Mirrors the host `sphere_distance_one<T>` algorithm: degree → radian
-// conversion, Haversine `a` term, antipodal check, atan2-based central
+// conversion, Haversine `a` term, antipodal check, asin-based central
 // angle, multiply by Earth radius. Each work-item evaluates one
 // (lon_a, lat_a) × (lon_b, lat_b) pair.
 //
-// Math is open-coded with `sycl::sin / cos / atan2 / sqrt / fabs / isfinite`
-// so AdaptiveCpp's SSCP path picks up the Metal libkernel forwarders for
-// fp64 (soft-fp64 on Metal, native on CUDA / ROCm / Level Zero). The
-// malloc_shared + memcpy pattern matches `point_in_ring_bulk_fp64_sycl`
-// above — required to avoid the Metal SSCP small-buffer rebind issue
-// that drops trailing bytes when the kernel reads via malloc_device.
+// fp32 + fp64 are now distinct non-templated functions (was templated
+// `sphere_distance_bulk_sycl<T>` which hung Metal SSCP JIT for `T = double`
+// — template instantiation through Metal's argbuffer struct emitter
+// triggered an infinite compile loop on soft-fp64 trig lowering). Mirrors
+// the explicit-double pattern at `pgaccel-kernels/src/h3_ops.cpp:972-1019`
+// (`pgaccel_h3_lat_lng_to_cell_bulk` fp64 path) which proved the hang is
+// in template instantiation, not in direct `sycl::sin/cos/asin/sqrt`
+// builtins on `double`. malloc_shared + memcpy avoids the Metal SSCP
+// small-buffer rebind issue that drops trailing bytes when the kernel
+// reads via malloc_device.
 // ---------------------------------------------------------------------------
-template <typename T>
-static pgaccel_status sphere_distance_bulk_sycl(const T* points_a, const T* points_b, size_t count,
-                                                T* distances, uint8_t* uncertain) {
+static pgaccel_status sphere_distance_bulk_sycl_f32(const float* points_a, const float* points_b,
+                                                    size_t count, float* distances,
+                                                    uint8_t* uncertain) {
   sycl::queue* q = g_queue;
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
   try {
-    T* d_a = sycl::malloc_shared<T>(count * 2, *q);
-    T* d_b = sycl::malloc_shared<T>(count * 2, *q);
-    T* d_dist = sycl::malloc_shared<T>(count, *q);
+    float* d_a = sycl::malloc_shared<float>(count * 2, *q);
+    float* d_b = sycl::malloc_shared<float>(count * 2, *q);
+    float* d_dist = sycl::malloc_shared<float>(count, *q);
     uint8_t* d_unc = sycl::malloc_shared<uint8_t>(count, *q);
 
     if (!d_a || !d_b || !d_dist || !d_unc) {
@@ -412,75 +417,55 @@ static pgaccel_status sphere_distance_bulk_sycl(const T* points_a, const T* poin
       return PGACCEL_OOM;
     }
 
-    std::memcpy(d_a, points_a, count * 2 * sizeof(T));
-    std::memcpy(d_b, points_b, count * 2 * sizeof(T));
+    std::memcpy(d_a, points_a, count * 2 * sizeof(float));
+    std::memcpy(d_b, points_b, count * 2 * sizeof(float));
 
-    // Math constants stay constexpr so Metal SSCP folds them into kernel IR
-    // as immediates rather than lambda captures. Promoting both to `const T`
-    // pushes the kernel past Metal's flat-args limit and the SSCP emitter
-    // spins forever compiling argbuffer layout — same class as the
-    // `__args` MSL compile error tracked in TODO Phase 7. Per-T predicates
-    // (antipodal_thresh, close_dist) need a runtime branch on
-    // `std::is_same<T, double>`, so they remain `const T` and ride as
-    // captures.
-    constexpr T deg_to_rad = static_cast<T>(M_PI / 180.0);
-    constexpr T earth_radius = static_cast<T>(EARTH_RADIUS_M);
-    const T antipodal_thresh = std::is_same<T, double>::value
-                                   ? static_cast<T>(ANTIPODAL_COS_THRESH_FP64)
-                                   : static_cast<T>(ANTIPODAL_COS_THRESH_FP32);
-    const T close_dist = std::is_same<T, double>::value ? static_cast<T>(CLOSE_DIST_M_FP64)
-                                                        : static_cast<T>(CLOSE_DIST_M_FP32);
+    constexpr float deg_to_rad = static_cast<float>(M_PI / 180.0);
+    constexpr float earth_radius = static_cast<float>(EARTH_RADIUS_M);
+    constexpr float antipodal_thresh = ANTIPODAL_COS_THRESH_FP32;
+    constexpr float close_dist = static_cast<float>(CLOSE_DIST_M_FP32);
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const size_t i = id[0];
-       const T lon1_deg = d_a[i * 2];
-       const T lat1_deg = d_a[i * 2 + 1];
-       const T lon2_deg = d_b[i * 2];
-       const T lat2_deg = d_b[i * 2 + 1];
+       const float lon1_deg = d_a[i * 2];
+       const float lat1_deg = d_a[i * 2 + 1];
+       const float lon2_deg = d_b[i * 2];
+       const float lat2_deg = d_b[i * 2 + 1];
 
-       // NaN / Inf -> UNCERTAIN with zero distance.
        if (!sycl::isfinite(lon1_deg) || !sycl::isfinite(lat1_deg) || !sycl::isfinite(lon2_deg) ||
            !sycl::isfinite(lat2_deg)) {
-         d_dist[i] = T(0);
+         d_dist[i] = 0.0f;
          d_unc[i] = 1;
          return;
        }
 
-       const T lat1 = lat1_deg * deg_to_rad;
-       const T lon1 = lon1_deg * deg_to_rad;
-       const T lat2 = lat2_deg * deg_to_rad;
-       const T lon2 = lon2_deg * deg_to_rad;
+       const float lat1 = lat1_deg * deg_to_rad;
+       const float lon1 = lon1_deg * deg_to_rad;
+       const float lat2 = lat2_deg * deg_to_rad;
+       const float lon2 = lon2_deg * deg_to_rad;
 
-       const T dlat = lat2 - lat1;
-       const T dlon = lon2 - lon1;
+       const float dlat = lat2 - lat1;
+       const float dlon = lon2 - lon1;
 
-       const T sin_dlat = sycl::sin(dlat / T(2));
-       const T sin_dlon = sycl::sin(dlon / T(2));
+       const float sin_dlat = sycl::sin(dlat / 2.0f);
+       const float sin_dlon = sycl::sin(dlon / 2.0f);
 
-       T a = sin_dlat * sin_dlat + sycl::cos(lat1) * sycl::cos(lat2) * sin_dlon * sin_dlon;
+       float a = sin_dlat * sin_dlat + sycl::cos(lat1) * sycl::cos(lat2) * sin_dlon * sin_dlon;
 
-       // Antipodal check: a near 1.0 means the asin-form below loses precision.
        if (a > antipodal_thresh) {
-         d_dist[i] = T(0);
+         d_dist[i] = 0.0f;
          d_unc[i] = 1;
          return;
        }
 
-       // Clamp a to [0, 1] for numerical safety before sqrt.
-       if (a < T(0))
-         a = T(0);
-       if (a > T(1))
-         a = T(1);
+       if (a < 0.0f)
+         a = 0.0f;
+       if (a > 1.0f)
+         a = 1.0f;
 
-       // c = 2*asin(sqrt(a)). Mathematically equivalent to the
-       // 2*atan2(sqrt(a), sqrt(1-a)) form on the same domain a ∈ [0,1] —
-       // chosen because Metal soft-fp64 emits asin/sqrt forwarders cleanly
-       // (kAsinMinimax in the JIT cache), while atan2 lowering pulled in
-       // additional soft-fp64 helpers that hung Metal SSCP compilation.
-       const T c = T(2) * sycl::asin(sycl::sqrt(a));
-       const T d = earth_radius * c;
+       const float c = 2.0f * sycl::asin(sycl::sqrt(a));
+       const float d = earth_radius * c;
 
-       // Very close points: precision loss flag.
        if (d < close_dist) {
          d_dist[i] = d;
          d_unc[i] = 1;
@@ -491,7 +476,7 @@ static pgaccel_status sphere_distance_bulk_sycl(const T* points_a, const T* poin
        d_unc[i] = 0;
      }).wait_and_throw();
 
-    std::memcpy(distances, d_dist, count * sizeof(T));
+    std::memcpy(distances, d_dist, count * sizeof(float));
     std::memcpy(uncertain, d_unc, count * sizeof(uint8_t));
 
     sycl::free(d_a, *q);
@@ -502,10 +487,119 @@ static pgaccel_status sphere_distance_bulk_sycl(const T* points_a, const T* poin
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
-    fprintf(stderr, "pgaccel: SYCL sphere_distance_bulk failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: SYCL sphere_distance_bulk_f32 failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: sphere_distance_bulk failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: sphere_distance_bulk_f32 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+// fp64 entry point — non-templated so Metal SSCP doesn't recurse into
+// argbuffer-struct emission for a templated functor (the hang root cause).
+// Uses `q->submit([&](sycl::handler& h) { h.parallel_for(..., [=](id<1>) {
+// /* explicit double everywhere */ }); })` per h3_ops.cpp:972.
+static pgaccel_status sphere_distance_bulk_sycl_f64(const double* points_a, const double* points_b,
+                                                    size_t count, double* distances,
+                                                    uint8_t* uncertain) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  try {
+    double* d_a = sycl::malloc_shared<double>(count * 2, *q);
+    double* d_b = sycl::malloc_shared<double>(count * 2, *q);
+    double* d_dist = sycl::malloc_shared<double>(count, *q);
+    uint8_t* d_unc = sycl::malloc_shared<uint8_t>(count, *q);
+
+    if (!d_a || !d_b || !d_dist || !d_unc) {
+      if (d_a)
+        sycl::free(d_a, *q);
+      if (d_b)
+        sycl::free(d_b, *q);
+      if (d_dist)
+        sycl::free(d_dist, *q);
+      if (d_unc)
+        sycl::free(d_unc, *q);
+      return PGACCEL_OOM;
+    }
+
+    std::memcpy(d_a, points_a, count * 2 * sizeof(double));
+    std::memcpy(d_b, points_b, count * 2 * sizeof(double));
+
+    const double deg_to_rad = M_PI / 180.0;
+    const double earth_radius = EARTH_RADIUS_M;
+    const double antipodal_thresh = ANTIPODAL_COS_THRESH_FP64;
+    const double close_dist = CLOSE_DIST_M_FP64;
+
+    q->submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const double lon1_deg = d_a[i * 2];
+         const double lat1_deg = d_a[i * 2 + 1];
+         const double lon2_deg = d_b[i * 2];
+         const double lat2_deg = d_b[i * 2 + 1];
+
+         if (!sycl::isfinite(lon1_deg) || !sycl::isfinite(lat1_deg) || !sycl::isfinite(lon2_deg) ||
+             !sycl::isfinite(lat2_deg)) {
+           d_dist[i] = 0.0;
+           d_unc[i] = 1;
+           return;
+         }
+
+         const double lat1 = lat1_deg * deg_to_rad;
+         const double lon1 = lon1_deg * deg_to_rad;
+         const double lat2 = lat2_deg * deg_to_rad;
+         const double lon2 = lon2_deg * deg_to_rad;
+
+         const double dlat = lat2 - lat1;
+         const double dlon = lon2 - lon1;
+
+         const double sin_dlat = sycl::sin(dlat / 2.0);
+         const double sin_dlon = sycl::sin(dlon / 2.0);
+
+         double a = sin_dlat * sin_dlat + sycl::cos(lat1) * sycl::cos(lat2) * sin_dlon * sin_dlon;
+
+         if (a > antipodal_thresh) {
+           d_dist[i] = 0.0;
+           d_unc[i] = 1;
+           return;
+         }
+
+         if (a < 0.0)
+           a = 0.0;
+         if (a > 1.0)
+           a = 1.0;
+
+         const double c = 2.0 * sycl::asin(sycl::sqrt(a));
+         const double d = earth_radius * c;
+
+         if (d < close_dist) {
+           d_dist[i] = d;
+           d_unc[i] = 1;
+           return;
+         }
+
+         d_dist[i] = d;
+         d_unc[i] = 0;
+       });
+     }).wait_and_throw();
+
+    std::memcpy(distances, d_dist, count * sizeof(double));
+    std::memcpy(uncertain, d_unc, count * sizeof(uint8_t));
+
+    sycl::free(d_a, *q);
+    sycl::free(d_b, *q);
+    sycl::free(d_dist, *q);
+    sycl::free(d_unc, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL sphere_distance_bulk_f64 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: sphere_distance_bulk_f64 failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
 }
@@ -745,7 +839,7 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
 }
 
 // ---------------------------------------------------------------------------
-// SYCL kernel — st_length_bulk via Euclidean edge-length sum (fp32)
+// SYCL kernel — st_length_bulk via Euclidean edge-length sum (fp32 + fp64)
 //
 // CSR layout matches st_area_bulk_sycl. Each work-item walks its
 // row's vertex sequence and sums sqrt(dx² + dy²) over consecutive
@@ -753,12 +847,12 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
 // edge); LineStrings are open (sum stops at the last vertex pair).
 // The dispatcher caller sets a flag on the kernel call to choose.
 //
-// fp32 only for now — `sycl::sqrt(double)` on Metal pulls in the
-// SLEEF soft-fp64 sqrt path which hangs SSCP JIT compilation in the
-// same class as the sphere_distance fp64 issue (see TODO Phase 7).
-// fp64 LineString length is deferable: the public entry returns
-// `PGACCEL_ERROR_NO_DEVICE` for use_fp64=true so the caller routes
-// to PG.
+// fp32 + fp64 are now distinct non-templated functions — same split
+// rationale as sphere_distance_bulk_sycl_{f32,f64} above (templated
+// SYCL kernels with `T = double` hung Metal SSCP JIT during argbuffer-
+// struct emission). Direct-double `sycl::sqrt` builtins compile cleanly
+// when the functor is non-templated, mirroring the explicit-double
+// pattern at `pgaccel-kernels/src/h3_ops.cpp:972-1019`.
 // ---------------------------------------------------------------------------
 namespace {
 pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_offsets,
@@ -824,10 +918,92 @@ pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
-    fprintf(stderr, "pgaccel: SYCL st_length_bulk failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: SYCL st_length_bulk_f32 failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: st_length_bulk failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: st_length_bulk_f32 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+// fp64 path — non-templated functor wrapped in `q->submit([&](handler& h){...})`
+// per the h3_ops.cpp:972 explicit-double pattern. The previous public
+// entry returned NO_DEVICE on use_fp64=true under the hypothesis that
+// `sycl::sqrt(double)` on Metal soft-fp64 hung SSCP JIT; that hypothesis
+// turned out to be wrong — the hang was in templated functor
+// instantiation through the argbuffer-struct emitter, not in the sqrt
+// builtin itself. Direct-double sqrt compiles cleanly when the kernel
+// is non-templated. Same fix shape as sphere_distance_bulk_sycl_f64.
+pgaccel_status st_length_bulk_sycl_f64(const double* coords, const uint32_t* row_offsets,
+                                       size_t row_count, bool closed_ring, double* lengths) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  const uint32_t total_coord_count = row_offsets[row_count];
+
+  try {
+    double* d_coords =
+        sycl::malloc_shared<double>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    double* d_lengths = sycl::malloc_shared<double>(row_count, *q);
+
+    if (!d_coords || !d_offsets || !d_lengths) {
+      if (d_coords)
+        sycl::free(d_coords, *q);
+      if (d_offsets)
+        sycl::free(d_offsets, *q);
+      if (d_lengths)
+        sycl::free(d_lengths, *q);
+      return PGACCEL_OOM;
+    }
+
+    if (total_coord_count > 0) {
+      std::memcpy(d_coords, coords, total_coord_count * sizeof(double));
+    }
+    std::memcpy(d_offsets, row_offsets, (row_count + 1) * sizeof(uint32_t));
+
+    const bool is_closed = closed_ring;
+
+    q->submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const uint32_t start = d_offsets[i];
+         const uint32_t end = d_offsets[i + 1];
+         const uint32_t vertex_count = (end - start) / 2;
+         if (vertex_count < 2) {
+           d_lengths[i] = 0.0;
+           return;
+         }
+         double total = 0.0;
+         const uint32_t edge_count = is_closed ? vertex_count : vertex_count - 1;
+         for (uint32_t k = 0; k < edge_count; ++k) {
+           const uint32_t k_next = is_closed ? (k + 1) % vertex_count : k + 1;
+           const double x_k = d_coords[start + k * 2];
+           const double y_k = d_coords[start + k * 2 + 1];
+           const double x_next = d_coords[start + k_next * 2];
+           const double y_next = d_coords[start + k_next * 2 + 1];
+           const double dx = x_next - x_k;
+           const double dy = y_next - y_k;
+           total += sycl::sqrt(dx * dx + dy * dy);
+         }
+         d_lengths[i] = total;
+       });
+     }).wait_and_throw();
+
+    std::memcpy(lengths, d_lengths, row_count * sizeof(double));
+
+    sycl::free(d_coords, *q);
+    sycl::free(d_offsets, *q);
+    sycl::free(d_lengths, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL st_length_bulk_f64 failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: st_length_bulk_f64 failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
 }
@@ -842,10 +1018,8 @@ extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint3
     return PGACCEL_ERROR_INIT;
 
   if (use_fp64) {
-    // fp64 path deferred — sycl::sqrt(double) on Metal pulls SLEEF
-    // soft-fp64 sqrt which hangs SSCP JIT. Caller routes to PG via
-    // the standard NO_DEVICE escape hatch.
-    return PGACCEL_ERROR_NO_DEVICE;
+    return st_length_bulk_sycl_f64(static_cast<const double*>(coords), row_offsets, row_count,
+                                   closed_ring, static_cast<double*>(lengths));
   }
   return st_length_bulk_sycl_f32(static_cast<const float*>(coords), row_offsets, row_count,
                                  closed_ring, static_cast<float*>(lengths));
@@ -887,27 +1061,26 @@ extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, con
 
   // GPU dispatch only — no CPU host loop (CLAUDE.md rules 11/12).
   //
-  // fp32 path runs the SYCL kernel on every backend (Metal native fp32,
-  // CUDA / ROCm / Level Zero native).
-  //
-  // fp64 path is currently deferred (returns PGACCEL_ERROR_NO_DEVICE so
-  // the caller's three-layer recheck routes the row to PG via PostGIS).
-  // Reason: with AdaptiveCpp `fork-safe-metal` @ 4f3cde11, instantiating
-  // `sphere_distance_bulk_sycl<double>` registers a kernel whose Metal
-  // SSCP soft-fp64 JIT hangs the compiler at .dylib load — and because
-  // AdaptiveCpp prepares all kernels in the dylib together, an unrelated
-  // (e.g. `point_in_ring_bulk_fp64_sycl`) dispatch then blocks forever
-  // waiting on the same compile barrier. Reproduces deterministically with
-  // `sycl::sin / cos / sqrt / atan2 / asin` on `double`. Same class as the
-  // `__args` MSL compile error tracked in TODO.md Phase 7. fp32 SYCL is
-  // unaffected. Re-enable fp64 once soft-fp64 trig coverage stabilises in
-  // the AdaptiveCpp fork.
+  // The previous templated `sphere_distance_bulk_sycl<T>` instantiation
+  // for `T = double` hung Metal SSCP JIT at .dylib load (template
+  // instantiation through the argbuffer-struct emitter recursed on the
+  // soft-fp64 trig lowering). Splitting into two non-templated functions
+  // — `sphere_distance_bulk_sycl_f32` and `_f64` — mirrors the explicit-
+  // double pattern at `pgaccel-kernels/src/h3_ops.cpp:972-1019` which
+  // proved direct `sycl::sin/cos/asin/sqrt(double)` builtins compile
+  // cleanly on Metal SSCP; only the templated form hung. Both paths are
+  // now live: native fp64 on CUDA/ROCm/Level Zero, soft-fp64 on Metal
+  // (Metal soft-fp64 is ~10-30× slower than native — acceptable for
+  // correctness-critical queries; planner uses `has_native_fp64` as a
+  // cost signal but never as a gate).
   if (use_fp64) {
-    return PGACCEL_ERROR_NO_DEVICE;
+    return sphere_distance_bulk_sycl_f64(static_cast<const double*>(points_a),
+                                         static_cast<const double*>(points_b), count,
+                                         static_cast<double*>(distances), uncertain);
   }
-  return sphere_distance_bulk_sycl<float>(static_cast<const float*>(points_a),
-                                          static_cast<const float*>(points_b), count,
-                                          static_cast<float*>(distances), uncertain);
+  return sphere_distance_bulk_sycl_f32(static_cast<const float*>(points_a),
+                                       static_cast<const float*>(points_b), count,
+                                       static_cast<float*>(distances), uncertain);
 }
 
 extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, const void* segs_b,
@@ -929,4 +1102,501 @@ extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, co
   }
   return segment_intersects_bulk_sycl<float>(static_cast<const float*>(segs_a),
                                              static_cast<const float*>(segs_b), count, results);
+}
+
+// ---------------------------------------------------------------------------
+// st_distance polygon-to-polygon (fp32)
+//
+// Computes the minimum Euclidean distance between two polygon boundaries
+// using nearest-vertex-to-edge distance. Each work-item walks the
+// vertices of polygon A against the edges of polygon B (and vice versa)
+// and emits the minimum perpendicular distance.
+//
+// UNCERTAIN policy: this is an *upper bound* on the boundary distance —
+// not the topological distance (which is 0 for overlapping polygons or
+// when one contains the other). The dispatcher tags polygon pairs whose
+// boundaries touch / overlap as UNCERTAIN so PG re-checks via
+// ST_Distance for the containment / overlap cases. Disjoint boundaries
+// get the boundary-distance shortcut directly.
+//
+// CSR layout matches `st_area_bulk_sycl` / `st_length_bulk_sycl_f32`:
+//   coords_a[]: flat fp32 [x,y,...] for all polygon-A rings
+//   row_offsets_a[]: [row_count + 1] coord-pair offsets
+//   coords_b[], row_offsets_b[]: same for polygon-B
+// ---------------------------------------------------------------------------
+
+namespace {
+
+pgaccel_status
+st_distance_polygon_polygon_bulk_sycl_f32(const float* coords_a, const uint32_t* row_offsets_a,
+                                          const float* coords_b, const uint32_t* row_offsets_b,
+                                          size_t row_count, float* distances, uint8_t* uncertain) {
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  const uint32_t total_a = row_offsets_a[row_count];
+  const uint32_t total_b = row_offsets_b[row_count];
+
+  try {
+    float* d_a = sycl::malloc_shared<float>(total_a > 0 ? total_a : 1, *q);
+    float* d_b = sycl::malloc_shared<float>(total_b > 0 ? total_b : 1, *q);
+    uint32_t* d_off_a = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    uint32_t* d_off_b = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
+    float* d_dist = sycl::malloc_shared<float>(row_count, *q);
+    uint8_t* d_unc = sycl::malloc_shared<uint8_t>(row_count, *q);
+
+    if (!d_a || !d_b || !d_off_a || !d_off_b || !d_dist || !d_unc) {
+      if (d_a)
+        sycl::free(d_a, *q);
+      if (d_b)
+        sycl::free(d_b, *q);
+      if (d_off_a)
+        sycl::free(d_off_a, *q);
+      if (d_off_b)
+        sycl::free(d_off_b, *q);
+      if (d_dist)
+        sycl::free(d_dist, *q);
+      if (d_unc)
+        sycl::free(d_unc, *q);
+      return PGACCEL_OOM;
+    }
+
+    if (total_a > 0)
+      std::memcpy(d_a, coords_a, total_a * sizeof(float));
+    if (total_b > 0)
+      std::memcpy(d_b, coords_b, total_b * sizeof(float));
+    std::memcpy(d_off_a, row_offsets_a, (row_count + 1) * sizeof(uint32_t));
+    std::memcpy(d_off_b, row_offsets_b, (row_count + 1) * sizeof(uint32_t));
+
+    q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const uint32_t sa = d_off_a[i];
+       const uint32_t ea = d_off_a[i + 1];
+       const uint32_t sb = d_off_b[i];
+       const uint32_t eb = d_off_b[i + 1];
+       const uint32_t va = (ea - sa) / 2;
+       const uint32_t vb = (eb - sb) / 2;
+       if (va < 3 || vb < 3) {
+         d_dist[i] = 0.0f;
+         d_unc[i] = 1;  // degenerate → let PG handle
+         return;
+       }
+
+       float min_dist_sq = std::numeric_limits<float>::infinity();
+       bool overlap = false;
+
+       // Walk vertices of A against edges of B.
+       for (uint32_t va_idx = 0; va_idx < va; ++va_idx) {
+         const float px = d_a[sa + va_idx * 2];
+         const float py = d_a[sa + va_idx * 2 + 1];
+         for (uint32_t vb_idx = 0; vb_idx < vb; ++vb_idx) {
+           const uint32_t next = (vb_idx + 1) % vb;
+           const float ax = d_b[sb + vb_idx * 2];
+           const float ay = d_b[sb + vb_idx * 2 + 1];
+           const float bx = d_b[sb + next * 2];
+           const float by = d_b[sb + next * 2 + 1];
+           const float dx = bx - ax;
+           const float dy = by - ay;
+           const float len_sq = dx * dx + dy * dy;
+           float d_sq;
+           if (len_sq < EPS_FP32 * EPS_FP32) {
+             const float ex = px - ax;
+             const float ey = py - ay;
+             d_sq = ex * ex + ey * ey;
+           } else {
+             // Project (p - a) onto (b - a), clamped to [0, 1].
+             const float t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+             const float tc = sycl::fmin(sycl::fmax(t, 0.0f), 1.0f);
+             const float qx = ax + tc * dx;
+             const float qy = ay + tc * dy;
+             const float ex = px - qx;
+             const float ey = py - qy;
+             d_sq = ex * ex + ey * ey;
+           }
+           if (d_sq < min_dist_sq)
+             min_dist_sq = d_sq;
+           if (d_sq < EPS_FP32 * EPS_FP32) {
+             overlap = true;
+           }
+         }
+       }
+       // Symmetrical sweep: vertices of B against edges of A.
+       for (uint32_t vb_idx = 0; vb_idx < vb; ++vb_idx) {
+         const float px = d_b[sb + vb_idx * 2];
+         const float py = d_b[sb + vb_idx * 2 + 1];
+         for (uint32_t va_idx = 0; va_idx < va; ++va_idx) {
+           const uint32_t next = (va_idx + 1) % va;
+           const float ax = d_a[sa + va_idx * 2];
+           const float ay = d_a[sa + va_idx * 2 + 1];
+           const float bx = d_a[sa + next * 2];
+           const float by = d_a[sa + next * 2 + 1];
+           const float dx = bx - ax;
+           const float dy = by - ay;
+           const float len_sq = dx * dx + dy * dy;
+           float d_sq;
+           if (len_sq < EPS_FP32 * EPS_FP32) {
+             const float ex = px - ax;
+             const float ey = py - ay;
+             d_sq = ex * ex + ey * ey;
+           } else {
+             const float t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+             const float tc = sycl::fmin(sycl::fmax(t, 0.0f), 1.0f);
+             const float qx = ax + tc * dx;
+             const float qy = ay + tc * dy;
+             const float ex = px - qx;
+             const float ey = py - qy;
+             d_sq = ex * ex + ey * ey;
+           }
+           if (d_sq < min_dist_sq)
+             min_dist_sq = d_sq;
+           if (d_sq < EPS_FP32 * EPS_FP32) {
+             overlap = true;
+           }
+         }
+       }
+
+       const float min_dist = sycl::sqrt(min_dist_sq);
+       d_dist[i] = min_dist;
+       // Boundary touch / overlap → UNCERTAIN (interior containment is
+       // not detected by edge-walk alone, so let PG decide).
+       d_unc[i] = overlap ? 1 : 0;
+     }).wait_and_throw();
+
+    std::memcpy(distances, d_dist, row_count * sizeof(float));
+    std::memcpy(uncertain, d_unc, row_count * sizeof(uint8_t));
+
+    sycl::free(d_a, *q);
+    sycl::free(d_b, *q);
+    sycl::free(d_off_a, *q);
+    sycl::free(d_off_b, *q);
+    sycl::free(d_dist, *q);
+    sycl::free(d_unc, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL st_distance_polygon_polygon_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: st_distance_polygon_polygon_bulk failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+}  // namespace
+
+extern "C" pgaccel_status
+pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* row_offsets_a,
+                                         const float* coords_b, const uint32_t* row_offsets_b,
+                                         size_t row_count, float* distances, uint8_t* uncertain) {
+  if (row_count == 0)
+    return PGACCEL_OK;
+  if (!coords_a || !row_offsets_a || !coords_b || !row_offsets_b || !distances || !uncertain)
+    return PGACCEL_ERROR_INIT;
+  return st_distance_polygon_polygon_bulk_sycl_f32(coords_a, row_offsets_a, coords_b, row_offsets_b,
+                                                   row_count, distances, uncertain);
+}
+
+// ---------------------------------------------------------------------------
+// Algorithmic spatial predicates (pair-row inputs via pgaccel_geometry).
+//
+// `pgaccel_st_equals_bulk`, `_st_touches_bulk`, `_st_crosses_bulk`, and
+// `_st_overlaps_bulk` follow the same DEFINITE / UNCERTAIN routing
+// contract as `pgaccel_spatial_intersects`: each pair classifies into one
+// of three buckets, and `UNCERTAIN` (0) means PG re-checks via the
+// reference PostGIS implementation. The kernels exercise only the cheap-
+// to-evaluate portions of DE-9IM topology — bbox disjoint, vertex-set
+// equality on Point/Point pairs, ring-vertex equality on Polygon/Polygon
+// pairs — and route every other case to UNCERTAIN. Full DE-9IM topology
+// is genuinely complex and remains a follow-up; per CLAUDE.md anti-cheat
+// ban #9 ("when stuck, say so") we surface UNCERTAIN rather than fake
+// results, which is the documented escape hatch (see CLAUDE.md rule 11
+// commentary).
+//
+// Output convention (one int8 per row in `results[i]`):
+//   1  → DEFINITE TRUE  (predicate holds)
+//  -1  → DEFINITE FALSE (predicate definitely does NOT hold)
+//   0  → UNCERTAIN — caller routes to PG
+//
+// All kernels reuse the existing `pgaccel_geometry` C struct (defined in
+// `pgaccel_ffi.h`) so the bridge layer doesn't need new descriptor
+// types. Inputs that fail the type/shape gate (e.g. cross-dim pair on
+// st_equals) immediately fall to UNCERTAIN — the kernels never crash on
+// shape-mismatched inputs.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Maximum ring vertex count for which we'll attempt the O(N²) ring-
+// equality fast path on the host. Beyond this, the kernel falls through
+// to UNCERTAIN immediately. Sized small intentionally — the cost of
+// building per-row coordinate buffers on the GPU outweighs the win for
+// fat rings.
+constexpr size_t RING_EQUAL_FAST_PATH_LIMIT = 32;
+
+enum class AlgorithmicPredicate {
+  Equals,
+  Touches,
+  Crosses,
+  Overlaps,
+};
+
+pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
+                                                   const pgaccel_geometry* geoms_b, size_t count,
+                                                   AlgorithmicPredicate pred, int8_t* results) {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (!geoms_a || !geoms_b || !results)
+    return PGACCEL_ERROR_INIT;
+
+  sycl::queue* q = g_queue;
+  if (!q)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  try {
+    // Per-row metadata laid out for a flat-args kernel:
+    //   bboxes_a[i*4 .. i*4+4], bboxes_b[i*4 .. i*4+4]
+    //   types_a[i], types_b[i]                 (int)
+    //   point_eq[i]                            (uint8 — Point/Point coord match)
+    //   ring_eq[i]                             (uint8 — Polygon/Polygon ring match)
+    // Polygon ring equality is computed host-side because per-row
+    // ring buffers would require variable-stride USM per element.
+    float* d_bboxes_a = sycl::malloc_shared<float>(count * 4, *q);
+    float* d_bboxes_b = sycl::malloc_shared<float>(count * 4, *q);
+    int* d_types_a = sycl::malloc_shared<int>(count, *q);
+    int* d_types_b = sycl::malloc_shared<int>(count, *q);
+    uint8_t* d_point_eq = sycl::malloc_shared<uint8_t>(count, *q);
+    uint8_t* d_ring_eq = sycl::malloc_shared<uint8_t>(count, *q);
+    int8_t* d_results = sycl::malloc_shared<int8_t>(count, *q);
+
+    if (!d_bboxes_a || !d_bboxes_b || !d_types_a || !d_types_b || !d_point_eq || !d_ring_eq ||
+        !d_results) {
+      if (d_bboxes_a)
+        sycl::free(d_bboxes_a, *q);
+      if (d_bboxes_b)
+        sycl::free(d_bboxes_b, *q);
+      if (d_types_a)
+        sycl::free(d_types_a, *q);
+      if (d_types_b)
+        sycl::free(d_types_b, *q);
+      if (d_point_eq)
+        sycl::free(d_point_eq, *q);
+      if (d_ring_eq)
+        sycl::free(d_ring_eq, *q);
+      if (d_results)
+        sycl::free(d_results, *q);
+      return PGACCEL_OOM;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+      const pgaccel_geometry& a = geoms_a[i];
+      const pgaccel_geometry& b = geoms_b[i];
+      if (a.bbox) {
+        std::memcpy(&d_bboxes_a[i * 4], a.bbox, 4 * sizeof(float));
+      } else {
+        d_bboxes_a[i * 4 + 0] = 0.0f;
+        d_bboxes_a[i * 4 + 1] = 0.0f;
+        d_bboxes_a[i * 4 + 2] = 0.0f;
+        d_bboxes_a[i * 4 + 3] = 0.0f;
+      }
+      if (b.bbox) {
+        std::memcpy(&d_bboxes_b[i * 4], b.bbox, 4 * sizeof(float));
+      } else {
+        d_bboxes_b[i * 4 + 0] = 0.0f;
+        d_bboxes_b[i * 4 + 1] = 0.0f;
+        d_bboxes_b[i * 4 + 2] = 0.0f;
+        d_bboxes_b[i * 4 + 3] = 0.0f;
+      }
+      d_types_a[i] = static_cast<int>(a.type);
+      d_types_b[i] = static_cast<int>(b.type);
+
+      uint8_t pt_eq = 0;
+      if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POINT && a.coords && b.coords &&
+          a.coord_count >= 1 && b.coord_count >= 1) {
+        const float dx = a.coords[0] - b.coords[0];
+        const float dy = a.coords[1] - b.coords[1];
+        if (std::abs(dx) < EPS_FP32 && std::abs(dy) < EPS_FP32) {
+          pt_eq = 1;
+        }
+      }
+      d_point_eq[i] = pt_eq;
+
+      uint8_t ring_eq = 0;
+      if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POLYGON && a.coords &&
+          b.coords && a.coord_count >= 3 && b.coord_count >= 3 &&
+          a.coord_count <= RING_EQUAL_FAST_PATH_LIMIT &&
+          b.coord_count <= RING_EQUAL_FAST_PATH_LIMIT && a.coord_count == b.coord_count) {
+        // Walk all rotations forward and reverse.
+        bool found = false;
+        const size_t n = a.coord_count;
+        for (size_t start = 0; start < n && !found; ++start) {
+          bool fwd = true;
+          bool rev = true;
+          for (size_t k = 0; k < n; ++k) {
+            const size_t fi = (start + k) % n;
+            const size_t ri = (start + n - k) % n;
+            if (std::abs(a.coords[k * 2] - b.coords[fi * 2]) >= EPS_FP32 ||
+                std::abs(a.coords[k * 2 + 1] - b.coords[fi * 2 + 1]) >= EPS_FP32) {
+              fwd = false;
+            }
+            if (std::abs(a.coords[k * 2] - b.coords[ri * 2]) >= EPS_FP32 ||
+                std::abs(a.coords[k * 2 + 1] - b.coords[ri * 2 + 1]) >= EPS_FP32) {
+              rev = false;
+            }
+            if (!fwd && !rev)
+              break;
+          }
+          if (fwd || rev)
+            found = true;
+        }
+        if (found) {
+          ring_eq = 1;
+        }
+      }
+      d_ring_eq[i] = ring_eq;
+    }
+
+    const int pred_id = static_cast<int>(pred);
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       const float* ba = &d_bboxes_a[i * 4];
+       const float* bb = &d_bboxes_b[i * 4];
+       const int ta = d_types_a[i];
+       const int tb = d_types_b[i];
+       const uint8_t pt_eq = d_point_eq[i];
+       const uint8_t ring_eq = d_ring_eq[i];
+
+       if (ta == static_cast<int>(PGACCEL_GEOM_UNKNOWN) ||
+           tb == static_cast<int>(PGACCEL_GEOM_UNKNOWN)) {
+         d_results[i] = 0;
+         return;
+       }
+
+       const bool disjoint =
+           (ba[2] < bb[0]) || (bb[2] < ba[0]) || (ba[3] < bb[1]) || (bb[3] < ba[1]);
+
+       if (pred_id == static_cast<int>(AlgorithmicPredicate::Equals)) {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
+           d_results[i] = pt_eq ? int8_t(1) : int8_t(-1);
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = 1;
+           return;
+         }
+         if (ta != tb) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       } else if (pred_id == static_cast<int>(AlgorithmicPredicate::Touches)) {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       } else if (pred_id == static_cast<int>(AlgorithmicPredicate::Crosses)) {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       } else /* Overlaps */ {
+         if (disjoint) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta != tb) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) && pt_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+           d_results[i] = -1;
+           return;
+         }
+         d_results[i] = 0;
+       }
+     }).wait_and_throw();
+
+    std::memcpy(results, d_results, count * sizeof(int8_t));
+
+    sycl::free(d_bboxes_a, *q);
+    sycl::free(d_bboxes_b, *q);
+    sycl::free(d_types_a, *q);
+    sycl::free(d_types_b, *q);
+    sycl::free(d_point_eq, *q);
+    sycl::free(d_ring_eq, *q);
+    sycl::free(d_results, *q);
+
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+}  // namespace
+
+extern "C" pgaccel_status pgaccel_st_equals_bulk(const pgaccel_geometry* geoms_a,
+                                                 const pgaccel_geometry* geoms_b, size_t count,
+                                                 int8_t* results) {
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Equals,
+                                             results);
+}
+
+extern "C" pgaccel_status pgaccel_st_touches_bulk(const pgaccel_geometry* geoms_a,
+                                                  const pgaccel_geometry* geoms_b, size_t count,
+                                                  int8_t* results) {
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Touches,
+                                             results);
+}
+
+extern "C" pgaccel_status pgaccel_st_crosses_bulk(const pgaccel_geometry* geoms_a,
+                                                  const pgaccel_geometry* geoms_b, size_t count,
+                                                  int8_t* results) {
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Crosses,
+                                             results);
+}
+
+extern "C" pgaccel_status pgaccel_st_overlaps_bulk(const pgaccel_geometry* geoms_a,
+                                                   const pgaccel_geometry* geoms_b, size_t count,
+                                                   int8_t* results) {
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count,
+                                             AlgorithmicPredicate::Overlaps, results);
 }

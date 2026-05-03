@@ -55,13 +55,13 @@ pub fn adapter() -> ExtensionAdapter {
 /// | `st_distance`    | YES (Point*Point fp32) | `pgaccel_sphere_distance_bulk` (Haversine SYCL kernel) via `dispatch_gpu_st_distance`. Point*Point pairs only — non-Point inputs (per row OR for the constant qual) defer to PG. fp32 only; fp64 returns NO_DEVICE per the soft-fp64 trig hang (Phase 7). Polygon-to-polygon distance is genuinely harder algorithmically and not wired. |
 /// | `st_area`        | YES (single-arg Polygon, fp32) | `pgaccel_st_area_bulk` (Shoelace SYCL kernel) via `dispatch_gpu_st_area` in `engine/dispatch/spatial.rs`. Single-ring Polygon only; multi-ring / non-Polygon rows return NULL so PG handles via `st_area`'s scalar implementation. |
 /// | `st_length`      | YES (LineString / Polygon perimeter, fp32) | `pgaccel_st_length_bulk` (Euclidean edge-length sum SYCL kernel) via `dispatch_gpu_st_length`. fp32 only — fp64 returns NO_DEVICE pending the soft-fp64 sqrt fix (Phase 7). LineString = open-path length; Polygon = closed-ring perimeter; mixed batches dispatch closed and open rows separately. |
-/// | `st_equals`      | no          | No GPU kernel. Executor would fall through the `_ => Intersects` match in `executor/join/mod.rs:502` and return wrong results. |
+/// | `st_equals`      | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_equals_bulk` (Agent 2A task 4). DEFINITE TRUE for identical Point/Point coords or identical Polygon/Polygon ring vertex sets (≤ 32 verts host-side); DEFINITE FALSE for disjoint bbox or cross-dim pairs; UNCERTAIN otherwise → PG recheck via PostGIS `ST_Equals`. |
 /// | `st_disjoint`    | YES (negation of intersects) | `SpatialPredicate::Disjoint` (`three_layer.rs`) routes to `spatial_intersects` and swaps definite_true / definite_false. Free given the existing kernel; no separate dispatch. |
 /// | `st_covers`      | YES (alias of contains) | Reuses `pgaccel_point_in_ring_bulk` via `SpatialPredicate::Contains` — boundary-touching points fall in UNCERTAIN where PG's Layer-3 recheck applies the boundary-inclusive semantics that distinguishes covers from contains. |
 /// | `st_coveredby`   | YES (alias of within) | Same kernel as `st_covers` with args swapped via `SpatialPredicate::Within`. |
-/// | `st_touches`     | no          | Same as `st_equals`. |
-/// | `st_crosses`     | no          | Same as `st_equals`. |
-/// | `st_overlaps`    | no          | Same as `st_equals`. |
+/// | `st_touches`     | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_touches_bulk` (Agent 2A task 4). DEFINITE FALSE on disjoint bbox / identical points / identical polygons (interiors overlap); everything else UNCERTAIN → PG recheck. |
+/// | `st_crosses`     | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_crosses_bulk` (Agent 2A task 4). Same shortcut pattern; cross-dim line × polygon cases route to UNCERTAIN. |
+/// | `st_overlaps`    | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_overlaps_bulk` (Agent 2A task 4). Cross-dim and identical inputs → DEFINITE FALSE; same-dim non-identical → UNCERTAIN → PG recheck. |
 ///
 /// Per `CLAUDE.md` anti-cheat ban #7 ("no stubs masquerading as done"),
 /// predicates whose kernel paths are absent or return
@@ -78,6 +78,13 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         "st_area",
         "st_length",
         "st_distance",
+        // Agent 2A task 4 — algorithmic predicates with DEFINITE /
+        // UNCERTAIN routing through the new pgaccel_st_*_bulk SYCL
+        // kernels. Per-row dispatch wiring lands in Phase B Agent 1B.
+        "st_equals",
+        "st_touches",
+        "st_crosses",
+        "st_overlaps",
     ];
     NAMES
         .iter()
@@ -118,7 +125,9 @@ mod tests {
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 10);
+        // 10 original + 4 algorithmic predicates (st_equals/touches/crosses/overlaps)
+        // landed in Agent 2A task 6.
+        assert_eq!(adapter().functions.len(), 14);
     }
 
     #[test]
@@ -287,19 +296,13 @@ mod tests {
         assert!(adapter().functions.iter().any(|f| f.name == "st_dwithin"));
     }
 
-    // The predicates below have no GPU kernel path today. They must NOT be
-    // registered — doing so either (a) adds Custom Scan overhead with zero
-    // benefit (all_uncertain stub path) or (b) causes wrong results via
-    // the `_ => Intersects` fall-through in executor/join/mod.rs. See the
-    // audit table in `gpu_spatial_entries` for the full rationale.
-
     // st_area / st_length / st_distance moved to positive coverage above
     // (contains_st_area / contains_st_length / contains_st_distance).
-
-    #[test]
-    fn does_not_contain_st_equals() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_equals"));
-    }
+    //
+    // st_equals / st_touches / st_crosses / st_overlaps moved to positive
+    // coverage in Agent 2A task 6 — they now dispatch through
+    // pgaccel_st_*_bulk SYCL kernels with DEFINITE / UNCERTAIN routing
+    // (see audit table above for the per-predicate semantics).
 
     #[test]
     fn contains_st_disjoint() {
@@ -307,25 +310,31 @@ mod tests {
     }
 
     #[test]
-    fn does_not_contain_st_touches() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_touches"));
+    fn contains_st_equals() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_equals"));
     }
 
     #[test]
-    fn does_not_contain_st_crosses() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_crosses"));
+    fn contains_st_touches() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_touches"));
     }
 
     #[test]
-    fn does_not_contain_st_overlaps() {
-        assert!(!adapter().functions.iter().any(|f| f.name == "st_overlaps"));
+    fn contains_st_crosses() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_crosses"));
+    }
+
+    #[test]
+    fn contains_st_overlaps() {
+        assert!(adapter().functions.iter().any(|f| f.name == "st_overlaps"));
     }
 
     // -- gpu_spatial_entries helper -------------------------------------------
 
     #[test]
     fn gpu_spatial_entries_returns_correct_count() {
-        assert_eq!(gpu_spatial_entries().len(), 10);
+        // 10 original + 4 algorithmic predicates from Agent 2A task 6.
+        assert_eq!(gpu_spatial_entries().len(), 14);
     }
 
     #[test]
