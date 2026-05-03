@@ -74,11 +74,7 @@ pub fn adapter() -> ExtensionAdapter {
 
     let functions = GPU_NAMES
         .iter()
-        .map(|&name| FunctionAccelEntry {
-            schema: "public",
-            name,
-            strategy: AccelStrategy::GpuH3,
-        })
+        .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuH3))
         .collect();
 
     ExtensionAdapter {

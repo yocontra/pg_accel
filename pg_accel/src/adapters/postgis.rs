@@ -81,11 +81,7 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
     ];
     NAMES
         .iter()
-        .map(|&name| FunctionAccelEntry {
-            schema: "public",
-            name,
-            strategy: AccelStrategy::GpuSpatial,
-        })
+        .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuSpatial))
         .collect()
 }
 

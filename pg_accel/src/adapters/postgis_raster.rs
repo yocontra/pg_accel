@@ -54,11 +54,7 @@ fn gpu_raster_entries() -> Vec<FunctionAccelEntry> {
     const NAMES: &[&str] = &["st_mapalgebra", "st_clip", "st_reclass"];
     NAMES
         .iter()
-        .map(|&name| FunctionAccelEntry {
-            schema: "public",
-            name,
-            strategy: AccelStrategy::GpuRaster,
-        })
+        .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuRaster))
         .collect()
 }
 

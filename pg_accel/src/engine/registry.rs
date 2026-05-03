@@ -57,6 +57,43 @@ impl AccelStrategy {
     }
 }
 
+/// Shape of the per-input-row output produced by an accelerated function.
+///
+/// Most acceleratable functions are scalar — one Datum per input row
+/// (`ST_Contains`, `h3_get_resolution`, `ST_Area`, …). A handful return
+/// multiple scalars per row (`ST_SummaryStats` returns
+/// `(count, sum, mean, stddev, min, max)`) or a variable-length array per row
+/// (H3 `grid_disk`, `polyfill`, `cell_to_boundary`, `cells_to_multi_polygon`).
+///
+/// Dispatch needs to know up front which of these three shapes a function
+/// produces so it can allocate the right output buffer layout and pick the
+/// right `DispatchResult` variant. Defaults to `Scalar` so existing single-
+/// scalar entries don't need to opt in explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutputShape {
+    /// One scalar Datum per input row. Existing default.
+    Scalar,
+    /// `field_count` fixed scalars per input row, returned as a record/composite.
+    /// Used by multi-scalar returns like `ST_SummaryStats(rast)` (6 fields).
+    Record {
+        /// Number of scalars per input row.
+        field_count: u32,
+    },
+    /// CSR-style variable-length output — `offsets[N+1]` indexes into a flat
+    /// `values` buffer. Used by H3 grid expansions (`grid_disk`, `polyfill`,
+    /// `cell_to_boundary`, `cells_to_multi_polygon`) where each input row
+    /// produces a different number of output cells/coordinates.
+    VarLen,
+}
+
+impl Default for OutputShape {
+    /// Default to `Scalar` so existing entries continue to compile via
+    /// `..Default::default()` without changes to per-row semantics.
+    fn default() -> Self {
+        Self::Scalar
+    }
+}
+
 /// A single SQL function that `pg_accel` knows how to accelerate.
 #[derive(Debug, Clone)]
 pub struct FunctionAccelEntry {
@@ -66,6 +103,26 @@ pub struct FunctionAccelEntry {
     pub name: &'static str,
     /// Acceleration strategy to apply.
     pub strategy: AccelStrategy,
+    /// Shape of the per-input-row output. Defaults to [`OutputShape::Scalar`]
+    /// (1 Datum per row); set explicitly for record-returning or variable-
+    /// length-output kernels (e.g. `ST_SummaryStats`, H3 grid expansions).
+    pub output_shape: OutputShape,
+}
+
+impl FunctionAccelEntry {
+    /// Construct a scalar-output entry. Convenience constructor that defaults
+    /// `output_shape` to [`OutputShape::Scalar`] — used by the bulk of
+    /// existing adapters (`ST_Contains`, `h3_get_resolution`, etc.) where
+    /// every accelerated function produces exactly one Datum per input row.
+    #[must_use]
+    pub const fn scalar(schema: &'static str, name: &'static str, strategy: AccelStrategy) -> Self {
+        Self {
+            schema,
+            name,
+            strategy,
+            output_shape: OutputShape::Scalar,
+        }
+    }
 }
 
 /// An extension adapter that declares a set of acceleratable functions.
@@ -179,6 +236,7 @@ impl AdapterRegistry {
                             schema: func.schema,
                             name: func.name,
                             strategy: func.strategy,
+                            output_shape: func.output_shape,
                         },
                     );
                 }
@@ -345,15 +403,12 @@ mod tests {
     fn register_and_lookup_by_oid() {
         let mut reg = AdapterRegistry::new();
         let oid = pgrx::pg_sys::Oid::from(42_u32);
-        let entry = FunctionAccelEntry {
-            schema: "public",
-            name: "st_contains",
-            strategy: AccelStrategy::GpuSpatial,
-        };
+        let entry = FunctionAccelEntry::scalar("public", "st_contains", AccelStrategy::GpuSpatial);
         reg.register_function(oid, entry);
         let found = reg.lookup(oid);
         assert!(found.is_some());
         assert_eq!(found.map(|e| e.strategy), Some(AccelStrategy::GpuSpatial));
+        assert_eq!(found.map(|e| e.output_shape), Some(OutputShape::Scalar));
     }
 
     #[test]
@@ -369,11 +424,11 @@ mod tests {
         reg.register_adapter(ExtensionAdapter {
             name: "PostGIS",
             version_query: "SELECT postgis_version()",
-            functions: vec![FunctionAccelEntry {
-                schema: "public",
-                name: "st_intersects",
-                strategy: AccelStrategy::GpuSpatial,
-            }],
+            functions: vec![FunctionAccelEntry::scalar(
+                "public",
+                "st_intersects",
+                AccelStrategy::GpuSpatial,
+            )],
         });
         assert_eq!(reg.adapter_count(), 1);
     }
@@ -392,11 +447,7 @@ mod tests {
 
         reg.register_function(
             oid,
-            FunctionAccelEntry {
-                schema: "public",
-                name: "func_a",
-                strategy: AccelStrategy::GpuSpatial,
-            },
+            FunctionAccelEntry::scalar("public", "func_a", AccelStrategy::GpuSpatial),
         );
         assert_eq!(reg.resolved_count(), 1);
         assert_eq!(reg.lookup(oid).unwrap().strategy, AccelStrategy::GpuSpatial);
@@ -404,11 +455,7 @@ mod tests {
         // Re-register same OID with different entry
         reg.register_function(
             oid,
-            FunctionAccelEntry {
-                schema: "public",
-                name: "func_b",
-                strategy: AccelStrategy::GpuH3,
-            },
+            FunctionAccelEntry::scalar("public", "func_b", AccelStrategy::GpuH3),
         );
         // Count stays at 1 (overwrite, not duplicate)
         assert_eq!(reg.resolved_count(), 1);
@@ -425,27 +472,15 @@ mod tests {
 
         reg.register_function(
             oid1,
-            FunctionAccelEntry {
-                schema: "public",
-                name: "f1",
-                strategy: AccelStrategy::GpuSpatial,
-            },
+            FunctionAccelEntry::scalar("public", "f1", AccelStrategy::GpuSpatial),
         );
         reg.register_function(
             oid2,
-            FunctionAccelEntry {
-                schema: "public",
-                name: "f2",
-                strategy: AccelStrategy::GpuRaster,
-            },
+            FunctionAccelEntry::scalar("public", "f2", AccelStrategy::GpuRaster),
         );
         reg.register_function(
             oid3,
-            FunctionAccelEntry {
-                schema: "pg_catalog",
-                name: "f3",
-                strategy: AccelStrategy::GpuSort,
-            },
+            FunctionAccelEntry::scalar("pg_catalog", "f3", AccelStrategy::GpuSort),
         );
 
         assert_eq!(reg.resolved_count(), 3);
@@ -469,16 +504,8 @@ mod tests {
             name: "another_ext",
             version_query: "SELECT 2",
             functions: vec![
-                FunctionAccelEntry {
-                    schema: "public",
-                    name: "fn1",
-                    strategy: AccelStrategy::GpuReduce,
-                },
-                FunctionAccelEntry {
-                    schema: "public",
-                    name: "fn2",
-                    strategy: AccelStrategy::GpuH3,
-                },
+                FunctionAccelEntry::scalar("public", "fn1", AccelStrategy::GpuReduce),
+                FunctionAccelEntry::scalar("public", "fn2", AccelStrategy::GpuH3),
             ],
         });
 
@@ -540,17 +567,104 @@ mod tests {
 
     #[test]
     fn function_accel_entry_debug_and_clone() {
-        let entry = FunctionAccelEntry {
-            schema: "public",
-            name: "st_intersects",
-            strategy: AccelStrategy::GpuSpatial,
-        };
+        let entry =
+            FunctionAccelEntry::scalar("public", "st_intersects", AccelStrategy::GpuSpatial);
         let cloned = entry.clone();
         assert_eq!(cloned.schema, "public");
         assert_eq!(cloned.name, "st_intersects");
         assert_eq!(cloned.strategy, AccelStrategy::GpuSpatial);
+        assert_eq!(cloned.output_shape, OutputShape::Scalar);
 
         let debug = format!("{entry:?}");
         assert!(debug.contains("st_intersects"));
+    }
+
+    // -- OutputShape variants -----------------------------------------------
+
+    #[test]
+    fn output_shape_default_is_scalar() {
+        let shape: OutputShape = OutputShape::default();
+        assert_eq!(shape, OutputShape::Scalar);
+    }
+
+    #[test]
+    fn output_shape_scalar_variant() {
+        let s = OutputShape::Scalar;
+        assert_eq!(s, OutputShape::Scalar);
+        assert_ne!(s, OutputShape::VarLen);
+    }
+
+    #[test]
+    fn output_shape_record_variant_carries_field_count() {
+        let r = OutputShape::Record { field_count: 6 };
+        match r {
+            OutputShape::Record { field_count } => assert_eq!(field_count, 6),
+            _ => panic!("expected Record variant"),
+        }
+        // Different field counts are not equal.
+        assert_ne!(
+            OutputShape::Record { field_count: 6 },
+            OutputShape::Record { field_count: 7 }
+        );
+    }
+
+    #[test]
+    fn output_shape_varlen_variant() {
+        let v = OutputShape::VarLen;
+        assert_eq!(v, OutputShape::VarLen);
+        assert_ne!(v, OutputShape::Scalar);
+    }
+
+    #[test]
+    fn output_shape_copy_semantics() {
+        let original = OutputShape::Record { field_count: 3 };
+        let copied = original;
+        assert_eq!(original, copied);
+    }
+
+    #[test]
+    fn output_shape_debug_format() {
+        assert!(format!("{:?}", OutputShape::Scalar).contains("Scalar"));
+        assert!(format!("{:?}", OutputShape::VarLen).contains("VarLen"));
+        let r = format!("{:?}", OutputShape::Record { field_count: 6 });
+        assert!(r.contains("Record"));
+        assert!(r.contains('6'));
+    }
+
+    // -- FunctionAccelEntry constructors -------------------------------------
+
+    #[test]
+    fn function_accel_entry_default_is_scalar() {
+        // The convenience constructor must default output_shape to Scalar so
+        // every existing adapter entry keeps the per-row scalar contract.
+        let e = FunctionAccelEntry::scalar("public", "st_contains", AccelStrategy::GpuSpatial);
+        assert_eq!(e.schema, "public");
+        assert_eq!(e.name, "st_contains");
+        assert_eq!(e.strategy, AccelStrategy::GpuSpatial);
+        assert_eq!(e.output_shape, OutputShape::Scalar);
+    }
+
+    #[test]
+    fn function_accel_entry_record_output_shape() {
+        // Record-shaped entries (e.g. ST_SummaryStats with 6 scalar fields)
+        // are constructed via the struct literal, not the `scalar` shortcut.
+        let e = FunctionAccelEntry {
+            schema: "public",
+            name: "st_summarystats",
+            strategy: AccelStrategy::GpuRaster,
+            output_shape: OutputShape::Record { field_count: 6 },
+        };
+        assert_eq!(e.output_shape, OutputShape::Record { field_count: 6 });
+    }
+
+    #[test]
+    fn function_accel_entry_varlen_output_shape() {
+        let e = FunctionAccelEntry {
+            schema: "public",
+            name: "h3_grid_disk",
+            strategy: AccelStrategy::GpuH3,
+            output_shape: OutputShape::VarLen,
+        };
+        assert_eq!(e.output_shape, OutputShape::VarLen);
     }
 }
