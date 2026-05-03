@@ -423,6 +423,610 @@ extern "C" pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t wi
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
+/* ── Raster Resample (bilinear interpolation) ─────────────────── */
+/*
+ * Bilinear-interpolate src_pixels (W×H, fp32) to dst_pixels (new_W×new_H,
+ * fp32). Scale factors are derived per-axis (src/dst). Out-of-range
+ * neighbours clamp to nearest edge. Input/output pixel type is FP32 only
+ * — Metal is fp32-only and the interpolation kernel uses float
+ * throughout (CLAUDE.md rule 12).
+ */
+extern "C" pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_t src_w,
+                                                  size_t src_h, size_t dst_w, size_t dst_h,
+                                                  float* dst_pixels) {
+  if (src_pixels == nullptr || dst_pixels == nullptr) {
+    return PGACCEL_ERROR_INIT;
+  }
+  if (src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0) {
+    return PGACCEL_OK;
+  }
+
+  try {
+    auto& q = get_queue();
+    const size_t src_n = src_w * src_h;
+    const size_t dst_n = dst_w * dst_h;
+
+    // SAFETY: USM device allocations freed at end of scope.
+    float* d_src = sycl::malloc_device<float>(src_n, q);
+    float* d_dst = sycl::malloc_device<float>(dst_n, q);
+    if (!d_src || !d_dst) {
+      sycl::free(d_src, q);
+      sycl::free(d_dst, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_src, src_pixels, src_n * sizeof(float)).wait_and_throw();
+
+    const float sw = static_cast<float>(src_w);
+    const float sh = static_cast<float>(src_h);
+    const float dw = static_cast<float>(dst_w);
+    const float dh = static_cast<float>(dst_h);
+    const size_t sw_sz = src_w;
+    const size_t sh_sz = src_h;
+    const size_t dw_sz = dst_w;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(dst_n), [=](sycl::id<1> id) {
+         const size_t idx = id[0];
+         const size_t dr = idx / dw_sz;
+         const size_t dc = idx - dr * dw_sz;
+
+         // Map dst pixel center to src coordinate space (pixel center at
+         // (dc + 0.5) / dw, scaled to src by * sw - 0.5 to align centres).
+         float sx = (static_cast<float>(dc) + 0.5f) * sw / dw - 0.5f;
+         float sy = (static_cast<float>(dr) + 0.5f) * sh / dh - 0.5f;
+
+         // Clamp to valid neighbour range [0, n-1].
+         if (sx < 0.0f)
+           sx = 0.0f;
+         if (sy < 0.0f)
+           sy = 0.0f;
+         const float maxx = sw - 1.0f;
+         const float maxy = sh - 1.0f;
+         if (sx > maxx)
+           sx = maxx;
+         if (sy > maxy)
+           sy = maxy;
+
+         const size_t x0 = static_cast<size_t>(sycl::floor(sx));
+         const size_t y0 = static_cast<size_t>(sycl::floor(sy));
+         size_t x1 = x0 + 1;
+         size_t y1 = y0 + 1;
+         if (x1 >= sw_sz)
+           x1 = sw_sz - 1;
+         if (y1 >= sh_sz)
+           y1 = sh_sz - 1;
+
+         const float fx = sx - static_cast<float>(x0);
+         const float fy = sy - static_cast<float>(y0);
+
+         const float p00 = d_src[y0 * sw_sz + x0];
+         const float p10 = d_src[y0 * sw_sz + x1];
+         const float p01 = d_src[y1 * sw_sz + x0];
+         const float p11 = d_src[y1 * sw_sz + x1];
+
+         const float top = p00 * (1.0f - fx) + p10 * fx;
+         const float bot = p01 * (1.0f - fx) + p11 * fx;
+         d_dst[idx] = top * (1.0f - fy) + bot * fy;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(dst_pixels, d_dst, dst_n * sizeof(float)).wait_and_throw();
+
+    sycl::free(d_src, q);
+    sycl::free(d_dst, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL raster_resample failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+/* ── Raster Slope (Horn's method) ─────────────────────────────── */
+/*
+ * Per-pixel slope angle in degrees, computed via 3×3 Horn gradient. Edge
+ * pixels (border 1-pixel ring) get slope 0 — the 3×3 stencil is undefined
+ * there. cell_size_x / cell_size_y are world units per pixel (e.g. metres
+ * for projected rasters). Output is fp32 degrees in [0, 90].
+ */
+extern "C" pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t width, size_t height,
+                                               double cell_size_x, double cell_size_y,
+                                               float* slope_out) {
+  if (src_pixels == nullptr || slope_out == nullptr) {
+    return PGACCEL_ERROR_INIT;
+  }
+  if (width == 0 || height == 0) {
+    return PGACCEL_OK;
+  }
+
+  try {
+    auto& q = get_queue();
+    const size_t n = width * height;
+
+    float* d_src = sycl::malloc_device<float>(n, q);
+    float* d_out = sycl::malloc_device<float>(n, q);
+    if (!d_src || !d_out) {
+      sycl::free(d_src, q);
+      sycl::free(d_out, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_src, src_pixels, n * sizeof(float)).wait_and_throw();
+
+    const size_t w = width;
+    const size_t h_sz = height;
+    const float csx = static_cast<float>(cell_size_x);
+    const float csy = static_cast<float>(cell_size_y);
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
+         const size_t idx = id[0];
+         const size_t r = idx / w;
+         const size_t c = idx - r * w;
+
+         if (r == 0 || c == 0 || r >= h_sz - 1 || c >= w - 1) {
+           d_out[idx] = 0.0f;
+           return;
+         }
+
+         // Horn's 3×3 kernel:
+         //   dz/dx = ((a + 2d + g) - (c + 2f + i)) / (8 * csx)
+         //   dz/dy = ((g + 2h + i) - (a + 2b + c)) / (8 * csy)
+         // Layout (a..i):
+         //   a b c
+         //   d e f
+         //   g h i
+         const size_t row_p = (r - 1) * w;
+         const size_t row_0 = r * w;
+         const size_t row_n = (r + 1) * w;
+         const float a = d_src[row_p + c - 1];
+         const float b = d_src[row_p + c];
+         const float c_v = d_src[row_p + c + 1];
+         const float d = d_src[row_0 + c - 1];
+         const float f = d_src[row_0 + c + 1];
+         const float g = d_src[row_n + c - 1];
+         const float h_v = d_src[row_n + c];
+         const float i = d_src[row_n + c + 1];
+
+         const float dzdx = ((a + 2.0f * d + g) - (c_v + 2.0f * f + i)) / (8.0f * csx);
+         const float dzdy = ((g + 2.0f * h_v + i) - (a + 2.0f * b + c_v)) / (8.0f * csy);
+         const float rise_run = sycl::sqrt(dzdx * dzdx + dzdy * dzdy);
+         const float slope_rad = sycl::atan(rise_run);
+         d_out[idx] = slope_rad * (180.0f / 3.14159265358979323846f);
+       });
+     }).wait_and_throw();
+
+    q.memcpy(slope_out, d_out, n * sizeof(float)).wait_and_throw();
+
+    sycl::free(d_src, q);
+    sycl::free(d_out, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL raster_slope failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+/* ── Raster Aspect (3×3 gradient → compass direction) ─────────── */
+/*
+ * Per-pixel aspect (compass direction of the steepest descent), in degrees
+ * [0, 360). North = 0, East = 90, South = 180, West = 270. Flat areas
+ * (zero gradient) get -1 by convention (matching gdaldem). Edge pixels
+ * are also -1.
+ */
+extern "C" pgaccel_status pgaccel_raster_aspect(const float* src_pixels, size_t width,
+                                                size_t height, float* aspect_out) {
+  if (src_pixels == nullptr || aspect_out == nullptr) {
+    return PGACCEL_ERROR_INIT;
+  }
+  if (width == 0 || height == 0) {
+    return PGACCEL_OK;
+  }
+
+  try {
+    auto& q = get_queue();
+    const size_t n = width * height;
+
+    float* d_src = sycl::malloc_device<float>(n, q);
+    float* d_out = sycl::malloc_device<float>(n, q);
+    if (!d_src || !d_out) {
+      sycl::free(d_src, q);
+      sycl::free(d_out, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_src, src_pixels, n * sizeof(float)).wait_and_throw();
+
+    const size_t w = width;
+    const size_t h_sz = height;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
+         const size_t idx = id[0];
+         const size_t r = idx / w;
+         const size_t c = idx - r * w;
+
+         if (r == 0 || c == 0 || r >= h_sz - 1 || c >= w - 1) {
+           d_out[idx] = -1.0f;
+           return;
+         }
+
+         const size_t row_p = (r - 1) * w;
+         const size_t row_0 = r * w;
+         const size_t row_n = (r + 1) * w;
+         const float a = d_src[row_p + c - 1];
+         const float b = d_src[row_p + c];
+         const float c_v = d_src[row_p + c + 1];
+         const float d = d_src[row_0 + c - 1];
+         const float f = d_src[row_0 + c + 1];
+         const float g = d_src[row_n + c - 1];
+         const float h_v = d_src[row_n + c];
+         const float i = d_src[row_n + c + 1];
+
+         // Cell-size cancels in the atan2 ratio → use raw sums.
+         const float dzdx = (c_v + 2.0f * f + i) - (a + 2.0f * d + g);
+         const float dzdy = (g + 2.0f * h_v + i) - (a + 2.0f * b + c_v);
+
+         if (dzdx == 0.0f && dzdy == 0.0f) {
+           d_out[idx] = -1.0f;
+           return;
+         }
+
+         // gdaldem aspect: 180 / pi * atan2(dzdy, -dzdx); then fold to compass.
+         const float k_pi = 3.14159265358979323846f;
+         float aspect = sycl::atan2(dzdy, -dzdx) * (180.0f / k_pi);
+         if (aspect < 0.0f) {
+           aspect = 90.0f - aspect;
+         } else if (aspect > 90.0f) {
+           aspect = 360.0f - aspect + 90.0f;
+         } else {
+           aspect = 90.0f - aspect;
+         }
+         if (aspect >= 360.0f)
+           aspect -= 360.0f;
+         d_out[idx] = aspect;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(aspect_out, d_out, n * sizeof(float)).wait_and_throw();
+
+    sycl::free(d_src, q);
+    sycl::free(d_out, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL raster_aspect failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+/* ── Raster Hillshade (slope + aspect + sun) ──────────────────── */
+/*
+ * Per-pixel shaded relief value [0, 255]. Uses Horn's slope/aspect plus
+ * sun azimuth (degrees clockwise from north) and altitude (degrees above
+ * horizon). z_factor scales pixel value height units to match cell_size
+ * units. Edge pixels get 0.
+ */
+extern "C" pgaccel_status pgaccel_raster_hillshade(const float* src_pixels, size_t width,
+                                                   size_t height, double cell_size_x,
+                                                   double cell_size_y, double sun_azimuth_deg,
+                                                   double sun_altitude_deg, double z_factor,
+                                                   float* shade_out) {
+  if (src_pixels == nullptr || shade_out == nullptr) {
+    return PGACCEL_ERROR_INIT;
+  }
+  if (width == 0 || height == 0) {
+    return PGACCEL_OK;
+  }
+
+  try {
+    auto& q = get_queue();
+    const size_t n = width * height;
+
+    float* d_src = sycl::malloc_device<float>(n, q);
+    float* d_out = sycl::malloc_device<float>(n, q);
+    if (!d_src || !d_out) {
+      sycl::free(d_src, q);
+      sycl::free(d_out, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_src, src_pixels, n * sizeof(float)).wait_and_throw();
+
+    const size_t w = width;
+    const size_t h_sz = height;
+    const float csx = static_cast<float>(cell_size_x);
+    const float csy = static_cast<float>(cell_size_y);
+    const float zf = static_cast<float>(z_factor);
+    const float k_pi = 3.14159265358979323846f;
+    // Convert sun azimuth (compass deg, N=0 CW) to math angle (E=0 CCW)
+    // and altitude to zenith.
+    const float az_math_rad =
+        (360.0f - static_cast<float>(sun_azimuth_deg) + 90.0f) * k_pi / 180.0f;
+    const float zenith_rad = (90.0f - static_cast<float>(sun_altitude_deg)) * k_pi / 180.0f;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
+         const size_t idx = id[0];
+         const size_t r = idx / w;
+         const size_t c = idx - r * w;
+
+         if (r == 0 || c == 0 || r >= h_sz - 1 || c >= w - 1) {
+           d_out[idx] = 0.0f;
+           return;
+         }
+
+         const size_t row_p = (r - 1) * w;
+         const size_t row_0 = r * w;
+         const size_t row_n = (r + 1) * w;
+         const float a = d_src[row_p + c - 1];
+         const float b = d_src[row_p + c];
+         const float c_v = d_src[row_p + c + 1];
+         const float d = d_src[row_0 + c - 1];
+         const float f = d_src[row_0 + c + 1];
+         const float g = d_src[row_n + c - 1];
+         const float h_v = d_src[row_n + c];
+         const float i = d_src[row_n + c + 1];
+
+         const float dzdx = ((c_v + 2.0f * f + i) - (a + 2.0f * d + g)) * zf / (8.0f * csx);
+         const float dzdy = ((g + 2.0f * h_v + i) - (a + 2.0f * b + c_v)) * zf / (8.0f * csy);
+
+         const float slope_rad = sycl::atan(sycl::sqrt(dzdx * dzdx + dzdy * dzdy));
+         float aspect_rad;
+         if (dzdx == 0.0f && dzdy == 0.0f) {
+           aspect_rad = 0.0f;
+         } else {
+           aspect_rad = sycl::atan2(dzdy, -dzdx);
+           if (aspect_rad < 0.0f)
+             aspect_rad += 2.0f * k_pi;
+         }
+
+         // Hillshade formula (gdaldem):
+         //   shade = 255 * (cos(zen) * cos(slope) + sin(zen) * sin(slope) * cos(az - aspect))
+         float shade =
+             sycl::cos(zenith_rad) * sycl::cos(slope_rad) +
+             sycl::sin(zenith_rad) * sycl::sin(slope_rad) * sycl::cos(az_math_rad - aspect_rad);
+         if (shade < 0.0f)
+           shade = 0.0f;
+         d_out[idx] = shade * 255.0f;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(shade_out, d_out, n * sizeof(float)).wait_and_throw();
+
+    sycl::free(d_src, q);
+    sycl::free(d_out, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL raster_hillshade failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+/* ── Raster Value (single-pixel lookup at point coords) ───────── */
+/*
+ * Looks up the pixel value at each (x, y) world coordinate in the input
+ * point array. Translates (x, y) → (col, row) via the raster's affine,
+ * bounds-checks, and writes the pixel value into output[i]. Out-of-bounds
+ * points get NaN. Pixel buffer is fp32; output is fp64.
+ */
+extern "C" pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t width,
+                                               size_t height, double origin_x, double origin_y,
+                                               double scale_x, double scale_y,
+                                               const double* point_xy, size_t point_count,
+                                               double* output) {
+  if (rast_pixels == nullptr || point_xy == nullptr || output == nullptr) {
+    return PGACCEL_ERROR_INIT;
+  }
+  if (width == 0 || height == 0 || point_count == 0) {
+    return PGACCEL_OK;
+  }
+  if (scale_x == 0.0 || scale_y == 0.0) {
+    return PGACCEL_ERROR_INIT;
+  }
+
+  try {
+    auto& q = get_queue();
+    const size_t n = width * height;
+
+    // Translate world (x, y) -> (col, row) host-side and pass as int32
+    // pairs. Doing the division inside the SYCL kernel exposed the Metal
+    // soft-fp64 reciprocal bug that returns 0 for `(x - ox) / sx`
+    // (cold-cache failure on M2 Max: raster_value lookup at (2.5, -1.5)
+    // expected 12 got 0, 2026-05-02). The kernel now just does an array
+    // index — no fp64 arithmetic on device.
+    constexpr int32_t OOB_SENTINEL = INT32_MIN;
+    std::vector<int32_t> col_row(point_count * 2);
+    for (size_t i = 0; i < point_count; ++i) {
+      const double x = point_xy[i * 2];
+      const double y = point_xy[i * 2 + 1];
+      const double col_d = std::floor((x - origin_x) / scale_x);
+      const double row_d = std::floor((y - origin_y) / scale_y);
+      if (col_d < 0.0 || row_d < 0.0 || col_d >= static_cast<double>(width) ||
+          row_d >= static_cast<double>(height)) {
+        col_row[i * 2] = OOB_SENTINEL;
+        col_row[i * 2 + 1] = OOB_SENTINEL;
+      } else {
+        col_row[i * 2] = static_cast<int32_t>(col_d);
+        col_row[i * 2 + 1] = static_cast<int32_t>(row_d);
+      }
+    }
+
+    float* d_rast = sycl::malloc_device<float>(n, q);
+    int32_t* d_idx = sycl::malloc_device<int32_t>(point_count * 2, q);
+    double* d_out = sycl::malloc_device<double>(point_count, q);
+    if (!d_rast || !d_idx || !d_out) {
+      sycl::free(d_rast, q);
+      sycl::free(d_idx, q);
+      sycl::free(d_out, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_rast, rast_pixels, n * sizeof(float));
+    q.memcpy(d_idx, col_row.data(), point_count * 2 * sizeof(int32_t));
+    q.wait_and_throw();
+
+    const size_t w = width;
+    // NaN bit pattern carried as uint64; sycl::bit_cast inside the kernel
+    // produces the fp64 NaN without needing the host `<cmath>` `nan`
+    // builtin (Metal SSCP rejects sycl::nan).
+    const uint64_t nan_bits = static_cast<uint64_t>(0x7ff8000000000000ULL);
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const int32_t col = d_idx[i * 2];
+         const int32_t row = d_idx[i * 2 + 1];
+         if (col == OOB_SENTINEL) {
+           d_out[i] = sycl::bit_cast<double>(nan_bits);
+           return;
+         }
+         d_out[i] =
+             static_cast<double>(d_rast[static_cast<size_t>(row) * w + static_cast<size_t>(col)]);
+       });
+     }).wait_and_throw();
+    sycl::free(d_idx, q);
+
+    q.memcpy(output, d_out, point_count * sizeof(double)).wait_and_throw();
+
+    sycl::free(d_rast, q);
+    sycl::free(d_out, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL raster_value failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+/* ── Raster SummaryStats (count/sum/mean/stddev/min/max per row) ─ */
+/*
+ * Per raster-row, computes 6 summary statistics over its pixels:
+ *   output[r*6 + 0] = count   (non-NaN, non-NoData pixel count, fp64)
+ *   output[r*6 + 1] = sum
+ *   output[r*6 + 2] = mean
+ *   output[r*6 + 3] = stddev  (population, sqrt(E[X^2] - E[X]^2))
+ *   output[r*6 + 4] = min
+ *   output[r*6 + 5] = max
+ *
+ * `pixels_per_row` is constant across rows (one raster geometry per
+ * input row, all rasters same dimensions). When `nodata_masks` is
+ * non-null, the mask pixel-by-pixel — `1` = NoData, skipped from stats.
+ *
+ * Output buffer = 6 * sizeof(double) * row_count. Coordinates with
+ * `OutputShape::Record { field_count: 6 }` on the Rust side.
+ */
+extern "C" pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_count,
+                                                      size_t pixels_per_row,
+                                                      const uint8_t* nodata_masks, double* output) {
+  if (rast_pixels == nullptr || output == nullptr) {
+    return PGACCEL_ERROR_INIT;
+  }
+  if (row_count == 0 || pixels_per_row == 0) {
+    return PGACCEL_OK;
+  }
+
+  try {
+    auto& q = get_queue();
+    const size_t n = row_count * pixels_per_row;
+
+    float* d_pix = sycl::malloc_device<float>(n, q);
+    uint8_t* d_mask = nodata_masks ? sycl::malloc_device<uint8_t>(n, q) : nullptr;
+    double* d_out = sycl::malloc_device<double>(row_count * 6, q);
+    if (!d_pix || !d_out || (nodata_masks && !d_mask)) {
+      sycl::free(d_pix, q);
+      sycl::free(d_mask, q);
+      sycl::free(d_out, q);
+      return PGACCEL_ERROR_OOM;
+    }
+
+    q.memcpy(d_pix, rast_pixels, n * sizeof(float));
+    if (nodata_masks) {
+      q.memcpy(d_mask, nodata_masks, n);
+    }
+    q.wait_and_throw();
+
+    const size_t ppr = pixels_per_row;
+    const bool has_mask = (nodata_masks != nullptr);
+    uint8_t* d_mask_capture = d_mask;
+
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+         const size_t r = id[0];
+         const size_t base = r * ppr;
+         double cnt = 0.0;
+         double sum = 0.0;
+         double sum_sq = 0.0;
+         double mn = 0.0;
+         double mx = 0.0;
+         bool have_any = false;
+
+         for (size_t i = 0; i < ppr; ++i) {
+           if (has_mask && d_mask_capture[base + i] != 0)
+             continue;
+           const double v = static_cast<double>(d_pix[base + i]);
+           if (sycl::isnan(v) || sycl::isinf(v))
+             continue;
+           if (!have_any) {
+             mn = v;
+             mx = v;
+             have_any = true;
+           } else {
+             if (v < mn)
+               mn = v;
+             if (v > mx)
+               mx = v;
+           }
+           cnt += 1.0;
+           sum += v;
+           sum_sq += v * v;
+         }
+
+         d_out[r * 6 + 0] = cnt;
+         d_out[r * 6 + 1] = sum;
+         // Slot 2 holds sum_sq until host derives mean from sum / cnt.
+         // Slot 3 stays 0 until host derives stddev. Computing mean/stddev
+         // device-side returned 0 under Metal soft-fp64 (sum / cnt → 0 in
+         // cold-cache testing on M2 Max, test_raster row 0 mean / masked
+         // mean failures, 2026-05-02). Move the ratio host-side to keep
+         // every code path SYCL-only without tripping soft-fp64 reciprocal.
+         d_out[r * 6 + 2] = sum_sq;
+         d_out[r * 6 + 3] = 0.0;
+         d_out[r * 6 + 4] = have_any ? mn : 0.0;
+         d_out[r * 6 + 5] = have_any ? mx : 0.0;
+       });
+     }).wait_and_throw();
+
+    q.memcpy(output, d_out, row_count * 6 * sizeof(double)).wait_and_throw();
+
+    // Host-side: convert (sum_sq, 0) placeholders into (mean, stddev).
+    for (size_t r = 0; r < row_count; ++r) {
+      const double cnt = output[r * 6 + 0];
+      const double sum = output[r * 6 + 1];
+      const double sum_sq = output[r * 6 + 2];
+      const double mean = (cnt > 0.0) ? sum / cnt : 0.0;
+      double variance = (cnt > 0.0) ? (sum_sq / cnt - mean * mean) : 0.0;
+      if (variance < 0.0) {
+        variance = 0.0;  // floating-point noise guard
+      }
+      output[r * 6 + 2] = mean;
+      output[r * 6 + 3] = std::sqrt(variance);
+    }
+
+    sycl::free(d_pix, q);
+    sycl::free(d_mask, q);
+    sycl::free(d_out, q);
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: SYCL raster_summarystats failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
 extern "C" pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_count,
                                                  int input_type, const pgaccel_reclass_rule* rules,
                                                  size_t rule_count, int output_type,

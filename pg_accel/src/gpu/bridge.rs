@@ -423,6 +423,77 @@ unsafe extern "C" {
         output_pixels: *mut std::ffi::c_void,
     ) -> PgaccelStatus;
 
+    // -- Raster extension kernels (Agent 3A) --
+
+    /// Bilinear-interpolate `src` (`src_w` × `src_h`, fp32) to
+    /// `dst` (`dst_w` × `dst_h`, fp32). Edge-clamped neighbours.
+    pub fn pgaccel_raster_resample(
+        src_pixels: *const f32,
+        src_w: usize,
+        src_h: usize,
+        dst_w: usize,
+        dst_h: usize,
+        dst_pixels: *mut f32,
+    ) -> PgaccelStatus;
+
+    /// Per-pixel slope angle (degrees) via Horn's 3×3 gradient.
+    pub fn pgaccel_raster_slope(
+        src_pixels: *const f32,
+        width: usize,
+        height: usize,
+        cell_size_x: f64,
+        cell_size_y: f64,
+        slope_out: *mut f32,
+    ) -> PgaccelStatus;
+
+    /// Per-pixel aspect (compass direction of steepest descent, degrees).
+    pub fn pgaccel_raster_aspect(
+        src_pixels: *const f32,
+        width: usize,
+        height: usize,
+        aspect_out: *mut f32,
+    ) -> PgaccelStatus;
+
+    /// Per-pixel hillshade (shaded relief value [0, 255]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_raster_hillshade(
+        src_pixels: *const f32,
+        width: usize,
+        height: usize,
+        cell_size_x: f64,
+        cell_size_y: f64,
+        sun_azimuth_deg: f64,
+        sun_altitude_deg: f64,
+        z_factor: f64,
+        shade_out: *mut f32,
+    ) -> PgaccelStatus;
+
+    /// Per-point pixel-value lookup (`(x, y)` world coords → `f64`).
+    /// Out-of-bounds points get NaN.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_raster_value(
+        rast_pixels: *const f32,
+        width: usize,
+        height: usize,
+        origin_x: f64,
+        origin_y: f64,
+        scale_x: f64,
+        scale_y: f64,
+        point_xy: *const f64,
+        point_count: usize,
+        output: *mut f64,
+    ) -> PgaccelStatus;
+
+    /// Per-row 6-scalar summary stats (`count`, `sum`, `mean`, `stddev`,
+    /// `min`, `max`). Output buffer = `6 * sizeof(f64) * row_count`.
+    pub fn pgaccel_raster_summarystats(
+        rast_pixels: *const f32,
+        row_count: usize,
+        pixels_per_row: usize,
+        nodata_masks: *const u8,
+        output: *mut f64,
+    ) -> PgaccelStatus;
+
     // -- Expression evaluator kernels --
 
     /// Evaluate a predicate expression on a columnar batch.

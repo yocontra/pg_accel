@@ -534,6 +534,48 @@ pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_cou
  *   - pgaccel_raster_summarystats (count/sum/mean/stddev/min/max)
  * Keep declarations in this block so dispatch wiring stays grouped.
  */
+
+/* Bilinear-interpolate src_pixels (W×H, fp32) to dst_pixels (new_W×new_H,
+ * fp32). Out-of-range neighbours clamp to nearest edge. */
+pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_t src_w, size_t src_h,
+                                       size_t dst_w, size_t dst_h, float* dst_pixels);
+
+/* Per-pixel slope angle in degrees via Horn's 3×3 gradient. Edge pixels
+ * (1-pixel border) get 0 — the stencil is undefined there. cell_size_x/y
+ * are world units per pixel. Output is fp32 degrees [0, 90]. */
+pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t width, size_t height,
+                                    double cell_size_x, double cell_size_y, float* slope_out);
+
+/* Per-pixel aspect (compass direction of steepest descent) in degrees
+ * [0, 360). N=0, E=90, S=180, W=270. Flat areas and edge pixels get -1. */
+pgaccel_status pgaccel_raster_aspect(const float* src_pixels, size_t width, size_t height,
+                                     float* aspect_out);
+
+/* Per-pixel shaded relief value [0, 255]. sun_azimuth_deg is compass
+ * (N=0 CW); sun_altitude_deg is degrees above horizon. z_factor scales
+ * pixel-value height units to match cell_size units. Edge pixels get 0. */
+pgaccel_status pgaccel_raster_hillshade(const float* src_pixels, size_t width, size_t height,
+                                        double cell_size_x, double cell_size_y,
+                                        double sun_azimuth_deg, double sun_altitude_deg,
+                                        double z_factor, float* shade_out);
+
+/* Per-point pixel-value lookup. Translates each (x, y) in `point_xy` to
+ * (col, row) via the raster's affine, bounds-checks, writes the pixel
+ * value into `output[i]`. Out-of-bounds points get NaN. Pixel buffer is
+ * fp32, output is fp64. */
+pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t width, size_t height,
+                                    double origin_x, double origin_y, double scale_x,
+                                    double scale_y, const double* point_xy, size_t point_count,
+                                    double* output);
+
+/* Per-row 6-scalar summary stats over fp32 raster pixels. Output layout
+ * is `[count, sum, mean, stddev, min, max]` per row × `row_count` rows
+ * (`6 * sizeof(double) * row_count` total). When `nodata_masks` is non-
+ * null, mask byte `1` skips that pixel. NaN/inf pixels are skipped.
+ * Coordinates with `OutputShape::Record { field_count: 6 }` in Rust. */
+pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_count,
+                                           size_t pixels_per_row, const uint8_t* nodata_masks,
+                                           double* output);
 /* ── END raster-extensions ─────────────────────────────────────────── */
 
 /* Window-function declarations live in pgaccel_window.h (separate header
