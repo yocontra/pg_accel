@@ -1342,9 +1342,9 @@ enum class AlgorithmicPredicate {
   Overlaps,
 };
 
-pgaccel_status algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
-                                              const pgaccel_geometry* geoms_b, size_t count,
-                                              AlgorithmicPredicate pred, int8_t* results) {
+pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
+                                                   const pgaccel_geometry* geoms_b, size_t count,
+                                                   AlgorithmicPredicate pred, int8_t* results) {
   if (count == 0)
     return PGACCEL_OK;
   if (!geoms_a || !geoms_b || !results)
@@ -1563,10 +1563,10 @@ pgaccel_status algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
-    fprintf(stderr, "pgaccel: SYCL algorithmic_predicate_dispatch failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: SYCL sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: algorithmic_predicate_dispatch failed: %s\n", e.what());
+    fprintf(stderr, "pgaccel: sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
 }
@@ -1576,27 +1576,27 @@ pgaccel_status algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
 extern "C" pgaccel_status pgaccel_st_equals_bulk(const pgaccel_geometry* geoms_a,
                                                  const pgaccel_geometry* geoms_b, size_t count,
                                                  int8_t* results) {
-  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Equals,
-                                        results);
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Equals,
+                                             results);
 }
 
 extern "C" pgaccel_status pgaccel_st_touches_bulk(const pgaccel_geometry* geoms_a,
                                                   const pgaccel_geometry* geoms_b, size_t count,
                                                   int8_t* results) {
-  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Touches,
-                                        results);
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Touches,
+                                             results);
 }
 
 extern "C" pgaccel_status pgaccel_st_crosses_bulk(const pgaccel_geometry* geoms_a,
                                                   const pgaccel_geometry* geoms_b, size_t count,
                                                   int8_t* results) {
-  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Crosses,
-                                        results);
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Crosses,
+                                             results);
 }
 
 extern "C" pgaccel_status pgaccel_st_overlaps_bulk(const pgaccel_geometry* geoms_a,
                                                    const pgaccel_geometry* geoms_b, size_t count,
                                                    int8_t* results) {
-  return algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Overlaps,
-                                        results);
+  return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count,
+                                             AlgorithmicPredicate::Overlaps, results);
 }
