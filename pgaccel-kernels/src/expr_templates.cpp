@@ -420,6 +420,36 @@ extern "C" pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* bat
 // Template 5: col1 <cmp1> const1 AND col2 <cmp2> const2
 // ===========================================================================
 
+namespace {
+
+// Pre-encoded f64 → u64 bit pattern for kernel-side reconstruction.
+//
+// AdaptiveCpp Metal SSCP emits one `[[id(N)]]` argbuffer slot per captured
+// field, but its slot accounting is broken for `acpp_f64` (8-byte scalar)
+// fields — each f64 takes 1 id slot in the emitter's count but Metal's
+// argbuffer layout actually requires 2, so any field after an f64 collides
+// with the previous slot (`'id' set location to N, but minimum is N+1`).
+//
+// Workaround: never put a literal `double` in the captured struct. Instead
+// transmit the f64 as a `uint64_t` bit pattern (1 id slot, no alignment
+// surprise) and reconstruct on the kernel side via `sycl::bit_cast`. The
+// captures become entirely 1-slot fields (pointers + 1-slot scalars),
+// keeping the emitter's id accounting in step with Metal's expectation.
+struct TwoPredAndParams {
+  const double* col1;
+  const uint8_t* null1;
+  const double* col2;
+  const uint8_t* null2;
+  int8_t* res;
+  uint64_t cv1_bits;
+  uint64_t cv2_bits;
+  uint16_t op1;
+  uint16_t op2;
+  size_t n;
+};
+
+}  // namespace
+
 extern "C" pgaccel_status
 pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx,
                                    uint16_t cmp1_opcode, double const1_val, uint32_t col2_idx,
@@ -461,22 +491,30 @@ pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx
   stage_col_f64(batch, col1_idx, d_col1, d_null1);
   stage_col_f64(batch, col2_idx, d_col2, d_null2);
 
-  const double cv1 = const1_val;
-  const double cv2 = const2_val;
-  const uint16_t op1 = cmp1_opcode;
-  const uint16_t op2 = cmp2_opcode;
+  uint64_t cv1_bits;
+  uint64_t cv2_bits;
+  std::memcpy(&cv1_bits, &const1_val, sizeof(cv1_bits));
+  std::memcpy(&cv2_bits, &const2_val, sizeof(cv2_bits));
+
+  const TwoPredAndParams p{
+      d_col1, d_null1, d_col2, d_null2, d_res, cv1_bits, cv2_bits, cmp1_opcode, cmp2_opcode, n,
+  };
 
   q->parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
      const size_t i = id[0];
-     if (d_null1[i] || !pg_cmp(op1, d_col1[i], cv1)) {
-       d_res[i] = PGACCEL_EXPR_FALSE;
+     // Reconstruct f64 constants from u64 bit pattern. `sycl::bit_cast`
+     // is a SYCL 2020 builtin device-callable equivalent to memcpy-bitcast.
+     const double cv1 = sycl::bit_cast<double>(p.cv1_bits);
+     const double cv2 = sycl::bit_cast<double>(p.cv2_bits);
+     if (p.null1[i] || !pg_cmp(p.op1, p.col1[i], cv1)) {
+       p.res[i] = PGACCEL_EXPR_FALSE;
        return;
      }
-     if (d_null2[i] || !pg_cmp(op2, d_col2[i], cv2)) {
-       d_res[i] = PGACCEL_EXPR_FALSE;
+     if (p.null2[i] || !pg_cmp(p.op2, p.col2[i], cv2)) {
+       p.res[i] = PGACCEL_EXPR_FALSE;
        return;
      }
-     d_res[i] = PGACCEL_EXPR_TRUE;
+     p.res[i] = PGACCEL_EXPR_TRUE;
    }).wait();
 
   std::memcpy(results, d_res, n * sizeof(int8_t));

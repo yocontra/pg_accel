@@ -59,8 +59,10 @@ pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* batch, uint32_
                                              int8_t* results);
 pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* batch, uint32_t col_idx,
                                              bool check_not_null, int8_t* results);
-// pgaccel_expr_template_two_pred_and intentionally NOT declared — see the
-// note further down explaining the broken-and-unused status.
+pgaccel_status pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx,
+                                                  uint16_t cmp1_opcode, double const1_val,
+                                                  uint32_t col2_idx, uint16_t cmp2_opcode,
+                                                  double const2_val, int8_t* results);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,27 +271,138 @@ static void test_is_null() {
 }
 
 // ---------------------------------------------------------------------------
-// NOTE: pgaccel_expr_template_two_pred_and is intentionally NOT tested here.
+// Helper: build a two-column int64 batch from two vectors
+// ---------------------------------------------------------------------------
+struct TwoColI64Batch {
+  std::vector<int64_t> data0;
+  std::vector<int64_t> data1;
+  std::vector<uint8_t> nulls0;
+  std::vector<uint8_t> nulls1;
+  void* col_data_ptrs[2];
+  uint8_t* col_null_ptrs[2];
+  pgaccel_val_tag col_types[2];
+  pgaccel_batch batch;
+
+  TwoColI64Batch(std::vector<int64_t> v0, std::vector<int64_t> v1, std::vector<uint8_t> n0,
+                 std::vector<uint8_t> n1)
+      : data0(std::move(v0)), data1(std::move(v1)), nulls0(std::move(n0)), nulls1(std::move(n1)) {
+    col_data_ptrs[0] = data0.data();
+    col_data_ptrs[1] = data1.data();
+    col_null_ptrs[0] = nulls0.data();
+    col_null_ptrs[1] = nulls1.data();
+    col_types[0] = PGACCEL_VAL_INT64;
+    col_types[1] = PGACCEL_VAL_INT64;
+    batch.num_rows = data0.size();
+    batch.num_cols = 2;
+    batch.col_data = col_data_ptrs;
+    batch.col_nulls = col_null_ptrs;
+    batch.col_types = col_types;
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Test: two_pred_and — col0 < 5 AND col1 > 10
 // ---------------------------------------------------------------------------
 //
-// The C++ kernel exists (pgaccel-kernels/src/expr_templates.cpp:423) and the
-// Rust bridge declares it (pg_accel/src/gpu/bridge.rs:484), but no Rust
-// executor code path actually calls it — `scan/exec.rs:558-593`,
-// `agg/execute.rs:1539,1601`, and `preagg/mod.rs:457,617` all handle the
-// `TemplateKernel::TwoPredAnd` variant by calling
-// `pgaccel_expr_template_cmp_const` TWICE and AND-ing the results in Rust.
+// Validates the Metal-SSCP capture-pack refactor (10 captures → 1 struct):
+// - kernel must JIT cleanly with NO `xcrun metal failed` warnings
+// - result buffer must contain correct AND-of-predicates per row, NOT
+//   the uninitialized state that the pre-refactor argbuffer-path failure
+//   left behind
 //
-// An exploratory test of this kernel (commit 6a8a78b session, dropped before
-// commit) confirmed that JIT compilation fails with
-//   error: attribute 'id' set location to 4, but minimum is 5
-//   device void* t4 [[id(4)]];
-// — same Metal `[[id(N)]]` argument-buffer-collision class as the documented
-// Phase 7 `__args` MSL compile error on `reduce_stats_f64` at large N.
-// The kernel returns PGACCEL_OK because `parallel_for(...).wait()` doesn't
-// surface the JIT failure, but the result buffer stays at its uninitialized
-// state. This is harmless today because nothing calls it, but the latent
-// bug (and the question of whether to delete the kernel or fix it) is
-// recorded in TODO Phase 7 alongside the existing `__args` entry.
+// Restores the assertions excluded in commit `8808636`'s
+// "intentionally NOT tested" note.
+static void test_two_pred_and() {
+  printf("--- test_two_pred_and ---\n");
+
+  // 13 rows. col0 = {0..9, 1, 2, 3}; col1 = {2,4,6,8,10,12,14,16,18,20,11,15,100}.
+  // Predicate: col0 < 5 AND col1 > 10.
+  std::vector<int64_t> v0 = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3};
+  std::vector<int64_t> v1 = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 11, 15, 100};
+  std::vector<uint8_t> n0(13, 0);
+  std::vector<uint8_t> n1(13, 0);
+  TwoColI64Batch b(std::move(v0), std::move(v1), std::move(n0), std::move(n1));
+
+  int8_t results[13] = {};
+  pgaccel_status s = pgaccel_expr_template_two_pred_and(&b.batch, 0, PGACCEL_EXPR_OP_LT, 5.0, 1,
+                                                        PGACCEL_EXPR_OP_GT, 10.0, results);
+  ASSERT_STATUS_OK("two_pred_and status", s);
+
+  // Manually computed expected: (col0 < 5) AND (col1 > 10).
+  // Rows 0-4: col0 in 0..4 (T) but col1 in 2..10 (all <= 10 -> F) -> F.
+  // Rows 5-9: col0 in 5..9 (F) -> F.
+  // Rows 10-12: col0 in {1,2,3} (T) and col1 in {11,15,100} (T) -> T.
+  int8_t expected[13] = {
+      PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE,
+      PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE,
+      PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_TRUE,  PGACCEL_EXPR_TRUE,
+      PGACCEL_EXPR_TRUE,
+  };
+
+  bool ok = true;
+  for (int i = 0; i < 13; i++) {
+    if (results[i] != expected[i]) {
+      fprintf(stderr, "  row %d (col0=%lld, col1=%lld): got %d, expected %d\n", i,
+              static_cast<long long>(b.data0[i]), static_cast<long long>(b.data1[i]), results[i],
+              expected[i]);
+      ok = false;
+    }
+  }
+  ASSERT_TRUE("two_pred_and (col0 < 5 AND col1 > 10) matches expected", ok);
+}
+
+// ---------------------------------------------------------------------------
+// Test: two_pred_and — null propagation
+// ---------------------------------------------------------------------------
+//
+// Per kernel contract, NULL on either column → FALSE for that row.
+static void test_two_pred_and_nulls() {
+  printf("--- test_two_pred_and_nulls ---\n");
+
+  // 5 rows. col0 = 1..5, col1 = 11..15. Both predicates would otherwise be
+  // TRUE for all rows (col0 < 10 AND col1 > 5). Mark row 1's col0 NULL and
+  // row 3's col1 NULL.
+  std::vector<int64_t> v0 = {1, 2, 3, 4, 5};
+  std::vector<int64_t> v1 = {11, 12, 13, 14, 15};
+  std::vector<uint8_t> n0 = {0, 1, 0, 0, 0};
+  std::vector<uint8_t> n1 = {0, 0, 0, 1, 0};
+  TwoColI64Batch b(std::move(v0), std::move(v1), std::move(n0), std::move(n1));
+
+  int8_t results[5] = {};
+  pgaccel_status s = pgaccel_expr_template_two_pred_and(&b.batch, 0, PGACCEL_EXPR_OP_LT, 10.0, 1,
+                                                        PGACCEL_EXPR_OP_GT, 5.0, results);
+  ASSERT_STATUS_OK("two_pred_and_nulls status", s);
+
+  ASSERT_TRUE("row 0 (no nulls) → TRUE", results[0] == PGACCEL_EXPR_TRUE);
+  ASSERT_TRUE("row 1 (col0 NULL) → FALSE", results[1] == PGACCEL_EXPR_FALSE);
+  ASSERT_TRUE("row 2 (no nulls) → TRUE", results[2] == PGACCEL_EXPR_TRUE);
+  ASSERT_TRUE("row 3 (col1 NULL) → FALSE", results[3] == PGACCEL_EXPR_FALSE);
+  ASSERT_TRUE("row 4 (no nulls) → TRUE", results[4] == PGACCEL_EXPR_TRUE);
+}
+
+// ---------------------------------------------------------------------------
+// Test: two_pred_and rejects unsupported opcodes on either side
+// ---------------------------------------------------------------------------
+static void test_two_pred_and_rejects_unsupported_opcode() {
+  printf("--- test_two_pred_and_rejects_unsupported_opcode ---\n");
+
+  std::vector<int64_t> v0 = {1};
+  std::vector<int64_t> v1 = {1};
+  std::vector<uint8_t> n0 = {0};
+  std::vector<uint8_t> n1 = {0};
+  TwoColI64Batch b(std::move(v0), std::move(v1), std::move(n0), std::move(n1));
+
+  int8_t results[1] = {};
+  // Bad opcode on side 1.
+  pgaccel_status s1 = pgaccel_expr_template_two_pred_and(&b.batch, 0, 999, 0.0, 1,
+                                                         PGACCEL_EXPR_OP_EQ, 0.0, results);
+  ASSERT_TRUE("two_pred_and bad op1 → UNSUPPORTED", s1 == PGACCEL_ERROR_UNSUPPORTED);
+
+  // Bad opcode on side 2.
+  pgaccel_status s2 = pgaccel_expr_template_two_pred_and(&b.batch, 0, PGACCEL_EXPR_OP_EQ, 0.0, 1,
+                                                         999, 0.0, results);
+  ASSERT_TRUE("two_pred_and bad op2 → UNSUPPORTED", s2 == PGACCEL_ERROR_UNSUPPORTED);
+}
 
 // ---------------------------------------------------------------------------
 // Test: cmp_const rejects unsupported opcode
@@ -341,6 +454,9 @@ int main() {
   test_in_list();
   test_in_list_too_large();
   test_is_null();
+  test_two_pred_and();
+  test_two_pred_and_nulls();
+  test_two_pred_and_rejects_unsupported_opcode();
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
