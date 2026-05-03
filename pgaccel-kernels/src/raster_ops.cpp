@@ -832,56 +832,67 @@ extern "C" pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t 
     auto& q = get_queue();
     const size_t n = width * height;
 
+    // Translate world (x, y) -> (col, row) host-side and pass as int32
+    // pairs. Doing the division inside the SYCL kernel exposed the Metal
+    // soft-fp64 reciprocal bug that returns 0 for `(x - ox) / sx`
+    // (cold-cache failure on M2 Max: raster_value lookup at (2.5, -1.5)
+    // expected 12 got 0, 2026-05-02). The kernel now just does an array
+    // index — no fp64 arithmetic on device.
+    constexpr int32_t OOB_SENTINEL = INT32_MIN;
+    std::vector<int32_t> col_row(point_count * 2);
+    for (size_t i = 0; i < point_count; ++i) {
+      const double x = point_xy[i * 2];
+      const double y = point_xy[i * 2 + 1];
+      const double col_d = std::floor((x - origin_x) / scale_x);
+      const double row_d = std::floor((y - origin_y) / scale_y);
+      if (col_d < 0.0 || row_d < 0.0 || col_d >= static_cast<double>(width) ||
+          row_d >= static_cast<double>(height)) {
+        col_row[i * 2] = OOB_SENTINEL;
+        col_row[i * 2 + 1] = OOB_SENTINEL;
+      } else {
+        col_row[i * 2] = static_cast<int32_t>(col_d);
+        col_row[i * 2 + 1] = static_cast<int32_t>(row_d);
+      }
+    }
+
     float* d_rast = sycl::malloc_device<float>(n, q);
-    double* d_pts = sycl::malloc_device<double>(point_count * 2, q);
+    int32_t* d_idx = sycl::malloc_device<int32_t>(point_count * 2, q);
     double* d_out = sycl::malloc_device<double>(point_count, q);
-    if (!d_rast || !d_pts || !d_out) {
+    if (!d_rast || !d_idx || !d_out) {
       sycl::free(d_rast, q);
-      sycl::free(d_pts, q);
+      sycl::free(d_idx, q);
       sycl::free(d_out, q);
       return PGACCEL_ERROR_OOM;
     }
 
     q.memcpy(d_rast, rast_pixels, n * sizeof(float));
-    q.memcpy(d_pts, point_xy, point_count * 2 * sizeof(double));
+    q.memcpy(d_idx, col_row.data(), point_count * 2 * sizeof(int32_t));
     q.wait_and_throw();
 
     const size_t w = width;
-    const size_t h_sz = height;
-    const double ox = origin_x;
-    const double oy = origin_y;
-    const double sx = scale_x;
-    const double sy = scale_y;
-    // Quiet NaN bit pattern (IEEE 754 fp64): exponent all 1s, MSB of
-    // mantissa set. Built via bit_cast inside the kernel to avoid the
-    // host-side `<cmath>` `nan` builtin (Metal SSCP rejects it). Same
-    // pattern as the fp32 nan_f at raster_ops.cpp:188.
-    const double nan_d = sycl::bit_cast<double>(static_cast<uint64_t>(0x7ff8000000000000ULL));
+    // NaN bit pattern carried as uint64; sycl::bit_cast inside the kernel
+    // produces the fp64 NaN without needing the host `<cmath>` `nan`
+    // builtin (Metal SSCP rejects sycl::nan).
+    const uint64_t nan_bits = static_cast<uint64_t>(0x7ff8000000000000ULL);
 
     q.submit([&](sycl::handler& h) {
        h.parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
          const size_t i = id[0];
-         const double x = d_pts[i * 2];
-         const double y = d_pts[i * 2 + 1];
-         const double col_d = (x - ox) / sx;
-         const double row_d = (y - oy) / sy;
-         const double col_floor = sycl::floor(col_d);
-         const double row_floor = sycl::floor(row_d);
-         if (col_floor < 0.0 || row_floor < 0.0 || col_floor >= static_cast<double>(w) ||
-             row_floor >= static_cast<double>(h_sz)) {
-           d_out[i] = nan_d;
+         const int32_t col = d_idx[i * 2];
+         const int32_t row = d_idx[i * 2 + 1];
+         if (col == OOB_SENTINEL) {
+           d_out[i] = sycl::bit_cast<double>(nan_bits);
            return;
          }
-         const size_t col = static_cast<size_t>(col_floor);
-         const size_t row = static_cast<size_t>(row_floor);
-         d_out[i] = static_cast<double>(d_rast[row * w + col]);
+         d_out[i] =
+             static_cast<double>(d_rast[static_cast<size_t>(row) * w + static_cast<size_t>(col)]);
        });
      }).wait_and_throw();
+    sycl::free(d_idx, q);
 
     q.memcpy(output, d_out, point_count * sizeof(double)).wait_and_throw();
 
     sycl::free(d_rast, q);
-    sycl::free(d_pts, q);
     sycl::free(d_out, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
@@ -974,22 +985,36 @@ extern "C" pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, 
            sum_sq += v * v;
          }
 
-         double mean = (cnt > 0.0) ? sum / cnt : 0.0;
-         double variance = (cnt > 0.0) ? (sum_sq / cnt - mean * mean) : 0.0;
-         if (variance < 0.0)
-           variance = 0.0;  // floating-point noise guard
-         double stddev = sycl::sqrt(variance);
-
          d_out[r * 6 + 0] = cnt;
          d_out[r * 6 + 1] = sum;
-         d_out[r * 6 + 2] = mean;
-         d_out[r * 6 + 3] = stddev;
+         // Slot 2 holds sum_sq until host derives mean from sum / cnt.
+         // Slot 3 stays 0 until host derives stddev. Computing mean/stddev
+         // device-side returned 0 under Metal soft-fp64 (sum / cnt → 0 in
+         // cold-cache testing on M2 Max, test_raster row 0 mean / masked
+         // mean failures, 2026-05-02). Move the ratio host-side to keep
+         // every code path SYCL-only without tripping soft-fp64 reciprocal.
+         d_out[r * 6 + 2] = sum_sq;
+         d_out[r * 6 + 3] = 0.0;
          d_out[r * 6 + 4] = have_any ? mn : 0.0;
          d_out[r * 6 + 5] = have_any ? mx : 0.0;
        });
      }).wait_and_throw();
 
     q.memcpy(output, d_out, row_count * 6 * sizeof(double)).wait_and_throw();
+
+    // Host-side: convert (sum_sq, 0) placeholders into (mean, stddev).
+    for (size_t r = 0; r < row_count; ++r) {
+      const double cnt = output[r * 6 + 0];
+      const double sum = output[r * 6 + 1];
+      const double sum_sq = output[r * 6 + 2];
+      const double mean = (cnt > 0.0) ? sum / cnt : 0.0;
+      double variance = (cnt > 0.0) ? (sum_sq / cnt - mean * mean) : 0.0;
+      if (variance < 0.0) {
+        variance = 0.0;  // floating-point noise guard
+      }
+      output[r * 6 + 2] = mean;
+      output[r * 6 + 3] = std::sqrt(variance);
+    }
 
     sycl::free(d_pix, q);
     sycl::free(d_mask, q);
