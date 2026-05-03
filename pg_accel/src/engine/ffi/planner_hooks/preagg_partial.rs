@@ -595,7 +595,13 @@ mod tests {
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
-mod pg_test_explain {
+// Module name renamed from `pg_test_explain` to drop the `pg_` prefix —
+// pgrx renders this as a SQL schema name and PG rejects schemas with the
+// reserved `pg_` prefix (SQLSTATE 42939). The old name made every
+// `cargo test --features pg_test` invocation fail with "unacceptable
+// schema name", blocking iterative validation for any agent landing
+// FFI-heavy executor work. Found by Agent F3-finish 2026-05-03.
+mod preagg_explain {
     use pgrx::prelude::{Spi, pg_test};
 
     /// Drive a query whose star-shape would normally trigger the
