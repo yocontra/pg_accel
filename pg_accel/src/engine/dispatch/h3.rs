@@ -1,9 +1,7 @@
 //! GPU H3 cell dispatch.
 
 use crate::adapters::extractors::array::{ParseError as ArrayParseError, parse_array};
-use crate::adapters::extractors::geometry::{
-    encode_pg_polygon, encode_pg_polygon_array, extract_geometry,
-};
+use crate::adapters::extractors::geometry::{encode_pg_polygon, extract_geometry};
 use crate::engine::gucs;
 use crate::engine::registry;
 use crate::gpu;
@@ -519,6 +517,64 @@ unsafe fn varlena_from_bare_bytes(bare: &[u8]) -> pgrx::pg_sys::Datum {
     pg_sys::Datum::from(ptr)
 }
 
+/// Build a `polygon[]` (POLYGONARRAYOID = 1027) ArrayType varlena Datum
+/// from a slice of bare PG `polygon` bodies (each body matches the
+/// post-VARHDRSZ payload produced by [`encode_pg_polygon`]).
+///
+/// Each body is first wrapped via [`varlena_from_bare_bytes`] into a
+/// proper `polygon` Datum, then the slice of Datums is handed to PG's
+/// `construct_array` (`src/backend/utils/adt/arrayfuncs.c`). Letting PG
+/// build the array header guarantees the on-disk layout matches what
+/// `heap_form_tuple` and downstream readers (npoints, array_out, etc.)
+/// expect — including the inter-element MAXALIGN padding that earlier
+/// hand-rolled encoders got wrong on multi-element inputs (root cause of
+/// the multi-cell `h3_cells_to_multi_polygon` SIGABRT).
+///
+/// `polygon` type metadata: `typlen = -1` (varlena), `typbyval = false`,
+/// `typalign = 'd'` (TYPALIGN_DOUBLE) per `pg_type.dat`. An empty input
+/// slice produces a valid empty 1-D array via `construct_array(_, 0, ...)`.
+///
+/// # Safety
+///
+/// Must be called on the main backend thread. All allocations land in
+/// `CurrentMemoryContext`.
+unsafe fn build_polygon_array_datum(bodies: &[Vec<u8>]) -> pgrx::pg_sys::Datum {
+    use pgrx::pg_sys;
+
+    // Pre-build the per-element polygon varlena Datums. construct_array
+    // copies element bytes into its own allocation, so it's safe for these
+    // intermediate pallocs to live in the same CurrentMemoryContext.
+    let mut elem_datums: Vec<pg_sys::Datum> = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        // SAFETY: caller guarantees main backend thread.
+        let d = unsafe { varlena_from_bare_bytes(body) };
+        elem_datums.push(d);
+    }
+
+    // construct_array(elems, nelems, elmtype, elmlen, elmbyval, elmalign)
+    // For polygon: elmlen = -1 (varlena), elmbyval = false, elmalign = 'd'.
+    // Cast c_uint::MAX-safe: polygon[] holes are kernel-bounded ring counts
+    // (typically < a few hundred), well under i32::MAX. nelems == 0 is
+    // handled inside construct_md_array — it returns a valid empty array
+    // via construct_empty_array(elmtype).
+    let nelems = i32::try_from(elem_datums.len()).unwrap_or(i32::MAX);
+    // SAFETY: construct_array reads `nelems` Datums from the pointer and
+    // copies their varlena bytes; we have ownership of elem_datums for the
+    // duration of the call. The function is callable on the main backend
+    // thread and palloc's the result in CurrentMemoryContext.
+    let arr_ptr = unsafe {
+        pg_sys::construct_array(
+            elem_datums.as_mut_ptr(),
+            nelems,
+            pg_sys::POLYGONOID,
+            -1,
+            false,
+            pg_sys::TYPALIGN_DOUBLE as ::core::ffi::c_char,
+        )
+    };
+    pg_sys::Datum::from(arr_ptr)
+}
+
 /// `h3_cell_to_boundary(cell)` -> PG built-in `polygon` per cell.
 ///
 /// Each input row produces exactly one output Datum (a `polygon` varlena
@@ -869,21 +925,37 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
                 continue;
             }
         };
-        let holes_bytes = match encode_pg_polygon_array(&holes) {
-            Ok(b) => b,
-            Err(e) => {
-                pgrx::debug1!(
-                    "pg_accel: h3_cells_to_multi_polygon: holes[] encode failed ({e}); NULL row"
-                );
-                push_null_record(&mut datums);
-                continue;
+
+        // Encode each hole polygon body as bare bytes; failures emit a NULL
+        // row (anti-cheat ban #4: surface error, never fabricate output).
+        let mut hole_bodies: Vec<Vec<u8>> = Vec::with_capacity(holes.len());
+        let mut hole_encode_failed = false;
+        for hole in &holes {
+            match encode_pg_polygon(hole) {
+                Ok(b) => hole_bodies.push(b),
+                Err(e) => {
+                    pgrx::debug1!(
+                        "pg_accel: h3_cells_to_multi_polygon: holes[] encode failed ({e}); NULL row"
+                    );
+                    hole_encode_failed = true;
+                    break;
+                }
             }
-        };
+        }
+        if hole_encode_failed {
+            push_null_record(&mut datums);
+            continue;
+        }
 
         // SAFETY: main backend thread; varlena_from_bare_bytes palloc's a
         // varlena in the current memory context.
         let exterior_datum = unsafe { varlena_from_bare_bytes(&exterior_bytes) };
-        let holes_datum = unsafe { varlena_from_bare_bytes(&holes_bytes) };
+        // Build the polygon[] holes Datum via PG's `construct_array`
+        // (utils/adt/arrayfuncs.c). PG handles all ArrayType header
+        // bookkeeping (ndim, dataoffset, elemtype, dim/lbound) and inter-
+        // element MAXALIGN padding; hand-rolling that layout was historically
+        // a source of layout drift across PG versions.
+        let holes_datum = unsafe { build_polygon_array_datum(&hole_bodies) };
         datums.push((exterior_datum, false));
         datums.push((holes_datum, false));
     }
@@ -914,12 +986,13 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
 //     polygon[]) RETURNS SETOF record
 //     (h3--3.7.2--4.0.0.sql:196)
 //
-// The dispatch encodes results via `encode_pg_polygon` and
-// `encode_pg_polygon_array` (see polygon_encoder.rs); these tests
-// roundtrip the encoded bytes through PG's polygon parser by calling
-// `npoints(...)` to verify they decode cleanly. Earlier revisions emitted
-// PostGIS GSERIALIZED bytes, which crashed npoints() because the layout
-// doesn't match utils/geo_decls.h:151-157.
+// The dispatch encodes the per-polygon body via `encode_pg_polygon` (see
+// polygon_encoder.rs) and builds the `polygon[]` array varlena via PG's
+// `construct_array` from `build_polygon_array_datum` above. The earlier
+// hand-rolled `encode_pg_polygon_array` route mis-laid the ArrayType
+// header for multi-element inputs and crashed `heap_form_tuple`; that
+// helper is retained only as a tested encoder reference. These tests
+// roundtrip the bytes through PG's polygon parser via `npoints(...)`.
 //
 // All tests skip silently if the `h3` extension isn't installable in the
 // pgrx_tests DB — same idiom as function_scan.rs:661.
@@ -948,20 +1021,13 @@ mod tests {
     /// `test_cell_to_boundary_multi_cell_emit` in
     /// `pgaccel-kernels/test/test_h3.cpp`).
     ///
-    /// **Still `#[ignore]`'d** because of a separate dispatch-layer bug:
-    /// for multi-cell input the dispatch produces a `polygon[]` holes
-    /// varlena that fails `heap_form_tuple` validation inside PG, leading
-    /// to a `panic_cannot_unwind` at
-    /// `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:445` ->
-    /// `ExecStoreHeapTuple` -> SIGABRT. Single-cell input works (`holes`
-    /// is empty, exercised by `h3_cells_to_multi_polygon_npoints`).
-    /// Reproduced by un-ignoring this test cold-cache against the kernel
-    /// fix in this branch — kernel returns 24 finite doubles for N=2
-    /// (verified by `test_cell_to_boundary_multi_cell_emit`) and the
-    /// crash is downstream of that. Tracked separately; not in Agent K
-    /// scope (file ownership: dispatch + encoder are not in my partition).
-    // anti-cheat-allow: separate dispatch-layer encoder bug (function_scan.rs:445 ExecStoreHeapTuple validation on the polygon[] holes varlena); kernel-layer fix verified by test_cell_to_boundary_multi_cell_emit
-    #[ignore]
+    /// **Encoder-layer fix landed (Agent BUG1):** the multi-cell crash
+    /// was a hand-rolled `polygon[]` varlena layout that failed downstream
+    /// readers in `heap_form_tuple` -> `ExecStoreHeapTuple`. Holes are now
+    /// built via PG's `construct_array` in
+    /// [`super::build_polygon_array_datum`], which guarantees the on-disk
+    /// ArrayType layout matches what PG expects (correct ndim/dataoffset/
+    /// inter-element padding). See dispatch/h3.rs ~870 for the call site.
     #[pg_test]
     fn h3_cells_to_multi_polygon_emits_one_row() {
         if !ensure_extension("h3") {

@@ -411,38 +411,33 @@ pub(super) unsafe fn next_tuple(
             }
         }
         (OutputShape::Record { field_count }, BufferedOutput::Record { datums, .. }) => {
-            // Multi-column record output. Build a heap tuple from the row's
-            // field slice and store it into the slot — slot's tupdesc has
-            // `field_count` attrs.
+            // Multi-column record output. PG's `ExecInitCustomScan` builds the
+            // scan slot as a virtual slot (TTSOpsVirtual) — heap-tuple storage
+            // would require a TTSOpsHeapTuple slot and `ExecStoreHeapTuple`
+            // would `elog(ERROR, "trying to store a heap tuple into wrong type
+            // of slot")` (`src/backend/executor/execTuples.c::ExecStoreHeapTuple`),
+            // which historically aborted multi-cell h3_cells_to_multi_polygon.
+            // Populate `tts_values` / `tts_isnull` directly and promote with
+            // `ExecStoreVirtualTuple` — same pattern the Scalar / VarLen arms
+            // use above.
             let fc = *field_count as usize;
             let base = row_idx.saturating_mul(fc);
-            // SAFETY: slot is a valid TupleTableSlot; (*slot).tts_tupleDescriptor
-            // was set in init_state. heap_form_tuple expects parallel
-            // values+nulls arrays sized to natts.
+            // SAFETY: slot is a valid TupleTableSlot; the tts_values /
+            // tts_isnull arrays were sized for `fc` attrs by the slot's
+            // tupdesc (set up at scan init from `output_field_types`).
             unsafe {
                 pg_sys::ExecClearTuple(slot);
-                let tupdesc = (*slot).tts_tupleDescriptor;
-                if tupdesc.is_null() {
+                let values = (*slot).tts_values;
+                let nulls = (*slot).tts_isnull;
+                if values.is_null() || nulls.is_null() {
                     return slot;
                 }
-
-                // Build parallel Datum + bool arrays from the flat slice.
-                let mut values: Vec<pg_sys::Datum> = Vec::with_capacity(fc);
-                let mut nulls: Vec<bool> = Vec::with_capacity(fc);
                 for k in 0..fc {
                     let (d, n) = datums[base + k];
-                    values.push(d);
-                    nulls.push(n);
+                    *values.add(k) = d;
+                    *nulls.add(k) = n;
                 }
-
-                let htup =
-                    pg_sys::heap_form_tuple(tupdesc, values.as_mut_ptr(), nulls.as_mut_ptr());
-                if htup.is_null() {
-                    return slot;
-                }
-                // ExecStoreHeapTuple takes ownership of the tuple's memory
-                // (shouldFree=true frees it when the slot is cleared next).
-                pg_sys::ExecStoreHeapTuple(htup, slot, true)
+                pg_sys::ExecStoreVirtualTuple(slot)
             }
         }
         (OutputShape::VarLen, BufferedOutput::VarLen { datums }) => {
