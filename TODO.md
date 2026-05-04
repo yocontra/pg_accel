@@ -55,11 +55,6 @@ commit `a57cadb` on origin/main.**
                        │    `pgaccel_h3_cell_to_boundary_emit`) exceeds 10-min test timeout. Host-port │
                        │    from K commit `0319d93` stays. See P2 entry for next-step investigation.   │
                        │
-                       ├─ small-N hash_agg kernel SSCP fix ──→ unblocks test_fork hashagg_f64 N=64
-                       │
-                       └─ sort_kv cold-cache fork crash SSCP fix ──→ unblocks Phase 6 cold-cache work
-                                                                     (same SSCP root cause as small-N)
-
    Geometry-array extractor ──→ unlocks st_value(rast, geometry[]) end-to-end smoke
    for st_value             (PostGIS doesn't expose this SQL surface today; lower priority)
 
@@ -73,10 +68,11 @@ commit `a57cadb` on origin/main.**
 ### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
 
 **P0 — correctness blockers (silent wrong-results or crashes possible)**:
-- **`hash_agg` 2-level pointer kernel returns 0 on small batches** — `test_fork
-  hashagg_f64` N=64 reads 0 instead of 2048. Sort-based path correct at
-  N >= 100k (verified 10M); silent wrong-result class for any caller that
-  bypasses the sort path. Phase 6 SSCP investigation.
+- _(none open — small-N hash_agg silent zero closed by AdaptiveCpp upstream
+  fixes `c2092425` (i33 width promotion) + `160728fd` (PHI literal
+  inlining). Cold-cache `test_fork` PASSES: hashagg_f64 N=64 returns
+  total=2048 (the 4-group sum of vals[0..63]). `test_hash_agg_keys` =
+  10/10 cold-cache.)_
 
 **P1 — perf blockers (correctness fine, GPU acceleration off in some cases)**:
 - **B5b PreAgg exec-side refactor** — B5a (commit `7c6d355`) shipped the
@@ -91,9 +87,6 @@ commit `a57cadb` on origin/main.**
   calibrated to 0.01 (`4144ac8`); per-row probe (0.01/row) is now the
   largest planner-side discouragement. Closing it unlocks AVG+STDDEV +
   plain-JOIN audit rows AND Phase 1 cost-multiplier calibration.
-- **Phase 6 cold-cache fork crash on `sort_kv_i32`/`i64`** — same SSCP root
-  cause as the small-N hash_agg bug. Warmup-at-init tried, regressed,
-  reverted.
 
 **P2 — open follow-ups (genuinely lower priority)**:
 - **AdaptiveCpp upstream emitter fixes — patches landed, pg_accel revert
@@ -131,6 +124,18 @@ commit `a57cadb` on origin/main.**
 
 ### Closed in this round (no longer in Open list)
 
+- ✅ small-N `hash_agg` silent zero (P0) — AdaptiveCpp upstream fixes
+  `c2092425` + `160728fd` lift the SSCP edge case that was causing
+  `agg_hash`'s `run_unsorted_accum_kernel` (`pgaccel-kernels/src/hash_agg.cpp:371-439`)
+  to return 0 at N=64. Cold-cache `test_fork` reports
+  `[child] fp64 matrix: hashagg_f64 OK` (total=2048, 4 groups). No
+  pg_accel kernel changes were required — the bug was in
+  AdaptiveCpp's MetalEmitter, not the SYCL kernel.
+- ✅ `sort_kv_i32`/`i64` cold-cache fork dispatch (P1) — verified via
+  ad-hoc fork harness (parent loads .dylib, child calls `pgaccel_init()`,
+  cold-dispatches `pgaccel_sort_kv_i32` then `_i64`). Both succeed,
+  `.metalar` archives are produced for the radix-sort u32 / u64 kernels.
+  Same upstream fixes as above; warmup-at-init is no longer needed.
 - ✅ fp64 sphere_distance + st_length fork-safety — AdaptiveCpp runtime
   acknowledges helper exit 9 (skip-too-large), kernel gates dropped,
   test_spatial 109/109 cold-cache (`5e84560`)
