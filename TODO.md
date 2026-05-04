@@ -48,9 +48,12 @@ commit `a57cadb` on origin/main.**
                        ┌─ B5b PreAgg exec refactor ──→ unlocks parallel star-join PreAgg
                        │   (open; gated by B5a GUC, default off)
                        │
-   AdaptiveCpp upstream┼─ 33-bit int width emitter fix ──→ revert K's host-port for grid_disk
-   `fork-safe-metal`   │
-                       └─ PHI literal declaration emitter fix ──→ revert K's host-port for cell_to_boundary
+   AdaptiveCpp upstream┼─ 33-bit int width emitter fix ✅ landed `c2092425`     ┐
+   `fork-safe-metal`   │  PHI literal declaration emitter fix ✅ landed `160728fd` ┤
+                       │  → pg_accel revert BLOCKED: cold-cache JIT compile of soft-fp64 SLEEF SYCL    │
+                       │    kernels (sin/cos/atan via `pgaccel_h3_lat_lng_to_cell`,                    │
+                       │    `pgaccel_h3_cell_to_boundary_emit`) exceeds 10-min test timeout. Host-port │
+                       │    from K commit `0319d93` stays. See P2 entry for next-step investigation.   │
                        │
                        ├─ small-N hash_agg kernel SSCP fix ──→ unblocks test_fork hashagg_f64 N=64
                        │
@@ -93,14 +96,27 @@ commit `a57cadb` on origin/main.**
   reverted.
 
 **P2 — open follow-ups (genuinely lower priority)**:
-- **AdaptiveCpp upstream emitter fixes (2 distinct bugs identified by K)** —
-  (a) `LLVMToMetal: Unsupported integer bit width: 33` from `1u + ring_sum`
-  pattern; (b) `use of undeclared identifier 't_double__1_000000e_00...'`
-  from `[2 x double] {1.0, 0.0}` PHI literal in `sycl::cos(0)`/`sin(0)`.
-  Both currently worked around by host-porting the affected H3 kernels.
-  Filing upstream + landing on `~/local/src/AdaptiveCpp/fork-safe-metal`
-  would let us revert to SYCL kernels. See "Metal Emitter performance/
-  robustness polish" entry.
+- **AdaptiveCpp upstream emitter fixes — patches landed, pg_accel revert
+  blocked on JIT compile time.** Both upstream bugs filed by K were
+  landed on `~/local/src/AdaptiveCpp/fork-safe-metal`:
+  (a) `LLVMToMetal: Unsupported integer bit width: 33` → fix
+  `c2092425` (promote non-standard integer widths to next supported size);
+  (b) `use of undeclared identifier 't_double__1_000000e_00...'` →
+  fix `160728fd` (inline aggregate constants at PHI/select/store use sites).
+  Both verified via standalone repros. **The pg_accel-side revert from K's
+  host-port (`pgaccel-kernels/src/h3_ops.cpp` commit `51b5353`) back to
+  SYCL is blocked**: cold-cache `test_h3` hangs at `test_lat_lng_to_cell`
+  / `test_cell_to_boundary` even with `ACPP_METAL_ARCHIVE_MAX_BYTES=8388608`,
+  because soft-fp64 SLEEF (sin/cos/asin/atan) compiled through MetalEmitter
+  → `xcrun metal` exceeds the 600s test budget. Repro recipe:
+  `make clear-jit && cd pgaccel-kernels/build && ACPP_METAL_ARCHIVE_MAX_BYTES=8388608 timeout 600 stdbuf -oL ./test_h3 > /tmp/h3.log 2>&1`
+  — exits 124 (timeout). Next-step candidates:
+  (i) reduce SLEEF surface emitted into the metallib (only emit functions
+      transitively reachable from kernel entries),
+  (ii) cache-warm the SLEEF metallib at `_PG_init`-equivalent for the test
+      harness to keep the cold-cache budget honest,
+  (iii) pre-port more SLEEF helpers to host (regression direction).
+  Host-port (a, b) remains the working path for now.
 - **Geometry-array extractor for `st_value`** — `pgaccel_raster_value`
   kernel works; `extract_geometry_array` walker for PG `geometry[]` arg
   is missing. PostGIS doesn't expose `ST_Value(rast, ARRAY[...])` at the
