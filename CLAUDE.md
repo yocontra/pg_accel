@@ -18,12 +18,14 @@ just ci               # Full local CI: lint + test
 just package          # cargo pgrx package (installable .so)
 just gpu-build        # cmake build for GPU kernels (AdaptiveCpp/SYCL)
 just gpu-test         # Run standalone GPU kernel tests
-just clear-jit        # Clear AdaptiveCpp Metal SSCP JIT cache (~/.acpp/apps/global/jit-cache)
+make clear-jit        # Clear AdaptiveCpp Metal SSCP JIT cache (~/.acpp/apps/global/jit-cache)
 ```
 
-**Always use `just clear-jit` instead of `rm -rf ~/.acpp/apps/global/jit-cache/*`.**
-The recipe is auto-allowed by the harness; the bare `rm` prompts on every
-invocation. Use `just clear-jit` to force a cold-cache run before any test
+**Always use `make clear-jit` to clear the JIT cache.** Never use `rm -rf
+~/.acpp/apps/global/jit-cache/*` and do NOT invoke `just clear-jit` directly
+either — `make clear-jit` is the single canonical entrypoint. The `make`
+recipe is auto-allowed by the harness; the bare `rm` prompts on every
+invocation. Use `make clear-jit` to force a cold-cache run before any test
 that needs to verify fork-safety, archive-builder behaviour, or kernel
 re-compilation after a code change.
 
