@@ -57,13 +57,6 @@ commit `a57cadb` on origin/main.**
                        └─ sort_kv cold-cache fork crash SSCP fix ──→ unblocks Phase 6 cold-cache work
                                                                      (same SSCP root cause as small-N)
 
-   SRF passthrough SIGABRT ──→ unlocks SELECT srf(c), other FROM t (reads of non-SRF cols)
-                                (open; native PG ProjectSet still works as fallback)
-
-   h3_cells_to_multi_polygon
-   dispatch encoder bug   ──→ unblocks multi-cell input via cells_to_multi_polygon path
-   (heap_form_tuple)        (kernel SIGABRT is FIXED by K; encoder-layer bug in next_tuple)
-
    Geometry-array extractor ──→ unlocks st_value(rast, geometry[]) end-to-end smoke
    for st_value             (PostGIS doesn't expose this SQL surface today; lower priority)
 
@@ -77,17 +70,6 @@ commit `a57cadb` on origin/main.**
 ### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
 
 **P0 — correctness blockers (silent wrong-results or crashes possible)**:
-- **SRF passthrough column SIGABRT** — `SELECT id, srf(cell) FROM t` crashes
-  when the parent agg reads `id`. `count(*)` works (no passthrough read).
-  Native PG ProjectSet runs the query correctly when our hook's planner cost
-  loses; the Custom Scan is the broken path. See "SRF-in-target-list executor
-  wiring — passthrough crash" entry below.
-- **`h3_cells_to_multi_polygon` dispatch encoder bug** — kernel SIGABRT was
-  fixed by K (commit `0319d93`), but a separate `heap_form_tuple` validation
-  failure on the `polygon[]` holes varlena now causes `panic_cannot_unwind`
-  at `function_scan.rs:445` for multi-cell input. Single-cell paths work
-  correctly. See "h3_cells_to_multi_polygon dispatch-layer encoder bug"
-  entry below.
 - **`hash_agg` 2-level pointer kernel returns 0 on small batches** — `test_fork
   hashagg_f64` N=64 reads 0 instead of 2048. Sort-based path correct at
   N >= 100k (verified 10M); silent wrong-result class for any caller that
@@ -702,19 +684,23 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     (`test_grid_disk_single_cell_input`, `test_cell_to_boundary_multi_cell_emit`).
     The pgrx test `function_scan_h3_grid_disk_emits_seven_cells_for_k1`
     now PASSES (verified cold-cache).
-  - **Open (separate dispatch bug, surfaced by Agent K when un-ignoring
-    `h3_cells_to_multi_polygon_emits_one_row`):** for **multi-cell**
-    input the dispatch produces a `polygon[]` holes varlena that fails
-    `heap_form_tuple` validation inside PG, leading to a
-    `panic_cannot_unwind` at
-    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:445`
-    (`ExecStoreHeapTuple`) → SIGABRT. Single-cell input (`holes` is
-    empty) works fine — pinned by `h3_cells_to_multi_polygon_npoints`.
-    Kernel layer is verified correct (kernel returns 24 finite doubles
-    for N=2 cells in `test_cell_to_boundary_multi_cell_emit`); the bug
-    is in the encoder pipeline (`encode_pg_polygon_array` →
-    `varlena_from_bare_bytes` → `heap_form_tuple`). Owner: dispatch /
-    encoder agent (not Agent K's file ownership).
+  - **CLOSED 2026-05-03 by Agent BUG1**: the multi-cell crash root-caused
+    to the FunctionScan executor's Record arm calling
+    `pg_sys::ExecStoreHeapTuple` against a virtual scan slot
+    (`TTSOpsVirtual` — the default for Custom Scan), which triggers
+    `elog(ERROR, "trying to store a heap tuple into wrong type of slot")`
+    in `src/backend/executor/execTuples.c::ExecStoreHeapTuple` and
+    propagates as `panic_cannot_unwind`. Fix at
+    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:413` switches
+    the Record path to populate `tts_values` / `tts_isnull` directly and
+    promote with `ExecStoreVirtualTuple`, mirroring the Scalar / VarLen
+    arms. Hand-rolled `polygon[]` ArrayType layout was *also* replaced
+    with PG's `construct_array` via `build_polygon_array_datum`
+    (`pg_accel/src/engine/dispatch/h3.rs`) for defence-in-depth — the
+    earlier `encode_pg_polygon_array` path is retained only as a tested
+    encoder reference. Verified cold-cache: `h3_cells_to_multi_polygon_emits_one_row`
+    + `h3_cells_to_multi_polygon_npoints` + `h3_cell_to_boundary_npoints`
+    all PASS (3/3 in the dispatch/h3 tests submodule).
   - **CLOSED 2026-05-03 by Agent B4 (commit `c53ae15`)**: dispatch shape
     mismatch for `h3_cell_to_boundary` — kernel previously emitted
     GSERIALIZED but h3-pg declares `RETURNS polygon` (PG built-in).
@@ -724,64 +710,26 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     a hexagon. Same fix sweeps `h3_cells_to_multi_polygon` (kernel
     emits exterior + holes as `(polygon, polygon[])` Record per row)
     — single-cell verified via `h3_cells_to_multi_polygon_npoints`.
-    Multi-cell still hits the open dispatch encoder bug above.
+    Multi-cell verified via `h3_cells_to_multi_polygon_emits_one_row`
+    after Agent BUG1's executor fix above.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered
   set matches the kernel set exactly.
-- **Done when** (refreshed 2026-05-03 after B5a / K / SRF executor):
+- **Done when** (refreshed 2026-05-03 after B5a / K / SRF executor / BUG1
+  / BUG2):
   CLOSED — FunctionScan plumbing landed (`30a9b6e`, `da6b054`); registry
   re-resolve landed (`3827b24`); FunctionScan executor crash fixed
   (`bedda75`); h3_cell_to_boundary + h3_cells_to_multi_polygon shape fix
   landed (`c53ae15`); h3_grid_disk single-cell None + cell_to_boundary
   multi-cell SIGABRT kernel-layer fixes landed (`0319d93`); SRF executor
-  wiring landed (`a57cadb`).
-  REMAINING: (1) **multi-cell `h3_cells_to_multi_polygon` dispatch encoder
-  bug** — separate from the kernel SIGABRT K fixed; `heap_form_tuple`
-  validation rejects the `polygon[]` holes varlena → see "h3_cells_to_multi_polygon
-  multi-cell dispatch encoder bug" P0 entry below. (2) **SRF passthrough
-  column SIGABRT** — see "SRF-in-target-list executor wiring — passthrough
-  crash" P0 entry below.
-
-### SRF-in-target-list executor wiring — passthrough column SIGABRT (P0)
-
-- **What** (surfaced 2026-05-03 by Agent SRF, commit `a57cadb`): full
-  `GpuAccelSrfTargetList` Custom Scan plumbing landed (vtables in
-  `pg_accel/src/engine/ffi/custom_scan/mod.rs`, executor in
-  `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs:466`, planner
-  hook wrap in `planner_hooks/srf_target_list.rs`). EXPLAIN now shows
-  `Custom Scan (GpuAccelSrfTargetList)` for SRF-in-target-list queries
-  (verified by `pg_test_srf_tlist_explain_shows_custom_scan`). Single-row
-  expansion semantics verified by
-  `pg_test_srf_tlist_h3_grid_disk_expands` (14 rows from 2 inputs at k=1).
-  **HOWEVER**: when the parent agg / Subquery Scan reads a passthrough
-  Var column out of our Custom Scan output, the backend SIGABRTs. Test
-  `pg_test_srf_tlist_passthrough_cols` is `#[ignore]`'d with
-  `// anti-cheat-allow:` noting the documented blocker.
-- **Repro shape**: `count(DISTINCT id) FROM (SELECT id, h3_grid_disk(cell, 1)
-  AS d FROM cells) sub` crashes; `count(*) FROM (...)` works because the
-  parent doesn't read the passthrough column. Fails the same way for
-  `sum(id)` and direct row iteration.
-- **Diagnosed**: passthrough-column attno mapping IS correct
-  (`srf_arg_attno=1, passthrough_attnos=[2, 0]` for reordered subpath
-  pathtarget `[cell, id]`, verified via debug warnings before crash).
-  Tried (didn't fix): `MemoryContextSwitchTo(CacheMemoryContext)` around
-  `dispatch::dispatch`; per-call `fmgr_info` refresh to update `fn_mcxt`.
-  Likely: a per-tuple memory-context interaction between our
-  `ExecStoreVirtualTuple` slot and the parent Agg's projection that
-  invalidates the passthrough Datum pointer between batches.
-- **Today's behavior**: native PG ProjectSet remains the documented
-  fallback for queries that read passthrough cols — planner cost picks
-  it over our Custom Scan when the parent will materialize, so user
-  queries don't crash in practice (just don't get GPU acceleration).
-  The Custom Scan IS the broken path when the cost gate picks it (e.g.
-  count(*) shapes where no passthrough is read).
-- **Done when**: `pg_test_srf_tlist_passthrough_cols` un-ignored and
-  passes; representative shape `SELECT id, h3_grid_disk(cell, 1) FROM t`
-  returns correct expanded rows with `id` preserved per output row.
-- Depends on: nothing (pure executor work; isolate the per-tuple
-  memory-context interaction).
+  wiring landed (`a57cadb`); multi-cell `h3_cells_to_multi_polygon`
+  Record-arm `ExecStoreHeapTuple` SIGABRT fixed by Agent BUG1; SRF
+  passthrough column wrong-result fixed by Agent BUG2 (root cause was
+  `gpu_agg` planner accepting `count(DISTINCT)` and silently dropping
+  the DISTINCT; SRF executor itself emitted correct schema + data the
+  whole time — see fix commit).
 
 ### h3_cells_to_multi_polygon multi-cell dispatch encoder bug (P0)
 

@@ -1922,6 +1922,33 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         // SAFETY: aggref is a valid Aggref node.
         let aggref_ref = unsafe { &*aggref };
 
+        // Reject Aggrefs that carry semantics our reduce / hashagg kernels
+        // do not implement. Without this gate, `count(DISTINCT x)`,
+        // `sum(x ORDER BY ...)`, and `count(*) FILTER (WHERE …)` would all
+        // silently degrade to plain `count(*)` / `sum(x)` because the
+        // executor never inspects `aggdistinct`/`aggorder`/`aggfilter` —
+        // a P0 silent wrong-result class. PG's native Agg handles all
+        // three correctly when we decline; the planner falls back to it
+        // because `add_path` has no GpuAgg candidate to compare against.
+        //
+        // Surfaced 2026-05-03 via `pg_test_srf_tlist_passthrough_cols`,
+        // which used `count(DISTINCT id)` in the assertion and saw 14
+        // (rows) instead of 2 (distinct ids). The same wrong result
+        // reproduces on a plain table without any SRF — the bug is in
+        // the agg gate, not in the SRF executor.
+        if !aggref_ref.aggdistinct.is_null() {
+            pgrx::debug1!("pg_accel: gpu_agg rejected: aggregate has DISTINCT clause");
+            return;
+        }
+        if !aggref_ref.aggorder.is_null() {
+            pgrx::debug1!("pg_accel: gpu_agg rejected: aggregate has ORDER BY clause");
+            return;
+        }
+        if !aggref_ref.aggfilter.is_null() {
+            pgrx::debug1!("pg_accel: gpu_agg rejected: aggregate has FILTER clause");
+            return;
+        }
+
         // Partial-agg gate (Phase 2): only support aggregates whose transition
         // state is a plain data type (SUM(int2/int4/float4/float8), MIN, MAX,
         // COUNT). When aggtranstype == INTERNAL (AVG, STDDEV, VARIANCE,
