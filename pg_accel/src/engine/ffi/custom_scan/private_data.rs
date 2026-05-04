@@ -1093,3 +1093,230 @@ mod functionscan_tests {
         assert_eq!(decoded, original);
     }
 }
+
+// ---------------------------------------------------------------------------
+// SrfTargetList serialization / deserialization (Phase 2 follow-up to F3)
+// ---------------------------------------------------------------------------
+
+/// Magic marker preceding a serialized [`SrfTargetListPrivData`] block.
+///
+/// Distinct from `FUNCTIONSCAN_SENTINEL` and `PARTIAL_SENTINEL` so the three
+/// block formats cannot be silently confused if a layout regression
+/// mis-positions the cursor.
+pub const SRF_TARGET_LIST_SENTINEL: c_int = 0x5354_4C53; // b"STLS"
+
+/// Plan metadata for an SRF-in-target-list Custom-Scan injection.
+///
+/// Captures the data needed to expand a `SELECT srf(col), passthrough_cols
+/// FROM t` ProjectSet at execution time:
+///
+/// - `fn_oid`: registered SRF (`h3_grid_disk`, `h3_cell_to_boundary`, etc.)
+/// - `output_shape_disc` / `output_shape_field_count`: same encoding as
+///   `FunctionScanPrivData` so the executor can pick the right
+///   `DispatchResult` arm.
+/// - `srf_arg_attno`: 1-based attno of the per-row input column (Var) in
+///   the child plan's targetlist. The executor reads this column from each
+///   slot returned by `ExecProcNode(child)` and feeds it as `batch[0]` to
+///   the dispatcher.
+/// - `srf_tlist_pos`: 0-based position of the SRF result column in the
+///   output tuple (the upper tlist this Custom Scan replaces).
+/// - `passthrough_attnos`: for each non-SRF column in the output tlist,
+///   the 1-based child attno to copy from per output row. Aligned with
+///   `passthrough_tlist_positions` so position `k` in the output tuple
+///   gets `passthrough_attnos[k]` from the child slot. The SRF position
+///   itself is encoded as attno `0` (skipped during passthrough).
+/// - `qual_args`: the constant args to the SRF (`k=1` in
+///   `h3_grid_disk(cell, 1)`). Datum + type OID pairs, same encoding as
+///   `FunctionScanPrivData::args`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SrfTargetListPrivData {
+    /// OID of the registered SRF function.
+    pub fn_oid: pg_sys::Oid,
+    /// `OutputShape` discriminant: 0 = Scalar, 1 = Record, 2 = VarLen.
+    pub output_shape_disc: i32,
+    /// `field_count` for the Record variant; 0 otherwise.
+    pub output_shape_field_count: u32,
+    /// 1-based attno of the SRF's Var argument in the child plan's
+    /// targetlist (which child column to feed per row).
+    pub srf_arg_attno: i32,
+    /// 0-based position of the SRF column in the output tuple.
+    pub srf_tlist_pos: i32,
+    /// Per output-tuple-position: 1-based child attno to passthrough,
+    /// or 0 if that position is the SRF column. Length == n_output_cols.
+    pub passthrough_attnos: Vec<i32>,
+    /// Constant args to the SRF, in positional order. Each entry is
+    /// `(datum_as_i64, type_oid_as_u32)` — same shape as
+    /// `FunctionScanPrivData::args`.
+    pub qual_args: Vec<(i64, u32)>,
+}
+
+/// Append an [`SrfTargetListPrivData`] onto `list` using the
+/// `SRF_TARGET_LIST_SENTINEL`-prefixed layout.
+///
+/// Layout (after the standard 6-element header):
+///
+/// ```text
+/// [SRF_TARGET_LIST_SENTINEL,
+///  fn_oid, output_shape_disc, output_shape_field_count,
+///  srf_arg_attno, srf_tlist_pos,
+///  n_passthrough, passthrough_attno_0, ..., passthrough_attno_{n-1},
+///  n_qual_args,
+///  per qual arg: (datum_hi, datum_lo, type_oid)]
+/// ```
+///
+/// # Safety
+///
+/// Must be called in a valid PG memory context on the main backend thread.
+#[allow(clippy::cast_possible_wrap)]
+pub unsafe fn append_srf_target_list_priv(
+    mut list: *mut pg_sys::List,
+    priv_data: &SrfTargetListPrivData,
+) -> *mut pg_sys::List {
+    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
+    unsafe {
+        list = pg_sys::lappend(list, pg_sys::makeInteger(SRF_TARGET_LIST_SENTINEL).cast());
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(u32::from(priv_data.fn_oid) as c_int).cast(),
+        );
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.output_shape_disc).cast(),
+        );
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.output_shape_field_count as c_int).cast(),
+        );
+        list = pg_sys::lappend(list, pg_sys::makeInteger(priv_data.srf_arg_attno).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(priv_data.srf_tlist_pos).cast());
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.passthrough_attnos.len() as c_int).cast(),
+        );
+        for &attno in &priv_data.passthrough_attnos {
+            list = pg_sys::lappend(list, pg_sys::makeInteger(attno).cast());
+        }
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(priv_data.qual_args.len() as c_int).cast(),
+        );
+        for &(datum, type_oid) in &priv_data.qual_args {
+            let datum_u = datum as u64;
+            list = pg_sys::lappend(list, pg_sys::makeInteger((datum_u >> 32) as c_int).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(datum_u as u32 as c_int).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(type_oid as c_int).cast());
+        }
+    }
+    list
+}
+
+/// Deserialize an [`SrfTargetListPrivData`] from `list` starting at
+/// `start_idx` (the position of the `SRF_TARGET_LIST_SENTINEL`).
+///
+/// Returns `None` if the sentinel does not match or the list is too
+/// short to hold the declared payload.
+///
+/// # Safety
+///
+/// `list` must be a valid PG `List *` of `Integer` nodes.
+#[allow(clippy::cast_sign_loss)]
+pub unsafe fn deserialize_srf_target_list_priv(
+    list: *mut pg_sys::List,
+    start_idx: usize,
+) -> Option<SrfTargetListPrivData> {
+    if list.is_null() {
+        return None;
+    }
+    // SAFETY: list_length is safe on a non-null List.
+    let list_len = unsafe { pg_sys::list_length(list) } as usize;
+    // Need at least sentinel + 6 fixed fields + n_passthrough(0) + n_qual_args(0)
+    if start_idx + 6 >= list_len {
+        return None;
+    }
+    let sentinel = unsafe { list_int_at(list, start_idx as c_int) };
+    if sentinel != SRF_TARGET_LIST_SENTINEL {
+        return None;
+    }
+    let fn_oid_raw = unsafe { list_int_at(list, (start_idx + 1) as c_int) } as u32;
+    let shape_disc = unsafe { list_int_at(list, (start_idx + 2) as c_int) };
+    let shape_field_count = unsafe { list_int_at(list, (start_idx + 3) as c_int) } as u32;
+    let srf_arg_attno = unsafe { list_int_at(list, (start_idx + 4) as c_int) };
+    let srf_tlist_pos = unsafe { list_int_at(list, (start_idx + 5) as c_int) };
+    let n_passthrough = unsafe { list_int_at(list, (start_idx + 6) as c_int) } as usize;
+    let pass_base = start_idx + 7;
+    if pass_base + n_passthrough >= list_len {
+        return None;
+    }
+    let mut passthrough_attnos = Vec::with_capacity(n_passthrough);
+    for k in 0..n_passthrough {
+        passthrough_attnos.push(unsafe { list_int_at(list, (pass_base + k) as c_int) });
+    }
+    let n_args_idx = pass_base + n_passthrough;
+    if n_args_idx >= list_len {
+        return None;
+    }
+    let n_qual_args = unsafe { list_int_at(list, n_args_idx as c_int) } as usize;
+    let qual_base = n_args_idx + 1;
+    if qual_base + n_qual_args * 3 > list_len {
+        return None;
+    }
+    let mut qual_args = Vec::with_capacity(n_qual_args);
+    for k in 0..n_qual_args {
+        let off = qual_base + k * 3;
+        let hi = unsafe { list_int_at(list, off as c_int) } as u32;
+        let lo = unsafe { list_int_at(list, (off + 1) as c_int) } as u32;
+        let datum = (((hi as u64) << 32) | lo as u64) as i64;
+        let type_oid = unsafe { list_int_at(list, (off + 2) as c_int) } as u32;
+        qual_args.push((datum, type_oid));
+    }
+    Some(SrfTargetListPrivData {
+        fn_oid: pg_sys::Oid::from(fn_oid_raw),
+        output_shape_disc: shape_disc,
+        output_shape_field_count: shape_field_count,
+        srf_arg_attno,
+        srf_tlist_pos,
+        passthrough_attnos,
+        qual_args,
+    })
+}
+
+#[cfg(feature = "pg_test")]
+#[allow(clippy::unwrap_used)]
+mod srf_target_list_tests {
+    use pgrx::pg_test;
+
+    use super::*;
+
+    /// Sentinel must be distinct from `FUNCTIONSCAN_SENTINEL` and
+    /// `PARTIAL_SENTINEL` so the three block formats are unambiguous.
+    #[test]
+    fn srf_target_list_sentinel_distinct() {
+        assert_ne!(SRF_TARGET_LIST_SENTINEL, FUNCTIONSCAN_SENTINEL);
+        assert_ne!(SRF_TARGET_LIST_SENTINEL, PARTIAL_SENTINEL);
+    }
+
+    /// Round-trip: build a serialized priv block, then deserialize and
+    /// confirm equality field-by-field.
+    #[pg_test]
+    fn srf_target_list_priv_roundtrip() {
+        use pgrx::pg_sys;
+        let original = SrfTargetListPrivData {
+            fn_oid: pg_sys::Oid::from(98765_u32),
+            output_shape_disc: 2, // VarLen
+            output_shape_field_count: 0,
+            srf_arg_attno: 2,
+            srf_tlist_pos: 1,
+            passthrough_attnos: vec![1, 0], // pos 0 = passthrough child attno 1; pos 1 = SRF
+            qual_args: vec![(7i64, pg_sys::INT4OID.to_u32())],
+        };
+        // SAFETY: pg_test runs in a real backend, so CurrentMemoryContext
+        // is valid for lappend / makeInteger.
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        unsafe {
+            list = append_srf_target_list_priv(list, &original);
+        }
+        let decoded = unsafe { deserialize_srf_target_list_priv(list, 0) }
+            .expect("srf_target_list priv must round-trip");
+        assert_eq!(decoded, original);
+    }
+}
