@@ -942,21 +942,25 @@ mod tests {
     /// exactly one (exterior, holes) record per call regardless of input
     /// array cardinality.
     ///
-    /// **NOTE**: marked `#[ignore]` because the underlying GPU kernel
-    /// (`pgaccel_h3_cells_to_multi_polygon_emit` →
-    /// `pgaccel_h3_cell_to_boundary_emit` at `pgaccel-kernels/src/h3_ops.cpp:2562`)
-    /// crashes the backend (SIGABRT) when called with multi-cell input.
-    /// I bisected against `c2f715f` (the commit that originally added
-    /// this test) and confirmed the same SIGABRT happens with the
-    /// previous GSERIALIZED-emitting dispatch — so the kernel was broken
-    /// before this branch. Single-cell input works fine: see
-    /// `h3_cells_to_multi_polygon_npoints` below for the unit test that
-    /// actually exercises the dispatch+encoder path. Single-cell
-    /// `npoints(exterior)` returns a positive vertex count, confirming
-    /// the encoder is correct.
-    // pre-existing kernel SIGABRT on multi-cell input (h3_ops.cpp:2547-2562);
-    // reproduced on c2f715f baseline. Tracked separately.
-    // anti-cheat-allow: pre-existing kernel SIGABRT (h3_ops.cpp:2547-2562) on multi-cell input; reproduced on c2f715f baseline; separate blocker from polygon-shape fix
+    /// **Kernel-layer fix landed (Agent K Round 3):** the delegated
+    /// `pgaccel_h3_cell_to_boundary_emit` no longer JIT-fails or SIGABRT's
+    /// on multi-cell input (it now runs host-side; pinned by
+    /// `test_cell_to_boundary_multi_cell_emit` in
+    /// `pgaccel-kernels/test/test_h3.cpp`).
+    ///
+    /// **Still `#[ignore]`'d** because of a separate dispatch-layer bug:
+    /// for multi-cell input the dispatch produces a `polygon[]` holes
+    /// varlena that fails `heap_form_tuple` validation inside PG, leading
+    /// to a `panic_cannot_unwind` at
+    /// `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:445` ->
+    /// `ExecStoreHeapTuple` -> SIGABRT. Single-cell input works (`holes`
+    /// is empty, exercised by `h3_cells_to_multi_polygon_npoints`).
+    /// Reproduced by un-ignoring this test cold-cache against the kernel
+    /// fix in this branch — kernel returns 24 finite doubles for N=2
+    /// (verified by `test_cell_to_boundary_multi_cell_emit`) and the
+    /// crash is downstream of that. Tracked separately; not in Agent K
+    /// scope (file ownership: dispatch + encoder are not in my partition).
+    // anti-cheat-allow: separate dispatch-layer encoder bug (function_scan.rs:445 ExecStoreHeapTuple validation on the polygon[] holes varlena); kernel-layer fix verified by test_cell_to_boundary_multi_cell_emit
     #[ignore]
     #[pg_test]
     fn h3_cells_to_multi_polygon_emits_one_row() {

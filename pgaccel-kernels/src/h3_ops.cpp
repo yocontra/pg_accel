@@ -1,6 +1,7 @@
 #include <sycl/sycl.hpp>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "pgaccel_ffi.h"
@@ -1362,85 +1363,26 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells
   if (cells == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
 
-  try {
-    sycl::queue q{sycl::default_selector_v};
-
-    // SAFETY: USM device allocations freed at end of scope
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint32_t* d_counts = sycl::malloc_device<uint32_t>(count, q);
-
-    if (!d_cells || !d_counts) {
-      sycl::free(d_cells, q);
-      sycl::free(d_counts, q);
-      return PGACCEL_ERROR_OOM;
-    }
-
-    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
-
-    const int32_t k_val = k;
-    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
-    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
-    const int max_res = H3_MAX_RESOLUTION;
-
-    q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         const uint64_t cell = d_cells[i];
-
-         if (cell == 0 || k_val < 0) {
-           d_counts[i] = 0;
-           return;
-         }
-         if (k_val == 0) {
-           d_counts[i] = 1;
-           return;
-         }
-
-         const int base = static_cast<int>((cell >> 45) & 0x7F);
-         const bool is_pent_base = (base < 64) ? ((pent_low >> base) & 1ULL) != 0
-                                               : ((pent_high >> (base - 64)) & 1ULL) != 0;
-         bool pent = is_pent_base;
-         if (pent) {
-           const int res = static_cast<int>((cell >> 52) & 0xF);
-           for (int r = 1; r <= res; r++) {
-             const int shift = (max_res - r) * 3;
-             if (((cell >> shift) & 0x7) != 0) {
-               pent = false;
-               break;
-             }
-           }
-         }
-
-         uint32_t ring_sum = 0;
-         for (int kk = 1; kk <= k_val; kk++) {
-           ring_sum += pent ? static_cast<uint32_t>(5 * kk) : static_cast<uint32_t>(6 * kk);
-         }
-         d_counts[i] = 1u + ring_sum;
-       });
-     }).wait_and_throw();
-
-    std::vector<uint32_t> counts(count);
-    q.memcpy(counts.data(), d_counts, count * sizeof(uint32_t)).wait_and_throw();
-
-    out_offsets[0] = 0;
-    uint64_t acc = 0;
-    for (size_t i = 0; i < count; i++) {
-      acc += counts[i];
-      if (acc > UINT32_MAX) {
-        sycl::free(d_cells, q);
-        sycl::free(d_counts, q);
-        return PGACCEL_ERROR_UNSUPPORTED;
-      }
-      out_offsets[i + 1] = static_cast<uint32_t>(acc);
-    }
-
-    sycl::free(d_cells, q);
-    sycl::free(d_counts, q);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
-  return PGACCEL_ERROR_NO_DEVICE;
+  // Host-side per-cell count via the `h3_grid_disk_count` helper above.
+  // The previous SYCL implementation hit an AdaptiveCpp Metal SSCP codegen
+  // bug (`LLVMToMetal: MetalEmitter failed: Error: Unsupported integer
+  // bit width: 33`) caused by an LLVM-IR temporary produced from the
+  // `1u + ring_sum` accumulation pattern; the kernel failed JIT for ANY
+  // count (including count=1, which surfaced in pgrx integration tests
+  // as `gpu::h3_grid_disk_bulk(&[cell], 1) -> None`). The work is trivial
+  // bit ops over a flat cell array — no GPU benefit even at large counts.
+  // Mirrors the pattern in `pgaccel_h3_cells_to_multi_polygon_output_size`
+  // (line ~2530) which already does host-side per-cell pentagon detection.
+  out_offsets[0] = 0;
+  uint64_t acc = 0;
+  for (size_t i = 0; i < count; i++) {
+    acc += h3_grid_disk_count(cells[i], k);
+    if (acc > UINT32_MAX)
+      return PGACCEL_ERROR_UNSUPPORTED;
+    out_offsets[i + 1] = static_cast<uint32_t>(acc);
+  }
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_t count, int32_t k,
@@ -1525,8 +1467,17 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_
     sycl::free(d_out, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const std::exception& ex) {
+    fprintf(stderr,
+            "pgaccel_h3_grid_disk_emit: SYCL exception: %s "
+            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR_NO_DEVICE\n",
+            ex.what(), count, (int)k, total);
+  } catch (...) {
+    fprintf(stderr,
+            "pgaccel_h3_grid_disk_emit: unknown exception "
+            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR_NO_DEVICE\n",
+            count, (int)k, total);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -1545,85 +1496,24 @@ extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t
   if (cells == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
 
-  try {
-    sycl::queue q{sycl::default_selector_v};
-
-    // SAFETY: USM device allocations freed at end of scope
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint32_t* d_counts = sycl::malloc_device<uint32_t>(count, q);
-
-    if (!d_cells || !d_counts) {
-      sycl::free(d_cells, q);
-      sycl::free(d_counts, q);
-      return PGACCEL_ERROR_OOM;
-    }
-
-    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
-
-    const int32_t k_val = k;
-    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
-    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
-    const int max_res = H3_MAX_RESOLUTION;
-
-    q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         const uint64_t cell = d_cells[i];
-
-         if (cell == 0 || k_val < 0) {
-           d_counts[i] = 0;
-           return;
-         }
-         if (k_val == 0) {
-           d_counts[i] = 1;  // ring-0 = the cell itself
-           return;
-         }
-
-         // Pentagon detection — kernel returns 0 count to signal pentagon
-         // input (the FFI contract says pentagons are unsupported for
-         // grid_ring_unsafe, but we surface this via empty CSR rather than
-         // an out-of-band error so the executor stays branch-free).
-         const int base = static_cast<int>((cell >> 45) & 0x7F);
-         const bool is_pent_base = (base < 64) ? ((pent_low >> base) & 1ULL) != 0
-                                               : ((pent_high >> (base - 64)) & 1ULL) != 0;
-         bool pent = is_pent_base;
-         if (pent) {
-           const int res = static_cast<int>((cell >> 52) & 0xF);
-           for (int r = 1; r <= res; r++) {
-             const int shift = (max_res - r) * 3;
-             if (((cell >> shift) & 0x7) != 0) {
-               pent = false;
-               break;
-             }
-           }
-         }
-
-         d_counts[i] = pent ? static_cast<uint32_t>(5 * k_val) : static_cast<uint32_t>(6 * k_val);
-       });
-     }).wait_and_throw();
-
-    std::vector<uint32_t> counts(count);
-    q.memcpy(counts.data(), d_counts, count * sizeof(uint32_t)).wait_and_throw();
-
-    out_offsets[0] = 0;
-    uint64_t acc = 0;
-    for (size_t i = 0; i < count; i++) {
-      acc += counts[i];
-      if (acc > UINT32_MAX) {
-        sycl::free(d_cells, q);
-        sycl::free(d_counts, q);
-        return PGACCEL_ERROR_UNSUPPORTED;
-      }
-      out_offsets[i + 1] = static_cast<uint32_t>(acc);
-    }
-
-    sycl::free(d_cells, q);
-    sycl::free(d_counts, q);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
-  return PGACCEL_ERROR_NO_DEVICE;
+  // Host-side per-cell count via `h3_grid_ring_count`. Same rationale as
+  // `pgaccel_h3_grid_disk_output_size` above — keeping the size pass on
+  // host removes a class of AdaptiveCpp Metal SSCP emitter risk for
+  // arithmetic-on-small-integers shapes and saves a JIT compile on cold
+  // start. Pentagon input still surfaces a 0-row entry per the FFI
+  // contract (grid_ring is documented as pentagon-unsupported but we
+  // emit an empty CSR slot rather than an out-of-band error to keep the
+  // executor branch-free).
+  out_offsets[0] = 0;
+  uint64_t acc = 0;
+  for (size_t i = 0; i < count; i++) {
+    acc += h3_grid_ring_count(cells[i], k);
+    if (acc > UINT32_MAX)
+      return PGACCEL_ERROR_UNSUPPORTED;
+    out_offsets[i + 1] = static_cast<uint32_t>(acc);
+  }
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells, size_t count,
@@ -2028,74 +1918,30 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t
   if (cells == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
 
-  try {
-    sycl::queue q{sycl::default_selector_v};
-
-    // SAFETY: USM device allocations freed at end of scope
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint32_t* d_counts = sycl::malloc_device<uint32_t>(count, q);
-
-    if (!d_cells || !d_counts) {
-      sycl::free(d_cells, q);
-      sycl::free(d_counts, q);
-      return PGACCEL_ERROR_OOM;
-    }
-
-    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
-
-    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
-    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
-    const int max_res = H3_MAX_RESOLUTION;
-
-    q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         const uint64_t cell = d_cells[i];
-         if (cell == 0) {
-           d_counts[i] = 0;
-           return;
-         }
-         const int base = static_cast<int>((cell >> 45) & 0x7F);
-         const bool is_pent_base = (base < 64) ? ((pent_low >> base) & 1ULL) != 0
-                                               : ((pent_high >> (base - 64)) & 1ULL) != 0;
-         bool pent = is_pent_base;
-         if (pent) {
-           const int res = static_cast<int>((cell >> 52) & 0xF);
-           for (int r = 1; r <= res; r++) {
-             const int shift = (max_res - r) * 3;
-             if (((cell >> shift) & 0x7) != 0) {
-               pent = false;
-               break;
-             }
-           }
-         }
-         // 6 hex vertices × 2 doubles = 12; 5 pent vertices × 2 = 10
-         d_counts[i] = pent ? 10u : 12u;
-       });
-     }).wait_and_throw();
-
-    std::vector<uint32_t> counts(count);
-    q.memcpy(counts.data(), d_counts, count * sizeof(uint32_t)).wait_and_throw();
-
-    out_offsets[0] = 0;
-    uint64_t acc = 0;
-    for (size_t i = 0; i < count; i++) {
-      acc += counts[i];
-      if (acc > UINT32_MAX) {
-        sycl::free(d_cells, q);
-        sycl::free(d_counts, q);
-        return PGACCEL_ERROR_UNSUPPORTED;
-      }
+  // Host-side per-cell vertex count. Mirrors the host implementation in
+  // `pgaccel_h3_cells_to_multi_polygon_output_size` (which already lives
+  // entirely on host). Paired with the now-host
+  // `pgaccel_h3_cell_to_boundary_emit` (see comment at the head of that
+  // function for the AdaptiveCpp Metal SSCP emitter bug). Keeping size
+  // and emit on host together avoids cold-start JIT entirely and keeps
+  // both passes consistent on pentagon detection.
+  out_offsets[0] = 0;
+  uint64_t acc = 0;
+  for (size_t i = 0; i < count; i++) {
+    const uint64_t cell = cells[i];
+    if (cell == 0) {
       out_offsets[i + 1] = static_cast<uint32_t>(acc);
+      continue;
     }
-
-    sycl::free(d_cells, q);
-    sycl::free(d_counts, q);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
-  return PGACCEL_ERROR_NO_DEVICE;
+    const bool pent = h3_is_pentagon_host(cell);
+    // 6 hex vertices × 2 doubles = 12; 5 pent vertices × 2 = 10
+    acc += pent ? 10u : 12u;
+    if (acc > UINT32_MAX)
+      return PGACCEL_ERROR_UNSUPPORTED;
+    out_offsets[i + 1] = static_cast<uint32_t>(acc);
+  }
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells, size_t count,
@@ -2110,152 +1956,94 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells
   if (total == 0)
     return PGACCEL_OK;
 
-  try {
-    sycl::queue q{sycl::default_selector_v};
+  // Host-only implementation. The previous SYCL kernel hit an AdaptiveCpp
+  // Metal SSCP emitter bug where `[2 x double]` PHI-node literals
+  // containing `{1.0, 0.0}` (produced by `sycl::cos(0)` / `sycl::sin(0)`
+  // and the `atan2` polynomial reduction) were referenced in the emitted
+  // Metal source by a name like
+  // `t_double__1_000000e_00__double__0_000000e_00_` but never declared,
+  // so the Metal compiler rejected the module with `use of undeclared
+  // identifier`. JIT failed for ALL counts (including count=1; the
+  // user-visible symptom in pg_test was SIGABRT in
+  // `pgaccel_h3_cells_to_multi_polygon_emit` which delegates to this
+  // kernel for multi-cell input).
+  //
+  // The math is pure per-cell scalar work: pentagon detection (bit ops)
+  // + digit-replay loop (≤ 15 iterations) + 5/6 vertex inverse-gnomonic
+  // projections. For typical batch sizes the host cost is negligible
+  // relative to the GPU launch overhead saved. Delegated callers
+  // (`pgaccel_h3_cells_to_multi_polygon_emit`) inherit the fix
+  // automatically.
+  static constexpr double H3_CX[7] = {0.0, 1.0, 0.5, -0.5, -1.0, -0.5, 0.5};
+  static constexpr double H3_CY[7] = {0.0,
+                                      0.0,
+                                      0.866025403784438646,
+                                      0.866025403784438646,
+                                      0.0,
+                                      -0.866025403784438646,
+                                      -0.866025403784438646};
+  const double SQRT7 = 2.6457513110645906;
+  const double TWO_PI = 6.28318530717958647692;
+  const int max_res = H3_MAX_RESOLUTION;
 
-    // SAFETY: USM device allocations freed at end of scope
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint32_t* d_offsets = sycl::malloc_device<uint32_t>(count + 1, q);
-    double* d_out = sycl::malloc_device<double>(total, q);
-    double* d_fc_lat = sycl::malloc_device<double>(20, q);
-    double* d_fc_lng = sycl::malloc_device<double>(20, q);
+  for (size_t i = 0; i < count; i++) {
+    const uint64_t cell = cells[i];
+    const uint32_t start = offsets[i];
+    const uint32_t end = offsets[i + 1];
+    const uint32_t want = (end >= start) ? (end - start) : 0u;
+    if (want == 0 || cell == 0)
+      continue;
 
-    if (!d_cells || !d_offsets || !d_out || !d_fc_lat || !d_fc_lng) {
-      sycl::free(d_cells, q);
-      sycl::free(d_offsets, q);
-      sycl::free(d_out, q);
-      sycl::free(d_fc_lat, q);
-      sycl::free(d_fc_lng, q);
-      return PGACCEL_ERROR_OOM;
+    const int base = static_cast<int>((cell >> 45) & 0x7F);
+    const bool pent = h3_is_pentagon_host(cell);
+    const int res = static_cast<int>((cell >> 52) & 0xF);
+    const int n_verts = pent ? 5 : 6;
+
+    int face = base;
+    if (face < 0 || face >= 20)
+      face = 0;
+    const double clat = FACE_CENTER_LAT[face];
+    const double clng = FACE_CENTER_LNG[face];
+    const double cos_clat = std::cos(clat);
+    const double sin_clat = std::sin(clat);
+
+    double x = 0.0, y = 0.0;
+    double scale = 1.0;
+    for (int r = 1; r <= res; r++) {
+      scale /= SQRT7;
+      const int shift = (max_res - r) * 3;
+      const int d = static_cast<int>((cell >> shift) & 0x7);
+      const int dd = (d < 0 || d > 6) ? 0 : d;
+      x += H3_CX[dd] * scale;
+      y += H3_CY[dd] * scale;
     }
 
-    q.memcpy(d_cells, cells, count * sizeof(uint64_t));
-    q.memcpy(d_offsets, offsets, (count + 1) * sizeof(uint32_t));
-    q.memcpy(d_fc_lat, FACE_CENTER_LAT, 20 * sizeof(double));
-    q.memcpy(d_fc_lng, FACE_CENTER_LNG, 20 * sizeof(double));
-    q.wait_and_throw();
+    for (int v = 0; v < n_verts; v++) {
+      const double ang = (TWO_PI * static_cast<double>(v)) / static_cast<double>(n_verts);
+      const double vx = x + scale * std::cos(ang);
+      const double vy = y + scale * std::sin(ang);
+      const double rho = std::sqrt(vx * vx + vy * vy);
+      double lat_v, lng_v;
+      if (rho < 1e-12) {
+        lat_v = clat;
+        lng_v = clng;
+      } else {
+        const double cc = std::atan(rho);
+        const double sin_cc = std::sin(cc);
+        const double cos_cc = std::cos(cc);
+        lat_v = std::asin(cos_cc * sin_clat + (vy * sin_cc * cos_clat) / rho);
+        lng_v = clng + std::atan2(vx * sin_cc, rho * cos_clat * cos_cc - vy * sin_clat * sin_cc);
+      }
+      const uint32_t base_idx = start + static_cast<uint32_t>(v) * 2u;
+      if (base_idx + 1u >= start + want)
+        break;
+      out_coords[base_idx + 0] = lat_v;
+      out_coords[base_idx + 1] = lng_v;
+    }
+  }
 
-    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
-    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
-    const int max_res = H3_MAX_RESOLUTION;
-
-    q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         const uint64_t cell = d_cells[i];
-         const uint32_t start = d_offsets[i];
-         const uint32_t end = d_offsets[i + 1];
-         const uint32_t want = end - start;
-         if (want == 0 || cell == 0)
-           return;
-
-         // Pentagon detection
-         const int base = static_cast<int>((cell >> 45) & 0x7F);
-         const bool is_pent_base = (base < 64) ? ((pent_low >> base) & 1ULL) != 0
-                                               : ((pent_high >> (base - 64)) & 1ULL) != 0;
-         bool pent = is_pent_base;
-         const int res = static_cast<int>((cell >> 52) & 0xF);
-         if (pent) {
-           for (int r = 1; r <= res; r++) {
-             const int shift = (max_res - r) * 3;
-             if (((cell >> shift) & 0x7) != 0) {
-               pent = false;
-               break;
-             }
-           }
-         }
-         const int n_verts = pent ? 5 : 6;
-
-         // Compute face/local-IJK position by replaying the digit sequence
-         // (mirrors cell_to_ijk on host). At each resolution step, scale
-         // existing IJK by 3 and add the digit's direction. Use this to
-         // derive a face-local (x,y) offset from face centre, then invert
-         // the gnomonic projection at the cell's base-cell face.
-         //
-         // Face index — base_cell maps 1-to-1 to the FACE_CENTER arrays
-         // for the simplified FACE_TO_BASE_CELL we use elsewhere. Index
-         // base in [0,19] maps to face = base; otherwise we fall back to
-         // face 0.
-         int face = base;
-         if (face < 0 || face >= 20)
-           face = 0;
-         const double clat = d_fc_lat[face];
-         const double clng = d_fc_lng[face];
-         const double cos_clat = sycl::cos(clat);
-         const double sin_clat = sycl::sin(clat);
-
-         // Replay digits to build face-local (x,y). Use the inverse of the
-         // forward projection scale used in lat_lng_to_cell:
-         //   scale starts at 1.0, divided by sqrt(7) per resolution step.
-         const double SQRT7 = 2.6457513110645906;
-         const double CX[7] = {0.0, 1.0, 0.5, -0.5, -1.0, -0.5, 0.5};
-         const double CY[7] = {0.0,
-                               0.0,
-                               0.866025403784438646,
-                               0.866025403784438646,
-                               0.0,
-                               -0.866025403784438646,
-                               -0.866025403784438646};
-         double x = 0.0, y = 0.0;
-         double scale = 1.0;
-         for (int r = 1; r <= res; r++) {
-           scale /= SQRT7;
-           const int shift = (max_res - r) * 3;
-           const int d = static_cast<int>((cell >> shift) & 0x7);
-           const int dd = (d < 0 || d > 6) ? 0 : d;
-           x += CX[dd] * scale;
-           y += CY[dd] * scale;
-         }
-         // `scale` now == cell-radius scale at this resolution.
-         // Build vertex offsets at distance `scale` around (x,y).
-         // For hex: 6 evenly spaced angles starting at 0; for pentagon: 5.
-         const double TWO_PI = 6.28318530717958647692;
-         for (int v = 0; v < n_verts; v++) {
-           const double ang = (TWO_PI * static_cast<double>(v)) / static_cast<double>(n_verts);
-           const double vx = x + scale * sycl::cos(ang);
-           const double vy = y + scale * sycl::sin(ang);
-
-           // Inverse gnomonic projection from (vx,vy) on tangent plane at
-           // (clat,clng) back to (lat,lng). Standard formulas:
-           //   rho = sqrt(vx^2 + vy^2)
-           //   c = atan(rho)
-           //   lat = asin(cos(c)*sin(clat) + (vy*sin(c)*cos(clat))/rho)
-           //   lng = clng + atan2(vx*sin(c), rho*cos(clat)*cos(c) - vy*sin(clat)*sin(c))
-           const double rho = sycl::sqrt(vx * vx + vy * vy);
-           double lat_v, lng_v;
-           if (rho < 1e-12) {
-             lat_v = clat;
-             lng_v = clng;
-           } else {
-             const double cc = sycl::atan(rho);
-             const double sin_cc = sycl::sin(cc);
-             const double cos_cc = sycl::cos(cc);
-             lat_v = sycl::asin(cos_cc * sin_clat + (vy * sin_cc * cos_clat) / rho);
-             lng_v =
-                 clng + sycl::atan2(vx * sin_cc, rho * cos_clat * cos_cc - vy * sin_clat * sin_cc);
-           }
-
-           const uint32_t base_idx = start + static_cast<uint32_t>(v) * 2u;
-           if (base_idx + 1u >= start + want)
-             break;
-           d_out[base_idx + 0] = lat_v;
-           d_out[base_idx + 1] = lng_v;
-         }
-       });
-     }).wait_and_throw();
-
-    q.memcpy(out_coords, d_out, total * sizeof(double)).wait_and_throw();
-
-    sycl::free(d_cells, q);
-    sycl::free(d_offsets, q);
-    sycl::free(d_out, q);
-    sycl::free(d_fc_lat, q);
-    sycl::free(d_fc_lng, q);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
-  return PGACCEL_ERROR_NO_DEVICE;
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
 }
 
 // ---------------------------------------------------------------------------

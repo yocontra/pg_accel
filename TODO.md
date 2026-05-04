@@ -645,31 +645,39 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     (`gpu::h3_grid_disk_bulk` returning `None`); see new TODO entry
     "h3_grid_disk SYCL kernel returns None on single-cell input"
     below.
-  - **Open (surfaced 2026-05-03 by B2.5 executor fix):
-    `h3_grid_disk` SYCL kernel returns `None` on single-cell input.**
-    Symptom: with the FunctionScan executor crash gone, the test
-    `function_scan_h3_grid_disk_emits_seven_cells_for_k1` now reaches
-    `dispatch_gpu_h3_var_grid_disk` at
-    `pg_accel/src/engine/dispatch/h3.rs:411`, where
-    `gpu::h3_grid_disk_bulk(&[cell], 1)` returns `None`. The `None`
-    propagates to `pgrx::error!` (correct error surfacing per
-    anti-cheat ban #4), aborting the SPI query. The kernel
-    (`pgaccel_h3_grid_disk_output_size` / `pgaccel_h3_grid_disk_emit`
-    in `pgaccel-kernels/src/h3_ops.cpp:1355` / `:1446`) has standalone
-    test coverage in `pgaccel-kernels/test/test_h3.cpp:706` that
-    passes 2-cell inputs at k=1; the single-cell PG-backend dispatch
-    path likely fails on first SYCL `default_selector_v` queue init in
-    a forked PG process (Apple Silicon Metal `MTLBinaryArchive`
-    fork-safety regression — same family as the issues described in
-    `CLAUDE.md` "MTLBinaryArchive cache" section). Diagnostic next
-    steps: (1) `just clear-jit` then re-run the standalone
-    `pgaccel-kernels/test/test_h3.cpp::test_grid_disk_*` to confirm
-    kernel works in isolation; (2) attach `lldb` to the PG backend
-    that runs the SPI query and break on
-    `pgaccel_h3_grid_disk_output_size` to capture the SYCL exception;
-    (3) check `~/.acpp/apps/global/jit-cache/*.metalar` after a failed
-    dispatch to see whether the archive builder ran. Owner: separate
-    follow-up agent (kernel/AdaptiveCpp specialist).
+  - **Closed (2026-05-03, Agent K Round 3):** `h3_grid_disk` single-cell
+    `None` and `h3_cell_to_boundary` multi-cell SIGABRT root-caused to
+    AdaptiveCpp Metal SSCP emitter bugs:
+    - `pgaccel_h3_grid_disk_output_size` JIT-failed with
+      `LLVMToMetal: MetalEmitter failed: Error: Unsupported integer bit
+      width: 33` for ALL counts (the count=1 case surfaced first via
+      `function_scan_h3_grid_disk_emits_seven_cells_for_k1`).
+    - `pgaccel_h3_cell_to_boundary_emit` JIT-failed with `use of
+      undeclared identifier 't_double__1_000000e_00__double__0_000000e_00_'`
+      (a `[2 x double] {1.0, 0.0}` PHI literal referenced but never
+      declared in the emitted Metal). Multi-cell input then
+      SIGABRT'd via the delegated `pgaccel_h3_cells_to_multi_polygon_emit`.
+    Fix at `pgaccel-kernels/src/h3_ops.cpp` ports the size pass for
+    `grid_disk` / `grid_ring_unsafe` / `cell_to_boundary` and the entire
+    boundary emit kernel to host code (mirrors existing host-only pattern
+    in `cells_to_multi_polygon_output_size` and `polyfill_*`). Pinned by
+    new regression tests in `pgaccel-kernels/test/test_h3.cpp`
+    (`test_grid_disk_single_cell_input`, `test_cell_to_boundary_multi_cell_emit`).
+    The pgrx test `function_scan_h3_grid_disk_emits_seven_cells_for_k1`
+    now PASSES (verified cold-cache).
+  - **Open (separate dispatch bug, surfaced by Agent K when un-ignoring
+    `h3_cells_to_multi_polygon_emits_one_row`):** for **multi-cell**
+    input the dispatch produces a `polygon[]` holes varlena that fails
+    `heap_form_tuple` validation inside PG, leading to a
+    `panic_cannot_unwind` at
+    `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:445`
+    (`ExecStoreHeapTuple`) → SIGABRT. Single-cell input (`holes` is
+    empty) works fine — pinned by `h3_cells_to_multi_polygon_npoints`.
+    Kernel layer is verified correct (kernel returns 24 finite doubles
+    for N=2 cells in `test_cell_to_boundary_multi_cell_emit`); the bug
+    is in the encoder pipeline (`encode_pg_polygon_array` →
+    `varlena_from_bare_bytes` → `heap_form_tuple`). Owner: dispatch /
+    encoder agent (not Agent K's file ownership).
   - **Open: dispatch shape mismatch for `h3_cell_to_boundary`**
     (surfaced 2026-05-03 by F3-finish testing): the h3-pg
     extension declares `h3_cell_to_boundary(h3index, boolean)
