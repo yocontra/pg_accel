@@ -79,18 +79,22 @@ executor + 3 pg_test integration tests). Open work in TODO order:
    (c) `h3_cells_to_multi_polygon` per-row `bigint[]` ArrayType
    walker (shares the `geometry[]` walker blocker tracked under
    "Geometry-array extractor for st_value").
-5. **(LANDED)** Phase 4 SRF-in-target-list executor wiring — both
-   the planner-side detection (B6) and the executor side now ship
-   together. `pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs`
-   wraps each candidate `T_ProjectSetPath` in a `GpuAccelSrfTargetList`
-   `CustomPath` (subpath as `custom_paths[0]`, SrfTargetListPrivData
-   carrying srf_arg_attno + srf_tlist_pos + passthrough_attnos +
-   qual_args), and `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs`
-   drives the child via `ExecProcNode`, dispatches the SRF per input
-   row, and emits expanded tuples preserving non-SRF passthrough
-   columns (mirrors `function_scan.rs` structure). Multi-SRF tlists
-   (cartesian product semantics per `nodeProjectSet.c`) remain
-   unsupported and fall through to native PG ProjectSet.
+5. **(PARTIALLY LANDED)** Phase 4 SRF-in-target-list — planner-side
+   detection (B6) + executor wiring + plumbing all ship at
+   `pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs` and
+   `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs` (mirrors
+   `function_scan.rs` structure). EXPLAIN injection is verified
+   (`pg_test_srf_tlist_explain_shows_custom_scan` asserts
+   `Custom Scan (GpuAccelSrfTargetList)`). **Runtime execution of
+   passthrough columns SIGABRTs the backend** (see ignored test
+   `pg_test_srf_tlist_passthrough_cols` for repro shape +
+   anti-cheat-allow rationale). Single-SRF, no-passthrough-read
+   queries (count(*)) are unaffected because the planner cost
+   prefers native PG ProjectSet there. Multi-SRF tlists (cartesian
+   product per `nodeProjectSet.c`) remain unsupported regardless.
+   Follow-up: isolate the per-tuple memory-context interaction that
+   triggers the crash when the parent agg reads passthrough cols
+   from our Custom Scan output.
 6. **Phase 4 type coverage — JSON / JSONB.** UUID + INET / CIDR
    end-to-end on hash_agg group keys SHIPPED in commits `243fa1f` +
    `c4134d5` + `3fbc03d`; classifier re-enabled (commit `639f6f1`).
