@@ -769,6 +769,13 @@ unsafe fn pgaccel_inject_gpu_preagg(
     let mut fact_relid: pg_sys::Index = 0;
     #[allow(unused_assignments)]
     let mut fact_scan_expr: Option<crate::engine::expr_compiler::CompiledExpr> = None;
+    // B5a: capture the fact-side base Path so it can be attached as
+    // `custom_paths[0]` when `pg_accel.preagg_parallel_safe` is on. The walk
+    // sets this at the break point (the base relation that terminates the
+    // join chain). Stays null when the GUC is off — we only need the path
+    // pointer if we're going to attach it.
+    #[allow(unused_assignments)]
+    let mut fact_path: *mut Path = std::ptr::null_mut();
 
     loop {
         // SAFETY: current is a valid Path pointer.
@@ -858,6 +865,12 @@ unsafe fn pgaccel_inject_gpu_preagg(
                 }
                 fact_rows = parent_ref.rows;
                 fact_relid = parent_ref.relid;
+                // B5a: remember the fact-side path. `current` is the cheapest
+                // base scan path used by the existing cost walk; reusing it
+                // (rather than re-picking via `find_cheapest_path` on
+                // parent_ref.pathlist) keeps cost accounting consistent with
+                // what we already validated above.
+                fact_path = current;
 
                 // Extract fact-side WHERE clause as a compiled template.
                 fact_scan_expr =
@@ -1056,6 +1069,23 @@ unsafe fn pgaccel_inject_gpu_preagg(
         pg_best_cost,
     );
 
+    // B5a: read the GUC once. The default-off path must stay byte-identical
+    // to the pre-B5a behaviour — same custom_paths shape (dimensions only),
+    // same parallel_safe=false. When the GUC is on, the fact path is
+    // prepended as `custom_paths[0]` and `parallel_safe=true` so PG can
+    // wrap the CustomPath in a Gather. The serialized
+    // `parallel_safe_planner_attached` flag tells `materialize_dimensions`
+    // to skip slot 0 of the resulting `(*node).custom_ps` list.
+    //
+    // NOTE: B5b is responsible for wiring the executor side
+    // (`PreAggExecState::set_fact_child(child_ps)` + slot-based scan path).
+    // Until B5b lands, the executor reads `parallel_safe_planner_attached`
+    // only to skip slot 0 in `materialize_dimensions`; the fact-side
+    // PlanState is left inert and the executor still scans the fact heap
+    // directly. Toggling the GUC on without B5b will not crash but may
+    // N-fold over-aggregate under parallel workers (see TODO.md).
+    let attach_fact_path = gucs::preagg_parallel_safe() && !fact_path.is_null();
+
     // SAFETY: Allocating via palloc.
     unsafe {
         let cpath = pg_sys::palloc0(std::mem::size_of::<CustomPath>()).cast::<CustomPath>();
@@ -1066,8 +1096,16 @@ unsafe fn pgaccel_inject_gpu_preagg(
         (*cpath).path.pathtarget = (*output_rel).reltarget;
         (*cpath).path.param_info = std::ptr::null_mut();
         (*cpath).path.parallel_aware = false;
-        (*cpath).path.parallel_safe = false;
-        (*cpath).path.parallel_workers = 0;
+        (*cpath).path.parallel_safe = attach_fact_path;
+        // Inherit worker count from the fact path when attached; PG will
+        // gate parallel selection on this anyway. Default-off path keeps
+        // the previous explicit zero.
+        (*cpath).path.parallel_workers = if attach_fact_path {
+            // SAFETY: fact_path validated non-null by attach_fact_path guard.
+            (*fact_path).parallel_workers.max(0)
+        } else {
+            0
+        };
         (*cpath).path.rows = n_groups;
         (*cpath).path.startup_cost = dim_cost + cost::PREAGG_FIXED_OVERHEAD;
         (*cpath).path.total_cost = total_cost;
@@ -1076,8 +1114,19 @@ unsafe fn pgaccel_inject_gpu_preagg(
         (*cpath).flags = 0;
         (*cpath).methods = custom_scan::preagg_path_methods();
 
-        // Attach inner (dimension) paths as custom_paths.
+        // Attach child paths.
+        // - Default-off layout (B5a flag false): dimensions only, byte-
+        //   identical to pre-B5a — `materialize_dimensions` reads
+        //   `custom_paths[i]` as `depths[i]`.
+        // - B5a-attached layout: fact path at slot 0, dimensions shifted to
+        //   slots 1..N. `materialize_dimensions` reads
+        //   `custom_paths[i+1]` as `depths[i]` (skip-slot-0 logic gated by
+        //   the serialized `parallel_safe_planner_attached` flag).
         let mut child_list: *mut List = std::ptr::null_mut();
+        if attach_fact_path {
+            // SAFETY: fact_path is non-null per the `attach_fact_path` guard.
+            child_list = lappend(child_list, fact_path.cast());
+        }
         for &ip in &inner_paths {
             child_list = lappend(child_list, ip.cast());
         }
@@ -1106,6 +1155,11 @@ unsafe fn pgaccel_inject_gpu_preagg(
         // here — this is the serial PreAgg planner hook
         // (`pgaccel_inject_gpu_preagg`); the parallel preagg path lives in
         // `planner_hooks/preagg_partial.rs` and passes a `Some(spec)`.
+        //
+        // `parallel_safe_planner_attached` mirrors the `attach_fact_path`
+        // local — when true the executor's `materialize_dimensions` skips
+        // slot 0 of `custom_ps` (which now holds the fact PlanState) so
+        // depth indices stay aligned with `depths[]`.
         (*cpath).custom_private = custom_scan::serialize_preagg_private(
             fact_relid,
             fact_oid,
@@ -1114,6 +1168,7 @@ unsafe fn pgaccel_inject_gpu_preagg(
             &group_keys,
             fact_scan_expr.as_ref(),
             None,
+            attach_fact_path,
         );
 
         add_path(output_rel, cpath.cast());

@@ -2485,12 +2485,37 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             }
 
             // Materialize dimension tables from child plan states.
+            //
+            // **B5a slot layout**:
+            // - Default (`parallel_safe_planner_attached == false`): slots
+            //   `0..N` are the dimension PlanStates; `child_states[i]` aligns
+            //   with `depths[i]` exactly as it did pre-B5a.
+            // - Parallel-attached (`parallel_safe_planner_attached == true`):
+            //   slot 0 is the fact-side PlanState (attached by
+            //   `pgaccel_inject_gpu_preagg`); dimensions are at slots `1..N+1`.
+            //   We skip slot 0 here so `child_states[i]` still maps to
+            //   `depths[i]`.
+            //
+            // **B5b note**: the fact PlanState at slot 0 is currently inert
+            // — the executor still scans the fact heap directly via
+            // `table_open(scan_oid)` below. B5b will introduce
+            // `PreAggExecState::set_fact_child(child_ps)` to consume slot 0
+            // through the slot-based scan path and remove the heap-direct
+            // fallback once verified. Until then, holding a fact PlanState
+            // open is a no-op for correctness (PG creates the child
+            // PlanStates regardless of whether we read them).
             let custom_ps = (*node).custom_ps;
             if !custom_ps.is_null() {
                 let n_children = pg_sys::list_length(custom_ps);
+                let start_slot: i32 = if preagg_info.parallel_safe_planner_attached {
+                    1
+                } else {
+                    0
+                };
                 let mut child_states: Vec<*mut pg_sys::PlanState> = Vec::new();
-                for i in 0..n_children {
-                    // SAFETY: custom_ps[i] is a valid PlanState.
+                for i in start_slot..n_children {
+                    // SAFETY: custom_ps[i] is a valid PlanState; bounds
+                    // checked by `i < n_children` and `start_slot >= 0`.
                     let child = pg_sys::list_nth(custom_ps, i).cast::<pg_sys::PlanState>();
                     child_states.push(child);
                 }
