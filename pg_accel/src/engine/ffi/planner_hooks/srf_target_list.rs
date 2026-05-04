@@ -696,28 +696,18 @@ unsafe fn args_supported(args: *mut pg_sys::List) -> bool {
     var_count == 1
 }
 
-/// Integration tests for the SRF-in-target-list planner hook.
+/// Integration tests for the SRF-in-target-list planner hook + executor.
 ///
-/// **Scope**: with the executor wiring still pending (see module
-/// doc "Status (anti-cheat ban #9)"), these tests verify that:
+/// **Scope** (executor wiring landed): these tests verify that
 ///
-/// 1. SRF-in-target-list queries continue to return correct results
-///    (native PG ProjectSet path is preserved when our hook bails).
-/// 2. The planner hook fires at `UPPERREL_FINAL` and does not
-///    crash the backend on a query whose tlist contains a
-///    registered SRF over a heap column.
-/// 3. Row-count expansion semantics observed via PG's own
-///    ProjectSet match the F3 FunctionScan semantics — confirming
-///    that when the executor wiring lands, the row-count
-///    invariant ("one input row → many output rows") is the same
-///    contract on both injection sites.
-///
-/// These tests intentionally do **not** assert that EXPLAIN shows
-/// a `Custom Scan (GpuAccelSrfTargetList)` node — that would be a
-/// cheat per ban #1, since the executor isn't wired and the hook
-/// does not yet add a CustomPath. When the executor wiring lands,
-/// these tests grow an EXPLAIN assertion alongside the row-count
-/// checks.
+/// 1. SRF-in-target-list queries return correct row-count expansion
+///    (one input row → many output rows) when our planner injects the
+///    `GpuAccelSrfTargetList` Custom Scan.
+/// 2. The EXPLAIN plan shows `Custom Scan (GpuAccelSrfTargetList)`
+///    instead of native `ProjectSet -> SeqScan` — confirms the planner
+///    hook actually wraps + add_path picks our cost.
+/// 3. Passthrough columns survive expansion: a Var passthrough column
+///    repeats its value once per expanded SRF output row.
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 #[pgrx::pg_schema]
@@ -764,51 +754,12 @@ mod tests {
         Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
     }
 
-    /// `SELECT id, h3_cell_to_boundary(cell) FROM cells` against a
-    /// 4-row table must return 4 rows (one per input cell) — the
-    /// boundary SRF emits a single polygon per cell. With the
-    /// executor wiring pending, the native PG ProjectSet handles
-    /// expansion; this test guards that the planner hook does not
-    /// break the existing path.
-    #[pg_test]
-    fn srf_target_list_h3_cell_to_boundary_preserves_row_count() {
-        if !ensure_extension("h3") {
-            return;
-        }
-        // Trigger registry init.
-        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
-
-        Spi::run(
-            "CREATE TEMP TABLE _srf_tlist_cells(id int, cell h3index); \
-             INSERT INTO _srf_tlist_cells VALUES \
-               (1, '8a2a1072b59ffff'::h3index), \
-               (2, '8a2a1072b597fff'::h3index), \
-               (3, '8a2a1072b58ffff'::h3index), \
-               (4, '8a2a1072b587fff'::h3index)",
-        )
-        .expect("setup ok");
-
-        // h3_cell_to_boundary returns one polygon per input cell — the
-        // ProjectSet expands 1:1 here, so the SRF tlist call returns
-        // exactly one row per input row.
-        let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM (SELECT id, h3_cell_to_boundary(cell) AS b \
-             FROM _srf_tlist_cells) sub",
-        )
-        .expect("count query ok")
-        .expect("count not null");
-        assert_eq!(
-            count, 4,
-            "h3_cell_to_boundary in target list must emit one row per input cell, got {count}",
-        );
-    }
-
     /// `SELECT id, h3_grid_disk(cell, 1) FROM cells` with 2 input
     /// rows must expand to 2 * 7 = 14 output rows (k=1 disk = 7 cells
     /// per non-pentagon input). Verifies the multi-row expansion
-    /// semantics that the eventual GpuAccel executor must preserve.
+    /// semantics — one input row → many output rows.
     #[pg_test]
-    fn srf_target_list_h3_grid_disk_expands_rows() {
+    fn pg_test_srf_tlist_h3_grid_disk_expands() {
         if !ensure_extension("h3") {
             return;
         }
@@ -831,34 +782,25 @@ mod tests {
         assert_eq!(
             count, 14,
             "h3_grid_disk(cell, 1) over 2 non-pentagon cells must expand to 14 rows \
-             (2 * 7), got {count}",
+             (2 * 7); got {count}. Native PG ProjectSet and our injected \
+             GpuAccelSrfTargetList both must satisfy this row-count contract.",
         );
     }
 
-    /// `EXPLAIN SELECT h3_grid_disk(cell, 1) FROM cells` (a real
-    /// SETOF SRF — h3_grid_disk is `RETURNS SETOF h3index` per
-    /// h3-pg `h3--unreleased.sql`) must produce a plan containing a
-    /// `ProjectSet` node and complete without crashing the backend.
-    /// With the planner hook in detect-only mode, EXPLAIN shows a
-    /// native `ProjectSet -> SeqScan` plan; the hook's pathlist walk
-    /// runs during planning and must not raise an error or corrupt
-    /// path metadata. When the executor wiring lands, this assertion
-    /// flips to require `Custom Scan (GpuAccelSrfTargetList)` in
-    /// place of `ProjectSet`.
-    ///
-    /// **Note**: `h3_cell_to_boundary(h3index) RETURNS polygon` is
-    /// NOT a SETOF function (single polygon return), so it does not
-    /// trigger `parse->hasTargetSRFs` — it would not exercise this
-    /// hook at all. Use `h3_grid_disk` for the EXPLAIN sanity check.
+    /// `EXPLAIN SELECT id, h3_grid_disk(cell, 1) FROM h3_cells` plan
+    /// must contain `Custom Scan (GpuAccelSrfTargetList)` confirming our
+    /// planner hook injection won the add_path comparison. If the plan
+    /// still shows native `ProjectSet -> SeqScan`, the hook either
+    /// bailed or our cost estimate didn't undercut PG's.
     #[pg_test]
-    fn srf_target_list_explain_does_not_crash() {
+    fn pg_test_srf_tlist_explain_shows_custom_scan() {
         if !ensure_extension("h3") {
             return;
         }
         Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
         Spi::run(
-            "CREATE TEMP TABLE _srf_tlist_explain(id int, cell h3index); \
-             INSERT INTO _srf_tlist_explain VALUES (1, '8928308280fffff'::h3index)",
+            "CREATE TEMP TABLE _srf_tlist_explain2(id int, cell h3index); \
+             INSERT INTO _srf_tlist_explain2 VALUES (1, '8928308280fffff'::h3index)",
         )
         .expect("setup ok");
 
@@ -867,7 +809,7 @@ mod tests {
             let table = client
                 .select(
                     "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \
-                     FROM _srf_tlist_explain",
+                     FROM _srf_tlist_explain2",
                     None,
                     &[],
                 )
@@ -882,16 +824,75 @@ mod tests {
         assert!(
             !plan.is_empty(),
             "EXPLAIN returned no rows (likely backend crash); the SRF-in-target-list \
-             hook must not break native PG planning",
+             hook + executor wiring must not break planning",
         );
-        // h3_grid_disk RETURNS SETOF triggers ProjectSet wrapping by
-        // adjust_paths_for_srfs (planner.c:6577). Until the executor
-        // wiring lands, native PG handles expansion — confirms the
-        // hook does not corrupt the path metadata it walks.
+        // The injected Custom Scan node uses the GpuAccelSrfTargetList
+        // CustomName from SRF_TARGET_LIST_PATH_METHODS. EXPLAIN renders
+        // CustomScan nodes as "Custom Scan (<CustomName>)".
         assert!(
-            plan.contains("ProjectSet"),
-            "Expected EXPLAIN plan to show ProjectSet for \
-             SRF-in-target-list h3_grid_disk; got:\n{plan}",
+            plan.contains("GpuAccelSrfTargetList"),
+            "Expected EXPLAIN plan to contain Custom Scan (GpuAccelSrfTargetList) \
+             after planner hook + executor wiring landed; got:\n{plan}",
+        );
+        // Defensive: we should NOT see the bare native `ProjectSet ->`
+        // form — if we do, the hook didn't replace it.
+        assert!(
+            !plan.contains("ProjectSet"),
+            "Expected EXPLAIN plan to NOT contain native 'ProjectSet' (replaced by \
+             GpuAccelSrfTargetList); got:\n{plan}",
+        );
+    }
+
+    /// `SELECT id, h3_grid_disk(cell, 1) FROM h3_cells WHERE id = 42`
+    /// returns multiple rows all with `id = 42`. Verifies that the
+    /// passthrough Var column is preserved correctly across SRF
+    /// expansion — every expanded row carries the source input row's
+    /// passthrough Datum, mirroring PG's nodeProjectSet.c semantics
+    /// ("non-SRF tlist expressions evaluated per output row using the
+    /// source input row").
+    #[pg_test]
+    fn pg_test_srf_tlist_passthrough_cols() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+
+        Spi::run(
+            "CREATE TEMP TABLE _srf_tlist_pass(id int, cell h3index); \
+             INSERT INTO _srf_tlist_pass VALUES \
+               (42, '8928308280fffff'::h3index), \
+               (99, '89283082813ffff'::h3index)",
+        )
+        .expect("setup ok");
+
+        // For id=42, k=1 grid disk emits 7 output rows. Every one must
+        // carry id=42 in the passthrough column.
+        let n_for_42 = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (SELECT id, h3_grid_disk(cell, 1) AS d \
+             FROM _srf_tlist_pass WHERE id = 42) sub WHERE id = 42",
+        )
+        .expect("count for id=42 ok")
+        .expect("not null");
+        assert_eq!(
+            n_for_42, 7,
+            "Expected 7 expanded rows with passthrough id=42 from h3_grid_disk(cell, 1); \
+             got {n_for_42}. If passthrough is broken, id won't match the WHERE filter \
+             on the inner query and the count drops.",
+        );
+
+        // Sanity: the passthrough is per-row, not random — every output
+        // row must equal its source input row's id. Verify by selecting
+        // distinct id values from the expanded result.
+        let distinct_ids = Spi::get_one::<i64>(
+            "SELECT count(DISTINCT id) FROM (SELECT id, h3_grid_disk(cell, 1) AS d \
+             FROM _srf_tlist_pass) sub",
+        )
+        .expect("distinct ids ok")
+        .expect("not null");
+        assert_eq!(
+            distinct_ids, 2,
+            "Expected exactly 2 distinct passthrough ids in expanded output \
+             (matching the 2 input rows); got {distinct_ids}.",
         );
     }
 }
