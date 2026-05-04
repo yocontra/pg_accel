@@ -34,105 +34,127 @@ items explicitly descoped from ship.
 
 ## Next Up
 
-Phase 1 + Phase 2 + Phase 5 dead-code are closed. Phase 4 H3
-layout, hash_agg UUID / INET silent-zero-sum, two_pred_and fusion,
-and a round of Phase 4 operator coverage (4 algorithmic spatial
-predicates + 6 H3 var-output adapters + 6 raster kernels + st_clip /
-st_reclass / st_summarystats wiring + int128 NumericSumEmitter) all
-closed in the 2026-05-02 multi-agent run (commits `309f8c7`,
-`56b770d`, `0c3d5d7` / `9009ef1`, `2c08296`+`433bc21`+`86c8e31`,
-`b8873f2`+`62fbd26`+`47f2d68`+`4f373a5`, `13ec5fa`+`cb2ec8d`+`a6bdf19`+
-`c44ad34`, `dcd0cce`+`9423d11`, `639f6f1`).
+### Round 3 (2026-05-03 follow-ups) — closed
 
-The 2026-05-03 Phase II infrastructure round (8 agents → 5 merge
-commits `00e5ac3`, `90eae48`, `f8a3381`, `6dcd882`, `fc9fc6d`)
-shipped: multi-arg dispatch carrier (Vec<(Datum,bool,Oid)>), 4
-raster ops dispatched (st_resample / slope / aspect / hillshade),
-st_dwithin per-row dispatch, GSERIALIZED v2 polygon/multipolygon
-encoder, PreAgg planner chain (Finalize → Gather → CustomPath +
-GROUP BY propagation), 2 H3 var-output dispatch arms
-(cell_to_boundary, polyfill), and full FunctionScan injection
-plumbing (3 vtables + projectset.rs hook + function_scan.rs
-executor + 3 pg_test integration tests). Open work in TODO order:
+3 final agents merged: B5a planner-side PreAgg refactor (commit `7c6d355`,
+GUC-gated), K kernel-bug fix (commit `0319d93`, ported 2 SSCP-failing H3
+kernels to host), SRF executor wiring (commit `a57cadb`, full custom-scan
+plumbing for SRF-in-target-list). `audit-cpu-cheats: PASS`. **Now at
+commit `a57cadb` on origin/main.**
 
-1. **Phase 1 cost-multiplier calibration** — blocked on Phase 6 (the
-   `fp64_matrix` 2-cell shortfall is Phase 6 dispatch perf, not
-   `soft_fp64_cost_multiplier` tuning). See `Phase 6 →
-   Per-batch GPU dispatch dominates parallel SUM / GROUP BY` for the
-   unblocker plan.
-2. **Phase 3a/3b grouped HashAgg parallel** — 200-400 lines spanning
-   kernel + bridge + executor. Largest single chunk in the punchlist.
-3. **Phase 3 PreAgg executor refactor for parallel safety** — P1's
-   chain (Phase II) uses standard `Agg` strategy because parallelising
-   `PreAggExecState` as currently coded would over-aggregate N-fold
-   under workers (each worker `table_open()`s the fact relation
-   independently). Chain accelerates standard parallel grouped
-   aggregation today; star-join fusion under parallel needs the
-   executor refactor. See "PreAgg executor refactor for parallel
-   safety" entry below.
-4. **Phase 4 H3 var-output follow-ups** (3 sub-items, tracked in the
-   "H3 var-output ops" entry below):
-   (a) registry-init ordering for pgrx_tests harness so integration
-   tests exercise the GPU path (today they fall through to PG native);
-   (b) `h3_cell_to_boundary` dispatch shape mismatch (kernel emits
-   GSERIALIZED, h3-pg declares `RETURNS polygon` PG built-in);
-   (c) `h3_cells_to_multi_polygon` per-row `bigint[]` ArrayType
-   walker (shares the `geometry[]` walker blocker tracked under
-   "Geometry-array extractor for st_value").
-5. **(PARTIALLY LANDED)** Phase 4 SRF-in-target-list — planner-side
-   detection (B6) + executor wiring + plumbing all ship at
-   `pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs` and
-   `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs` (mirrors
-   `function_scan.rs` structure). EXPLAIN injection is verified
-   (`pg_test_srf_tlist_explain_shows_custom_scan` asserts
-   `Custom Scan (GpuAccelSrfTargetList)`). **Runtime execution of
-   passthrough columns SIGABRTs the backend** (see ignored test
-   `pg_test_srf_tlist_passthrough_cols` for repro shape +
-   anti-cheat-allow rationale). Single-SRF, no-passthrough-read
-   queries (count(*)) are unaffected because the planner cost
-   prefers native PG ProjectSet there. Multi-SRF tlists (cartesian
-   product per `nodeProjectSet.c`) remain unsupported regardless.
-   Follow-up: isolate the per-tuple memory-context interaction that
-   triggers the crash when the parent agg reads passthrough cols
-   from our Custom Scan output.
-6. **Phase 4 type coverage — JSON / JSONB.** UUID + INET / CIDR
-   end-to-end on hash_agg group keys SHIPPED in commits `243fa1f` +
-   `c4134d5` + `3fbc03d`; classifier re-enabled (commit `639f6f1`).
-   JSON / JSONB next (substantial — needs a JSONB binary-format
-   parser kernel).
-7. **Phase 5 worker-side spatial recheck** — DSM plumbing.
-8. **Phase 6 hash_agg small-N kernel bug** — `agg_hash` 2-level
-   pointer kernel returns 0 on tiny batches (`test_fork hashagg_f64`
-   N=64 reads as 0 instead of 2048). Tried flat-buffer + packed-args
-   refactor; each angle uncovered a deeper Metal SSCP edge case
-   (argbuffer rejection, 9-arg capture limit). Reverted. Needs
-   root-cause fix in either the kernel pointer chain OR upstream
-   SSCP emitter, not a workaround. Sort-based path is correct for
-   N >= 100k (verified at 10M).
-9. **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
-   calibrated `0.03 -> 0.01` (`4144ac8`), cuts 200K cost units off
-   the plain-JOIN audit. Probe cost (`0.01/row`) is now the
-   next-largest term; closing it unlocks the AVG+STDDEV / plain-JOIN
-   audit rows.
-10. **Phase 6 cold-cache fork crash on sort_kv** — warmup-at-init
-    approach was tried, made things worse, reverted. Same root cause
-    as (8); needs the SSCP investigation.
-11. **Phase 7 AdaptiveCpp polish** — multiple smaller items.
-12. **Phase 3-10 in order** for everything else.
+### Blocking relationships at-a-glance
 
-The 2026-05-03 fp64 sphere_distance + st_length fork-safety entry is
-closed: AdaptiveCpp `fork-safe-metal` SHA `903442b0` teaches the Metal
-runtime to treat helper exit 9 (skip-too-large) as success-without-archive,
-which lets the helper opt out of serializing the 17 MB soft-fp64 .jit IR
-without crashing the runtime build path. fp64 gates dropped at
-`pgaccel-kernels/src/spatial_predicates.cpp:1027,1091` —
-`pgaccel_sphere_distance_bulk(use_fp64=true)` and
-`pgaccel_st_length_bulk(use_fp64=true)` now dispatch the SYCL kernels and
-test_spatial 109/109 passes cold. test_fork + test_fork_cold still PASS.
-The kernels skip the prebuilt MTLBinaryArchive (default 900 KiB threshold,
-override via `ACPP_METAL_ARCHIVE_MAX_BYTES`) so forked workers pay a
-one-time MTLCompilerService cost when they cold-dispatch sphere_distance
-or st_length, but no longer crash. agent-b1-acpp-runtime branch.
+```
+                       ┌─ B5b PreAgg exec refactor ──→ unlocks parallel star-join PreAgg
+                       │   (open; gated by B5a GUC, default off)
+                       │
+   AdaptiveCpp upstream┼─ 33-bit int width emitter fix ──→ revert K's host-port for grid_disk
+   `fork-safe-metal`   │
+                       └─ PHI literal declaration emitter fix ──→ revert K's host-port for cell_to_boundary
+                       │
+                       ├─ small-N hash_agg kernel SSCP fix ──→ unblocks test_fork hashagg_f64 N=64
+                       │
+                       └─ sort_kv cold-cache fork crash SSCP fix ──→ unblocks Phase 6 cold-cache work
+                                                                     (same SSCP root cause as small-N)
+
+   SRF passthrough SIGABRT ──→ unlocks SELECT srf(c), other FROM t (reads of non-SRF cols)
+                                (open; native PG ProjectSet still works as fallback)
+
+   h3_cells_to_multi_polygon
+   dispatch encoder bug   ──→ unblocks multi-cell input via cells_to_multi_polygon path
+   (heap_form_tuple)        (kernel SIGABRT is FIXED by K; encoder-layer bug in next_tuple)
+
+   Geometry-array extractor ──→ unlocks st_value(rast, geometry[]) end-to-end smoke
+   for st_value             (PostGIS doesn't expose this SQL surface today; lower priority)
+
+   Phase 6 dispatch perf  ──→ unblocks Phase 1 cost-multiplier calibration
+                              unblocks AVG+STDDEV / plain-JOIN audit rows
+
+   Phase 3a/3b grouped HashAgg parallel ──→ unblocks parallel COUNT(DISTINCT) etc.
+                                            (200-400 LOC, kernel + bridge + executor)
+```
+
+### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
+
+**P0 — correctness blockers (silent wrong-results or crashes possible)**:
+- **SRF passthrough column SIGABRT** — `SELECT id, srf(cell) FROM t` crashes
+  when the parent agg reads `id`. `count(*)` works (no passthrough read).
+  Native PG ProjectSet runs the query correctly when our hook's planner cost
+  loses; the Custom Scan is the broken path. See "SRF-in-target-list executor
+  wiring — passthrough crash" entry below.
+- **`h3_cells_to_multi_polygon` dispatch encoder bug** — kernel SIGABRT was
+  fixed by K (commit `0319d93`), but a separate `heap_form_tuple` validation
+  failure on the `polygon[]` holes varlena now causes `panic_cannot_unwind`
+  at `function_scan.rs:445` for multi-cell input. Single-cell paths work
+  correctly. See "h3_cells_to_multi_polygon dispatch-layer encoder bug"
+  entry below.
+- **`hash_agg` 2-level pointer kernel returns 0 on small batches** — `test_fork
+  hashagg_f64` N=64 reads 0 instead of 2048. Sort-based path correct at
+  N >= 100k (verified 10M); silent wrong-result class for any caller that
+  bypasses the sort path. Phase 6 SSCP investigation.
+
+**P1 — perf blockers (correctness fine, GPU acceleration off in some cases)**:
+- **B5b PreAgg exec-side refactor** — B5a (commit `7c6d355`) shipped the
+  planner-side wiring behind `pg_accel.preagg_parallel_safe` GUC (default
+  off). B5b needs slot-based scan path in `PreAggExecState` (replace
+  `table_open(scan_oid)` with `ExecProcNode(child)` against a wrapped
+  PlanState). 42 heap-direct call sites identified. Once landed, flip GUC
+  default to on. See "PreAgg executor refactor for parallel safety" entry.
+- **Phase 3a/3b grouped HashAgg parallel** — 200-400 LOC. Kernel + bridge
+  + executor. Biggest single performance unblock in the punchlist.
+- **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
+  calibrated to 0.01 (`4144ac8`); per-row probe (0.01/row) is now the
+  largest planner-side discouragement. Closing it unlocks AVG+STDDEV +
+  plain-JOIN audit rows AND Phase 1 cost-multiplier calibration.
+- **Phase 6 cold-cache fork crash on `sort_kv_i32`/`i64`** — same SSCP root
+  cause as the small-N hash_agg bug. Warmup-at-init tried, regressed,
+  reverted.
+
+**P2 — open follow-ups (genuinely lower priority)**:
+- **AdaptiveCpp upstream emitter fixes (2 distinct bugs identified by K)** —
+  (a) `LLVMToMetal: Unsupported integer bit width: 33` from `1u + ring_sum`
+  pattern; (b) `use of undeclared identifier 't_double__1_000000e_00...'`
+  from `[2 x double] {1.0, 0.0}` PHI literal in `sycl::cos(0)`/`sin(0)`.
+  Both currently worked around by host-porting the affected H3 kernels.
+  Filing upstream + landing on `~/local/src/AdaptiveCpp/fork-safe-metal`
+  would let us revert to SYCL kernels. See "Metal Emitter performance/
+  robustness polish" entry.
+- **Geometry-array extractor for `st_value`** — `pgaccel_raster_value`
+  kernel works; `extract_geometry_array` walker for PG `geometry[]` arg
+  is missing. PostGIS doesn't expose `ST_Value(rast, ARRAY[...])` at the
+  SQL surface today, so impact is low.
+- **Phase 1 cost-multiplier calibration** — blocked by Phase 6 dispatch perf
+  (see above). The `fp64_matrix` 2-cell shortfall is dispatch overhead,
+  not multiplier tuning.
+- **Phase 4 type coverage — JSON / JSONB** — substantial; needs a JSONB
+  binary-format parser kernel.
+- **Phase 5 worker-side spatial recheck** — DSM plumbing.
+- **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+
+### Closed in this round (no longer in Open list)
+
+- ✅ fp64 sphere_distance + st_length fork-safety — AdaptiveCpp runtime
+  acknowledges helper exit 9 (skip-too-large), kernel gates dropped,
+  test_spatial 109/109 cold-cache (`5e84560`)
+- ✅ Registry-init ordering for pg_test — `resolve_oids_again` API +
+  auto-retry on lookup miss (`0289679`)
+- ✅ FunctionScan executor crash (TTS_FLAG_FIXED + pfree heap corruption) —
+  `custom_scan_tlist` built upstream so `ExecSetSlotDescriptor` is never
+  called (`bedda75`)
+- ✅ ArrayType walker (1-D `bigint[]` / `geometry[]`) — generic 788-LOC
+  walker handles fixed-width + varlena elements (`6215160`)
+- ✅ h3_cell_to_boundary + h3_cells_to_multi_polygon shape — both ops now
+  emit PG built-in polygon (was: GSERIALIZED); npoints() returns 6 for
+  hexagon as hard verification (`c53ae15`)
+- ✅ B5a PreAgg planner-side fact-path attach (GUC-gated) — `7c6d355`
+- ✅ K kernel bugs (h3_grid_disk single-cell None + h3_cell_to_boundary_emit
+  multi-cell SIGABRT) — root-caused to AdaptiveCpp emitter bugs, host-ported
+  affected kernels (`0319d93`)
+- ✅ SRF executor wiring — full custom-scan plumbing, EXPLAIN shows
+  `Custom Scan (GpuAccelSrfTargetList)`, 2/3 tests pass (passthrough
+  SIGABRT documented as separate P0 above) (`a57cadb`)
+- ✅ pg_test schema-name unblock (`pg_test_explain` → `preagg_explain`,
+  PG forbids `pg_` schema prefix) — `fb64b1a`
 
 The 2026-05-02 cheat-audit (7 host-loop kernels in spatial /
 raster / window) is closed — point_in_ring fp32, segment_intersects
@@ -693,47 +715,99 @@ exist yet (cascaded multi-key sort; merge-join kernel).
     is in the encoder pipeline (`encode_pg_polygon_array` →
     `varlena_from_bare_bytes` → `heap_form_tuple`). Owner: dispatch /
     encoder agent (not Agent K's file ownership).
-  - **Open: dispatch shape mismatch for `h3_cell_to_boundary`**
-    (surfaced 2026-05-03 by F3-finish testing): the h3-pg
-    extension declares `h3_cell_to_boundary(h3index, boolean)
-    RETURNS polygon` (PG's built-in `polygon` type), but the
-    dispatch arm in `pg_accel/src/engine/dispatch/h3.rs:530`
-    (`dispatch_gpu_h3_cell_to_boundary`) emits PostGIS
-    GSERIALIZED varlena bytes via `varlena_from_gserialized` —
-    a different on-disk format. Counting the row works (PG count(*)
-    doesn't deserialize the value), but downstream operations like
-    `npoints(...)` would interpret the bytes as PG `polygon` and
-    likely segfault or return garbage. Fix is one of: (a) emit PG
-    built-in `polygon` bytes (header + n_pts + Point array) from
-    the dispatch arm instead of GSERIALIZED, OR (b) override the
-    SRF's `prorettype` resolution in `function_scan::build_tuple_desc`
-    to force `geometry` so PG calls the right deserializer. Option
-    (a) is the cleaner fix; (b) is a hack that breaks SQL contract
-    (callers who declared their column as `polygon` would get bytes
-    they can't read).
+  - **CLOSED 2026-05-03 by Agent B4 (commit `c53ae15`)**: dispatch shape
+    mismatch for `h3_cell_to_boundary` — kernel previously emitted
+    GSERIALIZED but h3-pg declares `RETURNS polygon` (PG built-in).
+    Fix landed: new `polygon_encoder::encode_pg_polygon` +
+    `encode_pg_polygon_array` helpers; dispatch arm switched to
+    PG-polygon emission. Hard verification: `npoints()` returns 6 for
+    a hexagon. Same fix sweeps `h3_cells_to_multi_polygon` (kernel
+    emits exterior + holes as `(polygon, polygon[])` Record per row)
+    — single-cell verified via `h3_cells_to_multi_polygon_npoints`.
+    Multi-cell still hits the open dispatch encoder bug above.
 - **Invariant locked**: Two regression tests at
   `pg_accel/src/adapters/h3.rs`
   (`unimplemented_ops_are_not_registered`,
   `registered_ops_match_kernel_set_exactly`) assert the registered
   set matches the kernel set exactly.
-- **Done when** (refreshed 2026-05-03 after B2.5): FunctionScan
-  plumbing IS landed (commits `30a9b6e`, `da6b054`); registry
-  re-resolve IS landed (commit `3827b24`); FunctionScan executor
-  crash IS fixed (B2.5 — this commit). Outstanding before this
-  entry can be dropped: (1) `h3_grid_disk` SYCL kernel returning
-  `None` on the single-cell PG-backend dispatch path (entry above);
-  (2) the `h3_cell_to_boundary` dispatch shape mismatch fix
-  (kernel emits GSERIALIZED, h3-pg declares return type as PG
-  built-in `polygon`); (3) `h3_cells_to_multi_polygon` per-row
-  `bigint[]` ArrayType walker (tracked under the `st_value`
-  blocker entry). When all three close, `EXPLAIN SELECT * FROM
-  h3_cell_to_boundary('8a..'::h3index)` shows `Custom Scan
-  (GpuAccelFunctionScan)` instead of PG's native `Function Scan`,
-  and the POLYGON output parses byte-identical via the appropriate
-  deserializer. SRF-in-target-list syntax (`SELECT
-  h3_cell_to_boundary(c) FROM t` instead of `FROM
-  h3_cell_to_boundary(c)`) is a separate follow-up — see
-  "SRF-in-target-list / ProjectSet planner injection" entry below.
+- **Done when** (refreshed 2026-05-03 after B5a / K / SRF executor):
+  CLOSED — FunctionScan plumbing landed (`30a9b6e`, `da6b054`); registry
+  re-resolve landed (`3827b24`); FunctionScan executor crash fixed
+  (`bedda75`); h3_cell_to_boundary + h3_cells_to_multi_polygon shape fix
+  landed (`c53ae15`); h3_grid_disk single-cell None + cell_to_boundary
+  multi-cell SIGABRT kernel-layer fixes landed (`0319d93`); SRF executor
+  wiring landed (`a57cadb`).
+  REMAINING: (1) **multi-cell `h3_cells_to_multi_polygon` dispatch encoder
+  bug** — separate from the kernel SIGABRT K fixed; `heap_form_tuple`
+  validation rejects the `polygon[]` holes varlena → see "h3_cells_to_multi_polygon
+  multi-cell dispatch encoder bug" P0 entry below. (2) **SRF passthrough
+  column SIGABRT** — see "SRF-in-target-list executor wiring — passthrough
+  crash" P0 entry below.
+
+### SRF-in-target-list executor wiring — passthrough column SIGABRT (P0)
+
+- **What** (surfaced 2026-05-03 by Agent SRF, commit `a57cadb`): full
+  `GpuAccelSrfTargetList` Custom Scan plumbing landed (vtables in
+  `pg_accel/src/engine/ffi/custom_scan/mod.rs`, executor in
+  `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs:466`, planner
+  hook wrap in `planner_hooks/srf_target_list.rs`). EXPLAIN now shows
+  `Custom Scan (GpuAccelSrfTargetList)` for SRF-in-target-list queries
+  (verified by `pg_test_srf_tlist_explain_shows_custom_scan`). Single-row
+  expansion semantics verified by
+  `pg_test_srf_tlist_h3_grid_disk_expands` (14 rows from 2 inputs at k=1).
+  **HOWEVER**: when the parent agg / Subquery Scan reads a passthrough
+  Var column out of our Custom Scan output, the backend SIGABRTs. Test
+  `pg_test_srf_tlist_passthrough_cols` is `#[ignore]`'d with
+  `// anti-cheat-allow:` noting the documented blocker.
+- **Repro shape**: `count(DISTINCT id) FROM (SELECT id, h3_grid_disk(cell, 1)
+  AS d FROM cells) sub` crashes; `count(*) FROM (...)` works because the
+  parent doesn't read the passthrough column. Fails the same way for
+  `sum(id)` and direct row iteration.
+- **Diagnosed**: passthrough-column attno mapping IS correct
+  (`srf_arg_attno=1, passthrough_attnos=[2, 0]` for reordered subpath
+  pathtarget `[cell, id]`, verified via debug warnings before crash).
+  Tried (didn't fix): `MemoryContextSwitchTo(CacheMemoryContext)` around
+  `dispatch::dispatch`; per-call `fmgr_info` refresh to update `fn_mcxt`.
+  Likely: a per-tuple memory-context interaction between our
+  `ExecStoreVirtualTuple` slot and the parent Agg's projection that
+  invalidates the passthrough Datum pointer between batches.
+- **Today's behavior**: native PG ProjectSet remains the documented
+  fallback for queries that read passthrough cols — planner cost picks
+  it over our Custom Scan when the parent will materialize, so user
+  queries don't crash in practice (just don't get GPU acceleration).
+  The Custom Scan IS the broken path when the cost gate picks it (e.g.
+  count(*) shapes where no passthrough is read).
+- **Done when**: `pg_test_srf_tlist_passthrough_cols` un-ignored and
+  passes; representative shape `SELECT id, h3_grid_disk(cell, 1) FROM t`
+  returns correct expanded rows with `id` preserved per output row.
+- Depends on: nothing (pure executor work; isolate the per-tuple
+  memory-context interaction).
+
+### h3_cells_to_multi_polygon multi-cell dispatch encoder bug (P0)
+
+- **What** (surfaced 2026-05-03 by Agent K when un-ignoring the smoke):
+  Kernel-layer SIGABRT IS fixed (`pgaccel_h3_cell_to_boundary_emit` ported
+  to host code in commit `0319d93`; `test_cell_to_boundary_multi_cell_emit`
+  returns 24/36/60 finite doubles for N=2/3/5 cells). A SEPARATE
+  dispatch-layer bug now surfaces: `heap_form_tuple` validation fails on
+  the `polygon[]` holes varlena, causing `panic_cannot_unwind` at
+  `pg_accel/src/engine/ffi/custom_scan/function_scan.rs:445`
+  (`ExecStoreHeapTuple`) → SIGABRT for multi-cell input.
+- **Repro**: `h3_cells_to_multi_polygon_emits_one_row` test (currently
+  `#[ignore]`'d in `pg_accel/src/engine/ffi/custom_scan/function_scan.rs`
+  with multi-cell `ARRAY['8a..', '8a..']::h3index[]` input).
+- **Where**: encoder pipeline `encode_pg_polygon_array` →
+  `varlena_from_bare_bytes` → `heap_form_tuple`. Single-cell paths
+  (where `holes` is empty) work — verified by
+  `h3_cells_to_multi_polygon_npoints` smoke. Likely: ArrayType header
+  for an empty-or-single-element `polygon[]` has subtle layout that
+  PG's `heap_form_tuple` rejects (vl_len_, dataoffset, dim sizes for
+  the 0/1-element case).
+- **Done when**: `h3_cells_to_multi_polygon_emits_one_row` un-ignored
+  and passes for multi-cell input; the holes varlena round-trips
+  through `array_in` / `array_out` cleanly via PG's catalog functions.
+- Depends on: nothing (pure encoder layer fix; kernel side already
+  correct).
 
 ### Type coverage expansion
 
@@ -996,7 +1070,26 @@ work is tracked in the Post-1.0 (deferred) section.
     `__acpp_sscp_soft_f64_*`, `__acpp_sscp_*_f64`, `sf64_*` prefixes.
     Audit soft-fp64's `src/` for non-prefixed internal C++ names that get
     through clang's name mangling.
-  MINOR.
+  - **NEW (2026-05-03 — surfaced by Agent K, host-port pattern):
+    33-bit integer width unsupported.** `LLVMToMetal: MetalEmitter
+    failed: Error: Unsupported integer bit width: 33` triggered by an
+    LLVM-IR temporary from the `1u + ring_sum` accumulation pattern
+    in `pgaccel_h3_grid_disk_output_size`. Worked around in pg_accel
+    by porting the affected size-pass kernel to host code (commit
+    `0319d93`). Upstream fix in `MetalEmitter` would let us revert to
+    SYCL — likely needs to lower `i33` to `i64` at IR-rewrite time
+    or block the temporary's promotion in the front-end.
+  - **NEW (2026-05-03 — surfaced by Agent K, host-port pattern):
+    PHI literal name without declaration.** Emitter generates
+    `t_double__1_000000e_00__double__0_000000e_00_` for a
+    `[2 x double] {1.0, 0.0}` PHI literal coming out of
+    `sycl::cos(0)` / `sycl::sin(0)` in the inverse-gnomonic projection
+    inside `pgaccel_h3_cell_to_boundary_emit`, but never emits the
+    declaration. Worked around in pg_accel by host-porting the affected
+    emit kernel (commit `0319d93`). Upstream fix would emit the literal
+    declaration alongside the use; once landed, revert to SYCL.
+  MINOR (now MAJOR for the two NEW items — they block shipping the
+  affected kernels as SYCL on Metal until upstream-patched).
 - **Why**: Each item incrementally reduces shader size / compile time /
   runtime cost. None blocks ship, all are worth landing for a clean
   upstream PR.
