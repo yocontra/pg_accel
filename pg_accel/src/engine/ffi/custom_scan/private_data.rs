@@ -390,6 +390,17 @@ pub(super) unsafe fn deserialize_custom_private(
 /// don't silently deserialize as partial-agg metadata.
 pub(in crate::engine::ffi) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAAG"
 
+/// Magic marker for the B5a "PreAgg parallel-safe planner-attached" flag.
+/// When present in the PreAgg `custom_private` layout (after `has_scan_expr`
+/// and before any optional [`PARTIAL_SENTINEL`] block), the next list element
+/// is a `c_int` (1 = the planner attached the fact path as `custom_paths[0]`
+/// and marked the CustomPath `parallel_safe = true`; 0 = serial layout).
+/// Round-tripped via [`PreAggPrivData::parallel_safe_planner_attached`].
+/// Distinct from [`PARTIAL_SENTINEL`] so the deserializer can probe for
+/// either marker independently. Old plans (serialized before B5a) lack this
+/// block entirely; the deserializer treats absence as `false`.
+pub(in crate::engine::ffi) const PREAGG_PARALLEL_ATTACHED_SENTINEL: c_int = 0x5050_5341; // b"PPSA"
+
 /// Append a [`PartialAggSpec`] onto `list` using the sentinel-prefixed
 /// layout consumed by `deserialize_partial_spec`.
 ///
@@ -479,7 +490,7 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
 // ---------------------------------------------------------------------------
 
 /// Deserialized PreAgg configuration from `custom_private`.
-pub(super) struct PreAggPrivData {
+pub(in crate::engine::ffi) struct PreAggPrivData {
     pub(super) scan_relid: pg_sys::Index,
     /// Stable relation OID for the fact table. Use this (via `table_open`)
     /// at execution time rather than `scan_relid`, because the planner's
@@ -497,6 +508,15 @@ pub(super) struct PreAggPrivData {
     /// (`append_partial_spec` / `deserialize_partial_spec`) appended to the
     /// PreAgg layout.
     pub(super) partial: Option<PartialAggSpec>,
+    /// **B5a flag.** `true` when the planner injected this PreAgg path with
+    /// the fact relation's path attached as `custom_paths[0]` (and the
+    /// `CustomPath.path.parallel_safe` bit set). Slot 0 of the deserialized
+    /// `(*node).custom_ps` list is then a fact-side PlanState rather than a
+    /// dimension; `materialize_dimensions` must skip it to keep the depth
+    /// indices aligned with `depths[]`. Round-tripped via the
+    /// [`PREAGG_PARALLEL_ATTACHED_SENTINEL`] block. Default `false` for
+    /// existing plans (no sentinel = serial layout).
+    pub(super) parallel_safe_planner_attached: bool,
 }
 
 /// Serialize PreAgg metadata into a PG `List` of `Integer` nodes.
@@ -514,6 +534,8 @@ pub(super) struct PreAggPrivData {
 ///  n_group_keys,
 ///  // Per group key: source, attno, type_oid
 ///  has_scan_expr, (if 1: template_type, ...template_data...),
+///  // Optional B5a parallel-attached sentinel block (planner-side wiring):
+///  (PREAGG_PARALLEL_ATTACHED_SENTINEL, attached_flag)?
 ///  // Optional partial-agg sentinel block (worker-side parallel preagg):
 ///  (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?
 /// ]
@@ -524,10 +546,19 @@ pub(super) struct PreAggPrivData {
 /// (the serial path) skips the sentinel block entirely so existing
 /// non-parallel plans don't change shape.
 ///
+/// `parallel_safe_planner_attached` (B5a) is `true` only when the planner
+/// hook attached the fact path as `custom_paths[0]` and marked the
+/// CustomPath `parallel_safe = true`. Default-off plans skip the sentinel
+/// block entirely so the wire layout is byte-identical to pre-B5a.
+///
 /// # Safety
 ///
 /// Must be called during planning on the main backend thread.
-#[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
 #[must_use]
 pub unsafe fn serialize_preagg_private(
     scan_relid: pg_sys::Index,
@@ -537,6 +568,7 @@ pub unsafe fn serialize_preagg_private(
     group_keys: &[GroupKeyDesc],
     scan_expr: Option<&crate::engine::expr_compiler::CompiledExpr>,
     partial: Option<&PartialAggSpec>,
+    parallel_safe_planner_attached: bool,
 ) -> *mut pg_sys::List {
     use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 
@@ -661,6 +693,20 @@ pub unsafe fn serialize_preagg_private(
             }
         }
 
+        // Optional B5a parallel-attached sentinel block. Written ONLY when
+        // the planner attached the fact path as `custom_paths[0]`; default
+        // plans skip this block entirely so the wire layout matches pre-B5a
+        // byte-for-byte. The deserializer probes for either sentinel here
+        // (PREAGG_PARALLEL_ATTACHED_SENTINEL, then optionally
+        // PARTIAL_SENTINEL) and consumes both in order when present.
+        if parallel_safe_planner_attached {
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(PREAGG_PARALLEL_ATTACHED_SENTINEL).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
+        }
+
         // Optional partial-agg sentinel block. Mirrors the Agg-strategy
         // layout (append_partial_spec writes
         // `[PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols]`)
@@ -680,7 +726,7 @@ pub unsafe fn serialize_preagg_private(
 ///
 /// `custom_private` must be a valid PG `List` of Integer nodes.
 #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
-pub(super) unsafe fn deserialize_preagg_private(
+pub(in crate::engine::ffi) unsafe fn deserialize_preagg_private(
     custom_private: *mut pg_sys::List,
 ) -> PreAggPrivData {
     use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
@@ -693,6 +739,7 @@ pub(super) unsafe fn deserialize_preagg_private(
         group_keys: vec![],
         scan_expr: None,
         partial: None,
+        parallel_safe_planner_attached: false,
     };
     if custom_private.is_null() {
         return empty;
@@ -870,10 +917,35 @@ pub(super) unsafe fn deserialize_preagg_private(
         None
     };
 
+    // Optional sentinel blocks — order is fixed (PREAGG_PARALLEL_ATTACHED
+    // first, then PARTIAL). Both are independently optional. Pre-B5a plans
+    // had only the PARTIAL_SENTINEL block; the deserializer now probes
+    // PREAGG_PARALLEL_ATTACHED first and falls through to PARTIAL probing
+    // either way (handles new-with-attached, new-without-attached, and
+    // legacy-partial-only layouts identically).
+    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
+
+    let mut parallel_safe_planner_attached = false;
+    if (idx as usize) < list_len {
+        // SAFETY: list_int_at bounds-checked above.
+        let sentinel = unsafe { list_int_at(custom_private, idx) };
+        if sentinel == PREAGG_PARALLEL_ATTACHED_SENTINEL {
+            // Sentinel + 1 i32 payload (1 = attached, 0 = not).
+            if (idx as usize) + 1 < list_len {
+                // SAFETY: list_int_at bounds-checked above.
+                let flag = unsafe { list_int_at(custom_private, idx + 1) };
+                parallel_safe_planner_attached = flag != 0;
+                idx += 2;
+            } else {
+                // Truncated layout: defensive — treat as absent.
+                parallel_safe_planner_attached = false;
+            }
+        }
+    }
+
     // Optional PARTIAL_SENTINEL block — present only when the planner
     // injected a parallel partial-emit path (preagg_partial::try_inject).
     // Mirrors the Agg-strategy decode at deserialize_custom_private:344-356.
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
     let partial = if (idx as usize) < list_len {
         let sentinel = unsafe { list_int_at(custom_private, idx) };
         if sentinel == PARTIAL_SENTINEL {
@@ -898,6 +970,7 @@ pub(super) unsafe fn deserialize_preagg_private(
         group_keys,
         scan_expr,
         partial,
+        parallel_safe_planner_attached,
     }
 }
 

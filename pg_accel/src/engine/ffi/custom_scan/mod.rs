@@ -45,7 +45,18 @@ pub use private_data::{
     deserialize_functionscan_priv,
 };
 pub(super) use private_data::{PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec};
-use private_data::{deserialize_custom_private, deserialize_preagg_private};
+// B5a flag: re-exported into `mod` scope so the round-trip tests in
+// `engine::ffi::custom_scan::tests` can probe the wire layout for the
+// sentinel and the deserialized struct directly without reaching into
+// the (private) `private_data` submodule.
+use private_data::deserialize_custom_private;
+pub(in crate::engine::ffi) use private_data::{PREAGG_PARALLEL_ATTACHED_SENTINEL, PreAggPrivData};
+// `deserialize_preagg_private` is consumed both by `begin_custom_scan`
+// (this module) and by the round-trip tests in `tests.rs`. The previous
+// strictly-private import was sufficient pre-B5a; the round-trip tests
+// need to name it directly. Promoting via `pub(in crate::engine::ffi)`
+// keeps it invisible outside the FFI module tree.
+pub(in crate::engine::ffi) use private_data::deserialize_preagg_private;
 
 // ---------------------------------------------------------------------------
 // FunctionScan output-shape discriminants
@@ -2485,12 +2496,33 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             }
 
             // Materialize dimension tables from child plan states.
+            //
+            // **B5a slot layout**:
+            // - Default (`parallel_safe_planner_attached == false`): slots
+            //   `0..N` are the dimension PlanStates; `child_states[i]` aligns
+            //   with `depths[i]` exactly as it did pre-B5a.
+            // - Parallel-attached (`parallel_safe_planner_attached == true`):
+            //   slot 0 is the fact-side PlanState (attached by
+            //   `pgaccel_inject_gpu_preagg`); dimensions are at slots `1..N+1`.
+            //   We skip slot 0 here so `child_states[i]` still maps to
+            //   `depths[i]`.
+            //
+            // **B5b note**: the fact PlanState at slot 0 is currently inert
+            // — the executor still scans the fact heap directly via
+            // `table_open(scan_oid)` below. B5b will introduce
+            // `PreAggExecState::set_fact_child(child_ps)` to consume slot 0
+            // through the slot-based scan path and remove the heap-direct
+            // fallback once verified. Until then, holding a fact PlanState
+            // open is a no-op for correctness (PG creates the child
+            // PlanStates regardless of whether we read them).
             let custom_ps = (*node).custom_ps;
             if !custom_ps.is_null() {
                 let n_children = pg_sys::list_length(custom_ps);
+                let start_slot: i32 = i32::from(preagg_info.parallel_safe_planner_attached);
                 let mut child_states: Vec<*mut pg_sys::PlanState> = Vec::new();
-                for i in 0..n_children {
-                    // SAFETY: custom_ps[i] is a valid PlanState.
+                for i in start_slot..n_children {
+                    // SAFETY: custom_ps[i] is a valid PlanState; bounds
+                    // checked by `i < n_children` and `start_slot >= 0`.
                     let child = pg_sys::list_nth(custom_ps, i).cast::<pg_sys::PlanState>();
                     child_states.push(child);
                 }
