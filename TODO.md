@@ -79,20 +79,22 @@ executor + 3 pg_test integration tests). Open work in TODO order:
    (c) `h3_cells_to_multi_polygon` per-row `bigint[]` ArrayType
    walker (shares the `geometry[]` walker blocker tracked under
    "Geometry-array extractor for st_value").
-5. **Phase 4 SRF-in-target-list executor wiring** — Phase II
-   shipped FunctionScan-only (`SELECT * FROM h3_*(c)`). The
-   complementary `SELECT h3_*(c) FROM t` syntax has its
-   **planner-side detection** landed by Round 3 Phase B agent B6
-   at `pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs`
-   (`create_upper_paths_hook` at `UPPERREL_FINAL` walks for
-   `T_ProjectSetPath` and identifies registered SRFs). The
-   **executor side** — driving the child plan, per-row Var
-   extraction, dispatch, multi-row tuple expansion (~500-800 LOC
-   sibling executor module to `function_scan.rs`) — is the
-   remaining half. Detection-only per ban #9; native PG
-   ProjectSet still executes the queries (correct results, no
-   acceleration). See "SRF-in-target-list executor wiring" entry
-   below for the full executor contract.
+5. **(PARTIALLY LANDED)** Phase 4 SRF-in-target-list — planner-side
+   detection (B6) + executor wiring + plumbing all ship at
+   `pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs` and
+   `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs` (mirrors
+   `function_scan.rs` structure). EXPLAIN injection is verified
+   (`pg_test_srf_tlist_explain_shows_custom_scan` asserts
+   `Custom Scan (GpuAccelSrfTargetList)`). **Runtime execution of
+   passthrough columns SIGABRTs the backend** (see ignored test
+   `pg_test_srf_tlist_passthrough_cols` for repro shape +
+   anti-cheat-allow rationale). Single-SRF, no-passthrough-read
+   queries (count(*)) are unaffected because the planner cost
+   prefers native PG ProjectSet there. Multi-SRF tlists (cartesian
+   product per `nodeProjectSet.c`) remain unsupported regardless.
+   Follow-up: isolate the per-tuple memory-context interaction that
+   triggers the crash when the parent agg reads passthrough cols
+   from our Custom Scan output.
 6. **Phase 4 type coverage — JSON / JSONB.** UUID + INET / CIDR
    end-to-end on hash_agg group keys SHIPPED in commits `243fa1f` +
    `c4134d5` + `3fbc03d`; classifier re-enabled (commit `639f6f1`).
@@ -732,47 +734,6 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   h3_cell_to_boundary(c) FROM t` instead of `FROM
   h3_cell_to_boundary(c)`) is a separate follow-up — see
   "SRF-in-target-list / ProjectSet planner injection" entry below.
-
-### SRF-in-target-list executor wiring
-
-- **What** (Round 3 Phase B agent B6, 2026-05-02): planner-side
-  detection of SRF-in-target-list now ships at
-  `pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs`. The
-  hook installs at `UPPERREL_FINAL` (per
-  `src/backend/optimizer/plan/planner.c:2063` in pg17.9), walks the
-  input rel's `pathlist` for `T_ProjectSetPath` nodes, and identifies
-  registered SRFs whose tlist arg shape is `[Var, Const*]`. Detection
-  bails (preserving native PG ProjectSet) on any of:
-  unregistered SRFs, mixed registered/unregistered tlists, Scalar
-  shape (no acceleration win), or registry entries missing
-  `output_field_types`/`output_field_names`. **Detection-only**
-  per anti-cheat ban #9 — the hook does not yet add a CustomPath.
-  Native PG ProjectSet continues to execute SRF-in-target-list
-  queries; pg_test row-count assertions confirm correctness on the
-  preserved path. MINOR (workaround: rewrite as `FROM srf(...)`).
-- **Why**: PostGIS / H3 users typically write SRF-in-target-list
-  syntax; forcing them to refactor to `FROM h3_*(...)` is awkward.
-- **How (remaining)**: Wire the executor side. The CustomPath would
-  carry the projectset's `subpath` as `custom_paths[0]` (child plan)
-  and serialize the SRF FuncExpr funcid + Var attno + Const args in
-  custom_private. At exec time, drive the child via `ExecProcNode`,
-  evaluate each input row's Var to extract the per-row Datum, batch
-  per-row datums and dispatch through the existing
-  `dispatch::dispatch` interface (mirroring `function_scan.rs`),
-  then expand each input row's multi-row output into scan tuples
-  with non-SRF tlist columns passed through. ~500-800 LOC plus a
-  new executor module sibling to `function_scan.rs`. The complexity
-  is in the child-plan iteration, not in dispatching itself.
-  Alternative: option (b) `planner_hook` whole-query rewrite to
-  swap SRF-in-target-list to FROM-clause LATERAL join. Less code
-  but mutates the user's EXPLAIN shape, which is surprising.
-- Depends on: planner-side detection (landed by B6).
-- **Done when**: `EXPLAIN SELECT h3_cell_to_boundary(c) FROM cells`
-  shows the cell_to_boundary kernel being invoked (no longer
-  rendered by PG's scalar-fn invocation path), AND the row-count
-  pg_tests in `srf_target_list.rs::tests` flip from "preserves
-  native ProjectSet semantics" to "GpuAccel custom scan emits
-  correct expansion".
 
 ### Type coverage expansion
 

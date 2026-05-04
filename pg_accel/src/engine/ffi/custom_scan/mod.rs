@@ -35,6 +35,7 @@ mod explain;
 mod function_scan;
 mod plan_partial_agg;
 mod private_data;
+mod srf_target_list;
 
 use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
@@ -57,6 +58,12 @@ pub(in crate::engine::ffi) use private_data::{PREAGG_PARALLEL_ATTACHED_SENTINEL,
 // need to name it directly. Promoting via `pub(in crate::engine::ffi)`
 // keeps it invisible outside the FFI module tree.
 pub(in crate::engine::ffi) use private_data::deserialize_preagg_private;
+// SRF executor (Round 3 follow-up) — public re-exports for the planner
+// hook in `srf_target_list.rs` and the executor module in `srf_target_list.rs`.
+pub use private_data::{
+    SRF_TARGET_LIST_SENTINEL, SrfTargetListPrivData, append_srf_target_list_priv,
+    deserialize_srf_target_list_priv,
+};
 
 // ---------------------------------------------------------------------------
 // FunctionScan output-shape discriminants
@@ -118,6 +125,12 @@ pub enum GpuStrategy {
     /// resulting `AcceleratedVarLen` / `AcceleratedRecord` shapes as scan
     /// tuples.
     FunctionScan = 6,
+    /// SRF-in-target-list injection (Phase 2 F3 follow-up): replace PG's
+    /// `ProjectSet` plan node for `SELECT srf(col), passthrough_cols FROM t`
+    /// queries. Drives the underlying scan via `ExecProcNode` and expands
+    /// each input row's SRF call into multiple output tuples while
+    /// preserving non-SRF target-list columns.
+    SrfTargetList = 7,
 }
 
 impl GpuStrategy {
@@ -131,6 +144,7 @@ impl GpuStrategy {
             4 => Self::Window,
             5 => Self::PreAgg,
             6 => Self::FunctionScan,
+            7 => Self::SrfTargetList,
             _ => Self::Scan,
         }
     }
@@ -146,6 +160,7 @@ impl GpuStrategy {
             Self::Window => c"GpuWindow",
             Self::PreAgg => c"GpuPreAgg",
             Self::FunctionScan => c"GpuFunctionScan",
+            Self::SrfTargetList => c"GpuAccelSrfTargetList",
         }
     }
 }
@@ -281,6 +296,17 @@ static FUNCTION_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomSc
     CreateCustomScanState: Some(create_custom_scan_state),
 });
 
+static SRF_TARGET_LIST_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
+    CustomName: c"GpuAccelSrfTargetList".as_ptr(),
+    PlanCustomPath: Some(plan_custom_path_srf_target_list),
+    ReparameterizeCustomPathByChild: None,
+});
+
+static SRF_TARGET_LIST_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
+    CustomName: c"GpuAccelSrfTargetList".as_ptr(),
+    CreateCustomScanState: Some(create_custom_scan_state),
+});
+
 static EXEC_METHODS: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods {
     CustomName: c"GpuAccelScan".as_ptr(),
     BeginCustomScan: Some(begin_custom_scan),
@@ -353,6 +379,13 @@ pub fn function_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const FUNCTION_PATH_METHODS.0
 }
 
+/// Pointer to SRF-in-target-list `CustomPathMethods` vtable.
+#[inline]
+#[must_use]
+pub fn srf_target_list_path_methods() -> *const pg_sys::CustomPathMethods {
+    &raw const SRF_TARGET_LIST_PATH_METHODS.0
+}
+
 /// Register Custom Scan methods with PostgreSQL. Must be called from `_PG_init`.
 pub fn register() {
     // SAFETY: RegisterCustomScanMethods stores pointers to our static vtables
@@ -366,6 +399,7 @@ pub fn register() {
         pg_sys::RegisterCustomScanMethods(&raw const WINDOW_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const PREAGG_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const FUNCTION_SCAN_METHODS.0);
+        pg_sys::RegisterCustomScanMethods(&raw const SRF_TARGET_LIST_SCAN_METHODS.0);
     }
 }
 
@@ -1293,6 +1327,97 @@ unsafe extern "C-unwind" fn plan_custom_path_function(
 
         // Copy the FUNCTIONSCAN_SENTINEL-prefixed payload from the path.
         // The planner hook stored it at index 0 of the path's custom_private.
+        let path_priv = (*best_path).custom_private;
+        if !path_priv.is_null() {
+            let n = pg_sys::list_length(path_priv);
+            for i in 0..n {
+                let cell = pg_sys::list_nth(path_priv, i);
+                list = pg_sys::lappend(list, cell);
+            }
+        }
+
+        (*cscan).custom_private = list;
+    }
+
+    cscan.cast()
+}
+
+/// Convert an SRF-in-target-list `CustomPath` into a `CustomScan` plan node.
+///
+/// The path's `custom_private` carries a `SrfTargetListPrivData` block
+/// (sentinel-prefixed at index 0) and `custom_paths[0]` holds the underlying
+/// scan path that produces the per-row inputs. The planner has already
+/// produced the lower plan via `create_plan_recurse`; we receive it via
+/// `custom_plans[0]` and stash it on `cscan.custom_plans` so `ExecInitNode`
+/// runs through it during executor init.
+///
+/// Plan-side responsibilities:
+///
+/// 1. `scanrelid = 0` (synthetic scan, no underlying RTE_RELATION).
+/// 2. `custom_scan_tlist` mirrors the planner-supplied `tlist` (the upper
+///    target list with passthrough Vars + the SRF FuncExpr position) — this
+///    is what becomes the output tuple shape.
+/// 3. `custom_plans` holds the child scan plan (used by `begin_custom_scan`
+///    to run `ExecInitNode` and by `next_tuple` to drain via `ExecProcNode`).
+///
+/// # Safety
+///
+/// Called by the PostgreSQL planner on the main backend thread.
+unsafe extern "C-unwind" fn plan_custom_path_srf_target_list(
+    _root: *mut pg_sys::PlannerInfo,
+    _rel: *mut pg_sys::RelOptInfo,
+    best_path: *mut pg_sys::CustomPath,
+    tlist: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_srf_target_list").entered();
+    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
+    let cscan = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
+    };
+
+    // SAFETY: cscan is freshly palloc'd and zeroed; best_path + tlist + custom_plans
+    // are valid planner pointers.
+    unsafe {
+        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
+        // The planner-supplied tlist is the upper target list (including the
+        // SRF FuncExpr position). It defines our output tuple shape.
+        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        // custom_scan_tlist also gets a copy so PG's setrefs pass can rewrite
+        // independently of plan.targetlist.
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        // custom_plans carries the child scan plan PG built from
+        // best_path.custom_paths[0]. begin_custom_scan calls ExecInitNode on it.
+        (*cscan).custom_plans = custom_plans;
+        (*cscan).flags = (*best_path).flags;
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const SRF_TARGET_LIST_SCAN_METHODS.0;
+
+        // Top-level header so deserialize_custom_private routes us through the
+        // SrfTargetList arm. The SrfTargetListPrivData payload follows.
+        let batch_size = gucs::min_batch_size();
+        let expected_threads = resolve_thread_count();
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(GpuStrategy::SrfTargetList as c_int).cast(),
+        );
+        list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
+        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // fn_oid placeholder (read from STLS block)
+        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // target_attno placeholder
+        list = pg_sys::lappend(
+            list,
+            pg_sys::makeInteger(AccelStrategy::GpuH3 as c_int).cast(), // strategy hint
+        );
+
+        // Copy the SRF_TARGET_LIST_SENTINEL-prefixed payload from the path.
         let path_priv = (*best_path).custom_private;
         if !path_priv.is_null() {
             let n = pg_sys::list_length(path_priv);
@@ -2458,6 +2583,24 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         return;
     }
 
+    // SrfTargetList: short-circuit before allocating any of the legacy
+    // executor states. Drives the child scan via ExecProcNode (already
+    // initialised into custom_ps[0] by the loop above) and expands the SRF
+    // per row using a buffered cursor.
+    if privdata.gpu_strategy == GpuStrategy::SrfTargetList {
+        // SAFETY: node is a valid CustomScanState on the main backend thread.
+        let exec = unsafe { srf_target_list::init_state(node) };
+        // SAFETY: state points to our extended GpuAccelScanState; writing
+        // executor pointer + zero counters.
+        unsafe {
+            (*state).accel.executor = exec;
+            (*state).accel.rows_dispatched = 0;
+            (*state).accel.batches_executed = 0;
+            (*state).accel.dispatch_time_us = 0;
+        }
+        return;
+    }
+
     let batch_size = if privdata.batch_size > 0 {
         privdata.batch_size as usize
     } else {
@@ -3150,6 +3293,20 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         return slot;
     }
 
+    // SrfTargetList strategy (Phase 2 F3 follow-up): per-input-row dispatch
+    // + per-output-row tuple emission. Routed through the dedicated
+    // srf_target_list module which drives the child scan via ExecProcNode.
+    if gpu_strategy == GpuStrategy::SrfTargetList {
+        // SAFETY: executor was Box::into_raw'd as SrfTargetListExecState in
+        // begin_custom_scan.
+        let slot = unsafe { srf_target_list::next_tuple(node, executor) };
+        // SAFETY: propagate row counter for EXPLAIN ANALYZE.
+        unsafe {
+            (*state).accel.rows_dispatched = srf_target_list::rows_dispatched(executor);
+        }
+        return slot;
+    }
+
     // Dispatch through the unified ExecutorState trait. Each state owns its
     // internal branching (has_vscan, is_fused, is_grouped, has_scan_desc)
     // rather than leaking those into the ffi layer.
@@ -3167,6 +3324,9 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             GpuStrategy::Join => &mut *executor.cast::<JoinExecState>(),
             GpuStrategy::FunctionScan => unreachable!(
                 "FunctionScan handled by short-circuit above; dyn ExecutorState match unreachable"
+            ),
+            GpuStrategy::SrfTargetList => unreachable!(
+                "SrfTargetList handled by short-circuit above; dyn ExecutorState match unreachable"
             ),
         };
         let slot = dyn_state.exec(node);
@@ -3240,6 +3400,12 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                 // delegate to the dedicated drop helper.
                 // SAFETY: executor was Box::into_raw'd as FunctionScanExecState.
                 function_scan::drop_state((*state).accel.executor);
+            } else if GpuStrategy::from_i32((*state).accel.strategy) == GpuStrategy::SrfTargetList {
+                // SrfTargetList owns its own boxed state (SrfTargetListExecState);
+                // delegate to the dedicated drop helper. The child PlanState is
+                // ended below by the standard custom_ps walk.
+                // SAFETY: executor was Box::into_raw'd as SrfTargetListExecState.
+                srf_target_list::drop_state((*state).accel.executor);
             } else {
                 let gpu_strategy = GpuStrategy::from_i32((*state).accel.strategy);
                 if gpu_strategy == GpuStrategy::PreAgg {
@@ -3360,6 +3526,14 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
         // dispatch (constant args ⇒ same output is correct).
         if gpu_strategy == GpuStrategy::FunctionScan {
             function_scan::rescan((*state).accel.executor);
+            return;
+        }
+
+        // SrfTargetList: clear the per-row expansion buffer; the surrounding
+        // rescan_custom_scan walks custom_ps and rescans the child plan, so the
+        // next next_tuple call will re-pull the first input row.
+        if gpu_strategy == GpuStrategy::SrfTargetList {
+            srf_target_list::rescan((*state).accel.executor);
             return;
         }
 
