@@ -68,11 +68,33 @@ commit `a57cadb` on origin/main.**
 ### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
 
 **P0 — correctness blockers (silent wrong-results or crashes possible)**:
-- _(none open — small-N hash_agg silent zero closed by AdaptiveCpp upstream
-  fixes `c2092425` (i33 width promotion) + `160728fd` (PHI literal
-  inlining). Cold-cache `test_fork` PASSES: hashagg_f64 N=64 returns
-  total=2048 (the 4-group sum of vals[0..63]). `test_hash_agg_keys` =
-  10/10 cold-cache.)_
+- **`test_fork` cold-cache crash on `pgaccel_h3_lat_lng_to_cell_bulk`** —
+  Deterministic SIGABRT on `[MTLFunction newArgumentEncoderWithBufferIndex:
+  reflection:functionReflection:]` inside
+  `hipsycl::rt::metal_inorder_queue::submit_sscp_kernel_from_code_object`
+  for the h3 lat→lng kernel, after `reduce_sum_f64`/`sort_kv_f64`/`spatial_f64`
+  succeed in the same forked child. Crash class is the SSCP argbuffer
+  reflection failure documented at `pgaccel-kernels/src/hash_agg.cpp:178-185`
+  (`device device void**` MSL validation), but for a soft-fp64 SLEEF kernel.
+  Verified deterministic on origin/main with no local mods. Repro:
+  `make clear-jit && timeout 300 stdbuf -oL ./pgaccel-kernels/build/test_fork`.
+  Crash report: `~/Library/Logs/DiagnosticReports/test_fork-*.ips`,
+  imageOffset 1438760 in Metal.framework.
+  Suspected regression from upstream `c2092425` / `160728fd` (A1+A2 emitter
+  fixes) — both modified MetalEmitter argument-layout / aggregate-inlining
+  paths. Fix candidates:
+  (i) bisect: rebuild AdaptiveCpp at `4f3cde11` (pre-A1/A2) and re-run
+      test_fork to confirm bisect direction;
+  (ii) split lat_lng_to_cell's captured params into individual scalars
+       (mirror the hash_agg.cpp:170-265 flat-buffer pattern) — workaround,
+       not root-cause fix.
+- _(small-N hash_agg silent zero verified closed by upstream fixes — cold-cache
+  `test_fork` shows `hashagg_f64 OK` (total=2048) when h3_f64 doesn't crash
+  earlier in the chain; `test_hash_agg_keys` = 10/10 cold-cache.)_
+- _(`sort_kv_i32`/`sort_kv_i64` cold-cache fork dispatch verified working via
+  standalone harness; the in-suite `test_fork` regression is for these is NOT
+  yet wired in — addition was reverted because the test_fork suite is currently
+  broken upstream of where they'd run, see h3 entry above.)_
 
 **P1 — perf blockers (correctness fine, GPU acceleration off in some cases)**:
 - **B5b PreAgg exec-side refactor** — B5a (commit `7c6d355`) shipped the
