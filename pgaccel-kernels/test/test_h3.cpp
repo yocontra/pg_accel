@@ -1033,6 +1033,181 @@ static void test_cells_to_multi_polygon() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: grid_disk single-cell input (regression for Agent K Round 3 Bug 1).
+// ---------------------------------------------------------------------------
+// The original SYCL `pgaccel_h3_grid_disk_output_size` kernel JIT-failed
+// on AdaptiveCpp Metal SSCP with `LLVMToMetal: MetalEmitter failed:
+// Error: Unsupported integer bit width: 33` for ANY count (including
+// count=1). This surfaced in pg_test as
+// `gpu::h3_grid_disk_bulk(&[cell], 1) -> None` and triggered the
+// dispatch-side `pgrx::error!` "GPU kernel failed; refusing CPU
+// fallback". The fix moved the size pass to the host-side
+// `h3_grid_disk_count` helper. This test pins the single-cell path so a
+// regression that re-introduces a kernel-side size pass tripping the
+// i33 emitter is caught here at kernel-test time, before reaching
+// `function_scan_h3_grid_disk_emits_seven_cells_for_k1` in pg_test.
+static void test_grid_disk_single_cell_input() {
+  printf("--- test_grid_disk_single_cell_input ---\n");
+
+  int digits[15] = {0};
+  uint64_t hex = make_cell(57, 5, digits);
+
+  // k=0: single cell emits itself.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(&hex, 1, 0, off);
+    ASSERT_STATUS_OK("single-cell k=0 size status", s);
+    ASSERT_EQ("single-cell k=0 off[0]", off[0], 0);
+    ASSERT_EQ("single-cell k=0 off[1]", off[1], 1);
+
+    uint64_t out[1] = {0};
+    s = pgaccel_h3_grid_disk_emit(&hex, 1, 0, off, out);
+    ASSERT_STATUS_OK("single-cell k=0 emit status", s);
+    ASSERT_TRUE("single-cell k=0 emits self", out[0] == hex);
+  }
+
+  // k=1: hex k-ring = 7 (origin + 6 neighbours). This is the exact case
+  // exercised by `function_scan_h3_grid_disk_emits_seven_cells_for_k1`.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(&hex, 1, 1, off);
+    ASSERT_STATUS_OK("single-cell k=1 size status", s);
+    ASSERT_EQ("single-cell k=1 total (1+6)", off[1], 7);
+
+    std::vector<uint64_t> out(7, 0);
+    s = pgaccel_h3_grid_disk_emit(&hex, 1, 1, off, out.data());
+    ASSERT_STATUS_OK("single-cell k=1 emit status", s);
+    ASSERT_TRUE("single-cell k=1 origin at slot 0", out[0] == hex);
+    bool all_nonzero = true;
+    for (uint64_t v : out) {
+      if (v == 0) {
+        all_nonzero = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("single-cell k=1 all 7 outputs non-zero", all_nonzero);
+  }
+
+  // k=2: hex disk = 1 + 6 + 12 = 19.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_grid_disk_output_size(&hex, 1, 2, off);
+    ASSERT_STATUS_OK("single-cell k=2 size status", s);
+    ASSERT_EQ("single-cell k=2 total (1+6+12)", off[1], 19);
+
+    std::vector<uint64_t> out(19, 0);
+    s = pgaccel_h3_grid_disk_emit(&hex, 1, 2, off, out.data());
+    ASSERT_STATUS_OK("single-cell k=2 emit status", s);
+    bool all_nonzero = true;
+    for (uint64_t v : out) {
+      if (v == 0) {
+        all_nonzero = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("single-cell k=2 all 19 outputs non-zero", all_nonzero);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test: cell_to_boundary multi-cell emit (regression for Agent K Bug 2).
+// ---------------------------------------------------------------------------
+// The original SYCL `pgaccel_h3_cell_to_boundary_emit` kernel JIT-failed
+// with `use of undeclared identifier 't_double__1_000000e_00__double__0_000000e_00_'`
+// — an AdaptiveCpp Metal SSCP emitter bug where the `[2 x double]
+// {1.0, 0.0}` PHI-node literal produced by `sycl::cos(0)` / `sycl::sin(0)`
+// inside the inverse-gnomonic projection was referenced by name but
+// never declared in the generated `.metal` source. Failure occurred for
+// ALL counts; the user-visible symptom was SIGABRT in
+// `pgaccel_h3_cells_to_multi_polygon_emit` (which delegates to this
+// kernel) when called with multi-cell input. The fix ports the entire
+// boundary kernel (and its delegated multi_polygon caller) to host
+// code. This test exercises the multi-cell emit path with sizes
+// 2/3/5/10 to pin the behaviour.
+static void test_cell_to_boundary_multi_cell_emit() {
+  printf("--- test_cell_to_boundary_multi_cell_emit ---\n");
+
+  // Build N hex cells at varying base cells / digits to ensure we exercise
+  // the full digit-replay path (not just a single cached cell).
+  int d_a[15] = {1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  int d_b[15] = {2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  int d_c[15] = {3, 4, 5, 6, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  int d_d[15] = {0};
+
+  // Pick non-pentagon base cells (H3 pentagons are 4, 14, 24, 33, 49, 50,
+  // 58, 63, 72, 83, 97, 107, 117). Stride through 5,6,7,8,9,10,11,12,13,15
+  // so at N=10 we still avoid 14 (a pentagon).
+  const int hex_bases[10] = {5, 6, 7, 8, 9, 10, 11, 12, 13, 15};
+
+  for (size_t N : {(size_t)2, (size_t)3, (size_t)5, (size_t)10}) {
+    std::vector<uint64_t> cells(N);
+    for (size_t i = 0; i < N; i++) {
+      const int* dig = (i % 4 == 0) ? d_d : (i % 4 == 1) ? d_a : (i % 4 == 2) ? d_b : d_c;
+      cells[i] = make_cell(hex_bases[i], 5, dig);
+    }
+
+    std::vector<uint32_t> off(N + 1, 99);
+    pgaccel_status s = pgaccel_h3_cell_to_boundary_output_size(cells.data(), N, off.data());
+    ASSERT_STATUS_OK("multi-cell boundary size status", s);
+    ASSERT_EQ("multi-cell boundary off[0]", off[0], 0);
+    // All inputs are hexagons (non-pentagon bases) → 12 doubles each.
+    ASSERT_EQ("multi-cell boundary total = 12 * N", off[N], 12u * N);
+
+    std::vector<double> out(off[N], 0.0);
+    s = pgaccel_h3_cell_to_boundary_emit(cells.data(), N, off.data(), out.data());
+    ASSERT_STATUS_OK("multi-cell boundary emit status", s);
+
+    // Every coordinate must be finite (NaN/inf would indicate the emit
+    // path silently skipped writing — the original SIGABRT scenario).
+    bool all_finite = true;
+    for (double v : out) {
+      if (!std::isfinite(v)) {
+        all_finite = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("multi-cell boundary all coords finite", all_finite);
+
+    // First cell's first vertex must be a real (non-zero) lat/lng pair —
+    // a zero pair would mean the emit pass never wrote (the silent
+    // SIGABRT-then-zero fallthrough mode).
+    const double lat0 = out[0];
+    const double lng0 = out[1];
+    ASSERT_TRUE("multi-cell boundary first vertex non-zero", (lat0 != 0.0) || (lng0 != 0.0));
+  }
+
+  // Also verify the cells_to_multi_polygon delegated path works for
+  // multi-cell input — this is the user-visible path that was crashing
+  // in pg_test (`h3_cells_to_multi_polygon_emits_one_row`).
+  for (size_t N : {(size_t)2, (size_t)3, (size_t)5}) {
+    std::vector<uint64_t> cells(N);
+    for (size_t i = 0; i < N; i++)
+      cells[i] = make_cell(hex_bases[i], 5, d_d);
+
+    std::vector<uint32_t> ring_off(N + 1, 99);
+    uint32_t ring_count = 99;
+    pgaccel_status s = pgaccel_h3_cells_to_multi_polygon_output_size(cells.data(), N,
+                                                                     ring_off.data(), &ring_count);
+    ASSERT_STATUS_OK("multi-cell c2mp size status", s);
+    ASSERT_EQ("multi-cell c2mp ring_count == N", ring_count, static_cast<uint32_t>(N));
+    ASSERT_EQ("multi-cell c2mp total = 12 * N", ring_off[N], 12u * N);
+
+    std::vector<double> coords(ring_off[N], 0.0);
+    s = pgaccel_h3_cells_to_multi_polygon_emit(cells.data(), N, ring_off.data(), ring_count,
+                                               coords.data());
+    ASSERT_STATUS_OK("multi-cell c2mp emit status", s);
+    bool all_finite = true;
+    for (double v : coords) {
+      if (!std::isfinite(v)) {
+        all_finite = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("multi-cell c2mp all coords finite", all_finite);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 int main() {
@@ -1057,6 +1232,10 @@ int main() {
   test_cell_to_boundary();
   test_polyfill();
   test_cells_to_multi_polygon();
+
+  // Regression tests for Agent K Round 3 kernel-layer bugs.
+  test_grid_disk_single_cell_input();
+  test_cell_to_boundary_multi_cell_emit();
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
