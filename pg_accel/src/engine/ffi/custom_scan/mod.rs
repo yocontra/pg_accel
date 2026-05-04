@@ -45,7 +45,18 @@ pub use private_data::{
     deserialize_functionscan_priv,
 };
 pub(super) use private_data::{PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec};
-use private_data::{deserialize_custom_private, deserialize_preagg_private};
+// B5a flag: re-exported into `mod` scope so the round-trip tests in
+// `engine::ffi::custom_scan::tests` can probe the wire layout for the
+// sentinel and the deserialized struct directly without reaching into
+// the (private) `private_data` submodule.
+use private_data::deserialize_custom_private;
+pub(in crate::engine::ffi) use private_data::{PREAGG_PARALLEL_ATTACHED_SENTINEL, PreAggPrivData};
+// `deserialize_preagg_private` is consumed both by `begin_custom_scan`
+// (this module) and by the round-trip tests in `tests.rs`. The previous
+// strictly-private import was sufficient pre-B5a; the round-trip tests
+// need to name it directly. Promoting via `pub(in crate::engine::ffi)`
+// keeps it invisible outside the FFI module tree.
+pub(in crate::engine::ffi) use private_data::deserialize_preagg_private;
 
 // ---------------------------------------------------------------------------
 // FunctionScan output-shape discriminants
@@ -2507,11 +2518,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             let custom_ps = (*node).custom_ps;
             if !custom_ps.is_null() {
                 let n_children = pg_sys::list_length(custom_ps);
-                let start_slot: i32 = if preagg_info.parallel_safe_planner_attached {
-                    1
-                } else {
-                    0
-                };
+                let start_slot: i32 = i32::from(preagg_info.parallel_safe_planner_attached);
                 let mut child_states: Vec<*mut pg_sys::PlanState> = Vec::new();
                 for i in start_slot..n_children {
                     // SAFETY: custom_ps[i] is a valid PlanState; bounds

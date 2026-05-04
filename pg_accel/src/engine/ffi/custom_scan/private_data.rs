@@ -490,7 +490,7 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
 // ---------------------------------------------------------------------------
 
 /// Deserialized PreAgg configuration from `custom_private`.
-pub(super) struct PreAggPrivData {
+pub(in crate::engine::ffi) struct PreAggPrivData {
     pub(super) scan_relid: pg_sys::Index,
     /// Stable relation OID for the fact table. Use this (via `table_open`)
     /// at execution time rather than `scan_relid`, because the planner's
@@ -554,7 +554,11 @@ pub(super) struct PreAggPrivData {
 /// # Safety
 ///
 /// Must be called during planning on the main backend thread.
-#[allow(clippy::cast_possible_wrap, clippy::too_many_lines)]
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
 #[must_use]
 pub unsafe fn serialize_preagg_private(
     scan_relid: pg_sys::Index,
@@ -722,7 +726,7 @@ pub unsafe fn serialize_preagg_private(
 ///
 /// `custom_private` must be a valid PG `List` of Integer nodes.
 #[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
-pub(super) unsafe fn deserialize_preagg_private(
+pub(in crate::engine::ffi) unsafe fn deserialize_preagg_private(
     custom_private: *mut pg_sys::List,
 ) -> PreAggPrivData {
     use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};

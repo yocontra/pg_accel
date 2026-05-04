@@ -1214,3 +1214,275 @@ fn partial_sentinel_is_ascii_paag() {
     let bytes = 0x5041_4147u32.to_be_bytes();
     assert_eq!(&bytes, b"PAAG");
 }
+
+#[test]
+fn preagg_parallel_attached_sentinel_is_ascii_ppsa() {
+    // PREAGG_PARALLEL_ATTACHED_SENTINEL is `b"PPSA"` packed as a big-endian
+    // i32 — distinct from PARTIAL_SENTINEL (b"PAAG") so the deserializer can
+    // probe each independently.
+    let bytes = 0x5050_5341u32.to_be_bytes();
+    assert_eq!(&bytes, b"PPSA");
+    // Also assert distinctness vs PARTIAL_SENTINEL.
+    assert_ne!(0x5050_5341u32, 0x5041_4147u32);
+}
+
+// ---------------------------------------------------------------------------
+// B5a PreAgg parallel-safe round-trip tests
+//
+// Round-trip the new `parallel_safe_planner_attached` flag through
+// serialize/deserialize_preagg_private. Both branches (true / false) must
+// reproduce the input exactly. Default-off (false) MUST emit no extra
+// sentinel bytes so existing plans on the wire stay byte-identical to
+// pre-B5a (regression guard for ban #1).
+//
+// Note: `#[pg_test]` registers each function as a SQL function under the
+// containing module's pgrx schema. To keep them at schema `tests` (the
+// outer `mod tests` here under `cfg(feature = "pg_test")`), the helpers
+// and tests live directly here, NOT inside another submodule.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "pg_test")]
+mod b5a_round_trip {
+    //! Helpers + tests for the B5a `parallel_safe_planner_attached` flag.
+    //! See file-level comment above; tests appear at the outer module
+    //! scope (immediately below this submodule) so the SQL function
+    //! resolver finds them under schema `tests`.
+    use super::*;
+    use crate::engine::executor::agg::AggOp;
+    use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
+
+    pub(super) fn sample_inputs() -> (
+        pg_sys::Index,
+        pg_sys::Oid,
+        Vec<JoinDepthDesc>,
+        Vec<PreAggColDesc>,
+        Vec<GroupKeyDesc>,
+    ) {
+        let depth = JoinDepthDesc {
+            outer_attno: 2,
+            inner_attno: 1,
+            key_type: 0,
+            dim_filters: vec![DimFilter {
+                col_idx: 1,
+                cmp_opcode: 95, // INT4LT placeholder
+                const_val: 42.0,
+            }],
+            group_col_attnos: vec![3],
+        };
+        let agg = PreAggColDesc {
+            op: AggOp::Sum,
+            attno: 4,
+            type_oid: pg_sys::FLOAT8OID,
+        };
+        let gk = GroupKeyDesc {
+            source: 1,
+            attno: 3,
+            type_oid: pg_sys::INT4OID,
+        };
+        (
+            7,                              // scan_relid
+            pg_sys::Oid::from(123_456_u32), // scan_oid
+            vec![depth],
+            vec![agg],
+            vec![gk],
+        )
+    }
+
+    pub(super) fn assert_inputs_round_tripped(
+        deserialized: &crate::engine::ffi::custom_scan::PreAggPrivData,
+    ) {
+        assert_eq!(deserialized.scan_relid, 7);
+        assert_eq!(u32::from(deserialized.scan_oid), 123_456);
+        assert_eq!(deserialized.depths.len(), 1);
+        assert_eq!(deserialized.depths[0].outer_attno, 2);
+        assert_eq!(deserialized.depths[0].inner_attno, 1);
+        assert_eq!(deserialized.depths[0].dim_filters.len(), 1);
+        assert_eq!(deserialized.depths[0].dim_filters[0].col_idx, 1);
+        assert_eq!(deserialized.depths[0].group_col_attnos, vec![3]);
+        assert_eq!(deserialized.agg_descs.len(), 1);
+        assert!(matches!(deserialized.agg_descs[0].op, AggOp::Sum));
+        assert_eq!(deserialized.agg_descs[0].attno, 4);
+        assert_eq!(deserialized.group_keys.len(), 1);
+        assert_eq!(deserialized.group_keys[0].source, 1);
+        assert_eq!(deserialized.group_keys[0].attno, 3);
+    }
+}
+
+// The pg_test framework hard-codes its SQL function lookup to
+// `tests."<funcname>"()`. To make our `#[pg_test]` functions resolve under
+// schema `tests`, they must sit inside a `#[pgrx::pg_schema] mod tests`
+// block — the schema name comes from the `pg_schema`-annotated module
+// name. We can't put the annotation on the OUTER `mod tests` (it's
+// already declared in `mod.rs` without the attribute and used as a Rust
+// unit-test mod; adding `#[pg_schema]` there would also try to register
+// every `#[pg_test]` in the file, conflicting with the existing
+// `#[test]` ones). Instead, wrap our pg_tests in a NESTED `mod tests`
+// with the annotation; the SQL schema generator picks up the inner
+// module's name (= `tests`) for the `pg_test` functions inside.
+/// `#[pgrx::pg_schema]`-annotated wrapper for the B5a round-trip tests.
+/// See file-level comment above for why this nested `tests` module exists
+/// (the pg_test framework hard-codes `tests."<funcname>"()` lookups).
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod tests {
+    use super::b5a_round_trip::{assert_inputs_round_tripped, sample_inputs};
+    use super::*;
+    use pgrx::pg_test;
+
+    /// Default-off: `parallel_safe_planner_attached = false` round-trips
+    /// to `false` AND the wire layout contains no PREAGG_PARALLEL_ATTACHED
+    /// sentinel bytes (byte-identical to pre-B5a).
+    #[pg_test]
+    fn parallel_attached_false_roundtrips_and_omits_sentinel() {
+        let (relid, oid, depths, aggs, gks) = sample_inputs();
+
+        // SAFETY: pg_test runs inside a PG memory context; serialize allocates
+        // List nodes via palloc.
+        let list = unsafe {
+            serialize_preagg_private(
+                relid, oid, &depths, &aggs, &gks, None, None,
+                /*parallel_safe_planner_attached=*/ false,
+            )
+        };
+
+        // Verify no PREAGG_PARALLEL_ATTACHED sentinel is anywhere in the
+        // serialized list. This is the byte-identical guard.
+        // SAFETY: list_length on a valid PG List.
+        let len = unsafe { pg_sys::list_length(list) };
+        for i in 0..len {
+            // SAFETY: i bounded by list_length.
+            let v = unsafe { list_int_at(list, i) };
+            assert_ne!(
+                v, PREAGG_PARALLEL_ATTACHED_SENTINEL,
+                "default-off serialization MUST NOT emit PREAGG_PARALLEL_ATTACHED_SENTINEL \
+                 (byte-identical to pre-B5a layout) — found at index {i}"
+            );
+        }
+
+        // Round-trip: deserialize and confirm the flag is false.
+        // SAFETY: list is a valid List built above.
+        let parsed = unsafe { deserialize_preagg_private(list) };
+        assert!(
+            !parsed.parallel_safe_planner_attached,
+            "default-off must round-trip to false"
+        );
+        assert_inputs_round_tripped(&parsed);
+    }
+
+    /// GUC-on: `parallel_safe_planner_attached = true` round-trips to `true`
+    /// AND the serialized list contains the PREAGG_PARALLEL_ATTACHED sentinel
+    /// followed by `1`.
+    #[pg_test]
+    fn parallel_attached_true_roundtrips_and_emits_sentinel() {
+        let (relid, oid, depths, aggs, gks) = sample_inputs();
+
+        // SAFETY: pg_test PG memory context.
+        let list = unsafe {
+            serialize_preagg_private(
+                relid, oid, &depths, &aggs, &gks, None, None,
+                /*parallel_safe_planner_attached=*/ true,
+            )
+        };
+
+        // Find the sentinel and confirm payload == 1.
+        // SAFETY: list_length on valid List.
+        let len = unsafe { pg_sys::list_length(list) };
+        let mut found_sentinel_at = None;
+        for i in 0..len {
+            // SAFETY: i bounded.
+            let v = unsafe { list_int_at(list, i) };
+            if v == PREAGG_PARALLEL_ATTACHED_SENTINEL {
+                found_sentinel_at = Some(i);
+                break;
+            }
+        }
+        let sentinel_idx = found_sentinel_at
+            .expect("PREAGG_PARALLEL_ATTACHED_SENTINEL must appear when flag is true");
+        // SAFETY: sentinel_idx + 1 is in bounds — serializer always writes
+        // exactly one payload word after the sentinel.
+        let payload = unsafe { list_int_at(list, sentinel_idx + 1) };
+        assert_eq!(payload, 1, "sentinel payload must be 1 (=attached)");
+
+        // SAFETY: list valid above.
+        let parsed = unsafe { deserialize_preagg_private(list) };
+        assert!(
+            parsed.parallel_safe_planner_attached,
+            "GUC-on must round-trip to true"
+        );
+        assert_inputs_round_tripped(&parsed);
+    }
+
+    /// Both sentinel blocks present together: B5a-attached AND a worker-side
+    /// PartialAggSpec. Confirms the deserializer consumes each independently.
+    #[pg_test]
+    fn parallel_attached_true_with_partial_spec_roundtrips() {
+        use crate::engine::executor::agg::AggOp;
+        use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+
+        let (relid, oid, depths, aggs, gks) = sample_inputs();
+        let spec = PartialAggSpec {
+            per_column: vec![PartialColumn {
+                op: AggOp::Sum,
+                attno: 4,
+                transtype_oid: pg_sys::FLOAT8OID,
+                serialize_fn_oid: None,
+            }],
+        };
+
+        // SAFETY: pg_test PG memory context.
+        let list = unsafe {
+            serialize_preagg_private(
+                relid,
+                oid,
+                &depths,
+                &aggs,
+                &gks,
+                None,
+                Some(&spec),
+                /*parallel_safe_planner_attached=*/ true,
+            )
+        };
+        // SAFETY: list valid above.
+        let parsed = unsafe { deserialize_preagg_private(list) };
+        assert!(parsed.parallel_safe_planner_attached);
+        assert!(parsed.partial.is_some());
+        let p = parsed.partial.as_ref().expect("partial spec present");
+        assert_eq!(p.per_column.len(), 1);
+        assert!(matches!(p.per_column[0].op, AggOp::Sum));
+    }
+
+    /// GUC roundtrip via SET / SHOW / SELECT current_setting.
+    /// Confirms `pg_accel.preagg_parallel_safe` is registered as USERSET
+    /// and reads back the value the session set. Default must be `false`
+    /// (off) — required by ban #1 (no behaviour change for default-off path).
+    #[pg_test]
+    fn preagg_parallel_safe_guc_roundtrip() {
+        use pgrx::Spi;
+
+        // Default value MUST be off (B5a flag is opt-in).
+        let default_val: bool =
+            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
+                .expect("read default")
+                .expect("non-NULL default");
+        assert!(
+            !default_val,
+            "pg_accel.preagg_parallel_safe must default to false"
+        );
+
+        // SET on, read back.
+        Spi::run("SET pg_accel.preagg_parallel_safe = on;").expect("SET on");
+        let on_val: bool =
+            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
+                .expect("read on")
+                .expect("non-NULL on");
+        assert!(on_val, "after SET on, GUC must read true");
+
+        // SET off, read back.
+        Spi::run("SET pg_accel.preagg_parallel_safe = off;").expect("SET off");
+        let off_val: bool =
+            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
+                .expect("read off")
+                .expect("non-NULL off");
+        assert!(!off_val, "after SET off, GUC must read false");
+    }
+}
