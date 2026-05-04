@@ -303,20 +303,33 @@ shows GPU Custom Scan inside a Gather and produces identical results.
      fixture; easy to ship a test that passes for the wrong reason (PG
      falling back to its own parallel HashAgg).
 - **How — split into 2 independently-verifiable phases**:
-  - **B5a (planner-side, no exec changes)**: Rework
-    `pgaccel_inject_gpu_preagg` to attach the fact-side path as
-    `custom_paths[0]` behind a feature flag (e.g.
-    `pg_accel.preagg_parallel_safe` GUC, default false). Re-index
-    `materialize_dimensions` to skip slot 0. Mark `parallel_safe = true`
-    only when the flag is on. Keep executor heap-direct (no scan
-    refactor). Verifies the planner chain shape change in isolation.
-  - **B5b (exec-side, gated by the flag)**: Introduce
+  - **B5a (planner-side, no exec changes)** — **DONE 2026-05-02
+    (branch `agent-b5a-preagg-planner`)**. The
+    `pg_accel.preagg_parallel_safe` boolean GUC (default `false`) is
+    registered in `pg_accel/src/engine/gucs.rs`. When `true`,
+    `pgaccel_inject_gpu_preagg`
+    (`pg_accel/src/engine/ffi/planner_hooks/mod.rs`) attaches the
+    cheapest fact-side base Path as `custom_paths[0]`, sets
+    `path.parallel_safe = true`, and inherits `parallel_workers` from the
+    fact path. The wire layout adds an optional
+    `PREAGG_PARALLEL_ATTACHED_SENTINEL` block (round-tripped via
+    `PreAggPrivData::parallel_safe_planner_attached`) that the executor
+    side reads in `custom_scan/mod.rs::begin_custom_scan` to skip slot 0
+    of `(*node).custom_ps` when present — keeping `child_states[i]`
+    aligned with `depths[i]`. Default-off plans emit no sentinel and are
+    byte-identical to pre-B5a on the wire. Round-trip + GUC tests under
+    `engine::ffi::custom_scan::tests::b5a_round_trip`.
+  - **B5b (exec-side, gated by the flag)** — **PENDING**. Introduce
     `PreAggExecState::set_fact_child(child_ps)` and a parallel
-    slot-based scan path. Route `scan_and_accumulate` to it when the
-    child is set; falls back to today's heap-direct path otherwise.
+    slot-based scan path that consumes the (currently inert) fact-side
+    PlanState at `custom_ps[0]`. Route `scan_and_accumulate` to it when
+    the child is set; falls back to today's heap-direct path otherwise.
     Add the parallel-correctness test gated on the flag (parallel SUM
     must match serial SUM exactly). Once verified, flip the GUC default
     to true and remove the heap-direct path in a separate cleanup PR.
+    **Until B5b lands, do NOT enable `pg_accel.preagg_parallel_safe` in
+    production** — toggling on without B5b will not crash but may N-fold
+    over-aggregate under parallel workers.
 - Depends on: Nothing — pure pg_accel work, no upstream dependency.
   But sequencing matters (B5a → B5b).
 - **Done when**: A star-join + GROUP BY query runs PreAgg inside
