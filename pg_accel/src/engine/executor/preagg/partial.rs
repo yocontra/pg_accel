@@ -295,3 +295,82 @@ pub(super) unsafe fn heap_read_f64(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Slot-based extraction helpers (B5b — used when a fact-side child PlanState
+// has been attached and the executor consumes rows via ExecProcNode rather
+// than a direct heap_getnext loop). These mirror the heap_read_* helpers
+// above but read decoded Datums from `tts_values` / `tts_isnull` after the
+// caller has run `slot_getallattrs`.
+// ---------------------------------------------------------------------------
+
+/// Read an i64 value from a TupleTableSlot column, type-aware. Returns
+/// `None` if the column is NULL.
+///
+/// # Safety
+///
+/// `slot` must be a fully materialized `TupleTableSlot` (the caller has
+/// run `slot_getallattrs`). `attno` is 1-based and must be within the slot's
+/// attribute count. `typid` must be the column's declared type OID.
+#[inline]
+pub(super) unsafe fn slot_read_i64(
+    slot: *mut pg_sys::TupleTableSlot,
+    attno: i32,
+    typid: pg_sys::Oid,
+) -> Option<i64> {
+    if attno <= 0 {
+        return None;
+    }
+    let idx = (attno - 1) as usize;
+    // SAFETY: caller guarantees the slot is materialized and idx is in bounds.
+    unsafe {
+        if *(*slot).tts_isnull.add(idx) {
+            return None;
+        }
+        let datum = *(*slot).tts_values.add(idx);
+        #[allow(clippy::cast_possible_wrap)]
+        let raw = datum.value();
+        Some(match typid {
+            pg_sys::INT2OID => i64::from(raw as i16),
+            pg_sys::INT4OID => i64::from(raw as i32),
+            // INT8 / DATE / TIMESTAMP / OID / etc. — fits in 8 bytes, treated
+            // as the bit pattern of an i64 by the caller.
+            _ => raw as i64,
+        })
+    }
+}
+
+/// Read an f64 value from a TupleTableSlot column, type-aware. Returns
+/// `None` if the column is NULL.
+///
+/// # Safety
+///
+/// Same contract as [`slot_read_i64`].
+#[inline]
+pub(super) unsafe fn slot_read_f64(
+    slot: *mut pg_sys::TupleTableSlot,
+    attno: i32,
+    typid: pg_sys::Oid,
+) -> Option<f64> {
+    if attno <= 0 {
+        return None;
+    }
+    let idx = (attno - 1) as usize;
+    // SAFETY: caller guarantees the slot is materialized and idx is in bounds.
+    unsafe {
+        if *(*slot).tts_isnull.add(idx) {
+            return None;
+        }
+        let datum = *(*slot).tts_values.add(idx);
+        let raw = datum.value();
+        #[allow(clippy::cast_precision_loss)]
+        Some(match typid {
+            pg_sys::FLOAT4OID => f64::from(f32::from_bits(raw as u32)),
+            pg_sys::FLOAT8OID => f64::from_bits(raw as u64),
+            pg_sys::INT2OID => f64::from(raw as i16),
+            pg_sys::INT4OID => f64::from(raw as i32),
+            pg_sys::INT8OID => (raw as i64) as f64,
+            _ => f64::from_bits(raw as u64),
+        })
+    }
+}
