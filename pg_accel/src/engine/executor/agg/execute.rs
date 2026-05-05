@@ -14,7 +14,7 @@ use crate::engine::stats;
 use crate::gpu;
 use crate::gpu::{PgaccelAggCol, PgaccelAggFunc};
 
-use super::ffi_bridge::agg_op_to_ffi;
+use super::ffi_bridge::{agg_op_to_ffi, agg_op_to_ffi_partial};
 use super::keys::{GroupKeyInfo, append_key_bytes};
 use super::ops::AggOp;
 use super::partial::{ColumnAccumulator, PartialEmitter};
@@ -2235,6 +2235,12 @@ impl AggExecState {
 
     /// Grouped-mode `next`: consume all input, then emit one group per call.
     ///
+    /// When [`AggExecState::partial_emitters`] is set, dispatches the
+    /// **partial-mode** GPU kernel and emits per-group transition-state
+    /// tuples ready for PG's combine functions (`float8_combine` /
+    /// `numeric_avg_combine`). Otherwise dispatches the finalize-mode
+    /// kernel (legacy path).
+    ///
     /// # Safety
     ///
     /// Must be called on the main backend thread. All pointers must be valid.
@@ -2244,15 +2250,435 @@ impl AggExecState {
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
         let _span = tracing::debug_span!("exec.agg_grouped").entered();
+        let is_partial = self.partial_emitters.is_some();
         // First call: consume all input and run hash aggregation.
         if !self.child_exhausted {
             self.child_exhausted = true;
-            // SAFETY: caller guarantees child_ps is valid.
-            unsafe { self.execute_grouped_agg(child_ps) };
+            if is_partial {
+                // SAFETY: caller guarantees child_ps is valid.
+                unsafe { self.execute_grouped_agg_partial(child_ps) };
+            } else {
+                // SAFETY: caller guarantees child_ps is valid.
+                unsafe { self.execute_grouped_agg(child_ps) };
+            }
         }
 
         // Emit one result tuple per call.
-        // SAFETY: caller guarantees result_slot is valid.
-        unsafe { self.emit_grouped_tuple(result_slot) }
+        if is_partial {
+            // SAFETY: caller guarantees result_slot is valid.
+            unsafe { self.emit_grouped_tuple_partial(result_slot) }
+        } else {
+            // SAFETY: caller guarantees result_slot is valid.
+            unsafe { self.emit_grouped_tuple(result_slot) }
+        }
+    }
+
+    /// Grouped-mode dispatch for **partial** parallel-aggregate output.
+    ///
+    /// Identical to [`execute_grouped_agg`](Self::execute_grouped_agg)
+    /// in input-collection / staging shape, but routes the actual GPU
+    /// dispatch through [`gpu::hash_agg_execute_partial`] so per-group
+    /// AVG / STDDEV / VAR transition states (`[N, sum]` / `[N, sum,
+    /// sum_sq]`) are emitted instead of finalized scalars. The
+    /// FFI-side `PgaccelAggFunc` is selected via
+    /// [`agg_op_to_ffi_partial`] so AVG/STDDEV/VAR keep their dedicated
+    /// variants (rather than collapsing to `Sum` like the finalize
+    /// path).
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread. `child_ps` must be valid.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss
+    )]
+    unsafe fn execute_grouped_agg_partial(&mut self, child_ps: *mut pg_sys::PlanState) {
+        let group_key_info = match &self.group_key {
+            Some(info) => info.clone(),
+            None => return,
+        };
+
+        let key_size = group_key_info.key_size();
+        if key_size == 0 {
+            return;
+        }
+
+        let num_aggs = self.columns.len();
+        let mut key_buf: Vec<u8> = Vec::new();
+        let mut key_null_mask: Vec<u8> = Vec::new();
+        let mut value_bufs: Vec<Vec<u8>> = vec![Vec::new(); num_aggs];
+        let mut value_null_masks: Vec<Vec<u8>> = vec![Vec::new(); num_aggs];
+        let mut value_type_tags: Vec<i32> = vec![0; num_aggs];
+        let mut value_types_resolved = false;
+        let mut row_count: usize = 0;
+        let start = std::time::Instant::now();
+        loop {
+            // SAFETY: ExecProcNode pulls the next child tuple.
+            let child_slot = unsafe { pg_sys::ExecProcNode(child_ps) };
+            if child_slot.is_null() {
+                break;
+            }
+            // SAFETY: child_slot is non-null.
+            let is_empty = unsafe { (*child_slot).tts_flags & pg_sys::TTS_FLAG_EMPTY as u16 != 0 };
+            if is_empty {
+                break;
+            }
+
+            if !value_types_resolved {
+                // SAFETY: child_slot and tupleDescriptor are valid.
+                let tupdesc = unsafe { (*child_slot).tts_tupleDescriptor };
+                if !tupdesc.is_null() {
+                    let natts = unsafe { (*tupdesc).natts as usize };
+                    for (i, col) in self.columns.iter_mut().enumerate() {
+                        if col.attno > 0 {
+                            let idx = (col.attno - 1) as usize;
+                            if idx < natts {
+                                let attr = unsafe { &*(*tupdesc).attrs.as_ptr().add(idx) };
+                                col.type_oid = attr.atttypid;
+                                value_type_tags[i] = oid_to_val_tag(attr.atttypid);
+                            }
+                        }
+                    }
+                }
+                value_types_resolved = true;
+            }
+
+            row_count += 1;
+
+            let mut key_is_null: bool = false;
+            // SAFETY: child_slot is valid; attno is 1-based.
+            let key_datum = unsafe {
+                pg_sys::slot_getattr(child_slot, group_key_info.attno, &raw mut key_is_null)
+            };
+            key_null_mask.push(u8::from(key_is_null));
+
+            if key_is_null {
+                key_buf.extend_from_slice(&vec![0u8; key_size]);
+            } else {
+                append_key_bytes(
+                    &mut key_buf,
+                    key_datum,
+                    group_key_info.key_type,
+                    group_key_info.type_oid,
+                );
+            }
+
+            for (i, col) in self.columns.iter().enumerate() {
+                if col.op == AggOp::Count && col.attno <= 0 {
+                    value_bufs[i].extend_from_slice(&0f64.to_ne_bytes());
+                    value_null_masks[i].push(0);
+                    continue;
+                }
+
+                if col.attno <= 0 {
+                    value_bufs[i].extend_from_slice(&0f64.to_ne_bytes());
+                    value_null_masks[i].push(1);
+                    continue;
+                }
+
+                let mut val_is_null: bool = false;
+                // SAFETY: child_slot is valid.
+                let val_datum =
+                    unsafe { pg_sys::slot_getattr(child_slot, col.attno, &raw mut val_is_null) };
+                value_null_masks[i].push(u8::from(val_is_null));
+                if val_is_null {
+                    value_bufs[i].extend_from_slice(&0f64.to_ne_bytes());
+                } else {
+                    append_value_bytes(
+                        &mut value_bufs[i],
+                        val_datum,
+                        value_type_tags[i],
+                        col.type_oid,
+                    );
+                }
+            }
+
+            if row_count.is_multiple_of(self.batch_size) {
+                pgrx::check_for_interrupts!();
+            }
+        }
+
+        self.rows_dispatched = row_count as u64;
+        self.batches_executed = 1;
+        self.dispatch_time_us = start.elapsed().as_micros() as u64;
+
+        if row_count == 0 {
+            return;
+        }
+
+        // Build FFI agg_col descriptors using the partial-mode mapping
+        // so AVG/STDDEV/VAR keep their dedicated kernel variants.
+        let ffi_agg_cols: Vec<PgaccelAggCol> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| PgaccelAggCol {
+                func: agg_op_to_ffi_partial(col.op),
+                col_idx: if col.op == AggOp::Count && col.attno <= 0 {
+                    usize::MAX
+                } else {
+                    i
+                },
+            })
+            .collect();
+
+        let value_col_ptrs: Vec<*const std::ffi::c_void> = value_bufs
+            .iter()
+            .map(|buf| buf.as_ptr().cast::<std::ffi::c_void>())
+            .collect();
+        let value_null_ptrs: Vec<*const u8> = value_null_masks.iter().map(Vec::as_ptr).collect();
+
+        let dispatch_start = std::time::Instant::now();
+        let result = gpu::hash_agg_execute_partial(
+            key_buf.as_ptr().cast(),
+            key_null_mask.as_ptr(),
+            row_count,
+            group_key_info.key_type,
+            &value_col_ptrs,
+            &value_null_ptrs,
+            &value_type_tags,
+            &ffi_agg_cols,
+        );
+        self.dispatch_time_us += dispatch_start.elapsed().as_micros() as u64;
+
+        if let Some(hash_result) = result {
+            let group_count = hash_result.group_count();
+            self.gpu_dispatched = true;
+            tracing::debug!(
+                "pg_accel: hash_agg_partial: {} groups from {} rows",
+                group_count,
+                row_count
+            );
+            self.grouped_result = Some(GroupedAggResult {
+                result: hash_result,
+                next_group: 0,
+                group_count,
+                key_type: group_key_info.key_type,
+            });
+        } else {
+            // Per CLAUDE.md rule 11: GPU hash-agg must succeed. Refuse
+            // CPU fallback (the caller-supplied finalize Aggregate node
+            // would otherwise produce zero rows for a workload that
+            // actually has data).
+            pgrx::error!(
+                "pg_accel: GPU hash-agg partial-mode kernel failed; refusing to fall back to CPU (rule 11). rows={}",
+                row_count,
+            );
+        }
+    }
+
+    /// Emit the next grouped **partial-mode** result tuple, or null if
+    /// exhausted. Called once per row by the executor; produces one
+    /// `(group_key, partial_state_for_agg_0, partial_state_for_agg_1, ...)`
+    /// tuple per group, with each agg column carrying the transition-
+    /// state Datum the matching `PartialEmitter` declares
+    /// ([`Float8StatsEmitter`] for AVG/STDDEV/VAR float8 paths,
+    /// [`ScalarPassthrough`] / [`CountEmitter`] / [`IntegerSumPromotion`]
+    /// for the width-1 funcs).
+    ///
+    /// # Safety
+    ///
+    /// `result_slot` must be a valid `TupleTableSlot` pointer. Must be
+    /// called on the main backend thread.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    unsafe fn emit_grouped_tuple_partial(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let gr = match self.grouped_result.as_mut() {
+            Some(gr) if gr.next_group < gr.group_count => gr,
+            _ => return std::ptr::null_mut(),
+        };
+
+        let gidx = gr.next_group;
+        gr.next_group += 1;
+
+        let Some(group_key_info) = &self.group_key else {
+            return std::ptr::null_mut();
+        };
+
+        // SAFETY: result_slot is a valid TupleTableSlot pointer.
+        unsafe {
+            pg_sys::ExecClearTuple(result_slot);
+            let values = (*result_slot).tts_values;
+            let isnull = (*result_slot).tts_isnull;
+
+            // Group-key Datum at its tlist position. Identical to the
+            // finalize-mode path so callers building target lists can
+            // share the same helpers.
+            let gk_pos = self.group_key_tlist_pos;
+            let keys_ptr = gr.result.group_keys_ptr();
+            if keys_ptr.is_null() {
+                *isnull.add(gk_pos) = true;
+            } else {
+                *isnull.add(gk_pos) = false;
+                let datum = match gr.key_type {
+                    0 => {
+                        // SAFETY: keys_ptr points to group_count i32 values.
+                        let key = *(keys_ptr.cast::<i32>()).add(gidx);
+                        match group_key_info.type_oid {
+                            pg_sys::INT2OID => pg_sys::Datum::from(key as i16),
+                            _ => pg_sys::Datum::from(key),
+                        }
+                    }
+                    1 => {
+                        // SAFETY: keys_ptr points to group_count i64 values.
+                        let key = *(keys_ptr.cast::<i64>()).add(gidx);
+                        pg_sys::Datum::from(key)
+                    }
+                    2 => {
+                        // SAFETY: keys_ptr points to group_count f64 values.
+                        let key = *(keys_ptr.cast::<f64>()).add(gidx);
+                        match group_key_info.type_oid {
+                            pg_sys::FLOAT4OID => pg_sys::Datum::from((key as f32).to_bits()),
+                            _ => pg_sys::Datum::from(key.to_bits()),
+                        }
+                    }
+                    4 => {
+                        // SAFETY: keys_ptr is non-null and references
+                        // group_count * 16 bytes of valid UUID data
+                        // owned by the GPU result.
+                        let src = (keys_ptr.cast::<u8>()).add(gidx * 16);
+                        let dst = pg_sys::palloc(16) as *mut u8;
+                        std::ptr::copy_nonoverlapping(src, dst, 16);
+                        pg_sys::Datum::from(dst as u64)
+                    }
+                    _ => pg_sys::Datum::from(0),
+                };
+                *values.add(gk_pos) = datum;
+            }
+
+            // Per-agg partial-state Datums.
+            //
+            // For width-1 funcs we read the legacy single-f64 lane and
+            // emit it according to the column's result type (matches
+            // ScalarPassthrough / CountEmitter / IntegerSumPromotion).
+            //
+            // For AVG (width 2) we construct a `float8[2] = [N, sum]`
+            // Datum.
+            //
+            // For STDDEV/VAR (width 3) we convert the kernel's
+            // sum_sq (Σx²) lane to Sxx = Σx² − sum²/N exactly as
+            // Float8StatsEmitter does, then construct a `float8[3]`.
+            let mut slot_idx = 0;
+            for (i, col) in self.columns.iter().enumerate() {
+                if slot_idx == gk_pos {
+                    slot_idx += 1;
+                }
+                let width = gr.result.partial_width(i);
+                let Some(parts) = gr.result.partial_results(i) else {
+                    *isnull.add(slot_idx) = true;
+                    slot_idx += 1;
+                    continue;
+                };
+
+                let base = gidx * width;
+                if width == 1 {
+                    // Width-1 funcs: SUM / MIN / MAX / COUNT — emit a
+                    // single Datum whose bit-shape depends on the column
+                    // result type, mirroring the finalize-mode emit
+                    // logic.
+                    let raw_f64 = parts[base];
+                    let datum = if col.op == AggOp::Count {
+                        pg_sys::Datum::from(raw_f64 as i64)
+                    } else {
+                        match col.result_type_oid {
+                            pg_sys::FLOAT4OID => pg_sys::Datum::from((raw_f64 as f32).to_bits()),
+                            pg_sys::INT2OID => pg_sys::Datum::from(raw_f64 as i16),
+                            pg_sys::INT4OID => pg_sys::Datum::from(raw_f64 as i32),
+                            pg_sys::INT8OID => pg_sys::Datum::from(raw_f64 as i64),
+                            oid if oid == NUMERICOID => {
+                                // float8 -> Numeric for SUM(int8|numeric)
+                                // partial states. Same DirectFunctionCall
+                                // pattern as finalize-mode emit_grouped_tuple
+                                // and Float8StatsEmitter.
+                                let f8_datum = pg_sys::Datum::from(raw_f64.to_bits());
+                                let fptr: unsafe extern "C-unwind" fn(
+                                    *mut pg_sys::FunctionCallInfoBaseData,
+                                )
+                                    -> pg_sys::Datum =
+                                    core::mem::transmute(pg_sys::float8_numeric as *const ());
+                                pg_sys::DirectFunctionCall1Coll(
+                                    Some(fptr),
+                                    pg_sys::InvalidOid,
+                                    f8_datum,
+                                )
+                            }
+                            _ => pg_sys::Datum::from(raw_f64.to_bits()),
+                        }
+                    };
+                    *values.add(slot_idx) = datum;
+                    *isnull.add(slot_idx) = false;
+                } else if width == 2 {
+                    // AVG: emit float8[2] = [N, sum].
+                    let n = parts[base];
+                    let sum = parts[base + 1];
+                    let mut elems: [pg_sys::Datum; 2] = [
+                        pg_sys::Datum::from(n.to_bits()),
+                        pg_sys::Datum::from(sum.to_bits()),
+                    ];
+                    // SAFETY: construct_array copies the Datum slice into
+                    // a palloc'd ArrayType; FLOAT8OID is pass-by-value=true,
+                    // length=8, alignment 'd' (double).
+                    let arr_ptr = pg_sys::construct_array(
+                        elems.as_mut_ptr(),
+                        2,
+                        pg_sys::FLOAT8OID,
+                        8,
+                        true,
+                        b'd' as core::ffi::c_char,
+                    );
+                    if arr_ptr.is_null() {
+                        *isnull.add(slot_idx) = true;
+                    } else {
+                        *values.add(slot_idx) = pg_sys::Datum::from(arr_ptr as usize);
+                        *isnull.add(slot_idx) = false;
+                    }
+                } else if width == 3 {
+                    // STDDEV / VAR: emit float8[3] = [N, sum, Sxx]. The
+                    // kernel writes sum_sq = Σx²; convert to
+                    // Sxx = Σ(x − μ)² = Σx² − sum²/N here so the array
+                    // matches PG's float8_combine transtype layout
+                    // exactly. Mirrors Float8StatsEmitter.
+                    let n = parts[base];
+                    let sum = parts[base + 1];
+                    let sum_sq = parts[base + 2];
+                    let sxx = if n > 0.0 {
+                        (sum_sq - (sum * sum) / n).max(0.0)
+                    } else {
+                        0.0
+                    };
+                    let mut elems: [pg_sys::Datum; 3] = [
+                        pg_sys::Datum::from(n.to_bits()),
+                        pg_sys::Datum::from(sum.to_bits()),
+                        pg_sys::Datum::from(sxx.to_bits()),
+                    ];
+                    // SAFETY: same contract as the width-2 branch above;
+                    // 3-element float8 array.
+                    let arr_ptr = pg_sys::construct_array(
+                        elems.as_mut_ptr(),
+                        3,
+                        pg_sys::FLOAT8OID,
+                        8,
+                        true,
+                        b'd' as core::ffi::c_char,
+                    );
+                    if arr_ptr.is_null() {
+                        *isnull.add(slot_idx) = true;
+                    } else {
+                        *values.add(slot_idx) = pg_sys::Datum::from(arr_ptr as usize);
+                        *isnull.add(slot_idx) = false;
+                    }
+                } else {
+                    *isnull.add(slot_idx) = true;
+                }
+                slot_idx += 1;
+            }
+
+            pg_sys::ExecStoreVirtualTuple(result_slot);
+        }
+
+        result_slot
     }
 }

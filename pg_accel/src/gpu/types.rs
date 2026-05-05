@@ -224,6 +224,13 @@ impl PgaccelAggFunc {
     /// group for this func. SUM/MIN/MAX/COUNT keep their 1-wide finalize
     /// shape; AVG widens to 2 (`[N, sum]`); STDDEV/VAR widen to 3
     /// (`[N, sum, sum_sq]`).
+    ///
+    /// Mirror of the C-side `pgaccel_agg_partial_width` (see
+    /// `pgaccel-kernels/include/pgaccel_hash_agg.h`); the Rust copy is
+    /// kept around for planner/executor code that needs the width
+    /// without a kernel-state round-trip — `bridge::pgaccel_agg_get_partial_width`
+    /// reads the per-state width recorded by the kernel.
+    #[allow(dead_code)] // reason: Rust mirror of C-side pgaccel_agg_partial_width; planner-side users land in Phase 3A
     #[must_use]
     pub const fn partial_width(self) -> usize {
         match self {
