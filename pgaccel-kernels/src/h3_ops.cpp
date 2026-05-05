@@ -931,6 +931,29 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
   // res >= 12 in-kernel because precision is insufficient. The fp64 branch
   // (handled via a separate kernel dispatched when `want_fp64` is set)
   // handles the high-resolution case.
+  //
+  // ─── Argbuffer-reflection workaround (mirror of hash_agg.cpp:178-185) ───
+  // The natural lambda capture for these kernels is six typed device
+  // pointers (lats/lngs/cells/valid/fc_lat/fc_lng) plus a few scalars.
+  // On Apple Metal the AdaptiveCpp SSCP backend, once a kernel captures
+  // more than ~5 arguments, packs them into an `Input_0` argument-buffer
+  // struct passed as a single `[[buffer(1)]]`. Metal's
+  // `[MTLFunction newArgumentEncoderWithBufferIndex:reflection:]` then
+  // refuses to index past slot 0 of that buffer in forked PG backends
+  // (`bufferIndex 1 does not identify an argument buffer` assertion at
+  // _MTLFunction.mm:11540, repro under cold-cache test_fork).
+  //
+  // The fix: stage every per-row + face-center buffer end-to-end into
+  // ONE shared-memory `uint8_t*` slab AND keep total captures at ≤4
+  // so the emitter stays in the per-buffer path (no `Input_0` struct,
+  // no argbuffer reflection). Sub-array byte offsets are computed
+  // INSIDE the kernel from a single captured `count`, not passed as
+  // scalars. Captures here are exactly: { `d_slab` pointer, `count`,
+  // `res`, `deg2rad` } — four arguments. The kernel rebuilds typed
+  // views via `reinterpret_cast<T*>(slab + offset)` from offsets it
+  // recomputes. This keeps the kernel resident on GPU (no host
+  // fallback — see CLAUDE.md rules #11/#12) while side-stepping the
+  // emitter's argbuffer code path entirely.
   try {
     sycl::queue q{sycl::default_selector_v};
 
@@ -940,39 +963,75 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
       // on Metal's software emulation is ~10-30x slower than native —
       // acceptable for correctness-critical res >= 12 queries, which
       // are rare in practice.
-      double* d_lats = sycl::malloc_device<double>(count, q);
-      double* d_lngs = sycl::malloc_device<double>(count, q);
-      uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-      uint8_t* d_valid = sycl::malloc_device<uint8_t>(count, q);
-      double* d_fc_lat = sycl::malloc_device<double>(20, q);
-      double* d_fc_lng = sycl::malloc_device<double>(20, q);
+      //
+      // Flat-slab layout (all 8-byte items first to guarantee alignment):
+      //   [0           .. +count*8 )         : double   lats[count]
+      //   [count*8     .. +count*8 )         : double   lngs[count]
+      //   [count*16    .. +count*8 )         : uint64_t cells[count]
+      //   [count*24    .. +160     )         : double   fc_lat[20]
+      //   [count*24+160 .. +160    )         : double   fc_lng[20]
+      //   [count*24+320 .. +count  )         : uint8_t  valid[count]
+      //
+      // The kernel rebuilds these offsets from `count` so the only
+      // pointer captured is `d_slab` (see top-of-function comment for
+      // why this matters on Apple Metal SSCP).
+      const size_t f64_bytes = count * sizeof(double);
+      const size_t cells_bytes = count * sizeof(uint64_t);
+      const size_t fc_bytes = 20 * sizeof(double);
+      const size_t valid_bytes = count * sizeof(uint8_t);
 
-      if (!d_lats || !d_lngs || !d_cells || !d_valid || !d_fc_lat || !d_fc_lng) {
-        sycl::free(d_lats, q);
-        sycl::free(d_lngs, q);
-        sycl::free(d_cells, q);
-        sycl::free(d_valid, q);
-        sycl::free(d_fc_lat, q);
-        sycl::free(d_fc_lng, q);
+      const size_t lat_off = 0;
+      const size_t lng_off = lat_off + f64_bytes;
+      const size_t cells_off = lng_off + f64_bytes;
+      const size_t fc_lat_off = cells_off + cells_bytes;
+      const size_t fc_lng_off = fc_lat_off + fc_bytes;
+      const size_t valid_off = fc_lng_off + fc_bytes;
+      const size_t slab_bytes = valid_off + valid_bytes;
+
+      uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+      if (!d_slab) {
         return PGACCEL_ERROR_OOM;
       }
 
-      q.memcpy(d_lats, lats, count * sizeof(double));
-      q.memcpy(d_lngs, lngs, count * sizeof(double));
-      q.memcpy(d_fc_lat, FACE_CENTER_LAT, 20 * sizeof(double));
-      q.memcpy(d_fc_lng, FACE_CENTER_LNG, 20 * sizeof(double));
-      q.wait_and_throw();
+      // Stage host inputs into the slab (shared memory is host-writable).
+      std::memcpy(d_slab + lat_off, lats, f64_bytes);
+      std::memcpy(d_slab + lng_off, lngs, f64_bytes);
+      std::memcpy(d_slab + fc_lat_off, FACE_CENTER_LAT, fc_bytes);
+      std::memcpy(d_slab + fc_lng_off, FACE_CENTER_LNG, fc_bytes);
+      // Outputs: zero-init so partial failure leaves a defined state.
+      std::memset(d_slab + cells_off, 0, cells_bytes);
+      std::memset(d_slab + valid_off, 0, valid_bytes);
 
       const int res = resolution;
       const double deg2rad = DEG_TO_RAD;
-
-      const int f2bc[20] = {
-          1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-      };
+      const size_t row_count = count;
 
       q.submit([&](sycl::handler& h) {
+         // Captures: { d_slab, row_count, res, deg2rad } — 4 args.
+         // Below the AdaptiveCpp Metal-SSCP `Input_0` packing threshold,
+         // so the emitter keeps each as a separate `[[buffer(N)]]` and
+         // no argument-buffer reflection is invoked at dispatch time.
          h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
            const size_t i = id[0];
+           // Recompute offsets in-kernel from row_count. Layout MUST
+           // match the host-side computation above byte-for-byte.
+           const size_t k_f64_bytes = row_count * sizeof(double);
+           const size_t k_cells_bytes = row_count * sizeof(uint64_t);
+           const size_t k_fc_bytes = 20 * sizeof(double);
+           const size_t k_lat_off = 0;
+           const size_t k_lng_off = k_lat_off + k_f64_bytes;
+           const size_t k_cells_off = k_lng_off + k_f64_bytes;
+           const size_t k_fc_lat_off = k_cells_off + k_cells_bytes;
+           const size_t k_fc_lng_off = k_fc_lat_off + k_fc_bytes;
+           const size_t k_valid_off = k_fc_lng_off + k_fc_bytes;
+
+           const double* d_lats = reinterpret_cast<const double*>(d_slab + k_lat_off);
+           const double* d_lngs = reinterpret_cast<const double*>(d_slab + k_lng_off);
+           const double* d_fc_lat = reinterpret_cast<const double*>(d_slab + k_fc_lat_off);
+           const double* d_fc_lng = reinterpret_cast<const double*>(d_slab + k_fc_lng_off);
+           uint64_t* d_cells = reinterpret_cast<uint64_t*>(d_slab + k_cells_off);
+           uint8_t* d_valid = d_slab + k_valid_off;
+
            double lat_deg = d_lats[i];
            double lng_deg = d_lngs[i];
 
@@ -1026,7 +1085,10 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
              return;
            }
 
-           int base_cell = f2bc[best_face];
+           // Inline face-to-base-cell mapping (1-indexed identity for the
+           // 20 icosahedron faces). Inlined to avoid capturing yet another
+           // device pointer in the lambda.
+           int base_cell = best_face + 1;
 
            const double CX[7] = {0.0, 1.0, 0.5, -0.5, -1.0, -0.5, 0.5};
            const double CY[7] = {0.0,
@@ -1075,91 +1137,96 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
          });
        }).wait_and_throw();
 
-      q.memcpy(cell_ids, d_cells, count * sizeof(uint64_t));
-      q.memcpy(valid, d_valid, count * sizeof(uint8_t));
-      q.wait_and_throw();
+      // Copy results back from the slab. Shared memory is host-readable
+      // but a memcpy is still required because the caller-supplied
+      // pointers may live in a different allocation.
+      std::memcpy(cell_ids, d_slab + cells_off, cells_bytes);
+      std::memcpy(valid, d_slab + valid_off, valid_bytes);
 
-      sycl::free(d_lats, q);
-      sycl::free(d_lngs, q);
-      sycl::free(d_cells, q);
-      sycl::free(d_valid, q);
-      sycl::free(d_fc_lat, q);
-      sycl::free(d_fc_lng, q);
+      sycl::free(d_slab, q);
       pgaccel_record_gpu_exec();
       return PGACCEL_OK;
     }
     // ---- fp32 path (res < 12, or caller didn't request fp64) ----------
+    //
+    // Same trick as the fp64 path above: stage everything into a single
+    // shared-memory slab and capture only { d_slab, count, res, deg2rad }
+    // (4 args) so the AdaptiveCpp Metal-SSCP emitter does NOT pack the
+    // captures into an `Input_0` argument-buffer struct.
+    //
+    // Slab layout (8-byte items first to guarantee uint64_t alignment;
+    // 4-byte floats and 1-byte valid follow):
+    //   [0           .. +count*8 ) : uint64_t cells[count]
+    //   [count*8     .. +count*4 ) : float    lats[count]
+    //   [count*12    .. +count*4 ) : float    lngs[count]
+    //   [count*16    .. +80      ) : float    fc_lat[20]
+    //   [count*16+80 .. +80      ) : float    fc_lng[20]
+    //   [count*16+160 .. +count  ) : uint8_t  valid[count]
+    //
+    // Kernel rebuilds these offsets from `count`.
+    const size_t cells_bytes = count * sizeof(uint64_t);
+    const size_t f32_bytes = count * sizeof(float);
+    const size_t fc_bytes = 20 * sizeof(float);
+    const size_t valid_bytes = count * sizeof(uint8_t);
 
-    float* d_lats = sycl::malloc_device<float>(count, q);
-    float* d_lngs = sycl::malloc_device<float>(count, q);
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint8_t* d_valid = sycl::malloc_device<uint8_t>(count, q);
+    const size_t cells_off = 0;
+    const size_t lat_off = cells_off + cells_bytes;
+    const size_t lng_off = lat_off + f32_bytes;
+    const size_t fc_lat_off = lng_off + f32_bytes;
+    const size_t fc_lng_off = fc_lat_off + fc_bytes;
+    const size_t valid_off = fc_lng_off + fc_bytes;
+    const size_t slab_bytes = valid_off + valid_bytes;
 
-    if (!d_lats || !d_lngs || !d_cells || !d_valid) {
-      sycl::free(d_lats, q);
-      sycl::free(d_lngs, q);
-      sycl::free(d_cells, q);
-      sycl::free(d_valid, q);
+    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+    if (!d_slab) {
       return PGACCEL_ERROR_OOM;
     }
 
-    // Convert double inputs to fp32 for the fp32 GPU path (used when the
-    // caller opted out of fp64 for speed; Metal fp64 is soft-fp64 lowered)
-    auto* h_lats_f32 = new (std::nothrow) float[count];
-    auto* h_lngs_f32 = new (std::nothrow) float[count];
-    if (!h_lats_f32 || !h_lngs_f32) {
-      delete[] h_lats_f32;
-      delete[] h_lngs_f32;
-      sycl::free(d_lats, q);
-      sycl::free(d_lngs, q);
-      sycl::free(d_cells, q);
-      sycl::free(d_valid, q);
-      return PGACCEL_ERROR_OOM;
-    }
+    // Stage inputs: convert host doubles to fp32 in-place into the slab
+    // (saves the temporary heap arrays).
+    auto* slab_lats = reinterpret_cast<float*>(d_slab + lat_off);
+    auto* slab_lngs = reinterpret_cast<float*>(d_slab + lng_off);
     for (size_t i = 0; i < count; i++) {
-      h_lats_f32[i] = static_cast<float>(lats[i]);
-      h_lngs_f32[i] = static_cast<float>(lngs[i]);
+      slab_lats[i] = static_cast<float>(lats[i]);
+      slab_lngs[i] = static_cast<float>(lngs[i]);
     }
-
-    q.memcpy(d_lats, h_lats_f32, count * sizeof(float));
-    q.memcpy(d_lngs, h_lngs_f32, count * sizeof(float));
-    q.wait_and_throw();
-
-    delete[] h_lats_f32;
-    delete[] h_lngs_f32;
+    auto* slab_fc_lat = reinterpret_cast<float*>(d_slab + fc_lat_off);
+    auto* slab_fc_lng = reinterpret_cast<float*>(d_slab + fc_lng_off);
+    for (int f = 0; f < 20; f++) {
+      slab_fc_lat[f] = static_cast<float>(FACE_CENTER_LAT[f]);
+      slab_fc_lng[f] = static_cast<float>(FACE_CENTER_LNG[f]);
+    }
+    std::memset(d_slab + cells_off, 0, cells_bytes);
+    std::memset(d_slab + valid_off, 0, valid_bytes);
 
     const int res = resolution;
     const float deg2rad = static_cast<float>(DEG_TO_RAD);
-
-    // Copy face centers to device-accessible arrays
-    float h_fc_lat[20], h_fc_lng[20];
-    for (int f = 0; f < 20; f++) {
-      h_fc_lat[f] = static_cast<float>(FACE_CENTER_LAT[f]);
-      h_fc_lng[f] = static_cast<float>(FACE_CENTER_LNG[f]);
-    }
-    float* d_fc_lat = sycl::malloc_device<float>(20, q);
-    float* d_fc_lng = sycl::malloc_device<float>(20, q);
-    if (!d_fc_lat || !d_fc_lng) {
-      sycl::free(d_lats, q);
-      sycl::free(d_lngs, q);
-      sycl::free(d_cells, q);
-      sycl::free(d_valid, q);
-      sycl::free(d_fc_lat, q);
-      sycl::free(d_fc_lng, q);
-      return PGACCEL_ERROR_OOM;
-    }
-    q.memcpy(d_fc_lat, h_fc_lat, 20 * sizeof(float));
-    q.memcpy(d_fc_lng, h_fc_lng, 20 * sizeof(float));
-    q.wait_and_throw();
-
-    // Face-to-base-cell mapping
-    const int f2bc[20] = {
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-    };
+    const size_t row_count = count;
 
     q.submit([&](sycl::handler& h) {
+       // Captures: { d_slab, row_count, res, deg2rad } — 4 args. Same
+       // rationale as the fp64 path above.
        h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
          const size_t i = id[0];
+         // Recompute offsets in-kernel from row_count. Layout MUST
+         // match the host-side computation above byte-for-byte.
+         const size_t k_cells_bytes = row_count * sizeof(uint64_t);
+         const size_t k_f32_bytes = row_count * sizeof(float);
+         const size_t k_fc_bytes = 20 * sizeof(float);
+         const size_t k_cells_off = 0;
+         const size_t k_lat_off = k_cells_off + k_cells_bytes;
+         const size_t k_lng_off = k_lat_off + k_f32_bytes;
+         const size_t k_fc_lat_off = k_lng_off + k_f32_bytes;
+         const size_t k_fc_lng_off = k_fc_lat_off + k_fc_bytes;
+         const size_t k_valid_off = k_fc_lng_off + k_fc_bytes;
+
+         const float* d_lats = reinterpret_cast<const float*>(d_slab + k_lat_off);
+         const float* d_lngs = reinterpret_cast<const float*>(d_slab + k_lng_off);
+         const float* d_fc_lat = reinterpret_cast<const float*>(d_slab + k_fc_lat_off);
+         const float* d_fc_lng = reinterpret_cast<const float*>(d_slab + k_fc_lng_off);
+         uint64_t* d_cells = reinterpret_cast<uint64_t*>(d_slab + k_cells_off);
+         uint8_t* d_valid = d_slab + k_valid_off;
+
          float lat_deg = d_lats[i];
          float lng_deg = d_lngs[i];
 
@@ -1217,7 +1284,9 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
            return;
          }
 
-         int base_cell = f2bc[best_face];
+         // Inline face-to-base-cell mapping (1-indexed identity for the
+         // 20 icosahedron faces).
+         int base_cell = best_face + 1;
 
          // Hex child center offsets (aperture-7)
          const float CX[7] = {0.0f, 1.0f, 0.5f, -0.5f, -1.0f, -0.5f, 0.5f};
@@ -1262,16 +1331,10 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
        });
      }).wait_and_throw();
 
-    q.memcpy(cell_ids, d_cells, count * sizeof(uint64_t));
-    q.memcpy(valid, d_valid, count * sizeof(uint8_t));
-    q.wait_and_throw();
+    std::memcpy(cell_ids, d_slab + cells_off, cells_bytes);
+    std::memcpy(valid, d_slab + valid_off, valid_bytes);
 
-    sycl::free(d_lats, q);
-    sycl::free(d_lngs, q);
-    sycl::free(d_cells, q);
-    sycl::free(d_valid, q);
-    sycl::free(d_fc_lat, q);
-    sycl::free(d_fc_lng, q);
+    sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const std::exception&) {
