@@ -458,7 +458,14 @@ pub(super) unsafe fn try_inject(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// Widened from `cfg(test)` to `cfg(any(test, feature = "pg_test"))` so
+// pgrx's schema generator (which builds with `feature = "pg_test"`, NOT
+// `cfg(test)`) can see this module and recurse into the nested
+// `#[pgrx::pg_schema] mod tests` below to register the pg_test
+// functions. Without this widening, `cargo pgrx test` fails with
+// "function tests.X does not exist" because the CREATE FUNCTION DDL is
+// never emitted.
+#[cfg(any(test, feature = "pg_test"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     //! Unit tests for the preagg_partial chain construction.
@@ -578,78 +585,79 @@ mod tests {
         assert_ne!(final_deserial, simple);
         assert_ne!(final_deserial, initial_serial);
     }
-}
 
-// ---------------------------------------------------------------------------
-// PG-live tests
-//
-// These exercise `try_inject` against a real planner via Spi-driven EXPLAIN
-// queries. The injection is observable two ways:
-//   (a) `pg_accel_stats()` counters (set by the hook itself), or
-//   (b) the EXPLAIN output structure (Finalize Agg → Gather → CustomScan
-//       (GpuAccel)).
-//
-// We use (b) because it tests the end-to-end shape: planner gating + chain
-// construction + downstream `set_customscan_references` happiness.
-// ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // PG-live tests
+    //
+    // These exercise `try_inject` against a real planner via Spi-driven
+    // EXPLAIN queries. Observable two ways: (a) `pg_accel_stats()` counters
+    // set by the hook, or (b) the EXPLAIN output structure (Finalize Agg →
+    // Gather → CustomScan (GpuAccel)). We use (b) — it tests the end-to-end
+    // shape: planner gating + chain construction + downstream
+    // `set_customscan_references` happiness.
+    //
+    // The nested `mod tests` is required so pgrx's pg_test framework, which
+    // hard-codes its SQL function lookup as `tests."<funcname>"()` (see
+    // pgrx-tests-0.17.0/src/framework.rs:122 and
+    // custom_scan/tests.rs:1311-1326), resolves the function. The pgrx
+    // schema generator picks up the inner module's name (= `tests`) from
+    // the `#[pgrx::pg_schema]` attribute. Earlier siblings of the outer
+    // mod (e.g. `preagg_explain`) caused every pg_test invocation to fail
+    // with "function tests.X does not exist".
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "pg_test")]
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
 
-#[cfg(any(test, feature = "pg_test"))]
-#[pgrx::pg_schema]
-// Module name renamed from `pg_test_explain` to drop the `pg_` prefix —
-// pgrx renders this as a SQL schema name and PG rejects schemas with the
-// reserved `pg_` prefix (SQLSTATE 42939). The old name made every
-// `cargo test --features pg_test` invocation fail with "unacceptable
-// schema name", blocking iterative validation for any agent landing
-// FFI-heavy executor work. Found by Agent F3-finish 2026-05-03.
-mod preagg_explain {
-    use pgrx::prelude::{Spi, pg_test};
-
-    /// Drive a query whose star-shape would normally trigger the
-    /// `pgaccel_inject_gpu_preagg` hook AND whose grouped_rel is
-    /// parallel-eligible. We don't strictly need the EXPLAIN to show our
-    /// custom path (PG may pick its own parallel HashAgg if cheaper); we
-    /// just need the SQL to plan + execute without crashing the planner.
-    ///
-    /// This is the fork-safety smoke for the new `add_path` call: if the
-    /// chain construction produces a malformed Path subclass, PG's planner
-    /// asserts at `create_plan` time and the backend dies. Surviving the
-    /// query proves the chain is at minimum well-formed.
-    #[pg_test]
-    fn preagg_partial_chain_does_not_crash_planner_with_group_by() {
-        // Setup: a small fact table with enough rows to clear the
-        // `gpu_reduce_min_rows` gate (default 5_000-25_000 depending on
-        // device profile). 50_000 is comfortably above any reasonable
-        // device's minimum.
-        Spi::run(
-            "DROP TABLE IF EXISTS pgaccel_preagg_partial_smoke; \
+        /// Drive a query whose star-shape would normally trigger the
+        /// `pgaccel_inject_gpu_preagg` hook AND whose grouped_rel is
+        /// parallel-eligible. We don't strictly need the EXPLAIN to show our
+        /// custom path (PG may pick its own parallel HashAgg if cheaper); we
+        /// just need the SQL to plan + execute without crashing the planner.
+        ///
+        /// This is the fork-safety smoke for the new `add_path` call: if the
+        /// chain construction produces a malformed Path subclass, PG's planner
+        /// asserts at `create_plan` time and the backend dies. Surviving the
+        /// query proves the chain is at minimum well-formed.
+        #[pg_test]
+        fn preagg_partial_chain_does_not_crash_planner_with_group_by() {
+            // Setup: a small fact table with enough rows to clear the
+            // `gpu_reduce_min_rows` gate (default 5_000-25_000 depending on
+            // device profile). 50_000 is comfortably above any reasonable
+            // device's minimum.
+            Spi::run(
+                "DROP TABLE IF EXISTS pgaccel_preagg_partial_smoke; \
              CREATE UNLOGGED TABLE pgaccel_preagg_partial_smoke (\
                 k int4, v float8, region text); \
              INSERT INTO pgaccel_preagg_partial_smoke \
              SELECT i % 100, random() * 1000.0, ('region_' || (i % 10))::text \
              FROM generate_series(1, 50000) i; \
              ANALYZE pgaccel_preagg_partial_smoke;",
-        )
-        .expect("setup table");
+            )
+            .expect("setup table");
 
-        // Query with GROUP BY — exercises the AGG_HASHED branch.
-        let row_count: i64 = Spi::get_one::<i64>(
-            "SELECT count(*) FROM (\
+            // Query with GROUP BY — exercises the AGG_HASHED branch.
+            let row_count: i64 = Spi::get_one::<i64>(
+                "SELECT count(*) FROM (\
                 SELECT region, sum(v) AS s \
                 FROM pgaccel_preagg_partial_smoke \
                 GROUP BY region\
              ) t",
-        )
-        .expect("aggregating select with GROUP BY")
-        .expect("row_count non-NULL");
-        // 10 distinct regions, so the outer count should be 10.
-        assert_eq!(row_count, 10);
+            )
+            .expect("aggregating select with GROUP BY")
+            .expect("row_count non-NULL");
+            // 10 distinct regions, so the outer count should be 10.
+            assert_eq!(row_count, 10);
 
-        // Plain aggregate without GROUP BY — exercises the AGG_PLAIN branch.
-        let one_row: f64 = Spi::get_one::<f64>("SELECT sum(v) FROM pgaccel_preagg_partial_smoke")
-            .expect("plain aggregate select")
-            .expect("sum non-NULL");
-        assert!(one_row.is_finite() && one_row > 0.0);
+            // Plain aggregate without GROUP BY — exercises the AGG_PLAIN branch.
+            let one_row: f64 =
+                Spi::get_one::<f64>("SELECT sum(v) FROM pgaccel_preagg_partial_smoke")
+                    .expect("plain aggregate select")
+                    .expect("sum non-NULL");
+            assert!(one_row.is_finite() && one_row > 0.0);
 
-        Spi::run("DROP TABLE pgaccel_preagg_partial_smoke;").expect("drop");
+            Spi::run("DROP TABLE pgaccel_preagg_partial_smoke;").expect("drop");
+        }
     }
 }
