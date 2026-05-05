@@ -75,19 +75,41 @@ commit `a57cadb` on origin/main.**
   for the h3 lat→lng kernel, after `reduce_sum_f64`/`sort_kv_f64`/`spatial_f64`
   succeed in the same forked child. Crash class is the SSCP argbuffer
   reflection failure documented at `pgaccel-kernels/src/hash_agg.cpp:178-185`
-  (`device device void**` MSL validation), but for a soft-fp64 SLEEF kernel.
-  Verified deterministic on origin/main with no local mods. Repro:
-  `make clear-jit && timeout 300 stdbuf -oL ./pgaccel-kernels/build/test_fork`.
+  (`device device void**` MSL validation), for a soft-fp64 SLEEF kernel.
+  Repro: `make clear-jit && timeout 300 stdbuf -oL ./pgaccel-kernels/build/test_fork`.
   Crash report: `~/Library/Logs/DiagnosticReports/test_fork-*.ips`,
   imageOffset 1438760 in Metal.framework.
-  Suspected regression from upstream `c2092425` / `160728fd` (A1+A2 emitter
-  fixes) — both modified MetalEmitter argument-layout / aggregate-inlining
-  paths. Fix candidates:
-  (i) bisect: rebuild AdaptiveCpp at `4f3cde11` (pre-A1/A2) and re-run
-      test_fork to confirm bisect direction;
-  (ii) split lat_lng_to_cell's captured params into individual scalars
-       (mirror the hash_agg.cpp:170-265 flat-buffer pattern) — workaround,
-       not root-cause fix.
+
+  **Bisect (2026-05-04, by Opus 4.7) RULED OUT A1/A2 as the cause.** Both
+  upstream commits `c2092425` (A1: i33 promotion) and `160728fd` (A2: PHI
+  aggregate-constant inlining) were tested independently and together:
+  - HEAD (A1+A2): crash present
+  - revert A2 only (`28782f69`): crash present
+  - revert A1 only (`57124796`): crash present
+  - baseline `4f3cde11` (pre-A1/A2): crash STILL present
+  Reverts undone, AdaptiveCpp restored to `160728fd` (HEAD = A1+A2).
+
+  The kernel hash that crashes (`11740988318123383688.15643916352673870754`)
+  is identical across all four states, confirming the failing MSL is the
+  same bytes regardless of A1/A2. The argbuffer-reflection failure is
+  inherent to lat_lng_to_cell's parameter capture pattern — it predates
+  the suspected commits and survives all revert combinations from
+  `4f3cde11..HEAD`. Earlier "regression suspected from c2092425/160728fd"
+  framing was wrong.
+
+  Next-step recipe (workaround, since root cause is a kernel-side capture
+  pattern, not an emitter regression):
+  (i) Apply the `hash_agg.cpp:170-265` flat-buffer pattern to
+      `pgaccel_h3_lat_lng_to_cell_bulk` — coalesce the captured
+      `(lat_array, lng_array, cells_out, valid_out)` quartet into one
+      `uint8_t*` flat slab + per-output byte offsets so the emitted
+      argbuffer holds one slot, not four typed pointers. This is the
+      same workaround that closed the parallel hash_agg crash.
+  (ii) Bisect deeper than `4f3cde11` to find the upstream commit that
+       introduced the argbuffer-emit pattern for >3 device-pointer
+       captures, if (i) is ruled inadequate.
+  Earlier candidate "rebuild at `4f3cde11`" is now confirmed not a fix —
+  do not waste cycles re-running it.
 - _(small-N hash_agg silent zero verified closed by upstream fixes — cold-cache
   `test_fork` shows `hashagg_f64 OK` (total=2048) when h3_f64 doesn't crash
   earlier in the chain; `test_hash_agg_keys` = 10/10 cold-cache.)_
