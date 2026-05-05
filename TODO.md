@@ -70,8 +70,11 @@ commit `a57cadb` on origin/main.**
    Phase 6 dispatch perf  ──→ unblocks Phase 1 cost-multiplier calibration
                               unblocks AVG+STDDEV / plain-JOIN audit rows
 
-   Phase 3a/3b grouped HashAgg parallel ──→ unblocks parallel COUNT(DISTINCT) etc.
-                                            (200-400 LOC, kernel + bridge + executor)
+   Phase 3a grouped HashAgg parallel    ──→ unblocks parallel COUNT(DISTINCT) etc.
+   (planner side; 3B done via              (3B: kernel + bridge + executor — `be4d2c2`,
+    be4d2c2/46726d8/13797a0)                 `46726d8`, `13797a0`. 3A: planner-side
+                                             groupClause threading + partial_emitters
+                                             wiring. ~200-400 LOC remaining for 3A.)
 ```
 
 ### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
@@ -100,8 +103,13 @@ commit `a57cadb` on origin/main.**
   `table_open(scan_oid)` with `ExecProcNode(child)` against a wrapped
   PlanState). 42 heap-direct call sites identified. Once landed, flip GUC
   default to on. See "PreAgg executor refactor for parallel safety" entry.
-- **Phase 3a/3b grouped HashAgg parallel** — 200-400 LOC. Kernel + bridge
-  + executor. Biggest single performance unblock in the punchlist.
+- **Phase 3a grouped HashAgg parallel — planner side** — 3B (executor +
+  kernel + bridge) shipped via `be4d2c2` / `46726d8` / `13797a0`; the
+  planner now needs to remove the groupClause bail at
+  `partial_agg.rs:84` and populate `AggExecState::partial_emitters` for
+  grouped paths so the new `execute_grouped_agg_partial` path runs.
+  See "Phase 3a/3b grouped HashAgg parallel" entry below for the
+  full 3A checklist.
 - **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
   calibrated to 0.01 (`4144ac8`); per-row probe (0.01/row) is now the
   largest planner-side discouragement. Closing it unlocks AVG+STDDEV +
@@ -240,23 +248,41 @@ Executor gap:
 
 Split into 3a (planner) and 3b (executor, gating):
 
-**Phase 3b (gating) — Executor grouped partial emit path**
-- Extend `hash_agg_execute` / `HashAggResult` to return per-group *partial*
-  transition states (AVG/STDDEV/VAR need `[N, sum, sum_sq]` per group; SUM /
-  MIN / MAX / COUNT need raw accumulator per group). Route via GPU kernel
-  output mode — NOT a host-side `HashMap<Box<[u8]>, Vec<ColumnAccumulator>>`
-  scaffold (CLAUDE.md rule 11/12 ban CPU compute on the GPU dispatch path,
-  enforced at compile time).
-- ~200-400 line change spanning kernel + bridge + result accessor + emit
-  path. Needs a correctness test matrix cross-verified against PG's
-  `advance_combine_function` semantics for each emitter shape.
+**Phase 3b (gating) — Executor grouped partial emit path** ✅ **DONE**
+(commits `be4d2c2` + `46726d8` + `13797a0`).
+- Kernel (`pgaccel-kernels/src/hash_agg.cpp`):
+  `pgaccel_hash_agg_execute_partial` C entry point + parallel
+  `agg_hash_partial` / `agg_sort_based_partial` host orchestration +
+  `run_unsorted_partial_kernel` / `run_sorted_partial_kernel` SYCL
+  kernels. Per-agg per-group lanes: 1 for SUM/MIN/MAX/COUNT, 2 for
+  AVG (`[N, sum]`), 3 for STDDEV/VAR (`[N, sum, sum_sq]`).
+- Bridge (`pg_accel/src/gpu/`): `PgaccelAggFunc::Avg/Stddev/Var`
+  variants + `partial_width()` helper; `HashAggResult::partial_results()`
+  / `partial_width()` accessors; `hash_agg_execute_partial()` wrapper.
+- Executor (`pg_accel/src/engine/executor/agg/execute.rs`):
+  `execute_grouped_agg_partial` + `emit_grouped_tuple_partial` —
+  emits `float8[2]` (AVG) / `float8[3]` (STDDEV/VAR) Datums via
+  `construct_array`, with `Sxx = sum_sq − sum²/N` conversion at emit
+  time matching `Float8StatsEmitter`. Width-1 funcs keep finalize-mode
+  Datum bit shape. Path is dormant until `partial_emitters` is set
+  for the grouped case (Phase 3A's job).
+- Tests:
+  - Kernel: `test_hash_agg_partial` — 6 tests / 64 assertions PASS
+    cold-cache (SUM/AVG/STDDEV/MIN+MAX/COUNT*/AVG-bool, both small-N
+    hash and large-N sort paths).
+  - Rust: 4 `partial_ffi_*` lib tests PASS under `--features pg_test`
+    (bridge round-trip + finalize-state width-1 fallback).
+- `test_hash_agg_keys` 10/10 cold-cache — finalize-mode regression
+  baseline preserved.
 
-**Phase 3a (planner) — wait for 3b**
+**Phase 3a (planner) — UNBLOCKED, ready to land**
 - Remove the `groupClause` bail at `partial_agg.rs:84`.
 - Extend PAAG (or new PGGK block) with `group_keys: Vec<(attno, typoid)>`.
 - Thread groupClause into `plan_custom_path_agg` in `custom_scan/mod.rs`.
 - Pass `groupClause` + `numGroups` to `create_agg_path` alongside
   `AGG_PLAIN`/`numGroups=1` currently hardcoded at `partial_agg.rs:377,382`.
+- For grouped paths, populate `AggExecState::partial_emitters` so
+  `next_grouped` routes through the new partial-mode path (3B).
 
 **Gates verified intact (must not regress)**:
 - `partial_agg.rs:170-203` precise AVG/STDDEV/VAR transtype gate.
