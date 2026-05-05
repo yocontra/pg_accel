@@ -194,6 +194,16 @@ pub struct PgaccelBatch {
 // ---------------------------------------------------------------------------
 
 /// Aggregate function tag for GPU hash aggregation.
+///
+/// Variants 0..3 are the *finalize-mode* funcs supported by the original
+/// `pgaccel_hash_agg_execute` entry point. Variants 4..6 (`Avg`, `Stddev`,
+/// `Var`) are emitted **only** by `pgaccel_hash_agg_execute_partial` —
+/// they describe richer per-group transition states (`[N, sum]` for AVG,
+/// `[N, sum, sum_sq]` for STDDEV/VAR, in PG's `float8_accum` layout).
+///
+/// Mirror of the C enum `pgaccel_agg_func` in
+/// `pgaccel-kernels/include/pgaccel_hash_agg.h`. Discriminant values must
+/// stay synced — `bridge.rs` asserts this in `agg_func_discriminant_values_match_c`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PgaccelAggFunc {
@@ -201,6 +211,27 @@ pub enum PgaccelAggFunc {
     Min = 1,
     Max = 2,
     Count = 3,
+    /// AVG transition state: `[N, sum]` per group (partial mode only).
+    Avg = 4,
+    /// `STDDEV_*` transition state: `[N, sum, sum_sq]` per group (partial mode only).
+    Stddev = 5,
+    /// `VAR_*` transition state: `[N, sum, sum_sq]` per group (partial mode only).
+    Var = 6,
+}
+
+impl PgaccelAggFunc {
+    /// Width (number of f64 lanes) the **partial-mode** kernel emits per
+    /// group for this func. SUM/MIN/MAX/COUNT keep their 1-wide finalize
+    /// shape; AVG widens to 2 (`[N, sum]`); STDDEV/VAR widen to 3
+    /// (`[N, sum, sum_sq]`).
+    #[must_use]
+    pub const fn partial_width(self) -> usize {
+        match self {
+            Self::Sum | Self::Min | Self::Max | Self::Count => 1,
+            Self::Avg => 2,
+            Self::Stddev | Self::Var => 3,
+        }
+    }
 }
 
 /// Aggregate column descriptor for GPU hash aggregation.

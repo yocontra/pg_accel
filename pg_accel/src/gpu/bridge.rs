@@ -780,6 +780,40 @@ unsafe extern "C" {
     /// Get aggregate results for one aggregate column.
     pub fn pgaccel_agg_get_results(state: *const PgaccelAggState, agg_idx: usize) -> *const f64;
 
+    /// Perform grouped aggregation in **partial** mode (Phase 3B).
+    ///
+    /// Same input shape as `pgaccel_hash_agg_execute`. Output emits per-group
+    /// transition states matching PG's combine functions: 1 lane for
+    /// SUM/MIN/MAX/COUNT (identical to finalize mode), 2 lanes
+    /// `[N, sum]` for `AVG`, 3 lanes `[N, sum, sum_sq]` for STDDEV/VAR.
+    /// Read per-agg results via `pgaccel_agg_get_partial_results` and
+    /// per-agg lane width via `pgaccel_agg_get_partial_width`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_hash_agg_execute_partial(
+        group_keys: *const std::ffi::c_void,
+        group_null_mask: *const u8,
+        row_count: usize,
+        key_type: i32,
+        value_cols: *const *const std::ffi::c_void,
+        value_nulls: *const *const u8,
+        value_types: *const i32,
+        agg_cols: *const PgaccelAggCol,
+        num_aggs: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Get partial-mode aggregate results for one aggregate column.
+    ///
+    /// Returns a pointer to `group_count * partial_width(func)` f64 values
+    /// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
+    /// Falls back to finalize-mode buffer for legacy states (width=1).
+    pub fn pgaccel_agg_get_partial_results(
+        state: *const PgaccelAggState,
+        agg_idx: usize,
+    ) -> *const f64;
+
+    /// Get partial-mode lane width for one aggregate column. 0 on error.
+    pub fn pgaccel_agg_get_partial_width(state: *const PgaccelAggState, agg_idx: usize) -> usize;
+
     /// Get per-group row counts.
     pub fn pgaccel_agg_get_counts(state: *const PgaccelAggState) -> *const i64;
 
@@ -1139,6 +1173,21 @@ mod tests {
         assert_eq!(PgaccelAggFunc::Min as i32, 1);
         assert_eq!(PgaccelAggFunc::Max as i32, 2);
         assert_eq!(PgaccelAggFunc::Count as i32, 3);
+        // Partial-mode funcs (used by pgaccel_hash_agg_execute_partial only).
+        assert_eq!(PgaccelAggFunc::Avg as i32, 4);
+        assert_eq!(PgaccelAggFunc::Stddev as i32, 5);
+        assert_eq!(PgaccelAggFunc::Var as i32, 6);
+    }
+
+    #[test]
+    fn agg_func_partial_widths() {
+        assert_eq!(PgaccelAggFunc::Sum.partial_width(), 1);
+        assert_eq!(PgaccelAggFunc::Min.partial_width(), 1);
+        assert_eq!(PgaccelAggFunc::Max.partial_width(), 1);
+        assert_eq!(PgaccelAggFunc::Count.partial_width(), 1);
+        assert_eq!(PgaccelAggFunc::Avg.partial_width(), 2);
+        assert_eq!(PgaccelAggFunc::Stddev.partial_width(), 3);
+        assert_eq!(PgaccelAggFunc::Var.partial_width(), 3);
     }
 
     #[test]
