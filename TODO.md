@@ -39,30 +39,53 @@ items explicitly descoped from ship.
 3 final agents merged: B5a planner-side PreAgg refactor (commit `7c6d355`,
 GUC-gated), K kernel-bug fix (commit `0319d93`, ported 2 SSCP-failing H3
 kernels to host), SRF executor wiring (commit `a57cadb`, full custom-scan
-plumbing for SRF-in-target-list). `audit-cpu-cheats: PASS`. **Now at
-commit `a57cadb` on origin/main.**
+plumbing for SRF-in-target-list). `audit-cpu-cheats: PASS`.
+
+### Round 4 (2026-05-04/05) — landed on `main`
+
+7 commits past `a57cadb`. P0 punchlist now empty. Highlights:
+- ✅ SRF passthrough wrong-result (`4c2687b`) — DISTINCT/ORDER/FILTER reject in agg planner
+- ✅ h3 multi-cell SRF Record-arm slot fix (`b09c22f`) — virtual slot + `construct_array`
+- ✅ `make clear-jit` canonicalised (`0449662`)
+- ✅ ACPP A1+A2 emitter fixes upstream (`c2092425`, `160728fd`); pg_accel revert blocked on SLEEF JIT compile-time (see P2)
+- ✅ hash_agg small-N + sort_kv cold-cache (`5076e08`) — closed by upstream A1+A2
+- ✅ h3 lat_lng_to_cell argbuffer-flatten (`b17c588`) — captured params 9→4, dodges Metal SSCP encoder reflection bug
+- ✅ pgrx pg_test schema-rendering bug (`a3f27e1`) — `cargo pgrx test pg17 preagg` 47/48→48/48
+
+### Round 5 (2026-05-05) — landed on worktree branches, **NOT YET MERGED to main**
+
+Six parallel agents shipped P1/P2 work in disjoint worktrees. Each branch
+is independently mergeable; recommended order = chronological (B5b first
+since it touches the broadest scope, then 3B, then P6D; ACPP cherry-picks
+last since they're upstream).
+
+| Branch | Status | Net effect |
+|---|---|---|
+| `agent-b5b-preagg-exec` | ✅ ready | PreAgg slot-based scan refactor; `preagg_parallel_safe` GUC default flipped on (commits `b4940e4`, `058baf7`); 47/48 → 48/48 preagg tests |
+| `worktree-agent-a5b484b0e375d86d0` (Phase 3B) | ✅ ready | HashAgg per-group partial-state kernel + bridge + executor (commits `be4d2c2`, `46726d8`, `13797a0`, `a0296d2`); 64/64 partial-correctness tests, 10/10 hash_agg_keys cold-cache. Unblocks Phase 3A (planner-side). |
+| `worktree-agent-a77f649bdfa546315` (Phase 6 perf) | ✅ ready | Probe-cost amortisation: 4 hard-coded literals (`0.01`/`0.005`) moved into `DeviceLimits`, calibrated from measured GPU throughput (commit `cf88435`). EXPLAIN evidence: AVG+STDDEV and plain JOIN now pick `Custom Scan (GpuAccelAgg/Join)` instead of PG's stock plans. |
+| `~/local/src/AdaptiveCpp-acpp45/agent-acpp45` | ✅ ready | MetalEmitter polish bundle (4 commits): forward-decl volume reduction, ReplaceIntrinsics fixpoint, soft-fp64 classifier centralisation, `__args` argument-buffer `constant` qualifier (ACPP4) |
+| `~/local/src/AdaptiveCpp-acpp67/agent-acpp67` | ✅ partial ready | cmake JSON list-separator fix (verified end-to-end), fp64 fork-safety stress test, `ACPP_METAL_DUMP_IR` debug logging. 4 sub-items deferred (forwarder coverage matrix, MPFR ULP, `-Wall` triage, cross-backend parity — needs CUDA/ROCm hardware not available locally). |
+| `~/local/src/AdaptiveCpp-sleef/agent-sleef` | ⚠️ partial; **blocked** | Pre-O3 reachability prune for soft-fp64 (commit `b6a4c2ee`) reduces bitcode 5.4 MB → 605 KB AND clears the cold-cache `test_h3` xcrun-metal hang documented in P2 below. **But**: outlining SLEEF helpers exposes a multi-AS pointer-param emitter limitation (228/336 tests fail with `cannot pass pointer to default address space as a pointer to address space 'device'`). Flag `SF64_DISABLE_SLEEF_INLINE` is OFF by default so behaviour is preserved. Next-step in P2. |
 
 ### Blocking relationships at-a-glance
 
 ```
-                       ┌─ B5b PreAgg exec refactor ──→ unlocks parallel star-join PreAgg
-                       │   (open; gated by B5a GUC, default off)
-                       │
-   AdaptiveCpp upstream┼─ 33-bit int width emitter fix ✅ landed `c2092425`     ┐
-   `fork-safe-metal`   │  PHI literal declaration emitter fix ✅ landed `160728fd` ┤
-                       │  → pg_accel revert BLOCKED: cold-cache JIT compile of soft-fp64 SLEEF SYCL    │
-                       │    kernels (sin/cos/atan via `pgaccel_h3_lat_lng_to_cell`,                    │
-                       │    `pgaccel_h3_cell_to_boundary_emit`) exceeds 10-min test timeout. Host-port │
-                       │    from K commit `0319d93` stays. See P2 entry for next-step investigation.   │
-                       │
+   AdaptiveCpp upstream    ┌─ ACPP4 (`__args` constant qualifier) ✅ on `agent-acpp45`
+   `fork-safe-metal`       ├─ ACPP5-2/4/5 (emitter polish) ✅ on `agent-acpp45`
+                           ├─ A1+A2 (i33 / PHI literal) ✅ on `fork-safe-metal` HEAD
+                           └─ SLEEF surface reduction ⚠️ partial on `agent-sleef`
+                                                          (multi-AS pointer specialization
+                                                           in MetalEmitter is the next 200-400 LOC
+                                                           of upstream work; flag-OFF preserves status quo)
+
+   pg_accel main           ┌─ B5b PreAgg exec refactor ✅ on `agent-b5b-preagg-exec` — ready to merge
+                           ├─ Phase 3B HashAgg parallel ✅ on `worktree-agent-a5b484b0e375d86d0` — ready
+                           ├─ Phase 6 probe-cost ✅ on `worktree-agent-a77f649bdfa546315` — ready
+                           └─ Phase 3A planner-side — UNBLOCKED by 3B; ~50 LOC follow-up
+
    Geometry-array extractor ──→ unlocks st_value(rast, geometry[]) end-to-end smoke
    for st_value             (PostGIS doesn't expose this SQL surface today; lower priority)
-
-   Phase 6 dispatch perf  ──→ unblocks Phase 1 cost-multiplier calibration
-                              unblocks AVG+STDDEV / plain-JOIN audit rows
-
-   Phase 3a/3b grouped HashAgg parallel ──→ unblocks parallel COUNT(DISTINCT) etc.
-                                            (200-400 LOC, kernel + bridge + executor)
 ```
 
 ### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
@@ -78,52 +101,71 @@ commit `a57cadb` on origin/main.**
   entries since the h3 fix unblocked the chain.)_
 
 **P1 — perf blockers (correctness fine, GPU acceleration off in some cases)**:
-- **B5b PreAgg exec-side refactor** — B5a (commit `7c6d355`) shipped the
-  planner-side wiring behind `pg_accel.preagg_parallel_safe` GUC (default
-  off). B5b needs slot-based scan path in `PreAggExecState` (replace
-  `table_open(scan_oid)` with `ExecProcNode(child)` against a wrapped
-  PlanState). 42 heap-direct call sites identified. Once landed, flip GUC
-  default to on. See "PreAgg executor refactor for parallel safety" entry.
-- **Phase 3a/3b grouped HashAgg parallel** — 200-400 LOC. Kernel + bridge
-  + executor. Biggest single performance unblock in the punchlist.
-- **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
-  calibrated to 0.01 (`4144ac8`); per-row probe (0.01/row) is now the
-  largest planner-side discouragement. Closing it unlocks AVG+STDDEV +
-  plain-JOIN audit rows AND Phase 1 cost-multiplier calibration.
+- _(B5b PreAgg exec-side refactor — done on `agent-b5b-preagg-exec` worktree
+  branch, ready to merge. See Round 5 table above.)_
+- _(Phase 3B HashAgg parallel kernel/bridge/executor — done on
+  `worktree-agent-a5b484b0e375d86d0`, ready to merge.)_
+- _(Phase 6 dispatch perf / probe-cost amortisation — done on
+  `worktree-agent-a77f649bdfa546315`, ready to merge.)_
+- **Phase 3A grouped HashAgg planner-side** — UNBLOCKED by 3B kernel/bridge.
+  ~50 LOC: (i) drop `groupClause` bail at `partial_agg.rs:84`, (ii) extend
+  PAAG with `group_keys: Vec<(attno, typoid)>`, (iii) thread groupClause into
+  `plan_custom_path_agg` in `custom_scan/mod.rs`, (iv) pass `groupClause` +
+  `numGroups` to `create_agg_path`. 3B's `partial_emitters` field stays
+  dormant until 3A wires emitters on for grouped paths.
 
 **P2 — open follow-ups (genuinely lower priority)**:
-- **AdaptiveCpp upstream emitter fixes — patches landed, pg_accel revert
-  blocked on JIT compile time.** Both upstream bugs filed by K were
-  landed on `~/local/src/AdaptiveCpp/fork-safe-metal`:
-  (a) `LLVMToMetal: Unsupported integer bit width: 33` → fix
-  `c2092425` (promote non-standard integer widths to next supported size);
-  (b) `use of undeclared identifier 't_double__1_000000e_00...'` →
-  fix `160728fd` (inline aggregate constants at PHI/select/store use sites).
-  Both verified via standalone repros. **The pg_accel-side revert from K's
-  host-port (`pgaccel-kernels/src/h3_ops.cpp` commit `51b5353`) back to
-  SYCL is blocked**: cold-cache `test_h3` hangs at `test_lat_lng_to_cell`
-  / `test_cell_to_boundary` even with `ACPP_METAL_ARCHIVE_MAX_BYTES=8388608`,
-  because soft-fp64 SLEEF (sin/cos/asin/atan) compiled through MetalEmitter
-  → `xcrun metal` exceeds the 600s test budget. Repro recipe:
-  `make clear-jit && cd pgaccel-kernels/build && ACPP_METAL_ARCHIVE_MAX_BYTES=8388608 timeout 600 stdbuf -oL ./test_h3 > /tmp/h3.log 2>&1`
-  — exits 124 (timeout). Next-step candidates:
-  (i) reduce SLEEF surface emitted into the metallib (only emit functions
-      transitively reachable from kernel entries),
-  (ii) cache-warm the SLEEF metallib at `_PG_init`-equivalent for the test
-      harness to keep the cold-cache budget honest,
-  (iii) pre-port more SLEEF helpers to host (regression direction).
-  Host-port (a, b) remains the working path for now.
+- **SLEEF JIT compile-time + multi-AS pointer specialization** —
+  upstream work on `~/local/src/AdaptiveCpp-sleef/agent-sleef` (commit
+  `b6a4c2ee`) addressed item (i) from the prior Round 4 entry: pre-O3
+  reachability prune drops unreachable soft-fp64 functions and SLEEF
+  coefficient globals, shrinking bitcode 5.4 MB → 605 KB and eliminating
+  the cold-cache `test_h3` xcrun-metal hang. **However**, outlining the
+  SLEEF helpers (which is what removes the hang on the kernel side too —
+  the only step that would unblock K's host-port revert) exposes a
+  per-call-site address-space specialization gap in `MetalEmitter`:
+  helpers like `poly_array(double, const double*, i32, sf64_internal_fe_acc&)`
+  take TWO pointer params with different runtime ASes (`constant` +
+  `thread`) but emit as `ptr addrspace(0)` for both. With the
+  `SF64_DISABLE_SLEEF_INLINE` flag ON, 228/336 tests fail with
+  `cannot pass pointer to default address space as a pointer to address
+  space 'device'`. Flag is OFF by default so default behaviour is
+  preserved. Next-step: implement per-AS function specialization in
+  `MetalEmitter` (clone helpers per AS combination, ~200-400 LOC in
+  `Emitter.cpp` + `LLVMToMetal.cpp`). Until then, K's host-port at
+  `pgaccel-kernels/src/h3_ops.cpp` (commit `51b5353`/`0319d93`) stays.
+  ACPP A1+A2 fixes themselves (`c2092425` + `160728fd`) remain on
+  `fork-safe-metal` HEAD, verified via standalone repros.
 - **Geometry-array extractor for `st_value`** — `pgaccel_raster_value`
   kernel works; `extract_geometry_array` walker for PG `geometry[]` arg
   is missing. PostGIS doesn't expose `ST_Value(rast, ARRAY[...])` at the
   SQL surface today, so impact is low.
-- **Phase 1 cost-multiplier calibration** — blocked by Phase 6 dispatch perf
-  (see above). The `fp64_matrix` 2-cell shortfall is dispatch overhead,
-  not multiplier tuning.
+- **Phase 1 cost-multiplier calibration** — UNBLOCKED by Phase 6 probe-cost
+  work in `worktree-agent-a77f649bdfa546315`. Once Phase 6 lands, the
+  `fp64_matrix` 2-cell shortfall (which was dispatch overhead, not
+  multiplier tuning) should resolve naturally; spot-check the audit and
+  close.
 - **Phase 4 type coverage — JSON / JSONB** — substantial; needs a JSONB
   binary-format parser kernel.
 - **Phase 5 worker-side spatial recheck** — DSM plumbing.
-- **Phase 7 AdaptiveCpp polish** — multiple smaller items.
+- **AdaptiveCpp polish — partial work landed on worktree branches**:
+  - `agent-acpp45` (4 commits, ready to cherry-pick): forward-decl volume
+    reduction, ReplaceIntrinsics fixpoint, soft-fp64 classifier
+    centralisation, `__args` argument-buffer `constant` qualifier (ACPP4).
+    Dropped: ACPP5-1 (uint4 shift fast paths — already implemented),
+    ACPP5-3 (`optnone` removal — needs custom InstCombine recognizer-
+    suppression, infeasible in one session).
+  - `agent-acpp67` (3 commits): cmake JSON list-separator fix
+    (verified end-to-end), fp64 fork-safety stress test (auto-skips
+    without install), `ACPP_METAL_DUMP_IR` debug logging.
+  - **Deferred from `agent-acpp67`**: forwarder coverage matrix
+    (ACPP6.2), MPFR ULP cross-check (ACPP6.3 — depends on 6.2),
+    `-Wall`/`-Wextra` triage (ACPP7.4), fenv flag readback API +
+    `ACPP_METAL_FP64_EXPORT` ABI audit (ACPP7.5), `ACPP_METAL_KEEP_SOURCE`
+    decommission + `-fno-fast-math` semantics + 31-buffer scale test
+    (ACPP7.6 mostly), cross-backend parity verification (ACPP7.7 —
+    needs CUDA/ROCm/L0 hardware not available locally; per anti-cheat
+    ban #1 not testable here).
 
 ### Closed in this round (no longer in Open list)
 
