@@ -340,7 +340,8 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_fork_warmed \
     && ./pgaccel-kernels/build/test_fork_cold \
     && ./pgaccel-kernels/build/test_sycl_basic \
-    && ./pgaccel-kernels/build/test_reduce_stats
+    && ./pgaccel-kernels/build/test_reduce_stats \
+    && ./pgaccel-kernels/build/test_hash_agg_partial
 
 # Wipe the AdaptiveCpp Metal SSCP JIT cache, then run a single named
 # kernel test binary with a 5-minute timeout. Use this from the
