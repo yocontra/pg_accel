@@ -68,55 +68,14 @@ commit `a57cadb` on origin/main.**
 ### Open items by priority (P0 = correctness blocker, P1 = perf blocker, P2 = nice-to-have)
 
 **P0 — correctness blockers (silent wrong-results or crashes possible)**:
-- **`test_fork` cold-cache crash on `pgaccel_h3_lat_lng_to_cell_bulk`** —
-  Deterministic SIGABRT on `[MTLFunction newArgumentEncoderWithBufferIndex:
-  reflection:functionReflection:]` inside
-  `hipsycl::rt::metal_inorder_queue::submit_sscp_kernel_from_code_object`
-  for the h3 lat→lng kernel, after `reduce_sum_f64`/`sort_kv_f64`/`spatial_f64`
-  succeed in the same forked child. Crash class is the SSCP argbuffer
-  reflection failure documented at `pgaccel-kernels/src/hash_agg.cpp:178-185`
-  (`device device void**` MSL validation), for a soft-fp64 SLEEF kernel.
-  Repro: `make clear-jit && timeout 300 stdbuf -oL ./pgaccel-kernels/build/test_fork`.
-  Crash report: `~/Library/Logs/DiagnosticReports/test_fork-*.ips`,
-  imageOffset 1438760 in Metal.framework.
-
-  **Bisect (2026-05-04, by Opus 4.7) RULED OUT A1/A2 as the cause.** Both
-  upstream commits `c2092425` (A1: i33 promotion) and `160728fd` (A2: PHI
-  aggregate-constant inlining) were tested independently and together:
-  - HEAD (A1+A2): crash present
-  - revert A2 only (`28782f69`): crash present
-  - revert A1 only (`57124796`): crash present
-  - baseline `4f3cde11` (pre-A1/A2): crash STILL present
-  Reverts undone, AdaptiveCpp restored to `160728fd` (HEAD = A1+A2).
-
-  The kernel hash that crashes (`11740988318123383688.15643916352673870754`)
-  is identical across all four states, confirming the failing MSL is the
-  same bytes regardless of A1/A2. The argbuffer-reflection failure is
-  inherent to lat_lng_to_cell's parameter capture pattern — it predates
-  the suspected commits and survives all revert combinations from
-  `4f3cde11..HEAD`. Earlier "regression suspected from c2092425/160728fd"
-  framing was wrong.
-
-  Next-step recipe (workaround, since root cause is a kernel-side capture
-  pattern, not an emitter regression):
-  (i) Apply the `hash_agg.cpp:170-265` flat-buffer pattern to
-      `pgaccel_h3_lat_lng_to_cell_bulk` — coalesce the captured
-      `(lat_array, lng_array, cells_out, valid_out)` quartet into one
-      `uint8_t*` flat slab + per-output byte offsets so the emitted
-      argbuffer holds one slot, not four typed pointers. This is the
-      same workaround that closed the parallel hash_agg crash.
-  (ii) Bisect deeper than `4f3cde11` to find the upstream commit that
-       introduced the argbuffer-emit pattern for >3 device-pointer
-       captures, if (i) is ruled inadequate.
-  Earlier candidate "rebuild at `4f3cde11`" is now confirmed not a fix —
-  do not waste cycles re-running it.
+- _(none open — see Closed in this round below for the
+  `pgaccel_h3_lat_lng_to_cell_bulk` argbuffer-reflection fix.)_
 - _(small-N hash_agg silent zero verified closed by upstream fixes — cold-cache
-  `test_fork` shows `hashagg_f64 OK` (total=2048) when h3_f64 doesn't crash
-  earlier in the chain; `test_hash_agg_keys` = 10/10 cold-cache.)_
+  `test_fork` shows `hashagg_f64 OK` (total=2048) and `h3_f64 OK` end-to-end;
+  `test_hash_agg_keys` = 10/10 cold-cache.)_
 - _(`sort_kv_i32`/`sort_kv_i64` cold-cache fork dispatch verified working via
-  standalone harness; the in-suite `test_fork` regression is for these is NOT
-  yet wired in — addition was reverted because the test_fork suite is currently
-  broken upstream of where they'd run, see h3 entry above.)_
+  standalone harness; in-suite `test_fork` now reaches all six fp64 matrix
+  entries since the h3 fix unblocked the chain.)_
 
 **P1 — perf blockers (correctness fine, GPU acceleration off in some cases)**:
 - **B5b PreAgg exec-side refactor** — B5a (commit `7c6d355`) shipped the
@@ -168,6 +127,18 @@ commit `a57cadb` on origin/main.**
 
 ### Closed in this round (no longer in Open list)
 
+- ✅ `test_fork` cold-cache crash on `pgaccel_h3_lat_lng_to_cell_bulk` (P0) —
+  fixed in commit `b17c588`. Both kernels (fp64 res>=12 and fp32 res<12)
+  collapsed from 6 typed device pointers to a single `uint8_t*` shared-
+  memory slab + `{count, res, deg2rad}` scalars. Capture count drops from
+  ~9 to 4, so AdaptiveCpp Metal SSCP no longer packs them into the
+  `Input_0` argbuffer struct that Metal's runtime reflection refused to
+  index past slot 0 of in forked children. Cold-cache `test_fork` now
+  PASSES twice in a row with `[child] fp64 matrix: h3_f64 (lat_lng_to_cell) OK`
+  followed by `hashagg_f64 OK` and `bbox_f64 OK`. MSL kernel signature
+  is now `(constant ulong& t0, device void* t1, constant uint& t2,
+  constant ulong& t3)` — same shape as the always-working spatial_f64
+  / sort_kv_f64 kernels. No CPU fallback.
 - ✅ small-N `hash_agg` silent zero (P0) — AdaptiveCpp upstream fixes
   `c2092425` + `160728fd` lift the SSCP edge case that was causing
   `agg_hash`'s `run_unsorted_accum_kernel` (`pgaccel-kernels/src/hash_agg.cpp:371-439`)
