@@ -67,8 +67,13 @@ commit `a57cadb` on origin/main.**
    Geometry-array extractor ──→ unlocks st_value(rast, geometry[]) end-to-end smoke
    for st_value             (PostGIS doesn't expose this SQL surface today; lower priority)
 
-   Phase 6 dispatch perf  ──→ unblocks Phase 1 cost-multiplier calibration
-                              unblocks AVG+STDDEV / plain-JOIN audit rows
+   Phase 6 dispatch perf ✅ closed by per-row planner-cost calibration
+                            (gpu_hashjoin_build/probe + custom_scan_yield +
+                            gpu_partial_agg moved into DeviceLimits at
+                            0.0005/row on M-series; AVG+STDDEV and plain-JOIN
+                            audit rows both promoted to RequiredToday).
+                            Phase 1 cost-multiplier calibration is no longer
+                            blocked.
 
    Phase 3a/3b grouped HashAgg parallel ──→ unblocks parallel COUNT(DISTINCT) etc.
                                             (200-400 LOC, kernel + bridge + executor)
@@ -102,10 +107,6 @@ commit `a57cadb` on origin/main.**
   default to on. See "PreAgg executor refactor for parallel safety" entry.
 - **Phase 3a/3b grouped HashAgg parallel** — 200-400 LOC. Kernel + bridge
   + executor. Biggest single performance unblock in the punchlist.
-- **Phase 6 dispatch perf / probe-cost amortisation** — yield cost
-  calibrated to 0.01 (`4144ac8`); per-row probe (0.01/row) is now the
-  largest planner-side discouragement. Closing it unlocks AVG+STDDEV +
-  plain-JOIN audit rows AND Phase 1 cost-multiplier calibration.
 - **Phase 6 cold-cache fork crash on `sort_kv_i32`/`i64`** — same SSCP root
   cause as the small-N hash_agg bug. Warmup-at-init tried, regressed,
   reverted.
@@ -123,9 +124,14 @@ commit `a57cadb` on origin/main.**
   kernel works; `extract_geometry_array` walker for PG `geometry[]` arg
   is missing. PostGIS doesn't expose `ST_Value(rast, ARRAY[...])` at the
   SQL surface today, so impact is low.
-- **Phase 1 cost-multiplier calibration** — blocked by Phase 6 dispatch perf
-  (see above). The `fp64_matrix` 2-cell shortfall is dispatch overhead,
-  not multiplier tuning.
+- **Phase 1 cost-multiplier calibration** — Phase 6 dispatch-perf
+  blocker is now closed (per-row planner-side hashjoin build/probe,
+  CustomScan yield, and partial-agg costs all moved from hard-coded
+  `0.01` / `0.005` literals into `DeviceLimits`, calibrated to GPU
+  kernel throughput at ~0.0005 / row on M-series). Re-run `fp64_matrix`
+  to confirm the 2-cell shortfall closes; if any cells still miss after
+  the dispatch-perf fix, calibrate `soft_fp64_cost_multiplier` from the
+  fresh measured ratios.
 - **Phase 4 type coverage — JSON / JSONB** — substantial; needs a JSONB
   binary-format parser kernel.
 - **Phase 5 worker-side spatial recheck** — DSM plumbing.

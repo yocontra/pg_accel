@@ -473,6 +473,22 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_op_cost_filter.to_string(),
         ),
         (
+            "gpu_hashjoin_build_per_row".into(),
+            limits.gpu_hashjoin_build_per_row.to_string(),
+        ),
+        (
+            "gpu_hashjoin_probe_per_row".into(),
+            limits.gpu_hashjoin_probe_per_row.to_string(),
+        ),
+        (
+            "custom_scan_yield_per_row".into(),
+            limits.custom_scan_yield_per_row.to_string(),
+        ),
+        (
+            "gpu_partial_agg_per_row".into(),
+            limits.gpu_partial_agg_per_row.to_string(),
+        ),
+        (
             "gpu_agg_cost_ratio".into(),
             limits.gpu_agg_cost_ratio.to_string(),
         ),
