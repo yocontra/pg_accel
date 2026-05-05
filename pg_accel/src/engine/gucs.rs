@@ -40,16 +40,17 @@ static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
 /// declined to inject for this particular query.
 static ASSERT_DISPATCH: GucSetting<bool> = GucSetting::<bool>::new(false);
 
-/// PreAgg parallel-safety opt-in. **B5a planner-side wiring only** — when
-/// `true` the `pgaccel_inject_gpu_preagg` planner hook prepends the fact
-/// path as `custom_paths[0]` and marks the resulting CustomPath
-/// `parallel_safe = true`. The exec-side scan refactor (B5b) is required
-/// for correctness under PG parallel workers; until B5b lands, leaving
-/// this GUC `on` will let the planner attach the path but the executor
-/// will still scan the fact table heap-direct (correct under serial,
-/// would N-fold over-aggregate under workers if PG ever picks the
-/// parallel chain). Default `false` keeps today's serial behaviour.
-static PREAGG_PARALLEL_SAFE: GucSetting<bool> = GucSetting::<bool>::new(false);
+/// PreAgg parallel-safety. **B5a planner + B5b executor**: when `true` the
+/// `pgaccel_inject_gpu_preagg` planner hook prepends the fact path as
+/// `custom_paths[0]` and marks the resulting CustomPath `parallel_safe =
+/// true`; the executor's slot-based scan loop (`scan_and_accumulate_slot`)
+/// then consumes rows via `ExecProcNode` against the attached child
+/// PlanState, which under PG's Gather is a per-worker parallel-aware scan.
+///
+/// Default `true` since B5b landed. Operators who hit a regression can
+/// disable with `SET pg_accel.preagg_parallel_safe = off` to fall back to
+/// the byte-identical pre-B5a heap-direct serial path.
+static PREAGG_PARALLEL_SAFE: GucSetting<bool> = GucSetting::<bool>::new(true);
 
 // ---------------------------------------------------------------------------
 // Log-level enum
@@ -151,16 +152,13 @@ pub fn init_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_accel.preagg_parallel_safe",
-        c"Enable parallel-safe PreAgg planner wiring (B5a planner-side; \
-          B5b executor refactor required for correctness — keep off until \
-          B5b lands).",
-        c"When true, the PreAgg CustomPath is constructed with the fact \
-          path attached as custom_paths[0] and parallel_safe = true so \
-          PG can wrap it in a Gather. The executor side (slot-based fact \
-          scan via the attached child PlanState) is wired by B5b; until \
-          then leave this GUC false to preserve serial behaviour. Toggling \
-          on without B5b will not crash but may N-fold over-aggregate \
-          under parallel workers.",
+        c"Enable parallel-safe PreAgg execution (planner + executor).",
+        c"When true (default), the PreAgg CustomPath is constructed with \
+          the fact base path attached as custom_paths[0] and parallel_safe \
+          = true so PG can wrap it in a Gather; the executor consumes fact \
+          rows via ExecProcNode against the attached child PlanState. \
+          Disable to fall back to the byte-identical pre-B5a heap-direct \
+          serial path (e.g. for A/B regression testing).",
         &PREAGG_PARALLEL_SAFE,
         GucContext::Userset,
         GucFlags::default(),
@@ -220,14 +218,13 @@ pub fn assert_dispatch() -> bool {
     ASSERT_DISPATCH.get()
 }
 
-/// Whether the parallel-safe PreAgg planner wiring is enabled.
+/// Whether the parallel-safe PreAgg planner + executor path is enabled.
 ///
-/// **B5a planner-side flag.** When `true`, the `pgaccel_inject_gpu_preagg`
-/// hook attaches the fact path as `custom_paths[0]` and marks the
-/// CustomPath `parallel_safe = true`. The executor side that consumes
-/// the attached child PlanState is wired by B5b; until then the executor
-/// continues to scan the fact heap directly. Default `false` preserves
-/// today's serial behaviour byte-for-byte.
+/// **B5a + B5b**: when `true`, the planner attaches the fact path as
+/// `custom_paths[0]` with `parallel_safe = true`, and the executor
+/// consumes rows from that child via `ExecProcNode` rather than
+/// `heap_getnext`. Default `true` since B5b. Set to `false` to fall back
+/// to the legacy heap-direct serial path for A/B regression testing.
 #[inline]
 #[must_use]
 pub fn preagg_parallel_safe() -> bool {

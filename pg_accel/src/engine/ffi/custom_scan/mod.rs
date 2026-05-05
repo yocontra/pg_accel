@@ -2659,9 +2659,14 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // open is a no-op for correctness (PG creates the child
             // PlanStates regardless of whether we read them).
             let custom_ps = (*node).custom_ps;
+            let mut fact_child: *mut pg_sys::PlanState = std::ptr::null_mut();
             if !custom_ps.is_null() {
                 let n_children = pg_sys::list_length(custom_ps);
                 let start_slot: i32 = i32::from(preagg_info.parallel_safe_planner_attached);
+                if preagg_info.parallel_safe_planner_attached && n_children > 0 {
+                    // SAFETY: custom_ps non-null and n_children > 0 → index 0 valid.
+                    fact_child = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
+                }
                 let mut child_states: Vec<*mut pg_sys::PlanState> = Vec::new();
                 for i in start_slot..n_children {
                     // SAFETY: custom_ps[i] is a valid PlanState; bounds
@@ -2673,50 +2678,68 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 exec.materialize_dimensions(&child_states);
             }
 
-            // Open the fact table for direct heap scan.
-            //
-            // Prefer the stable relation OID stored at planning time.
-            // The range-table index (scan_relid) can be rewritten by
-            // `set_plan_refs` for upper plans (scanrelid=0 spans a join),
-            // making it an unsafe index into `estate->es_range_table` at
-            // execution time. The OID is stable and always valid.
-            //
-            // When the OID is present we `table_open(oid, AccessShareLock)`
-            // directly — `end_custom_scan` will `table_close` it. Otherwise,
-            // if the RTE index is valid, fall back to `ExecOpenScanRelation`
-            // (which the executor's own cleanup path will close).
-            let estate = (*node).ss.ps.state;
-            if preagg_info.scan_oid != pg_sys::InvalidOid {
-                // SAFETY: OID is valid (resolved at plan time from an
-                // RTE_RELATION entry). Main backend thread.
-                let rel = pg_sys::table_open(
-                    preagg_info.scan_oid,
-                    pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-                );
-                let snap = (*estate).es_snapshot;
-                // SAFETY: rel and snap are valid; main backend thread.
-                let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-                exec.set_scan_desc(sd);
-                exec.set_scan_rel(rel);
-            } else if preagg_info.scan_relid > 0 {
-                // Guard: the RTE must be a real heap relation. Non-relation
-                // RTEs (function, VALUES, CTE, subquery, or entries
-                // invalidated by setrefs) passed to ExecOpenScanRelation
-                // raise ERROR → SIGABRT. If the relid is not a valid heap
-                // relation, skip the manual self-scan; the executor will
-                // consume rows via custom_ps / child plans instead (not a
-                // CPU fallback — still GPU-executed).
-                let rt_entry = pg_sys::exec_rt_fetch(preagg_info.scan_relid, estate);
-                if !rt_entry.is_null()
-                    && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
-                    && (*rt_entry).relid != pg_sys::InvalidOid
-                {
-                    let rel = pg_sys::ExecOpenScanRelation(estate, preagg_info.scan_relid, eflags);
+            // B5b parallel-safe path: when the planner attached the fact
+            // base path as `custom_paths[0]`, PG's standard Custom Scan init
+            // produces a fact-side `PlanState` at `custom_ps[0]`. Hand it
+            // to the executor; `scan_and_accumulate` then dispatches to the
+            // slot-based loop, which is parallel-safe (under PG's Gather,
+            // each worker's child is its own per-worker scan that hands out
+            // disjoint heap blocks via parallel-aware scan APIs). No
+            // `table_open` or `table_beginscan` is needed here; the child
+            // PlanState owns the relation handle.
+            if fact_child.is_null() {
+                // Default-off / serial path: open the fact table for direct
+                // heap scan, byte-identical to pre-B5b behaviour.
+                //
+                // Prefer the stable relation OID stored at planning time.
+                // The range-table index (scan_relid) can be rewritten by
+                // `set_plan_refs` for upper plans (scanrelid=0 spans a
+                // join), making it an unsafe index into
+                // `estate->es_range_table` at execution time. The OID is
+                // stable and always valid.
+                //
+                // When the OID is present we `table_open(oid,
+                // AccessShareLock)` directly — `end_custom_scan` will
+                // `table_close` it. Otherwise, if the RTE index is valid,
+                // fall back to `ExecOpenScanRelation` (which the executor's
+                // own cleanup path will close).
+                let estate = (*node).ss.ps.state;
+                if preagg_info.scan_oid != pg_sys::InvalidOid {
+                    // SAFETY: OID is valid (resolved at plan time from an
+                    // RTE_RELATION entry). Main backend thread.
+                    let rel = pg_sys::table_open(
+                        preagg_info.scan_oid,
+                        pg_sys::AccessShareLock as pg_sys::LOCKMODE,
+                    );
                     let snap = (*estate).es_snapshot;
                     // SAFETY: rel and snap are valid; main backend thread.
                     let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
                     exec.set_scan_desc(sd);
+                    exec.set_scan_rel(rel);
+                } else if preagg_info.scan_relid > 0 {
+                    // Guard: the RTE must be a real heap relation. Non-
+                    // relation RTEs (function, VALUES, CTE, subquery, or
+                    // entries invalidated by setrefs) passed to
+                    // ExecOpenScanRelation raise ERROR → SIGABRT. If the
+                    // relid is not a valid heap relation, skip the manual
+                    // self-scan; the executor will consume rows via
+                    // custom_ps / child plans instead (not a CPU fallback —
+                    // still GPU-executed).
+                    let rt_entry = pg_sys::exec_rt_fetch(preagg_info.scan_relid, estate);
+                    if !rt_entry.is_null()
+                        && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
+                        && (*rt_entry).relid != pg_sys::InvalidOid
+                    {
+                        let rel =
+                            pg_sys::ExecOpenScanRelation(estate, preagg_info.scan_relid, eflags);
+                        let snap = (*estate).es_snapshot;
+                        // SAFETY: rel and snap are valid; main backend thread.
+                        let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                        exec.set_scan_desc(sd);
+                    }
                 }
+            } else {
+                exec.set_fact_child(fact_child);
             }
 
             pgrx::debug1!(
