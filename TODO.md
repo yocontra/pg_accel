@@ -370,7 +370,7 @@ shows GPU Custom Scan inside a Gather and produces identical results.
   `agg_path_methods()` + `is_partial=1` + PAAG sentinel layout).
   GROUP BY propagation works via `root.processed_groupClause` +
   `parse.havingQual` into `pg_sys::create_agg_path` (mirrors PG's
-  own `add_paths_to_grouping_rel`, `planner.c:7253-7263`).
+  own `add_paths_to_grouping_rel` flow).
   `AGG_HASHED` strategy when GROUP BY present, `AGG_PLAIN`
   otherwise. 16/16 unit tests pass.
 - **Compromise (anti-cheat ban #9)**: P1's chain uses the existing
@@ -555,13 +555,12 @@ exist yet (cascaded multi-key sort; merge-join kernel).
   half-right. Investigation confirmed the
   `set_join_pathlist_hook` DOES fire and pgaccel's GpuHashJoin path
   IS injected via `add_path()`. PG's `add_path()` still discards the
-  path on cost. After yield calibration `0.03 → 0.01` in `4144ac8`
-  (`pg_accel/src/engine/cost/constants.rs:184` —
-  `CUSTOM_SCAN_YIELD_COST = 0.01`), the yield term dropped from 300K
-  to ~100K cost units on a 10M-output join, but the path is still
-  discarded — the per-row build + probe cost (`0.01/row each`,
-  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:239`) is now
-  the dominant pgaccel-side cost. MAJOR (cost-model + Phase 6
+  path on cost. Phase 6 moved the live yield/build/probe costs into
+  hardware-derived `DeviceLimits`
+  (`pg_accel/src/engine/cost/device_limits.rs:94`), replacing the older
+  hard-coded `0.01` / `0.005` literals that made pgaccel's path too
+  expensive. Re-run the audit and close this entry if the planner now
+  keeps the GpuHashJoin path. MAJOR (cost-model + Phase 6
   dispatch-perf intersection).
 - **Why**: Joins are the backbone of analytics queries. The hook
   is correct; the cost is honest. Closing the per-row probe cost
