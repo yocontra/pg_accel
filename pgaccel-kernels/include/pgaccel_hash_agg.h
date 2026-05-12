@@ -24,7 +24,34 @@ typedef enum {
   PGACCEL_AGG_MIN = 1,
   PGACCEL_AGG_MAX = 2,
   PGACCEL_AGG_COUNT = 3,
+  /* Partial-mode-only funcs. These are NOT accepted by
+   * pgaccel_hash_agg_execute (the finalize-mode entry point) — only by
+   * pgaccel_hash_agg_execute_partial below, which emits per-group
+   * transition states matching PG's float8_avg_accum / float8_accum
+   * shapes:
+   *   PGACCEL_AGG_AVG    → [N, sum]            (float8[2])
+   *   PGACCEL_AGG_STDDEV → [N, sum, sum_sq]    (float8[3])  — Σx², not Σ(x-μ)²
+   *   PGACCEL_AGG_VAR    → [N, sum, sum_sq]    (float8[3])  — same as STDDEV
+   * The host emit path converts sum_sq (Σx²) to Sxx = Σx² − Σx²/N. */
+  PGACCEL_AGG_AVG = 4,
+  PGACCEL_AGG_STDDEV = 5,
+  PGACCEL_AGG_VAR = 6,
 } pgaccel_agg_func;
+
+/* Partial-mode lane width per agg func (number of f64 lanes per group
+ * the partial-mode kernel writes into out_partials). Mirrors
+ * PgaccelAggFunc::partial_width on the Rust side. */
+static inline size_t pgaccel_agg_partial_width(pgaccel_agg_func f) {
+  switch (f) {
+    case PGACCEL_AGG_AVG:
+      return 2;
+    case PGACCEL_AGG_STDDEV:
+    case PGACCEL_AGG_VAR:
+      return 3;
+    default:
+      return 1; /* SUM, MIN, MAX, COUNT */
+  }
+}
 
 /* ── Aggregate column descriptor ────────────────────────────────── */
 
@@ -68,6 +95,46 @@ const void* pgaccel_agg_get_group_keys(const pgaccel_agg_state* state);
 ///
 /// Returns pointer to array of `group_count` f64 values.
 const double* pgaccel_agg_get_results(const pgaccel_agg_state* state, size_t agg_idx);
+
+/// Perform grouped aggregation in **partial** mode — emits per-group
+/// transition states ready for PG's combine functions (Phase 3B).
+///
+/// Same shape as `pgaccel_hash_agg_execute` for SUM / MIN / MAX / COUNT
+/// (1 f64 per group, identical to finalize mode). For PGACCEL_AGG_AVG
+/// emits 2 f64s per group (`[N, sum]` matching float8_avg_accum). For
+/// PGACCEL_AGG_STDDEV / PGACCEL_AGG_VAR emits 3 f64s per group
+/// (`[N, sum, sum_sq]` — host-side converts to Sxx = sum_sq − sum²/N).
+///
+/// Per-group counts in `pgaccel_agg_get_counts` are total **rows** per
+/// group (NULLs included). Per-agg per-group **non-null** counts live in
+/// the partial output's first lane for AVG / STDDEV / VAR (= the `N` PG
+/// expects).
+///
+/// Use `pgaccel_agg_get_partial_results` to read per-agg results and
+/// `pgaccel_agg_partial_width` (above) to interpret lane shape.
+///
+/// Returns aggregation state, or NULL on failure.
+pgaccel_agg_state*
+pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_null_mask,
+                                 size_t row_count, int key_type, const void* const* value_cols,
+                                 const uint8_t* const* value_nulls, const int* value_types,
+                                 const pgaccel_agg_col* agg_cols, size_t num_aggs);
+
+/// Get the partial-mode aggregate results for one aggregate column.
+///
+/// Returns a pointer to `group_count * partial_width(func)` f64 values
+/// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
+/// For finalize-mode states this is identical to
+/// `pgaccel_agg_get_results` (width=1 per group).
+///
+/// Returns NULL if `state` is NULL or `agg_idx` is out of bounds.
+const double* pgaccel_agg_get_partial_results(const pgaccel_agg_state* state, size_t agg_idx);
+
+/// Get the partial-mode lane width for one aggregate column.
+///
+/// 1 for SUM/MIN/MAX/COUNT (finalize-compatible), 2 for AVG, 3 for
+/// STDDEV/VAR. Returns 0 on error (null state, oob agg_idx).
+size_t pgaccel_agg_get_partial_width(const pgaccel_agg_state* state, size_t agg_idx);
 
 /// Get the count per group (for COUNT aggregates or AVG denominator).
 const int64_t* pgaccel_agg_get_counts(const pgaccel_agg_state* state);

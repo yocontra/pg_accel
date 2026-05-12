@@ -1811,6 +1811,104 @@ pub fn hash_agg_execute(
     Some(HashAggResult { state })
 }
 
+impl HashAggResult {
+    /// Get **partial-mode** aggregate results for one aggregate column.
+    ///
+    /// Returns a slice of length `group_count * partial_width(func)`,
+    /// laid out group-major: `[g0_lane0, g0_lane1, ..., g1_lane0, ...]`.
+    ///
+    /// For finalize-mode states (produced by `hash_agg_execute`), this
+    /// is identical to [`results`](Self::results) — width is 1, so the
+    /// slice has length `group_count`.
+    ///
+    /// Use [`partial_width`](Self::partial_width) to interpret the layout.
+    #[must_use]
+    pub fn partial_results(&self, agg_idx: usize) -> Option<&[f64]> {
+        let count = self.group_count();
+        if count == 0 {
+            return Some(&[]);
+        }
+        // SAFETY: state is valid; agg_idx bounds checked by C side.
+        let width = unsafe { bridge::pgaccel_agg_get_partial_width(self.state, agg_idx) };
+        if width == 0 {
+            return None;
+        }
+        // SAFETY: state is valid; agg_idx bounds checked by C side.
+        let ptr = unsafe { bridge::pgaccel_agg_get_partial_results(self.state, agg_idx) };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: ptr references count*width f64s owned by state (valid until drop).
+        Some(unsafe { std::slice::from_raw_parts(ptr, count * width) })
+    }
+
+    /// Get the partial-mode lane width for one aggregate column.
+    ///
+    /// 1 for SUM/MIN/MAX/COUNT (finalize-compatible), 2 for AVG, 3 for
+    /// STDDEV/VAR. Returns 0 on error (oob agg_idx).
+    #[must_use]
+    pub fn partial_width(&self, agg_idx: usize) -> usize {
+        // SAFETY: state is valid; agg_idx bounds checked by C side.
+        unsafe { bridge::pgaccel_agg_get_partial_width(self.state, agg_idx) }
+    }
+}
+
+/// Execute GPU hash aggregation in **partial** mode (Phase 3B).
+///
+/// Same input shape as [`hash_agg_execute`], but per-group output carries
+/// PG combine-function transition states for AVG / STDDEV / VAR — one
+/// `[N, sum]` (AVG) or `[N, sum, sum_sq]` (STDDEV/VAR) tuple per group.
+/// SUM / MIN / MAX / COUNT keep their finalize-mode width-1 shape.
+///
+/// Use [`HashAggResult::partial_results`] (returns slice of width × n_groups
+/// f64s) to read each agg's per-group state; the planner / executor
+/// converts these to the matching float8[] / bytea Datums PG's combine
+/// functions accept.
+#[allow(clippy::too_many_arguments)]
+pub fn hash_agg_execute_partial(
+    group_keys: *const std::ffi::c_void,
+    group_null_mask: *const u8,
+    row_count: usize,
+    key_type: i32,
+    value_cols: &[*const std::ffi::c_void],
+    value_nulls: &[*const u8],
+    value_types: &[i32],
+    agg_cols: &[PgaccelAggCol],
+) -> Option<HashAggResult> {
+    let _span = tracing::info_span!(
+        "gpu.hash_agg_partial",
+        n_rows = row_count,
+        n_aggs = agg_cols.len(),
+        key_type,
+    )
+    .entered();
+    if row_count == 0 || agg_cols.is_empty() {
+        return None;
+    }
+
+    // SAFETY: All pointers are caller-provided and valid for row_count
+    // elements. value_cols, value_nulls, value_types have num_aggs
+    // elements each.
+    let state = unsafe {
+        bridge::pgaccel_hash_agg_execute_partial(
+            group_keys,
+            group_null_mask,
+            row_count,
+            key_type,
+            value_cols.as_ptr(),
+            value_nulls.as_ptr(),
+            value_types.as_ptr(),
+            agg_cols.as_ptr(),
+            agg_cols.len(),
+        )
+    };
+
+    if state.is_null() {
+        return None;
+    }
+    Some(HashAggResult { state })
+}
+
 // ---------------------------------------------------------------------------
 // Hash join wrappers
 // ---------------------------------------------------------------------------

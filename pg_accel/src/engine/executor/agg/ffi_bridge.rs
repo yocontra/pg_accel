@@ -25,3 +25,24 @@ pub const fn agg_op_to_ffi(op: AggOp) -> PgaccelAggFunc {
         AggOp::Count | AggOp::Passthrough => PgaccelAggFunc::Count,
     }
 }
+
+/// Map `AggOp` to the FFI `PgaccelAggFunc` enum for **partial-mode**
+/// dispatch (Phase 3B). Unlike `agg_op_to_ffi`, this preserves Avg /
+/// Stddev / Var as their dedicated partial-mode variants so the GPU
+/// kernel emits the correct per-group transition-state shape.
+///
+/// Bitwise / boolean reductions are not yet wired through the partial
+/// kernel — they fall back to Min/Max for now (the lane shape is the
+/// same single-f64 shape, so the legacy classification still produces
+/// correct partial results when the planner gates them in).
+pub const fn agg_op_to_ffi_partial(op: AggOp) -> PgaccelAggFunc {
+    match op {
+        AggOp::Sum => PgaccelAggFunc::Sum,
+        AggOp::Avg => PgaccelAggFunc::Avg,
+        AggOp::StddevSamp | AggOp::StddevPop => PgaccelAggFunc::Stddev,
+        AggOp::VarSamp | AggOp::VarPop => PgaccelAggFunc::Var,
+        AggOp::Min | AggOp::BitAnd | AggOp::BoolAnd => PgaccelAggFunc::Min,
+        AggOp::Max | AggOp::BitOr | AggOp::BoolOr => PgaccelAggFunc::Max,
+        AggOp::Count | AggOp::Passthrough => PgaccelAggFunc::Count,
+    }
+}

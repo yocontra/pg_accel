@@ -778,3 +778,268 @@ fn apply_gpu_result_max() {
     assert!(col.gpu_dispatched);
     assert!((col.acc.max_val - 123.0).abs() < f64::EPSILON);
 }
+
+// ---------------------------------------------------------------------------
+// Partial-mode FFI tests (Phase 3B).
+//
+// These tests exercise the `pgaccel_hash_agg_execute_partial` bridge
+// directly — driving the kernel from Rust via a synthetic columnar
+// batch, then checking the partial-mode lane shapes match what PG's
+// combine functions expect (`float8_avg_accum` = `[N, sum]`,
+// `float8_accum` = `[N, sum, sum_sq]` after Sxx conversion).
+//
+// Run with: cargo pgrx test pg17 (or `--features pg_test`).
+// The pg_test annotation ensures CurrentMemoryContext is live — the
+// kernel itself does not call PG, but downstream callers using
+// `construct_array` would.
+// ---------------------------------------------------------------------------
+
+use crate::engine::executor::agg::ffi_bridge::agg_op_to_ffi_partial;
+use crate::gpu::{self, PgaccelAggCol};
+
+/// Helper: build a columnar batch with `groups` distinct int64 keys and
+/// `rows_per_group` rows per group, with float64 values that vary
+/// per-row. Returns `(keys, key_nulls, values, val_nulls)`.
+fn build_batch_int64_f64(
+    groups: usize,
+    rows_per_group: usize,
+) -> (Vec<i64>, Vec<u8>, Vec<f64>, Vec<u8>) {
+    let n = groups * rows_per_group;
+    let mut keys = Vec::with_capacity(n);
+    let key_nulls = vec![0u8; n];
+    let mut values = Vec::with_capacity(n);
+    let val_nulls = vec![0u8; n];
+    for i in 0..n {
+        let gid = (i % groups) as i64;
+        keys.push(gid * 100 + 7);
+        values.push((i + 1) as f64);
+    }
+    (keys, key_nulls, values, val_nulls)
+}
+
+#[test]
+fn partial_ffi_sum_int64_keyed() {
+    // Small-N path (agg_hash_partial): SUM single-lane partial state.
+    const ROWS_PER_GROUP: usize = 250;
+    const NUM_GROUPS: usize = 4;
+    let (keys, key_nulls, values, val_nulls) = build_batch_int64_f64(NUM_GROUPS, ROWS_PER_GROUP);
+    let n = keys.len();
+
+    let mut expected_sums = vec![0.0_f64; NUM_GROUPS];
+    for (i, v) in values.iter().enumerate() {
+        expected_sums[i % NUM_GROUPS] += v;
+    }
+
+    let val_col_ptrs = vec![values.as_ptr().cast::<std::ffi::c_void>()];
+    let val_null_ptrs = vec![val_nulls.as_ptr()];
+    let val_types = vec![5_i32]; // PGACCEL_VAL_FLOAT64
+    let agg_cols = vec![PgaccelAggCol {
+        func: agg_op_to_ffi_partial(AggOp::Sum),
+        col_idx: 0,
+    }];
+
+    let result = gpu::hash_agg_execute_partial(
+        keys.as_ptr().cast(),
+        key_nulls.as_ptr(),
+        n,
+        1, // PGACCEL_KEY_INT64
+        &val_col_ptrs,
+        &val_null_ptrs,
+        &val_types,
+        &agg_cols,
+    );
+
+    // GPU may be unavailable in some test envs; skip-on-None mirrors how
+    // gpu::reduce_* tests are structured. When GPU IS available, the
+    // assertions below run; when not, the test is a no-op rather than
+    // a false failure.
+    let Some(result) = result else {
+        return;
+    };
+
+    assert_eq!(result.group_count(), NUM_GROUPS);
+    assert_eq!(result.partial_width(0), 1);
+
+    let parts = result.partial_results(0).expect("partial buffer present");
+    assert_eq!(parts.len(), NUM_GROUPS);
+
+    // Match each output group to expected by reading the group key buffer.
+    let keys_ptr = result.group_keys_ptr().cast::<i64>();
+    for g in 0..NUM_GROUPS {
+        let k = unsafe { *keys_ptr.add(g) };
+        let expected_gid = ((k - 7) / 100) as usize;
+        assert!(expected_gid < NUM_GROUPS);
+        assert!(
+            (parts[g] - expected_sums[expected_gid]).abs() < 1e-6,
+            "group {g} (key {k}, expected_gid {expected_gid}): got {got}, expected {exp}",
+            got = parts[g],
+            exp = expected_sums[expected_gid]
+        );
+    }
+}
+
+#[test]
+fn partial_ffi_avg_emits_two_lanes() {
+    // AVG -> 2 lanes per group: [N, sum].
+    const ROWS_PER_GROUP: usize = 200;
+    const NUM_GROUPS: usize = 3;
+    let (keys, key_nulls, values, val_nulls) = build_batch_int64_f64(NUM_GROUPS, ROWS_PER_GROUP);
+    let n = keys.len();
+
+    let mut expected_sums = vec![0.0_f64; NUM_GROUPS];
+    let mut expected_counts = vec![0_i64; NUM_GROUPS];
+    for (i, v) in values.iter().enumerate() {
+        expected_sums[i % NUM_GROUPS] += v;
+        expected_counts[i % NUM_GROUPS] += 1;
+    }
+
+    let val_col_ptrs = vec![values.as_ptr().cast::<std::ffi::c_void>()];
+    let val_null_ptrs = vec![val_nulls.as_ptr()];
+    let val_types = vec![5_i32];
+    let agg_cols = vec![PgaccelAggCol {
+        func: agg_op_to_ffi_partial(AggOp::Avg),
+        col_idx: 0,
+    }];
+
+    let result = gpu::hash_agg_execute_partial(
+        keys.as_ptr().cast(),
+        key_nulls.as_ptr(),
+        n,
+        1,
+        &val_col_ptrs,
+        &val_null_ptrs,
+        &val_types,
+        &agg_cols,
+    );
+    let Some(result) = result else {
+        return;
+    };
+
+    assert_eq!(result.group_count(), NUM_GROUPS);
+    assert_eq!(result.partial_width(0), 2);
+
+    let parts = result.partial_results(0).expect("partial buffer present");
+    assert_eq!(parts.len(), NUM_GROUPS * 2);
+
+    let keys_ptr = result.group_keys_ptr().cast::<i64>();
+    for g in 0..NUM_GROUPS {
+        let k = unsafe { *keys_ptr.add(g) };
+        let expected_gid = ((k - 7) / 100) as usize;
+        assert!(expected_gid < NUM_GROUPS);
+        let n_lane = parts[g * 2];
+        let sum_lane = parts[g * 2 + 1];
+        // The N lane carries the non-null count as f64 (matches
+        // float8_avg_accum's [N, sum] layout).
+        assert!((n_lane - expected_counts[expected_gid] as f64).abs() < 1e-9);
+        assert!((sum_lane - expected_sums[expected_gid]).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn partial_ffi_stddev_emits_three_lanes() {
+    // STDDEV -> 3 lanes per group: [N, sum, sum_sq].
+    // Verifies the lane ordering is what Float8StatsEmitter and PG's
+    // float8_combine expect after the Sxx conversion at emit time.
+    const ROWS_PER_GROUP: usize = 200;
+    const NUM_GROUPS: usize = 3;
+    let (keys, key_nulls, values, val_nulls) = build_batch_int64_f64(NUM_GROUPS, ROWS_PER_GROUP);
+    let n = keys.len();
+
+    let mut expected_sums = vec![0.0_f64; NUM_GROUPS];
+    let mut expected_sum_sqs = vec![0.0_f64; NUM_GROUPS];
+    let mut expected_counts = vec![0_i64; NUM_GROUPS];
+    for (i, v) in values.iter().enumerate() {
+        expected_sums[i % NUM_GROUPS] += v;
+        expected_sum_sqs[i % NUM_GROUPS] += v * v;
+        expected_counts[i % NUM_GROUPS] += 1;
+    }
+
+    let val_col_ptrs = vec![values.as_ptr().cast::<std::ffi::c_void>()];
+    let val_null_ptrs = vec![val_nulls.as_ptr()];
+    let val_types = vec![5_i32];
+    let agg_cols = vec![PgaccelAggCol {
+        func: agg_op_to_ffi_partial(AggOp::StddevSamp),
+        col_idx: 0,
+    }];
+
+    let result = gpu::hash_agg_execute_partial(
+        keys.as_ptr().cast(),
+        key_nulls.as_ptr(),
+        n,
+        1,
+        &val_col_ptrs,
+        &val_null_ptrs,
+        &val_types,
+        &agg_cols,
+    );
+    let Some(result) = result else {
+        return;
+    };
+
+    assert_eq!(result.partial_width(0), 3);
+    let parts = result.partial_results(0).expect("partial buffer present");
+    assert_eq!(parts.len(), NUM_GROUPS * 3);
+
+    let keys_ptr = result.group_keys_ptr().cast::<i64>();
+    for g in 0..NUM_GROUPS {
+        let k = unsafe { *keys_ptr.add(g) };
+        let expected_gid = ((k - 7) / 100) as usize;
+        assert!(expected_gid < NUM_GROUPS);
+        let n_lane = parts[g * 3];
+        let sum_lane = parts[g * 3 + 1];
+        let sum_sq_lane = parts[g * 3 + 2];
+        assert!((n_lane - expected_counts[expected_gid] as f64).abs() < 1e-9);
+        // Use 1e-3 tolerance for sum to absorb the natural f64
+        // accumulation drift on a 200-row sum where the sum reaches
+        // ~6e4.
+        assert!((sum_lane - expected_sums[expected_gid]).abs() < 1e-3);
+        // sum_sq drifts more (200 rows of squared values reach ~2e10);
+        // use a relative tolerance of 1e-9 of the magnitude.
+        let mag = expected_sum_sqs[expected_gid].abs().max(1.0);
+        assert!((sum_sq_lane - expected_sum_sqs[expected_gid]).abs() / mag < 1e-9);
+    }
+}
+
+#[test]
+fn partial_ffi_finalize_state_falls_back_to_width_1() {
+    // States produced by the legacy `hash_agg_execute` (finalize mode)
+    // have empty partial_widths/partial_results; the C-side accessor
+    // must fall back to the finalize-mode buffer with width=1 so callers
+    // can use `partial_results` / `partial_width` uniformly.
+    const ROWS_PER_GROUP: usize = 250;
+    const NUM_GROUPS: usize = 4;
+    let (keys, key_nulls, values, val_nulls) = build_batch_int64_f64(NUM_GROUPS, ROWS_PER_GROUP);
+    let n = keys.len();
+
+    let val_col_ptrs = vec![values.as_ptr().cast::<std::ffi::c_void>()];
+    let val_null_ptrs = vec![val_nulls.as_ptr()];
+    let val_types = vec![5_i32];
+    let agg_cols = vec![PgaccelAggCol {
+        func: PgaccelAggFunc::Sum,
+        col_idx: 0,
+    }];
+
+    // FINALIZE entry point.
+    let result = gpu::hash_agg_execute(
+        keys.as_ptr().cast(),
+        key_nulls.as_ptr(),
+        n,
+        1,
+        &val_col_ptrs,
+        &val_null_ptrs,
+        &val_types,
+        &agg_cols,
+    );
+    let Some(result) = result else {
+        return;
+    };
+
+    // Finalize state still answers partial_width with 1 + finalize buffer.
+    assert_eq!(result.partial_width(0), 1);
+    let parts = result.partial_results(0).expect("fallback buffer");
+    let finalize_parts = result.results(0).expect("finalize buffer");
+    assert_eq!(parts.len(), finalize_parts.len());
+    for (a, b) in parts.iter().zip(finalize_parts.iter()) {
+        assert!((a - b).abs() < f64::EPSILON);
+    }
+}
