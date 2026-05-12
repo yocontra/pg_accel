@@ -76,6 +76,15 @@ impl AttExtractInfo {
         self.data_offset
     }
 
+    /// 0-based attribute index (= 1-based attno - 1) recorded at
+    /// construction. For slot-based readers this equals the position of
+    /// the column inside `tts_values` / `tts_isnull`; for heap-direct
+    /// readers it is used as the bitmap index.
+    #[must_use]
+    pub fn att_index(&self) -> usize {
+        self.att_index
+    }
+
     /// Create a dummy extraction info that always fails fast-extract.
     ///
     /// Used as a placeholder for `COUNT(*)` columns that do not need

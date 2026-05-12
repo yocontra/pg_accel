@@ -1453,29 +1453,24 @@ mod tests {
 
     /// GUC roundtrip via SET / SHOW / SELECT current_setting.
     /// Confirms `pg_accel.preagg_parallel_safe` is registered as USERSET
-    /// and reads back the value the session set. Default must be `false`
-    /// (off) — required by ban #1 (no behaviour change for default-off path).
+    /// and reads back the value the session set. Default is `true` since
+    /// B5b landed — both planner and executor sides are wired so the
+    /// parallel chain is the recommended path. Operators can still flip
+    /// the GUC off for A/B regression testing against the legacy
+    /// heap-direct serial path.
     #[pg_test]
     fn preagg_parallel_safe_guc_roundtrip() {
         use pgrx::Spi;
 
-        // Default value MUST be off (B5a flag is opt-in).
+        // Default value is on (B5a planner + B5b executor).
         let default_val: bool =
             Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
                 .expect("read default")
                 .expect("non-NULL default");
         assert!(
-            !default_val,
-            "pg_accel.preagg_parallel_safe must default to false"
+            default_val,
+            "pg_accel.preagg_parallel_safe must default to true post-B5b"
         );
-
-        // SET on, read back.
-        Spi::run("SET pg_accel.preagg_parallel_safe = on;").expect("SET on");
-        let on_val: bool =
-            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
-                .expect("read on")
-                .expect("non-NULL on");
-        assert!(on_val, "after SET on, GUC must read true");
 
         // SET off, read back.
         Spi::run("SET pg_accel.preagg_parallel_safe = off;").expect("SET off");
@@ -1484,5 +1479,13 @@ mod tests {
                 .expect("read off")
                 .expect("non-NULL off");
         assert!(!off_val, "after SET off, GUC must read false");
+
+        // SET on, read back.
+        Spi::run("SET pg_accel.preagg_parallel_safe = on;").expect("SET on");
+        let on_val: bool =
+            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
+                .expect("read on")
+                .expect("non-NULL on");
+        assert!(on_val, "after SET on, GUC must read true");
     }
 }

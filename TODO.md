@@ -79,7 +79,7 @@ last since they're upstream).
                                                            in MetalEmitter is the next 200-400 LOC
                                                            of upstream work; flag-OFF preserves status quo)
 
-   pg_accel main           ┌─ B5b PreAgg exec refactor ✅ on `agent-b5b-preagg-exec` — ready to merge
+   pg_accel main           ┌─ B5b PreAgg exec refactor ✅ merged locally from `agent-b5b-preagg-exec`
                            ├─ Phase 3B HashAgg parallel ✅ on `worktree-agent-a5b484b0e375d86d0` — ready
                            ├─ Phase 6 probe-cost ✅ on `worktree-agent-a77f649bdfa546315` — ready
                            └─ Phase 3A planner-side — UNBLOCKED by 3B; ~50 LOC follow-up
@@ -101,8 +101,8 @@ last since they're upstream).
   entries since the h3 fix unblocked the chain.)_
 
 **P1 — perf blockers (correctness fine, GPU acceleration off in some cases)**:
-- _(B5b PreAgg exec-side refactor — done on `agent-b5b-preagg-exec` worktree
-  branch, ready to merge. See Round 5 table above.)_
+- _(B5b PreAgg exec-side refactor — merged locally from
+  `agent-b5b-preagg-exec`. See Round 5 table above.)_
 - _(Phase 3B HashAgg parallel kernel/bridge/executor — done on
   `worktree-agent-a5b484b0e375d86d0`, ready to merge.)_
 - _(Phase 6 dispatch perf / probe-cost amortisation — done on
@@ -353,17 +353,17 @@ shows GPU Custom Scan inside a Gather and produces identical results.
   CustomScan(GpuAccel)` with `parallel_safe=true` on the partial
   CustomPath. (PreAgg-strategy parallelisation is its own entry.)
 
-### PreAgg executor refactor for parallel safety — split into B5a + B5b
+### PreAgg executor refactor for parallel safety — B5a + B5b — DONE 2026-05-03
 
 - **What** (refreshed 2026-05-03 after Agent B5 escalated per ban #9):
-  `PreAggExecState` opens the fact table directly via
+  `PreAggExecState` opened the fact table directly via
   `table_open(scan_oid)` (see `pg_accel/src/engine/executor/preagg/mod.rs`
   and `partial_emit.rs`). Under PG's parallel workers each worker would
   re-open the same fact relation and re-scan it from row 0 — N workers
   means N× duplicate input rows, which over-aggregates by exactly N.
-  P1's planner chain falls back to standard `Agg` strategy rather than
+  P1's planner chain fell back to standard `Agg` strategy rather than
   `PreAgg` (see "Preagg parallel path" entry above) as the workaround.
-  MAJOR (correctness — under parallel, PreAgg as currently coded
+  MAJOR (correctness — under parallel, PreAgg as previously coded
   would silently produce wrong sums).
 - **Why escalated** (Agent B5 ban-#9 evaluation): single-shot refactor
   surfaced 3 distinct mismatches that aren't safely committable in one
@@ -403,20 +403,24 @@ shows GPU Custom Scan inside a Gather and produces identical results.
     aligned with `depths[i]`. Default-off plans emit no sentinel and are
     byte-identical to pre-B5a on the wire. Round-trip + GUC tests under
     `engine::ffi::custom_scan::tests::b5a_round_trip`.
-  - **B5b (exec-side, gated by the flag)** — **PENDING**. Introduce
-    `PreAggExecState::set_fact_child(child_ps)` and a parallel
-    slot-based scan path that consumes the (currently inert) fact-side
-    PlanState at `custom_ps[0]`. Route `scan_and_accumulate` to it when
-    the child is set; falls back to today's heap-direct path otherwise.
-    Add the parallel-correctness test gated on the flag (parallel SUM
-    must match serial SUM exactly). Once verified, flip the GUC default
-    to true and remove the heap-direct path in a separate cleanup PR.
-    **Until B5b lands, do NOT enable `pg_accel.preagg_parallel_safe` in
-    production** — toggling on without B5b will not crash but may N-fold
-    over-aggregate under parallel workers.
+  - **B5b (exec-side, gated by the flag)** — **DONE 2026-05-03**. Added
+    `PreAggExecState::set_fact_child(child_ps)` and a slot-based
+    `scan_and_accumulate_slot` path that consumes the fact-side
+    `PlanState` at `custom_ps[0]` via `ExecProcNode`. `scan_and_accumulate`
+    dispatches to slot-path when `fact_child` is set, falls back to
+    heap-path otherwise (preserved byte-identical to pre-B5a for
+    `preagg_parallel_safe = off`). Critical fix: the child plan's
+    targetlist may project the base scan to fewer columns than the
+    relation has, so the slot's `tts_values` indexes do **not** match
+    relation attnos; the executor walks `(*plan).targetlist` on the
+    first row to build `fact_slot_attno_map: HashMap<rel_attno,
+    slot_attno>`, and `AttExtractInfo::new` is called against the
+    translated slot attno. The 47-test preagg suite (sans 1
+    pre-existing pgrx schema-rendering failure unrelated to this work)
+    passes cold-cache. **GUC default is now `on`**; operators can flip
+    it `off` for A/B regression vs the legacy heap-direct path.
 - Depends on: Nothing — pure pg_accel work, no upstream dependency.
-  But sequencing matters (B5a → B5b).
-- **Done when**: A star-join + GROUP BY query runs PreAgg inside
+- **Closed when**: A star-join + GROUP BY query runs PreAgg inside
   parallel workers without N-fold over-aggregation; the
   `pg_accel.preagg_parallel_safe = on` GUC is the default;
   heap-direct fallback path can be removed in a separate cleanup PR.
