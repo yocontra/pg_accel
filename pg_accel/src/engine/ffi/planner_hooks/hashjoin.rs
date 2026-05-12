@@ -51,27 +51,28 @@ pub(super) fn per_row_cost_for_batch_gate(uses_fp64: bool, limits: &DeviceLimits
 
 /// Per-row hash-build cost contribution (per inner row).
 ///
-/// Breakdown (see [`super::join_pathlist`] for the derivation): 0.005
-/// `ExecCopySlotMinimalTuple` + 0.002 key extract + 0.003 amortised GPU hash
-/// insert = 0.01. Only the GPU hash insert component is fp64-sensitive, but
-/// the helper penalises the whole per-row value so the planner sees a
-/// realistic ~32x slowdown on soft-fp64 Float64 keys. The `ExecCopy` /
-/// extract components are dwarfed by the soft-fp64 kernel slowdown at the
-/// sizes we care about.
+/// Reads `limits.gpu_hashjoin_build_per_row` (Phase 6 calibration: derived
+/// from kernel throughput rather than the legacy `0.005 + 0.002 + 0.003`
+/// CPU-bookkeeping breakdown that triple-counted ExecCopy + key extract +
+/// GPU insert work which PG's stock HashJoin already amortises into its
+/// scan + cpu_tuple_cost terms). Only the GPU hash-insert component is
+/// fp64-sensitive, but the helper penalises the whole per-row value so the
+/// planner sees a realistic ~32x slowdown on soft-fp64 Float64 keys.
 #[must_use]
 #[inline]
 pub(super) fn build_cost_per_inner_row(uses_fp64: bool, limits: &DeviceLimits) -> f64 {
-    cost::apply_fp64_penalty(0.01, uses_fp64, limits)
+    cost::apply_fp64_penalty(limits.gpu_hashjoin_build_per_row, uses_fp64, limits)
 }
 
 /// Per-row GPU hash-probe cost contribution (per outer row).
 ///
-/// Same breakdown as [`build_cost_per_inner_row`]: 0.005 copy + 0.002 extract
-/// + 0.003 amortised GPU hash probe. Penalised uniformly for the same reason.
+/// Reads `limits.gpu_hashjoin_probe_per_row` (Phase 6 calibration; same
+/// rationale as [`build_cost_per_inner_row`]). Penalised uniformly for the
+/// soft-fp64 case.
 #[must_use]
 #[inline]
 pub(super) fn probe_cost_per_outer_row(uses_fp64: bool, limits: &DeviceLimits) -> f64 {
-    cost::apply_fp64_penalty(0.01, uses_fp64, limits)
+    cost::apply_fp64_penalty(limits.gpu_hashjoin_probe_per_row, uses_fp64, limits)
 }
 
 /// Eligibility gate for injecting a parallel (partial) GPU hashjoin variant.
@@ -119,7 +120,12 @@ pub(super) fn partial_total_cost(
     let gpu_launch = cost::GPU_LAUNCH_OVERHEAD;
     let build_cost = inner_rows * build_cost_per_inner_row(uses_fp64, limits);
     let probe_cost = outer_partial_rows * probe_cost_per_outer_row(uses_fp64, limits);
-    let yield_cost = output_partial_rows * cost::CUSTOM_SCAN_YIELD_COST;
+    // Phase 6: reads `limits.custom_scan_yield_per_row` (hardware-derived)
+    // rather than the global `CUSTOM_SCAN_YIELD_COST` constant. See the
+    // matching change in `join_pathlist.rs` and the doc on
+    // `DeviceLimits::custom_scan_yield_per_row` for the calibration
+    // rationale.
+    let yield_cost = output_partial_rows * limits.custom_scan_yield_per_row;
     base_cost + gpu_launch + build_cost + probe_cost + yield_cost
 }
 
@@ -201,8 +207,16 @@ mod tests {
         let l = limits_soft();
         let build = build_cost_per_inner_row(true, &l);
         let probe = probe_cost_per_outer_row(true, &l);
-        assert!((build - 0.01 * 32.0).abs() < 1e-12, "build: got {build}");
-        assert!((probe - 0.01 * 32.0).abs() < 1e-12, "probe: got {probe}");
+        let expected_build = l.gpu_hashjoin_build_per_row * 32.0;
+        let expected_probe = l.gpu_hashjoin_probe_per_row * 32.0;
+        assert!(
+            (build - expected_build).abs() < 1e-12,
+            "build: got {build}, expected {expected_build}",
+        );
+        assert!(
+            (probe - expected_probe).abs() < 1e-12,
+            "probe: got {probe}, expected {expected_probe}",
+        );
     }
 
     #[test]
@@ -210,8 +224,8 @@ mod tests {
         let l = limits_soft();
         let build = build_cost_per_inner_row(false, &l);
         let probe = probe_cost_per_outer_row(false, &l);
-        assert!((build - 0.01).abs() < 1e-12);
-        assert!((probe - 0.01).abs() < 1e-12);
+        assert!((build - l.gpu_hashjoin_build_per_row).abs() < 1e-12);
+        assert!((probe - l.gpu_hashjoin_probe_per_row).abs() < 1e-12);
     }
 
     #[test]
@@ -243,8 +257,12 @@ mod tests {
     }
 
     /// Partial cost with fp64 keys on a soft-fp64 device differs from the
-    /// integer baseline by exactly `(mult-1) * 0.01 * (inner + outer_partial)`
+    /// integer baseline by exactly
+    /// `(mult-1) * (inner * build_per_row + outer_partial * probe_per_row)`
     /// (yield cost is fp64-agnostic, base costs are pre-passed as zero here).
+    /// After the Phase 6 calibration the per-row constants are read from
+    /// `DeviceLimits`, so we compute the expected delta from the limits
+    /// rather than the legacy `0.01` literal.
     #[test]
     fn partial_total_cost_fp64_penalty_is_applied() {
         let l = limits_soft();
@@ -257,17 +275,18 @@ mod tests {
         let cost_fp = partial_total_cost(outer_partial, 0.0, inner, 0.0, output_partial, true, &l);
 
         let delta = cost_fp - cost_int;
-        let expected = (32.0_f64 - 1.0) * (inner + outer_partial) * 0.01;
+        let expected = (32.0_f64 - 1.0)
+            * (inner * l.gpu_hashjoin_build_per_row + outer_partial * l.gpu_hashjoin_probe_per_row);
         assert!(
             (delta - expected).abs() < 1e-6,
-            "fp64 - int delta {delta} should be (mult-1)*0.01*(in+out) = {expected}",
+            "fp64 - int delta {delta} should be (mult-1)*(inner*build+outer*probe) = {expected}",
         );
     }
 
     /// Plan assertion: an fp64-keyed hash join on a soft-fp64 device must
     /// produce a ~32x higher total GPU-op cost than the same join with an
     /// Int64 key at the same row counts, reflecting the soft-fp64 kernel
-    /// slowdown. Yield cost (0.03/row) is CPU-side and unaffected.
+    /// slowdown. CustomScan yield cost is CPU-side and unaffected.
     #[test]
     fn fp64_vs_int64_cost_ratio_matches_soft_fp64_multiplier() {
         let l = limits_soft();

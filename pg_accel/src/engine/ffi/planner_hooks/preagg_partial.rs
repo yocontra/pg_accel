@@ -293,9 +293,13 @@ pub(super) unsafe fn try_inject(
         || agg_descs
             .iter()
             .any(|(op, _, rtype)| matches!(op, AggOp::Avg) || *rtype == float8_u32);
-    let agg_per_row_base = 0.005_f64;
-    let agg_per_row =
-        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits());
+    // Phase 6 calibration: read from `DeviceLimits::gpu_partial_agg_per_row`
+    // (same fix as `partial_agg::try_inject` — the legacy `0.005` was 10x
+    // measured GPU reduce throughput, dominating the partial-agg cost when
+    // the soft-fp64 multiplier applied).
+    let limits = cost::device_limits();
+    let agg_per_row_base = limits.gpu_partial_agg_per_row;
+    let agg_per_row = cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, limits);
     let reduce_cost = base.rows * agg_per_row;
     let startup_cost = base.total_cost + gpu_overhead;
     let total_cost = (base.total_cost + reduce_cost)

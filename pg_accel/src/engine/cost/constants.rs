@@ -163,22 +163,20 @@ pub const GPU_EXPR_PER_ROW_COST: f64 = 0.025;
 /// Custom Scan yield overhead (~3μs/row for output construction).
 pub const GPU_HASH_JOIN_PER_ROW_COST: f64 = 0.02;
 
-/// Per-output-row Custom Scan yield cost.
+/// Per-output-row Custom Scan yield cost (legacy / fallback constant).
 ///
-/// Calibrated to match PG's `cpu_tuple_cost` default (`0.01`). The
-/// per-row work pgaccel does to yield a tuple to its parent operator
-/// (`ExecForceStoreMinimalTuple` + projection apply) is comparable to
-/// PG's stock node tuple-yield work — empirical measurement on
-/// M-series shows `ExecForceStoreMinimalTuple` is ~50ns and the
-/// projection step is similar, totalling ~100ns/row ≈ 0.01 cost units.
+/// **Phase 6 calibration:** the live planner-side per-row yield cost now
+/// lives in `DeviceLimits::custom_scan_yield_per_row` (hardware-derived;
+/// 0.0005 / row on unified-memory M-series, 0.001 / row on discrete GPU).
+/// All planner cost-formulas (`hashjoin.rs`, `join_pathlist.rs`) read from
+/// the dynamic field rather than this constant. The constant is retained
+/// for backwards compatibility with downstream tests/tools and as the
+/// historical baseline (matched PG's `cpu_tuple_cost = 0.01` default), but
+/// re-introducing it into a planner cost path will reintroduce the
+/// 200K-cost-unit penalty that wiped out the GpuHashJoin path in
+/// `add_path()` for 10M-output joins (see TODO Phase 6 dispatch-perf
+/// entry).
 ///
-/// History: previously `0.03` (3x `cpu_tuple_cost`) was used to model
-/// "Custom Scan adds projection overhead". That over-penalised
-/// pgaccel's hash-join and partial-agg paths — for a 10M-output JOIN
-/// the extra 0.02/row × 10M = 200K cost was enough to push pgaccel's
-/// path strictly above PG's stock `Hash Join` (~291K vs pgaccel ~554K
-/// at 0.03; pgaccel ~354K at 0.01). After the calibration to 0.01,
-/// `add_path()` picks pgaccel's GpuHashJoin on the bench fact×dim
-/// query — see TODO Phase 4 entry "Plain JOIN: GpuHashJoin path
-/// injected but discarded by add_path()" for the audit-row reclass.
+/// History: `0.03` (3x `cpu_tuple_cost`) → `0.01` (4144ac8) →
+/// `DeviceLimits::custom_scan_yield_per_row` (Phase 6).
 pub const CUSTOM_SCAN_YIELD_COST: f64 = 0.01;

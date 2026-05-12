@@ -166,24 +166,22 @@ fn build_matrix() -> Vec<AuditRow> {
             expectation: RatchetExpectation::RequiredToday,
         },
         AuditRow {
-            // Combined AVG+STDDEV: pgaccel's partial_agg classifier DOES
-            // inject a CustomPath (debug1 confirms `injected
-            // Finalize(Agg) -> Gather -> GpuAccel(partial) chain`), but
-            // PG's add_path() then discards it because the GpuAccel
-            // path's per-row Custom-Scan yield cost (the same 0.03/row
-            // term that dominates the plain JOIN audit row) puts it
-            // above PG's stock Partial Aggregate. Single STDDEV alone
-            // wins (its per-row arith cost amortises the yield); single
-            // AVG alone loses (cheap in PG). Same Phase 6 yield-cost
-            // reduction unblocks this.
+            // Combined AVG+STDDEV: pgaccel's partial_agg classifier
+            // injects `Finalize(Agg) -> Gather -> GpuAccel(partial)` and
+            // `add_path()` now picks it. The Phase 6 calibration moved
+            // the per-row partial-agg cost from a hard-coded `0.005`
+            // literal to `DeviceLimits::gpu_partial_agg_per_row` (= 0.0005
+            // / row on M-series). Combined with the soft-fp64 32x
+            // multiplier the previous 0.005 produced 200K cost units of
+            // partial-agg overhead on 10M-row scans, which `add_path`
+            // dropped in favour of PG's stock Partial Aggregate; the new
+            // 0.0005 keeps the GPU path strictly cheaper. Promoted to
+            // RequiredToday after Phase 6 calibration landed.
             name: "parallel_avg_stddev",
             description: "AVG(v), STDDEV(v) — combined parallel partial agg",
             setup: vec![],
             query: "SELECT AVG(v), STDDEV(v) FROM bench_f32_10m",
-            expectation: RatchetExpectation::RequiredAfterPhase(
-                "6 yield-cost reduction (partial-agg path injected but \
-                 add_path discards on cost)",
-            ),
+            expectation: RatchetExpectation::RequiredToday,
         },
         AuditRow {
             name: "parallel_groupby",
@@ -220,25 +218,23 @@ fn build_matrix() -> Vec<AuditRow> {
             expectation: RatchetExpectation::RequiredAfterPhase("3c window partial path"),
         },
         AuditRow {
-            // Plain JOIN: pg_accel's set_join_pathlist_hook DOES inject a
-            // GpuHashJoin CustomPath, but PG's add_path() discards it
-            // because the cost model includes a per-output-row Custom Scan
-            // yield cost (0.03 / row in planner_hooks/join_pathlist.rs:254).
-            // For a 10M-output join the yield cost dominates (300K cost
-            // units), making pg_accel's path strictly more expensive than
-            // PG's native parallel hash join. Closing this gate is a
-            // cost-model + Phase 6 dispatch-perf item, not a planner-side
-            // fix. Re-classify as RequiredAfterPhase until the Phase 6
-            // yield-cost reduction lands.
+            // Plain JOIN: pg_accel's set_join_pathlist_hook injects
+            // `GpuHashJoin` and PG's `add_path()` now picks it. The Phase
+            // 6 calibration moved the per-row hash-join build / probe /
+            // yield costs from hard-coded 0.01 literals to
+            // `DeviceLimits::gpu_hashjoin_{build,probe}_per_row` and
+            // `DeviceLimits::custom_scan_yield_per_row` (each = 0.0005
+            // / row on M-series). The old 0.01/row × 10M output added
+            // ~200K cost units of "Custom Scan overhead" that double-
+            // counted ExecCopySlotMinimalTuple work PG already amortises
+            // into its parent operator's `cpu_tuple_cost`. Promoted to
+            // RequiredToday after Phase 6 calibration landed.
             name: "parallel_join",
             description: "Plain JOIN — parallel hash join",
             setup: vec![],
             query: "SELECT f.*, d.name FROM bench_fact f \
                     JOIN bench_dim d USING(id)",
-            expectation: RatchetExpectation::RequiredAfterPhase(
-                "6 yield-cost reduction (GpuHashJoin path is injected but \
-                 add_path discards it; cost model penalises 0.03/row yield)",
-            ),
+            expectation: RatchetExpectation::RequiredToday,
         },
         AuditRow {
             name: "parallel_join_groupby",

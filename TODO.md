@@ -81,14 +81,19 @@ last since they're upstream).
 
    pg_accel main           ┌─ B5b PreAgg exec refactor ✅ merged locally from `agent-b5b-preagg-exec`
                            ├─ Phase 3B HashAgg parallel ✅ merged locally from `worktree-agent-a5b484b0e375d86d0`
-                           ├─ Phase 6 probe-cost ✅ on `worktree-agent-a77f649bdfa546315` — ready
+                           ├─ Phase 6 probe-cost ✅ merged locally from `worktree-agent-a77f649bdfa546315`
                            └─ Phase 3A planner-side — UNBLOCKED by 3B; ~50 LOC follow-up
 
    Geometry-array extractor ──→ unlocks st_value(rast, geometry[]) end-to-end smoke
    for st_value             (PostGIS doesn't expose this SQL surface today; lower priority)
 
-   Phase 6 dispatch perf  ──→ unblocks Phase 1 cost-multiplier calibration
-                              unblocks AVG+STDDEV / plain-JOIN audit rows
+   Phase 6 dispatch perf ✅ closed by per-row planner-cost calibration
+                            (gpu_hashjoin_build/probe + custom_scan_yield +
+                            gpu_partial_agg moved into DeviceLimits at
+                            0.0005/row on M-series; AVG+STDDEV and plain-JOIN
+                            audit rows both promoted to RequiredToday).
+                            Phase 1 cost-multiplier calibration is no longer
+                            blocked.
 
    Phase 3a grouped HashAgg parallel    ──→ unblocks parallel COUNT(DISTINCT) etc.
    (planner side; 3B done via              (3B: kernel + bridge + executor — `be4d2c2`,
@@ -114,8 +119,8 @@ last since they're upstream).
   `agent-b5b-preagg-exec`. See Round 5 table above.)_
 - _(Phase 3B HashAgg parallel kernel/bridge/executor — merged locally from
   `worktree-agent-a5b484b0e375d86d0`; planner-side 3A remains.)_
-- _(Phase 6 dispatch perf / probe-cost amortisation — done on
-  `worktree-agent-a77f649bdfa546315`, ready to merge.)_
+- _(Phase 6 dispatch perf / probe-cost amortisation — merged locally from
+  `worktree-agent-a77f649bdfa546315`; audit and fp64 calibration follow.)_
 - **Phase 3A grouped HashAgg planner-side** — UNBLOCKED by 3B kernel/bridge.
   ~50 LOC: (i) drop `groupClause` bail at `partial_agg.rs:84`, (ii) extend
   PAAG with `group_keys: Vec<(attno, typoid)>`, (iii) thread groupClause into
@@ -149,11 +154,14 @@ last since they're upstream).
   kernel works; `extract_geometry_array` walker for PG `geometry[]` arg
   is missing. PostGIS doesn't expose `ST_Value(rast, ARRAY[...])` at the
   SQL surface today, so impact is low.
-- **Phase 1 cost-multiplier calibration** — UNBLOCKED by Phase 6 probe-cost
-  work in `worktree-agent-a77f649bdfa546315`. Once Phase 6 lands, the
-  `fp64_matrix` 2-cell shortfall (which was dispatch overhead, not
-  multiplier tuning) should resolve naturally; spot-check the audit and
-  close.
+- **Phase 1 cost-multiplier calibration** — Phase 6 dispatch-perf
+  blocker is now closed (per-row planner-side hashjoin build/probe,
+  CustomScan yield, and partial-agg costs all moved from hard-coded
+  `0.01` / `0.005` literals into `DeviceLimits`, calibrated to GPU
+  kernel throughput at ~0.0005 / row on M-series). Re-run `fp64_matrix`
+  to confirm the 2-cell shortfall closes; if any cells still miss after
+  the dispatch-perf fix, calibrate `soft_fp64_cost_multiplier` from the
+  fresh measured ratios.
 - **Phase 4 type coverage — JSON / JSONB** — substantial; needs a JSONB
   binary-format parser kernel.
 - **Phase 5 worker-side spatial recheck** — DSM plumbing.

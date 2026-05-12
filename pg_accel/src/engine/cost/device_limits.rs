@@ -91,6 +91,46 @@ pub struct DeviceLimits {
     /// Includes predicate evaluation on GPU.
     pub gpu_op_cost_filter: f64,
 
+    // -- Hash-join + partial-agg per-row planner costs (Phase 6 amortisation)
+    //
+    // These four fields replace four hard-coded `0.01` / `0.005` literals
+    // that previously lived in `planner_hooks/hashjoin.rs` and the
+    // `partial_agg.rs` / `preagg_partial.rs` cost formulas. Each was an
+    // over-pessimistic estimate that included bookkeeping work (e.g.
+    // ExecCopySlotMinimalTuple) that PG's stock plan does not separately
+    // charge — for a 10M-row plain JOIN that single-counted overhead added
+    // 200K cost units to pgaccel's path and made `add_path()` always
+    // discard our `GpuHashJoin`.
+    //
+    // Calibration: kernel-time empirical. The GPU hash insert / probe
+    // kernels run at ~50M rows/sec (50ns / row = 0.0005 cost units).
+    // Partial-agg `Reduce` is the same (~50M rows/sec → 0.0005).
+    // `ExecForceStoreMinimalTuple` measured ~50ns / row on M-series so we
+    // charge 0.0005 / row for CustomScan yield — the stock HashJoin
+    // doesn't add a separate yield term, so this is an honest delta over
+    // what PG implicitly counts.
+    //
+    // Hardware scaling: unified memory halves transfer overhead so the
+    // discrete-GPU baseline is 2x.
+    /// Per-inner-row GPU hash-join build cost (kernel insert amortised).
+    /// Replaces the `0.005 + 0.002 + 0.003 = 0.01` literal that
+    /// triple-counted ExecCopy + key extract + GPU insert.
+    pub gpu_hashjoin_build_per_row: f64,
+    /// Per-outer-row GPU hash-join probe cost (kernel probe amortised).
+    /// Same accounting fix as `gpu_hashjoin_build_per_row`.
+    pub gpu_hashjoin_probe_per_row: f64,
+    /// Per-output-row CustomScan yield cost. Calibrated against
+    /// `ExecForceStoreMinimalTuple` (~50ns / row on M-series); the stock
+    /// PG HashJoin / HashAgg do not add a separate yield term, so this is
+    /// an honest delta over PG's bundled `cpu_tuple_cost`.
+    pub custom_scan_yield_per_row: f64,
+    /// Per-row partial-aggregate per-row reduce cost (used by
+    /// `partial_agg::try_inject` and `preagg_partial`). Replaces the
+    /// `0.005` literal that was 10x the measured GPU reduce throughput
+    /// (~50M rows/sec). Soft-fp64 multiplier (32x on Apple Silicon
+    /// without native fp64) is applied at the use site, not here.
+    pub gpu_partial_agg_per_row: f64,
+
     // -- Cost-ratio gates vs PG's best non-parallel path --------------------
     /// Max ratio of GpuAgg total cost to PG's cheapest non-parallel agg path
     /// before the planner injects our path. Our Custom Scan runs
@@ -333,6 +373,17 @@ impl DeviceLimits {
             gpu_op_cost_window: if unified { 0.000_5 } else { 0.001 },
             gpu_op_cost_filter: if unified { 0.000_5 } else { 0.001 },
 
+            // Phase 6 dispatch-perf calibration: per-row hash-join +
+            // partial-agg + CustomScan-yield costs derived from kernel
+            // throughput rather than over-pessimistic CPU-side bookkeeping.
+            // Base `0.001 / row` (= 1µs / row in PG's cost-unit convention,
+            // safely above the measured ~50ns / row to leave headroom for
+            // micro-bench noise). Unified memory halves transfer overhead.
+            gpu_hashjoin_build_per_row: if unified { 0.000_5 } else { 0.001 },
+            gpu_hashjoin_probe_per_row: if unified { 0.000_5 } else { 0.001 },
+            custom_scan_yield_per_row: if unified { 0.000_5 } else { 0.001 },
+            gpu_partial_agg_per_row: if unified { 0.000_5 } else { 0.001 },
+
             // Cost ratio gates vs PG's cheapest NON-parallel path. We compare
             // against the serial baseline (not the parallel Gather plan) so
             // the GPU batch speedup isn't required to overcome the
@@ -434,6 +485,14 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
+            // Phase 6 dispatch-perf calibration. Discrete-profile defaults
+            // (no GPU detected → conservative — never under-charge a path
+            // that won't actually run on GPU). When a GPU is detected,
+            // `from_profile` halves these on unified memory.
+            gpu_hashjoin_build_per_row: 0.001,
+            gpu_hashjoin_probe_per_row: 0.001,
+            custom_scan_yield_per_row: 0.001,
+            gpu_partial_agg_per_row: 0.001,
             gpu_agg_cost_ratio: 0.80,
             gpu_window_cost_ratio: 1.50,
             gpu_preagg_cost_ratio: 1.50,

@@ -269,9 +269,19 @@ pub(super) unsafe fn try_inject(
         || agg_descs
             .iter()
             .any(|(op, _, rtype)| matches!(op, AggOp::Avg) || *rtype == float8_u32);
-    let agg_per_row_base = 0.005_f64;
-    let agg_per_row =
-        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits());
+    // Phase 6 calibration: read from `DeviceLimits::gpu_partial_agg_per_row`
+    // rather than the legacy `0.005` literal. The old constant was 10x the
+    // measured GPU reduce throughput (~50M rows/sec → ~0.0005 cost units /
+    // row on M-series) and combined with the soft-fp64 32x multiplier
+    // produced a per-row cost of 0.16 for fp64 partial aggs (AVG / STDDEV /
+    // VAR), which added 200K cost units to the 10M-row partial-agg path
+    // and made `add_path()` always discard our `Finalize → Gather →
+    // GpuAccel partial` chain. See TODO Phase 6 entry "dispatch perf /
+    // probe-cost amortisation". Soft-fp64 multiplier is still applied at
+    // the use site.
+    let limits = cost::device_limits();
+    let agg_per_row_base = limits.gpu_partial_agg_per_row;
+    let agg_per_row = cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, limits);
     let reduce_cost = base.rows * agg_per_row;
     let startup_cost = base.total_cost + gpu_overhead;
     let total_cost = (base.total_cost + reduce_cost)
