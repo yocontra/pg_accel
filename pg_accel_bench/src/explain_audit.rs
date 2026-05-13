@@ -93,36 +93,36 @@ impl AuditOutcome {
     }
 }
 
-/// Common fixtures shared across multiple rows. Idempotent — the
-/// `IF NOT EXISTS` guards make it safe to re-run the audit.
+/// Common fixtures shared across multiple rows. Idempotent: tables are
+/// created if needed, then truncated before deterministic reload.
 const COMMON_FIXTURES: &[&str] = &[
     "CREATE UNLOGGED TABLE IF NOT EXISTS bench_f32_10m \
        (id bigint, v real, dim int)",
+    "TRUNCATE bench_f32_10m",
     "INSERT INTO bench_f32_10m (id, v, dim) \
      SELECT g, random()::real, (g % 16)::int \
-     FROM generate_series(1, 10000000) g \
-     ON CONFLICT DO NOTHING",
+     FROM generate_series(1, 10000000) g",
     "ANALYZE bench_f32_10m",
     "CREATE UNLOGGED TABLE IF NOT EXISTS bench_fact \
        (id bigint, payload real)",
+    "TRUNCATE bench_fact",
     "INSERT INTO bench_fact (id, payload) \
-     SELECT g, random()::real FROM generate_series(1, 1000000) g \
-     ON CONFLICT DO NOTHING",
+     SELECT g, random()::real FROM generate_series(1, 1000000) g",
     "CREATE UNLOGGED TABLE IF NOT EXISTS bench_dim \
        (id bigint, name text)",
+    "TRUNCATE bench_dim",
     "INSERT INTO bench_dim (id, name) \
-     SELECT g, 'd' || g::text FROM generate_series(1, 1000) g \
-     ON CONFLICT DO NOTHING",
+     SELECT g, 'd' || g::text FROM generate_series(1, 1000) g",
     "ANALYZE bench_fact",
     "ANALYZE bench_dim",
     "CREATE UNLOGGED TABLE IF NOT EXISTS bench_isort \
        (id bigint, v real, dim int)",
     "CREATE INDEX IF NOT EXISTS bench_isort_dim_idx \
        ON bench_isort(dim)",
+    "TRUNCATE bench_isort",
     "INSERT INTO bench_isort (id, v, dim) \
      SELECT g, random()::real, (g % 16)::int \
-     FROM generate_series(1, 1000000) g \
-     ON CONFLICT DO NOTHING",
+     FROM generate_series(1, 1000000) g",
     "ANALYZE bench_isort",
     "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part \
        (id bigint, v real, dim int) \
@@ -135,10 +135,10 @@ const COMMON_FIXTURES: &[&str] = &[
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 2)",
     "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p3 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 3)",
+    "TRUNCATE bench_part",
     "INSERT INTO bench_part (id, v, dim) \
      SELECT g, random()::real, (g % 16)::int \
-     FROM generate_series(1, 1000000) g \
-     ON CONFLICT DO NOTHING",
+     FROM generate_series(1, 1000000) g",
     "ANALYZE bench_part",
 ];
 
@@ -191,23 +191,14 @@ fn build_matrix() -> Vec<AuditRow> {
             expectation: RatchetExpectation::RequiredAfterPhase("3a/3b grouped HashAgg"),
         },
         AuditRow {
-            // ORDER BY + LIMIT: pgaccel's sort injector defers when the
-            // LIMIT is small relative to the input — debug1 says
-            // `LIMIT 100 << 10000000 rows, deferring to PG top-N
-            // heapsort`. This is the correct cost-aware behavior: PG's
-            // top-N heapsort is O(N log K) where K=100 is tiny, so it
-            // dominates a full GPU sort. The query as written can't
-            // reasonably be RequiredToday for GPU injection. Drop LIMIT
-            // (or use a larger LIMIT, e.g. LIMIT N/10) to exercise the
-            // GpuSort path. Tracked as a fixture issue, not a planner gap.
+            // Full ORDER BY with no small LIMIT: a tiny LIMIT correctly
+            // defers to PG's top-N heapsort, so this row intentionally
+            // exercises the full-sort GpuSort path.
             name: "parallel_orderby",
-            description: "ORDER BY v LIMIT 100 — top-N heapsort",
+            description: "ORDER BY v — full sort",
             setup: vec![],
-            query: "SELECT * FROM bench_f32_10m ORDER BY v LIMIT 100",
-            expectation: RatchetExpectation::RequiredAfterPhase(
-                "audit fixture rewrite (LIMIT 100 << 10M defers to PG \
-                 top-N heapsort by design — small-K is GPU-unfavorable)",
-            ),
+            query: "SELECT * FROM bench_f32_10m ORDER BY v",
+            expectation: RatchetExpectation::RequiredToday,
         },
         AuditRow {
             name: "parallel_window_partitioned",
@@ -559,6 +550,18 @@ mod tests {
     fn matrix_covers_nine_rows() {
         // Ship-gate matrix size — see TODO.md Phase 9.
         assert_eq!(build_matrix().len(), 9);
+    }
+
+    #[test]
+    fn orderby_row_exercises_full_sort_today() {
+        let matrix = build_matrix();
+        let row = matrix
+            .iter()
+            .find(|row| row.name == "parallel_orderby")
+            .expect("parallel_orderby row missing");
+        assert_eq!(row.description, "ORDER BY v — full sort");
+        assert_eq!(row.query, "SELECT * FROM bench_f32_10m ORDER BY v");
+        assert!(matches!(row.expectation, RatchetExpectation::RequiredToday));
     }
 
     #[test]
