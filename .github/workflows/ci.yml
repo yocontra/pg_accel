@@ -2,120 +2,268 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
+    inputs:
+      cuda_smoke:
+        description: Run the optional self-hosted CUDA smoke job.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  ACPP_REQUIRED_SHA: 4f3cde11a302eebac28aa1ccc79ad3399cb8183c
+  SOFT_FP64_REQUIRED_TAG: v1.3.0
 
 jobs:
-  prek:
-    name: prek (pre-commit hooks)
-    runs-on: ubuntu-latest
+  mac-arm64:
+    name: macOS arm64 just ci
+    runs-on: macos-14
+    timeout-minutes: 120
+
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # prek's anti-cheat grep hooks scan working-tree files; they do not
-          # need git history. Shallow checkout keeps the job fast.
-          fetch-depth: 1
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          # prek only needs `cargo fmt`; don't churn the full build cache.
-          shared-key: prek
-          cache-targets: false
-      - uses: astral-sh/setup-uv@v5
-      - name: Install prek
-        run: uv tool install prek
-      - name: Cache prek hook installs
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup default "$rust_version"
+
+      - name: Cache Cargo artifacts
         uses: actions/cache@v4
         with:
-          path: ~/.cache/prek
-          key: prek-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
-          restore-keys: prek-${{ runner.os }}-
-      - name: Run prek
-        # SKIP the hooks already covered by dedicated jobs: cargo-deny runs
-        # in the `deny` job, cargo-fmt runs in the `lint` job.
-        env:
-          SKIP: cargo-deny,cargo-fmt
-        run: prek run --all-files --show-diff-on-failure
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-macos-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            cargo-macos-${{ runner.arch }}-
 
-  lint:
-    name: Lint
-    # macOS runners are required because the default `gpu` feature triggers
-    # the pgaccel-kernels CMake build, which depends on AdaptiveCpp + Metal.
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache pgrx cluster
+        uses: actions/cache@v4
         with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install AdaptiveCpp
-        run: brew install adaptivecpp || true
-      - run: cargo fmt -- --check
-      - run: cargo clippy --no-default-features --features pg17 -- -D warnings
+          path: ~/.pgrx
+          key: pgrx-macos-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'pg_accel/pg_accel.control') }}
+          restore-keys: |
+            pgrx-macos-${{ runner.arch }}-
 
-  deny:
-    name: Dependency Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
-  test-unit:
-    name: Test (${{ matrix.os }}, PG ${{ matrix.pg }})
-    needs: [lint]
-    strategy:
-      matrix:
-        # macOS only — GPU feature requires AdaptiveCpp + Metal which is
-        # not available on Linux runners.
-        os: [macos-26]
-        pg: [17]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install AdaptiveCpp
-        run: brew install adaptivecpp || true
-      - run: cargo install cargo-pgrx --locked --version '~0.17'
-      - run: cargo pgrx init --pg${{ matrix.pg }} download
-      - run: cargo pgrx test pg${{ matrix.pg }}
-
-  gpu-kernels:
-    name: GPU Kernels (CPU emulation)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          cd pgaccel-kernels
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
-          ctest --test-dir build --output-on-failure
-
-  conventional-commits:
-    name: Conventional Commits
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
+      - name: Cache AdaptiveCpp install
+        id: cache-acpp
+        uses: actions/cache@v4
         with:
-          fetch-depth: 0
-      - name: Check PR title
+          path: |
+            ~/local
+            ~/Projects/AdaptiveCpp
+            ~/Projects/soft-fp64
+          key: acpp-macos-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+
+      - name: Install Homebrew dependencies
+        shell: bash
         run: |
-          TITLE="${{ github.event.pull_request.title }}"
-          if ! echo "$TITLE" | grep -qE '^(feat|fix|perf|refactor|test|docs|ci|chore|build|style)(\(.+\))?!?:'; then
-            echo "PR title must follow Conventional Commits: type(scope): description"
-            echo "Got: $TITLE"
-            exit 1
+          set -euo pipefail
+          brew update
+          brew install just postgresql@17 postgis h3 llvm@20 lld@20 boost libomp
+          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-pgrx --version 0.17.0 --locked
+          cargo install cargo-deny --locked
+          cargo install cargo-audit --locked
+
+      - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.cache-acpp.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-gpu-metal-headers
+          just setup-gpu-acpp
+
+      - name: Initialize pgrx PG17
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-pgrx
+
+      - name: Run local CI gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          just ci
+
+      - name: Run standalone GPU kernel gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          just gpu-test
+
+      - name: Run live extension smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          just extension-smoke 17
+
+      - name: Generate package schema artifact
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo pgrx schema -p pg_accel pg17 --features pg17 -o artifacts/pg_accel--1.0.0.sql
+
+      - name: Upload schema artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-schema-macos-arm64
+          path: artifacts/pg_accel--1.0.0.sql
+          if-no-files-found: error
+
+  linux-x86:
+    name: Linux x86_64 check/test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup default "$rust_version"
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-linux-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            cargo-linux-${{ runner.arch }}-
+
+      - name: Cache AdaptiveCpp generic install
+        id: cache-acpp-linux
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/local
+            ~/Projects/AdaptiveCpp
+            ~/Projects/soft-fp64
+          key: acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            git \
+            libssl-dev \
+            lld \
+            llvm-dev \
+            ninja-build \
+            pkg-config \
+            postgresql-server-dev-all
+
+      - name: Build pinned AdaptiveCpp generic toolchain
+        if: steps.cache-acpp-linux.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          acpp_src="$HOME/Projects/AdaptiveCpp"
+          soft_fp64_src="$HOME/Projects/soft-fp64"
+          if [ ! -d "$acpp_src/.git" ]; then
+            git clone --branch fork-safe-metal https://github.com/yocontra/AdaptiveCpp.git "$acpp_src"
           fi
+          git -C "$acpp_src" fetch origin fork-safe-metal
+          git -C "$acpp_src" checkout "$ACPP_REQUIRED_SHA"
+          if [ ! -d "$soft_fp64_src/.git" ]; then
+            git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" https://github.com/yocontra/soft-fp.git "$soft_fp64_src"
+          fi
+          cmake -S "$acpp_src" -B "$acpp_src/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/local" \
+            -DWITH_OPENCL_BACKEND=OFF \
+            -DWITH_LEVEL_ZERO_BACKEND=OFF \
+            -DWITH_CUDA_BACKEND=OFF \
+            -DWITH_ROCM_BACKEND=OFF \
+            -DWITH_SSCP_COMPILER=ON \
+            -DBUILD_CLANG_PLUGIN=ON \
+            -DDEFAULT_TARGETS=generic \
+            -DACPP_SOFT_FP64_SRC_DIR="$soft_fp64_src"
+          cmake --build "$acpp_src/build" --target install --parallel 2
+          "$HOME/local/bin/acpp-info" | head -20
+
+      - name: Check without GPU devices
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace --features pg17 --all-targets
+
+      - name: Run Rust tests without GPU device tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --features pg17 --no-run
+
+  cuda-smoke:
+    name: CUDA smoke
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.cuda_smoke) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'cuda-smoke')) }}
+    runs-on:
+      - self-hosted
+      - cuda
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify CUDA AdaptiveCpp runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v nvidia-smi
+          command -v acpp
+          nvidia-smi
+          acpp --acpp-version
+
+      - name: Build kernels and run minimal smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B pgaccel-kernels/build -S pgaccel-kernels \
+            -DCMAKE_PREFIX_PATH="$HOME/local" \
+            -DACPP_TARGETS=cuda
+          cmake --build pgaccel-kernels/build --parallel
+          ./pgaccel-kernels/build/test_device
+          ./pgaccel-kernels/build/test_sycl_basic

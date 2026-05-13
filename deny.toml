@@ -28,5 +28,6 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 
 [advisories]
-# Unmaintained crates pulled in transitively by pgrx.
+# RUSTSEC-2021-0127 / RUSTSEC-2024-0436 are unmaintained crates pulled in
+# transitively by pgrx.
 ignore = ["RUSTSEC-2021-0127", "RUSTSEC-2024-0436"]

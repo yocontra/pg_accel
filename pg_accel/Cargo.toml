@@ -10,6 +10,10 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme.workspace = true
+# pg_accel is a pgrx extension that builds the sibling pgaccel-kernels CMake
+# project. Publish release artifacts through the pgrx package/release workflow;
+# a standalone crates.io package would be missing that repo-level source tree.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]

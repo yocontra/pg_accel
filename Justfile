@@ -37,8 +37,9 @@ setup-tools:
 # Install Homebrew dependencies (including PostGIS + h3 for pgrx)
 setup-brew:
     brew install postgresql@17 postgis h3
-    cargo install cargo-pgrx --locked
+    cargo install cargo-pgrx --version 0.17.0 --locked
     cargo install cargo-deny --locked
+    cargo install cargo-audit --locked
 
 # Initialize pgrx for PG 17 and link all required extensions into it
 setup-pgrx:
@@ -48,8 +49,11 @@ setup-pgrx:
 
     # Symlink PostGIS, h3, and other extensions into pgrx-managed PG.
     # Without this, CREATE EXTENSION fails inside the pgrx instance.
-    PGRX_LIB="$HOME/.pgrx/17.9/pgrx-install/lib/postgresql"
-    PGRX_EXT="$HOME/.pgrx/17.9/pgrx-install/share/postgresql/extension"
+    PG17_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config"
+    PG17_MINOR="$("$PG17_CONFIG" --version | awk '{ print $2 }' | cut -d. -f1,2)"
+    PGRX_LIB="$HOME/.pgrx/$PG17_MINOR/pgrx-install/lib/postgresql"
+    PGRX_EXT="$HOME/.pgrx/$PG17_MINOR/pgrx-install/share/postgresql/extension"
+    HOMEBREW_PREFIX="$(brew --prefix)"
 
     # PostGIS
     for f in "$(brew --prefix postgis)"/lib/postgresql@17/*.dylib; do
@@ -60,10 +64,10 @@ setup-pgrx:
     done
 
     # h3 + h3_postgis
-    for f in /opt/homebrew/lib/postgresql@17/h3*.dylib; do
+    for f in "$HOMEBREW_PREFIX"/lib/postgresql@17/h3*.dylib; do
         ln -sf "$f" "$PGRX_LIB/$(basename "$f")"
     done
-    for f in /opt/homebrew/share/postgresql@17/extension/h3*; do
+    for f in "$HOMEBREW_PREFIX"/share/postgresql@17/extension/h3*; do
         ln -sf "$f" "$PGRX_EXT/$(basename "$f")"
     done
 
@@ -126,7 +130,7 @@ setup-gpu-acpp:
     # the pinned tag — AdaptiveCpp's CMake reads `src/`, `src/sleef/`,
     # `include/` directly via `ACPP_SOFT_FP64_SRC_DIR`.
     SOFT_FP64_SRC="${SOFT_FP64_SRC:-$HOME/Projects/soft-fp64}"
-    SOFT_FP64_REQUIRED_TAG="v1.2.0"
+    SOFT_FP64_REQUIRED_TAG="v1.3.0"
     if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
         git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" \
             https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"
@@ -201,12 +205,17 @@ deny:
 # advisory check: audit uses the full RustSec DB directly). Fails with a clear
 # message on machines that don't have cargo-audit installed — `cargo install
 # cargo-audit --locked` fixes it.
+# Ignored advisories are transitive warnings from pgrx/pgrx-tests/bench-only
+# deps, not pg_accel runtime safety boundaries.
 audit:
     @command -v cargo-audit >/dev/null 2>&1 || { \
       echo "error: cargo-audit not installed. Run: cargo install cargo-audit --locked" >&2; \
       exit 1; \
     }
-    cargo audit
+    cargo audit \
+      --ignore RUSTSEC-2021-0127 \
+      --ignore RUSTSEC-2024-0436 \
+      --ignore RUSTSEC-2026-0097
 
 # Validate file:line citations in CLAUDE.md / ARCHITECTURE.md / TODO.md.
 # Anti-cheat §10 requires citations to be verifiable; this catches drift
@@ -328,6 +337,7 @@ gpu-build:
 
 # Run GPU kernel tests
 gpu-test: gpu-build
+    just clear-jit
     ./pgaccel-kernels/build/test_device \
     && ./pgaccel-kernels/build/test_bbox \
     && ./pgaccel-kernels/build/test_spatial \
@@ -336,12 +346,15 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_raster \
     && ./pgaccel-kernels/build/test_correctness \
     && ./pgaccel-kernels/build/test_exec_gpu \
+    && ./pgaccel-kernels/build/test_hash_agg_keys \
     && ./pgaccel-kernels/build/test_fork \
     && ./pgaccel-kernels/build/test_fork_warmed \
     && ./pgaccel-kernels/build/test_fork_cold \
     && ./pgaccel-kernels/build/test_sycl_basic \
     && ./pgaccel-kernels/build/test_reduce_stats \
-    && ./pgaccel-kernels/build/test_hash_agg_partial
+    && ./pgaccel-kernels/build/test_hash_agg_partial \
+    && ./pgaccel-kernels/build/test_window \
+    && ./pgaccel-kernels/build/test_expr_templates
 
 # Wipe the AdaptiveCpp Metal SSCP JIT cache, then run a single named
 # kernel test binary with a 5-minute timeout. Use this from the
@@ -426,7 +439,30 @@ ci: pre-commit test-unit
 
 # Build installable pgrx package
 package pg="17":
-    cargo pgrx package --pg-config $(which pg_config) --features pg{{pg}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_config="$(cargo pgrx info pg-config pg{{pg}})"
+    cargo pgrx package --package pg_accel --pg-config "$pg_config" --features pg{{pg}}
+    cp NOTICE target/release/pg_accel-pg{{pg}}/NOTICE
+
+# Install into the pgrx-managed cluster and prove a fresh CREATE EXTENSION path.
+extension-smoke pg="17":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pg_config="$(cargo pgrx info pg-config pg{{pg}})"
+    cargo pgrx install --package pg_accel --features pg{{pg}} --pg-config "$pg_config"
+    cargo pgrx start --package pg_accel pg{{pg}}
+    data_dir="$HOME/.pgrx/data-{{pg}}"
+    port="$(awk -F= '/^port[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2 }' "$data_dir/postgresql.conf")"
+    : "${port:?could not read pgrx PostgreSQL port}"
+    db="pg_accel_smoke_{{pg}}"
+    dropdb -h localhost -p "$port" --if-exists "$db"
+    createdb -h localhost -p "$port" "$db"
+    psql -h localhost -p "$port" -d "$db" -v ON_ERROR_STOP=1 \
+        -c "CREATE EXTENSION pg_accel;" \
+        -c "SELECT pg_accel_version();" \
+        -c "SELECT * FROM pg_accel_stats();"
+    dropdb -h localhost -p "$port" "$db"
 
 # Live OTel span viewer TUI (reads OTLP JSON file)
 otel-tui:

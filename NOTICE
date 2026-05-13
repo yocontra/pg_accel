@@ -9,7 +9,7 @@ identifiers follow https://spdx.org/licenses/.
 The AdaptiveCpp fork pin referenced below is:
   repository: https://github.com/yocontra/AdaptiveCpp
   branch:     fork-safe-metal
-  commit:     792d045e8b218241ef54af74244bf5fa92b2f80f
+  commit:     4f3cde11a302eebac28aa1ccc79ad3399cb8183c
 Source bundles for any license linked below can be obtained from that pin
 (the `external/`, `src/`, and `LICENSE`/`COPYING` files under that tree).
 
@@ -22,9 +22,9 @@ Role:    Software fp64 emulation. Function bodies are linked into the
          Metal .metallib cache on Apple Silicon (which lacks hardware
          fp64) via the AdaptiveCpp fork's compiler backend.
 Source:  https://github.com/yocontra/AdaptiveCpp/tree/fork-safe-metal
-         (soft-fp64 sources under the AdaptiveCpp fork tree; see
-         `src/compiler/llvm-to-backend/metal/soft-fp64/` and adjacent
-         `LICENSE` file for verbatim MIT text.)
+         (AdaptiveCpp Metal consumes soft-fp64 via
+         `ACPP_SOFT_FP64_SRC_DIR`.)
+         https://github.com/yocontra/soft-fp.git (tag v1.3.0)
 
 License text (MIT):
 
@@ -57,7 +57,7 @@ Role:    SYCL runtime + compiler toolchain. The `libacpp-rt.dylib`
          compiler frontend produces the device code cached in
          `~/.acpp/apps/global/jit-cache/`.
 Source:  https://github.com/yocontra/AdaptiveCpp (branch fork-safe-metal,
-         commit 792d045e8b218241ef54af74244bf5fa92b2f80f). Verbatim
+         commit 4f3cde11a302eebac28aa1ccc79ad3399cb8183c). Verbatim
          license text is in the `LICENSE` file at the root of that tree.
 
 License text (BSD-2-Clause):
@@ -95,9 +95,9 @@ Role:    Transcendental math function bodies (sin, cos, exp, log, etc.)
          used inside the soft-fp64 emulation path. Linked into the
          Metal .metallib cache at install time.
 Source:  https://github.com/shibatch/sleef — mirrored inside the
-         AdaptiveCpp fork tree used for the build; see the `LICENSE.txt`
-         shipped alongside the vendored SLEEF sources in the AdaptiveCpp
-         fork pin above.
+         soft-fp64 source tree used for the build; see the `LICENSE.txt`
+         shipped alongside the vendored SLEEF sources in soft-fp64 tag
+         v1.3.0.
 
 License text (Boost Software License 1.0):
 
