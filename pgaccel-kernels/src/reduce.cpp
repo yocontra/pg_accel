@@ -638,21 +638,17 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data, size_t co
   if (!data)
     return PGACCEL_ERROR;
 
-  try {
-    sycl::queue* q = get_queue();
-    if (q) {
-      pgaccel_status st =
-          tree_reduce_multi_sycl<double>(*q, data, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
-        pgaccel_record_gpu_exec();
-        return st;
-      }
-    }
-  } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_f64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  pgaccel_status st = pgaccel_reduce_sum_f64(data, count, out_sum);
+  if (st != PGACCEL_OK)
+    return st;
+  st = pgaccel_reduce_min_f64(data, count, out_min);
+  if (st != PGACCEL_OK)
+    return st;
+  st = pgaccel_reduce_max_f64(data, count, out_max);
+  if (st != PGACCEL_OK)
+    return st;
+  *out_count = static_cast<int64_t>(count);
+  return PGACCEL_OK;
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data, size_t count,
@@ -999,19 +995,12 @@ extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t co
   if (!data)
     return PGACCEL_ERROR;
 
-  try {
-    sycl::queue* q = get_queue();
-    if (q) {
-      pgaccel_status st = tree_reduce_stats_sycl<double, double, uint64_t>(
-          *q, data, count, out_count, out_sum, out_sum_sq);
-      if (st == PGACCEL_OK) {
-        pgaccel_record_gpu_exec();
-        return st;
-      }
-    }
-  } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_stats_f64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  pgaccel_status st = pgaccel_reduce_sum_f64(data, count, out_sum);
+  if (st != PGACCEL_OK)
+    return st;
+  st = pgaccel_reduce_sum_sq_f64(data, count, out_sum_sq);
+  if (st != PGACCEL_OK)
+    return st;
+  *out_count = static_cast<uint64_t>(count);
+  return PGACCEL_OK;
 }

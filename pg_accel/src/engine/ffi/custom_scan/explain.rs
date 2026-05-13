@@ -64,6 +64,30 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
             let time_ms = (*state).accel.dispatch_time_us as f64 / 1000.0;
             pg_sys::ExplainPropertyFloat(c"Dispatch Time".as_ptr(), c"ms".as_ptr(), time_ms, 3, es);
 
+            if strategy == GpuStrategy::Scan {
+                pg_sys::ExplainPropertyInteger(
+                    c"Spatial Rechecks".as_ptr(),
+                    std::ptr::null(),
+                    (*state).accel.spatial_rechecks as i64,
+                    es,
+                );
+                #[allow(clippy::cast_precision_loss)]
+                let recheck_ms = (*state).accel.spatial_recheck_time_us as f64 / 1000.0;
+                pg_sys::ExplainPropertyFloat(
+                    c"Spatial Recheck Time".as_ptr(),
+                    c"ms".as_ptr(),
+                    recheck_ms,
+                    3,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Parallel Worker".as_ptr(),
+                    std::ptr::null(),
+                    i64::from((*state).accel.parallel_worker_number),
+                    es,
+                );
+            }
+
             // For Agg strategy, report whether GPU reduce was used and
             // whether this is a partial (worker-side) aggregate path.
             if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {

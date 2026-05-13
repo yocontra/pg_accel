@@ -684,32 +684,40 @@ fn adapter_h3_gpu_strategy_for_gpu_functions() {
 #[test]
 fn adapter_postgis_gpu_spatial_strategy() {
     let a = postgis::adapter();
-    // Only st_intersects has a working GPU kernel; others were removed
-    // because the three-layer pipeline returns all_uncertain() for them.
-    let spatial_names = ["st_intersects"];
-    for name in &spatial_names {
-        let entry = a.functions.iter().find(|f| f.name == *name);
-        assert!(entry.is_some(), "Missing spatial function '{name}'");
-        assert_eq!(entry.unwrap().strategy, AccelStrategy::GpuSpatial);
+    for entry in &a.functions {
+        assert_eq!(
+            entry.strategy,
+            AccelStrategy::GpuSpatial,
+            "PostGIS function '{}' must use GpuSpatial",
+            entry.name
+        );
     }
 }
 
 #[test]
 fn adapter_postgis_raster_gpu_strategy() {
     let a = postgis_raster::adapter();
-    let gpu_names = ["st_mapalgebra", "st_clip", "st_reclass"];
-    for name in &gpu_names {
-        let entry = a.functions.iter().find(|f| f.name == *name);
-        assert!(entry.is_some(), "Missing raster GPU function '{name}'");
-        assert_eq!(entry.unwrap().strategy, AccelStrategy::GpuRaster);
+    for entry in &a.functions {
+        assert_eq!(
+            entry.strategy,
+            AccelStrategy::GpuRaster,
+            "raster function '{}' must use GpuRaster",
+            entry.name
+        );
     }
 }
 
 #[test]
 fn adapter_combined_function_count() {
     let total: usize = all_adapters().iter().map(|a| a.functions.len()).sum();
-    // h3=4, postgis=1, postgis_raster=3 = 8
-    assert_eq!(total, 8);
+    let expected = h3::adapter().functions.len()
+        + postgis::adapter().functions.len()
+        + postgis_raster::adapter().functions.len();
+    assert_eq!(total, expected);
+    assert!(
+        total >= 38,
+        "adapter surface unexpectedly shrank; expected at least 38 registered functions"
+    );
 }
 
 #[test]

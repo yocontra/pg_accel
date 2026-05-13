@@ -21,6 +21,7 @@
 //! Geometry data (POLY):   type(4) + nrings(4) + per ring: npoints(4) + coords
 //! ```
 
+pub mod array;
 pub mod bbox;
 pub mod header;
 pub mod linestring;
@@ -32,6 +33,7 @@ pub mod wkb;
 #[cfg(feature = "pg_test")]
 mod tests;
 
+pub use array::{ExtractError, ExtractedGeom, extract_geometry_array};
 pub use bbox::extract_bbox;
 pub use header::has_bbox_flag;
 pub use point::{extract_point, extract_point_xy_f32};
@@ -68,8 +70,10 @@ use self::wkb::datum_to_gserialized_bytes;
 #[must_use]
 pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
     let bytes = datum_to_gserialized_bytes(datum)?;
-    let bytes = bytes.as_slice();
+    extract_geometry_from_bytes(bytes.as_slice())
+}
 
+pub(super) fn extract_geometry_from_bytes(bytes: &[u8]) -> Option<ExtractedGeometry> {
     if bytes.len() < MIN_HEADER_LEN {
         return None;
     }

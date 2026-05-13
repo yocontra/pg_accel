@@ -322,6 +322,7 @@ unsafe fn pgaccel_inject_gpu_window(
         let wc_ref = unsafe { &*wclause };
 
         // Extract partition attno from PARTITION BY clause.
+        let mut partition_attno_type: u32 = 0;
         let partition_attno = if wc_ref.partitionClause.is_null() {
             0 // no PARTITION BY
         } else {
@@ -347,7 +348,9 @@ unsafe fn pgaccel_inject_gpu_window(
                     if !te_expr.is_null()
                         && unsafe { (*te_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var
                     {
-                        attno = i32::from(unsafe { (*te_expr.cast::<pg_sys::Var>()).varattno });
+                        let var = te_expr.cast::<pg_sys::Var>();
+                        attno = i32::from(unsafe { (*var).varattno });
+                        partition_attno_type = u32::from(unsafe { (*var).vartype });
                     }
                     break;
                 }
@@ -358,6 +361,27 @@ unsafe fn pgaccel_inject_gpu_window(
             }
             attno
         };
+
+        if partition_attno > 0
+            && !matches!(
+                partition_attno_type,
+                WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
+            )
+        {
+            // SAFETY: planner hook runs on the main backend thread.
+            if let Some(policy) =
+                unsafe { planner_type_policy(pg_sys::Oid::from(partition_attno_type)).rejection() }
+            {
+                record_planner_type_rejection(
+                    "window partition",
+                    pg_sys::Oid::from(partition_attno_type),
+                    policy,
+                    rows as u64,
+                );
+            }
+            pgrx::debug1!("pg_accel window: unsupported partition key type {partition_attno_type}");
+            return;
+        }
 
         // Extract ORDER BY attno AND its Var's vartype.
         // The vartype feeds `uses_fp64` so the cost site can apply the
@@ -401,6 +425,27 @@ unsafe fn pgaccel_inject_gpu_window(
             attno
         };
 
+        if order_attno > 0
+            && !matches!(
+                order_attno_type,
+                WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
+            )
+        {
+            // SAFETY: planner hook runs on the main backend thread.
+            if let Some(policy) =
+                unsafe { planner_type_policy(pg_sys::Oid::from(order_attno_type)).rejection() }
+            {
+                record_planner_type_rejection(
+                    "window order",
+                    pg_sys::Oid::from(order_attno_type),
+                    policy,
+                    rows as u64,
+                );
+            }
+            pgrx::debug1!("pg_accel window: unsupported order key type {order_attno_type}");
+            return;
+        }
+
         // Extract value column attno AND its Var's vartype for aggregate-like
         // window funcs. The vartype feeds `uses_fp64` alongside the ORDER BY
         // vartype above.
@@ -425,6 +470,17 @@ unsafe fn pgaccel_inject_gpu_window(
                         typid,
                         WIN_FLOAT4OID | WIN_FLOAT8OID | WIN_INT4OID | WIN_INT8OID
                     ) {
+                        // SAFETY: planner hook runs on the main backend thread.
+                        if let Some(policy) =
+                            unsafe { planner_type_policy(pg_sys::Oid::from(typid)).rejection() }
+                        {
+                            record_planner_type_rejection(
+                                "window value",
+                                pg_sys::Oid::from(typid),
+                                policy,
+                                rows as u64,
+                            );
+                        }
                         pgrx::debug1!("pg_accel window: unsupported value type {typid}");
                         return;
                     }
@@ -873,8 +929,27 @@ unsafe fn pgaccel_inject_gpu_preagg(
                 fact_path = current;
 
                 // Extract fact-side WHERE clause as a compiled template.
-                fact_scan_expr =
-                    unsafe { compile_restrictinfo_to_template(parent_ref.baserestrictinfo) };
+                let fact_restricts = parent_ref.baserestrictinfo;
+                let has_fact_restricts =
+                    !fact_restricts.is_null() && unsafe { pg_sys::list_length(fact_restricts) } > 0;
+                fact_scan_expr = unsafe { compile_restrictinfo_to_template(fact_restricts) };
+                if has_fact_restricts && fact_scan_expr.is_none() {
+                    // SAFETY: planner hook runs on the main backend thread.
+                    if let Some(rejection) =
+                        unsafe { find_explicit_unsupported_type_in_restrictinfo(fact_restricts) }
+                    {
+                        record_planner_type_rejection(
+                            "preagg fact filter",
+                            rejection.oid,
+                            rejection.policy,
+                            fact_rows.max(0.0) as u64,
+                        );
+                    }
+                    pgrx::debug1!(
+                        "pg_accel: preagg rejected: unsupported fact-side filter cannot be pushed"
+                    );
+                    return;
+                }
                 break;
             }
         }
@@ -953,6 +1028,18 @@ unsafe fn pgaccel_inject_gpu_preagg(
                     0
                 } else {
                     let arg_expr = unsafe { (*te).expr };
+                    // SAFETY: planner hook runs on the main backend thread.
+                    if let Some(rejection) =
+                        unsafe { find_explicit_unsupported_type(arg_expr.cast()) }
+                    {
+                        record_planner_type_rejection(
+                            "preagg input",
+                            rejection.oid,
+                            rejection.policy,
+                            fact_rows.max(0.0) as u64,
+                        );
+                        return;
+                    }
                     // SAFETY: arg_expr is a valid Node pointer from PG parser output.
                     unsafe { extract_var_attno(arg_expr) }
                 }
@@ -970,6 +1057,19 @@ unsafe fn pgaccel_inject_gpu_preagg(
             let varattno = i32::from(unsafe { (*var).varattno });
             let varno = unsafe { (*var).varno } as u32;
             let typid = unsafe { (*var).vartype };
+
+            // Explicitly reject type families whose equality/serialization
+            // semantics are not implemented by the preagg grouping path.
+            // SAFETY: planner hook runs on the main backend thread.
+            if let Some(policy) = unsafe { planner_type_policy(typid).rejection() } {
+                record_planner_type_rejection(
+                    "preagg group key",
+                    typid,
+                    policy,
+                    fact_rows.max(0.0) as u64,
+                );
+                return;
+            }
 
             // Determine if this var references the fact table or a dimension.
             let (source, attno) =
@@ -1607,6 +1707,7 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // SAFETY: root is a valid PlannerInfo pointer.
     let root_ref = unsafe { &*root };
     let input_ref = unsafe { &*input_rel };
+    let agg_rows_estimate = input_ref.rows.max(0.0) as u64;
 
     // Gate: Check GROUP BY — we support plain aggregates, single-column,
     // and two-column GROUP BY (composite key encoding: two int4 → one int8).
@@ -1682,6 +1783,15 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 return;
             };
             let Some(key_type) = GroupKeyInfo::key_type_from_oid(gk_typid) else {
+                // SAFETY: planner hook runs on the main backend thread.
+                if let Some(policy) = unsafe { planner_type_policy(gk_typid).rejection() } {
+                    record_planner_type_rejection(
+                        "agg group key",
+                        gk_typid,
+                        policy,
+                        agg_rows_estimate,
+                    );
+                }
                 pgrx::debug1!("pg_accel: gpu_agg rejected: unsupported GROUP BY type");
                 return;
             };
@@ -1707,6 +1817,24 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 matches!(u32::from(oid), 21 | 23) // INT2OID | INT4OID
             };
             if !is_small_int(typid1) || !is_small_int(typid2) {
+                // SAFETY: planner hook runs on the main backend thread.
+                if let Some(policy) = unsafe { planner_type_policy(typid1).rejection() } {
+                    record_planner_type_rejection(
+                        "agg composite group key",
+                        typid1,
+                        policy,
+                        agg_rows_estimate,
+                    );
+                }
+                // SAFETY: planner hook runs on the main backend thread.
+                if let Some(policy) = unsafe { planner_type_policy(typid2).rejection() } {
+                    record_planner_type_rejection(
+                        "agg composite group key",
+                        typid2,
+                        policy,
+                        agg_rows_estimate,
+                    );
+                }
                 pgrx::debug1!(
                     "pg_accel: gpu_agg rejected: 2-col GROUP BY requires int2/int4 types"
                 );
@@ -2046,6 +2174,17 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
             );
             if !is_numeric_result {
+                // SAFETY: planner hook runs on the main backend thread.
+                if let Some(policy) =
+                    unsafe { planner_type_policy(pg_sys::Oid::from(result_type)).rejection() }
+                {
+                    record_planner_type_rejection(
+                        "agg expression",
+                        pg_sys::Oid::from(result_type),
+                        policy,
+                        agg_rows_estimate,
+                    );
+                }
                 return;
             }
             AGG_FLOAT8OID
@@ -2057,6 +2196,17 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
             )
         {
+            // SAFETY: planner hook runs on the main backend thread.
+            if let Some(policy) =
+                unsafe { planner_type_policy(pg_sys::Oid::from(typid)).rejection() }
+            {
+                record_planner_type_rejection(
+                    "agg input",
+                    pg_sys::Oid::from(typid),
+                    policy,
+                    agg_rows_estimate,
+                );
+            }
             return;
         }
         // fp64 classification: this aggregate uses fp64 machinery if either
@@ -2867,10 +3017,123 @@ const EXPR_FLOAT8_OID: u32 = 701;
 const EXPR_DATE_OID: u32 = 1082;
 const EXPR_TIMESTAMP_OID: u32 = 1114;
 
-/// Whether a PG type OID is supported by the GPU expression evaluator.
-#[inline]
-fn is_gpu_expr_type(oid: u32) -> bool {
+/// Unsupported type families that must be declined explicitly at planning
+/// time. These are intentionally policy rejections, not executor fallbacks:
+/// pg_accel does not ship production-safe kernels/parsers for them today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnsupportedTypePolicy {
+    Json,
+    Jsonb,
+    Array,
+    Interval,
+    Domain,
+    Composite,
+    Custom,
+}
+
+impl UnsupportedTypePolicy {
+    #[must_use]
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Jsonb => "jsonb",
+            Self::Array => "array",
+            Self::Interval => "interval",
+            Self::Domain => "domain",
+            Self::Composite => "composite",
+            Self::Custom => "custom",
+        }
+    }
+
+    #[must_use]
+    pub(super) const fn reason(self) -> &'static str {
+        match self {
+            Self::Json => "unsupported_json_type",
+            Self::Jsonb => "unsupported_jsonb_type",
+            Self::Array => "unsupported_array_type",
+            Self::Interval => "unsupported_interval_type",
+            Self::Domain => "unsupported_domain_type",
+            Self::Composite => "unsupported_composite_type",
+            Self::Custom => "unsupported_custom_type",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuTypeSupport {
+    Supported,
+    ExplicitReject(UnsupportedTypePolicy),
+    UnsupportedOther,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExplicitTypeRejection {
+    policy: UnsupportedTypePolicy,
+    oid: pg_sys::Oid,
+}
+
+impl GpuTypeSupport {
+    #[must_use]
+    const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+
+    #[must_use]
+    const fn rejection(self) -> Option<UnsupportedTypePolicy> {
+        match self {
+            Self::ExplicitReject(policy) => Some(policy),
+            Self::Supported | Self::UnsupportedOther => None,
+        }
+    }
+}
+
+#[must_use]
+const fn is_builtin_array_oid(oid: u32) -> bool {
     matches!(
+        oid,
+        // Common built-in array OIDs from pg_type.dat. Dynamic/user arrays
+        // are caught at planner time through get_element_type().
+        1000 | 1001
+            | 1002
+            | 1003
+            | 1005
+            | 1007
+            | 1009
+            | 1014
+            | 1015
+            | 1016
+            | 1017
+            | 1021
+            | 1022
+            | 1028
+            | 1033
+            | 1115
+            | 1182
+            | 1183
+            | 1185
+            | 1187
+            | 1231
+            | 1270
+            | 2951
+            | 3807
+    )
+}
+
+#[must_use]
+const fn builtin_rejected_type_policy(oid: u32) -> Option<UnsupportedTypePolicy> {
+    match oid {
+        114 => Some(UnsupportedTypePolicy::Json),
+        3802 => Some(UnsupportedTypePolicy::Jsonb),
+        1186 => Some(UnsupportedTypePolicy::Interval),
+        2249 => Some(UnsupportedTypePolicy::Composite),
+        _ if is_builtin_array_oid(oid) => Some(UnsupportedTypePolicy::Array),
+        _ => None,
+    }
+}
+
+#[must_use]
+fn gpu_supported_scalar_type_policy(oid: u32) -> GpuTypeSupport {
+    if matches!(
         oid,
         EXPR_BOOL_OID
             | EXPR_INT2_OID
@@ -2880,7 +3143,85 @@ fn is_gpu_expr_type(oid: u32) -> bool {
             | EXPR_FLOAT8_OID
             | EXPR_DATE_OID
             | EXPR_TIMESTAMP_OID
-    )
+    ) {
+        return GpuTypeSupport::Supported;
+    }
+
+    if let Some(policy) = builtin_rejected_type_policy(oid) {
+        return GpuTypeSupport::ExplicitReject(policy);
+    }
+
+    if oid >= pg_sys::FirstNormalObjectId {
+        return GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Custom);
+    }
+
+    GpuTypeSupport::UnsupportedOther
+}
+
+/// Planner-time type policy with catalog-backed detection for dynamic array,
+/// domain, and composite types. Must run on the main backend thread.
+///
+/// # Safety
+///
+/// Calls PostgreSQL catalog helpers; caller must be in planner/backend context.
+unsafe fn planner_type_policy(oid: pg_sys::Oid) -> GpuTypeSupport {
+    let oid_raw = u32::from(oid);
+    if gpu_supported_scalar_type_policy(oid_raw).is_supported() {
+        return GpuTypeSupport::Supported;
+    }
+    if let Some(policy) = builtin_rejected_type_policy(oid_raw) {
+        return GpuTypeSupport::ExplicitReject(policy);
+    }
+    if oid == pg_sys::InvalidOid {
+        return GpuTypeSupport::UnsupportedOther;
+    }
+
+    // SAFETY: lsyscache type helpers are catalog lookups on the main backend
+    // thread. They return InvalidOid / '\0' for invalid or missing types.
+    let elem_oid = unsafe { pg_sys::get_element_type(oid) };
+    if elem_oid != pg_sys::InvalidOid {
+        return GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Array);
+    }
+
+    // SAFETY: same catalog-lookup contract as above.
+    let typtype = unsafe { pg_sys::get_typtype(oid) } as u8;
+    if typtype == pg_sys::TYPTYPE_DOMAIN {
+        return GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Domain);
+    }
+    if typtype == pg_sys::TYPTYPE_COMPOSITE {
+        return GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Composite);
+    }
+
+    // SAFETY: type_is_rowtype includes RECORDOID and domains over composite.
+    if unsafe { pg_sys::type_is_rowtype(oid) } {
+        return GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Composite);
+    }
+
+    if oid_raw >= pg_sys::FirstNormalObjectId {
+        return GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Custom);
+    }
+
+    GpuTypeSupport::UnsupportedOther
+}
+
+fn record_planner_type_rejection(
+    context: &str,
+    oid: pg_sys::Oid,
+    policy: UnsupportedTypePolicy,
+    n_rows_estimate: u64,
+) {
+    pgrx::debug1!(
+        "pg_accel {context}: rejected unsupported {} type oid={}",
+        policy.label(),
+        u32::from(oid)
+    );
+    stats::increment_planner_rejected(policy.reason(), n_rows_estimate);
+}
+
+/// Whether a PG type OID is supported by the GPU expression evaluator.
+#[inline]
+fn is_gpu_expr_type(oid: u32) -> bool {
+    gpu_supported_scalar_type_policy(oid).is_supported()
 }
 
 /// Check if restriction clauses are candidates for GpuExpr evaluation.
@@ -2889,7 +3230,10 @@ fn is_gpu_expr_type(oid: u32) -> bool {
 /// expressions (OpExpr or BoolExpr at the top level). Full compilability
 /// is checked at executor time — if compilation fails, the executor
 /// gracefully falls back to PG's standard `ExecEvalExpr`.
-pub(super) fn try_gpu_expr_match(restrictinfo_list: *mut List) -> Option<AccelMatch> {
+pub(super) fn try_gpu_expr_match(
+    restrictinfo_list: *mut List,
+    n_rows_estimate: u64,
+) -> Option<AccelMatch> {
     if restrictinfo_list.is_null() {
         return None;
     }
@@ -2910,6 +3254,14 @@ pub(super) fn try_gpu_expr_match(restrictinfo_list: *mut List) -> Option<AccelMa
         }
         let clause = unsafe { (*ri).clause };
         if clause.is_null() {
+            return None;
+        }
+        // Surface explicit policy rejections before the generic
+        // compilability guard returns `None`. This keeps JSON/ARRAY/domain
+        // declines visible in traces instead of looking like an arbitrary
+        // "no match" CPU plan choice.
+        if let Some(rejection) = unsafe { find_explicit_unsupported_type(clause.cast()) } {
+            record_planner_type_rejection("expr", rejection.oid, rejection.policy, n_rows_estimate);
             return None;
         }
         // SAFETY: clause is a valid Expr node from the planner.
@@ -3007,10 +3359,38 @@ fn is_gpu_compilable_clause(node: *mut pg_sys::Node) -> bool {
             false
         }
         NodeTag::T_FuncExpr => {
-            // FuncExpr: accept only known GPU-compilable functions.
+            // FuncExpr: accept only known GPU-compilable math functions and
+            // only when every argument is a supported scalar. This prevents
+            // JSON/JSONB/ARRAY helpers that return bool (for example
+            // jsonb_path_exists) from being claimed by the generic GpuExpr
+            // planner path and then deferred per-row at execution time.
             let funcexpr = node.cast::<pg_sys::FuncExpr>();
             let result_type = u32::from(unsafe { (*funcexpr).funcresulttype });
-            is_gpu_expr_type(result_type)
+            if !is_gpu_expr_type(result_type) {
+                return false;
+            }
+            let name_ptr = unsafe { pg_sys::get_func_name((*funcexpr).funcid) };
+            if name_ptr.is_null() {
+                return false;
+            }
+            let Ok(func_name) = (unsafe { std::ffi::CStr::from_ptr(name_ptr) }).to_str() else {
+                return false;
+            };
+            if crate::engine::expr_compiler::math_func_opcode(func_name).is_none() {
+                return false;
+            }
+            let args = unsafe { (*funcexpr).args };
+            if args.is_null() {
+                return false;
+            }
+            let nargs = unsafe { pg_sys::list_length(args) };
+            for j in 0..nargs {
+                let arg = unsafe { pg_sys::list_nth(args, j).cast::<pg_sys::Node>() };
+                if !is_gpu_compilable_expr_node(arg) {
+                    return false;
+                }
+            }
+            true
         }
         NodeTag::T_CaseExpr => {
             // CASE expressions: result type must be numeric.
@@ -3055,6 +3435,166 @@ fn is_gpu_compilable_expr_node(node: *mut pg_sys::Node) -> bool {
         NodeTag::T_RelabelType | NodeTag::T_CoerceViaIO => true,
         _ => false,
     }
+}
+
+/// Recursively find an explicitly rejected type in a planner expression.
+///
+/// # Safety
+///
+/// `node` must be a valid PG expression `Node` pointer. Catalog type
+/// lookups must run on the main backend thread.
+#[allow(clippy::cast_ptr_alignment)]
+unsafe fn find_explicit_unsupported_type(node: *mut pg_sys::Node) -> Option<ExplicitTypeRejection> {
+    if node.is_null() {
+        return None;
+    }
+
+    let check_oid = |oid: pg_sys::Oid| -> Option<ExplicitTypeRejection> {
+        // SAFETY: caller is in planner/backend context.
+        unsafe {
+            planner_type_policy(oid)
+                .rejection()
+                .map(|policy| ExplicitTypeRejection { policy, oid })
+        }
+    };
+
+    // SAFETY: node is a valid Node pointer.
+    match unsafe { (*node).type_ } {
+        NodeTag::T_Var => {
+            let var = node.cast::<pg_sys::Var>();
+            // SAFETY: tag confirmed Var.
+            check_oid(unsafe { (*var).vartype })
+        }
+        NodeTag::T_Const => {
+            let cst = node.cast::<pg_sys::Const>();
+            // SAFETY: tag confirmed Const.
+            check_oid(unsafe { (*cst).consttype })
+        }
+        NodeTag::T_OpExpr => {
+            let op = node.cast::<pg_sys::OpExpr>();
+            if let Some(policy) = check_oid(unsafe { (*op).opresulttype }) {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type_in_list((*op).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let b = node.cast::<pg_sys::BoolExpr>();
+            unsafe { find_explicit_unsupported_type_in_list((*b).args) }
+        }
+        NodeTag::T_FuncExpr => {
+            let f = node.cast::<pg_sys::FuncExpr>();
+            if let Some(policy) = check_oid(unsafe { (*f).funcresulttype }) {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type_in_list((*f).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let c = node.cast::<pg_sys::CaseExpr>();
+            if let Some(policy) = check_oid(unsafe { (*c).casetype }) {
+                return Some(policy);
+            }
+            if let Some(policy) =
+                unsafe { find_explicit_unsupported_type((*c).arg.cast::<pg_sys::Node>()) }
+            {
+                return Some(policy);
+            }
+            if let Some(policy) = unsafe { find_explicit_unsupported_type_in_list((*c).args) } {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type((*c).defresult.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_NullTest => {
+            let nt = node.cast::<pg_sys::NullTest>();
+            unsafe { find_explicit_unsupported_type((*nt).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_RelabelType => {
+            let r = node.cast::<pg_sys::RelabelType>();
+            if let Some(policy) = check_oid(unsafe { (*r).resulttype }) {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type((*r).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let c = node.cast::<pg_sys::CoerceViaIO>();
+            if let Some(policy) = check_oid(unsafe { (*c).resulttype }) {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type((*c).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let saop = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { find_explicit_unsupported_type_in_list((*saop).args) }
+        }
+        NodeTag::T_ArrayExpr => {
+            let array = node.cast::<pg_sys::ArrayExpr>();
+            if let Some(policy) = check_oid(unsafe { (*array).array_typeid }) {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type_in_list((*array).elements) }
+        }
+        NodeTag::T_RowExpr => {
+            let row = node.cast::<pg_sys::RowExpr>();
+            if let Some(policy) = check_oid(unsafe { (*row).row_typeid }) {
+                return Some(policy);
+            }
+            unsafe { find_explicit_unsupported_type_in_list((*row).args) }
+        }
+        _ => None,
+    }
+}
+
+/// Scan a PG expression list for explicit unsupported type-policy hits.
+///
+/// # Safety
+///
+/// `list` must be null or a valid PG `List` of expression `Node` pointers.
+unsafe fn find_explicit_unsupported_type_in_list(
+    list: *mut pg_sys::List,
+) -> Option<ExplicitTypeRejection> {
+    if list.is_null() {
+        return None;
+    }
+    // SAFETY: list is a valid List pointer.
+    let len = unsafe { pg_sys::list_length(list) };
+    for i in 0..len {
+        // SAFETY: i is in bounds for list.
+        let node = unsafe { pg_sys::list_nth(list, i).cast::<pg_sys::Node>() };
+        if let Some(policy) = unsafe { find_explicit_unsupported_type(node) } {
+            return Some(policy);
+        }
+    }
+    None
+}
+
+/// Scan a RestrictInfo list for explicit unsupported type-policy hits.
+///
+/// # Safety
+///
+/// `list` must be null or a valid PG `List` of `RestrictInfo` nodes.
+unsafe fn find_explicit_unsupported_type_in_restrictinfo(
+    list: *mut pg_sys::List,
+) -> Option<ExplicitTypeRejection> {
+    if list.is_null() {
+        return None;
+    }
+    // SAFETY: list is a valid RestrictInfo List pointer.
+    let len = unsafe { pg_sys::list_length(list) };
+    for i in 0..len {
+        // SAFETY: i is in bounds for list.
+        let ri = unsafe { pg_sys::list_nth(list, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is a valid RestrictInfo.
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            continue;
+        }
+        if let Some(rejection) = unsafe { find_explicit_unsupported_type(clause.cast()) } {
+            return Some(rejection);
+        }
+    }
+    None
 }
 
 /// Find the first registered accelerable function in a `List` of `RestrictInfo`.
@@ -3231,7 +3771,17 @@ pub(super) unsafe fn find_equi_join_key(
             20 => 1, // Int64
             // float4 (700), float8 (701)
             700 | 701 => 2, // Float64
-            _ => continue,  // Unsupported key type
+            _ => {
+                // SAFETY: planner hook runs on the main backend thread.
+                if let Some(policy) = unsafe { planner_type_policy(key_oid).rejection() } {
+                    pgrx::debug1!(
+                        "pg_accel join: rejected unsupported {} key type oid={}",
+                        policy.label(),
+                        u32::from(key_oid)
+                    );
+                }
+                continue;
+            }
         };
 
         // User-facing escape valve: `pg_accel.fp64_enabled=false` fully

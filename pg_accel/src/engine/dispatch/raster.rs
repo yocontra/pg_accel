@@ -1,8 +1,10 @@
 //! GPU raster dispatch for `ST_MapAlgebra`, `ST_Clip`, `ST_Reclass`,
 //! and the Agent 3A kernels (`ST_SummaryStats`).
 
-use crate::adapters::extractors::array::{ParseError as ArrayParseError, parse_array};
-use crate::adapters::extractors::geometry::extract_point;
+use crate::adapters::extractors::array::ParseError as ArrayParseError;
+use crate::adapters::extractors::geometry::{
+    ExtractError as GeometryExtractError, extract_geometry_array,
+};
 use crate::adapters::extractors::raster;
 use crate::engine::gucs;
 use crate::engine::registry;
@@ -40,9 +42,9 @@ use super::DispatchResult;
 ///   hillshade pipelines).
 /// - `st_hillshade(rast, cell_x, cell_y, sun_az, sun_alt)` — Phase II
 ///   F1: 4 f64 args.
-/// - `st_value(rast, point_array)` — Phase 2 B3: walks the geometry[]
-///   ArrayType payload via `extractors::array::parse_array`, extracts
-///   each element's POINT (x, y), and runs the kernel once per row
+/// - `st_value(rast, point_array)` — walks the geometry[] payload via
+///   `extractors::geometry::extract_geometry_array`, extracts each
+///   element's POINT (x, y), and runs the kernel once per row
 ///   over the row's flat point buffer. Multidim arrays escalate cleanly
 ///   per anti-cheat ban #9.
 ///
@@ -1029,10 +1031,9 @@ unsafe fn dispatch_st_value(
         return DispatchResult::Deferred;
     }
 
-    // SAFETY: main backend thread; `points_datum` is a varlena ArrayType*.
-    let points_arr = match unsafe { parse_array(points_datum) } {
-        Ok(a) => a,
-        Err(ArrayParseError::Multidim(n)) => {
+    let points = match extract_geometry_array(points_datum) {
+        Ok(points) => points,
+        Err(GeometryExtractError::Array(ArrayParseError::Multidim(n))) => {
             pgrx::debug1!(
                 "pg_accel: dispatch_st_value: multidim geometry[] (ndim={n}) escalated per ban #9"
             );
@@ -1044,31 +1045,18 @@ unsafe fn dispatch_st_value(
         }
     };
 
-    // Walk the array once. Each element is a varlena GSERIALIZED point;
-    // accept POINT geometries only, drop NULL elements (matches PostGIS
-    // ST_Value behaviour: NULL point in the array → NULL result).
-    let mut points_xy: Vec<f64> = Vec::with_capacity(points_arr.nelems * 2);
-    let mut element_was_point: Vec<bool> = Vec::with_capacity(points_arr.nelems);
-    for opt_elem in &points_arr {
-        match opt_elem {
-            Some(bytes) => {
-                // The walker hands us bytes [start..start+varsize] of the
-                // element's varlena. We need a Datum pointing at it for
-                // `extract_point`. The slice base is stable for the
-                // duration of this dispatch frame (it borrows the
-                // detoasted varlena memory).
-                let elem_datum = pgrx::pg_sys::Datum::from(bytes.as_ptr());
-                if let Some((x, y)) = extract_point(elem_datum) {
-                    points_xy.push(x);
-                    points_xy.push(y);
-                    element_was_point.push(true);
-                } else {
-                    // Non-POINT element (e.g. LINESTRING) — degenerate
-                    // input. Mark slot, skip kernel input.
-                    element_was_point.push(false);
-                }
-            }
-            None => element_was_point.push(false),
+    // Walk the extracted slots once. Accept POINT geometries only; NULL
+    // and non-POINT elements preserve their array position but do not feed
+    // the raster_value kernel.
+    let mut points_xy: Vec<f64> = Vec::with_capacity(points.len() * 2);
+    let mut element_was_point: Vec<bool> = Vec::with_capacity(points.len());
+    for point in &points {
+        if let Some((x, y)) = point.point_xy() {
+            points_xy.push(x);
+            points_xy.push(y);
+            element_was_point.push(true);
+        } else {
+            element_was_point.push(false);
         }
     }
     let valid_pts = points_xy.len() / 2;

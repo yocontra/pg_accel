@@ -566,6 +566,7 @@ fn pg_accel_device_limits() -> TableIterator<
 
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used, dead_code)]
+#[pgrx::pg_schema]
 mod tests {
     use super::*;
 

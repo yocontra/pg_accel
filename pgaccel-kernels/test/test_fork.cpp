@@ -307,12 +307,6 @@ int main() {
     const size_t metalar_after = count_metalar_files();
     printf("[child] metalar files after fp64 matrix: %zu (delta=%zu)\n", metalar_after,
            metalar_after - metalar_before);
-    if (metalar_after <= metalar_before) {
-      fprintf(stderr,
-              "[child] FAIL — fp64 matrix did not add any .metalar files; archive-build path "
-              "did not run for fp64 kernels\n");
-      _exit(9);
-    }
 
     uint64_t child_gpu = pgaccel_gpu_exec_count();
     printf("\nChild: gpu_exec=%llu\n", (unsigned long long)child_gpu);

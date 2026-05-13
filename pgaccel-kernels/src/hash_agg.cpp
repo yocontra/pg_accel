@@ -26,8 +26,10 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -164,6 +166,66 @@ static inline size_t key_size_for_type(int key_type) {
   }
 }
 
+static inline bool key_bytes_equal(const uint8_t* stored, const uint8_t* current, size_t ksz,
+                                   int key_type) {
+  if (key_type != 2)
+    return memcmp(stored, current, ksz) == 0;
+
+  double a;
+  double b;
+  memcpy(&a, stored, sizeof(a));
+  memcpy(&b, current, sizeof(b));
+  const bool a_nan = (a != a);
+  const bool b_nan = (b != b);
+  return (a_nan && b_nan) || a == b;
+}
+
+static inline bool null_sort_sentinel_collides(const void* group_keys,
+                                               const uint8_t* group_null_mask, size_t row_count,
+                                               int key_type) {
+  if (group_null_mask == nullptr)
+    return false;
+
+  bool has_null = false;
+  for (size_t i = 0; i < row_count; ++i) {
+    if (group_null_mask[i]) {
+      has_null = true;
+      break;
+    }
+  }
+  if (!has_null)
+    return false;
+
+  switch (key_type) {
+    case 0: {
+      const auto* src = static_cast<const int32_t*>(group_keys);
+      for (size_t i = 0; i < row_count; ++i) {
+        if (!group_null_mask[i] && src[i] == std::numeric_limits<int32_t>::max())
+          return true;
+      }
+      return false;
+    }
+    case 1: {
+      const auto* src = static_cast<const int64_t*>(group_keys);
+      for (size_t i = 0; i < row_count; ++i) {
+        if (!group_null_mask[i] && src[i] == std::numeric_limits<int64_t>::max())
+          return true;
+      }
+      return false;
+    }
+    case 2: {
+      const auto* src = static_cast<const double*>(group_keys);
+      for (size_t i = 0; i < row_count; ++i) {
+        if (!group_null_mask[i] && std::isinf(src[i]) && src[i] > 0.0)
+          return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SYCL accumulation kernel: dispatches one work-item per (group, agg).
 //
@@ -247,49 +309,45 @@ inline val_read device_read_value_flat(const uint8_t* value_data, const uint8_t*
   return r;
 }
 
-// Captured kernel state for the sorted-input accumulator. Every field is
-// either a single device pointer (1 argbuffer slot) or a u64/size_t
-// scalar (1 slot). No pointer-of-pointer (`void**`), no `acpp_f64` (whose
-// 2-slot Metal layout the AdaptiveCpp emitter mis-counts).
-//
-// `value_data` / `null_data` are flat concatenated shared-mem buffers.
-// `value_offsets[a]` and `null_offsets[a]` give the byte offset where
-// agg `a`'s column starts. `null_present[a]` is non-zero when agg `a`
-// has a non-null `null_data` slab.
-struct SortedAccumParams {
-  size_t n_groups;
-  size_t num_aggs;
-  const uint32_t* indices;
-  const size_t* group_starts;
-  const size_t* group_ends;
-  const uint8_t* value_data;
-  const uint8_t* null_data;
-  const size_t* value_offsets;
-  const size_t* null_offsets;
-  const uint8_t* null_present;
-  const int* value_types;
-  const pgaccel_agg_func* agg_funcs;
-  const size_t* agg_col_idx;
-  double* out_results;
-  int64_t* out_counts;
-};
-
-struct UnsortedAccumParams {
+// Metal SSCP can pack lambdas with many captures into an argument-buffer
+// reflection path that is not fork-safe. HashAgg kernels instead capture
+// one shared `uint8_t*` slab and recover every input/output by byte offset.
+struct HashAggKernelSlabHeader {
   size_t n_groups;
   size_t row_count;
   size_t num_aggs;
-  const size_t* row_to_group;
-  const uint8_t* value_data;
-  const uint8_t* null_data;
-  const size_t* value_offsets;
-  const size_t* null_offsets;
-  const uint8_t* null_present;
-  const int* value_types;
-  const pgaccel_agg_func* agg_funcs;
-  const size_t* agg_col_idx;
-  double* out_results;
-  int64_t* out_counts;
+  size_t indices_off;
+  size_t group_starts_off;
+  size_t group_ends_off;
+  size_t row_to_group_off;
+  size_t value_data_off;
+  size_t null_data_off;
+  size_t value_offsets_off;
+  size_t null_offsets_off;
+  size_t null_present_off;
+  size_t value_types_off;
+  size_t agg_funcs_off;
+  size_t agg_col_idx_off;
+  size_t agg_offsets_off;
+  size_t agg_widths_off;
+  size_t out_results_off;
+  size_t out_counts_off;
 };
+
+inline size_t align_up(size_t value, size_t alignment) {
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+uint8_t* make_hashagg_kernel_slab(sycl::queue& q, size_t n_groups, size_t row_count,
+                                  size_t num_aggs, const uint32_t* indices,
+                                  const size_t* group_starts, const size_t* group_ends,
+                                  const size_t* row_to_group, const uint8_t* value_data,
+                                  size_t value_data_bytes, const uint8_t* null_data,
+                                  size_t null_data_bytes, const size_t* value_offsets,
+                                  const size_t* null_offsets, const uint8_t* null_present,
+                                  const int* value_types, const pgaccel_agg_func* agg_funcs,
+                                  const size_t* agg_col_idx, const size_t* agg_offsets,
+                                  const size_t* agg_widths, size_t output_double_count);
 
 // Run the accumulation kernel for a sorted-input path.
 // `indices[i]` gives the original row index for sort position `i`.
@@ -300,32 +358,50 @@ struct UnsortedAccumParams {
 // `out_counts` is a length-n_groups i64 buffer.
 //
 // All input buffers must already live in shared memory.
-void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
+bool run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
                              const uint32_t* indices, const size_t* group_starts,
                              const size_t* group_ends, const uint8_t* value_data,
-                             const uint8_t* null_data, const size_t* value_offsets,
+                             size_t value_data_bytes, const uint8_t* null_data,
+                             size_t null_data_bytes, const size_t* value_offsets,
                              const size_t* null_offsets, const uint8_t* null_present,
                              const int* value_types, const pgaccel_agg_func* agg_funcs,
                              const size_t* agg_col_idx, double* out_results, int64_t* out_counts) {
-  const SortedAccumParams p{
-      n_groups,    num_aggs,  indices,       group_starts, group_ends,
-      value_data,  null_data, value_offsets, null_offsets, null_present,
-      value_types, agg_funcs, agg_col_idx,   out_results,  out_counts,
-  };
+  const size_t row_count = n_groups > 0 ? group_ends[n_groups - 1] : 0;
+  uint8_t* slab = make_hashagg_kernel_slab(
+      q, n_groups, row_count, num_aggs, indices, group_starts, group_ends, nullptr, value_data,
+      value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
+      value_types, agg_funcs, agg_col_idx, nullptr, nullptr, num_aggs * n_groups);
+  if (slab == nullptr)
+    return false;
   q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+     const auto* local_indices = reinterpret_cast<const uint32_t*>(slab + h->indices_off);
+     const auto* local_group_starts = reinterpret_cast<const size_t*>(slab + h->group_starts_off);
+     const auto* local_group_ends = reinterpret_cast<const size_t*>(slab + h->group_ends_off);
+     const uint8_t* local_value_data = slab + h->value_data_off;
+     const uint8_t* local_null_data = slab + h->null_data_off;
+     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+     const uint8_t* local_null_present = slab + h->null_present_off;
+     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+     const auto* local_agg_funcs =
+         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+     auto* local_out_results = reinterpret_cast<double*>(slab + h->out_results_off);
+     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
      const size_t g = id[0];
-     const size_t start = p.group_starts[g];
-     const size_t end = p.group_ends[g];
+     const size_t start = local_group_starts[g];
+     const size_t end = local_group_ends[g];
 
      int64_t cnt = 0;
 
-     for (size_t a = 0; a < p.num_aggs; ++a) {
-       const pgaccel_agg_func func = p.agg_funcs[a];
-       const size_t col = p.agg_col_idx[a];
-       const size_t voff = p.value_offsets[a];
-       const size_t noff = p.null_offsets[a];
-       const bool nullable = p.null_present[a] != 0;
-       const int vtype = p.value_types[a];
+     for (size_t a = 0; a < h->num_aggs; ++a) {
+       const pgaccel_agg_func func = local_agg_funcs[a];
+       const size_t col = local_agg_col_idx[a];
+       const size_t voff = local_value_offsets[a];
+       const size_t noff = local_null_offsets[a];
+       const bool nullable = local_null_present[a] != 0;
+       const int vtype = local_value_types[a];
 
        double acc = 0.0;
        if (func == PGACCEL_AGG_MIN)
@@ -334,7 +410,7 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
          acc = -std::numeric_limits<double>::infinity();
 
        for (size_t i = start; i < end; ++i) {
-         const uint32_t r = p.indices[i];
+         const uint32_t r = local_indices[i];
          // Bump count once per row (only on the first agg's pass).
          if (a == 0)
            ++cnt;
@@ -344,8 +420,8 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
            continue;
          }
 
-         val_read vr =
-             device_read_value_flat(p.value_data, p.null_data, voff, noff, nullable, r, vtype);
+         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                              nullable, r, vtype);
          if (vr.is_null)
            continue;
 
@@ -364,12 +440,23 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
            case PGACCEL_AGG_COUNT:
              acc += 1.0;
              break;
+           case PGACCEL_AGG_AVG:
+           case PGACCEL_AGG_STDDEV:
+           case PGACCEL_AGG_VAR:
+             // Partial-mode-only functions are rejected by
+             // pgaccel_hash_agg_execute before this kernel launches.
+             break;
          }
        }
-       p.out_results[a * p.n_groups + g] = acc;
+       local_out_results[a * h->n_groups + g] = acc;
      }
-     p.out_counts[g] = cnt;
-   }).wait();
+     local_out_counts[g] = cnt;
+   }).wait_and_throw();
+  const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+  std::memcpy(out_results, slab + h->out_results_off, num_aggs * n_groups * sizeof(double));
+  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  sycl::free(slab, q);
+  return true;
 }
 
 // Run the accumulation kernel for an unsorted-input path.
@@ -378,30 +465,45 @@ void run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
 // rows linearly to find the ones belonging to its group. Acceptable
 // when n_groups is small (the hash path runs only when row_count <
 // SORT_AGG_MIN_ROWS = 100k).
-void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count, size_t num_aggs,
+bool run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count, size_t num_aggs,
                                const size_t* row_to_group, const uint8_t* value_data,
-                               const uint8_t* null_data, const size_t* value_offsets,
+                               size_t value_data_bytes, const uint8_t* null_data,
+                               size_t null_data_bytes, const size_t* value_offsets,
                                const size_t* null_offsets, const uint8_t* null_present,
                                const int* value_types, const pgaccel_agg_func* agg_funcs,
                                const size_t* agg_col_idx, double* out_results,
                                int64_t* out_counts) {
-  const UnsortedAccumParams p{
-      n_groups,  row_count,     num_aggs,     row_to_group, value_data,
-      null_data, value_offsets, null_offsets, null_present, value_types,
-      agg_funcs, agg_col_idx,   out_results,  out_counts,
-  };
+  uint8_t* slab = make_hashagg_kernel_slab(
+      q, n_groups, row_count, num_aggs, nullptr, nullptr, nullptr, row_to_group, value_data,
+      value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
+      value_types, agg_funcs, agg_col_idx, nullptr, nullptr, num_aggs * n_groups);
+  if (slab == nullptr)
+    return false;
   q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+     const auto* local_row_to_group = reinterpret_cast<const size_t*>(slab + h->row_to_group_off);
+     const uint8_t* local_value_data = slab + h->value_data_off;
+     const uint8_t* local_null_data = slab + h->null_data_off;
+     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+     const uint8_t* local_null_present = slab + h->null_present_off;
+     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+     const auto* local_agg_funcs =
+         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+     auto* local_out_results = reinterpret_cast<double*>(slab + h->out_results_off);
+     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
      const size_t g = id[0];
 
      int64_t cnt = 0;
 
-     for (size_t a = 0; a < p.num_aggs; ++a) {
-       const pgaccel_agg_func func = p.agg_funcs[a];
-       const size_t col = p.agg_col_idx[a];
-       const size_t voff = p.value_offsets[a];
-       const size_t noff = p.null_offsets[a];
-       const bool nullable = p.null_present[a] != 0;
-       const int vtype = p.value_types[a];
+     for (size_t a = 0; a < h->num_aggs; ++a) {
+       const pgaccel_agg_func func = local_agg_funcs[a];
+       const size_t col = local_agg_col_idx[a];
+       const size_t voff = local_value_offsets[a];
+       const size_t noff = local_null_offsets[a];
+       const bool nullable = local_null_present[a] != 0;
+       const int vtype = local_value_types[a];
 
        double acc = 0.0;
        if (func == PGACCEL_AGG_MIN)
@@ -409,8 +511,8 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
        else if (func == PGACCEL_AGG_MAX)
          acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t r = 0; r < p.row_count; ++r) {
-         if (p.row_to_group[r] != g)
+       for (size_t r = 0; r < h->row_count; ++r) {
+         if (local_row_to_group[r] != g)
            continue;
          if (a == 0)
            ++cnt;
@@ -420,8 +522,8 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
            continue;
          }
 
-         val_read vr =
-             device_read_value_flat(p.value_data, p.null_data, voff, noff, nullable, r, vtype);
+         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                              nullable, r, vtype);
          if (vr.is_null)
            continue;
 
@@ -440,12 +542,23 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
            case PGACCEL_AGG_COUNT:
              acc += 1.0;
              break;
+           case PGACCEL_AGG_AVG:
+           case PGACCEL_AGG_STDDEV:
+           case PGACCEL_AGG_VAR:
+             // Partial-mode-only functions are rejected by
+             // pgaccel_hash_agg_execute before this kernel launches.
+             break;
          }
        }
-       p.out_results[a * p.n_groups + g] = acc;
+       local_out_results[a * h->n_groups + g] = acc;
      }
-     p.out_counts[g] = cnt;
-   }).wait();
+     local_out_counts[g] = cnt;
+   }).wait_and_throw();
+  const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+  std::memcpy(out_results, slab + h->out_results_off, num_aggs * n_groups * sizeof(double));
+  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  sycl::free(slab, q);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -468,73 +581,116 @@ void run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
 // matching finalize-mode semantics.
 // ---------------------------------------------------------------------------
 
-// Captured kernel state. Same flat-buffer / single-pointer / scalar
-// pattern as SortedAccumParams above. NO pointer-of-pointer captures.
-struct UnsortedPartialParams {
-  size_t n_groups;
-  size_t row_count;
-  size_t num_aggs;
-  const size_t* row_to_group;
-  const uint8_t* value_data;
-  const uint8_t* null_data;
-  const size_t* value_offsets;
-  const size_t* null_offsets;
-  const uint8_t* null_present;
-  const int* value_types;
-  const pgaccel_agg_func* agg_funcs;
-  const size_t* agg_col_idx;
-  const size_t* agg_offsets;  // [num_aggs] prefix-sum index into out_partials (in doubles)
-  const size_t* agg_widths;   // [num_aggs] lane count (1 / 2 / 3)
-  double* out_partials;       // total length = sum_a(widths[a] * n_groups)
-  int64_t* out_counts;        // [n_groups] total rows per group (NULLs included)
-};
+uint8_t* make_hashagg_kernel_slab(sycl::queue& q, size_t n_groups, size_t row_count,
+                                  size_t num_aggs, const uint32_t* indices,
+                                  const size_t* group_starts, const size_t* group_ends,
+                                  const size_t* row_to_group, const uint8_t* value_data,
+                                  size_t value_data_bytes, const uint8_t* null_data,
+                                  size_t null_data_bytes, const size_t* value_offsets,
+                                  const size_t* null_offsets, const uint8_t* null_present,
+                                  const int* value_types, const pgaccel_agg_func* agg_funcs,
+                                  const size_t* agg_col_idx, const size_t* agg_offsets,
+                                  const size_t* agg_widths, size_t output_double_count) {
+  HashAggKernelSlabHeader h{};
+  h.n_groups = n_groups;
+  h.row_count = row_count;
+  h.num_aggs = num_aggs;
 
-struct SortedPartialParams {
-  size_t n_groups;
-  size_t num_aggs;
-  const uint32_t* indices;
-  const size_t* group_starts;
-  const size_t* group_ends;
-  const uint8_t* value_data;
-  const uint8_t* null_data;
-  const size_t* value_offsets;
-  const size_t* null_offsets;
-  const uint8_t* null_present;
-  const int* value_types;
-  const pgaccel_agg_func* agg_funcs;
-  const size_t* agg_col_idx;
-  const size_t* agg_offsets;
-  const size_t* agg_widths;
-  double* out_partials;
-  int64_t* out_counts;
-};
+  size_t cursor = align_up(sizeof(HashAggKernelSlabHeader), alignof(double));
+  auto add = [&](size_t bytes, size_t alignment) {
+    cursor = align_up(cursor, alignment);
+    const size_t off = cursor;
+    cursor += bytes == 0 ? 1 : bytes;
+    return off;
+  };
 
-void run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_count, size_t num_aggs,
+  h.indices_off = indices ? add(row_count * sizeof(uint32_t), alignof(uint32_t)) : SIZE_MAX;
+  h.group_starts_off = group_starts ? add(n_groups * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
+  h.group_ends_off = group_ends ? add(n_groups * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
+  h.row_to_group_off = row_to_group ? add(row_count * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
+  h.value_data_off = add(value_data_bytes, alignof(double));
+  h.null_data_off = add(null_data_bytes, alignof(double));
+  h.value_offsets_off = add(num_aggs * sizeof(size_t), alignof(size_t));
+  h.null_offsets_off = add(num_aggs * sizeof(size_t), alignof(size_t));
+  h.null_present_off = add(num_aggs * sizeof(uint8_t), alignof(uint8_t));
+  h.value_types_off = add(num_aggs * sizeof(int), alignof(int));
+  h.agg_funcs_off = add(num_aggs * sizeof(pgaccel_agg_func), alignof(pgaccel_agg_func));
+  h.agg_col_idx_off = add(num_aggs * sizeof(size_t), alignof(size_t));
+  h.agg_offsets_off = agg_offsets ? add(num_aggs * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
+  h.agg_widths_off = agg_widths ? add(num_aggs * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
+  h.out_results_off = add(output_double_count * sizeof(double), alignof(double));
+  h.out_counts_off = add(n_groups * sizeof(int64_t), alignof(int64_t));
+
+  uint8_t* slab = sycl::malloc_shared<uint8_t>(cursor, q);
+  if (slab == nullptr)
+    return nullptr;
+  std::memset(slab, 0, cursor);
+  std::memcpy(slab, &h, sizeof(h));
+
+  auto copy_region = [&](size_t off, const void* src, size_t bytes) {
+    if (off != SIZE_MAX && src != nullptr && bytes > 0)
+      std::memcpy(slab + off, src, bytes);
+  };
+  copy_region(h.indices_off, indices, row_count * sizeof(uint32_t));
+  copy_region(h.group_starts_off, group_starts, n_groups * sizeof(size_t));
+  copy_region(h.group_ends_off, group_ends, n_groups * sizeof(size_t));
+  copy_region(h.row_to_group_off, row_to_group, row_count * sizeof(size_t));
+  copy_region(h.value_data_off, value_data, value_data_bytes);
+  copy_region(h.null_data_off, null_data, null_data_bytes);
+  copy_region(h.value_offsets_off, value_offsets, num_aggs * sizeof(size_t));
+  copy_region(h.null_offsets_off, null_offsets, num_aggs * sizeof(size_t));
+  copy_region(h.null_present_off, null_present, num_aggs * sizeof(uint8_t));
+  copy_region(h.value_types_off, value_types, num_aggs * sizeof(int));
+  copy_region(h.agg_funcs_off, agg_funcs, num_aggs * sizeof(pgaccel_agg_func));
+  copy_region(h.agg_col_idx_off, agg_col_idx, num_aggs * sizeof(size_t));
+  copy_region(h.agg_offsets_off, agg_offsets, num_aggs * sizeof(size_t));
+  copy_region(h.agg_widths_off, agg_widths, num_aggs * sizeof(size_t));
+  return slab;
+}
+
+bool run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_count, size_t num_aggs,
                                  const size_t* row_to_group, const uint8_t* value_data,
-                                 const uint8_t* null_data, const size_t* value_offsets,
+                                 size_t value_data_bytes, const uint8_t* null_data,
+                                 size_t null_data_bytes, const size_t* value_offsets,
                                  const size_t* null_offsets, const uint8_t* null_present,
                                  const int* value_types, const pgaccel_agg_func* agg_funcs,
                                  const size_t* agg_col_idx, const size_t* agg_offsets,
                                  const size_t* agg_widths, double* out_partials,
-                                 int64_t* out_counts) {
-  const UnsortedPartialParams p{
-      n_groups,      row_count,    num_aggs,     row_to_group, value_data, null_data,
-      value_offsets, null_offsets, null_present, value_types,  agg_funcs,  agg_col_idx,
-      agg_offsets,   agg_widths,   out_partials, out_counts,
-  };
+                                 int64_t* out_counts, size_t total_partials) {
+  uint8_t* slab = make_hashagg_kernel_slab(
+      q, n_groups, row_count, num_aggs, nullptr, nullptr, nullptr, row_to_group, value_data,
+      value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
+      value_types, agg_funcs, agg_col_idx, agg_offsets, agg_widths, total_partials);
+  if (slab == nullptr)
+    return false;
   q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+     const auto* local_row_to_group = reinterpret_cast<const size_t*>(slab + h->row_to_group_off);
+     const uint8_t* local_value_data = slab + h->value_data_off;
+     const uint8_t* local_null_data = slab + h->null_data_off;
+     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+     const uint8_t* local_null_present = slab + h->null_present_off;
+     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+     const auto* local_agg_funcs =
+         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+     const auto* local_agg_offsets = reinterpret_cast<const size_t*>(slab + h->agg_offsets_off);
+     const auto* local_agg_widths = reinterpret_cast<const size_t*>(slab + h->agg_widths_off);
+     auto* local_out_partials = reinterpret_cast<double*>(slab + h->out_results_off);
+     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
      const size_t g = id[0];
      int64_t cnt = 0;
 
-     for (size_t a = 0; a < p.num_aggs; ++a) {
-       const pgaccel_agg_func func = p.agg_funcs[a];
-       const size_t col = p.agg_col_idx[a];
-       const size_t voff = p.value_offsets[a];
-       const size_t noff = p.null_offsets[a];
-       const bool nullable = p.null_present[a] != 0;
-       const int vtype = p.value_types[a];
-       const size_t off = p.agg_offsets[a];
-       const size_t width = p.agg_widths[a];
+     for (size_t a = 0; a < h->num_aggs; ++a) {
+       const pgaccel_agg_func func = local_agg_funcs[a];
+       const size_t col = local_agg_col_idx[a];
+       const size_t voff = local_value_offsets[a];
+       const size_t noff = local_null_offsets[a];
+       const bool nullable = local_null_present[a] != 0;
+       const int vtype = local_value_types[a];
+       const size_t off = local_agg_offsets[a];
+       const size_t width = local_agg_widths[a];
 
        double acc = 0.0;
        double sum_sq = 0.0;
@@ -544,8 +700,8 @@ void run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_cou
        else if (func == PGACCEL_AGG_MAX)
          acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t r = 0; r < p.row_count; ++r) {
-         if (p.row_to_group[r] != g)
+       for (size_t r = 0; r < h->row_count; ++r) {
+         if (local_row_to_group[r] != g)
            continue;
          if (a == 0)
            ++cnt;
@@ -555,8 +711,8 @@ void run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_cou
            continue;
          }
 
-         val_read vr =
-             device_read_value_flat(p.value_data, p.null_data, voff, noff, nullable, r, vtype);
+         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                              nullable, r, vtype);
          if (vr.is_null)
            continue;
          ++non_null_count;
@@ -588,7 +744,7 @@ void run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_cou
        }
 
        // Write per-agg lanes for this group.
-       double* base = p.out_partials + off + g * width;
+       double* base = local_out_partials + off + g * width;
        if (width == 1) {
          base[0] = acc;
        } else if (width == 2) {
@@ -600,40 +756,65 @@ void run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_cou
          base[2] = sum_sq;
        }
      }
-     p.out_counts[g] = cnt;
-   }).wait();
+     local_out_counts[g] = cnt;
+   }).wait_and_throw();
+  const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+  std::memcpy(out_partials, slab + h->out_results_off, total_partials * sizeof(double));
+  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  sycl::free(slab, q);
+  return true;
 }
 
-void run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
+bool run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
                                const uint32_t* indices, const size_t* group_starts,
                                const size_t* group_ends, const uint8_t* value_data,
-                               const uint8_t* null_data, const size_t* value_offsets,
+                               size_t value_data_bytes, const uint8_t* null_data,
+                               size_t null_data_bytes, const size_t* value_offsets,
                                const size_t* null_offsets, const uint8_t* null_present,
                                const int* value_types, const pgaccel_agg_func* agg_funcs,
                                const size_t* agg_col_idx, const size_t* agg_offsets,
-                               const size_t* agg_widths, double* out_partials,
-                               int64_t* out_counts) {
-  const SortedPartialParams p{
-      n_groups,    num_aggs,      indices,      group_starts, group_ends,  value_data,
-      null_data,   value_offsets, null_offsets, null_present, value_types, agg_funcs,
-      agg_col_idx, agg_offsets,   agg_widths,   out_partials, out_counts,
-  };
+                               const size_t* agg_widths, double* out_partials, int64_t* out_counts,
+                               size_t total_partials) {
+  const size_t row_count = n_groups > 0 ? group_ends[n_groups - 1] : 0;
+  uint8_t* slab = make_hashagg_kernel_slab(
+      q, n_groups, row_count, num_aggs, indices, group_starts, group_ends, nullptr, value_data,
+      value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
+      value_types, agg_funcs, agg_col_idx, agg_offsets, agg_widths, total_partials);
+  if (slab == nullptr)
+    return false;
   q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+     const auto* local_indices = reinterpret_cast<const uint32_t*>(slab + h->indices_off);
+     const auto* local_group_starts = reinterpret_cast<const size_t*>(slab + h->group_starts_off);
+     const auto* local_group_ends = reinterpret_cast<const size_t*>(slab + h->group_ends_off);
+     const uint8_t* local_value_data = slab + h->value_data_off;
+     const uint8_t* local_null_data = slab + h->null_data_off;
+     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+     const uint8_t* local_null_present = slab + h->null_present_off;
+     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+     const auto* local_agg_funcs =
+         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+     const auto* local_agg_offsets = reinterpret_cast<const size_t*>(slab + h->agg_offsets_off);
+     const auto* local_agg_widths = reinterpret_cast<const size_t*>(slab + h->agg_widths_off);
+     auto* local_out_partials = reinterpret_cast<double*>(slab + h->out_results_off);
+     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
      const size_t g = id[0];
-     const size_t start = p.group_starts[g];
-     const size_t end = p.group_ends[g];
+     const size_t start = local_group_starts[g];
+     const size_t end = local_group_ends[g];
 
      int64_t cnt = 0;
 
-     for (size_t a = 0; a < p.num_aggs; ++a) {
-       const pgaccel_agg_func func = p.agg_funcs[a];
-       const size_t col = p.agg_col_idx[a];
-       const size_t voff = p.value_offsets[a];
-       const size_t noff = p.null_offsets[a];
-       const bool nullable = p.null_present[a] != 0;
-       const int vtype = p.value_types[a];
-       const size_t off = p.agg_offsets[a];
-       const size_t width = p.agg_widths[a];
+     for (size_t a = 0; a < h->num_aggs; ++a) {
+       const pgaccel_agg_func func = local_agg_funcs[a];
+       const size_t col = local_agg_col_idx[a];
+       const size_t voff = local_value_offsets[a];
+       const size_t noff = local_null_offsets[a];
+       const bool nullable = local_null_present[a] != 0;
+       const int vtype = local_value_types[a];
+       const size_t off = local_agg_offsets[a];
+       const size_t width = local_agg_widths[a];
 
        double acc = 0.0;
        double sum_sq = 0.0;
@@ -644,7 +825,7 @@ void run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
          acc = -std::numeric_limits<double>::infinity();
 
        for (size_t i = start; i < end; ++i) {
-         const uint32_t r = p.indices[i];
+         const uint32_t r = local_indices[i];
          if (a == 0)
            ++cnt;
 
@@ -653,8 +834,8 @@ void run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
            continue;
          }
 
-         val_read vr =
-             device_read_value_flat(p.value_data, p.null_data, voff, noff, nullable, r, vtype);
+         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                              nullable, r, vtype);
          if (vr.is_null)
            continue;
          ++non_null_count;
@@ -685,7 +866,7 @@ void run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
          }
        }
 
-       double* base = p.out_partials + off + g * width;
+       double* base = local_out_partials + off + g * width;
        if (width == 1) {
          base[0] = acc;
        } else if (width == 2) {
@@ -697,8 +878,13 @@ void run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
          base[2] = sum_sq;
        }
      }
-     p.out_counts[g] = cnt;
-   }).wait();
+     local_out_counts[g] = cnt;
+   }).wait_and_throw();
+  const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+  std::memcpy(out_partials, slab + h->out_results_off, total_partials * sizeof(double));
+  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  sycl::free(slab, q);
+  return true;
 }
 
 // Helper: stage value-column data and null masks into a SINGLE flat shared
@@ -878,18 +1064,16 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
     return nullptr;
 
   size_t n_groups = 0;
+  size_t null_group_idx = SIZE_MAX;
   for (size_t r = 0; r < row_count; ++r) {
     bool is_null = (group_null_mask != nullptr && group_null_mask[r]);
     if (is_null) {
-      uint64_t h = 0xDEADBEEFULL;
-      auto it = hash_to_groups.find(h);
-      if (it == hash_to_groups.end()) {
-        size_t gidx = n_groups++;
-        hash_to_groups[h] = {gidx};
-        row_to_group[r] = gidx;
+      if (null_group_idx == SIZE_MAX) {
+        null_group_idx = n_groups++;
+        row_to_group[r] = null_group_idx;
         group_key_buf.resize(group_key_buf.size() + ksz, 0);
       } else {
-        row_to_group[r] = it->second[0];
+        row_to_group[r] = null_group_idx;
       }
       continue;
     }
@@ -901,7 +1085,7 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
       for (size_t gidx : it->second) {
         const uint8_t* stored = group_key_buf.data() + gidx * ksz;
         const uint8_t* current = static_cast<const uint8_t*>(group_keys) + r * ksz;
-        if (memcmp(stored, current, ksz) == 0) {
+        if (key_bytes_equal(stored, current, ksz, key_type)) {
           row_to_group[r] = gidx;
           found = true;
           break;
@@ -939,10 +1123,16 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
     return nullptr;
   }
 
-  run_unsorted_accum_kernel(*q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data,
-                            sc->d_null_data, sc->d_value_offsets, sc->d_null_offsets,
-                            sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx,
-                            d_results, d_counts);
+  if (!run_unsorted_accum_kernel(
+          *q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data, sc->value_data_bytes,
+          sc->d_null_data, sc->null_data_bytes, sc->d_value_offsets, sc->d_null_offsets,
+          sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx, d_results, d_counts)) {
+    sycl::free(d_results, *q);
+    sycl::free(d_counts, *q);
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(row_to_group, *q);
+    return nullptr;
+  }
 
   // -- Phase 3: build the result state.
   auto* state = new (std::nothrow) pgaccel_agg_state();
@@ -994,6 +1184,8 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
 
   size_t ksz = key_size_for_type(key_type);
   if (ksz == 0)
+    return nullptr;
+  if (null_sort_sentinel_collides(group_keys, group_null_mask, row_count, key_type))
     return nullptr;
 
   // -- Phase 1: GPU sort by key. NULLs get a sentinel that sorts to
@@ -1128,10 +1320,19 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
     return nullptr;
   }
 
-  run_sorted_accum_kernel(*q, n_groups, num_aggs, indices, d_group_starts, d_group_ends,
-                          sc->d_value_data, sc->d_null_data, sc->d_value_offsets,
-                          sc->d_null_offsets, sc->d_null_present, sc->d_value_types, sc->d_funcs,
-                          sc->d_col_idx, d_results, d_counts);
+  if (!run_sorted_accum_kernel(*q, n_groups, num_aggs, indices, d_group_starts, d_group_ends,
+                               sc->d_value_data, sc->value_data_bytes, sc->d_null_data,
+                               sc->null_data_bytes, sc->d_value_offsets, sc->d_null_offsets,
+                               sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx,
+                               d_results, d_counts)) {
+    sycl::free(d_results, *q);
+    sycl::free(d_counts, *q);
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(indices, *q);
+    return nullptr;
+  }
 
   // -- Phase 4: build the result state.
   auto* state = new (std::nothrow) pgaccel_agg_state();
@@ -1227,18 +1428,16 @@ agg_hash_partial(const void* group_keys, const uint8_t* group_null_mask, size_t 
     return nullptr;
 
   size_t n_groups = 0;
+  size_t null_group_idx = SIZE_MAX;
   for (size_t r = 0; r < row_count; ++r) {
     bool is_null = (group_null_mask != nullptr && group_null_mask[r]);
     if (is_null) {
-      uint64_t h = 0xDEADBEEFULL;
-      auto it = hash_to_groups.find(h);
-      if (it == hash_to_groups.end()) {
-        size_t gidx = n_groups++;
-        hash_to_groups[h] = {gidx};
-        row_to_group[r] = gidx;
+      if (null_group_idx == SIZE_MAX) {
+        null_group_idx = n_groups++;
+        row_to_group[r] = null_group_idx;
         group_key_buf.resize(group_key_buf.size() + ksz, 0);
       } else {
-        row_to_group[r] = it->second[0];
+        row_to_group[r] = null_group_idx;
       }
       continue;
     }
@@ -1250,7 +1449,7 @@ agg_hash_partial(const void* group_keys, const uint8_t* group_null_mask, size_t 
       for (size_t gidx : it->second) {
         const uint8_t* stored = group_key_buf.data() + gidx * ksz;
         const uint8_t* current = static_cast<const uint8_t*>(group_keys) + r * ksz;
-        if (memcmp(stored, current, ksz) == 0) {
+        if (key_bytes_equal(stored, current, ksz, key_type)) {
           row_to_group[r] = gidx;
           found = true;
           break;
@@ -1306,10 +1505,19 @@ agg_hash_partial(const void* group_keys, const uint8_t* group_null_mask, size_t 
   }
 
   if (n_groups > 0) {
-    run_unsorted_partial_kernel(*q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data,
-                                sc->d_null_data, sc->d_value_offsets, sc->d_null_offsets,
-                                sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx,
-                                d_offsets, d_widths, d_partials, d_counts);
+    if (!run_unsorted_partial_kernel(
+            *q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data, sc->value_data_bytes,
+            sc->d_null_data, sc->null_data_bytes, sc->d_value_offsets, sc->d_null_offsets,
+            sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx, d_offsets, d_widths,
+            d_partials, d_counts, total)) {
+      sycl::free(d_widths, *q);
+      sycl::free(d_offsets, *q);
+      sycl::free(d_partials, *q);
+      sycl::free(d_counts, *q);
+      free_staged_columns(*q, sc, num_aggs);
+      sycl::free(row_to_group, *q);
+      return nullptr;
+    }
   }
 
   auto* state = new (std::nothrow) pgaccel_agg_state();
@@ -1358,6 +1566,8 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
 
   size_t ksz = key_size_for_type(key_type);
   if (ksz == 0)
+    return nullptr;
+  if (null_sort_sentinel_collides(group_keys, group_null_mask, row_count, key_type))
     return nullptr;
 
   uint32_t* indices = sycl::malloc_shared<uint32_t>(row_count, *q);
@@ -1501,10 +1711,21 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
     d_offsets[a] = offsets_h[a];
   }
 
-  run_sorted_partial_kernel(*q, n_groups, num_aggs, indices, d_group_starts, d_group_ends,
-                            sc->d_value_data, sc->d_null_data, sc->d_value_offsets,
-                            sc->d_null_offsets, sc->d_null_present, sc->d_value_types, sc->d_funcs,
-                            sc->d_col_idx, d_offsets, d_widths, d_partials, d_counts);
+  if (!run_sorted_partial_kernel(*q, n_groups, num_aggs, indices, d_group_starts, d_group_ends,
+                                 sc->d_value_data, sc->value_data_bytes, sc->d_null_data,
+                                 sc->null_data_bytes, sc->d_value_offsets, sc->d_null_offsets,
+                                 sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx,
+                                 d_offsets, d_widths, d_partials, d_counts, total)) {
+    sycl::free(d_widths, *q);
+    sycl::free(d_offsets, *q);
+    sycl::free(d_partials, *q);
+    sycl::free(d_counts, *q);
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(indices, *q);
+    return nullptr;
+  }
 
   auto* state = new (std::nothrow) pgaccel_agg_state();
   if (state == nullptr) {
@@ -1569,19 +1790,32 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
                                             size_t num_aggs) {
   if (row_count == 0 || agg_cols == nullptr)
     return nullptr;
+  for (size_t a = 0; a < num_aggs; ++a) {
+    if (agg_cols[a].func == PGACCEL_AGG_AVG || agg_cols[a].func == PGACCEL_AGG_STDDEV ||
+        agg_cols[a].func == PGACCEL_AGG_VAR) {
+      return nullptr;
+    }
+  }
 
   // Use sort-based path for large datasets (GPU-parallel sort + SYCL
   // per-group reduce). Falls back to hash path on sort failure.
-  if (row_count >= SORT_AGG_MIN_ROWS) {
-    pgaccel_agg_state* st =
-        agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
-                       value_types, agg_cols, num_aggs);
-    if (st != nullptr)
-      return st;
-  }
+  try {
+    if (row_count >= SORT_AGG_MIN_ROWS) {
+      pgaccel_agg_state* st =
+          agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
+                         value_types, agg_cols, num_aggs);
+      if (st != nullptr)
+        return st;
+    }
 
-  return agg_hash(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
-                  value_types, agg_cols, num_aggs);
+    return agg_hash(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
+                    value_types, agg_cols, num_aggs);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg_execute failed: %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg_execute failed (unknown)\n");
+  }
+  return nullptr;
 }
 
 size_t pgaccel_agg_group_count(const pgaccel_agg_state* state) {
@@ -1612,16 +1846,23 @@ pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_nu
   if (row_count == 0 || agg_cols == nullptr)
     return nullptr;
 
-  if (row_count >= SORT_AGG_MIN_ROWS) {
-    pgaccel_agg_state* st =
-        agg_sort_based_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
-                               value_nulls, value_types, agg_cols, num_aggs);
-    if (st != nullptr)
-      return st;
-  }
+  try {
+    if (row_count >= SORT_AGG_MIN_ROWS) {
+      pgaccel_agg_state* st =
+          agg_sort_based_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
+                                 value_nulls, value_types, agg_cols, num_aggs);
+      if (st != nullptr)
+        return st;
+    }
 
-  return agg_hash_partial(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
-                          value_types, agg_cols, num_aggs);
+    return agg_hash_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
+                            value_nulls, value_types, agg_cols, num_aggs);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg_execute_partial failed: %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg_execute_partial failed (unknown)\n");
+  }
+  return nullptr;
 }
 
 const double* pgaccel_agg_get_partial_results(const pgaccel_agg_state* state, size_t agg_idx) {

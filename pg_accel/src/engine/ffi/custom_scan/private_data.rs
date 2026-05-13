@@ -197,8 +197,11 @@ pub(super) unsafe fn deserialize_custom_private(
     }
 
     // For Agg strategy, read optional group key info after agg descriptors.
-    // Layout: [...agg descs..., has_group_key, gk_attno, gk_type_oid,
-    //   gk_key_type, gk2_attno, gk_tlist_pos]
+    // Current layout:
+    //   [...agg descs..., has_group_key,
+    //    gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos, self_scan_relid]
+    // Legacy layout omitted `gk_tlist_pos`; those plans default the group
+    // key to output slot 0.
     let (group_key, group_key_tlist_pos) = if matches!(gpu_strategy, GpuStrategy::Agg) {
         let num_aggs = unsafe { list_int_at(custom_private, 6) } as usize;
         let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
@@ -207,26 +210,32 @@ pub(super) unsafe fn deserialize_custom_private(
             // SAFETY: Index is within bounds (checked above).
             let has_gk = unsafe { list_int_at(custom_private, gk_base as c_int) };
             if has_gk != 0 && gk_base + 3 < list_len {
+                let has_tlist_pos = gk_base + 5 < list_len
+                    && unsafe { list_int_at(custom_private, (gk_base + 5) as c_int) }
+                        != PARTIAL_SENTINEL;
                 let gk_attno = unsafe { list_int_at(custom_private, (gk_base + 1) as c_int) };
                 let gk_type_oid =
                     pg_sys::Oid::from(
                         unsafe { list_int_at(custom_private, (gk_base + 2) as c_int) } as u32,
                     );
                 let gk_key_type = unsafe { list_int_at(custom_private, (gk_base + 3) as c_int) };
-                // gk_base + 4 = group_key2_attno, gk_base + 5 = gk_tlist_pos
-                let tlist_pos = if gk_base + 5 < list_len {
-                    unsafe { list_int_at(custom_private, (gk_base + 5) as c_int) }
+                let tlist_pos = if has_tlist_pos {
+                    unsafe { list_int_at(custom_private, (gk_base + 4) as c_int) }
                 } else {
-                    0 // default: group key at position 0
+                    0
                 };
-                (
-                    Some(GroupKeyInfo {
-                        attno: gk_attno,
-                        type_oid: gk_type_oid,
-                        key_type: gk_key_type,
-                    }),
-                    tlist_pos,
-                )
+                if gk_attno > 0 && matches!(gk_key_type, 0 | 1 | 2 | 4 | 5) {
+                    (
+                        Some(GroupKeyInfo {
+                            attno: gk_attno,
+                            type_oid: gk_type_oid,
+                            key_type: gk_key_type,
+                        }),
+                        tlist_pos,
+                    )
+                } else {
+                    (None, 0)
+                }
             } else {
                 (None, 0)
             }
@@ -314,7 +323,7 @@ pub(super) unsafe fn deserialize_custom_private(
     //
     // Layout (Agg):
     //   [..., num_aggs, (op,attno,rtype)*N,
-    //    has_gk, (gk_attno, gk_type_oid, gk_key_type)?,
+    //    has_gk, (gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos)?,
     //    self_scan_relid,
     //    (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?]
     //
@@ -327,8 +336,16 @@ pub(super) unsafe fn deserialize_custom_private(
         let relid_idx = if gk_base < list_len {
             let has_gk = unsafe { list_int_at(custom_private, gk_base as c_int) };
             if has_gk != 0 {
-                // has_gk + 3 payload ints + 1 (relid slot)
-                gk_base + 4
+                let has_tlist_pos = gk_base + 5 < list_len
+                    && unsafe { list_int_at(custom_private, (gk_base + 5) as c_int) }
+                        != PARTIAL_SENTINEL;
+                if has_tlist_pos {
+                    // has_gk + 4 payload ints, then relid slot.
+                    gk_base + 5
+                } else {
+                    // Legacy layout: has_gk + 3 payload ints, then relid.
+                    gk_base + 4
+                }
             } else {
                 gk_base + 1
             }
@@ -1127,8 +1144,6 @@ pub unsafe fn deserialize_functionscan_priv(
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod functionscan_tests {
-    use pgrx::pg_test;
-
     use super::*;
 
     /// Sentinel must be distinct from `PARTIAL_SENTINEL` so the two
@@ -1139,31 +1154,38 @@ mod functionscan_tests {
         assert_ne!(FUNCTIONSCAN_SENTINEL, PARTIAL_SENTINEL);
     }
 
-    /// Round-trip assertion via the in-memory layout: build a small list
-    /// with `append_functionscan_priv`, then read it back with
-    /// `deserialize_functionscan_priv` from the same offset. Uses a
-    /// pgrx-managed memory context so PG `lappend` allocates safely.
-    #[pg_test]
-    fn functionscan_priv_roundtrip() {
-        use pgrx::pg_sys;
-        let original = FunctionScanPrivData {
-            fn_oid: pg_sys::Oid::from(12345_u32),
-            output_shape_disc: 1, // Record
-            output_shape_field_count: 6,
-            args: vec![
-                (0xDEAD_BEEF_DEAD_BEEFu64 as i64, pg_sys::INT8OID.to_u32()),
-                (42i64, pg_sys::INT4OID.to_u32()),
-            ],
-        };
-        // SAFETY: pg_test runs in a real backend, so CurrentMemoryContext is
-        // valid and lappend / makeInteger are safe.
-        let mut list: *mut pg_sys::List = std::ptr::null_mut();
-        unsafe {
-            list = append_functionscan_priv(list, &original);
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::pg_test;
+
+        use super::*;
+
+        /// Round-trip assertion via the in-memory layout: build a small list
+        /// with `append_functionscan_priv`, then read it back with
+        /// `deserialize_functionscan_priv` from the same offset. Uses a
+        /// pgrx-managed memory context so PG `lappend` allocates safely.
+        #[pg_test]
+        fn functionscan_priv_roundtrip() {
+            use pgrx::pg_sys;
+            let original = FunctionScanPrivData {
+                fn_oid: pg_sys::Oid::from(12345_u32),
+                output_shape_disc: 1, // Record
+                output_shape_field_count: 6,
+                args: vec![
+                    (0xDEAD_BEEF_DEAD_BEEFu64 as i64, pg_sys::INT8OID.to_u32()),
+                    (42i64, pg_sys::INT4OID.to_u32()),
+                ],
+            };
+            // SAFETY: pg_test runs in a real backend, so CurrentMemoryContext is
+            // valid and lappend / makeInteger are safe.
+            let mut list: *mut pg_sys::List = std::ptr::null_mut();
+            unsafe {
+                list = append_functionscan_priv(list, &original);
+            }
+            let decoded = unsafe { deserialize_functionscan_priv(list, 0) }
+                .expect("functionscan priv must round-trip");
+            assert_eq!(decoded, original);
         }
-        let decoded = unsafe { deserialize_functionscan_priv(list, 0) }
-            .expect("functionscan priv must round-trip");
-        assert_eq!(decoded, original);
     }
 }
 
@@ -1356,8 +1378,6 @@ pub unsafe fn deserialize_srf_target_list_priv(
 #[cfg(feature = "pg_test")]
 #[allow(clippy::unwrap_used)]
 mod srf_target_list_tests {
-    use pgrx::pg_test;
-
     use super::*;
 
     /// Sentinel must be distinct from `FUNCTIONSCAN_SENTINEL` and
@@ -1368,28 +1388,35 @@ mod srf_target_list_tests {
         assert_ne!(SRF_TARGET_LIST_SENTINEL, PARTIAL_SENTINEL);
     }
 
-    /// Round-trip: build a serialized priv block, then deserialize and
-    /// confirm equality field-by-field.
-    #[pg_test]
-    fn srf_target_list_priv_roundtrip() {
-        use pgrx::pg_sys;
-        let original = SrfTargetListPrivData {
-            fn_oid: pg_sys::Oid::from(98765_u32),
-            output_shape_disc: 2, // VarLen
-            output_shape_field_count: 0,
-            srf_arg_attno: 2,
-            srf_tlist_pos: 1,
-            passthrough_attnos: vec![1, 0], // pos 0 = passthrough child attno 1; pos 1 = SRF
-            qual_args: vec![(7i64, pg_sys::INT4OID.to_u32())],
-        };
-        // SAFETY: pg_test runs in a real backend, so CurrentMemoryContext
-        // is valid for lappend / makeInteger.
-        let mut list: *mut pg_sys::List = std::ptr::null_mut();
-        unsafe {
-            list = append_srf_target_list_priv(list, &original);
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::pg_test;
+
+        use super::*;
+
+        /// Round-trip: build a serialized priv block, then deserialize and
+        /// confirm equality field-by-field.
+        #[pg_test]
+        fn srf_target_list_priv_roundtrip() {
+            use pgrx::pg_sys;
+            let original = SrfTargetListPrivData {
+                fn_oid: pg_sys::Oid::from(98765_u32),
+                output_shape_disc: 2, // VarLen
+                output_shape_field_count: 0,
+                srf_arg_attno: 2,
+                srf_tlist_pos: 1,
+                passthrough_attnos: vec![1, 0], // pos 0 = passthrough child attno 1; pos 1 = SRF
+                qual_args: vec![(7i64, pg_sys::INT4OID.to_u32())],
+            };
+            // SAFETY: pg_test runs in a real backend, so CurrentMemoryContext
+            // is valid for lappend / makeInteger.
+            let mut list: *mut pg_sys::List = std::ptr::null_mut();
+            unsafe {
+                list = append_srf_target_list_priv(list, &original);
+            }
+            let decoded = unsafe { deserialize_srf_target_list_priv(list, 0) }
+                .expect("srf_target_list priv must round-trip");
+            assert_eq!(decoded, original);
         }
-        let decoded = unsafe { deserialize_srf_target_list_priv(list, 0) }
-            .expect("srf_target_list priv must round-trip");
-        assert_eq!(decoded, original);
     }
 }

@@ -57,6 +57,21 @@ pub enum DispatchResult {
     /// The batch was evaluated by an accelerated path. One Datum per input
     /// row — the existing scalar contract.
     Accelerated(Vec<(pgrx::pg_sys::Datum, bool)>),
+    /// Accelerated scalar batch where the GPU produced definite decisions
+    /// for most rows and PostgreSQL exact recheck was needed for the reported
+    /// uncertain subset.
+    ///
+    /// This is distinct from [`DispatchResult::Deferred`]: the GPU path did
+    /// run, and the recheck is Layer 3 of the spatial correctness contract,
+    /// not a CPU substitute for a failed kernel.
+    AcceleratedWithRecheck {
+        /// One scalar Datum per input row.
+        results: Vec<(pgrx::pg_sys::Datum, bool)>,
+        /// Number of rows rechecked via PostgreSQL/PostGIS exact semantics.
+        recheck_count: u64,
+        /// Wall-clock time spent in the exact recheck, in microseconds.
+        recheck_time_us: u64,
+    },
     /// Accelerated batch with a fixed number of fields per input row.
     ///
     /// `datums.len()` MUST equal `input_row_count * fields_per_row`. The

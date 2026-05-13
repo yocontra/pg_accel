@@ -133,6 +133,24 @@ pub struct ScanExecState {
 
     /// Cumulative microseconds spent in dispatch.
     pub dispatch_time_us: u64,
+
+    /// Rows that required PostgreSQL/PostGIS exact recheck after spatial GPU
+    /// evaluation in this backend.
+    pub spatial_rechecks: u64,
+
+    /// Cumulative microseconds spent in spatial exact recheck.
+    pub spatial_recheck_time_us: u64,
+
+    /// Recheck count for the most recent batch, used when recording per-batch
+    /// GPU stats.
+    last_spatial_recheck_count: u64,
+
+    /// PostgreSQL parallel worker number that owns this executor, or -1 for
+    /// leader/non-parallel execution.
+    parallel_worker_number: i32,
+
+    /// DSM feature flags attached by `InitializeWorkerCustomScan`.
+    dsm_flags: u32,
 }
 
 impl ScanExecState {
@@ -171,6 +189,11 @@ impl ScanExecState {
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
+            spatial_rechecks: 0,
+            spatial_recheck_time_us: 0,
+            last_spatial_recheck_count: 0,
+            parallel_worker_number: -1,
+            dsm_flags: 0,
         }
     }
 
@@ -322,6 +345,37 @@ impl ScanExecState {
     #[must_use]
     pub fn econtext_ptr(&self) -> *mut pg_sys::ExprContext {
         self.econtext
+    }
+
+    /// Mark this executor as running inside a PostgreSQL parallel worker.
+    pub fn mark_parallel_worker(&mut self, worker_number: i32, dsm_flags: u32) {
+        self.parallel_worker_number = worker_number;
+        self.dsm_flags = dsm_flags;
+    }
+
+    /// Returns the parallel worker number, or -1 outside worker execution.
+    #[must_use]
+    pub fn parallel_worker_number(&self) -> i32 {
+        self.parallel_worker_number
+    }
+
+    /// Returns total spatial exact rechecks performed by this executor.
+    #[must_use]
+    pub fn spatial_rechecks(&self) -> u64 {
+        self.spatial_rechecks
+    }
+
+    /// Returns cumulative spatial exact recheck time in microseconds.
+    #[must_use]
+    pub fn spatial_recheck_time_us(&self) -> u64 {
+        self.spatial_recheck_time_us
+    }
+
+    /// Record Layer-3 spatial exact recheck work for the current batch.
+    pub(super) fn record_spatial_recheck_batch(&mut self, rows: u64, time_us: u64) {
+        self.last_spatial_recheck_count = rows;
+        self.spatial_rechecks = self.spatial_rechecks.saturating_add(rows);
+        self.spatial_recheck_time_us = self.spatial_recheck_time_us.saturating_add(time_us);
     }
 }
 

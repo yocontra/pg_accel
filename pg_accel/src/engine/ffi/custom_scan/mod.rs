@@ -190,6 +190,10 @@ pub(super) struct GpuAccelState {
     pub(super) rows_dispatched: u64,
     pub(super) batches_executed: u64,
     pub(super) dispatch_time_us: u64,
+    pub(super) spatial_rechecks: u64,
+    pub(super) spatial_recheck_time_us: u64,
+    pub(super) parallel_worker_number: i32,
+    pub(super) dsm_flags: u32,
     /// Opaque pointer to heap-allocated Rust executor state.
     /// Points to either `ScanExecState` or `SortExecState` depending
     /// on `strategy`. Set in `begin_custom_scan`, freed in `end_custom_scan`.
@@ -650,7 +654,8 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         // Read aggregate descriptors + partial flag from the path's custom_private.
         // Path layout:
         //   [num_aggs, (op, attno, rtype)*N,
-        //    has_gk, (gk_attno, gk_type_oid, gk_key_type)?  (3 payload ints when has_gk=1),
+        //    has_gk,
+        //    (gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)?,
         //    self_scan_relid,
         //    is_partial,
         //    (PARTIAL_SENTINEL, n_cols, (op, attno, transtype, ser)*n_cols)?]
@@ -668,7 +673,35 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         } else {
             0
         };
-        let self_scan_idx = gk_base + if has_gk != 0 { 4 } else { 1 };
+        let group_key_payload = if has_gk != 0 && gk_base + 7 < path_len {
+            let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
+            let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
+            let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
+            let gk_tlist_pos = list_int_at(path_priv, (gk_base + 5) as c_int);
+            Some((gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos))
+        } else if has_gk != 0 && gk_base + 5 < path_len {
+            // Legacy short layout: has_gk + 3 payload ints, then
+            // self_scan_relid/is_partial. It had no tlist-pos slot, so
+            // default the group key to output slot 0.
+            let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
+            let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
+            let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
+            Some((gk_attno, gk_type_oid, gk_key_type, 0))
+        } else {
+            None
+        };
+        let has_valid_gk = group_key_payload
+            .as_ref()
+            .is_some_and(|(attno, _, key_type, _)| {
+                *attno > 0 && matches!(*key_type, 0 | 1 | 2 | 4 | 5)
+            });
+        let self_scan_idx = if has_gk != 0 && has_valid_gk && gk_base + 7 < path_len {
+            gk_base + 6
+        } else if has_gk != 0 && has_valid_gk {
+            gk_base + 4
+        } else {
+            gk_base + 1
+        };
         let is_partial_idx = self_scan_idx + 1;
         let self_scan_relid = if self_scan_idx < path_len {
             list_int_at(path_priv, self_scan_idx as c_int)
@@ -799,23 +832,19 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             list = pg_sys::lappend(list, pg_sys::makeInteger(rtype).cast());
         }
 
-        // Forward group key info from path's custom_private.
-        // Path layout: [num_aggs, (op,attno,rtype)*N, has_group_key, gk_attno,
-        //               gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos, self_scan_relid]
-        let gk_base = 1 + (num_aggs as usize) * 3;
-        if gk_base < path_len {
-            let has_gk = list_int_at(path_priv, gk_base as c_int);
-            list = pg_sys::lappend(list, pg_sys::makeInteger(has_gk).cast());
-            if has_gk != 0 && gk_base + 3 < path_len {
-                let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
-                let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
-                let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
-                list = pg_sys::lappend(list, pg_sys::makeInteger(remap_attno(gk_attno)).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(gk_type_oid).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(gk_key_type).cast());
-            }
+        // Forward group key info from path's custom_private. Plan layout:
+        //   [..., has_group_key,
+        //    (gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos)?,
+        //    self_scan_relid, (PARTIAL_SENTINEL block)?]
+        if let Some((gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos)) = group_key_payload
+            .filter(|(attno, _, key_type, _)| *attno > 0 && matches!(*key_type, 0 | 1 | 2 | 4 | 5))
+        {
+            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(remap_attno(gk_attno)).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(gk_type_oid).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(gk_key_type).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(gk_tlist_pos).cast());
         } else {
-            // No group key info in path — plain aggregate.
             list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
         }
 
@@ -1731,6 +1760,7 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
         (*state).css.flags = (*cscan).flags;
         (*state).css.methods = &raw const EXEC_METHODS.0;
         (*state).accel.executor = std::ptr::null_mut();
+        (*state).accel.parallel_worker_number = -1;
 
         // All scan strategies use VirtualTupleTableSlot (PG default).
         // ExecForceStoreHeapTuple triggers heap_deform_tuple (~50ns) which
@@ -3096,6 +3126,12 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             let qual = (*node).ss.ps.qual;
             let econtext = (*node).ss.ps.ps_ExprContext;
             let mut exec = Box::new(ScanExecState::new(strategy, batch_size, qual, econtext));
+            if (*state).accel.parallel_worker_number >= 0 {
+                exec.mark_parallel_worker(
+                    (*state).accel.parallel_worker_number,
+                    (*state).accel.dsm_flags,
+                );
+            }
 
             // For GpuExpr strategy, compile the qual list to GPU bytecode.
             // Template match is tried first (fastest), then bytecode,
@@ -3204,6 +3240,8 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         (*state).accel.rows_dispatched = 0;
         (*state).accel.batches_executed = 0;
         (*state).accel.dispatch_time_us = 0;
+        (*state).accel.spatial_rechecks = 0;
+        (*state).accel.spatial_recheck_time_us = 0;
     }
 }
 
@@ -3358,6 +3396,11 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
         (*state).accel.batches_executed = dyn_state.batches_executed();
         (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
+        if gpu_strategy == GpuStrategy::Scan {
+            let scan_state = &*executor.cast::<ScanExecState>();
+            (*state).accel.spatial_rechecks = scan_state.spatial_rechecks();
+            (*state).accel.spatial_recheck_time_us = scan_state.spatial_recheck_time_us();
+        }
         slot
     };
 
@@ -3650,6 +3693,12 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                     )
                 };
             let mut exec = Box::new(ScanExecState::new(old_strategy, batch_size, qual, econtext));
+            if (*state).accel.parallel_worker_number >= 0 {
+                exec.mark_parallel_worker(
+                    (*state).accel.parallel_worker_number,
+                    (*state).accel.dsm_flags,
+                );
+            }
             if old_fn_oid != pg_sys::InvalidOid {
                 // SAFETY: old_fn_oid was validated during the initial
                 // set_gpu_context call. We are on the main backend thread.
@@ -3678,6 +3727,8 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
         (*state).accel.rows_dispatched = 0;
         (*state).accel.batches_executed = 0;
         (*state).accel.dispatch_time_us = 0;
+        (*state).accel.spatial_rechecks = 0;
+        (*state).accel.spatial_recheck_time_us = 0;
     }
 
     // SAFETY: Rescan all children.

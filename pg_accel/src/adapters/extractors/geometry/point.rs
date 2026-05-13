@@ -22,8 +22,10 @@ use super::wkb::datum_to_gserialized_bytes;
 #[must_use]
 pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
     let bytes = datum_to_gserialized_bytes(datum)?;
-    let bytes = bytes.as_slice();
+    extract_point_from_bytes(bytes.as_slice())
+}
 
+pub(super) fn extract_point_from_bytes(bytes: &[u8]) -> Option<(f64, f64)> {
     if bytes.len() < MIN_HEADER_LEN {
         return None;
     }
@@ -35,7 +37,10 @@ pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
         MIN_HEADER_LEN // 8
     };
 
-    // Need: uint32 type + float64 x + float64 y = 4 + 8 + 8 = 20 bytes.
+    // Need at least: uint32 type + float64 x + float64 y = 4 + 8 + 8.
+    // Some PostGIS point arrays include an explicit npoints=1 word after
+    // the type; support both layouts because older synthetic tests use the
+    // compact point form.
     let needed = geom_start + 4 + 16;
     if bytes.len() < needed {
         return None;
@@ -52,7 +57,7 @@ pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
         return None;
     }
 
-    let x_offset = geom_start + 4;
+    let x_offset = point_xy_offset(bytes, geom_start)?;
     let y_offset = x_offset + 8;
 
     let x = f64::from_le_bytes([
@@ -77,6 +82,18 @@ pub fn extract_point(datum: Datum) -> Option<(f64, f64)> {
     ]);
 
     Some((x, y))
+}
+
+fn point_xy_offset(bytes: &[u8], geom_start: usize) -> Option<usize> {
+    let compact = geom_start + 4;
+    let with_npoints = geom_start + 8;
+    if bytes.len() >= with_npoints + 16 {
+        let npoints = u32::from_le_bytes(bytes[compact..with_npoints].try_into().ok()?);
+        if npoints == 1 {
+            return Some(with_npoints);
+        }
+    }
+    Some(compact)
 }
 
 /// Zero-allocation point extraction: reads (x, y) as f32 directly from a
@@ -176,24 +193,24 @@ pub fn extract_point_xy_f32(datum: Datum) -> Option<(f32, f32)> {
     #[allow(clippy::cast_possible_truncation)]
     Some((x as f32, y as f32))
 }
-/// Extract a POINT geometry: type(4) + x(f64) + y(f64).
+/// Extract a POINT geometry: type(4) + optional npoints(4) + x(f64) + y(f64).
 ///
-/// Per PostGIS `gserialized2_from_lwpoint` (liblwgeom/gserialized2.c):
-/// a POINT is serialized as type followed directly by its coordinates.
-/// There is NO `npoints` field for POINT (unlike LINESTRING / POLYGON).
 pub(super) fn extract_point_geom(
     bytes: &[u8],
     geom_start: usize,
     embedded_bbox: Option<[f32; 4]>,
 ) -> Option<ExtractedGeometry> {
-    // type(4) + x(8) + y(8) = 20
+    // type(4) + x(8) + y(8) = 20, or type(4) + npoints(4) + x(8) + y(8).
     let needed = geom_start + 4 + 16;
     if bytes.len() < needed {
         return None;
     }
 
-    let x_off = geom_start + 4; // skip type(4)
+    let x_off = point_xy_offset(bytes, geom_start)?;
     let y_off = x_off + 8;
+    if bytes.len() < y_off + 8 {
+        return None;
+    }
     let x = f64::from_le_bytes(bytes[x_off..x_off + 8].try_into().ok()?);
     let y = f64::from_le_bytes(bytes[y_off..y_off + 8].try_into().ok()?);
 

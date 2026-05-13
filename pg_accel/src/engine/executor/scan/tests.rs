@@ -226,6 +226,27 @@ fn gist_recheck_stays_false_for_gpu_raster() {
     assert!(!state.gist_recheck);
 }
 
+#[test]
+fn parallel_worker_marker_is_recorded_on_scan_executor() {
+    let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+    state.mark_parallel_worker(2, 0x1);
+
+    assert_eq!(state.parallel_worker_number(), 2);
+    assert_eq!(state.dsm_flags, 0x1);
+}
+
+#[test]
+fn spatial_recheck_batch_counters_accumulate() {
+    let mut state = make_state(AccelStrategy::GpuSpatial, 256);
+
+    state.record_spatial_recheck_batch(3, 120);
+    state.record_spatial_recheck_batch(2, 80);
+
+    assert_eq!(state.last_spatial_recheck_count, 2);
+    assert_eq!(state.spatial_rechecks(), 5);
+    assert_eq!(state.spatial_recheck_time_us(), 200);
+}
+
 // ── Batch dispatch routing (strategy selection) ─────────────────────
 
 #[test]

@@ -42,6 +42,7 @@ fn strategy_from_i32_all_valid_values() {
     assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Window);
     assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::PreAgg);
     assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::FunctionScan);
+    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::SrfTargetList);
 }
 
 #[test]
@@ -49,8 +50,8 @@ fn strategy_from_i32_boundary_values() {
     // Negative values default to Scan.
     assert_eq!(GpuStrategy::from_i32(i32::MIN), GpuStrategy::Scan);
     assert_eq!(GpuStrategy::from_i32(-100), GpuStrategy::Scan);
-    // Values above the last variant (FunctionScan=6 since Phase 2 F3) default to Scan.
-    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::Scan);
+    // Values above the last variant (SrfTargetList=7) default to Scan.
+    assert_eq!(GpuStrategy::from_i32(8), GpuStrategy::Scan);
     assert_eq!(GpuStrategy::from_i32(i32::MAX), GpuStrategy::Scan);
 }
 
@@ -152,9 +153,10 @@ fn strategy_window_debug() {
 
 #[test]
 fn strategy_from_i32_above_functionscan_defaults_to_scan() {
-    // Phase 2 F3 added FunctionScan=6. Anything above that is unknown.
+    // Phase 2 F3 added FunctionScan=6; the SRF target-list strategy is 7.
     assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::FunctionScan);
-    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::Scan);
+    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::SrfTargetList);
+    assert_eq!(GpuStrategy::from_i32(8), GpuStrategy::Scan);
     assert_eq!(GpuStrategy::from_i32(100), GpuStrategy::Scan);
 }
 
@@ -248,8 +250,9 @@ fn strategy_labels_start_with_gpu() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn accel_state_zeroed_has_expected_defaults() {
-    // Simulates what palloc0 gives us: all bytes zero.
+fn accel_state_created_has_expected_defaults() {
+    // Simulates create_custom_scan_state after palloc0 plus explicit
+    // non-parallel worker marker initialization.
     let state = GpuAccelState {
         strategy: 0,
         batch_size: 0,
@@ -257,6 +260,10 @@ fn accel_state_zeroed_has_expected_defaults() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
+        spatial_rechecks: 0,
+        spatial_recheck_time_us: 0,
+        parallel_worker_number: -1,
+        dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Scan);
@@ -264,6 +271,10 @@ fn accel_state_zeroed_has_expected_defaults() {
     assert_eq!(state.rows_dispatched, 0);
     assert_eq!(state.batches_executed, 0);
     assert_eq!(state.dispatch_time_us, 0);
+    assert_eq!(state.spatial_rechecks, 0);
+    assert_eq!(state.spatial_recheck_time_us, 0);
+    assert_eq!(state.parallel_worker_number, -1);
+    assert_eq!(state.dsm_flags, 0);
     assert!(state.executor.is_null());
 }
 
@@ -276,6 +287,10 @@ fn accel_state_strategy_field_maps_to_gpu_strategy() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
+        spatial_rechecks: 0,
+        spatial_recheck_time_us: 0,
+        parallel_worker_number: -1,
+        dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     state.strategy = GpuStrategy::Sort as i32;
@@ -298,6 +313,10 @@ fn accel_state_counter_accumulation() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
+        spatial_rechecks: 0,
+        spatial_recheck_time_us: 0,
+        parallel_worker_number: -1,
+        dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     // Simulate dispatching 3 batches of 1024 rows each.
@@ -320,6 +339,10 @@ fn accel_state_counters_no_overflow_at_large_values() {
         rows_dispatched: u64::MAX - 10,
         batches_executed: u64::MAX - 1,
         dispatch_time_us: u64::MAX / 2,
+        spatial_rechecks: 0,
+        spatial_recheck_time_us: 0,
+        parallel_worker_number: -1,
+        dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     state.rows_dispatched += 5;
@@ -339,6 +362,10 @@ fn accel_state_dispatch_time_to_ms_conversion() {
         rows_dispatched: 1000,
         batches_executed: 4,
         dispatch_time_us: 12_345,
+        spatial_rechecks: 0,
+        spatial_recheck_time_us: 0,
+        parallel_worker_number: -1,
+        dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     // This mirrors the conversion done in explain_custom_scan.
@@ -356,6 +383,10 @@ fn accel_state_dispatch_time_zero_us_is_zero_ms() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
+        spatial_rechecks: 0,
+        spatial_recheck_time_us: 0,
+        parallel_worker_number: -1,
+        dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     #[allow(clippy::cast_precision_loss)]
@@ -757,13 +788,27 @@ fn exec_methods_mark_restore_are_none() {
 
 #[test]
 fn exec_methods_parallel_callbacks_are_wired() {
-    // DSM hooks must be Some (even as no-op stubs) for PG to schedule
-    // the node inside a parallel Gather.
+    // DSM hooks must be Some for PG to schedule the node inside a parallel
+    // Gather. They also carry the worker-side spatial recheck capability
+    // marker used by InitializeWorkerCustomScan.
     assert!(EXEC_METHODS.0.EstimateDSMCustomScan.is_some());
     assert!(EXEC_METHODS.0.InitializeDSMCustomScan.is_some());
     assert!(EXEC_METHODS.0.ReInitializeDSMCustomScan.is_some());
     assert!(EXEC_METHODS.0.InitializeWorkerCustomScan.is_some());
     assert!(EXEC_METHODS.0.ShutdownCustomScan.is_some());
+}
+
+#[test]
+fn dsm_estimate_allocates_worker_recheck_coordinate() {
+    // The DSM hooks are not just no-op sentinels: workers attach a tiny
+    // coordinate block so spatial Layer-3 recheck work is explicitly marked
+    // as worker-local rather than silently leader-only.
+    let estimated =
+        unsafe { dsm::estimate_dsm_custom_scan(std::ptr::null_mut(), std::ptr::null_mut()) };
+
+    assert_eq!(estimated, dsm::DSM_COORD_SIZE);
+    assert!(estimated >= std::mem::size_of::<dsm::GpuAccelDsmState>());
+    assert_ne!(dsm::DSM_FLAG_WORKER_SPATIAL_RECHECK, 0);
 }
 
 #[test]
@@ -1449,6 +1494,86 @@ mod tests {
         let p = parsed.partial.as_ref().expect("partial spec present");
         assert_eq!(p.per_column.len(), 1);
         assert!(matches!(p.per_column[0].op, AggOp::Sum));
+    }
+
+    /// Agg plan-private layout for grouped partial HashAgg:
+    /// group-key metadata must survive ahead of the PAAG sentinel so
+    /// begin_custom_scan builds `AggExecState::new_grouped`, then attaches
+    /// partial emitters for SUM + AVG/STDDEV-family transition states.
+    #[pg_test]
+    fn agg_grouped_partial_private_layout_roundtrips() {
+        use crate::engine::executor::agg::AggOp;
+        use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+        use crate::engine::registry::AccelStrategy;
+
+        let spec = PartialAggSpec {
+            per_column: vec![
+                PartialColumn {
+                    op: AggOp::Sum,
+                    attno: 2,
+                    transtype_oid: pg_sys::FLOAT8OID,
+                    serialize_fn_oid: None,
+                },
+                PartialColumn {
+                    op: AggOp::Avg,
+                    attno: 2,
+                    transtype_oid: pg_sys::FLOAT8ARRAYOID,
+                    serialize_fn_oid: None,
+                },
+            ],
+        };
+
+        // SAFETY: pg_test runs on the main backend thread with a live PG
+        // memory context; makeInteger/lappend allocate List cells there.
+        let parsed = unsafe {
+            let mut list: *mut pg_sys::List = std::ptr::null_mut();
+            list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Agg as i32).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(256).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(AccelStrategy::GpuReduce as i32).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(AggOp::Sum.to_i32()).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(u32::from(pg_sys::FLOAT8OID) as i32).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(AggOp::Avg.to_i32()).cast());
+            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast());
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(u32::from(pg_sys::FLOAT8OID) as i32).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has_group_key
+            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // gk attno
+            list = pg_sys::lappend(
+                list,
+                pg_sys::makeInteger(u32::from(pg_sys::INT4OID) as i32).cast(),
+            );
+            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // int32 key
+            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // tlist pos
+            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // self_scan_relid
+            list = append_partial_spec(list, &spec);
+            deserialize_custom_private(list)
+        };
+
+        let gk = parsed.group_key.as_ref().expect("group key");
+        assert_eq!(gk.attno, 1);
+        assert_eq!(gk.type_oid, pg_sys::INT4OID);
+        assert_eq!(gk.key_type, 0);
+        assert_eq!(parsed.group_key_tlist_pos, 0);
+        assert_eq!(parsed.self_scan_relid, 0);
+        let partial = parsed.partial.as_ref().expect("partial spec");
+        assert_eq!(partial.per_column.len(), 2);
+        assert!(matches!(partial.per_column[0].op, AggOp::Sum));
+        assert_eq!(partial.per_column[0].transtype_oid, pg_sys::FLOAT8OID);
+        assert!(matches!(partial.per_column[1].op, AggOp::Avg));
+        assert_eq!(partial.per_column[1].transtype_oid, pg_sys::FLOAT8ARRAYOID);
     }
 
     /// GUC roundtrip via SET / SHOW / SELECT current_setting.

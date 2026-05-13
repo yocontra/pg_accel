@@ -239,6 +239,9 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     // Map the dispatch outcome to the BufferedOutput shape.
     let (output, dispatched_ok) = match (entry.output_shape, dispatch_result) {
         (OutputShape::Scalar, DispatchResult::Accelerated(d)) => (BufferedOutput::Scalar(d), true),
+        (OutputShape::Scalar, DispatchResult::AcceleratedWithRecheck { results, .. }) => {
+            (BufferedOutput::Scalar(results), true)
+        }
         (
             OutputShape::Record { field_count: _ },
             DispatchResult::AcceleratedRecord {
@@ -254,6 +257,14 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
         ),
         (OutputShape::VarLen, DispatchResult::AcceleratedVarLen { offsets: _, datums }) => {
             (BufferedOutput::VarLen { datums }, true)
+        }
+        (_, DispatchResult::AcceleratedWithRecheck { .. }) => {
+            pgrx::debug1!(
+                "pg_accel: function_scan init: scalar recheck result shape did not match \
+                 registry output shape for fn_oid={}; returning empty result",
+                u32::from(priv_data.fn_oid),
+            );
+            (BufferedOutput::Scalar(Vec::new()), false)
         }
         (_, DispatchResult::Deferred) => {
             // Dispatcher couldn't accelerate this call. Emit zero rows

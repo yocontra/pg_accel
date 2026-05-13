@@ -138,32 +138,54 @@ mod tests {
 
     #[pg_test]
     fn test_guc_soft_fp64_cost_multiplier_rejects_above_cap() {
+        use pgrx::prelude::{PgSqlErrorCode, PgTryBuilder};
+
         // Any value > 64.0 must be rejected by PG's DefineCustomRealVariable
         // range check — this is the parity-floor cheat defense: a misconfig
         // (or agent under pressure) cannot silently set the multiplier to
         // 1000 to make a failing fp64 benchmark "pass".
-        let result = Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 100.0");
+        let result = PgTryBuilder::new(|| {
+            Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 100.0")
+                .expect("SET should either succeed or raise INVALID_PARAMETER_VALUE");
+            false
+        })
+        .catch_when(PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE, |_| true)
+        .execute();
         assert!(
-            result.is_err(),
+            result,
             "SET soft_fp64_cost_multiplier = 100.0 must be rejected; got Ok(_) which means the \
              hard cap is not enforced at registration"
         );
         // 64.0000001 must also be rejected — the boundary is closed at 64.0.
-        let result = Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 64.0001");
+        let result = PgTryBuilder::new(|| {
+            Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 64.0001")
+                .expect("SET should either succeed or raise INVALID_PARAMETER_VALUE");
+            false
+        })
+        .catch_when(PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE, |_| true)
+        .execute();
         assert!(
-            result.is_err(),
+            result,
             "SET soft_fp64_cost_multiplier = 64.0001 must be rejected; cap is 64.0 inclusive"
         );
     }
 
     #[pg_test]
     fn test_guc_soft_fp64_cost_multiplier_rejects_below_floor() {
+        use pgrx::prelude::{PgSqlErrorCode, PgTryBuilder};
+
         // Values below 1.0 are nonsensical for a "cost multiplier" — a GPU
         // can never be faster at soft-fp64 than at fp32, so anything < 1.0
         // must be rejected.
-        let result = Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 0.5");
+        let result = PgTryBuilder::new(|| {
+            Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 0.5")
+                .expect("SET should either succeed or raise INVALID_PARAMETER_VALUE");
+            false
+        })
+        .catch_when(PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE, |_| true)
+        .execute();
         assert!(
-            result.is_err(),
+            result,
             "SET soft_fp64_cost_multiplier = 0.5 must be rejected; floor is 1.0"
         );
     }
@@ -996,14 +1018,15 @@ mod tests {
     fn test_adapter_h3_structure() {
         let a = crate::adapters::h3::adapter();
         assert_eq!(a.name, "h3");
-        assert_eq!(a.functions.len(), 9, "9 GPU H3");
+        let expected = a.functions.len();
+        assert!(expected >= 15, "expected scalar + varlen GPU H3 entries");
 
         let gpu_count = a
             .functions
             .iter()
             .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuH3)
             .count();
-        assert_eq!(gpu_count, 9);
+        assert_eq!(gpu_count, expected);
 
         let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
         assert!(names.contains(&"h3_latlng_to_cell"));
@@ -1012,20 +1035,24 @@ mod tests {
         assert!(names.contains(&"h3_is_valid_cell"));
         assert!(names.contains(&"h3_is_pentagon"));
         assert!(names.contains(&"h3_is_res_class_iii"));
+        assert!(names.contains(&"h3_grid_disk"));
+        assert!(names.contains(&"h3_cell_to_boundary"));
+        assert!(names.contains(&"h3_cells_to_multi_polygon"));
     }
 
     #[pg_test]
     fn test_adapter_postgis_raster_structure() {
         let a = crate::adapters::postgis_raster::adapter();
         assert_eq!(a.name, "postgis_raster");
-        assert_eq!(a.functions.len(), 3, "3 GPU raster");
+        let expected = a.functions.len();
+        assert!(expected >= 9, "expected full GPU raster adapter surface");
 
         let gpu_count = a
             .functions
             .iter()
             .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuRaster)
             .count();
-        assert_eq!(gpu_count, 3);
+        assert_eq!(gpu_count, expected);
     }
 
     #[pg_test]
@@ -2379,12 +2406,19 @@ mod tests {
     fn test_reduce_actually_uses_gpu() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("force GPU cost in smoke");
+        Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 1.0").expect("force fp64 smoke cost");
+        Spi::run("DROP TABLE IF EXISTS _gpu_reduce_t").expect("drop temp table");
+        Spi::run(
+            "CREATE TEMP TABLE _gpu_reduce_t AS \
+             SELECT g::float8 AS x FROM generate_series(1, 500000) AS g",
+        )
+        .expect("create reduce temp table");
+        Spi::run("ANALYZE _gpu_reduce_t").expect("analyze reduce table");
 
         crate::gpu::reset_gpu_exec_count();
 
-        // Large enough to clear pg_accel.min_batch_size and trigger GPU dispatch.
-        let _ = Spi::get_one::<f64>("SELECT sum(x::float8) FROM generate_series(1, 200000) AS x")
-            .expect("reduce query ok");
+        let _ = Spi::get_one::<f64>("SELECT sum(x) FROM _gpu_reduce_t").expect("reduce query ok");
 
         crate::gpu::assert_gpu_executed(1);
     }

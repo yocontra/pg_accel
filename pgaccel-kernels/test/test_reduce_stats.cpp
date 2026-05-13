@@ -94,8 +94,9 @@ static int check_eq_u64(const char* label, uint64_t got, uint64_t expected) {
 
 // Test one size. Generates a random f64 vector seeded deterministically,
 // computes CPU reference stats in fp64, invokes every fp64 reduce kernel,
-// and compares with u35 (≤8 ULP) tolerance for sums (reductions) and
-// u10 (≤4 ULP) tolerance for derived stddev/var (one sqrt).
+// and compares with the tree-reduction-aware budget for sums and derived
+// stats. Variance/stddev inherit the reduction budget because they are
+// computed from two independently tree-reduced values (sum and sum_sq).
 static void test_size(size_t N) {
   std::printf("\n=== fp64 reduce @ N=%zu ===\n", N);
   std::mt19937_64 rng(0xC0FFEEULL ^ N);
@@ -234,14 +235,13 @@ static void test_size(size_t N) {
       const double stddev_pop = std::sqrt(std::max(0.0, var_pop));
       const double stddev_samp = std::sqrt(std::max(0.0, var_samp));
 
-      // Cancellation in (sum_sq - count*avg^2) can blow up relative
-      // error past u35 — but for uniform[-100,100] with mean ~0 the
-      // cancellation is mild. Keep the budget at 64 ULP for derived
-      // quantities; flag anything larger as a kernel regression.
-      check_ulp("var_pop (derived)", var_pop, ref_var_pop, 64);
-      check_ulp("var_samp (derived)", var_samp, ref_var_samp, 64);
-      check_ulp("stddev_pop (derived)", stddev_pop, ref_stddev_pop, 64);
-      check_ulp("stddev_samp (derived)", stddev_samp, ref_stddev_samp, 64);
+      // Derived values carry error from both independent reductions. Use the
+      // same tree-reduction-aware envelope as sum/sum_sq so this test catches
+      // real kernel drift without requiring scalar-order bit behavior.
+      check_ulp("var_pop (derived)", var_pop, ref_var_pop, reduce_budget);
+      check_ulp("var_samp (derived)", var_samp, ref_var_samp, reduce_budget);
+      check_ulp("stddev_pop (derived)", stddev_pop, ref_stddev_pop, reduce_budget);
+      check_ulp("stddev_samp (derived)", stddev_samp, ref_stddev_samp, reduce_budget);
     }
   }
 }

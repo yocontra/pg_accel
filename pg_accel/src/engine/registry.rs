@@ -54,7 +54,7 @@ pub enum AccelStrategy {
     GpuExpr = 6,
     /// GPU hash join — equi-join via hash build + probe.
     GpuHashJoin = 7,
-    /// GPU window functions — ROW_NUMBER, RANK, SUM OVER, LAG/LEAD, etc.
+    /// GPU window functions — currently running SUM/COUNT over numeric windows.
     GpuWindow = 8,
 }
 

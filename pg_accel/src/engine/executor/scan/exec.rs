@@ -254,6 +254,7 @@ impl ScanExecState {
 
         self.result_mask.clear();
         self.result_pos = 0;
+        self.last_spatial_recheck_count = 0;
 
         match self.strategy {
             AccelStrategy::GpuSpatial | AccelStrategy::GpuH3 | AccelStrategy::GpuRaster => {
@@ -289,7 +290,7 @@ impl ScanExecState {
                 | AccelStrategy::GpuRaster
                 | AccelStrategy::GpuExpr
         ) {
-            stats::record_gpu_batch(batch_len as u64, 0);
+            stats::record_gpu_batch(batch_len as u64, self.last_spatial_recheck_count);
         }
     }
 
@@ -441,6 +442,25 @@ impl ScanExecState {
                     "pg_accel: GPU spatial {}/{} rows passed",
                     pass_count,
                     batch_len,
+                );
+            }
+            DispatchResult::AcceleratedWithRecheck {
+                results,
+                recheck_count,
+                recheck_time_us,
+            } => {
+                self.record_spatial_recheck_batch(recheck_count, recheck_time_us);
+                for &(datum, is_null) in &results {
+                    let passed = !is_null && datum.value() != 0;
+                    self.result_mask.push(passed);
+                }
+                let pass_count = self.result_mask.iter().filter(|&&b| b).count();
+                tracing::debug!(
+                    "pg_accel: GPU spatial {}/{} rows passed ({} exact rechecked, worker={})",
+                    pass_count,
+                    batch_len,
+                    recheck_count,
+                    self.parallel_worker_number,
                 );
             }
             DispatchResult::Deferred => {

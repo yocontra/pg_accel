@@ -1,35 +1,13 @@
-// Standalone correctness tests for the UUID and INET hash-agg key
-// paths in pgaccel-kernels/src/hash_agg.cpp. These two key-type arms
-// (PGACCEL_KEY_UUID, PGACCEL_KEY_INET) shipped earlier this session
-// (commits 243fa1f / c4134d5 / 3fbc03d) but had zero kernel-level
-// test coverage — only Rust-side adapter tests exercised them.
-//
-// **KNOWN FAILURE — DO NOT ADD TO `just gpu-test` UNTIL FIXED.**
-//
-// Initial cold-cache run uncovered a Metal SSCP MSL-emitter bug for
-// UUID and INET key types: the per-group SUM accumulation kernel
-// emits MSL with `device device void**` (duplicate address-space
-// qualifier + cross-address-space cast) that fails `xcrun metal`
-// compilation. The grouping (sort path) succeeds — `group_count` is
-// correct — but every per-group sum reads back as 0.0 because the
-// JIT-compile failure leaves the value-aggregation pass un-executed.
-//
-// Filed as a Phase 6 SSCP entry in TODO.md. Until the upstream
-// AdaptiveCpp emitter fix lands, this test stays as a reproducer:
-// committed but not wired into `just gpu-test`. Per anti-cheat ban
-// #1 / #9, the test asserts the H3-/INET-correct behavior so it
-// FAILS today and PASSES the moment the kernel bug is resolved —
-// no `#[ignore]`, no fake-success workaround.
-//
-// The tests use N >= SORT_AGG_MIN_ROWS = 100000 so the sort-based
-// dispatch path runs (the small-N agg_hash path is the one with the
-// other TODO Phase 6 known bug; sort-based is correct at scale for
-// INT64 keys, demonstrated by the baseline test below).
+// Standalone correctness tests for hash-agg group-key paths in
+// pgaccel-kernels/src/hash_agg.cpp. These cover wide UUID/INET keys,
+// FLOAT64 key normalization, and NULL/sentinel collision handling.
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "pgaccel_expr.h"
@@ -312,6 +290,118 @@ static void test_hash_agg_int64_baseline() {
   pgaccel_agg_free(state);
 }
 
+static void test_hash_agg_f64_zero_nan_normalization() {
+  printf("--- test_hash_agg_f64_zero_nan_normalization ---\n");
+
+  uint64_t nan_payload_bits = 0x7ff8000000001234ULL;
+  double nan_payload;
+  std::memcpy(&nan_payload, &nan_payload_bits, sizeof(nan_payload));
+
+  std::vector<double> keys = {-0.0, 0.0, std::numeric_limits<double>::quiet_NaN(), nan_payload};
+  std::vector<uint8_t> key_nulls(keys.size(), 0);
+  std::vector<double> values = {1.0, 2.0, 3.0, 4.0};
+  std::vector<uint8_t> val_nulls(keys.size(), 0);
+
+  const void* val_arrays[1] = {values.data()};
+  const uint8_t* val_null_arrays[1] = {val_nulls.data()};
+  int val_types[1] = {PGACCEL_VAL_FLOAT64};
+  pgaccel_agg_col agg_cols[1] = {{PGACCEL_AGG_SUM, 0}};
+
+  pgaccel_agg_state* state =
+      pgaccel_hash_agg_execute(keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_FLOAT64,
+                               val_arrays, val_null_arrays, val_types, agg_cols, 1);
+  ASSERT_TRUE("FLOAT64 normalization state non-null", state != nullptr);
+  if (!state) {
+    return;
+  }
+
+  ASSERT_EQ_SZ("FLOAT64 normalization group_count == 2", pgaccel_agg_group_count(state), (size_t)2);
+  const auto* keys_out = static_cast<const double*>(pgaccel_agg_get_group_keys(state));
+  const double* sums = pgaccel_agg_get_results(state, 0);
+  bool saw_zero = false;
+  bool saw_nan = false;
+  for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+    if (keys_out[g] != keys_out[g]) {
+      saw_nan = true;
+      ASSERT_TRUE("NaN payloads grouped together", std::abs(sums[g] - 7.0) < 1e-9);
+    } else if (keys_out[g] == 0.0) {
+      saw_zero = true;
+      ASSERT_TRUE("-0.0 and +0.0 grouped together", std::abs(sums[g] - 3.0) < 1e-9);
+    }
+  }
+  ASSERT_TRUE("FLOAT64 normalization saw zero group", saw_zero);
+  ASSERT_TRUE("FLOAT64 normalization saw NaN group", saw_nan);
+  pgaccel_agg_free(state);
+}
+
+static void test_hash_agg_int64_null_sentinel_collision() {
+  printf("--- test_hash_agg_int64_null_sentinel_collision ---\n");
+
+  constexpr size_t N = 100000;
+  std::vector<int64_t> keys(N);
+  std::vector<uint8_t> key_nulls(N, 0);
+  std::vector<double> values(N, 1.0);
+  std::vector<uint8_t> val_nulls(N, 0);
+  double expected_null = 0.0;
+  double expected_max = 0.0;
+  double expected_seven = 0.0;
+
+  for (size_t i = 0; i < N; ++i) {
+    switch (i % 3) {
+      case 0:
+        keys[i] = 42;
+        key_nulls[i] = 1;
+        expected_null += 1.0;
+        break;
+      case 1:
+        keys[i] = std::numeric_limits<int64_t>::max();
+        expected_max += 1.0;
+        break;
+      default:
+        keys[i] = 7;
+        expected_seven += 1.0;
+        break;
+    }
+  }
+
+  const void* val_arrays[1] = {values.data()};
+  const uint8_t* val_null_arrays[1] = {val_nulls.data()};
+  int val_types[1] = {PGACCEL_VAL_FLOAT64};
+  pgaccel_agg_col agg_cols[1] = {{PGACCEL_AGG_SUM, 0}};
+
+  pgaccel_agg_state* state =
+      pgaccel_hash_agg_execute(keys.data(), key_nulls.data(), N, PGACCEL_KEY_INT64, val_arrays,
+                               val_null_arrays, val_types, agg_cols, 1);
+  ASSERT_TRUE("INT64 null/sentinel collision state non-null", state != nullptr);
+  if (!state) {
+    return;
+  }
+
+  ASSERT_EQ_SZ("INT64 null/sentinel collision group_count == 3", pgaccel_agg_group_count(state),
+               (size_t)3);
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(state));
+  const double* sums = pgaccel_agg_get_results(state, 0);
+  bool saw_null = false;
+  bool saw_max = false;
+  bool saw_seven = false;
+  for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+    if (keys_out[g] == 0 && std::abs(sums[g] - expected_null) < 1e-9) {
+      saw_null = true;
+    } else if (keys_out[g] == std::numeric_limits<int64_t>::max()) {
+      saw_max = true;
+      ASSERT_TRUE("INT64 max sentinel-real group sum", std::abs(sums[g] - expected_max) < 1e-9);
+    } else if (keys_out[g] == 7) {
+      saw_seven = true;
+      ASSERT_TRUE("INT64 ordinary group sum", std::abs(sums[g] - expected_seven) < 1e-9);
+    }
+  }
+  ASSERT_TRUE("INT64 null/sentinel saw NULL group", saw_null);
+  ASSERT_TRUE("INT64 null/sentinel saw max group", saw_max);
+  ASSERT_TRUE("INT64 null/sentinel saw ordinary group", saw_seven);
+
+  pgaccel_agg_free(state);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -324,6 +414,8 @@ int main() {
   }
 
   test_hash_agg_int64_baseline();
+  test_hash_agg_f64_zero_nan_normalization();
+  test_hash_agg_int64_null_sentinel_collision();
   test_hash_agg_uuid_keys();
   test_hash_agg_inet_keys();
 

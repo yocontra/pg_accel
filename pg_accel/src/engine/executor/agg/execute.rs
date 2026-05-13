@@ -26,6 +26,14 @@ use super::values::{append_value_bytes, oid_to_val_tag};
 /// raw bits in the `Datum`, which PG would misinterpret as a pointer.
 const NUMERICOID: pg_sys::Oid = pg_sys::Oid::from_u32(1700);
 
+#[derive(Debug, Clone, Copy)]
+struct FusedMultiResult {
+    sum: f64,
+    min: f64,
+    max: f64,
+    count: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Per-column accumulator
 // ---------------------------------------------------------------------------
@@ -1728,7 +1736,8 @@ impl AggExecState {
     }
 
     /// Attempt a single fused GPU pass that reduces all eligible columns
-    /// simultaneously via the fused `reduce_multi_f32/f64` kernel.
+    /// simultaneously via the fused `reduce_multi_*` kernel matching the
+    /// source column type.
     ///
     /// Fix Agent 4 (2026-04-11): this version detects groups of
     /// aggregate columns that all reference the **same** input column but
@@ -1798,10 +1807,7 @@ impl AggExecState {
                 tracing::debug_span!("gpu.reduce_multi", attno, n, num_aggs = col_indices.len(),)
                     .entered();
 
-            // Dispatch the fused f64 multi-reduce. On Metal the wrapper
-            // auto-casts to f32 inside gpu/mod.rs.
-            let slice = self.columns[col_indices[0]].gpu_values.as_slice();
-            let fused = gpu::reduce_multi_f64(slice);
+            let fused = Self::dispatch_fused_multi_for_column(&self.columns[col_indices[0]]);
 
             let Some(result) = fused else {
                 tracing::warn!(
@@ -1842,6 +1848,36 @@ impl AggExecState {
         }
         // Columns not covered by any fusable group retain their buffers
         // and fall through to per-column dispatch.
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn dispatch_fused_multi_for_column(col: &AggColumn) -> Option<FusedMultiResult> {
+        match col.type_oid {
+            pg_sys::FLOAT4OID => {
+                let values: Vec<f32> = col.gpu_values.iter().map(|&v| v as f32).collect();
+                gpu::reduce_multi_f32(&values).map(|result| FusedMultiResult {
+                    sum: f64::from(result.sum),
+                    min: f64::from(result.min),
+                    max: f64::from(result.max),
+                    count: result.count,
+                })
+            }
+            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
+                let values: Vec<i64> = col.gpu_values.iter().map(|&v| v as i64).collect();
+                gpu::reduce_multi_i64(&values).map(|result| FusedMultiResult {
+                    sum: result.sum as f64,
+                    min: result.min as f64,
+                    max: result.max as f64,
+                    count: result.count,
+                })
+            }
+            _ => gpu::reduce_multi_f64(&col.gpu_values).map(|result| FusedMultiResult {
+                sum: result.sum,
+                min: result.min,
+                max: result.max,
+                count: result.count,
+            }),
+        }
     }
 
     /// Evaluate a single `col <cmp> const` predicate inline on a HeapTuple.

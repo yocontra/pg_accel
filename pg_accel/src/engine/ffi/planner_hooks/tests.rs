@@ -479,10 +479,13 @@ fn sort_type_oid_float8_is_sortable() {
 }
 
 #[test]
-fn sort_type_oids_match_guard_accepts_all_three() {
-    for oid in [SORT_INT4OID, SORT_FLOAT4OID, SORT_FLOAT8OID] {
+fn sort_type_oids_match_guard_accepts_all_four() {
+    for oid in [SORT_INT4OID, SORT_INT8OID, SORT_FLOAT4OID, SORT_FLOAT8OID] {
         assert!(
-            matches!(oid, SORT_INT4OID | SORT_FLOAT4OID | SORT_FLOAT8OID),
+            matches!(
+                oid,
+                SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID
+            ),
             "OID {oid} should match the sortable guard"
         );
     }
@@ -490,12 +493,100 @@ fn sort_type_oids_match_guard_accepts_all_three() {
 
 #[test]
 fn sort_type_oids_reject_non_sortable() {
-    let non_sortable = [16u32, 20, 21, 25, 1043]; // bool, int8, int2, text, varchar
+    let non_sortable = [16u32, 21, 25, 1043, 114, 3802, 1007, 1186];
     for oid in non_sortable {
         assert!(
-            !matches!(oid, SORT_INT4OID | SORT_FLOAT4OID | SORT_FLOAT8OID),
+            !matches!(
+                oid,
+                SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID
+            ),
             "OID {oid} should NOT match the sortable guard"
         );
+    }
+}
+
+// =====================================================================
+// Explicit unsupported type policy
+// =====================================================================
+
+#[test]
+fn unsupported_type_policy_classifies_structured_builtin_types() {
+    assert_eq!(
+        builtin_rejected_type_policy(114),
+        Some(UnsupportedTypePolicy::Json)
+    );
+    assert_eq!(
+        builtin_rejected_type_policy(3802),
+        Some(UnsupportedTypePolicy::Jsonb)
+    );
+    assert_eq!(
+        builtin_rejected_type_policy(1186),
+        Some(UnsupportedTypePolicy::Interval)
+    );
+    assert_eq!(
+        builtin_rejected_type_policy(1007),
+        Some(UnsupportedTypePolicy::Array)
+    );
+}
+
+#[test]
+fn unsupported_type_policy_classifies_user_oid_as_custom() {
+    let user_oid = pg_sys::FirstNormalObjectId;
+    assert_eq!(
+        gpu_supported_scalar_type_policy(user_oid),
+        GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Custom)
+    );
+}
+
+#[test]
+fn gpu_expr_type_rejects_json_array_interval_and_custom() {
+    for oid in [114, 3802, 1007, 1186, pg_sys::FirstNormalObjectId] {
+        assert!(
+            !is_gpu_expr_type(oid),
+            "OID {oid} must not be accepted by generic GpuExpr type gating"
+        );
+    }
+}
+
+#[test]
+fn unsupported_type_policy_reason_codes_are_stable() {
+    let cases = [
+        (UnsupportedTypePolicy::Json, "json", "unsupported_json_type"),
+        (
+            UnsupportedTypePolicy::Jsonb,
+            "jsonb",
+            "unsupported_jsonb_type",
+        ),
+        (
+            UnsupportedTypePolicy::Array,
+            "array",
+            "unsupported_array_type",
+        ),
+        (
+            UnsupportedTypePolicy::Interval,
+            "interval",
+            "unsupported_interval_type",
+        ),
+        (
+            UnsupportedTypePolicy::Domain,
+            "domain",
+            "unsupported_domain_type",
+        ),
+        (
+            UnsupportedTypePolicy::Composite,
+            "composite",
+            "unsupported_composite_type",
+        ),
+        (
+            UnsupportedTypePolicy::Custom,
+            "custom",
+            "unsupported_custom_type",
+        ),
+    ];
+
+    for (policy, label, reason) in cases {
+        assert_eq!(policy.label(), label);
+        assert_eq!(policy.reason(), reason);
     }
 }
 
@@ -518,7 +609,7 @@ fn agg_type_oids_match_guard_accepts_numeric() {
 
 #[test]
 fn agg_type_oids_reject_non_numeric() {
-    let non_numeric = [16u32, 21, 25, 1043, 1700]; // bool, int2, text, varchar, numeric
+    let non_numeric = [16u32, 21, 25, 1043, 1700, 114, 3802, 1007, 1186];
     for oid in non_numeric {
         assert!(
             !matches!(
@@ -549,7 +640,7 @@ fn win_type_oids_match_guard_accepts_numeric() {
 
 #[test]
 fn win_type_oids_reject_non_numeric() {
-    let non_numeric = [16u32, 21, 25, 1043];
+    let non_numeric = [16u32, 21, 25, 1043, 114, 3802, 1007, 1186];
     for oid in non_numeric {
         assert!(
             !matches!(
@@ -1513,86 +1604,88 @@ fn partial_column_none_serialize_fn_oid_is_canonical_invalid() {
 // the reader walk disagree on offsets.
 // ---------------------------------------------------------------------
 
-#[pgrx::pg_schema]
 mod partial_agg_spec_roundtrip {
-    use pgrx::pg_sys;
-    use pgrx::prelude::pg_test;
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::pg_sys;
+        use pgrx::prelude::pg_test;
 
-    use crate::engine::executor::agg::AggOp;
-    use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-    use crate::engine::ffi::custom_scan::{append_partial_spec, deserialize_partial_spec};
+        use crate::engine::executor::agg::AggOp;
+        use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+        use crate::engine::ffi::custom_scan::{append_partial_spec, deserialize_partial_spec};
 
-    #[pg_test]
-    fn paag_roundtrip_preserves_serialize_fn_oid_for_avg() {
-        // Mirror a spec produced by `partial_agg::try_inject` for a mixed
-        // aggregate list: AVG(float8), STDDEV_SAMP(float4), SUM(float8).
-        // Only the Float8Stats ops would ever carry a non-None
-        // `serialize_fn_oid` today (float4/float8 accum have no serialize fn,
-        // so the emitter ships float8[] directly) — but the sentinel format
-        // must still faithfully round-trip any caller-supplied OID.
-        let ser_avg_oid = pg_sys::Oid::from(12345u32);
-        let spec = PartialAggSpec {
-            per_column: vec![
-                PartialColumn {
-                    op: AggOp::Avg,
-                    attno: 2,
-                    transtype_oid: pg_sys::FLOAT8ARRAYOID,
-                    serialize_fn_oid: Some(ser_avg_oid),
-                },
-                PartialColumn {
-                    op: AggOp::StddevSamp,
-                    attno: 3,
-                    transtype_oid: pg_sys::FLOAT8ARRAYOID,
-                    serialize_fn_oid: None,
-                },
-                PartialColumn {
-                    op: AggOp::Sum,
-                    attno: 4,
-                    transtype_oid: pg_sys::FLOAT8OID,
-                    serialize_fn_oid: None,
-                },
-            ],
-        };
-
-        // SAFETY: test runs on the main backend thread with a live
-        // `CurrentMemoryContext`. `append_partial_spec` / `deserialize_partial_spec`
-        // are both main-thread helpers.
-        let (got_len, got_first_op, got_first_ser, got_second_ser, got_third_transtype) = unsafe {
-            let list: *mut pg_sys::List = std::ptr::null_mut();
-            // Sentinel @ idx 0, n_cols @ idx 1, columns from idx 2.
-            let list = append_partial_spec(list, &spec);
-            let Some(back) = deserialize_partial_spec(list, 1) else {
-                panic!("deserialize_partial_spec returned None on a 3-column spec");
+        #[pg_test]
+        fn paag_roundtrip_preserves_serialize_fn_oid_for_avg() {
+            // Mirror a spec produced by `partial_agg::try_inject` for a mixed
+            // aggregate list: AVG(float8), STDDEV_SAMP(float4), SUM(float8).
+            // Only the Float8Stats ops would ever carry a non-None
+            // `serialize_fn_oid` today (float4/float8 accum have no serialize fn,
+            // so the emitter ships float8[] directly) — but the sentinel format
+            // must still faithfully round-trip any caller-supplied OID.
+            let ser_avg_oid = pg_sys::Oid::from(12345u32);
+            let spec = PartialAggSpec {
+                per_column: vec![
+                    PartialColumn {
+                        op: AggOp::Avg,
+                        attno: 2,
+                        transtype_oid: pg_sys::FLOAT8ARRAYOID,
+                        serialize_fn_oid: Some(ser_avg_oid),
+                    },
+                    PartialColumn {
+                        op: AggOp::StddevSamp,
+                        attno: 3,
+                        transtype_oid: pg_sys::FLOAT8ARRAYOID,
+                        serialize_fn_oid: None,
+                    },
+                    PartialColumn {
+                        op: AggOp::Sum,
+                        attno: 4,
+                        transtype_oid: pg_sys::FLOAT8OID,
+                        serialize_fn_oid: None,
+                    },
+                ],
             };
-            (
-                back.per_column.len(),
-                back.per_column[0].op,
-                back.per_column[0].serialize_fn_oid,
-                back.per_column[1].serialize_fn_oid,
-                back.per_column[2].transtype_oid,
-            )
-        };
 
-        assert_eq!(got_len, 3);
-        assert!(matches!(got_first_op, AggOp::Avg));
-        assert_eq!(got_first_ser, Some(ser_avg_oid));
-        assert!(got_second_ser.is_none());
-        assert_eq!(got_third_transtype, pg_sys::FLOAT8OID);
-    }
+            // SAFETY: test runs on the main backend thread with a live
+            // `CurrentMemoryContext`. `append_partial_spec` / `deserialize_partial_spec`
+            // are both main-thread helpers.
+            let (got_len, got_first_op, got_first_ser, got_second_ser, got_third_transtype) = unsafe {
+                let list: *mut pg_sys::List = std::ptr::null_mut();
+                // Sentinel @ idx 0, n_cols @ idx 1, columns from idx 2.
+                let list = append_partial_spec(list, &spec);
+                let Some(back) = deserialize_partial_spec(list, 1) else {
+                    panic!("deserialize_partial_spec returned None on a 3-column spec");
+                };
+                (
+                    back.per_column.len(),
+                    back.per_column[0].op,
+                    back.per_column[0].serialize_fn_oid,
+                    back.per_column[1].serialize_fn_oid,
+                    back.per_column[2].transtype_oid,
+                )
+            };
 
-    #[pg_test]
-    fn paag_roundtrip_empty_spec_yields_empty_per_column() {
-        let spec = PartialAggSpec {
-            per_column: Vec::new(),
-        };
-        // SAFETY: Main backend thread, live memory context.
-        let round = unsafe {
-            let list: *mut pg_sys::List = std::ptr::null_mut();
-            let list = append_partial_spec(list, &spec);
-            deserialize_partial_spec(list, 1)
-        };
-        let back = round.expect("zero-column spec should still roundtrip");
-        assert!(back.per_column.is_empty());
+            assert_eq!(got_len, 3);
+            assert!(matches!(got_first_op, AggOp::Avg));
+            assert_eq!(got_first_ser, Some(ser_avg_oid));
+            assert!(got_second_ser.is_none());
+            assert_eq!(got_third_transtype, pg_sys::FLOAT8OID);
+        }
+
+        #[pg_test]
+        fn paag_roundtrip_empty_spec_yields_empty_per_column() {
+            let spec = PartialAggSpec {
+                per_column: Vec::new(),
+            };
+            // SAFETY: Main backend thread, live memory context.
+            let round = unsafe {
+                let list: *mut pg_sys::List = std::ptr::null_mut();
+                let list = append_partial_spec(list, &spec);
+                deserialize_partial_spec(list, 1)
+            };
+            let back = round.expect("zero-column spec should still roundtrip");
+            assert!(back.per_column.is_empty());
+        }
     }
 }
 
@@ -1613,80 +1706,72 @@ mod partial_agg_spec_roundtrip {
 // 2. A single-key ORDER BY query still runs through cleanly (regression
 //    guard against the observability branch accidentally swallowing the
 //    path we can accelerate).
-#[pgrx::pg_schema]
 mod incremental_sort_detect {
-    use pgrx::prelude::{Spi, pg_test};
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
 
-    /// Smoke: a 2-key ORDER BY query runs without the planner crashing,
-    /// regardless of whether PG ends up using IncrementalSort or a plain
-    /// Sort. The classifier and FFI call in `try_inject_gpu_sort_path`
-    /// must be robust to the `num_pathkeys > GPU_SORT_MAX_PATHKEYS` path.
-    #[pg_test]
-    fn multi_key_order_by_does_not_crash_planner() {
-        Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_smoke").expect("drop prior");
-        Spi::run(
-            "CREATE TABLE pgaccel_incsort_smoke (a int4, b int4) WITH (autovacuum_enabled=off)",
-        )
-        .expect("create");
-        Spi::run(
-            "INSERT INTO pgaccel_incsort_smoke \
+        /// Smoke: a 2-key ORDER BY query runs without the planner crashing,
+        /// regardless of whether PG ends up using IncrementalSort or a plain
+        /// Sort. The classifier and FFI call in `try_inject_gpu_sort_path`
+        /// must be robust to the `num_pathkeys > GPU_SORT_MAX_PATHKEYS` path.
+        #[pg_test]
+        fn multi_key_order_by_does_not_crash_planner() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_smoke").expect("drop prior");
+            Spi::run(
+                "CREATE TABLE pgaccel_incsort_smoke (a int4, b int4) WITH (autovacuum_enabled=off)",
+            )
+            .expect("create");
+            Spi::run(
+                "INSERT INTO pgaccel_incsort_smoke \
              SELECT g % 10, g FROM generate_series(1, 2000) g",
-        )
-        .expect("seed");
-        Spi::run("ANALYZE pgaccel_incsort_smoke").expect("analyze");
+            )
+            .expect("seed");
+            Spi::run("ANALYZE pgaccel_incsort_smoke").expect("analyze");
 
-        // EXPLAIN a 2-key ORDER BY: this hits the IncrementalSort
-        // classifier branch in try_inject_gpu_sort_path. We only assert
-        // the planner returns something non-empty; we intentionally do
-        // NOT assert "IncrementalSort" appears because selectivity may
-        // give PG a plain Sort here and that is still a valid plan — the
-        // test is about "planner did not crash", not "PG picked a
-        // particular strategy".
-        let plan = Spi::get_one::<String>(
-            "SELECT string_agg(line, E'\n') FROM ( \
-                 SELECT unnest(ARRAY(EXPLAIN SELECT * FROM pgaccel_incsort_smoke \
-                                     ORDER BY a, b LIMIT 10)) AS line \
-             ) q",
-        );
-        // The specific query form above is finicky across PG versions;
-        // fall back to a simpler assertion: the plain SELECT + ORDER BY
-        // executes to completion.
-        let _ = plan;
-        let row_count = Spi::get_one::<i64>(
+            // EXPLAIN a 2-key ORDER BY: this hits the IncrementalSort
+            // classifier branch in try_inject_gpu_sort_path. We only assert
+            // the planner returns something non-empty; we intentionally do
+            // NOT assert "IncrementalSort" appears because selectivity may
+            // give PG a plain Sort here and that is still a valid plan — the
+            // test is about "planner did not crash", not "PG picked a
+            // particular strategy".
+            let row_count = Spi::get_one::<i64>(
             "SELECT count(*) FROM (SELECT * FROM pgaccel_incsort_smoke ORDER BY a, b LIMIT 10) q",
         )
         .expect("select ORDER BY a, b")
         .expect("row_count should be non-NULL");
-        assert_eq!(
-            row_count, 10,
-            "multi-key ORDER BY + LIMIT should return 10 rows"
-        );
+            assert_eq!(
+                row_count, 10,
+                "multi-key ORDER BY + LIMIT should return 10 rows"
+            );
 
-        Spi::run("DROP TABLE pgaccel_incsort_smoke").expect("drop");
-    }
+            Spi::run("DROP TABLE pgaccel_incsort_smoke").expect("drop");
+        }
 
-    /// Single-key ORDER BY regression guard: the observability branch
-    /// must not swallow the path we can accelerate. We only verify the
-    /// query runs to completion and returns the expected row count;
-    /// whether pg_accel injects a GPU sort depends on row count thresholds
-    /// and is not what this test covers.
-    #[pg_test]
-    fn single_key_order_by_still_executes() {
-        Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_single").expect("drop prior");
-        Spi::run("CREATE TABLE pgaccel_incsort_single (a int4) WITH (autovacuum_enabled=off)")
-            .expect("create");
-        Spi::run(
-            "INSERT INTO pgaccel_incsort_single \
+        /// Single-key ORDER BY regression guard: the observability branch
+        /// must not swallow the path we can accelerate. We only verify the
+        /// query runs to completion and returns the expected row count;
+        /// whether pg_accel injects a GPU sort depends on row count thresholds
+        /// and is not what this test covers.
+        #[pg_test]
+        fn single_key_order_by_still_executes() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_single").expect("drop prior");
+            Spi::run("CREATE TABLE pgaccel_incsort_single (a int4) WITH (autovacuum_enabled=off)")
+                .expect("create");
+            Spi::run(
+                "INSERT INTO pgaccel_incsort_single \
              SELECT g FROM generate_series(1, 1000) g",
-        )
-        .expect("seed");
-        let row_count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM (SELECT * FROM pgaccel_incsort_single ORDER BY a LIMIT 50) q",
-        )
-        .expect("select ORDER BY a")
-        .expect("row_count should be non-NULL");
-        assert_eq!(row_count, 50);
-        Spi::run("DROP TABLE pgaccel_incsort_single").expect("drop");
+            )
+            .expect("seed");
+            let row_count = Spi::get_one::<i64>(
+                "SELECT count(*) FROM (SELECT * FROM pgaccel_incsort_single ORDER BY a LIMIT 50) q",
+            )
+            .expect("select ORDER BY a")
+            .expect("row_count should be non-NULL");
+            assert_eq!(row_count, 50);
+            Spi::run("DROP TABLE pgaccel_incsort_single").expect("drop");
+        }
     }
 }
 
@@ -1710,118 +1795,122 @@ mod incremental_sort_detect {
 //    the planner may pick HashJoin or NestLoop depending on cost — the
 //    test is about "hook + pathlist walk did not crash", not "PG picked
 //    a particular strategy".
-#[pgrx::pg_schema]
 mod mergejoin_detect {
-    use pgrx::prelude::{Spi, pg_test};
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
 
-    /// Smoke: two already-sorted tables joined on an equi-condition give
-    /// the planner a favourable shape for merge-join. The hook walks
-    /// `joinrel->pathlist`, observes any `T_MergePath` entries, and
-    /// emits the `mergejoin_no_gpu_kernel` rejection signal. The query
-    /// must still run to completion.
-    #[pg_test]
-    fn sorted_equijoin_does_not_crash_planner() {
-        Spi::run("DROP TABLE IF EXISTS pgaccel_mj_left").expect("drop prior left");
-        Spi::run("DROP TABLE IF EXISTS pgaccel_mj_right").expect("drop prior right");
-        Spi::run("CREATE TABLE pgaccel_mj_left (k int4, v int4) WITH (autovacuum_enabled=off)")
-            .expect("create left");
-        Spi::run("CREATE TABLE pgaccel_mj_right (k int4, w int4) WITH (autovacuum_enabled=off)")
+        /// Smoke: two already-sorted tables joined on an equi-condition give
+        /// the planner a favourable shape for merge-join. The hook walks
+        /// `joinrel->pathlist`, observes any `T_MergePath` entries, and
+        /// emits the `mergejoin_no_gpu_kernel` rejection signal. The query
+        /// must still run to completion.
+        #[pg_test]
+        fn sorted_equijoin_does_not_crash_planner() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_mj_left").expect("drop prior left");
+            Spi::run("DROP TABLE IF EXISTS pgaccel_mj_right").expect("drop prior right");
+            Spi::run("CREATE TABLE pgaccel_mj_left (k int4, v int4) WITH (autovacuum_enabled=off)")
+                .expect("create left");
+            Spi::run(
+                "CREATE TABLE pgaccel_mj_right (k int4, w int4) WITH (autovacuum_enabled=off)",
+            )
             .expect("create right");
-        Spi::run(
-            "INSERT INTO pgaccel_mj_left \
+            Spi::run(
+                "INSERT INTO pgaccel_mj_left \
              SELECT g, g * 2 FROM generate_series(1, 2000) g",
-        )
-        .expect("seed left");
-        Spi::run(
-            "INSERT INTO pgaccel_mj_right \
+            )
+            .expect("seed left");
+            Spi::run(
+                "INSERT INTO pgaccel_mj_right \
              SELECT g, g * 3 FROM generate_series(1, 2000) g",
-        )
-        .expect("seed right");
-        // BTREE indexes give the planner pre-sorted access paths on the
-        // join key — the classic MergeJoin-favourable shape.
-        Spi::run("CREATE INDEX ON pgaccel_mj_left (k)").expect("idx left");
-        Spi::run("CREATE INDEX ON pgaccel_mj_right (k)").expect("idx right");
-        Spi::run("ANALYZE pgaccel_mj_left").expect("analyze left");
-        Spi::run("ANALYZE pgaccel_mj_right").expect("analyze right");
+            )
+            .expect("seed right");
+            // BTREE indexes give the planner pre-sorted access paths on the
+            // join key — the classic MergeJoin-favourable shape.
+            Spi::run("CREATE INDEX ON pgaccel_mj_left (k)").expect("idx left");
+            Spi::run("CREATE INDEX ON pgaccel_mj_right (k)").expect("idx right");
+            Spi::run("ANALYZE pgaccel_mj_left").expect("analyze left");
+            Spi::run("ANALYZE pgaccel_mj_right").expect("analyze right");
 
-        // Encourage the planner to consider merge-join. We do not set
-        // `enable_hashjoin=off` globally — that would be a cheat per
-        // anti-cheat #3. We only nudge within this session so the path
-        // is visible to the classifier; final plan choice is still PG's.
-        Spi::run("SET LOCAL enable_hashjoin = off").ok();
-        Spi::run("SET LOCAL enable_nestloop = off").ok();
+            // Encourage the planner to consider merge-join. We do not set
+            // `enable_hashjoin=off` globally — that would be a cheat per
+            // anti-cheat #3. We only nudge within this session so the path
+            // is visible to the classifier; final plan choice is still PG's.
+            Spi::run("SET LOCAL enable_hashjoin = off").ok();
+            Spi::run("SET LOCAL enable_nestloop = off").ok();
 
-        let row_count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM ( \
+            let row_count = Spi::get_one::<i64>(
+                "SELECT count(*) FROM ( \
                  SELECT l.k, l.v, r.w \
                  FROM pgaccel_mj_left l \
                  JOIN pgaccel_mj_right r ON l.k = r.k \
                  ORDER BY l.k \
              ) q",
-        )
-        .expect("sorted equi-join")
-        .expect("row_count should be non-NULL");
-        assert_eq!(
-            row_count, 2000,
-            "sorted equi-join should return all 2000 matches"
-        );
+            )
+            .expect("sorted equi-join")
+            .expect("row_count should be non-NULL");
+            assert_eq!(
+                row_count, 2000,
+                "sorted equi-join should return all 2000 matches"
+            );
 
-        Spi::run("DROP TABLE pgaccel_mj_left").expect("drop left");
-        Spi::run("DROP TABLE pgaccel_mj_right").expect("drop right");
-    }
+            Spi::run("DROP TABLE pgaccel_mj_left").expect("drop left");
+            Spi::run("DROP TABLE pgaccel_mj_right").expect("drop right");
+        }
 
-    /// Regression guard: `pg_accel_stats()` exposes the planner-rejected
-    /// counter. The MergeJoin detect path must increment it (or at least
-    /// not decrement it) over the course of the join query above. We
-    /// measure delta, not absolute, because other rejections may also
-    /// fire.
-    #[pg_test]
-    fn mergejoin_rejection_counter_is_non_decreasing() {
-        Spi::run("DROP TABLE IF EXISTS pgaccel_mj_ctr_l").expect("drop prior l");
-        Spi::run("DROP TABLE IF EXISTS pgaccel_mj_ctr_r").expect("drop prior r");
-        Spi::run("CREATE TABLE pgaccel_mj_ctr_l (k int4) WITH (autovacuum_enabled=off)")
-            .expect("create l");
-        Spi::run("CREATE TABLE pgaccel_mj_ctr_r (k int4) WITH (autovacuum_enabled=off)")
-            .expect("create r");
-        Spi::run(
-            "INSERT INTO pgaccel_mj_ctr_l \
+        /// Regression guard: `pg_accel_stats()` exposes the planner-rejected
+        /// counter. The MergeJoin detect path must increment it (or at least
+        /// not decrement it) over the course of the join query above. We
+        /// measure delta, not absolute, because other rejections may also
+        /// fire.
+        #[pg_test]
+        fn mergejoin_rejection_counter_is_non_decreasing() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_mj_ctr_l").expect("drop prior l");
+            Spi::run("DROP TABLE IF EXISTS pgaccel_mj_ctr_r").expect("drop prior r");
+            Spi::run("CREATE TABLE pgaccel_mj_ctr_l (k int4) WITH (autovacuum_enabled=off)")
+                .expect("create l");
+            Spi::run("CREATE TABLE pgaccel_mj_ctr_r (k int4) WITH (autovacuum_enabled=off)")
+                .expect("create r");
+            Spi::run(
+                "INSERT INTO pgaccel_mj_ctr_l \
              SELECT g FROM generate_series(1, 500) g",
-        )
-        .expect("seed l");
-        Spi::run(
-            "INSERT INTO pgaccel_mj_ctr_r \
+            )
+            .expect("seed l");
+            Spi::run(
+                "INSERT INTO pgaccel_mj_ctr_r \
              SELECT g FROM generate_series(1, 500) g",
-        )
-        .expect("seed r");
-        Spi::run("CREATE INDEX ON pgaccel_mj_ctr_l (k)").expect("idx l");
-        Spi::run("CREATE INDEX ON pgaccel_mj_ctr_r (k)").expect("idx r");
-        Spi::run("ANALYZE pgaccel_mj_ctr_l").expect("analyze l");
-        Spi::run("ANALYZE pgaccel_mj_ctr_r").expect("analyze r");
+            )
+            .expect("seed r");
+            Spi::run("CREATE INDEX ON pgaccel_mj_ctr_l (k)").expect("idx l");
+            Spi::run("CREATE INDEX ON pgaccel_mj_ctr_r (k)").expect("idx r");
+            Spi::run("ANALYZE pgaccel_mj_ctr_l").expect("analyze l");
+            Spi::run("ANALYZE pgaccel_mj_ctr_r").expect("analyze r");
 
-        Spi::run("SET LOCAL enable_hashjoin = off").ok();
-        Spi::run("SET LOCAL enable_nestloop = off").ok();
+            Spi::run("SET LOCAL enable_hashjoin = off").ok();
+            Spi::run("SET LOCAL enable_nestloop = off").ok();
 
-        let before = crate::engine::stats::read_planner_rejected();
-        let rows = Spi::get_one::<i64>(
-            "SELECT count(*) FROM ( \
+            let before = crate::engine::stats::read_planner_rejected();
+            let rows = Spi::get_one::<i64>(
+                "SELECT count(*) FROM ( \
                  SELECT l.k FROM pgaccel_mj_ctr_l l JOIN pgaccel_mj_ctr_r r ON l.k = r.k \
              ) q",
-        )
-        .expect("mergejoin-shaped join")
-        .expect("row_count non-NULL");
-        assert_eq!(rows, 500);
-        let after = crate::engine::stats::read_planner_rejected();
-        // Must be non-decreasing. We cannot assert strict-greater because
-        // row counts may be below GPU gates that would skip the hook
-        // before reaching the observe call, or the hook may be invoked
-        // 0 times if PG decides the top path is trivial.
-        assert!(
-            after >= before,
-            "planner_rejected counter must be non-decreasing across query execution"
-        );
+            )
+            .expect("mergejoin-shaped join")
+            .expect("row_count non-NULL");
+            assert_eq!(rows, 500);
+            let after = crate::engine::stats::read_planner_rejected();
+            // Must be non-decreasing. We cannot assert strict-greater because
+            // row counts may be below GPU gates that would skip the hook
+            // before reaching the observe call, or the hook may be invoked
+            // 0 times if PG decides the top path is trivial.
+            assert!(
+                after >= before,
+                "planner_rejected counter must be non-decreasing across query execution"
+            );
 
-        Spi::run("DROP TABLE pgaccel_mj_ctr_l").expect("drop l");
-        Spi::run("DROP TABLE pgaccel_mj_ctr_r").expect("drop r");
+            Spi::run("DROP TABLE pgaccel_mj_ctr_l").expect("drop l");
+            Spi::run("DROP TABLE pgaccel_mj_ctr_r").expect("drop r");
+        }
     }
 }
 
@@ -1838,47 +1927,51 @@ mod mergejoin_detect {
 // returns null on a null pathlist) and run an integration smoke that
 // ensures the planner does not crash when the bitmap-fallback branch is
 // reachable on a real table.
-#[pgrx::pg_schema]
 mod bitmap_heap_inject {
-    use pgrx::prelude::{Spi, pg_test};
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
 
-    /// Smoke: planner does not crash on a table where a bitmap-eligible
-    /// path is in scope. We seed enough rows to clear `min_batch_size`
-    /// and create a btree index so the planner has a `T_BitmapHeapPath`
-    /// candidate. The bitmap fallback branch may or may not fire (PG
-    /// will pick whatever it costs cheapest), but the planner walking
-    /// `find_cheapest_bitmap_heap_path` over the pathlist must not
-    /// crash.
-    #[pg_test]
-    fn bitmap_eligible_query_does_not_crash_planner() {
-        Spi::run("DROP TABLE IF EXISTS pgaccel_bmp_smoke").expect("drop prior");
-        Spi::run("CREATE TABLE pgaccel_bmp_smoke (a int4, b int4) WITH (autovacuum_enabled=off)")
+        /// Smoke: planner does not crash on a table where a bitmap-eligible
+        /// path is in scope. We seed enough rows to clear `min_batch_size`
+        /// and create a btree index so the planner has a `T_BitmapHeapPath`
+        /// candidate. The bitmap fallback branch may or may not fire (PG
+        /// will pick whatever it costs cheapest), but the planner walking
+        /// `find_cheapest_bitmap_heap_path` over the pathlist must not
+        /// crash.
+        #[pg_test]
+        fn bitmap_eligible_query_does_not_crash_planner() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_bmp_smoke").expect("drop prior");
+            Spi::run(
+                "CREATE TABLE pgaccel_bmp_smoke (a int4, b int4) WITH (autovacuum_enabled=off)",
+            )
             .expect("create");
-        Spi::run(
-            "INSERT INTO pgaccel_bmp_smoke \
+            Spi::run(
+                "INSERT INTO pgaccel_bmp_smoke \
              SELECT g, g % 1000 FROM generate_series(1, 200000) g",
-        )
-        .expect("seed");
-        Spi::run("CREATE INDEX ON pgaccel_bmp_smoke (b)").expect("idx");
-        Spi::run("ANALYZE pgaccel_bmp_smoke").expect("analyze");
+            )
+            .expect("seed");
+            Spi::run("CREATE INDEX ON pgaccel_bmp_smoke (b)").expect("idx");
+            Spi::run("ANALYZE pgaccel_bmp_smoke").expect("analyze");
 
-        // Bias the planner toward bitmap by disabling pure index scan.
-        // We do NOT touch parallel settings — that is forbidden by
-        // anti-cheat rule #3 and benchmark rule #11.
-        Spi::run("SET LOCAL enable_seqscan = off").ok();
-        Spi::run("SET LOCAL enable_indexscan = off").ok();
+            // Bias the planner toward bitmap by disabling pure index scan.
+            // We do NOT touch parallel settings — that is forbidden by
+            // anti-cheat rule #3 and benchmark rule #11.
+            Spi::run("SET LOCAL enable_seqscan = off").ok();
+            Spi::run("SET LOCAL enable_indexscan = off").ok();
 
-        let row_count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM pgaccel_bmp_smoke WHERE b BETWEEN 100 AND 200",
-        )
-        .expect("bitmap-eligible select")
-        .expect("row_count non-NULL");
-        assert!(
-            row_count > 0,
-            "bitmap-eligible select should return non-zero rows"
-        );
+            let row_count = Spi::get_one::<i64>(
+                "SELECT count(*) FROM pgaccel_bmp_smoke WHERE b BETWEEN 100 AND 200",
+            )
+            .expect("bitmap-eligible select")
+            .expect("row_count non-NULL");
+            assert!(
+                row_count > 0,
+                "bitmap-eligible select should return non-zero rows"
+            );
 
-        Spi::run("DROP TABLE pgaccel_bmp_smoke").expect("drop");
+            Spi::run("DROP TABLE pgaccel_bmp_smoke").expect("drop");
+        }
     }
 }
 
@@ -1907,58 +2000,60 @@ fn find_cheapest_bitmap_heap_path_null_is_null() {
 // OTHER_MEMBER_REL, so PG's `add_paths_to_append_rel` collects any
 // CustomPath we inject into the child's pathlist and wraps the set
 // in an Append / MergeAppend.
-#[pgrx::pg_schema]
 mod append_inject {
-    use pgrx::prelude::{Spi, pg_test};
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
 
-    /// Smoke: a 4-partition range-partitioned table with a numeric
-    /// WHERE predicate runs to completion. The planner walking each
-    /// partition child via the relaxed `set_rel_pathlist_hook` must
-    /// not crash.
-    #[pg_test]
-    fn partitioned_table_select_does_not_crash_planner() {
-        Spi::run("DROP TABLE IF EXISTS pgaccel_part_smoke").expect("drop prior");
-        Spi::run(
-            "CREATE TABLE pgaccel_part_smoke (a int4, b int4) \
+        /// Smoke: a 4-partition range-partitioned table with a numeric
+        /// WHERE predicate runs to completion. The planner walking each
+        /// partition child via the relaxed `set_rel_pathlist_hook` must
+        /// not crash.
+        #[pg_test]
+        fn partitioned_table_select_does_not_crash_planner() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_part_smoke").expect("drop prior");
+            Spi::run(
+                "CREATE TABLE pgaccel_part_smoke (a int4, b int4) \
              PARTITION BY RANGE (a)",
-        )
-        .expect("create parent");
-        Spi::run(
-            "CREATE TABLE pgaccel_part_smoke_p1 PARTITION OF pgaccel_part_smoke \
+            )
+            .expect("create parent");
+            Spi::run(
+                "CREATE TABLE pgaccel_part_smoke_p1 PARTITION OF pgaccel_part_smoke \
              FOR VALUES FROM (0) TO (50000)",
-        )
-        .expect("p1");
-        Spi::run(
-            "CREATE TABLE pgaccel_part_smoke_p2 PARTITION OF pgaccel_part_smoke \
+            )
+            .expect("p1");
+            Spi::run(
+                "CREATE TABLE pgaccel_part_smoke_p2 PARTITION OF pgaccel_part_smoke \
              FOR VALUES FROM (50000) TO (100000)",
-        )
-        .expect("p2");
-        Spi::run(
-            "CREATE TABLE pgaccel_part_smoke_p3 PARTITION OF pgaccel_part_smoke \
+            )
+            .expect("p2");
+            Spi::run(
+                "CREATE TABLE pgaccel_part_smoke_p3 PARTITION OF pgaccel_part_smoke \
              FOR VALUES FROM (100000) TO (150000)",
-        )
-        .expect("p3");
-        Spi::run(
-            "CREATE TABLE pgaccel_part_smoke_p4 PARTITION OF pgaccel_part_smoke \
+            )
+            .expect("p3");
+            Spi::run(
+                "CREATE TABLE pgaccel_part_smoke_p4 PARTITION OF pgaccel_part_smoke \
              FOR VALUES FROM (150000) TO (200000)",
-        )
-        .expect("p4");
-        Spi::run(
-            "INSERT INTO pgaccel_part_smoke \
+            )
+            .expect("p4");
+            Spi::run(
+                "INSERT INTO pgaccel_part_smoke \
              SELECT g, g % 1000 FROM generate_series(0, 199999) g",
-        )
-        .expect("seed");
-        Spi::run("ANALYZE pgaccel_part_smoke").expect("analyze");
+            )
+            .expect("seed");
+            Spi::run("ANALYZE pgaccel_part_smoke").expect("analyze");
 
-        let row_count =
-            Spi::get_one::<i64>("SELECT count(*) FROM pgaccel_part_smoke WHERE b > 100")
-                .expect("partitioned select")
-                .expect("row_count non-NULL");
-        assert!(
-            row_count > 0,
-            "partitioned select with predicate should return non-zero rows"
-        );
+            let row_count =
+                Spi::get_one::<i64>("SELECT count(*) FROM pgaccel_part_smoke WHERE b > 100")
+                    .expect("partitioned select")
+                    .expect("row_count non-NULL");
+            assert!(
+                row_count > 0,
+                "partitioned select with predicate should return non-zero rows"
+            );
 
-        Spi::run("DROP TABLE pgaccel_part_smoke").expect("drop");
+            Spi::run("DROP TABLE pgaccel_part_smoke").expect("drop");
+        }
     }
 }

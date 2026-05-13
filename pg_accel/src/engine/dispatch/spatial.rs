@@ -133,6 +133,7 @@ unsafe fn try_bulk_point_in_polygon(
     }
 
     // CPU recheck uncertain rows via the original PostGIS function.
+    let recheck_start = std::time::Instant::now();
     for &batch_idx in &needs_recheck {
         let (datum_a, is_null_a) = batch[batch_idx];
         if is_strict && is_null_a {
@@ -165,7 +166,15 @@ unsafe fn try_bulk_point_in_polygon(
         }
     }
 
-    Some(DispatchResult::Accelerated(results))
+    if needs_recheck.is_empty() {
+        Some(DispatchResult::Accelerated(results))
+    } else {
+        Some(DispatchResult::AcceleratedWithRecheck {
+            results,
+            recheck_count: needs_recheck.len() as u64,
+            recheck_time_us: recheck_start.elapsed().as_micros() as u64,
+        })
+    }
 }
 
 /// 3. **CPU recheck** — Rows that the pipeline cannot conclusively decide
@@ -542,6 +551,7 @@ unsafe fn apply_scalar_recheck(
 ) -> DispatchResult {
     let mut recheck_pass = 0usize;
     let recheck_total = needs_scalar_recheck.len();
+    let recheck_start = std::time::Instant::now();
     for &batch_idx in &needs_scalar_recheck {
         let (datum_a, is_null_a) = batch[batch_idx];
         if is_strict && is_null_a {
@@ -588,7 +598,15 @@ unsafe fn apply_scalar_recheck(
         );
     }
 
-    DispatchResult::Accelerated(results)
+    if recheck_total == 0 {
+        DispatchResult::Accelerated(results)
+    } else {
+        DispatchResult::AcceleratedWithRecheck {
+            results,
+            recheck_count: recheck_total as u64,
+            recheck_time_us: recheck_start.elapsed().as_micros() as u64,
+        }
+    }
 }
 
 /// Single-arg `st_area(geom)` dispatch: extract one Polygon per row,

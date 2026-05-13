@@ -162,7 +162,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // NullTest). Independent of adapter registry — expression compilability
     // is checked via node-tag and type inspection. This enables GPU-
     // accelerated scan for queries like `WHERE val > 0.5 AND id < 1000`.
-    let gpu_expr_match = try_gpu_expr_match(rel_ref.baserestrictinfo);
+    let gpu_expr_rows = rel_ref.tuples.max(rel_ref.rows).max(0.0) as u64;
+    let gpu_expr_match = try_gpu_expr_match(rel_ref.baserestrictinfo, gpu_expr_rows);
 
     // Extension-function match: requires the adapter registry (PostGIS,
     // H3, raster). Only initialise and check when GpuExpr didn't match,
@@ -994,6 +995,18 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         var_typid,
         SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID
     ) {
+        // SAFETY: planner hook runs on the main backend thread, so catalog
+        // type lookups inside planner_type_policy are safe here.
+        if let Some(policy) =
+            unsafe { super::planner_type_policy(pg_sys::Oid::from(var_typid)).rejection() }
+        {
+            super::record_planner_type_rejection(
+                "sort",
+                pg_sys::Oid::from(var_typid),
+                policy,
+                rows as u64,
+            );
+        }
         pgrx::debug1!("pg_accel sort: unsupported type {var_typid}");
         return;
     }

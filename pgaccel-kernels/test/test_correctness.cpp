@@ -63,8 +63,10 @@ static uint64_t make_cell(int base_cell, int resolution, const int* digits) {
   cell |= (1ULL << 59);
   cell |= ((uint64_t)(resolution & 0xF) << 52);
   cell |= ((uint64_t)(base_cell & 0x7F) << 45);
+  // H3 v4 layout: digit r in [1..15] occupies bits
+  // [(15-r)*3+2 .. (15-r)*3]. There is no reserved-bit offset here.
   for (int r = 1; r <= 15; r++) {
-    int shift = (15 - r) * 3 + 1;
+    int shift = (15 - r) * 3;
     if (r <= resolution) {
       cell |= ((uint64_t)(digits[r - 1] & 0x7) << shift);
     } else {

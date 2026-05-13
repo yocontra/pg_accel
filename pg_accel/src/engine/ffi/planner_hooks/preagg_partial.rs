@@ -41,8 +41,8 @@
 use pgrx::pg_sys::{self, CustomPath, List, NodeTag, Path, lappend};
 
 use crate::engine::cost;
-use crate::engine::executor::agg::AggOp;
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
+use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
 use crate::engine::gucs;
 
 use super::agg_common::{self, AggClass};
@@ -51,9 +51,9 @@ use super::custom_scan;
 /// Try to inject the parallel partial-aggregate path chain (with GROUP BY
 /// support) directly onto `grouped_rel->pathlist`.
 ///
-/// Mirrors [`super::partial_agg::try_inject`] but does NOT bail on
-/// `groupClause` present — instead propagates the GROUP BY into the
-/// manually-built Finalize Agg via `root.processed_groupClause`.
+/// Mirrors [`super::partial_agg::try_inject`] but does NOT bail on a supported
+/// `groupClause` — instead propagates the GROUP BY into the manually-built
+/// Finalize Agg via `root.processed_groupClause`.
 ///
 /// Bails silently when any pre-condition isn't met (no partial paths on
 /// input, unclassified Aggref, GPU unavailable, etc.).
@@ -117,6 +117,19 @@ pub(super) unsafe fn try_inject(
         pgrx::debug1!("pg_accel preagg_partial: query has no aggregates or GROUP BY");
         return;
     }
+    let group_len = if query.groupClause.is_null() {
+        0
+    } else {
+        // SAFETY: groupClause is a valid planner-owned List.
+        unsafe { pg_sys::list_length(query.groupClause) }
+    };
+    if group_len > 1 {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: GROUP BY has {} keys; partial path supports one key",
+            group_len
+        );
+        return;
+    }
 
     // Fetch the partial grouping rel (PG 17 doesn't fire the upper-paths
     // hook at UPPERREL_PARTIAL_GROUP_AGG, so we materialise it ourselves
@@ -139,6 +152,99 @@ pub(super) unsafe fn try_inject(
         pgrx::debug1!("pg_accel preagg_partial: partially_grouped_rel.consider_parallel=false");
         return;
     }
+
+    let partial_exprs = if partial_ref.reltarget.is_null() {
+        std::ptr::null_mut()
+    } else {
+        // SAFETY: reltarget is non-null.
+        unsafe { (*partial_ref.reltarget).exprs }
+    };
+
+    let (group_key_info, group_key_tlist_pos): (Option<GroupKeyInfo>, i32) = if group_len == 1 {
+        let tlist = query.targetList;
+        let tlist_len = if tlist.is_null() {
+            0
+        } else {
+            // SAFETY: targetList is a valid planner-owned List.
+            unsafe { pg_sys::list_length(tlist) }
+        };
+        // SAFETY: groupClause has exactly one element.
+        let sc =
+            unsafe { pg_sys::list_nth(query.groupClause, 0).cast::<pg_sys::SortGroupClause>() };
+        if sc.is_null() {
+            return;
+        }
+        // SAFETY: sc is a valid SortGroupClause.
+        let sgref = unsafe { (*sc).tleSortGroupRef };
+        let mut resolved: Option<(i32, pg_sys::Oid)> = None;
+        for j in 0..tlist_len {
+            // SAFETY: j is in [0, tlist_len).
+            let tle = unsafe { pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>() };
+            if tle.is_null() || unsafe { (*tle).ressortgroupref } != sgref {
+                continue;
+            }
+            let expr = unsafe { (*tle).expr };
+            if expr.is_null() {
+                return;
+            }
+            let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
+            if tag != NodeTag::T_Var {
+                pgrx::debug1!("pg_accel preagg_partial: GROUP BY key is not a plain Var");
+                return;
+            }
+            let var = expr.cast::<pg_sys::Var>();
+            resolved = Some((i32::from(unsafe { (*var).varattno }), unsafe {
+                (*var).vartype
+            }));
+            break;
+        }
+        let Some((attno, type_oid)) = resolved else {
+            pgrx::debug1!("pg_accel preagg_partial: could not resolve GROUP BY key");
+            return;
+        };
+        let Some(key_type) = GroupKeyInfo::key_type_from_oid(type_oid) else {
+            pgrx::debug1!("pg_accel preagg_partial: unsupported GROUP BY key type");
+            return;
+        };
+        if !matches!(key_type, 0 | 1 | 2 | 4) {
+            pgrx::debug1!(
+                "pg_accel preagg_partial: GROUP BY key type {} cannot be emitted by grouped agg",
+                key_type
+            );
+            return;
+        }
+        let mut tlist_pos = -1;
+        if !partial_exprs.is_null() {
+            let n_exprs = unsafe { pg_sys::list_length(partial_exprs) };
+            for i in 0..n_exprs {
+                let expr = unsafe { pg_sys::list_nth(partial_exprs, i).cast::<pg_sys::Expr>() };
+                if expr.is_null()
+                    || unsafe { (*expr.cast::<pg_sys::Node>()).type_ } != NodeTag::T_Var
+                {
+                    continue;
+                }
+                let var = expr.cast::<pg_sys::Var>();
+                if i32::from(unsafe { (*var).varattno }) == attno {
+                    tlist_pos = i;
+                    break;
+                }
+            }
+        }
+        if tlist_pos < 0 {
+            pgrx::debug1!("pg_accel preagg_partial: grouped partial target lacks group key Var");
+            return;
+        }
+        (
+            Some(GroupKeyInfo {
+                attno,
+                type_oid,
+                key_type,
+            }),
+            tlist_pos,
+        )
+    } else {
+        (None, -1)
+    };
 
     // Row-count threshold (mirror partial_agg).
     let rows = input_ref.rows as usize;
@@ -207,6 +313,19 @@ pub(super) unsafe fn try_inject(
         // SAFETY: aggref non-null and a valid Aggref.
         let aggref_ref = unsafe { &*aggref };
 
+        if !aggref_ref.aggdistinct.is_null() {
+            pgrx::debug1!("pg_accel preagg_partial: aggregate has DISTINCT clause");
+            return;
+        }
+        if !aggref_ref.aggorder.is_null() {
+            pgrx::debug1!("pg_accel preagg_partial: aggregate has ORDER BY clause");
+            return;
+        }
+        if !aggref_ref.aggfilter.is_null() {
+            pgrx::debug1!("pg_accel preagg_partial: aggregate has FILTER clause");
+            return;
+        }
+
         // Mirror the gate from partial_agg.rs:192-203 — Float8StatsEmitter
         // requires `_float8` (FLOAT8ARRAYOID) transtype. INTERNAL transtypes
         // (numeric_avg_accum, int8_avg_accum) need dedicated emitter support
@@ -271,8 +390,8 @@ pub(super) unsafe fn try_inject(
     // is what create_agg_path expects; query.groupClause is the pre-processed
     // form). When present, has_group_keys is true (set above when we saw any
     // T_Var in the target list), and we feed AGG_HASHED + the processed clause.
-    let has_group_by = has_group_keys
-        || (!query.groupClause.is_null() && !root_ref.processed_groupClause.is_null());
+    let has_group_by =
+        group_key_info.is_some() || (has_group_keys && !root_ref.processed_groupClause.is_null());
 
     // Pick the cheapest partial child path to wrap.
     // SAFETY: partial_pathlist is non-empty.
@@ -333,8 +452,9 @@ pub(super) unsafe fn try_inject(
         (*cpath).methods = custom_scan::agg_path_methods();
 
         // Serialize the custom_private layout expected by plan_custom_path_agg
-        // (mirrors partial_agg.rs:308-336). Layout:
+        // (mirrors partial_agg.rs). Layout:
         //   [num_aggs, op0, attno0, rtype0, ..., has_group_key,
+        //    (gk_attno, gk_type_oid, gk_key_type, gk2_attno=0, gk_tlist_pos)?,
         //    self_scan_relid=0, is_partial=1, PARTIAL_SENTINEL block]
         let mut priv_list: *mut List = std::ptr::null_mut();
         #[allow(clippy::cast_possible_truncation)]
@@ -345,12 +465,19 @@ pub(super) unsafe fn try_inject(
             priv_list = lappend(priv_list, pg_sys::makeInteger(attno).cast());
             priv_list = lappend(priv_list, pg_sys::makeInteger(rtype as i32).cast());
         }
-        // has_group_key flag (informational; the actual GROUP BY clause
-        // rides through the Finalize Agg via processed_groupClause below).
-        priv_list = lappend(
-            priv_list,
-            pg_sys::makeInteger(i32::from(has_group_by)).cast(),
-        );
+        if let Some(ref gk) = group_key_info {
+            priv_list = lappend(priv_list, pg_sys::makeInteger(1).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(gk.attno).cast());
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(u32::from(gk.type_oid) as i32).cast(),
+            );
+            priv_list = lappend(priv_list, pg_sys::makeInteger(gk.key_type).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(group_key_tlist_pos).cast());
+        } else {
+            priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
+        }
         // No self-scan (child is PG's parallel seq scan).
         priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
         // is_partial = 1.
@@ -483,6 +610,7 @@ mod tests {
     /// true when target list contains any T_Var (GROUP BY column) OR
     /// when the parsed query has a non-NULL `groupClause` AND the planner
     /// has resolved `processed_groupClause`.
+    #[cfg(test)]
     fn has_group_by(
         has_group_keys_in_tlist: bool,
         query_group_clause_nonnull: bool,
@@ -492,6 +620,7 @@ mod tests {
     }
 
     /// Mirror the AggStrategy / numGroups decision in [`super::try_inject`].
+    #[cfg(test)]
     fn agg_strategy_for_group_by(has_group_by: bool) -> pg_sys::AggStrategy::Type {
         if has_group_by {
             pg_sys::AggStrategy::AGG_HASHED
@@ -500,6 +629,7 @@ mod tests {
         }
     }
 
+    #[cfg(test)]
     fn num_groups_for_group_by(rows: f64, has_group_by: bool) -> f64 {
         if has_group_by {
             rows.sqrt().clamp(1.0, 10_000.0)

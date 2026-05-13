@@ -325,9 +325,12 @@ fn dispatch_gpu_reduce_below_threshold_falls_back() {
 }
 
 #[test]
-fn dispatch_gpu_reduce_above_threshold_attempts_gpu() {
+fn dispatch_gpu_reduce_below_threshold_sum_drains_cpu_path() {
     let mut col = tcol(AggOp::Sum, 1);
-    let n = (cost::device_limits().gpu_reduce_min_rows) + 100;
+    let n = cost::device_limits()
+        .gpu_reduce_min_rows
+        .saturating_sub(1)
+        .max(1);
     col.gpu_values = vec![1.0; n];
     col.acc.has_value = true;
     col.dispatch_gpu_reduce();
@@ -339,9 +342,12 @@ fn dispatch_gpu_reduce_above_threshold_attempts_gpu() {
 }
 
 #[test]
-fn dispatch_gpu_reduce_min_above_threshold() {
+fn dispatch_gpu_reduce_below_threshold_min_drains_cpu_path() {
     let mut col = tcol(AggOp::Min, 1);
-    let n = (cost::device_limits().gpu_reduce_min_rows) + 100;
+    let n = cost::device_limits()
+        .gpu_reduce_min_rows
+        .saturating_sub(1)
+        .max(1);
     let mut vals = vec![100.0; n];
     vals[n / 2] = -42.0;
     col.gpu_values = vals;
@@ -352,9 +358,12 @@ fn dispatch_gpu_reduce_min_above_threshold() {
 }
 
 #[test]
-fn dispatch_gpu_reduce_max_above_threshold() {
+fn dispatch_gpu_reduce_below_threshold_max_drains_cpu_path() {
     let mut col = tcol(AggOp::Max, 1);
-    let n = (cost::device_limits().gpu_reduce_min_rows) + 100;
+    let n = cost::device_limits()
+        .gpu_reduce_min_rows
+        .saturating_sub(1)
+        .max(1);
     let mut vals = vec![1.0; n];
     vals[n / 3] = 9999.0;
     col.gpu_values = vals;

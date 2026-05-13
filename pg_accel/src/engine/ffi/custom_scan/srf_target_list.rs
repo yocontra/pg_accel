@@ -528,6 +528,21 @@ unsafe fn dispatch_and_buffer(
             state.expansion.expansion = datums;
             true
         }
+        (OutputShape::Scalar, DispatchResult::AcceleratedWithRecheck { results, .. }) => {
+            if results.is_empty() {
+                return false;
+            }
+            state.expansion.expansion = results;
+            true
+        }
+        (_, DispatchResult::AcceleratedWithRecheck { .. }) => {
+            pgrx::debug1!(
+                "pg_accel: srf_target_list dispatch: scalar recheck result shape did not match \
+                 registry output shape for fn_oid={}; returning zero rows",
+                u32::from(state.priv_data.fn_oid),
+            );
+            false
+        }
         (_, DispatchResult::Deferred) => {
             // Dispatcher couldn't accelerate; emit zero rows. Per anti-cheat
             // ban #4 we surface this via debug log rather than swallow silently
