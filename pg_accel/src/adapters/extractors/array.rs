@@ -735,7 +735,7 @@ mod tests {
         // Build a 12-byte buffer (varlena header + ndim + dataoffset only;
         // missing elemtype). Set the varlena length word so `varsize`
         // reports 12.
-        let mut buf = vec![0u8; 12];
+        let mut buf = [0u8; 12];
         let len_word = (12u32) << 2;
         buf[0..4].copy_from_slice(&len_word.to_le_bytes());
         // ndim = 1

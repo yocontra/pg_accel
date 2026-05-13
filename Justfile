@@ -191,11 +191,11 @@ fmt-check:
 
 # Run clippy lints
 lint:
-    cargo clippy -- -D warnings
+    cargo clippy --workspace --features pg17 --all-targets -- -D warnings
 
 # Type check (pg17 + all non-pg features)
 check:
-    cargo check --features pg17
+    cargo check --workspace --features pg17 --all-targets
 
 # Run cargo-deny checks (licenses + advisories)
 deny:

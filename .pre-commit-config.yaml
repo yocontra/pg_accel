@@ -88,6 +88,10 @@ repos:
     hooks:
       - id: taplo-format
       - id: taplo-lint
+        # The upstream hook enables remote SchemaStore catalogs by default.
+        # Keep commit/push hooks deterministic when the catalog is unavailable
+        # or returns a format this taplo build cannot decode.
+        args: [--no-schema]
 
   # ─────────────────────────────────────────────────────────────────────────
   # Shell scripts
@@ -113,19 +117,16 @@ repos:
 
       # --- Rust: slow checks deferred to pre-push ---------------------------
       - id: cargo-check
-        name: cargo check --features pg17
-        entry: cargo check --features pg17 --all-targets
+        name: cargo check --workspace --features pg17 --all-targets
+        entry: cargo check --workspace --features pg17 --all-targets
         language: system
         types_or: [rust]
         pass_filenames: false
         stages: [pre-push]
 
       - id: cargo-clippy
-        name: cargo clippy -D warnings
-        # Match `just lint` exactly. The bench binary has 42 pre-existing clippy
-        # errors under `--all-targets`; scoping to the default lib/bin target set
-        # keeps the hook green while still catching regressions on the hot path.
-        entry: cargo clippy -- -D warnings
+        name: cargo clippy --workspace --features pg17 --all-targets
+        entry: cargo clippy --workspace --features pg17 --all-targets -- -D warnings
         language: system
         types_or: [rust]
         pass_filenames: false

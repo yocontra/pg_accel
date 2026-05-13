@@ -175,7 +175,7 @@ mod tests {
         let base = cost::GPU_HASH_JOIN_PER_ROW_COST;
         let c = per_row_cost_for_batch_gate(true, &l);
         assert!(
-            (c - base * 32.0).abs() < 1e-12,
+            base.mul_add(-32.0, c).abs() < 1e-12,
             "soft-fp64 Float64 key should pay 32x at batch gate; got {c}",
         );
     }
@@ -276,7 +276,10 @@ mod tests {
 
         let delta = cost_fp - cost_int;
         let expected = (32.0_f64 - 1.0)
-            * (inner * l.gpu_hashjoin_build_per_row + outer_partial * l.gpu_hashjoin_probe_per_row);
+            * inner.mul_add(
+                l.gpu_hashjoin_build_per_row,
+                outer_partial * l.gpu_hashjoin_probe_per_row,
+            );
         assert!(
             (delta - expected).abs() < 1e-6,
             "fp64 - int delta {delta} should be (mult-1)*(inner*build+outer*probe) = {expected}",

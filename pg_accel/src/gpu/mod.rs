@@ -142,7 +142,7 @@ pub fn reset_gpu_exec_count() {
 
 /// Assert that at least `min_count` GPU kernel executions occurred.
 /// Panics with a clear message if GPU isn't actually running.
-#[cfg(any(test, feature = "pg_test"))]
+#[cfg(feature = "pg_test")]
 pub fn assert_gpu_executed(min_count: u64) {
     let count = gpu_exec_count();
     assert!(
