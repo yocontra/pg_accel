@@ -240,6 +240,14 @@ pub unsafe extern "C-unwind" fn _PG_init() {
 #[cfg(not(test))]
 #[pg_guard]
 unsafe extern "C-unwind" fn pgaccel_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
+    let gpu_status = crate::gpu::shutdown();
+    if !gpu_status.is_ok() {
+        pgrx::warning!(
+            "pg_accel: GPU runtime shutdown failed during backend exit (status={:?})",
+            gpu_status,
+        );
+    }
+
     engine::thread_budget::cleanup_backend();
     // Flush tracing writers so the trace JSONL is durable on disk before
     // the process exits — helps post-mortem inspection of clean exits too.

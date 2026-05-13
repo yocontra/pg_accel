@@ -725,6 +725,96 @@ fn should_batch_gpu_raster_sufficient_rows() {
 }
 
 #[test]
+fn extension_scan_gate_h3_latlng_requires_bulk_rows() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let min_rows = rel_pathlist::h3_standalone_scan_min_rows(&limits);
+
+    assert_eq!(
+        rel_pathlist::extension_scan_gate(
+            registry::AccelStrategy::GpuH3,
+            Some("h3_latlng_to_cell"),
+            min_rows - 1,
+            &limits,
+        ),
+        Err("h3_rows_below_standalone_min")
+    );
+    assert_eq!(
+        rel_pathlist::extension_scan_gate(
+            registry::AccelStrategy::GpuH3,
+            Some("h3_latlng_to_cell"),
+            min_rows,
+            &limits,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn extension_scan_gate_rejects_cheap_h3_metadata_ops() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let rows = rel_pathlist::h3_standalone_scan_min_rows(&limits) * 10;
+
+    for name in [
+        "h3_get_resolution",
+        "h3_get_base_cell",
+        "h3_is_valid_cell",
+        "h3_cell_to_parent",
+    ] {
+        assert_eq!(
+            rel_pathlist::extension_scan_gate(
+                registry::AccelStrategy::GpuH3,
+                Some(name),
+                rows,
+                &limits,
+            ),
+            Err("h3_function_not_compute_heavy"),
+            "{name} should stay out of standalone rel_pathlist exposure"
+        );
+    }
+}
+
+#[test]
+fn extension_scan_gate_raster_requires_bulk_rows() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let min_rows = rel_pathlist::raster_standalone_scan_min_rows(&limits);
+
+    assert_eq!(
+        rel_pathlist::extension_scan_gate(
+            registry::AccelStrategy::GpuRaster,
+            Some("st_slope"),
+            min_rows - 1,
+            &limits,
+        ),
+        Err("raster_rows_below_standalone_min")
+    );
+    assert_eq!(
+        rel_pathlist::extension_scan_gate(
+            registry::AccelStrategy::GpuRaster,
+            Some("st_slope"),
+            min_rows,
+            &limits,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn extension_scan_gate_rejects_cheap_raster_value() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let rows = rel_pathlist::raster_standalone_scan_min_rows(&limits) * 10;
+
+    assert_eq!(
+        rel_pathlist::extension_scan_gate(
+            registry::AccelStrategy::GpuRaster,
+            Some("st_value"),
+            rows,
+            &limits,
+        ),
+        Err("raster_function_not_compute_heavy")
+    );
+}
+
+#[test]
 fn should_batch_gpu_reduce_sufficient_rows() {
     assert!(cost::should_batch(500, cost::GPU_REDUCE_PER_ROW_COST, 256));
 }
@@ -897,44 +987,42 @@ fn safety_margin_gate_boundary_exactly_at_margin() {
 }
 
 // =====================================================================
-// LIMIT gate logic (limit_tuples < rows / 4)
+// LIMIT gate logic (full no-limit sorts are rejected, top-k stays eligible)
 // =====================================================================
 
 #[test]
-fn limit_gate_small_limit_skips_gpu_sort() {
-    let rows: usize = 1_000_000;
+fn limit_gate_small_limit_allows_topk_gpu_sort() {
     let limit_tuples: f64 = 100.0;
-    // When limit < rows/4, GPU sort should be skipped.
     assert!(
-        limit_tuples > 0.0 && (limit_tuples as usize) < rows / 4,
-        "small LIMIT should trigger skip"
+        cost::sort_limit_present(limit_tuples),
+        "small positive LIMIT should keep top-k sort eligible"
     );
 }
 
 #[test]
 fn limit_gate_large_limit_allows_gpu_sort() {
-    let rows: usize = 1000;
     let limit_tuples: f64 = 500.0;
-    // When limit >= rows/4, GPU sort is allowed.
     assert!(
-        !(limit_tuples > 0.0 && (limit_tuples as usize) < rows / 4),
-        "large LIMIT should NOT trigger skip"
+        cost::sort_limit_present(limit_tuples),
+        "large positive LIMIT should keep sort eligible"
     );
 }
 
 #[test]
-fn limit_gate_zero_limit_allows_gpu_sort() {
+fn limit_gate_zero_limit_rejects_full_gpu_sort() {
     let limit_tuples: f64 = 0.0;
-    // Zero limit means no LIMIT clause — GPU sort allowed.
-    assert!(!(limit_tuples > 0.0), "zero limit should NOT trigger skip");
+    assert!(
+        !cost::sort_limit_present(limit_tuples),
+        "zero/no LIMIT should reject full scalar GPU sort"
+    );
 }
 
 #[test]
-fn limit_gate_negative_limit_allows_gpu_sort() {
+fn limit_gate_negative_limit_rejects_full_gpu_sort() {
     let limit_tuples: f64 = -1.0;
     assert!(
-        !(limit_tuples > 0.0),
-        "negative limit should NOT trigger skip"
+        !cost::sort_limit_present(limit_tuples),
+        "negative/no LIMIT should reject full scalar GPU sort"
     );
 }
 
@@ -1049,6 +1137,7 @@ fn device_limits_cpu_only_thresholds_are_sane() {
     assert_eq!(limits.gpu_window_min_rows, 100_000);
     assert_eq!(limits.gpu_reduce_min_rows, 25_000);
     assert_eq!(limits.gpu_hash_agg_min_rows, 250_000);
+    assert_eq!(limits.gpu_hash_agg_unsafe_input_rows, 100_000);
     assert_eq!(limits.gpu_hash_agg_max_groups, 10_000);
     assert_eq!(limits.optimal_batch_min, 256);
     assert_eq!(limits.optimal_batch_max, 8192);

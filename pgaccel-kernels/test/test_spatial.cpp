@@ -624,6 +624,67 @@ static void test_point_in_ring_fp64_gpu_dispatch() {
 }
 
 // ---------------------------------------------------------------------------
+// point_in_polygon_bulk tests
+// ---------------------------------------------------------------------------
+
+static void test_point_in_polygon_bulk_simple_path() {
+  printf("--- point_in_polygon_bulk: simple kernel path ---\n");
+
+  float bbox[] = {0.0f, 0.0f, 10.0f, 10.0f};
+  float poly[] = {
+      0.0f, 0.0f, 10.0f, 0.0f, 10.0f, 10.0f, 0.0f, 10.0f, 0.0f, 0.0f,
+  };
+  uint32_t rings[] = {0};
+  float pts[] = {
+      5.0f,  5.0f,   // inside, survives bbox and simple PIP
+      20.0f, 20.0f,  // bbox reject
+      2.0f,  8.0f,   // inside, survives bbox and simple PIP
+  };
+  int8_t results[] = {99, 99, 99};
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 3, bbox, poly, 5, rings, 1, results);
+
+  ASSERT_EQ("simple PIP status OK", s, PGACCEL_OK);
+  ASSERT_EQ("simple PIP inside[0]", results[0], 1);
+  ASSERT_EQ("simple PIP bbox outside", results[1], -1);
+  ASSERT_EQ("simple PIP inside[2]", results[2], 1);
+}
+
+static void test_point_in_polygon_bulk_coop_path() {
+  printf("--- point_in_polygon_bulk: cooperative kernel path ---\n");
+
+  constexpr size_t unique_vertices = 1024;
+  constexpr float two_pi = 6.28318530717958647692f;
+  std::vector<float> ring((unique_vertices + 1) * 2);
+  for (size_t i = 0; i < unique_vertices; ++i) {
+    const float angle = two_pi * static_cast<float>(i) / static_cast<float>(unique_vertices);
+    ring[i * 2] = std::cos(angle);
+    ring[i * 2 + 1] = std::sin(angle);
+  }
+  ring[unique_vertices * 2] = ring[0];
+  ring[unique_vertices * 2 + 1] = ring[1];
+
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  uint32_t rings[] = {0};
+  float pts[] = {
+      0.0f,   0.0f,  // inside
+      0.9f,   0.9f,  // inside bbox, outside polygon
+      2.0f,   0.0f,  // bbox reject
+      -0.25f, 0.5f,  // inside
+  };
+  int8_t results[] = {99, 99, 99, 99};
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 4, bbox, ring.data(), unique_vertices + 1,
+                                                   rings, 1, results);
+
+  ASSERT_EQ("coop PIP status OK", s, PGACCEL_OK);
+  ASSERT_EQ("coop PIP inside[0]", results[0], 1);
+  ASSERT_EQ("coop PIP in-bbox outside", results[1], -1);
+  ASSERT_EQ("coop PIP bbox outside", results[2], -1);
+  ASSERT_EQ("coop PIP inside[3]", results[3], 1);
+}
+
+// ---------------------------------------------------------------------------
 // st_area_bulk tests — Shoelace formula on flat [x,y,x,y,...] CSR layout
 // ---------------------------------------------------------------------------
 //
@@ -1072,6 +1133,8 @@ int main() {
   test_point_in_ring_triangle();
   test_point_in_ring_fp64_bulk();
   test_point_in_ring_fp64_gpu_dispatch();
+  test_point_in_polygon_bulk_simple_path();
+  test_point_in_polygon_bulk_coop_path();
 
   test_sphere_distance_basic();
   test_sphere_distance_edge_cases();

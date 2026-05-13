@@ -69,16 +69,16 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Gate 1c: Early output-rows check. Skip all expensive work (equi-join
-    // detection, registry scan, restrict-list walks) when the join output is
-    // too small for any GPU path to break even. This is the hot path for
-    // multi-table OLAP queries where the planner evaluates many join orderings.
+    // Gate 1c: Early max-output check. Large-output GpuHashJoin is a known
+    // crash/loser lane; `gpu_join_max_output_rows` is a real upper bound, not
+    // the older min-ish gate. Keep this before expensive join recognition.
     // SAFETY: joinrel is a valid RelOptInfo provided by the planner.
     {
         #[allow(clippy::cast_sign_loss)]
-        let est_rows = unsafe { (*joinrel).rows } as usize;
-        let min = cost::device_limits().gpu_join_max_output_rows / 2;
-        if est_rows < min {
+        let est_rows = unsafe { (*joinrel).rows.max(0.0) } as usize;
+        let max = cost::device_limits().gpu_join_max_output_rows;
+        if est_rows > max {
+            pgrx::debug1!("pg_accel join: output rows={est_rows} > max={max}, deferring to PG");
             return;
         }
     }
@@ -150,17 +150,42 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Gate 3c: Minimum output rows for GPU hash join. Custom Scan yield
-    // overhead (~3µs/row ≈ 0.03 cost units) makes small-output joins
-    // strictly slower than PG's native HashJoin. Require at least
-    // gpu_join_max_output_rows / 2 output rows for GPU to have any chance.
-    if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
-        let min_output = cost::device_limits().gpu_join_max_output_rows / 2;
+    // Gate 3c: Do not expose `GpuHashJoin` as a selected planner path while
+    // the executor-side C API only has a CPU open-addressed debug fallback and
+    // an unsafe raw-host-pointer sort-merge probe. PG-Strom-shaped join work
+    // resumes here once the kernel contract is a real GPU build/probe path or
+    // GPU-resident hash-table reuse.
+    if matches!(strategy, registry::AccelStrategy::GpuHashJoin)
+        && !selected_gpu_hashjoin_kernel_available()
+    {
         #[allow(clippy::cast_sign_loss)]
-        let output_rows = joinrel_ref.rows as usize;
-        if output_rows < min_output {
+        let n_rows_est = joinrel_ref.rows.max(0.0) as u64;
+        pgrx::debug1!(
+            "pg_accel join: GpuHashJoin skipped: no selected real-GPU hash join \
+             build/probe kernel is available"
+        );
+        stats::increment_planner_rejected("hashjoin_no_selected_gpu_kernel", n_rows_est);
+        return;
+    }
+
+    let limits = cost::device_limits();
+
+    // Gate 3d: Real max build/output gates for GPU hash join. The build side
+    // must stay below the kernel's sort-merge threshold (`count >= 100000`),
+    // and large-output joins stay with PostgreSQL's native HashJoin.
+    if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
+        #[allow(clippy::cast_sign_loss)]
+        let build_rows = cost::conservative_input_rows(innerrel_ref.rows, innerrel_ref.tuples);
+        #[allow(clippy::cast_sign_loss)]
+        let output_rows = joinrel_ref.rows.max(0.0) as usize;
+        if !cost::hashjoin_cardinality_safe(build_rows, output_rows, limits) {
             pgrx::debug1!(
-                "pg_accel join: output rows={output_rows} < min={min_output}, deferring to PG"
+                "pg_accel join: cardinality gate rejected build_rows={} output_rows={} \
+                 (max_build={}, max_output={})",
+                build_rows,
+                output_rows,
+                limits.gpu_hash_join_build_max_rows,
+                limits.gpu_join_max_output_rows,
             );
             return;
         }
@@ -175,7 +200,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // cost and handle fp64 classification at their own injection site.
     let join_rows_gate = joinrel_ref.rows as usize;
     let min_batch = gucs::min_batch_size().max(1) as usize;
-    let limits = cost::device_limits();
     let hashjoin_uses_fp64 = equi
         .as_ref()
         .is_some_and(|k| hashjoin::key_type_is_fp64(k.key_type));
@@ -191,9 +215,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // No max-output or max-build gates: hash table is CPU-side malloc,
-    // and GPU probe handles arbitrary row counts. The cost model
-    // (should_batch above) already filters unprofitable small joins.
+    // Max-output and max-build gates have already run above; the remaining
+    // cost model only filters rows inside that temporary safe envelope.
 
     // Gate 5: Both sides need cheapest paths.
     let outer_path = outerrel_ref.cheapest_total_path;
@@ -291,6 +314,11 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             );
         }
     }
+}
+
+#[must_use]
+fn selected_gpu_hashjoin_kernel_available() -> bool {
+    false
 }
 
 /// Build the `custom_private` integer list for a `GpuHashJoin` / spatial
@@ -639,7 +667,7 @@ unsafe fn pick_parallel_safe_inner_path(innerrel_ref: &RelOptInfo) -> *mut Path 
 
 #[cfg(test)]
 mod tests {
-    use super::{JoinShape, classify_join_shape};
+    use super::{JoinShape, classify_join_shape, selected_gpu_hashjoin_kernel_available};
 
     // -- classify_join_shape -----------------------------------------------
     //
@@ -686,5 +714,13 @@ mod tests {
         // emits so a rename shows up as a test diff.
         const EXPECTED_REASON: &str = "mergejoin_no_gpu_kernel";
         assert_eq!(EXPECTED_REASON, "mergejoin_no_gpu_kernel");
+    }
+
+    #[test]
+    fn selected_gpu_hashjoin_kernel_is_not_available_yet() {
+        assert!(
+            !selected_gpu_hashjoin_kernel_available(),
+            "planner must not expose GpuHashJoin until build/probe are real GPU paths"
+        );
     }
 }

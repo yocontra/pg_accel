@@ -6,6 +6,7 @@ use std::time::Instant;
 use postgres::{Client, NoTls};
 use rand::Rng;
 
+use crate::artifacts::ArtifactWriter;
 use crate::report::{self, IterationResult, WorkloadResult};
 use crate::workloads::Workload;
 
@@ -430,6 +431,9 @@ pub struct BenchConfig {
     /// If true, skip the postmaster-GUC mismatch hard-fail check
     /// (action_items C4). Only intended for developer iteration.
     pub skip_guc_verify: bool,
+    /// If set, persist reports, crash inventories, plan snippets, GUCs, and
+    /// bounded log tails under this directory.
+    pub artifacts_dir: Option<PathBuf>,
 }
 
 impl Default for BenchConfig {
@@ -447,6 +451,7 @@ impl Default for BenchConfig {
             plans_capture_path: None,
             guc_profile: None,
             skip_guc_verify: false,
+            artifacts_dir: None,
         }
     }
 }
@@ -1024,10 +1029,175 @@ pub fn run_all_with_config(
         .into());
     }
 
+    let workload_names: Vec<&str> = workloads.iter().map(|w| w.name()).collect();
+    let run_context = prepare_run_context(connection, &workload_names, config)?;
+    let observed_gucs = run_context.observed_gucs;
+    let artifacts = run_context.artifacts;
+
+    initialize_plans_file(config);
+
+    let mut results = Vec::with_capacity(workloads.len() * ROW_SCALES.len());
+    let mut crashes: Vec<report::CrashedScale> = Vec::new();
+
+    for w in workloads {
+        for &rows in ROW_SCALES {
+            eprintln!("\n[scale] {} @ {} rows", w.name(), format_rows(rows));
+            match run_workload_with_config(connection, w.as_ref(), rows, config, artifacts.as_ref())
+            {
+                Ok(mut result) => {
+                    result.rows = rows;
+                    results.push(result);
+                }
+                Err(e) => {
+                    let err_msg = format!("{e}");
+                    eprintln!("[CRASH] {} @ {} — {err_msg}", w.name(), format_rows(rows));
+                    let mut crash = report::CrashedScale {
+                        workload: w.name().to_owned(),
+                        rows,
+                        error: err_msg,
+                        repro_command: Some(repro_command(connection, w.name(), rows, config)),
+                        plan_snippet_artifact: artifacts
+                            .as_ref()
+                            .and_then(|a| a.existing_plan_snippet_artifact(w.name(), rows)),
+                        log_tail_artifacts: Vec::new(),
+                    };
+                    if let Some(artifact_writer) = artifacts.as_ref() {
+                        match artifact_writer.capture_log_tails(&format!(
+                            "crash-{:03}-{}-{rows}",
+                            crashes.len() + 1,
+                            w.name()
+                        )) {
+                            Ok(paths) => crash.log_tail_artifacts = paths,
+                            Err(log_err) => {
+                                eprintln!("[artifacts] log tail capture failed: {log_err}");
+                            }
+                        }
+                    }
+                    crashes.push(crash);
+                    if let Some(artifact_writer) = artifacts.as_ref()
+                        && let Err(write_err) = artifact_writer.write_crashes(&crashes)
+                    {
+                        eprintln!("[artifacts] crash list write failed: {write_err}");
+                    }
+                    let _ = cleanup(connection, w.as_ref());
+                    wait_for_pg(connection)?;
+                }
+            }
+        }
+    }
+
+    let mut report = report::generate_report_ex(
+        results,
+        crashes,
+        Some(connection),
+        config.iterations,
+        config.warmup,
+        observed_gucs,
+        config.timing_mode,
+        config.cache_mode,
+        config.speedup_source,
+    );
+    if let Some(artifact_writer) = artifacts.as_ref() {
+        report.artifact_dir = Some(artifact_writer.root().display().to_string());
+        if let Err(e) = artifact_writer.write_crashes(&report.crashes) {
+            eprintln!("[artifacts] final crash list write failed: {e}");
+        }
+        if let Err(e) = artifact_writer.write_report(&report) {
+            eprintln!("[artifacts] report write failed: {e}");
+        }
+    }
+    Ok(report)
+}
+
+/// Run one workload at one row scale and return a one-row report. This is
+/// the crash-repro path; it intentionally does not enforce the statistical
+/// minimum iteration count so operators can reproduce a backend failure with
+/// `--iterations 1`.
+pub fn run_one_report_with_config(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+    config: &BenchConfig,
+) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
+    let run_context = prepare_run_context(connection, &[workload.name()], config)?;
+    let observed_gucs = run_context.observed_gucs;
+    let artifacts = run_context.artifacts;
+    initialize_plans_file(config);
+
+    let mut results = Vec::new();
+    let mut crashes = Vec::new();
+    match run_workload_with_config(connection, workload, rows, config, artifacts.as_ref()) {
+        Ok(mut result) => {
+            result.rows = rows;
+            results.push(result);
+        }
+        Err(e) => {
+            let mut crash = report::CrashedScale {
+                workload: workload.name().to_owned(),
+                rows,
+                error: format!("{e}"),
+                repro_command: Some(repro_command(connection, workload.name(), rows, config)),
+                plan_snippet_artifact: artifacts
+                    .as_ref()
+                    .and_then(|a| a.existing_plan_snippet_artifact(workload.name(), rows)),
+                log_tail_artifacts: Vec::new(),
+            };
+            if let Some(artifact_writer) = artifacts.as_ref() {
+                match artifact_writer
+                    .capture_log_tails(&format!("crash-001-{}-{rows}", workload.name()))
+                {
+                    Ok(paths) => crash.log_tail_artifacts = paths,
+                    Err(log_err) => eprintln!("[artifacts] log tail capture failed: {log_err}"),
+                }
+            }
+            let _ = cleanup(connection, workload);
+            let _ = wait_for_pg(connection);
+            crashes.push(crash);
+        }
+    }
+
+    let mut report = report::generate_report_ex(
+        results,
+        crashes,
+        Some(connection),
+        config.iterations,
+        config.warmup,
+        observed_gucs,
+        config.timing_mode,
+        config.cache_mode,
+        config.speedup_source,
+    );
+    if let Some(artifact_writer) = artifacts.as_ref() {
+        report.artifact_dir = Some(artifact_writer.root().display().to_string());
+        if let Err(e) = artifact_writer.write_crashes(&report.crashes) {
+            eprintln!("[artifacts] crash list write failed: {e}");
+        }
+        if let Err(e) = artifact_writer.write_report(&report) {
+            eprintln!("[artifacts] report write failed: {e}");
+        }
+    }
+    Ok(report)
+}
+
+struct RunContext {
+    observed_gucs: Option<ObservedGucs>,
+    artifacts: Option<ArtifactWriter>,
+}
+
+fn prepare_run_context(
+    connection: &str,
+    workload_names: &[&str],
+    config: &BenchConfig,
+) -> Result<RunContext, Box<dyn std::error::Error>> {
+    let artifacts = prepare_artifacts(connection, config)?;
     let mut observed_gucs: Option<ObservedGucs> = None;
+
     if let Some(profile) = &config.guc_profile {
         eprintln!("[gucs] applying profile: {profile:?}");
-        profile.apply(connection)?;
+        if let Err(e) = profile.apply(connection) {
+            record_setup_failure(artifacts.as_ref(), "guc-apply", &format!("{e}"));
+            return Err(e);
+        }
         // Verify observed values match; hard-fail on postmaster-setting
         // drift (action_items C4, Reviewer 2 §1) unless --skip-guc-verify.
         match verify_and_capture_gucs(connection, profile, config.skip_guc_verify) {
@@ -1045,74 +1215,153 @@ pub fn run_all_with_config(
                 // The error already carries the "postmaster restart
                 // required; ran `ALTER SYSTEM` but X still shows Y"
                 // message from `PostmasterMismatch::Display`.
+                record_setup_failure(artifacts.as_ref(), "guc-verify", &format!("{e}"));
                 return Err(e);
             }
         }
     }
 
-    ensure_extensions(connection, workloads)?;
-
-    // Truncate plans file once at the start of the run, if plan capture is
-    // enabled. Subsequent workload passes append.
-    if let Some(path) = &config.plans_capture_path {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)
-        {
-            Ok(mut f) => {
-                let _ = writeln!(
-                    f,
-                    "=== pg_accel benchmark plans — captured once per workload/scale ==="
-                );
-            }
-            Err(e) => eprintln!("[plans] could not open {}: {e}", path.display()),
-        }
+    if let Err(e) = ensure_extensions_for_names(connection, workload_names) {
+        record_setup_failure(artifacts.as_ref(), "extension-setup", &format!("{e}"));
+        return Err(e);
     }
 
-    let mut results = Vec::with_capacity(workloads.len() * ROW_SCALES.len());
-    let mut crashes: Vec<report::CrashedScale> = Vec::new();
-
-    for w in workloads {
-        for &rows in ROW_SCALES {
-            eprintln!("\n[scale] {} @ {} rows", w.name(), format_rows(rows));
-            match run_workload_with_config(connection, w.as_ref(), rows, config) {
-                Ok(mut result) => {
-                    result.rows = rows;
-                    results.push(result);
-                }
-                Err(e) => {
-                    let err_msg = format!("{e}");
-                    eprintln!("[CRASH] {} @ {} — {err_msg}", w.name(), format_rows(rows));
-                    crashes.push(report::CrashedScale {
-                        workload: w.name().to_owned(),
-                        rows,
-                        error: err_msg,
-                    });
-                    let _ = cleanup(connection, w.as_ref());
-                    wait_for_pg(connection)?;
-                }
-            }
-        }
-    }
-
-    Ok(report::generate_report_ex(
-        results,
-        crashes,
-        Some(connection),
-        config.iterations,
-        config.warmup,
+    persist_guc_snapshot(artifacts.as_ref(), connection, observed_gucs.as_ref());
+    Ok(RunContext {
         observed_gucs,
-        config.timing_mode,
-        config.cache_mode,
-        config.speedup_source,
-    ))
+        artifacts,
+    })
+}
+
+fn prepare_artifacts(
+    connection: &str,
+    config: &BenchConfig,
+) -> Result<Option<ArtifactWriter>, Box<dyn std::error::Error>> {
+    let Some(dir) = &config.artifacts_dir else {
+        return Ok(None);
+    };
+    let writer = ArtifactWriter::new(dir.clone(), discover_log_candidates(connection))?;
+    eprintln!(
+        "[artifacts] writing benchmark artifacts to {}",
+        dir.display()
+    );
+    Ok(Some(writer))
+}
+
+fn persist_guc_snapshot(
+    artifacts: Option<&ArtifactWriter>,
+    connection: &str,
+    observed: Option<&ObservedGucs>,
+) {
+    let Some(artifact_writer) = artifacts else {
+        return;
+    };
+
+    if let Some(snapshot) = observed {
+        let gucs = report::GucSettings {
+            settings: snapshot.settings.clone(),
+        };
+        if let Err(e) =
+            artifact_writer.write_guc_snapshot(&gucs, snapshot.postmaster_start_time.as_deref())
+        {
+            eprintln!("[artifacts] GUC snapshot write failed: {e}");
+        }
+        return;
+    }
+
+    match report::GucSettings::from_connection(connection) {
+        Ok(gucs) => {
+            if let Err(e) = artifact_writer.write_guc_snapshot(&gucs, None) {
+                eprintln!("[artifacts] GUC snapshot write failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("[artifacts] GUC snapshot capture failed: {e}"),
+    }
+}
+
+fn record_setup_failure(artifacts: Option<&ArtifactWriter>, label: &str, error: &str) {
+    let Some(artifact_writer) = artifacts else {
+        return;
+    };
+    if let Err(e) = artifact_writer.write_failure(label, error) {
+        eprintln!("[artifacts] setup failure write failed: {e}");
+    }
+    if let Err(e) = artifact_writer.capture_log_tails(label) {
+        eprintln!("[artifacts] setup failure log tail capture failed: {e}");
+    }
+}
+
+fn discover_log_candidates(connection: &str) -> Vec<PathBuf> {
+    let mut candidates = crate::artifacts::default_log_candidates();
+    if let Ok(mut client) = Client::connect(connection, NoTls)
+        && let Ok(row) = client.query_one("SHOW data_directory", &[])
+    {
+        let data_dir: String = row.get(0);
+        crate::artifacts::append_pgdata_log_candidates(&mut candidates, Path::new(&data_dir));
+    }
+    candidates
+}
+
+fn initialize_plans_file(config: &BenchConfig) {
+    let Some(path) = &config.plans_capture_path else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            let _ = writeln!(
+                f,
+                "=== pg_accel benchmark plans - captured once per workload/scale ==="
+            );
+        }
+        Err(e) => eprintln!("[plans] could not open {}: {e}", path.display()),
+    }
+}
+
+fn repro_command(connection: &str, workload: &str, rows: usize, config: &BenchConfig) -> String {
+    let mut parts = vec![
+        "cargo".to_owned(),
+        "run".to_owned(),
+        "-p".to_owned(),
+        "pg_accel_bench".to_owned(),
+        "--".to_owned(),
+        "crash-repro".to_owned(),
+        "--workload".to_owned(),
+        shell_quote(workload),
+        "--rows".to_owned(),
+        rows.to_string(),
+        "--iterations".to_owned(),
+        config.iterations.to_string(),
+        "--warmup".to_owned(),
+        config.warmup.to_string(),
+        "--connection".to_owned(),
+        shell_quote(connection),
+    ];
+    if let Some(dir) = &config.artifacts_dir {
+        parts.push("--artifacts-dir".to_owned());
+        parts.push(shell_quote(&dir.display().to_string()));
+    }
+    parts.join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '='))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
 }
 
 /// Wait for PostgreSQL to become available after a backend crash.
@@ -1161,6 +1410,7 @@ fn run_workload_with_config(
     workload: &dyn Workload,
     rows: usize,
     config: &BenchConfig,
+    artifacts: Option<&ArtifactWriter>,
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     setup(connection, workload, rows, config.seed)?;
 
@@ -1183,6 +1433,14 @@ fn run_workload_with_config(
     // Sin #5). The full-plans file (plans.txt) is still written if
     // plans_capture_path is set.
     let plan_snippet = capture_plan_snippet(connection, workload).ok();
+    if let (Some(artifact_writer), Some(snippet)) = (artifacts, plan_snippet.as_deref())
+        && let Err(e) = artifact_writer.write_plan_snippet(workload.name(), rows, snippet)
+    {
+        eprintln!(
+            "[artifacts] plan snippet write failed for {} @ {rows}: {e}",
+            workload.name()
+        );
+    }
     let dispatched = plan_snippet
         .as_deref()
         .is_some_and(plan_contains_custom_scan);
@@ -1301,9 +1559,9 @@ fn detect_extensions(connection: &str) -> Result<Vec<String>, Box<dyn std::error
 /// installed (meaning the underlying package is not available on the system).
 /// This ensures the benchmark suite is fully self-contained — it never
 /// silently skips workloads due to missing extensions.
-fn ensure_extensions(
+fn ensure_extensions_for_names(
     connection: &str,
-    workloads: &[Box<dyn Workload>],
+    workload_names: &[&str],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
 
@@ -1312,7 +1570,6 @@ fn ensure_extensions(
 
     // Collect unique extensions required by selected workloads.
     let ext_reqs = crate::workloads::extension_requirements();
-    let workload_names: Vec<&str> = workloads.iter().map(|w| w.name()).collect();
     for (wl, ext) in &ext_reqs {
         if workload_names.contains(wl) && !required.contains(ext) {
             required.push(ext);

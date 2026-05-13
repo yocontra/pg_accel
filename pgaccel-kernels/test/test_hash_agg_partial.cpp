@@ -18,7 +18,8 @@
 // We exercise both grouping paths via row counts on either side of
 // SORT_AGG_MIN_ROWS = 100k:
 //   - small N (< 100k) -> agg_hash_partial (host hashtable + SYCL kernel)
-//   - large N (>= 100k) -> agg_sort_based_partial (GPU sort + kernel)
+//   - large N (>= 100k) -> agg_sort_based_partial where supported; Metal
+//     intentionally uses the guarded hash fallback until the sort path is safe.
 //
 // Per CLAUDE.md anti-cheat ban #1, every assertion runs against a
 // real kernel dispatch and the comparison is exact (or 1e-6 relative
@@ -158,14 +159,14 @@ static void test_partial_sum_int64_small_n() {
 }
 
 // ---------------------------------------------------------------------------
-// AVG(float8) — large-N (sort path) — verify [N, sum] per group.
+// AVG(float8) — large-N path — verify [N, sum] per group.
 // ---------------------------------------------------------------------------
 static void test_partial_avg_large_n() {
   printf("--- test_partial_avg_large_n ---\n");
 
   constexpr size_t ROWS_PER_GROUP = 30000;
   constexpr size_t NUM_GROUPS = 4;
-  constexpr size_t N = ROWS_PER_GROUP * NUM_GROUPS;  // 120k — uses sort-based path
+  constexpr size_t N = ROWS_PER_GROUP * NUM_GROUPS;  // 120k — large-N dispatch path
 
   std::vector<int64_t> keys(N);
   std::vector<uint8_t> key_nulls(N, 0);

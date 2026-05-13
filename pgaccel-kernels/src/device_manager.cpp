@@ -277,6 +277,8 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
   if (g_queue != nullptr) {
     try {
       g_queue->wait();
+      pgaccel_pool_reset();
+      g_queue->wait();
     } catch (...) {
       // Best-effort flush; nothing useful to do on failure.
     }

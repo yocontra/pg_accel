@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+mod artifacts;
 mod explain_audit;
 mod parallel_stress_test;
 mod plan_shape_test;
@@ -14,6 +15,8 @@ mod report;
 mod runner;
 mod stats;
 mod workloads;
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -136,6 +139,72 @@ enum Command {
         /// only intended for developer iteration.
         #[arg(long)]
         skip_guc_verify: bool,
+
+        /// Directory for benchmark artifacts. If omitted, a fresh
+        /// `benchmarks/artifacts/run-<timestamp>` directory is created.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
+
+    /// Reproduce one workload at one row scale with full crash artifacts.
+    CrashRepro {
+        /// Workload name to run.
+        #[arg(long)]
+        workload: String,
+
+        /// Row scale to reproduce (for example, 1000000).
+        #[arg(long)]
+        rows: usize,
+
+        /// Number of measured iterations. Defaults to 1 for fast crash repro.
+        #[arg(long, default_value_t = 1)]
+        iterations: usize,
+
+        /// Number of warmup iterations. Defaults to 0 for fast crash repro.
+        #[arg(long, default_value_t = 0)]
+        warmup: usize,
+
+        /// Seed for deterministic random data generation.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Output format: `markdown`, `json`, or `csv`.
+        #[arg(long, default_value = "markdown")]
+        format: ReportFormat,
+
+        /// Apply the realistic GUC profile before running.
+        #[arg(long)]
+        realistic_gucs: bool,
+
+        /// Capture `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output for this
+        /// workload/scale to `plans.txt` inside the artifact directory.
+        #[arg(long)]
+        capture_plans: bool,
+
+        /// Timing mode: `raw`, `explain`, or `both`.
+        #[arg(long, default_value = "raw")]
+        timing: TimingArg,
+
+        /// Cache cleanliness mode: `warm`, `cold`, or `both`.
+        #[arg(long, default_value = "warm")]
+        cache_mode: CacheModeArg,
+
+        /// Source distribution for report speedup labels.
+        #[arg(long, default_value = "median")]
+        speedup_from: SpeedupSourceArg,
+
+        /// Skip the postmaster-GUC mismatch hard-fail.
+        #[arg(long)]
+        skip_guc_verify: bool,
+
+        /// Directory for repro artifacts. If omitted, a fresh
+        /// `benchmarks/artifacts/crash-repro-<timestamp>` directory is created.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
     },
 
     /// Print a previously-stored report (reads JSON from stdin).
@@ -364,6 +433,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             cache_mode,
             speedup_from,
             skip_guc_verify,
+            artifacts_dir,
         } => {
             if dry_run {
                 cmd_dry_run(workload.as_deref(), category.as_deref())
@@ -382,9 +452,41 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &cache_mode,
                     &speedup_from,
                     skip_guc_verify,
+                    artifacts_dir,
                 )
             }
         }
+        Command::CrashRepro {
+            workload,
+            rows,
+            iterations,
+            warmup,
+            seed,
+            connection,
+            format,
+            realistic_gucs,
+            capture_plans,
+            timing,
+            cache_mode,
+            speedup_from,
+            skip_guc_verify,
+            artifacts_dir,
+        } => cmd_crash_repro(
+            &connection,
+            &workload,
+            rows,
+            iterations,
+            warmup,
+            seed,
+            &format,
+            realistic_gucs,
+            capture_plans,
+            &timing,
+            &cache_mode,
+            &speedup_from,
+            skip_guc_verify,
+            artifacts_dir,
+        ),
         Command::Report { format } => cmd_report(&format),
         Command::Validate {
             workload,
@@ -433,8 +535,10 @@ fn cmd_run(
     cache_mode: &CacheModeArg,
     speedup_from: &SpeedupSourceArg,
     skip_guc_verify: bool,
+    artifacts_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workloads = resolve_workloads(workload_name, category)?;
+    let run_artifacts = artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("run"));
     let config = runner::BenchConfig {
         iterations,
         warmup,
@@ -443,7 +547,7 @@ fn cmd_run(
         cache_mode: runner::CacheMode::from(cache_mode),
         speedup_source: runner::SpeedupSource::from(speedup_from),
         plans_capture_path: if capture_plans {
-            Some(std::path::PathBuf::from("benchmarks/plans.txt"))
+            Some(PathBuf::from("benchmarks/plans.txt"))
         } else {
             None
         },
@@ -453,10 +557,63 @@ fn cmd_run(
             None
         },
         skip_guc_verify,
+        artifacts_dir: Some(run_artifacts),
     };
     let report = runner::run_all_with_config(connection, &workloads, &config)?;
     print_report(&report, format)?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_crash_repro(
+    connection: &str,
+    workload_name: &str,
+    rows: usize,
+    iterations: usize,
+    warmup: usize,
+    seed: u64,
+    format: &ReportFormat,
+    realistic_gucs: bool,
+    capture_plans: bool,
+    timing: &TimingArg,
+    cache_mode: &CacheModeArg,
+    speedup_from: &SpeedupSourceArg,
+    skip_guc_verify: bool,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut workloads = resolve_workloads(Some(workload_name), None)?;
+    let workload = workloads
+        .pop()
+        .ok_or_else(|| format!("unknown workload: {workload_name}"))?;
+    let repro_artifacts =
+        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("crash-repro"));
+    let config = runner::BenchConfig {
+        iterations,
+        warmup,
+        seed,
+        timing_mode: runner::TimingMode::from(timing),
+        cache_mode: runner::CacheMode::from(cache_mode),
+        speedup_source: runner::SpeedupSource::from(speedup_from),
+        plans_capture_path: if capture_plans {
+            Some(repro_artifacts.join("plans.txt"))
+        } else {
+            None
+        },
+        guc_profile: if realistic_gucs {
+            Some(runner::GucProfile::realistic())
+        } else {
+            None
+        },
+        skip_guc_verify,
+        artifacts_dir: Some(repro_artifacts),
+    };
+    let report = runner::run_one_report_with_config(connection, workload.as_ref(), rows, &config)?;
+    print_report(&report, format)?;
+    if report.crashes.is_empty() {
+        Ok(())
+    } else {
+        Err("crash-repro: workload failed; see artifact directory for logs".into())
+    }
 }
 
 fn cmd_report(format: &ReportFormat) -> Result<(), Box<dyn std::error::Error>> {

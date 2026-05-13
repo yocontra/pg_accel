@@ -11,16 +11,122 @@ use pgrx::pg_sys::{
 
 use super::super::custom_scan;
 use super::{
-    AccelMatch, PREV_SET_REL_PATHLIST_HOOK, create_custom_path, extract_const_geom_vertex_count,
+    PREV_SET_REL_PATHLIST_HOOK, create_custom_path, extract_const_geom_vertex_count,
     find_accelerable_match, find_cheapest_path, find_cheapest_seqscan_cost,
     find_cheapest_seqscan_path, has_cheap_spatial_index_path, has_cheaper_spatial_index_path,
-    try_gpu_expr_match,
 };
 use crate::engine::cost;
 use crate::engine::executor::sort::SortKeyDesc;
 use crate::engine::gucs;
 use crate::engine::registry;
 use crate::engine::stats;
+
+/// Keep the generic GpuExpr matcher reachable for unit tests and future fused
+/// GpuScan work without calling it from the normal base-relation planner hook.
+#[allow(dead_code)]
+fn retained_gpu_expr_matcher() -> fn(*mut List, u64) -> Option<super::AccelMatch> {
+    super::try_gpu_expr_match
+}
+
+/// Minimum standalone scan rows for H3 scalar kernels.
+///
+/// H3 target-list / aggregate fusion is handled elsewhere. The scan hook
+/// should only expose a Custom Scan when there is enough bulk work to amortize
+/// PostgreSQL tuple extraction and GPU launch outside a fused GpuScan pipeline.
+pub(super) fn h3_standalone_scan_min_rows(limits: &cost::DeviceLimits) -> usize {
+    limits.gpu_min_rows.saturating_mul(10).max(100_000)
+}
+
+/// Minimum standalone scan rows for raster kernels.
+///
+/// Raster work is per-pixel, but the scan hook only sees table rows. Require a
+/// larger row batch here until the planner can cost tile dimensions directly.
+pub(super) fn raster_standalone_scan_min_rows(limits: &cost::DeviceLimits) -> usize {
+    limits.gpu_min_rows.saturating_mul(20).max(100_000)
+}
+
+fn h3_scan_function_is_compute_heavy(name: &str) -> bool {
+    matches!(name, "h3_latlng_to_cell" | "h3_grid_distance")
+}
+
+fn raster_scan_function_is_compute_heavy(name: &str) -> bool {
+    matches!(
+        name,
+        "st_mapalgebra"
+            | "st_clip"
+            | "st_reclass"
+            | "st_resample"
+            | "st_slope"
+            | "st_aspect"
+            | "st_hillshade"
+            | "st_summarystats"
+    )
+}
+
+/// Strategy-specific standalone scan gate for extension functions.
+///
+/// Cheap scalar H3/raster functions are only acceptable once they are fused
+/// into a real GpuScan pipeline. Normal rel_pathlist exposure is reserved for
+/// batched compute-heavy kernels. Spatial predicates are handled by the
+/// vertex/work-product gate below because their cost depends on polygon shape.
+pub(super) fn extension_scan_gate(
+    strategy: registry::AccelStrategy,
+    fn_name: Option<&str>,
+    rows: usize,
+    limits: &cost::DeviceLimits,
+) -> Result<(), &'static str> {
+    match strategy {
+        registry::AccelStrategy::GpuH3 => {
+            if rows < h3_standalone_scan_min_rows(limits) {
+                return Err("h3_rows_below_standalone_min");
+            }
+            let Some(name) = fn_name else {
+                return Err("h3_unknown_function");
+            };
+            if h3_scan_function_is_compute_heavy(name) {
+                Ok(())
+            } else {
+                Err("h3_function_not_compute_heavy")
+            }
+        }
+        registry::AccelStrategy::GpuRaster => {
+            if rows < raster_standalone_scan_min_rows(limits) {
+                return Err("raster_rows_below_standalone_min");
+            }
+            let Some(name) = fn_name else {
+                return Err("raster_unknown_function");
+            };
+            if raster_scan_function_is_compute_heavy(name) {
+                Ok(())
+            } else {
+                Err("raster_function_not_compute_heavy")
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Resolve a function OID to a lowercase SQL function name.
+///
+/// The adapter registry stores OIDs, while the standalone-scan gates need to
+/// distinguish cheap scalar functions from compute-heavy kernels.
+unsafe fn function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
+    if fn_oid == pg_sys::Oid::INVALID {
+        return None;
+    }
+
+    // SAFETY: get_func_name is a backend catalog lookup. The planner hook runs
+    // on the main backend thread, and null simply means the OID was not found.
+    let name_ptr = unsafe { pg_sys::get_func_name(fn_oid) };
+    if name_ptr.is_null() {
+        return None;
+    }
+
+    // SAFETY: name_ptr is a null-terminated C string owned by the current PG
+    // memory context.
+    let name_cstr = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+    name_cstr.to_str().ok().map(str::to_ascii_lowercase)
+}
 
 // ---------------------------------------------------------------------------
 // Scan hook
@@ -115,8 +221,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
-    // Gate 2c: Skip system catalog tables. GpuExpr (and other strategies)
-    // are only useful for user tables. System catalogs have OIDs below
+    // Gate 2c: Skip system catalog tables. Accelerator strategies are only
+    // useful for user tables. System catalogs have OIDs below
     // FirstNormalObjectId (16384).
     if u32::from(rte_ref.relid) < pg_sys::FirstNormalObjectId {
         return;
@@ -158,16 +264,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         }
     }
 
-    // GpuExpr path: standard numeric WHERE clauses (OpExpr, BoolExpr,
-    // NullTest). Independent of adapter registry — expression compilability
-    // is checked via node-tag and type inspection. This enables GPU-
-    // accelerated scan for queries like `WHERE val > 0.5 AND id < 1000`.
-    let gpu_expr_rows = rel_ref.tuples.max(rel_ref.rows).max(0.0) as u64;
-    let gpu_expr_match = try_gpu_expr_match(rel_ref.baserestrictinfo, gpu_expr_rows);
-
     // Extension-function match: requires the adapter registry (PostGIS,
-    // H3, raster). Only initialise and check when GpuExpr didn't match,
-    // or always to prefer the more specific strategy.
+    // H3, raster). Generic numeric GpuExpr is intentionally not exposed as
+    // a standalone Custom Scan path; expression evaluation belongs inside a
+    // future fused GpuScan pipeline or test-only primitive.
     registry::lazy_init();
     let reg_match = if registry::is_ready() {
         let reg = registry::global_registry();
@@ -180,15 +280,18 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         None
     };
 
-    // Prefer extension-specific match (spatial, H3, raster) over generic
-    // GpuExpr — extension strategies have dedicated kernels optimised for
-    // their data types.
-    let accel = reg_match.or(gpu_expr_match);
+    let accel = reg_match;
     let Some(accel) = accel else {
         pgrx::debug1!("pg_accel: set_rel_pathlist: no accelerable match found");
         return;
     };
     let strategy = accel.strategy;
+    if strategy == registry::AccelStrategy::GpuExpr {
+        pgrx::debug1!(
+            "pg_accel: set_rel_pathlist: standalone GpuExpr Custom Scan exposure disabled"
+        );
+        return;
+    }
     pgrx::debug1!("pg_accel: set_rel_pathlist: found {:?} match", strategy);
 
     // Gate 4: Cost model gating — skip if batching is not worthwhile.
@@ -203,38 +306,18 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let per_row_cost_base = match strategy {
         registry::AccelStrategy::GpuRaster => cost::GPU_RASTER_PER_ROW_COST,
         registry::AccelStrategy::GpuH3 => cost::GPU_H3_PER_ROW_COST,
-        registry::AccelStrategy::GpuExpr => cost::GPU_EXPR_PER_ROW_COST,
         _ => cost::GPU_SPATIAL_PER_ROW_COST,
     };
     // fp64 classification via the adapter helper (`adapters::uses_fp64`).
     // Spatial always uses fp64 (recheck path); H3 uses fp64 only for
-    // `h3_latlng_to_cell`; raster/expr report false. For strategies where
-    // the function name can't be resolved (e.g. fn_oid = InvalidOid on a
-    // synthetic GpuExpr match), default to `false`. The helper centralises
-    // the per-function classification so it's consistent with the adapters'
-    // own declarations in `pg_accel/src/adapters/*.rs`.
-    let fn_uses_fp64: bool = {
-        let fn_oid = accel.fn_oid;
-        if fn_oid == pg_sys::Oid::INVALID {
-            false
-        } else {
-            // SAFETY: get_func_name is a catalog lookup safe on the main
-            // backend thread. Returns null for unknown OIDs, caller frees
-            // via pfree (but we don't free here — pstrdup-backed pointer
-            // lives for the current memory context).
-            let name_ptr = unsafe { pg_sys::get_func_name(fn_oid) };
-            if name_ptr.is_null() {
-                false
-            } else {
-                // SAFETY: name_ptr is a null-terminated C string from pg_proc.
-                let name_cstr = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
-                match name_cstr.to_str() {
-                    Ok(s) => crate::adapters::uses_fp64(strategy, s),
-                    Err(_) => false,
-                }
-            }
-        }
-    };
+    // `h3_latlng_to_cell`; raster reports false. For strategies where
+    // the function name can't be resolved, default to `false`. The helper
+    // centralises the per-function classification so it's consistent with
+    // the adapters' own declarations in `pg_accel/src/adapters/*.rs`.
+    let fn_name = unsafe { function_name_for_oid(accel.fn_oid) };
+    let fn_uses_fp64 = fn_name
+        .as_deref()
+        .is_some_and(|name| crate::adapters::uses_fp64(strategy, name));
     let per_row_cost =
         cost::apply_fp64_penalty(per_row_cost_base, fn_uses_fp64, cost::device_limits());
     if !cost::should_batch(rows, per_row_cost, min_batch) {
@@ -245,34 +328,24 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         );
         return;
     }
-    // GpuExpr has a device-derived minimum row threshold in addition to the
-    // GUC-based min_batch_size. The inline template filter is lightweight
-    // but still needs enough rows to amortize compilation + scan overhead.
-    if strategy == registry::AccelStrategy::GpuExpr
-        && rows < cost::device_limits().gpu_expr_min_rows
+
+    // Gate 4a: extension-specific standalone scan policy.
+    //
+    // H3/PostGIS/raster functions are only exposed through rel_pathlist when
+    // the scan itself is a batch-sized compute-heavy unit. Cheap scalar ops
+    // should be fused into GpuScan later rather than wrapped as standalone
+    // Custom Scans over PostgreSQL tuples.
+    if let Err(reason) =
+        extension_scan_gate(strategy, fn_name.as_deref(), rows, cost::device_limits())
     {
         pgrx::debug1!(
-            "pg_accel: set_rel_pathlist: GpuExpr rejected rows={} < expr_min={}",
+            "pg_accel: set_rel_pathlist: {:?} rejected function={:?} rows={} reason={}",
+            strategy,
+            fn_name.as_deref(),
             rows,
-            cost::device_limits().gpu_expr_min_rows
+            reason
         );
         return;
-    }
-
-    // Gate 4a-raster: Raster operations need significantly more rows to
-    // amortize GPU overhead than spatial predicates. Benchmark (2026-04-12)
-    // shows 0.62x at 10K but 1.38x at 100K. Require 5x the device-derived
-    // gpu_min_rows (typically 50K) before injecting a GpuRaster path.
-    if strategy == registry::AccelStrategy::GpuRaster {
-        let raster_min = cost::device_limits().gpu_min_rows * 5;
-        if rows < raster_min {
-            pgrx::debug1!(
-                "pg_accel: set_rel_pathlist: GpuRaster rejected rows={} < raster_min={}",
-                rows,
-                raster_min
-            );
-            return;
-        }
     }
 
     // Gate 4b: Defer to GiST/SP-GiST index scan for selective spatial filters.
@@ -327,6 +400,18 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         // ST_MakeEnvelope) that PG didn't constant-fold.
         let vcount =
             unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) }.unwrap_or(0);
+        if !cost::spatial_polygon_rows_safe(rows, vcount, dl) {
+            pgrx::debug1!(
+                "pg_accel: spatial 100K safety gate: rows={} vcount={} in unsafe band \
+                 [{}..={}] with min_vertices={}, skipping",
+                rows,
+                vcount,
+                dl.gpu_spatial_unsafe_band_min_rows,
+                dl.gpu_spatial_unsafe_band_max_rows,
+                dl.gpu_spatial_unsafe_band_min_vertices,
+            );
+            return;
+        }
         if vcount < min_verts {
             pgrx::debug1!(
                 "pg_accel: spatial vertex gate: vcount={} < min={}, skipping",
@@ -379,18 +464,13 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // `make_custom_scan_plan` (custom_scan/mod.rs) because the GPU
     // evaluates the same predicate.
     //
-    // GpuExpr is excluded from the bitmap fallback because its plan
-    // shape requires `scanrelid > 0` with no child plan
-    // (custom_scan/mod.rs around the `is_gpu_expr` branch); injecting
-    // a GpuExpr CustomPath whose child is a BitmapHeapPath would be
-    // dropped on the floor at PlanCustomPath time. Non-GpuExpr
-    // strategies (GpuSpatial / GpuH3 / GpuRaster) use `scanrelid=0`
-    // and consume the child via `ExecProcNode`, which works for any
-    // child plan node including BitmapHeapScan.
+    // Registry-backed scan strategies (GpuSpatial / GpuH3 / GpuRaster) use
+    // `scanrelid=0` and consume the child via `ExecProcNode`, which works
+    // for any child plan node including BitmapHeapScan.
     // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
     let mut cheapest = unsafe { find_cheapest_seqscan_path(rel_ref.pathlist) };
     let mut wrapped_bitmap = false;
-    if cheapest.is_null() && strategy != registry::AccelStrategy::GpuExpr {
+    if cheapest.is_null() {
         // SAFETY: rel_ref.pathlist is a valid List pointer.
         let bitmap = unsafe { super::find_cheapest_bitmap_heap_path(rel_ref.pathlist) };
         if !bitmap.is_null() {
@@ -418,7 +498,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let num_batches = (base.rows / batch_size).ceil();
     let batch_overhead = num_batches * 2.0; // per-batch dispatch + sync cost
     // GPU strategies incur a fixed kernel launch overhead.
-    // GpuExpr uses CPU inline template filter (no GPU launch).
     let gpu_overhead = match strategy {
         registry::AccelStrategy::GpuSpatial
         | registry::AccelStrategy::GpuRaster
@@ -433,13 +512,12 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // queries we want to accelerate.
     let startup_cost = base.startup_cost + 1.0 + gpu_overhead;
 
-    // All GPU strategies get a cost-margin discount vs PG's serial seqscan.
-    // Compute-bound spatial/h3/raster operations get a more aggressive margin
-    // because GPU batched SIMD evaluation is dramatically faster than PG's
-    // per-row function call loop (even parallelized across workers), and PG's
-    // parallel cost model divides by worker count which underestimates the
-    // gap. GpuExpr uses the lighter margin since the inline template is
-    // only modestly faster than PG's expression evaluation.
+    // All registry-backed GPU strategies get a cost-margin discount vs PG's
+    // serial seqscan. Compute-bound spatial/h3/raster operations get a more
+    // aggressive margin because GPU batched SIMD evaluation is dramatically
+    // faster than PG's per-row function call loop (even parallelized across
+    // workers), and PG's parallel cost model divides by worker count which
+    // underestimates the gap.
     let cost_margin = match strategy {
         registry::AccelStrategy::GpuSpatial
         | registry::AccelStrategy::GpuRaster
@@ -469,7 +547,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // index path. The Custom Scan always does a full sequential heap scan.
     // At large scales (10M+), a selective GiST index scan reads far fewer
     // heap pages, making it faster even if PG's cost estimate is close.
-    // This applies to all strategies — GpuExpr also does a full heap walk.
+    // This applies to all scan strategies: the Custom Scan still does a full
+    // heap walk unless a bitmap child is wrapped.
     // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
     if unsafe { has_cheaper_spatial_index_path(rel_ref.pathlist, total_cost) } {
         return;
@@ -527,12 +606,9 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // child that pre-filters via the index instead of doing a full
     // sequential heap walk.
     //
-    // Skip when:
-    //   * `wrapped_bitmap` is already true (we already wrapped the
-    //     bitmap path because seqscan was pruned).
-    //   * Strategy is GpuExpr (requires `scanrelid > 0` with no child;
-    //     a BitmapHeap child would be dropped at PlanCustomPath time).
-    if !wrapped_bitmap && strategy != registry::AccelStrategy::GpuExpr {
+    // Skip when `wrapped_bitmap` is already true: we already wrapped the
+    // bitmap path because seqscan was pruned.
+    if !wrapped_bitmap {
         // SAFETY: rel_ref.pathlist is a valid List pointer.
         let bitmap_alt = unsafe { super::find_cheapest_bitmap_heap_path(rel_ref.pathlist) };
         if !bitmap_alt.is_null() {
@@ -595,93 +671,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
             "planner.injected_partition_child"
         );
     }
-
-    // Mirror the non-parallel injection into the partial pathlist so queries
-    // whose optimal plan is `Gather ∘ Parallel Scan` pick up the GPU path.
-    // For each parallel-safe child in `rel->partial_pathlist`, wrap it in a
-    // parallel-safe CustomPath and register via `add_partial_path`. The
-    // costing is reused (same strategy, same rows) — PG's own add_partial_path
-    // discards dominated entries.
-    // SAFETY: rel_ref.partial_pathlist is a valid List pointer (possibly null).
-    unsafe {
-        inject_gpu_expr_partial_paths(rel, rel_ref.partial_pathlist, &accel, startup_cost);
-    }
-}
-
-/// Inject a parallel-safe GpuExpr CustomPath for every entry in
-/// `partial_pathlist`. Mirrors the non-parallel body of
-/// `pgaccel_set_rel_pathlist` but wraps each partial child individually so
-/// PG can place the CustomScan inside a `Gather`.
-///
-/// # Safety
-///
-/// `rel` and `partial_pathlist` must be valid planner-provided pointers.
-unsafe fn inject_gpu_expr_partial_paths(
-    rel: *mut RelOptInfo,
-    partial_pathlist: *mut List,
-    accel: &super::AccelMatch,
-    startup_cost_base: pg_sys::Cost,
-) {
-    if partial_pathlist.is_null() {
-        return;
-    }
-    // SAFETY: partial_pathlist is a valid List.
-    let n = unsafe { pg_sys::list_length(partial_pathlist) };
-    if n == 0 {
-        return;
-    }
-
-    for i in 0..n {
-        // SAFETY: i < list_length.
-        let child = unsafe { pg_sys::list_nth(partial_pathlist, i).cast::<Path>() };
-        if child.is_null() {
-            continue;
-        }
-        // Child from partial_pathlist is parallel-safe by construction, but
-        // double-check defensively.
-        // SAFETY: child is a valid Path node.
-        let child_ref = unsafe { &*child };
-        if !child_ref.parallel_safe {
-            continue;
-        }
-
-        // Recompute cost against THIS child (partial paths split rows across
-        // workers; use the child's own rows estimate so add_partial_path's
-        // dominance check sees an honest total).
-        let batch_size = cost::optimal_batch_size(child_ref.rows as usize) as f64;
-        let num_batches = (child_ref.rows / batch_size).ceil();
-        let batch_overhead = num_batches * 2.0;
-        let total_cost = child_ref.total_cost + batch_overhead;
-
-        // SAFETY: palloc-based construction + inheritance from child via
-        // `create_custom_path`, then overriding parallel fields explicitly.
-        unsafe {
-            let cpath = create_custom_path(
-                rel,
-                child,
-                startup_cost_base,
-                total_cost,
-                child_ref.rows,
-                custom_scan::scan_path_methods(),
-            );
-            // Upgrade to parallel-safe; inherit child's worker count.
-            (*cpath).path.parallel_aware = false;
-            (*cpath).path.parallel_safe = true;
-            (*cpath).path.parallel_workers = child_ref.parallel_workers.max(1);
-
-            // Same custom_private layout as the non-partial variant.
-            let mut priv_list: *mut List = std::ptr::null_mut();
-            priv_list = lappend(
-                priv_list,
-                pg_sys::makeInteger(u32::from(accel.fn_oid) as i32).cast(),
-            );
-            priv_list = lappend(priv_list, pg_sys::makeInteger(accel.target_attno).cast());
-            priv_list = lappend(priv_list, pg_sys::makeInteger(accel.strategy as i32).cast());
-            (*cpath).custom_private = priv_list;
-
-            add_partial_path(rel, cpath.cast());
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +691,30 @@ pub(super) const SORT_FLOAT8OID: u32 = 701;
 /// work. Planner + executor MUST agree on this bound — otherwise the
 /// planner injects paths the executor bails on, wasting a plan.
 pub(super) const GPU_SORT_MAX_PATHKEYS: i32 = 1;
+
+/// Maximum output fraction for a standalone heap-backed `GpuSort` path.
+///
+/// The normal base-relation planner hook may expose bounded top-k shapes,
+/// but not generic full-output ORDER BY over heap tuples. Full sort remains
+/// an internal primitive until a GPU-resident/top-k/rank/finalization pipeline
+/// can keep intermediate rows off the PostgreSQL tuple path.
+const GPU_SORT_MAX_HEAP_TOPK_FRACTION: f64 = 0.25;
+
+#[must_use]
+#[inline]
+pub(super) fn heap_topk_sort_candidate(limit_tuples: f64, rows: usize) -> bool {
+    if rows == 0 || !cost::sort_limit_present(limit_tuples) {
+        return false;
+    }
+
+    let limit_rows = limit_tuples.ceil();
+    #[allow(clippy::cast_precision_loss)]
+    let row_count = rows as f64;
+
+    limit_rows >= 1.0
+        && limit_rows < row_count
+        && limit_rows <= row_count * GPU_SORT_MAX_HEAP_TOPK_FRACTION
+}
 
 /// Classification of how `root->sort_pathkeys` relates to the pathkeys of
 /// paths already attached to the base relation.
@@ -913,20 +926,22 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // No max-rows gate: the executor handles arbitrary row counts via
-    // chunked GPU sort (sort in chunks of gpu_sort_max_elements, then
-    // k-way merge). GPU sort is beneficial at any scale.
-
-    // Gate: Skip when LIMIT is small relative to table size. PG's top-N
-    // heapsort is O(n log k) with tiny memory — always faster than full
-    // GPU sort + truncation for small k.
+    // Gate: reject full-output standalone heap sorts. A positive LIMIT by
+    // itself is not enough: LIMIT values close to the relation cardinality
+    // still push nearly every heap tuple through the Custom Scan and are the
+    // same loser lane as no-limit ORDER BY. Keep only bounded top-k shapes
+    // exposed from this hook; GPU-resident rank/finalization/full-sort uses
+    // should enter through a later internal pipeline instead.
     let limit_tuples = root_ref.limit_tuples;
-    if limit_tuples > 0.0 && (limit_tuples as usize) < rows / 4 {
+    if !heap_topk_sort_candidate(limit_tuples, rows) {
         pgrx::debug1!(
-            "pg_accel sort: LIMIT {} << {} rows, deferring to PG top-N heapsort",
-            limit_tuples as usize,
+            "pg_accel sort: LIMIT {:?} on {} rows is not a bounded top-k heap sort; \
+             deferring standalone ORDER BY to PostgreSQL",
+            limit_tuples,
             rows
         );
+        let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        stats::increment_planner_rejected("sort_heap_full_output", rejected_rows);
         return;
     }
 
@@ -1299,7 +1314,10 @@ unsafe fn inject_gpu_sort_partial_paths(
 
 #[cfg(test)]
 mod tests {
-    use super::{GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape};
+    use super::{
+        GPU_SORT_MAX_HEAP_TOPK_FRACTION, GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape,
+        heap_topk_sort_candidate,
+    };
 
     /// Regression guard: the planner sort gate and the executor sort
     /// dispatcher must agree on the supported pathkey count. The executor
@@ -1386,9 +1404,38 @@ mod tests {
         );
     }
 
-    /// The partial-path injectors must be early-exit-safe on a null
+    // -- heap_topk_sort_candidate ------------------------------------------
+
+    #[test]
+    fn heap_topk_gate_rejects_no_limit_full_output_sort() {
+        assert!(!heap_topk_sort_candidate(-1.0, 1_000_000));
+        assert!(!heap_topk_sort_candidate(0.0, 1_000_000));
+        assert!(!heap_topk_sort_candidate(f64::NAN, 1_000_000));
+    }
+
+    #[test]
+    fn heap_topk_gate_rejects_limit_covering_all_rows() {
+        assert!(!heap_topk_sort_candidate(1_000_000.0, 1_000_000));
+        assert!(!heap_topk_sort_candidate(1_500_000.0, 1_000_000));
+    }
+
+    #[test]
+    fn heap_topk_gate_rejects_non_selective_limit() {
+        let rows = 1_000_000;
+        let non_selective_limit = 1_000_000.0 * (GPU_SORT_MAX_HEAP_TOPK_FRACTION + 0.01);
+        assert!(!heap_topk_sort_candidate(non_selective_limit, rows));
+    }
+
+    #[test]
+    fn heap_topk_gate_allows_bounded_topk() {
+        assert!(heap_topk_sort_candidate(1_000.0, 1_000_000));
+        assert!(heap_topk_sort_candidate(250_000.0, 1_000_000));
+    }
+
+    /// The GpuSort partial-path injector must be early-exit-safe on a null
     /// `partial_pathlist` — PG passes null when parallelism is disabled
-    /// for this rel, and we must not dereference it.
+    /// for this rel, and we must not dereference it. Generic GpuExpr no
+    /// longer has a standalone partial-path injector.
     ///
     /// We can't construct a real `RelOptInfo` in a unit test (dozens of
     /// PG-internal fields), but we can confirm the null-list short-circuit
@@ -1399,20 +1446,10 @@ mod tests {
     /// non-null list requires a live planner and belongs in `#[pg_test]`.
     #[test]
     fn inject_partial_paths_null_list_is_safe() {
-        use super::{inject_gpu_expr_partial_paths, inject_gpu_sort_partial_paths};
+        use super::inject_gpu_sort_partial_paths;
         use crate::engine::executor::sort::SortKeyDesc;
-        use crate::engine::registry::AccelStrategy;
         use pgrx::pg_sys;
 
-        let accel = super::super::AccelMatch {
-            strategy: AccelStrategy::GpuExpr,
-            fn_oid: pg_sys::Oid::INVALID,
-            target_attno: 0,
-        };
-        // SAFETY: Both callees null-check `partial_pathlist` before any deref.
-        unsafe {
-            inject_gpu_expr_partial_paths(std::ptr::null_mut(), std::ptr::null_mut(), &accel, 0.0);
-        }
         let sort_key = SortKeyDesc {
             attno: 1,
             sort_op: pg_sys::Oid::INVALID,

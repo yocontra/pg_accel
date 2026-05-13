@@ -1,6 +1,7 @@
 #include <sycl/sycl.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -226,8 +227,8 @@ static int8_t evaluate_predicate(const pgaccel_geometry& a, const pgaccel_geomet
  * GPU-accelerated point-in-polygon kernel (SYCL)
  *
  * Each GPU thread evaluates one point against the full polygon.
- * On Apple Silicon (unified memory), alloc_input returns the host
- * pointer directly — zero allocation, zero copy overhead.
+ * Kernel data is packed into one USM slab before dispatch so Metal does
+ * not lower multiple captured USM pointers through argument buffers.
  * ================================================================ */
 
 /* Device-side point-in-ring: same ray-casting algorithm as the scalar path.
@@ -291,6 +292,88 @@ static constexpr size_t COOP_VERTEX_THRESHOLD = 1024;
 /* Work-group size for the cooperative kernel. Metal prefers 128–256. */
 static constexpr size_t COOP_GROUP_SIZE = 128;
 
+static constexpr size_t SPATIAL_PIP_NO_OFFSET = static_cast<size_t>(-1);
+
+/* Metal SSCP is sensitive to kernels that capture several USM pointers; it
+ * can lower those captures into argument-buffer accesses that abort at runtime.
+ * Keep PIP kernels to one slab pointer and recover typed views from offsets
+ * inside the kernel, matching the hash-agg workaround pattern. */
+struct SpatialPipKernelSlabHeader {
+  size_t surv_count;
+  size_t poly_coord_count;
+  size_t ring_count;
+  uint32_t has_rings;
+  size_t points_off;
+  size_t poly_off;
+  size_t rings_off;
+  size_t results_off;
+};
+
+static size_t spatial_align_up(size_t value, size_t alignment) {
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* surv_pts,
+                                             size_t surv_count, const float* poly_coords,
+                                             size_t poly_coord_count, const uint32_t* ring_offsets,
+                                             size_t ring_count,
+                                             SpatialPipKernelSlabHeader* out_header) {
+  const bool has_rings = (ring_offsets != nullptr && ring_count > 0);
+
+  SpatialPipKernelSlabHeader h{};
+  h.surv_count = surv_count;
+  h.poly_coord_count = poly_coord_count;
+  h.ring_count = has_rings ? ring_count : 0;
+  h.has_rings = has_rings ? 1u : 0u;
+  h.rings_off = SPATIAL_PIP_NO_OFFSET;
+
+  size_t cursor = spatial_align_up(sizeof(SpatialPipKernelSlabHeader), alignof(float));
+  auto add = [&](size_t bytes, size_t alignment) {
+    cursor = spatial_align_up(cursor, alignment);
+    const size_t off = cursor;
+    cursor += bytes == 0 ? 1 : bytes;
+    return off;
+  };
+
+  h.points_off = add(surv_count * 2 * sizeof(float), alignof(float));
+  h.poly_off = add(poly_coord_count * 2 * sizeof(float), alignof(float));
+  if (has_rings) {
+    h.rings_off = add(ring_count * sizeof(uint32_t), alignof(uint32_t));
+  }
+  h.results_off = add(surv_count * sizeof(int8_t), alignof(int8_t));
+
+  uint8_t* slab = pgaccel_alloc<uint8_t>(cursor, q);
+  if (slab == nullptr)
+    return nullptr;
+
+  auto fill = [&](uint8_t* dst) {
+    std::memset(dst, 0, cursor);
+    std::memcpy(dst, &h, sizeof(h));
+    std::memcpy(dst + h.points_off, surv_pts, surv_count * 2 * sizeof(float));
+    std::memcpy(dst + h.poly_off, poly_coords, poly_coord_count * 2 * sizeof(float));
+    if (has_rings) {
+      std::memcpy(dst + h.rings_off, ring_offsets, ring_count * sizeof(uint32_t));
+    }
+  };
+
+  if (g_unified_memory) {
+    fill(slab);
+  } else {
+    std::vector<uint8_t> staged(cursor);
+    fill(staged.data());
+    try {
+      q.memcpy(slab, staged.data(), cursor).wait_and_throw();
+    } catch (...) {
+      sycl::free(slab, q);
+      throw;
+    }
+  }
+
+  if (out_header)
+    *out_header = h;
+  return slab;
+}
+
 /* GPU dispatch: parallel_for over all surviving points, one thread
  * per point. Good when polygons are small.
  *
@@ -311,58 +394,43 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* surv_pts, size_t
   if (!q)
     return PGACCEL_ERROR;
 
+  uint8_t* slab = nullptr;
   try {
-    float* d_pts = pgaccel_alloc_input<float>(surv_count * 2, *q, surv_pts);
-    float* d_poly = pgaccel_alloc_input<float>(poly_coord_count * 2, *q, poly_coords);
-
-    uint32_t dummy_ring = 0;
-    uint32_t* d_rings = nullptr;
-    if (ring_offsets && ring_count > 0) {
-      d_rings = pgaccel_alloc_input<uint32_t>(ring_count, *q, ring_offsets);
-    } else {
-      d_rings = pgaccel_alloc_input<uint32_t>(1, *q, &dummy_ring);
-    }
-
-    int8_t* d_results = pgaccel_alloc<int8_t>(surv_count, *q);
-
-    if (!d_pts || !d_poly || !d_results) {
-      pgaccel_free_input(d_pts, *q, surv_pts);
-      pgaccel_free_input(d_poly, *q, poly_coords);
-      if (ring_offsets && ring_count > 0)
-        pgaccel_free_input(d_rings, *q, ring_offsets);
-      else
-        pgaccel_free_input(d_rings, *q, &dummy_ring);
-      if (d_results)
-        sycl::free(d_results, *q);
+    SpatialPipKernelSlabHeader slab_header{};
+    slab = make_spatial_pip_kernel_slab(*q, surv_pts, surv_count, poly_coords, poly_coord_count,
+                                        ring_offsets, ring_count, &slab_header);
+    if (slab == nullptr) {
       return PGACCEL_OOM;
     }
 
-    size_t vc = poly_coord_count;
-    size_t rc = ring_count;
-    bool has_rings = (ring_offsets != nullptr && ring_count > 0);
-
     q->parallel_for(sycl::range<1>(surv_count), [=](sycl::id<1> id) {
        size_t i = id[0];
-       float px = d_pts[i * 2];
-       float py = d_pts[i * 2 + 1];
-       d_results[i] =
-           device_point_in_polygon(px, py, d_poly, vc, has_rings ? d_rings : nullptr, rc);
+       const auto* h = reinterpret_cast<const SpatialPipKernelSlabHeader*>(slab);
+       const auto* pts_ptr = reinterpret_cast<const float*>(slab + h->points_off);
+       const auto* poly_ptr = reinterpret_cast<const float*>(slab + h->poly_off);
+       const auto* rings_ptr =
+           h->has_rings ? reinterpret_cast<const uint32_t*>(slab + h->rings_off) : nullptr;
+       auto* res_ptr = reinterpret_cast<int8_t*>(slab + h->results_off);
+
+       float px = pts_ptr[i * 2];
+       float py = pts_ptr[i * 2 + 1];
+       res_ptr[i] =
+           device_point_in_polygon(px, py, poly_ptr, h->poly_coord_count, rings_ptr, h->ring_count);
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, surv_count);
+    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off), surv_count);
 
-    pgaccel_free_input(d_pts, *q, surv_pts);
-    pgaccel_free_input(d_poly, *q, poly_coords);
-    if (ring_offsets && ring_count > 0)
-      pgaccel_free_input(d_rings, *q, ring_offsets);
-    else
-      pgaccel_free_input(d_rings, *q, &dummy_ring);
-    sycl::free(d_results, *q);
+    sycl::free(slab, *q);
+    slab = nullptr;
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
+    if (slab)
+      sycl::free(slab, *q);
     fprintf(stderr, "pgaccel: SYCL point_in_polygon failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
+    if (slab)
+      sycl::free(slab, *q);
     fprintf(stderr, "pgaccel: point_in_polygon failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
@@ -389,36 +457,14 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
   if (!q)
     return PGACCEL_ERROR;
 
+  uint8_t* slab = nullptr;
   try {
-    float* d_pts = pgaccel_alloc_input<float>(surv_count * 2, *q, surv_pts);
-    float* d_poly = pgaccel_alloc_input<float>(poly_coord_count * 2, *q, poly_coords);
-
-    uint32_t dummy_ring = 0;
-    uint32_t* d_rings = nullptr;
-    if (ring_offsets && ring_count > 0) {
-      d_rings = pgaccel_alloc_input<uint32_t>(ring_count, *q, ring_offsets);
-    } else {
-      d_rings = pgaccel_alloc_input<uint32_t>(1, *q, &dummy_ring);
-    }
-
-    int8_t* d_results = pgaccel_alloc<int8_t>(surv_count, *q);
-
-    if (!d_pts || !d_poly || !d_results) {
-      pgaccel_free_input(d_pts, *q, surv_pts);
-      pgaccel_free_input(d_poly, *q, poly_coords);
-      if (ring_offsets && ring_count > 0)
-        pgaccel_free_input(d_rings, *q, ring_offsets);
-      else
-        pgaccel_free_input(d_rings, *q, &dummy_ring);
-      if (d_results)
-        sycl::free(d_results, *q);
+    SpatialPipKernelSlabHeader slab_header{};
+    slab = make_spatial_pip_kernel_slab(*q, surv_pts, surv_count, poly_coords, poly_coord_count,
+                                        ring_offsets, ring_count, &slab_header);
+    if (slab == nullptr) {
       return PGACCEL_OOM;
     }
-
-    const size_t vc = poly_coord_count;
-    const size_t rc = ring_count;
-    const bool has_rings = (ring_offsets != nullptr && ring_count > 0);
-    const float eps_sq = EPSILON * EPSILON;
 
     // One work-group per point.
     auto nd = sycl::nd_range<1>(sycl::range<1>(surv_count * COOP_GROUP_SIZE),
@@ -429,12 +475,14 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
        sycl::local_accessor<uint32_t, 1> lparity(sycl::range<1>(1), h);
        sycl::local_accessor<uint32_t, 1> lon_edge(sycl::range<1>(1), h);
 
-       float* pts_ptr = d_pts;
-       float* poly_ptr = d_poly;
-       uint32_t* rings_ptr = d_rings;
-       int8_t* res_ptr = d_results;
-
        h.parallel_for(nd, [=](sycl::nd_item<1> it) {
+         const auto* hdr = reinterpret_cast<const SpatialPipKernelSlabHeader*>(slab);
+         const auto* pts_ptr = reinterpret_cast<const float*>(slab + hdr->points_off);
+         const auto* poly_ptr = reinterpret_cast<const float*>(slab + hdr->poly_off);
+         const auto* rings_ptr =
+             hdr->has_rings ? reinterpret_cast<const uint32_t*>(slab + hdr->rings_off) : nullptr;
+         auto* res_ptr = reinterpret_cast<int8_t*>(slab + hdr->results_off);
+
          const size_t lid = it.get_local_id(0);
          const size_t pi = it.get_group(0);  // point index
          const size_t gsz = it.get_local_range(0);
@@ -447,16 +495,16 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
          bool definitive = false;
 
          // Scan each ring cooperatively.
-         size_t nrings = has_rings ? rc : 1;
+         size_t nrings = hdr->has_rings ? hdr->ring_count : 1;
          for (size_t r = 0; !definitive && r < nrings; ++r) {
            size_t start;
            size_t end;
-           if (has_rings) {
+           if (hdr->has_rings) {
              start = rings_ptr[r];
-             end = (r + 1 < rc) ? rings_ptr[r + 1] : vc;
+             end = (r + 1 < hdr->ring_count) ? rings_ptr[r + 1] : hdr->poly_coord_count;
            } else {
              start = 0;
-             end = vc;
+             end = hdr->poly_coord_count;
            }
            size_t rlen = end - start;
            if (rlen < 3)
@@ -486,7 +534,7 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
              // On-vertex test.
              const float dx = px - xi;
              const float dy = py - yi;
-             if (dx * dx + dy * dy < eps_sq) {
+             if (dx * dx + dy * dy < EPSILON * EPSILON) {
                my_on_edge = 1u;
                continue;
              }
@@ -543,20 +591,19 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
        });
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, surv_count);
+    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off), surv_count);
 
-    pgaccel_free_input(d_pts, *q, surv_pts);
-    pgaccel_free_input(d_poly, *q, poly_coords);
-    if (ring_offsets && ring_count > 0)
-      pgaccel_free_input(d_rings, *q, ring_offsets);
-    else
-      pgaccel_free_input(d_rings, *q, &dummy_ring);
-    sycl::free(d_results, *q);
+    sycl::free(slab, *q);
+    slab = nullptr;
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
+    if (slab)
+      sycl::free(slab, *q);
     fprintf(stderr, "pgaccel: SYCL coop point_in_polygon failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
+    if (slab)
+      sycl::free(slab, *q);
     fprintf(stderr, "pgaccel: coop point_in_polygon failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }

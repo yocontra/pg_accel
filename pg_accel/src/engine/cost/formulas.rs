@@ -42,6 +42,76 @@ pub fn should_use_gpu(profile: &PlatformProfile, estimated_rows: usize, per_row_
     profile.has_gpu && estimated_rows >= device_limits().gpu_min_rows && per_row_cost > 0.01
 }
 
+/// Whether grouped GPU hash aggregation is below the temporary crash gate.
+///
+/// The gate is intentionally row-count only: the unsafe C++ sort-based
+/// hashagg branch starts around 100K rows and the 2026-05-13 run saw backend
+/// crashes at large grouped-agg scales. Keeping the predicate simple makes
+/// PostgreSQL native HashAgg the only candidate for the known unsafe lane
+/// without affecting plain reductions.
+#[must_use]
+#[inline]
+pub fn hashagg_input_rows_safe(input_rows: usize, limits: &DeviceLimits) -> bool {
+    input_rows < limits.gpu_hash_agg_unsafe_input_rows
+}
+
+/// Whether a GPU hashjoin cardinality is inside the temporary safe envelope.
+///
+/// Large build sides crashed at 100K+ rows, and 10M-output joins either
+/// crashed or lost badly. The build side is the inner relation used by the
+/// planner hook for GPU hash-table construction.
+#[must_use]
+#[inline]
+pub fn hashjoin_cardinality_safe(
+    build_rows: usize,
+    output_rows: usize,
+    limits: &DeviceLimits,
+) -> bool {
+    build_rows <= limits.gpu_hash_join_build_max_rows
+        && output_rows <= limits.gpu_join_max_output_rows
+}
+
+/// Conservative input cardinality for planner safety gates.
+///
+/// PostgreSQL may estimate `rel->rows` slightly below the physical input
+/// count after ANALYZE. Crash gates must use the larger of `rows` and
+/// `tuples` so a 100K-row relation does not slip under a `99999` safety cap
+/// due to sampling noise.
+#[must_use]
+#[inline]
+pub fn conservative_input_rows(rows: f64, tuples: f64) -> usize {
+    rows.max(tuples).max(0.0) as usize
+}
+
+/// Whether a sort path has a LIMIT and therefore avoids the known full-sort
+/// loser lane.
+///
+/// No-limit scalar GpuSort currently falls back to CPU sorting inside Custom
+/// Scan once the executor-side GPU element cap is exceeded, which caused the
+/// 10M full-sort losses observed on 2026-05-13. Limited/top-k shapes remain
+/// eligible.
+#[must_use]
+#[inline]
+pub fn sort_limit_present(limit_tuples: f64) -> bool {
+    limit_tuples.is_finite() && limit_tuples > 0.0
+}
+
+/// Whether a spatial polygon predicate avoids the narrow 100K-row crash band.
+///
+/// This only applies after the planner has confirmed a constant polygon
+/// vertex count; H3/raster/generic expression paths do not use it.
+#[must_use]
+#[inline]
+pub fn spatial_polygon_rows_safe(
+    input_rows: usize,
+    polygon_vertices: usize,
+    limits: &DeviceLimits,
+) -> bool {
+    !(input_rows >= limits.gpu_spatial_unsafe_band_min_rows
+        && input_rows <= limits.gpu_spatial_unsafe_band_max_rows
+        && polygon_vertices >= limits.gpu_spatial_unsafe_band_min_vertices)
+}
+
 /// Universal cost model for self-scanning Custom Scan paths (agg, sort, window).
 ///
 /// These paths scan a base relation directly (heap_getnext + arena copy),

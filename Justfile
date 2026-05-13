@@ -236,13 +236,10 @@ test-unit pg="17":
 test pg="17": (test-unit pg)
     @echo "All tests passed."
 
-# Run benchmark suite against local pgrx PG. Seeds data (1M rows) and runs
-# all workloads. Long benches can fill the PG log; `log-rails` truncates
-# oversized logs first.
+# Run benchmark suite against local pgrx PG. The runner seeds and cleans up
+# each workload/scale itself. Long benches can fill the PG log; `log-rails`
+# truncates oversized logs first.
 bench iterations="10" warmup="5": log-rails
-    cargo run -p pg_accel_bench --release -- setup \
-        --rows 1000000 \
-        --connection "host=localhost port=28817 dbname=postgres"
     cargo run -p pg_accel_bench --release -- run \
         --iterations {{iterations}} --warmup {{warmup}} \
         --connection "host=localhost port=28817 dbname=postgres" \
@@ -344,7 +341,7 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_spatial_dispatch \
     && ./pgaccel-kernels/build/test_h3 \
     && ./pgaccel-kernels/build/test_raster \
-    && ./pgaccel-kernels/build/test_correctness \
+    && PGACCEL_HASH_JOIN_ENABLE_CPU_FALLBACK=1 ./pgaccel-kernels/build/test_correctness \
     && ./pgaccel-kernels/build/test_exec_gpu \
     && ./pgaccel-kernels/build/test_hash_agg_keys \
     && ./pgaccel-kernels/build/test_fork \

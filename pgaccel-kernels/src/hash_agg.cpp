@@ -235,8 +235,8 @@ static inline bool null_sort_sentinel_collides(const void* group_keys,
 // are contiguous and supplied via `group_starts`/`group_ends` so the
 // kernel does NOT scan all rows for each group. For unsorted input
 // (`agg_hash` path) the kernel scans all rows once per group; this is
-// O(n*g) but n_groups is bounded by SORT_AGG_MIN_ROWS (100k) for the
-// hash path so the cross-product stays under ~1e10 ops, GPU-resident.
+// O(n*g), so large-row fallback is admitted only for low-cardinality
+// batches.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -274,6 +274,87 @@ inline size_t value_elem_size(int val_type) {
     default:
       return 0;
   }
+}
+
+inline bool checked_add_size(size_t a, size_t b, size_t* out) {
+  if (out == nullptr)
+    return false;
+  if (a > std::numeric_limits<size_t>::max() - b)
+    return false;
+  *out = a + b;
+  return true;
+}
+
+inline bool checked_mul_size(size_t a, size_t b, size_t* out) {
+  if (out == nullptr)
+    return false;
+  if (a != 0 && b > std::numeric_limits<size_t>::max() / a)
+    return false;
+  *out = a * b;
+  return true;
+}
+
+inline bool checked_align_up(size_t value, size_t alignment, size_t* out) {
+  if (out == nullptr || alignment == 0)
+    return false;
+  const size_t rem = value % alignment;
+  if (rem == 0) {
+    *out = value;
+    return true;
+  }
+  return checked_add_size(value, alignment - rem, out);
+}
+
+inline bool is_valid_agg_func(pgaccel_agg_func func) {
+  switch (func) {
+    case PGACCEL_AGG_SUM:
+    case PGACCEL_AGG_MIN:
+    case PGACCEL_AGG_MAX:
+    case PGACCEL_AGG_COUNT:
+    case PGACCEL_AGG_AVG:
+    case PGACCEL_AGG_STDDEV:
+    case PGACCEL_AGG_VAR:
+      return true;
+    default:
+      return false;
+  }
+}
+
+inline bool is_partial_only_agg_func(pgaccel_agg_func func) {
+  return func == PGACCEL_AGG_AVG || func == PGACCEL_AGG_STDDEV || func == PGACCEL_AGG_VAR;
+}
+
+inline bool agg_reads_value(pgaccel_agg_func func, size_t col_idx) {
+  return !(func == PGACCEL_AGG_COUNT && col_idx == SIZE_MAX);
+}
+
+bool hashagg_sort_based_available() {
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  return std::strcmp(caps.backend_name, "metal") != 0;
+}
+
+bool validate_hashagg_inputs(const void* group_keys, size_t row_count, int key_type,
+                             const void* const* value_cols, const int* value_types,
+                             const pgaccel_agg_col* agg_cols, size_t num_aggs, bool partial_mode) {
+  if (row_count == 0 || group_keys == nullptr || agg_cols == nullptr || value_types == nullptr ||
+      num_aggs == 0)
+    return false;
+  if (key_size_for_type(key_type) == 0)
+    return false;
+
+  for (size_t a = 0; a < num_aggs; ++a) {
+    const pgaccel_agg_func func = agg_cols[a].func;
+    if (!is_valid_agg_func(func))
+      return false;
+    if (!partial_mode && is_partial_only_agg_func(func))
+      return false;
+    if (value_elem_size(value_types[a]) == 0)
+      return false;
+    if (agg_reads_value(func, agg_cols[a].col_idx) &&
+        (value_cols == nullptr || value_cols[a] == nullptr))
+      return false;
+  }
+  return true;
 }
 
 inline val_read device_read_value_flat(const uint8_t* value_data, const uint8_t* null_data,
@@ -334,10 +415,6 @@ struct HashAggKernelSlabHeader {
   size_t out_counts_off;
 };
 
-inline size_t align_up(size_t value, size_t alignment) {
-  return (value + alignment - 1) & ~(alignment - 1);
-}
-
 uint8_t* make_hashagg_kernel_slab(sycl::queue& q, size_t n_groups, size_t row_count,
                                   size_t num_aggs, const uint32_t* indices,
                                   const size_t* group_starts, const size_t* group_ends,
@@ -367,94 +444,112 @@ bool run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
                              const int* value_types, const pgaccel_agg_func* agg_funcs,
                              const size_t* agg_col_idx, double* out_results, int64_t* out_counts) {
   const size_t row_count = n_groups > 0 ? group_ends[n_groups - 1] : 0;
+  size_t output_double_count = 0;
+  size_t output_bytes = 0;
+  size_t counts_bytes = 0;
+  if (!checked_mul_size(num_aggs, n_groups, &output_double_count) ||
+      !checked_mul_size(output_double_count, sizeof(double), &output_bytes) ||
+      !checked_mul_size(n_groups, sizeof(int64_t), &counts_bytes))
+    return false;
   uint8_t* slab = make_hashagg_kernel_slab(
       q, n_groups, row_count, num_aggs, indices, group_starts, group_ends, nullptr, value_data,
       value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
-      value_types, agg_funcs, agg_col_idx, nullptr, nullptr, num_aggs * n_groups);
+      value_types, agg_funcs, agg_col_idx, nullptr, nullptr, output_double_count);
   if (slab == nullptr)
     return false;
-  q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
-     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-     const auto* local_indices = reinterpret_cast<const uint32_t*>(slab + h->indices_off);
-     const auto* local_group_starts = reinterpret_cast<const size_t*>(slab + h->group_starts_off);
-     const auto* local_group_ends = reinterpret_cast<const size_t*>(slab + h->group_ends_off);
-     const uint8_t* local_value_data = slab + h->value_data_off;
-     const uint8_t* local_null_data = slab + h->null_data_off;
-     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
-     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
-     const uint8_t* local_null_present = slab + h->null_present_off;
-     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
-     const auto* local_agg_funcs =
-         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
-     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
-     auto* local_out_results = reinterpret_cast<double*>(slab + h->out_results_off);
-     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
-     const size_t g = id[0];
-     const size_t start = local_group_starts[g];
-     const size_t end = local_group_ends[g];
+  try {
+    q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+       const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+       const auto* local_indices = reinterpret_cast<const uint32_t*>(slab + h->indices_off);
+       const auto* local_group_starts = reinterpret_cast<const size_t*>(slab + h->group_starts_off);
+       const auto* local_group_ends = reinterpret_cast<const size_t*>(slab + h->group_ends_off);
+       const uint8_t* local_value_data = slab + h->value_data_off;
+       const uint8_t* local_null_data = slab + h->null_data_off;
+       const auto* local_value_offsets =
+           reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+       const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+       const uint8_t* local_null_present = slab + h->null_present_off;
+       const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+       const auto* local_agg_funcs =
+           reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+       const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+       auto* local_out_results = reinterpret_cast<double*>(slab + h->out_results_off);
+       auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
+       const size_t g = id[0];
+       const size_t start = local_group_starts[g];
+       const size_t end = local_group_ends[g];
 
-     int64_t cnt = 0;
+       int64_t cnt = 0;
 
-     for (size_t a = 0; a < h->num_aggs; ++a) {
-       const pgaccel_agg_func func = local_agg_funcs[a];
-       const size_t col = local_agg_col_idx[a];
-       const size_t voff = local_value_offsets[a];
-       const size_t noff = local_null_offsets[a];
-       const bool nullable = local_null_present[a] != 0;
-       const int vtype = local_value_types[a];
+       for (size_t a = 0; a < h->num_aggs; ++a) {
+         const pgaccel_agg_func func = local_agg_funcs[a];
+         const size_t col = local_agg_col_idx[a];
+         const size_t voff = local_value_offsets[a];
+         const size_t noff = local_null_offsets[a];
+         const bool nullable = local_null_present[a] != 0;
+         const int vtype = local_value_types[a];
 
-       double acc = 0.0;
-       if (func == PGACCEL_AGG_MIN)
-         acc = std::numeric_limits<double>::infinity();
-       else if (func == PGACCEL_AGG_MAX)
-         acc = -std::numeric_limits<double>::infinity();
+         double acc = 0.0;
+         if (func == PGACCEL_AGG_MIN)
+           acc = std::numeric_limits<double>::infinity();
+         else if (func == PGACCEL_AGG_MAX)
+           acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t i = start; i < end; ++i) {
-         const uint32_t r = local_indices[i];
-         // Bump count once per row (only on the first agg's pass).
-         if (a == 0)
-           ++cnt;
+         for (size_t i = start; i < end; ++i) {
+           const uint32_t r = local_indices[i];
+           // Bump count once per row (only on the first agg's pass).
+           if (a == 0)
+             ++cnt;
 
-         if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
-           acc += 1.0;
-           continue;
-         }
-
-         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
-                                              nullable, r, vtype);
-         if (vr.is_null)
-           continue;
-
-         switch (func) {
-           case PGACCEL_AGG_SUM:
-             acc += vr.value;
-             break;
-           case PGACCEL_AGG_MIN:
-             if (vr.value < acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_MAX:
-             if (vr.value > acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_COUNT:
+           if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
              acc += 1.0;
-             break;
-           case PGACCEL_AGG_AVG:
-           case PGACCEL_AGG_STDDEV:
-           case PGACCEL_AGG_VAR:
-             // Partial-mode-only functions are rejected by
-             // pgaccel_hash_agg_execute before this kernel launches.
-             break;
+             continue;
+           }
+
+           val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                                nullable, r, vtype);
+           if (vr.is_null)
+             continue;
+
+           switch (func) {
+             case PGACCEL_AGG_SUM:
+               acc += vr.value;
+               break;
+             case PGACCEL_AGG_MIN:
+               if (vr.value < acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_MAX:
+               if (vr.value > acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_COUNT:
+               acc += 1.0;
+               break;
+             case PGACCEL_AGG_AVG:
+             case PGACCEL_AGG_STDDEV:
+             case PGACCEL_AGG_VAR:
+               // Partial-mode-only functions are rejected by
+               // pgaccel_hash_agg_execute before this kernel launches.
+               break;
+           }
          }
+         local_out_results[a * h->n_groups + g] = acc;
        }
-       local_out_results[a * h->n_groups + g] = acc;
-     }
-     local_out_counts[g] = cnt;
-   }).wait_and_throw();
+       local_out_counts[g] = cnt;
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg sorted kernel failed: %s\n", e.what());
+    sycl::free(slab, q);
+    return false;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg sorted kernel failed (unknown)\n");
+    sycl::free(slab, q);
+    return false;
+  }
   const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-  std::memcpy(out_results, slab + h->out_results_off, num_aggs * n_groups * sizeof(double));
-  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  std::memcpy(out_results, slab + h->out_results_off, output_bytes);
+  std::memcpy(out_counts, slab + h->out_counts_off, counts_bytes);
   sycl::free(slab, q);
   return true;
 }
@@ -463,8 +558,7 @@ bool run_sorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
 // `row_to_group[r]` gives the group index for row `r` (or `SIZE_MAX` if
 // the row was not assigned). One work-item per group; each scans all
 // rows linearly to find the ones belonging to its group. Acceptable
-// when n_groups is small (the hash path runs only when row_count <
-// SORT_AGG_MIN_ROWS = 100k).
+// when n_groups is small; large-row fallback is capped before launch.
 bool run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count, size_t num_aggs,
                                const size_t* row_to_group, const uint8_t* value_data,
                                size_t value_data_bytes, const uint8_t* null_data,
@@ -473,90 +567,108 @@ bool run_unsorted_accum_kernel(sycl::queue& q, size_t n_groups, size_t row_count
                                const int* value_types, const pgaccel_agg_func* agg_funcs,
                                const size_t* agg_col_idx, double* out_results,
                                int64_t* out_counts) {
+  size_t output_double_count = 0;
+  size_t output_bytes = 0;
+  size_t counts_bytes = 0;
+  if (!checked_mul_size(num_aggs, n_groups, &output_double_count) ||
+      !checked_mul_size(output_double_count, sizeof(double), &output_bytes) ||
+      !checked_mul_size(n_groups, sizeof(int64_t), &counts_bytes))
+    return false;
   uint8_t* slab = make_hashagg_kernel_slab(
       q, n_groups, row_count, num_aggs, nullptr, nullptr, nullptr, row_to_group, value_data,
       value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
-      value_types, agg_funcs, agg_col_idx, nullptr, nullptr, num_aggs * n_groups);
+      value_types, agg_funcs, agg_col_idx, nullptr, nullptr, output_double_count);
   if (slab == nullptr)
     return false;
-  q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
-     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-     const auto* local_row_to_group = reinterpret_cast<const size_t*>(slab + h->row_to_group_off);
-     const uint8_t* local_value_data = slab + h->value_data_off;
-     const uint8_t* local_null_data = slab + h->null_data_off;
-     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
-     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
-     const uint8_t* local_null_present = slab + h->null_present_off;
-     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
-     const auto* local_agg_funcs =
-         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
-     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
-     auto* local_out_results = reinterpret_cast<double*>(slab + h->out_results_off);
-     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
-     const size_t g = id[0];
+  try {
+    q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+       const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+       const auto* local_row_to_group = reinterpret_cast<const size_t*>(slab + h->row_to_group_off);
+       const uint8_t* local_value_data = slab + h->value_data_off;
+       const uint8_t* local_null_data = slab + h->null_data_off;
+       const auto* local_value_offsets =
+           reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+       const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+       const uint8_t* local_null_present = slab + h->null_present_off;
+       const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+       const auto* local_agg_funcs =
+           reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+       const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+       auto* local_out_results = reinterpret_cast<double*>(slab + h->out_results_off);
+       auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
+       const size_t g = id[0];
 
-     int64_t cnt = 0;
+       int64_t cnt = 0;
 
-     for (size_t a = 0; a < h->num_aggs; ++a) {
-       const pgaccel_agg_func func = local_agg_funcs[a];
-       const size_t col = local_agg_col_idx[a];
-       const size_t voff = local_value_offsets[a];
-       const size_t noff = local_null_offsets[a];
-       const bool nullable = local_null_present[a] != 0;
-       const int vtype = local_value_types[a];
+       for (size_t a = 0; a < h->num_aggs; ++a) {
+         const pgaccel_agg_func func = local_agg_funcs[a];
+         const size_t col = local_agg_col_idx[a];
+         const size_t voff = local_value_offsets[a];
+         const size_t noff = local_null_offsets[a];
+         const bool nullable = local_null_present[a] != 0;
+         const int vtype = local_value_types[a];
 
-       double acc = 0.0;
-       if (func == PGACCEL_AGG_MIN)
-         acc = std::numeric_limits<double>::infinity();
-       else if (func == PGACCEL_AGG_MAX)
-         acc = -std::numeric_limits<double>::infinity();
+         double acc = 0.0;
+         if (func == PGACCEL_AGG_MIN)
+           acc = std::numeric_limits<double>::infinity();
+         else if (func == PGACCEL_AGG_MAX)
+           acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t r = 0; r < h->row_count; ++r) {
-         if (local_row_to_group[r] != g)
-           continue;
-         if (a == 0)
-           ++cnt;
+         for (size_t r = 0; r < h->row_count; ++r) {
+           if (local_row_to_group[r] != g)
+             continue;
+           if (a == 0)
+             ++cnt;
 
-         if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
-           acc += 1.0;
-           continue;
-         }
-
-         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
-                                              nullable, r, vtype);
-         if (vr.is_null)
-           continue;
-
-         switch (func) {
-           case PGACCEL_AGG_SUM:
-             acc += vr.value;
-             break;
-           case PGACCEL_AGG_MIN:
-             if (vr.value < acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_MAX:
-             if (vr.value > acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_COUNT:
+           if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
              acc += 1.0;
-             break;
-           case PGACCEL_AGG_AVG:
-           case PGACCEL_AGG_STDDEV:
-           case PGACCEL_AGG_VAR:
-             // Partial-mode-only functions are rejected by
-             // pgaccel_hash_agg_execute before this kernel launches.
-             break;
+             continue;
+           }
+
+           val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                                nullable, r, vtype);
+           if (vr.is_null)
+             continue;
+
+           switch (func) {
+             case PGACCEL_AGG_SUM:
+               acc += vr.value;
+               break;
+             case PGACCEL_AGG_MIN:
+               if (vr.value < acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_MAX:
+               if (vr.value > acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_COUNT:
+               acc += 1.0;
+               break;
+             case PGACCEL_AGG_AVG:
+             case PGACCEL_AGG_STDDEV:
+             case PGACCEL_AGG_VAR:
+               // Partial-mode-only functions are rejected by
+               // pgaccel_hash_agg_execute before this kernel launches.
+               break;
+           }
          }
+         local_out_results[a * h->n_groups + g] = acc;
        }
-       local_out_results[a * h->n_groups + g] = acc;
-     }
-     local_out_counts[g] = cnt;
-   }).wait_and_throw();
+       local_out_counts[g] = cnt;
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg unsorted kernel failed: %s\n", e.what());
+    sycl::free(slab, q);
+    return false;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg unsorted kernel failed (unknown)\n");
+    sycl::free(slab, q);
+    return false;
+  }
   const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-  std::memcpy(out_results, slab + h->out_results_off, num_aggs * n_groups * sizeof(double));
-  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  std::memcpy(out_results, slab + h->out_results_off, output_bytes);
+  std::memcpy(out_counts, slab + h->out_counts_off, counts_bytes);
   sycl::free(slab, q);
   return true;
 }
@@ -596,30 +708,74 @@ uint8_t* make_hashagg_kernel_slab(sycl::queue& q, size_t n_groups, size_t row_co
   h.row_count = row_count;
   h.num_aggs = num_aggs;
 
-  size_t cursor = align_up(sizeof(HashAggKernelSlabHeader), alignof(double));
+  size_t indices_bytes = 0;
+  size_t group_bounds_bytes = 0;
+  size_t row_to_group_bytes = 0;
+  size_t value_offsets_bytes = 0;
+  size_t null_offsets_bytes = 0;
+  size_t null_present_bytes = 0;
+  size_t value_types_bytes = 0;
+  size_t agg_funcs_bytes = 0;
+  size_t agg_col_idx_bytes = 0;
+  size_t agg_offsets_bytes = 0;
+  size_t agg_widths_bytes = 0;
+  size_t out_results_bytes = 0;
+  size_t out_counts_bytes = 0;
+  if ((indices && !checked_mul_size(row_count, sizeof(uint32_t), &indices_bytes)) ||
+      ((group_starts || group_ends) &&
+       !checked_mul_size(n_groups, sizeof(size_t), &group_bounds_bytes)) ||
+      (row_to_group && !checked_mul_size(row_count, sizeof(size_t), &row_to_group_bytes)) ||
+      !checked_mul_size(num_aggs, sizeof(size_t), &value_offsets_bytes) ||
+      !checked_mul_size(num_aggs, sizeof(size_t), &null_offsets_bytes) ||
+      !checked_mul_size(num_aggs, sizeof(uint8_t), &null_present_bytes) ||
+      !checked_mul_size(num_aggs, sizeof(int), &value_types_bytes) ||
+      !checked_mul_size(num_aggs, sizeof(pgaccel_agg_func), &agg_funcs_bytes) ||
+      !checked_mul_size(num_aggs, sizeof(size_t), &agg_col_idx_bytes) ||
+      (agg_offsets && !checked_mul_size(num_aggs, sizeof(size_t), &agg_offsets_bytes)) ||
+      (agg_widths && !checked_mul_size(num_aggs, sizeof(size_t), &agg_widths_bytes)) ||
+      !checked_mul_size(output_double_count, sizeof(double), &out_results_bytes) ||
+      !checked_mul_size(n_groups, sizeof(int64_t), &out_counts_bytes))
+    return nullptr;
+
+  size_t cursor = 0;
+  if (!checked_align_up(sizeof(HashAggKernelSlabHeader), alignof(double), &cursor))
+    return nullptr;
+  bool layout_ok = true;
   auto add = [&](size_t bytes, size_t alignment) {
-    cursor = align_up(cursor, alignment);
-    const size_t off = cursor;
-    cursor += bytes == 0 ? 1 : bytes;
+    size_t aligned = 0;
+    if (!checked_align_up(cursor, alignment, &aligned)) {
+      layout_ok = false;
+      return SIZE_MAX;
+    }
+    const size_t span = bytes == 0 ? 1 : bytes;
+    size_t next = 0;
+    if (!checked_add_size(aligned, span, &next)) {
+      layout_ok = false;
+      return SIZE_MAX;
+    }
+    cursor = next;
+    const size_t off = aligned;
     return off;
   };
 
-  h.indices_off = indices ? add(row_count * sizeof(uint32_t), alignof(uint32_t)) : SIZE_MAX;
-  h.group_starts_off = group_starts ? add(n_groups * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
-  h.group_ends_off = group_ends ? add(n_groups * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
-  h.row_to_group_off = row_to_group ? add(row_count * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
+  h.indices_off = indices ? add(indices_bytes, alignof(uint32_t)) : SIZE_MAX;
+  h.group_starts_off = group_starts ? add(group_bounds_bytes, alignof(size_t)) : SIZE_MAX;
+  h.group_ends_off = group_ends ? add(group_bounds_bytes, alignof(size_t)) : SIZE_MAX;
+  h.row_to_group_off = row_to_group ? add(row_to_group_bytes, alignof(size_t)) : SIZE_MAX;
   h.value_data_off = add(value_data_bytes, alignof(double));
   h.null_data_off = add(null_data_bytes, alignof(double));
-  h.value_offsets_off = add(num_aggs * sizeof(size_t), alignof(size_t));
-  h.null_offsets_off = add(num_aggs * sizeof(size_t), alignof(size_t));
-  h.null_present_off = add(num_aggs * sizeof(uint8_t), alignof(uint8_t));
-  h.value_types_off = add(num_aggs * sizeof(int), alignof(int));
-  h.agg_funcs_off = add(num_aggs * sizeof(pgaccel_agg_func), alignof(pgaccel_agg_func));
-  h.agg_col_idx_off = add(num_aggs * sizeof(size_t), alignof(size_t));
-  h.agg_offsets_off = agg_offsets ? add(num_aggs * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
-  h.agg_widths_off = agg_widths ? add(num_aggs * sizeof(size_t), alignof(size_t)) : SIZE_MAX;
-  h.out_results_off = add(output_double_count * sizeof(double), alignof(double));
-  h.out_counts_off = add(n_groups * sizeof(int64_t), alignof(int64_t));
+  h.value_offsets_off = add(value_offsets_bytes, alignof(size_t));
+  h.null_offsets_off = add(null_offsets_bytes, alignof(size_t));
+  h.null_present_off = add(null_present_bytes, alignof(uint8_t));
+  h.value_types_off = add(value_types_bytes, alignof(int));
+  h.agg_funcs_off = add(agg_funcs_bytes, alignof(pgaccel_agg_func));
+  h.agg_col_idx_off = add(agg_col_idx_bytes, alignof(size_t));
+  h.agg_offsets_off = agg_offsets ? add(agg_offsets_bytes, alignof(size_t)) : SIZE_MAX;
+  h.agg_widths_off = agg_widths ? add(agg_widths_bytes, alignof(size_t)) : SIZE_MAX;
+  h.out_results_off = add(out_results_bytes, alignof(double));
+  h.out_counts_off = add(out_counts_bytes, alignof(int64_t));
+  if (!layout_ok)
+    return nullptr;
 
   uint8_t* slab = sycl::malloc_shared<uint8_t>(cursor, q);
   if (slab == nullptr)
@@ -631,20 +787,20 @@ uint8_t* make_hashagg_kernel_slab(sycl::queue& q, size_t n_groups, size_t row_co
     if (off != SIZE_MAX && src != nullptr && bytes > 0)
       std::memcpy(slab + off, src, bytes);
   };
-  copy_region(h.indices_off, indices, row_count * sizeof(uint32_t));
-  copy_region(h.group_starts_off, group_starts, n_groups * sizeof(size_t));
-  copy_region(h.group_ends_off, group_ends, n_groups * sizeof(size_t));
-  copy_region(h.row_to_group_off, row_to_group, row_count * sizeof(size_t));
+  copy_region(h.indices_off, indices, indices_bytes);
+  copy_region(h.group_starts_off, group_starts, group_bounds_bytes);
+  copy_region(h.group_ends_off, group_ends, group_bounds_bytes);
+  copy_region(h.row_to_group_off, row_to_group, row_to_group_bytes);
   copy_region(h.value_data_off, value_data, value_data_bytes);
   copy_region(h.null_data_off, null_data, null_data_bytes);
-  copy_region(h.value_offsets_off, value_offsets, num_aggs * sizeof(size_t));
-  copy_region(h.null_offsets_off, null_offsets, num_aggs * sizeof(size_t));
-  copy_region(h.null_present_off, null_present, num_aggs * sizeof(uint8_t));
-  copy_region(h.value_types_off, value_types, num_aggs * sizeof(int));
-  copy_region(h.agg_funcs_off, agg_funcs, num_aggs * sizeof(pgaccel_agg_func));
-  copy_region(h.agg_col_idx_off, agg_col_idx, num_aggs * sizeof(size_t));
-  copy_region(h.agg_offsets_off, agg_offsets, num_aggs * sizeof(size_t));
-  copy_region(h.agg_widths_off, agg_widths, num_aggs * sizeof(size_t));
+  copy_region(h.value_offsets_off, value_offsets, value_offsets_bytes);
+  copy_region(h.null_offsets_off, null_offsets, null_offsets_bytes);
+  copy_region(h.null_present_off, null_present, null_present_bytes);
+  copy_region(h.value_types_off, value_types, value_types_bytes);
+  copy_region(h.agg_funcs_off, agg_funcs, agg_funcs_bytes);
+  copy_region(h.agg_col_idx_off, agg_col_idx, agg_col_idx_bytes);
+  copy_region(h.agg_offsets_off, agg_offsets, agg_offsets_bytes);
+  copy_region(h.agg_widths_off, agg_widths, agg_widths_bytes);
   return slab;
 }
 
@@ -657,110 +813,126 @@ bool run_unsorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t row_cou
                                  const size_t* agg_col_idx, const size_t* agg_offsets,
                                  const size_t* agg_widths, double* out_partials,
                                  int64_t* out_counts, size_t total_partials) {
+  size_t output_bytes = 0;
+  size_t counts_bytes = 0;
+  if (!checked_mul_size(total_partials, sizeof(double), &output_bytes) ||
+      !checked_mul_size(n_groups, sizeof(int64_t), &counts_bytes))
+    return false;
   uint8_t* slab = make_hashagg_kernel_slab(
       q, n_groups, row_count, num_aggs, nullptr, nullptr, nullptr, row_to_group, value_data,
       value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
       value_types, agg_funcs, agg_col_idx, agg_offsets, agg_widths, total_partials);
   if (slab == nullptr)
     return false;
-  q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
-     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-     const auto* local_row_to_group = reinterpret_cast<const size_t*>(slab + h->row_to_group_off);
-     const uint8_t* local_value_data = slab + h->value_data_off;
-     const uint8_t* local_null_data = slab + h->null_data_off;
-     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
-     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
-     const uint8_t* local_null_present = slab + h->null_present_off;
-     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
-     const auto* local_agg_funcs =
-         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
-     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
-     const auto* local_agg_offsets = reinterpret_cast<const size_t*>(slab + h->agg_offsets_off);
-     const auto* local_agg_widths = reinterpret_cast<const size_t*>(slab + h->agg_widths_off);
-     auto* local_out_partials = reinterpret_cast<double*>(slab + h->out_results_off);
-     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
-     const size_t g = id[0];
-     int64_t cnt = 0;
+  try {
+    q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+       const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+       const auto* local_row_to_group = reinterpret_cast<const size_t*>(slab + h->row_to_group_off);
+       const uint8_t* local_value_data = slab + h->value_data_off;
+       const uint8_t* local_null_data = slab + h->null_data_off;
+       const auto* local_value_offsets =
+           reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+       const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+       const uint8_t* local_null_present = slab + h->null_present_off;
+       const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+       const auto* local_agg_funcs =
+           reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+       const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+       const auto* local_agg_offsets = reinterpret_cast<const size_t*>(slab + h->agg_offsets_off);
+       const auto* local_agg_widths = reinterpret_cast<const size_t*>(slab + h->agg_widths_off);
+       auto* local_out_partials = reinterpret_cast<double*>(slab + h->out_results_off);
+       auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
+       const size_t g = id[0];
+       int64_t cnt = 0;
 
-     for (size_t a = 0; a < h->num_aggs; ++a) {
-       const pgaccel_agg_func func = local_agg_funcs[a];
-       const size_t col = local_agg_col_idx[a];
-       const size_t voff = local_value_offsets[a];
-       const size_t noff = local_null_offsets[a];
-       const bool nullable = local_null_present[a] != 0;
-       const int vtype = local_value_types[a];
-       const size_t off = local_agg_offsets[a];
-       const size_t width = local_agg_widths[a];
+       for (size_t a = 0; a < h->num_aggs; ++a) {
+         const pgaccel_agg_func func = local_agg_funcs[a];
+         const size_t col = local_agg_col_idx[a];
+         const size_t voff = local_value_offsets[a];
+         const size_t noff = local_null_offsets[a];
+         const bool nullable = local_null_present[a] != 0;
+         const int vtype = local_value_types[a];
+         const size_t off = local_agg_offsets[a];
+         const size_t width = local_agg_widths[a];
 
-       double acc = 0.0;
-       double sum_sq = 0.0;
-       int64_t non_null_count = 0;
-       if (func == PGACCEL_AGG_MIN)
-         acc = std::numeric_limits<double>::infinity();
-       else if (func == PGACCEL_AGG_MAX)
-         acc = -std::numeric_limits<double>::infinity();
+         double acc = 0.0;
+         double sum_sq = 0.0;
+         int64_t non_null_count = 0;
+         if (func == PGACCEL_AGG_MIN)
+           acc = std::numeric_limits<double>::infinity();
+         else if (func == PGACCEL_AGG_MAX)
+           acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t r = 0; r < h->row_count; ++r) {
-         if (local_row_to_group[r] != g)
-           continue;
-         if (a == 0)
-           ++cnt;
+         for (size_t r = 0; r < h->row_count; ++r) {
+           if (local_row_to_group[r] != g)
+             continue;
+           if (a == 0)
+             ++cnt;
 
-         if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
-           acc += 1.0;
-           continue;
-         }
-
-         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
-                                              nullable, r, vtype);
-         if (vr.is_null)
-           continue;
-         ++non_null_count;
-
-         switch (func) {
-           case PGACCEL_AGG_SUM:
-             acc += vr.value;
-             break;
-           case PGACCEL_AGG_MIN:
-             if (vr.value < acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_MAX:
-             if (vr.value > acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_COUNT:
+           if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
              acc += 1.0;
-             break;
-           case PGACCEL_AGG_AVG:
-             acc += vr.value;
-             break;
-           case PGACCEL_AGG_STDDEV:
-           case PGACCEL_AGG_VAR:
-             acc += vr.value;
-             sum_sq += vr.value * vr.value;
-             break;
+             continue;
+           }
+
+           val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                                nullable, r, vtype);
+           if (vr.is_null)
+             continue;
+           ++non_null_count;
+
+           switch (func) {
+             case PGACCEL_AGG_SUM:
+               acc += vr.value;
+               break;
+             case PGACCEL_AGG_MIN:
+               if (vr.value < acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_MAX:
+               if (vr.value > acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_COUNT:
+               acc += 1.0;
+               break;
+             case PGACCEL_AGG_AVG:
+               acc += vr.value;
+               break;
+             case PGACCEL_AGG_STDDEV:
+             case PGACCEL_AGG_VAR:
+               acc += vr.value;
+               sum_sq += vr.value * vr.value;
+               break;
+           }
+         }
+
+         // Write per-agg lanes for this group.
+         double* base = local_out_partials + off + g * width;
+         if (width == 1) {
+           base[0] = acc;
+         } else if (width == 2) {
+           base[0] = static_cast<double>(non_null_count);
+           base[1] = acc;
+         } else if (width == 3) {
+           base[0] = static_cast<double>(non_null_count);
+           base[1] = acc;
+           base[2] = sum_sq;
          }
        }
-
-       // Write per-agg lanes for this group.
-       double* base = local_out_partials + off + g * width;
-       if (width == 1) {
-         base[0] = acc;
-       } else if (width == 2) {
-         base[0] = static_cast<double>(non_null_count);
-         base[1] = acc;
-       } else if (width == 3) {
-         base[0] = static_cast<double>(non_null_count);
-         base[1] = acc;
-         base[2] = sum_sq;
-       }
-     }
-     local_out_counts[g] = cnt;
-   }).wait_and_throw();
+       local_out_counts[g] = cnt;
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg partial unsorted kernel failed: %s\n", e.what());
+    sycl::free(slab, q);
+    return false;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg partial unsorted kernel failed (unknown)\n");
+    sycl::free(slab, q);
+    return false;
+  }
   const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-  std::memcpy(out_partials, slab + h->out_results_off, total_partials * sizeof(double));
-  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  std::memcpy(out_partials, slab + h->out_results_off, output_bytes);
+  std::memcpy(out_counts, slab + h->out_counts_off, counts_bytes);
   sycl::free(slab, q);
   return true;
 }
@@ -776,113 +948,129 @@ bool run_sorted_partial_kernel(sycl::queue& q, size_t n_groups, size_t num_aggs,
                                const size_t* agg_widths, double* out_partials, int64_t* out_counts,
                                size_t total_partials) {
   const size_t row_count = n_groups > 0 ? group_ends[n_groups - 1] : 0;
+  size_t output_bytes = 0;
+  size_t counts_bytes = 0;
+  if (!checked_mul_size(total_partials, sizeof(double), &output_bytes) ||
+      !checked_mul_size(n_groups, sizeof(int64_t), &counts_bytes))
+    return false;
   uint8_t* slab = make_hashagg_kernel_slab(
       q, n_groups, row_count, num_aggs, indices, group_starts, group_ends, nullptr, value_data,
       value_data_bytes, null_data, null_data_bytes, value_offsets, null_offsets, null_present,
       value_types, agg_funcs, agg_col_idx, agg_offsets, agg_widths, total_partials);
   if (slab == nullptr)
     return false;
-  q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
-     const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-     const auto* local_indices = reinterpret_cast<const uint32_t*>(slab + h->indices_off);
-     const auto* local_group_starts = reinterpret_cast<const size_t*>(slab + h->group_starts_off);
-     const auto* local_group_ends = reinterpret_cast<const size_t*>(slab + h->group_ends_off);
-     const uint8_t* local_value_data = slab + h->value_data_off;
-     const uint8_t* local_null_data = slab + h->null_data_off;
-     const auto* local_value_offsets = reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
-     const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
-     const uint8_t* local_null_present = slab + h->null_present_off;
-     const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
-     const auto* local_agg_funcs =
-         reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
-     const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
-     const auto* local_agg_offsets = reinterpret_cast<const size_t*>(slab + h->agg_offsets_off);
-     const auto* local_agg_widths = reinterpret_cast<const size_t*>(slab + h->agg_widths_off);
-     auto* local_out_partials = reinterpret_cast<double*>(slab + h->out_results_off);
-     auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
-     const size_t g = id[0];
-     const size_t start = local_group_starts[g];
-     const size_t end = local_group_ends[g];
+  try {
+    q.parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+       const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
+       const auto* local_indices = reinterpret_cast<const uint32_t*>(slab + h->indices_off);
+       const auto* local_group_starts = reinterpret_cast<const size_t*>(slab + h->group_starts_off);
+       const auto* local_group_ends = reinterpret_cast<const size_t*>(slab + h->group_ends_off);
+       const uint8_t* local_value_data = slab + h->value_data_off;
+       const uint8_t* local_null_data = slab + h->null_data_off;
+       const auto* local_value_offsets =
+           reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+       const auto* local_null_offsets = reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+       const uint8_t* local_null_present = slab + h->null_present_off;
+       const auto* local_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+       const auto* local_agg_funcs =
+           reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+       const auto* local_agg_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+       const auto* local_agg_offsets = reinterpret_cast<const size_t*>(slab + h->agg_offsets_off);
+       const auto* local_agg_widths = reinterpret_cast<const size_t*>(slab + h->agg_widths_off);
+       auto* local_out_partials = reinterpret_cast<double*>(slab + h->out_results_off);
+       auto* local_out_counts = reinterpret_cast<int64_t*>(slab + h->out_counts_off);
+       const size_t g = id[0];
+       const size_t start = local_group_starts[g];
+       const size_t end = local_group_ends[g];
 
-     int64_t cnt = 0;
+       int64_t cnt = 0;
 
-     for (size_t a = 0; a < h->num_aggs; ++a) {
-       const pgaccel_agg_func func = local_agg_funcs[a];
-       const size_t col = local_agg_col_idx[a];
-       const size_t voff = local_value_offsets[a];
-       const size_t noff = local_null_offsets[a];
-       const bool nullable = local_null_present[a] != 0;
-       const int vtype = local_value_types[a];
-       const size_t off = local_agg_offsets[a];
-       const size_t width = local_agg_widths[a];
+       for (size_t a = 0; a < h->num_aggs; ++a) {
+         const pgaccel_agg_func func = local_agg_funcs[a];
+         const size_t col = local_agg_col_idx[a];
+         const size_t voff = local_value_offsets[a];
+         const size_t noff = local_null_offsets[a];
+         const bool nullable = local_null_present[a] != 0;
+         const int vtype = local_value_types[a];
+         const size_t off = local_agg_offsets[a];
+         const size_t width = local_agg_widths[a];
 
-       double acc = 0.0;
-       double sum_sq = 0.0;
-       int64_t non_null_count = 0;
-       if (func == PGACCEL_AGG_MIN)
-         acc = std::numeric_limits<double>::infinity();
-       else if (func == PGACCEL_AGG_MAX)
-         acc = -std::numeric_limits<double>::infinity();
+         double acc = 0.0;
+         double sum_sq = 0.0;
+         int64_t non_null_count = 0;
+         if (func == PGACCEL_AGG_MIN)
+           acc = std::numeric_limits<double>::infinity();
+         else if (func == PGACCEL_AGG_MAX)
+           acc = -std::numeric_limits<double>::infinity();
 
-       for (size_t i = start; i < end; ++i) {
-         const uint32_t r = local_indices[i];
-         if (a == 0)
-           ++cnt;
+         for (size_t i = start; i < end; ++i) {
+           const uint32_t r = local_indices[i];
+           if (a == 0)
+             ++cnt;
 
-         if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
-           acc += 1.0;
-           continue;
-         }
-
-         val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
-                                              nullable, r, vtype);
-         if (vr.is_null)
-           continue;
-         ++non_null_count;
-
-         switch (func) {
-           case PGACCEL_AGG_SUM:
-             acc += vr.value;
-             break;
-           case PGACCEL_AGG_MIN:
-             if (vr.value < acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_MAX:
-             if (vr.value > acc)
-               acc = vr.value;
-             break;
-           case PGACCEL_AGG_COUNT:
+           if (func == PGACCEL_AGG_COUNT && col == SIZE_MAX) {
              acc += 1.0;
-             break;
-           case PGACCEL_AGG_AVG:
-             acc += vr.value;
-             break;
-           case PGACCEL_AGG_STDDEV:
-           case PGACCEL_AGG_VAR:
-             acc += vr.value;
-             sum_sq += vr.value * vr.value;
-             break;
+             continue;
+           }
+
+           val_read vr = device_read_value_flat(local_value_data, local_null_data, voff, noff,
+                                                nullable, r, vtype);
+           if (vr.is_null)
+             continue;
+           ++non_null_count;
+
+           switch (func) {
+             case PGACCEL_AGG_SUM:
+               acc += vr.value;
+               break;
+             case PGACCEL_AGG_MIN:
+               if (vr.value < acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_MAX:
+               if (vr.value > acc)
+                 acc = vr.value;
+               break;
+             case PGACCEL_AGG_COUNT:
+               acc += 1.0;
+               break;
+             case PGACCEL_AGG_AVG:
+               acc += vr.value;
+               break;
+             case PGACCEL_AGG_STDDEV:
+             case PGACCEL_AGG_VAR:
+               acc += vr.value;
+               sum_sq += vr.value * vr.value;
+               break;
+           }
+         }
+
+         double* base = local_out_partials + off + g * width;
+         if (width == 1) {
+           base[0] = acc;
+         } else if (width == 2) {
+           base[0] = static_cast<double>(non_null_count);
+           base[1] = acc;
+         } else if (width == 3) {
+           base[0] = static_cast<double>(non_null_count);
+           base[1] = acc;
+           base[2] = sum_sq;
          }
        }
-
-       double* base = local_out_partials + off + g * width;
-       if (width == 1) {
-         base[0] = acc;
-       } else if (width == 2) {
-         base[0] = static_cast<double>(non_null_count);
-         base[1] = acc;
-       } else if (width == 3) {
-         base[0] = static_cast<double>(non_null_count);
-         base[1] = acc;
-         base[2] = sum_sq;
-       }
-     }
-     local_out_counts[g] = cnt;
-   }).wait_and_throw();
+       local_out_counts[g] = cnt;
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg partial sorted kernel failed: %s\n", e.what());
+    sycl::free(slab, q);
+    return false;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg partial sorted kernel failed (unknown)\n");
+    sycl::free(slab, q);
+    return false;
+  }
   const auto* h = reinterpret_cast<const HashAggKernelSlabHeader*>(slab);
-  std::memcpy(out_partials, slab + h->out_results_off, total_partials * sizeof(double));
-  std::memcpy(out_counts, slab + h->out_counts_off, n_groups * sizeof(int64_t));
+  std::memcpy(out_partials, slab + h->out_results_off, output_bytes);
+  std::memcpy(out_counts, slab + h->out_counts_off, counts_bytes);
   sycl::free(slab, q);
   return true;
 }
@@ -934,8 +1122,11 @@ StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_a
   s->d_value_types = sycl::malloc_shared<int>(num_aggs, q);
   s->d_funcs = sycl::malloc_shared<pgaccel_agg_func>(num_aggs, q);
   s->d_col_idx = sycl::malloc_shared<size_t>(num_aggs, q);
-  if (!s->d_value_offsets || !s->d_null_offsets || !s->d_null_present || !s->d_value_types ||
-      !s->d_funcs || !s->d_col_idx) {
+  auto fail = [&]() {
+    if (s->d_value_data)
+      sycl::free(s->d_value_data, q);
+    if (s->d_null_data)
+      sycl::free(s->d_null_data, q);
     if (s->d_value_offsets)
       sycl::free(s->d_value_offsets, q);
     if (s->d_null_offsets)
@@ -949,7 +1140,11 @@ StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_a
     if (s->d_col_idx)
       sycl::free(s->d_col_idx, q);
     delete s;
-    return nullptr;
+    return static_cast<StagedColumnArrays*>(nullptr);
+  };
+  if (!s->d_value_offsets || !s->d_null_offsets || !s->d_null_present || !s->d_value_types ||
+      !s->d_funcs || !s->d_col_idx) {
+    return fail();
   }
 
   // Compute per-agg byte offsets and total flat-buffer sizes.
@@ -961,17 +1156,26 @@ StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_a
     s->d_col_idx[a] = agg_cols[a].col_idx;
 
     const size_t elem_size = value_elem_size(value_types[a]);
-    if (value_cols[a] == nullptr || elem_size == 0) {
+    const void* value_col = value_cols != nullptr ? value_cols[a] : nullptr;
+    if (value_col == nullptr || elem_size == 0) {
       s->d_value_offsets[a] = SIZE_MAX;  // sentinel — kernel must not read
     } else {
+      size_t value_bytes = 0;
+      size_t next_total = 0;
+      if (!checked_mul_size(row_count, elem_size, &value_bytes) ||
+          !checked_add_size(value_total, value_bytes, &next_total))
+        return fail();
       s->d_value_offsets[a] = value_total;
-      value_total += row_count * elem_size;
+      value_total = next_total;
     }
 
     if (value_nulls != nullptr && value_nulls[a] != nullptr) {
+      size_t next_total = 0;
+      if (!checked_add_size(null_total, row_count, &next_total))
+        return fail();
       s->d_null_present[a] = 1;
       s->d_null_offsets[a] = null_total;
-      null_total += row_count;  // 1 byte per row
+      null_total = next_total;  // 1 byte per row
     } else {
       s->d_null_present[a] = 0;
       s->d_null_offsets[a] = SIZE_MAX;
@@ -984,18 +1188,7 @@ StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_a
   s->d_value_data = sycl::malloc_shared<uint8_t>(s->value_data_bytes, q);
   s->d_null_data = sycl::malloc_shared<uint8_t>(s->null_data_bytes, q);
   if (!s->d_value_data || !s->d_null_data) {
-    if (s->d_value_data)
-      sycl::free(s->d_value_data, q);
-    if (s->d_null_data)
-      sycl::free(s->d_null_data, q);
-    sycl::free(s->d_value_offsets, q);
-    sycl::free(s->d_null_offsets, q);
-    sycl::free(s->d_null_present, q);
-    sycl::free(s->d_value_types, q);
-    sycl::free(s->d_funcs, q);
-    sycl::free(s->d_col_idx, q);
-    delete s;
-    return nullptr;
+    return fail();
   }
 
   // Memcpy each per-agg slab into the flat buffer at its offset.
@@ -1003,7 +1196,13 @@ StagedColumnArrays* stage_columns(sycl::queue& q, size_t row_count, size_t num_a
     const size_t voff = s->d_value_offsets[a];
     if (voff != SIZE_MAX) {
       const size_t elem_size = value_elem_size(value_types[a]);
-      std::memcpy(s->d_value_data + voff, value_cols[a], row_count * elem_size);
+      size_t value_bytes = 0;
+      if (!checked_mul_size(row_count, elem_size, &value_bytes))
+        return fail();
+      const void* value_col = value_cols != nullptr ? value_cols[a] : nullptr;
+      if (value_col == nullptr)
+        return fail();
+      std::memcpy(s->d_value_data + voff, value_col, value_bytes);
     }
     if (s->d_null_present[a]) {
       std::memcpy(s->d_null_data + s->d_null_offsets[a], value_nulls[a], row_count);
@@ -1036,6 +1235,16 @@ void free_staged_columns(sycl::queue& q, StagedColumnArrays* s, size_t /*num_agg
 }
 
 }  // namespace
+
+/// Minimum rows to consider the sort-based path. Metal currently bypasses
+/// that path because AdaptiveCpp can abort the process during argument-buffer
+/// validation before C++ error handling can run.
+static constexpr size_t SORT_AGG_MIN_ROWS = 100000;
+
+/// If a large batch cannot use the sort path, the hash fallback still uses
+/// the current per-group linear scan kernel. Keep that fallback to
+/// low-cardinality cases and return NULL for high-cardinality large batches.
+static constexpr size_t HASH_AGG_MAX_LARGE_UNSORTED_GROUPS = 4096;
 
 // ---------------------------------------------------------------------------
 // Hash-based grouped aggregation (host-side group assignment + GPU
@@ -1102,6 +1311,15 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
     }
   }
 
+  if (row_count >= SORT_AGG_MIN_ROWS && n_groups > HASH_AGG_MAX_LARGE_UNSORTED_GROUPS) {
+    std::fprintf(stderr,
+                 "pgaccel: hash_agg large unsorted fallback rejected "
+                 "(rows=%zu groups=%zu)\n",
+                 row_count, n_groups);
+    sycl::free(row_to_group, *q);
+    return nullptr;
+  }
+
   // -- Phase 2 (SYCL kernel): per-group accumulation. Stage value
   // columns into shared memory and dispatch one work-item per group.
   StagedColumnArrays* sc =
@@ -1111,7 +1329,14 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
     return nullptr;
   }
 
-  double* d_results = sycl::malloc_shared<double>(num_aggs * n_groups, *q);
+  size_t result_count = 0;
+  if (!checked_mul_size(num_aggs, n_groups, &result_count)) {
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(row_to_group, *q);
+    return nullptr;
+  }
+
+  double* d_results = sycl::malloc_shared<double>(result_count, *q);
   int64_t* d_counts = sycl::malloc_shared<int64_t>(n_groups, *q);
   if (d_results == nullptr || d_counts == nullptr) {
     if (d_results)
@@ -1166,13 +1391,6 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
 // Sort-based grouped aggregation (GPU sort + SYCL per-group reduce).
 // ---------------------------------------------------------------------------
 
-/// Minimum rows to use sort-based path. The sort path is GPU-parallel
-/// with O(n) work; the hash path's per-group linear-scan kernel is
-/// O(n*g) so degrades on high-cardinality. For small N the
-/// hash overhead is dominated by host hash-map operations either
-/// way, so we still pick sort-based when N is large.
-static constexpr size_t SORT_AGG_MIN_ROWS = 100000;
-
 static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* group_null_mask,
                                          size_t row_count, int key_type,
                                          const void* const* value_cols,
@@ -1184,6 +1402,8 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
 
   size_t ksz = key_size_for_type(key_type);
   if (ksz == 0)
+    return nullptr;
+  if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return nullptr;
   if (null_sort_sentinel_collides(group_keys, group_null_mask, row_count, key_type))
     return nullptr;
@@ -1306,7 +1526,16 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
     return nullptr;
   }
 
-  double* d_results = sycl::malloc_shared<double>(num_aggs * n_groups, *q);
+  size_t result_count = 0;
+  if (!checked_mul_size(num_aggs, n_groups, &result_count)) {
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(indices, *q);
+    return nullptr;
+  }
+
+  double* d_results = sycl::malloc_shared<double>(result_count, *q);
   int64_t* d_counts = sycl::malloc_shared<int64_t>(n_groups, *q);
   if (d_results == nullptr || d_counts == nullptr) {
     if (d_results)
@@ -1351,7 +1580,18 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
   state->num_aggs = num_aggs;
 
   // Build group key buffer (one key per group from first row).
-  state->group_key_buf.resize(n_groups * ksz);
+  size_t group_key_bytes = 0;
+  if (!checked_mul_size(n_groups, ksz, &group_key_bytes)) {
+    sycl::free(d_results, *q);
+    sycl::free(d_counts, *q);
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(indices, *q);
+    delete state;
+    return nullptr;
+  }
+  state->group_key_buf.resize(group_key_bytes);
   for (size_t g = 0; g < n_groups; ++g) {
     uint32_t orig_row = indices[d_group_starts[g]];
     if (has_null_group && g == n_groups - 1) {
@@ -1402,7 +1642,10 @@ bool compute_partial_layout(const pgaccel_agg_col* agg_cols, size_t num_aggs, si
     offsets[a] = total;
     if (widths[a] == 0)
       return false;
-    total += widths[a] * n_groups;
+    size_t agg_group_width = 0;
+    if (!checked_mul_size(widths[a], n_groups, &agg_group_width) ||
+        !checked_add_size(total, agg_group_width, &total))
+      return false;
   }
   return true;
 }
@@ -1464,6 +1707,15 @@ agg_hash_partial(const void* group_keys, const uint8_t* group_null_mask, size_t 
       const uint8_t* kb = static_cast<const uint8_t*>(group_keys) + r * ksz;
       group_key_buf.insert(group_key_buf.end(), kb, kb + ksz);
     }
+  }
+
+  if (row_count >= SORT_AGG_MIN_ROWS && n_groups > HASH_AGG_MAX_LARGE_UNSORTED_GROUPS) {
+    std::fprintf(stderr,
+                 "pgaccel: hash_agg partial large unsorted fallback rejected "
+                 "(rows=%zu groups=%zu)\n",
+                 row_count, n_groups);
+    sycl::free(row_to_group, *q);
+    return nullptr;
   }
 
   // Per-agg width / offset layout.
@@ -1566,6 +1818,8 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
 
   size_t ksz = key_size_for_type(key_type);
   if (ksz == 0)
+    return nullptr;
+  if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return nullptr;
   if (null_sort_sentinel_collides(group_keys, group_null_mask, row_count, key_type))
     return nullptr;
@@ -1744,7 +1998,20 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
   state->group_count = n_groups;
   state->num_aggs = num_aggs;
 
-  state->group_key_buf.resize(n_groups * ksz);
+  size_t group_key_bytes = 0;
+  if (!checked_mul_size(n_groups, ksz, &group_key_bytes)) {
+    sycl::free(d_widths, *q);
+    sycl::free(d_offsets, *q);
+    sycl::free(d_partials, *q);
+    sycl::free(d_counts, *q);
+    free_staged_columns(*q, sc, num_aggs);
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(indices, *q);
+    delete state;
+    return nullptr;
+  }
+  state->group_key_buf.resize(group_key_bytes);
   for (size_t g = 0; g < n_groups; ++g) {
     uint32_t orig_row = indices[d_group_starts[g]];
     if (has_null_group && g == n_groups - 1) {
@@ -1788,19 +2055,15 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
                                             const uint8_t* const* value_nulls,
                                             const int* value_types, const pgaccel_agg_col* agg_cols,
                                             size_t num_aggs) {
-  if (row_count == 0 || agg_cols == nullptr)
+  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
+                               num_aggs, false))
     return nullptr;
-  for (size_t a = 0; a < num_aggs; ++a) {
-    if (agg_cols[a].func == PGACCEL_AGG_AVG || agg_cols[a].func == PGACCEL_AGG_STDDEV ||
-        agg_cols[a].func == PGACCEL_AGG_VAR) {
-      return nullptr;
-    }
-  }
 
-  // Use sort-based path for large datasets (GPU-parallel sort + SYCL
-  // per-group reduce). Falls back to hash path on sort failure.
+  // Use sort-based path for large datasets except on Metal, where the
+  // AdaptiveCpp backend can abort the process while validating sort/hashagg
+  // argument buffers. Fallback returns NULL for high-cardinality large batches.
   try {
-    if (row_count >= SORT_AGG_MIN_ROWS) {
+    if (row_count >= SORT_AGG_MIN_ROWS && hashagg_sort_based_available()) {
       pgaccel_agg_state* st =
           agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
                          value_types, agg_cols, num_aggs);
@@ -1843,11 +2106,12 @@ pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_nu
                                  size_t row_count, int key_type, const void* const* value_cols,
                                  const uint8_t* const* value_nulls, const int* value_types,
                                  const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  if (row_count == 0 || agg_cols == nullptr)
+  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
+                               num_aggs, true))
     return nullptr;
 
   try {
-    if (row_count >= SORT_AGG_MIN_ROWS) {
+    if (row_count >= SORT_AGG_MIN_ROWS && hashagg_sort_based_available()) {
       pgaccel_agg_state* st =
           agg_sort_based_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
                                  value_nulls, value_types, agg_cols, num_aggs);

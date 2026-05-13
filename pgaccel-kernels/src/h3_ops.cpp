@@ -3,8 +3,23 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 #include "pgaccel_ffi.h"
+
+// SAFETY: g_queue is owned by device_manager.cpp. All H3 kernels share it so
+// pgaccel_shutdown() tears down one Metal context for the process.
+extern sycl::queue* g_queue;
+
+static sycl::queue& get_queue() {
+  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
+    throw std::runtime_error("pgaccel_init failed");
+  }
+  if (g_queue == nullptr) {
+    throw std::runtime_error("pgaccel queue unavailable");
+  }
+  return *g_queue;
+}
 
 // ---------------------------------------------------------------------------
 // H3 bit-layout constants
@@ -343,7 +358,7 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(const uint64_t* cells, 
     return PGACCEL_ERROR_INIT;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
@@ -388,7 +403,7 @@ extern "C" pgaccel_status pgaccel_h3_get_base_cell_bulk(const uint64_t* cells, s
     return PGACCEL_ERROR_INIT;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
     int32_t* d_base = sycl::malloc_device<int32_t>(count, q);
@@ -432,7 +447,7 @@ extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, s
     return PGACCEL_ERROR_INIT;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
     uint8_t* d_valid = sycl::malloc_device<uint8_t>(count, q);
@@ -528,7 +543,7 @@ extern "C" pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, siz
     return PGACCEL_ERROR_INIT;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
     uint8_t* d_pent = sycl::malloc_device<uint8_t>(count, q);
@@ -599,7 +614,7 @@ extern "C" pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells
     return PGACCEL_ERROR_INIT;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
     uint8_t* d_out = sycl::malloc_device<uint8_t>(count, q);
@@ -643,7 +658,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, 
   }
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
@@ -714,7 +729,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* c
     return PGACCEL_ERROR_UNSUPPORTED;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
@@ -793,7 +808,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a,
   }
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_a = sycl::malloc_device<uint64_t>(count, q);
@@ -955,7 +970,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
   // fallback — see CLAUDE.md rules #11/#12) while side-stepping the
   // emitter's argbuffer code path entirely.
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     if (want_fp64) {
       // ---- fp64 path (res >= 12) -------------------------------------
@@ -1462,7 +1477,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_
     return PGACCEL_OK;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
@@ -1594,7 +1609,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells
     return PGACCEL_OK;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
@@ -1703,7 +1718,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t
     return PGACCEL_ERROR_UNSUPPORTED;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
@@ -1806,7 +1821,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
     return PGACCEL_OK;
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
 
     // SAFETY: USM device allocations freed at end of scope
     uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);

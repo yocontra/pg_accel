@@ -124,29 +124,15 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     // Dispatch by upper relation stage.
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
-            // 1) Fused star-join pre-aggregation (most benefit when it matches).
-            // SAFETY: All pointers are valid planner arguments.
-            unsafe { preagg_partial::try_inject(root, input_rel, output_rel) };
-            unsafe { pgaccel_inject_gpu_preagg(root, input_rel, output_rel) };
-
-            // 2) Standard (non-parallel) GpuAgg path.
+            // 1) Standard (non-parallel) GpuAgg path.
+            //
+            // Parallel partial aggregation and serial PreAgg are intentionally
+            // not called from normal planning today. Both available scaffolds
+            // still wrap PostgreSQL CPU child paths in important cases; they
+            // can re-enter only after the child is a real GPU-resident
+            // GpuScan/GpuJoin/PreAgg producer.
             // SAFETY: All pointers are valid planner arguments.
             unsafe { agg::inject(root, input_rel, output_rel) };
-
-            // 3) Partial / parallel GpuAgg path.
-            //
-            // PG 17 doesn't fire the upper_paths hook for
-            // `UPPERREL_PARTIAL_GROUP_AGG` directly, and by the time the
-            // `UPPERREL_GROUP_AGG` hook fires, core has already run
-            // `gather_grouping_paths` + `add_paths_to_grouping_rel`. Adding
-            // a partial CustomPath to `partially_grouped_rel->partial_pathlist`
-            // here would be orphaned (no Gather, no Finalize Agg).
-            //
-            // `partial_agg::try_inject` instead builds the full
-            // Finalize Agg → Gather → GpuAccel(partial) chain itself and
-            // adds the Finalize AggPath directly to `grouped_rel->pathlist`.
-            // SAFETY: All pointers are valid planner arguments.
-            unsafe { partial_agg::try_inject(root, input_rel, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
             // SAFETY: All pointers are valid planner arguments.
@@ -753,8 +739,15 @@ const AGG_INT8OID: u32 = 20;
 // GPU PreAgg (fused star-join + aggregate) injection
 // ---------------------------------------------------------------------------
 
-/// Detect star-schema join trees (fact table + small dimension joins + aggregate)
-/// and inject a fused `GpuPreAgg` CustomPath that replaces the entire pipeline.
+/// Disabled serial PreAgg recognizer/injection scaffold.
+///
+/// Detects star-schema join trees (fact table + small dimension joins +
+/// aggregate) and builds a fused `GpuPreAgg` CustomPath shape, but this helper
+/// is intentionally not called from normal planning. The executor behind this
+/// path is CPU-only today, so exposing it as a planner alternative makes OLAP
+/// benchmarks select a slower fake-GPU path. Serial PreAgg can return to the
+/// planner only after it is backed by a real GPU-resident scan/join/pre-agg
+/// pipeline.
 ///
 /// Walks the cheapest input path backwards through join nodes to find:
 /// - A chain of HashJoin paths where each inner side is a small table
@@ -773,6 +766,7 @@ const AGG_INT8OID: u32 = 20;
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap
 )]
+#[allow(dead_code)]
 unsafe fn pgaccel_inject_gpu_preagg(
     root: *mut PlannerInfo,
     input_rel: *mut RelOptInfo,
@@ -804,6 +798,16 @@ unsafe fn pgaccel_inject_gpu_preagg(
 
     // Gate: must have aggregation (hasAggs or groupClause).
     if !query.hasAggs && query.groupClause.is_null() {
+        return;
+    }
+    // Serial PreAgg is only a candidate for grouped star aggregates. Ungrouped
+    // join counts still pay dimension materialization and single-threaded
+    // fact scanning, and the benchmark suite shows PostgreSQL parallel hash
+    // join wins decisively for that shape.
+    if query.groupClause.is_null() {
+        pgrx::debug1!(
+            "pg_accel: preagg rejected: ungrouped serial PreAgg is not a benchmark-winning lane"
+        );
         return;
     }
 
@@ -982,7 +986,6 @@ unsafe fn pgaccel_inject_gpu_preagg(
 
     let mut agg_descs: Vec<PreAggColDesc> = Vec::new();
     let mut group_keys: Vec<GroupKeyDesc> = Vec::new();
-
     for i in 0..tlist_len {
         // SAFETY: i is in [0, tlist_len).
         let tle = unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
@@ -1086,6 +1089,12 @@ unsafe fn pgaccel_inject_gpu_preagg(
     // Gate: need at least one aggregate.
     if agg_descs.is_empty() && group_keys.is_empty() {
         pgrx::debug1!("pg_accel: preagg rejected: no aggregates or group keys found");
+        return;
+    }
+    if group_keys.is_empty() {
+        pgrx::debug1!(
+            "pg_accel: preagg rejected: ungrouped serial PreAgg is not a benchmark-winning lane"
+        );
         return;
     }
 
@@ -1907,6 +1916,14 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         );
         return;
     }
+    if group_key_info.is_some() && !cost::hashagg_input_rows_safe(rows, cost::device_limits()) {
+        pgrx::debug1!(
+            "pg_accel: gpu_agg rejected: grouped agg rows {} >= unsafe threshold {}",
+            rows,
+            cost::device_limits().gpu_hash_agg_unsafe_input_rows
+        );
+        return;
+    }
 
     // Gate: Reject GpuAgg wrapping pathologically small multi-join outputs.
     // When the input is a join path with too few rows to amortize GPU
@@ -2015,6 +2032,11 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // on a float8 input column. AVG/STDDEV/VAR all use f64 accumulators,
     // so they count even when the result isn't FLOAT8OID.
     let mut agg_uses_fp64 = false;
+    // SUM(bigint) is exact through the typed i64 kernel, but the benchmark
+    // lane still loses badly to PG parallel because extraction/dispatch cost
+    // dominates. Charge it honestly by default; forced-cost smoke tests can
+    // still exercise the kernel.
+    let mut has_i64_sum = false;
 
     // SAFETY: tlist is a valid List of TargetEntry (non-partial) or Expr (partial).
     for i in 0..tlist_len {
@@ -2223,20 +2245,35 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         if this_agg_f64 {
             agg_uses_fp64 = true;
         }
+        if matches!(op, AggOp::Sum) && typid == AGG_INT8OID {
+            has_i64_sum = true;
+        }
         agg_descs.push((op, attno, u32::from(aggref_ref.aggtype)));
     }
 
     if agg_descs.is_empty() {
         return;
     }
+    if group_key_info.is_some() && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
+        pgrx::debug1!(
+            "pg_accel: gpu_agg rejected: grouped AVG maps incorrectly in the current executor"
+        );
+        return;
+    }
 
-    // Find cheapest input path. In partial mode we pick from partial_pathlist
-    // so our CustomScan wraps a path that PG considers parallel-safe (e.g.
-    // Parallel Seq Scan), matching the shape PG's own Partial Aggregate uses.
+    // Find the input path. Prefer a GPU-producing child (GpuScan/GpuJoin) so
+    // GpuAgg stays part of a GPU pipeline. Only the non-partial plain-table
+    // case may fall back to a regular path, and only if the self-scan gate
+    // below can make the aggregate own the heap scan itself.
     let cheapest = if is_partial {
-        unsafe { find_cheapest_path(input_ref.partial_pathlist) }
+        unsafe { find_cheapest_gpu_producing_path(input_ref.partial_pathlist) }
     } else {
-        unsafe { find_cheapest_path(input_ref.pathlist) }
+        let gpu_child = unsafe { find_cheapest_gpu_producing_path(input_ref.pathlist) };
+        if gpu_child.is_null() {
+            unsafe { find_cheapest_path(input_ref.pathlist) }
+        } else {
+            gpu_child
+        }
     };
     if cheapest.is_null() {
         return;
@@ -2258,15 +2295,10 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // Detect fusion opportunity: child is our scan CustomPath AND the
     // row count meets the fusion minimum. Below the threshold, fusion
     // setup overhead (scan_desc open, template compile) exceeds savings.
+    let child_is_gpu_scan = gpu_agg_child_is_gpu_scan(cheapest);
+    let child_is_gpu_producing = gpu_agg_child_is_gpu_producing(cheapest);
     let child_is_our_scan =
-        if unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ } == NodeTag::T_CustomPath {
-            let cp = cheapest.cast::<CustomPath>();
-            // SAFETY: cp is a valid CustomPath (tag checked above).
-            let is_ours = unsafe { (*cp).methods == custom_scan::scan_path_methods() };
-            is_ours && rows >= cost::device_limits().gpu_pipeline_fusion_min_rows
-        } else {
-            false
-        };
+        child_is_gpu_scan && rows >= cost::device_limits().gpu_pipeline_fusion_min_rows;
 
     // Detect self-scan opportunity: child is a plain path on a base
     // relation (SeqScan) with NO restriction quals. The executor will
@@ -2294,10 +2326,14 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         };
     let child_is_plain_path =
         unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ == NodeTag::T_Path };
-    let self_scan_relid: pg_sys::Index = if !child_is_our_scan
+    let child_is_nonparallel_path = !unsafe { (*cheapest).parallel_aware }
+        && unsafe { (*cheapest).parallel_workers } <= 0
+        && !unsafe { (*cheapest).parallel_safe };
+    let self_scan_relid: pg_sys::Index = if !child_is_gpu_producing
         && is_baserel
         && rte_is_relation
         && child_is_plain_path
+        && child_is_nonparallel_path
         && rows >= cost::device_limits().gpu_reduce_min_rows
         && !has_quals
     {
@@ -2305,6 +2341,40 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     } else {
         0
     };
+    let wraps_cpu_child = !child_is_gpu_producing && self_scan_relid == 0;
+    if wraps_cpu_child {
+        if has_quals {
+            if let Some(rejection) = unsafe {
+                find_explicit_unsupported_type_in_restrictinfo(input_ref.baserestrictinfo)
+            } {
+                record_planner_type_rejection(
+                    "agg child filter",
+                    rejection.oid,
+                    rejection.policy,
+                    agg_rows_estimate,
+                );
+                pgrx::debug1!(
+                    "pg_accel: gpu_agg rejected: CPU child filter contains unsupported type"
+                );
+                return;
+            }
+
+            let count_only = agg_descs
+                .iter()
+                .all(|(op, attno, _)| matches!(op, AggOp::Count) && *attno == 0);
+            if count_only {
+                pgrx::debug1!(
+                    "pg_accel: gpu_agg rejected: count-only aggregate over CPU-qualified child"
+                );
+                return;
+            }
+
+            pgrx::debug1!("pg_accel: gpu_agg rejected: CPU-qualified child is not GPU-producing");
+        } else {
+            pgrx::debug1!("pg_accel: gpu_agg rejected: child path is not GPU-producing");
+        }
+        return;
+    }
 
     let is_vectorized = child_is_our_scan || self_scan_relid > 0;
 
@@ -2312,7 +2382,13 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // Per-row cost: vectorized paths (self-scan or fused GpuExpr child)
     // do direct heap walk + columnar extract, eliminating ExecProcNode
     // and MinimalTuple overhead. Same architecture as hash join.
-    let agg_per_row_base = if is_vectorized { 0.001 } else { 0.005 };
+    let agg_per_row_base = if has_i64_sum {
+        0.03
+    } else if is_vectorized {
+        0.001
+    } else {
+        0.005
+    };
     // Apply the soft-fp64 cost multiplier when any aggregate in the tlist
     // uses fp64 accumulation and the device lacks native fp64 (Apple
     // Silicon / Metal without hardware fp64). The emulated fp64 arithmetic
@@ -2338,12 +2414,15 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     } else {
         base.total_cost
     };
-    let startup_cost = scan_cost + gpu_overhead;
+    let cost_multiplier = gucs::cost_multiplier();
+    let startup_cost = (scan_cost + gpu_overhead) * cost_multiplier;
     // Apply GPU_COST_SAFETY_MARGIN so our batched GPU agg undercuts PG's
     // parallel plan cost. The margin reflects real-world GPU speedup vs
     // PG's optimistic parallel cost model (which assumes perfect scaling).
-    let total_cost = (scan_cost + reduce_cost).mul_add(cost::GPU_COST_SAFETY_MARGIN, gpu_overhead)
-        * gucs::cost_multiplier();
+    let total_cost = ((scan_cost + reduce_cost)
+        .mul_add(cost::GPU_COST_SAFETY_MARGIN, gpu_overhead)
+        * cost_multiplier)
+        .max(startup_cost);
 
     // Gate: Only inject if GpuAgg is meaningfully cheaper than the existing
     // best path at this rel. In partial mode we compare against the cheapest
@@ -2496,6 +2575,65 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
 pub(super) unsafe fn find_cheapest_path(pathlist: *mut List) -> *mut Path {
     // SAFETY: delegates to find_cheapest_path_filtered with no filter.
     unsafe { find_cheapest_path_filtered(pathlist, false) }
+}
+
+/// Find the cheapest path that produces data through a pg_accel GPU CustomPath.
+///
+/// `GpuAgg` may consume a child only when that child has already moved the
+/// expensive scan/join/filter work into a GPU pipeline. Otherwise the aggregate
+/// path is just a wrapper around PostgreSQL tuple production and is slower than
+/// core PG parallel aggregation.
+///
+/// # Safety
+///
+/// `pathlist` must be a valid PG `List` of `Path*` or null.
+pub(super) unsafe fn find_cheapest_gpu_producing_path(pathlist: *mut List) -> *mut Path {
+    if pathlist.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // SAFETY: pathlist is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let mut best: *mut Path = std::ptr::null_mut();
+    for i in 0..len {
+        // SAFETY: i is in bounds for pathlist.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() || !gpu_agg_child_is_gpu_producing(path) {
+            continue;
+        }
+        if best.is_null() || unsafe { (*path).total_cost < (*best).total_cost } {
+            best = path;
+        }
+    }
+    best
+}
+
+/// True when `path` is a GPU scan child that can be fused with aggregate
+/// extraction.
+#[must_use]
+pub(super) fn gpu_agg_child_is_gpu_scan(path: *mut Path) -> bool {
+    custom_path_uses_methods(path, custom_scan::scan_path_methods())
+}
+
+/// True when `path` is a pg_accel child that has already moved scan/join work
+/// into the GPU path. `GpuAgg` is allowed to wrap these children, but must not
+/// wrap plain PostgreSQL CPU filter/join/scan paths.
+#[must_use]
+pub(super) fn gpu_agg_child_is_gpu_producing(path: *mut Path) -> bool {
+    custom_path_uses_methods(path, custom_scan::scan_path_methods())
+        || custom_path_uses_methods(path, custom_scan::join_path_methods())
+}
+
+#[must_use]
+fn custom_path_uses_methods(path: *mut Path, methods: *const pg_sys::CustomPathMethods) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    if unsafe { (*path.cast::<pg_sys::Node>()).type_ } != NodeTag::T_CustomPath {
+        return false;
+    }
+    let cp = path.cast::<CustomPath>();
+    unsafe { (*cp).methods == methods }
 }
 
 /// Find the cheapest non-parallel path in a pathlist.

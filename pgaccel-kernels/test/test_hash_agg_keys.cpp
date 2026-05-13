@@ -402,6 +402,81 @@ static void test_hash_agg_int64_null_sentinel_collision() {
   pgaccel_agg_free(state);
 }
 
+static void test_hash_agg_invalid_inputs_return_null() {
+  printf("--- test_hash_agg_invalid_inputs_return_null ---\n");
+
+  std::vector<int64_t> keys = {1, 2, 3, 4};
+  std::vector<uint8_t> key_nulls(keys.size(), 0);
+  std::vector<double> values(keys.size(), 1.0);
+  std::vector<uint8_t> val_nulls(keys.size(), 0);
+
+  const void* val_arrays[1] = {values.data()};
+  const uint8_t* val_null_arrays[1] = {val_nulls.data()};
+  int val_types[1] = {PGACCEL_VAL_FLOAT64};
+  pgaccel_agg_col sum_cols[1] = {{PGACCEL_AGG_SUM, 0}};
+
+  pgaccel_agg_state* state =
+      pgaccel_hash_agg_execute(nullptr, key_nulls.data(), keys.size(), PGACCEL_KEY_INT64,
+                               val_arrays, val_null_arrays, val_types, sum_cols, 1);
+  ASSERT_TRUE("NULL group_keys rejected", state == nullptr);
+
+  state = pgaccel_hash_agg_execute(keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64,
+                                   nullptr, val_null_arrays, val_types, sum_cols, 1);
+  ASSERT_TRUE("NULL value_cols rejected for SUM", state == nullptr);
+
+  pgaccel_agg_col bad_cols[1] = {{static_cast<pgaccel_agg_func>(99), 0}};
+  state = pgaccel_hash_agg_execute(keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64,
+                                   val_arrays, val_null_arrays, val_types, bad_cols, 1);
+  ASSERT_TRUE("unknown aggregate func rejected", state == nullptr);
+
+  pgaccel_agg_col avg_cols[1] = {{PGACCEL_AGG_AVG, 0}};
+  state = pgaccel_hash_agg_execute(keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64,
+                                   val_arrays, val_null_arrays, val_types, avg_cols, 1);
+  ASSERT_TRUE("finalize-mode AVG rejected", state == nullptr);
+}
+
+static void test_hash_agg_count_star_without_value_cols() {
+  printf("--- test_hash_agg_count_star_without_value_cols ---\n");
+
+  std::vector<int64_t> keys = {10, 20, 10, 30, 20, 20};
+  std::vector<uint8_t> key_nulls(keys.size(), 0);
+  int val_types[1] = {PGACCEL_VAL_FLOAT64};
+  pgaccel_agg_col agg_cols[1] = {{PGACCEL_AGG_COUNT, SIZE_MAX}};
+
+  pgaccel_agg_state* state =
+      pgaccel_hash_agg_execute(keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64,
+                               nullptr, nullptr, val_types, agg_cols, 1);
+  ASSERT_TRUE("COUNT(*) accepts NULL value_cols", state != nullptr);
+  if (!state) {
+    return;
+  }
+
+  ASSERT_EQ_SZ("COUNT(*) no value cols group_count == 3", pgaccel_agg_group_count(state),
+               (size_t)3);
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(state));
+  const double* counts = pgaccel_agg_get_results(state, 0);
+  bool saw_10 = false;
+  bool saw_20 = false;
+  bool saw_30 = false;
+  for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+    if (keys_out[g] == 10) {
+      saw_10 = true;
+      ASSERT_TRUE("COUNT(*) key=10 count", std::abs(counts[g] - 2.0) < 1e-9);
+    } else if (keys_out[g] == 20) {
+      saw_20 = true;
+      ASSERT_TRUE("COUNT(*) key=20 count", std::abs(counts[g] - 3.0) < 1e-9);
+    } else if (keys_out[g] == 30) {
+      saw_30 = true;
+      ASSERT_TRUE("COUNT(*) key=30 count", std::abs(counts[g] - 1.0) < 1e-9);
+    }
+  }
+  ASSERT_TRUE("COUNT(*) no value cols saw key=10", saw_10);
+  ASSERT_TRUE("COUNT(*) no value cols saw key=20", saw_20);
+  ASSERT_TRUE("COUNT(*) no value cols saw key=30", saw_30);
+
+  pgaccel_agg_free(state);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -413,6 +488,8 @@ int main() {
     return 1;
   }
 
+  test_hash_agg_invalid_inputs_return_null();
+  test_hash_agg_count_star_without_value_cols();
   test_hash_agg_int64_baseline();
   test_hash_agg_f64_zero_nan_normalization();
   test_hash_agg_int64_null_sentinel_collision();

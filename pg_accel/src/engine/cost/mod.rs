@@ -21,7 +21,8 @@ pub use constants::{
 };
 pub use device_limits::{DeviceLimits, DeviceLimitsSource, device_limits, device_limits_source};
 pub use formulas::{
-    apply_fp64_penalty, estimate_threads, optimal_batch_size, self_scan_cost,
-    self_scan_cost_fp64_aware, should_batch, should_use_gpu,
+    apply_fp64_penalty, conservative_input_rows, estimate_threads, hashagg_input_rows_safe,
+    hashjoin_cardinality_safe, optimal_batch_size, self_scan_cost, self_scan_cost_fp64_aware,
+    should_batch, should_use_gpu, sort_limit_present, spatial_polygon_rows_safe,
 };
 pub use platform::PlatformProfile;

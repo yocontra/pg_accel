@@ -130,6 +130,12 @@ pub struct CrashedScale {
     pub workload: String,
     pub rows: usize,
     pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repro_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_snippet_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub log_tail_artifacts: Vec<String>,
 }
 
 /// Full benchmark report containing results for all workloads at all scales.
@@ -139,6 +145,10 @@ pub struct BenchReport {
     pub gucs: Option<GucSettings>,
     pub methodology: Methodology,
     pub workloads: Vec<WorkloadResult>,
+    /// Directory where report JSON/Markdown/CSV, crash lists, log tails,
+    /// plan snippets, and GUC snapshots were persisted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_dir: Option<String>,
     /// Scales that crashed and were skipped (not included in workloads).
     #[serde(default)]
     pub crashes: Vec<CrashedScale>,
@@ -603,6 +613,9 @@ impl BenchReport {
         let _ = writeln!(out, "|-----------|-------|");
         let _ = writeln!(out, "| Iterations | {} |", self.methodology.iterations);
         let _ = writeln!(out, "| Warmup iterations | {} |", self.methodology.warmup);
+        if let Some(dir) = &self.artifact_dir {
+            let _ = writeln!(out, "| Artifact directory | `{dir}` |");
+        }
         let scales_str: Vec<String> = self
             .methodology
             .row_scales
@@ -904,22 +917,39 @@ impl BenchReport {
             out.push_str("## Crashed Scales\n\n");
             out.push_str(
                 "The following workload/scale combinations crashed the PostgreSQL \
-                 backend and were excluded from results.\n\n",
+                 backend and were excluded from results. Artifact paths are relative \
+                 to the artifact directory when one was configured.\n\n",
             );
-            let _ = writeln!(out, "| Workload | Scale | Error |");
-            let _ = writeln!(out, "|----------|-------|-------|");
+            let _ = writeln!(
+                out,
+                "| Workload | Scale | Error | Plan Snippet | Log Tails | Repro |"
+            );
+            let _ = writeln!(
+                out,
+                "|----------|-------|-------|--------------|-----------|-------|"
+            );
             for c in &self.crashes {
                 let short_err = if c.error.len() > 80 {
                     format!("{}...", &c.error[..77])
                 } else {
                     c.error.clone()
                 };
+                let plan = c.plan_snippet_artifact.as_deref().unwrap_or("-");
+                let logs = if c.log_tail_artifacts.is_empty() {
+                    "-".to_owned()
+                } else {
+                    c.log_tail_artifacts.join("<br>")
+                };
+                let repro = c.repro_command.as_deref().unwrap_or("-");
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | `{}` |",
                     c.workload,
                     format_rows(c.rows),
                     short_err,
+                    plan,
+                    logs,
+                    repro,
                 );
             }
             out.push('\n');
@@ -1143,20 +1173,33 @@ impl BenchReport {
         // ----- CRASH summary rows (action_items L) -----
         if !self.crashes.is_empty() {
             out.push_str("### Crashed scales\n\n");
-            let _ = writeln!(out, "| Workload | Scale | Error |");
-            let _ = writeln!(out, "|---|---|---|");
+            let _ = writeln!(
+                out,
+                "| Workload | Scale | Error | Plan Snippet | Log Tails | Repro |"
+            );
+            let _ = writeln!(out, "|---|---|---|---|---|---|");
             for c in &self.crashes {
                 let short = if c.error.len() > 80 {
                     format!("{}...", &c.error[..77])
                 } else {
                     c.error.clone()
                 };
+                let plan = c.plan_snippet_artifact.as_deref().unwrap_or("-");
+                let logs = if c.log_tail_artifacts.is_empty() {
+                    "-".to_owned()
+                } else {
+                    c.log_tail_artifacts.join("<br>")
+                };
+                let repro = c.repro_command.as_deref().unwrap_or("-");
                 let _ = writeln!(
                     out,
-                    "| {} | {} | CRASH: {} |",
+                    "| {} | {} | CRASH: {} | {} | {} | `{}` |",
                     c.workload,
                     format_rows(c.rows),
                     short,
+                    plan,
+                    logs,
+                    repro,
                 );
             }
             out.push('\n');
@@ -1332,6 +1375,7 @@ pub fn generate_report_ex(
         gucs,
         methodology,
         workloads,
+        artifact_dir: None,
         crashes,
         postmaster_start_time,
     }
@@ -1506,6 +1550,7 @@ mod tests {
                 speedup_source: "median".to_owned(),
             },
             workloads,
+            artifact_dir: None,
             crashes: Vec::new(),
         }
     }

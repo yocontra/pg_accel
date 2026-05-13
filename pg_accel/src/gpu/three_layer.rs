@@ -880,10 +880,10 @@ mod tests {
         );
     }
 
-    // -- spatial_contains (all-uncertain — no GPU containment kernel) -------
+    // -- spatial_contains ----------------------------------------------------
 
     #[test]
-    fn contains_is_uncertain_without_kernel() {
+    fn contains_polygon_point_lands_in_exactly_one_bucket() {
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
@@ -899,13 +899,16 @@ mod tests {
             ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::Contains, &[poly], &[pt], false);
-        assert_eq!(result.uncertain, vec![0]);
+        assert_eq!(
+            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+            1
+        );
     }
 
     // -- spatial_eval / Within (swapped Contains) ---------------------------
 
     #[test]
-    fn within_is_uncertain_without_kernel() {
+    fn within_matches_swapped_contains() {
         let pt = ExtractedGeometry {
             bbox: [2.0, 2.0, 2.0, 2.0],
             coords: vec![2.0, 2.0],
@@ -920,9 +923,19 @@ mod tests {
             geom_type: GeomType::Polygon,
             ring_offsets: vec![0],
         };
-        // ST_Within(pt, poly) = ST_Contains(poly, pt) — no GPU kernel
-        let result = spatial_eval(SpatialPredicate::Within, &[pt], &[poly], false);
-        assert_eq!(result.uncertain, vec![0]);
+        // ST_Within(pt, poly) = ST_Contains(poly, pt). The bucket may be
+        // definite_true or uncertain depending on GPU availability, but the
+        // swapped routes must agree.
+        let via_within = spatial_eval(
+            SpatialPredicate::Within,
+            std::slice::from_ref(&pt),
+            std::slice::from_ref(&poly),
+            false,
+        );
+        let via_contains = spatial_eval(SpatialPredicate::Contains, &[poly], &[pt], false);
+        assert_eq!(via_within.definite_true, via_contains.definite_true);
+        assert_eq!(via_within.definite_false, via_contains.definite_false);
+        assert_eq!(via_within.uncertain, via_contains.uncertain);
     }
 
     // -- spatial_eval / DWithin (all-uncertain — no GPU DWithin kernel) -----

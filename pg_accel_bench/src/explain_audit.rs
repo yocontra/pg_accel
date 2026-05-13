@@ -29,6 +29,7 @@ use postgres::{Client, NoTls};
 pub enum RatchetExpectation {
     /// The row must pass on the current commit. A failure flips the audit
     /// to a non-zero exit and is reported as a regression.
+    #[allow(dead_code)]
     RequiredToday,
     /// The row is expected to fail today; the listed phase is what unlocks
     /// it. Reported as `[SKIP-gated-by-...]` regardless of pass/fail so
@@ -160,28 +161,23 @@ fn build_matrix() -> Vec<AuditRow> {
     vec![
         AuditRow {
             name: "parallel_sum",
-            description: "Plain SUM(v) — parallel reduce",
+            description: "Plain SUM(v) — GPU-resident parallel reduce",
             setup: vec![],
             query: "SELECT SUM(v) FROM bench_f32_10m",
-            expectation: RatchetExpectation::RequiredToday,
+            expectation: RatchetExpectation::RequiredAfterPhase("GpuScan-fused partial aggregate"),
         },
         AuditRow {
-            // Combined AVG+STDDEV: pgaccel's partial_agg classifier
-            // injects `Finalize(Agg) -> Gather -> GpuAccel(partial)` and
-            // `add_path()` now picks it. The Phase 6 calibration moved
-            // the per-row partial-agg cost from a hard-coded `0.005`
-            // literal to `DeviceLimits::gpu_partial_agg_per_row` (= 0.0005
-            // / row on M-series). Combined with the soft-fp64 32x
-            // multiplier the previous 0.005 produced 200K cost units of
-            // partial-agg overhead on 10M-row scans, which `add_path`
-            // dropped in favour of PG's stock Partial Aggregate; the new
-            // 0.0005 keeps the GPU path strictly cheaper. Promoted to
-            // RequiredToday after Phase 6 calibration landed.
+            // Combined AVG+STDDEV used to be RequiredToday through a
+            // `Finalize(Agg) -> Gather -> GpuAccel(partial)` path that
+            // wrapped PostgreSQL's CPU partial scan. That shape violates the
+            // GPU-resident admission rule: partial aggregate may re-enter
+            // once the child is a real GpuScan/GpuJoin producer or the
+            // aggregate owns the scan/reduce pipeline.
             name: "parallel_avg_stddev",
-            description: "AVG(v), STDDEV(v) — combined parallel partial agg",
+            description: "AVG(v), STDDEV(v) — GPU-resident parallel partial agg",
             setup: vec![],
             query: "SELECT AVG(v), STDDEV(v) FROM bench_f32_10m",
-            expectation: RatchetExpectation::RequiredToday,
+            expectation: RatchetExpectation::RequiredAfterPhase("GpuScan-fused partial aggregate"),
         },
         AuditRow {
             name: "parallel_groupby",
@@ -191,14 +187,15 @@ fn build_matrix() -> Vec<AuditRow> {
             expectation: RatchetExpectation::RequiredAfterPhase("3a/3b grouped HashAgg"),
         },
         AuditRow {
-            // Full ORDER BY with no small LIMIT: a tiny LIMIT correctly
-            // defers to PG's top-N heapsort, so this row intentionally
-            // exercises the full-sort GpuSort path.
+            // Full ORDER BY with no LIMIT is not a release winning lane yet.
+            // The 2026-05-13 benchmark showed no-limit GpuSort losing badly,
+            // and the planner now intentionally gates it back to PostgreSQL
+            // until the GPU full-sort algorithm/materialization path is fixed.
             name: "parallel_orderby",
             description: "ORDER BY v — full sort",
             setup: vec![],
             query: "SELECT * FROM bench_f32_10m ORDER BY v",
-            expectation: RatchetExpectation::RequiredToday,
+            expectation: RatchetExpectation::RequiredAfterPhase("full-sort GPU algorithm/costing"),
         },
         AuditRow {
             name: "parallel_window_partitioned",
@@ -209,23 +206,17 @@ fn build_matrix() -> Vec<AuditRow> {
             expectation: RatchetExpectation::RequiredAfterPhase("3c window partial path"),
         },
         AuditRow {
-            // Plain JOIN: pg_accel's set_join_pathlist_hook injects
-            // `GpuHashJoin` and PG's `add_path()` now picks it. The Phase
-            // 6 calibration moved the per-row hash-join build / probe /
-            // yield costs from hard-coded 0.01 literals to
-            // `DeviceLimits::gpu_hashjoin_{build,probe}_per_row` and
-            // `DeviceLimits::custom_scan_yield_per_row` (each = 0.0005
-            // / row on M-series). The old 0.01/row × 10M output added
-            // ~200K cost units of "Custom Scan overhead" that double-
-            // counted ExecCopySlotMinimalTuple work PG already amortises
-            // into its parent operator's `cpu_tuple_cost`. Promoted to
-            // RequiredToday after Phase 6 calibration landed.
+            // Plain JOIN is still a target lane, but the current cost model
+            // correctly lets PostgreSQL's Parallel Hash Join win this 1M x
+            // 1K fixture. Keep the row in the audit so it ratchets back to
+            // RequiredToday only after the kernel/executor work proves a real
+            // win instead of forcing an under-costed GpuHashJoin.
             name: "parallel_join",
             description: "Plain JOIN — parallel hash join",
             setup: vec![],
             query: "SELECT f.*, d.name FROM bench_fact f \
                     JOIN bench_dim d USING(id)",
-            expectation: RatchetExpectation::RequiredToday,
+            expectation: RatchetExpectation::RequiredAfterPhase("hashjoin cost/kernel calibration"),
         },
         AuditRow {
             name: "parallel_join_groupby",
@@ -553,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn orderby_row_exercises_full_sort_today() {
+    fn orderby_row_exercises_gated_full_sort_lane() {
         let matrix = build_matrix();
         let row = matrix
             .iter()
@@ -561,7 +552,24 @@ mod tests {
             .expect("parallel_orderby row missing");
         assert_eq!(row.description, "ORDER BY v — full sort");
         assert_eq!(row.query, "SELECT * FROM bench_f32_10m ORDER BY v");
-        assert!(matches!(row.expectation, RatchetExpectation::RequiredToday));
+        assert!(matches!(
+            row.expectation,
+            RatchetExpectation::RequiredAfterPhase("full-sort GPU algorithm/costing")
+        ));
+    }
+
+    #[test]
+    fn join_row_is_gated_until_hashjoin_wins() {
+        let matrix = build_matrix();
+        let row = matrix
+            .iter()
+            .find(|row| row.name == "parallel_join")
+            .expect("parallel_join row missing");
+        assert_eq!(row.description, "Plain JOIN — parallel hash join");
+        assert!(matches!(
+            row.expectation,
+            RatchetExpectation::RequiredAfterPhase("hashjoin cost/kernel calibration")
+        ));
     }
 
     #[test]

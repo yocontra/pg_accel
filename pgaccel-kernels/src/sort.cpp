@@ -58,9 +58,11 @@ static inline int32_t sortable_to_i32(uint32_t u) {
   return static_cast<int32_t>(u ^ 0x80000000u);
 }
 
-/// Convert float to sortable uint32 (preserves order including NaN-last for PG).
+/// Convert float to sortable uint32 (NaN-last for PG, signed zeros equal).
 static inline uint32_t f32_to_sortable(float f) {
-  if (f != f)
+  if (f == 0.0f)
+    f = 0.0f;
+  else if (f != f)
     f = std::numeric_limits<float>::quiet_NaN();
   uint32_t bits;
   std::memcpy(&bits, &f, sizeof(bits));
@@ -75,6 +77,18 @@ static inline float sortable_to_f32(uint32_t u) {
   float f;
   std::memcpy(&f, &bits, sizeof(f));
   return f;
+}
+
+/// Convert double to sortable uint64 (NaN-last for PG, signed zeros equal).
+static inline uint64_t f64_to_sortable(double f) {
+  if (f == 0.0)
+    f = 0.0;
+  else if (f != f)
+    f = std::numeric_limits<double>::quiet_NaN();
+  uint64_t bits;
+  std::memcpy(&bits, &f, sizeof(bits));
+  uint64_t mask = (bits & 0x8000000000000000ULL) ? 0xFFFFFFFFFFFFFFFFULL : 0x8000000000000000ULL;
+  return bits ^ mask;
 }
 
 /// Convert signed int64 to sortable uint64 (flip sign bit).
@@ -504,11 +518,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
           running[b] += d_group_hist[g * RADIX_BINS + b];
         }
       }
-      // d_group_hist is malloc_shared — we can write directly into
-      // its host-mapped view.  Metal requires a queue barrier to
-      // ensure the GPU sees our writes before the scatter kernel
-      // launches, but the actual byte motion is a plain memcpy.
-      std::memcpy(d_group_hist, scan_buf.data(), ngroups * RADIX_BINS * sizeof(uint32_t));
+      q->memcpy(d_group_hist, scan_buf.data(), ngroups * RADIX_BINS * sizeof(uint32_t))
+          .wait_and_throw();
 
       // ---- Scatter pass --------------------------------------
       // Each work-group does a stable scatter of its tile.
@@ -869,17 +880,53 @@ static pgaccel_status sycl_radix_sort_kv_i32(int32_t* keys, uint32_t* indices, s
 
 /// GPU radix sort for float32 keys + indices (key-value).
 static pgaccel_status sycl_radix_sort_kv_f32(float* keys, uint32_t* indices, size_t count) {
+  if (count > std::numeric_limits<uint32_t>::max())
+    return PGACCEL_ERROR;
+
   std::vector<uint32_t> ukeys(count);
+  std::vector<uint32_t> order(count);
   for (size_t i = 0; i < count; i++) {
     ukeys[i] = f32_to_sortable(keys[i]);
+    order[i] = static_cast<uint32_t>(i);
   }
 
-  pgaccel_status st = sycl_radix_sort_kv_u32(ukeys.data(), indices, count);
+  pgaccel_status st = sycl_radix_sort_kv_u32(ukeys.data(), order.data(), count);
   if (st != PGACCEL_OK)
     return st;
 
+  std::vector<float> original_keys(keys, keys + count);
+  std::vector<uint32_t> original_indices(indices, indices + count);
   for (size_t i = 0; i < count; i++) {
-    keys[i] = sortable_to_f32(ukeys[i]);
+    const uint32_t src = order[i];
+    keys[i] = original_keys[src];
+    indices[i] = original_indices[src];
+  }
+
+  return PGACCEL_OK;
+}
+
+/// GPU radix sort for double keys + indices (key-value).
+static pgaccel_status sycl_radix_sort_kv_f64(double* keys, uint32_t* indices, size_t count) {
+  if (count > std::numeric_limits<uint32_t>::max())
+    return PGACCEL_ERROR;
+
+  std::vector<uint64_t> ukeys(count);
+  std::vector<uint32_t> order(count);
+  for (size_t i = 0; i < count; i++) {
+    ukeys[i] = f64_to_sortable(keys[i]);
+    order[i] = static_cast<uint32_t>(i);
+  }
+
+  pgaccel_status st = sycl_radix_sort_kv_u64(ukeys.data(), order.data(), count);
+  if (st != PGACCEL_OK)
+    return st;
+
+  std::vector<double> original_keys(keys, keys + count);
+  std::vector<uint32_t> original_indices(indices, indices + count);
+  for (size_t i = 0; i < count; i++) {
+    const uint32_t src = order[i];
+    keys[i] = original_keys[src];
+    indices[i] = original_indices[src];
   }
 
   return PGACCEL_OK;
@@ -895,19 +942,37 @@ static pgaccel_status sycl_radix_sort_i32(int32_t* data, size_t count) {
 
 /// GPU radix sort for plain float32 (values only, no indices).
 static pgaccel_status sycl_radix_sort_f32(float* data, size_t count) {
+  if (count > std::numeric_limits<uint32_t>::max())
+    return PGACCEL_ERROR;
+
   std::vector<uint32_t> indices(count);
   for (size_t i = 0; i < count; i++)
     indices[i] = static_cast<uint32_t>(i);
   return sycl_radix_sort_kv_f32(data, indices.data(), count);
 }
 
+/// GPU radix sort for plain double (values only, no indices).
+static pgaccel_status sycl_radix_sort_f64(double* data, size_t count) {
+  if (count > std::numeric_limits<uint32_t>::max())
+    return PGACCEL_ERROR;
+
+  std::vector<uint32_t> indices(count);
+  for (size_t i = 0; i < count; i++)
+    indices[i] = static_cast<uint32_t>(i);
+  return sycl_radix_sort_kv_f64(data, indices.data(), count);
+}
+
 // ===========================================================================
 // Dispatch: choose GPU radix / GPU bitonic
 // ===========================================================================
 
-/// Trait: which integer-like types can use radix sort.
+/// Trait: which types can use radix sort.
 template <typename T>
 struct is_radix_sortable : std::false_type {};
+template <>
+struct is_radix_sortable<float> : std::true_type {};
+template <>
+struct is_radix_sortable<double> : std::true_type {};
 template <>
 struct is_radix_sortable<int32_t> : std::true_type {};
 template <>
@@ -924,14 +989,18 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
   if (count <= 1)
     return PGACCEL_OK;
 
-  // Integer keys above RADIX_SORT_THRESHOLD: use radix sort.
+  // Radix-sortable keys above RADIX_SORT_THRESHOLD: use radix sort.
   // The radix kernel uses local-memory atomics only (reliable on Metal)
   // and a work-group-per-tile scatter with host-computed per-group
   // offsets — no global atomics.
   if constexpr (is_radix_sortable<T>::value) {
     if (count >= RADIX_SORT_THRESHOLD) {
       pgaccel_status st = PGACCEL_UNSUPPORTED;
-      if constexpr (std::is_same_v<T, int32_t>) {
+      if constexpr (std::is_same_v<T, float>) {
+        st = sycl_radix_sort_f32(data, count);
+      } else if constexpr (std::is_same_v<T, double>) {
+        st = sycl_radix_sort_f64(data, count);
+      } else if constexpr (std::is_same_v<T, int32_t>) {
         st = sycl_radix_sort_i32(data, count);
       } else if constexpr (std::is_same_v<T, uint32_t>) {
         // uint32 radix: no conversion needed, just indices-then-drop.
@@ -985,11 +1054,15 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices, size_t count)
   if (count <= 1)
     return PGACCEL_OK;
 
-  // Integer keys above RADIX_SORT_THRESHOLD: use radix sort.
+  // Radix-sortable keys above RADIX_SORT_THRESHOLD: use radix sort.
   if constexpr (is_radix_sortable<K>::value) {
     if (count >= RADIX_SORT_THRESHOLD) {
       pgaccel_status st = PGACCEL_UNSUPPORTED;
-      if constexpr (std::is_same_v<K, int32_t>) {
+      if constexpr (std::is_same_v<K, float>) {
+        st = sycl_radix_sort_kv_f32(keys, indices, count);
+      } else if constexpr (std::is_same_v<K, double>) {
+        st = sycl_radix_sort_kv_f64(keys, indices, count);
+      } else if constexpr (std::is_same_v<K, int32_t>) {
         st = sycl_radix_sort_kv_i32(keys, indices, count);
       } else if constexpr (std::is_same_v<K, uint32_t>) {
         st = sycl_radix_sort_kv_u32(reinterpret_cast<uint32_t*>(keys), indices, count);

@@ -56,6 +56,7 @@ use super::custom_scan;
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+#[allow(dead_code)]
 pub(super) unsafe fn try_inject(
     root: *mut pg_sys::PlannerInfo,
     input_rel: *mut pg_sys::RelOptInfo,
@@ -215,10 +216,19 @@ pub(super) unsafe fn try_inject(
     } else {
         None
     };
+    if group_key_info.is_some() && !cost::hashagg_input_rows_safe(rows, cost::device_limits()) {
+        pgrx::debug1!(
+            "pg_accel partial_agg: grouped rows {} >= unsafe hashagg threshold {}",
+            rows,
+            cost::device_limits().gpu_hash_agg_unsafe_input_rows,
+        );
+        return;
+    }
 
     let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::with_capacity(n_exprs as usize);
     let mut partial_cols: Vec<PartialColumn> = Vec::with_capacity(n_exprs as usize);
     let mut group_key_tlist_pos: i32 = -1;
+    let mut has_i64_sum = false;
     for i in 0..n_exprs {
         // SAFETY: i is in [0, n_exprs).
         let expr = unsafe { pg_sys::list_nth(partial_exprs, i).cast::<pg_sys::Expr>() };
@@ -296,6 +306,7 @@ pub(super) unsafe fn try_inject(
         }
 
         // Extract attno from first arg (or 0 for COUNT(*)).
+        let mut arg_type_oid = pg_sys::InvalidOid;
         let (attno, rtype) = if op == AggOp::Count && aggref_ref.aggstar {
             (0i32, u32::from(aggref_ref.aggtype))
         } else {
@@ -312,10 +323,16 @@ pub(super) unsafe fn try_inject(
             if arg_expr.is_null() {
                 return;
             }
+            if unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var {
+                arg_type_oid = unsafe { (*arg_expr.cast::<pg_sys::Var>()).vartype };
+            }
             // SAFETY: arg_expr is a valid Expr pointer.
             let extracted = unsafe { super::extract_var_attno(arg_expr) };
             (extracted, u32::from(aggref_ref.aggtype))
         };
+        if matches!(op, AggOp::Sum) && arg_type_oid == pg_sys::INT8OID {
+            has_i64_sum = true;
+        }
 
         let serialize_fn_oid = match class {
             AggClass::Float8Stats { serialize_fn } if serialize_fn != pg_sys::InvalidOid => {
@@ -336,16 +353,32 @@ pub(super) unsafe fn try_inject(
     if agg_descs.is_empty() {
         return;
     }
+    if has_i64_sum {
+        pgrx::debug1!(
+            "pg_accel partial_agg: SUM(bigint) rejected until parallel i64 reduce is stable"
+        );
+        return;
+    }
+    if group_key_info.is_some() && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
+        pgrx::debug1!(
+            "pg_accel partial_agg: grouped AVG rejected until grouped AVG executor mapping is fixed",
+        );
+        return;
+    }
     if group_key_info.is_some() && group_key_tlist_pos < 0 {
         pgrx::debug1!("pg_accel partial_agg: grouped partial target lacks group key Var");
         return;
     }
 
-    // Pick the cheapest partial child path to wrap.
-    // SAFETY: partial_pathlist is non-empty.
+    // Pick the cheapest GPU-producing partial child path to wrap. Do not wrap
+    // PostgreSQL's own Parallel SeqScan/Bitmap/Join paths: that shape keeps
+    // tuple production on CPU and only adds a GpuAgg frame around it.
     let cheapest_partial =
-        unsafe { pg_sys::list_nth(input_ref.partial_pathlist, 0).cast::<Path>() };
+        unsafe { super::find_cheapest_gpu_producing_path(input_ref.partial_pathlist) };
     if cheapest_partial.is_null() {
+        pgrx::debug1!(
+            "pg_accel partial_agg: rejected because no GPU-producing partial child exists"
+        );
         return;
     }
     // SAFETY: cheapest_partial is non-null.

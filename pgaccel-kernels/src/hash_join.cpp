@@ -1,12 +1,11 @@
 /*
- * hash_join.cpp — GPU hash join: open-addressing hash table build + probe.
+ * hash_join.cpp — hash join support kernels and debug fallback.
  *
- * Build: inner relation keys → hash table with linear probing.
- * Probe: outer relation keys → matching (outer_idx, inner_idx) pairs.
+ * The legacy open-addressing implementation below is CPU-only. It is kept as
+ * an opt-in debug/test fallback, not as a selected PostgreSQL planner path.
+ * Normal planner-selected GpuHashJoin must use a real GPU build/probe path or
+ * GPU-resident reuse; until that exists the Rust planner declines GpuHashJoin.
  * NULL keys are excluded from both build and probe.
- *
- * The hash table uses open addressing with linear probing and a load
- * factor of 0.5 for good probe performance.
  */
 
 #include <sycl/sycl.hpp>
@@ -15,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -23,6 +23,19 @@
 // ---------------------------------------------------------------------------
 // Hash functions
 // ---------------------------------------------------------------------------
+
+static bool env_flag_enabled(const char* name) {
+  const char* value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+static bool cpu_hash_join_debug_enabled() {
+  return env_flag_enabled("PGACCEL_HASH_JOIN_ENABLE_CPU_FALLBACK");
+}
+
+static bool unsafe_sort_merge_debug_enabled() {
+  return env_flag_enabled("PGACCEL_HASH_JOIN_ENABLE_UNSAFE_SORT_MERGE");
+}
 
 /// Murmurhash3 finalizer for 64-bit keys.
 static inline uint64_t hash64(uint64_t k) {
@@ -111,6 +124,22 @@ static size_t next_pow2(size_t n) {
   return n + 1;
 }
 
+static bool mul_overflows_size(size_t a, size_t b) {
+  return b != 0 && a > std::numeric_limits<size_t>::max() / b;
+}
+
+static bool add_overflows_size(size_t a, size_t b) {
+  return a > std::numeric_limits<size_t>::max() - b;
+}
+
+static bool output_pair_capacity_representable(size_t max_matches) {
+  return max_matches <= (std::numeric_limits<size_t>::max() - 1) / 2;
+}
+
+static bool row_index_representable(size_t row) {
+  return row <= static_cast<size_t>(std::numeric_limits<uint32_t>::max());
+}
+
 // ---------------------------------------------------------------------------
 // Build (CPU)
 // ---------------------------------------------------------------------------
@@ -127,9 +156,16 @@ static pgaccel_hash_table* build_cpu(const T* keys, const uint8_t* null_mask,
   }
 
   // Load factor ~0.5
+  if (non_null > std::numeric_limits<size_t>::max() / 2)
+    return nullptr;
   size_t capacity = next_pow2(non_null * 2);
+  if (capacity < non_null)
+    return nullptr;
   if (capacity < 16)
     capacity = 16;
+  if (mul_overflows_size(capacity, sizeof(T)) || mul_overflows_size(capacity, sizeof(uint32_t))) {
+    return nullptr;
+  }
   size_t mask = capacity - 1;
 
   auto* ht = static_cast<pgaccel_hash_table*>(calloc(1, sizeof(pgaccel_hash_table)));
@@ -205,6 +241,10 @@ static pgaccel_hash_table* build_sort_merge(const T* keys, const uint8_t* null_m
   }
   if (non_null == 0)
     return nullptr;
+  if (!row_index_representable(non_null) || mul_overflows_size(non_null, sizeof(T)) ||
+      mul_overflows_size(non_null, sizeof(uint32_t))) {
+    return nullptr;
+  }
 
   auto* ht = static_cast<pgaccel_hash_table*>(calloc(1, sizeof(pgaccel_hash_table)));
   if (ht == nullptr)
@@ -267,6 +307,16 @@ static pgaccel_hash_table* build_sort_merge(const T* keys, const uint8_t* null_m
 extern sycl::queue* g_queue;
 extern bool g_unified_memory;
 
+static bool sort_merge_host_pointer_probe_supported() {
+  // Sort-merge currently stores malloc() build arrays and captures caller
+  // probe/output pointers directly in SYCL kernels. That is not a valid
+  // selected-path contract: Metal and discrete GPU backends cannot dereference
+  // those pointers, and even unified-memory hosts do not make the build side
+  // GPU-resident. Keep it behind an explicit debug opt-in until the path stages
+  // device/shared buffers for all captured arrays.
+  return unsafe_sort_merge_debug_enabled() && g_queue != nullptr && g_unified_memory;
+}
+
 template <typename T>
 static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const T* outer_keys,
                                             const uint8_t* outer_null_mask, size_t outer_count,
@@ -275,10 +325,18 @@ static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const 
   sycl::queue* q = g_queue;
   if (q == nullptr)
     return PGACCEL_UNSUPPORTED;
+  if (!sort_merge_host_pointer_probe_supported()) {
+    *match_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
 
   const T* sorted_keys = static_cast<const T*>(ht->slot_keys);
   const uint32_t* sorted_indices = ht->slot_indices;
   const size_t inner_count = ht->count;
+  if (!row_index_representable(outer_count) || !row_index_representable(inner_count)) {
+    *match_count = 0;
+    return PGACCEL_ERROR;
+  }
 
   // Pass 1: count matches per outer key via parallel binary search.
   uint32_t* d_counts = nullptr;
@@ -292,7 +350,7 @@ static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const 
   if (d_counts == nullptr)
     return PGACCEL_OOM;
 
-  uint32_t* d_offsets = nullptr;
+  size_t* d_offsets = nullptr;
 
   try {
     // Zero-initialize counts.
@@ -379,10 +437,14 @@ static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const 
       q->memcpy(h_counts.data(), d_counts, outer_count * sizeof(uint32_t)).wait_and_throw();
     }
 
-    std::vector<uint32_t> offsets(outer_count);
-    uint32_t total = 0;
+    std::vector<size_t> offsets(outer_count);
+    size_t total = 0;
     for (size_t i = 0; i < outer_count; i++) {
       offsets[i] = total;
+      if (add_overflows_size(total, h_counts[i])) {
+        sycl::free(d_counts, *q);
+        return PGACCEL_ERROR;
+      }
       total += h_counts[i];
     }
 
@@ -394,18 +456,18 @@ static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const 
 
     // Upload offsets for pass 2.
     if (g_unified_memory) {
-      d_offsets = static_cast<uint32_t*>(sycl::malloc_shared<uint32_t>(outer_count, *q));
+      d_offsets = static_cast<size_t*>(sycl::malloc_shared<size_t>(outer_count, *q));
     } else {
-      d_offsets = sycl::malloc_device<uint32_t>(outer_count, *q);
+      d_offsets = sycl::malloc_device<size_t>(outer_count, *q);
     }
     if (d_offsets == nullptr) {
       sycl::free(d_counts, *q);
       return PGACCEL_OOM;
     }
     if (g_unified_memory) {
-      std::memcpy(d_offsets, offsets.data(), outer_count * sizeof(uint32_t));
+      std::memcpy(d_offsets, offsets.data(), outer_count * sizeof(size_t));
     } else {
-      q->memcpy(d_offsets, offsets.data(), outer_count * sizeof(uint32_t)).wait_and_throw();
+      q->memcpy(d_offsets, offsets.data(), outer_count * sizeof(size_t)).wait_and_throw();
     }
 
     // Pass 2: write match pairs at computed offsets.
@@ -415,7 +477,7 @@ static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const 
        const uint32_t cnt = d_counts[oi];
        if (cnt == 0)
          return;
-       const uint32_t base = d_offsets[oi];
+       const size_t base = d_offsets[oi];
        if (base >= capped)
          return;
 
@@ -446,7 +508,7 @@ static pgaccel_status probe_sort_merge_sycl(const pgaccel_hash_table* ht, const 
 
        // Write match pairs.
        for (uint32_t k = 0; k < cnt; k++) {
-         uint32_t write_pos = base + k;
+         size_t write_pos = base + k;
          if (write_pos >= capped)
            break;
          match_pairs[write_pos * 2] = static_cast<uint32_t>(oi);
@@ -520,6 +582,10 @@ static pgaccel_status probe_cpu(const pgaccel_hash_table* ht, const T* outer_key
     // Linear probing — search until empty slot
     while (ht->slot_indices[slot] != EMPTY_SLOT) {
       if (keys_equal(slot_keys[slot], outer_keys[oi])) {
+        if (mc == std::numeric_limits<size_t>::max()) {
+          *match_count = mc;
+          return PGACCEL_ERROR;
+        }
         if (mc < max_matches) {
           match_pairs[mc * 2] = static_cast<uint32_t>(oi);
           match_pairs[mc * 2 + 1] = ht->slot_indices[slot];
@@ -545,37 +611,57 @@ pgaccel_hash_table* pgaccel_hash_join_build(const void* keys, const uint8_t* nul
                                             pgaccel_key_type key_type) {
   if (keys == nullptr || indices == nullptr || count == 0)
     return nullptr;
+  if (!row_index_representable(count))
+    return nullptr;
 
   pgaccel_hash_table* ht = nullptr;
 
-  // Use GPU sort-merge for large inner sides; CPU hash for small.
-  const bool use_sort_merge = (count >= GPU_SORT_MERGE_MIN_INNER);
+  const bool allow_cpu_fallback = cpu_hash_join_debug_enabled();
+
+  // Use sort-merge only for explicit debug runs. It is not a selected-path
+  // implementation because probe kernels capture raw host pointers.
+  const bool use_sort_merge =
+      (count >= GPU_SORT_MERGE_MIN_INNER) && sort_merge_host_pointer_probe_supported();
+
+  // No production GPU hash build/probe exists yet. Refuse the public API by
+  // default so accidental executor calls cannot silently run a CPU join behind
+  // a GpuHashJoin plan. Kernel correctness tests can opt into the legacy CPU
+  // fallback with PGACCEL_HASH_JOIN_ENABLE_CPU_FALLBACK=1.
+  if (!use_sort_merge && !allow_cpu_fallback) {
+    return nullptr;
+  }
 
   switch (key_type) {
     case PGACCEL_KEY_INT32:
-      ht = use_sort_merge
-               ? build_sort_merge<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices,
-                                           count)
-               : build_cpu<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices, count);
+      if (use_sort_merge) {
+        ht =
+            build_sort_merge<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices, count);
+      } else {
+        ht = build_cpu<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices, count);
+      }
       break;
     case PGACCEL_KEY_INT64:
-      ht = use_sort_merge
-               ? build_sort_merge<int64_t>(static_cast<const int64_t*>(keys), null_mask, indices,
-                                           count)
-               : build_cpu<int64_t>(static_cast<const int64_t*>(keys), null_mask, indices, count);
+      if (use_sort_merge) {
+        ht =
+            build_sort_merge<int64_t>(static_cast<const int64_t*>(keys), null_mask, indices, count);
+      } else {
+        ht = build_cpu<int64_t>(static_cast<const int64_t*>(keys), null_mask, indices, count);
+      }
       break;
     case PGACCEL_KEY_FLOAT64:
-      ht = use_sort_merge
-               ? build_sort_merge<double>(static_cast<const double*>(keys), null_mask, indices,
-                                          count)
-               : build_cpu<double>(static_cast<const double*>(keys), null_mask, indices, count);
+      if (use_sort_merge) {
+        ht = build_sort_merge<double>(static_cast<const double*>(keys), null_mask, indices, count);
+      } else {
+        ht = build_cpu<double>(static_cast<const double*>(keys), null_mask, indices, count);
+      }
       break;
     default:
       return nullptr;
   }
 
-  // Sort-merge build returns nullptr on failure; fall back to CPU hash.
-  if (ht == nullptr && use_sort_merge) {
+  // Sort-merge build returns nullptr on failure; fall back to CPU hash only
+  // during explicit debug/test runs.
+  if (ht == nullptr && use_sort_merge && allow_cpu_fallback) {
     switch (key_type) {
       case PGACCEL_KEY_INT32:
         ht = build_cpu<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices, count);
@@ -609,17 +695,32 @@ pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void*
                                        const uint8_t* outer_null_mask, size_t outer_count,
                                        uint32_t* match_pairs, size_t max_matches,
                                        size_t* match_count) {
+  if (match_count != nullptr) {
+    *match_count = 0;
+  }
   if (ht == nullptr || outer_keys == nullptr || match_pairs == nullptr || match_count == nullptr) {
     return PGACCEL_ERROR;
   }
 
+  if (!output_pair_capacity_representable(max_matches)) {
+    return PGACCEL_ERROR;
+  }
+
   if (outer_count == 0) {
-    *match_count = 0;
     return PGACCEL_OK;
+  }
+  if (!row_index_representable(outer_count)) {
+    return PGACCEL_ERROR;
+  }
+  if (ht->slot_keys == nullptr || ht->slot_indices == nullptr) {
+    return PGACCEL_ERROR;
   }
 
   // capacity == 0 signals sort-merge mode (GPU-sorted build side).
   const bool is_sort_merge = (ht->capacity == 0);
+  if (!is_sort_merge && !cpu_hash_join_debug_enabled()) {
+    return PGACCEL_UNSUPPORTED;
+  }
 
   switch (ht->key_type) {
     case PGACCEL_KEY_INT32:

@@ -12,9 +12,10 @@
 //! parallelising the PreAgg strategy is a separate executor refactor.
 //!
 //! What this module DOES: mirror [`super::partial_agg::try_inject`] but with
-//! GROUP BY propagation through the manually-built Finalize Agg chain. This
-//! covers the common OLAP shape (`SUM(...) ... GROUP BY dim`) that
-//! `partial_agg.rs` bails on.
+//! GROUP BY propagation through the manually-built Finalize Agg chain, once
+//! the input side is already GPU-producing. It must not wrap PostgreSQL's
+//! CPU `Parallel Seq Scan` / `Partial Aggregate` paths: that shape violates
+//! the GPU-resident admission rule and loses the project mission.
 //!
 //! The architectural follow-up (parallel PreAgg with proper scan-state
 //! sharing — `parallel_aware = true`, route fact-table scan through the
@@ -23,13 +24,10 @@
 //!
 //! ## Status
 //!
-//! **Implemented.** Phase II Agent P1 lands the planner-side path
-//! construction. Mirrors [`super::partial_agg::try_inject`] structurally
-//! (Finalize Agg → Gather → CustomPath using `agg_path_methods` +
-//! `is_partial = 1`) and adds GROUP BY propagation via
-//! `root.processed_groupClause` + `parse.havingQual` into
-//! `pg_sys::create_agg_path` (using `AGG_HASHED` for GROUP BY,
-//! `AGG_PLAIN` otherwise).
+//! **Planner scaffold.** The path construction exists, but normal planning
+//! only exposes it when the wrapped child is already a pg_accel GPU-producing
+//! path. A CPU-child wrapper must stay gated until scan+aggregate fusion or
+//! a real GPU-resident partial aggregate pipeline lands.
 //!
 //! Phase B Agent 1B previously wired the executor-side `PreAggPrivData`
 //! round-trip (`partial: Option<PartialAggSpec>`, `enable_partial(spec)`
@@ -69,6 +67,7 @@ use super::custom_scan;
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+#[allow(dead_code)]
 pub(super) unsafe fn try_inject(
     root: *mut pg_sys::PlannerInfo,
     input_rel: *mut pg_sys::RelOptInfo,
@@ -275,6 +274,7 @@ pub(super) unsafe fn try_inject(
     let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::new();
     let mut partial_cols: Vec<PartialColumn> = Vec::new();
     let mut has_group_keys = false;
+    let mut has_i64_sum = false;
 
     for i in 0..tlist_len {
         // SAFETY: i is in [0, tlist_len).
@@ -350,6 +350,7 @@ pub(super) unsafe fn try_inject(
         };
 
         // Resolve the input column attno (0 for COUNT(*)).
+        let mut arg_type_oid = pg_sys::InvalidOid;
         let (attno, rtype) = if op == AggOp::Count && aggref_ref.aggstar {
             (0_i32, u32::from(aggref_ref.aggtype))
         } else {
@@ -367,10 +368,16 @@ pub(super) unsafe fn try_inject(
             if arg_expr.is_null() {
                 return;
             }
+            if unsafe { (*arg_expr.cast::<pg_sys::Node>()).type_ } == NodeTag::T_Var {
+                arg_type_oid = unsafe { (*arg_expr.cast::<pg_sys::Var>()).vartype };
+            }
             // SAFETY: arg_expr is a valid Expr pointer.
             let extracted = unsafe { super::extract_var_attno(arg_expr) };
             (extracted, u32::from(aggref_ref.aggtype))
         };
+        if matches!(op, AggOp::Sum) && arg_type_oid == pg_sys::INT8OID {
+            has_i64_sum = true;
+        }
 
         agg_descs.push((op, attno, rtype));
         partial_cols.push(PartialColumn {
@@ -385,6 +392,12 @@ pub(super) unsafe fn try_inject(
         pgrx::debug1!("pg_accel preagg_partial: no Aggrefs in target list");
         return;
     }
+    if has_i64_sum {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: SUM(bigint) rejected until parallel i64 reduce is stable"
+        );
+        return;
+    }
 
     // Detect GROUP BY presence from the parsed query (root.processed_groupClause
     // is what create_agg_path expects; query.groupClause is the pre-processed
@@ -392,12 +405,31 @@ pub(super) unsafe fn try_inject(
     // T_Var in the target list), and we feed AGG_HASHED + the processed clause.
     let has_group_by =
         group_key_info.is_some() || (has_group_keys && !root_ref.processed_groupClause.is_null());
+    if has_group_by && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: grouped AVG rejected until grouped AVG executor mapping is fixed",
+        );
+        return;
+    }
 
-    // Pick the cheapest partial child path to wrap.
-    // SAFETY: partial_pathlist is non-empty.
+    if has_group_by && !cost::hashagg_input_rows_safe(rows, cost::device_limits()) {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: grouped rows {} >= unsafe hashagg threshold {}",
+            rows,
+            cost::device_limits().gpu_hash_agg_unsafe_input_rows,
+        );
+        return;
+    }
+
+    // Pick the cheapest GPU-producing partial child path to wrap. Do not
+    // wrap PostgreSQL's own Parallel SeqScan/Bitmap/Join paths: that shape
+    // keeps tuple production on CPU and only adds a GpuAgg frame around it.
     let cheapest_partial =
-        unsafe { pg_sys::list_nth(input_ref.partial_pathlist, 0).cast::<Path>() };
+        unsafe { super::find_cheapest_gpu_producing_path(input_ref.partial_pathlist) };
     if cheapest_partial.is_null() {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: rejected because no GPU-producing partial child exists"
+        );
         return;
     }
     // SAFETY: cheapest_partial is non-null.

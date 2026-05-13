@@ -6,6 +6,10 @@
 
 #include "pgaccel_ffi.h"
 
+// SAFETY: g_queue is owned by device_manager.cpp. The arena borrows the
+// process-global queue so runtime teardown stays centralized.
+extern sycl::queue* g_queue;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -40,7 +44,7 @@ struct Pool {
   size_t total_allocated = 0;
   AllocMode mode = AllocMode::SharedUSM;
   bool initialized = false;
-  sycl::queue* queue = nullptr;  // owned by pool, created lazily
+  sycl::queue* queue = nullptr;  // borrowed from device_manager.cpp
 };
 
 static Pool g_pool;
@@ -92,28 +96,26 @@ static void raw_free(void* ptr) {
 static void ensure_pool_initialized() {
   if (g_pool.initialized)
     return;
+
+  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
+    g_pool.queue = nullptr;
+    return;
+  }
+  g_pool.queue = g_queue;
+  if (g_pool.queue == nullptr) {
+    return;
+  }
   g_pool.initialized = true;
 
   // Query the device manager's public API to determine platform capabilities.
-  // The device manager owns the primary queue (static linkage), so we create
-  // our own queue targeting the same default device for USM allocations.
+  // The device manager owns the primary queue; the pool borrows it for USM
+  // allocations so pgaccel_shutdown() owns all Metal context teardown.
   pgaccel_platform_caps caps = pgaccel_get_caps();
 
-  try {
-    // SAFETY: pgaccel_init() must have been called before any alloc.
-    // We create a queue on the default device, which should match the
-    // device manager's selection (highest-scored device).
-    g_pool.queue = new sycl::queue{sycl::default_selector_v, sycl::property::queue::in_order{}};
-
-    if (caps.is_unified_memory) {
-      g_pool.mode = AllocMode::SharedUSM;
-    } else {
-      g_pool.mode = AllocMode::DeviceUSM;
-    }
-  } catch (...) {
-    // SYCL queue creation failed. No CPU fallback: subsequent raw_alloc
-    // calls will return nullptr, propagating allocation failure to callers.
-    g_pool.queue = nullptr;
+  if (caps.is_unified_memory) {
+    g_pool.mode = AllocMode::SharedUSM;
+  } else {
+    g_pool.mode = AllocMode::DeviceUSM;
   }
 }
 
@@ -192,6 +194,8 @@ extern "C" void pgaccel_pool_reset() {
   g_pool.oversized.clear();
 
   g_pool.total_allocated = 0;
+  g_pool.queue = nullptr;
+  g_pool.initialized = false;
 }
 
 extern "C" size_t pgaccel_pool_bytes_used() {

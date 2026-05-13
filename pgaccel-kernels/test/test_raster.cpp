@@ -756,6 +756,12 @@ static void test_raster_summarystats_with_mask() {
 int main() {
   printf("=== pgaccel raster kernel tests ===\n\n");
 
+  pgaccel_status init_status = pgaccel_init();
+  if (init_status != PGACCEL_OK) {
+    fprintf(stderr, "pgaccel_init() failed with status %d\n", init_status);
+    return 1;
+  }
+
   test_map_algebra_simple();
   test_map_algebra_two_band();
   test_map_algebra_int32();
@@ -778,6 +784,8 @@ int main() {
   test_raster_value_4x4();
   test_raster_summarystats_layout();
   test_raster_summarystats_with_mask();
+
+  pgaccel_shutdown();
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_tests_passed, g_tests_failed);
 

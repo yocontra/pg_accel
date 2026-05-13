@@ -26,6 +26,12 @@ pub struct DeviceLimits {
     /// Minimum rows for GPU hash aggregation (grouped agg) dispatch.
     /// Below this, PG's native HashAgg with parallel workers is faster.
     pub gpu_hash_agg_min_rows: usize,
+    /// First input row count at which grouped GPU hash aggregation is
+    /// considered unsafe. The C++ sort-based hashagg branch starts at about
+    /// 100K rows and can abort inside Metal/AdaptiveCpp before Rust can catch
+    /// anything. Until that kernel path is fixed, the planner leaves grouped
+    /// hashagg at or above this threshold to PostgreSQL.
+    pub gpu_hash_agg_unsafe_input_rows: usize,
     /// Maximum number of groups for GPU hash aggregation.
     pub gpu_hash_agg_max_groups: usize,
     /// Maximum elements per GPU reduce dispatch chunk.
@@ -38,6 +44,13 @@ pub struct DeviceLimits {
     /// Custom Scan yield overhead (~3μs/row) makes large-output joins
     /// strictly slower than PG's native HashJoin.
     pub gpu_join_max_output_rows: usize,
+    /// Lower bound of the 100K-row spatial polygon crash band.
+    pub gpu_spatial_unsafe_band_min_rows: usize,
+    /// Upper bound of the 100K-row spatial polygon crash band.
+    pub gpu_spatial_unsafe_band_max_rows: usize,
+    /// Minimum constant polygon vertex count for the 100K-row spatial crash
+    /// band. H3 and simple non-polygon predicates do not use this gate.
+    pub gpu_spatial_unsafe_band_min_vertices: usize,
     /// Minimum polygon vertex count for GPU spatial dispatch.
     /// Below this threshold, the GPU kernel overhead exceeds PG parallel's
     /// per-row cost, so we defer to standard PostGIS evaluation.
@@ -249,6 +262,7 @@ impl DeviceLimits {
         // At 25K+ the kernel amortizes the overhead.
         let gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000);
         let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
+        let gpu_hash_agg_unsafe_input_rows = 100_000;
 
         // ~64 bytes per hash entry; use 1/256th of GPU memory as budget.
         // GPU hash agg kernel uses open-addressing with atomic accumulators;
@@ -273,11 +287,11 @@ impl DeviceLimits {
             256_000
         };
 
-        // Chunk size for GPU sort dispatch. Sort requires two arrays
-        // (keys + indices) ≈ 12 bytes per element. The executor sorts in
-        // chunks of this size and k-way merges, so arbitrarily large
-        // inputs are handled. Capped at 4M to keep per-chunk GPU dispatch
-        // fast (Metal radix sort is O(n) but buffer allocation dominates).
+        // Maximum elements for direct GPU sort dispatch. Sort requires two
+        // arrays (keys + indices) ≈ 12 bytes per element. The executor's
+        // full-sort path currently declines GPU above this cap and sorts
+        // inside Custom Scan, so the planner separately rejects no-limit full
+        // sorts until the chunked GPU merge path is competitive.
         let gpu_sort_max_elements = if mem > 0 {
             (mem / 32 / 12).clamp(64_000, 4_000_000)
         } else {
@@ -311,10 +325,17 @@ impl DeviceLimits {
             gpu_window_min_rows,
             gpu_reduce_min_rows,
             gpu_hash_agg_min_rows,
+            gpu_hash_agg_unsafe_input_rows,
             gpu_hash_agg_max_groups,
             gpu_reduce_max_chunk,
             gpu_sort_max_elements,
             gpu_join_max_output_rows,
+            // 2026-05-13 safety band: many polygon/selectivity fixtures crash
+            // at the 100K scale, while adjacent 10K/1M cells do not show the
+            // same monotonic memory profile. Keep this row-band gate narrow.
+            gpu_spatial_unsafe_band_min_rows: 80_000,
+            gpu_spatial_unsafe_band_max_rows: 150_000,
+            gpu_spatial_unsafe_band_min_vertices: 100,
             // Spatial vertex threshold: GPU kernel overhead is constant
             // (~19ms for geom deser + seq scan), while PG parallel scales
             // linearly with vertex count. This gate rejects the obviously
@@ -333,12 +354,16 @@ impl DeviceLimits {
             // but Custom Scan framing still adds per-row cost. Needs enough
             // rows to amortize compilation + scan overhead.
             gpu_expr_min_rows: cu_scale(250_000).clamp(50_000, 2_000_000),
-            // Hash join build: ~64 bytes per hash entry. Use 1/64th of
-            // GPU memory as budget for the build-side hash table.
+            // Hash join build: reject the sort-merge kernel branch that
+            // starts at count >= 100000. That path currently probes SYCL
+            // kernels with raw host pointers on Metal, so the planner cap is
+            // pinned just below the threshold until the kernel contract is
+            // fixed. Memory can lower the cap on tiny devices but never
+            // raises it into the unsafe branch.
             gpu_hash_join_build_max_rows: if mem > 0 {
-                (mem / 64 / 64).clamp(10_000, 1_000_000)
+                (mem / 64 / 64).clamp(10_000, 99_999)
             } else {
-                100_000
+                99_999
             },
             // Pipeline fusion: setup has overhead (scan_desc open, template
             // compile). Needs enough rows to amortize.
@@ -353,8 +378,11 @@ impl DeviceLimits {
                 100_000
             },
             // PreAgg per-row cost model: derived from empirical measurement.
+            // Dimension materialization is CPU-side tuple extraction + hash
+            // table build; large dimensions were under-costed at 0.01 and
+            // selected losing count-only join plans.
             // Unified memory halves probe cost (no DMA).
-            preagg_dim_materialize_cost: 0.01,
+            preagg_dim_materialize_cost: 0.10,
             preagg_fact_scan_cost: 0.001,
             preagg_probe_cost: if unified { 0.0015 } else { 0.003 },
             preagg_agg_cost: 0.002,
@@ -424,10 +452,11 @@ impl DeviceLimits {
             hashagg_max_state_bytes_per_group: 256,
             sort_break_even_rows_int: cu_scale(100_000).clamp(20_000, 1_000_000),
             sort_break_even_rows_float: cu_scale(80_000).clamp(16_000, 800_000),
-            // Spatial PIP break-even: tuned so `vsweep_256v × 100k = 25.6M`
-            // passes (bucket B2 workload should dispatch) and
-            // `vsweep_4v × 1M = 4M` skips.
-            spatial_point_in_ring_break_even_verts_x_rows: 10_000_000,
+            // Spatial PIP break-even: raised after the 2026-05-13 run showed
+            // moderate polygon/selectivity cells often losing even when
+            // stable. Keep only compute-heavy polygon work eligible while
+            // the staging/selectivity cost model is rebuilt.
+            spatial_point_in_ring_break_even_verts_x_rows: 500_000_000,
             // Upper gate: `scale_1m_mega500v` hits ~10^12 work items and is
             // strictly worse on GPU than PG parallel. Reject above ~5 * 10^10.
             spatial_point_in_ring_max_verts_x_rows: 50_000_000_000,
@@ -462,17 +491,21 @@ impl DeviceLimits {
             gpu_window_min_rows: 100_000,
             gpu_reduce_min_rows: 25_000,
             gpu_hash_agg_min_rows: 250_000,
+            gpu_hash_agg_unsafe_input_rows: 100_000,
             gpu_hash_agg_max_groups: 10_000,
             gpu_reduce_max_chunk: 256_000,
             gpu_sort_max_elements: 2_000_000,
             gpu_join_max_output_rows: 100_000,
+            gpu_spatial_unsafe_band_min_rows: 80_000,
+            gpu_spatial_unsafe_band_max_rows: 150_000,
+            gpu_spatial_unsafe_band_min_vertices: 100,
             gpu_spatial_min_vertices: 50_000,
             gpu_expr_min_rows: 250_000,
-            gpu_hash_join_build_max_rows: 100_000,
+            gpu_hash_join_build_max_rows: 99_999,
             gpu_pipeline_fusion_min_rows: 10_000,
             gpu_preagg_min_fact_rows: 50_000,
             gpu_preagg_max_dim_rows: 100_000,
-            preagg_dim_materialize_cost: 0.01,
+            preagg_dim_materialize_cost: 0.10,
             preagg_fact_scan_cost: 0.001,
             preagg_probe_cost: 0.003,
             preagg_agg_cost: 0.002,
@@ -504,7 +537,7 @@ impl DeviceLimits {
             hashagg_max_state_bytes_per_group: 256,
             sort_break_even_rows_int: 100_000,
             sort_break_even_rows_float: 80_000,
-            spatial_point_in_ring_break_even_verts_x_rows: 10_000_000,
+            spatial_point_in_ring_break_even_verts_x_rows: 500_000_000,
             spatial_point_in_ring_max_verts_x_rows: 50_000_000_000,
             window_min_partition_rows: 10_000,
             expr_min_predicate_complexity_x_rows: 50_000,

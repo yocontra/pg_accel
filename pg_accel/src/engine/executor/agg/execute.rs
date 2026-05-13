@@ -17,6 +17,7 @@ use crate::gpu::{PgaccelAggCol, PgaccelAggFunc};
 use super::ffi_bridge::{agg_op_to_ffi, agg_op_to_ffi_partial};
 use super::keys::{GroupKeyInfo, append_key_bytes};
 use super::ops::AggOp;
+use super::partial::emitter::int128_to_numeric;
 use super::partial::{ColumnAccumulator, PartialEmitter};
 use super::values::{append_value_bytes, oid_to_val_tag};
 
@@ -32,6 +33,9 @@ struct FusedMultiResult {
     min: f64,
     max: f64,
     count: i64,
+    int_sum: Option<i128>,
+    int_min: Option<i64>,
+    int_max: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -53,8 +57,20 @@ pub(super) struct AggColumn {
     pub(super) result_type_oid: pg_sys::Oid,
     /// Running per-column accumulator (sum, count, min/max, `sum_sq`, …).
     pub(super) acc: ColumnAccumulator,
-    /// Buffer for GPU reduce dispatch.
+    /// Float64 buffer for GPU reduce dispatch.
     pub(super) gpu_values: Vec<f64>,
+    /// Float32 buffer for GPU reduce dispatch.
+    pub(super) gpu_values_f32: Vec<f32>,
+    /// Int64 buffer for GPU reduce dispatch.
+    pub(super) gpu_values_i64: Vec<i64>,
+    /// Exact int64-source SUM state for `SUM(bigint)` finalization.
+    pub(super) int_sum: i128,
+    /// Exact int64-source MIN state.
+    pub(super) int_min: i64,
+    /// Exact int64-source MAX state.
+    pub(super) int_max: i64,
+    /// Whether the exact int64-source state has observed at least one value.
+    pub(super) int_has_value: bool,
     /// Whether GPU reduce was successfully used.
     pub(super) gpu_dispatched: bool,
     /// When true, Avg columns accumulate the full `[N, Sx, Sxx]` state
@@ -90,6 +106,12 @@ impl AggColumn {
                 bool_acc: false,
             },
             gpu_values: Vec::new(),
+            gpu_values_f32: Vec::new(),
+            gpu_values_i64: Vec::new(),
+            int_sum: 0,
+            int_min: i64::MAX,
+            int_max: i64::MIN,
+            int_has_value: false,
             gpu_dispatched: false,
             needs_full_stats: false,
         }
@@ -142,6 +164,79 @@ impl AggColumn {
         }
     }
 
+    fn accumulate_i64(&mut self, val: i64) {
+        if self.int_has_value {
+            if val < self.int_min {
+                self.int_min = val;
+            }
+            if val > self.int_max {
+                self.int_max = val;
+            }
+        } else {
+            self.int_min = val;
+            self.int_max = val;
+            self.int_has_value = true;
+        }
+
+        if matches!(self.op, AggOp::Sum | AggOp::Avg) {
+            self.int_sum = self
+                .int_sum
+                .checked_add(i128::from(val))
+                .unwrap_or_else(|| {
+                    pgrx::error!("pg_accel: INT8 aggregate overflowed i128 accumulator")
+                });
+        }
+
+        self.accumulate(val as f64);
+    }
+
+    fn observe_f64(&mut self, val: f64, buffer_gpu: bool) {
+        self.acc.count += 1;
+        self.acc.has_value = true;
+        if buffer_gpu {
+            self.gpu_values.push(val);
+        } else {
+            self.accumulate(val);
+        }
+    }
+
+    fn observe_f32(&mut self, val: f32, buffer_gpu: bool) {
+        self.acc.count += 1;
+        self.acc.has_value = true;
+        if buffer_gpu {
+            self.gpu_values_f32.push(val);
+        } else {
+            self.accumulate(f64::from(val));
+        }
+    }
+
+    fn observe_i64(&mut self, val: i64, buffer_gpu: bool) {
+        self.acc.count += 1;
+        self.acc.has_value = true;
+        if buffer_gpu {
+            self.gpu_values_i64.push(val);
+        } else {
+            self.accumulate_i64(val);
+        }
+    }
+
+    fn gpu_value_count(&self) -> usize {
+        self.gpu_values
+            .len()
+            .saturating_add(self.gpu_values_f32.len())
+            .saturating_add(self.gpu_values_i64.len())
+    }
+
+    fn has_gpu_values(&self) -> bool {
+        self.gpu_value_count() > 0
+    }
+
+    fn clear_gpu_buffers(&mut self) {
+        self.gpu_values.clear();
+        self.gpu_values_f32.clear();
+        self.gpu_values_i64.clear();
+    }
+
     /// Dispatch buffered values through GPU reduce.
     ///
     /// For small batches below the GPU threshold, accumulates directly
@@ -151,7 +246,7 @@ impl AggColumn {
     /// should not have injected a GpuReduce path if GPU is unavailable.
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn dispatch_gpu_reduce(&mut self) {
-        let n = self.gpu_values.len();
+        let n = self.gpu_value_count();
         let limits = cost::device_limits();
         if n < limits.gpu_reduce_min_rows {
             // Small batch: single-pass accumulation (no GPU overhead).
@@ -165,7 +260,63 @@ impl AggColumn {
             return;
         }
 
-        // Try f64 GPU path first (CUDA/ROCm with fp64 support).
+        match self.type_oid {
+            pg_sys::FLOAT4OID => self.dispatch_gpu_reduce_f32(),
+            pg_sys::INT8OID => self.dispatch_gpu_reduce_i64(),
+            pg_sys::FLOAT8OID => self.dispatch_gpu_reduce_f64(),
+            _ => self.dispatch_gpu_reduce_f64(),
+        }
+    }
+
+    fn dispatch_gpu_reduce_f32(&mut self) {
+        let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
+        let gpu_result = match self.op {
+            AggOp::Sum => gpu::reduce_sum_f32(&self.gpu_values_f32).map(f64::from),
+            AggOp::Avg if !use_stats_for_avg => {
+                gpu::reduce_sum_f32(&self.gpu_values_f32).map(f64::from)
+            }
+            AggOp::Min => gpu::reduce_min_f32(&self.gpu_values_f32).map(f64::from),
+            AggOp::Max => gpu::reduce_max_f32(&self.gpu_values_f32).map(f64::from),
+            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
+                if let Some((c, s, ss)) = gpu::reduce_stats_f32(&self.gpu_values_f32) {
+                    self.gpu_dispatched = true;
+                    self.acc.sum = s;
+                    self.acc.sum_sq = ss;
+                    if self.acc.count == 0 {
+                        self.acc.count = c;
+                    }
+                    self.acc.has_value = true;
+                    self.clear_gpu_buffers();
+                } else {
+                    pgrx::error!(
+                        "pg_accel: GPU reduce_stats_f32 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                        self.op,
+                    );
+                }
+                return;
+            }
+            AggOp::Count
+            | AggOp::Passthrough
+            | AggOp::BitAnd
+            | AggOp::BitOr
+            | AggOp::BoolAnd
+            | AggOp::BoolOr => {
+                self.drain_small_batch();
+                return;
+            }
+        };
+
+        if let Some(result) = gpu_result {
+            self.apply_gpu_result(result);
+        } else {
+            pgrx::error!(
+                "pg_accel: GPU reduce_f32 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                self.op,
+            );
+        }
+    }
+
+    fn dispatch_gpu_reduce_f64(&mut self) {
         let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
         let gpu_result = match self.op {
             AggOp::Sum => gpu::reduce_sum_f64(&self.gpu_values),
@@ -186,7 +337,7 @@ impl AggColumn {
                         self.acc.count = c;
                     }
                     self.acc.has_value = true;
-                    self.gpu_values = Vec::new();
+                    self.clear_gpu_buffers();
                 } else {
                     pgrx::error!(
                         "pg_accel: GPU reduce_stats kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
@@ -209,38 +360,29 @@ impl AggColumn {
 
         if let Some(result) = gpu_result {
             self.apply_gpu_result(result);
-            return;
-        }
-        // f64 unsupported (e.g. Metal) — try f32 path with precision loss.
-        #[allow(clippy::cast_possible_truncation)]
-        let f32_values: Vec<f32> = self.gpu_values.iter().map(|&v| v as f32).collect();
-
-        let f32_result = match self.op {
-            AggOp::Sum | AggOp::Avg => gpu::reduce_sum_f32(&f32_values).map(f64::from),
-            AggOp::Min => gpu::reduce_min_f32(&f32_values).map(f64::from),
-            AggOp::Max => gpu::reduce_max_f32(&f32_values).map(f64::from),
-            AggOp::StddevSamp
-            | AggOp::StddevPop
-            | AggOp::VarSamp
-            | AggOp::VarPop
-            | AggOp::Count
-            | AggOp::Passthrough
-            | AggOp::BitAnd
-            | AggOp::BitOr
-            | AggOp::BoolAnd
-            | AggOp::BoolOr => None,
-        };
-
-        if let Some(result) = f32_result {
-            self.apply_gpu_result(result);
         } else {
-            // GPU reduce failed for a reducible op. Per CLAUDE.md rule 11,
-            // no CPU fallback — raise a PG ERROR so the caller knows the
-            // query cannot be answered accurately rather than silently
-            // substituting a scalar accumulator (which has produced wrong
-            // results, e.g. SUM=0).
             pgrx::error!(
                 "pg_accel: GPU reduce kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                self.op,
+            );
+        }
+    }
+
+    fn dispatch_gpu_reduce_i64(&mut self) {
+        let AggOp::Sum = self.op else {
+            tracing::debug!(
+                "pg_accel: no standalone INT8 GPU reduce kernel for {:?}; declining GPU reduce",
+                self.op
+            );
+            self.drain_small_batch();
+            return;
+        };
+
+        if let Some(result) = gpu::reduce_sum_i64(&self.gpu_values_i64) {
+            self.apply_gpu_i64_sum_result(result);
+        } else {
+            pgrx::error!(
+                "pg_accel: GPU reduce_sum_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
                 self.op,
             );
         }
@@ -252,15 +394,22 @@ impl AggColumn {
     /// combined via the accumulator. If GPU fails for any chunk, a warning
     /// is logged — the planner should not have injected this path.
     pub(super) fn dispatch_gpu_reduce_chunked(&mut self) {
+        match self.type_oid {
+            pg_sys::FLOAT4OID => {
+                self.dispatch_gpu_reduce_chunked_f32();
+                return;
+            }
+            pg_sys::INT8OID => {
+                self.dispatch_gpu_reduce_chunked_i64();
+                return;
+            }
+            _ => {}
+        }
+
         let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
         let values = std::mem::take(&mut self.gpu_values);
         let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
         for chunk in values.chunks(max_chunk) {
-            // The f64 wrappers in `gpu::` auto-cast to f32 on devices
-            // without fp64 (Metal), so we always call the f64 entry point
-            // here — no two-attempt retry needed. Precision tradeoff: on
-            // fp32-only devices the per-chunk partial is folded into the
-            // outer Kahan accumulator, bounding the drift.
             let gpu_result = match self.op {
                 AggOp::Sum => gpu::reduce_sum_f64(chunk),
                 AggOp::Avg if !use_stats_for_avg => gpu::reduce_sum_f64(chunk),
@@ -318,6 +467,96 @@ impl AggColumn {
         self.acc.has_value = true;
     }
 
+    pub(super) fn dispatch_gpu_reduce_chunked_f32(&mut self) {
+        let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
+        let values = std::mem::take(&mut self.gpu_values_f32);
+        let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
+        for chunk in values.chunks(max_chunk) {
+            let gpu_result = match self.op {
+                AggOp::Sum => gpu::reduce_sum_f32(chunk).map(f64::from),
+                AggOp::Avg if !use_stats_for_avg => gpu::reduce_sum_f32(chunk).map(f64::from),
+                AggOp::Min => gpu::reduce_min_f32(chunk).map(f64::from),
+                AggOp::Max => gpu::reduce_max_f32(chunk).map(f64::from),
+                AggOp::Avg
+                | AggOp::StddevSamp
+                | AggOp::StddevPop
+                | AggOp::VarSamp
+                | AggOp::VarPop => {
+                    if let Some((c, s, ss)) = gpu::reduce_stats_f32(chunk) {
+                        self.gpu_dispatched = true;
+                        let y = s - self.acc.sum_comp;
+                        let t = self.acc.sum + y;
+                        self.acc.sum_comp = (t - self.acc.sum) - y;
+                        self.acc.sum = t;
+                        self.acc.sum_sq += ss;
+                        self.acc.count = self.acc.count.saturating_add(c);
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU reduce_stats_f32 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                    None
+                }
+                AggOp::Count
+                | AggOp::Passthrough
+                | AggOp::BitAnd
+                | AggOp::BitOr
+                | AggOp::BoolAnd
+                | AggOp::BoolOr => None,
+            };
+
+            if let Some(partial) = gpu_result {
+                self.gpu_dispatched = true;
+                self.accumulate(partial);
+            } else if !use_stats_for_avg
+                && matches!(self.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max)
+            {
+                pgrx::error!(
+                    "pg_accel: GPU reduce_f32 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                    self.op,
+                );
+            }
+        }
+        self.acc.has_value = true;
+    }
+
+    pub(super) fn dispatch_gpu_reduce_chunked_i64(&mut self) {
+        let AggOp::Sum = self.op else {
+            tracing::debug!(
+                "pg_accel: no standalone INT8 GPU reduce kernel for {:?}; declining GPU reduce",
+                self.op
+            );
+            self.drain_small_batch();
+            return;
+        };
+
+        let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
+        let values = std::mem::take(&mut self.gpu_values_i64);
+        for chunk in values.chunks(max_chunk) {
+            if let Some(partial) = gpu::reduce_sum_i64(chunk) {
+                self.gpu_dispatched = true;
+                self.int_has_value = true;
+                self.int_sum = self
+                    .int_sum
+                    .checked_add(i128::from(partial))
+                    .unwrap_or_else(|| {
+                        pgrx::error!("pg_accel: INT8 aggregate overflowed i128 accumulator")
+                    });
+                let y = partial as f64 - self.acc.sum_comp;
+                let t = self.acc.sum + y;
+                self.acc.sum_comp = (t - self.acc.sum) - y;
+                self.acc.sum = t;
+            } else {
+                pgrx::error!(
+                    "pg_accel: GPU reduce_sum_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                    self.op,
+                );
+            }
+        }
+        self.acc.has_value = true;
+    }
+
     pub(super) fn apply_gpu_result(&mut self, result: f64) {
         self.gpu_dispatched = true;
         match self.op {
@@ -335,7 +574,16 @@ impl AggColumn {
             | AggOp::BoolAnd
             | AggOp::BoolOr => {}
         }
-        self.gpu_values = Vec::new();
+        self.clear_gpu_buffers();
+    }
+
+    pub(super) fn apply_gpu_i64_sum_result(&mut self, result: i64) {
+        self.gpu_dispatched = true;
+        self.int_sum = i128::from(result);
+        self.int_has_value = true;
+        self.acc.sum = result as f64;
+        self.acc.has_value = true;
+        self.clear_gpu_buffers();
     }
 
     /// Drain the GPU value buffer through the scalar accumulator.
@@ -345,6 +593,12 @@ impl AggColumn {
     pub(super) fn drain_small_batch(&mut self) {
         for val in std::mem::take(&mut self.gpu_values) {
             self.accumulate(val);
+        }
+        for val in std::mem::take(&mut self.gpu_values_f32) {
+            self.accumulate(f64::from(val));
+        }
+        for val in std::mem::take(&mut self.gpu_values_i64) {
+            self.accumulate_i64(val);
         }
     }
 
@@ -374,6 +628,30 @@ impl AggColumn {
                 AggOp::Count => (pg_sys::Datum::from(0_i64), false),
                 _ => (pg_sys::Datum::from(0), true),
             };
+        }
+
+        if self.type_oid == pg_sys::INT8OID && self.int_has_value {
+            match self.op {
+                AggOp::Sum if self.result_type_oid == NUMERICOID => {
+                    // SAFETY: main backend thread; allocates a Numeric in
+                    // CurrentMemoryContext.
+                    let datum = unsafe { int128_to_numeric(self.int_sum, 0) };
+                    return (datum, false);
+                }
+                AggOp::Sum if self.result_type_oid == pg_sys::INT8OID => {
+                    let Ok(v) = i64::try_from(self.int_sum) else {
+                        pgrx::error!("pg_accel: INT8 SUM does not fit in INT8 result")
+                    };
+                    return (pg_sys::Datum::from(v), false);
+                }
+                AggOp::Min if self.result_type_oid == pg_sys::INT8OID => {
+                    return (pg_sys::Datum::from(self.int_min), false);
+                }
+                AggOp::Max if self.result_type_oid == pg_sys::INT8OID => {
+                    return (pg_sys::Datum::from(self.int_max), false);
+                }
+                _ => {}
+            }
         }
 
         let raw_f64 = match self.op {
@@ -711,23 +989,43 @@ impl AggExecState {
 
                     // SAFETY: tupdesc is valid, col.attno is 1-based and within range.
                     let info = unsafe { AttExtractInfo::new(tupdesc, col.attno) };
-                    // SAFETY: tuples are valid MinimalTuples, info matches schema,
-                    // last_child_slot is a valid TupleTableSlot on main thread.
-                    let (values, nulls) =
-                        unsafe { tuple_extract::extract_f64(&tuples, &info, last_child_slot) };
-
-                    for (j, &val) in values.iter().enumerate() {
-                        if nulls[j] == 1 {
-                            continue;
+                    match info.typid {
+                        pg_sys::FLOAT4OID => {
+                            // SAFETY: tuples are valid MinimalTuples, info matches schema,
+                            // last_child_slot is a valid TupleTableSlot on main thread.
+                            let (values, nulls) = unsafe {
+                                tuple_extract::extract_f32(&tuples, &info, last_child_slot)
+                            };
+                            for (j, &val) in values.iter().enumerate() {
+                                if nulls[j] == 1 {
+                                    continue;
+                                }
+                                col.observe_f32(val, gpu_flags[i]);
+                            }
                         }
-
-                        col.acc.count += 1;
-                        col.acc.has_value = true;
-
-                        if gpu_flags[i] {
-                            col.gpu_values.push(val);
-                        } else {
-                            col.accumulate(val);
+                        pg_sys::INT8OID => {
+                            // SAFETY: same as above; INT8 extraction preserves all bits.
+                            let (values, nulls) = unsafe {
+                                tuple_extract::extract_i64(&tuples, &info, last_child_slot)
+                            };
+                            for (j, &val) in values.iter().enumerate() {
+                                if nulls[j] == 1 {
+                                    continue;
+                                }
+                                col.observe_i64(val, gpu_flags[i]);
+                            }
+                        }
+                        _ => {
+                            // SAFETY: same as above.
+                            let (values, nulls) = unsafe {
+                                tuple_extract::extract_f64(&tuples, &info, last_child_slot)
+                            };
+                            for (j, &val) in values.iter().enumerate() {
+                                if nulls[j] == 1 {
+                                    continue;
+                                }
+                                col.observe_f64(val, gpu_flags[i]);
+                            }
                         }
                     }
                 }
@@ -753,7 +1051,7 @@ impl AggExecState {
 
         // Per-column fallback for columns not handled by fused path.
         for col in &mut self.columns {
-            if !col.gpu_values.is_empty() {
+            if col.has_gpu_values() {
                 col.dispatch_gpu_reduce();
                 if col.gpu_dispatched {
                     self.gpu_dispatched = true;
@@ -1047,33 +1345,41 @@ impl AggExecState {
                 };
 
                 // SAFETY: hdr is valid, info matches schema.
-                // Type-dispatch: read as native type, convert to f64.
-                let val: Option<f64> = unsafe {
-                    match info.typid {
-                        t if t == pg_sys::FLOAT4OID => {
-                            tuple_extract::try_fast_read_heap_pub::<f32>(hdr, info).map(f64::from)
+                match info.typid {
+                    t if t == pg_sys::FLOAT4OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<f32>(hdr, info) };
+                        if let Some(v) = val {
+                            col.observe_f32(v, gpu_flags[i]);
                         }
-                        t if t == pg_sys::INT2OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info).map(f64::from)
-                        }
-                        t if t == pg_sys::INT4OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info).map(f64::from)
-                        }
-                        t if t == pg_sys::INT8OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info)
-                                .map(|v| v as f64)
-                        }
-                        _ => tuple_extract::try_fast_read_heap_pub::<f64>(hdr, info),
                     }
-                };
-
-                if let Some(v) = val {
-                    col.acc.count += 1;
-                    col.acc.has_value = true;
-                    if gpu_flags[i] {
-                        col.gpu_values.push(v);
-                    } else {
-                        col.accumulate(v);
+                    t if t == pg_sys::INT8OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<i64>(hdr, info) };
+                        if let Some(v) = val {
+                            col.observe_i64(v, gpu_flags[i]);
+                        }
+                    }
+                    t if t == pg_sys::INT2OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info) };
+                        if let Some(v) = val {
+                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                        }
+                    }
+                    t if t == pg_sys::INT4OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info) };
+                        if let Some(v) = val {
+                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                        }
+                    }
+                    _ => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<f64>(hdr, info) };
+                        if let Some(v) = val {
+                            col.observe_f64(v, gpu_flags[i]);
+                        }
                     }
                 }
             }
@@ -1103,7 +1409,7 @@ impl AggExecState {
         self.try_fused_multi_reduce();
 
         for col in &mut self.columns {
-            if !col.gpu_values.is_empty() {
+            if col.has_gpu_values() {
                 col.dispatch_gpu_reduce();
                 if col.gpu_dispatched {
                     self.gpu_dispatched = true;
@@ -1654,40 +1960,42 @@ impl AggExecState {
                 // Fast-extract the value from HeapTuple data.
                 // SAFETY: t_data is valid from heap_getnext. info matches
                 // the table schema from set_fused_context initialization.
-                let val: Option<f64> = unsafe {
-                    match info.typid {
-                        t if t == pg_sys::FLOAT4OID => {
-                            tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info)
-                                .map(f64::from)
+                match info.typid {
+                    t if t == pg_sys::FLOAT4OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info) };
+                        if let Some(v) = val {
+                            col.observe_f32(v, gpu_flags[i]);
                         }
-                        t if t == pg_sys::INT2OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info)
-                                .map(f64::from)
-                        }
-                        t if t == pg_sys::INT4OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info)
-                                .map(f64::from)
-                        }
-                        t if t == pg_sys::INT8OID => {
-                            tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info)
-                                .map(|v| v as f64)
-                        }
-                        _ => tuple_extract::try_fast_read_heap_pub::<f64>(t_data, info),
                     }
-                };
-
-                let Some(v) = val else {
-                    // Null or not fast-extractable: skip this row for this column.
-                    continue;
-                };
-
-                col.acc.count += 1;
-                col.acc.has_value = true;
-
-                if gpu_flags[i] {
-                    col.gpu_values.push(v);
-                } else {
-                    col.accumulate(v);
+                    t if t == pg_sys::INT8OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info) };
+                        if let Some(v) = val {
+                            col.observe_i64(v, gpu_flags[i]);
+                        }
+                    }
+                    t if t == pg_sys::INT2OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info) };
+                        if let Some(v) = val {
+                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                        }
+                    }
+                    t if t == pg_sys::INT4OID => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info) };
+                        if let Some(v) = val {
+                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                        }
+                    }
+                    _ => {
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<f64>(t_data, info) };
+                        if let Some(v) = val {
+                            col.observe_f64(v, gpu_flags[i]);
+                        }
+                    }
                 }
             }
         }
@@ -1701,7 +2009,7 @@ impl AggExecState {
 
         // Per-column fallback for columns not handled by fused path.
         for col in &mut self.columns {
-            if !col.gpu_values.is_empty() {
+            if col.has_gpu_values() {
                 col.dispatch_gpu_reduce();
                 if col.gpu_dispatched {
                     self.gpu_dispatched = true;
@@ -1774,7 +2082,7 @@ impl AggExecState {
             // Avg columns running under a partial plan need the full stats
             // state, so they stay on the per-column reduce_stats path.
             let avg_needs_stats = c.op == AggOp::Avg && c.needs_full_stats;
-            if !c.gpu_values.is_empty()
+            if c.has_gpu_values()
                 && !avg_needs_stats
                 && matches!(c.op, AggOp::Sum | AggOp::Avg | AggOp::Min | AggOp::Max)
             {
@@ -1790,15 +2098,15 @@ impl AggExecState {
                 continue;
             }
 
-            // All columns in the group share an attno so their gpu_values
+            // All columns in the group share an attno so their GPU buffers
             // are populated from the same tuple stream — lengths must match.
-            let n = self.columns[col_indices[0]].gpu_values.len();
+            let n = self.columns[col_indices[0]].gpu_value_count();
             if n < reduce_f32_break_even_rows {
                 continue;
             }
             let same_len = col_indices
                 .iter()
-                .all(|&i| self.columns[i].gpu_values.len() == n);
+                .all(|&i| self.columns[i].gpu_value_count() == n);
             if !same_len {
                 continue;
             }
@@ -1821,9 +2129,27 @@ impl AggExecState {
             for &col_idx in &col_indices {
                 let col = &mut self.columns[col_idx];
                 match col.op {
-                    AggOp::Sum | AggOp::Avg => col.acc.sum = result.sum,
-                    AggOp::Min => col.acc.min_val = result.min,
-                    AggOp::Max => col.acc.max_val = result.max,
+                    AggOp::Sum | AggOp::Avg => {
+                        col.acc.sum = result.sum;
+                        if let Some(sum) = result.int_sum {
+                            col.int_sum = sum;
+                            col.int_has_value = true;
+                        }
+                    }
+                    AggOp::Min => {
+                        col.acc.min_val = result.min;
+                        if let Some(min) = result.int_min {
+                            col.int_min = min;
+                            col.int_has_value = true;
+                        }
+                    }
+                    AggOp::Max => {
+                        col.acc.max_val = result.max;
+                        if let Some(max) = result.int_max {
+                            col.int_max = max;
+                            col.int_has_value = true;
+                        }
+                    }
                     _ => {}
                 }
                 // Ensure count is correct for AVG finalize.
@@ -1836,7 +2162,7 @@ impl AggExecState {
                 }
                 col.gpu_dispatched = true;
                 col.acc.has_value = true;
-                col.gpu_values.clear();
+                col.clear_gpu_buffers();
             }
             self.gpu_dispatched = true;
             tracing::debug!(
@@ -1854,21 +2180,38 @@ impl AggExecState {
     fn dispatch_fused_multi_for_column(col: &AggColumn) -> Option<FusedMultiResult> {
         match col.type_oid {
             pg_sys::FLOAT4OID => {
-                let values: Vec<f32> = col.gpu_values.iter().map(|&v| v as f32).collect();
-                gpu::reduce_multi_f32(&values).map(|result| FusedMultiResult {
+                gpu::reduce_multi_f32(&col.gpu_values_f32).map(|result| FusedMultiResult {
                     sum: f64::from(result.sum),
                     min: f64::from(result.min),
                     max: f64::from(result.max),
                     count: result.count,
+                    int_sum: None,
+                    int_min: None,
+                    int_max: None,
                 })
             }
-            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
+            pg_sys::INT8OID => {
+                let values = &col.gpu_values_i64;
+                gpu::reduce_multi_i64(values).map(|result| FusedMultiResult {
+                    sum: result.sum as f64,
+                    min: result.min as f64,
+                    max: result.max as f64,
+                    count: result.count,
+                    int_sum: Some(i128::from(result.sum)),
+                    int_min: Some(result.min),
+                    int_max: Some(result.max),
+                })
+            }
+            pg_sys::INT2OID | pg_sys::INT4OID => {
                 let values: Vec<i64> = col.gpu_values.iter().map(|&v| v as i64).collect();
                 gpu::reduce_multi_i64(&values).map(|result| FusedMultiResult {
                     sum: result.sum as f64,
                     min: result.min as f64,
                     max: result.max as f64,
                     count: result.count,
+                    int_sum: None,
+                    int_min: None,
+                    int_max: None,
                 })
             }
             _ => gpu::reduce_multi_f64(&col.gpu_values).map(|result| FusedMultiResult {
@@ -1876,6 +2219,9 @@ impl AggExecState {
                 min: result.min,
                 max: result.max,
                 count: result.count,
+                int_sum: None,
+                int_min: None,
+                int_max: None,
             }),
         }
     }

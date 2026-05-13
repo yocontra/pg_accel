@@ -195,10 +195,12 @@ fn cpu_only_limits_match_previous_defaults() {
     assert_eq!(l.gpu_window_min_rows, 100_000);
     assert_eq!(l.gpu_reduce_min_rows, 25_000);
     assert_eq!(l.gpu_hash_agg_min_rows, 250_000);
+    assert_eq!(l.gpu_hash_agg_unsafe_input_rows, 100_000);
     assert_eq!(l.gpu_hash_agg_max_groups, 10_000);
     assert_eq!(l.gpu_expr_min_rows, 250_000);
-    assert_eq!(l.gpu_hash_join_build_max_rows, 100_000);
+    assert_eq!(l.gpu_hash_join_build_max_rows, 99_999);
     assert_eq!(l.gpu_pipeline_fusion_min_rows, 10_000);
+    assert!((l.preagg_dim_materialize_cost - 0.10).abs() < f64::EPSILON);
     assert_eq!(l.optimal_batch_min, 256);
     assert_eq!(l.optimal_batch_max, 8192);
 }
@@ -220,6 +222,7 @@ fn baseline_gpu_matches_defaults() {
     assert_eq!(l.gpu_sort_min_rows, 100_000);
     assert_eq!(l.gpu_window_min_rows, 100_000);
     assert_eq!(l.gpu_reduce_min_rows, 25_000);
+    assert!((l.preagg_dim_materialize_cost - 0.10).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -278,6 +281,61 @@ fn batch_cost_just_above_threshold() {
 #[test]
 fn batch_large_row_count() {
     assert!(should_batch(10_000_000, 0.05, 256));
+}
+
+// -- 2026-05-13 conservative planner safety gates -------------------------
+
+#[test]
+fn hashagg_safety_gate_rejects_sort_based_kernel_threshold() {
+    let l = DeviceLimits::cpu_only();
+    assert!(hashagg_input_rows_safe(99_999, &l));
+    assert!(!hashagg_input_rows_safe(100_000, &l));
+    assert!(!hashagg_input_rows_safe(1_000_000, &l));
+}
+
+#[test]
+fn hashjoin_safety_gate_rejects_unsafe_build_threshold() {
+    let l = DeviceLimits::cpu_only();
+    assert!(hashjoin_cardinality_safe(
+        l.gpu_hash_join_build_max_rows,
+        l.gpu_join_max_output_rows,
+        &l
+    ));
+    assert!(!hashjoin_cardinality_safe(100_000, 1, &l));
+}
+
+#[test]
+fn conservative_input_rows_uses_physical_tuple_estimate_for_crash_gates() {
+    assert_eq!(conservative_input_rows(99_950.0, 100_000.0), 100_000);
+    assert_eq!(conservative_input_rows(100_010.0, 100_000.0), 100_010);
+    assert_eq!(conservative_input_rows(-1.0, -1.0), 0);
+}
+
+#[test]
+fn hashjoin_safety_gate_rejects_large_output() {
+    let l = DeviceLimits::cpu_only();
+    assert!(!hashjoin_cardinality_safe(
+        1,
+        l.gpu_join_max_output_rows + 1,
+        &l
+    ));
+}
+
+#[test]
+fn sort_limit_gate_rejects_full_no_limit_sort() {
+    assert!(!sort_limit_present(-1.0));
+    assert!(!sort_limit_present(0.0));
+    assert!(!sort_limit_present(f64::NAN));
+    assert!(sort_limit_present(1.0));
+}
+
+#[test]
+fn spatial_unsafe_band_rejects_100k_polygon_only() {
+    let l = DeviceLimits::cpu_only();
+    assert!(spatial_polygon_rows_safe(10_000, 500, &l));
+    assert!(!spatial_polygon_rows_safe(100_000, 500, &l));
+    assert!(spatial_polygon_rows_safe(100_000, 99, &l));
+    assert!(spatial_polygon_rows_safe(1_000_000, 500, &l));
 }
 
 #[test]
@@ -368,7 +426,7 @@ fn preagg_fixed_overhead_less_than_gpu_launch() {
 #[test]
 fn preagg_costs_positive() {
     let l = DeviceLimits::cpu_only();
-    assert!(l.preagg_dim_materialize_cost > 0.0);
+    assert!((l.preagg_dim_materialize_cost - 0.10).abs() < f64::EPSILON);
     assert!(l.preagg_fact_scan_cost > 0.0);
     assert!(l.preagg_probe_cost > 0.0);
     assert!(l.preagg_agg_cost > 0.0);

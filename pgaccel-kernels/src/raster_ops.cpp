@@ -2,8 +2,14 @@
 
 #include <cmath>
 #include <cstring>
+#include <stdexcept>
 
 #include "pgaccel_ffi.h"
+
+// SAFETY: g_queue is owned by device_manager.cpp. Raster kernels must share
+// the same process-global queue so pgaccel_shutdown() can release the Metal
+// context; a private static queue leaks an extra runtime context at exit.
+extern sycl::queue* g_queue;
 
 /* ── Pixel type helpers ───────────────────────────────────────── */
 
@@ -70,12 +76,13 @@ static void write_pixel(void* data, size_t idx, int pt, double val) {
 // kernel body.
 
 static sycl::queue& get_queue() {
-  // Leak on purpose: the AdaptiveCpp Metal runtime has atexit teardown
-  // ordering that throws from ~queue() after its allocator/mutex has
-  // already been destroyed, which terminates the process. Matches the
-  // `g_queue` pointer pattern used elsewhere in this library.
-  static sycl::queue* q = new sycl::queue(sycl::default_selector_v);
-  return *q;
+  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
+    throw std::runtime_error("pgaccel_init failed");
+  }
+  if (g_queue == nullptr) {
+    throw std::runtime_error("pgaccel queue unavailable");
+  }
+  return *g_queue;
 }
 
 /* map_algebra GPU dispatcher.

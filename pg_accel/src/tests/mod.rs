@@ -1409,7 +1409,7 @@ mod tests {
     }
 
     // =========================================================================
-    // GPU expression evaluation tests
+    // Numeric expression fallback tests
     // =========================================================================
 
     #[pg_test]
@@ -1432,7 +1432,7 @@ mod tests {
             .expect("q")
             .expect("v");
 
-        assert_eq!(on, off, "GpuExpr comparison: results should match");
+        assert_eq!(on, off, "numeric comparison fallback: results should match");
     }
 
     #[pg_test]
@@ -1457,7 +1457,7 @@ mod tests {
                 .expect("q")
                 .expect("v");
 
-        assert_eq!(on, off, "GpuExpr BETWEEN: results should match");
+        assert_eq!(on, off, "numeric BETWEEN fallback: results should match");
     }
 
     #[pg_test]
@@ -1482,7 +1482,7 @@ mod tests {
                 .expect("q")
                 .expect("v");
 
-        assert_eq!(on, off, "GpuExpr arithmetic: results should match");
+        assert_eq!(on, off, "numeric arithmetic fallback: results should match");
     }
 
     #[pg_test]
@@ -1507,11 +1507,14 @@ mod tests {
             .expect("q")
             .expect("v");
 
-        assert_eq!(on, off, "GpuExpr NULL handling: results should match");
+        assert_eq!(
+            on, off,
+            "numeric NULL-handling fallback: results should match"
+        );
     }
 
     #[pg_test]
-    fn test_gpu_expr_explain_custom_scan() {
+    fn test_numeric_expr_where_does_not_inject_custom_scan() {
         Spi::run("SELECT setseed(0.42)").expect("seed");
         Spi::run(
             "CREATE TEMP TABLE _t_expl AS \
@@ -1527,7 +1530,7 @@ mod tests {
             let mut lines = Vec::new();
             let table = client
                 .select(
-                    "EXPLAIN SELECT count(*) FROM _t_expl WHERE val > 500.0",
+                    "EXPLAIN SELECT id FROM _t_expl WHERE val > 500.0",
                     None,
                     &[],
                 )
@@ -1540,11 +1543,16 @@ mod tests {
             lines.join("\n")
         });
 
-        // The plan text is captured; this test verifies no crash on EXPLAIN.
-        // When GpuExpr is wired, this should contain 'Custom Scan'.
+        // Generic numeric expressions must not expose the old standalone
+        // CPU-inline GpuExpr Custom Scan. They remain ordinary PG plans until
+        // expression evaluation is fused into a real GpuScan pipeline.
         assert!(
             !plan_text.is_empty(),
             "EXPLAIN should produce non-empty output"
+        );
+        assert!(
+            !plan_text.contains("Custom Scan"),
+            "generic numeric WHERE should not inject a standalone Custom Scan:\n{plan_text}"
         );
     }
 
@@ -2247,6 +2255,40 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_preagg_serial_cpu_path_not_exposed_to_planner() {
+        setup_star_schema();
+
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        let plan_text = Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(
+                    "EXPLAIN (FORMAT TEXT) \
+                     SELECT d_year, sum(lo_revenue) \
+                     FROM _fact_lineorder \
+                     JOIN _dim_date ON lo_orderdate = d_datekey \
+                     GROUP BY d_year",
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+
+        assert!(
+            !plan_text.contains("GpuAccelPreAgg") && !plan_text.contains("GpuPreAgg"),
+            "serial CPU-only PreAgg must not be exposed in normal planning, got:\n{plan_text}"
+        );
+    }
+
+    #[pg_test]
     fn test_preagg_plain_sum_one_dim() {
         setup_star_schema();
 
@@ -2423,11 +2465,41 @@ mod tests {
         crate::gpu::assert_gpu_executed(1);
     }
 
-    /// Verifies that running a large sort actually dispatches to the GPU.
+    /// Regression guard: SUM(bigint) must not round through f64 before GPU
+    /// dispatch. 2^53 + 1 is exactly representable as int8 but not as f64.
+    #[pg_test]
+    fn test_reduce_int8_sum_preserves_above_f64_exact_range() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("force GPU cost");
+        Spi::run("DROP TABLE IF EXISTS _gpu_reduce_i8_t").expect("drop temp table");
+        Spi::run(
+            "CREATE TEMP TABLE _gpu_reduce_i8_t AS \
+             SELECT CASE WHEN g = 1 \
+                         THEN 9007199254740993::bigint \
+                         ELSE 0::bigint \
+                    END AS x \
+             FROM generate_series(1, 500000) AS g",
+        )
+        .expect("create int8 reduce temp table");
+        Spi::run("ANALYZE _gpu_reduce_i8_t").expect("analyze int8 reduce table");
+
+        crate::gpu::reset_gpu_exec_count();
+
+        let sum = Spi::get_one::<AnyNumeric>("SELECT sum(x) FROM _gpu_reduce_i8_t")
+            .expect("int8 reduce query ok")
+            .expect("not null");
+
+        assert_eq!(sum.to_string(), "9007199254740993");
+        crate::gpu::assert_gpu_executed(1);
+    }
+
+    /// Verifies that an eligible top-k sort actually dispatches to the GPU.
     #[pg_test]
     fn test_sort_actually_uses_gpu() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("force GPU cost");
 
         Spi::run(
             "CREATE TEMP TABLE _gpu_sort_t AS \
@@ -2438,7 +2510,7 @@ mod tests {
 
         crate::gpu::reset_gpu_exec_count();
 
-        let _ = Spi::run("SELECT v FROM _gpu_sort_t ORDER BY v").expect("sort query ok");
+        let _ = Spi::run("SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 1024").expect("sort query ok");
 
         crate::gpu::assert_gpu_executed(1);
     }
@@ -2480,13 +2552,11 @@ mod tests {
     // =========================================================================
     //
     // These tests verify the Phase 3 change in
-    // `src/engine/ffi/planner_hooks/rel_pathlist.rs`: the scan-level GpuExpr
-    // and GpuSort injectors now also populate `rel->partial_pathlist`, so
-    // queries whose optimal plan is `Gather ∘ Parallel Scan` pick up the
-    // GPU CustomPath. A smoke test runs EXPLAIN with parallel workers
-    // enabled and asserts either a plain CustomScan (non-parallel chosen
-    // by cost) or a Gather-wrapping CustomScan appears — what we guard
-    // against is the planner REJECTING our partial path with a panic.
+    // `src/engine/ffi/planner_hooks/rel_pathlist.rs`: the scan-level GpuSort
+    // injector also populates `rel->partial_pathlist`, so queries whose
+    // optimal plan is `Gather ∘ Parallel Scan` can pick up the GPU CustomPath.
+    // Generic GpuExpr no longer exposes a standalone partial CustomPath; the
+    // negative test below guards that planner behavior.
 
     /// GpuSort partial path: EXPLAIN a sort on a table large enough to
     /// trigger parallel planning, assert the plan contains a CustomScan
@@ -2535,10 +2605,10 @@ mod tests {
         assert!(!plan.is_empty(), "EXPLAIN returned no rows");
     }
 
-    /// GpuExpr partial path: EXPLAIN a WHERE-filter query with parallel
-    /// workers forced on. Same regression guard as the sort test.
+    /// Generic numeric WHERE clauses must not add standalone GpuExpr partial
+    /// paths, even when parallel scan planning is forced on.
     #[pg_test]
-    fn test_gpu_expr_partial_path_injects() {
+    fn test_numeric_expr_partial_path_does_not_inject() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
         Spi::run("SET pg_accel.min_batch_size = 1000").expect("SET min_batch");
@@ -2572,6 +2642,56 @@ mod tests {
             lines.join("\n")
         });
         assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Custom Scan"),
+            "generic numeric WHERE should not inject standalone GpuExpr partial paths:\n{plan}"
+        );
+    }
+
+    /// Parallel partial aggregate must not wrap PostgreSQL's CPU parallel
+    /// scan. It may return once the child is a real GPU-producing GpuScan /
+    /// GpuJoin, or when the aggregate owns a direct non-partial GPU self-scan.
+    #[pg_test]
+    fn test_parallel_sum_does_not_wrap_cpu_partial_scan() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
+        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
+        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
+        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+
+        Spi::run(
+            "CREATE UNLOGGED TABLE _agg_par_t AS \
+             SELECT g::bigint AS id, (random() * 1e6)::float4 AS v \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("create table");
+        Spi::run("ANALYZE _agg_par_t").expect("ANALYZE");
+
+        let plan = Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(
+                    "EXPLAIN (FORMAT TEXT) SELECT sum(v) FROM _agg_par_t",
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        });
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !(plan.contains("Custom Scan (GpuAccelAgg)") && plan.contains("Parallel Seq Scan")),
+            "GpuAccelAgg must not wrap a CPU Parallel Seq Scan:\n{plan}"
+        );
+
+        Spi::run("DROP TABLE _agg_par_t").expect("drop table");
     }
 
     /// GpuHashJoin partial path: EXPLAIN a 2-table int equi-join with

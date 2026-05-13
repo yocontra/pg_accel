@@ -7,10 +7,26 @@
 
 #include <cstddef>
 #include <cstring>
+#include <stdexcept>
 
 #include "pgaccel_ffi.h"
 
+// SAFETY: g_queue is owned by device_manager.cpp. Bbox kernels must not
+// create short-lived private queues because each Metal queue owns context
+// state that must be released by pgaccel_shutdown().
+extern sycl::queue* g_queue;
+
 namespace {
+
+static sycl::queue& get_queue() {
+  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
+    throw std::runtime_error("pgaccel_init failed");
+  }
+  if (g_queue == nullptr) {
+    throw std::runtime_error("pgaccel queue unavailable");
+  }
+  return *g_queue;
+}
 
 // ---------------------------------------------------------------------------
 // SYCL kernel — parallel over all (i,j) pairs
@@ -144,7 +160,7 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(const float* boxes_a,
   }
 
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
     pgaccel_status st =
         bbox_intersects_bulk_sycl<float>(q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
     if (st == PGACCEL_OK) {
@@ -173,7 +189,7 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(const double* boxes_a
 
   // fp64 always available: native on CUDA/ROCm/Level Zero, soft-fp64 on Metal.
   try {
-    sycl::queue q{sycl::default_selector_v};
+    sycl::queue& q = get_queue();
     pgaccel_status st =
         bbox_intersects_bulk_sycl<double>(q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
     if (st == PGACCEL_OK) {

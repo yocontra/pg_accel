@@ -43,13 +43,18 @@ typedef enum {
  * PgaccelAggFunc::partial_width on the Rust side. */
 static inline size_t pgaccel_agg_partial_width(pgaccel_agg_func f) {
   switch (f) {
+    case PGACCEL_AGG_SUM:
+    case PGACCEL_AGG_MIN:
+    case PGACCEL_AGG_MAX:
+    case PGACCEL_AGG_COUNT:
+      return 1;
     case PGACCEL_AGG_AVG:
       return 2;
     case PGACCEL_AGG_STDDEV:
     case PGACCEL_AGG_VAR:
       return 3;
     default:
-      return 1; /* SUM, MIN, MAX, COUNT */
+      return 0;
   }
 }
 
