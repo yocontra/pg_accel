@@ -490,24 +490,24 @@ fn very_large_batch_null_passthrough() {
 
 #[test]
 fn accel_strategy_from_i32_known_values() {
-    assert_eq!(AccelStrategy::from_i32(1), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(2), AccelStrategy::GpuRaster);
-    assert_eq!(AccelStrategy::from_i32(3), AccelStrategy::GpuH3);
-    assert_eq!(AccelStrategy::from_i32(4), AccelStrategy::GpuSort);
-    assert_eq!(AccelStrategy::from_i32(5), AccelStrategy::GpuReduce);
-    assert_eq!(AccelStrategy::from_i32(6), AccelStrategy::GpuExpr);
-    assert_eq!(AccelStrategy::from_i32(7), AccelStrategy::GpuHashJoin);
-    assert_eq!(AccelStrategy::from_i32(8), AccelStrategy::GpuWindow);
+    assert_eq!(AccelStrategy::from_i32(1), Some(AccelStrategy::GpuSpatial));
+    assert_eq!(AccelStrategy::from_i32(2), Some(AccelStrategy::GpuRaster));
+    assert_eq!(AccelStrategy::from_i32(3), Some(AccelStrategy::GpuH3));
+    assert_eq!(AccelStrategy::from_i32(4), Some(AccelStrategy::GpuSort));
+    assert_eq!(AccelStrategy::from_i32(5), Some(AccelStrategy::GpuReduce));
+    assert_eq!(AccelStrategy::from_i32(6), Some(AccelStrategy::GpuExpr));
+    assert_eq!(AccelStrategy::from_i32(7), Some(AccelStrategy::GpuHashJoin));
+    assert_eq!(AccelStrategy::from_i32(8), Some(AccelStrategy::GpuWindow));
 }
 
 #[test]
-fn accel_strategy_from_i32_unknown_defaults_to_gpu_spatial() {
-    assert_eq!(AccelStrategy::from_i32(0), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(-1), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(9), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(100), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(i32::MAX), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(i32::MIN), AccelStrategy::GpuSpatial);
+fn accel_strategy_from_i32_unknown_is_invalid() {
+    assert_eq!(AccelStrategy::from_i32(0), None);
+    assert_eq!(AccelStrategy::from_i32(-1), None);
+    assert_eq!(AccelStrategy::from_i32(9), None);
+    assert_eq!(AccelStrategy::from_i32(100), None);
+    assert_eq!(AccelStrategy::from_i32(i32::MAX), None);
+    assert_eq!(AccelStrategy::from_i32(i32::MIN), None);
 }
 
 #[test]
@@ -524,7 +524,7 @@ fn accel_strategy_roundtrip_through_i32() {
     ];
     for s in strategies {
         let as_i32 = s as i32;
-        assert_eq!(AccelStrategy::from_i32(as_i32), s);
+        assert_eq!(AccelStrategy::from_i32(as_i32), Some(s));
     }
 }
 
@@ -603,6 +603,78 @@ fn dispatch_routing_gpu_spatial_is_not_deferred() {
             | AccelStrategy::GpuReduce
             | AccelStrategy::GpuHashJoin
             | AccelStrategy::GpuWindow
+    ));
+}
+
+#[test]
+fn dispatch_resolution_maps_registered_names_to_typed_ops() {
+    let h3_entry = FunctionAccelEntry::scalar("public", "h3_grid_disk", AccelStrategy::GpuH3);
+    assert!(matches!(
+        resolve_dispatch_operation(AccelStrategy::GpuH3, Some(&h3_entry)),
+        DispatchOperation::H3(H3DispatchOp::GridDisk)
+    ));
+
+    let raster_entry =
+        FunctionAccelEntry::scalar("public", "st_summarystats", AccelStrategy::GpuRaster);
+    assert!(matches!(
+        resolve_dispatch_operation(AccelStrategy::GpuRaster, Some(&raster_entry)),
+        DispatchOperation::Raster(RasterDispatchOp::SummaryStats)
+    ));
+
+    let spatial_entry =
+        FunctionAccelEntry::scalar("public", "st_dwithin", AccelStrategy::GpuSpatial);
+    assert!(matches!(
+        resolve_dispatch_operation(AccelStrategy::GpuSpatial, Some(&spatial_entry)),
+        DispatchOperation::Spatial(SpatialDispatchOp::DWithin)
+    ));
+}
+
+#[test]
+fn spatial_dispatch_op_from_name_is_exact_allowlist() {
+    assert_eq!(
+        SpatialDispatchOp::from_name("st_area"),
+        SpatialDispatchOp::Area
+    );
+    assert_eq!(
+        SpatialDispatchOp::from_name("st_length"),
+        SpatialDispatchOp::Length
+    );
+    assert_eq!(
+        SpatialDispatchOp::from_name("st_distance"),
+        SpatialDispatchOp::Distance
+    );
+    assert_eq!(
+        SpatialDispatchOp::from_name("st_intersects"),
+        SpatialDispatchOp::Intersects
+    );
+    assert_eq!(
+        SpatialDispatchOp::from_name("st_dwithin"),
+        SpatialDispatchOp::DWithin
+    );
+    assert_eq!(
+        SpatialDispatchOp::from_name("st_intersection"),
+        SpatialDispatchOp::Unknown
+    );
+    assert_eq!(
+        SpatialDispatchOp::from_name("ST_Intersects"),
+        SpatialDispatchOp::Unknown
+    );
+}
+
+#[test]
+fn dispatch_resolution_unknown_non_spatial_defers() {
+    let entry = FunctionAccelEntry::scalar("public", "st_clip", AccelStrategy::GpuRaster);
+    assert!(matches!(
+        resolve_dispatch_operation(AccelStrategy::GpuH3, Some(&entry)),
+        DispatchOperation::Deferred
+    ));
+}
+
+#[test]
+fn dispatch_resolution_spatial_miss_returns_unknown_route() {
+    assert!(matches!(
+        resolve_dispatch_operation(AccelStrategy::GpuSpatial, None),
+        DispatchOperation::Spatial(SpatialDispatchOp::Unknown)
     ));
 }
 
@@ -736,18 +808,6 @@ fn predicate_clone() {
     assert_eq!(cloned.label, "original");
     assert!((cloned.selectivity - 0.3).abs() < f64::EPSILON);
     assert!((cloned.cost - 2.0).abs() < f64::EPSILON);
-}
-
-// -- FcinfoWith2Args layout -------------------------------------------------
-
-#[test]
-fn fcinfo_with_2args_size_exceeds_base() {
-    let base_size = std::mem::size_of::<pgrx::pg_sys::FunctionCallInfoBaseData>();
-    let with_2args_size = std::mem::size_of::<FcinfoWith2Args>();
-    assert!(
-        with_2args_size > base_size,
-        "FcinfoWith2Args ({with_2args_size}) must be larger than base ({base_size})"
-    );
 }
 
 // -- Multi-arg carrier (Phase II Agent F1) ---------------------------------
@@ -885,10 +945,9 @@ fn carrier_empty_slice_compiles() {
 }
 
 #[test]
-fn carrier_first_helper_works_for_legacy_one_arg_ops() {
-    // The h3.rs / raster.rs dispatchers package qual_datums[0] as the
-    // legacy `Option<(Datum, bool)>` for arms that only consume one
-    // const. Verify that's the inverse of `Vec::first().map(...)`.
+fn carrier_first_helper_works_for_one_arg_ops() {
+    // The h3.rs / raster.rs dispatchers package qual_datums[0] as an
+    // `Option<(Datum, bool)>` for arms that only consume one const.
     let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![(
         pgrx::pg_sys::Datum::from(42_u64),
         false,

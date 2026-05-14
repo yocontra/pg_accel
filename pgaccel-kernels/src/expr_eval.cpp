@@ -5,7 +5,7 @@
  * Each GPU thread independently evaluates the program for one row.
  *
  * Correctness rules:
- *   - Integer overflow → UNCERTAIN (CPU recheck raises ERROR)
+ *   - Integer overflow → UNCERTAIN (caller rejects/errors)
  *   - Division by zero → UNCERTAIN
  *   - sqrt(negative) → UNCERTAIN
  *   - NaN = NaN → TRUE (PG semantics)

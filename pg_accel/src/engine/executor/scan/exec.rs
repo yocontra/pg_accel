@@ -30,17 +30,6 @@ impl ScanExecState {
         child_plan_state: *mut pg_sys::PlanState,
         scan_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
-        // Fast inline filter path: direct heap scan + template kernel.
-        // Evaluates the filter on the CPU inline during heap_getnext,
-        // returning passing tuples directly from the heap buffer without
-        // creating MinimalTuples. This avoids the ExecForceStoreMinimalTuple
-        // overhead that dominates the batched path.
-        if !self.scan_desc.is_null()
-            && let Some(CompiledExpr::Template(_)) = self.compiled_expr
-        {
-            return unsafe { self.inline_filter_scan(scan_slot) };
-        }
-
         loop {
             // 1. Try to return the next passing row from the current batch.
             if let Some(slot) = self.drain_next(scan_slot) {
@@ -70,163 +59,6 @@ impl ScanExecState {
         }
     }
 
-    /// Inline filter scan: evaluate the template predicate directly on
-    /// each HeapTuple from `heap_getnext` and return passing tuples
-    /// immediately. No MinimalTuple creation, no batching, no slot
-    /// deformation for non-passing rows.
-    ///
-    /// This is called once per `exec_custom_scan` invocation and returns
-    /// a single passing tuple (or null when exhausted).
-    ///
-    /// # Safety
-    ///
-    /// Must be called on the main backend thread. `scan_slot` and
-    /// `self.scan_desc` must be valid. `self.compiled_expr` must be
-    /// `Some(Template(_))`.
-    pub unsafe fn inline_filter_scan(
-        &mut self,
-        scan_slot: *mut pg_sys::TupleTableSlot,
-    ) -> *mut pg_sys::TupleTableSlot {
-        // Lazily initialize cached extraction info on first call.
-        if self.inline_filter_infos.is_none() {
-            let tupdesc = unsafe { (*scan_slot).tts_tupleDescriptor };
-            let infos = match &self.compiled_expr {
-                Some(CompiledExpr::Template(TemplateKernel::CmpConst { col_idx, .. })) => {
-                    vec![unsafe { AttExtractInfo::new(tupdesc, (*col_idx + 1) as i32) }]
-                }
-                Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                    col1_idx,
-                    col2_idx,
-                    ..
-                })) => vec![
-                    unsafe { AttExtractInfo::new(tupdesc, (*col1_idx + 1) as i32) },
-                    unsafe { AttExtractInfo::new(tupdesc, (*col2_idx + 1) as i32) },
-                ],
-                _ => vec![],
-            };
-            self.inline_filter_infos = Some(infos);
-        }
-
-        let empty = Vec::new();
-        let infos = self.inline_filter_infos.as_ref().unwrap_or(&empty);
-        if infos.is_empty() {
-            // Unsupported template — skip inline, fall through to batched.
-            self.child_exhausted = true;
-            return std::ptr::null_mut();
-        }
-
-        loop {
-            // Use table_scan_getnextslot which stores the tuple directly
-            // into the scan slot with proper buffer pinning.
-            // SAFETY: scan_desc and scan_slot are valid; main backend thread.
-            let got = unsafe {
-                pg_sys::table_scan_getnextslot(
-                    self.scan_desc,
-                    pg_sys::ScanDirection::ForwardScanDirection,
-                    scan_slot,
-                )
-            };
-            if !got {
-                self.child_exhausted = true;
-                return std::ptr::null_mut();
-            }
-
-            self.rows_dispatched += 1;
-
-            // Periodic interrupt check.
-            if self.rows_dispatched.is_multiple_of(65536) {
-                pgrx::check_for_interrupts!();
-            }
-
-            // Evaluate the predicate inline on the CPU.
-            // SAFETY: scan_slot has a valid tuple from table_scan_getnextslot.
-            // We extract the HeapTuple header for fast inline evaluation.
-            let t_data = unsafe {
-                let htup = pg_sys::ExecFetchSlotHeapTuple(scan_slot, false, std::ptr::null_mut());
-                if htup.is_null() {
-                    // Can't get heap tuple — conservatively return the row
-                    // and let ExecScan's qual evaluate it.
-                    return scan_slot;
-                }
-                (*htup).t_data
-            };
-
-            let passes = match &self.compiled_expr {
-                Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                    cmp_opcode,
-                    const_val,
-                    ..
-                })) => Self::inline_eval_cmp(t_data, &infos[0], *cmp_opcode, *const_val),
-                Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                    cmp1_opcode,
-                    const1_val,
-                    cmp2_opcode,
-                    const2_val,
-                    ..
-                })) => {
-                    Self::inline_eval_cmp(t_data, &infos[0], *cmp1_opcode, *const1_val)
-                        && Self::inline_eval_cmp(t_data, &infos[1], *cmp2_opcode, *const2_val)
-                }
-                _ => true,
-            };
-
-            if passes {
-                return scan_slot;
-            }
-        }
-    }
-
-    /// Evaluate a single `col <cmp> const` predicate inline on a HeapTuple.
-    ///
-    /// Returns `true` if the predicate passes, `false` otherwise.
-    /// Returns `true` (pass) if the value can't be fast-extracted (conservative).
-    #[inline(always)]
-    fn inline_eval_cmp(
-        t_data: pg_sys::HeapTupleHeader,
-        info: &AttExtractInfo,
-        cmp_opcode: u16,
-        const_val: f64,
-    ) -> bool {
-        if !info.can_fast_extract() {
-            // Can't fast-extract — conservatively pass (PG will recheck).
-            return true;
-        }
-
-        // SAFETY: t_data is valid. info matches the schema.
-        let val: Option<f64> = unsafe {
-            match info.typid {
-                t if t == pg_sys::FLOAT4OID => {
-                    tuple_extract::try_fast_read_heap_pub::<f32>(t_data, info).map(f64::from)
-                }
-                t if t == pg_sys::INT2OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info).map(f64::from)
-                }
-                t if t == pg_sys::INT4OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info).map(f64::from)
-                }
-                t if t == pg_sys::INT8OID => {
-                    tuple_extract::try_fast_read_heap_pub::<i64>(t_data, info).map(|v| v as f64)
-                }
-                _ => tuple_extract::try_fast_read_heap_pub::<f64>(t_data, info),
-            }
-        };
-
-        let Some(v) = val else {
-            // Null or extraction failed — conservatively pass.
-            return true;
-        };
-
-        match cmp_opcode {
-            expr_compiler::opcode::EQ => (v - const_val).abs() < f64::EPSILON,
-            expr_compiler::opcode::NE => (v - const_val).abs() >= f64::EPSILON,
-            expr_compiler::opcode::LT => v < const_val,
-            expr_compiler::opcode::LE => v <= const_val,
-            expr_compiler::opcode::GT => v > const_val,
-            expr_compiler::opcode::GE => v >= const_val,
-            _ => true,
-        }
-    }
-
     /// Run the accumulated batch through the dispatch layer.
     ///
     /// Branches on `self.strategy`:
@@ -234,7 +66,8 @@ impl ScanExecState {
     ///   dispatches through the three-layer GPU pipeline, and uses the
     ///   boolean results as the filter mask.
     /// - **`GpuExpr`**: Uses the columnar expression evaluation path.
-    /// - Other strategies: Fall back to scalar qual evaluation.
+    /// - Other strategies: executor/planner bug; selected plans must not
+    ///   run a CPU-only scalar path.
     ///
     /// # Safety
     ///
@@ -252,9 +85,7 @@ impl ScanExecState {
 
         let start = std::time::Instant::now();
 
-        self.result_mask.clear();
-        self.result_pos = 0;
-        self.last_spatial_recheck_count = 0;
+        self.clear_results();
 
         match self.strategy {
             AccelStrategy::GpuSpatial | AccelStrategy::GpuH3 | AccelStrategy::GpuRaster => {
@@ -269,15 +100,15 @@ impl ScanExecState {
                 unsafe { self.dispatch_gpu_expr(scan_slot, batch_len) };
             }
             _ => {
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+                pgrx::error!(
+                    "pg_accel: scan executor received {:?}; refusing CPU fallback under a GPU plan",
+                    self.strategy
+                );
             }
         }
 
         let elapsed_us = start.elapsed().as_micros() as u64;
-        self.rows_dispatched += batch_len as u64;
-        self.batches_executed += 1;
-        self.dispatch_time_us += elapsed_us;
+        self.record_dispatch_batch(batch_len as u64, elapsed_us);
 
         // Per-backend stats: record this batch completion on the main thread.
         stats::record_batch(batch_len as u64, elapsed_us);
@@ -290,78 +121,7 @@ impl ScanExecState {
                 | AccelStrategy::GpuRaster
                 | AccelStrategy::GpuExpr
         ) {
-            stats::record_gpu_batch(batch_len as u64, self.last_spatial_recheck_count);
-        }
-    }
-
-    /// Scalar qual evaluation path (fallback for non-GPU-dispatch strategies).
-    ///
-    /// # Safety
-    ///
-    /// Must be called on the main backend thread.
-    pub(super) unsafe fn dispatch_scalar_qual(
-        &mut self,
-        scan_slot: *mut pg_sys::TupleTableSlot,
-        batch_len: usize,
-    ) {
-        tracing::debug!(
-            "pg_accel: dispatch_scalar_qual: batch_len={}, qual_null={}, econtext_null={}",
-            batch_len,
-            self.qual.is_null(),
-            self.econtext.is_null()
-        );
-        if self.qual.is_null() || self.econtext.is_null() {
-            // No qual — all rows pass.
-            self.result_mask.resize(batch_len, true);
-        } else {
-            let mut pass_count = 0u64;
-            for i in 0..batch_len {
-                let mt = self.tuple_buffer[i];
-                if mt.is_null() {
-                    self.result_mask.push(false);
-                    continue;
-                }
-
-                // SAFETY: mt is a valid MinimalTuple from ExecCopySlotMinimalTuple.
-                // Use ExecForceStoreMinimalTuple because scan_slot may be a
-                // VirtualTupleTableSlot (ps_ResultTupleSlot default).
-                // `false` means the slot does NOT own the tuple (we manage it).
-                if i == 0 {
-                    let t_len = unsafe { (*mt).t_len } as usize;
-                    let natts = unsafe {
-                        let desc = (*scan_slot).tts_tupleDescriptor;
-                        if desc.is_null() { -1 } else { (*desc).natts }
-                    };
-                    tracing::debug!(
-                        "pg_accel: scalar_qual: mt[0] t_len={}, slot natts={}",
-                        t_len,
-                        natts
-                    );
-                }
-                unsafe {
-                    pg_sys::ExecForceStoreMinimalTuple(mt, scan_slot, false);
-                    (*self.econtext).ecxt_scantuple = scan_slot;
-                }
-
-                // SAFETY: ExecEvalExpr is the pgrx C-shim for PG's
-                // static-inline ExecEvalExpr. qual and econtext are valid.
-                let mut is_null = false;
-                let result = unsafe {
-                    pg_sys::ExecEvalExpr(self.qual, self.econtext, std::ptr::addr_of_mut!(is_null))
-                };
-
-                let passed = !is_null && result.value() != 0;
-                if passed {
-                    pass_count += 1;
-                }
-                self.result_mask.push(passed);
-
-                // SAFETY: Reset per-tuple memory to prevent leaks.
-                unsafe {
-                    pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
-                }
-            }
-            tracing::debug!("pg_accel: {}/{} rows passed qual", pass_count, batch_len,);
+            stats::record_gpu_batch(batch_len as u64, 0);
         }
     }
 
@@ -370,25 +130,20 @@ impl ScanExecState {
     /// Extracts the geometry column (`target_attno`) from each buffered
     /// tuple, packages them as `(Datum, bool)` pairs, and calls
     /// `dispatch::dispatch()` with the `GpuSpatial` strategy. The dispatch
-    /// layer handles the three-layer pipeline (bbox → GPU kernel → CPU
-    /// recheck) and returns boolean results.
-    ///
-    /// Falls back to scalar qual if GPU context is not configured
-    /// (`target_attno == 0` or `fn_oid == InvalidOid`).
+    /// layer handles the GPU pipeline and returns boolean results. Runtime
+    /// host-side predicate evaluation is forbidden inside pg_accel.
     ///
     /// # Safety
     ///
     /// Must be called on the main backend thread.
     pub(super) unsafe fn dispatch_gpu_path(
         &mut self,
-        scan_slot: *mut pg_sys::TupleTableSlot,
+        _scan_slot: *mut pg_sys::TupleTableSlot,
         batch_len: usize,
     ) {
         // Guard: GPU context must be configured.
         if self.target_attno == 0 || self.fn_oid == pg_sys::InvalidOid {
-            // SAFETY: Caller guarantees main backend thread.
-            unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
-            return;
+            pgrx::error!("pg_accel: GPU scan context is not configured; refusing CPU fallback");
         }
 
         // Use pre-extracted datums from fill_batch (captured from the
@@ -396,13 +151,11 @@ impl ScanExecState {
         let datum_batch: Vec<(pg_sys::Datum, bool)> = if self.datum_buffer.len() == batch_len {
             self.datum_buffer.clone()
         } else {
-            // Fallback: no pre-extracted datums (shouldn't happen for GPU path).
-            tracing::debug!(
+            pgrx::error!(
                 "pg_accel: dispatch_gpu_path: datum_buffer size mismatch {}/{}",
                 self.datum_buffer.len(),
                 batch_len,
             );
-            vec![(pg_sys::Datum::from(0), true); batch_len]
         };
 
         if !datum_batch.is_empty() {
@@ -444,29 +197,10 @@ impl ScanExecState {
                     batch_len,
                 );
             }
-            DispatchResult::AcceleratedWithRecheck {
-                results,
-                recheck_count,
-                recheck_time_us,
-            } => {
-                self.record_spatial_recheck_batch(recheck_count, recheck_time_us);
-                for &(datum, is_null) in &results {
-                    let passed = !is_null && datum.value() != 0;
-                    self.result_mask.push(passed);
-                }
-                let pass_count = self.result_mask.iter().filter(|&&b| b).count();
-                tracing::debug!(
-                    "pg_accel: GPU spatial {}/{} rows passed ({} exact rechecked, worker={})",
-                    pass_count,
-                    batch_len,
-                    recheck_count,
-                    self.parallel_worker_number,
-                );
-            }
             DispatchResult::Deferred => {
-                // GPU dispatch deferred — use PG's standard scalar qual.
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+                pgrx::error!(
+                    "pg_accel: GPU dispatch deferred at execution time; planner must decline this path"
+                );
             }
             DispatchResult::AcceleratedRecord { .. } | DispatchResult::AcceleratedVarLen { .. } => {
                 // The Record / VarLen variants exist for record-returning
@@ -480,28 +214,22 @@ impl ScanExecState {
                 // the projection path (ProjectSet / FunctionScan) which is
                 // a different planner hook entirely.
                 //
-                // If this arm is hit, dispatch routed the wrong way — defer
-                // to PG so the row still produces a correct answer rather
-                // than silently dropping data, and log a warning so the
-                // planner mis-injection is visible.
-                tracing::warn!(
+                // If this arm is hit, dispatch routed the wrong way. That is
+                // a planner/executor contract bug, not a reason to execute a
+                // CPU fallback under a GpuAccelScan node.
+                pgrx::error!(
                     "pg_accel: scan dispatch returned non-scalar shape (Record/VarLen) \
-                     in per-row filter context; deferring to PG. The planner injected \
-                     a GpuAccelScan strategy whose function emits multi-Datum / SRF rows \
-                     — that's a planner-side mis-routing, tracked as the SRF / record \
-                     projection-hook follow-up."
+                     in per-row filter context; refusing CPU fallback"
                 );
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
             }
         }
     }
 
     /// GPU expression evaluation path.
     ///
-    /// Dispatches to the compiled expression (template or bytecode) when
-    /// available, falling back to scalar qual evaluation otherwise.
-    /// Uncertain results (+0) are rechecked via the scalar qual path.
+    /// Dispatches to the compiled expression (template or bytecode). The GPU
+    /// program must return definite booleans; uncertain rows are planner or
+    /// kernel coverage bugs, not permission to run a CPU qual inside pg_accel.
     ///
     /// # Safety
     ///
@@ -512,24 +240,21 @@ impl ScanExecState {
         batch_len: usize,
     ) {
         let Some(compiled) = &self.compiled_expr else {
-            // No compiled expression — fall back to scalar qual.
-            // SAFETY: Caller guarantees main backend thread.
-            unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
-            return;
+            pgrx::error!("pg_accel: GpuExpr has no compiled GPU expression; refusing CPU fallback");
         };
 
         match compiled {
             CompiledExpr::DeferToPg => {
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.dispatch_scalar_qual(scan_slot, batch_len) };
+                pgrx::error!(
+                    "pg_accel: GpuExpr was marked DeferToPg; planner must decline this path"
+                );
             }
             CompiledExpr::Template(kernel) => {
                 // Build a columnar batch from buffered tuples.
                 let col_results = self.eval_template_kernel(kernel, scan_slot, batch_len);
                 match col_results {
                     Some(results) => {
-                        // SAFETY: Caller guarantees main backend thread;
-                        // scalar recheck for uncertain rows uses PG functions.
+                        // SAFETY: Caller guarantees main backend thread.
                         unsafe {
                             self.apply_three_val_results(&results, scan_slot, batch_len);
                         }
@@ -551,8 +276,7 @@ impl ScanExecState {
                 let result = self.eval_bytecode_predicate(program, scan_slot, batch_len);
                 match result {
                     Some(results) => {
-                        // SAFETY: Caller guarantees main backend thread;
-                        // scalar recheck for uncertain rows uses PG functions.
+                        // SAFETY: Caller guarantees main backend thread.
                         unsafe {
                             self.apply_three_val_results(&results, scan_slot, batch_len);
                         }
@@ -627,7 +351,8 @@ impl ScanExecState {
                     batch_len,
                 )
             }
-            // Other template variants: fall back to scalar qual.
+            // Other template variants are planner/compiler bugs for selected
+            // GpuExpr paths; the caller turns None into an ERROR.
             _ => None,
         }
     }
@@ -690,12 +415,13 @@ impl ScanExecState {
         unsafe { tuple_extract::extract_f64(batch, &info, scan_slot) }
     }
 
-    /// Apply three-valued GPU results (+1=true, -1=false, 0=uncertain)
-    /// to the result mask. Uncertain rows are rechecked via scalar qual.
+    /// Apply GPU results (+1=true, -1=false) to the result mask.
+    /// Uncertain rows are rejected because pg_accel plans must not run CPU
+    /// qual fallback work.
     ///
     /// # Safety (internal)
     ///
-    /// Scalar qual recheck calls PG functions — must be on main thread.
+    /// Must run on the main backend thread.
     unsafe fn apply_three_val_results(
         &mut self,
         results: &[i8],
@@ -703,8 +429,6 @@ impl ScanExecState {
         batch_len: usize,
     ) {
         let mut pass_count = 0u64;
-        let mut recheck_count = 0u64;
-
         for i in 0..batch_len {
             let r = results.get(i).copied().unwrap_or(-1);
             match r {
@@ -718,51 +442,15 @@ impl ScanExecState {
                     self.result_mask.push(false);
                 }
                 _ => {
-                    // Uncertain (0) — CPU recheck needed.
-                    recheck_count += 1;
-                    if self.qual.is_null() || self.econtext.is_null() {
-                        // No qual to recheck — treat as pass.
-                        self.result_mask.push(true);
-                        pass_count += 1;
-                    } else {
-                        let mt = self.tuple_buffer[i];
-                        if mt.is_null() {
-                            self.result_mask.push(false);
-                            continue;
-                        }
-                        // SAFETY: mt is valid, scan_slot/qual/econtext are valid,
-                        // main backend thread.
-                        unsafe {
-                            pg_sys::ExecForceStoreMinimalTuple(mt, scan_slot, false);
-                            (*self.econtext).ecxt_scantuple = scan_slot;
-                        }
-                        let mut is_null = false;
-                        let result = unsafe {
-                            pg_sys::ExecEvalExpr(
-                                self.qual,
-                                self.econtext,
-                                std::ptr::addr_of_mut!(is_null),
-                            )
-                        };
-                        let passed = !is_null && result.value() != 0;
-                        if passed {
-                            pass_count += 1;
-                        }
-                        self.result_mask.push(passed);
-                        // SAFETY: Reset per-tuple memory to prevent leaks.
-                        unsafe {
-                            pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
-                        }
-                    }
+                    let _ = scan_slot;
+                    pgrx::error!(
+                        "pg_accel: GpuExpr returned an uncertain result at row {}; refusing CPU qual fallback",
+                        i,
+                    );
                 }
             }
         }
-        tracing::debug!(
-            "pg_accel: GpuExpr {}/{} passed ({} rechecked)",
-            pass_count,
-            batch_len,
-            recheck_count,
-        );
+        tracing::debug!("pg_accel: GpuExpr {}/{} passed", pass_count, batch_len,);
     }
 
     /// Try to return the next passing tuple from the current batch.
@@ -773,82 +461,14 @@ impl ScanExecState {
         &mut self,
         scan_slot: *mut pg_sys::TupleTableSlot,
     ) -> Option<*mut pg_sys::TupleTableSlot> {
-        while self.result_pos < self.tuple_buffer.len() {
-            let idx = self.result_pos;
-            self.result_pos += 1;
-
-            // Check if this row passed the filter.
-            let passed = self.result_mask.get(idx).copied().unwrap_or(false);
-
-            if !passed {
-                continue;
-            }
-
-            let mt = self.tuple_buffer[idx];
-            if mt.is_null() {
-                continue;
-            }
-
-            // Restore the MinimalTuple into scan_slot for return to parent.
-            // SAFETY: mt is a valid MinimalTuple. Use ExecForceStoreMinimalTuple
-            // because scan_slot may be a VirtualTupleTableSlot. `false` = slot
-            // does not own the tuple (we pfree it when the buffer is cleared).
-            unsafe {
-                pg_sys::ExecForceStoreMinimalTuple(mt, scan_slot, false);
-            }
-
-            return Some(scan_slot);
-        }
-
-        None
-    }
-
-    /// Fetch the next tuple from the heap scan and store it in `scan_slot`.
-    /// Called by `gpu_scan_access` (the ExecScan access method).
-    /// Returns the scan slot (non-empty) on success, or an empty slot
-    /// when the scan is exhausted.
-    ///
-    /// # Safety
-    ///
-    /// Must be called on the main backend thread. `self.scan_desc` must be
-    /// valid. `scan_slot` must be a valid `TupleTableSlot` with a TupleDesc
-    /// matching the table's physical layout.
-    pub unsafe fn gpu_scan_next(
-        &mut self,
-        scan_slot: *mut pg_sys::TupleTableSlot,
-    ) -> *mut pg_sys::TupleTableSlot {
-        if self.child_exhausted {
-            unsafe { pg_sys::ExecClearTuple(scan_slot) };
-            return scan_slot;
-        }
-        // Fetch the next heap tuple. heap_getnext returns a pointer into
-        // a pinned shared buffer page. The buffer stays pinned until the
-        // next heap_getnext call, so the tuple is valid for this iteration.
-        // SAFETY: scan_desc is valid; main backend thread.
-        let htup = unsafe {
-            pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
-        };
-        if htup.is_null() {
-            self.child_exhausted = true;
-            unsafe { pg_sys::ExecClearTuple(scan_slot) };
-            return scan_slot;
-        }
-        self.rows_dispatched += 1;
-        if self.rows_dispatched.is_multiple_of(65536) {
-            pgrx::check_for_interrupts!();
-        }
-        // Store the heap tuple in the scan slot. shouldFree=false because
-        // the tuple lives in a pinned shared buffer that stays valid until
-        // the next heap_getnext call. ExecForceStoreHeapTuple on a
-        // BufferHeapTupleTableSlot stores the pointer and marks the slot
-        // as containing a heap tuple. ExecMaterializeSlot then forces
-        // deformation so tts_values/tts_isnull are populated for correct
-        // datum access by parent nodes (aggregates, projections).
-        // SAFETY: htup is valid from heap_getnext; scan_slot is valid.
+        // SAFETY: tuple_buffer entries were copied from PostgreSQL slots or
+        // direct heap tuples and stay alive until the next batch clear/drop.
         unsafe {
-            pg_sys::ExecForceStoreHeapTuple(htup, scan_slot, false);
-            pg_sys::ExecMaterializeSlot(scan_slot);
+            self.result_drain.drain_minimal_tuple_to_slot(
+                &self.tuple_buffer,
+                &self.result_mask,
+                scan_slot,
+            )
         }
-        scan_slot
     }
 }

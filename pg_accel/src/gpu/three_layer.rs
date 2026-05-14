@@ -1,23 +1,18 @@
 //! Three-layer spatial predicate pipeline.
 //!
-//! The pipeline evaluates spatial predicates in three layers:
+//! The pipeline classifies spatial predicates with GPU-backed layers:
 //!
 //! 1. **Bbox filter** (cheap) -- axis-aligned bounding-box overlap test.
 //! 2. **GPU kernel** (medium) -- exact geometry test on the GPU.
-//! 3. **PG exact recheck** (correctness) -- pairs the GPU classifies as
-//!    `Uncertain` are rechecked by the standard PostgreSQL executor via
-//!    PostGIS functions. This is a correctness recheck for numerically
-//!    ambiguous cases, not a CPU fallback: the GPU always runs first and
-//!    decides which pairs even need to be rechecked.
+//! 3. **Uncertain bucket** -- pairs the GPU cannot classify exactly.
 //!
-//! Layers 1+2 are batched and dispatched together on the GPU. Layer 3 runs
-//! on the main backend thread via PG functions (PG C functions are not
-//! thread-safe, so this cannot move to a worker).
+//! pg_accel execution callers must reject `Uncertain` rows under selected
+//! GPU plans. PostgreSQL's native plan remains outside pg_accel; this module
+//! does not authorize runtime PostGIS evaluation inside accelerator nodes.
 //!
-//! If the GPU kernel itself fails to dispatch, the pipeline returns all
-//! pairs as `Uncertain` so the PG executor handles the entire batch via
-//! PostGIS. There is no CPU implementation of the spatial kernels — the
-//! planner only injects this path when GPU hardware is available.
+//! If the GPU kernel itself fails to dispatch, the pipeline returns all pairs
+//! as `Uncertain`. Callers then error or decline the accelerated path rather
+//! than computing the predicate on CPU inside pg_accel.
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -56,29 +51,26 @@ pub enum SpatialPredicate {
     Within,
     /// `ST_DWithin` — are the geometries within the given distance (metres)?
     /// Routes through `pgaccel_sphere_distance_bulk` (fp32 SYCL kernel)
-    /// for Point × Point pairs; non-Point pairs short-circuit to
-    /// UNCERTAIN. fp64 returns NO_DEVICE pending the soft-fp64 trig
-    /// hang fix tracked in TODO Phase 7.
+    /// for Point × Point pairs; non-Point pairs short-circuit to UNCERTAIN
+    /// and selected pg_accel plans reject them. fp64 returns NO_DEVICE
+    /// pending the soft-fp64 trig hang fix tracked in TODO Phase 7.
     ///
     /// `dead_code` allow: only constructed by the pg_test integration
-    /// suite today. `resolve_spatial_predicate` doesn't emit DWithin
-    /// because the threshold parameter has to flow through the
-    /// function-call args (separate dispatch path); the JOIN executor
-    /// uses spatial_eval directly only via the test harness.
+    /// suite and the spatial dispatcher. The dispatcher constructs this
+    /// variant only after validating and decoding the third threshold arg.
     #[allow(dead_code)]
     DWithin(f64),
     /// `ST_Disjoint` — do the geometries share NO space?
     /// Implemented as the negation of `Intersects` (every Intersects
-    /// definite_true becomes a Disjoint definite_false and vice
-    /// versa; uncertain pairs stay uncertain since the PostGIS
-    /// recheck is bit-correct either way).
+    /// definite_true becomes a Disjoint definite_false and vice versa;
+    /// uncertain pairs stay uncertain and are rejected by GPU-only callers).
     Disjoint,
     /// `ST_Equals` — do the two geometries have the same point set?
     /// Routes to `pgaccel_st_equals_bulk` (Agent 2A task 4). The
     /// kernel surfaces DEFINITE for identical Point/Point coords,
     /// identical Polygon/Polygon ring vertex sets, and disjoint-bbox
-    /// shortcuts; everything else falls to UNCERTAIN so PG re-checks
-    /// via PostGIS `ST_Equals`.
+    /// shortcuts; everything else falls to UNCERTAIN and is rejected by
+    /// GPU-only callers.
     #[allow(dead_code)] // Phase B Agent 1B wires per-row dispatch
     Equals,
     /// `ST_Touches` — do the boundaries intersect with disjoint interiors?
@@ -125,9 +117,8 @@ pub struct SpatialResult {
     /// definite_true / definite_false buckets from `spatial_intersects`)
     /// and by the pg_test integration tests in `three_layer_tests.rs`.
     pub definite_false: Vec<usize>,
-    /// Indices of pairs the GPU marked numerically ambiguous. The caller
-    /// rechecks these via PostGIS on the main backend thread (Layer 3
-    /// exact recheck).
+    /// Indices of pairs the GPU could not classify. GPU-only execution
+    /// callers must reject these rows or decline the accelerated path.
     pub uncertain: Vec<usize>,
 }
 
@@ -137,12 +128,10 @@ pub struct SpatialResult {
 
 /// Execute spatial intersection predicate on geometry pairs.
 ///
-/// Dispatches layers 1+2 to the GPU kernel library via
-/// `pgaccel_spatial_intersects`. If the kernel dispatch fails (e.g. the
-/// device died mid-query), returns all pairs as `Uncertain` so the PG
-/// executor rechecks them via standard PostGIS functions.
-///
-/// Layer 3 (PG exact recheck of uncertain pairs) is left to the caller.
+/// Dispatches GPU classification via `pgaccel_spatial_intersects`. If kernel
+/// dispatch fails (e.g. the device died mid-query), returns all pairs as
+/// `Uncertain`; selected pg_accel callers must reject that result instead of
+/// evaluating the predicate on CPU.
 ///
 /// # Panics
 ///
@@ -158,7 +147,8 @@ pub fn spatial_intersects(
         return result;
     }
 
-    // GPU dispatch failed — mark all pairs as uncertain for PG exact recheck.
+    // GPU dispatch failed — mark all pairs as uncertain so GPU-only callers
+    // reject or decline the accelerated path.
     all_uncertain(geoms_a.len().min(geoms_b.len()))
 }
 
@@ -170,7 +160,8 @@ pub fn spatial_intersects(
 /// - `Within` → inverse containment (swaps arguments, then contains)
 /// - `DWithin(d)` → distance ≤ threshold (Haversine for point pairs)
 ///
-/// Layer 3 (PG exact recheck of uncertain pairs) is left to the caller.
+/// Uncertain pairs are left to the caller, which must reject them under a
+/// selected GPU-only pg_accel plan.
 #[must_use]
 pub fn spatial_eval(
     predicate: SpatialPredicate,
@@ -192,9 +183,8 @@ pub fn spatial_eval(
         }
         SpatialPredicate::Disjoint => {
             // st_disjoint = NOT st_intersects. Run intersects, then
-            // swap the definite buckets. uncertain stays uncertain
-            // because the PG recheck function (st_disjoint vs
-            // st_intersects) is correct in either direction.
+            // swap the definite buckets. uncertain stays uncertain and is
+            // rejected by GPU-only callers.
             let r = spatial_intersects(geoms_a, geoms_b, skip_bbox);
             SpatialResult {
                 definite_true: r.definite_false,
@@ -234,10 +224,9 @@ enum AlgorithmicPredicateKind {
 /// Routes through the matching `pgaccel_st_*_bulk` SYCL kernel. The
 /// kernel returns int8 results matching the three-layer convention
 /// (1 = DEFINITE TRUE, -1 = DEFINITE FALSE, 0 = UNCERTAIN). UNCERTAIN
-/// is the documented escape hatch for full DE-9IM topology, which is
-/// not implemented in the kernel — those pairs route to PG for the
-/// reference PostGIS check (CLAUDE.md rule 11; this is NOT a CPU
-/// fallback).
+/// is the documented classification for full DE-9IM topology that is not
+/// implemented in the kernel. Selected pg_accel plans reject those pairs
+/// instead of routing them to PostGIS evaluation inside pg_accel.
 #[must_use]
 fn spatial_algorithmic(
     geoms_a: &[ExtractedGeometry],
@@ -333,9 +322,8 @@ fn spatial_algorithmic(
     };
 
     if !matches!(status, PgaccelStatus::Ok) {
-        // Kernel reported failure — surface every pair as Uncertain so PG
-        // recheck runs on the entire batch. NOT a CPU fallback — the
-        // documented escape hatch when the GPU path can't classify.
+        // Kernel reported failure — surface every pair as Uncertain so the
+        // selected GPU-only caller rejects the batch.
         return all_uncertain(n);
     }
 
@@ -360,8 +348,8 @@ fn spatial_algorithmic(
 ///
 /// Routes `Polygon ⊇ Point` pairs through `pgaccel_point_in_ring_bulk`
 /// (real SYCL kernel, fp32 path). Other geometry-pair shapes
-/// short-circuit the whole batch to `Uncertain` so PG handles them via
-/// PostGIS recheck. `ST_Within(A, B) = ST_Contains(B, A)` is plumbed in
+/// short-circuit the whole batch to `Uncertain`, which selected pg_accel
+/// plans reject. `ST_Within(A, B) = ST_Contains(B, A)` is plumbed in
 /// `spatial_eval` via argument swap, so this implementation also serves
 /// the within case (B is the polygon, A is the point on the within
 /// path; here we always treat geoms_a as the polygon and geoms_b as
@@ -509,8 +497,8 @@ pub fn spatial_contains(
 ///
 /// Routes Point × Point pairs through `pgaccel_sphere_distance_bulk` (real
 /// SYCL Haversine kernel, fp32 path). Other geometry pairs short-circuit
-/// the whole batch to `Uncertain` so PG handles them via PostGIS recheck —
-/// the kernel today is point-only, and `pgaccel_sphere_distance_bulk` fp64
+/// the whole batch to `Uncertain`; selected pg_accel plans reject them. The
+/// kernel today is point-only, and `pgaccel_sphere_distance_bulk` fp64
 /// is deferred (returns NO_DEVICE per the soft-fp64 trig hang documented
 /// in TODO Phase 7), so we only ever invoke the fp32 path.
 #[must_use]
@@ -531,8 +519,8 @@ fn spatial_dwithin(
 
     // Point-only kernel: any non-Point pair short-circuits the entire
     // batch to Uncertain. Mixing Point + non-Point inside a single batch
-    // would require splitting; doing that here is more complex than the
-    // win, so let PG handle non-Point pairs.
+    // would require splitting and exact per-shape kernels, so mark the
+    // batch as not GPU-covered.
     let all_points = geoms_a[..n]
         .iter()
         .zip(geoms_b[..n].iter())
@@ -587,10 +575,8 @@ fn spatial_dwithin(
     };
 
     if !matches!(status, PgaccelStatus::Ok) {
-        // Kernel reported failure — surface as Uncertain so PG recheck
-        // handles every pair. NOT a CPU fallback (CLAUDE.md rule 11):
-        // we are not recomputing on CPU, we are deferring to PG's
-        // PostGIS implementation which is the documented escape hatch.
+        // Kernel reported failure — surface as Uncertain so selected
+        // GPU-only callers reject instead of recomputing on CPU.
         return all_uncertain(n);
     }
 
@@ -623,8 +609,7 @@ fn spatial_dwithin(
 ///
 /// Converts `ExtractedGeometry` slices into the C `pgaccel_geometry` layout
 /// and calls `pgaccel_spatial_intersects`. Returns `None` if the kernel
-/// dispatch fails, causing the caller to mark all pairs as uncertain for
-/// PG exact recheck.
+/// dispatch fails, causing the caller to mark all pairs as uncertain.
 fn try_gpu_dispatch(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
@@ -651,7 +636,7 @@ fn try_gpu_dispatch(
     // The C spatial kernel assumes well-formed inputs. Degenerate inputs
     // (Point with no coords, Polygon ring with < 3 vertices, Unknown type)
     // cause out-of-bounds reads inside the kernel, so short-circuit the
-    // entire batch to the uncertain path which lets PG recheck handle it.
+    // entire batch to the uncertain path.
     let is_degenerate = |g: &ExtractedGeometry| -> bool {
         match g.geom_type {
             GeomType::Point => g.coord_count == 0 || g.coords.len() < 2,
@@ -761,9 +746,9 @@ fn try_gpu_dispatch(
 
 /// Build a [`SpatialResult`] where all `n` pairs are `Uncertain`.
 ///
-/// Used when the GPU kernel dispatch fails, or when no kernel exists for
-/// the predicate. The PG executor's Layer 3 exact recheck handles them via
-/// standard PostGIS.
+/// Used when the GPU kernel dispatch fails, or when no kernel exists for the
+/// predicate. Selected pg_accel plans reject this result rather than running
+/// host-side predicate evaluation inside pg_accel.
 #[must_use]
 fn all_uncertain(n: usize) -> SpatialResult {
     SpatialResult {
@@ -938,10 +923,10 @@ mod tests {
         assert_eq!(via_within.uncertain, via_contains.uncertain);
     }
 
-    // -- spatial_eval / DWithin (all-uncertain — no GPU DWithin kernel) -----
+    // -- spatial_eval / DWithin --------------------------------------------
 
     #[test]
-    fn dwithin_is_uncertain_without_kernel() {
+    fn dwithin_point_pair_lands_in_exactly_one_bucket() {
         let a = ExtractedGeometry {
             bbox: [13.405, 52.52, 13.405, 52.52],
             coords: vec![13.405, 52.52],
@@ -957,7 +942,10 @@ mod tests {
             ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::DWithin(5000.0), &[a], &[b], false);
-        assert_eq!(result.uncertain, vec![0]);
+        assert_eq!(
+            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
+            1
+        );
     }
 
     #[test]

@@ -1,9 +1,8 @@
 // Basic SYCL runtime diagnostics used by the Metal backend smoke chain.
 //
-// Raw host pointers are intentionally not treated as a supported contract on
-// backends where device_manager reports g_unified_memory=false. Metal on Apple
-// Silicon can silently read zeros from raw host pointers, so production kernels
-// must stage inputs through SYCL allocations instead.
+// Raw host pointers are intentionally not a supported kernel contract. Metal on
+// Apple Silicon can silently read zeros from raw host pointers, so production
+// kernels must stage inputs through SYCL allocations.
 #include <sycl/sycl.hpp>
 
 #include <cmath>
@@ -12,7 +11,6 @@
 #include "pgaccel_ffi.h"
 
 extern sycl::queue* g_queue;
-extern bool g_unified_memory;
 
 namespace {
 
@@ -40,8 +38,6 @@ int main() {
   }
 
   bool ok = true;
-  std::printf("unified_memory=%d\n", static_cast<int>(g_unified_memory));
-
   {
     float* out = sycl::malloc_shared<float>(1, *q);
     if (out == nullptr)
@@ -94,34 +90,6 @@ int main() {
     std::printf(" (expected 20 20 20 20 20 20 20 20)\n");
     sycl::free(in, *q);
     sycl::free(out, *q);
-  }
-
-  {
-    if (!g_unified_memory) {
-      std::printf("Test 4 (raw host ptr): skipped; raw host pointers are unsupported when "
-                  "g_unified_memory=0\n");
-    } else {
-      constexpr size_t N = 8;
-      float host_data[N];
-      for (size_t i = 0; i < N; ++i)
-        host_data[i] = 5.0f;
-      float* out = sycl::malloc_shared<float>(N, *q);
-      if (out == nullptr)
-        return 1;
-      for (size_t i = 0; i < N; ++i)
-        out[i] = -1.0f;
-      float* raw = host_data;
-      q->submit([&](sycl::handler& h) {
-         h.parallel_for(sycl::range<1>(N), [=](sycl::id<1> i) { out[i] = raw[i] * 3.0f; });
-       }).wait();
-      std::printf("Test 4 (raw host ptr on unified backend):");
-      for (size_t i = 0; i < N; ++i) {
-        std::printf(" %.0f", out[i]);
-        ok &= assert_float("raw host pointer on unified backend", out[i], 15.0f);
-      }
-      std::printf(" (expected 15 15 15 15 15 15 15 15)\n");
-      sycl::free(out, *q);
-    }
   }
 
   {

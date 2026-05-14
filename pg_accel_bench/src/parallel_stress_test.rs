@@ -25,7 +25,7 @@ use crate::workloads::parallel_stress::{
     ParallelStress, ParallelStressGrouped, ParallelStressSort, ParallelStressWindow,
 };
 
-const DEFAULT_CONNECTION: &str = "host=localhost port=28817 dbname=postgres";
+const DEFAULT_CONNECTION: &str = "host=localhost port=28819 dbname=postgres";
 const ITERATIONS: usize = 20;
 const FP_TOLERANCE: f64 = 1e-3;
 

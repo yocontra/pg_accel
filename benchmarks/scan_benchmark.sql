@@ -2,7 +2,7 @@
 -- Tests WHERE clause filtering across data types and row counts.
 -- With OLAP ungating, numeric OpExpr predicates now match GpuExpr and
 -- are evaluated on the GPU via the bytecode expression evaluator.
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/scan_benchmark.sql
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/scan_benchmark.sql
 
 \timing on
 \pset pager off
@@ -114,7 +114,7 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING ON, BUFFERS OFF)
   WHERE (val_f8 < 0.3 AND val_i4 > 500000) OR (col_c > 0.9);
 
 -- ============================================================================
--- BENCHMARK 2: Built-in functions in WHERE (deferred — BatchedEval rejected)
+-- BENCHMARK 2: Built-in functions in WHERE (GPU path currently rejected)
 -- ============================================================================
 
 \echo ''

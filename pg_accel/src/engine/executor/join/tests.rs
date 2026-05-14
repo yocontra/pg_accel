@@ -209,6 +209,122 @@ fn hash_table_none_initially() {
     assert!(state.hash_table.is_none());
 }
 
+#[test]
+fn hash_join_telemetry_defaults() {
+    let state = make_state(AccelStrategy::GpuHashJoin, 256);
+    let telemetry = state.hash_join_telemetry();
+    assert_eq!(telemetry.build_count, 0);
+    assert_eq!(telemetry.redundant_inner_builds, 0);
+    assert_eq!(telemetry.build_rows, 0);
+    assert_eq!(telemetry.hash_table_capacity, 0);
+    assert_eq!(telemetry.probe_batches, 0);
+    assert_eq!(telemetry.worker_count, 1);
+    assert_eq!(telemetry.worker_number, -1);
+}
+
+#[test]
+fn hash_join_non_null_rows_counts_zero_mask_entries() {
+    assert_eq!(hash_join_non_null_rows(&[]), 0);
+    assert_eq!(hash_join_non_null_rows(&[0, 1, 0, 0, 1]), 3);
+}
+
+#[test]
+fn hash_join_table_capacity_matches_open_address_layout() {
+    assert_eq!(hash_join_table_capacity(0), Some(16));
+    assert_eq!(hash_join_table_capacity(1), Some(16));
+    assert_eq!(hash_join_table_capacity(8), Some(16));
+    assert_eq!(hash_join_table_capacity(9), Some(32));
+    assert_eq!(hash_join_table_capacity(100), Some(256));
+}
+
+#[test]
+fn hash_join_table_capacity_rejects_overflow() {
+    assert_eq!(hash_join_table_capacity(usize::MAX), None);
+    assert_eq!(hash_join_table_capacity((usize::MAX / 2) + 1), None);
+}
+
+#[test]
+fn hash_join_max_matches_uses_checked_four_x_outer_count() {
+    assert_eq!(hash_join_max_matches(0), Some(0));
+    assert_eq!(hash_join_max_matches(7), Some(28));
+    assert_eq!(hash_join_max_matches((usize::MAX / 4) + 1), None);
+}
+
+#[test]
+fn hash_join_match_buffer_u32s_uses_checked_pair_capacity() {
+    assert_eq!(hash_join_match_buffer_u32s(0), Some(0));
+    assert_eq!(hash_join_match_buffer_u32s(12), Some(24));
+    assert_eq!(hash_join_match_buffer_u32s((usize::MAX / 2) + 1), None);
+}
+
+#[test]
+fn hash_join_match_count_guard_rejects_duplicate_overflow() {
+    // Current selected-hash-join exposure is planner-disabled until the GPU
+    // probe API can size output buffers from a real match count. If enabled
+    // later, duplicate-heavy keys must error instead of truncating or falling
+    // back to a CPU join.
+    let outer_count = 1;
+    let max_matches = hash_join_max_matches(outer_count).expect("capacity");
+    assert_eq!(max_matches, 4);
+    assert!(hash_join_match_count_within_capacity(4, max_matches));
+    assert!(!hash_join_match_count_within_capacity(5, max_matches));
+}
+
+#[test]
+fn hash_join_row_indices_must_fit_u32() {
+    assert!(hash_join_row_indices_representable(u32::MAX as usize));
+    assert!(!hash_join_row_indices_representable(u32::MAX as usize + 1));
+}
+
+#[test]
+fn hash_join_build_metadata_tracks_redundant_builds() {
+    let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+
+    let first_redundant = state.record_hash_join_build_metadata(10, 8, 16);
+    let telemetry = state.hash_join_telemetry();
+    assert!(!first_redundant);
+    assert_eq!(telemetry.build_count, 1);
+    assert_eq!(telemetry.redundant_inner_builds, 0);
+    assert_eq!(telemetry.build_rows, 10);
+    assert_eq!(telemetry.build_non_null_rows, 8);
+    assert_eq!(telemetry.hash_table_capacity, 16);
+
+    let second_redundant = state.record_hash_join_build_metadata(12, 9, 32);
+    let telemetry = state.hash_join_telemetry();
+    assert!(second_redundant);
+    assert_eq!(telemetry.build_count, 2);
+    assert_eq!(telemetry.redundant_inner_builds, 1);
+    assert_eq!(telemetry.build_rows, 12);
+    assert_eq!(telemetry.build_non_null_rows, 9);
+    assert_eq!(telemetry.hash_table_capacity, 32);
+}
+
+#[test]
+fn hash_join_probe_metadata_tracks_capacity_and_result() {
+    let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+
+    state.record_hash_join_probe_metadata(128, 512, 1024);
+    let telemetry = state.hash_join_telemetry();
+    assert_eq!(telemetry.probe_batches, 1);
+    assert_eq!(telemetry.last_probe_rows, 128);
+    assert_eq!(telemetry.last_max_matches, 512);
+    assert_eq!(telemetry.last_match_buffer_u32s, 1024);
+    assert_eq!(telemetry.last_match_count, 0);
+
+    state.record_hash_join_probe_result(77);
+    let telemetry = state.hash_join_telemetry();
+    assert_eq!(telemetry.last_match_count, 77);
+}
+
+#[test]
+fn hash_join_worker_metadata_records_gpu_worker_shape() {
+    let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+    state.record_hash_join_worker_metadata(3);
+    let telemetry = state.hash_join_telemetry();
+    assert_eq!(telemetry.worker_count, 1);
+    assert_eq!(telemetry.worker_number, 3);
+}
+
 // -- FmgrInfo zero initialization ------------------------------------------
 
 #[test]
@@ -445,33 +561,6 @@ fn resolve_st_within_is_within() {
 }
 
 #[test]
-fn resolve_st_disjoint_is_disjoint() {
-    assert_eq!(
-        resolve_spatial_predicate(Some("st_disjoint")),
-        Some(three_layer::SpatialPredicate::Disjoint)
-    );
-}
-
-#[test]
-fn resolve_st_covers_aliases_contains() {
-    // st_covers reuses the Contains kernel partition; PG's Layer-3
-    // recheck applies the boundary-inclusive semantics on UNCERTAIN
-    // pairs.
-    assert_eq!(
-        resolve_spatial_predicate(Some("st_covers")),
-        Some(three_layer::SpatialPredicate::Contains)
-    );
-}
-
-#[test]
-fn resolve_st_coveredby_aliases_within() {
-    assert_eq!(
-        resolve_spatial_predicate(Some("st_coveredby")),
-        Some(three_layer::SpatialPredicate::Within)
-    );
-}
-
-#[test]
 fn resolve_none_is_none() {
     assert_eq!(resolve_spatial_predicate(None), None);
 }
@@ -483,10 +572,11 @@ fn resolve_unknown_predicates_are_none_not_intersects() {
     // as `Intersects`. See adapters/postgis.rs:gpu_spatial_entries audit
     // table and the Phase 4 TODO entry.
     //
-    // st_dwithin / st_disjoint / st_covers / st_coveredby moved out of
-    // this list as their wired GPU paths landed (Phase 4 PostGIS
-    // backlog).
     for name in [
+        "st_dwithin",
+        "st_disjoint",
+        "st_covers",
+        "st_coveredby",
         "st_distance",
         "st_area",
         "st_length",

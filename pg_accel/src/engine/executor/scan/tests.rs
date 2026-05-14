@@ -16,9 +16,9 @@ fn make_state(strategy: AccelStrategy, batch_size: usize) -> ScanExecState {
 fn new_state_is_not_exhausted() {
     let state = make_state(AccelStrategy::GpuSpatial, 256);
     assert!(!state.child_exhausted);
-    assert_eq!(state.rows_dispatched, 0);
-    assert_eq!(state.batches_executed, 0);
-    assert_eq!(state.dispatch_time_us, 0);
+    assert_eq!(state.rows_dispatched(), 0);
+    assert_eq!(state.batches_executed(), 0);
+    assert_eq!(state.dispatch_time_us(), 0);
     assert_eq!(state.strategy(), AccelStrategy::GpuSpatial);
 }
 
@@ -38,17 +38,17 @@ fn drain_empty_returns_none() {
 }
 
 #[test]
-fn result_pos_advances() {
+fn result_drain_position_advances() {
     let mut state = make_state(AccelStrategy::GpuSpatial, 256);
     // Simulate a batch where all rows are filtered out.
     state.tuple_buffer = vec![std::ptr::null_mut(); 3];
     state.result_mask = vec![false, false, false];
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
     // Should have advanced past all three.
-    assert_eq!(state.result_pos, 3);
+    assert_eq!(state.result_drain.position(), 3);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn tuple_buffer_preallocated() {
 fn result_mask_starts_empty() {
     let state = make_state(AccelStrategy::GpuSpatial, 256);
     assert!(state.result_mask.is_empty());
-    assert_eq!(state.result_pos, 0);
+    assert_eq!(state.result_drain.position(), 0);
 }
 
 #[test]
@@ -88,12 +88,12 @@ fn drain_next_skips_null_tuples_even_when_mask_true() {
     // Simulate a batch with null MinimalTuple pointers but mask says pass.
     state.tuple_buffer = vec![std::ptr::null_mut(); 5];
     state.result_mask = vec![true, true, true, true, true];
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     // drain_next should skip all null tuples and return None.
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
-    assert_eq!(state.result_pos, 5);
+    assert_eq!(state.result_drain.position(), 5);
 }
 
 #[test]
@@ -103,11 +103,11 @@ fn drain_next_with_empty_mask_returns_none() {
     // unwrap_or(false) means all skipped.
     state.tuple_buffer = vec![std::ptr::null_mut(); 3];
     state.result_mask = vec![];
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
-    assert_eq!(state.result_pos, 3);
+    assert_eq!(state.result_drain.position(), 3);
 }
 
 #[test]
@@ -116,23 +116,23 @@ fn drain_next_with_partial_mask() {
     // Mask shorter than buffer — extra entries default to false.
     state.tuple_buffer = vec![std::ptr::null_mut(); 5];
     state.result_mask = vec![false, false]; // only 2 entries
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
-    assert_eq!(state.result_pos, 5);
+    assert_eq!(state.result_drain.position(), 5);
 }
 
 #[test]
-fn drain_next_result_pos_beyond_buffer() {
+fn drain_next_cursor_beyond_buffer() {
     let mut state = make_state(AccelStrategy::GpuSpatial, 256);
     state.tuple_buffer = vec![std::ptr::null_mut(); 2];
     state.result_mask = vec![true, true];
-    state.result_pos = 10; // already past end
+    state.result_drain.set_position(10); // already past end
 
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
-    assert_eq!(state.result_pos, 10); // unchanged
+    assert_eq!(state.result_drain.position(), 10); // unchanged
 }
 
 #[test]
@@ -141,11 +141,11 @@ fn drain_next_mixed_mask_skips_false() {
     // All null pointers, so even true entries are skipped (null mt check).
     state.tuple_buffer = vec![std::ptr::null_mut(); 4];
     state.result_mask = vec![false, true, false, true];
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
-    assert_eq!(state.result_pos, 4);
+    assert_eq!(state.result_drain.position(), 4);
 }
 
 #[test]
@@ -180,9 +180,9 @@ fn qual_ptr_and_econtext_ptr_accessors() {
 #[test]
 fn counters_are_zero_on_init() {
     let state = make_state(AccelStrategy::GpuH3, 64);
-    assert_eq!(state.rows_dispatched, 0);
-    assert_eq!(state.batches_executed, 0);
-    assert_eq!(state.dispatch_time_us, 0);
+    assert_eq!(state.rows_dispatched(), 0);
+    assert_eq!(state.batches_executed(), 0);
+    assert_eq!(state.dispatch_time_us(), 0);
 }
 
 #[test]
@@ -235,18 +235,6 @@ fn parallel_worker_marker_is_recorded_on_scan_executor() {
     assert_eq!(state.dsm_flags, 0x1);
 }
 
-#[test]
-fn spatial_recheck_batch_counters_accumulate() {
-    let mut state = make_state(AccelStrategy::GpuSpatial, 256);
-
-    state.record_spatial_recheck_batch(3, 120);
-    state.record_spatial_recheck_batch(2, 80);
-
-    assert_eq!(state.last_spatial_recheck_count, 2);
-    assert_eq!(state.spatial_rechecks(), 5);
-    assert_eq!(state.spatial_recheck_time_us(), 200);
-}
-
 // ── Batch dispatch routing (strategy selection) ─────────────────────
 
 #[test]
@@ -290,23 +278,17 @@ fn gpu_context_defaults_unconfigured() {
 }
 
 #[test]
-fn gpu_context_dispatch_falls_back_when_unconfigured() {
-    // When target_attno==0 or fn_oid==InvalidOid, dispatch_gpu_path
-    // should fall back to the scalar qual path. With null qual, all
-    // rows pass. We verify that logic via the mask after a manual call.
+#[should_panic]
+fn gpu_context_dispatch_errors_when_unconfigured() {
+    // A selected GPU scan must have a valid GPU context. Missing context is a
+    // planner/executor contract bug, not a reason to run a CPU qual path.
     let mut state = make_state(AccelStrategy::GpuSpatial, 4);
     state.tuple_buffer = vec![std::ptr::null_mut(); 4];
     state.result_mask.clear();
-    state.result_pos = 0;
+    state.result_drain.reset();
 
-    // dispatch_gpu_path with unconfigured GPU context should produce
-    // all-true mask (null qual = passthrough).
-    // SAFETY: We pass null scan_slot; the scalar qual path with null
-    // qual just resizes the mask to all true without touching the slot.
+    // SAFETY: this test intentionally exercises the unconfigured error path.
     unsafe { state.dispatch_gpu_path(std::ptr::null_mut(), 4) };
-
-    assert_eq!(state.result_mask.len(), 4);
-    assert!(state.result_mask.iter().all(|&b| b));
 }
 
 // ── GpuExpr compiled expression paths ───────────────────────────────
@@ -340,36 +322,29 @@ fn set_compiled_expr_template_cmp_const() {
 }
 
 #[test]
-fn gpu_expr_dispatch_falls_back_when_no_compiled_expr() {
-    // When compiled_expr is None, dispatch_gpu_expr should fall back
-    // to scalar qual. With null qual, all rows pass.
+#[should_panic]
+fn gpu_expr_dispatch_errors_when_no_compiled_expr() {
+    // A selected GpuExpr plan must have a compiled GPU expression.
     let mut state = make_state(AccelStrategy::GpuExpr, 3);
     state.tuple_buffer = vec![std::ptr::null_mut(); 3];
     state.result_mask.clear();
-    state.result_pos = 0;
+    state.result_drain.reset();
 
-    // SAFETY: null scan_slot; scalar qual with null qual just resizes mask.
+    // SAFETY: this test intentionally exercises the missing-compiled-expression error path.
     unsafe { state.dispatch_gpu_expr(std::ptr::null_mut(), 3) };
-
-    assert_eq!(state.result_mask.len(), 3);
-    assert!(state.result_mask.iter().all(|&b| b));
 }
 
 #[test]
-fn gpu_expr_defer_to_pg_variant_passes_all_with_null_qual() {
+#[should_panic]
+fn gpu_expr_defer_to_pg_variant_errors() {
     let mut state = make_state(AccelStrategy::GpuExpr, 5);
     state.set_compiled_expr(CompiledExpr::DeferToPg);
     state.tuple_buffer = vec![std::ptr::null_mut(); 5];
     state.result_mask.clear();
-    state.result_pos = 0;
+    state.result_drain.reset();
 
-    // DeferToPg branch calls dispatch_scalar_qual, which with null
-    // qual produces all-true mask.
-    // SAFETY: null scan_slot is fine when qual is null (no slot access).
+    // SAFETY: this test intentionally exercises the DeferToPg error path.
     unsafe { state.dispatch_gpu_expr(std::ptr::null_mut(), 5) };
-
-    assert_eq!(state.result_mask.len(), 5);
-    assert!(state.result_mask.iter().all(|&b| b));
 }
 
 // ── Rescan / state reset ────────────────────────────────────────────
@@ -380,54 +355,24 @@ fn rescan_like_reset_clears_buffers() {
     let mut state = make_state(AccelStrategy::GpuSpatial, 256);
     state.tuple_buffer = vec![std::ptr::null_mut(); 10];
     state.result_mask = vec![true; 10];
-    state.result_pos = 7;
+    state.result_drain.set_position(7);
     state.child_exhausted = true;
-    state.rows_dispatched = 500;
-    state.batches_executed = 10;
+    for _ in 0..10 {
+        state.record_dispatch_batch(50, 0);
+    }
 
     // Rescan resets scan-level state but preserves strategy config.
-    state.tuple_buffer.clear();
-    state.result_mask.clear();
-    state.result_pos = 0;
+    state.clear_batch_buffers();
     state.child_exhausted = false;
 
     assert!(state.tuple_buffer.is_empty());
     assert!(state.result_mask.is_empty());
-    assert_eq!(state.result_pos, 0);
+    assert_eq!(state.result_drain.position(), 0);
     assert!(!state.child_exhausted);
     // Counters typically accumulate across rescans for EXPLAIN ANALYZE.
-    assert_eq!(state.rows_dispatched, 500);
-    assert_eq!(state.batches_executed, 10);
+    assert_eq!(state.rows_dispatched(), 500);
+    assert_eq!(state.batches_executed(), 10);
     assert_eq!(state.strategy(), AccelStrategy::GpuSpatial);
-}
-
-// ── Counter accumulation ────────────────────────────────────────────
-
-#[test]
-fn counter_accumulation_across_dispatch_batch() {
-    let mut state = make_state(AccelStrategy::GpuSpatial, 4);
-    state.tuple_buffer = vec![std::ptr::null_mut(); 4];
-    state.result_mask.clear();
-    state.result_pos = 0;
-
-    // Dispatch with unconfigured GPU falls back to scalar (null qual
-    // -> all pass), and updates counters.
-    // SAFETY: null scan_slot; scalar qual with null qual is safe.
-    unsafe { state.dispatch_batch(std::ptr::null_mut()) };
-
-    assert_eq!(state.rows_dispatched, 4);
-    assert_eq!(state.batches_executed, 1);
-    assert!(state.dispatch_time_us < 1_000_000); // sanity: under 1s
-
-    // Second batch.
-    state.tuple_buffer = vec![std::ptr::null_mut(); 6];
-    state.result_mask.clear();
-    state.result_pos = 0;
-    // SAFETY: same conditions.
-    unsafe { state.dispatch_batch(std::ptr::null_mut()) };
-
-    assert_eq!(state.rows_dispatched, 10);
-    assert_eq!(state.batches_executed, 2);
 }
 
 #[test]
@@ -439,8 +384,8 @@ fn dispatch_batch_empty_is_noop() {
     unsafe { state.dispatch_batch(std::ptr::null_mut()) };
 
     // Empty batch should not increment counters.
-    assert_eq!(state.rows_dispatched, 0);
-    assert_eq!(state.batches_executed, 0);
+    assert_eq!(state.rows_dispatched(), 0);
+    assert_eq!(state.batches_executed(), 0);
 }
 
 // ── Batch size edge cases ───────────────────────────────────────────
@@ -470,12 +415,12 @@ fn drain_stops_after_first_pass_null_tuple() {
     let mut state = make_state(AccelStrategy::GpuSpatial, 8);
     state.tuple_buffer = vec![std::ptr::null_mut(); 8];
     state.result_mask = vec![true; 8];
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     let first = state.drain_next(std::ptr::null_mut());
     assert!(first.is_none());
     // All 8 were consumed (all null -> skipped).
-    assert_eq!(state.result_pos, 8);
+    assert_eq!(state.result_drain.position(), 8);
 }
 
 #[test]
@@ -486,14 +431,14 @@ fn partial_batch_drain_preserves_position() {
     state.result_mask = vec![
         false, false, false, true, false, true, false, false, false, true,
     ];
-    state.result_pos = 0;
+    state.result_drain.reset();
 
     // Drain once — skips false entries, finds true at idx 3, but
     // tuple is null so continues, finds true at idx 5 (also null), etc.
     let result = state.drain_next(std::ptr::null_mut());
     assert!(result.is_none());
     // Position should be at end since all tuples are null.
-    assert_eq!(state.result_pos, 10);
+    assert_eq!(state.result_drain.position(), 10);
 }
 
 #[test]
@@ -508,26 +453,6 @@ fn child_exhausted_flag_prevents_further_batches() {
     let drain_result = state.drain_next(std::ptr::null_mut());
     assert!(drain_result.is_none());
     assert!(state.child_exhausted);
-}
-
-// ── Scalar qual: null qual means all rows pass ──────────────────────
-
-#[test]
-fn scalar_qual_null_passes_all_for_various_sizes() {
-    for size in [1, 7, 64, 255] {
-        let mut state = make_state(AccelStrategy::GpuSpatial, size);
-        state.tuple_buffer = vec![std::ptr::null_mut(); size];
-        state.result_mask.clear();
-
-        // SAFETY: null scan_slot is fine when qual is null.
-        unsafe { state.dispatch_scalar_qual(std::ptr::null_mut(), size) };
-
-        assert_eq!(state.result_mask.len(), size);
-        assert!(
-            state.result_mask.iter().all(|&b| b),
-            "null qual should pass all rows for batch_size={size}"
-        );
-    }
 }
 
 // ── Multi-arg dispatch carrier (Phase II Agent F1) ──────────────────

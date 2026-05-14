@@ -3,7 +3,9 @@
 //! Implements `next` / `rescan` for three join strategies:
 //! - `GpuSpatial`  — spatial nested loop with GPU predicate evaluation
 //! - `GpuHashJoin` — build-side hash table with GPU probe helpers
-//! - Scalar qual evaluation fallback (same API, CPU-evaluated predicate)
+//!
+//! Selected join paths must run a GPU kernel; PostgreSQL native joins are the
+//! only fallback when no GPU implementation is available.
 
 mod build;
 mod probe;
@@ -20,14 +22,10 @@ use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 /// Resolve the PostGIS function name registered in the adapter to a
 /// concrete [`three_layer::SpatialPredicate`].
 ///
-/// This is an explicit **allowlist**: only function names we have wired
-/// through the three-layer GPU pipeline return `Some`. Unknown or
-/// unregistered names return `None`, and the caller must bail to PG's
-/// scalar qual path (PostGIS). Silently defaulting an unknown name to
-/// `Intersects` — the previous behaviour — would return wrong results
-/// for predicates like `ST_Touches`, `ST_Equals`, `ST_Disjoint`, etc.,
-/// and is banned per `CLAUDE.md` anti-cheat rule #4 (no silent
-/// misdispatch) and the Phase 4 spatial-dispatch-gap work.
+/// This is an explicit allowlist: only function names wired through the GPU
+/// pipeline return `Some`. Unknown or unregistered names return `None`, and
+/// the caller errors because pg_accel must not run a scalar PostGIS fallback
+/// inside an accelerator plan.
 #[must_use]
 pub(super) fn resolve_spatial_predicate(
     fn_name: Option<&str>,
@@ -36,18 +34,6 @@ pub(super) fn resolve_spatial_predicate(
         Some("st_intersects") => Some(three_layer::SpatialPredicate::Intersects),
         Some("st_contains") => Some(three_layer::SpatialPredicate::Contains),
         Some("st_within") => Some(three_layer::SpatialPredicate::Within),
-        Some("st_disjoint") => Some(three_layer::SpatialPredicate::Disjoint),
-        // st_covers / st_coveredby differ from contains / within only at
-        // boundary touches: PostGIS contains rejects boundary points,
-        // PostGIS covers accepts them. point_in_ring_bulk returns
-        // 0 (UNCERTAIN) for points near a ring edge — those rows go
-        // to PG's Layer-3 recheck which calls back the *original*
-        // SQL function (st_covers vs st_contains) and gets the
-        // correct boundary semantics. Strictly-interior and
-        // strictly-exterior partitioning is identical, so reusing
-        // the Contains / Within enum variants is sound.
-        Some("st_covers") => Some(three_layer::SpatialPredicate::Contains),
-        Some("st_coveredby") => Some(three_layer::SpatialPredicate::Within),
         _ => None,
     }
 }
@@ -66,6 +52,81 @@ pub(super) struct PendingMatch {
 pub(crate) struct TlistMapEntry {
     pub(super) child_idx: usize,
     pub(super) child_attno: i16,
+}
+
+const HASH_JOIN_MATCHES_PER_OUTER: usize = 4;
+const HASH_JOIN_WORKER_COUNT: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HashJoinTelemetry {
+    pub(super) build_count: u64,
+    pub(super) redundant_inner_builds: u64,
+    pub(super) build_rows: usize,
+    pub(super) build_non_null_rows: usize,
+    pub(super) hash_table_capacity: usize,
+    pub(super) probe_batches: u64,
+    pub(super) last_probe_rows: usize,
+    pub(super) last_max_matches: usize,
+    pub(super) last_match_buffer_u32s: usize,
+    pub(super) last_match_count: usize,
+    pub(super) worker_count: u32,
+    pub(super) worker_number: i32,
+}
+
+impl Default for HashJoinTelemetry {
+    fn default() -> Self {
+        Self {
+            build_count: 0,
+            redundant_inner_builds: 0,
+            build_rows: 0,
+            build_non_null_rows: 0,
+            hash_table_capacity: 0,
+            probe_batches: 0,
+            last_probe_rows: 0,
+            last_max_matches: 0,
+            last_match_buffer_u32s: 0,
+            last_match_count: 0,
+            worker_count: HASH_JOIN_WORKER_COUNT,
+            worker_number: -1,
+        }
+    }
+}
+
+#[must_use]
+pub(super) fn hash_join_non_null_rows(null_mask: &[u8]) -> usize {
+    null_mask
+        .iter()
+        .fold(0usize, |count, &is_null| count + usize::from(is_null == 0))
+}
+
+#[must_use]
+pub(super) fn hash_join_table_capacity(non_null_rows: usize) -> Option<usize> {
+    let load_slots = non_null_rows.checked_mul(2)?;
+    let rounded = load_slots.max(2).checked_next_power_of_two()?;
+    Some(rounded.max(16))
+}
+
+#[must_use]
+pub(super) fn hash_join_max_matches(outer_count: usize) -> Option<usize> {
+    outer_count.checked_mul(HASH_JOIN_MATCHES_PER_OUTER)
+}
+
+#[must_use]
+pub(super) fn hash_join_match_buffer_u32s(max_matches: usize) -> Option<usize> {
+    max_matches.checked_mul(2)
+}
+
+#[must_use]
+pub(super) fn hash_join_row_indices_representable(row_count: usize) -> bool {
+    u32::try_from(row_count).is_ok()
+}
+
+#[must_use]
+pub(super) fn hash_join_match_count_within_capacity(
+    match_count: usize,
+    max_matches: usize,
+) -> bool {
+    match_count <= max_matches
 }
 
 /// Rust-side batch join executor state.
@@ -144,6 +205,9 @@ pub struct JoinExecState {
     /// Temporary slot for loading inner MinimalTuples during hash join yield.
     hash_inner_slot: *mut pg_sys::TupleTableSlot,
 
+    /// Structured hash-join metadata for traces and tests.
+    hash_join_telemetry: HashJoinTelemetry,
+
     // -- Counters for EXPLAIN ANALYZE --
     /// Total outer rows pulled.
     pub rows_dispatched: u64,
@@ -189,6 +253,7 @@ impl JoinExecState {
             tlist_map: Vec::new(),
             hash_outer_slot: std::ptr::null_mut(),
             hash_inner_slot: std::ptr::null_mut(),
+            hash_join_telemetry: HashJoinTelemetry::default(),
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
@@ -221,6 +286,55 @@ impl JoinExecState {
         self.dispatch_time_us = 0;
     }
 
+    #[must_use]
+    pub(crate) fn hash_join_telemetry(&self) -> HashJoinTelemetry {
+        self.hash_join_telemetry
+    }
+
+    pub(super) fn record_hash_join_worker_metadata(&mut self, worker_number: i32) {
+        self.hash_join_telemetry.worker_count = HASH_JOIN_WORKER_COUNT;
+        self.hash_join_telemetry.worker_number = worker_number;
+    }
+
+    pub(super) fn record_hash_join_build_metadata(
+        &mut self,
+        build_rows: usize,
+        build_non_null_rows: usize,
+        hash_table_capacity: usize,
+    ) -> bool {
+        let redundant = self.hash_join_telemetry.build_count > 0;
+        self.hash_join_telemetry.build_count =
+            self.hash_join_telemetry.build_count.saturating_add(1);
+        if redundant {
+            self.hash_join_telemetry.redundant_inner_builds = self
+                .hash_join_telemetry
+                .redundant_inner_builds
+                .saturating_add(1);
+        }
+        self.hash_join_telemetry.build_rows = build_rows;
+        self.hash_join_telemetry.build_non_null_rows = build_non_null_rows;
+        self.hash_join_telemetry.hash_table_capacity = hash_table_capacity;
+        redundant
+    }
+
+    pub(super) fn record_hash_join_probe_metadata(
+        &mut self,
+        probe_rows: usize,
+        max_matches: usize,
+        match_buffer_u32s: usize,
+    ) {
+        self.hash_join_telemetry.probe_batches =
+            self.hash_join_telemetry.probe_batches.saturating_add(1);
+        self.hash_join_telemetry.last_probe_rows = probe_rows;
+        self.hash_join_telemetry.last_max_matches = max_matches;
+        self.hash_join_telemetry.last_match_buffer_u32s = match_buffer_u32s;
+        self.hash_join_telemetry.last_match_count = 0;
+    }
+
+    pub(super) fn record_hash_join_probe_result(&mut self, match_count: usize) {
+        self.hash_join_telemetry.last_match_count = match_count;
+    }
+
     /// Fetch the next matching join tuple.
     ///
     /// Implements a nested-loop join: for each outer tuple, scan all
@@ -239,108 +353,39 @@ impl JoinExecState {
         let _span = tracing::debug_span!("exec.join_next").entered();
         match self.strategy {
             AccelStrategy::GpuSpatial => {
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.next_gpu_spatial(outer_ps, inner_ps, result_slot) }
+                let _ = (outer_ps, inner_ps, result_slot);
+                pgrx::error!(
+                    "pg_accel: spatial join executor is not selectable until complete GPU output assembly is wired; refusing CPU fallback"
+                );
             }
             AccelStrategy::GpuHashJoin => {
                 // SAFETY: Caller guarantees main backend thread.
                 unsafe { self.next_hash_join(outer_ps, inner_ps, result_slot) }
             }
             _ => {
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.next_scalar(outer_ps, inner_ps, result_slot) }
+                pgrx::error!(
+                    "pg_accel: join executor received {:?}; refusing scalar CPU fallback",
+                    self.strategy,
+                );
             }
         }
     }
 
-    /// Scalar nested-loop join: evaluate residual qual one tuple at a time
-    /// via `ExecEvalExpr`. Used for non-spatial GPU strategies.
+    /// Legacy scalar nested-loop join helper. Runtime CPU join evaluation is
+    /// forbidden for pg_accel plans, so any call is a contract error.
     ///
     /// # Safety
     ///
     /// Must be called on the main backend thread.
+    #[allow(dead_code)]
     unsafe fn next_scalar(
         &mut self,
         outer_ps: *mut pg_sys::PlanState,
         inner_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
-        loop {
-            // Pull a new outer tuple if needed.
-            if self.current_outer.is_null() {
-                if self.outer_exhausted {
-                    return std::ptr::null_mut();
-                }
-
-                // SAFETY: ExecProcNode pulls the next tuple from outer.
-                let outer_slot = unsafe { pg_sys::ExecProcNode(outer_ps) };
-                if outer_slot.is_null() || unsafe { Self::slot_is_empty(outer_slot) } {
-                    self.outer_exhausted = true;
-                    return std::ptr::null_mut();
-                }
-
-                // SAFETY: Materialize so it persists across inner scans.
-                unsafe {
-                    pg_sys::ExecMaterializeSlot(outer_slot);
-                }
-                self.current_outer = outer_slot;
-                self.rows_dispatched += 1;
-
-                // Rescan inner side for new outer tuple (except first time).
-                if self.inner_needs_rescan {
-                    // SAFETY: inner_ps is valid, provided by caller.
-                    unsafe {
-                        pg_sys::ExecReScan(inner_ps);
-                    }
-                }
-                self.inner_needs_rescan = true;
-            }
-
-            // Pull inner tuples and check join condition.
-            // SAFETY: ExecProcNode pulls from inner plan.
-            let inner_slot = unsafe { pg_sys::ExecProcNode(inner_ps) };
-            if inner_slot.is_null() || unsafe { Self::slot_is_empty(inner_slot) } {
-                // Inner exhausted for this outer — move to next outer.
-                self.current_outer = std::ptr::null_mut();
-                self.batches_executed += 1;
-
-                // CHECK_FOR_INTERRUPTS between outer tuples.
-                pgrx::check_for_interrupts!();
-                continue;
-            }
-
-            // Evaluate residual join qual if present.
-            if !self.qual.is_null() && !self.econtext.is_null() {
-                // SAFETY: Set both scan and inner tuple in econtext.
-                unsafe {
-                    (*self.econtext).ecxt_scantuple = self.current_outer;
-                    (*self.econtext).ecxt_innertuple = inner_slot;
-                }
-
-                let mut is_null = false;
-                // SAFETY: ExecEvalExpr evaluates the qual expression.
-                let result = unsafe {
-                    pg_sys::ExecEvalExpr(self.qual, self.econtext, std::ptr::addr_of_mut!(is_null))
-                };
-
-                // Reset per-tuple memory.
-                // SAFETY: econtext is valid.
-                unsafe {
-                    pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
-                }
-
-                if is_null || result.value() == 0 {
-                    continue; // Qual failed, try next inner tuple.
-                }
-            }
-
-            // Match found — copy inner tuple to result slot and return.
-            // SAFETY: Both slots are valid TupleTableSlot pointers.
-            unsafe {
-                pg_sys::ExecCopySlot(result_slot, inner_slot);
-            }
-            return result_slot;
-        }
+        let _ = (outer_ps, inner_ps, result_slot);
+        pgrx::error!("pg_accel: scalar join helper called; refusing CPU join fallback");
     }
 
     /// GPU-accelerated spatial join: batch inner tuples for each outer,
@@ -350,12 +395,12 @@ impl JoinExecState {
     /// For each outer tuple, collects up to `batch_size` inner tuples,
     /// evaluates the residual spatial predicate via `dispatch_gpu_spatial`
     /// (which uses the three-layer pipeline: bbox → geometric fast-path →
-    /// CPU recheck), and buffers matching pairs. Returns them one at a time.
+    /// reject-uncertain), and buffers matching pairs. Returns them one at a time.
     ///
     /// # Safety
     ///
     /// Must be called on the main backend thread.
-    #[allow(clippy::too_many_lines)]
+    #[allow(dead_code, clippy::too_many_lines)]
     unsafe fn next_gpu_spatial(
         &mut self,
         outer_ps: *mut pg_sys::PlanState,
@@ -446,13 +491,9 @@ impl JoinExecState {
             let inner_count = inner_tuples.len();
 
             // Evaluate spatial join predicate for each (outer, inner) pair.
-            //
-            // When GPU context is configured (outer_attno, inner_attno, fn_oid),
-            // extract geometry datums from both sides and run the three-layer
-            // GPU pipeline. Uncertain pairs fall back to scalar CPU recheck.
-            //
-            // When GPU context is not configured, fall back to scalar qual
-            // evaluation via ExecEvalExpr.
+            // The GPU context must be configured and must produce definite
+            // decisions. Runtime scalar PostGIS fallback is forbidden inside
+            // pg_accel.
             let gpu_configured = self.outer_attno > 0
                 && self.inner_attno > 0
                 && self.fn_oid != pg_sys::InvalidOid
@@ -482,7 +523,7 @@ impl JoinExecState {
                     let mut geoms_a: Vec<three_layer::ExtractedGeometry> =
                         Vec::with_capacity(inner_count);
                     let mut geom_idx_to_inner: Vec<usize> = Vec::with_capacity(inner_count);
-                    let mut needs_scalar_recheck: Vec<usize> = Vec::new();
+                    let mut unclassified_inner: Vec<usize> = Vec::new();
 
                     for (i, &mt) in inner_tuples.iter().enumerate() {
                         if mt.is_null() {
@@ -510,17 +551,14 @@ impl JoinExecState {
                             geom_idx_to_inner.push(i);
                             geoms_a.push(geom);
                         } else {
-                            needs_scalar_recheck.push(i);
+                            unclassified_inner.push(i);
                         }
                     }
 
                     if geoms_a.is_empty() {
-                        // No geometries extracted — fall back to scalar qual
-                        // for the entire batch.
-                        // SAFETY: Caller guarantees main backend thread.
-                        unsafe {
-                            self.eval_batch_scalar_qual(&inner_tuples, result_slot);
-                        }
+                        pgrx::error!(
+                            "pg_accel: spatial join extracted no GPU-compatible geometries; refusing scalar CPU fallback"
+                        );
                     } else {
                         // Build parallel geoms_b (same outer geom for every pair).
                         let geoms_b_vec: Vec<three_layer::ExtractedGeometry> =
@@ -542,31 +580,9 @@ impl JoinExecState {
                         let predicate = resolve_spatial_predicate(fn_name);
 
                         let Some(predicate) = predicate else {
-                            // Unknown spatial predicate: route the whole batch
-                            // through PostGIS via PG's scalar qual path so we
-                            // return correct results instead of silently
-                            // misdispatching as Intersects.
-                            if !self.qual.is_null() && !self.econtext.is_null() {
-                                // SAFETY: Caller guarantees main backend thread.
-                                unsafe {
-                                    self.eval_batch_scalar_qual(&inner_tuples, result_slot);
-                                }
-                            } else {
-                                // No qual installed — free the batch and move on.
-                                for mt in inner_tuples {
-                                    // SAFETY: Free owned copies.
-                                    unsafe { pg_sys::pfree(mt.cast()) };
-                                }
-                            }
-                            let elapsed_us = start.elapsed().as_micros() as u64;
-                            self.dispatch_time_us += elapsed_us;
-                            self.batches_executed += 1;
-                            stats::record_batch(inner_count as u64, elapsed_us);
-                            if inner_count < self.batch_size {
-                                self.current_outer = std::ptr::null_mut();
-                                pgrx::check_for_interrupts!();
-                            }
-                            continue;
+                            pgrx::error!(
+                                "pg_accel: spatial join predicate is not GPU-covered; refusing scalar CPU fallback"
+                            );
                         };
 
                         // Run the three-layer GPU pipeline.
@@ -595,43 +611,17 @@ impl JoinExecState {
                         }
                         // definite_false: already false in the mask.
 
-                        // UNCERTAIN rows need CPU recheck.
                         for &geom_idx in &spatial_result.uncertain {
                             if geom_idx < geom_idx_to_inner.len() {
-                                needs_scalar_recheck.push(geom_idx_to_inner[geom_idx]);
+                                unclassified_inner.push(geom_idx_to_inner[geom_idx]);
                             }
                         }
 
-                        // CPU recheck for uncertain rows via scalar qual.
-                        if !self.qual.is_null() && !self.econtext.is_null() {
-                            for &inner_idx in &needs_scalar_recheck {
-                                let mt = inner_tuples[inner_idx];
-                                if mt.is_null() {
-                                    continue;
-                                }
-                                // SAFETY: Load inner tuple and evaluate qual.
-                                unsafe {
-                                    pg_sys::ExecForceStoreMinimalTuple(mt, result_slot, false);
-                                    (*self.econtext).ecxt_scantuple = self.current_outer;
-                                    (*self.econtext).ecxt_innertuple = result_slot;
-                                }
-                                let mut is_null = false;
-                                // SAFETY: ExecEvalExpr on main backend thread.
-                                let result = unsafe {
-                                    pg_sys::ExecEvalExpr(
-                                        self.qual,
-                                        self.econtext,
-                                        std::ptr::addr_of_mut!(is_null),
-                                    )
-                                };
-                                // SAFETY: econtext is valid.
-                                unsafe {
-                                    pg_sys::MemoryContextReset(
-                                        (*self.econtext).ecxt_per_tuple_memory,
-                                    );
-                                }
-                                mask[inner_idx] = !is_null && result.value() != 0;
-                            }
+                        if !unclassified_inner.is_empty() {
+                            pgrx::error!(
+                                "pg_accel: spatial join GPU path produced {} uncertain/non-extractable pairs; refusing non-GPU completion",
+                                unclassified_inner.len(),
+                            );
                         }
 
                         // Buffer matching inner tuples, free non-matches.
@@ -654,20 +644,10 @@ impl JoinExecState {
                         unsafe { pg_sys::pfree(mt.cast()) };
                     }
                 }
-            } else if !self.qual.is_null() && !self.econtext.is_null() {
-                // Scalar qual: evaluate qual per tuple via PG's ExecEvalExpr.
-                // SAFETY: Caller guarantees main backend thread.
-                unsafe {
-                    self.eval_batch_scalar_qual(&inner_tuples, result_slot);
-                }
             } else {
-                // No qual — all inner tuples match.
-                for mt in inner_tuples {
-                    self.pending_matches.push(PendingMatch {
-                        outer_tuple: std::ptr::null_mut(),
-                        inner_tuple: mt,
-                    });
-                }
+                pgrx::error!(
+                    "pg_accel: spatial join GPU context is not configured; refusing scalar CPU fallback"
+                );
             }
 
             let elapsed_us = start.elapsed().as_micros() as u64;
@@ -691,52 +671,22 @@ impl JoinExecState {
         }
     }
 
-    /// Evaluate the scalar qual for each inner `MinimalTuple` against the
-    /// current outer tuple. Matching tuples are pushed to `pending_matches`;
-    /// non-matching tuples are freed.
+    /// Legacy scalar qual helper. Runtime CPU join qual evaluation is
+    /// forbidden for pg_accel plans, so any call is a contract error.
     ///
     /// # Safety
     ///
     /// Must be called on the main backend thread. `self.qual` and
     /// `self.econtext` must be valid (non-null). `self.current_outer` must
     /// point to a materialized outer slot.
+    #[allow(dead_code)]
     unsafe fn eval_batch_scalar_qual(
         &mut self,
         inner_tuples: &[pg_sys::MinimalTuple],
         result_slot: *mut pg_sys::TupleTableSlot,
     ) {
-        for &mt in inner_tuples {
-            if mt.is_null() {
-                continue;
-            }
-            // SAFETY: Load MinimalTuple into result_slot for eval.
-            unsafe {
-                pg_sys::ExecForceStoreMinimalTuple(mt, result_slot, false);
-                (*self.econtext).ecxt_scantuple = self.current_outer;
-                (*self.econtext).ecxt_innertuple = result_slot;
-            }
-
-            let mut is_null = false;
-            // SAFETY: ExecEvalExpr evaluates the qual expression.
-            let result = unsafe {
-                pg_sys::ExecEvalExpr(self.qual, self.econtext, std::ptr::addr_of_mut!(is_null))
-            };
-
-            // SAFETY: econtext is valid.
-            unsafe {
-                pg_sys::MemoryContextReset((*self.econtext).ecxt_per_tuple_memory);
-            }
-
-            if !is_null && result.value() != 0 {
-                self.pending_matches.push(PendingMatch {
-                    outer_tuple: std::ptr::null_mut(),
-                    inner_tuple: mt,
-                });
-            } else {
-                // SAFETY: Not a match — free the owned copy.
-                unsafe { pg_sys::pfree(mt.cast()) };
-            }
-        }
+        let _ = (inner_tuples, result_slot);
+        pgrx::error!("pg_accel: scalar join qual helper called; refusing CPU join fallback");
     }
 
     /// Configure GPU dispatch context for spatial join evaluation.

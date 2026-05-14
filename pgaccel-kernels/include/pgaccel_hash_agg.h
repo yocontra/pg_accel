@@ -88,6 +88,17 @@ pgaccel_hash_agg_execute(const void* group_keys, const uint8_t* group_null_mask,
                          const int* value_types,            /* [num_aggs] pgaccel_val_tag */
                          const pgaccel_agg_col* agg_cols, size_t num_aggs);
 
+/// Diagnostic/test entry point: force the sort-based grouped aggregation
+/// path and never fall back to the unsorted hash path.
+///
+/// On backends where the sort-based hashagg path is quarantined (currently
+/// Metal/AdaptiveCpp), returns PGACCEL_UNSUPPORTED and leaves `out_state`
+/// NULL so callers can decline the pg_accel plan cleanly.
+pgaccel_status pgaccel_hash_agg_execute_sort_based(
+    const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
+    const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state);
+
 /// Get the number of groups in the result.
 size_t pgaccel_agg_group_count(const pgaccel_agg_state* state);
 
@@ -129,16 +140,14 @@ pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_nu
 ///
 /// Returns a pointer to `group_count * partial_width(func)` f64 values
 /// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
-/// For finalize-mode states this is identical to
-/// `pgaccel_agg_get_results` (width=1 per group).
-///
 /// Returns NULL if `state` is NULL or `agg_idx` is out of bounds.
+/// Returns NULL when the state was built in finalize mode.
 const double* pgaccel_agg_get_partial_results(const pgaccel_agg_state* state, size_t agg_idx);
 
 /// Get the partial-mode lane width for one aggregate column.
 ///
-/// 1 for SUM/MIN/MAX/COUNT (finalize-compatible), 2 for AVG, 3 for
-/// STDDEV/VAR. Returns 0 on error (null state, oob agg_idx).
+/// 1 for SUM/MIN/MAX/COUNT, 2 for AVG, 3 for STDDEV/VAR. Returns 0 when the
+/// state has no partial buffer for `agg_idx`.
 size_t pgaccel_agg_get_partial_width(const pgaccel_agg_state* state, size_t agg_idx);
 
 /// Get the count per group (for COUNT aggregates or AVG denominator).

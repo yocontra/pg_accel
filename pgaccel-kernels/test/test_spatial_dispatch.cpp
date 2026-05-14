@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -53,6 +54,64 @@ static bool has_pair(const uint32_t* pairs, size_t count, uint32_t i, uint32_t j
     }
   }
   return false;
+}
+
+struct PipCounts {
+  size_t inside = 0;
+  size_t outside = 0;
+  size_t uncertain = 0;
+  size_t untouched = 0;
+  size_t other = 0;
+};
+
+static PipCounts count_pip_results(const std::vector<int8_t>& results) {
+  PipCounts counts;
+  for (int8_t result : results) {
+    if (result == 1) {
+      counts.inside++;
+    } else if (result == -1) {
+      counts.outside++;
+    } else if (result == 0) {
+      counts.uncertain++;
+    } else if (result == 99) {
+      counts.untouched++;
+    } else {
+      counts.other++;
+    }
+  }
+  return counts;
+}
+
+static void fill_selectivity_points(std::vector<float>& points, size_t inside_count) {
+  const size_t point_count = points.size() / 2;
+  const size_t outside_count = point_count - inside_count;
+  const size_t in_bbox_outside_count = outside_count / 2;
+
+  for (size_t i = 0; i < point_count; ++i) {
+    if (i < inside_count) {
+      points[i * 2] = (i & 1) ? 0.25f : -0.20f;
+      points[i * 2 + 1] = (i & 1) ? 0.10f : -0.15f;
+    } else if (i < inside_count + in_bbox_outside_count) {
+      points[i * 2] = 0.95f;
+      points[i * 2 + 1] = 0.95f;
+    } else {
+      points[i * 2] = 1.50f;
+      points[i * 2 + 1] = 1.50f;
+    }
+  }
+}
+
+static std::vector<float> make_regular_ring(size_t unique_vertices, float radius) {
+  constexpr double kPi = 3.14159265358979323846264338327950288;
+  std::vector<float> ring((unique_vertices + 1) * 2);
+  for (size_t i = 0; i < unique_vertices; ++i) {
+    const double angle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(unique_vertices);
+    ring[i * 2] = static_cast<float>(radius * std::cos(angle));
+    ring[i * 2 + 1] = static_cast<float>(radius * std::sin(angle));
+  }
+  ring[unique_vertices * 2] = ring[0];
+  ring[unique_vertices * 2 + 1] = ring[1];
+  return ring;
 }
 
 /* ----------------------------------------------------------------
@@ -310,6 +369,91 @@ TEST(total_partitioning) {
 }
 
 /* ----------------------------------------------------------------
+ * Regression: 100K point-in-polygon selectivity sweep, simple kernel.
+ *
+ * The 2026-05 Phase-1 release gate exposed Metal/AdaptiveCpp crashes
+ * around 100K spatial selectivity fixtures. This keeps a deterministic
+ * standalone repro in the dispatch test and verifies that each point
+ * forms exactly one accounted point/polygon pair.
+ * ---------------------------------------------------------------- */
+TEST(point_in_polygon_bulk_simple_100k_selectivity_sweep) {
+  constexpr size_t point_count = 100000;
+
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  float diamond[] = {
+      0.0f, 1.0f, 1.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  const size_t selectivities[] = {1, 10, 50, 90};
+
+  ASSERT_EQ(pgaccel_init(), PGACCEL_OK);
+
+  for (size_t pct : selectivities) {
+    const size_t expected_inside = point_count * pct / 100;
+    std::vector<float> points(point_count * 2);
+    fill_selectivity_points(points, expected_inside);
+
+    std::vector<int8_t> results(point_count, 99);
+    pgaccel_reset_gpu_exec_count();
+    const uint64_t before = pgaccel_gpu_exec_count();
+
+    pgaccel_status s = pgaccel_point_in_polygon_bulk(points.data(), point_count, bbox, diamond, 5,
+                                                     nullptr, 0, results.data());
+
+    ASSERT_EQ(s, PGACCEL_OK);
+    const uint64_t after = pgaccel_gpu_exec_count();
+    ASSERT_EQ(after, before + 1);
+
+    const PipCounts counts = count_pip_results(results);
+    ASSERT_EQ(counts.inside + counts.outside + counts.uncertain, point_count);
+    ASSERT_EQ(counts.inside, expected_inside);
+    ASSERT_EQ(counts.outside, point_count - expected_inside);
+    ASSERT_EQ(counts.uncertain, 0u);
+    ASSERT_EQ(counts.untouched, 0u);
+    ASSERT_EQ(counts.other, 0u);
+  }
+}
+
+/* ----------------------------------------------------------------
+ * Regression: 100K point-in-polygon, 1024+ vertex cooperative kernel.
+ *
+ * A 1025-coordinate closed ring crosses the cooperative dispatch
+ * threshold. The high-selectivity point set keeps most points in the
+ * polygon bbox so the cooperative kernel is exercised at the crash scale.
+ * ---------------------------------------------------------------- */
+TEST(point_in_polygon_bulk_coop_1024v_100k) {
+  constexpr size_t point_count = 100000;
+  constexpr size_t unique_vertices = 1024;
+  constexpr size_t expected_inside = point_count * 90 / 100;
+
+  std::vector<float> ring = make_regular_ring(unique_vertices, 1.0f);
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  uint32_t rings[] = {0};
+
+  std::vector<float> points(point_count * 2);
+  fill_selectivity_points(points, expected_inside);
+
+  std::vector<int8_t> results(point_count, 99);
+  ASSERT_EQ(pgaccel_init(), PGACCEL_OK);
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(points.data(), point_count, bbox, ring.data(),
+                                                   unique_vertices + 1, rings, 1, results.data());
+
+  ASSERT_EQ(s, PGACCEL_OK);
+  const uint64_t after = pgaccel_gpu_exec_count();
+  ASSERT_EQ(after, before + 1);
+
+  const PipCounts counts = count_pip_results(results);
+  ASSERT_EQ(counts.inside + counts.outside + counts.uncertain, point_count);
+  ASSERT_EQ(counts.inside, expected_inside);
+  ASSERT_EQ(counts.outside, point_count - expected_inside);
+  ASSERT_EQ(counts.uncertain, 0u);
+  ASSERT_EQ(counts.untouched, 0u);
+  ASSERT_EQ(counts.other, 0u);
+}
+
+/* ----------------------------------------------------------------
  * Test: unsupported geometry-type pairs must be UNCERTAIN, never
  * silently DEFINITE_TRUE or DEFINITE_FALSE from the predicate layer.
  *
@@ -408,6 +552,8 @@ int main() {
   run_line_vs_line();
   run_unknown_geom_type();
   run_total_partitioning();
+  run_point_in_polygon_bulk_simple_100k_selectivity_sweep();
+  run_point_in_polygon_bulk_coop_1024v_100k();
   run_unsupported_pairs_are_uncertain();
 
   printf("\n%d passed, %d failed\n", g_tests_passed, g_tests_failed);

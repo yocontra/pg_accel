@@ -141,11 +141,6 @@ fn find_accelerable_match_null_returns_none() {
 }
 
 #[test]
-fn find_accelerable_strategy_null_returns_none() {
-    assert!(find_accelerable_strategy(std::ptr::null_mut()).is_none());
-}
-
-#[test]
 fn extract_var_attno_from_args_null_returns_zero() {
     assert_eq!(extract_var_attno_from_args(std::ptr::null_mut()), 0);
 }
@@ -249,56 +244,44 @@ fn equi_join_key_float64_construction() {
 fn accel_strategy_from_i32_all_variants() {
     assert_eq!(
         registry::AccelStrategy::from_i32(1),
-        registry::AccelStrategy::GpuSpatial
+        Some(registry::AccelStrategy::GpuSpatial)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(2),
-        registry::AccelStrategy::GpuRaster
+        Some(registry::AccelStrategy::GpuRaster)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(3),
-        registry::AccelStrategy::GpuH3
+        Some(registry::AccelStrategy::GpuH3)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(4),
-        registry::AccelStrategy::GpuSort
+        Some(registry::AccelStrategy::GpuSort)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(5),
-        registry::AccelStrategy::GpuReduce
+        Some(registry::AccelStrategy::GpuReduce)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(6),
-        registry::AccelStrategy::GpuExpr
+        Some(registry::AccelStrategy::GpuExpr)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(7),
-        registry::AccelStrategy::GpuHashJoin
+        Some(registry::AccelStrategy::GpuHashJoin)
     );
     assert_eq!(
         registry::AccelStrategy::from_i32(8),
-        registry::AccelStrategy::GpuWindow
+        Some(registry::AccelStrategy::GpuWindow)
     );
 }
 
 #[test]
-fn accel_strategy_from_i32_unknown_defaults_to_gpu_spatial() {
-    assert_eq!(
-        registry::AccelStrategy::from_i32(-1),
-        registry::AccelStrategy::GpuSpatial
-    );
-    assert_eq!(
-        registry::AccelStrategy::from_i32(0),
-        registry::AccelStrategy::GpuSpatial
-    );
-    assert_eq!(
-        registry::AccelStrategy::from_i32(99),
-        registry::AccelStrategy::GpuSpatial
-    );
-    assert_eq!(
-        registry::AccelStrategy::from_i32(i32::MAX),
-        registry::AccelStrategy::GpuSpatial
-    );
+fn accel_strategy_from_i32_unknown_is_invalid() {
+    assert_eq!(registry::AccelStrategy::from_i32(-1), None);
+    assert_eq!(registry::AccelStrategy::from_i32(0), None);
+    assert_eq!(registry::AccelStrategy::from_i32(99), None);
+    assert_eq!(registry::AccelStrategy::from_i32(i32::MAX), None);
 }
 
 #[test]
@@ -316,7 +299,7 @@ fn accel_strategy_repr_i32_roundtrip() {
     ];
     for s in strategies {
         let i = s as i32;
-        assert_eq!(registry::AccelStrategy::from_i32(i), s);
+        assert_eq!(registry::AccelStrategy::from_i32(i), Some(s));
     }
 }
 
@@ -335,14 +318,14 @@ fn agg_op_to_i32_roundtrip() {
         AggOp::Passthrough,
     ];
     for op in ops {
-        assert_eq!(AggOp::from_i32(op.to_i32()), op);
+        assert_eq!(AggOp::from_i32(op.to_i32()), Some(op));
     }
 }
 
 #[test]
-fn agg_op_from_i32_unknown_returns_passthrough() {
-    assert_eq!(AggOp::from_i32(100), AggOp::Passthrough);
-    assert_eq!(AggOp::from_i32(-1), AggOp::Passthrough);
+fn agg_op_from_i32_unknown_is_invalid() {
+    assert_eq!(AggOp::from_i32(100), None);
+    assert_eq!(AggOp::from_i32(-1), None);
 }
 
 // =====================================================================
@@ -1321,8 +1304,9 @@ fn empty_registry_lookup_returns_none() {
 // NumericSumEmitter path. `classify_aggref` is the gate: returning None for
 // F_SUM_NUMERIC forces the planner to let PG handle it natively.
 //
-// SUM(int8) must stay accelerated (i64 values fit into f64 losslessly up to
-// 2^53 and match PG's int8_sum semantics in that range).
+// SUM(int8) must stay accelerated on the non-parallel direct typed i64 reduce
+// path, while parallel partial SUM(int8) remains planner-guarded until it can
+// emit PG's internal transition-state shape.
 // =====================================================================
 
 #[test]
@@ -1356,6 +1340,41 @@ fn classify_aggref_accepts_sum_int8() {
             Some((AggOp::Sum, super::agg_common::AggClass::NumericSum))
         ),
         "SUM(int8) must still be accelerated; got {result:?}"
+    );
+}
+
+#[test]
+fn partial_sum_int8_guard_uses_aggregate_oid() {
+    let aggref = pg_sys::Aggref {
+        aggfnoid: pg_sys::Oid::from(pg_sys::F_SUM_INT8),
+        ..pg_sys::Aggref::default()
+    };
+
+    assert!(super::agg_common::aggref_is_sum_int8(
+        &aggref,
+        AggOp::Sum,
+        pg_sys::InvalidOid
+    ));
+}
+
+#[test]
+fn typed_reduce_break_even_uses_value_type_thresholds() {
+    let limits = cost::device_limits();
+    assert_eq!(
+        reduce_break_even_rows_for_type(AGG_FLOAT4OID),
+        limits.reduce_f32_break_even_rows
+    );
+    assert_eq!(
+        reduce_break_even_rows_for_type(AGG_FLOAT8OID),
+        limits.reduce_f64_break_even_rows
+    );
+    assert_eq!(
+        reduce_break_even_rows_for_type(AGG_INT8OID),
+        limits.reduce_i64_break_even_rows
+    );
+    assert_eq!(
+        reduce_break_even_rows_for_type(AGG_INT4OID),
+        limits.reduce_f64_break_even_rows
     );
 }
 

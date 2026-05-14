@@ -79,10 +79,10 @@ int main() {
     }
     printf("Child: pgaccel_init OK!\n");
 
-    // Check if we got a real GPU or CPU fallback
+    // Check that initialization found real GPU compute units.
     pgaccel_device_info info = pgaccel_get_device_info();
-    printf("Child: device=%s backend=%s compute_units=%u unified=%d fp64=%d\n", info.device_name,
-           info.backend_name, info.compute_units, info.is_unified_memory, info.has_native_fp64);
+    printf("Child: device=%s backend=%s compute_units=%u fp64=%d\n", info.device_name,
+           info.backend_name, info.compute_units, info.has_native_fp64);
 
     if (info.compute_units == 0) {
       fprintf(stderr, "\nRESULT: FAIL — No GPU compute units detected.\n");

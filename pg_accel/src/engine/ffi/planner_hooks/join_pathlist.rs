@@ -151,10 +151,9 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     }
 
     // Gate 3c: Do not expose `GpuHashJoin` as a selected planner path while
-    // the executor-side C API only has a CPU open-addressed debug fallback and
-    // an unsafe raw-host-pointer sort-merge probe. PG-Strom-shaped join work
-    // resumes here once the kernel contract is a real GPU build/probe path or
-    // GPU-resident hash-table reuse.
+    // the executor-side C API has no safe selected GPU build/probe contract.
+    // PG-Strom-shaped join work resumes here once the kernel contract is a
+    // real GPU build/probe path or GPU-resident hash-table reuse.
     if matches!(strategy, registry::AccelStrategy::GpuHashJoin)
         && !selected_gpu_hashjoin_kernel_available()
     {
@@ -249,18 +248,9 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     //   the build side.
     let probe_cost =
         outerrel_ref.rows * hashjoin::probe_cost_per_outer_row(hashjoin_uses_fp64, limits);
-    // - Yield: per output row: ExecForceStoreMinimalTuple + slot_getattr
-    //   for building the virtual result tuple. Phase 6 calibration: reads
-    //   `limits.custom_scan_yield_per_row` (hardware-derived; ~0.0005 / row
-    //   on unified-memory M-series, 0.001 / row on discrete GPU). The
-    //   previous calibration to `CUSTOM_SCAN_YIELD_COST = 0.01 / row`
-    //   matched PG's `cpu_tuple_cost` default but was double-counting work
-    //   that PG's stock HashJoin already amortises into the parent
-    //   operator's `cpu_tuple_cost`; for a 10M-output JOIN that 0.01 / row
-    //   added 100K cost units that, combined with build + probe at another
-    //   100K, pushed pgaccel's path strictly above PG's stock `Parallel
-    //   Hash Join` (~76K). Pure CPU-side tuple materialization — not
-    //   affected by soft-fp64.
+    // - Yield: per output row: ExecForceStoreMinimalTuple + slot_getattr for
+    //   building the virtual result tuple. This is a hardware-derived device
+    //   limit and is not affected by soft-fp64.
     let yield_cost = joinrel_ref.rows * limits.custom_scan_yield_per_row;
 
     // SAFETY: outer_path is non-null, verified above.

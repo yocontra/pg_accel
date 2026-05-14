@@ -162,21 +162,3 @@ pub const GPU_EXPR_PER_ROW_COST: f64 = 0.025;
 /// ≈ 0.00005. We use 0.02 to include key extraction overhead and
 /// Custom Scan yield overhead (~3μs/row for output construction).
 pub const GPU_HASH_JOIN_PER_ROW_COST: f64 = 0.02;
-
-/// Per-output-row Custom Scan yield cost (legacy / fallback constant).
-///
-/// **Phase 6 calibration:** the live planner-side per-row yield cost now
-/// lives in `DeviceLimits::custom_scan_yield_per_row` (hardware-derived;
-/// 0.0005 / row on unified-memory M-series, 0.001 / row on discrete GPU).
-/// All planner cost-formulas (`hashjoin.rs`, `join_pathlist.rs`) read from
-/// the dynamic field rather than this constant. The constant is retained
-/// for backwards compatibility with downstream tests/tools and as the
-/// historical baseline (matched PG's `cpu_tuple_cost = 0.01` default), but
-/// re-introducing it into a planner cost path will reintroduce the
-/// 200K-cost-unit penalty that wiped out the GpuHashJoin path in
-/// `add_path()` for 10M-output joins (see TODO Phase 6 dispatch-perf
-/// entry).
-///
-/// History: `0.03` (3x `cpu_tuple_cost`) → `0.01` (4144ac8) →
-/// `DeviceLimits::custom_scan_yield_per_row` (Phase 6).
-pub const CUSTOM_SCAN_YIELD_COST: f64 = 0.01;

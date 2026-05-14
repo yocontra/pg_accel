@@ -22,6 +22,8 @@ use crate::engine::stats;
 
 mod agg;
 mod agg_common;
+mod decision;
+mod gate;
 mod hashjoin;
 mod join_pathlist;
 mod partial_agg;
@@ -33,6 +35,11 @@ mod sort;
 mod srf_target_list;
 mod window;
 
+pub(in crate::engine::ffi::planner_hooks) use decision::{
+    DecisionFacts, PlannerDecision, PlannerDecisionRecorder, RejectionReason,
+};
+
+use gate::HookContext;
 use join_pathlist::pgaccel_set_join_pathlist;
 use rel_pathlist::pgaccel_set_rel_pathlist;
 #[cfg(feature = "pg_test")]
@@ -101,29 +108,18 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         }
     }
 
-    // Record this planner hook invocation (main backend thread only).
-    stats::record_planner_hook_call();
-
-    // Gate: GUC check.
-    if !gucs::enabled() {
+    // SAFETY: root is the planner-provided pointer for this hook invocation.
+    let Some(mut hook_context) =
+        (unsafe { HookContext::begin(root, "upper_paths", upper_stage_candidate(stage)) })
+    else {
         return;
-    }
-
-    // Gate: Only accelerate pure SELECT statements. INSERT...SELECT,
-    // UPDATE...FROM, DELETE...USING run scans in ModifyTable context
-    // where Custom Scan slot handling is incompatible.
-    // SAFETY: root.parse is a valid Query pointer provided by the planner.
-    let parse = unsafe { (*root).parse };
-    if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
-        stats::record_command_type_skip();
-        return;
-    }
-
+    };
     let _span = tracing::info_span!("planner.upper_paths", stage = stage).entered();
 
     // Dispatch by upper relation stage.
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
+            hook_context.accept();
             // 1) Standard (non-parallel) GpuAgg path.
             //
             // Parallel partial aggregation and serial PreAgg are intentionally
@@ -135,10 +131,19 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             unsafe { agg::inject(root, input_rel, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
+            if !hook_context.require_gpu_usable() {
+                pgrx::debug1!("pg_accel window: gpu not usable");
+                return;
+            }
+            hook_context.accept();
             // SAFETY: All pointers are valid planner arguments.
             unsafe { pgaccel_inject_gpu_window(root, input_rel, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_FINAL => {
+            if !hook_context.require_gpu_usable() || !hook_context.require_transaction_for_spi() {
+                return;
+            }
+            hook_context.accept();
             // SRF-in-target-list detection (Phase 2 follow-up to F3).
             // Walks the input rel's pathlist for ProjectSetPath nodes
             // wrapping registered SRFs. Currently planner-side only —
@@ -150,6 +155,15 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         _ => {}
     }
     let _ = extra;
+}
+
+fn upper_stage_candidate(stage: UpperRelationKind::Type) -> &'static str {
+    match stage {
+        pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => "GpuAgg",
+        pg_sys::UpperRelationKind::UPPERREL_WINDOW => "GpuWindow",
+        pg_sys::UpperRelationKind::UPPERREL_FINAL => "GpuSrfTargetList",
+        _ => "UpperPath",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -180,12 +194,6 @@ unsafe fn pgaccel_inject_gpu_window(
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
 ) {
-    // Gate: GPU must be available and enabled.
-    if !cost::gpu_is_usable() {
-        pgrx::debug1!("pg_accel window: gpu not usable");
-        return;
-    }
-
     // SAFETY: root is a valid PlannerInfo pointer.
     let root_ref = unsafe { &*root };
     let input_ref = unsafe { &*input_rel };
@@ -735,6 +743,15 @@ const AGG_FLOAT8OID: u32 = 701;
 const AGG_INT4OID: u32 = 23;
 const AGG_INT8OID: u32 = 20;
 
+fn reduce_break_even_rows_for_type(type_oid: u32) -> usize {
+    let limits = cost::device_limits();
+    match type_oid {
+        AGG_FLOAT4OID => limits.reduce_f32_break_even_rows,
+        AGG_INT8OID => limits.reduce_i64_break_even_rows,
+        _ => limits.reduce_f64_break_even_rows,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GPU PreAgg (fused star-join + aggregate) injection
 // ---------------------------------------------------------------------------
@@ -749,7 +766,7 @@ const AGG_INT8OID: u32 = 20;
 /// planner only after it is backed by a real GPU-resident scan/join/pre-agg
 /// pipeline.
 ///
-/// Walks the cheapest input path backwards through join nodes to find:
+/// Walks the cheapest input path in reverse through join nodes to find:
 /// - A chain of HashJoin paths where each inner side is a small table
 /// - A base (fact) table scan at the bottom
 /// - Equi-join keys at each join level
@@ -817,7 +834,7 @@ unsafe fn pgaccel_inject_gpu_preagg(
     // Phase 1: Walk the join tree to find star-schema pattern.
     // -----------------------------------------------------------------------
 
-    // We walk backwards from the cheapest path, collecting join depths.
+    // We walk in reverse from the cheapest path, collecting join depths.
     // Each level must be a HashJoin/NestLoop with a small inner side.
     let mut depths: Vec<JoinDepthDesc> = Vec::new();
     let mut inner_paths: Vec<*mut Path> = Vec::new();
@@ -829,11 +846,9 @@ unsafe fn pgaccel_inject_gpu_preagg(
     let mut fact_relid: pg_sys::Index = 0;
     #[allow(unused_assignments)]
     let mut fact_scan_expr: Option<crate::engine::expr_compiler::CompiledExpr> = None;
-    // B5a: capture the fact-side base Path so it can be attached as
-    // `custom_paths[0]` when `pg_accel.preagg_parallel_safe` is on. The walk
-    // sets this at the break point (the base relation that terminates the
-    // join chain). Stays null when the GUC is off — we only need the path
-    // pointer if we're going to attach it.
+    // Capture the fact-side base Path so it can be attached as
+    // `custom_paths[0]`. The walk sets this at the break point: the base
+    // relation that terminates the join chain.
     #[allow(unused_assignments)]
     let mut fact_path: *mut Path = std::ptr::null_mut();
 
@@ -1178,22 +1193,10 @@ unsafe fn pgaccel_inject_gpu_preagg(
         pg_best_cost,
     );
 
-    // B5a: read the GUC once. The default-off path must stay byte-identical
-    // to the pre-B5a behaviour — same custom_paths shape (dimensions only),
-    // same parallel_safe=false. When the GUC is on, the fact path is
-    // prepended as `custom_paths[0]` and `parallel_safe=true` so PG can
-    // wrap the CustomPath in a Gather. The serialized
-    // `parallel_safe_planner_attached` flag tells `materialize_dimensions`
-    // to skip slot 0 of the resulting `(*node).custom_ps` list.
-    //
-    // NOTE: B5b is responsible for wiring the executor side
-    // (`PreAggExecState::set_fact_child(child_ps)` + slot-based scan path).
-    // Until B5b lands, the executor reads `parallel_safe_planner_attached`
-    // only to skip slot 0 in `materialize_dimensions`; the fact-side
-    // PlanState is left inert and the executor still scans the fact heap
-    // directly. Toggling the GUC on without B5b will not crash but may
-    // N-fold over-aggregate under parallel workers (see TODO.md).
-    let attach_fact_path = gucs::preagg_parallel_safe() && !fact_path.is_null();
+    if fact_path.is_null() {
+        pgrx::debug1!("pg_accel: preagg declined: missing fact path");
+        return;
+    }
 
     // SAFETY: Allocating via palloc.
     unsafe {
@@ -1205,16 +1208,8 @@ unsafe fn pgaccel_inject_gpu_preagg(
         (*cpath).path.pathtarget = (*output_rel).reltarget;
         (*cpath).path.param_info = std::ptr::null_mut();
         (*cpath).path.parallel_aware = false;
-        (*cpath).path.parallel_safe = attach_fact_path;
-        // Inherit worker count from the fact path when attached; PG will
-        // gate parallel selection on this anyway. Default-off path keeps
-        // the previous explicit zero.
-        (*cpath).path.parallel_workers = if attach_fact_path {
-            // SAFETY: fact_path validated non-null by attach_fact_path guard.
-            (*fact_path).parallel_workers.max(0)
-        } else {
-            0
-        };
+        (*cpath).path.parallel_safe = true;
+        (*cpath).path.parallel_workers = (*fact_path).parallel_workers.max(0);
         (*cpath).path.rows = n_groups;
         (*cpath).path.startup_cost = dim_cost + cost::PREAGG_FIXED_OVERHEAD;
         (*cpath).path.total_cost = total_cost;
@@ -1223,19 +1218,11 @@ unsafe fn pgaccel_inject_gpu_preagg(
         (*cpath).flags = 0;
         (*cpath).methods = custom_scan::preagg_path_methods();
 
-        // Attach child paths.
-        // - Default-off layout (B5a flag false): dimensions only, byte-
-        //   identical to pre-B5a — `materialize_dimensions` reads
-        //   `custom_paths[i]` as `depths[i]`.
-        // - B5a-attached layout: fact path at slot 0, dimensions shifted to
-        //   slots 1..N. `materialize_dimensions` reads
-        //   `custom_paths[i+1]` as `depths[i]` (skip-slot-0 logic gated by
-        //   the serialized `parallel_safe_planner_attached` flag).
+        // Attach fact path at slot 0; dimensions are shifted to slots 1..N.
+        // The serialized `parallel_safe_planner_attached` flag makes
+        // `materialize_dimensions` skip the fact PlanState.
         let mut child_list: *mut List = std::ptr::null_mut();
-        if attach_fact_path {
-            // SAFETY: fact_path is non-null per the `attach_fact_path` guard.
-            child_list = lappend(child_list, fact_path.cast());
-        }
+        child_list = lappend(child_list, fact_path.cast());
         for &ip in &inner_paths {
             child_list = lappend(child_list, ip.cast());
         }
@@ -1265,10 +1252,9 @@ unsafe fn pgaccel_inject_gpu_preagg(
         // (`pgaccel_inject_gpu_preagg`); the parallel preagg path lives in
         // `planner_hooks/preagg_partial.rs` and passes a `Some(spec)`.
         //
-        // `parallel_safe_planner_attached` mirrors the `attach_fact_path`
-        // local — when true the executor's `materialize_dimensions` skips
-        // slot 0 of `custom_ps` (which now holds the fact PlanState) so
-        // depth indices stay aligned with `depths[]`.
+        // `parallel_safe_planner_attached` is always true for current plans:
+        // the executor skips slot 0 of `custom_ps` because it holds the fact
+        // PlanState, keeping depth indices aligned with `depths[]`.
         (*cpath).custom_private = custom_scan::serialize_preagg_private(
             fact_relid,
             fact_oid,
@@ -1277,7 +1263,7 @@ unsafe fn pgaccel_inject_gpu_preagg(
             &group_keys,
             fact_scan_expr.as_ref(),
             None,
-            attach_fact_path,
+            true,
         );
 
         add_path(output_rel, cpath.cast());
@@ -2037,6 +2023,8 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // dominates. Charge it honestly by default; forced-cost smoke tests can
     // still exercise the kernel.
     let mut has_i64_sum = false;
+    let mut has_gpu_value_reduce = false;
+    let mut required_reduce_rows = cost::device_limits().gpu_reduce_min_rows;
 
     // SAFETY: tlist is a valid List of TargetEntry (non-partial) or Expr (partial).
     for i in 0..tlist_len {
@@ -2248,10 +2236,39 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         if matches!(op, AggOp::Sum) && typid == AGG_INT8OID {
             has_i64_sum = true;
         }
+        if group_key_info.is_none()
+            && attno != 0
+            && matches!(
+                op,
+                AggOp::Sum
+                    | AggOp::Avg
+                    | AggOp::Min
+                    | AggOp::Max
+                    | AggOp::StddevSamp
+                    | AggOp::StddevPop
+                    | AggOp::VarSamp
+                    | AggOp::VarPop
+            )
+        {
+            has_gpu_value_reduce = true;
+            required_reduce_rows = required_reduce_rows.max(reduce_break_even_rows_for_type(typid));
+        }
         agg_descs.push((op, attno, u32::from(aggref_ref.aggtype)));
     }
 
     if agg_descs.is_empty() {
+        return;
+    }
+    if group_key_info.is_none() && !has_gpu_value_reduce {
+        pgrx::debug1!("pg_accel: gpu_agg rejected: plain aggregate has no GPU value-reduce column");
+        return;
+    }
+    if group_key_info.is_none() && rows < required_reduce_rows {
+        pgrx::debug1!(
+            "pg_accel: gpu_agg rejected: rows {} < typed reduce break-even {}",
+            rows,
+            required_reduce_rows,
+        );
         return;
     }
     if group_key_info.is_some() && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
@@ -3365,9 +3382,10 @@ fn is_gpu_expr_type(oid: u32) -> bool {
 /// Check if restriction clauses are candidates for GpuExpr evaluation.
 ///
 /// Returns a GpuExpr match when all clauses look like standard numeric
-/// expressions (OpExpr or BoolExpr at the top level). Full compilability
-/// is checked at executor time — if compilation fails, the executor
-/// gracefully falls back to PG's standard `ExecEvalExpr`.
+/// expressions (OpExpr or BoolExpr at the top level). Full compilability is
+/// checked at executor time; if compilation fails after a pg_accel path was
+/// selected, execution errors rather than running `ExecEvalExpr` as a CPU
+/// fallback.
 pub(super) fn try_gpu_expr_match(
     restrictinfo_list: *mut List,
     n_rows_estimate: u64,
@@ -3768,12 +3786,6 @@ pub(super) fn find_accelerable_match(restrictinfo_list: *mut List) -> Option<Acc
     None
 }
 
-/// Backward-compatible wrapper that returns only the strategy.
-#[allow(dead_code)]
-fn find_accelerable_strategy(restrictinfo_list: *mut List) -> Option<registry::AccelStrategy> {
-    find_accelerable_match(restrictinfo_list).map(|m| m.strategy)
-}
-
 /// Result of detecting an equi-join condition (e.g., `a.col = b.col`).
 pub(super) struct EquiJoinKey {
     /// 1-based attribute number of the outer relation's join key.
@@ -3979,8 +3991,14 @@ unsafe fn unwrap_var(mut node: *mut pg_sys::Node) -> *mut pg_sys::Var {
     }
 }
 
-/// Recursively find the first registered accelerable function in a node tree.
-/// Returns the strategy, function OID, and target attribute number.
+/// Find a registered accelerable function only when the current qual node is
+/// itself a boolean GPU predicate.
+///
+/// This deliberately does not recurse into arbitrary boolean/comparison
+/// expressions. A nested non-boolean GPU function such as
+/// `h3_latlng_to_cell(...) = const` is not a valid scan filter by itself:
+/// treating its scalar Datum as a pass mask would require a CPU qual fallback
+/// or a fused GPU expression for the enclosing comparison.
 fn node_find_accel_match(
     node: *mut pg_sys::Node,
     reg: &registry::AdapterRegistry,
@@ -4002,16 +4020,23 @@ fn node_find_accel_match(
             // SAFETY: funcexpr is valid; reading funcid field.
             let oid = unsafe { (*funcexpr).funcid };
             if let Some(entry) = reg.lookup(oid) {
+                let result_type = unsafe { (*funcexpr).funcresulttype };
+                if result_type != pg_sys::BOOLOID
+                    || !matches!(entry.output_shape, registry::OutputShape::Scalar)
+                {
+                    return None;
+                }
                 let attno = extract_var_attno_from_args(unsafe { (*funcexpr).args });
+                if attno <= 0 {
+                    return None;
+                }
                 return Some(AccelMatch {
                     strategy: entry.strategy,
                     fn_oid: oid,
                     target_attno: attno,
                 });
             }
-            // SAFETY: funcexpr is valid; reading args field.
-            let args = unsafe { (*funcexpr).args };
-            recurse_args_for_match(args, reg)
+            None
         }
         NodeTag::T_OpExpr => {
             // SAFETY: tag confirmed this is an OpExpr.
@@ -4026,27 +4051,30 @@ fn node_find_accel_match(
                 oid = unsafe { (*opexpr).opfuncid };
             }
             if let Some(entry) = reg.lookup(oid) {
+                let result_type = unsafe { (*opexpr).opresulttype };
+                if result_type != pg_sys::BOOLOID
+                    || !matches!(entry.output_shape, registry::OutputShape::Scalar)
+                {
+                    return None;
+                }
                 let attno = extract_var_attno_from_args(unsafe { (*opexpr).args });
+                if attno <= 0 {
+                    return None;
+                }
                 return Some(AccelMatch {
                     strategy: entry.strategy,
                     fn_oid: oid,
                     target_attno: attno,
                 });
             }
-            // SAFETY: opexpr is valid; reading args field.
-            let args = unsafe { (*opexpr).args };
-            recurse_args_for_match(args, reg)
-        }
-        NodeTag::T_BoolExpr => {
-            // SAFETY: tag confirmed BoolExpr; reading args list.
-            let args = unsafe { (*node.cast::<pg_sys::BoolExpr>()).args };
-            recurse_args_for_match(args, reg)
+            None
         }
         _ => None,
     }
 }
 
 /// Recurse into a `List` of expression nodes looking for an accelerable function.
+#[allow(dead_code)]
 fn recurse_args_for_match(args: *mut List, reg: &registry::AdapterRegistry) -> Option<AccelMatch> {
     if args.is_null() {
         return None;

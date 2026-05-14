@@ -1,7 +1,4 @@
-//! FFI helpers for cross-version PostgreSQL compatibility.
-
-#[allow(dead_code)]
-pub mod pg_compat;
+//! FFI helpers for PostgreSQL 17+ planner/executor integration.
 
 pub mod custom_scan;
 pub mod planner_hooks;

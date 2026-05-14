@@ -4,8 +4,8 @@
 //! Tests verify that the pipeline partitions geometry pairs into
 //! `definite_true`, `definite_false`, and `uncertain` buckets. Whether a
 //! given pair lands in true/false vs uncertain depends on the GPU device's
-//! numeric precision — uncertain pairs are handed to PostGIS for an exact
-//! recheck on the main backend thread (Layer 3).
+//! numeric precision. GPU-only dispatch callers must reject uncertain pairs
+//! or decline the accelerated path.
 
 use crate::gpu::three_layer::{
     ExtractedGeometry, GeomType, SpatialPredicate, spatial_contains, spatial_eval,
@@ -112,8 +112,7 @@ fn pipeline_line_vs_polygon_uncertain() {
     };
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     let result = spatial_intersects(&[line], &[poly], false);
-    // Degenerate LineString (< 6 coord floats) short-circuits to uncertain
-    // so the PG exact recheck handles it safely.
+    // Degenerate LineString (< 6 coord floats) short-circuits to uncertain.
     assert_eq!(result.uncertain, vec![0]);
 }
 
@@ -213,8 +212,8 @@ fn dwithin_point_pair_partitioned() {
 
 #[test]
 fn dwithin_non_point_short_circuits_to_uncertain() {
-    // Polygon × Polygon: kernel is point-only, so the whole batch must
-    // land in uncertain (PG handles via PostGIS recheck).
+    // Polygon × Polygon: kernel is point-only, so the whole batch must land
+    // in uncertain for GPU-only callers to reject.
     let poly = make_polygon(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)]);
     let result = spatial_eval(
         SpatialPredicate::DWithin(100.0),
@@ -309,9 +308,8 @@ fn pipeline_large_batch() {
 // `spatial_contains(geoms_a, geoms_b)` tests "Polygon-A contains
 // Point-B" via the existing pgaccel_point_in_ring_bulk fp32 SYCL
 // kernel. The constant-polygon fast path collapses N pairs into one
-// kernel dispatch when every geoms_a entry shares the same coords
-// vector pointer (typical for spatial JOINs against a fixed
-// area-of-interest). Per-pair dispatch is the slow-path fallback.
+// kernel dispatch when every geoms_a entry shares the same coords vector
+// pointer; otherwise per-pair dispatch is the slower GPU path.
 //
 // As with dwithin, kernel dispatch in the unit-test process returns
 // PGACCEL_ERROR_NO_DEVICE because g_queue is not initialised; the
@@ -372,10 +370,9 @@ fn contains_degenerate_polygon_short_circuits() {
 }
 
 #[test]
-fn contains_constant_polygon_fast_path_partitioned() {
-    // All polygons share the same coords vector — exercise the
-    // constant-polygon fast path (single kernel dispatch over all
-    // points). Verified by partition arithmetic.
+fn contains_cloned_polygons_partitioned() {
+    // Cloned polygons have equal coordinates but distinct Vec buffers, so this
+    // exercises the per-pair path. Verified by partition arithmetic.
     let poly = make_polygon(&[
         (0.0, 0.0),
         (10.0, 0.0),
@@ -418,8 +415,8 @@ fn within_routes_through_contains_with_swap() {
 // ===========================================================================
 //
 // `spatial_eval(SpatialPredicate::Disjoint)` runs spatial_intersects
-// and inverts the definite buckets. uncertain rows stay uncertain
-// because the PG recheck function for st_disjoint is bit-correct.
+// and inverts the definite buckets. uncertain rows stay uncertain for
+// GPU-only callers to reject.
 
 #[test]
 fn disjoint_empty_inputs() {

@@ -1,6 +1,6 @@
 use super::Workload;
 
-/// Tests H3 cell computation: `h3_latlng_to_cell` on bulk points with GROUP BY.
+/// Winning H3 lane: `h3_latlng_to_cell` on bulk points with GROUP BY.
 ///
 /// Baseline uses h3-pg's `h3_lat_lng_to_cell` alias so the PG-parallel
 /// comparand runs stock h3-pg C code rather than pg_accel's expression
@@ -15,7 +15,7 @@ impl Workload for H3Bulk {
 
     fn description(&self) -> &'static str {
         "SELECT h3_latlng_to_cell(geom, 7), count(*) FROM bench_h3_points \
-         GROUP BY 1 — tests GpuH3 bulk cell ops. \
+         GROUP BY 1 — protects the GpuH3 bulk cell win. \
          Baseline uses h3-pg `h3_lat_lng_to_cell`."
     }
 
@@ -49,7 +49,7 @@ impl Workload for H3Bulk {
 
     fn baseline_query_sql(&self) -> Option<String> {
         // h3-pg alias `h3_lat_lng_to_cell` is not in pg_accel's adapter
-        // list (`pg_accel/src/adapters/h3.rs:15`), so this call path
+        // list, so this call path
         // bypasses the pg_accel planner hook entirely and measures the
         // stock h3-pg C function.
         Some(

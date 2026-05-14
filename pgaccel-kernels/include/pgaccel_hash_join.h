@@ -1,10 +1,10 @@
 /*
- * pgaccel_hash_join.h — hash join debug fallback types and API.
+ * pgaccel_hash_join.h — hash join diagnostic types and API.
  *
- * The legacy open-addressing implementation is CPU-only and exists for
- * debug/kernel correctness tests. It is not a production selected planner
- * path; normal GpuHashJoin planning must wait for a real GPU build/probe
- * implementation or GPU-resident hash-table reuse.
+ * Normal GpuHashJoin planning must wait for a real GPU build/probe
+ * implementation or GPU-resident hash-table reuse. This API returns
+ * unsupported/null when no GPU implementation is available; it does not run
+ * a CPU hash join fallback.
  * NULL keys are excluded from the build side (SQL: NULL = NULL is not TRUE).
  *
  * Three-result model per probe:
@@ -53,17 +53,15 @@ typedef enum {
 
 /* ── Hash table handle ──────────────────────────────────────────── */
 
-/// Opaque handle to a hash table. The current open-addressed implementation
-/// is CPU-only and requires explicit debug opt-in.
+/// Opaque handle to a GPU hash table.
 typedef struct pgaccel_hash_table pgaccel_hash_table;
 
 /* ── Build API ──────────────────────────────────────────────────── */
 
 /// Build a hash table from inner relation keys.
 ///
-/// The current open-addressed implementation is disabled by default and only
-/// runs when `PGACCEL_HASH_JOIN_ENABLE_CPU_FALLBACK=1` is set. This prevents
-/// selected `GpuHashJoin` plans from silently running a CPU fallback.
+/// Returns NULL when no real GPU build/probe implementation is available for
+/// the requested shape.
 ///
 /// `keys` points to an array of `count` values of the specified type.
 /// `null_mask[i] == 1` means key[i] is NULL (excluded from table).
@@ -82,9 +80,6 @@ void pgaccel_hash_join_free(pgaccel_hash_table* ht);
 /* ── Probe API ──────────────────────────────────────────────────── */
 
 /// Probe the hash table with outer relation keys.
-///
-/// CPU open-addressed tables return `PGACCEL_UNSUPPORTED` unless
-/// `PGACCEL_HASH_JOIN_ENABLE_CPU_FALLBACK=1` is set.
 ///
 /// For each outer key, finds matching inner row indices.
 /// Results are written as (outer_idx, inner_idx) pairs into

@@ -8,6 +8,8 @@
 )]
 
 mod artifacts;
+mod bench_model;
+mod config;
 mod explain_audit;
 mod parallel_stress_test;
 mod plan_shape_test;
@@ -22,7 +24,7 @@ use clap::{Parser, Subcommand};
 
 use crate::report::BenchReport;
 
-const DEFAULT_CONNECTION: &str = "host=localhost port=28817 dbname=postgres";
+const DEFAULT_CONNECTION: &str = "host=localhost dbname=postgres";
 
 #[derive(Parser)]
 #[command(name = "pg_accel_bench", about = "Benchmark harness for pg_accel")]
@@ -124,13 +126,6 @@ enum Command {
         #[arg(long, default_value = "warm")]
         cache_mode: CacheModeArg,
 
-        /// Source distribution for the headline speedup calculation —
-        /// `median` (default, robust to 22% CV cold-start jitter on the
-        /// GPU side) or `mean` (backwards-compat with the historical
-        /// report).
-        #[arg(long, default_value = "median")]
-        speedup_from: SpeedupSourceArg,
-
         /// Skip the postmaster-GUC mismatch hard-fail (action_items C4).
         /// By default the harness refuses to run if `shared_buffers` or
         /// any other `PGC_POSTMASTER` setting drifts from the requested
@@ -194,9 +189,6 @@ enum Command {
         cache_mode: CacheModeArg,
 
         /// Source distribution for report speedup labels.
-        #[arg(long, default_value = "median")]
-        speedup_from: SpeedupSourceArg,
-
         /// Skip the postmaster-GUC mismatch hard-fail.
         #[arg(long)]
         skip_guc_verify: bool,
@@ -240,6 +232,18 @@ enum Command {
     /// `pg_accel_bench/src/explain_audit.rs` and `TODO.md` Phase 9.
     /// Exits non-zero iff any `RequiredToday` row fails.
     ExplainAudit {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+    },
+
+    /// Run the pg_accel install/provenance gate without benchmarks.
+    ///
+    /// Checks that the live backend is loading the expected extension SQL,
+    /// control metadata, installed binary, mapped dylib, and device-limit
+    /// smoke before accepting benchmark or audit evidence.
+    #[command(visible_alias = "provenance-gate")]
+    Provenance {
         /// PostgreSQL connection string.
         #[arg(long, default_value = DEFAULT_CONNECTION)]
         connection: String,
@@ -335,42 +339,6 @@ impl From<&CacheModeArg> for runner::CacheMode {
     }
 }
 
-/// CLI wrapper for median/mean speedup selection.
-#[derive(Clone, Debug)]
-enum SpeedupSourceArg {
-    Median,
-    Mean,
-}
-
-impl std::fmt::Display for SpeedupSourceArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Median => write!(f, "median"),
-            Self::Mean => write!(f, "mean"),
-        }
-    }
-}
-
-impl std::str::FromStr for SpeedupSourceArg {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "median" => Ok(Self::Median),
-            "mean" => Ok(Self::Mean),
-            other => Err(format!("unknown speedup source: {other}")),
-        }
-    }
-}
-
-impl From<&SpeedupSourceArg> for runner::SpeedupSource {
-    fn from(value: &SpeedupSourceArg) -> Self {
-        match value {
-            SpeedupSourceArg::Median => Self::Median,
-            SpeedupSourceArg::Mean => Self::Mean,
-        }
-    }
-}
-
 impl std::fmt::Display for ReportFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -431,7 +399,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             capture_plans,
             timing,
             cache_mode,
-            speedup_from,
             skip_guc_verify,
             artifacts_dir,
         } => {
@@ -450,7 +417,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     capture_plans,
                     &timing,
                     &cache_mode,
-                    &speedup_from,
                     skip_guc_verify,
                     artifacts_dir,
                 )
@@ -468,7 +434,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             capture_plans,
             timing,
             cache_mode,
-            speedup_from,
             skip_guc_verify,
             artifacts_dir,
         } => cmd_crash_repro(
@@ -483,7 +448,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             capture_plans,
             &timing,
             &cache_mode,
-            &speedup_from,
             skip_guc_verify,
             artifacts_dir,
         ),
@@ -494,10 +458,28 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rows,
         } => cmd_validate(workload.as_deref(), category.as_deref(), rows),
         Command::ExplainAudit { connection } => cmd_explain_audit(&connection),
+        Command::Provenance { connection } => cmd_provenance(&connection),
+    }
+}
+
+fn cmd_provenance(connection: &str) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("[provenance] checking pg_accel install provenance on {connection}");
+    match runner::verify_pg_accel_provenance(connection) {
+        Ok(()) => {
+            eprintln!("[provenance] success: live backend passed the pg_accel provenance gate");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!(
+                "[provenance] failure: live backend did not pass the pg_accel provenance gate"
+            );
+            Err(e)
+        }
     }
 }
 
 fn cmd_explain_audit(connection: &str) -> Result<(), Box<dyn std::error::Error>> {
+    runner::verify_pg_accel_provenance(connection)?;
     let all_passed = explain_audit::run_audit(connection)?;
     if all_passed {
         Ok(())
@@ -533,7 +515,6 @@ fn cmd_run(
     capture_plans: bool,
     timing: &TimingArg,
     cache_mode: &CacheModeArg,
-    speedup_from: &SpeedupSourceArg,
     skip_guc_verify: bool,
     artifacts_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -545,9 +526,8 @@ fn cmd_run(
         seed,
         timing_mode: runner::TimingMode::from(timing),
         cache_mode: runner::CacheMode::from(cache_mode),
-        speedup_source: runner::SpeedupSource::from(speedup_from),
         plans_capture_path: if capture_plans {
-            Some(PathBuf::from("benchmarks/plans.txt"))
+            Some(run_artifacts.join("plans.txt"))
         } else {
             None
         },
@@ -577,7 +557,6 @@ fn cmd_crash_repro(
     capture_plans: bool,
     timing: &TimingArg,
     cache_mode: &CacheModeArg,
-    speedup_from: &SpeedupSourceArg,
     skip_guc_verify: bool,
     artifacts_dir: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -593,7 +572,6 @@ fn cmd_crash_repro(
         seed,
         timing_mode: runner::TimingMode::from(timing),
         cache_mode: runner::CacheMode::from(cache_mode),
-        speedup_source: runner::SpeedupSource::from(speedup_from),
         plans_capture_path: if capture_plans {
             Some(repro_artifacts.join("plans.txt"))
         } else {

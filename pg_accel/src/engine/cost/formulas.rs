@@ -3,6 +3,72 @@
 use super::constants::GPU_LAUNCH_OVERHEAD;
 use super::device_limits::{DeviceLimits, device_limits};
 use super::platform::PlatformProfile;
+use super::units::PgCost;
+
+/// Per-row cost for walking a heap tuple and copying it into the arena used
+/// by self-scanning Custom Scan paths.
+pub const SELF_SCAN_HEAP_COST_PER_ROW: f64 = 0.003;
+
+/// Per-row, per-column extraction cost for self-scanning Custom Scan paths.
+pub const SELF_SCAN_EXTRACT_COST_PER_COLUMN: f64 = 0.002;
+
+/// Inputs to the self-scanning Custom Scan cost model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelfScanCostInput {
+    /// Estimated input rows.
+    pub rows: f64,
+    /// Number of columns extracted into the GPU batch.
+    pub extract_columns: usize,
+    /// Kernel-specific per-row GPU operation cost.
+    pub gpu_op_cost: f64,
+}
+
+impl SelfScanCostInput {
+    /// Build a self-scan cost input with raw planner units.
+    #[must_use]
+    pub const fn new(rows: f64, extract_columns: usize, gpu_op_cost: f64) -> Self {
+        Self {
+            rows,
+            extract_columns,
+            gpu_op_cost,
+        }
+    }
+
+    /// Build an fp64-aware input by applying the active device fp64 penalty
+    /// to the kernel operation cost only.
+    #[must_use]
+    pub fn fp64_aware(
+        rows: f64,
+        extract_columns: usize,
+        gpu_op_cost: f64,
+        uses_fp64: bool,
+    ) -> Self {
+        Self::new(
+            rows,
+            extract_columns,
+            apply_fp64_penalty(gpu_op_cost, uses_fp64, device_limits()),
+        )
+    }
+}
+
+/// Named components of a self-scanning Custom Scan estimate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelfScanCostBreakdown {
+    /// Heap walk plus tuple-arena copy cost.
+    pub scan: PgCost,
+    /// Datum extraction / columnar transposition cost.
+    pub extract: PgCost,
+    /// Fixed launch plus kernel operation cost.
+    pub gpu: PgCost,
+}
+
+impl SelfScanCostBreakdown {
+    /// Total planner cost.
+    #[must_use]
+    pub fn total(self) -> PgCost {
+        PgCost::new(self.scan.get() + self.extract.get() + self.gpu.get())
+    }
+}
 
 /// Apply the soft-fp64 cost multiplier to a GPU per-row op cost when the
 /// strategy uses fp64 and the device lacks native fp64.
@@ -86,10 +152,9 @@ pub fn conservative_input_rows(rows: f64, tuples: f64) -> usize {
 /// Whether a sort path has a LIMIT and therefore avoids the known full-sort
 /// loser lane.
 ///
-/// No-limit scalar GpuSort currently falls back to CPU sorting inside Custom
-/// Scan once the executor-side GPU element cap is exceeded, which caused the
-/// 10M full-sort losses observed on 2026-05-13. Limited/top-k shapes remain
-/// eligible.
+/// Full-output heap GpuSort is planner-rejected until it has a real GPU
+/// dispatch path that wins end-to-end. Bounded top-k remains eligible. If a
+/// selected GpuSort cannot dispatch on GPU, the executor errors.
 #[must_use]
 #[inline]
 pub fn sort_limit_present(limit_tuples: f64) -> bool {
@@ -126,11 +191,25 @@ pub fn spatial_polygon_rows_safe(
 /// (hardware-derived).
 #[must_use]
 pub fn self_scan_cost(rows: f64, num_extract_cols: usize, gpu_op_cost: f64) -> f64 {
-    let scan_cost = rows * 0.003; // heap_getnext + arena copy
+    estimate_self_scan_cost(SelfScanCostInput::new(rows, num_extract_cols, gpu_op_cost))
+        .total()
+        .get()
+}
+
+/// Return a named self-scan cost breakdown instead of a single opaque number.
+#[must_use]
+pub fn estimate_self_scan_cost(input: SelfScanCostInput) -> SelfScanCostBreakdown {
+    let scan_cost = input.rows * SELF_SCAN_HEAP_COST_PER_ROW;
     #[allow(clippy::cast_precision_loss)]
-    let extract_cost = rows * num_extract_cols as f64 * 0.002; // try_fast_read per column
-    let gpu_cost = rows.mul_add(gpu_op_cost, GPU_LAUNCH_OVERHEAD); // kernel-specific
-    scan_cost + extract_cost + gpu_cost
+    let extract_cost =
+        input.rows * input.extract_columns as f64 * SELF_SCAN_EXTRACT_COST_PER_COLUMN;
+    let gpu_cost = input.rows.mul_add(input.gpu_op_cost, GPU_LAUNCH_OVERHEAD);
+
+    SelfScanCostBreakdown {
+        scan: PgCost::new(scan_cost),
+        extract: PgCost::new(extract_cost),
+        gpu: PgCost::new(gpu_cost),
+    }
 }
 
 /// fp64-aware variant of [`self_scan_cost`].
@@ -146,8 +225,14 @@ pub fn self_scan_cost_fp64_aware(
     gpu_op_cost: f64,
     uses_fp64: bool,
 ) -> f64 {
-    let adjusted_op_cost = apply_fp64_penalty(gpu_op_cost, uses_fp64, device_limits());
-    self_scan_cost(rows, num_extract_cols, adjusted_op_cost)
+    estimate_self_scan_cost(SelfScanCostInput::fp64_aware(
+        rows,
+        num_extract_cols,
+        gpu_op_cost,
+        uses_fp64,
+    ))
+    .total()
+    .get()
 }
 
 /// Optimal batch size for the given row estimate, clamped to device-derived bounds.
@@ -213,6 +298,19 @@ mod fp64_penalty_tests {
         let l = limits_soft();
         let c = apply_fp64_penalty(0.001, true, &l);
         assert!((c - 0.032).abs() < 1e-12);
+    }
+
+    #[test]
+    fn self_scan_breakdown_names_cost_components() {
+        let breakdown = estimate_self_scan_cost(SelfScanCostInput::new(1_000.0, 2, 0.01));
+
+        assert_eq!(breakdown.scan.get(), 1_000.0 * SELF_SCAN_HEAP_COST_PER_ROW);
+        assert_eq!(
+            breakdown.extract.get(),
+            1_000.0 * 2.0 * SELF_SCAN_EXTRACT_COST_PER_COLUMN
+        );
+        assert_eq!(breakdown.gpu.get(), 1_000.0_f64.mul_add(0.01, 5.0));
+        assert_eq!(breakdown.total().get(), self_scan_cost(1_000.0, 2, 0.01));
     }
 
     /// Core plan assertion: the GPU-op portion of the self-scan cost scales
@@ -292,24 +390,20 @@ mod fp64_penalty_tests {
         );
     }
 
-    /// Spatial strategy ratio test — verifies that the adapter helper
-    /// classifies GpuSpatial as fp64 and that the per-row cost multiplier
-    /// gets applied. Mirrors what `rel_pathlist.rs` now does at the
-    /// GpuSpatial cost-computing site.
+    /// Spatial vector functions are not registered for normal exposure until
+    /// planner-time geometry subtype gates exist, so adapter-level fp64
+    /// classification is disabled for GpuSpatial.
     #[test]
-    fn spatial_uses_fp64_and_gets_multiplier() {
+    fn spatial_unregistered_does_not_get_adapter_fp64_multiplier() {
         use crate::adapters::uses_fp64 as adapter_uses_fp64;
         use crate::engine::registry::AccelStrategy;
 
-        // Gate 1: adapter helper must classify GpuSpatial as fp64.
         let fp64 = adapter_uses_fp64(AccelStrategy::GpuSpatial, "st_intersects");
         assert!(
-            fp64,
-            "adapter helper must classify GpuSpatial st_intersects as fp64"
+            !fp64,
+            "unregistered GpuSpatial st_intersects must not receive adapter fp64 penalty"
         );
 
-        // Gate 2: applying the penalty through apply_fp64_penalty with the
-        // GPU_SPATIAL_PER_ROW_COST constant produces a 32x ratio.
         let l_native = limits_native();
         let l_soft = limits_soft();
         let per_row_base = super::super::constants::GPU_SPATIAL_PER_ROW_COST;
@@ -318,8 +412,8 @@ mod fp64_penalty_tests {
         let soft = apply_fp64_penalty(per_row_base, fp64, &l_soft);
         let ratio = soft / native;
         assert!(
-            (ratio - 32.0).abs() < 1e-6,
-            "expected exact 32x ratio for GpuSpatial, got {ratio}"
+            (ratio - 1.0).abs() < 1e-6,
+            "unregistered GpuSpatial should not be fp64-penalized, got {ratio}"
         );
     }
 

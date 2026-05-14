@@ -145,13 +145,8 @@ mod tests {
     #[pg_test]
     fn partial_numeric_sum_nonempty_returns_datum() {
         let emitter = NumericSumEmitter;
-        let acc = ColumnAccumulator {
-            sum: 123.0,
-            has_value: true,
-            ..Default::default()
-        };
         // SAFETY: main-thread backend; NumericSumEmitter palloc's a Numeric.
-        let (datum, isnull) = unsafe { emitter.emit(&acc) };
+        let (datum, isnull) = unsafe { emitter.emit_with_i128(123, 0, true) };
         assert!(!isnull);
         // Numeric is pass-by-reference; the Datum must hold a non-null pointer.
         assert_ne!(datum.value(), 0);
@@ -161,9 +156,8 @@ mod tests {
     #[pg_test]
     fn partial_numeric_sum_null_when_empty() {
         let emitter = NumericSumEmitter;
-        let acc = ColumnAccumulator::default();
         // SAFETY: main-thread backend.
-        let (_d, isnull) = unsafe { emitter.emit(&acc) };
+        let (_d, isnull) = unsafe { emitter.emit_with_i128(0, 0, false) };
         assert!(isnull);
     }
 

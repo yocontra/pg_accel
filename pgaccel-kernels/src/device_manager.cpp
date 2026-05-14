@@ -45,9 +45,6 @@ static pgaccel_platform_caps g_caps = {};
 // Accessed by other translation units (sort.cpp, mem_pool.cpp) via extern.
 sycl::queue* g_queue = nullptr;
 
-// Accessed by alloc_helper.h via extern. Set during pgaccel_init().
-bool g_unified_memory = false;
-
 // ---------------------------------------------------------------------------
 // Backend name detection
 // ---------------------------------------------------------------------------
@@ -71,8 +68,6 @@ static std::string detect_backend_name(const sycl::device& dev) {
   if (lower.find("metal") != std::string::npos || lower.find("apple") != std::string::npos)
     return "metal";
 
-  if (dev.is_cpu())
-    return "cpu";
   return "unknown";
 }
 
@@ -81,10 +76,10 @@ static std::string detect_backend_name(const sycl::device& dev) {
 // ---------------------------------------------------------------------------
 
 static int score_device(const sycl::device& dev) {
-  std::string backend = detect_backend_name(dev);
+  if (!dev.is_gpu())
+    return -1;
 
-  if (dev.is_cpu())
-    return 0;
+  std::string backend = detect_backend_name(dev);
 
   // Discrete GPU backends, ranked by maturity.
   if (backend == "cuda")
@@ -102,7 +97,7 @@ static int score_device(const sycl::device& dev) {
   if (dev.is_gpu())
     return 40;
 
-  return 10;
+  return -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,12 +107,7 @@ static int score_device(const sycl::device& dev) {
 static void populate_caps(const sycl::device& dev, const std::string& backend) {
   g_caps.has_native_fp64 = dev.has(sycl::aspect::fp64);
   g_caps.has_atomic64 = dev.has(sycl::aspect::atomic64);
-  g_caps.has_ooo_queue = (backend != "metal" && backend != "cpu");
-  g_caps.is_unified_memory = dev.has(sycl::aspect::usm_shared_allocations) && !dev.is_gpu();
-  // Apple Silicon has unified physical memory, but AdaptiveCpp's Metal
-  // backend requires sycl::malloc_device/shared — raw host pointers
-  // silently read as zero from GPU kernels.  Do NOT enable the unified
-  // memory fast-path for Metal.
+  g_caps.has_ooo_queue = (backend != "metal");
   g_caps.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
   g_caps.compute_units = dev.get_info<sycl::info::device::max_compute_units>();
   std::strncpy(g_caps.backend_name, backend.c_str(), sizeof(g_caps.backend_name) - 1);
@@ -141,7 +131,6 @@ static void populate_device_info(const sycl::device& dev, const std::string& bac
   g_device_info.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
   g_device_info.has_native_fp64 = dev.has(sycl::aspect::fp64);
   g_device_info.has_atomic64 = dev.has(sycl::aspect::atomic64);
-  g_device_info.is_unified_memory = g_caps.is_unified_memory;
 }
 
 // ===========================================================================
@@ -161,7 +150,6 @@ extern "C" pgaccel_status pgaccel_init(void) {
     // fork internally at its dispatch chokepoints and recovers (Metal /
     // ROCm) or raises a clean error (CUDA / Level Zero) on the next use.
     g_queue = nullptr;
-    g_unified_memory = false;
     fprintf(stderr,
             "pgaccel: fork detected (parent=%d, child=%d)"
             " — attempting fresh GPU init\n",
@@ -204,46 +192,49 @@ extern "C" pgaccel_status pgaccel_init(void) {
         }
       }
 
-      std::string backend = detect_backend_name(best);
-      populate_caps(best, backend);
-      g_unified_memory = g_caps.is_unified_memory;
-      populate_device_info(best, backend);
+      if (best_score < 0 || !best.is_gpu()) {
+        fprintf(stderr, "pgaccel: FATAL: no SYCL GPU device found\n");
+      } else {
+        std::string backend = detect_backend_name(best);
+        populate_caps(best, backend);
+        populate_device_info(best, backend);
 
-      // Async exception handler: AdaptiveCpp's Metal backend (and
-      // other backends) report kernel-launch failures asynchronously
-      // through the queue's exception list instead of throwing
-      // synchronously from submit().  Without this handler, a
-      // failed dispatch (e.g. MTLCompilerService unreachable) logs
-      // "[AdaptiveCpp Error] ... metal: Failed to create compute
-      // pipeline state" to stderr but q.submit(...).wait() returns
-      // silently and the caller reads a zero-initialized output
-      // buffer as if the kernel had succeeded.
-      //
-      // By installing a handler that rethrows every sycl::exception
-      // it sees, callers that use wait_and_throw() (on either the
-      // queue or the returned event) will surface these async
-      // errors as synchronous exceptions at the wait site.
-      auto async_handler = [](sycl::exception_list exceptions) {
-        for (std::exception_ptr const& e : exceptions) {
-          try {
-            std::rethrow_exception(e);
-          } catch (const sycl::exception& ex) {
-            fprintf(stderr, "pgaccel: async SYCL error: %s\n", ex.what());
-            throw;
-          } catch (const std::exception& ex) {
-            fprintf(stderr, "pgaccel: async error: %s\n", ex.what());
-            throw;
+        // Async exception handler: AdaptiveCpp's Metal backend (and
+        // other backends) report kernel-launch failures asynchronously
+        // through the queue's exception list instead of throwing
+        // synchronously from submit().  Without this handler, a
+        // failed dispatch (e.g. MTLCompilerService unreachable) logs
+        // "[AdaptiveCpp Error] ... metal: Failed to create compute
+        // pipeline state" to stderr but q.submit(...).wait() returns
+        // silently and the caller reads a zero-initialized output
+        // buffer as if the kernel had succeeded.
+        //
+        // By installing a handler that rethrows every sycl::exception
+        // it sees, callers that use wait_and_throw() (on either the
+        // queue or the returned event) will surface these async
+        // errors as synchronous exceptions at the wait site.
+        auto async_handler = [](sycl::exception_list exceptions) {
+          for (std::exception_ptr const& e : exceptions) {
+            try {
+              std::rethrow_exception(e);
+            } catch (const sycl::exception& ex) {
+              fprintf(stderr, "pgaccel: async SYCL error: %s\n", ex.what());
+              throw;
+            } catch (const std::exception& ex) {
+              fprintf(stderr, "pgaccel: async error: %s\n", ex.what());
+              throw;
+            }
           }
-        }
-      };
+        };
 
-      g_queue = new sycl::queue(best, async_handler,
-                                sycl::property_list{sycl::property::queue::in_order{}});
+        g_queue = new sycl::queue(best, async_handler,
+                                  sycl::property_list{sycl::property::queue::in_order{}});
 
-      // Silent success: backend init fires per-forked-backend, so
-      // logging here produces O(queries) log lines. See Justfile
-      // `log-rails` recipe for how PG's own log is rotated.
-      init_ok = true;
+        // Silent success: backend init fires per-forked-backend, so
+        // logging here produces O(queries) log lines. See Justfile
+        // `log-rails` recipe for how PG's own log is rotated.
+        init_ok = true;
+      }
     }
   } catch (const sycl::exception& e) {
     fprintf(stderr, "pgaccel: FATAL: SYCL init failed: %s\n", e.what());

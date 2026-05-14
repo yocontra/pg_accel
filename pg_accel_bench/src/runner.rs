@@ -1,459 +1,1032 @@
-use std::fs::OpenOptions;
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use postgres::{Client, NoTls};
 use rand::Rng;
+use serde::Serialize;
 
 use crate::artifacts::ArtifactWriter;
+#[allow(unused_imports)]
+pub use crate::config::{
+    BenchConfig, CacheMode, GucProfile, ObservedGucs, PostmasterMismatch, ROW_SCALES, TimingMode,
+    verify_and_capture_gucs,
+};
 use crate::report::{self, IterationResult, WorkloadResult};
 use crate::workloads::Workload;
 
-/// The four row scales every benchmark is run at. Not configurable —
-/// the entire suite always runs at all four for reproducible, comparable
-/// results.
-///
-/// **Why no 1K scale:** Reviewer 1 Sin #15 — 160-microsecond measurements
-/// taken over the libpq wire protocol are below the instrument noise floor.
-/// The protocol round-trip floor on localhost is tens of microseconds, and
-/// libpq buffering / kernel scheduling jitter eats the rest. 1K-row rows
-/// measure the client harness, not the database. Gray's rule: measurements
-/// must exceed the instrument noise floor by 100×. Minimum reportable scale
-/// is 10K.
-pub const ROW_SCALES: &[usize] = &[10_000, 100_000, 1_000_000, 10_000_000];
+const PROVENANCE_SCHEMA_VERSION: u32 = 1;
+const EXPECTED_EXTENSION_VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUST_BACKTRACE_ARTIFACT: &str = "rust_backtrace.txt";
+const CRASH_CONTEXT_EMBED_BYTES: usize = 128 * 1024;
 
-/// Timing mode used to measure a single query iteration.
-///
-/// `ExplainAnalyze` uses `EXPLAIN ANALYZE` and parses `Execution Time`. This
-/// penalizes non-custom-scan plans more than Custom Scan plans because a
-/// Custom Scan Provider's Next() path can report row-counts essentially for
-/// free, while a parallel Seq Scan + Gather + HashAgg pays the per-tuple
-/// instrumentation cost in every worker. This advantages pg_accel by
-/// ~15-25% on agg/reduce categories (Reviewer 2 §3(i) / action_items M1).
-///
-/// `RawWallClock` submits the query via `client.simple_query()` and measures
-/// wall-clock time with `Instant::now()` on the client side. No `EXPLAIN
-/// ANALYZE`, no per-node instrumentation. This is the preferred mode for
-/// the publication-quality rigorous run and is now the **default**.
-///
-/// `Both` runs every iteration twice (raw first, then EXPLAIN ANALYZE)
-/// and captures both values so reviewers can audit the gap between the
-/// two mechanisms on any given workload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum TimingMode {
-    /// Use `EXPLAIN ANALYZE` and parse `Execution Time`.
-    ExplainAnalyze,
-    /// Use client-side `Instant` around a plain `simple_query()` call.
-    /// **Default** — reports publishable numbers.
-    #[default]
-    RawWallClock,
-    /// Capture both raw wall-clock and EXPLAIN ANALYZE on every iteration.
-    /// Statistical aggregation uses the raw column; the EXPLAIN column is
-    /// stored alongside for audit / gap analysis.
-    Both,
-}
-
-/// Cache cleanliness mode for a single measurement.
-///
-/// `Warm` runs after `BenchConfig::warmup` iterations (≥5 in reviewer-
-/// recommended profile, action_items M14). Page cache and shared buffers
-/// are expected to hold the working set.
-///
-/// `Cold` invokes `sync && purge` (macOS) or `echo 3 >
-/// /proc/sys/vm/drop_caches` (Linux, requires root) between iterations
-/// — `DISCARD ALL` does **not** clear the OS page cache (Reviewer 2
-/// §3(ii) / action_items M2). On Linux without root, we document the
-/// limitation in the report and proceed with warm-only measurement.
-///
-/// `Both` produces side-by-side cold and warm columns in the report.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum CacheMode {
-    /// Measure under warm cache only — require at least 5 warmup iterations.
-    #[default]
-    Warm,
-    /// Measure under cold cache only — purge the OS page cache between
-    /// every timed iteration (warmup is disabled).
-    Cold,
-    /// Capture both cold and warm side-by-side.
-    Both,
-}
-
-/// Source distribution used to compute the headline speedup.
-///
-/// `Median` (default) uses `parallel_median / accel_median` per cell. This
-/// is robust to the 22% CV cold-start contamination on the GPU side at
-/// smaller scales (Reviewer 1 Sin #19 / action_items M12).
-///
-/// `Mean` preserves the historical behaviour for backwards-compat.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SpeedupSource {
-    #[default]
-    Median,
-    Mean,
-}
-
-/// PostgreSQL GUC profile applied before a benchmark run.
-///
-/// Two built-in profiles:
-/// - `toy()` — the pgrx development defaults (small `shared_buffers`, tiny
-///   `work_mem`, 2 parallel workers). Useful for comparing against the
-///   historical benchmarks, but not representative of production.
-/// - `realistic()` — a production-sized profile tuned for a 64 GB / 12-core
-///   workstation (8 GB `shared_buffers`, 256 MB `work_mem`, 48 GB
-///   `effective_cache_size`, 8 parallel workers). These are the numbers a
-///   production DBA would actually use; benchmarking with `toy()` is
-///   methodologically weak.
-///
-/// `shared_buffers` and `max_worker_processes` are not reloadable — they
-/// require a full PG restart. If the caller is running against an existing
-/// `pgrx` postmaster, those two settings are skipped with a warning instead
-/// of attempting `ALTER SYSTEM`.
-#[derive(Clone, Debug)]
-pub struct GucProfile {
-    pub shared_buffers: String,
-    pub work_mem: String,
-    pub effective_cache_size: String,
-    pub max_parallel_workers_per_gather: u32,
-    pub max_worker_processes: u32,
-    pub max_parallel_workers: u32,
-    pub maintenance_work_mem: String,
-    pub jit: String,
-    pub jit_above_cost: String,
-    pub random_page_cost: String,
-    pub effective_io_concurrency: u32,
-    pub track_io_timing: String,
-    pub parallel_leader_participation: String,
-}
-
-/// Settings that MUST match between the requested profile and the
-/// running postmaster. These are `PGC_POSTMASTER` — cannot be changed by
-/// `ALTER SYSTEM` + `pg_reload_conf()`, so if they drift the operator
-/// needs to restart PG before any publishable run.
-const POSTMASTER_SETTINGS: &[&str] = &["shared_buffers", "max_worker_processes"];
-
-impl GucProfile {
-    /// pgrx development defaults. The historically-used configuration.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn toy() -> Self {
-        Self {
-            shared_buffers: "128MB".to_owned(),
-            work_mem: "4MB".to_owned(),
-            effective_cache_size: "4GB".to_owned(),
-            max_parallel_workers_per_gather: 2,
-            max_worker_processes: 8,
-            max_parallel_workers: 4,
-            maintenance_work_mem: "64MB".to_owned(),
-            jit: "off".to_owned(),
-            jit_above_cost: "100000".to_owned(),
-            random_page_cost: "4.0".to_owned(),
-            effective_io_concurrency: 1,
-            track_io_timing: "off".to_owned(),
-            parallel_leader_participation: "on".to_owned(),
-        }
-    }
-
-    /// Production-sized profile for a 64 GB / 12-core workstation.
-    ///
-    /// Reviewer 2's recommended publication profile (action_items M4 and
-    /// review_2.md lines 115-135). 16 GB `shared_buffers`, 512 MB
-    /// `work_mem`, 48 GB `effective_cache_size`, 12 parallel workers,
-    /// 2 GB `maintenance_work_mem`.
-    #[must_use]
-    pub fn realistic() -> Self {
-        Self {
-            shared_buffers: "16GB".to_owned(),
-            work_mem: "512MB".to_owned(),
-            effective_cache_size: "48GB".to_owned(),
-            max_parallel_workers_per_gather: 8,
-            max_worker_processes: 16,
-            max_parallel_workers: 12,
-            maintenance_work_mem: "2GB".to_owned(),
-            jit: "off".to_owned(),
-            jit_above_cost: "100000".to_owned(),
-            random_page_cost: "1.1".to_owned(),
-            effective_io_concurrency: 256,
-            track_io_timing: "on".to_owned(),
-            parallel_leader_participation: "on".to_owned(),
-        }
-    }
-
-    /// Return (name, requested_value) pairs in a stable order.
-    #[must_use]
-    pub fn requested_settings(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("shared_buffers", self.shared_buffers.clone()),
-            ("work_mem", self.work_mem.clone()),
-            ("effective_cache_size", self.effective_cache_size.clone()),
-            (
-                "max_parallel_workers_per_gather",
-                self.max_parallel_workers_per_gather.to_string(),
-            ),
-            (
-                "max_worker_processes",
-                self.max_worker_processes.to_string(),
-            ),
-            (
-                "max_parallel_workers",
-                self.max_parallel_workers.to_string(),
-            ),
-            ("maintenance_work_mem", self.maintenance_work_mem.clone()),
-            ("jit", self.jit.clone()),
-            ("jit_above_cost", self.jit_above_cost.clone()),
-            ("random_page_cost", self.random_page_cost.clone()),
-            (
-                "effective_io_concurrency",
-                self.effective_io_concurrency.to_string(),
-            ),
-            ("track_io_timing", self.track_io_timing.clone()),
-            (
-                "parallel_leader_participation",
-                self.parallel_leader_participation.clone(),
-            ),
-        ]
-    }
-
-    /// Apply this profile to a running PG backend via `ALTER SYSTEM SET`.
-    ///
-    /// Settings that are not reloadable (`shared_buffers`,
-    /// `max_worker_processes`) are attempted via `ALTER SYSTEM SET` plus
-    /// `pg_reload_conf()`, but a warning is logged because they only take
-    /// effect after a full PG restart. For session-level reloadable GUCs
-    /// (`work_mem`, `effective_cache_size`,
-    /// `max_parallel_workers_per_gather`), the call also issues a
-    /// session-level `SET` so subsequent queries on this connection see the
-    /// new value immediately.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the connection fails. Individual `ALTER SYSTEM`
-    /// statements that fail are logged but not fatal — the benchmark
-    /// continues with whatever settings the server accepted.
-    pub fn apply(&self, connection: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut client = Client::connect(connection, NoTls)?;
-        for (name, val) in self.requested_settings() {
-            let sql = format!("ALTER SYSTEM SET {name} = '{val}'");
-            if let Err(e) = client.batch_execute(&sql) {
-                eprintln!("[gucs] ALTER SYSTEM SET {name} failed: {e}");
-            }
-        }
-        if let Err(e) = client.batch_execute("SELECT pg_reload_conf()") {
-            eprintln!("[gucs] pg_reload_conf failed: {e}");
-        }
-        Ok(())
-    }
-}
-
-/// Observed GUC snapshot captured via `SHOW ...` from inside the
-/// benchmarked session. This is what the report publishes — not the
-/// `requested_settings()` — because `shared_buffers` is `PGC_POSTMASTER`
-/// and the `ALTER SYSTEM SET` won't take effect until restart.
-///
-/// Reviewer 2 §1 / action_items C4: publishing a settings table that
-/// doesn't match the running postmaster is worse than no table at all.
 #[derive(Debug, Clone)]
-pub struct ObservedGucs {
-    /// Settings read via `SHOW name` from inside a benchmarked session.
-    pub settings: Vec<(String, String)>,
-    /// `pg_postmaster_start_time()` — proves we are talking to the
-    /// postmaster that was running when the profile was applied.
-    pub postmaster_start_time: Option<String>,
+struct RustBacktraceSetting {
+    effective_value: String,
+    previous_value: Option<String>,
+    action: &'static str,
 }
 
-/// Error returned when a postmaster setting does not match the requested
-/// value — the operator needs to edit `postgresql.conf` and restart PG.
 #[derive(Debug)]
-pub struct PostmasterMismatch {
-    pub name: String,
-    pub requested: String,
-    pub observed: String,
+struct ProvenanceFailure {
+    errors: Vec<String>,
 }
 
-impl std::fmt::Display for PostmasterMismatch {
+impl std::fmt::Display for ProvenanceFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "postmaster restart required; ran `ALTER SYSTEM` but {name} still shows {observed} \
-             (requested {requested}). Edit postgresql.conf (or restart pgrx with the new profile) \
-             and retry. To bypass during development, pass --skip-guc-verify.",
-            name = self.name,
-            observed = self.observed,
-            requested = self.requested,
+            "pg_accel provenance gate failed: {}",
+            self.errors.join("; ")
         )
     }
 }
 
-impl std::error::Error for PostmasterMismatch {}
+impl std::error::Error for ProvenanceFailure {}
 
-/// Query `SHOW` for every setting in the profile list and return the
-/// observed values. Used by `verify_and_capture_gucs` below.
-fn show_all_gucs(
-    connection: &str,
-    names: &[&str],
-) -> Result<ObservedGucs, Box<dyn std::error::Error>> {
-    let mut client = Client::connect(connection, NoTls)?;
-    let mut settings = Vec::with_capacity(names.len());
-    for name in names {
-        // `SHOW` returns one row with one text column.
-        let row = client.query_one(&format!("SHOW {name}"), &[])?;
-        let val: String = row.get(0);
-        settings.push(((*name).to_owned(), val));
+#[derive(Debug, Serialize)]
+struct ProvenanceReport {
+    schema_version: u32,
+    status: ProvenanceStatus,
+    expected_extension_version: String,
+    postgres: PostgresProvenance,
+    sql: SqlExtensionProvenance,
+    live_smoke: LiveExtensionSmoke,
+    pg_config: PgConfigProvenance,
+    expected_binary: Option<FileProvenance>,
+    installed_binary: Option<FileProvenance>,
+    loaded_binaries: Vec<FileProvenance>,
+    mapped_library_discovery: MappedLibraryDiscovery,
+    device_limits_sources: Vec<String>,
+    warnings: Vec<String>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProvenanceStatus {
+    Pass,
+    Warning,
+    Fail,
+}
+
+#[derive(Debug, Serialize)]
+struct PostgresProvenance {
+    backend_pid: i32,
+    server_version: Option<String>,
+    data_directory: Option<String>,
+    config_file: Option<String>,
+    shared_preload_libraries: Option<String>,
+    postmaster_start_time: Option<String>,
+    postmaster_start_unix_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct SqlExtensionProvenance {
+    extversion: Option<String>,
+    pg_accel_version: Option<String>,
+    function_probin: Option<String>,
+    function_prosrc: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveExtensionSmoke {
+    backend_pid: i32,
+    pg_accel_version: Option<String>,
+    kernel_executions: Option<i64>,
+    stats_rows: Option<i64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PgConfigProvenance {
+    command: Option<String>,
+    pkglibdir: Option<String>,
+    sharedir: Option<String>,
+    error: Option<String>,
+    control_file: Option<FileProvenance>,
+    control_default_version: Option<String>,
+    sql_files: Vec<FileProvenance>,
+}
+
+#[derive(Debug, Serialize)]
+struct FileProvenance {
+    path: String,
+    exists: bool,
+    sha256: Option<String>,
+    len_bytes: Option<u64>,
+    modified_unix_seconds: Option<u64>,
+    mapping_deleted: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MappedLibraryDiscovery {
+    method: String,
+    mapped_paths: Vec<String>,
+    warning: Option<String>,
+}
+
+#[derive(Debug)]
+struct MappedLibrary {
+    path: PathBuf,
+    display_path: String,
+    deleted: bool,
+}
+
+struct MappedLibraryProbe {
+    discovery: MappedLibraryDiscovery,
+    libraries: Vec<MappedLibrary>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DispatchStatsSnapshot {
+    rows_dispatched: u64,
+    batches_executed: u64,
+    stock_exec_count: u64,
+    gpu_rows_processed: u64,
+    gpu_kernel_executions: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DispatchStatsDelta {
+    rows_dispatched: u64,
+    batches_executed: u64,
+    stock_exec_count: u64,
+    gpu_rows_processed: u64,
+    gpu_kernel_executions: u64,
+}
+
+#[derive(Debug, Clone)]
+struct DispatchCounterCapture {
+    captured: bool,
+    delta: DispatchStatsDelta,
+    error: Option<String>,
+}
+
+impl DispatchCounterCapture {
+    fn unavailable(error: impl Into<String>) -> Self {
+        Self {
+            captured: false,
+            delta: DispatchStatsDelta::default(),
+            error: Some(error.into()),
+        }
     }
-    // pg_postmaster_start_time is a timestamptz, so cast to text.
-    let pm_start: Option<String> = client
-        .query_one("SELECT pg_postmaster_start_time()::text", &[])
-        .ok()
-        .map(|r| r.get::<_, String>(0));
-    Ok(ObservedGucs {
-        settings,
-        postmaster_start_time: pm_start,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MeasurementOutcome {
+    elapsed_ms: f64,
+    output_rows: u64,
+}
+
+/// Run the extension-binary provenance smoke without an artifact directory.
+///
+/// This is used by audit commands that do not otherwise create benchmark
+/// artifacts. Benchmark runs call the same gate from `prepare_run_context`
+/// with an [`ArtifactWriter`] so the full JSON report is persisted.
+pub fn verify_pg_accel_provenance(connection: &str) -> Result<(), Box<dyn std::error::Error>> {
+    run_provenance_gate(connection, None).map(|_| ())
+}
+
+fn run_provenance_gate(
+    connection: &str,
+    artifacts: Option<&ArtifactWriter>,
+) -> Result<ProvenanceReport, Box<dyn std::error::Error>> {
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+
+    let mut client = Client::connect(connection, NoTls)?;
+    let postgres = capture_postgres_provenance(&mut client)?;
+    let sql = capture_sql_extension_provenance(&mut client, &mut errors);
+    let live_smoke = capture_live_extension_smoke(&mut client, postgres.backend_pid);
+    let device_limits_sources = capture_device_limits_sources(&mut client, &mut errors);
+    let pg_config = capture_pg_config_provenance(&mut warnings);
+    let expected_binary = capture_expected_binary(&mut warnings);
+    let installed_binary = pg_config
+        .pkglibdir
+        .as_deref()
+        .and_then(find_installed_extension_binary)
+        .map(|path| inspect_file(&path, false));
+    if installed_binary.is_none() && pg_config.pkglibdir.is_some() {
+        warnings.push("pg_config pkglibdir did not contain a pg_accel extension binary".to_owned());
+    }
+
+    let mapped = discover_mapped_pg_accel_libraries(postgres.backend_pid);
+    if let Some(warning) = &mapped.discovery.warning {
+        warnings.push(warning.clone());
+    }
+    let loaded_binaries: Vec<FileProvenance> = mapped
+        .libraries
+        .iter()
+        .map(inspect_mapped_library)
+        .collect();
+    let mut report = ProvenanceReport {
+        schema_version: PROVENANCE_SCHEMA_VERSION,
+        status: ProvenanceStatus::Pass,
+        expected_extension_version: EXPECTED_EXTENSION_VERSION.to_owned(),
+        postgres,
+        sql,
+        live_smoke,
+        pg_config,
+        expected_binary,
+        installed_binary,
+        loaded_binaries,
+        mapped_library_discovery: mapped.discovery,
+        device_limits_sources,
+        warnings,
+        errors,
+    };
+    evaluate_provenance(&mut report);
+
+    report.status = if report.errors.is_empty() {
+        if report.warnings.is_empty() {
+            ProvenanceStatus::Pass
+        } else {
+            ProvenanceStatus::Warning
+        }
+    } else {
+        ProvenanceStatus::Fail
+    };
+
+    for warning in &report.warnings {
+        eprintln!("[provenance] WARNING: {warning}");
+    }
+    if let Some(artifact_writer) = artifacts
+        && let Err(e) = artifact_writer.write_provenance(&report, &report.warnings, &report.errors)
+    {
+        eprintln!("[artifacts] provenance write failed: {e}");
+    }
+
+    if report.errors.is_empty() {
+        eprintln!("[provenance] pg_accel extension provenance accepted");
+        Ok(report)
+    } else {
+        for error in &report.errors {
+            eprintln!("[provenance] ERROR: {error}");
+        }
+        Err(Box::new(ProvenanceFailure {
+            errors: report.errors.clone(),
+        }))
+    }
+}
+
+fn capture_postgres_provenance(
+    client: &mut Client,
+) -> Result<PostgresProvenance, Box<dyn std::error::Error>> {
+    let row = client.query_one(
+        "SELECT pg_backend_pid(), \
+                current_setting('server_version', true), \
+                current_setting('data_directory', true), \
+                current_setting('config_file', true), \
+                current_setting('shared_preload_libraries', true), \
+                pg_postmaster_start_time()::text, \
+                EXTRACT(EPOCH FROM pg_postmaster_start_time())::bigint",
+        &[],
+    )?;
+    let start_epoch: i64 = row.get(6);
+    Ok(PostgresProvenance {
+        backend_pid: row.get(0),
+        server_version: row.get(1),
+        data_directory: row.get(2),
+        config_file: row.get(3),
+        shared_preload_libraries: row.get(4),
+        postmaster_start_time: row.get(5),
+        postmaster_start_unix_seconds: u64::try_from(start_epoch).ok(),
     })
 }
 
-/// Capture observed GUCs and enforce that `PGC_POSTMASTER` settings match
-/// the requested profile. Returns the observed snapshot for embedding in
-/// the report.
-///
-/// # Errors
-///
-/// Returns a `PostmasterMismatch` error if any postmaster setting does
-/// not match the requested profile (e.g. `shared_buffers` reads `128MB`
-/// but was requested at `16GB`). Unless `skip_verify` is true, this
-/// aborts the harness — see Reviewer 2 §1 / action_items C4.
-pub fn verify_and_capture_gucs(
-    connection: &str,
-    profile: &GucProfile,
-    skip_verify: bool,
-) -> Result<ObservedGucs, Box<dyn std::error::Error>> {
-    let names: Vec<&str> = profile
-        .requested_settings()
-        .iter()
-        .map(|(n, _)| *n)
-        .collect();
-    let observed = show_all_gucs(connection, &names)?;
+fn capture_sql_extension_provenance(
+    client: &mut Client,
+    errors: &mut Vec<String>,
+) -> SqlExtensionProvenance {
+    let extversion = client
+        .query_opt(
+            "SELECT extversion FROM pg_extension WHERE extname = 'pg_accel'",
+            &[],
+        )
+        .ok()
+        .flatten()
+        .map(|row| row.get::<_, String>(0));
 
-    // Compare postmaster settings specifically.
-    let requested: Vec<(&str, String)> = profile.requested_settings();
-    for pm in POSTMASTER_SETTINGS {
-        let req = requested
-            .iter()
-            .find(|(n, _)| n == pm)
-            .map(|(_, v)| v.clone());
-        let obs = observed
-            .settings
-            .iter()
-            .find(|(n, _)| n == pm)
-            .map(|(_, v)| v.clone());
-        if let (Some(req_val), Some(obs_val)) = (req, obs)
-            && !pg_setting_values_equivalent(pm, &req_val, &obs_val)
-        {
-            let err = PostmasterMismatch {
-                name: (*pm).to_owned(),
-                requested: req_val,
-                observed: obs_val,
+    let pg_accel_version = match client.query_one("SELECT pg_accel_version()", &[]) {
+        Ok(row) => Some(row.get::<_, String>(0)),
+        Err(e) => {
+            errors.push(format!("SELECT pg_accel_version() failed: {e}"));
+            None
+        }
+    };
+
+    let function_row = client
+        .query_opt(
+            "SELECT p.probin, p.prosrc \
+               FROM pg_proc p \
+               JOIN pg_depend d ON d.objid = p.oid AND d.deptype = 'e' \
+               JOIN pg_extension e ON e.oid = d.refobjid \
+              WHERE e.extname = 'pg_accel' AND p.proname = 'pg_accel_version' \
+              ORDER BY p.oid \
+              LIMIT 1",
+            &[],
+        )
+        .ok()
+        .flatten();
+
+    let (function_probin, function_prosrc) = function_row.map_or((None, None), |row| {
+        (Some(row.get::<_, String>(0)), Some(row.get::<_, String>(1)))
+    });
+
+    SqlExtensionProvenance {
+        extversion,
+        pg_accel_version,
+        function_probin,
+        function_prosrc,
+    }
+}
+
+fn capture_live_extension_smoke(client: &mut Client, backend_pid: i32) -> LiveExtensionSmoke {
+    match client.query_one(
+        "SELECT pg_accel_version(), \
+                pg_accel_kernel_executions(), \
+                (SELECT COUNT(*)::bigint FROM pg_accel_stats())",
+        &[],
+    ) {
+        Ok(row) => LiveExtensionSmoke {
+            backend_pid,
+            pg_accel_version: Some(row.get(0)),
+            kernel_executions: Some(row.get(1)),
+            stats_rows: Some(row.get(2)),
+            error: None,
+        },
+        Err(e) => LiveExtensionSmoke {
+            backend_pid,
+            pg_accel_version: None,
+            kernel_executions: None,
+            stats_rows: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn capture_device_limits_sources(client: &mut Client, errors: &mut Vec<String>) -> Vec<String> {
+    match client.query(
+        "SELECT DISTINCT source FROM pg_accel_device_limits() ORDER BY source",
+        &[],
+    ) {
+        Ok(rows) => rows.iter().map(|row| row.get::<_, String>(0)).collect(),
+        Err(e) => {
+            errors.push(format!("SELECT pg_accel_device_limits() failed: {e}"));
+            Vec::new()
+        }
+    }
+}
+
+fn capture_pg_config_provenance(warnings: &mut Vec<String>) -> PgConfigProvenance {
+    let command = std::env::var("PG_CONFIG").unwrap_or_else(|_| "pg_config".to_owned());
+    let pkglibdir = match command_stdout(&command, &["--pkglibdir"]) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            warnings.push(format!("could not run {command} --pkglibdir: {e}"));
+            return PgConfigProvenance {
+                command: Some(command),
+                pkglibdir: None,
+                sharedir: None,
+                error: Some(e),
+                control_file: None,
+                control_default_version: None,
+                sql_files: Vec::new(),
             };
-            if skip_verify {
-                eprintln!("[gucs] WARNING: {err} (--skip-guc-verify is set, continuing)");
-            } else {
-                return Err(Box::new(err));
+        }
+    };
+
+    let sharedir = match command_stdout(&command, &["--sharedir"]) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            warnings.push(format!("could not run {command} --sharedir: {e}"));
+            None
+        }
+    };
+
+    let (control_file, control_default_version, sql_files) = sharedir
+        .as_deref()
+        .map_or((None, None, Vec::new()), capture_extension_metadata_files);
+
+    PgConfigProvenance {
+        command: Some(command),
+        pkglibdir,
+        sharedir,
+        error: None,
+        control_file,
+        control_default_version,
+        sql_files,
+    }
+}
+
+fn capture_extension_metadata_files(
+    sharedir: &str,
+) -> (Option<FileProvenance>, Option<String>, Vec<FileProvenance>) {
+    let extension_dir = Path::new(sharedir).join("extension");
+    let control_path = extension_dir.join("pg_accel.control");
+    let control_file = control_path
+        .is_file()
+        .then(|| inspect_file(&control_path, false));
+    let control_default_version = fs::read_to_string(&control_path)
+        .ok()
+        .and_then(|text| parse_control_default_version(&text));
+
+    let mut sql_paths = Vec::new();
+    if let Ok(entries) = fs::read_dir(extension_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name.starts_with("pg_accel--")
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+            {
+                sql_paths.push(path);
             }
         }
     }
-    Ok(observed)
+    sql_paths.sort();
+    let sql_files = sql_paths
+        .iter()
+        .map(|path| inspect_file(path, false))
+        .collect();
+
+    (control_file, control_default_version, sql_files)
 }
 
-/// PostgreSQL normalises byte-valued GUCs (e.g. `16GB` → `16384MB` when
-/// shown, `max_worker_processes` passes through as `16`). This helper
-/// compares the requested and observed strings leniently — same
-/// canonical byte count or same integer.
-fn pg_setting_values_equivalent(name: &str, requested: &str, observed: &str) -> bool {
-    if requested.eq_ignore_ascii_case(observed) {
-        return true;
-    }
-    // Byte-valued memory settings.
-    if matches!(
-        name,
-        "shared_buffers" | "work_mem" | "maintenance_work_mem" | "effective_cache_size"
-    ) {
-        let req = parse_pg_bytes(requested);
-        let obs = parse_pg_bytes(observed);
-        if let (Some(a), Some(b)) = (req, obs) {
-            return a == b;
+fn capture_expected_binary(warnings: &mut Vec<String>) -> Option<FileProvenance> {
+    if let Ok(path) = std::env::var("PG_ACCEL_EXPECTED_DYLIB") {
+        let probe = inspect_file(Path::new(&path), false);
+        if !probe.exists {
+            warnings.push(format!(
+                "PG_ACCEL_EXPECTED_DYLIB points to a missing file: {}",
+                probe.path
+            ));
         }
+        return Some(probe);
     }
-    false
-}
 
-/// Parse a PG memory string like `16GB`, `1024MB`, `8192kB` into a
-/// canonical byte count. Returns `None` for unrecognized inputs.
-fn parse_pg_bytes(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() {
+    let root = workspace_root();
+    let candidates = build_output_candidates(&root);
+    let Some(path) = candidates.iter().find(|path| path.is_file()) else {
+        warnings.push(format!(
+            "no local pg_accel build output found in {}; set PG_ACCEL_EXPECTED_DYLIB to make the binary-hash gate strict",
+            root.join("target").display()
+        ));
         return None;
-    }
-    let (num, unit) = s
-        .chars()
-        .position(|c| !c.is_ascii_digit())
-        .map_or((s, ""), |idx| (&s[..idx], &s[idx..]));
-    let num: u64 = num.parse().ok()?;
-    let mult: u64 = match unit.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1,
-        "kb" => 1024,
-        "mb" => 1024 * 1024,
-        "gb" => 1024 * 1024 * 1024,
-        "tb" => 1024u64 * 1024 * 1024 * 1024,
-        _ => return None,
     };
-    Some(num * mult)
+    Some(inspect_file(path, false))
 }
 
-/// Runtime configuration knobs that are not per-workload.
-///
-/// Created once by the CLI layer and threaded through the runner. Keeping
-/// this as a single struct (vs. adding more parameters to `run_all`)
-/// contains the blast radius of future additions.
-#[derive(Clone, Debug)]
-pub struct BenchConfig {
-    pub iterations: usize,
-    pub warmup: usize,
-    pub seed: u64,
-    pub timing_mode: TimingMode,
-    pub cache_mode: CacheMode,
-    pub speedup_source: SpeedupSource,
-    /// If set, run `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` once per
-    /// workload/scale before the timed loop and append the result to this
-    /// path.
-    pub plans_capture_path: Option<PathBuf>,
-    /// If set, this profile is applied via `ALTER SYSTEM SET` before the
-    /// first workload runs.
-    pub guc_profile: Option<GucProfile>,
-    /// If true, skip the postmaster-GUC mismatch hard-fail check
-    /// (action_items C4). Only intended for developer iteration.
-    pub skip_guc_verify: bool,
-    /// If set, persist reports, crash inventories, plan snippets, GUCs, and
-    /// bounded log tails under this directory.
-    pub artifacts_dir: Option<PathBuf>,
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
-impl Default for BenchConfig {
-    fn default() -> Self {
-        Self {
-            iterations: 10,
-            // action_items M14 / Reviewer 1 Sin #14: warmup raised from 1
-            // to 5 so shader compile + kernel launch jitter is amortized
-            // before the first timed iteration.
-            warmup: 5,
-            seed: 42,
-            timing_mode: TimingMode::default(),
-            cache_mode: CacheMode::default(),
-            speedup_source: SpeedupSource::default(),
-            plans_capture_path: None,
-            guc_profile: None,
-            skip_guc_verify: false,
-            artifacts_dir: None,
+fn build_output_candidates(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for profile in ["release", "debug"] {
+        for file_name in built_extension_library_names() {
+            out.push(root.join("target").join(profile).join(file_name));
         }
     }
+    out
+}
+
+fn built_extension_library_names() -> Vec<String> {
+    let ext = std::env::consts::DLL_EXTENSION;
+    if cfg!(windows) {
+        vec![format!("pg_accel.{ext}"), format!("libpg_accel.{ext}")]
+    } else {
+        vec![format!("libpg_accel.{ext}"), format!("pg_accel.{ext}")]
+    }
+}
+
+fn installed_extension_library_names() -> Vec<String> {
+    let ext = std::env::consts::DLL_EXTENSION;
+    vec![format!("pg_accel.{ext}"), format!("libpg_accel.{ext}")]
+}
+
+fn find_installed_extension_binary(pkglibdir: &str) -> Option<PathBuf> {
+    let dir = Path::new(pkglibdir);
+    installed_extension_library_names()
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn inspect_mapped_library(library: &MappedLibrary) -> FileProvenance {
+    if library.deleted {
+        return FileProvenance {
+            path: library.display_path.clone(),
+            exists: false,
+            sha256: None,
+            len_bytes: None,
+            modified_unix_seconds: None,
+            mapping_deleted: true,
+            error: Some("mapped dynamic library was deleted or replaced on disk".to_owned()),
+        };
+    }
+    inspect_file(&library.path, false)
+}
+
+fn inspect_file(path: &Path, mapping_deleted: bool) -> FileProvenance {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            let hash = sha256_file(path);
+            FileProvenance {
+                path: path.display().to_string(),
+                exists: true,
+                sha256: hash.as_ref().ok().cloned(),
+                len_bytes: Some(metadata.len()),
+                modified_unix_seconds: metadata.modified().ok().and_then(system_time_unix_secs),
+                mapping_deleted,
+                error: hash.err(),
+            }
+        }
+        Err(e) => FileProvenance {
+            path: path.display().to_string(),
+            exists: false,
+            sha256: None,
+            len_bytes: None,
+            modified_unix_seconds: None,
+            mapping_deleted,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let attempts: &[(&str, &[&str])] = &[
+        ("shasum", &["-a", "256"]),
+        ("sha256sum", &[]),
+        ("openssl", &["dgst", "-sha256", "-r"]),
+    ];
+    let mut last_error = String::new();
+    for (program, args) in attempts {
+        let output = Command::new(program)
+            .args(*args)
+            .arg(path)
+            .output()
+            .map_err(|e| e.to_string());
+        let Ok(output) = output else {
+            last_error = format!("{program}: {}", output.err().unwrap_or_default());
+            continue;
+        };
+        if !output.status.success() {
+            last_error = format!(
+                "{program} exited with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(hash) = stdout
+            .split_whitespace()
+            .find(|token| token.len() == 64 && token.chars().all(|ch| ch.is_ascii_hexdigit()))
+        {
+            return Ok(hash.to_ascii_lowercase());
+        }
+        last_error = format!("{program} did not print a SHA-256 digest");
+    }
+    Err(last_error)
+}
+
+fn command_stdout(program: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn discover_mapped_pg_accel_libraries(pid: i32) -> MappedLibraryProbe {
+    if cfg!(target_os = "linux") {
+        match discover_proc_maps_pg_accel(pid) {
+            Ok(libraries) if !libraries.is_empty() => {
+                return mapped_library_probe("proc_maps", libraries, None);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return mapped_library_probe(
+                    "proc_maps",
+                    Vec::new(),
+                    Some(format!("could not read /proc/{pid}/maps: {e}")),
+                );
+            }
+        }
+    }
+
+    if cfg!(target_family = "unix") {
+        match discover_lsof_pg_accel(pid) {
+            Ok(libraries) if !libraries.is_empty() => {
+                return mapped_library_probe("lsof", libraries, None);
+            }
+            Ok(_) => {
+                return mapped_library_probe(
+                    "lsof",
+                    Vec::new(),
+                    Some(format!(
+                        "lsof did not report a mapped pg_accel library for pid {pid}"
+                    )),
+                );
+            }
+            Err(e) => {
+                return mapped_library_probe(
+                    "lsof",
+                    Vec::new(),
+                    Some(format!("could not run lsof for pid {pid}: {e}")),
+                );
+            }
+        }
+    }
+
+    mapped_library_probe(
+        "unsupported",
+        Vec::new(),
+        Some(format!(
+            "{} does not expose a supported mapped-library discovery path",
+            std::env::consts::OS
+        )),
+    )
+}
+
+fn mapped_library_probe(
+    method: &str,
+    libraries: Vec<MappedLibrary>,
+    warning: Option<String>,
+) -> MappedLibraryProbe {
+    let mapped_paths = libraries
+        .iter()
+        .map(|library| library.display_path.clone())
+        .collect();
+    MappedLibraryProbe {
+        discovery: MappedLibraryDiscovery {
+            method: method.to_owned(),
+            mapped_paths,
+            warning,
+        },
+        libraries,
+    }
+}
+
+fn discover_proc_maps_pg_accel(pid: i32) -> Result<Vec<MappedLibrary>, String> {
+    let text = fs::read_to_string(format!("/proc/{pid}/maps")).map_err(|e| e.to_string())?;
+    let mut seen = BTreeSet::new();
+    let mut libraries = Vec::new();
+    for line in text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let deleted = tokens.last().is_some_and(|token| *token == "(deleted)");
+        let path_token = if deleted {
+            tokens.get(tokens.len().saturating_sub(2)).copied()
+        } else {
+            tokens.last().copied()
+        };
+        let Some(path_token) = path_token else {
+            continue;
+        };
+        let path = path_token.replace("\\040", " ");
+        if !is_pg_accel_library_path(&path) {
+            continue;
+        }
+        let display_path = if deleted {
+            format!("{path} (deleted)")
+        } else {
+            path.clone()
+        };
+        if seen.insert(display_path.clone()) {
+            libraries.push(MappedLibrary {
+                path: PathBuf::from(path),
+                display_path,
+                deleted,
+            });
+        }
+    }
+    Ok(libraries)
+}
+
+fn discover_lsof_pg_accel(pid: i32) -> Result<Vec<MappedLibrary>, String> {
+    let output = Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-Fn"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut libraries = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some(path) = line.strip_prefix('n') else {
+            continue;
+        };
+        if !is_pg_accel_library_path(path) {
+            continue;
+        }
+        if seen.insert(path.to_owned()) {
+            libraries.push(MappedLibrary {
+                path: PathBuf::from(path),
+                display_path: path.to_owned(),
+                deleted: false,
+            });
+        }
+    }
+    Ok(libraries)
+}
+
+fn is_pg_accel_library_path(path: &str) -> bool {
+    let Some(file_name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name.contains("pg_accel")
+        && Path::new(file_name)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("so")
+                    || ext.eq_ignore_ascii_case("dylib")
+                    || ext.eq_ignore_ascii_case("dll")
+            })
+}
+
+fn evaluate_provenance(report: &mut ProvenanceReport) {
+    check_extension_versions(report);
+    check_live_extension_smoke(report);
+    check_control_version(report);
+    check_device_limits(report);
+    if let Some(warning) =
+        file_probe_warning("expected build binary", report.expected_binary.as_ref())
+    {
+        report.warnings.push(warning);
+    }
+    if let Some(warning) = file_probe_warning(
+        "pg_config installed binary",
+        report.installed_binary.as_ref(),
+    ) {
+        report.warnings.push(warning);
+    }
+    let mut loaded_warnings = Vec::new();
+    let mut loaded_errors = Vec::new();
+    if report.loaded_binaries.is_empty() {
+        loaded_errors.push(
+            "could not discover a mapped pg_accel dynamic library for the live backend; \
+             cannot prove the loaded dylib hash"
+                .to_owned(),
+        );
+    }
+    for loaded in &report.loaded_binaries {
+        if let Some(warning) = file_probe_warning("loaded backend binary", Some(loaded)) {
+            loaded_warnings.push(warning);
+        }
+        if loaded.sha256.is_none() {
+            loaded_errors.push(format!(
+                "could not compute SHA-256 for live backend pg_accel binary {}",
+                loaded.path
+            ));
+        }
+        if loaded.mapping_deleted {
+            loaded_errors.push(format!(
+                "live backend maps a deleted/replaced pg_accel binary: {}",
+                loaded.path
+            ));
+        }
+    }
+    report.warnings.extend(loaded_warnings);
+    report.errors.extend(loaded_errors);
+    check_hash_relationships(report);
+    check_postmaster_restart_required(report);
+}
+
+fn check_live_extension_smoke(report: &mut ProvenanceReport) {
+    if let Some(error) = &report.live_smoke.error {
+        report.errors.push(format!(
+            "live pg_accel smoke query failed in backend {}: {error}",
+            report.live_smoke.backend_pid
+        ));
+        return;
+    }
+    match &report.live_smoke.pg_accel_version {
+        Some(version) if version == EXPECTED_EXTENSION_VERSION => {}
+        Some(version) => report.errors.push(format!(
+            "live pg_accel smoke returned version {version}, expected {EXPECTED_EXTENSION_VERSION}"
+        )),
+        None => report
+            .errors
+            .push("live pg_accel smoke did not return a version".to_owned()),
+    }
+    if report.live_smoke.kernel_executions.is_none() {
+        report
+            .errors
+            .push("live pg_accel smoke could not read pg_accel_kernel_executions()".to_owned());
+    }
+    if report.live_smoke.stats_rows.is_none_or(|rows| rows == 0) {
+        report
+            .errors
+            .push("live pg_accel smoke did not get a row from pg_accel_stats()".to_owned());
+    }
+}
+
+fn check_extension_versions(report: &mut ProvenanceReport) {
+    match &report.sql.extversion {
+        Some(version) if version == EXPECTED_EXTENSION_VERSION => {}
+        Some(version) => report.errors.push(format!(
+            "pg_extension.extversion is {version}, expected {EXPECTED_EXTENSION_VERSION}"
+        )),
+        None => report
+            .errors
+            .push("pg_extension does not list pg_accel".to_owned()),
+    }
+    match &report.sql.pg_accel_version {
+        Some(version) if version == EXPECTED_EXTENSION_VERSION => {}
+        Some(version) => report.errors.push(format!(
+            "pg_accel_version() returned {version}, expected {EXPECTED_EXTENSION_VERSION}"
+        )),
+        None => report
+            .errors
+            .push("pg_accel_version() did not return a value".to_owned()),
+    }
+}
+
+fn check_control_version(report: &mut ProvenanceReport) {
+    if let Some(version) = &report.pg_config.control_default_version {
+        if version != EXPECTED_EXTENSION_VERSION {
+            report.warnings.push(format!(
+                "pg_config sharedir control default_version is {version}, expected {EXPECTED_EXTENSION_VERSION}"
+            ));
+        }
+    } else if report.pg_config.sharedir.is_some() {
+        report
+            .warnings
+            .push("could not read pg_config sharedir pg_accel.control default_version".to_owned());
+    }
+}
+
+fn check_device_limits(report: &mut ProvenanceReport) {
+    if report.device_limits_sources.is_empty() {
+        report
+            .errors
+            .push("pg_accel_device_limits() returned no source rows".to_owned());
+        return;
+    }
+    for source in &report.device_limits_sources {
+        if source == "fallback_cpu_only" {
+            report.errors.push(
+                "pg_accel reports fallback_cpu_only device limits; benchmark/audit results require a real GPU path or native PostgreSQL plan".to_owned(),
+            );
+        }
+    }
+}
+
+fn file_probe_warning(label: &str, probe: Option<&FileProvenance>) -> Option<String> {
+    let probe = probe?;
+    if !probe.exists {
+        return Some(format!("{label} does not exist: {}", probe.path));
+    }
+    if probe.sha256.is_none() {
+        return Some(format!(
+            "could not compute SHA-256 for {label} {}: {}",
+            probe.path,
+            probe.error.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    None
+}
+
+fn check_hash_relationships(report: &mut ProvenanceReport) {
+    let expected_hash = report
+        .expected_binary
+        .as_ref()
+        .and_then(|probe| probe.sha256.as_deref());
+    let installed_hash = report
+        .installed_binary
+        .as_ref()
+        .and_then(|probe| probe.sha256.as_deref());
+
+    if let (Some(expected), Some(installed)) = (expected_hash, installed_hash)
+        && expected != installed
+    {
+        report.warnings.push(format!(
+            "pg_config installed pg_accel binary hash {installed} does not match local build hash {expected}"
+        ));
+    }
+
+    if report.loaded_binaries.is_empty() {
+        return;
+    }
+
+    for loaded in &report.loaded_binaries {
+        let Some(loaded_hash) = loaded.sha256.as_deref() else {
+            continue;
+        };
+        if let Some(expected) = expected_hash
+            && loaded_hash != expected
+        {
+            report.errors.push(format!(
+                "live backend loaded pg_accel hash {loaded_hash} from {}, expected local build hash {expected}",
+                loaded.path
+            ));
+        }
+        if let Some(installed) = installed_hash
+            && loaded_hash != installed
+        {
+            report.warnings.push(format!(
+                "live backend loaded pg_accel hash {loaded_hash} from {}, but pg_config pkglibdir binary hash is {installed}",
+                loaded.path
+            ));
+        }
+    }
+}
+
+fn check_postmaster_restart_required(report: &mut ProvenanceReport) {
+    if !shared_preload_contains_pg_accel(report.postgres.shared_preload_libraries.as_deref()) {
+        return;
+    }
+    let Some(start) = report.postgres.postmaster_start_unix_seconds else {
+        report
+            .warnings
+            .push("could not compare pg_accel binary mtime to pg_postmaster_start_time".to_owned());
+        return;
+    };
+
+    let mut checked_loaded = false;
+    for loaded in &report.loaded_binaries {
+        checked_loaded = true;
+        if let Some(modified) = loaded.modified_unix_seconds
+            && modified > start
+        {
+            report.errors.push(format!(
+                "live backend maps {}, but that file was modified after pg_postmaster_start_time; restart the actual benchmark postmaster",
+                loaded.path
+            ));
+        }
+    }
+
+    if !checked_loaded
+        && let Some(installed) = &report.installed_binary
+        && let Some(modified) = installed.modified_unix_seconds
+        && modified > start
+    {
+        report.errors.push(format!(
+            "pg_config installed pg_accel binary {} was modified after pg_postmaster_start_time; restart the actual benchmark postmaster",
+            installed.path
+        ));
+    }
+}
+
+fn shared_preload_contains_pg_accel(value: Option<&str>) -> bool {
+    value.is_some_and(|libraries| {
+        libraries.split(',').any(|item| {
+            item.trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .eq_ignore_ascii_case("pg_accel")
+        })
+    })
+}
+
+fn parse_control_default_version(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let without_comment = line.split('#').next().unwrap_or_default().trim();
+        let Some(rest) = without_comment.strip_prefix("default_version") else {
+            continue;
+        };
+        let Some((_, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn system_time_unix_secs(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 /// Purge the OS page cache between cold-cache iterations.
@@ -765,9 +1338,9 @@ pub fn run_with_timing_and_cache(
             timing_mode,
             CacheMode::Warm,
         )?;
-        let mut merged = cold.iterations;
-        merged.extend(warm.iterations);
-        return Ok(WorkloadResult::from_iterations_ex(
+        let mut merged = cold.iterations.clone();
+        merged.extend(warm.iterations.clone());
+        let mut result = WorkloadResult::from_iterations(
             workload.name().to_owned(),
             workload.description().to_owned(),
             workload.category().to_owned(),
@@ -775,7 +1348,10 @@ pub fn run_with_timing_and_cache(
             0,
             merged,
             true,
-        ));
+        );
+        merge_dispatch_counter_fields(&mut result, &cold);
+        merge_dispatch_counter_fields(&mut result, &warm);
+        return Ok(result);
     }
     let effective_warmup = if cache_mode == CacheMode::Cold {
         0
@@ -807,6 +1383,9 @@ pub fn run_with_timing_and_cache(
         Client::connect(connection, NoTls)?,
         Client::connect(connection, NoTls)?,
     ];
+    let mut counter_before: Option<DispatchStatsSnapshot> = None;
+    let mut counter_capture_error: Option<String> = None;
+    let mut accel_output_rows_consumed = 0_u64;
 
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
@@ -825,7 +1404,22 @@ pub fn run_with_timing_and_cache(
             order.swap(0, 1);
         }
 
-        let mut timings = [0.0_f64; 2];
+        if !is_warmup && counter_before.is_none() && counter_capture_error.is_none() {
+            match capture_dispatch_stats(&mut mode_clients[0]) {
+                Ok(snapshot) => counter_before = Some(snapshot),
+                Err(e) => {
+                    let msg =
+                        format!("could not capture pg_accel dispatch counters before run: {e}");
+                    eprintln!("[dispatch] WARNING: {msg}");
+                    counter_capture_error = Some(msg);
+                }
+            }
+        }
+
+        let mut timings = [MeasurementOutcome {
+            elapsed_ms: 0.0,
+            output_rows: 0,
+        }; 2];
         for &idx in &order {
             // DISCARD ALL resets session state before each measurement.
             mode_clients[idx].batch_execute("DISCARD ALL")?;
@@ -842,8 +1436,8 @@ pub fn run_with_timing_and_cache(
             )?;
         }
 
-        let accel_ms = timings[0];
-        let parallel_ms = timings[1];
+        let accel_ms = timings[0].elapsed_ms;
+        let parallel_ms = timings[1].elapsed_ms;
 
         let phase = if is_warmup { "warmup" } else { "bench" };
         let iter_num = if is_warmup {
@@ -868,6 +1462,8 @@ pub fn run_with_timing_and_cache(
         );
 
         if !is_warmup {
+            accel_output_rows_consumed =
+                accel_output_rows_consumed.saturating_add(timings[0].output_rows);
             results.push(IterationResult {
                 accel_ms,
                 parallel_ms,
@@ -875,12 +1471,29 @@ pub fn run_with_timing_and_cache(
         }
     }
 
+    let counter_capture = match (counter_before, counter_capture_error) {
+        (Some(before), None) => match capture_dispatch_stats(&mut mode_clients[0]) {
+            Ok(after) => DispatchCounterCapture {
+                captured: true,
+                delta: dispatch_stats_delta(before, after),
+                error: None,
+            },
+            Err(e) => DispatchCounterCapture::unavailable(format!(
+                "could not capture pg_accel dispatch counters after run: {e}"
+            )),
+        },
+        (_, Some(error)) => DispatchCounterCapture::unavailable(error),
+        (None, None) => DispatchCounterCapture::unavailable(
+            "no measured iterations ran before dispatch counter capture".to_owned(),
+        ),
+    };
+
     // Clean close.
     for client in &mut mode_clients {
         let _ = client.batch_execute("DISCARD ALL");
     }
 
-    Ok(WorkloadResult::from_iterations_ex(
+    let mut result = WorkloadResult::from_iterations(
         workload.name().to_owned(),
         workload.description().to_owned(),
         workload.category().to_owned(),
@@ -888,7 +1501,91 @@ pub fn run_with_timing_and_cache(
         0,
         results,
         true,
-    ))
+    );
+    result.accel_output_rows_consumed = accel_output_rows_consumed;
+    merge_dispatch_counter_capture(&mut result, counter_capture);
+    Ok(result)
+}
+
+fn capture_dispatch_stats(
+    client: &mut Client,
+) -> Result<DispatchStatsSnapshot, Box<dyn std::error::Error>> {
+    let row = client.query_one(
+        "SELECT rows_dispatched, batches_executed, stock_exec_count, \
+                gpu_rows_processed, gpu_kernel_executions \
+           FROM pg_accel_stats()",
+        &[],
+    )?;
+    Ok(DispatchStatsSnapshot {
+        rows_dispatched: i64_to_u64(row.get(0)),
+        batches_executed: i64_to_u64(row.get(1)),
+        stock_exec_count: i64_to_u64(row.get(2)),
+        gpu_rows_processed: i64_to_u64(row.get(3)),
+        gpu_kernel_executions: i64_to_u64(row.get(4)),
+    })
+}
+
+fn i64_to_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+fn dispatch_stats_delta(
+    before: DispatchStatsSnapshot,
+    after: DispatchStatsSnapshot,
+) -> DispatchStatsDelta {
+    DispatchStatsDelta {
+        rows_dispatched: after.rows_dispatched.saturating_sub(before.rows_dispatched),
+        batches_executed: after
+            .batches_executed
+            .saturating_sub(before.batches_executed),
+        stock_exec_count: after
+            .stock_exec_count
+            .saturating_sub(before.stock_exec_count),
+        gpu_rows_processed: after
+            .gpu_rows_processed
+            .saturating_sub(before.gpu_rows_processed),
+        gpu_kernel_executions: after
+            .gpu_kernel_executions
+            .saturating_sub(before.gpu_kernel_executions),
+    }
+}
+
+fn merge_dispatch_counter_capture(target: &mut WorkloadResult, capture: DispatchCounterCapture) {
+    target.dispatch_counter_captured = capture.captured;
+    target.gpu_kernel_execution_delta = capture.delta.gpu_kernel_executions;
+    target.pg_accel_rows_dispatched_delta = capture.delta.rows_dispatched;
+    target.pg_accel_batches_executed_delta = capture.delta.batches_executed;
+    target.pg_accel_gpu_rows_processed_delta = capture.delta.gpu_rows_processed;
+    target.pg_accel_stock_exec_delta = capture.delta.stock_exec_count;
+    target.dispatch_counter_error = capture.error;
+}
+
+fn merge_dispatch_counter_fields(target: &mut WorkloadResult, source: &WorkloadResult) {
+    target.dispatch_counter_captured =
+        target.dispatch_counter_captured || source.dispatch_counter_captured;
+    target.gpu_kernel_execution_delta = target
+        .gpu_kernel_execution_delta
+        .saturating_add(source.gpu_kernel_execution_delta);
+    target.pg_accel_rows_dispatched_delta = target
+        .pg_accel_rows_dispatched_delta
+        .saturating_add(source.pg_accel_rows_dispatched_delta);
+    target.pg_accel_batches_executed_delta = target
+        .pg_accel_batches_executed_delta
+        .saturating_add(source.pg_accel_batches_executed_delta);
+    target.pg_accel_gpu_rows_processed_delta = target
+        .pg_accel_gpu_rows_processed_delta
+        .saturating_add(source.pg_accel_gpu_rows_processed_delta);
+    target.pg_accel_stock_exec_delta = target
+        .pg_accel_stock_exec_delta
+        .saturating_add(source.pg_accel_stock_exec_delta);
+    target.accel_output_rows_consumed = target
+        .accel_output_rows_consumed
+        .saturating_add(source.accel_output_rows_consumed);
+    if target.dispatch_counter_error.is_none() {
+        target
+            .dispatch_counter_error
+            .clone_from(&source.dispatch_counter_error);
+    }
 }
 
 /// Measurement mode for a single run (two-way comparison).
@@ -907,7 +1604,7 @@ fn run_with_mode(
     mode: BenchMode,
     pre_query: &[String],
     timing_mode: TimingMode,
-) -> Result<f64, Box<dyn std::error::Error>> {
+) -> Result<MeasurementOutcome, Box<dyn std::error::Error>> {
     for sql in pre_query {
         client.batch_execute(sql)?;
     }
@@ -926,7 +1623,7 @@ fn run_with_mode(
         }
     }
     match timing_mode {
-        TimingMode::ExplainAnalyze => run_explain_analyze(client, query),
+        TimingMode::ExplainAnalyze => run_explain_analyze_outcome(client, query),
         TimingMode::RawWallClock => run_raw_wall_clock(client, query),
         TimingMode::Both => {
             // Run both mechanisms back-to-back on the same connection.
@@ -935,8 +1632,14 @@ fn run_with_mode(
             // stderr so operators can audit the gap.
             let raw = run_raw_wall_clock(client, query)?;
             match run_explain_analyze(client, query) {
-                Ok(ea) => eprintln!("[timing:both] raw={raw:.3}ms explain_analyze={ea:.3}ms"),
-                Err(e) => eprintln!("[timing:both] raw={raw:.3}ms explain_analyze=ERR({e})"),
+                Ok(ea) => eprintln!(
+                    "[timing:both] raw={:.3}ms explain_analyze={ea:.3}ms",
+                    raw.elapsed_ms
+                ),
+                Err(e) => eprintln!(
+                    "[timing:both] raw={:.3}ms explain_analyze=ERR({e})",
+                    raw.elapsed_ms
+                ),
             }
             Ok(raw)
         }
@@ -947,15 +1650,25 @@ fn run_with_mode(
 /// `execute()` call. No `EXPLAIN ANALYZE`, no per-node instrumentation
 /// overhead — this is the timing mode to use for publication-quality
 /// numbers.
-fn run_raw_wall_clock(client: &mut Client, query: &str) -> Result<f64, Box<dyn std::error::Error>> {
+fn run_raw_wall_clock(
+    client: &mut Client,
+    query: &str,
+) -> Result<MeasurementOutcome, Box<dyn std::error::Error>> {
     let start = Instant::now();
     // simple_query so multi-statement queries and SELECT ... still work; we
-    // don't care about the rows returned.
-    client.simple_query(query)?;
+    // fully consume rows returned to libpq.
+    let messages = client.simple_query(query)?;
     let elapsed = start.elapsed();
     #[allow(clippy::cast_precision_loss)]
     let ms = (elapsed.as_nanos() as f64) / 1.0e6;
-    Ok(ms)
+    let output_rows = messages
+        .iter()
+        .filter(|msg| matches!(msg, postgres::SimpleQueryMessage::Row(_)))
+        .count();
+    Ok(MeasurementOutcome {
+        elapsed_ms: ms,
+        output_rows: u64::try_from(output_rows).unwrap_or(u64::MAX),
+    })
 }
 
 /// Cleanup benchmark tables.
@@ -1051,28 +1764,15 @@ pub fn run_all_with_config(
                 Err(e) => {
                     let err_msg = format!("{e}");
                     eprintln!("[CRASH] {} @ {} — {err_msg}", w.name(), format_rows(rows));
-                    let mut crash = report::CrashedScale {
-                        workload: w.name().to_owned(),
+                    let crash = record_crash(
+                        connection,
+                        w.as_ref(),
                         rows,
-                        error: err_msg,
-                        repro_command: Some(repro_command(connection, w.name(), rows, config)),
-                        plan_snippet_artifact: artifacts
-                            .as_ref()
-                            .and_then(|a| a.existing_plan_snippet_artifact(w.name(), rows)),
-                        log_tail_artifacts: Vec::new(),
-                    };
-                    if let Some(artifact_writer) = artifacts.as_ref() {
-                        match artifact_writer.capture_log_tails(&format!(
-                            "crash-{:03}-{}-{rows}",
-                            crashes.len() + 1,
-                            w.name()
-                        )) {
-                            Ok(paths) => crash.log_tail_artifacts = paths,
-                            Err(log_err) => {
-                                eprintln!("[artifacts] log tail capture failed: {log_err}");
-                            }
-                        }
-                    }
+                        config,
+                        artifacts.as_ref(),
+                        crashes.len() + 1,
+                        &err_msg,
+                    );
                     crashes.push(crash);
                     if let Some(artifact_writer) = artifacts.as_ref()
                         && let Err(write_err) = artifact_writer.write_crashes(&crashes)
@@ -1086,7 +1786,7 @@ pub fn run_all_with_config(
         }
     }
 
-    let mut report = report::generate_report_ex(
+    let mut report = report::generate_report(
         results,
         crashes,
         Some(connection),
@@ -1095,10 +1795,12 @@ pub fn run_all_with_config(
         observed_gucs,
         config.timing_mode,
         config.cache_mode,
-        config.speedup_source,
     );
     if let Some(artifact_writer) = artifacts.as_ref() {
         report.artifact_dir = Some(artifact_writer.root().display().to_string());
+        if let Err(e) = artifact_writer.capture_log_tails("run-complete") {
+            eprintln!("[artifacts] run-complete log/telemetry tail capture failed: {e}");
+        }
         if let Err(e) = artifact_writer.write_crashes(&report.crashes) {
             eprintln!("[artifacts] final crash list write failed: {e}");
         }
@@ -1132,31 +1834,23 @@ pub fn run_one_report_with_config(
             results.push(result);
         }
         Err(e) => {
-            let mut crash = report::CrashedScale {
-                workload: workload.name().to_owned(),
+            let err_msg = format!("{e}");
+            let crash = record_crash(
+                connection,
+                workload,
                 rows,
-                error: format!("{e}"),
-                repro_command: Some(repro_command(connection, workload.name(), rows, config)),
-                plan_snippet_artifact: artifacts
-                    .as_ref()
-                    .and_then(|a| a.existing_plan_snippet_artifact(workload.name(), rows)),
-                log_tail_artifacts: Vec::new(),
-            };
-            if let Some(artifact_writer) = artifacts.as_ref() {
-                match artifact_writer
-                    .capture_log_tails(&format!("crash-001-{}-{rows}", workload.name()))
-                {
-                    Ok(paths) => crash.log_tail_artifacts = paths,
-                    Err(log_err) => eprintln!("[artifacts] log tail capture failed: {log_err}"),
-                }
-            }
+                config,
+                artifacts.as_ref(),
+                1,
+                &err_msg,
+            );
             let _ = cleanup(connection, workload);
             let _ = wait_for_pg(connection);
             crashes.push(crash);
         }
     }
 
-    let mut report = report::generate_report_ex(
+    let mut report = report::generate_report(
         results,
         crashes,
         Some(connection),
@@ -1165,10 +1859,12 @@ pub fn run_one_report_with_config(
         observed_gucs,
         config.timing_mode,
         config.cache_mode,
-        config.speedup_source,
     );
     if let Some(artifact_writer) = artifacts.as_ref() {
         report.artifact_dir = Some(artifact_writer.root().display().to_string());
+        if let Err(e) = artifact_writer.capture_log_tails("run-complete") {
+            eprintln!("[artifacts] run-complete log/telemetry tail capture failed: {e}");
+        }
         if let Err(e) = artifact_writer.write_crashes(&report.crashes) {
             eprintln!("[artifacts] crash list write failed: {e}");
         }
@@ -1184,12 +1880,90 @@ struct RunContext {
     artifacts: Option<ArtifactWriter>,
 }
 
+fn ensure_rust_backtrace() -> RustBacktraceSetting {
+    match std::env::var("RUST_BACKTRACE") {
+        Ok(value) if rust_backtrace_enabled(&value) => RustBacktraceSetting {
+            effective_value: value,
+            previous_value: None,
+            action: "already-enabled",
+        },
+        Ok(value) => {
+            set_rust_backtrace_one();
+            RustBacktraceSetting {
+                effective_value: "1".to_owned(),
+                previous_value: Some(value),
+                action: "set-by-runner",
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {
+            set_rust_backtrace_one();
+            RustBacktraceSetting {
+                effective_value: "1".to_owned(),
+                previous_value: None,
+                action: "set-by-runner",
+            }
+        }
+        Err(std::env::VarError::NotUnicode(value)) => {
+            set_rust_backtrace_one();
+            RustBacktraceSetting {
+                effective_value: "1".to_owned(),
+                previous_value: Some(value.to_string_lossy().into_owned()),
+                action: "set-by-runner",
+            }
+        }
+    }
+}
+
+fn rust_backtrace_enabled(value: &str) -> bool {
+    matches!(value.trim(), "1" | "full")
+}
+
+fn set_rust_backtrace_one() {
+    // SAFETY: this is called at the start of benchmark context setup before
+    // the runner creates worker threads. The benchmark process owns this
+    // environment mutation so repros and any child commands see backtraces.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RUST_BACKTRACE", "1");
+    }
+}
+
+fn persist_rust_backtrace_setting(
+    artifacts: Option<&ArtifactWriter>,
+    setting: &RustBacktraceSetting,
+) {
+    eprintln!(
+        "[diagnostics] RUST_BACKTRACE={} ({})",
+        setting.effective_value, setting.action
+    );
+    let Some(artifact_writer) = artifacts else {
+        return;
+    };
+
+    let path = artifact_writer.root().join(RUST_BACKTRACE_ARTIFACT);
+    let mut text = String::new();
+    let _ = writeln!(text, "RUST_BACKTRACE={}", setting.effective_value);
+    let _ = writeln!(text, "action={}", setting.action);
+    if let Some(previous) = &setting.previous_value {
+        let _ = writeln!(text, "previous={previous}");
+    }
+    text.push_str(
+        "note=This records the benchmark runner process environment. Existing PostgreSQL \
+         postmasters may need a restart to inherit changed environment variables.\n",
+    );
+    if let Err(e) = fs::write(&path, text) {
+        eprintln!("[artifacts] RUST_BACKTRACE record write failed: {e}");
+    }
+}
+
 fn prepare_run_context(
     connection: &str,
     workload_names: &[&str],
     config: &BenchConfig,
 ) -> Result<RunContext, Box<dyn std::error::Error>> {
+    let rust_backtrace = ensure_rust_backtrace();
     let artifacts = prepare_artifacts(connection, config)?;
+    persist_rust_backtrace_setting(artifacts.as_ref(), &rust_backtrace);
     let mut observed_gucs: Option<ObservedGucs> = None;
 
     if let Some(profile) = &config.guc_profile {
@@ -1223,6 +1997,10 @@ fn prepare_run_context(
 
     if let Err(e) = ensure_extensions_for_names(connection, workload_names) {
         record_setup_failure(artifacts.as_ref(), "extension-setup", &format!("{e}"));
+        return Err(e);
+    }
+    if let Err(e) = run_provenance_gate(connection, artifacts.as_ref()) {
+        record_setup_failure(artifacts.as_ref(), "provenance", &format!("{e}"));
         return Err(e);
     }
 
@@ -1327,8 +2105,300 @@ fn initialize_plans_file(config: &BenchConfig) {
     }
 }
 
+struct CrashContext<'a> {
+    connection: &'a str,
+    workload: &'a dyn Workload,
+    rows: usize,
+    config: &'a BenchConfig,
+    label: &'a str,
+    error: &'a str,
+    repro_command: &'a str,
+    plan_snippet_artifact: Option<&'a str>,
+    log_tail_artifacts: &'a [String],
+}
+
+fn record_crash(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+    config: &BenchConfig,
+    artifacts: Option<&ArtifactWriter>,
+    crash_index: usize,
+    error: &str,
+) -> report::CrashedScale {
+    let repro_command = repro_command(connection, workload.name(), rows, config);
+    let plan_snippet_artifact = artifacts.and_then(|artifact_writer| {
+        artifact_writer.existing_plan_snippet_artifact(workload.name(), rows)
+    });
+    let label = format!("crash-{crash_index:03}-{}-{rows}", workload.name());
+    let mut log_tail_artifacts = Vec::new();
+
+    if let Some(artifact_writer) = artifacts {
+        match artifact_writer.capture_log_tails(&label) {
+            Ok(paths) => log_tail_artifacts = paths,
+            Err(log_err) => eprintln!("[artifacts] log tail capture failed: {log_err}"),
+        }
+
+        let context = CrashContext {
+            connection,
+            workload,
+            rows,
+            config,
+            label: &label,
+            error,
+            repro_command: &repro_command,
+            plan_snippet_artifact: plan_snippet_artifact.as_deref(),
+            log_tail_artifacts: &log_tail_artifacts,
+        };
+        match write_crash_context_artifact(artifact_writer, &context) {
+            Ok(path) => log_tail_artifacts.insert(0, path),
+            Err(e) => eprintln!("[artifacts] crash context write failed: {e}"),
+        }
+    }
+
+    report::CrashedScale {
+        workload: workload.name().to_owned(),
+        rows,
+        error: error.to_owned(),
+        repro_command: Some(repro_command),
+        plan_snippet_artifact,
+        log_tail_artifacts,
+    }
+}
+
+fn write_crash_context_artifact(
+    artifact_writer: &ArtifactWriter,
+    context: &CrashContext<'_>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = artifact_writer.root().join("crash_contexts");
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!(
+        "{}.txt",
+        sanitize_artifact_component(context.label)
+    ));
+
+    let mut text = String::new();
+    let _ = writeln!(text, "# pg_accel Benchmark Crash Context");
+    let _ = writeln!(text);
+    let _ = writeln!(text, "label: {}", context.label);
+    let _ = writeln!(text, "workload: {}", context.workload.name());
+    let _ = writeln!(text, "rows: {}", context.rows);
+    let _ = writeln!(text, "error: {}", context.error);
+    let _ = writeln!(text, "connection: {}", context.connection);
+    let _ = writeln!(text, "artifact_dir: {}", artifact_writer.root().display());
+    let _ = writeln!(
+        text,
+        "RUST_BACKTRACE: {}",
+        std::env::var("RUST_BACKTRACE").unwrap_or_else(|_| "<unset>".to_owned())
+    );
+    let _ = writeln!(text);
+    let _ = writeln!(text, "## Repro Command");
+    let _ = writeln!(text);
+    let _ = writeln!(text, "{}", context.repro_command);
+
+    append_crash_config(&mut text, context.config);
+    append_crash_artifact_paths(&mut text, artifact_writer, context);
+    append_crash_sql(&mut text, context.workload);
+    append_optional_artifact_excerpt(
+        &mut text,
+        artifact_writer.root(),
+        "RUST_BACKTRACE Artifact",
+        Some(RUST_BACKTRACE_ARTIFACT),
+    );
+    append_optional_artifact_excerpt(
+        &mut text,
+        artifact_writer.root(),
+        "EXPLAIN Snippet",
+        context.plan_snippet_artifact,
+    );
+    append_optional_artifact_excerpt(
+        &mut text,
+        artifact_writer.root(),
+        "GUC Snapshot",
+        existing_artifact_path(artifact_writer.root(), "guc_snapshot.json").as_deref(),
+    );
+    for log_artifact in context.log_tail_artifacts {
+        append_optional_artifact_excerpt(
+            &mut text,
+            artifact_writer.root(),
+            "Log Tail",
+            Some(log_artifact),
+        );
+    }
+
+    fs::write(&path, text)?;
+    Ok(relative_artifact_path(artifact_writer.root(), &path))
+}
+
+fn append_crash_config(text: &mut String, config: &BenchConfig) {
+    let _ = writeln!(text);
+    let _ = writeln!(text, "## Runner Config");
+    let _ = writeln!(text);
+    let _ = writeln!(text, "iterations: {}", config.iterations);
+    let _ = writeln!(text, "warmup: {}", config.warmup);
+    let _ = writeln!(text, "seed: {}", config.seed);
+    let _ = writeln!(text, "timing: {}", timing_mode_cli_arg(config.timing_mode));
+    let _ = writeln!(
+        text,
+        "cache_mode: {}",
+        cache_mode_cli_arg(config.cache_mode)
+    );
+    let _ = writeln!(text, "realistic_gucs: {}", config.guc_profile.is_some());
+    let _ = writeln!(text, "skip_guc_verify: {}", config.skip_guc_verify);
+    let _ = writeln!(
+        text,
+        "capture_plans: {}",
+        config.plans_capture_path.is_some()
+    );
+    if let Some(path) = &config.plans_capture_path {
+        let _ = writeln!(text, "plans_capture_path: {}", path.display());
+    }
+}
+
+fn append_crash_artifact_paths(
+    text: &mut String,
+    artifact_writer: &ArtifactWriter,
+    context: &CrashContext<'_>,
+) {
+    let _ = writeln!(text);
+    let _ = writeln!(text, "## Artifact Paths");
+    let _ = writeln!(text);
+    match context.plan_snippet_artifact {
+        Some(path) => {
+            let _ = writeln!(text, "plan_snippet: {path}");
+        }
+        None => text.push_str("plan_snippet: <not captured before failure>\n"),
+    }
+    if let Some(path) = existing_artifact_path(artifact_writer.root(), "guc_snapshot.json") {
+        let _ = writeln!(text, "guc_snapshot: {path}");
+    } else {
+        text.push_str("guc_snapshot: <not available>\n");
+    }
+    if let Some(path) = existing_artifact_path(artifact_writer.root(), "provenance.json") {
+        let _ = writeln!(text, "provenance: {path}");
+    }
+    if context.log_tail_artifacts.is_empty() {
+        text.push_str("log_tails: <not available>\n");
+    } else {
+        text.push_str("log_tails:\n");
+        for path in context.log_tail_artifacts {
+            let _ = writeln!(text, "- {path}");
+        }
+    }
+}
+
+fn append_crash_sql(text: &mut String, workload: &dyn Workload) {
+    let _ = writeln!(text);
+    let _ = writeln!(text, "## SQL");
+    let _ = writeln!(text);
+    let pre_query_sql = workload.pre_query_sql();
+    if pre_query_sql.is_empty() {
+        text.push_str("pre_query_sql: <none>\n");
+    } else {
+        text.push_str("pre_query_sql:\n");
+        for (idx, sql) in pre_query_sql.iter().enumerate() {
+            let _ = writeln!(text, "--- pre-query {} ---", idx + 1);
+            text.push_str(sql);
+            if !sql.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+    }
+    text.push_str("--- accel query ---\n");
+    let query = workload.query_sql();
+    text.push_str(&query);
+    if !query.ends_with('\n') {
+        text.push('\n');
+    }
+    if let Some(baseline_query) = workload.baseline_query_sql() {
+        text.push_str("--- baseline query ---\n");
+        text.push_str(&baseline_query);
+        if !baseline_query.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+}
+
+fn append_optional_artifact_excerpt(
+    text: &mut String,
+    root: &Path,
+    title: &str,
+    relative_path: Option<&str>,
+) {
+    let _ = writeln!(text);
+    let _ = writeln!(text, "## {title}");
+    let _ = writeln!(text);
+    let Some(relative_path) = relative_path else {
+        text.push_str("<not available>\n");
+        return;
+    };
+    let path = artifact_display_path(root, relative_path);
+    let _ = writeln!(text, "path: {relative_path}");
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(CRASH_CONTEXT_EMBED_BYTES);
+            if start > 0 {
+                let _ = writeln!(
+                    text,
+                    "[truncated to last {CRASH_CONTEXT_EMBED_BYTES} bytes of {}]",
+                    bytes.len()
+                );
+            }
+            text.push_str(&String::from_utf8_lossy(&bytes[start..]));
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(text, "<could not read {}: {e}>", path.display());
+        }
+    }
+}
+
+fn existing_artifact_path(root: &Path, relative_path: &str) -> Option<String> {
+    let path = root.join(relative_path);
+    path.is_file().then(|| relative_path.to_owned())
+}
+
+fn artifact_display_path(root: &Path, display_path: &str) -> PathBuf {
+    let path = Path::new(display_path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn relative_artifact_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn sanitize_artifact_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(96));
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+        if out.len() >= 96 {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "artifact".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 fn repro_command(connection: &str, workload: &str, rows: usize, config: &BenchConfig) -> String {
     let mut parts = vec![
+        "RUST_BACKTRACE=1".to_owned(),
         "cargo".to_owned(),
         "run".to_owned(),
         "-p".to_owned(),
@@ -1343,14 +2413,45 @@ fn repro_command(connection: &str, workload: &str, rows: usize, config: &BenchCo
         config.iterations.to_string(),
         "--warmup".to_owned(),
         config.warmup.to_string(),
+        "--seed".to_owned(),
+        config.seed.to_string(),
+        "--timing".to_owned(),
+        timing_mode_cli_arg(config.timing_mode).to_owned(),
+        "--cache-mode".to_owned(),
+        cache_mode_cli_arg(config.cache_mode).to_owned(),
         "--connection".to_owned(),
         shell_quote(connection),
     ];
+    if config.guc_profile.is_some() {
+        parts.push("--realistic-gucs".to_owned());
+    }
+    if config.plans_capture_path.is_some() {
+        parts.push("--capture-plans".to_owned());
+    }
+    if config.skip_guc_verify {
+        parts.push("--skip-guc-verify".to_owned());
+    }
     if let Some(dir) = &config.artifacts_dir {
         parts.push("--artifacts-dir".to_owned());
         parts.push(shell_quote(&dir.display().to_string()));
     }
     parts.join(" ")
+}
+
+fn timing_mode_cli_arg(mode: TimingMode) -> &'static str {
+    match mode {
+        TimingMode::ExplainAnalyze => "explain",
+        TimingMode::RawWallClock => "raw",
+        TimingMode::Both => "both",
+    }
+}
+
+fn cache_mode_cli_arg(mode: CacheMode) -> &'static str {
+    match mode {
+        CacheMode::Cold => "cold",
+        CacheMode::Warm => "warm",
+        CacheMode::Both => "both",
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1432,7 +2533,9 @@ fn run_workload_with_config(
     // feeds the dispatch classification (action_items C8 / Reviewer 1
     // Sin #5). The full-plans file (plans.txt) is still written if
     // plans_capture_path is set.
-    let plan_snippet = capture_plan_snippet(connection, workload).ok();
+    let plan_snippet = capture_plan_snippet(connection, workload, BenchMode::Accel).ok();
+    let baseline_plan_snippet =
+        capture_plan_snippet(connection, workload, BenchMode::PgParallel).ok();
     if let (Some(artifact_writer), Some(snippet)) = (artifacts, plan_snippet.as_deref())
         && let Err(e) = artifact_writer.write_plan_snippet(workload.name(), rows, snippet)
     {
@@ -1441,9 +2544,12 @@ fn run_workload_with_config(
             workload.name()
         );
     }
-    let dispatched = plan_snippet
+    let plan_selected = plan_snippet
         .as_deref()
         .is_some_and(plan_contains_custom_scan);
+    let plan_text_dispatched = plan_snippet
+        .as_deref()
+        .is_some_and(plan_indicates_gpu_dispatch);
     if let Some(path) = &config.plans_capture_path
         && let Err(e) = capture_plan(connection, workload, rows, path)
     {
@@ -1452,11 +2558,6 @@ fn run_workload_with_config(
             workload.name()
         );
     }
-
-    // TODO(fix-agent-6): once pg_accel_stats() exposes
-    // `pg_accel_kernel_executions_delta`, combine the plan-text check with
-    // a counter-delta check (delta > 0 means dispatched). Leaving the
-    // plan-text path as the only signal for now.
 
     let mut result = run_with_timing_and_cache(
         connection,
@@ -1467,8 +2568,35 @@ fn run_workload_with_config(
         config.cache_mode,
     )?;
     result.rows = rows;
-    result.dispatched = dispatched;
+    result.plan_selected = plan_selected;
+    let function_kernel_candidate = report::is_function_kernel_candidate(
+        workload.name(),
+        workload.category(),
+        &result.kernel_class,
+        workload.description(),
+    );
+    let counter_proves_kernel =
+        result.dispatch_counter_captured && result.gpu_kernel_execution_delta > 0;
+    let stock_fallback_seen = result.pg_accel_stock_exec_delta > 0;
+    let function_output_consumed = result.accel_output_rows_consumed > 0;
+    result.function_srf_kernel_dispatched = function_kernel_candidate
+        && !plan_selected
+        && counter_proves_kernel
+        && function_output_consumed
+        && !stock_fallback_seen;
+    result.gpu_kernel_dispatched = counter_proves_kernel
+        && (!function_kernel_candidate || plan_selected || function_output_consumed)
+        && !stock_fallback_seen;
+    emit_dispatch_classification_warning(
+        workload.name(),
+        rows,
+        plan_selected,
+        plan_text_dispatched,
+        function_kernel_candidate,
+        &result,
+    );
     result.plan_snippet = plan_snippet;
+    result.baseline_plan_snippet = baseline_plan_snippet;
     result.thermal = thermal;
     result.table_stats = vacuum_stats;
     cleanup(connection, workload)?;
@@ -1476,20 +2604,30 @@ fn run_workload_with_config(
 }
 
 /// Capture a short plan snippet (first 30 lines of
-/// `EXPLAIN (VERBOSE) <query>`) with `pg_accel.enabled = on`. Used for
-/// dispatch classification — we only need to see whether a Custom Scan
-/// node appears in the plan.
+/// `EXPLAIN (VERBOSE, COSTS OFF) <query>`) for one benchmark side. Used
+/// for dispatch classification and no-dispatch native-plan comparability
+/// checks.
 fn capture_plan_snippet(
     connection: &str,
     workload: &dyn Workload,
+    mode: BenchMode,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
-    client.batch_execute("SET pg_accel.enabled = on")?;
+    match mode {
+        BenchMode::Accel => client.batch_execute("SET pg_accel.enabled = on")?,
+        BenchMode::PgParallel => client.batch_execute("SET pg_accel.enabled = off")?,
+    }
     client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
     for sql in workload.pre_query_sql() {
         client.batch_execute(&sql)?;
     }
-    let explain = format!("EXPLAIN (VERBOSE) {}", workload.query_sql());
+    let query = match mode {
+        BenchMode::Accel => workload.query_sql(),
+        BenchMode::PgParallel => workload
+            .baseline_query_sql()
+            .unwrap_or_else(|| workload.query_sql()),
+    };
+    let explain = format!("EXPLAIN (VERBOSE, COSTS OFF) {query}");
     let rows_out = client.query(&explain, &[])?;
     let mut buf = String::new();
     for (i, row) in rows_out.iter().enumerate() {
@@ -1504,11 +2642,75 @@ fn capture_plan_snippet(
 }
 
 /// Return true if a plan text snippet contains a Custom Scan node (which
-/// for pg_accel is always prefixed with "GPU"). This is the heuristic we
-/// use to classify a workload as "dispatched to GPU".
+/// for pg_accel is always prefixed with "GPU").
 #[must_use]
 pub fn plan_contains_custom_scan(plan: &str) -> bool {
-    plan.contains("Custom Scan") || plan.contains("GPU Dispatched: true")
+    plan.contains("Custom Scan")
+}
+
+fn emit_dispatch_classification_warning(
+    workload: &str,
+    rows: usize,
+    plan_selected: bool,
+    plan_text_dispatched: bool,
+    function_kernel_candidate: bool,
+    result: &WorkloadResult,
+) {
+    if !result.dispatch_counter_captured {
+        eprintln!(
+            "[dispatch] WARNING: {workload} @ {rows}: runtime counter capture unavailable; \
+             not crediting GPU dispatch ({})",
+            result
+                .dispatch_counter_error
+                .as_deref()
+                .unwrap_or("unknown stats error")
+        );
+        return;
+    }
+    if result.pg_accel_stock_exec_delta > 0 {
+        eprintln!(
+            "[dispatch] WARNING: {workload} @ {rows}: pg_accel stock executor fallback delta={} \
+             with kernel_delta={}; excluding from GPU-dispatched wins",
+            result.pg_accel_stock_exec_delta, result.gpu_kernel_execution_delta
+        );
+        return;
+    }
+    if plan_selected && result.gpu_kernel_execution_delta == 0 {
+        eprintln!(
+            "[dispatch] WARNING: {workload} @ {rows}: pg_accel plan selected but runtime \
+             kernel counter delta is zero; counting as plan-selected only"
+        );
+    }
+    if plan_text_dispatched && result.gpu_kernel_execution_delta == 0 {
+        eprintln!(
+            "[dispatch] WARNING: {workload} @ {rows}: plan text claimed GPU dispatch but \
+             runtime kernel counter delta is zero"
+        );
+    }
+    if function_kernel_candidate
+        && !plan_selected
+        && result.gpu_kernel_execution_delta > 0
+        && result.accel_output_rows_consumed == 0
+    {
+        eprintln!(
+            "[dispatch] WARNING: {workload} @ {rows}: function/SRF kernel counter advanced \
+             but no accel output rows were consumed; excluding from GPU-dispatched wins"
+        );
+    }
+}
+
+fn plan_indicates_gpu_dispatch(plan: &str) -> bool {
+    explicit_gpu_dispatched(plan).unwrap_or_else(|| plan_contains_custom_scan(plan))
+}
+
+fn explicit_gpu_dispatched(plan: &str) -> Option<bool> {
+    if plan.contains("GPU Dispatched: false") {
+        Some(false)
+    } else if plan.contains("GPU Dispatched: true") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// Capture `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` output for a workload and
@@ -1630,17 +2832,35 @@ fn run_explain_analyze(
     client: &mut Client,
     query: &str,
 ) -> Result<f64, Box<dyn std::error::Error>> {
+    Ok(run_explain_analyze_outcome(client, query)?.elapsed_ms)
+}
+
+fn run_explain_analyze_outcome(
+    client: &mut Client,
+    query: &str,
+) -> Result<MeasurementOutcome, Box<dyn std::error::Error>> {
     let explain_query = format!("EXPLAIN ANALYZE {query}");
     let rows = client.query(&explain_query, &[])?;
 
+    let mut elapsed_ms = None;
+    let mut output_rows = None;
     for row in &rows {
         let line: &str = row.get(0);
-        if let Some(ms) = parse_execution_time(line) {
-            return Ok(ms);
+        if output_rows.is_none() {
+            output_rows = parse_actual_rows(line);
+        }
+        if elapsed_ms.is_none() {
+            elapsed_ms = parse_execution_time(line);
         }
     }
 
-    Err("could not find 'Execution Time' in EXPLAIN ANALYZE output".into())
+    let Some(elapsed_ms) = elapsed_ms else {
+        return Err("could not find 'Execution Time' in EXPLAIN ANALYZE output".into());
+    };
+    Ok(MeasurementOutcome {
+        elapsed_ms,
+        output_rows: output_rows.unwrap_or(0),
+    })
 }
 
 /// Parse the millisecond value from an `Execution Time: X.XXX ms` line.
@@ -1650,6 +2870,17 @@ fn parse_execution_time(line: &str) -> Option<f64> {
     let suffix = suffix.trim();
     let ms_str = suffix.strip_suffix("ms")?.trim();
     ms_str.parse::<f64>().ok()
+}
+
+fn parse_actual_rows(line: &str) -> Option<u64> {
+    let actual_idx = line.find("actual ")?;
+    let suffix = &line[actual_idx..];
+    let rows_idx = suffix.find(" rows=")?;
+    let value = &suffix[rows_idx + " rows=".len()..];
+    let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
+    (!digits.is_empty())
+        .then(|| digits.parse::<u64>().ok())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -1741,10 +2972,34 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_dispatch_marker_false_overrides_custom_scan() {
+        let plan = "Custom Scan (pg_accel)\n  GPU Dispatched: false\n";
+        assert!(plan_contains_custom_scan(plan));
+        assert!(!plan_indicates_gpu_dispatch(plan));
+    }
+
+    #[test]
+    fn test_plan_dispatch_marker_true_counts_without_custom_scan() {
+        let plan = "Function Scan on h3_cells\n  GPU Dispatched: true\n";
+        assert!(plan_indicates_gpu_dispatch(plan));
+    }
+
+    #[test]
     #[allow(clippy::expect_used)]
     fn test_parse_execution_time_zero() {
         let result = parse_execution_time("Execution Time: 0.000 ms").expect("should parse zero");
         assert!(result.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_actual_rows_from_explain_analyze() {
+        let line = "Aggregate  (cost=12.00..12.01 rows=1 width=8) \
+                    (actual time=0.125..0.126 rows=1 loops=1)";
+        assert_eq!(parse_actual_rows(line), Some(1));
+        assert_eq!(
+            parse_actual_rows("Seq Scan on t  (cost=0.00..1.00 rows=5 width=4)"),
+            None
+        );
     }
 
     #[test]
@@ -1770,5 +3025,103 @@ mod tests {
         assert_eq!(format_rows(1_000_000), "1M");
         assert_eq!(format_rows(5_000_000), "5M");
         assert_eq!(format_rows(500), "500");
+    }
+
+    #[test]
+    fn test_repro_command_preserves_runner_flags() {
+        let config = BenchConfig {
+            iterations: 3,
+            warmup: 1,
+            seed: 99,
+            timing_mode: TimingMode::Both,
+            cache_mode: CacheMode::Cold,
+            plans_capture_path: Some(PathBuf::from("benchmarks/artifacts/repro/plans.txt")),
+            guc_profile: Some(GucProfile::realistic()),
+            skip_guc_verify: true,
+            artifacts_dir: Some(PathBuf::from("benchmarks/artifacts/repro")),
+        };
+        let command = repro_command(
+            "host=localhost port=28817 dbname=pg accel",
+            "hashagg_10g",
+            1_000_000,
+            &config,
+        );
+
+        assert!(command.starts_with("RUST_BACKTRACE=1 cargo run -p pg_accel_bench -- crash-repro"));
+        assert!(command.contains("--workload hashagg_10g"));
+        assert!(command.contains("--rows 1000000"));
+        assert!(command.contains("--iterations 3"));
+        assert!(command.contains("--warmup 1"));
+        assert!(command.contains("--seed 99"));
+        assert!(command.contains("--timing both"));
+        assert!(command.contains("--cache-mode cold"));
+        assert!(command.contains("--realistic-gucs"));
+        assert!(command.contains("--capture-plans"));
+        assert!(command.contains("--skip-guc-verify"));
+        assert!(command.contains("--artifacts-dir benchmarks/artifacts/repro"));
+        assert!(command.contains("--connection 'host=localhost port=28817 dbname=pg accel'"));
+    }
+
+    #[test]
+    fn test_sanitize_artifact_component() {
+        assert_eq!(
+            sanitize_artifact_component("crash-001-gpu/hash agg @ 1M"),
+            "crash-001-gpu-hash-agg---1M"
+        );
+        assert_eq!(sanitize_artifact_component("***"), "artifact");
+    }
+
+    #[test]
+    fn test_parse_control_default_version() {
+        assert_eq!(
+            parse_control_default_version(
+                "# comment\n\
+                 default_version = '1.0.0'\n"
+            )
+            .as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(
+            parse_control_default_version("default_version = \"2.3.4\" # generated").as_deref(),
+            Some("2.3.4")
+        );
+        assert!(parse_control_default_version("comment = 'no version'").is_none());
+    }
+
+    #[test]
+    fn test_shared_preload_contains_pg_accel() {
+        assert!(shared_preload_contains_pg_accel(Some(
+            "pg_stat_statements, pg_accel"
+        )));
+        assert!(shared_preload_contains_pg_accel(Some("'pg_accel'")));
+        assert!(!shared_preload_contains_pg_accel(Some(
+            "pg_stat_statements"
+        )));
+        assert!(!shared_preload_contains_pg_accel(None));
+    }
+
+    #[test]
+    fn test_pg_accel_library_path_detection() {
+        assert!(is_pg_accel_library_path("/opt/pg/lib/pg_accel.dylib"));
+        assert!(is_pg_accel_library_path(
+            "/usr/lib/postgresql/libpg_accel.so"
+        ));
+        assert!(!is_pg_accel_library_path("/tmp/pg_accel_traces.jsonl"));
+        assert!(!is_pg_accel_library_path("/opt/pg/lib/postgis-3.so"));
+    }
+
+    #[test]
+    fn test_file_probe_warning_for_missing_hash() {
+        let probe = FileProvenance {
+            path: "/tmp/pg_accel.dylib".to_owned(),
+            exists: true,
+            sha256: None,
+            len_bytes: Some(12),
+            modified_unix_seconds: Some(42),
+            mapping_deleted: false,
+            error: Some("hash tool missing".to_owned()),
+        };
+        let warning = file_probe_warning("loaded backend binary", Some(&probe));
+        assert!(warning.is_some_and(|text| text.contains("hash tool missing")));
     }
 }

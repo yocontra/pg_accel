@@ -1,4 +1,3 @@
-   Compiling pg_accel_bench v0.1.0 (/Users/contra/Projects/pg_accel/pg_accel_bench)
     Finished `release` profile [optimized] target(s) in 1.78s
      Running `/Users/contra/Projects/pg_accel/target/release/pg_accel_bench run --category ssbm --iterations 10 --warmup 3 --format markdown`
 [setup] installing extensions: pg_accel

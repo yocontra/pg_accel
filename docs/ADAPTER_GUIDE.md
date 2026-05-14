@@ -24,12 +24,14 @@ strategy to apply.
 
 ```rust
 pub enum AccelStrategy {
-    BatchedEval,    // Tight loop on main backend thread (no GPU)
     GpuSpatial,     // Spatial predicates → GPU three-layer pipeline
     GpuRaster,      // Per-pixel raster map algebra → GPU
     GpuH3,          // H3 cell computation → GPU
     GpuSort,        // GPU-accelerated radix sort
     GpuReduce,      // GPU-accelerated aggregate reduction
+    GpuExpr,        // GPU expression evaluation
+    GpuHashJoin,    // GPU hash join when a real build/probe kernel exists
+    GpuWindow,      // GPU window functions
 }
 ```
 
@@ -37,15 +39,17 @@ pub enum AccelStrategy {
 
 | Strategy | When to Use |
 |----------|------------|
-| `BatchedEval` | Function is palloc-heavy or not yet GPU-accelerated. Batching avoids repeated executor overhead. Safe default. |
 | `GpuSpatial` | Spatial predicates that benefit from GPU bbox pre-filter + parallel exact geometry testing. |
 | `GpuRaster` | Per-pixel/tile raster operations with regular memory access patterns. |
 | `GpuH3` | Pure integer/trigonometric H3 cell operations (no palloc, no PG API calls). |
 | `GpuSort` | Sort-key extraction and ordering that benefits from GPU radix sort. |
 | `GpuReduce` | Aggregate functions (SUM, AVG, MIN, MAX, COUNT) on numeric data. |
+| `GpuExpr` | Expression evaluation with a real GPU expression kernel. |
+| `GpuHashJoin` | Hash joins after a real GPU build/probe implementation exists. |
+| `GpuWindow` | Window functions with a backed GPU kernel. |
 
-**Rule of thumb:** Start with `BatchedEval`. Only use a GPU strategy if you have
-a corresponding GPU kernel implementation in `pgaccel-kernels/`.
+Only register a GPU strategy when the matching planner path, FFI bridge, and
+kernel implementation are all present.
 
 ## Core Types
 
@@ -68,7 +72,6 @@ Declares all acceleratable functions from one extension:
 ```rust
 pub struct ExtensionAdapter {
     pub name: &'static str,         // must match pg_extension.extname
-    pub version_query: &'static str,// SQL to detect extension presence
     pub functions: Vec<FunctionAccelEntry>,
 }
 ```
@@ -85,12 +88,11 @@ use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntr
 pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "my_extension",
-        version_query: "SELECT my_extension_version()",
         functions: vec![
             FunctionAccelEntry {
                 schema: "public",
                 name: "my_fast_func",
-                strategy: AccelStrategy::BatchedEval,
+                strategy: AccelStrategy::GpuExpr,
             },
             FunctionAccelEntry {
                 schema: "public",
@@ -104,8 +106,6 @@ pub fn adapter() -> ExtensionAdapter {
 
 **Key points:**
 - `name` must exactly match the extension name in `pg_extension` (`SELECT extname FROM pg_extension`)
-- `version_query` is used only for detection — it just needs to succeed when the
-  extension is installed
 - Function names must be lowercase and match `pg_proc.proname` exactly
 - Schema must match the schema the function is installed in (usually `public`)
 
@@ -181,28 +181,25 @@ use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntr
 
 /// Adapter for pgvector (vector similarity search).
 ///
-/// Distance functions use BatchedEval until GPU kernels are implemented.
-/// Once pgaccel-kernels gains vector distance kernels, switch to a
-/// dedicated GpuVector strategy.
+/// Distance functions are registered only after GPU kernels are implemented.
 pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "vector",  // pgvector's extname is "vector"
-        version_query: "SELECT extversion FROM pg_extension WHERE extname = 'vector'",
         functions: vec![
             FunctionAccelEntry {
                 schema: "public",
                 name: "cosine_distance",
-                strategy: AccelStrategy::BatchedEval,
+                strategy: AccelStrategy::GpuExpr,
             },
             FunctionAccelEntry {
                 schema: "public",
                 name: "l2_distance",
-                strategy: AccelStrategy::BatchedEval,
+                strategy: AccelStrategy::GpuExpr,
             },
             FunctionAccelEntry {
                 schema: "public",
                 name: "inner_product",
-                strategy: AccelStrategy::BatchedEval,
+                strategy: AccelStrategy::GpuExpr,
             },
         ],
     }
@@ -248,12 +245,11 @@ Once a GPU kernel exists in `pgaccel-kernels/`, change the strategy:
 FunctionAccelEntry {
     schema: "public",
     name: "cosine_distance",
-    strategy: AccelStrategy::GpuReduce,  // was BatchedEval
+    strategy: AccelStrategy::GpuReduce,
 },
 ```
 
-This is the standard progression: `BatchedEval` first (safe, measurable
-improvement from batching), GPU strategy later (requires kernel implementation).
+Do not register the function until the kernel-backed strategy is ready.
 
 ## Existing Adapters Reference
 
@@ -287,5 +283,5 @@ for functions that aren't registered.
    lowercase; the registry comparison is exact.
 4. **Test with the actual extension installed.** OID resolution depends on the
    real `pg_proc` catalog — unit tests with mock OIDs are not sufficient.
-5. **`BatchedEval` is always safe.** It runs on the main backend thread and can
-   call any PG function. GPU strategies have strict thread-safety requirements.
+5. **No CPU acceleration strategy.** A registered function must have a real GPU
+   path and strict thread-safety guarantees.

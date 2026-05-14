@@ -17,12 +17,14 @@
 // contingency work (streaming/chunking fix) — DO NOT make the test
 // pass by relaxing the ceiling; that masks a real streaming bug.
 //
-// On macOS we use mach_task_basic_info for RSS.
-
+#include <sys/resource.h>
+#if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_init.h>
 #include <mach/task.h>
-#include <sys/resource.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +56,7 @@ static size_t peak_rss_bytes() {
 }
 
 static size_t current_rss_bytes() {
+#if defined(__APPLE__)
   mach_task_basic_info_data_t info;
   mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
   kern_return_t kr = task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
@@ -61,6 +64,20 @@ static size_t current_rss_bytes() {
   if (kr != KERN_SUCCESS)
     return 0;
   return info.resident_size;
+#else
+  FILE* f = std::fopen("/proc/self/statm", "r");
+  if (!f)
+    return 0;
+  long resident_pages = 0;
+  int matched = std::fscanf(f, "%*s %ld", &resident_pages);
+  std::fclose(f);
+  if (matched != 1 || resident_pages < 0)
+    return 0;
+  long page_size = sysconf(_SC_PAGESIZE);
+  if (page_size <= 0)
+    return 0;
+  return static_cast<size_t>(resident_pages) * static_cast<size_t>(page_size);
+#endif
 }
 
 struct FamilyResult {
@@ -322,9 +339,8 @@ int main() {
 
   pgaccel_platform_caps caps = pgaccel_get_caps();
   pgaccel_device_info info = pgaccel_get_device_info();
-  printf("Device: %s backend=%s has_native_fp64=%d max_alloc_bytes=%zu unified=%d\n",
-         info.device_name, info.backend_name, info.has_native_fp64, caps.max_alloc_bytes,
-         caps.is_unified_memory);
+  printf("Device: %s backend=%s has_native_fp64=%d max_alloc_bytes=%zu\n", info.device_name,
+         info.backend_name, info.has_native_fp64, caps.max_alloc_bytes);
 
   // Input size: 2 × max_alloc_bytes / sizeof(double). If caps reports 0
   // (unknown), fall back to 2 GiB / 8 = 256 Mi doubles.

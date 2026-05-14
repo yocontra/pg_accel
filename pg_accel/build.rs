@@ -288,7 +288,7 @@ mod gpu_build {
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {
-        let acpp_prefix = home_dir().join("local");
+        let acpp_prefix = acpp_prefix();
 
         let mut cmd = Command::new("cmake");
         cmd.arg("-S")
@@ -299,26 +299,29 @@ mod gpu_build {
             // AdaptiveCpp/SYCL is the sole GPU backend (CUDA/ROCm/L0/Metal/CPU).
             .arg("-DPGACCEL_USE_SYCL=ON");
 
-        // AdaptiveCpp installs to ~/local via `just setup-gpu`.
+        // `just setup-gpu` installs AdaptiveCpp into .pgaccel/acpp/current.
+        // ACPP_PREFIX can override this for distro/system toolchains.
         if acpp_prefix.join("lib/cmake/AdaptiveCpp").exists() {
             cmd.arg(format!("-DCMAKE_PREFIX_PATH={}", acpp_prefix.display()));
-            // Target generic JIT compilation (works with Metal on macOS).
-            // Explicit target avoids concatenated default "ompmetal" bug.
-            cmd.arg("-DACPP_TARGETS=generic");
+            // Reuse the target selected by `just setup-gpu` (for example
+            // `cuda` on Linux/NVIDIA or `generic` for Metal SSCP builds).
+            if let Ok(targets) = std::env::var("ACPP_TARGETS") {
+                cmd.arg(format!("-DACPP_TARGETS={targets}"));
+            } else if let Some(targets) = repo_acpp_targets() {
+                cmd.arg(format!("-DACPP_TARGETS={targets}"));
+            } else {
+                cmd.arg("-DACPP_TARGETS=generic");
+            }
 
-            // On macOS, use Homebrew LLVM (required by AdaptiveCpp) and
-            // point the compiler at the Homebrew libomp headers/libs.
-            if cfg!(target_os = "macos") {
-                if let Some(llvm) = find_brew_prefix("llvm@20") {
-                    cmd.arg(format!("-DCMAKE_C_COMPILER={llvm}/bin/clang"));
-                    cmd.arg(format!("-DCMAKE_CXX_COMPILER={llvm}/bin/clang++"));
-                }
-                if let Some(libomp) = find_brew_prefix("libomp") {
-                    cmd.arg(format!("-DCMAKE_CXX_FLAGS=-O2 -I{libomp}/include"));
-                    let lib_flag = format!("-L{libomp}/lib");
-                    cmd.arg(format!("-DCMAKE_SHARED_LINKER_FLAGS={lib_flag}"));
-                    cmd.arg(format!("-DCMAKE_EXE_LINKER_FLAGS={lib_flag}"));
-                }
+            if let Ok(llvm_prefix) = std::env::var("LLVM_PREFIX") {
+                cmd.arg(format!("-DCMAKE_C_COMPILER={llvm_prefix}/bin/clang"));
+                cmd.arg(format!("-DCMAKE_CXX_COMPILER={llvm_prefix}/bin/clang++"));
+            }
+            if let Ok(libomp_prefix) = std::env::var("LIBOMP_PREFIX") {
+                cmd.arg(format!("-DCMAKE_CXX_FLAGS=-O2 -I{libomp_prefix}/include"));
+                let lib_flag = format!("-L{libomp_prefix}/lib");
+                cmd.arg(format!("-DCMAKE_SHARED_LINKER_FLAGS={lib_flag}"));
+                cmd.arg(format!("-DCMAKE_EXE_LINKER_FLAGS={lib_flag}"));
             }
         }
 
@@ -333,14 +336,35 @@ mod gpu_build {
         PathBuf::from(std::env::var("HOME").expect("HOME not set"))
     }
 
-    fn find_brew_prefix(pkg: &str) -> Option<String> {
-        Command::new("brew")
-            .arg("--prefix")
-            .arg(pkg)
-            .output()
+    fn acpp_prefix() -> PathBuf {
+        std::env::var_os("ACPP_PREFIX")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let repo_acpp = PathBuf::from(
+                    std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
+                )
+                .parent()
+                .expect("manifest dir has no parent")
+                .join(".pgaccel/acpp/current");
+                if repo_acpp.exists() {
+                    repo_acpp
+                } else {
+                    home_dir().join("local")
+                }
+            })
+    }
+
+    fn repo_acpp_targets() -> Option<String> {
+        let manifest_dir =
+            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
+        let targets_file = manifest_dir
+            .parent()
+            .expect("manifest dir has no parent")
+            .join(".pgaccel/acpp/current-targets");
+        std::fs::read_to_string(targets_file)
             .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
     }
 
     fn cmake_build(build_dir: &Path) {
@@ -363,7 +387,7 @@ mod gpu_build {
 
         // AdaptiveCpp SSCP runtime — our static kernels reference hipsycl
         // symbols resolved by these shared libs at load time.
-        let acpp_lib = home_dir().join("local/lib");
+        let acpp_lib = acpp_prefix().join("lib");
         println!("cargo::rustc-link-search=native={}", acpp_lib.display());
         println!("cargo::rustc-link-lib=dylib=acpp-rt");
         println!("cargo::rustc-link-lib=dylib=acpp-common");

@@ -80,8 +80,7 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
 - `dispatch::dispatch()` signature changed from
   `qual_datum: Option<(Datum, bool)>` to
   `qual_datums: &[(Datum, bool, Oid)]`; every existing dispatch arm
-  rewritten in the same atomic commit; no back-compat shim per the
-  user's "no back-compat — update all callsites" directive (1795e55).
+  rewritten in the same atomic commit and all callsites updated (1795e55).
 - `pg_test_explain` schema renamed → `preagg_explain` because PG
   forbids the `pg_` prefix on user-created schemas (fb64b1a).
 - `GpuStrategy::from_i32` boundary tests updated to recognise
@@ -151,7 +150,7 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
 - Planner hooks covering all GPU strategies with Custom Scan vtables and an expression compiler (3f65e6c)
 - SYCL kernels for hash aggregate, hash join, and expression evaluation (9be24a2, 15eaa3a)
 - Expression compiler, window executor, and columnar storage (1cf8544)
-- Three-layer spatial dispatch: bbox filter -> GPU predicate -> CPU recheck, with expanded geometry/raster extractors (40df3fd, 521ad9f)
+- Three-layer spatial dispatch: bbox filter -> GPU predicate -> uncertain-row rejection, with expanded geometry/raster extractors (40df3fd, 521ad9f)
 - Cost model overhaul with columnar storage and dispatch consolidation (6e116e6)
 - Early-rows dispatch gate and `GpuExpr` margin tuning (8bb4f69)
 - Benchmark suite: honest v2 harness, Bonferroni correction + geomean, realistic GUCs, plan capture, raw timing, warmup/seed/CSV (5dcb19a, 1442f00, a129c4f)
@@ -179,7 +178,7 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
 - `PGACCEL_HAS_SYCL` preprocessor flag and all `#if PGACCEL_HAS_SYCL` branches in kernel `.cpp` files (67169cb, 02db2d1)
 - `pg_accel/src/gpu/stubs.rs` CPU stub module (30320ae)
 - `pgaccel_cpu_fallback_count` / `pgaccel_reset_cpu_fallback_count` / `pgaccel_warn_cpu_fallback` FFI symbols and the `cpu_fallback_count` field in `pg_accel_stats()` (30320ae, 16734df, 6a16b64)
-- `probe_sort_merge_cpu` and `point_in_polygon` CPU fallback kernels (913c02b)
+- host-side sort-merge and point-in-polygon fallback kernels (913c02b)
 - `cpu_sort_kv` CPU sort helper (67169cb)
 - BGW-based GPU dispatch path (replaced by zero-IPC Metal) (4a3ed86)
 - `real_boundary` benchmark workload (bc9e63f)
@@ -221,27 +220,5 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
 ### Upgrade notes
 - **CPU fallback removal is a breaking build-configuration change.** Existing build scripts that pass `--features gpu`, set `PGACCEL_HAS_SYCL`, or depend on the `pgaccel_cpu_fallback_count` FFI symbol will fail. Drop the feature flag; the GPU bridge now builds unconditionally, and on hardware without a capable GPU the planner is a runtime no-op (queries fall back to native PG plans untouched).
 - **GPU dispatch is no longer routed through a background worker.** Deployments relying on an external BGW health signal should migrate to per-backend stats via `pg_accel_stats()`.
-- A schema migration script (`pg_accel--0.1.0--1.0.0.sql`) will accompany the 1.0.0 release to cover any `pg_accel_stats()` column changes (notably the removal of `cpu_fallback_count`). Tracking under "Extension SQL + control-file parity" in TODO.md.
 
 <!-- Last indexed commit: d3d5a1b1f5abbd23fa26e1c3470c9406c54ec9aa -->
-
-## [0.1.0] - 2026-03-28
-
-### Added
-- Custom Scan Provider for batch-parallel query execution
-- GPU-accelerated spatial predicates (ST_Intersects, ST_Contains, ST_Within, ST_DWithin, ST_Distance)
-- Three-layer spatial pipeline: bbox filter -> GPU geometric predicate -> CPU recheck
-- H3 hexagonal index operations (h3_latlng_to_cell, h3_grid_distance, h3_cell_to_parent, h3_get_resolution)
-- Raster operations (ST_MapAlgebra, ST_Clip, ST_Reclass) via GPU
-- PostgreSQL built-in function batching (math, text, timestamp, JSON)
-- Adapter system for third-party extension support
-- GSERIALIZED geometry extractor (bbox, point extraction)
-- PostGIS raster WKB format parser
-- Thread budget management via shared memory LWLock
-- Zero-overhead passthrough when GPU is not available
-- GUC configuration: pg_accel.enabled, pg_accel.gpu_enabled, pg_accel.cost_multiplier
-- pg_accel_device_info() and pg_accel_stats() monitoring functions
-- Support for PostgreSQL 15, 16, 17, 18
-- Support for PostGIS 3.3+, h3-pg 4.0+
-- Apple Metal GPU support via AdaptiveCpp/SYCL
-- CUDA, ROCm, Level Zero GPU support via AdaptiveCpp/SYCL

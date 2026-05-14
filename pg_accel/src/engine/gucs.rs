@@ -40,18 +40,6 @@ static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
 /// declined to inject for this particular query.
 static ASSERT_DISPATCH: GucSetting<bool> = GucSetting::<bool>::new(false);
 
-/// PreAgg parallel-safety. **B5a planner + B5b executor**: when `true` the
-/// `pgaccel_inject_gpu_preagg` planner hook prepends the fact path as
-/// `custom_paths[0]` and marks the resulting CustomPath `parallel_safe =
-/// true`; the executor's slot-based scan loop (`scan_and_accumulate_slot`)
-/// then consumes rows via `ExecProcNode` against the attached child
-/// PlanState, which under PG's Gather is a per-worker parallel-aware scan.
-///
-/// Default `true` since B5b landed. Operators who hit a regression can
-/// disable with `SET pg_accel.preagg_parallel_safe = off` to fall back to
-/// the byte-identical pre-B5a heap-direct serial path.
-static PREAGG_PARALLEL_SAFE: GucSetting<bool> = GucSetting::<bool>::new(true);
-
 // ---------------------------------------------------------------------------
 // Log-level enum
 // ---------------------------------------------------------------------------
@@ -149,20 +137,6 @@ pub fn init_gucs() {
         GucContext::Userset,
         GucFlags::default(),
     );
-
-    GucRegistry::define_bool_guc(
-        c"pg_accel.preagg_parallel_safe",
-        c"Enable parallel-safe PreAgg execution (planner + executor).",
-        c"When true (default), the PreAgg CustomPath is constructed with \
-          the fact base path attached as custom_paths[0] and parallel_safe \
-          = true so PG can wrap it in a Gather; the executor consumes fact \
-          rows via ExecProcNode against the attached child PlanState. \
-          Disable to fall back to the byte-identical pre-B5a heap-direct \
-          serial path (e.g. for A/B regression testing).",
-        &PREAGG_PARALLEL_SAFE,
-        GucContext::Userset,
-        GucFlags::default(),
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -216,19 +190,6 @@ pub fn log_level() -> PgAccelLogLevel {
 #[must_use]
 pub fn assert_dispatch() -> bool {
     ASSERT_DISPATCH.get()
-}
-
-/// Whether the parallel-safe PreAgg planner + executor path is enabled.
-///
-/// **B5a + B5b**: when `true`, the planner attaches the fact path as
-/// `custom_paths[0]` with `parallel_safe = true`, and the executor
-/// consumes rows from that child via `ExecProcNode` rather than
-/// `heap_getnext`. Default `true` since B5b. Set to `false` to fall back
-/// to the legacy heap-direct serial path for A/B regression testing.
-#[inline]
-#[must_use]
-pub fn preagg_parallel_safe() -> bool {
-    PREAGG_PARALLEL_SAFE.get()
 }
 
 #[cfg(feature = "pg_test")]

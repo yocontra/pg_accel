@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 #include "pgaccel_fused.h"
 
@@ -23,10 +24,6 @@ static constexpr size_t GPU_FUSED_THRESHOLD = 8192;
 // shared library.  It is written once during pgaccel_init() (single writer,
 // guarded by g_initialized) and read-only thereafter.
 extern sycl::queue* g_queue;
-
-// SAFETY: g_unified_memory is written once during pgaccel_init() and
-// read-only thereafter.
-extern bool g_unified_memory;
 
 /// Get the global SYCL queue created by pgaccel_init().
 /// Returns nullptr when SYCL was not initialized or init failed.
@@ -54,6 +51,8 @@ static inline bool eval_cmp_f32_device(float val, pgaccel_cmp_op op, float ref) 
       return val > ref;
     case PGACCEL_CMP_GE:
       return val >= ref;
+    case PGACCEL_CMP_ALWAYS_TRUE:
+      return true;
     default:
       return false;
   }
@@ -72,13 +71,18 @@ static inline bool eval_cmp_f32_device(float val, pgaccel_cmp_op op, float ref) 
 pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_col,
                                             pgaccel_cmp_op cmp_op, float filter_val,
                                             const float* agg_col, pgaccel_fused_agg_op agg_op,
-                                            size_t count, double* out_result) {
+                                            size_t count, double* out_result,
+                                            uint32_t* out_match_count) {
+  if (cmp_op != PGACCEL_CMP_ALWAYS_TRUE && filter_col == nullptr)
+    return PGACCEL_ERROR;
+  if (agg_op != PGACCEL_FUSED_COUNT && agg_col == nullptr)
+    return PGACCEL_ERROR;
+
   // Prepare device-accessible filter column
   float* d_filter = nullptr;
   bool owns_filter = false;
-  if (g_unified_memory) {
-    // SAFETY: On unified memory, host pointers are GPU-accessible.
-    d_filter = const_cast<float*>(filter_col);
+  if (cmp_op == PGACCEL_CMP_ALWAYS_TRUE) {
+    d_filter = nullptr;
   } else {
     d_filter = sycl::malloc_device<float>(count, q);
     if (!d_filter)
@@ -96,24 +100,20 @@ pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_
   float* d_agg = nullptr;
   bool owns_agg = false;
   if (agg_op != PGACCEL_FUSED_COUNT) {
-    if (g_unified_memory) {
-      d_agg = const_cast<float*>(agg_col);
-    } else {
-      d_agg = sycl::malloc_device<float>(count, q);
-      if (!d_agg) {
-        if (owns_filter)
-          sycl::free(d_filter, q);
-        return PGACCEL_OOM;
-      }
-      owns_agg = true;
-      try {
-        q.memcpy(d_agg, agg_col, count * sizeof(float)).wait_and_throw();
-      } catch (...) {
-        sycl::free(d_agg, q);
-        if (owns_filter)
-          sycl::free(d_filter, q);
-        throw;
-      }
+    d_agg = sycl::malloc_device<float>(count, q);
+    if (!d_agg) {
+      if (owns_filter)
+        sycl::free(d_filter, q);
+      return PGACCEL_OOM;
+    }
+    owns_agg = true;
+    try {
+      q.memcpy(d_agg, agg_col, count * sizeof(float)).wait_and_throw();
+    } catch (...) {
+      sycl::free(d_agg, q);
+      if (owns_filter)
+        sycl::free(d_filter, q);
+      throw;
     }
   }
 
@@ -162,7 +162,7 @@ pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_
   try {
     q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        size_t i = id[0];
-       if (!eval_cmp_f32_device(d_filter[i], k_cmp, k_val))
+       if (k_cmp != PGACCEL_CMP_ALWAYS_TRUE && !eval_cmp_f32_device(d_filter[i], k_cmp, k_val))
          return;
 
        // Atomically increment match count
@@ -198,6 +198,8 @@ pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_
     } else {
       *out_result = static_cast<double>(*d_result);
     }
+    if (out_match_count != nullptr)
+      *out_match_count = *d_match_count;
   } catch (...) {
     sycl::free(d_result, q);
     sycl::free(d_match_count, q);
@@ -205,7 +207,7 @@ pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_
       sycl::free(d_filter, q);
     if (owns_agg)
       sycl::free(d_agg, q);
-    throw;  // Re-throw so the outer catch in the public API triggers fallback
+    throw;  // Re-throw so the public API can report GPU failure.
   }
 
   // Cleanup
@@ -226,10 +228,13 @@ pgaccel_status sycl_fused_filter_reduce_f32(sycl::queue& q, const float* filter_
 pgaccel_status sycl_fused_filter_count_f32(sycl::queue& q, const float* filter_col,
                                            pgaccel_cmp_op cmp_op, float filter_val, size_t count,
                                            int64_t* out_count) {
+  if (cmp_op != PGACCEL_CMP_ALWAYS_TRUE && filter_col == nullptr)
+    return PGACCEL_ERROR;
+
   float* d_filter = nullptr;
   bool owns_filter = false;
-  if (g_unified_memory) {
-    d_filter = const_cast<float*>(filter_col);
+  if (cmp_op == PGACCEL_CMP_ALWAYS_TRUE) {
+    d_filter = nullptr;
   } else {
     d_filter = sycl::malloc_device<float>(count, q);
     if (!d_filter)
@@ -258,7 +263,7 @@ pgaccel_status sycl_fused_filter_count_f32(sycl::queue& q, const float* filter_c
   try {
     q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        size_t i = id[0];
-       if (eval_cmp_f32_device(d_filter[i], k_cmp, k_val)) {
+       if (k_cmp == PGACCEL_CMP_ALWAYS_TRUE || eval_cmp_f32_device(d_filter[i], k_cmp, k_val)) {
          sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
                           sycl::access::address_space::global_space>
              ref(*d_count);
@@ -271,7 +276,7 @@ pgaccel_status sycl_fused_filter_count_f32(sycl::queue& q, const float* filter_c
     sycl::free(d_count, q);
     if (owns_filter)
       sycl::free(d_filter, q);
-    throw;  // Re-throw so the outer catch in the public API triggers fallback
+    throw;  // Re-throw so the public API can report GPU failure.
   }
 
   sycl::free(d_count, q);
@@ -294,10 +299,12 @@ pgaccel_status sycl_fused_filter_multi_reduce_f32(sycl::queue& q, const float* f
                                                   const float* const* agg_cols,
                                                   const pgaccel_fused_agg_op* agg_ops,
                                                   size_t num_aggs, size_t count,
-                                                  double* out_results) {
+                                                  double* out_results, uint32_t* out_pass_count) {
   // Dispatch each aggregate as a single-column fused reduce.
   // This reuses sycl_fused_filter_reduce_f32 and is simpler than
   // multi-reduction in one kernel (SYCL reduction API limits).
+  uint32_t pass_count = 0;
+  bool have_pass_count = false;
   for (size_t j = 0; j < num_aggs; ++j) {
     if (agg_ops[j] == PGACCEL_FUSED_COUNT) {
       int64_t cnt = 0;
@@ -306,13 +313,24 @@ pgaccel_status sycl_fused_filter_multi_reduce_f32(sycl::queue& q, const float* f
       if (st != PGACCEL_OK)
         return st;
       out_results[j] = static_cast<double>(cnt);
+      if (!have_pass_count) {
+        pass_count = static_cast<uint32_t>(cnt);
+        have_pass_count = true;
+      }
     } else {
+      uint32_t cnt = 0;
       pgaccel_status st = sycl_fused_filter_reduce_f32(
-          q, filter_col, cmp_op, filter_val, agg_cols[j], agg_ops[j], count, &out_results[j]);
+          q, filter_col, cmp_op, filter_val, agg_cols[j], agg_ops[j], count, &out_results[j], &cnt);
       if (st != PGACCEL_OK)
         return st;
+      if (!have_pass_count) {
+        pass_count = cnt;
+        have_pass_count = true;
+      }
     }
   }
+  if (out_pass_count != nullptr)
+    *out_pass_count = pass_count;
   return PGACCEL_OK;
 }
 
@@ -324,24 +342,30 @@ pgaccel_status sycl_fused_filter_multi_reduce_f32(sycl::queue& q, const float* f
 
 extern "C" {
 
-pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, pgaccel_cmp_op cmp_op,
-                                                     float filter_val, const float* const* agg_cols,
-                                                     const pgaccel_fused_agg_op* agg_ops,
-                                                     size_t num_aggs, size_t count,
-                                                     double* out_results) {
-  if (!out_results)
+pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, size_t count,
+                                                     int cmp_op_raw, float filter_val,
+                                                     const pgaccel_reduce_col* cols,
+                                                     size_t num_cols, float* out_results,
+                                                     size_t* out_pass_count) {
+  if (!out_results || !out_pass_count)
     return PGACCEL_ERROR;
-  if (!filter_col)
+  pgaccel_cmp_op cmp_op = static_cast<pgaccel_cmp_op>(cmp_op_raw);
+  if (cmp_op_raw < PGACCEL_CMP_EQ || cmp_op_raw > PGACCEL_CMP_ALWAYS_TRUE)
     return PGACCEL_ERROR;
-  if (num_aggs == 0)
+  if (cmp_op != PGACCEL_CMP_ALWAYS_TRUE && !filter_col)
+    return PGACCEL_ERROR;
+  if (num_cols == 0) {
+    *out_pass_count = 0;
     return PGACCEL_OK;
-  if (!agg_cols || !agg_ops)
+  }
+  if (!cols)
     return PGACCEL_ERROR;
 
   if (count == 0) {
-    for (size_t j = 0; j < num_aggs; ++j) {
+    for (size_t j = 0; j < num_cols; ++j) {
       out_results[j] = 0.0;
     }
+    *out_pass_count = 0;
     return PGACCEL_OK;
   }
 
@@ -349,9 +373,26 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, pg
     try {
       sycl::queue* q = get_queue();
       if (q) {
+        std::vector<const float*> agg_cols(num_cols);
+        std::vector<pgaccel_fused_agg_op> agg_ops(num_cols);
+        for (size_t j = 0; j < num_cols; ++j) {
+          agg_ops[j] = static_cast<pgaccel_fused_agg_op>(cols[j].op);
+          if (cols[j].op < PGACCEL_FUSED_SUM || cols[j].op > PGACCEL_FUSED_COUNT)
+            return PGACCEL_ERROR;
+          if (agg_ops[j] != PGACCEL_FUSED_COUNT && cols[j].data == nullptr)
+            return PGACCEL_ERROR;
+          agg_cols[j] = cols[j].data;
+        }
+
+        std::vector<double> tmp_results(num_cols, 0.0);
+        uint32_t pass_count = 0;
         pgaccel_status st = sycl_fused_filter_multi_reduce_f32(
-            *q, filter_col, cmp_op, filter_val, agg_cols, agg_ops, num_aggs, count, out_results);
+            *q, filter_col, cmp_op, filter_val, agg_cols.data(), agg_ops.data(), num_cols, count,
+            tmp_results.data(), &pass_count);
         if (st == PGACCEL_OK) {
+          for (size_t j = 0; j < num_cols; ++j)
+            out_results[j] = static_cast<float>(tmp_results[j]);
+          *out_pass_count = static_cast<size_t>(pass_count);
           pgaccel_record_gpu_exec();
           return st;
         }

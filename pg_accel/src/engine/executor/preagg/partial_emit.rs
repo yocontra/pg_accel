@@ -12,7 +12,7 @@
 //!
 //! The existing sibling module `preagg::partial` holds the fact-side
 //! accumulation primitives (dim hash tables, `AggAccum`, heap readers). This
-//! module is the *emit* shim that wires those accumulators into the
+//! module wires those accumulators into the
 //! per-column `PartialEmitter` contract when `CustomPrivateData.partial ==
 //! Some(spec)`.
 

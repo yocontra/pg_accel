@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use pgrx::pg_sys;
 
 use crate::engine::executor::agg::AggOp;
-use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
 
 // ---------------------------------------------------------------------------
 // Dimension hash table
@@ -218,80 +217,6 @@ impl AggAccum {
             | AggOp::BitOr
             | AggOp::BoolAnd
             | AggOp::BoolOr => self.sum,
-        }
-    }
-}
-/// Returns `true` if the row passes the filter, `false` if it should be skipped.
-/// On extraction failure, returns `true` (conservative — let row through).
-pub(super) fn fused_eval_cmp(
-    t_data: pg_sys::HeapTupleHeader,
-    info: &AttExtractInfo,
-    cmp_opcode: u16,
-    const_val: f64,
-) -> bool {
-    if !info.can_fast_extract() {
-        return true; // conservative
-    }
-    // SAFETY: caller ensures t_data is a valid HeapTupleHeader.
-    let val = unsafe { heap_read_f64(t_data, info) };
-    val.is_none_or(|v| eval_cmp(v, cmp_opcode, const_val))
-}
-
-// ---------------------------------------------------------------------------
-// HeapTuple extraction helpers (wrappers around try_fast_read_heap_pub)
-// ---------------------------------------------------------------------------
-
-/// Read an i64 value from a HeapTuple header, type-aware.
-///
-/// # Safety
-///
-/// `ht_data` must be a valid `HeapTupleHeader`. `info` must match the schema.
-#[inline]
-pub(super) unsafe fn heap_read_i64(
-    ht_data: pg_sys::HeapTupleHeader,
-    info: &AttExtractInfo,
-) -> Option<i64> {
-    // SAFETY: caller guarantees ht_data and info validity.
-    unsafe {
-        match info.typid {
-            pg_sys::INT2OID => {
-                tuple_extract::try_fast_read_heap_pub::<i16>(ht_data, info).map(i64::from)
-            }
-            pg_sys::INT4OID => {
-                tuple_extract::try_fast_read_heap_pub::<i32>(ht_data, info).map(i64::from)
-            }
-            _ => tuple_extract::try_fast_read_heap_pub::<i64>(ht_data, info),
-        }
-    }
-}
-
-/// Read an f64 value from a HeapTuple header, type-aware.
-///
-/// # Safety
-///
-/// `ht_data` must be a valid `HeapTupleHeader`. `info` must match the schema.
-#[inline]
-pub(super) unsafe fn heap_read_f64(
-    ht_data: pg_sys::HeapTupleHeader,
-    info: &AttExtractInfo,
-) -> Option<f64> {
-    // SAFETY: caller guarantees ht_data and info validity.
-    unsafe {
-        match info.typid {
-            pg_sys::FLOAT4OID => {
-                tuple_extract::try_fast_read_heap_pub::<f32>(ht_data, info).map(f64::from)
-            }
-            pg_sys::INT2OID => {
-                tuple_extract::try_fast_read_heap_pub::<i16>(ht_data, info).map(f64::from)
-            }
-            pg_sys::INT4OID => {
-                tuple_extract::try_fast_read_heap_pub::<i32>(ht_data, info).map(f64::from)
-            }
-            #[allow(clippy::cast_precision_loss)]
-            pg_sys::INT8OID => {
-                tuple_extract::try_fast_read_heap_pub::<i64>(ht_data, info).map(|v| v as f64)
-            }
-            _ => tuple_extract::try_fast_read_heap_pub::<f64>(ht_data, info),
         }
     }
 }

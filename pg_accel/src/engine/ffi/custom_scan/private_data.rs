@@ -7,7 +7,7 @@ use std::ffi::c_int;
 
 use pgrx::pg_sys;
 
-use super::{GpuStrategy, list_int_at};
+use super::GpuStrategy;
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
 use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
@@ -16,6 +16,297 @@ use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSp
 use crate::engine::gucs;
 use crate::engine::registry::AccelStrategy;
 use crate::gpu::PgaccelKeyType;
+
+mod list_codec;
+
+use list_codec::{IntListReader, PgListWriter};
+
+const PATH_PRIVATE_HEADER_INTS: usize = 3;
+const PLAN_PRIVATE_HEADER_INTS: usize = 6;
+const PLAN_PAYLOAD_START: usize = PLAN_PRIVATE_HEADER_INTS;
+
+/// Error returned by private-data decoders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DecodeError {
+    MissingField {
+        layout: &'static str,
+        field: &'static str,
+        index: usize,
+        len: usize,
+    },
+    InvalidGpuStrategy {
+        raw: c_int,
+    },
+    InvalidAccelStrategy {
+        raw: c_int,
+    },
+    InvalidBatchSize {
+        raw: c_int,
+    },
+}
+
+/// Decode a `GpuStrategy` from the current integer wire layout.
+pub(super) const fn decode_gpu_strategy(raw: c_int) -> Result<GpuStrategy, DecodeError> {
+    match raw {
+        0 => Ok(GpuStrategy::Scan),
+        1 => Ok(GpuStrategy::Join),
+        2 => Ok(GpuStrategy::Agg),
+        3 => Ok(GpuStrategy::Sort),
+        4 => Ok(GpuStrategy::Window),
+        5 => Ok(GpuStrategy::PreAgg),
+        6 => Ok(GpuStrategy::FunctionScan),
+        7 => Ok(GpuStrategy::SrfTargetList),
+        _ => Err(DecodeError::InvalidGpuStrategy { raw }),
+    }
+}
+
+/// Decode an `AccelStrategy` from the current integer wire layout.
+pub(super) const fn decode_accel_strategy(raw: c_int) -> Result<AccelStrategy, DecodeError> {
+    match raw {
+        1 => Ok(AccelStrategy::GpuSpatial),
+        2 => Ok(AccelStrategy::GpuRaster),
+        3 => Ok(AccelStrategy::GpuH3),
+        4 => Ok(AccelStrategy::GpuSort),
+        5 => Ok(AccelStrategy::GpuReduce),
+        6 => Ok(AccelStrategy::GpuExpr),
+        7 => Ok(AccelStrategy::GpuHashJoin),
+        8 => Ok(AccelStrategy::GpuWindow),
+        _ => Err(DecodeError::InvalidAccelStrategy { raw }),
+    }
+}
+
+#[inline]
+fn decode_batch_size(raw: c_int) -> Result<c_int, DecodeError> {
+    if raw > 0 {
+        Ok(raw)
+    } else {
+        Err(DecodeError::InvalidBatchSize { raw })
+    }
+}
+
+fn require_private_field(
+    fields: &[c_int],
+    layout: &'static str,
+    index: usize,
+    field: &'static str,
+) -> Result<c_int, DecodeError> {
+    fields.get(index).copied().ok_or(DecodeError::MissingField {
+        layout,
+        field,
+        index,
+        len: fields.len(),
+    })
+}
+
+#[inline]
+fn require_reader_field(
+    reader: &IntListReader<'_>,
+    layout: &'static str,
+    index: usize,
+    field: &'static str,
+) -> Result<c_int, DecodeError> {
+    reader.get(index).ok_or(DecodeError::MissingField {
+        layout,
+        field,
+        index,
+        len: reader.len(),
+    })
+}
+
+/// Typed view of the planner hook's `CustomPath.custom_private` prefix.
+///
+/// Current path layout prefix:
+/// `[fn_oid, target_attno, accel_strategy, ...strategy-specific payload]`.
+#[allow(dead_code)] // reason: scaffold for migrating custom path call sites off raw indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PathPrivate {
+    pub(super) fn_oid: pg_sys::Oid,
+    pub(super) target_attno: i32,
+    pub(super) accel_strategy: AccelStrategy,
+}
+
+#[allow(dead_code)] // reason: path metadata call sites still use raw indexes.
+impl PathPrivate {
+    /// Decode the path private header from its integer protocol.
+    pub(super) fn decode(fields: &[c_int]) -> Result<Self, DecodeError> {
+        let fn_oid_raw = require_private_field(fields, "PathPrivate", 0, "fn_oid")? as u32;
+        let target_attno = require_private_field(fields, "PathPrivate", 1, "target_attno")?;
+        let accel_strategy_raw = require_private_field(fields, "PathPrivate", 2, "accel_strategy")?;
+
+        Ok(Self {
+            fn_oid: pg_sys::Oid::from(fn_oid_raw),
+            target_attno,
+            accel_strategy: decode_accel_strategy(accel_strategy_raw)?,
+        })
+    }
+
+    /// Re-encode the path header into the existing integer protocol.
+    #[must_use]
+    pub(super) fn to_ints(self) -> [c_int; PATH_PRIVATE_HEADER_INTS] {
+        [
+            u32::from(self.fn_oid) as c_int,
+            self.target_attno,
+            self.accel_strategy as c_int,
+        ]
+    }
+}
+
+/// Typed view of the executor plan's `CustomScan.custom_private` prefix.
+///
+/// Current plan layout prefix:
+/// `[strategy, batch_size, expected_threads, fn_oid, target_attno, accel_strategy,
+/// ...strategy-specific payload]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PlanPrivate {
+    pub(super) gpu_strategy: GpuStrategy,
+    pub(super) batch_size: c_int,
+    pub(super) expected_threads: c_int,
+    pub(super) fn_oid: pg_sys::Oid,
+    pub(super) target_attno: i32,
+    pub(super) accel_strategy: AccelStrategy,
+}
+
+impl PlanPrivate {
+    /// Decode the plan private header from its integer protocol.
+    #[cfg(test)]
+    pub(super) fn decode(fields: &[c_int]) -> Result<Self, DecodeError> {
+        Self::decode_reader(&IntListReader::from_slice(fields))
+    }
+
+    fn decode_reader(reader: &IntListReader<'_>) -> Result<Self, DecodeError> {
+        let gpu_strategy_raw = require_reader_field(reader, "PlanPrivate", 0, "strategy")?;
+        let batch_size_raw = require_reader_field(reader, "PlanPrivate", 1, "batch_size")?;
+        let expected_threads = require_reader_field(reader, "PlanPrivate", 2, "expected_threads")?;
+        let fn_oid_raw = require_reader_field(reader, "PlanPrivate", 3, "fn_oid")? as u32;
+        let target_attno = require_reader_field(reader, "PlanPrivate", 4, "target_attno")?;
+        let accel_strategy_raw = require_reader_field(reader, "PlanPrivate", 5, "accel_strategy")?;
+
+        Ok(Self {
+            gpu_strategy: decode_gpu_strategy(gpu_strategy_raw)?,
+            batch_size: decode_batch_size(batch_size_raw)?,
+            expected_threads,
+            fn_oid: pg_sys::Oid::from(fn_oid_raw),
+            target_attno,
+            accel_strategy: decode_accel_strategy(accel_strategy_raw)?,
+        })
+    }
+
+    /// Re-encode the plan header into the integer protocol.
+    #[allow(dead_code)] // reason: test-only serializer helper.
+    #[must_use]
+    pub(super) fn to_ints(self) -> [c_int; PLAN_PRIVATE_HEADER_INTS] {
+        [
+            self.gpu_strategy as c_int,
+            self.batch_size,
+            self.expected_threads,
+            u32::from(self.fn_oid) as c_int,
+            self.target_attno,
+            self.accel_strategy as c_int,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod typed_private_tests {
+    use super::*;
+
+    #[test]
+    fn strict_gpu_strategy_decoder_accepts_current_wire_values() {
+        for strategy in [
+            GpuStrategy::Scan,
+            GpuStrategy::Join,
+            GpuStrategy::Agg,
+            GpuStrategy::Sort,
+            GpuStrategy::Window,
+            GpuStrategy::PreAgg,
+            GpuStrategy::FunctionScan,
+            GpuStrategy::SrfTargetList,
+        ] {
+            assert_eq!(
+                decode_gpu_strategy(strategy as c_int),
+                Ok(strategy),
+                "strategy {strategy:?} should decode strictly"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_strategy_decoders_reject_unknown_values() {
+        assert_eq!(
+            decode_gpu_strategy(99),
+            Err(DecodeError::InvalidGpuStrategy { raw: 99 })
+        );
+        assert_eq!(
+            decode_accel_strategy(99),
+            Err(DecodeError::InvalidAccelStrategy { raw: 99 })
+        );
+    }
+
+    #[test]
+    fn plan_private_decodes_and_reencodes_header() {
+        let raw = [
+            GpuStrategy::Sort as c_int,
+            2048,
+            6,
+            1234,
+            5,
+            AccelStrategy::GpuSort as c_int,
+        ];
+
+        let decoded = PlanPrivate::decode(&raw).expect("valid plan header should decode");
+
+        assert_eq!(decoded.gpu_strategy, GpuStrategy::Sort);
+        assert_eq!(decoded.batch_size, 2048);
+        assert_eq!(decoded.expected_threads, 6);
+        assert_eq!(u32::from(decoded.fn_oid), 1234);
+        assert_eq!(decoded.target_attno, 5);
+        assert_eq!(decoded.accel_strategy, AccelStrategy::GpuSort);
+        assert_eq!(decoded.to_ints(), raw);
+    }
+
+    #[test]
+    fn plan_private_strict_decode_reports_missing_field() {
+        let err = PlanPrivate::decode(&[GpuStrategy::Scan as c_int, 256, 1])
+            .expect_err("truncated plan header should fail");
+
+        assert_eq!(
+            err,
+            DecodeError::MissingField {
+                layout: "PlanPrivate",
+                field: "fn_oid",
+                index: 3,
+                len: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_private_decode_rejects_bad_batch_size() {
+        let err = PlanPrivate::decode(&[
+            GpuStrategy::Scan as c_int,
+            0,
+            1,
+            42,
+            7,
+            AccelStrategy::GpuH3 as c_int,
+        ])
+        .expect_err("zero batch size should fail");
+
+        assert_eq!(err, DecodeError::InvalidBatchSize { raw: 0 });
+    }
+
+    #[test]
+    fn path_private_decodes_and_reencodes_header() {
+        let raw = [777, 2, AccelStrategy::GpuHashJoin as c_int];
+
+        let decoded = PathPrivate::decode(&raw).expect("valid path header should decode");
+
+        assert_eq!(u32::from(decoded.fn_oid), 777);
+        assert_eq!(decoded.target_attno, 2);
+        assert_eq!(decoded.accel_strategy, AccelStrategy::GpuHashJoin);
+        assert_eq!(decoded.to_ints(), raw);
+    }
+}
 
 /// Deserialized acceleration metadata from `custom_private`.
 pub(super) struct CustomPrivateData {
@@ -54,6 +345,214 @@ pub(super) struct CustomPrivateData {
     pub(super) partial: Option<PartialAggSpec>,
 }
 
+impl CustomPrivateData {
+    #[must_use]
+    pub(super) fn hash_join_validation_error(&self) -> Option<&'static str> {
+        if self.accel_strategy != AccelStrategy::GpuHashJoin {
+            return None;
+        }
+        if self.gpu_strategy != GpuStrategy::Join {
+            return Some("hash join accel requires join strategy");
+        }
+        if self.target_attno <= 0 || self.hash_inner_attno <= 0 {
+            return Some("join key attno must be positive");
+        }
+        if !matches!(self.hash_key_type, 0..=2) {
+            return Some("join key type is unsupported");
+        }
+        None
+    }
+}
+
+struct PlanPayloadReader<'reader, 'source> {
+    fields: &'reader IntListReader<'source>,
+}
+
+impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
+    const SORT_KEY_COUNT: usize = PLAN_PAYLOAD_START;
+    const SORT_KEYS: usize = Self::SORT_KEY_COUNT + 1;
+    const AGG_COUNT: usize = PLAN_PAYLOAD_START;
+    const AGGS: usize = Self::AGG_COUNT + 1;
+    const WINDOW_COUNT: usize = PLAN_PAYLOAD_START;
+    const WINDOW_SPECS: usize = Self::WINDOW_COUNT + 1;
+    const HASH_INNER_ATTNO: usize = PLAN_PAYLOAD_START;
+    const HASH_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
+
+    #[must_use]
+    const fn new(fields: &'reader IntListReader<'source>) -> Self {
+        PlanPayloadReader { fields }
+    }
+
+    #[must_use]
+    fn sort_key_count(&self) -> usize {
+        self.fields.int_at(Self::SORT_KEY_COUNT) as usize
+    }
+
+    #[must_use]
+    fn sort_keys(&self, count: usize) -> Vec<SortKeyDesc> {
+        let mut keys = Vec::with_capacity(count);
+        for key_index in 0..count {
+            let offset = Self::SORT_KEYS + key_index * SORT_KEY_INTS;
+            if !self.fields.contains_range(offset, SORT_KEY_INTS) {
+                break;
+            }
+            let mut key = self.fields.cursor_at(offset);
+            keys.push(SortKeyDesc {
+                attno: key.read_int() as i16,
+                sort_op: key.read_oid(),
+                collation: key.read_oid(),
+                nulls_first: key.read_bool(),
+            });
+        }
+        keys
+    }
+
+    #[must_use]
+    fn sort_limit(&self, key_count: usize) -> Option<usize> {
+        let limit_idx = Self::SORT_KEYS + key_count * SORT_KEY_INTS;
+        self.fields
+            .get(limit_idx)
+            .and_then(|value| (value > 0).then_some(value as usize))
+    }
+
+    #[must_use]
+    fn sort_self_scan_relid(&self, key_count: usize) -> u32 {
+        let relid_idx = Self::SORT_KEYS + key_count * SORT_KEY_INTS + 1;
+        self.fields
+            .get(relid_idx)
+            .map_or(0, |value| if value > 0 { value as u32 } else { 0 })
+    }
+
+    #[must_use]
+    fn agg_count(&self) -> usize {
+        self.fields.int_at(Self::AGG_COUNT) as usize
+    }
+
+    #[must_use]
+    fn agg_columns(&self, count: usize) -> Vec<(AggOp, i32, u32)> {
+        let mut columns = Vec::with_capacity(count);
+        for agg_index in 0..count {
+            let offset = Self::AGGS + agg_index * 3;
+            if !self.fields.contains_range(offset, 3) {
+                break;
+            }
+            let mut agg = self.fields.cursor_at(offset);
+            let op_raw = agg.read_int();
+            let Some(op) = AggOp::from_i32(op_raw) else {
+                pgrx::error!("pg_accel: invalid aggregate op tag {op_raw}");
+            };
+            columns.push((op, agg.read_int(), agg.read_u32()));
+        }
+        columns
+    }
+
+    #[must_use]
+    fn agg_group_key(&self, agg_count: usize) -> (Option<GroupKeyInfo>, usize) {
+        let group_key_base = Self::AGGS + agg_count * 3;
+        let Some(has_group_key) = self.fields.get(group_key_base) else {
+            return (None, 0);
+        };
+        if has_group_key == 0 || !self.fields.contains_range(group_key_base + 1, 4) {
+            return (None, 0);
+        }
+
+        let mut group_key = self.fields.cursor_at(group_key_base + 1);
+        let attno = group_key.read_int();
+        let type_oid = group_key.read_oid();
+        let key_type = group_key.read_int();
+        let tlist_pos = group_key.read_int();
+
+        if attno > 0 && matches!(key_type, 0 | 1 | 2 | 4 | 5) {
+            (
+                Some(GroupKeyInfo {
+                    attno,
+                    type_oid,
+                    key_type,
+                }),
+                tlist_pos as usize,
+            )
+        } else {
+            (None, 0)
+        }
+    }
+
+    #[must_use]
+    fn agg_self_scan_relid_and_partial(&self, agg_count: usize) -> (u32, Option<PartialAggSpec>) {
+        let relid_idx = self.agg_self_scan_relid_index(agg_count);
+        let relid = self
+            .fields
+            .get(relid_idx)
+            .map_or(0, |value| value as pg_sys::Index);
+        let partial_idx = relid_idx + 1;
+        let partial = if self.fields.int_at(partial_idx) == PARTIAL_SENTINEL {
+            deserialize_partial_spec_from_reader(self.fields, partial_idx + 1)
+        } else {
+            None
+        };
+        (relid, partial)
+    }
+
+    #[must_use]
+    fn agg_self_scan_relid_index(&self, agg_count: usize) -> usize {
+        let group_key_base = Self::AGGS + agg_count * 3;
+        let Some(has_group_key) = self.fields.get(group_key_base) else {
+            return self.fields.len().saturating_sub(1);
+        };
+        if has_group_key == 0 {
+            return group_key_base + 1;
+        }
+        group_key_base + 5
+    }
+
+    #[must_use]
+    fn window_specs(&self) -> Vec<WindowFuncSpec> {
+        let count = self.fields.int_at(Self::WINDOW_COUNT) as usize;
+        let mut specs = Vec::with_capacity(count);
+        for spec_index in 0..count {
+            let offset = Self::WINDOW_SPECS + spec_index * WINDOW_SPEC_INTS;
+            if !self.fields.contains_range(offset, WINDOW_SPEC_INTS) {
+                break;
+            }
+            let mut spec = self.fields.cursor_at(offset);
+            let Some(func) = WindowFunc::from_i32(spec.read_int()) else {
+                break;
+            };
+            specs.push(WindowFuncSpec {
+                func,
+                partition_attno: spec.read_int(),
+                order_attno: spec.read_int(),
+                value_attno: spec.read_int(),
+                offset: spec.read_int(),
+                default_val: f64::from_bits(spec.read_int() as u64),
+                result_type_oid: spec.read_u32(),
+                uses_fp64: spec.read_bool(),
+            });
+        }
+        specs
+    }
+
+    #[must_use]
+    fn window_scan_relid(&self) -> pg_sys::Index {
+        let spec_count = self.fields.int_at(Self::WINDOW_COUNT) as usize;
+        let relid_idx = Self::WINDOW_SPECS + spec_count * WINDOW_SPEC_INTS;
+        self.fields
+            .get(relid_idx)
+            .map_or(0, |value| value as pg_sys::Index)
+    }
+
+    #[must_use]
+    fn hash_join_info(&self) -> (i32, i32) {
+        if self.fields.contains_range(Self::HASH_INNER_ATTNO, 2) {
+            (
+                self.fields.int_at(Self::HASH_INNER_ATTNO),
+                self.fields.int_at(Self::HASH_KEY_TYPE),
+            )
+        } else {
+            (0, 0)
+        }
+    }
+}
+
 /// Deserialize strategy, batch size, accel context, and sort keys from
 /// `custom_private`.
 ///
@@ -61,99 +560,47 @@ pub(super) struct CustomPrivateData {
 ///   accel_strategy, num_sort_keys?, attno1, sort_op1, collation1,
 ///   nulls_first1, ...]`
 ///
-/// Falls back to GUC defaults when `custom_private` is null or malformed.
+/// Invalid or missing private data raises a PostgreSQL ERROR.
 ///
 /// # Safety
 ///
-/// `custom_private` must be null or a valid PG `List`.
+/// `custom_private` must be a valid PG `List` emitted by this build's
+/// planner hooks.
 #[allow(clippy::too_many_lines)]
 pub(super) unsafe fn deserialize_custom_private(
     custom_private: *mut pg_sys::List,
 ) -> CustomPrivateData {
     if custom_private.is_null() {
-        return CustomPrivateData {
-            gpu_strategy: GpuStrategy::Scan,
-            batch_size: gucs::min_batch_size().max(1),
-            fn_oid: pg_sys::Oid::INVALID,
-            target_attno: 0,
-            accel_strategy: AccelStrategy::GpuSpatial,
-            sort_keys: vec![],
-            sort_limit: None,
-            agg_columns: vec![],
-            group_key: None,
-            group_key_tlist_pos: 0,
-            hash_inner_attno: 0,
-            hash_key_type: 0,
-            window_specs: vec![],
-            window_scan_relid: 0,
-            self_scan_relid: 0,
-            partial: None,
-        };
+        pgrx::error!("pg_accel: missing CustomScan private data");
     }
 
     // SAFETY: custom_private is a valid List of Integer nodes.
-    let strategy_raw = unsafe { list_int_at(custom_private, 0) };
-    let batch_size = unsafe { list_int_at(custom_private, 1) };
-    let gpu_strategy = GpuStrategy::from_i32(strategy_raw);
+    let fields = unsafe { IntListReader::from_pg_list(custom_private) };
+    let plan_private = PlanPrivate::decode_reader(&fields)
+        .unwrap_or_else(|err| pgrx::error!("pg_accel: invalid CustomScan private data: {err:?}"));
+    let payload = PlanPayloadReader::new(&fields);
+    let gpu_strategy = plan_private.gpu_strategy;
+    let batch_size = plan_private.batch_size;
+    let _expected_threads = plan_private.expected_threads;
+    let fn_oid = plan_private.fn_oid;
+    let target_attno = plan_private.target_attno;
+    let accel_strategy = plan_private.accel_strategy;
 
-    let batch_size = if batch_size > 0 {
-        batch_size
+    let sort_key_count = if matches!(gpu_strategy, GpuStrategy::Sort) {
+        payload.sort_key_count()
     } else {
-        gucs::min_batch_size().max(1)
+        0
     };
-
-    // SAFETY: custom_private was populated by PlanCustomPath with valid integer nodes
-    // at indices 3, 4, 5.
-    let fn_oid_raw = unsafe { list_int_at(custom_private, 3) } as u32;
-    let fn_oid = pg_sys::Oid::from(fn_oid_raw);
-    let target_attno = unsafe { list_int_at(custom_private, 4) };
-    let accel_strategy_raw = unsafe { list_int_at(custom_private, 5) };
-    let accel_strategy = AccelStrategy::from_i32(accel_strategy_raw);
-
-    // For Sort strategy, read sort key descriptors starting at index 6.
-    let mut sort_keys = vec![];
-    if matches!(gpu_strategy, GpuStrategy::Sort) {
-        // SAFETY: custom_private is a valid List (checked non-null above);
-        // list_int_at and list_length handle bounds safely.
-        let num_keys = unsafe { list_int_at(custom_private, 6) } as usize;
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        let base = 7; // first sort key starts at index 7
-
-        for k in 0..num_keys {
-            let offset = base + k * SORT_KEY_INTS;
-            if offset + SORT_KEY_INTS > list_len {
-                break;
-            }
-            // SAFETY: Indices are within bounds (checked above).
-            let attno = unsafe { list_int_at(custom_private, offset as c_int) } as i16;
-            let sort_op_raw = unsafe { list_int_at(custom_private, (offset + 1) as c_int) } as u32;
-            let collation_raw =
-                unsafe { list_int_at(custom_private, (offset + 2) as c_int) } as u32;
-            let nulls_first = unsafe { list_int_at(custom_private, (offset + 3) as c_int) } != 0;
-
-            sort_keys.push(SortKeyDesc {
-                attno,
-                sort_op: pg_sys::Oid::from(sort_op_raw),
-                collation: pg_sys::Oid::from(collation_raw),
-                nulls_first,
-            });
-        }
-    }
+    let sort_keys = if matches!(gpu_strategy, GpuStrategy::Sort) {
+        payload.sort_keys(sort_key_count)
+    } else {
+        vec![]
+    };
 
     // For Sort strategy, read optional limit after sort keys.
     // Layout: [...sort keys..., limit_tuples, self_scan_relid]
     let sort_limit = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        // SAFETY: custom_private is a valid List.
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        let num_keys = unsafe { list_int_at(custom_private, 6) } as usize;
-        let limit_idx = 7 + num_keys * SORT_KEY_INTS;
-        if limit_idx < list_len {
-            // SAFETY: Index is within bounds (checked above).
-            let v = unsafe { list_int_at(custom_private, limit_idx as c_int) };
-            if v > 0 { Some(v as usize) } else { None }
-        } else {
-            None
-        }
+        payload.sort_limit(sort_key_count)
     } else {
         None
     };
@@ -161,87 +608,30 @@ pub(super) unsafe fn deserialize_custom_private(
     // For Sort strategy, read self_scan_relid for VectorizedScan.
     // It's one position after limit_tuples in the plan's custom_private.
     let sort_self_scan_relid = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        // SAFETY: custom_private is a valid List.
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        let num_keys = unsafe { list_int_at(custom_private, 6) } as usize;
-        let relid_idx = 7 + num_keys * SORT_KEY_INTS + 1; // +1 past limit
-        if relid_idx < list_len {
-            // SAFETY: Index is within bounds (checked above).
-            let v = unsafe { list_int_at(custom_private, relid_idx as c_int) };
-            if v > 0 { v as u32 } else { 0 }
-        } else {
-            0
-        }
+        payload.sort_self_scan_relid(sort_key_count)
     } else {
         0
     };
 
     // For Agg strategy, read aggregate column descriptors starting at index 6.
     // Layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...]
-    let mut agg_columns = vec![];
-    if matches!(gpu_strategy, GpuStrategy::Agg) {
-        // SAFETY: custom_private is a valid List; list_int_at handles bounds.
-        let num_aggs = unsafe { list_int_at(custom_private, 6) } as usize;
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        let base = 7;
-        for k in 0..num_aggs {
-            let offset = base + k * 3;
-            if offset + 3 > list_len {
-                break;
-            }
-            let op = AggOp::from_i32(unsafe { list_int_at(custom_private, offset as c_int) });
-            let attno = unsafe { list_int_at(custom_private, (offset + 1) as c_int) };
-            let rtype = unsafe { list_int_at(custom_private, (offset + 2) as c_int) } as u32;
-            agg_columns.push((op, attno, rtype));
-        }
-    }
+    let agg_count = if matches!(gpu_strategy, GpuStrategy::Agg) {
+        payload.agg_count()
+    } else {
+        0
+    };
+    let agg_columns = if matches!(gpu_strategy, GpuStrategy::Agg) {
+        payload.agg_columns(agg_count)
+    } else {
+        vec![]
+    };
 
     // For Agg strategy, read optional group key info after agg descriptors.
-    // Current layout:
+    // Layout:
     //   [...agg descs..., has_group_key,
     //    gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos, self_scan_relid]
-    // Legacy layout omitted `gk_tlist_pos`; those plans default the group
-    // key to output slot 0.
     let (group_key, group_key_tlist_pos) = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        let num_aggs = unsafe { list_int_at(custom_private, 6) } as usize;
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        let gk_base = 7 + num_aggs * 3;
-        if gk_base < list_len {
-            // SAFETY: Index is within bounds (checked above).
-            let has_gk = unsafe { list_int_at(custom_private, gk_base as c_int) };
-            if has_gk != 0 && gk_base + 3 < list_len {
-                let has_tlist_pos = gk_base + 5 < list_len
-                    && unsafe { list_int_at(custom_private, (gk_base + 5) as c_int) }
-                        != PARTIAL_SENTINEL;
-                let gk_attno = unsafe { list_int_at(custom_private, (gk_base + 1) as c_int) };
-                let gk_type_oid =
-                    pg_sys::Oid::from(
-                        unsafe { list_int_at(custom_private, (gk_base + 2) as c_int) } as u32,
-                    );
-                let gk_key_type = unsafe { list_int_at(custom_private, (gk_base + 3) as c_int) };
-                let tlist_pos = if has_tlist_pos {
-                    unsafe { list_int_at(custom_private, (gk_base + 4) as c_int) }
-                } else {
-                    0
-                };
-                if gk_attno > 0 && matches!(gk_key_type, 0 | 1 | 2 | 4 | 5) {
-                    (
-                        Some(GroupKeyInfo {
-                            attno: gk_attno,
-                            type_oid: gk_type_oid,
-                            key_type: gk_key_type,
-                        }),
-                        tlist_pos,
-                    )
-                } else {
-                    (None, 0)
-                }
-            } else {
-                (None, 0)
-            }
-        } else {
-            (None, 0)
-        }
+        payload.agg_group_key(agg_count)
     } else {
         (None, 0)
     };
@@ -249,55 +639,16 @@ pub(super) unsafe fn deserialize_custom_private(
     // For Window strategy, read window function specs starting at index 6.
     // Layout: [num_specs, func0, part_attno0, order_attno0, value_attno0,
     //   offset0, default_bits0, result_type0, ...]
-    let mut window_specs = vec![];
-    if matches!(gpu_strategy, GpuStrategy::Window) {
-        // SAFETY: custom_private is a valid List; list_int_at handles bounds.
-        let num_specs = unsafe { list_int_at(custom_private, 6) } as usize;
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        let base = 7;
-        for k in 0..num_specs {
-            let offset = base + k * WINDOW_SPEC_INTS;
-            if offset + WINDOW_SPEC_INTS > list_len {
-                break;
-            }
-            // SAFETY: Indices are within bounds (checked above).
-            let func_raw = unsafe { list_int_at(custom_private, offset as c_int) };
-            let Some(func) = WindowFunc::from_i32(func_raw) else {
-                break;
-            };
-            let part_attno = unsafe { list_int_at(custom_private, (offset + 1) as c_int) };
-            let ord_attno = unsafe { list_int_at(custom_private, (offset + 2) as c_int) };
-            let val_attno = unsafe { list_int_at(custom_private, (offset + 3) as c_int) };
-            let lag_offset = unsafe { list_int_at(custom_private, (offset + 4) as c_int) };
-            let default_bits = unsafe { list_int_at(custom_private, (offset + 5) as c_int) };
-            let result_type = unsafe { list_int_at(custom_private, (offset + 6) as c_int) } as u32;
-            let uses_fp64_raw = unsafe { list_int_at(custom_private, (offset + 7) as c_int) };
-            window_specs.push(WindowFuncSpec {
-                func,
-                partition_attno: part_attno,
-                order_attno: ord_attno,
-                value_attno: val_attno,
-                offset: lag_offset,
-                default_val: f64::from_bits(default_bits as u64),
-                result_type_oid: result_type,
-                uses_fp64: uses_fp64_raw != 0,
-            });
-        }
-    }
+    let window_specs = if matches!(gpu_strategy, GpuStrategy::Window) {
+        payload.window_specs()
+    } else {
+        vec![]
+    };
 
     // For Window strategy, read scan_relid after the specs.
     // Plan layout: [...base 6 fields..., num_specs, spec0..., scan_relid]
     let window_scan_relid: pg_sys::Index = if matches!(gpu_strategy, GpuStrategy::Window) {
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        // scan_relid is the last element: index = 7 + num_specs * WINDOW_SPEC_INTS
-        let num_specs_raw = unsafe { list_int_at(custom_private, 6) } as usize;
-        let relid_idx = 7 + num_specs_raw * WINDOW_SPEC_INTS;
-        if relid_idx < list_len {
-            // SAFETY: Index is within bounds (checked above).
-            unsafe { list_int_at(custom_private, relid_idx as c_int) as pg_sys::Index }
-        } else {
-            0
-        }
+        payload.window_scan_relid()
     } else {
         0
     };
@@ -305,15 +656,7 @@ pub(super) unsafe fn deserialize_custom_private(
     // For Join strategy with GpuHashJoin accel, read hash join info at index 6+.
     // Layout: [...base 6 fields..., inner_attno, key_type]
     let (hash_inner_attno, hash_key_type) = if accel_strategy == AccelStrategy::GpuHashJoin {
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        if list_len > 7 {
-            // SAFETY: Indices 6 and 7 are within bounds (checked above).
-            let inner_attno = unsafe { list_int_at(custom_private, 6) };
-            let key_type = unsafe { list_int_at(custom_private, 7) };
-            (inner_attno, key_type)
-        } else {
-            (0, 0)
-        }
+        payload.hash_join_info()
     } else {
         (0, 0)
     };
@@ -329,49 +672,7 @@ pub(super) unsafe fn deserialize_custom_private(
     //
     // The partial block is optional: non-parallel plans omit it entirely.
     let (self_scan_relid, partial) = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-        // The self_scan_relid index is derived from group-key positioning.
-        let num_aggs = unsafe { list_int_at(custom_private, 6) } as usize;
-        let gk_base = 7 + num_aggs * 3;
-        let relid_idx = if gk_base < list_len {
-            let has_gk = unsafe { list_int_at(custom_private, gk_base as c_int) };
-            if has_gk != 0 {
-                let has_tlist_pos = gk_base + 5 < list_len
-                    && unsafe { list_int_at(custom_private, (gk_base + 5) as c_int) }
-                        != PARTIAL_SENTINEL;
-                if has_tlist_pos {
-                    // has_gk + 4 payload ints, then relid slot.
-                    gk_base + 5
-                } else {
-                    // Legacy layout: has_gk + 3 payload ints, then relid.
-                    gk_base + 4
-                }
-            } else {
-                gk_base + 1
-            }
-        } else {
-            // Defensive: fall back to prior layout (second-to-last int).
-            list_len.saturating_sub(1)
-        };
-        let relid = if relid_idx < list_len {
-            (unsafe { list_int_at(custom_private, relid_idx as c_int) }) as pg_sys::Index
-        } else {
-            0
-        };
-        // Partial sentinel starts at relid_idx + 1 (if present).
-        let partial_idx = relid_idx + 1;
-        let partial_spec = if partial_idx < list_len {
-            let sentinel = unsafe { list_int_at(custom_private, partial_idx as c_int) };
-            if sentinel == PARTIAL_SENTINEL {
-                // SAFETY: indices bounds-checked via partial_idx + needed offsets.
-                unsafe { deserialize_partial_spec(custom_private, partial_idx + 1) }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        (relid, partial_spec)
+        payload.agg_self_scan_relid_and_partial(agg_count)
     } else if matches!(gpu_strategy, GpuStrategy::Sort) {
         (sort_self_scan_relid, None)
     } else {
@@ -388,7 +689,7 @@ pub(super) unsafe fn deserialize_custom_private(
         sort_limit,
         agg_columns,
         group_key,
-        group_key_tlist_pos: group_key_tlist_pos as usize,
+        group_key_tlist_pos,
         hash_inner_attno,
         hash_key_type,
         window_specs,
@@ -428,30 +729,19 @@ pub(in crate::engine::ffi) const PREAGG_PARALLEL_ATTACHED_SENTINEL: c_int = 0x50
 /// Must be called in a valid PG memory context on the main backend thread.
 #[allow(clippy::cast_possible_wrap)]
 pub(in crate::engine::ffi) unsafe fn append_partial_spec(
-    mut list: *mut pg_sys::List,
+    list: *mut pg_sys::List,
     spec: &PartialAggSpec,
 ) -> *mut pg_sys::List {
-    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
-    unsafe {
-        list = pg_sys::lappend(list, pg_sys::makeInteger(PARTIAL_SENTINEL).cast());
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(spec.per_column.len() as c_int).cast(),
-        );
-        for col in &spec.per_column {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(col.op.to_i32()).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(col.attno).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(col.transtype_oid) as c_int).cast(),
-            );
-            let ser_oid = col
-                .serialize_fn_oid
-                .map_or(0_i32, |o| u32::from(o) as c_int);
-            list = pg_sys::lappend(list, pg_sys::makeInteger(ser_oid).cast());
-        }
+    let mut writer = PgListWriter::from_existing(list);
+    writer.push_int(PARTIAL_SENTINEL);
+    writer.push_len(spec.per_column.len());
+    for col in &spec.per_column {
+        writer.push_int(col.op.to_i32());
+        writer.push_int(col.attno);
+        writer.push_oid(col.transtype_oid);
+        writer.push_u32(col.serialize_fn_oid.map_or(0, u32::from));
     }
-    list
+    writer.into_list()
 }
 
 /// Deserialize a [`PartialAggSpec`] from `list` starting at `start_idx`
@@ -465,28 +755,39 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
     list: *mut pg_sys::List,
     start_idx: usize,
 ) -> Option<PartialAggSpec> {
-    // SAFETY: list_length safe on the null-guarded list from caller.
-    let list_len = unsafe { pg_sys::list_length(list) } as usize;
-    if start_idx >= list_len {
+    // SAFETY: caller guarantees a valid PG List.
+    let fields = unsafe { IntListReader::from_pg_list(list) };
+    deserialize_partial_spec_from_reader(&fields, start_idx)
+}
+
+#[must_use]
+fn deserialize_partial_spec_from_reader(
+    fields: &IntListReader<'_>,
+    start_idx: usize,
+) -> Option<PartialAggSpec> {
+    if start_idx >= fields.len() {
         return None;
     }
-    let n_cols = unsafe { list_int_at(list, start_idx as c_int) } as usize;
+    let n_cols = fields.int_at(start_idx) as usize;
     if n_cols == 0 {
         return Some(PartialAggSpec {
             per_column: Vec::new(),
         });
     }
     let base = start_idx + 1;
-    if base + n_cols * 4 > list_len {
+    if !fields.contains_range(base, n_cols * 4) {
         return None;
     }
     let mut per_column = Vec::with_capacity(n_cols);
     for k in 0..n_cols {
-        let off = base + k * 4;
-        let op = AggOp::from_i32(unsafe { list_int_at(list, off as c_int) });
-        let attno = unsafe { list_int_at(list, (off + 1) as c_int) };
-        let transtype_raw = unsafe { list_int_at(list, (off + 2) as c_int) } as u32;
-        let ser_raw = unsafe { list_int_at(list, (off + 3) as c_int) } as u32;
+        let mut column = fields.cursor_at(base + k * 4);
+        let op_raw = column.read_int();
+        let Some(op) = AggOp::from_i32(op_raw) else {
+            pgrx::error!("pg_accel: invalid partial aggregate op tag {op_raw}");
+        };
+        let attno = column.read_int();
+        let transtype_oid = column.read_oid();
+        let ser_raw = column.read_u32();
         let serialize_fn_oid = if ser_raw == 0 {
             None
         } else {
@@ -495,7 +796,7 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
         per_column.push(PartialColumn {
             op,
             attno,
-            transtype_oid: pg_sys::Oid::from(transtype_raw),
+            transtype_oid,
             serialize_fn_oid,
         });
     }
@@ -507,6 +808,7 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
 // ---------------------------------------------------------------------------
 
 /// Deserialized PreAgg configuration from `custom_private`.
+#[allow(dead_code)]
 pub(in crate::engine::ffi) struct PreAggPrivData {
     pub(super) scan_relid: pg_sys::Index,
     /// Stable relation OID for the fact table. Use this (via `table_open`)
@@ -531,8 +833,7 @@ pub(in crate::engine::ffi) struct PreAggPrivData {
     /// `(*node).custom_ps` list is then a fact-side PlanState rather than a
     /// dimension; `materialize_dimensions` must skip it to keep the depth
     /// indices aligned with `depths[]`. Round-tripped via the
-    /// [`PREAGG_PARALLEL_ATTACHED_SENTINEL`] block. Default `false` for
-    /// existing plans (no sentinel = serial layout).
+    /// [`PREAGG_PARALLEL_ATTACHED_SENTINEL`] block.
     pub(super) parallel_safe_planner_attached: bool,
 }
 
@@ -551,8 +852,8 @@ pub(in crate::engine::ffi) struct PreAggPrivData {
 ///  n_group_keys,
 ///  // Per group key: source, attno, type_oid
 ///  has_scan_expr, (if 1: template_type, ...template_data...),
-///  // Optional B5a parallel-attached sentinel block (planner-side wiring):
-///  (PREAGG_PARALLEL_ATTACHED_SENTINEL, attached_flag)?
+///  // Required parallel-attached sentinel block (planner-side wiring):
+///  PREAGG_PARALLEL_ATTACHED_SENTINEL, attached_flag
 ///  // Optional partial-agg sentinel block (worker-side parallel preagg):
 ///  (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?
 /// ]
@@ -560,13 +861,11 @@ pub(in crate::engine::ffi) struct PreAggPrivData {
 ///
 /// `partial` carries the `PartialAggSpec` for parallel partial-emit paths
 /// (workers emit transition-state tuples for PG's Finalize Agg). `None`
-/// (the serial path) skips the sentinel block entirely so existing
-/// non-parallel plans don't change shape.
+/// means the current plan emits final aggregate Datums.
 ///
-/// `parallel_safe_planner_attached` (B5a) is `true` only when the planner
-/// hook attached the fact path as `custom_paths[0]` and marked the
-/// CustomPath `parallel_safe = true`. Default-off plans skip the sentinel
-/// block entirely so the wire layout is byte-identical to pre-B5a.
+/// `parallel_safe_planner_attached` must be `true`: current PreAgg plans
+/// attach the fact path as `custom_paths[0]` and require the slot-based
+/// executor path.
 ///
 /// # Safety
 ///
@@ -589,152 +888,110 @@ pub unsafe fn serialize_preagg_private(
 ) -> *mut pg_sys::List {
     use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 
+    if !parallel_safe_planner_attached {
+        pgrx::error!("pg_accel: refusing to serialize PreAgg without attached fact path");
+    }
+
     let batch_size = gucs::min_batch_size();
     let expected_threads = super::explain::resolve_thread_count();
 
-    let mut list: *mut pg_sys::List = std::ptr::null_mut();
-    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
-    unsafe {
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(GpuStrategy::PreAgg as c_int).cast(),
-        );
-        list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
-        list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
-        list = pg_sys::lappend(list, pg_sys::makeInteger(scan_relid as c_int).cast());
-        // Stable OID: stored as c_int (Oid is u32 — bit-cast via `as c_int`).
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(u32::from(scan_oid) as c_int).cast(),
-        );
-        list = pg_sys::lappend(list, pg_sys::makeInteger(depths.len() as c_int).cast());
+    let mut writer = PgListWriter::new();
+    writer.push_int(GpuStrategy::PreAgg as c_int);
+    writer.push_int(batch_size);
+    writer.push_int(expected_threads);
+    writer.push_int(scan_relid as c_int);
+    writer.push_oid(scan_oid);
+    writer.push_len(depths.len());
 
-        // Per depth.
-        for depth in depths {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(depth.outer_attno).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(depth.inner_attno).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(depth.key_type).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(depth.dim_filters.len() as c_int).cast(),
-            );
-            for filt in &depth.dim_filters {
-                list = pg_sys::lappend(list, pg_sys::makeInteger(filt.col_idx as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(filt.cmp_opcode as c_int).cast());
-                // Encode f64 as two i32s (hi and lo bits).
-                let bits = filt.const_val.to_bits();
-                list = pg_sys::lappend(list, pg_sys::makeInteger((bits >> 32) as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(bits as u32 as c_int).cast());
-            }
-            // Group col attnos for this depth.
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(depth.group_col_attnos.len() as c_int).cast(),
-            );
-            for &attno in &depth.group_col_attnos {
-                list = pg_sys::lappend(list, pg_sys::makeInteger(attno).cast());
-            }
+    // Per depth.
+    for depth in depths {
+        writer.push_int(depth.outer_attno);
+        writer.push_int(depth.inner_attno);
+        writer.push_int(depth.key_type);
+        writer.push_len(depth.dim_filters.len());
+        for filt in &depth.dim_filters {
+            writer.push_int(filt.col_idx as c_int);
+            writer.push_int(filt.cmp_opcode as c_int);
+            writer.push_f64_halves(filt.const_val);
         }
-
-        // Aggregates.
-        list = pg_sys::lappend(list, pg_sys::makeInteger(agg_descs.len() as c_int).cast());
-        for desc in agg_descs {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(desc.op.to_i32()).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(desc.attno).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(desc.type_oid) as c_int).cast(),
-            );
-        }
-
-        // GROUP BY keys.
-        list = pg_sys::lappend(list, pg_sys::makeInteger(group_keys.len() as c_int).cast());
-        for gk in group_keys {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(gk.source as c_int).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(gk.attno).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(gk.type_oid) as c_int).cast(),
-            );
-        }
-
-        // Serialize fact-side scan expression.
-        match scan_expr {
-            Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                col_idx,
-                cmp_opcode,
-                const_val,
-            })) => {
-                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has
-                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // type=CmpConst
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*col_idx as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*cmp_opcode as c_int).cast());
-                let bits = const_val.to_bits();
-                list = pg_sys::lappend(list, pg_sys::makeInteger((bits >> 32) as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(bits as u32 as c_int).cast());
-            }
-            Some(CompiledExpr::Template(TemplateKernel::Between { col_idx, lo, hi })) => {
-                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has
-                list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast()); // type=Between
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*col_idx as c_int).cast());
-                let lo_bits = lo.to_bits();
-                list = pg_sys::lappend(list, pg_sys::makeInteger((lo_bits >> 32) as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(lo_bits as u32 as c_int).cast());
-                let hi_bits = hi.to_bits();
-                list = pg_sys::lappend(list, pg_sys::makeInteger((hi_bits >> 32) as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(hi_bits as u32 as c_int).cast());
-            }
-            Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                col1_idx,
-                cmp1_opcode,
-                const1_val,
-                col2_idx,
-                cmp2_opcode,
-                const2_val,
-            })) => {
-                list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has
-                list = pg_sys::lappend(list, pg_sys::makeInteger(3).cast()); // type=TwoPredAnd
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*col1_idx as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*cmp1_opcode as c_int).cast());
-                let b1 = const1_val.to_bits();
-                list = pg_sys::lappend(list, pg_sys::makeInteger((b1 >> 32) as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(b1 as u32 as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*col2_idx as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(*cmp2_opcode as c_int).cast());
-                let b2 = const2_val.to_bits();
-                list = pg_sys::lappend(list, pg_sys::makeInteger((b2 >> 32) as c_int).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(b2 as u32 as c_int).cast());
-            }
-            _ => {
-                list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // no scan_expr
-            }
-        }
-
-        // Optional B5a parallel-attached sentinel block. Written ONLY when
-        // the planner attached the fact path as `custom_paths[0]`; default
-        // plans skip this block entirely so the wire layout matches pre-B5a
-        // byte-for-byte. The deserializer probes for either sentinel here
-        // (PREAGG_PARALLEL_ATTACHED_SENTINEL, then optionally
-        // PARTIAL_SENTINEL) and consumes both in order when present.
-        if parallel_safe_planner_attached {
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(PREAGG_PARALLEL_ATTACHED_SENTINEL).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
-        }
-
-        // Optional partial-agg sentinel block. Mirrors the Agg-strategy
-        // layout (append_partial_spec writes
-        // `[PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols]`)
-        // so deserialize_partial_spec can read it back. Absent when the
-        // plan is non-parallel (the serial preagg path).
-        if let Some(spec) = partial {
-            list = append_partial_spec(list, spec);
+        writer.push_len(depth.group_col_attnos.len());
+        for &attno in &depth.group_col_attnos {
+            writer.push_int(attno);
         }
     }
 
-    list
+    // Aggregates.
+    writer.push_len(agg_descs.len());
+    for desc in agg_descs {
+        writer.push_int(desc.op.to_i32());
+        writer.push_int(desc.attno);
+        writer.push_oid(desc.type_oid);
+    }
+
+    // GROUP BY keys.
+    writer.push_len(group_keys.len());
+    for gk in group_keys {
+        writer.push_u32(gk.source);
+        writer.push_int(gk.attno);
+        writer.push_oid(gk.type_oid);
+    }
+
+    // Serialize fact-side scan expression.
+    match scan_expr {
+        Some(CompiledExpr::Template(TemplateKernel::CmpConst {
+            col_idx,
+            cmp_opcode,
+            const_val,
+        })) => {
+            writer.push_bool(true);
+            writer.push_int(1);
+            writer.push_u32(*col_idx);
+            writer.push_int(*cmp_opcode as c_int);
+            writer.push_f64_halves(*const_val);
+        }
+        Some(CompiledExpr::Template(TemplateKernel::Between { col_idx, lo, hi })) => {
+            writer.push_bool(true);
+            writer.push_int(2);
+            writer.push_u32(*col_idx);
+            writer.push_f64_halves(*lo);
+            writer.push_f64_halves(*hi);
+        }
+        Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
+            col1_idx,
+            cmp1_opcode,
+            const1_val,
+            col2_idx,
+            cmp2_opcode,
+            const2_val,
+        })) => {
+            writer.push_bool(true);
+            writer.push_int(3);
+            writer.push_u32(*col1_idx);
+            writer.push_int(*cmp1_opcode as c_int);
+            writer.push_f64_halves(*const1_val);
+            writer.push_u32(*col2_idx);
+            writer.push_int(*cmp2_opcode as c_int);
+            writer.push_f64_halves(*const2_val);
+        }
+        _ => {
+            writer.push_bool(false);
+        }
+    }
+
+    writer.push_int(PREAGG_PARALLEL_ATTACHED_SENTINEL);
+    writer.push_bool(true);
+
+    // Optional partial-agg sentinel block. Mirrors the Agg-strategy
+    // layout (append_partial_spec writes
+    // `[PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols]`)
+    // so deserialize_partial_spec can read it back. Absent when the
+    // plan is non-parallel (the serial preagg path).
+    if let Some(spec) = partial {
+        // SAFETY: this function is called while planning in a valid PG memory context.
+        unsafe { append_partial_spec(writer.into_list(), spec) }
+    } else {
+        writer.into_list()
+    }
 }
 
 /// Deserialize PreAgg configuration from `custom_private`.
@@ -748,66 +1005,38 @@ pub(in crate::engine::ffi) unsafe fn deserialize_preagg_private(
 ) -> PreAggPrivData {
     use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 
-    let empty = PreAggPrivData {
-        scan_relid: 0,
-        scan_oid: pg_sys::InvalidOid,
-        depths: vec![],
-        agg_descs: vec![],
-        group_keys: vec![],
-        scan_expr: None,
-        partial: None,
-        parallel_safe_planner_attached: false,
-    };
     if custom_private.is_null() {
-        return empty;
+        pgrx::error!("pg_accel: missing PreAgg private data");
     }
 
-    let mut idx: c_int = 3; // skip [strategy, batch_size, expected_threads]
-
     // SAFETY: custom_private is a valid List.
-    let scan_relid = unsafe { list_int_at(custom_private, idx) } as pg_sys::Index;
-    idx += 1;
-    let scan_oid_raw = unsafe { list_int_at(custom_private, idx) } as u32;
-    idx += 1;
-    let scan_oid = pg_sys::Oid::from(scan_oid_raw);
-    let n_depths = unsafe { list_int_at(custom_private, idx) } as usize;
-    idx += 1;
+    let fields = unsafe { IntListReader::from_pg_list(custom_private) };
+    let mut cursor = fields.cursor_at(3); // skip [strategy, batch_size, expected_threads]
+
+    let scan_relid = cursor.read_int() as pg_sys::Index;
+    let scan_oid = cursor.read_oid();
+    let n_depths = cursor.read_usize();
 
     let mut depths = Vec::with_capacity(n_depths);
     for _ in 0..n_depths {
-        let outer_attno = unsafe { list_int_at(custom_private, idx) };
-        idx += 1;
-        let inner_attno = unsafe { list_int_at(custom_private, idx) };
-        idx += 1;
-        let key_type = unsafe { list_int_at(custom_private, idx) };
-        idx += 1;
-        let n_filters = unsafe { list_int_at(custom_private, idx) } as usize;
-        idx += 1;
+        let outer_attno = cursor.read_int();
+        let inner_attno = cursor.read_int();
+        let key_type = cursor.read_int();
+        let n_filters = cursor.read_usize();
 
         let mut dim_filters = Vec::with_capacity(n_filters);
         for _ in 0..n_filters {
-            let col_idx = unsafe { list_int_at(custom_private, idx) } as usize;
-            idx += 1;
-            let cmp_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
-            idx += 1;
-            let bits_hi = unsafe { list_int_at(custom_private, idx) } as u32;
-            idx += 1;
-            let bits_lo = unsafe { list_int_at(custom_private, idx) } as u32;
-            idx += 1;
-            let const_val = f64::from_bits(((bits_hi as u64) << 32) | bits_lo as u64);
             dim_filters.push(DimFilter {
-                col_idx,
-                cmp_opcode,
-                const_val,
+                col_idx: cursor.read_usize(),
+                cmp_opcode: cursor.read_int() as u16,
+                const_val: cursor.read_f64_halves(),
             });
         }
 
-        let n_group_cols = unsafe { list_int_at(custom_private, idx) } as usize;
-        idx += 1;
+        let n_group_cols = cursor.read_usize();
         let mut group_col_attnos = Vec::with_capacity(n_group_cols);
         for _ in 0..n_group_cols {
-            group_col_attnos.push(unsafe { list_int_at(custom_private, idx) });
-            idx += 1;
+            group_col_attnos.push(cursor.read_int());
         }
 
         depths.push(JoinDepthDesc {
@@ -820,112 +1049,60 @@ pub(in crate::engine::ffi) unsafe fn deserialize_preagg_private(
     }
 
     // Aggregates.
-    let n_aggs = unsafe { list_int_at(custom_private, idx) } as usize;
-    idx += 1;
+    let n_aggs = cursor.read_usize();
     let mut agg_descs = Vec::with_capacity(n_aggs);
     for _ in 0..n_aggs {
-        let op = AggOp::from_i32(unsafe { list_int_at(custom_private, idx) });
-        idx += 1;
-        let attno = unsafe { list_int_at(custom_private, idx) };
-        idx += 1;
-        let type_oid_raw = unsafe { list_int_at(custom_private, idx) } as u32;
-        idx += 1;
+        let op_raw = cursor.read_int();
+        let Some(op) = AggOp::from_i32(op_raw) else {
+            pgrx::error!("pg_accel: invalid PreAgg op tag {op_raw}");
+        };
         agg_descs.push(PreAggColDesc {
             op,
-            attno,
-            type_oid: pg_sys::Oid::from(type_oid_raw),
+            attno: cursor.read_int(),
+            type_oid: cursor.read_oid(),
         });
     }
 
     // GROUP BY keys.
-    let n_gkeys = unsafe { list_int_at(custom_private, idx) } as usize;
-    idx += 1;
+    let n_gkeys = cursor.read_usize();
     let mut group_keys = Vec::with_capacity(n_gkeys);
     for _ in 0..n_gkeys {
-        let source = unsafe { list_int_at(custom_private, idx) } as u32;
-        idx += 1;
-        let attno = unsafe { list_int_at(custom_private, idx) };
-        idx += 1;
-        let type_oid_raw = unsafe { list_int_at(custom_private, idx) } as u32;
-        idx += 1;
         group_keys.push(GroupKeyDesc {
-            source,
-            attno,
-            type_oid: pg_sys::Oid::from(type_oid_raw),
+            source: cursor.read_u32(),
+            attno: cursor.read_int(),
+            type_oid: cursor.read_oid(),
         });
     }
 
     // Deserialize scan_expr.
-    let has_scan_expr = unsafe { list_int_at(custom_private, idx) };
-    idx += 1;
-    let scan_expr = if has_scan_expr == 1 {
-        let template_type = unsafe { list_int_at(custom_private, idx) };
-        idx += 1;
+    let scan_expr = if cursor.read_bool() {
+        let template_type = cursor.read_int();
         match template_type {
             1 => {
                 // CmpConst
-                let col_idx = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let cmp_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
-                idx += 1;
-                let bits_hi = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let bits_lo = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let const_val = f64::from_bits(((bits_hi as u64) << 32) | bits_lo as u64);
                 Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                    col_idx,
-                    cmp_opcode,
-                    const_val,
+                    col_idx: cursor.read_u32(),
+                    cmp_opcode: cursor.read_int() as u16,
+                    const_val: cursor.read_f64_halves(),
                 }))
             }
             2 => {
                 // Between
-                let col_idx = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let lo_hi = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let lo_lo = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let lo = f64::from_bits(((lo_hi as u64) << 32) | lo_lo as u64);
-                let hi_hi = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let hi_lo = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let hi = f64::from_bits(((hi_hi as u64) << 32) | hi_lo as u64);
                 Some(CompiledExpr::Template(TemplateKernel::Between {
-                    col_idx,
-                    lo,
-                    hi,
+                    col_idx: cursor.read_u32(),
+                    lo: cursor.read_f64_halves(),
+                    hi: cursor.read_f64_halves(),
                 }))
             }
             3 => {
                 // TwoPredAnd
-                let col1_idx = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let cmp1_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
-                idx += 1;
-                let b1_hi = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let b1_lo = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let const1_val = f64::from_bits(((b1_hi as u64) << 32) | b1_lo as u64);
-                let col2_idx = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let cmp2_opcode = unsafe { list_int_at(custom_private, idx) } as u16;
-                idx += 1;
-                let b2_hi = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let b2_lo = unsafe { list_int_at(custom_private, idx) } as u32;
-                idx += 1;
-                let const2_val = f64::from_bits(((b2_hi as u64) << 32) | b2_lo as u64);
                 Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                    col1_idx,
-                    cmp1_opcode,
-                    const1_val,
-                    col2_idx,
-                    cmp2_opcode,
-                    const2_val,
+                    col1_idx: cursor.read_u32(),
+                    cmp1_opcode: cursor.read_int() as u16,
+                    const1_val: cursor.read_f64_halves(),
+                    col2_idx: cursor.read_u32(),
+                    cmp2_opcode: cursor.read_int() as u16,
+                    const2_val: cursor.read_f64_halves(),
                 }))
             }
             _ => None,
@@ -934,50 +1111,27 @@ pub(in crate::engine::ffi) unsafe fn deserialize_preagg_private(
         None
     };
 
-    // Optional sentinel blocks — order is fixed (PREAGG_PARALLEL_ATTACHED
-    // first, then PARTIAL). Both are independently optional. Pre-B5a plans
-    // had only the PARTIAL_SENTINEL block; the deserializer now probes
-    // PREAGG_PARALLEL_ATTACHED first and falls through to PARTIAL probing
-    // either way (handles new-with-attached, new-without-attached, and
-    // legacy-partial-only layouts identically).
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-
-    let mut parallel_safe_planner_attached = false;
-    if (idx as usize) < list_len {
-        // SAFETY: list_int_at bounds-checked above.
-        let sentinel = unsafe { list_int_at(custom_private, idx) };
-        if sentinel == PREAGG_PARALLEL_ATTACHED_SENTINEL {
-            // Sentinel + 1 i32 payload (1 = attached, 0 = not).
-            if (idx as usize) + 1 < list_len {
-                // SAFETY: list_int_at bounds-checked above.
-                let flag = unsafe { list_int_at(custom_private, idx + 1) };
-                parallel_safe_planner_attached = flag != 0;
-                idx += 2;
-            } else {
-                // Truncated layout: defensive — treat as absent.
-                parallel_safe_planner_attached = false;
-            }
-        }
+    // Required PREAGG_PARALLEL_ATTACHED block, optionally followed by PARTIAL.
+    let mut trailer_idx = cursor.position();
+    if !fields.contains_range(trailer_idx, 2)
+        || fields.int_at(trailer_idx) != PREAGG_PARALLEL_ATTACHED_SENTINEL
+    {
+        pgrx::error!("pg_accel: PreAgg private data missing attached fact child marker");
     }
+    let parallel_safe_planner_attached = fields.int_at(trailer_idx + 1) != 0;
+    if !parallel_safe_planner_attached {
+        pgrx::error!("pg_accel: PreAgg private data requested unattached fact path");
+    }
+    trailer_idx += 2;
 
     // Optional PARTIAL_SENTINEL block — present only when the planner
     // injected a parallel partial-emit path (preagg_partial::try_inject).
     // Mirrors the Agg-strategy decode at deserialize_custom_private:344-356.
-    let partial = if (idx as usize) < list_len {
-        let sentinel = unsafe { list_int_at(custom_private, idx) };
-        if sentinel == PARTIAL_SENTINEL {
-            // SAFETY: list bounds checked; deserialize_partial_spec consumes
-            // [n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols].
-            unsafe { deserialize_partial_spec(custom_private, (idx as usize) + 1) }
-        } else {
-            None
-        }
+    let partial = if fields.int_at(trailer_idx) == PARTIAL_SENTINEL {
+        deserialize_partial_spec_from_reader(&fields, trailer_idx + 1)
     } else {
         None
     };
-
-    // Suppress unused-assignment warning for idx.
-    let _ = idx;
 
     PreAggPrivData {
         scan_relid,
@@ -1057,37 +1211,20 @@ pub struct FunctionScanPrivData {
 /// thread. `list` may be null or a valid PG `List *`.
 #[allow(clippy::cast_possible_wrap)]
 pub unsafe fn append_functionscan_priv(
-    mut list: *mut pg_sys::List,
+    list: *mut pg_sys::List,
     priv_data: &FunctionScanPrivData,
 ) -> *mut pg_sys::List {
-    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
-    unsafe {
-        list = pg_sys::lappend(list, pg_sys::makeInteger(FUNCTIONSCAN_SENTINEL).cast());
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(u32::from(priv_data.fn_oid) as c_int).cast(),
-        );
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.output_shape_disc).cast(),
-        );
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.output_shape_field_count as c_int).cast(),
-        );
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.args.len() as c_int).cast(),
-        );
-        for &(datum, type_oid) in &priv_data.args {
-            // Split the i64 datum into hi / lo halves.
-            let datum_u = datum as u64;
-            list = pg_sys::lappend(list, pg_sys::makeInteger((datum_u >> 32) as c_int).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(datum_u as u32 as c_int).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(type_oid as c_int).cast());
-        }
+    let mut writer = PgListWriter::from_existing(list);
+    writer.push_int(FUNCTIONSCAN_SENTINEL);
+    writer.push_oid(priv_data.fn_oid);
+    writer.push_int(priv_data.output_shape_disc);
+    writer.push_u32(priv_data.output_shape_field_count);
+    writer.push_len(priv_data.args.len());
+    for &(datum, type_oid) in &priv_data.args {
+        writer.push_i64_halves(datum);
+        writer.push_u32(type_oid);
     }
-    list
+    writer.into_list()
 }
 
 /// Deserialize a [`FunctionScanPrivData`] from `list` starting at
@@ -1107,36 +1244,32 @@ pub unsafe fn deserialize_functionscan_priv(
     if list.is_null() {
         return None;
     }
-    // SAFETY: list_length is safe on a non-null List.
-    let list_len = unsafe { pg_sys::list_length(list) } as usize;
-    if start_idx + 4 >= list_len {
+    // SAFETY: caller guarantees a valid PG List.
+    let fields = unsafe { IntListReader::from_pg_list(list) };
+    if !fields.contains_range(start_idx, 5) {
         return None;
     }
-    let sentinel = unsafe { list_int_at(list, start_idx as c_int) };
-    if sentinel != FUNCTIONSCAN_SENTINEL {
+    let mut fixed = fields.cursor_at(start_idx);
+    if fixed.read_int() != FUNCTIONSCAN_SENTINEL {
         return None;
     }
-    let fn_oid_raw = unsafe { list_int_at(list, (start_idx + 1) as c_int) } as u32;
-    let shape_disc = unsafe { list_int_at(list, (start_idx + 2) as c_int) };
-    let shape_field_count = unsafe { list_int_at(list, (start_idx + 3) as c_int) } as u32;
-    let n_args = unsafe { list_int_at(list, (start_idx + 4) as c_int) } as usize;
-    let payload_base = start_idx + 5;
-    if payload_base + n_args * 3 > list_len {
+    let fn_oid = fixed.read_oid();
+    let output_shape_disc = fixed.read_int();
+    let output_shape_field_count = fixed.read_u32();
+    let n_args = fixed.read_usize();
+    let payload_base = fixed.position();
+    if !fields.contains_range(payload_base, n_args * 3) {
         return None;
     }
     let mut args = Vec::with_capacity(n_args);
-    for k in 0..n_args {
-        let off = payload_base + k * 3;
-        let hi = unsafe { list_int_at(list, off as c_int) } as u32;
-        let lo = unsafe { list_int_at(list, (off + 1) as c_int) } as u32;
-        let datum = (((hi as u64) << 32) | lo as u64) as i64;
-        let type_oid = unsafe { list_int_at(list, (off + 2) as c_int) } as u32;
-        args.push((datum, type_oid));
+    let mut arg = fields.cursor_at(payload_base);
+    for _ in 0..n_args {
+        args.push((arg.read_i64_halves(), arg.read_u32()));
     }
     Some(FunctionScanPrivData {
-        fn_oid: pg_sys::Oid::from(fn_oid_raw),
-        output_shape_disc: shape_disc,
-        output_shape_field_count: shape_field_count,
+        fn_oid,
+        output_shape_disc,
+        output_shape_field_count,
         args,
     })
 }
@@ -1264,45 +1397,26 @@ pub struct SrfTargetListPrivData {
 /// Must be called in a valid PG memory context on the main backend thread.
 #[allow(clippy::cast_possible_wrap)]
 pub unsafe fn append_srf_target_list_priv(
-    mut list: *mut pg_sys::List,
+    list: *mut pg_sys::List,
     priv_data: &SrfTargetListPrivData,
 ) -> *mut pg_sys::List {
-    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
-    unsafe {
-        list = pg_sys::lappend(list, pg_sys::makeInteger(SRF_TARGET_LIST_SENTINEL).cast());
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(u32::from(priv_data.fn_oid) as c_int).cast(),
-        );
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.output_shape_disc).cast(),
-        );
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.output_shape_field_count as c_int).cast(),
-        );
-        list = pg_sys::lappend(list, pg_sys::makeInteger(priv_data.srf_arg_attno).cast());
-        list = pg_sys::lappend(list, pg_sys::makeInteger(priv_data.srf_tlist_pos).cast());
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.passthrough_attnos.len() as c_int).cast(),
-        );
-        for &attno in &priv_data.passthrough_attnos {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(attno).cast());
-        }
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(priv_data.qual_args.len() as c_int).cast(),
-        );
-        for &(datum, type_oid) in &priv_data.qual_args {
-            let datum_u = datum as u64;
-            list = pg_sys::lappend(list, pg_sys::makeInteger((datum_u >> 32) as c_int).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(datum_u as u32 as c_int).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(type_oid as c_int).cast());
-        }
+    let mut writer = PgListWriter::from_existing(list);
+    writer.push_int(SRF_TARGET_LIST_SENTINEL);
+    writer.push_oid(priv_data.fn_oid);
+    writer.push_int(priv_data.output_shape_disc);
+    writer.push_u32(priv_data.output_shape_field_count);
+    writer.push_int(priv_data.srf_arg_attno);
+    writer.push_int(priv_data.srf_tlist_pos);
+    writer.push_len(priv_data.passthrough_attnos.len());
+    for &attno in &priv_data.passthrough_attnos {
+        writer.push_int(attno);
     }
-    list
+    writer.push_len(priv_data.qual_args.len());
+    for &(datum, type_oid) in &priv_data.qual_args {
+        writer.push_i64_halves(datum);
+        writer.push_u32(type_oid);
+    }
+    writer.into_list()
 }
 
 /// Deserialize an [`SrfTargetListPrivData`] from `list` starting at
@@ -1322,52 +1436,45 @@ pub unsafe fn deserialize_srf_target_list_priv(
     if list.is_null() {
         return None;
     }
-    // SAFETY: list_length is safe on a non-null List.
-    let list_len = unsafe { pg_sys::list_length(list) } as usize;
     // Need at least sentinel + 6 fixed fields + n_passthrough(0) + n_qual_args(0)
-    if start_idx + 6 >= list_len {
+    // SAFETY: caller guarantees a valid PG List.
+    let fields = unsafe { IntListReader::from_pg_list(list) };
+    if !fields.contains_range(start_idx, 7) {
         return None;
     }
-    let sentinel = unsafe { list_int_at(list, start_idx as c_int) };
-    if sentinel != SRF_TARGET_LIST_SENTINEL {
+    let mut fixed = fields.cursor_at(start_idx);
+    if fixed.read_int() != SRF_TARGET_LIST_SENTINEL {
         return None;
     }
-    let fn_oid_raw = unsafe { list_int_at(list, (start_idx + 1) as c_int) } as u32;
-    let shape_disc = unsafe { list_int_at(list, (start_idx + 2) as c_int) };
-    let shape_field_count = unsafe { list_int_at(list, (start_idx + 3) as c_int) } as u32;
-    let srf_arg_attno = unsafe { list_int_at(list, (start_idx + 4) as c_int) };
-    let srf_tlist_pos = unsafe { list_int_at(list, (start_idx + 5) as c_int) };
-    let n_passthrough = unsafe { list_int_at(list, (start_idx + 6) as c_int) } as usize;
-    let pass_base = start_idx + 7;
-    if pass_base + n_passthrough >= list_len {
+    let fn_oid = fixed.read_oid();
+    let output_shape_disc = fixed.read_int();
+    let output_shape_field_count = fixed.read_u32();
+    let srf_arg_attno = fixed.read_int();
+    let srf_tlist_pos = fixed.read_int();
+    let n_passthrough = fixed.read_usize();
+    let pass_base = fixed.position();
+    if !fields.contains_range(pass_base, n_passthrough + 1) {
         return None;
     }
     let mut passthrough_attnos = Vec::with_capacity(n_passthrough);
-    for k in 0..n_passthrough {
-        passthrough_attnos.push(unsafe { list_int_at(list, (pass_base + k) as c_int) });
+    let mut passthrough = fields.cursor_at(pass_base);
+    for _ in 0..n_passthrough {
+        passthrough_attnos.push(passthrough.read_int());
     }
-    let n_args_idx = pass_base + n_passthrough;
-    if n_args_idx >= list_len {
-        return None;
-    }
-    let n_qual_args = unsafe { list_int_at(list, n_args_idx as c_int) } as usize;
-    let qual_base = n_args_idx + 1;
-    if qual_base + n_qual_args * 3 > list_len {
+    let n_qual_args = passthrough.read_usize();
+    let qual_base = passthrough.position();
+    if !fields.contains_range(qual_base, n_qual_args * 3) {
         return None;
     }
     let mut qual_args = Vec::with_capacity(n_qual_args);
-    for k in 0..n_qual_args {
-        let off = qual_base + k * 3;
-        let hi = unsafe { list_int_at(list, off as c_int) } as u32;
-        let lo = unsafe { list_int_at(list, (off + 1) as c_int) } as u32;
-        let datum = (((hi as u64) << 32) | lo as u64) as i64;
-        let type_oid = unsafe { list_int_at(list, (off + 2) as c_int) } as u32;
-        qual_args.push((datum, type_oid));
+    let mut qual_arg = fields.cursor_at(qual_base);
+    for _ in 0..n_qual_args {
+        qual_args.push((qual_arg.read_i64_halves(), qual_arg.read_u32()));
     }
     Some(SrfTargetListPrivData {
-        fn_oid: pg_sys::Oid::from(fn_oid_raw),
-        output_shape_disc: shape_disc,
-        output_shape_field_count: shape_field_count,
+        fn_oid,
+        output_shape_disc,
+        output_shape_field_count,
         srf_arg_attno,
         srf_tlist_pos,
         passthrough_attnos,

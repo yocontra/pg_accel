@@ -29,7 +29,7 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
 
     // SAFETY: state is our extended struct, es is a valid ExplainState.
     unsafe {
-        let strategy = GpuStrategy::from_i32((*state).accel.strategy);
+        let strategy = GpuStrategy::decode((*state).accel.strategy);
 
         pg_sys::ExplainPropertyText(c"Strategy".as_ptr(), strategy.label().as_ptr(), es);
         pg_sys::ExplainPropertyInteger(
@@ -65,21 +65,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
             pg_sys::ExplainPropertyFloat(c"Dispatch Time".as_ptr(), c"ms".as_ptr(), time_ms, 3, es);
 
             if strategy == GpuStrategy::Scan {
-                pg_sys::ExplainPropertyInteger(
-                    c"Spatial Rechecks".as_ptr(),
-                    std::ptr::null(),
-                    (*state).accel.spatial_rechecks as i64,
-                    es,
-                );
-                #[allow(clippy::cast_precision_loss)]
-                let recheck_ms = (*state).accel.spatial_recheck_time_us as f64 / 1000.0;
-                pg_sys::ExplainPropertyFloat(
-                    c"Spatial Recheck Time".as_ptr(),
-                    c"ms".as_ptr(),
-                    recheck_ms,
-                    3,
-                    es,
-                );
                 pg_sys::ExplainPropertyInteger(
                     c"Parallel Worker".as_ptr(),
                     std::ptr::null(),

@@ -83,8 +83,8 @@ unsafe extern "C" {
 
     /// Bulk sphere distance computation (Haversine).
     ///
-    /// Outputs distances in metres. `uncertain[i] = 1` if the result
-    /// needs CPU recheck.
+    /// Outputs distances in metres. `uncertain[i] = 1` means the GPU result
+    /// was not classified as exact; pg_accel callers must reject it.
     pub fn pgaccel_sphere_distance_bulk(
         points_a: *const f32,
         points_b: *const f32,
@@ -233,12 +233,6 @@ unsafe extern "C" {
         hit_count: *mut usize,
     ) -> PgaccelStatus;
 
-    // -- Platform capability convenience predicates --
-
-    pub fn pgaccel_fp64_available() -> bool;
-    pub fn pgaccel_unified_memory() -> bool;
-    pub fn pgaccel_ooo_queue_available() -> bool;
-
     // -- Memory pool (USM arena allocator) --
 
     pub fn pgaccel_alloc(bytes: usize) -> *mut std::ffi::c_void;
@@ -301,6 +295,16 @@ unsafe extern "C" {
     ) -> PgaccelStatus;
 
     pub fn pgaccel_reduce_sum_i64(
+        data: *const i64,
+        count: usize,
+        result: *mut i64,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_min_i64(
+        data: *const i64,
+        count: usize,
+        result: *mut i64,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_max_i64(
         data: *const i64,
         count: usize,
         result: *mut i64,
@@ -664,7 +668,7 @@ unsafe extern "C" {
 
     /// Evaluate a predicate expression on a columnar batch.
     ///
-    /// Results: +1 = TRUE, -1 = FALSE, 0 = UNCERTAIN (CPU recheck).
+    /// Results: +1 = TRUE, -1 = FALSE, 0 = UNCERTAIN.
     pub fn pgaccel_expr_eval_predicate(
         program: *const PgaccelExprProgram,
         batch: *const PgaccelBatch,
@@ -805,7 +809,6 @@ unsafe extern "C" {
     ///
     /// Returns a pointer to `group_count * partial_width(func)` f64 values
     /// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
-    /// Falls back to finalize-mode buffer for legacy states (width=1).
     pub fn pgaccel_agg_get_partial_results(
         state: *const PgaccelAggState,
         agg_idx: usize,
@@ -1311,7 +1314,6 @@ mod tests {
             max_alloc_bytes: 1024,
             has_native_fp64: true,
             has_atomic64: false,
-            is_unified_memory: false,
         };
         let cloned = info.clone();
         assert!(cloned.has_native_fp64);
@@ -1327,7 +1329,6 @@ mod tests {
             has_native_fp64: false,
             has_atomic64: true,
             has_ooo_queue: false,
-            is_unified_memory: true,
             max_alloc_bytes: 2048,
             compute_units: 16,
             backend_name: [0; 64],

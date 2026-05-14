@@ -39,6 +39,22 @@ use crate::engine::gucs;
 use super::agg_common::{self, AggClass};
 use super::custom_scan;
 
+const PARTIAL_SUM_BIGINT_REJECT_LOG: &str = "SUM(bigint) rejected: PG partial combine expects the \
+ int8_avg_accum/numeric internal transition shape, while pg_accel currently only has a final \
+ scalar i64 reduce";
+
+#[must_use]
+fn parallel_partial_sum_bigint_rejected(
+    aggref: &pg_sys::Aggref,
+    op: AggOp,
+    arg_type_oid: pg_sys::Oid,
+) -> bool {
+    // Non-partial exact i64 reduce can still use the typed scalar lane. This
+    // guard is only for the parallel partial path, whose Finalize Agg expects
+    // PostgreSQL's SUM(bigint) transition state rather than a final i64 value.
+    agg_common::aggref_is_sum_int8(aggref, op, arg_type_oid)
+}
+
 /// Try to inject the parallel (partial → gather → finalize) GpuAgg path chain
 /// directly onto `grouped_rel->pathlist`.
 ///
@@ -330,7 +346,7 @@ pub(super) unsafe fn try_inject(
             let extracted = unsafe { super::extract_var_attno(arg_expr) };
             (extracted, u32::from(aggref_ref.aggtype))
         };
-        if matches!(op, AggOp::Sum) && arg_type_oid == pg_sys::INT8OID {
+        if parallel_partial_sum_bigint_rejected(aggref_ref, op, arg_type_oid) {
             has_i64_sum = true;
         }
 
@@ -354,9 +370,7 @@ pub(super) unsafe fn try_inject(
         return;
     }
     if has_i64_sum {
-        pgrx::debug1!(
-            "pg_accel partial_agg: SUM(bigint) rejected until parallel i64 reduce is stable"
-        );
+        pgrx::debug1!("pg_accel partial_agg: {}", PARTIAL_SUM_BIGINT_REJECT_LOG);
         return;
     }
     if group_key_info.is_some() && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
@@ -400,7 +414,7 @@ pub(super) unsafe fn try_inject(
             .iter()
             .any(|(op, _, rtype)| matches!(op, AggOp::Avg) || *rtype == float8_u32);
     // Phase 6 calibration: read from `DeviceLimits::gpu_partial_agg_per_row`
-    // rather than the legacy `0.005` literal. The old constant was 10x the
+    // rather than the old `0.005` literal. That constant was 10x the
     // measured GPU reduce throughput (~50M rows/sec → ~0.0005 cost units /
     // row on M-series) and combined with the soft-fp64 32x multiplier
     // produced a per-row cost of 0.16 for fp64 partial aggs (AVG / STDDEV /
@@ -579,4 +593,68 @@ pub(super) unsafe fn try_inject(
         cpath_workers,
         cpath_rows,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use pgrx::pg_sys;
+
+    use crate::engine::executor::agg::AggOp;
+
+    fn aggref_with_oid(aggfnoid: pg_sys::Oid) -> pg_sys::Aggref {
+        pg_sys::Aggref {
+            aggfnoid,
+            ..pg_sys::Aggref::default()
+        }
+    }
+
+    #[test]
+    fn parallel_partial_sum_bigint_guard_rejects_builtin_oid() {
+        let aggref = aggref_with_oid(pg_sys::Oid::from(pg_sys::F_SUM_INT8));
+
+        assert!(super::parallel_partial_sum_bigint_rejected(
+            &aggref,
+            AggOp::Sum,
+            pg_sys::InvalidOid,
+        ));
+    }
+
+    #[test]
+    fn parallel_partial_sum_bigint_guard_rejects_resolved_int8_arg() {
+        let aggref = aggref_with_oid(pg_sys::InvalidOid);
+
+        assert!(super::parallel_partial_sum_bigint_rejected(
+            &aggref,
+            AggOp::Sum,
+            pg_sys::INT8OID,
+        ));
+    }
+
+    #[test]
+    fn parallel_partial_sum_bigint_guard_allows_other_exact_i64_aggregates() {
+        let aggref = aggref_with_oid(pg_sys::InvalidOid);
+
+        assert!(!super::parallel_partial_sum_bigint_rejected(
+            &aggref,
+            AggOp::Max,
+            pg_sys::INT8OID,
+        ));
+    }
+
+    #[test]
+    fn parallel_partial_sum_bigint_guard_allows_other_sum_types() {
+        let sum_int4 = aggref_with_oid(pg_sys::Oid::from(pg_sys::F_SUM_INT4));
+        let sum_float8 = aggref_with_oid(pg_sys::Oid::from(pg_sys::F_SUM_FLOAT8));
+
+        assert!(!super::parallel_partial_sum_bigint_rejected(
+            &sum_int4,
+            AggOp::Sum,
+            pg_sys::INT4OID,
+        ));
+        assert!(!super::parallel_partial_sum_bigint_rejected(
+            &sum_float8,
+            AggOp::Sum,
+            pg_sys::FLOAT8OID,
+        ));
+    }
 }

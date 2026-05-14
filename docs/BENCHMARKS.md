@@ -11,7 +11,7 @@
 | CPU | TODO |
 | CPU Cores | TODO |
 | Memory | TODO |
-| GPU | TODO (Metal backend via AdaptiveCpp) |
+| GPU | TODO (AdaptiveCpp backend: Metal or CUDA) |
 
 ### PostgreSQL Configuration
 
@@ -70,17 +70,19 @@ All benchmarks use the `pg_accel_bench` harness (`pg_accel_bench/`). The harness
 ### Running Benchmarks
 
 ```bash
-# Run all workloads (30 iterations, 5 warmup, 100K rows)
-cargo run -p pg_accel_bench -- \
-  --connection "host=localhost port=28817 dbname=postgres" \
-  --iterations 30 --warmup 5 --rows 100000 --seed 42
+# Run all workloads at the standard row scales
+source scripts/pg_versions.sh
+PORT="$(pg_accel_pgrx_port_for_pg 17)"
+cargo run -p pg_accel_bench -- run \
+  --connection "host=localhost port=$PORT dbname=postgres" \
+  --iterations 30 --warmup 5 --seed 42
 
 # Run a specific workload
-cargo run -p pg_accel_bench -- \
+cargo run -p pg_accel_bench -- run \
   --connection "..." --workload spatial_join
 
 # Output formats: markdown (default), json, csv
-cargo run -p pg_accel_bench -- --connection "..." --format json
+cargo run -p pg_accel_bench -- run --connection "..." --format json
 ```
 
 ---
@@ -128,7 +130,7 @@ SELECT count(*)
 FROM bench_points p, bench_polygons g
 WHERE ST_Contains(g.geom, p.geom)
 ```
-**Strategy:** GpuSpatial — bbox pre-filter on GPU, CPU recheck for exact geometry.
+**Strategy:** GpuSpatial — bbox pre-filter on GPU with exact GPU geometry gates.
 Tests cross-table spatial join with point-in-polygon containment.
 
 #### proximity
@@ -195,7 +197,9 @@ SELECT * FROM bench_sort_ints ORDER BY x DESC LIMIT 1000
 Tests sort acceleration on 100K+ integer rows with LIMIT.
 
 #### topk_sort
-Similar to large_sort but with a composite sort key. Tests multi-key top-K merge.
+Similar to large_sort with a smaller bounded LIMIT. Tests single-key top-K
+selection; multi-key top-K remains planner-deferred until cascaded stable GPU
+sort support lands.
 
 #### spatial_sort
 Spatial distance-based ORDER BY — tests sort on computed spatial expressions.

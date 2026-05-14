@@ -78,8 +78,20 @@ static int run_size(size_t vc, size_t npts) {
     points[i * 2] = dist(rng);
     points[i * 2 + 1] = dist(rng);
   }
+  if (npts > 0) {
+    points[0] = 0.0f;
+    points[1] = 0.0f;
+  }
+  if (npts > 1) {
+    points[2] = 600.0f;
+    points[3] = 0.0f;
+  }
+  if (npts > 2) {
+    points[4] = 1201.0f;
+    points[5] = 1201.0f;
+  }
 
-  std::vector<int8_t> results(npts, 0);
+  std::vector<int8_t> results(npts, 99);
 
   // Warm-up
   {
@@ -91,10 +103,13 @@ static int run_size(size_t vc, size_t npts) {
                                   wresults.data());
   }
 
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
   auto t0 = clk::now();
   pgaccel_status st = pgaccel_point_in_polygon_bulk(points.data(), npts, bbox, ring.data(), vc,
                                                     nullptr, 0, results.data());
   auto t1 = clk::now();
+  const uint64_t after = pgaccel_gpu_exec_count();
   double ms = dur_ms(t1 - t0).count();
 
   // Cost proxy: npts * vc edge tests
@@ -118,8 +133,24 @@ static int run_size(size_t vc, size_t npts) {
     fprintf(stderr, "FAIL: status != OK\n");
     ++fails;
   }
+  if (npts > 0 && after != before + 1) {
+    fprintf(stderr, "FAIL: expected exactly one GPU PIP kernel launch\n");
+    ++fails;
+  }
   if (inside + outside + unc != npts) {
     fprintf(stderr, "FAIL: result count mismatch\n");
+    ++fails;
+  }
+  if (npts > 0 && results[0] != 1) {
+    fprintf(stderr, "FAIL: sentinel center point should be inside\n");
+    ++fails;
+  }
+  if (npts > 1 && results[1] != 1) {
+    fprintf(stderr, "FAIL: sentinel inner-radius point should be inside\n");
+    ++fails;
+  }
+  if (npts > 2 && results[2] != -1) {
+    fprintf(stderr, "FAIL: sentinel bbox-miss point should be outside\n");
     ++fails;
   }
   return fails;
@@ -130,6 +161,7 @@ int main(int argc, char** argv) {
 
   if (pgaccel_init() != PGACCEL_OK) {
     fprintf(stderr, "pgaccel_init failed\n");
+    return 1;
   }
 
   auto info = pgaccel_get_device_info();

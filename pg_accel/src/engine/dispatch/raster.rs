@@ -7,10 +7,9 @@ use crate::adapters::extractors::geometry::{
 };
 use crate::adapters::extractors::raster;
 use crate::engine::gucs;
-use crate::engine::registry;
 use crate::gpu;
 
-use super::DispatchResult;
+use super::{DispatchResult, RasterDispatchOp};
 
 // ---------------------------------------------------------------------------
 // Strategy: GpuRaster
@@ -56,28 +55,24 @@ pub unsafe fn dispatch_gpu_raster(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     _fn_info: &pgrx::pg_sys::FmgrInfo,
     _is_strict: bool,
-    fn_oid: pgrx::pg_sys::Oid,
+    op: RasterDispatchOp,
     qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
 ) -> DispatchResult {
-    let fn_name = registry::global_registry().lookup(fn_oid).map(|e| e.name);
-
-    // Most existing arms only consume `qual_datums[0]`; package as the
-    // legacy `(datum, is_null)` Option so the per-op helpers below stay
-    // ergonomic.
+    // Most arms only consume `qual_datums[0]`; package as a compact
+    // `(datum, is_null)` Option so the per-op helpers below stay ergonomic.
     let qual_datum: Option<(pgrx::pg_sys::Datum, bool)> =
         qual_datums.first().map(|&(d, n, _)| (d, n));
 
-    match fn_name {
-        Some("st_mapalgebra") => unsafe { dispatch_st_mapalgebra(batch) },
-        Some("st_clip") => unsafe { dispatch_st_clip(batch, qual_datum) },
-        Some("st_reclass") => unsafe { dispatch_st_reclass(batch, qual_datum) },
-        Some("st_summarystats") => unsafe { dispatch_st_summarystats(batch) },
-        Some("st_resample") => unsafe { dispatch_st_resample(batch, qual_datums) },
-        Some("st_slope") => unsafe { dispatch_st_slope(batch, qual_datums) },
-        Some("st_aspect") => unsafe { dispatch_st_aspect(batch, qual_datums) },
-        Some("st_hillshade") => unsafe { dispatch_st_hillshade(batch, qual_datums) },
-        Some("st_value") => unsafe { dispatch_st_value(batch, qual_datum) },
-        _ => DispatchResult::Deferred,
+    match op {
+        RasterDispatchOp::MapAlgebra => unsafe { dispatch_st_mapalgebra(batch, qual_datums) },
+        RasterDispatchOp::Clip => unsafe { dispatch_st_clip(batch, qual_datum) },
+        RasterDispatchOp::Reclass => unsafe { dispatch_st_reclass(batch, qual_datum) },
+        RasterDispatchOp::SummaryStats => unsafe { dispatch_st_summarystats(batch) },
+        RasterDispatchOp::Resample => unsafe { dispatch_st_resample(batch, qual_datums) },
+        RasterDispatchOp::Slope => unsafe { dispatch_st_slope(batch, qual_datums) },
+        RasterDispatchOp::Aspect => unsafe { dispatch_st_aspect(batch, qual_datums) },
+        RasterDispatchOp::Hillshade => unsafe { dispatch_st_hillshade(batch, qual_datums) },
+        RasterDispatchOp::Value => unsafe { dispatch_st_value(batch, qual_datum) },
     }
 }
 
@@ -106,76 +101,507 @@ unsafe fn raster_datum_as_bytes(datum: pgrx::pg_sys::Datum) -> &'static [u8] {
     unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }
 }
 
+const MAP_ALGEBRA_MAX_BANDS: usize = 8;
+
+#[derive(Clone)]
+struct MapAlgebraProgram {
+    instructions: Vec<gpu::PgaccelExprInst>,
+    source_bands: Vec<usize>,
+}
+
+fn load_band_inst(slot: usize) -> gpu::PgaccelExprInst {
+    gpu::PgaccelExprInst {
+        op: gpu::PgaccelOp::LoadBand,
+        // The C ABI field is a union. For LOAD_BAND, encode the i32 band
+        // index into the low bits of the f64-sized Rust mirror field.
+        arg: f64::from_bits(slot as u64),
+    }
+}
+
+fn load_const_inst(value: f64) -> gpu::PgaccelExprInst {
+    gpu::PgaccelExprInst {
+        op: gpu::PgaccelOp::LoadConst,
+        arg: value,
+    }
+}
+
+fn op_inst(op: gpu::PgaccelOp) -> gpu::PgaccelExprInst {
+    gpu::PgaccelExprInst { op, arg: 0.0 }
+}
+
+fn is_text_oid(typid: pgrx::pg_sys::Oid) -> bool {
+    typid == pgrx::pg_sys::TEXTOID || typid == pgrx::pg_sys::VARCHAROID
+}
+
+fn is_int_oid(typid: pgrx::pg_sys::Oid) -> bool {
+    typid == pgrx::pg_sys::INT2OID
+        || typid == pgrx::pg_sys::INT4OID
+        || typid == pgrx::pg_sys::INT8OID
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn datum_as_i32(datum: pgrx::pg_sys::Datum) -> i32 {
+    datum.value() as i32
+}
+
+unsafe fn datum_as_text(datum: pgrx::pg_sys::Datum) -> Option<&'static str> {
+    // SAFETY: caller guarantees datum is a valid varlena text Datum.
+    std::str::from_utf8(unsafe { raster_datum_as_bytes(datum) }).ok()
+}
+
+unsafe fn build_map_algebra_program(
+    qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
+) -> Option<MapAlgebraProgram> {
+    let mut band_args: Vec<usize> = Vec::new();
+    let mut expr_text: Option<String> = None;
+
+    for &(datum, is_null, typid) in qual_datums {
+        if is_null {
+            continue;
+        }
+        if is_text_oid(typid) {
+            // SAFETY: typid says this is a text-like varlena Datum.
+            let text = unsafe { datum_as_text(datum) }?;
+            if text.to_ascii_lowercase().contains("[rast") {
+                expr_text = Some(text.to_owned());
+                break;
+            }
+            continue;
+        }
+        if expr_text.is_none() && is_int_oid(typid) {
+            let band_1based = datum_as_i32(datum);
+            if band_1based <= 0 {
+                return None;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            band_args.push((band_1based as usize) - 1);
+        }
+    }
+
+    let expr_text = expr_text?;
+    MapAlgebraParser::new(&expr_text, &band_args).parse()
+}
+
+struct MapAlgebraParser<'a> {
+    input: &'a [u8],
+    pos: usize,
+    band_args: &'a [usize],
+    instructions: Vec<gpu::PgaccelExprInst>,
+    source_bands: Vec<usize>,
+    numbered_refs: Vec<usize>,
+}
+
+impl<'a> MapAlgebraParser<'a> {
+    fn new(input: &'a str, band_args: &'a [usize]) -> Self {
+        Self {
+            input: input.as_bytes(),
+            pos: 0,
+            band_args,
+            instructions: Vec::new(),
+            source_bands: Vec::new(),
+            numbered_refs: Vec::new(),
+        }
+    }
+
+    fn parse(mut self) -> Option<MapAlgebraProgram> {
+        self.parse_comparison()?;
+        self.skip_ws();
+        if self.pos != self.input.len() || self.instructions.is_empty() {
+            return None;
+        }
+
+        // The current scan carrier only provides one raster Datum plus
+        // constant args. Numbered refs are therefore safe only for same-raster
+        // multi-band expressions with distinct source band numbers.
+        let mut refs = self.numbered_refs.clone();
+        refs.sort_unstable();
+        refs.dedup();
+        if refs.len() > 1 {
+            let mut mapped = Vec::with_capacity(refs.len());
+            for n in &refs {
+                mapped.push(*self.band_args.get(n.saturating_sub(1))?);
+            }
+            let mut unique = mapped.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            if unique.len() != mapped.len() {
+                return None;
+            }
+        }
+
+        Some(MapAlgebraProgram {
+            instructions: self.instructions,
+            source_bands: self.source_bands,
+        })
+    }
+
+    fn parse_comparison(&mut self) -> Option<()> {
+        self.parse_add_sub()?;
+        loop {
+            self.skip_ws();
+            let op = if self.consume(b'>') {
+                Some(gpu::PgaccelOp::Gt)
+            } else if self.consume(b'<') {
+                Some(gpu::PgaccelOp::Lt)
+            } else if self.consume(b'=') {
+                let _ = self.consume(b'=');
+                Some(gpu::PgaccelOp::Eq)
+            } else {
+                None
+            };
+            let Some(op) = op else {
+                break;
+            };
+            self.parse_add_sub()?;
+            self.instructions.push(op_inst(op));
+        }
+        Some(())
+    }
+
+    fn parse_add_sub(&mut self) -> Option<()> {
+        self.parse_mul_div()?;
+        loop {
+            self.skip_ws();
+            let op = if self.consume(b'+') {
+                Some(gpu::PgaccelOp::Add)
+            } else if self.consume(b'-') {
+                Some(gpu::PgaccelOp::Sub)
+            } else {
+                None
+            };
+            let Some(op) = op else {
+                break;
+            };
+            self.parse_mul_div()?;
+            self.instructions.push(op_inst(op));
+        }
+        Some(())
+    }
+
+    fn parse_mul_div(&mut self) -> Option<()> {
+        self.parse_unary()?;
+        loop {
+            self.skip_ws();
+            let op = if self.consume(b'*') {
+                Some(gpu::PgaccelOp::Mul)
+            } else if self.consume(b'/') {
+                Some(gpu::PgaccelOp::Div)
+            } else {
+                None
+            };
+            let Some(op) = op else {
+                break;
+            };
+            self.parse_unary()?;
+            self.instructions.push(op_inst(op));
+        }
+        Some(())
+    }
+
+    fn parse_unary(&mut self) -> Option<()> {
+        self.skip_ws();
+        if self.consume(b'+') {
+            return self.parse_unary();
+        }
+        if self.consume(b'-') {
+            self.instructions.push(load_const_inst(0.0));
+            self.parse_unary()?;
+            self.instructions.push(op_inst(gpu::PgaccelOp::Sub));
+            return Some(());
+        }
+        self.parse_primary()
+    }
+
+    fn parse_primary(&mut self) -> Option<()> {
+        self.skip_ws();
+        if self.consume(b'(') {
+            self.parse_comparison()?;
+            self.skip_ws();
+            return self.consume(b')').then_some(());
+        }
+
+        if self.peek() == Some(b'[') {
+            let band_slot = self.parse_band_ref()?;
+            self.instructions.push(load_band_inst(band_slot));
+            return Some(());
+        }
+
+        if self.peek().is_some_and(is_number_start) {
+            let value = self.parse_number()?;
+            self.instructions.push(load_const_inst(value));
+            return Some(());
+        }
+
+        if self
+            .peek()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        {
+            return self.parse_function();
+        }
+
+        None
+    }
+
+    fn parse_function(&mut self) -> Option<()> {
+        let name = self.parse_identifier()?;
+        self.skip_ws();
+        if !self.consume(b'(') {
+            return None;
+        }
+
+        match name.as_str() {
+            "sqrt" => {
+                self.parse_comparison()?;
+                self.skip_ws();
+                if !self.consume(b')') {
+                    return None;
+                }
+                self.instructions.push(op_inst(gpu::PgaccelOp::Sqrt));
+            }
+            "abs" => {
+                self.parse_comparison()?;
+                self.skip_ws();
+                if !self.consume(b')') {
+                    return None;
+                }
+                self.instructions.push(op_inst(gpu::PgaccelOp::Abs));
+            }
+            "log" | "ln" => {
+                self.parse_comparison()?;
+                self.skip_ws();
+                if !self.consume(b')') {
+                    return None;
+                }
+                self.instructions.push(op_inst(gpu::PgaccelOp::Log));
+            }
+            "pow" | "power" => {
+                self.parse_comparison()?;
+                self.skip_ws();
+                if !self.consume(b',') {
+                    return None;
+                }
+                self.parse_comparison()?;
+                self.skip_ws();
+                if !self.consume(b')') {
+                    return None;
+                }
+                self.instructions.push(op_inst(gpu::PgaccelOp::Pow));
+            }
+            _ => return None,
+        }
+
+        Some(())
+    }
+
+    fn parse_band_ref(&mut self) -> Option<usize> {
+        if !self.consume(b'[') {
+            return None;
+        }
+        let start = self.pos;
+        while self.pos < self.input.len() && self.input[self.pos] != b']' {
+            self.pos += 1;
+        }
+        if self.pos >= self.input.len() {
+            return None;
+        }
+        let inner = std::str::from_utf8(&self.input[start..self.pos])
+            .ok()?
+            .trim()
+            .to_ascii_lowercase();
+        self.pos += 1; // closing bracket
+
+        let label = inner.split('.').next().unwrap_or("").trim();
+        let actual_band = if label == "rast" {
+            self.band_args.first().copied().unwrap_or(0)
+        } else if let Some(n_str) = label.strip_prefix("rast") {
+            let n: usize = n_str.parse().ok()?;
+            if n == 0 {
+                return None;
+            }
+            self.numbered_refs.push(n);
+            *self.band_args.get(n - 1)?
+        } else {
+            return None;
+        };
+
+        if let Some(slot) = self.source_bands.iter().position(|&b| b == actual_band) {
+            return Some(slot);
+        }
+        if self.source_bands.len() >= MAP_ALGEBRA_MAX_BANDS {
+            return None;
+        }
+        self.source_bands.push(actual_band);
+        Some(self.source_bands.len() - 1)
+    }
+
+    fn parse_number(&mut self) -> Option<f64> {
+        let start = self.pos;
+        let mut saw_digit = false;
+
+        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            saw_digit = true;
+            self.pos += 1;
+        }
+        if self.consume(b'.') {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                saw_digit = true;
+                self.pos += 1;
+            }
+        }
+        if !saw_digit {
+            return None;
+        }
+        if self.peek().is_some_and(|b| b == b'e' || b == b'E') {
+            let exp_pos = self.pos;
+            self.pos += 1;
+            let _ = self.consume(b'+') || self.consume(b'-');
+            let exp_start = self.pos;
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            if self.pos == exp_start {
+                self.pos = exp_pos;
+            }
+        }
+
+        std::str::from_utf8(&self.input[start..self.pos])
+            .ok()?
+            .parse()
+            .ok()
+    }
+
+    fn parse_identifier(&mut self) -> Option<String> {
+        let start = self.pos;
+        while self
+            .peek()
+            .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return None;
+        }
+        Some(
+            std::str::from_utf8(&self.input[start..self.pos])
+                .ok()?
+                .to_ascii_lowercase(),
+        )
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(|b| b.is_ascii_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.get(self.pos).copied()
+    }
+
+    fn consume(&mut self, b: u8) -> bool {
+        if self.peek() == Some(b) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn is_number_start(b: u8) -> bool {
+    b.is_ascii_digit() || b == b'.'
+}
+
 /// `st_mapalgebra` dispatch: per-row map-algebra over band 0 with an
-/// identity LOAD_BAND program. Same shape as the previous version of this
-/// file (preserved while the new arms are added below).
+/// expression parsed from the call's text argument. Unsupported expression
+/// grammar, non-constant expression text, offline bands, or ambiguous
+/// multi-raster shapes return [`DispatchResult::Deferred`] so selected
+/// pg_accel plans never silently become identity/no-op raster outputs.
 ///
 /// # Safety
 ///
 /// Must be called on the main backend thread.
-unsafe fn dispatch_st_mapalgebra(batch: &[(pgrx::pg_sys::Datum, bool)]) -> DispatchResult {
-    let mut raster_data: Vec<(raster::RasterHeader, Vec<f64>)> = Vec::new();
-    for &(datum, is_null) in batch {
-        if is_null {
-            continue;
-        }
-        // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        if let Some(header) = raster::parse_header(bytes)
-            && let Some(pixels) = raster::extract_pixels_f64(bytes, 0)
-        {
-            raster_data.push((header, pixels));
-        }
-    }
-
-    if raster_data.is_empty() || raster_data.len() < batch.len() / 2 {
+unsafe fn dispatch_st_mapalgebra(
+    batch: &[(pgrx::pg_sys::Datum, bool)],
+    qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
+) -> DispatchResult {
+    // SAFETY: map-algebra constants are backend Datums captured from the
+    // planner/executor call shape.
+    let Some(program) = (unsafe { build_map_algebra_program(qual_datums) }) else {
+        pgrx::debug1!(
+            "pg_accel: st_mapalgebra has no supported constant expression/band shape; deferring"
+        );
+        return DispatchResult::Deferred;
+    };
+    if program.source_bands.is_empty() || program.source_bands.len() > MAP_ALGEBRA_MAX_BANDS {
+        pgrx::debug1!(
+            "pg_accel: st_mapalgebra source band count {} unsupported; deferring",
+            program.source_bands.len()
+        );
         return DispatchResult::Deferred;
     }
 
     let timeout_ms = gucs::kernel_timeout_ms();
     let start = std::time::Instant::now();
 
+    let mut instructions = program.instructions.clone();
+    let expr = gpu::PgaccelExpr {
+        instructions: instructions.as_mut_ptr(),
+        inst_count: instructions.len(),
+        band_count: program.source_bands.len(),
+    };
+
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
-    let mut raster_idx = 0usize;
 
     for &(datum, is_null) in batch {
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
-        if raster_idx >= raster_data.len() {
-            return DispatchResult::Deferred;
-        }
-        let (ref header, ref pixels) = raster_data[raster_idx];
-        raster_idx += 1;
 
+        // SAFETY: main backend thread.
+        let bytes = unsafe { raster_datum_as_bytes(datum) };
+        let Some(header) = raster::parse_header(bytes) else {
+            pgrx::debug1!("pg_accel: st_mapalgebra raster header parse failed; deferring");
+            return DispatchResult::Deferred;
+        };
         let pixel_count = header.width as usize * header.height as usize;
         if pixel_count == 0 {
             results.push((datum, false));
             continue;
         }
 
-        let mut inst = gpu::PgaccelExprInst {
-            op: gpu::PgaccelOp::LoadBand,
-            arg: 0.0,
-        };
-        let expr = gpu::PgaccelExpr {
-            instructions: std::ptr::addr_of_mut!(inst),
-            inst_count: 1,
-            band_count: 1,
-        };
+        let mut band_buffers: Vec<Vec<f32>> = Vec::with_capacity(program.source_bands.len());
+        for &band_index in &program.source_bands {
+            let Some(pixels_f64) = raster::extract_pixels_f64(bytes, band_index) else {
+                pgrx::debug1!(
+                    "pg_accel: st_mapalgebra band {} unavailable/offline; deferring",
+                    band_index + 1
+                );
+                return DispatchResult::Deferred;
+            };
+            if pixels_f64.len() < pixel_count {
+                pgrx::debug1!(
+                    "pg_accel: st_mapalgebra band {} has {} pixels, expected {}; deferring",
+                    band_index + 1,
+                    pixels_f64.len(),
+                    pixel_count
+                );
+                return DispatchResult::Deferred;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            band_buffers.push(pixels_f64.iter().map(|&v| v as f32).collect());
+        }
 
-        let f32_pixels: Vec<f32> = pixels.iter().map(|&v| v as f32).collect();
-        let band_ptr: *const std::ffi::c_void = f32_pixels.as_ptr().cast();
-        let band_ptrs = [band_ptr];
-        let pixel_type = gpu::PgaccelPixelType::Float32 as i32;
-        let mut output_buf = vec![0u8; pixel_count * 4];
+        let band_ptrs: Vec<*const std::ffi::c_void> =
+            band_buffers.iter().map(|b| b.as_ptr().cast()).collect();
+        let mut output_buf = vec![0u8; pixel_count * std::mem::size_of::<f32>()];
         let mut nodata_mask = vec![0u8; pixel_count];
 
         let gpu_ok = gpu::map_algebra(
             &band_ptrs,
             pixel_count,
-            pixel_type,
+            gpu::PgaccelPixelType::Float32 as i32,
             &expr,
             &mut output_buf,
             &mut nodata_mask,
@@ -190,36 +616,20 @@ unsafe fn dispatch_st_mapalgebra(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispa
         let output_f32: &[f32] =
             unsafe { std::slice::from_raw_parts(output_buf.as_ptr().cast(), pixel_count) };
 
+        let Some(new_wkb) = raster::patch_band0_pixels(bytes, output_f32) else {
+            pgrx::error!(
+                "pg_accel: raster map_algebra could not patch output raster; refusing original-raster passthrough"
+            );
+        };
         // SAFETY: main backend thread.
-        let original_wkb = unsafe { raster_datum_as_bytes(datum) };
-
-        match raster::patch_band0_pixels(original_wkb, output_f32) {
-            Some(new_wkb) => {
-                let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
-                // SAFETY: palloc on main backend thread.
-                let new_varlena = unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
-                // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
-                unsafe {
-                    pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);
-                    let data_dest = pgrx::vardata_any(new_varlena.cast()).cast::<u8>();
-                    std::ptr::copy_nonoverlapping(
-                        new_wkb.as_ptr(),
-                        data_dest.cast_mut(),
-                        new_wkb.len(),
-                    );
-                }
-                results.push((pgrx::pg_sys::Datum::from(new_varlena), false));
-            }
-            None => {
-                results.push((datum, false));
-            }
-        }
+        let datum_out = unsafe { wkb_to_varlena_datum(&new_wkb) };
+        results.push((datum_out, false));
     }
 
     let elapsed_ms = start.elapsed().as_millis() as i32;
     if timeout_ms > 0 && elapsed_ms > timeout_ms {
         pgrx::warning!(
-            "pg_accel: raster pipeline took {}ms (timeout {}ms)",
+            "pg_accel: raster map_algebra pipeline took {}ms (timeout {}ms)",
             elapsed_ms,
             timeout_ms,
         );

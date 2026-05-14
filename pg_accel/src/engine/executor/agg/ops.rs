@@ -58,22 +58,23 @@ impl AggOp {
     }
 
     #[must_use]
-    pub const fn from_i32(v: i32) -> Self {
+    pub const fn from_i32(v: i32) -> Option<Self> {
         match v {
-            0 => Self::Sum,
-            1 => Self::Avg,
-            2 => Self::Min,
-            3 => Self::Max,
-            4 => Self::Count,
-            6 => Self::StddevSamp,
-            7 => Self::StddevPop,
-            8 => Self::VarSamp,
-            9 => Self::VarPop,
-            10 => Self::BitAnd,
-            11 => Self::BitOr,
-            12 => Self::BoolAnd,
-            13 => Self::BoolOr,
-            _ => Self::Passthrough,
+            0 => Some(Self::Sum),
+            1 => Some(Self::Avg),
+            2 => Some(Self::Min),
+            3 => Some(Self::Max),
+            4 => Some(Self::Count),
+            5 => Some(Self::Passthrough),
+            6 => Some(Self::StddevSamp),
+            7 => Some(Self::StddevPop),
+            8 => Some(Self::VarSamp),
+            9 => Some(Self::VarPop),
+            10 => Some(Self::BitAnd),
+            11 => Some(Self::BitOr),
+            12 => Some(Self::BoolAnd),
+            13 => Some(Self::BoolOr),
+            _ => None,
         }
     }
 }

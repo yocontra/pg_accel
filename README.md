@@ -16,12 +16,26 @@ version, then enable the extension as shown below.
 ### From source
 
 ```bash
-# Requires Rust, pgrx 0.17, Homebrew PostgreSQL 17, and AdaptiveCpp/SYCL.
-just setup-brew
-just setup-gpu
-cargo pgrx init --pg17 $(brew --prefix postgresql@17)/bin/pg_config
-cargo pgrx install --features pg17
+# Requires Rust, CMake, a C/C++ toolchain, and curl.
+just setup-system-deps
+just setup-tools
+just setup-pg-source 17
+ACPP_BACKEND=cuda just setup-gpu      # Linux/NVIDIA
+# or: ACPP_BACKEND=metal just setup-gpu # Apple Silicon/macOS
+just setup-pgrx
+cargo pgrx install --no-default-features --features pg17
 ```
+
+PostgreSQL is built from official source tarballs into `.pgaccel/postgres`.
+The default setup builds PG17.10; PG18.4 is configured for explicit ABI work.
+Override versions with
+`PG_ACCEL_PG17_VERSION=17.10`, `PG_ACCEL_PG18_VERSION=18.4`, or pass an exact
+version to `just pg-build 17.10`. PG17 is the repo default today. PG18 has a
+pgrx feature but still needs pg_accel ABI cleanup for PostgreSQL 18 tuple
+descriptor and planner changes; PG19 stays pending until pgrx publishes a real
+`pg19` feature and PostgreSQL source releases are available. Preview majors are
+skipped by default in extension tasks; use `PG_ACCEL_ENABLE_PREVIEW=1` when
+working on those ports.
 
 After installation, add to `postgresql.conf`:
 
@@ -74,15 +88,15 @@ GROUP BY b.name;
 
 | Requirement | Version | Notes |
 |---|---|---|
-| PostgreSQL | 15, 16, 17, or 18 | Built with pgrx 0.17 |
+| PostgreSQL | source-built 17, 18; 19 preview | PG19 activates when pgrx and PostgreSQL source releases exist |
 | Rust | stable | For building from source |
 | cmake | 3.20+ | For GPU kernel build |
-| Apple Silicon | M1+ | Required to execute the Metal GPU backend |
+| Apple Silicon or NVIDIA CUDA | M1+ for Metal, NVIDIA GPU for CUDA | Runtime GPU backend |
 | AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` | Required for source/package builds |
 
 Source and package builds compile the SYCL kernel library unconditionally.
-Runtime GPU acceleration requires Apple Silicon (M1+) with the AdaptiveCpp
-Metal backend.
+Runtime GPU acceleration requires an AdaptiveCpp backend visible to the native
+PostgreSQL process: Metal on macOS or CUDA on Linux/NVIDIA.
 
 ## Benchmarks
 
@@ -93,8 +107,8 @@ deployments use parallel query.
 
 **Hardware:** Apple M2 Max (12 CPU cores, 38 GPU cores, 64 GB unified memory)
 **PostgreSQL:** 17.9 with `max_parallel_workers_per_gather = 2`
-**Suite:** 129 workloads × 5 row scales (1K, 10K, 100K, 1M, 10M) = 643 measurements (2 crashed scales excluded)
-**Methodology:** 10 iterations + 3 warmup per measurement, randomized
+**Suite:** fixed workload matrix across four reportable row scales (10K, 100K, 1M, 10M)
+**Methodology:** 10 iterations + 5 warmup per measurement, randomized
 accel/baseline ordering, fresh connection per mode with `DISCARD ALL`,
 deterministic seed (42), paired t-test (p < 0.05)
 
@@ -188,8 +202,8 @@ just bench                        # default: all scales, 10 iterations
 
 **Correctness**: Every accelerated query is verified against PostgreSQL's own
 results (accel ON vs OFF comparison). Spatial predicates use the three-result
-model (TRUE/FALSE/UNCERTAIN) with automatic CPU recheck — no query ever
-returns wrong results.
+model (TRUE/FALSE/UNCERTAIN); uncertain rows make the accelerator path decline
+or error rather than running a CPU-backed pg_accel plan.
 
 ## What it does
 
@@ -197,9 +211,10 @@ pg_accel intercepts queries that use supported SQL functions (spatial predicates
 H3 cell operations, raster algebra, sorts, aggregates, hash joins, grouped
 aggregation, window functions, and WHERE clause expressions) and re-executes
 them in batches rather than one row at a time, offloading the heavy compute to
-GPU kernels via Metal on Apple Silicon. The extension installs as a standard PostgreSQL
-Custom Scan Provider -- it does not replace the planner or executor, it extends
-them. Queries that do not benefit from batching are left untouched.
+GPU kernels through AdaptiveCpp/SYCL. The same kernel layer targets Metal on
+Apple Silicon and CUDA on Linux/NVIDIA. The extension installs as a standard
+PostgreSQL Custom Scan Provider -- it does not replace the planner or executor,
+it extends them. Queries that do not benefit from batching are left untouched.
 
 ## How it works
 
@@ -209,8 +224,9 @@ them. Queries that do not benefit from batching are left untouched.
 
 - **Custom Scan Provider.** pg_accel hooks into the PostgreSQL planner via the
   Custom Scan interface. It injects alternative scan, join, aggregate, and sort
-  paths when the cost model predicts a net speedup. The standard executor path
-  is always available as a fallback.
+  paths when the cost model predicts a net speedup. Unsupported or losing
+  shapes are left with PostgreSQL during planning; selected GPU plans do not
+  run hidden CPU fallbacks inside pg_accel.
 
 - **Three-result GPU model.** GPU kernels return `true`, `false`, or `uncertain`
   for each row. Rows marked `uncertain` (due to floating-point edge cases or
@@ -223,9 +239,9 @@ them. Queries that do not benefit from batching are left untouched.
 
 | Category | Strategy | Functions |
 |---|---|---|
-| **PostGIS spatial predicates/functions** | GpuSpatial | Registered PostGIS functions listed below — three-layer pipeline (bbox filter, GPU kernel, CPU recheck) |
+| **PostGIS spatial predicates/functions** | GpuSpatial | Currently quarantined from normal registration until planner shape gates can prove exact GPU-only semantics |
 | **H3 cell operations** | GpuH3 | `h3_latlng_to_cell`, `h3_cell_to_parent`, `h3_grid_distance`, `h3_get_resolution` — bulk integer/trig math on GPU |
-| **Sort** | GpuSort | GPU bitonic sort with NaN-safe PG semantics, key-index separation (single numeric key: int4, float4, float8) |
+| **Sort** | GpuSort | GPU key-value sort with NaN-safe PG semantics, key-index separation (single numeric key: int4, int8, float4, float8) |
 | **Aggregates** | GpuReduce | SUM, MIN, MAX, COUNT via GPU reduction kernels |
 | **Grouped aggregation** | GpuHashAgg | `GROUP BY` with SUM, MIN, MAX, COUNT, AVG — GPU hash table with per-group accumulators |
 | **Hash join** | GpuHashJoin | Equi-join (`ON a.id = b.id`) with open-addressing hash table — int4, int8, float8 keys |
@@ -235,37 +251,30 @@ them. Queries that do not benefit from batching are left untouched.
 
 ### PostGIS GpuSpatial matrix
 
-The PostGIS adapter currently registers these functions for GpuSpatial. Rows
-the GPU cannot classify exactly are marked `UNCERTAIN` and rechecked by
-PostGIS on the CPU; shapes outside the listed fast path are not claimed as
-definite GPU answers.
+The PostGIS adapter currently exposes an empty normal-planning allowlist. The
+kernel library still contains spatial kernels, but unsupported or uncertain
+geometry shapes must decline before plan selection or error inside the GPU node;
+pg_accel does not run PostGIS predicate evaluation under an accelerator plan.
 
-| Function | Current GPU coverage |
+| Function | Current GPU exposure |
 |---|---|
-| `ST_Intersects` | Point x polygon, line x line, and point x point fast paths; other geometry pairs go to `UNCERTAIN` recheck. |
-| `ST_Contains` | Polygon x point fast path; other pairs go to `UNCERTAIN` recheck. |
-| `ST_Within` | Point x polygon via the contains kernel with arguments swapped; other pairs go to `UNCERTAIN` recheck. |
-| `ST_DWithin` | Point x point fp32 distance fast path; non-point pairs go to `UNCERTAIN` recheck. |
-| `ST_Disjoint` | Implemented as the definite-result inverse of `ST_Intersects`; uncertain rows stay uncertain for PostGIS recheck. |
-| `ST_Covers` / `ST_CoveredBy` | Reuse contains/within partitioning; boundary-sensitive rows go to `UNCERTAIN` recheck so PostGIS applies exact covers semantics. |
-| `ST_Equals`, `ST_Touches`, `ST_Crosses`, `ST_Overlaps` | Dedicated kernels provide definite shortcut results where supported and route full topology cases to `UNCERTAIN` recheck. |
-| `ST_Distance` | Point x point fp32 distance fast path; other pairs defer to PostgreSQL/PostGIS. |
-| `ST_Area` | Single-ring polygon geometry via shoelace kernel; unsupported rows defer to PostgreSQL/PostGIS. |
-| `ST_Length` | LineString length and polygon perimeter fast paths; unsupported rows defer to PostgreSQL/PostGIS. |
+| `ST_Intersects`, `ST_Contains`, `ST_Within`, `ST_DWithin`, `ST_Distance`, `ST_Area`, `ST_Length`, topology predicates | Quarantined from normal registration until planner-time shape gates prove exact GPU-only coverage. |
 
 ### In development
 
 | Category | Status |
 |---|---|
 | **Projections (GpuExpr)** | Expression compiler can handle projections but not yet wired into SELECT-list evaluation. |
-| **Multi-key sort** | GPU sort supports single numeric key only. Multi-key and text sort deferred to PostgreSQL. |
+| **Multi-key sort** | GPU sort supports single numeric key only. Multi-key and text sort are planner-deferred to PostgreSQL. |
 | **Fused operators** | Pipeline fusion (scan→filter→agg in one kernel launch) — planned. |
 
 ## Current limitations
 
-- **Sort**: Single numeric key only (int4, float4, float8). Multi-key and text sort deferred to PostgreSQL.
-- **GPU platform**: Apple Silicon (M1+) via Metal only. No GPU = no acceleration (queries pass through to PG untouched).
-- **Spatial GPU**: Only the registered PostGIS functions in the matrix above are considered for GpuSpatial. Unsupported geometry shapes are either marked `UNCERTAIN` for PostGIS recheck or deferred to PostgreSQL/PostGIS; unregistered PostGIS functions are not accelerated.
+- **Sort**: Single numeric key only (int4, int8, float4, float8). Multi-key, text, and full-output heap sorts are planner-deferred to PostgreSQL until real GPU dispatch wins end-to-end.
+- **GPU platform**: Native PostgreSQL process with an AdaptiveCpp backend: Metal
+  on Apple Silicon or CUDA on Linux/NVIDIA. No GPU = no acceleration (queries
+  pass through to PG untouched).
+- **Spatial GPU**: Normal planning currently leaves PostGIS vector predicates and functions to PostgreSQL/PostGIS unless a future shape gate proves exact GPU-only coverage. Uncertain GPU classifications are rejected, not rechecked on CPU inside pg_accel.
 - **Unsupported expression types**: Generic GpuExpr, PreAgg filters/inputs, aggregate grouping, windows, and joins only accept their wired scalar/key types. JSON/JSONB, ARRAY, INTERVAL, DOMAIN, COMPOSITE, and user-defined custom types are planner-policy rejects, not partial GPU support.
 - **Hash join**: Equi-join only (single key: int4, int8, float8). Multi-key and non-equi joins use PostgreSQL.
 - **Grouped aggregation**: Single numeric group key. Multi-key GROUP BY deferred to PostgreSQL.
@@ -273,20 +282,24 @@ definite GPU answers.
 
 ## GPU acceleration
 
-GPU acceleration requires Apple Silicon (M1 or later) with the Metal backend
-via the `yocontra/AdaptiveCpp` `fork-safe-metal` branch. `just setup-gpu`
-also verifies the soft-fp64 source checkout used by that branch is pinned to
-`v1.3.0`. To set up:
+GPU acceleration requires a native AdaptiveCpp backend visible to PostgreSQL:
+Metal on Apple Silicon or CUDA on Linux/NVIDIA. `just setup-gpu` builds the
+`yocontra/AdaptiveCpp` `fork-safe-metal` branch into `.pgaccel/acpp/<backend>`
+and pins the soft-fp64 source checkout to `v1.3.0`.
 
 ```bash
-# Install dependencies and build AdaptiveCpp
-just setup-gpu
+# Linux/NVIDIA
+ACPP_BACKEND=cuda just setup-gpu
+
+# Apple Silicon/macOS
+ACPP_BACKEND=metal just setup-gpu-metal-headers
+ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu
 
 # Verify GPU is available
-~/local/bin/acpp-info
+./.pgaccel/acpp/current/bin/acpp-info
 
-# Rebuild pg_accel
-cargo pgrx install --features pg17
+# Rebuild pg_accel with the current buildable PostgreSQL ABI
+cargo pgrx install --no-default-features --features pg17
 ```
 
 Without a usable GPU at runtime, pg_accel's planner hook is a no-op — all
@@ -302,10 +315,9 @@ All parameters live under the `pg_accel.*` namespace.
 | `pg_accel.min_batch_size` | int | `65536` | Minimum estimated rows before batched GPU execution is considered. |
 | `pg_accel.gpu_enabled` | bool | `on` | Enable GPU kernel dispatch. Set to `off` to disable all acceleration. |
 | `pg_accel.cost_multiplier` | float | `1.0` | Global multiplier for pg_accel cost estimates. >1.0 = more conservative, <1.0 = more aggressive. Range 0.1-10.0. |
-| `pg_accel.kernel_timeout_ms` | int | `5000` | Timeout (ms) for a single GPU kernel. Exceeded kernels fall back to CPU recheck. |
+| `pg_accel.kernel_timeout_ms` | int | `5000` | Timeout (ms) for a single GPU kernel. Exceeded kernels raise an error instead of running a CPU-backed pg_accel path. |
 | `pg_accel.log_level` | enum | `notice` | Verbosity: `debug`, `info`, `notice`, `warning`, `error`. |
 | `pg_accel.assert_dispatch` | bool | `off` | Benchmark guard that warns when a large-enough query was not routed to a GPU path. |
-| `pg_accel.preagg_parallel_safe` | bool | `on` | Enable parallel-safe PreAgg execution through an attached child plan. |
 | `pg_accel.fp64_enabled` | bool | `on` | Kill switch for fp64 GPU dispatch. When `off`, fp64-dependent paths are not injected. |
 | `pg_accel.soft_fp64_cost_multiplier` | float | `32.0` | Extra planner cost multiplier for fp64 work on devices without native fp64. Range 1.0-64.0. |
 
@@ -351,9 +363,9 @@ platform scope and safety model:
 
 - **Platform**: PG-Strom is CUDA-only (NVIDIA). pg_accel uses AdaptiveCpp/SYCL
   to target Metal (Apple Silicon), CUDA, ROCm, and Level Zero from one codebase.
-- **Safety**: pg_accel's three-result model (TRUE/FALSE/UNCERTAIN) with automatic
-  CPU recheck guarantees correctness even for fp32 edge cases, integer overflow,
-  and division by zero. No query ever returns wrong results.
+- **Safety**: pg_accel's three-result model (TRUE/FALSE/UNCERTAIN) makes
+  uncertain fp32 edge cases, integer overflow, and division by zero decline or
+  error instead of silently returning wrong results.
 - **Zero overhead**: pg_accel's planner exits in <50ns for non-accelerable queries.
   The cost model requires GPU to estimate 30% cheaper before being chosen.
 - **Scope**: pg_accel accelerates spatial predicates, H3 cell ops, sorts,
@@ -362,8 +374,9 @@ platform scope and safety model:
 
 ### Which PostgreSQL versions are supported?
 
-PostgreSQL 15, 16, 17, and 18. The extension is built with pgrx 0.17, which
-handles version-specific FFI differences.
+PostgreSQL 17 is buildable today and is the default target for this repo.
+PostgreSQL 18 is tracked as ABI cleanup work, and PostgreSQL 19 is pending pgrx
+`pg19` support. There are no supported code paths for older PostgreSQL majors.
 
 ### How do I turn it off?
 

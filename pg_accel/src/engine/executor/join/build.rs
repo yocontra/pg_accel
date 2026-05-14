@@ -25,6 +25,15 @@ impl JoinExecState {
         self.hash_outer_attno = outer_attno;
         self.hash_inner_attno = inner_attno;
         self.hash_key_type = key_type;
+        tracing::debug!(
+            target: "pg_accel::hash_join",
+            phase = "context",
+            outer_attno,
+            inner_attno,
+            key_type = ?key_type,
+            worker_count = 1u32,
+            "exec.hash_join_context"
+        );
     }
 
     /// Build the scan-slot → child-plan attribute mapping from
@@ -152,5 +161,13 @@ impl JoinExecState {
                 };
             }
         }
+        tracing::debug!(
+            target: "pg_accel::hash_join",
+            phase = "slots",
+            tlist_map_len = self.tlist_map.len(),
+            has_outer_slot = !self.hash_outer_slot.is_null(),
+            has_inner_slot = !self.hash_inner_slot.is_null(),
+            "exec.hash_join_slots"
+        );
     }
 }

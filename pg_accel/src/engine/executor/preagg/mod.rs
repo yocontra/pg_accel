@@ -4,10 +4,10 @@
 //! separate join + aggregate Custom Scan nodes:
 //!
 //! 1. **Dimension materialization** — pre-scans each dimension table,
-//!    builds CPU hash tables keyed by join key.
-//! 2. **Fused fact scan** — walks the fact table heap directly, probing
-//!    dimension hash tables inline, applying all filters, and accumulating
-//!    aggregates without any intermediate tuple materialization.
+//!    builds host-side hash tables keyed by join key.
+//! 2. **Fused fact scan** — pulls tuples from the attached fact child plan,
+//!    probing dimension hash tables inline, applying all filters, and
+//!    accumulating aggregates without intermediate tuple materialization.
 //! 3. **Result emission** — emits only the final aggregate/grouped rows.
 //!
 //! This eliminates all per-row yield overhead between join and aggregate
@@ -30,9 +30,7 @@ use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
 pub use partial::{DimColumn, DimFilter, DimHashTable};
 
 use finalize::encode_agg_result;
-use partial::{
-    AggAccum, fused_eval_cmp, heap_read_f64, heap_read_i64, slot_read_f64, slot_read_i64,
-};
+use partial::{AggAccum, slot_read_f64, slot_read_i64};
 use partial_emit::PreaggPartialState;
 
 // ---------------------------------------------------------------------------
@@ -119,20 +117,8 @@ pub struct PreAggExecState {
     group_key_order: Vec<Vec<i64>>,
 
     // --- Fact table scan ---
-    /// Direct heap scan descriptor (set during begin).
-    pub scan_desc: pg_sys::TableScanDesc,
-    /// Relation opened via `table_open` during begin (for OID-based open).
-    /// When non-null, `end_custom_scan` must call `table_close(rel,
-    /// AccessShareLock)`. When null, the relation was acquired via
-    /// `ExecOpenScanRelation` and `ExecCloseScanRelation` handles cleanup
-    /// (no explicit close needed here).
-    pub scan_rel: pg_sys::Relation,
     /// Fact-side child `PlanState` provided by the standard Custom Scan
-    /// callback chain when `pg_accel.preagg_parallel_safe` is on (B5b). When
-    /// non-null, the executor consumes fact rows via `ExecProcNode(child)`
-    /// instead of opening the heap directly via `table_open` — a prerequisite
-    /// for parallel-safe execution under PG's Gather, where each worker must
-    /// receive its own scan slice rather than re-scanning the whole heap.
+    /// callback chain. The executor consumes fact rows via `ExecProcNode(child)`.
     pub fact_child: *mut pg_sys::PlanState,
     /// Map from fact-relation `attno` (1-based) to the corresponding
     /// 1-based slot position in `fact_child`'s output tuple. Built lazily on
@@ -186,8 +172,6 @@ impl PreAggExecState {
             plain_accums,
             grouped_accums: HashMap::new(),
             group_key_order: Vec::new(),
-            scan_desc: std::ptr::null_mut(),
-            scan_rel: std::ptr::null_mut(),
             fact_child: std::ptr::null_mut(),
             fact_slot_attno_map: HashMap::new(),
             scan_done: false,
@@ -205,16 +189,6 @@ impl PreAggExecState {
     /// tuples instead of final aggregate Datums.
     pub fn enable_partial(&mut self, spec: &PartialAggSpec) {
         self.partial = Some(PreaggPartialState::new(spec));
-    }
-
-    /// Set the heap scan descriptor for the fact table.
-    pub fn set_scan_desc(&mut self, sd: pg_sys::TableScanDesc) {
-        self.scan_desc = sd;
-    }
-
-    /// Set the Relation handle opened via `table_open` (caller owns close).
-    pub fn set_scan_rel(&mut self, rel: pg_sys::Relation) {
-        self.scan_rel = rel;
     }
 
     /// Translate a relation-style 1-based attno to a 1-based slot position
@@ -391,7 +365,7 @@ impl PreAggExecState {
     /// # Safety
     ///
     /// Must be called on the main backend thread. `result_slot` must be valid.
-    /// `self.scan_desc` must have been set via `set_scan_desc`.
+    /// `self.fact_child` must point to the attached fact-side child plan.
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     pub unsafe fn next(
         &mut self,
@@ -400,7 +374,7 @@ impl PreAggExecState {
         // If we haven't finished scanning, do the full scan+probe+agg pass.
         if !self.scan_done {
             let start = std::time::Instant::now();
-            // SAFETY: scan_desc and result_slot are valid per caller contract.
+            // SAFETY: fact child and result slot are valid per caller contract.
             unsafe { self.scan_and_accumulate(result_slot) };
             self.scan_done = true;
             self.dispatch_time_us = start.elapsed().as_micros() as u64;
@@ -438,243 +412,23 @@ impl PreAggExecState {
         }
     }
 
-    /// The core pipeline: scan fact table, probe dimensions, accumulate.
-    ///
-    /// Dispatches to one of two implementations:
-    /// - Slot-based via `ExecProcNode` when [`set_fact_child`] has installed
-    ///   a fact-side child PlanState (B5b parallel-safe path). This is the
-    ///   default path under `pg_accel.preagg_parallel_safe = on`.
-    /// - Heap-direct via `heap_getnext` against `scan_desc` (legacy serial
-    ///   path, used when no child is attached or the planner ran with the
-    ///   parallel-safe flag off).
+    /// The core pipeline: scan fact child, probe dimensions, accumulate.
     ///
     /// # Safety
     ///
-    /// Either `self.scan_desc` must be a valid `TableScanDesc` or
     /// `self.fact_child` must be a valid `PlanState`. Main backend thread.
     unsafe fn scan_and_accumulate(&mut self, result_slot: *mut pg_sys::TupleTableSlot) {
         if self.fact_child.is_null() {
-            // SAFETY: heap path checks scan_desc internally; main thread.
-            unsafe { self.scan_and_accumulate_heap(result_slot) };
-        } else {
-            // SAFETY: fact_child non-null verified; main backend thread per
-            // Custom Scan exec contract.
-            unsafe { self.scan_and_accumulate_slot(result_slot) };
+            pgrx::error!(
+                "pg_accel: PreAgg plan missing fact child; refusing heap-direct CPU fallback"
+            );
         }
+        // SAFETY: fact_child non-null verified; main backend thread per
+        // Custom Scan exec contract.
+        unsafe { self.scan_and_accumulate_slot(result_slot) };
     }
 
-    /// Heap-direct fact-table scan loop (legacy serial path).
-    ///
-    /// # Safety
-    ///
-    /// `self.scan_desc` must be a valid `TableScanDesc`. Main backend thread.
-    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
-    unsafe fn scan_and_accumulate_heap(&mut self, _result_slot: *mut pg_sys::TupleTableSlot) {
-        let _span = tracing::info_span!("exec.preagg_scan_heap").entered();
-
-        // Guard: begin_custom_scan may refuse to open the fact-table scan if
-        // its RTE didn't survive setrefs (non-RTE_RELATION or InvalidOid).
-        // In that case scan_desc is null and we produce zero rows rather
-        // than dereferencing and SIGSEGV'ing.
-        if self.scan_desc.is_null() {
-            return;
-        }
-
-        let limits = cost::device_limits();
-        let interrupt_interval = limits.fused_interrupt_interval;
-
-        // Lazy-init extraction info for fact-side join keys.
-        if self.fact_join_key_infos.is_empty() && !self.depths.is_empty() {
-            // SAFETY: scan_desc is valid.
-            let rel = unsafe { (*self.scan_desc).rs_rd };
-            let table_tupdesc = unsafe { (*rel).rd_att };
-            for depth in &self.depths {
-                // SAFETY: table_tupdesc is valid.
-                let info = unsafe { AttExtractInfo::new(table_tupdesc, depth.outer_attno) };
-                self.fact_join_key_infos.push(info);
-            }
-        }
-
-        // Lazy-init extraction info for fact-side aggregate columns.
-        if self.fact_agg_infos.is_empty() && !self.agg_descs.is_empty() {
-            // SAFETY: scan_desc is valid.
-            let rel = unsafe { (*self.scan_desc).rs_rd };
-            let table_tupdesc = unsafe { (*rel).rd_att };
-            for desc in &self.agg_descs {
-                if desc.attno > 0 {
-                    // SAFETY: table_tupdesc is valid.
-                    let info = unsafe { AttExtractInfo::new(table_tupdesc, desc.attno) };
-                    self.fact_agg_infos.push(info);
-                } else {
-                    // COUNT(*) — no column extraction needed.
-                    self.fact_agg_infos.push(AttExtractInfo::dummy());
-                }
-            }
-        }
-
-        // Lazy-init filter extraction info.
-        if self.fact_filter_infos.is_empty() {
-            // SAFETY: scan_desc is valid.
-            let rel = unsafe { (*self.scan_desc).rs_rd };
-            let table_tupdesc = unsafe { (*rel).rd_att };
-            match &self.scan_expr {
-                Some(CompiledExpr::Template(
-                    TemplateKernel::CmpConst { col_idx, .. }
-                    | TemplateKernel::Between { col_idx, .. },
-                )) => {
-                    // SAFETY: table_tupdesc is valid.
-                    self.fact_filter_infos
-                        .push(unsafe { AttExtractInfo::new(table_tupdesc, (*col_idx + 1) as i32) });
-                }
-                Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                    col1_idx,
-                    col2_idx,
-                    ..
-                })) => {
-                    // SAFETY: table_tupdesc is valid.
-                    self.fact_filter_infos.push(unsafe {
-                        AttExtractInfo::new(table_tupdesc, (*col1_idx + 1) as i32)
-                    });
-                    self.fact_filter_infos.push(unsafe {
-                        AttExtractInfo::new(table_tupdesc, (*col2_idx + 1) as i32)
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // Lazy-init fact-side GROUP BY key extraction info.
-        if self.fact_group_key_infos.is_empty() && !self.group_keys.is_empty() {
-            // SAFETY: scan_desc is valid.
-            let rel = unsafe { (*self.scan_desc).rs_rd };
-            let table_tupdesc = unsafe { (*rel).rd_att };
-            for gk in &self.group_keys {
-                if gk.source == 0 && gk.attno > 0 {
-                    // SAFETY: table_tupdesc is valid.
-                    let info = unsafe { AttExtractInfo::new(table_tupdesc, gk.attno) };
-                    self.fact_group_key_infos.push((gk.attno, info));
-                }
-            }
-        }
-
-        let is_grouped = !self.group_keys.is_empty();
-        let mut rows_scanned: u64 = 0;
-
-        // Main scan loop — walk the fact table heap.
-        loop {
-            // SAFETY: heap_getnext on a valid TableScanDesc.
-            let htup = unsafe {
-                pg_sys::heap_getnext(self.scan_desc, pg_sys::ScanDirection::ForwardScanDirection)
-            };
-            if htup.is_null() {
-                break;
-            }
-
-            rows_scanned += 1;
-
-            // Periodic interrupt check.
-            if rows_scanned.is_multiple_of(interrupt_interval as u64) {
-                // SAFETY: CHECK_FOR_INTERRUPTS on main backend thread.
-                pg_sys::check_for_interrupts!();
-            }
-
-            // SAFETY: htup is a valid HeapTuple from heap_getnext.
-            let t_data = unsafe { (*htup).t_data };
-            if t_data.is_null() {
-                continue;
-            }
-
-            // --- Fact-side inline filter ---
-            if !self.apply_fact_filter(t_data) {
-                continue;
-            }
-
-            // --- Probe all dimension hash tables ---
-            let mut all_matched = true;
-            let mut dim_match_indices: Vec<u32> = Vec::with_capacity(self.depths.len());
-            for (depth_idx, info) in self.fact_join_key_infos.iter().enumerate() {
-                // Extract fact-side join key as i64.
-                let key: Option<i64> = if info.can_fast_extract() {
-                    // SAFETY: t_data is a valid HeapTupleHeader from heap_getnext.
-                    unsafe { heap_read_i64(t_data, info) }
-                } else {
-                    all_matched = false;
-                    break;
-                };
-
-                if let Some(key_val) = key {
-                    if let Some(row_idx) = self.dim_tables[depth_idx].probe(key_val) {
-                        dim_match_indices.push(row_idx);
-                    } else {
-                        all_matched = false;
-                        break;
-                    }
-                } else {
-                    // NULL join key → no match.
-                    all_matched = false;
-                    break;
-                }
-            }
-            if !all_matched {
-                continue;
-            }
-
-            // --- Extract aggregate column values ---
-            let mut agg_vals: Vec<Option<f64>> = Vec::with_capacity(self.agg_descs.len());
-            for (agg_idx, info) in self.fact_agg_infos.iter().enumerate() {
-                if self.agg_descs[agg_idx].attno <= 0 {
-                    // COUNT(*) — no value needed.
-                    agg_vals.push(Some(1.0));
-                } else if info.can_fast_extract() {
-                    // SAFETY: t_data is valid HeapTupleHeader from heap_getnext.
-                    let val = unsafe { heap_read_f64(t_data, info) };
-                    agg_vals.push(val);
-                } else {
-                    agg_vals.push(None);
-                }
-            }
-
-            // --- Accumulate ---
-            if is_grouped {
-                // Build group key from fact + dimension columns.
-                let group_key = self.build_group_key(t_data, &dim_match_indices);
-
-                let accums = self
-                    .grouped_accums
-                    .entry(group_key.clone())
-                    .or_insert_with(|| {
-                        self.group_key_order.push(group_key.clone());
-                        self.agg_descs.iter().map(|d| AggAccum::new(d.op)).collect()
-                    });
-
-                for (i, val) in agg_vals.iter().enumerate() {
-                    if let Some(v) = val {
-                        accums[i].accumulate(*v);
-                    }
-                }
-            } else {
-                // Plain aggregate.
-                for (i, val) in agg_vals.iter().enumerate() {
-                    if let Some(v) = val {
-                        self.plain_accums[i].accumulate(*v);
-                    }
-                }
-            }
-        }
-
-        self.rows_dispatched = rows_scanned;
-        pgrx::debug1!(
-            "pg_accel: preagg scan complete: {} fact rows, {} groups",
-            rows_scanned,
-            if is_grouped {
-                self.grouped_accums.len()
-            } else {
-                1
-            }
-        );
-    }
-
-    /// Slot-based fact-table scan loop (B5b parallel-safe path).
+    /// Slot-based fact-table scan loop.
     ///
     /// Pulls rows from `self.fact_child` via `ExecProcNode`, materializes
     /// each slot, and accumulates exactly the same way the heap path does
@@ -946,122 +700,8 @@ impl PreAggExecState {
         );
     }
 
-    /// Apply fact-side inline filter from the compiled expression.
-    #[inline]
-    fn apply_fact_filter(&self, t_data: pg_sys::HeapTupleHeader) -> bool {
-        match &self.scan_expr {
-            Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                cmp_opcode,
-                const_val,
-                ..
-            })) => self
-                .fact_filter_infos
-                .first()
-                .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp_opcode, *const_val)),
-            Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                cmp1_opcode,
-                const1_val,
-                cmp2_opcode,
-                const2_val,
-                ..
-            })) => {
-                let pass1 = self
-                    .fact_filter_infos
-                    .first()
-                    .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp1_opcode, *const1_val));
-                if !pass1 {
-                    return false;
-                }
-                self.fact_filter_infos
-                    .get(1)
-                    .is_none_or(|info| fused_eval_cmp(t_data, info, *cmp2_opcode, *const2_val))
-            }
-            Some(CompiledExpr::Template(TemplateKernel::Between { lo, hi, .. })) => {
-                self.fact_filter_infos.first().is_none_or(|info| {
-                    if !info.can_fast_extract() {
-                        return true; // conservative
-                    }
-                    // SAFETY: caller ensures t_data is valid.
-                    let val = unsafe { heap_read_f64(t_data, info) };
-                    val.is_none_or(|v| (*lo..=*hi).contains(&v))
-                })
-            }
-            _ => true, // No filter or unsupported → pass all rows
-        }
-    }
-
-    /// Build a group key vector from fact-side and dimension-side columns.
-    fn build_group_key(
-        &self,
-        t_data: pg_sys::HeapTupleHeader,
-        dim_match_indices: &[u32],
-    ) -> Vec<i64> {
-        let mut key = Vec::with_capacity(self.group_keys.len());
-        for gk in &self.group_keys {
-            if gk.source == 0 {
-                // Fact-side group key: extract from HeapTuple.
-                // Find the AttExtractInfo for this attno.
-                // We need to look it up — for now, use the fact_join_key_infos
-                // or build a separate set. For simplicity, try the join key infos.
-                let val = self.extract_fact_group_key(t_data, gk.attno);
-                key.push(val);
-            } else {
-                // Dimension-side group key.
-                let depth_idx = (gk.source - 1) as usize;
-                if depth_idx < self.dim_tables.len() && depth_idx < dim_match_indices.len() {
-                    let dim = &self.dim_tables[depth_idx];
-                    let row_idx = dim_match_indices[depth_idx] as usize;
-                    // Find the column index for this attno in the dim table.
-                    // group_col_attnos[i] has the attno, group_col_indices[i]
-                    // has the corresponding column index in dim.columns.
-                    let depth = &self.depths[depth_idx];
-                    let col_idx = depth
-                        .group_col_attnos
-                        .iter()
-                        .position(|&a| a == gk.attno)
-                        .and_then(|pos| dim.group_col_indices.get(pos).copied());
-
-                    if let Some(ci) = col_idx {
-                        if ci < dim.columns.len() && row_idx < dim.columns[ci].values_i64.len() {
-                            key.push(dim.columns[ci].values_i64[row_idx]);
-                        } else {
-                            key.push(0);
-                        }
-                    } else {
-                        key.push(0);
-                    }
-                } else {
-                    key.push(0);
-                }
-            }
-        }
-        key
-    }
-
-    /// Extract a fact-side group key value from HeapTuple.
-    fn extract_fact_group_key(&self, t_data: pg_sys::HeapTupleHeader, attno: i32) -> i64 {
-        // Dedicated fact GROUP BY key infos first.
-        for (a, info) in &self.fact_group_key_infos {
-            if *a == attno && info.can_fast_extract() {
-                // SAFETY: t_data is valid, verified by caller.
-                return unsafe { heap_read_i64(t_data, info) }.unwrap_or(0);
-            }
-        }
-        // Fallback: check join key infos (group key may coincide with join key).
-        for (idx, depth) in self.depths.iter().enumerate() {
-            if depth.outer_attno == attno
-                && let Some(info) = self.fact_join_key_infos.get(idx)
-                && info.can_fast_extract()
-            {
-                // SAFETY: t_data is valid, verified by caller.
-                return unsafe { heap_read_i64(t_data, info) }.unwrap_or(0);
-            }
-        }
-        0
-    }
-
     /// Apply fact-side inline filter against a materialized `TupleTableSlot`
-    /// (B5b parallel-safe path). Returns `true` if the row should be kept.
+    /// Returns `true` if the row should be kept.
     ///
     /// All slot positions are read from `fact_filter_infos[i].att_index + 1`
     /// since lazy-init has already translated the relation attno → slot

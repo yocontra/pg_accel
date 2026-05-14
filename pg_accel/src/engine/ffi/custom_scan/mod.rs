@@ -46,17 +46,12 @@ pub use private_data::{
     deserialize_functionscan_priv,
 };
 pub(super) use private_data::{PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec};
-// B5a flag: re-exported into `mod` scope so the round-trip tests in
-// `engine::ffi::custom_scan::tests` can probe the wire layout for the
-// sentinel and the deserialized struct directly without reaching into
-// the (private) `private_data` submodule.
+// Re-exported so round-trip tests can probe the wire layout without reaching
+// into the private_data submodule.
 use private_data::deserialize_custom_private;
 pub(in crate::engine::ffi) use private_data::{PREAGG_PARALLEL_ATTACHED_SENTINEL, PreAggPrivData};
 // `deserialize_preagg_private` is consumed both by `begin_custom_scan`
-// (this module) and by the round-trip tests in `tests.rs`. The previous
-// strictly-private import was sufficient pre-B5a; the round-trip tests
-// need to name it directly. Promoting via `pub(in crate::engine::ffi)`
-// keeps it invisible outside the FFI module tree.
+// (this module) and by the round-trip tests in `tests.rs`.
 pub(in crate::engine::ffi) use private_data::deserialize_preagg_private;
 // SRF executor (Round 3 follow-up) — public re-exports for the planner
 // hook in `srf_target_list.rs` and the executor module in `srf_target_list.rs`.
@@ -92,14 +87,14 @@ impl OutputShapeDisc {
         self as i32
     }
 
-    /// Decode from the integer form. Defaults to `Scalar` for unknown values
-    /// so a malformed plan-priv block doesn't crash deserialization.
+    /// Decode from the integer form. Unknown values are invalid.
     #[must_use]
-    pub const fn from_i32(v: i32) -> Self {
+    pub const fn from_i32(v: i32) -> Option<Self> {
         match v {
-            1 => Self::Record,
-            2 => Self::VarLen,
-            _ => Self::Scalar,
+            0 => Some(Self::Scalar),
+            1 => Some(Self::Record),
+            2 => Some(Self::VarLen),
+            _ => None,
         }
     }
 }
@@ -134,19 +129,26 @@ pub enum GpuStrategy {
 }
 
 impl GpuStrategy {
-    /// Convert from raw integer, defaulting to `Scan` for unknown values.
+    /// Convert from raw integer. Unknown values are invalid.
     #[must_use]
-    pub const fn from_i32(v: i32) -> Self {
+    pub const fn from_i32(v: i32) -> Option<Self> {
         match v {
-            1 => Self::Join,
-            2 => Self::Agg,
-            3 => Self::Sort,
-            4 => Self::Window,
-            5 => Self::PreAgg,
-            6 => Self::FunctionScan,
-            7 => Self::SrfTargetList,
-            _ => Self::Scan,
+            0 => Some(Self::Scan),
+            1 => Some(Self::Join),
+            2 => Some(Self::Agg),
+            3 => Some(Self::Sort),
+            4 => Some(Self::Window),
+            5 => Some(Self::PreAgg),
+            6 => Some(Self::FunctionScan),
+            7 => Some(Self::SrfTargetList),
+            _ => None,
         }
+    }
+
+    /// Decode state private data at execution time.
+    #[must_use]
+    pub fn decode(v: i32) -> Self {
+        Self::from_i32(v).unwrap_or_else(|| pgrx::error!("pg_accel: invalid GPU strategy tag {v}"))
     }
 
     /// Human-readable name for EXPLAIN output.
@@ -190,8 +192,6 @@ pub(super) struct GpuAccelState {
     pub(super) rows_dispatched: u64,
     pub(super) batches_executed: u64,
     pub(super) dispatch_time_us: u64,
-    pub(super) spatial_rechecks: u64,
-    pub(super) spatial_recheck_time_us: u64,
     pub(super) parallel_worker_number: i32,
     pub(super) dsm_flags: u32,
     /// Opaque pointer to heap-allocated Rust executor state.
@@ -480,8 +480,7 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
         (*cscan).scan.plan.targetlist = tlist;
         // Set custom_scan_tlist to the child plan's targetlist so PG
         // creates a scan slot with the correct tuple descriptor.
-        // Without this, scanrelid=0 + NULL tlist → 0-column slot,
-        // crashing when sort_tuples calls slot_getattr.
+        // Without this, scanrelid=0 + NULL tlist creates a 0-column slot.
         let child_tlist = if custom_plans.is_null() || pg_sys::list_length(custom_plans) == 0 {
             std::ptr::null_mut()
         } else {
@@ -673,32 +672,23 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         } else {
             0
         };
-        let group_key_payload = if has_gk != 0 && gk_base + 7 < path_len {
+        let group_key_payload = if has_gk != 0 {
+            if gk_base + 7 >= path_len {
+                pgrx::error!("pg_accel: malformed aggregate private group-key layout");
+            }
             let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
             let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
             let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
             let gk_tlist_pos = list_int_at(path_priv, (gk_base + 5) as c_int);
+            if gk_attno <= 0 || !matches!(gk_key_type, 0 | 1 | 2 | 4 | 5) {
+                pgrx::error!("pg_accel: invalid aggregate private group-key layout");
+            }
             Some((gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos))
-        } else if has_gk != 0 && gk_base + 5 < path_len {
-            // Legacy short layout: has_gk + 3 payload ints, then
-            // self_scan_relid/is_partial. It had no tlist-pos slot, so
-            // default the group key to output slot 0.
-            let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
-            let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
-            let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
-            Some((gk_attno, gk_type_oid, gk_key_type, 0))
         } else {
             None
         };
-        let has_valid_gk = group_key_payload
-            .as_ref()
-            .is_some_and(|(attno, _, key_type, _)| {
-                *attno > 0 && matches!(*key_type, 0 | 1 | 2 | 4 | 5)
-            });
-        let self_scan_idx = if has_gk != 0 && has_valid_gk && gk_base + 7 < path_len {
+        let self_scan_idx = if group_key_payload.is_some() {
             gk_base + 6
-        } else if has_gk != 0 && has_valid_gk {
-            gk_base + 4
         } else {
             gk_base + 1
         };
@@ -836,9 +826,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         //   [..., has_group_key,
         //    (gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos)?,
         //    self_scan_relid, (PARTIAL_SENTINEL block)?]
-        if let Some((gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos)) = group_key_payload
-            .filter(|(attno, _, key_type, _)| *attno > 0 && matches!(*key_type, 0 | 1 | 2 | 4 | 5))
-        {
+        if let Some((gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos)) = group_key_payload {
             list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
             list = pg_sys::lappend(list, pg_sys::makeInteger(remap_attno(gk_attno)).cast());
             list = pg_sys::lappend(list, pg_sys::makeInteger(gk_type_oid).cast());
@@ -856,21 +844,14 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         // the sentinel-prefixed layout. The deserializer treats absence of the
         // sentinel as `partial = None`.
         //
-        // Prefer the path-attached sentinel block (carries transtype + serialize_fn
-        // per column — needed for INTERNAL-state aggregates like AVG / STDDEV /
-        // VAR). Fall back to the legacy triple-based reconstruction for paths
-        // that predate the sentinel layout.
         if is_partial != 0 {
             // sentinel @ sentinel_idx, n_cols @ sentinel_idx + 1
-            let spec_from_sentinel = if has_sentinel_block {
-                deserialize_partial_spec(path_priv, sentinel_idx + 1)
-            } else {
-                None
-            };
-            let spec = match spec_from_sentinel {
-                Some(s) => s,
-                None => build_partial_spec_from_path(path_priv, num_aggs),
-            };
+            if !has_sentinel_block {
+                pgrx::error!("pg_accel: partial aggregate path missing sentinel spec block");
+            }
+            let spec = deserialize_partial_spec(path_priv, sentinel_idx + 1).unwrap_or_else(|| {
+                pgrx::error!("pg_accel: malformed partial aggregate sentinel spec block")
+            });
             list = append_partial_spec(list, &spec);
         }
 
@@ -886,7 +867,9 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
 /// Selects the correct concrete emitter for each op/transtype pair:
 /// - `COUNT(*)` / `COUNT(x)` → `CountEmitter` (int8)
 /// - `SUM(int4)` → `IntegerSumPromotion` (int8)
-/// - `SUM(int8)` / `SUM(numeric)` → `NumericSumEmitter`
+/// - `SUM(int8)` / `SUM(numeric)` → rejected by the planner; if a stale
+///   plan reaches execution, raise an ERROR before PG sees a bad transition
+///   Datum.
 /// - `SUM(float4)` / `SUM(float8)` / `MIN` / `MAX` with scalar transtype →
 ///   `ScalarPassthrough`
 /// - `AVG` / STDDEV / VAR with INTERNAL transtype → `Float8StatsEmitter`
@@ -896,7 +879,7 @@ fn build_partial_emitters(
 ) -> Vec<Box<dyn crate::engine::executor::agg::partial::PartialEmitter>> {
     use crate::engine::executor::agg::partial::PartialEmitter;
     use crate::engine::executor::agg::partial::emitter::{
-        CountEmitter, Float8StatsEmitter, IntegerSumPromotion, NumericSumEmitter, ScalarPassthrough,
+        CountEmitter, Float8StatsEmitter, IntegerSumPromotion, ScalarPassthrough,
     };
 
     let mut out: Vec<Box<dyn PartialEmitter>> = Vec::with_capacity(spec.per_column.len());
@@ -904,7 +887,12 @@ fn build_partial_emitters(
         let emitter: Box<dyn PartialEmitter> = match col.op {
             AggOp::Count => Box::new(CountEmitter),
             AggOp::Sum if col.transtype_oid == pg_sys::INT8OID => Box::new(IntegerSumPromotion),
-            AggOp::Sum if col.transtype_oid == pg_sys::NUMERICOID => Box::new(NumericSumEmitter),
+            AggOp::Sum if col.transtype_oid == pg_sys::NUMERICOID => {
+                pgrx::error!(
+                    "pg_accel: partial SUM(bigint/numeric) is not supported; planner should \
+                     have declined this path before executor init"
+                );
+            }
             AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
                 // Float8StatsEmitter handles both transtype shapes:
                 //  - INTERNAL transtype (numeric_accum, int8_accum) → serialize_fn
@@ -926,43 +914,6 @@ fn build_partial_emitters(
         out.push(emitter);
     }
     out
-}
-
-/// Build a [`PartialAggSpec`] from a partial-agg path's `custom_private`.
-///
-/// Resolves each column's `aggtranstype` and optional `aggserialfn` via
-/// syscache readers. We don't have direct access to the Aggref OIDs here;
-/// callers should populate those during path construction — for now the
-/// spec mirrors the plan's (op, attno, result_type) triples with transtype
-/// defaulted to the result type and no serialize fn.
-///
-/// # Safety
-/// `path_priv` must be the valid `custom_private` list of a partial-agg path.
-unsafe fn build_partial_spec_from_path(
-    path_priv: *mut pg_sys::List,
-    num_aggs: c_int,
-) -> crate::engine::executor::agg::partial::PartialAggSpec {
-    use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-
-    let mut per_column = Vec::with_capacity(num_aggs as usize);
-    for k in 0..num_aggs {
-        // SAFETY: path_priv is a valid Integer list with at least (1 + 3*num_aggs)
-        // entries (the planner enforces this layout).
-        let op_raw = unsafe { list_int_at(path_priv, 1 + k * 3) };
-        let attno = unsafe { list_int_at(path_priv, 2 + k * 3) };
-        let rtype = unsafe { list_int_at(path_priv, 3 + k * 3) } as u32;
-        let op = AggOp::from_i32(op_raw);
-        // Partial-agg injection path (planner_hooks) rejects INTERNAL-state
-        // aggregates (AVG/STDDEV/VAR/SUM(int8)/SUM(numeric)) — the transition
-        // type is therefore the same as the aggregate's result type.
-        per_column.push(PartialColumn {
-            op,
-            attno,
-            transtype_oid: pg_sys::Oid::from(rtype),
-            serialize_fn_oid: None,
-        });
-    }
-    PartialAggSpec { per_column }
 }
 
 /// Convert a window `CustomPath` into a `CustomScan` plan node.
@@ -1222,17 +1173,6 @@ unsafe fn build_function_scan_tlist(
         return None;
     }
 
-    // Resolve sentinel type-OID `0` (PostGIS geometry placeholder for H3
-    // boundary ops) via pg_proc.prorettype, mirroring the now-removed
-    // build_tuple_desc helper.
-    let resolved_rettype = if entry.output_field_types.contains(&0) {
-        // SAFETY: get_func_rettype is a catalog lookup safe on the main
-        // backend thread.
-        unsafe { pg_sys::get_func_rettype(priv_data.fn_oid) }
-    } else {
-        pg_sys::InvalidOid
-    };
-
     let mut list: *mut pg_sys::List = std::ptr::null_mut();
     for (i, (&t, &name)) in entry
         .output_field_types
@@ -1240,11 +1180,7 @@ unsafe fn build_function_scan_tlist(
         .zip(entry.output_field_names.iter())
         .enumerate()
     {
-        let typ_oid = if t == 0 {
-            resolved_rettype
-        } else {
-            pg_sys::Oid::from(t)
-        };
+        let typ_oid = pg_sys::Oid::from(t);
         if typ_oid == pg_sys::InvalidOid {
             return None;
         }
@@ -1550,7 +1486,7 @@ unsafe fn make_custom_scan_plan(
             if is_scan && !custom_plans.is_null() && pg_sys::list_length(custom_plans) > 0 {
                 let child = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
                 if !child.is_null() {
-                    (*child).qual = std::ptr::null_mut();
+                    strip_child_cpu_quals(child);
                     // SAFETY: build_physical_tlist creates a tlist with all
                     // physical columns from the relation.
                     (*child).targetlist = pg_sys::build_physical_tlist(root, rel);
@@ -1731,6 +1667,22 @@ unsafe fn make_custom_scan_plan(
     }
 
     cscan.cast()
+}
+
+/// Remove PostgreSQL CPU qualifier state from a child plan whose predicate is
+/// owned by pg_accel's GPU scan executor.
+///
+/// # Safety
+///
+/// `child` must point to a valid PostgreSQL `Plan` node.
+unsafe fn strip_child_cpu_quals(child: *mut pg_sys::Plan) {
+    unsafe {
+        (*child).qual = std::ptr::null_mut();
+        if (*child.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_BitmapHeapScan {
+            let bitmap = child.cast::<pg_sys::BitmapHeapScan>();
+            (*bitmap).bitmapqualorig = std::ptr::null_mut();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2595,7 +2547,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         (*state).accel.expected_threads = resolve_thread_count();
     }
 
-    // FunctionScan: short-circuit before allocating any of the legacy
+    // FunctionScan: short-circuit before allocating scan/aggregate/sort
     // executor states (the FunctionScan flow doesn't share their
     // ScanExecState / AggExecState shapes). init_state builds the TupleDesc,
     // dispatches once, and stashes the per-row cursor on a dedicated state.
@@ -2613,7 +2565,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         return;
     }
 
-    // SrfTargetList: short-circuit before allocating any of the legacy
+    // SrfTargetList: short-circuit before allocating scan/aggregate/sort
     // executor states. Drives the child scan via ExecProcNode (already
     // initialised into custom_ps[0] by the loop above) and expands the SRF
     // per row using a buffered cursor.
@@ -2668,32 +2620,17 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 );
             }
 
-            // Materialize dimension tables from child plan states.
-            //
-            // **B5a slot layout**:
-            // - Default (`parallel_safe_planner_attached == false`): slots
-            //   `0..N` are the dimension PlanStates; `child_states[i]` aligns
-            //   with `depths[i]` exactly as it did pre-B5a.
-            // - Parallel-attached (`parallel_safe_planner_attached == true`):
-            //   slot 0 is the fact-side PlanState (attached by
-            //   `pgaccel_inject_gpu_preagg`); dimensions are at slots `1..N+1`.
-            //   We skip slot 0 here so `child_states[i]` still maps to
-            //   `depths[i]`.
-            //
-            // **B5b note**: the fact PlanState at slot 0 is currently inert
-            // — the executor still scans the fact heap directly via
-            // `table_open(scan_oid)` below. B5b will introduce
-            // `PreAggExecState::set_fact_child(child_ps)` to consume slot 0
-            // through the slot-based scan path and remove the heap-direct
-            // fallback once verified. Until then, holding a fact PlanState
-            // open is a no-op for correctness (PG creates the child
-            // PlanStates regardless of whether we read them).
+            // Materialize dimension tables from child plan states. Slot 0 is
+            // the required fact-side PlanState; dimensions are slots 1..N.
             let custom_ps = (*node).custom_ps;
             let mut fact_child: *mut pg_sys::PlanState = std::ptr::null_mut();
+            if !preagg_info.parallel_safe_planner_attached {
+                pgrx::error!("pg_accel: PreAgg private data missing attached fact child marker");
+            }
             if !custom_ps.is_null() {
                 let n_children = pg_sys::list_length(custom_ps);
-                let start_slot: i32 = i32::from(preagg_info.parallel_safe_planner_attached);
-                if preagg_info.parallel_safe_planner_attached && n_children > 0 {
+                let start_slot: i32 = 1;
+                if n_children > 0 {
                     // SAFETY: custom_ps non-null and n_children > 0 → index 0 valid.
                     fact_child = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
                 }
@@ -2708,66 +2645,12 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 exec.materialize_dimensions(&child_states);
             }
 
-            // B5b parallel-safe path: when the planner attached the fact
-            // base path as `custom_paths[0]`, PG's standard Custom Scan init
-            // produces a fact-side `PlanState` at `custom_ps[0]`. Hand it
-            // to the executor; `scan_and_accumulate` then dispatches to the
-            // slot-based loop, which is parallel-safe (under PG's Gather,
-            // each worker's child is its own per-worker scan that hands out
-            // disjoint heap blocks via parallel-aware scan APIs). No
-            // `table_open` or `table_beginscan` is needed here; the child
-            // PlanState owns the relation handle.
+            // Hand the fact-side child to the executor. The child PlanState
+            // owns the relation handle and scan lifecycle.
             if fact_child.is_null() {
-                // Default-off / serial path: open the fact table for direct
-                // heap scan, byte-identical to pre-B5b behaviour.
-                //
-                // Prefer the stable relation OID stored at planning time.
-                // The range-table index (scan_relid) can be rewritten by
-                // `set_plan_refs` for upper plans (scanrelid=0 spans a
-                // join), making it an unsafe index into
-                // `estate->es_range_table` at execution time. The OID is
-                // stable and always valid.
-                //
-                // When the OID is present we `table_open(oid,
-                // AccessShareLock)` directly — `end_custom_scan` will
-                // `table_close` it. Otherwise, if the RTE index is valid,
-                // fall back to `ExecOpenScanRelation` (which the executor's
-                // own cleanup path will close).
-                let estate = (*node).ss.ps.state;
-                if preagg_info.scan_oid != pg_sys::InvalidOid {
-                    // SAFETY: OID is valid (resolved at plan time from an
-                    // RTE_RELATION entry). Main backend thread.
-                    let rel = pg_sys::table_open(
-                        preagg_info.scan_oid,
-                        pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-                    );
-                    let snap = (*estate).es_snapshot;
-                    // SAFETY: rel and snap are valid; main backend thread.
-                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-                    exec.set_scan_desc(sd);
-                    exec.set_scan_rel(rel);
-                } else if preagg_info.scan_relid > 0 {
-                    // Guard: the RTE must be a real heap relation. Non-
-                    // relation RTEs (function, VALUES, CTE, subquery, or
-                    // entries invalidated by setrefs) passed to
-                    // ExecOpenScanRelation raise ERROR → SIGABRT. If the
-                    // relid is not a valid heap relation, skip the manual
-                    // self-scan; the executor will consume rows via
-                    // custom_ps / child plans instead (not a CPU fallback —
-                    // still GPU-executed).
-                    let rt_entry = pg_sys::exec_rt_fetch(preagg_info.scan_relid, estate);
-                    if !rt_entry.is_null()
-                        && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
-                        && (*rt_entry).relid != pg_sys::InvalidOid
-                    {
-                        let rel =
-                            pg_sys::ExecOpenScanRelation(estate, preagg_info.scan_relid, eflags);
-                        let snap = (*estate).es_snapshot;
-                        // SAFETY: rel and snap are valid; main backend thread.
-                        let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-                        exec.set_scan_desc(sd);
-                    }
-                }
+                pgrx::error!(
+                    "pg_accel: PreAgg plan missing fact child; refusing heap-direct CPU fallback"
+                );
             } else {
                 exec.set_fact_child(fact_child);
             }
@@ -2868,8 +2751,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                         // methods vtable.
                         if (*child_css).methods == &raw const EXEC_METHODS.0 {
                             let child_state = child_css.cast::<GpuAccelScanState>();
-                            let child_strategy =
-                                GpuStrategy::from_i32((*child_state).accel.strategy);
+                            let child_strategy = GpuStrategy::decode((*child_state).accel.strategy);
                             if child_strategy == GpuStrategy::Scan {
                                 let child_exec_ptr = (*child_state).accel.executor;
                                 if !child_exec_ptr.is_null() {
@@ -2933,10 +2815,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             Box::into_raw(exec).cast()
         } else if privdata.accel_strategy == AccelStrategy::GpuHashJoin {
             // Hash join: create a JoinExecState with hash join context.
+            if let Some(reason) = privdata.hash_join_validation_error() {
+                pgrx::error!(
+                    "pg_accel: malformed GpuHashJoin private data ({reason}; outer_attno={}, inner_attno={}, key_type={}); refusing CPU fallback",
+                    privdata.target_attno,
+                    privdata.hash_inner_attno,
+                    privdata.hash_key_type,
+                );
+            }
             let key_type = match privdata.hash_key_type {
                 1 => PgaccelKeyType::Int64,
                 2 => PgaccelKeyType::Float64,
-                _ => PgaccelKeyType::Int32,
+                0 => PgaccelKeyType::Int32,
+                _ => unreachable!("hash_join_validation_error rejects invalid key types"),
             };
             let mut exec = Box::new(JoinExecState::new(
                 AccelStrategy::GpuHashJoin,
@@ -2966,6 +2857,12 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 exec.tlist_map.len(),
             );
             Box::into_raw(exec).cast()
+        } else if privdata.gpu_strategy == GpuStrategy::Join {
+            pgrx::error!(
+                "pg_accel: non-hash join strategy {:?} reached Custom Scan begin; \
+                 planner must decline until a complete GPU join executor is wired",
+                privdata.accel_strategy,
+            );
         } else if privdata.gpu_strategy == GpuStrategy::Window {
             pgrx::debug1!(
                 "pg_accel: begin_custom_scan: Window strategy, {} specs, scan_relid={}",
@@ -3120,10 +3017,14 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 strategy
             );
 
-            // Grab the compiled qual ExprState and ExprContext from PG's
-            // CustomScanState so the scalar qual fallback works when the
-            // GPU dispatch returns Deferred.
-            let qual = (*node).ss.ps.qual;
+            // GpuExpr compiles the qual to GPU bytecode/template form and
+            // clears PostgreSQL's ExprState so the selected Custom Scan never
+            // evaluates the predicate on CPU.
+            let qual = if strategy == AccelStrategy::GpuExpr {
+                std::ptr::null_mut()
+            } else {
+                (*node).ss.ps.qual
+            };
             let econtext = (*node).ss.ps.ps_ExprContext;
             let mut exec = Box::new(ScanExecState::new(strategy, batch_size, qual, econtext));
             if (*state).accel.parallel_worker_number >= 0 {
@@ -3134,8 +3035,8 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             }
 
             // For GpuExpr strategy, compile the qual list to GPU bytecode.
-            // Template match is tried first (fastest), then bytecode,
-            // then defer to PG if neither works.
+            // Template match is tried first (fastest), then bytecode. If
+            // neither works, the planner should not have selected GpuExpr.
             if strategy == AccelStrategy::GpuExpr {
                 // SAFETY: cscan.scan.plan.qual is a valid List * set by
                 // make_custom_scan_plan. tupdesc provides num_cols.
@@ -3166,13 +3067,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     },
                     num_cols
                 );
+                if matches!(
+                    compiled,
+                    crate::engine::expr_compiler::CompiledExpr::DeferToPg
+                ) {
+                    pgrx::error!(
+                        "pg_accel: GpuExpr cannot compile this qual to a GPU program; refusing CPU fallback"
+                    );
+                }
                 exec.set_compiled_expr(compiled);
+                (*node).ss.ps.qual = std::ptr::null_mut();
 
                 // For GpuExpr with scanrelid > 0 (direct heap scan),
                 // initialise a table scan so fill_batch can pull tuples.
-                // NOTE: Do NOT clear ps.qual here. ExecScan evaluates the
-                // qual after gpu_scan_access returns each tuple. Clearing
-                // it would bypass WHERE clause evaluation entirely.
                 let scanrelid = (*cscan).scan.scanrelid;
                 if scanrelid > 0 {
                     let rel = (*node).ss.ss_currentRelation;
@@ -3216,9 +3123,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     n_qual,
                 );
 
-                // Detect GiST index child for batched recheck.
-                // When the child is a GiST IndexScan, bbox filtering
-                // has already been done by the index — skip Layer 1.
+                // Detect GiST index child. When the child is a GiST
+                // IndexScan, bbox filtering has already been done by the
+                // index, so the GPU path can skip Layer 1 without invoking
+                // any CPU predicate recheck.
                 if strategy == AccelStrategy::GpuSpatial
                     && !(*node).custom_ps.is_null()
                     && pg_sys::list_length((*node).custom_ps) > 0
@@ -3240,58 +3148,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         (*state).accel.rows_dispatched = 0;
         (*state).accel.batches_executed = 0;
         (*state).accel.dispatch_time_us = 0;
-        (*state).accel.spatial_rechecks = 0;
-        (*state).accel.spatial_recheck_time_us = 0;
     }
-}
-
-/// `ExecCustomScan`: fetch the next tuple via batch dispatch.
-///
-/// Delegates to `ScanExecState::next` which handles batch accumulation,
-/// dispatch, and one-at-a-time result draining.
-///
-/// # Safety
-///
-/// Access method for ExecScan: fetches the next HeapTuple from our scan
-/// descriptor and stores it in the scan slot. ExecScan handles qual
-/// evaluation and projection.
-///
-/// # Safety
-///
-/// Called by ExecScan on the main backend thread. `node` is a valid ScanState
-/// embedded in our GpuAccelScanState.
-unsafe extern "C-unwind" fn gpu_scan_access(
-    node: *mut pg_sys::ScanState,
-) -> *mut pg_sys::TupleTableSlot {
-    let _span = tracing::debug_span!("ffi.gpu_scan_access").entered();
-    // Upcast ScanState → GpuAccelScanState to reach our executor.
-    let state = node.cast::<GpuAccelScanState>();
-    let executor = unsafe { (*state).accel.executor };
-    if executor.is_null() {
-        let scan_slot = unsafe { (*node).ss_ScanTupleSlot };
-        unsafe { pg_sys::ExecClearTuple(scan_slot) };
-        return scan_slot;
-    }
-    let scan_state = unsafe { &mut *executor.cast::<ScanExecState>() };
-    let scan_slot = unsafe { (*node).ss_ScanTupleSlot };
-    // Always use gpu_scan_next which calls table_scan_getnextslot for
-    // proper buffer pinning. ExecScan handles qual evaluation via the
-    // plan's qual list (compiled to ExprState by ExecInitCustomScan).
-    // SAFETY: scan_desc and scan_slot are valid; main backend thread.
-    unsafe { scan_state.gpu_scan_next(scan_slot) }
-}
-
-/// Recheck method for ExecScan — always returns true (no recheck needed
-/// since our scan returns actual heap tuples, not index pointers).
-///
-/// # Safety
-///
-/// Called by ExecScan on the main backend thread.
-unsafe extern "C-unwind" fn gpu_scan_recheck(
-    _node: *mut pg_sys::ScanState,
-    _slot: *mut pg_sys::TupleTableSlot,
-) -> bool {
-    true
 }
 
 /// Called by the executor on the main backend thread.
@@ -3301,42 +3158,20 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     let _span = tracing::debug_span!("ffi.exec_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();
 
-    // Fall through to passthrough when the extension is disabled.
     if !gucs::enabled() {
-        // SAFETY: node is a valid CustomScanState on the main backend thread.
-        return unsafe { passthrough_exec(node) };
+        pgrx::error!(
+            "pg_accel: Custom Scan reached execution while pg_accel.enabled=off; refusing CPU passthrough"
+        );
     }
 
     // SAFETY: executor was allocated in begin_custom_scan.
     let executor = unsafe { (*state).accel.executor };
     if executor.is_null() {
-        // SAFETY: node is a valid CustomScanState on the main backend thread.
-        return unsafe { passthrough_exec(node) };
+        pgrx::error!("pg_accel: Custom Scan has no GPU executor; refusing CPU passthrough");
     }
 
     // SAFETY: state points to our GpuAccelScanState with valid accel fields.
-    let gpu_strategy = GpuStrategy::from_i32(unsafe { (*state).accel.strategy });
-
-    // GpuExpr direct heap scan (scanrelid > 0) bypasses the trait dispatch
-    // and uses ExecScan for qual eval + scan→result slot projection.
-    if gpu_strategy == GpuStrategy::Scan {
-        // SAFETY: node->ss.ps.plan is a valid CustomScan plan node.
-        let scanrelid = unsafe {
-            let cscan = (*node).ss.ps.plan.cast::<pg_sys::CustomScan>();
-            (*cscan).scan.scanrelid
-        };
-        if scanrelid > 0 {
-            // SAFETY: node->ss is a valid ScanState; gpu_scan_access and
-            // gpu_scan_recheck are our own callbacks on the main thread.
-            return unsafe {
-                pg_sys::ExecScan(
-                    &raw mut (*node).ss,
-                    Some(gpu_scan_access),
-                    Some(gpu_scan_recheck),
-                )
-            };
-        }
-    }
+    let gpu_strategy = GpuStrategy::decode(unsafe { (*state).accel.strategy });
 
     // FunctionScan strategy (Phase 2 F3): one-shot dispatch + per-output-row
     // tuple emission. Routed through the dedicated function_scan module which
@@ -3396,18 +3231,19 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
         (*state).accel.batches_executed = dyn_state.batches_executed();
         (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
-        if gpu_strategy == GpuStrategy::Scan {
-            let scan_state = &*executor.cast::<ScanExecState>();
-            (*state).accel.spatial_rechecks = scan_state.spatial_rechecks();
-            (*state).accel.spatial_recheck_time_us = scan_state.spatial_recheck_time_us();
-        }
         slot
     };
 
-    // Apply ps_ProjInfo projection for Sort/Window, whose scan slot holds
-    // the full child tuple (scanrelid=0, custom_scan_tlist broader than
-    // plan.targetlist). ExecInitCustomScan builds pi_state for this map.
-    if !result.is_null() && matches!(gpu_strategy, GpuStrategy::Sort | GpuStrategy::Window) {
+    // Apply ps_ProjInfo projection when the scan slot can hold a broader
+    // tuple than plan.targetlist. ExecInitCustomScan builds pi_state for
+    // this map; GpuExpr reaches this path after the GPU predicate has
+    // selected rows, with PostgreSQL's CPU qual cleared.
+    if !result.is_null()
+        && matches!(
+            gpu_strategy,
+            GpuStrategy::Scan | GpuStrategy::Sort | GpuStrategy::Window
+        )
+    {
         // SAFETY: node is a valid CustomScanState; proj_info may be null
         // when scan slot schema already matches output.
         let proj_info = unsafe { (*node).ss.ps.ps_ProjInfo };
@@ -3449,52 +3285,27 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
     // was Box::into_raw'd in begin_custom_scan with the matching type.
     unsafe {
         if !(*state).accel.executor.is_null() {
-            // Check if this is a hash join by reading accel_strategy from custom_private.
-            let cscan = (*node).ss.ps.plan.cast::<pg_sys::CustomScan>();
-            let priv_list = (*cscan).custom_private;
-            let is_hash_join = if !priv_list.is_null() && pg_sys::list_length(priv_list) > 5 {
-                AccelStrategy::from_i32(list_int_at(priv_list, 5)) == AccelStrategy::GpuHashJoin
-            } else {
-                false
-            };
+            let gpu_strategy = GpuStrategy::decode((*state).accel.strategy);
 
-            if is_hash_join {
+            if gpu_strategy == GpuStrategy::Join {
                 // SAFETY: executor was Box::into_raw'd as JoinExecState.
                 let _ = Box::from_raw((*state).accel.executor.cast::<JoinExecState>());
-            } else if GpuStrategy::from_i32((*state).accel.strategy) == GpuStrategy::FunctionScan {
+            } else if GpuStrategy::decode((*state).accel.strategy) == GpuStrategy::FunctionScan {
                 // FunctionScan owns its own boxed state (FunctionScanExecState);
                 // delegate to the dedicated drop helper.
                 // SAFETY: executor was Box::into_raw'd as FunctionScanExecState.
                 function_scan::drop_state((*state).accel.executor);
-            } else if GpuStrategy::from_i32((*state).accel.strategy) == GpuStrategy::SrfTargetList {
+            } else if GpuStrategy::decode((*state).accel.strategy) == GpuStrategy::SrfTargetList {
                 // SrfTargetList owns its own boxed state (SrfTargetListExecState);
                 // delegate to the dedicated drop helper. The child PlanState is
                 // ended below by the standard custom_ps walk.
                 // SAFETY: executor was Box::into_raw'd as SrfTargetListExecState.
                 srf_target_list::drop_state((*state).accel.executor);
             } else {
-                let gpu_strategy = GpuStrategy::from_i32((*state).accel.strategy);
+                let gpu_strategy = GpuStrategy::decode((*state).accel.strategy);
                 if gpu_strategy == GpuStrategy::PreAgg {
                     // SAFETY: executor was Box::into_raw'd as PreAggExecState.
                     let preagg = Box::from_raw((*state).accel.executor.cast::<PreAggExecState>());
-                    // End direct heap scan if one was started.
-                    if !preagg.scan_desc.is_null() {
-                        // SAFETY: scan_desc was created by table_beginscan.
-                        pg_sys::table_endscan(preagg.scan_desc);
-                    }
-                    // Close the relation if we opened it via `table_open`.
-                    // When scan_rel is null the relation was acquired via
-                    // `ExecOpenScanRelation`, and the executor framework
-                    // closes it — we must not double-close.
-                    if !preagg.scan_rel.is_null() {
-                        // SAFETY: scan_rel was opened via table_open with
-                        // AccessShareLock in begin_custom_scan; main backend
-                        // thread.
-                        pg_sys::table_close(
-                            preagg.scan_rel,
-                            pg_sys::AccessShareLock as pg_sys::LOCKMODE,
-                        );
-                    }
                     drop(preagg);
                 } else if gpu_strategy == GpuStrategy::Agg {
                     // SAFETY: executor was Box::into_raw'd as AggExecState.
@@ -3581,7 +3392,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
     // SAFETY: All field accesses are to our GpuAccelScanState. The executor
     // pointer was previously produced by Box::into_raw for the matching type.
     unsafe {
-        let gpu_strategy = GpuStrategy::from_i32((*state).accel.strategy);
+        let gpu_strategy = GpuStrategy::decode((*state).accel.strategy);
         let batch_size = if (*state).accel.batch_size > 0 {
             (*state).accel.batch_size as usize
         } else {
@@ -3727,8 +3538,6 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
         (*state).accel.rows_dispatched = 0;
         (*state).accel.batches_executed = 0;
         (*state).accel.dispatch_time_us = 0;
-        (*state).accel.spatial_rechecks = 0;
-        (*state).accel.spatial_recheck_time_us = 0;
     }
 
     // SAFETY: Rescan all children.
@@ -3805,27 +3614,6 @@ unsafe fn serialize_sort_keys(
         }
     }
     list
-}
-
-/// Passthrough execution: pull one tuple from the child and return it
-/// directly, bypassing batch dispatch.
-///
-/// # Safety
-///
-/// Must be called on the main backend thread.
-unsafe fn passthrough_exec(node: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
-    // SAFETY: PG's ExecInitCustomScan stored child plan states in custom_ps.
-    unsafe {
-        let custom_ps = (*node).custom_ps;
-        if custom_ps.is_null() || pg_sys::list_length(custom_ps) == 0 {
-            return std::ptr::null_mut();
-        }
-        let child_state = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
-        if child_state.is_null() {
-            return std::ptr::null_mut();
-        }
-        pg_sys::ExecProcNode(child_state)
-    }
 }
 
 #[cfg(feature = "pg_test")]

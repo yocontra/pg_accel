@@ -1,9 +1,22 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::fs;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::stats;
+
+const NO_DISPATCH_TIMING_SKEW_THRESHOLD: f64 = 0.10;
+const FUNCTION_SRF_GPU_FUNCTIONS: &[&str] = &[
+    "h3_latlng_to_cell",
+    "h3_grid_disk",
+    "h3_grid_ring_unsafe",
+    "h3_polyfill",
+    "h3_cell_to_children",
+    "h3_cell_to_boundary",
+    "h3_cells_to_multi_polygon",
+];
 
 /// Timing results for a single iteration (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,31 +30,90 @@ pub struct IterationResult {
 
 /// Aggregated results for one workload at one row scale (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct WorkloadResult {
     pub name: String,
     pub description: String,
     /// Workload category (`gpu_spatial`, `gpu_h3`, `ssbm`, etc.). Used for
     /// rollup / geomean grouping in the report.
-    #[serde(default = "default_category")]
     pub category: String,
     /// Kernel class this workload exercises (`point_in_ring`, `reduce_f32`,
     /// `hashagg`, `h3_latlng`, etc.). Used by the Kernel Coverage table
     /// (action_items W11) to show that 127 workloads exercise only ~9
     /// distinct kernels.
-    #[serde(default = "default_kernel_class")]
     pub kernel_class: String,
     /// Row count this result was measured at.
     pub rows: usize,
     pub iterations: Vec<IterationResult>,
-    /// Whether this row was actually dispatched to a GPU Custom Scan path.
+    /// Whether PostgreSQL selected a pg_accel Custom Scan plan node.
     ///
-    /// Determined by inspecting the captured plan text for the Custom Scan
-    /// node (or, once Fix Agent 6 lands `pg_accel_kernel_executions_delta`,
-    /// by the counter delta during measurement). Rows where
-    /// `dispatched == false` are excluded from per-category geomeans and
-    /// reported in a separate "not dispatched" count.
-    #[serde(default = "default_dispatched")]
-    pub dispatched: bool,
+    /// This is intentionally separate from runtime GPU dispatch: aggregate
+    /// wrappers can be selected and still report `GPU Dispatched: false`.
+    #[serde(default)]
+    pub plan_selected: bool,
+    /// Whether a GPU kernel is credited as dispatched for this benchmark row.
+    ///
+    /// This is true for Custom Scan runtime dispatch and for recognized
+    /// function/SRF GPU kernels such as H3 bulk operations.
+    #[serde(default)]
+    pub gpu_kernel_dispatched: bool,
+    /// Whether the dispatch came from a function/SRF GPU kernel rather than a
+    /// Custom Scan plan node.
+    #[serde(default)]
+    pub function_srf_kernel_dispatched: bool,
+    /// Derived release-gate flag: no pg_accel Custom Scan was selected and no
+    /// function/SRF GPU dispatch was credited for this measured row.
+    #[serde(default)]
+    pub planner_declined: bool,
+    /// Derived release-gate flag: PostgreSQL selected a pg_accel Custom Scan
+    /// node, but runtime counters did not prove GPU kernel dispatch.
+    #[serde(default)]
+    pub custom_scan_selected_not_dispatched: bool,
+    /// Derived release-gate count for credited function/SRF kernel executions.
+    ///
+    /// The harness currently has one kernel counter surface, so this is the
+    /// total kernel delta only for rows classified as function/SRF dispatch.
+    #[serde(default)]
+    pub function_kernel_count: u64,
+    /// Derived release-gate alias for accel-side rows returned to PostgreSQL
+    /// or the client.
+    #[serde(default)]
+    pub rows_returned_to_cpu: u64,
+    /// Derived release-gate status for GPU-resident pipeline evidence when the
+    /// plan artifact exposes it.
+    #[serde(default)]
+    pub gpu_resident_pipeline: GpuResidentPipelineStatus,
+    /// Whether the harness successfully captured pg_accel runtime counters
+    /// around the measured accel-side executions.
+    #[serde(default)]
+    pub dispatch_counter_captured: bool,
+    /// Delta of `pg_accel_kernel_executions()`/`pg_accel_stats()` for the
+    /// accel backend across the measured workload. This is the source of
+    /// truth for GPU-dispatched wins.
+    #[serde(default)]
+    pub gpu_kernel_execution_delta: u64,
+    /// Delta of `pg_accel_stats().rows_dispatched`.
+    #[serde(default)]
+    pub pg_accel_rows_dispatched_delta: u64,
+    /// Delta of `pg_accel_stats().batches_executed`.
+    #[serde(default)]
+    pub pg_accel_batches_executed_delta: u64,
+    /// Delta of `pg_accel_stats().gpu_rows_processed`.
+    #[serde(default)]
+    pub pg_accel_gpu_rows_processed_delta: u64,
+    /// Delta of `pg_accel_stats().stock_exec_count`; non-zero values are a
+    /// red flag for CPU-backed pg_accel plans.
+    #[serde(default)]
+    pub pg_accel_stock_exec_delta: u64,
+    /// Rows returned to the client or reported by EXPLAIN ANALYZE for the
+    /// accel-side measured executions. Function/SRF kernel wins require this
+    /// to be non-zero so a launched kernel is not counted without output
+    /// consumption.
+    #[serde(default)]
+    pub accel_output_rows_consumed: u64,
+    /// Counter-capture failure, when the SQL stats surface was unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_counter_error: Option<String>,
     // -- pg_accel stats --
     pub accel_mean_ms: f64,
     pub accel_stddev_ms: f64,
@@ -91,11 +163,18 @@ pub struct WorkloadResult {
     /// with an asymmetric-variance note.
     pub cv_ratio: f64,
     /// Plan diagnostic text captured once per (workload, scale) by the
-    /// runner. Contains the first few lines of `EXPLAIN (ANALYZE, VERBOSE,
-    /// BUFFERS)` — the portion with the Custom Scan node / GPU Dispatched
-    /// tags. Used for the `dispatched` classification and for debugging.
+    /// runner with `pg_accel.enabled = on`. Contains the first few lines of
+    /// `EXPLAIN (VERBOSE, COSTS OFF)` — the portion with the Custom Scan
+    /// node / GPU Dispatched tags. Used for dispatch classification and
+    /// debugging.
     #[serde(default)]
     pub plan_snippet: Option<String>,
+    /// Comparable plan diagnostic text captured once per (workload, scale)
+    /// with `pg_accel.enabled = off` on the PG-parallel side. Used to flag
+    /// no-dispatch rows whose native PostgreSQL plan shape differs from the
+    /// accel-mode no-dispatch plan.
+    #[serde(default)]
+    pub baseline_plan_snippet: Option<String>,
     /// Thermal state captured immediately before this workload ran.
     /// `None` on platforms where capture is unavailable.
     #[serde(default)]
@@ -175,27 +254,49 @@ pub struct Methodology {
     /// Short label for the cache mode (`warm`, `cold`, `both`).
     #[serde(default)]
     pub cache_mode: String,
-    /// Source distribution for the headline speedup calculation
-    /// (`median` / `mean`).
-    #[serde(default)]
-    pub speedup_source: String,
 }
 
-/// Default category used when deserializing legacy JSON reports that predate
-/// the `category` field.
-fn default_category() -> String {
-    "gpu".to_owned()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchClassification {
+    pub plan_selected: bool,
+    pub gpu_kernel_dispatched: bool,
+    pub function_srf_kernel_dispatched: bool,
+    pub planner_declined: bool,
+    pub custom_scan_selected_not_dispatched: bool,
+    pub function_kernel_count: u64,
+    pub rows_returned_to_cpu: u64,
+    pub gpu_resident_pipeline: GpuResidentPipelineStatus,
 }
 
-/// Default kernel class for legacy JSON reports.
-fn default_kernel_class() -> String {
-    "unclassified".to_owned()
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuResidentPipelineStatus {
+    /// No explicit GPU-resident pipeline evidence was available in the
+    /// captured plan artifacts.
+    #[default]
+    NotReported,
+    /// Captured plan text exposed explicit fused/PreAgg pipeline evidence.
+    Reported,
+    /// The row was credited through a function/SRF kernel rather than a
+    /// Custom Scan pipeline.
+    NotApplicableFunctionSrf,
+    /// PostgreSQL planned the query natively, so no pg_accel pipeline exists.
+    PlannerDeclined,
+    /// A pg_accel Custom Scan was selected but runtime dispatch was not
+    /// proven.
+    SelectedNotDispatched,
 }
 
-/// Default dispatched value for legacy JSON reports (assume true so old
-/// archives still aggregate).
-const fn default_dispatched() -> bool {
-    true
+impl GpuResidentPipelineStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReported => "not_reported",
+            Self::Reported => "reported",
+            Self::NotApplicableFunctionSrf => "not_applicable_function_srf",
+            Self::PlannerDeclined => "planner_declined",
+            Self::SelectedNotDispatched => "selected_not_dispatched",
+        }
+    }
 }
 
 /// Thermal state captured before a workload runs (action_items M13 /
@@ -227,37 +328,18 @@ pub struct TableStats {
 }
 
 impl WorkloadResult {
-    /// Build aggregated result from raw iterations (two-way: accel vs parallel).
-    #[allow(dead_code)] // legacy shim; call sites migrated to from_iterations_ex
-    pub fn from_iterations(
-        name: String,
-        description: String,
-        category: String,
-        rows: usize,
-        iterations: Vec<IterationResult>,
-    ) -> Self {
-        Self::from_iterations_ex(
-            name,
-            description,
-            category,
-            classify_kernel("unclassified"),
-            rows,
-            iterations,
-            true,
-        )
-    }
-
-    /// Extended constructor used by the runner: populates kernel class,
+    /// Build aggregated result from raw iterations (two-way: accel vs parallel),
+    /// populating kernel class, dispatch status, and per-percentile statistics.
     /// dispatch status, and all per-percentile statistics.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_iterations_ex(
+    pub fn from_iterations(
         name: String,
         description: String,
         category: String,
         kernel_class: String,
         rows: usize,
         iterations: Vec<IterationResult>,
-        dispatched: bool,
+        gpu_kernel_dispatched: bool,
     ) -> Self {
         let accel_times: Vec<f64> = iterations.iter().map(|i| i.accel_ms).collect();
         let parallel_times: Vec<f64> = iterations.iter().map(|i| i.parallel_ms).collect();
@@ -295,7 +377,22 @@ impl WorkloadResult {
             category,
             kernel_class,
             rows,
-            dispatched,
+            plan_selected: gpu_kernel_dispatched,
+            gpu_kernel_dispatched,
+            function_srf_kernel_dispatched: false,
+            planner_declined: false,
+            custom_scan_selected_not_dispatched: false,
+            function_kernel_count: 0,
+            rows_returned_to_cpu: 0,
+            gpu_resident_pipeline: GpuResidentPipelineStatus::NotReported,
+            dispatch_counter_captured: false,
+            gpu_kernel_execution_delta: 0,
+            pg_accel_rows_dispatched_delta: 0,
+            pg_accel_batches_executed_delta: 0,
+            pg_accel_gpu_rows_processed_delta: 0,
+            pg_accel_stock_exec_delta: 0,
+            accel_output_rows_consumed: 0,
+            dispatch_counter_error: None,
             accel_mean_ms: accel_mean,
             accel_stddev_ms: stats::stddev(&accel_times),
             accel_median_ms: accel_median,
@@ -325,10 +422,35 @@ impl WorkloadResult {
             effect_size_meaningful,
             cv_ratio,
             plan_snippet: None,
+            baseline_plan_snippet: None,
             thermal: None,
             table_stats: Vec::new(),
             iterations,
         }
+    }
+
+    #[must_use]
+    pub fn dispatch_classification(&self) -> DispatchClassification {
+        infer_dispatch_classification(self, None)
+    }
+
+    fn dispatch_classification_with_plan_artifact(
+        &self,
+        full_plan: Option<&str>,
+    ) -> DispatchClassification {
+        infer_dispatch_classification(self, full_plan)
+    }
+
+    fn apply_dispatch_classification(&mut self, classification: DispatchClassification) {
+        self.plan_selected = classification.plan_selected;
+        self.gpu_kernel_dispatched = classification.gpu_kernel_dispatched;
+        self.function_srf_kernel_dispatched = classification.function_srf_kernel_dispatched;
+        self.planner_declined = classification.planner_declined;
+        self.custom_scan_selected_not_dispatched =
+            classification.custom_scan_selected_not_dispatched;
+        self.function_kernel_count = classification.function_kernel_count;
+        self.rows_returned_to_cpu = classification.rows_returned_to_cpu;
+        self.gpu_resident_pipeline = classification.gpu_resident_pipeline;
     }
 }
 
@@ -538,7 +660,291 @@ fn classify_significance(
     c
 }
 
+fn infer_dispatch_classification(
+    w: &WorkloadResult,
+    full_plan: Option<&str>,
+) -> DispatchClassification {
+    let snippet = w.plan_snippet.as_deref().unwrap_or_default();
+    let plan_selected = w.plan_selected
+        || plan_contains_custom_scan_marker(snippet)
+        || full_plan.is_some_and(plan_contains_custom_scan_marker);
+    let counter_capture_known = dispatch_counter_capture_known(w);
+    let counter_proves_kernel = w.gpu_kernel_execution_delta > 0;
+    let function_candidate = known_function_srf_kernel_workload(w);
+    let output_consumed = w.accel_output_rows_consumed > 0;
+    let function_srf_kernel_dispatched = function_candidate
+        && !plan_selected
+        && counter_capture_known
+        && counter_proves_kernel
+        && output_consumed
+        && w.pg_accel_stock_exec_delta == 0;
+
+    let custom_scan_gpu_dispatched = counter_capture_known
+        && counter_proves_kernel
+        && (!function_candidate || plan_selected || output_consumed)
+        && w.pg_accel_stock_exec_delta == 0;
+
+    let gpu_kernel_dispatched = custom_scan_gpu_dispatched || function_srf_kernel_dispatched;
+    let custom_scan_selected_not_dispatched = plan_selected && !gpu_kernel_dispatched;
+    let planner_declined = !plan_selected && !function_srf_kernel_dispatched;
+    let function_kernel_count = if function_srf_kernel_dispatched {
+        w.gpu_kernel_execution_delta
+    } else {
+        0
+    };
+    let rows_returned_to_cpu = w.accel_output_rows_consumed;
+    let gpu_resident_pipeline = classify_gpu_resident_pipeline_status(
+        w,
+        full_plan,
+        plan_selected,
+        gpu_kernel_dispatched,
+        function_srf_kernel_dispatched,
+        planner_declined,
+        custom_scan_selected_not_dispatched,
+    );
+
+    DispatchClassification {
+        plan_selected,
+        gpu_kernel_dispatched,
+        function_srf_kernel_dispatched,
+        planner_declined,
+        custom_scan_selected_not_dispatched,
+        function_kernel_count,
+        rows_returned_to_cpu,
+        gpu_resident_pipeline,
+    }
+}
+
+fn classify_gpu_resident_pipeline_status(
+    w: &WorkloadResult,
+    full_plan: Option<&str>,
+    plan_selected: bool,
+    gpu_kernel_dispatched: bool,
+    function_srf_kernel_dispatched: bool,
+    planner_declined: bool,
+    custom_scan_selected_not_dispatched: bool,
+) -> GpuResidentPipelineStatus {
+    if function_srf_kernel_dispatched {
+        return GpuResidentPipelineStatus::NotApplicableFunctionSrf;
+    }
+    if planner_declined {
+        return GpuResidentPipelineStatus::PlannerDeclined;
+    }
+    if custom_scan_selected_not_dispatched {
+        return GpuResidentPipelineStatus::SelectedNotDispatched;
+    }
+    if !plan_selected || !gpu_kernel_dispatched {
+        return GpuResidentPipelineStatus::NotReported;
+    }
+    if plan_contains_gpu_resident_pipeline_evidence(w.plan_snippet.as_deref().unwrap_or_default())
+        || full_plan.is_some_and(plan_contains_gpu_resident_pipeline_evidence)
+    {
+        return GpuResidentPipelineStatus::Reported;
+    }
+    GpuResidentPipelineStatus::NotReported
+}
+
+fn known_function_srf_kernel_workload(w: &WorkloadResult) -> bool {
+    is_function_kernel_candidate(&w.name, &w.category, &w.kernel_class, &w.description)
+}
+
+#[must_use]
+pub fn is_function_kernel_candidate(
+    name: &str,
+    category: &str,
+    kernel_class: &str,
+    description: &str,
+) -> bool {
+    let name = name.to_ascii_lowercase();
+    let category = category.to_ascii_lowercase();
+    let kernel = kernel_class.to_ascii_lowercase();
+    name.starts_with("h3_")
+        || name.contains("_h3_")
+        || category == "gpu_h3"
+        || kernel.starts_with("h3")
+        || description.to_ascii_lowercase().contains("h3_")
+}
+
+fn dispatch_counter_capture_known(w: &WorkloadResult) -> bool {
+    w.dispatch_counter_captured
+        || w.dispatch_counter_error.is_some()
+        || w.gpu_kernel_execution_delta > 0
+        || w.pg_accel_rows_dispatched_delta > 0
+        || w.pg_accel_batches_executed_delta > 0
+        || w.pg_accel_gpu_rows_processed_delta > 0
+        || w.pg_accel_stock_exec_delta > 0
+        || w.accel_output_rows_consumed > 0
+}
+
+#[allow(dead_code)]
+fn workload_or_plan_mentions_accel_function(w: &WorkloadResult, text: &str) -> bool {
+    let haystack = format!(
+        "{}\n{}\n{}",
+        w.name.to_ascii_lowercase(),
+        w.description.to_ascii_lowercase(),
+        text.to_ascii_lowercase()
+    );
+    FUNCTION_SRF_GPU_FUNCTIONS
+        .iter()
+        .any(|function| haystack.contains(function))
+}
+
+fn extract_full_plan_block(plans: &str, workload: &str, rows: usize) -> Option<String> {
+    let header = format!("=== {workload} @ rows={rows} ===");
+    let start = plans.find(&header)?;
+    let body = &plans[start + header.len()..];
+    let end = body.find("\n=== ").unwrap_or(body.len());
+    let block = body[..end].trim();
+    (!block.is_empty()).then(|| block.to_owned())
+}
+
+fn no_dispatch_anomaly(w: &WorkloadResult) -> bool {
+    both_modes_appear_non_dispatching(w)
+        && (no_dispatch_timing_skew(w) || no_dispatch_plan_mismatch(w))
+}
+
+fn both_modes_appear_non_dispatching(w: &WorkloadResult) -> bool {
+    !w.dispatch_classification().gpu_kernel_dispatched && !baseline_plan_dispatches(w)
+}
+
+fn baseline_plan_dispatches(w: &WorkloadResult) -> bool {
+    w.baseline_plan_snippet
+        .as_deref()
+        .is_some_and(plan_contains_custom_scan_marker)
+}
+
+fn no_dispatch_timing_skew(w: &WorkloadResult) -> bool {
+    if !both_modes_appear_non_dispatching(w) {
+        return false;
+    }
+    timing_skew_fraction(no_dispatch_speedup(w))
+        .is_some_and(|skew| skew >= NO_DISPATCH_TIMING_SKEW_THRESHOLD)
+}
+
+fn no_dispatch_plan_mismatch(w: &WorkloadResult) -> bool {
+    if !both_modes_appear_non_dispatching(w) {
+        return false;
+    }
+    let Some(accel_plan) = w.plan_snippet.as_deref() else {
+        return false;
+    };
+    let Some(baseline_plan) = w.baseline_plan_snippet.as_deref() else {
+        return false;
+    };
+    let accel_sig = plan_shape_signature(accel_plan);
+    let baseline_sig = plan_shape_signature(baseline_plan);
+    !accel_sig.is_empty() && !baseline_sig.is_empty() && accel_sig != baseline_sig
+}
+
+fn no_dispatch_speedup(w: &WorkloadResult) -> f64 {
+    if w.speedup_median_vs_parallel.is_finite() && w.speedup_median_vs_parallel > 0.0 {
+        w.speedup_median_vs_parallel
+    } else {
+        w.speedup_vs_parallel
+    }
+}
+
+fn timing_skew_fraction(speedup: f64) -> Option<f64> {
+    if !speedup.is_finite() || speedup <= 0.0 {
+        return None;
+    }
+    Some(if speedup >= 1.0 {
+        speedup - 1.0
+    } else {
+        (1.0 / speedup) - 1.0
+    })
+}
+
+fn plan_contains_custom_scan_marker(plan: &str) -> bool {
+    plan.contains("Custom Scan")
+}
+
+fn plan_contains_gpu_resident_pipeline_evidence(plan: &str) -> bool {
+    let lower = plan.to_ascii_lowercase();
+    lower.contains("strategy: gpupreagg")
+        || lower.contains("gpuaccelpreagg")
+        || lower.contains("fact rows scanned")
+        || lower.contains("has scan expr")
+        || lower.contains("pipeline fusion")
+        || lower.contains("gpu-resident")
+        || lower.contains("gpu resident")
+}
+
+fn plan_shape_signature(plan: &str) -> Vec<String> {
+    plan.lines().filter_map(normalize_plan_line).collect()
+}
+
+fn first_plan_signature_line(plan: Option<&str>) -> String {
+    plan.and_then(|p| plan_shape_signature(p).into_iter().next())
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn normalize_plan_line(line: &str) -> Option<String> {
+    let mut trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix("->") {
+        trimmed = rest.trim_start();
+    }
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("planning time:")
+        || lower.starts_with("execution time:")
+        || lower.starts_with("buffers:")
+    {
+        return None;
+    }
+
+    let mut truncate_at = lower.len();
+    for marker in ["  (cost=", " (cost=", "  (actual", " (actual"] {
+        if let Some(idx) = lower.find(marker) {
+            truncate_at = truncate_at.min(idx);
+        }
+    }
+    lower.truncate(truncate_at);
+
+    let normalized = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn markdown_cell(input: &str) -> String {
+    input.replace('|', "\\|").replace('\n', "<br>")
+}
+
+fn dispatch_evidence_label(w: &WorkloadResult) -> &'static str {
+    if w.function_srf_kernel_dispatched {
+        "function_srf_dispatch"
+    } else if w.custom_scan_selected_not_dispatched {
+        "custom_scan_selected_not_dispatched"
+    } else if w.planner_declined {
+        "planner_declined"
+    } else if w.gpu_kernel_dispatched {
+        "custom_scan_dispatch"
+    } else {
+        "uncredited_gpu_counter_or_unknown"
+    }
+}
+
 impl BenchReport {
+    fn with_normalized_dispatch(&self) -> Self {
+        let mut report = self.clone();
+        let full_plans = report.full_plan_artifact_text();
+        for w in &mut report.workloads {
+            let full_plan = full_plans
+                .as_deref()
+                .and_then(|plans| extract_full_plan_block(plans, &w.name, w.rows));
+            let classification = w.dispatch_classification_with_plan_artifact(full_plan.as_deref());
+            w.apply_dispatch_classification(classification);
+        }
+        report
+    }
+
+    fn full_plan_artifact_text(&self) -> Option<String> {
+        let dir = self.artifact_dir.as_deref()?;
+        fs::read_to_string(Path::new(dir).join("plans.txt")).ok()
+    }
+
     /// Render the report as a Markdown document.
     ///
     /// The summary table shows speedup at each row scale. Detailed sections
@@ -573,6 +979,8 @@ impl BenchReport {
         // losers. The non-h3 geomean is printed in its own row so the reader
         // can see the trig-kernel artifact (Reviewer 1 Sin #9) isolated.
         self.render_geomean_headline(&mut out);
+        self.render_dispatch_classification(&mut out);
+        self.render_dispatch_evidence(&mut out);
 
         // -------------------------------------------------------------------
         // Kernel coverage table (action_items W11 / Reviewer 1 Sin #17)
@@ -582,6 +990,8 @@ impl BenchReport {
         // entire suite; the category table inflates the count because the
         // same `point_in_ring` kernel appears under 4 different category
         // labels. This table collapses everything to kernel class.
+        self.render_no_dispatch_audit(&mut out);
+
         self.render_kernel_coverage(&mut out);
 
         // GUC settings
@@ -698,9 +1108,7 @@ impl BenchReport {
         // are visually distinct from "no result". Workloads with one or more
         // crashes get an asterisk in the row name and a `(N/M kernels stable)`
         // annotation reflecting how many of the attempted scales actually
-        // produced a result. The headline rate uses speedup-from-median or
-        // speedup-from-mean as configured.
-        let use_median = self.methodology.speedup_source == "median";
+        // produced a result. The headline rate uses median speedup.
         for name in &workload_names {
             // Count crashed scales for this workload across the requested
             // scale list. attempted = scales that have either a result or a
@@ -726,11 +1134,7 @@ impl BenchReport {
             let _ = write!(out, "| {display_name} |");
             for &s in scales {
                 if let Some(w) = lookup.get(&(name.as_str(), s)) {
-                    let sp = if use_median {
-                        w.speedup_median_vs_parallel
-                    } else {
-                        w.speedup_vs_parallel
-                    };
+                    let sp = w.speedup_median_vs_parallel;
                     // Significance gate: |d| ≥ 0.5 AND Bonferroni p < 0.05.
                     let adj = stats::bonferroni_adjusted_p(w.p_value_vs_parallel, n_tests);
                     let sig = adj.is_finite() && adj < 0.05 && w.effect_size_meaningful;
@@ -877,33 +1281,32 @@ impl BenchReport {
         // dispatch rejected). These are the most informative diagnostic rows
         // — they tell us which workloads never even got off the starting line.
         // -------------------------------------------------------------------
-        // action_items M: prefer the explicit `dispatched` flag (set from
-        // captured plan text) when available; fall back to the speedup
-        // heuristic for legacy result archives where the field is missing.
-        let non_dispatch: Vec<&WorkloadResult> = self
+        let normalized_dispatch = self.with_normalized_dispatch();
+        let non_dispatch: Vec<&WorkloadResult> = normalized_dispatch
             .workloads
             .iter()
-            .filter(|w| !w.dispatched || (w.speedup_vs_parallel - 1.0).abs() < 0.02)
+            .filter(|w| !w.gpu_kernel_dispatched)
             .collect();
         if !non_dispatch.is_empty() {
             out.push_str("## Non-Dispatching Workloads\n\n");
             out.push_str(
-                "Workloads where `|speedup − 1| < 0.02`. pg_accel almost certainly did not \
-                 dispatch a GPU path for these — check `benchmarks/plans.txt` (or run with \
-                 `--capture-plans`) to confirm whether a Custom Scan node appears in the \
-                 plan. If it does not, the planner hook is declining the path.\n\n",
+                "Workloads where runtime counters did not prove GPU dispatch. These are not GPU \
+                 performance conclusions. If the no-dispatch audit flags a row, treat it as \
+                 harness/planner skew until the pg_accel-side plan either dispatches to GPU or \
+                 normal PostgreSQL planning cleanly declines the pg_accel path.\n\n",
             );
             let _ = writeln!(
                 out,
-                "| Workload | Scale | Speedup | Accel (ms) | PG Parallel (ms) |"
+                "| Workload | Scale | Classification | Speedup | Accel (ms) | PG Parallel (ms) |"
             );
-            let _ = writeln!(out, "|---|---|---|---|---|");
+            let _ = writeln!(out, "|---|---|---|---|---|---|");
             for w in &non_dispatch {
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {:.2}x | {:.2} | {:.2} |",
+                    "| {} | {} | {} | {:.2}x | {:.2} | {:.2} |",
                     w.name,
                     format_rows(w.rows),
+                    dispatch_evidence_label(w),
                     w.speedup_vs_parallel,
                     w.accel_mean_ms,
                     w.parallel_mean_ms,
@@ -964,15 +1367,24 @@ impl BenchReport {
     ///
     /// Returns an error if serialization fails (should not happen in practice).
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
+        serde_json::to_string_pretty(&self.with_normalized_dispatch())
     }
 
     /// Render the report as CSV (one row per workload per scale, two-way).
     #[must_use]
     pub fn to_csv(&self) -> String {
+        let report = self.with_normalized_dispatch();
         let mut out = String::new();
         out.push_str(
-            "workload,category,kernel_class,dispatched,rows,\
+            "workload,category,kernel_class,plan_selected,gpu_kernel_dispatched,\
+             function_srf_kernel_dispatched,planner_declined,\
+             custom_scan_selected_not_dispatched,function_kernel_count,\
+             rows_returned_to_cpu,gpu_resident_pipeline,dispatch_counter_captured,\
+             gpu_kernel_execution_delta,pg_accel_rows_dispatched_delta,\
+             pg_accel_batches_executed_delta,pg_accel_gpu_rows_processed_delta,\
+             pg_accel_stock_exec_delta,\
+             accel_output_rows_consumed,rows,\
+             baseline_dispatched,no_dispatch_timing_skew,no_dispatch_plan_mismatch,\
              accel_mean_ms,accel_stddev_ms,accel_median_ms,accel_p25_ms,accel_p75_ms,accel_p95_ms,\
              accel_cv_pct,accel_min_ms,accel_max_ms,\
              parallel_mean_ms,parallel_stddev_ms,parallel_median_ms,parallel_p25_ms,parallel_p75_ms,\
@@ -980,7 +1392,10 @@ impl BenchReport {
              speedup_vs_parallel,speedup_median_vs_parallel,p_value_vs_parallel,\
              cohens_d_vs_parallel,effect_size_meaningful,cv_ratio,significant\n",
         );
-        for w in &self.workloads {
+        for w in &report.workloads {
+            let baseline_dispatched = baseline_plan_dispatches(w);
+            let timing_skew = no_dispatch_timing_skew(w);
+            let plan_mismatch = no_dispatch_plan_mismatch(w);
             let sig = if w.p_value_vs_parallel < 0.01 {
                 "yes"
             } else if w.p_value_vs_parallel < 0.05 {
@@ -990,7 +1405,8 @@ impl BenchReport {
             };
             let _ = writeln!(
                 out,
-                "{},{},{},{},{},\
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
+                 {},{},{},{},{},{},{},{},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},\
                  {:.4},{:.4},{:.4},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},\
@@ -1000,8 +1416,25 @@ impl BenchReport {
                 w.name,
                 w.category,
                 w.kernel_class,
-                w.dispatched,
+                w.plan_selected,
+                w.gpu_kernel_dispatched,
+                w.function_srf_kernel_dispatched,
+                w.planner_declined,
+                w.custom_scan_selected_not_dispatched,
+                w.function_kernel_count,
+                w.rows_returned_to_cpu,
+                w.gpu_resident_pipeline.as_str(),
+                w.dispatch_counter_captured,
+                w.gpu_kernel_execution_delta,
+                w.pg_accel_rows_dispatched_delta,
+                w.pg_accel_batches_executed_delta,
+                w.pg_accel_gpu_rows_processed_delta,
+                w.pg_accel_stock_exec_delta,
+                w.accel_output_rows_consumed,
                 w.rows,
+                baseline_dispatched,
+                timing_skew,
+                plan_mismatch,
                 w.accel_mean_ms,
                 w.accel_stddev_ms,
                 w.accel_median_ms,
@@ -1045,29 +1478,23 @@ impl BenchReport {
     ///   - Crashed scales count toward the family size for Bonferroni
     ///     so adding more crashes does NOT make the surviving rows
     ///     accidentally pass significance
-    ///   - Workloads where `dispatched == false` are excluded from
-    ///     per-category geomeans (action_items M)
+    ///   - Workloads where `gpu_kernel_dispatched == false` are excluded
+    ///     from per-category geomeans (action_items M)
     fn render_geomean_headline(&self, out: &mut String) {
+        let report = self.with_normalized_dispatch();
         // Family size for Bonferroni = attempted scales = workloads + crashes.
         // This is the same value used by the detail tables so the two views
         // never disagree.
-        let family_size = self.workloads.len() + self.crashes.len();
-        let speedup_label = if self.methodology.speedup_source == "median" {
-            "median speedup"
-        } else {
-            "mean speedup"
-        };
-        let speedup_of = |w: &WorkloadResult| -> f64 {
-            if self.methodology.speedup_source == "median" {
-                w.speedup_median_vs_parallel
-            } else {
-                w.speedup_vs_parallel
-            }
-        };
+        let family_size = report.workloads.len() + report.crashes.len();
+        let speedup_label = "median speedup";
+        let speedup_of = |w: &WorkloadResult| -> f64 { w.speedup_median_vs_parallel };
 
         // ----- Overall (dispatched only) -----
-        let dispatched: Vec<&WorkloadResult> =
-            self.workloads.iter().filter(|w| w.dispatched).collect();
+        let dispatched: Vec<&WorkloadResult> = report
+            .workloads
+            .iter()
+            .filter(|w| w.gpu_kernel_dispatched)
+            .collect();
         let dispatched_speedups: Vec<f64> = dispatched.iter().map(|w| speedup_of(w)).collect();
         let overall_gm = stats::geomean(&dispatched_speedups);
         let overall_counts = classify_significance(&dispatched, family_size, 0.05);
@@ -1083,7 +1510,7 @@ impl BenchReport {
         let _ = writeln!(
             out,
             "> {label}: overall {speedup_label} = **{overall_gm:.2}x** \
-             (geomean across {n} dispatched workloads, family size = {family_size}).",
+             (geomean across {n} GPU-dispatched workloads, family size = {family_size}).",
             n = dispatched.len(),
         );
         let _ = writeln!(
@@ -1095,12 +1522,12 @@ impl BenchReport {
             overall_counts.not_significant,
             overall_counts.effect_rejected,
         );
-        if !self.crashes.is_empty() {
+        if !report.crashes.is_empty() {
             let _ = writeln!(
                 out,
                 ">\n> {n_crash} scale(s) crashed and are counted in the Bonferroni \
                  family size but not in the geomean.",
-                n_crash = self.crashes.len(),
+                n_crash = report.crashes.len(),
             );
         }
         out.push('\n');
@@ -1161,7 +1588,7 @@ impl BenchReport {
         // overall row.
         let _ = writeln!(
             out,
-            "| **overall (dispatched)** | **{}** | **{overall_gm:.2}x** | **{}** | **{}** | **{}** | **{}** |",
+            "| **overall (GPU-dispatched)** | **{}** | **{overall_gm:.2}x** | **{}** | **{}** | **{}** | **{}** |",
             dispatched.len(),
             overall_counts.sig_wins,
             overall_counts.sig_losses,
@@ -1171,14 +1598,14 @@ impl BenchReport {
         out.push('\n');
 
         // ----- CRASH summary rows (action_items L) -----
-        if !self.crashes.is_empty() {
+        if !report.crashes.is_empty() {
             out.push_str("### Crashed scales\n\n");
             let _ = writeln!(
                 out,
                 "| Workload | Scale | Error | Plan Snippet | Log Tails | Repro |"
             );
             let _ = writeln!(out, "|---|---|---|---|---|---|");
-            for c in &self.crashes {
+            for c in &report.crashes {
                 let short = if c.error.len() > 80 {
                     format!("{}...", &c.error[..77])
                 } else {
@@ -1206,6 +1633,239 @@ impl BenchReport {
         }
     }
 
+    fn render_dispatch_classification(&self, out: &mut String) {
+        let report = self.with_normalized_dispatch();
+        let total = report.workloads.len();
+        let plan_selected = report.workloads.iter().filter(|w| w.plan_selected).count();
+        let gpu_kernel_dispatched = report
+            .workloads
+            .iter()
+            .filter(|w| w.gpu_kernel_dispatched)
+            .count();
+        let function_srf_kernel_dispatched = report
+            .workloads
+            .iter()
+            .filter(|w| w.function_srf_kernel_dispatched)
+            .count();
+        let counter_capture = report
+            .workloads
+            .iter()
+            .filter(|w| w.dispatch_counter_captured)
+            .count();
+        let kernel_counter_positive = report
+            .workloads
+            .iter()
+            .filter(|w| w.gpu_kernel_execution_delta > 0)
+            .count();
+        let stock_exec_positive = report
+            .workloads
+            .iter()
+            .filter(|w| w.pg_accel_stock_exec_delta > 0)
+            .count();
+        let plan_only = report
+            .workloads
+            .iter()
+            .filter(|w| w.custom_scan_selected_not_dispatched)
+            .count();
+        let planner_declined = report
+            .workloads
+            .iter()
+            .filter(|w| w.planner_declined)
+            .count();
+        let function_kernel_count: u64 = report
+            .workloads
+            .iter()
+            .map(|w| w.function_kernel_count)
+            .sum();
+        let rows_returned_to_cpu: u64 = report
+            .workloads
+            .iter()
+            .map(|w| w.rows_returned_to_cpu)
+            .sum();
+        let gpu_resident_reported = report
+            .workloads
+            .iter()
+            .filter(|w| w.gpu_resident_pipeline == GpuResidentPipelineStatus::Reported)
+            .count();
+        let gpu_resident_not_reported = report
+            .workloads
+            .iter()
+            .filter(|w| {
+                w.plan_selected
+                    && w.gpu_kernel_dispatched
+                    && w.gpu_resident_pipeline == GpuResidentPipelineStatus::NotReported
+            })
+            .count();
+
+        out.push_str("## Dispatch Classification\n\n");
+        out.push_str(
+            "Plan selection and runtime GPU work are counted separately. Runtime counter deltas \
+             are the source of truth for GPU-dispatched geomeans; plan-only pg_accel rows and \
+             rows with stock executor fallback are excluded. Release-gate fields in this section \
+             are derived from the existing workload counters and captured plan text.\n\n",
+        );
+        let _ = writeln!(out, "| Classification | Workloads |");
+        let _ = writeln!(out, "|---|---:|");
+        let _ = writeln!(out, "| Total measured rows | {total} |");
+        let _ = writeln!(
+            out,
+            "| pg_accel Custom Scan plan selected | {plan_selected} |"
+        );
+        let _ = writeln!(out, "| GPU kernel dispatched | {gpu_kernel_dispatched} |");
+        let _ = writeln!(
+            out,
+            "| Function/SRF kernel dispatched | {function_srf_kernel_dispatched} |"
+        );
+        let _ = writeln!(
+            out,
+            "| Runtime counter capture available | {counter_capture} |"
+        );
+        let _ = writeln!(
+            out,
+            "| Kernel counter delta > 0 | {kernel_counter_positive} |"
+        );
+        let _ = writeln!(
+            out,
+            "| pg_accel stock executor fallback delta > 0 | {stock_exec_positive} |"
+        );
+        let _ = writeln!(
+            out,
+            "| Custom Scan selected but no GPU dispatch | {plan_only} |"
+        );
+        let _ = writeln!(
+            out,
+            "| Planner declined/no credited pg_accel path | {planner_declined} |"
+        );
+        let _ = writeln!(
+            out,
+            "| Function/SRF kernel count | {function_kernel_count} |"
+        );
+        let _ = writeln!(out, "| Rows returned to CPU | {rows_returned_to_cpu} |");
+        let _ = writeln!(
+            out,
+            "| GPU-resident pipeline reported | {gpu_resident_reported} |"
+        );
+        let _ = writeln!(
+            out,
+            "| GPU-dispatched Custom Scan without resident-pipeline evidence | \
+             {gpu_resident_not_reported} |"
+        );
+        out.push('\n');
+    }
+
+    fn render_dispatch_evidence(&self, out: &mut String) {
+        let report = self.with_normalized_dispatch();
+        if report.workloads.is_empty() {
+            return;
+        }
+
+        out.push_str("### Dispatch Evidence By Row\n\n");
+        out.push_str(
+            "Each measured row is assigned one explicit release-gate classification. \
+             `rows_returned_to_cpu` is the accel-side output consumption count; \
+             `function_kernel_count` is populated only for credited function/SRF dispatch.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "| Workload | Scale | Classification | Function kernel count | Rows returned to CPU | \
+             GPU-resident pipeline | Kernel delta | Rows dispatched | GPU rows processed | Stock fallback |"
+        );
+        let _ = writeln!(out, "|---|---|---|---:|---:|---|---:|---:|---:|---:|");
+        for w in &report.workloads {
+            let classification = dispatch_evidence_label(w);
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                markdown_cell(&w.name),
+                format_rows(w.rows),
+                classification,
+                w.function_kernel_count,
+                w.rows_returned_to_cpu,
+                w.gpu_resident_pipeline.as_str(),
+                w.gpu_kernel_execution_delta,
+                w.pg_accel_rows_dispatched_delta,
+                w.pg_accel_gpu_rows_processed_delta,
+                w.pg_accel_stock_exec_delta,
+            );
+        }
+        out.push('\n');
+    }
+
+    /// Render warnings for rows where both benchmark modes appear to have
+    /// stayed on PostgreSQL-native plans, but the comparison is still not
+    /// trustworthy because timing or plan shape diverged materially.
+    fn render_no_dispatch_audit(&self, out: &mut String) {
+        let report = self.with_normalized_dispatch();
+        let mut anomalies: Vec<&WorkloadResult> = report
+            .workloads
+            .iter()
+            .filter(|w| no_dispatch_anomaly(w))
+            .collect();
+        anomalies.sort_by(|a, b| {
+            timing_skew_fraction(no_dispatch_speedup(b))
+                .unwrap_or(0.0)
+                .partial_cmp(&timing_skew_fraction(no_dispatch_speedup(a)).unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if anomalies.is_empty() {
+            return;
+        }
+
+        out.push_str("## No-Dispatch Timing Audit\n\n");
+        let _ = writeln!(
+            out,
+            "> WARNING: {} no-dispatch comparison(s) have >= {:.0}% timing skew or \
+             materially different native plan shapes. Do not use these rows as GPU \
+             performance conclusions.",
+            anomalies.len(),
+            NO_DISPATCH_TIMING_SKEW_THRESHOLD * 100.0,
+        );
+        out.push_str(
+            ">\n> Action item: delete or quarantine any pg_accel CPU fallback exposed by \
+             these rows. If pg_accel cannot GPU accelerate the query, normal PostgreSQL \
+             planning must decline the pg_accel path and let PostgreSQL use its native \
+             plan.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "| Workload | Scale | Median speedup | Timing skew | Plan shape | Accel plan | \
+             PG plan | Action |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
+        for w in anomalies {
+            let speedup = no_dispatch_speedup(w);
+            let skew = timing_skew_fraction(speedup).unwrap_or(f64::NAN) * 100.0;
+            let timing = if no_dispatch_timing_skew(w) {
+                format!("{skew:.1}%")
+            } else {
+                "<threshold".to_owned()
+            };
+            let plan_shape = if no_dispatch_plan_mismatch(w) {
+                "DIFF"
+            } else if w.plan_snippet.is_some() && w.baseline_plan_snippet.is_some() {
+                "same"
+            } else {
+                "not captured"
+            };
+            let _ = writeln!(
+                out,
+                "| {} | {} | {:.2}x | {} | {} | `{}` | `{}` | quarantine CPU fallback / \
+                 planner-decline |",
+                markdown_cell(&w.name),
+                format_rows(w.rows),
+                speedup,
+                timing,
+                plan_shape,
+                markdown_cell(&first_plan_signature_line(w.plan_snippet.as_deref())),
+                markdown_cell(&first_plan_signature_line(
+                    w.baseline_plan_snippet.as_deref(),
+                )),
+            );
+        }
+        out.push('\n');
+    }
+
     /// Render the kernel coverage table — collapses workloads by the
     /// kernel class they exercise. action_items O / W11.
     ///
@@ -1215,6 +1875,7 @@ impl BenchReport {
     /// category labels. Grouping by `kernel_class` makes the real
     /// coverage matrix obvious.
     fn render_kernel_coverage(&self, out: &mut String) {
+        let report = self.with_normalized_dispatch();
         out.push_str("## Kernel Coverage\n\n");
         out.push_str(
             "Workloads grouped by the GPU kernel class they exercise. \
@@ -1222,19 +1883,13 @@ impl BenchReport {
              of redundant variations of the same code path. Use this table \
              when adding new tests — prefer kernels with low coverage.\n\n",
         );
-        let family_size = self.workloads.len() + self.crashes.len();
-        let speedup_of = |w: &WorkloadResult| -> f64 {
-            if self.methodology.speedup_source == "median" {
-                w.speedup_median_vs_parallel
-            } else {
-                w.speedup_vs_parallel
-            }
-        };
+        let family_size = report.workloads.len() + report.crashes.len();
+        let speedup_of = |w: &WorkloadResult| -> f64 { w.speedup_median_vs_parallel };
 
         // Group dispatched workloads by kernel_class.
         let mut by_kernel: BTreeMap<String, Vec<&WorkloadResult>> = BTreeMap::new();
-        for w in &self.workloads {
-            if !w.dispatched {
+        for w in &report.workloads {
+            if !w.gpu_kernel_dispatched {
                 continue;
             }
             by_kernel.entry(w.kernel_class.clone()).or_default().push(w);
@@ -1267,43 +1922,14 @@ impl BenchReport {
     }
 }
 
-/// Generate a full report from workload results, with hardware and GUC info.
-///
-/// # Errors
-///
-/// Returns an error if GUC detection fails (non-fatal: report still generated
-/// without GUCs).
-#[allow(dead_code)] // legacy shim; call sites now use generate_report_ex directly
-pub fn generate_report(
-    workloads: Vec<WorkloadResult>,
-    crashes: Vec<CrashedScale>,
-    connection: Option<&str>,
-    iterations: usize,
-    warmup: usize,
-) -> BenchReport {
-    generate_report_ex(
-        workloads,
-        crashes,
-        connection,
-        iterations,
-        warmup,
-        None,
-        crate::runner::TimingMode::RawWallClock,
-        crate::runner::CacheMode::Warm,
-        crate::runner::SpeedupSource::Median,
-    )
-}
-
-/// Extended entrypoint used by `run_all_with_config` — carries the
-/// observed-GUC snapshot, timing mode, cache mode, and speedup source
-/// through into the report so the renderer can label the columns
-/// correctly (action_items C4 / M1 / M2 / M12).
+/// Build a benchmark report, carrying the observed-GUC snapshot, timing mode,
+/// and cache mode through so renderers can label columns correctly.
 #[allow(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
     clippy::option_if_let_else
 )]
-pub fn generate_report_ex(
+pub fn generate_report(
     workloads: Vec<WorkloadResult>,
     crashes: Vec<CrashedScale>,
     connection: Option<&str>,
@@ -1312,7 +1938,6 @@ pub fn generate_report_ex(
     observed: Option<crate::runner::ObservedGucs>,
     timing_mode: crate::runner::TimingMode,
     cache_mode: crate::runner::CacheMode,
-    speedup_source: crate::runner::SpeedupSource,
 ) -> BenchReport {
     let hardware = Some(HardwareProfile::detect());
 
@@ -1349,11 +1974,6 @@ pub fn generate_report_ex(
         crate::runner::CacheMode::Cold => "cold",
         crate::runner::CacheMode::Both => "both",
     };
-    let speedup_label = match speedup_source {
-        crate::runner::SpeedupSource::Median => "median",
-        crate::runner::SpeedupSource::Mean => "mean",
-    };
-
     let methodology = Methodology {
         iterations,
         warmup,
@@ -1368,9 +1988,8 @@ pub fn generate_report_ex(
         ],
         timing_mode: timing_label.to_owned(),
         cache_mode: cache_label.to_owned(),
-        speedup_source: speedup_label.to_owned(),
     };
-    BenchReport {
+    let report = BenchReport {
         hardware,
         gucs,
         methodology,
@@ -1378,7 +1997,8 @@ pub fn generate_report_ex(
         artifact_dir: None,
         crashes,
         postmaster_start_time,
-    }
+    };
+    report.with_normalized_dispatch()
 }
 
 // ---------------------------------------------------------------------------
@@ -1517,8 +2137,10 @@ mod tests {
             name.to_owned(),
             format!("Mock workload: {name}"),
             "gpu".to_owned(),
+            classify_kernel("unclassified"),
             rows,
             iterations,
+            true,
         )
     }
 
@@ -1547,12 +2169,24 @@ mod tests {
                 statistical_tests: vec!["Paired t-test".to_owned()],
                 timing_mode: "raw".to_owned(),
                 cache_mode: "warm".to_owned(),
-                speedup_source: "median".to_owned(),
             },
             workloads,
             artifact_dir: None,
             crashes: Vec::new(),
         }
+    }
+
+    fn mark_no_dispatch(
+        mut result: WorkloadResult,
+        accel_plan: &str,
+        baseline_plan: &str,
+    ) -> WorkloadResult {
+        result.plan_selected = false;
+        result.gpu_kernel_dispatched = false;
+        result.function_srf_kernel_dispatched = false;
+        result.plan_snippet = Some(accel_plan.to_owned());
+        result.baseline_plan_snippet = Some(baseline_plan.to_owned());
+        result
     }
 
     #[test]
@@ -1574,8 +2208,10 @@ mod tests {
             "one".to_owned(),
             "desc".to_owned(),
             "gpu".to_owned(),
+            classify_kernel("unclassified"),
             1000,
             iters,
+            true,
         );
         assert!((result.accel_mean_ms - 5.0).abs() < f64::EPSILON);
         assert!((result.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
@@ -1610,6 +2246,228 @@ mod tests {
     }
 
     #[test]
+    fn test_markdown_warns_on_no_dispatch_timing_skew() {
+        let plan = "Aggregate\n  Output: count(*)\n  -> Seq Scan on public.bench\n";
+        let workload = mark_no_dispatch(
+            mock_workload_result("native_skew", 100_000, 20.0, 10.0),
+            plan,
+            plan,
+        );
+        let report = mock_report(vec![workload]);
+        let md = report.to_markdown();
+
+        assert!(md.contains("## No-Dispatch Timing Audit"));
+        assert!(md.contains("native_skew"));
+        assert!(md.contains("quarantine CPU fallback"));
+    }
+
+    #[test]
+    fn test_markdown_warns_on_no_dispatch_plan_mismatch() {
+        let accel_plan = "Aggregate\n  Output: count(*)\n  -> Seq Scan on public.bench\n";
+        let baseline_plan = "Finalize Aggregate\n  -> Gather\n        Workers Planned: 2\n        -> Partial Aggregate\n             -> Parallel Seq Scan on public.bench\n";
+        let workload = mark_no_dispatch(
+            mock_workload_result("native_plan_diff", 100_000, 10.0, 10.0),
+            accel_plan,
+            baseline_plan,
+        );
+        let report = mock_report(vec![workload]);
+        let md = report.to_markdown();
+
+        assert!(md.contains("native_plan_diff"));
+        assert!(md.contains("| DIFF |"));
+    }
+
+    #[test]
+    fn test_markdown_omits_no_dispatch_audit_for_comparable_native_plan() {
+        let plan = "Aggregate\n  Output: count(*)\n  -> Seq Scan on public.bench\n";
+        let workload = mark_no_dispatch(
+            mock_workload_result("native_same", 100_000, 10.0, 10.0),
+            plan,
+            plan,
+        );
+        let report = mock_report(vec![workload]);
+        let md = report.to_markdown();
+
+        assert!(!md.contains("## No-Dispatch Timing Audit"));
+    }
+
+    #[test]
+    fn test_h3_function_kernel_counts_as_gpu_dispatched() {
+        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.function_srf_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
+             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+                .to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let md = report.to_markdown();
+        assert!(md.contains("geomean across 1 GPU-dispatched workloads"));
+        assert!(md.contains("| Function/SRF kernel dispatched | 1 |"));
+        assert!(!md.contains("## Non-Dispatching Workloads"));
+
+        let csv = report.to_csv();
+        assert!(csv.contains(
+            "h3_bulk,gpu_h3,h3_latlng,false,true,true,false,false,1,10,\
+             not_applicable_function_srf,true,1,0,0,0,0,10,100000"
+        ));
+    }
+
+    #[test]
+    fn test_h3_function_kernel_requires_output_consumption() {
+        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.function_srf_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 0;
+        let report = mock_report(vec![workload]);
+
+        let md = report.to_markdown();
+        assert!(md.contains("geomean across 0 GPU-dispatched workloads"));
+        assert!(md.contains("| Function/SRF kernel dispatched | 0 |"));
+    }
+
+    #[test]
+    fn test_cpu_backed_pg_accel_plan_is_not_a_win() {
+        let mut workload = mock_workload_result("spatial_filter", 100_000, 10.0, 50.0);
+        workload.plan_selected = true;
+        workload.gpu_kernel_dispatched = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.pg_accel_stock_exec_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some("Custom Scan (GpuAccelScan)\n".to_owned());
+        let report = mock_report(vec![workload]);
+
+        let md = report.to_markdown();
+        assert!(md.contains("geomean across 0 GPU-dispatched workloads"));
+        assert!(md.contains("| pg_accel stock executor fallback delta > 0 | 1 |"));
+    }
+
+    #[test]
+    fn test_explicit_gpu_dispatched_false_is_plan_selected_only() {
+        let mut workload = mock_workload_result("spatial_sel_90pct", 100_000, 20.0, 10.0);
+        workload.plan_selected = true;
+        workload.gpu_kernel_dispatched = true;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  -> Seq Scan on public.bench\n  \
+             GPU Dispatched: false\n"
+                .to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let md = report.to_markdown();
+        assert!(md.contains("geomean across 0 GPU-dispatched workloads"));
+        assert!(md.contains("| pg_accel Custom Scan plan selected | 1 |"));
+        assert!(md.contains("| Custom Scan selected but no GPU dispatch | 1 |"));
+
+        let csv = report.to_csv();
+        assert!(csv.contains(
+            "spatial_sel_90pct,gpu,unclassified,true,false,false,false,true,0,0,\
+             selected_not_dispatched,false,0,0,0,0,0,0,100000"
+        ));
+    }
+
+    #[test]
+    fn test_dispatch_classification_marks_planner_decline() {
+        let mut workload = mock_workload_result("native_only", 100_000, 10.0, 10.0);
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.plan_snippet = Some("Aggregate\n  -> Seq Scan on public.bench\n".to_owned());
+
+        let classification = workload.dispatch_classification();
+
+        assert!(classification.planner_declined);
+        assert!(!classification.plan_selected);
+        assert!(!classification.gpu_kernel_dispatched);
+        assert_eq!(
+            classification.gpu_resident_pipeline,
+            GpuResidentPipelineStatus::PlannerDeclined
+        );
+    }
+
+    #[test]
+    fn test_dispatch_classification_marks_custom_scan_no_dispatch() {
+        let mut workload = mock_workload_result("plan_only", 100_000, 10.0, 10.0);
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = true;
+        workload.dispatch_counter_captured = true;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: false\n".to_owned(),
+        );
+
+        let classification = workload.dispatch_classification();
+
+        assert!(classification.plan_selected);
+        assert!(!classification.gpu_kernel_dispatched);
+        assert!(classification.custom_scan_selected_not_dispatched);
+        assert_eq!(
+            classification.gpu_resident_pipeline,
+            GpuResidentPipelineStatus::SelectedNotDispatched
+        );
+    }
+
+    #[test]
+    fn test_dispatch_classification_counts_function_kernel_rows() {
+        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 3;
+        workload.accel_output_rows_consumed = 12;
+
+        let classification = workload.dispatch_classification();
+
+        assert!(classification.gpu_kernel_dispatched);
+        assert!(classification.function_srf_kernel_dispatched);
+        assert_eq!(classification.function_kernel_count, 3);
+        assert_eq!(classification.rows_returned_to_cpu, 12);
+        assert_eq!(
+            classification.gpu_resident_pipeline,
+            GpuResidentPipelineStatus::NotApplicableFunctionSrf
+        );
+    }
+
+    #[test]
+    fn test_dispatch_classification_reports_gpu_resident_preagg_evidence() {
+        let mut workload = mock_workload_result("ssbm_q1", 1_000_000, 10.0, 50.0);
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 2;
+        workload.pg_accel_rows_dispatched_delta = 1_000_000;
+        workload.pg_accel_gpu_rows_processed_delta = 1_000_000;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelPreAgg)\n  Strategy: GpuPreAgg\n  Fact Rows Scanned: 1000000\n"
+                .to_owned(),
+        );
+
+        let classification = workload.dispatch_classification();
+
+        assert!(classification.plan_selected);
+        assert!(classification.gpu_kernel_dispatched);
+        assert_eq!(
+            classification.gpu_resident_pipeline,
+            GpuResidentPipelineStatus::Reported
+        );
+    }
+
+    #[test]
     #[allow(clippy::expect_used)]
     fn test_json_roundtrip() {
         let report = mock_report(vec![mock_workload_result("json_wl", 100_000, 8.0, 16.0)]);
@@ -1629,6 +2487,10 @@ mod tests {
         assert!(json_str.contains("\"accel_mean_ms\""));
         assert!(json_str.contains("\"parallel_mean_ms\""));
         assert!(json_str.contains("\"row_scales\""));
+        assert!(json_str.contains("\"planner_declined\""));
+        assert!(json_str.contains("\"function_kernel_count\""));
+        assert!(json_str.contains("\"rows_returned_to_cpu\""));
+        assert!(json_str.contains("\"gpu_resident_pipeline\""));
         // Must NOT contain single-threaded fields
         assert!(!json_str.contains("\"single_mean_ms\""));
     }
@@ -1638,7 +2500,15 @@ mod tests {
         let report = mock_report(vec![mock_workload_result("csv_wl", 100_000, 10.0, 20.0)]);
         let csv = report.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
-        assert!(lines[0].starts_with("workload,category,kernel_class,dispatched,rows,"));
+        assert!(
+            lines[0]
+                .starts_with("workload,category,kernel_class,plan_selected,gpu_kernel_dispatched,")
+        );
+        assert!(lines[0].contains("no_dispatch_timing_skew"));
+        assert!(lines[0].contains("planner_declined"));
+        assert!(lines[0].contains("function_kernel_count"));
+        assert!(lines[0].contains("rows_returned_to_cpu"));
+        assert!(lines[0].contains("gpu_resident_pipeline"));
         assert!(lines[0].contains("accel_mean_ms"));
     }
 
@@ -1671,7 +2541,16 @@ mod tests {
             mock_workload_result("gen_test", 1_000, 10.0, 20.0),
             mock_workload_result("gen_test", 1_000_000, 10.0, 20.0),
         ];
-        let report = generate_report(workloads, Vec::new(), None, 30, 5);
+        let report = generate_report(
+            workloads,
+            Vec::new(),
+            None,
+            30,
+            5,
+            None,
+            crate::runner::TimingMode::RawWallClock,
+            crate::runner::CacheMode::Warm,
+        );
         assert!(report.hardware.is_some());
         assert!(report.gucs.is_none());
         assert_eq!(report.methodology.row_scales, vec![1_000, 1_000_000]);

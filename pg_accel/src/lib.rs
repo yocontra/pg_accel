@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 // Similar names are common in FFI wrappers (arg0/arg1, geom_a/geom_b).
 #![allow(clippy::similar_names)]
-// pgrx macros emit cfg(feature = "pg13") etc. for unsupported PG versions.
+// pgrx macros emit cfgs for feature names this crate does not define.
 #![allow(unexpected_cfgs)]
 // Pointer alignment casts are unavoidable when walking PG node graphs where
 // nodes arrive as *Node and must be down-cast to *OpExpr/*Var/etc.

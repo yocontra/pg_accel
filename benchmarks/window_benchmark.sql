@@ -1,7 +1,7 @@
 -- pg_accel Window Function Benchmark Suite
 -- Tests window function patterns that pg_accel does NOT accelerate (no planner/executor wiring).
 -- All queries should show zero overhead — no Custom Scan nodes in plans.
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/window_benchmark.sql
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/window_benchmark.sql
 --
 -- pg_accel has C++ kernels for ROW_NUMBER, RANK, DENSE_RANK, running SUM/COUNT,
 -- and LAG/LEAD, but they are not yet wired into the planner or executor.

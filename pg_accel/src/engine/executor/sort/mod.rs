@@ -1,12 +1,10 @@
 //! Batch-dispatch sort executor for pg_accel Custom Scan nodes.
 //!
-//! [`SortExecState`] consumes all input tuples, sorts them via PG's
-//! `SortSupport` comparison infrastructure (CPU path), and returns
-//! sorted tuples one at a time. When GPU sort kernels are wired,
-//! this will dispatch to GPU bitonic sort instead.
+//! [`SortExecState`] consumes all input tuples, dispatches supported sort keys
+//! to GPU kernels, and returns sorted tuples one at a time.
 //!
-//! Supports multi-key sorting with ASC/DESC and NULLS FIRST/LAST,
-//! plus top-k optimization for `ORDER BY ... LIMIT k`.
+//! The GPU path supports a single numeric key. Unsupported key shapes must be
+//! rejected before executor entry; executor mismatches fail closed.
 //!
 //! # Lifecycle
 //!
@@ -15,7 +13,6 @@
 //! 3. **`exec_custom_scan`** (subsequent) — returns sorted tuples.
 //! 4. **`end_custom_scan`** — reclaims via `Box::from_raw`.
 
-mod dispatch;
 mod tuplesort;
 
 use std::cmp::Reverse;
@@ -30,9 +27,9 @@ use crate::engine::registry::AccelStrategy;
 use crate::engine::stats;
 use crate::gpu;
 
-use dispatch::trivial_cmp;
 use tuplesort::{
     FLOAT4OID, FLOAT8OID, INT4OID, INT8OID, gpu_sort_chunked_f32, gpu_sort_chunked_f64,
+    gpu_sort_chunked_i32, gpu_sort_chunked_i64,
 };
 
 // ---------------------------------------------------------------------------
@@ -71,7 +68,8 @@ pub struct SortExecState {
     /// Batch size for input accumulation.
     batch_size: usize,
 
-    /// Sort key descriptors (multi-key sort supported).
+    /// Sort key descriptors. Selected GpuSort paths support one numeric key;
+    /// non-GpuSort/native sort paths may use multiple keys.
     sort_keys: Vec<SortKeyDesc>,
 
     /// Optional row limit for top-k optimization. When set, only the
@@ -181,14 +179,11 @@ impl SortExecState {
         result_slot
     }
 
-    /// Consume all input tuples in batches and sort them using PG's
-    /// `SortSupport` comparison infrastructure.
+    /// Consume all input tuples in batches and sort them using GPU kernels
+    /// when this is a planner-selected `GpuSort` path.
     ///
-    /// For each sort key, initializes a `SortSupportData` via
-    /// `PrepareSortSupportFromOrderingOp`, then pre-extracts all sort
-    /// key datums from the buffered tuples. An index-based sort avoids
-    /// moving full tuples during comparison. When `self.limit` is set,
-    /// applies top-k optimization via partial sort.
+    /// Extracts the single supported numeric key and dispatches to GPU.
+    /// Unsupported keys, failed kernels, and planner/executor mismatches error.
     ///
     /// # Safety
     ///
@@ -353,26 +348,12 @@ impl SortExecState {
 
             if gpu_done {
                 gpu_rows_sorted = n as u64;
-            } else if matches!(self.strategy, AccelStrategy::GpuSort) {
-                // Per rule 11 (no CPU fallbacks): a GpuSort path must execute
-                // on GPU. Reaching here means the planner injected a GpuSort
-                // but the GPU kernel refused — surface that instead of
-                // silently running PG SortSupport.
+            } else {
                 pgrx::error!(
                     "pg_accel: GPU sort kernel failed for {n} rows \
                      (strategy=GpuSort, type={inline_typid}). \
-                     No CPU fallback; fix the GPU path instead."
+                     Refusing to continue."
                 );
-            } else {
-                // Non-GpuSort strategies (tests, etc.) may still land here
-                // because they skip inline extraction entirely; defer to
-                // PG's SortSupport for those — this is NOT a CPU fallback
-                // for a GPU path, it's the native path for a non-GPU
-                // strategy that never attempted GPU sort.
-                // SAFETY: main backend thread, scratch_slot valid.
-                unsafe {
-                    self.sort_tuples(scratch_slot, n);
-                }
             }
         }
 
@@ -406,130 +387,14 @@ impl SortExecState {
         }
     }
 
-    /// Index-based sort of `sorted_tuples` using PG `SortSupport`.
-    ///
-    /// Pre-extracts all sort key datums, builds an index array, sorts
-    /// the indices by multi-key comparison, then reorders tuples.
-    ///
-    /// # Safety
-    ///
-    /// Must be called on the main backend thread.
-    unsafe fn sort_tuples(&mut self, scratch_slot: *mut pg_sys::TupleTableSlot, n: usize) {
-        let num_keys = self.sort_keys.len();
-
-        // -- Initialize SortSupportData for each key --
-        let mut ssup_vec: Vec<pg_sys::SortSupportData> = Vec::with_capacity(num_keys);
-        for key in &self.sort_keys {
-            // SAFETY: SortSupportData is zeroed, then populated by
-            // PrepareSortSupportFromOrderingOp which sets the comparator.
-            let mut ssup: pg_sys::SortSupportData = unsafe { std::mem::zeroed() };
-            ssup.ssup_cxt = unsafe { pg_sys::CurrentMemoryContext };
-            ssup.ssup_collation = key.collation;
-            ssup.ssup_nulls_first = key.nulls_first;
-            // ssup_attno is 1-based attribute number.
-            ssup.ssup_attno = key.attno;
-            // SAFETY: Initializes the comparator function pointer in ssup
-            // from the ordering operator OID. Main backend thread.
-            unsafe {
-                pg_sys::PrepareSortSupportFromOrderingOp(key.sort_op, &raw mut ssup);
-            }
-            ssup_vec.push(ssup);
-        }
-
-        // -- Pre-extract sort key datums for all tuples --
-        // Use bulk extraction to avoid per-tuple ExecForceStoreMinimalTuple.
-        // Layout: key_datums[key_idx][tuple_idx] = (Datum, is_null)
-        // SAFETY: scratch_slot has a valid tuple descriptor.
-        let tupdesc = unsafe { (*scratch_slot).tts_tupleDescriptor };
-        let mut key_datums: Vec<Vec<(pg_sys::Datum, bool)>> = Vec::with_capacity(num_keys);
-
-        for key in &self.sort_keys {
-            let info = unsafe { AttExtractInfo::new(tupdesc, key.attno as i32) };
-            // SAFETY: sorted_tuples contains valid MinimalTuple pointers.
-            // scratch_slot is valid for fallback extraction.
-            let (datums, nulls) =
-                unsafe { tuple_extract::extract_datum(&self.sorted_tuples, &info, scratch_slot) };
-            let col: Vec<(pg_sys::Datum, bool)> = datums
-                .into_iter()
-                .zip(nulls.into_iter())
-                .map(|(d, n)| (d, n != 0))
-                .collect();
-            key_datums.push(col);
-        }
-
-        // -- Build and sort index array --
-        let mut indices: Vec<usize> = (0..n).collect();
-
-        // For top-k when limit << n, use partial sort:
-        // select_nth_unstable_by partitions in O(n), then sort first k in O(k log k).
-        let use_topk = matches!(self.limit, Some(k) if k > 0 && k < n / 2);
-
-        let cmp = |a: &usize, b: &usize| -> std::cmp::Ordering {
-            for (k, ssup) in ssup_vec.iter().enumerate() {
-                let (da, na) = key_datums[k][*a];
-                let (db, nb) = key_datums[k][*b];
-
-                // Handle NULLs according to nulls_first setting.
-                match (na, nb) {
-                    (true, true) => continue,
-                    (true, false) => {
-                        return if ssup.ssup_nulls_first {
-                            std::cmp::Ordering::Less
-                        } else {
-                            std::cmp::Ordering::Greater
-                        };
-                    }
-                    (false, true) => {
-                        return if ssup.ssup_nulls_first {
-                            std::cmp::Ordering::Greater
-                        } else {
-                            std::cmp::Ordering::Less
-                        };
-                    }
-                    (false, false) => {}
-                }
-
-                // SAFETY: Both datums are non-null and the comparator was
-                // initialized by PrepareSortSupportFromOrderingOp. The
-                // ssup pointer is valid for the lifetime of this sort.
-                // We cast away const because PG's comparator signature
-                // takes a mutable SortSupport pointer.
-                let result = unsafe {
-                    let comparator = ssup.comparator.unwrap_or(trivial_cmp);
-                    let ssup_ptr = std::ptr::from_ref(ssup).cast_mut();
-                    comparator(da, db, ssup_ptr)
-                };
-
-                let ord = result.cmp(&0);
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            std::cmp::Ordering::Equal
-        };
-
-        if use_topk {
-            let k = self.limit.unwrap_or(n);
-            // SAFETY: k < n guaranteed by use_topk check above.
-            indices.select_nth_unstable_by(k, cmp);
-            indices.truncate(k);
-        }
-        indices.sort_by(cmp);
-
-        // -- Reorder tuples by sorted indices --
-        let reordered: Vec<pg_sys::MinimalTuple> =
-            indices.iter().map(|&i| self.sorted_tuples[i]).collect();
-        self.sorted_tuples = reordered;
-    }
-
     /// Attempt GPU-accelerated sort for a single numeric key column.
     ///
     /// Extracts the sort key datum from each tuple, converts to a GPU-sortable
     /// numeric type, runs the GPU key-value sort, and reorders tuples by the
     /// resulting index permutation.
     ///
-    /// Returns `true` if GPU sort succeeded, `false` if the caller should
-    /// defer to PG's SortSupport.
+    /// Returns `true` if GPU sort succeeded. `false` means the GPU path was
+    /// unsupported or failed; callers must error.
     ///
     /// # Supported types
     ///
@@ -821,8 +686,9 @@ impl SortExecState {
 
     /// Consume all tuples via SortScan and sort them.
     ///
-    /// Uses the vscan's inline-extracted keys for GPU sort when available,
-    /// falling back to PG's SortSupport for unsupported types.
+    /// Uses the vscan's inline-extracted keys for GPU sort. If a
+    /// planner-selected `GpuSort` path cannot dispatch, execution errors
+    /// instead of sorting on CPU inside pg_accel.
     ///
     /// # Safety
     ///
@@ -832,11 +698,11 @@ impl SortExecState {
         let start = std::time::Instant::now();
 
         // Extract everything from vscan in one block to release the borrow
-        // before calling self methods (apply_gpu_sort_result, sort_tuples).
+        // before calling self methods.
         let (
             n,
             key_typid,
-            scratch_slot,
+            _scratch_slot,
             non_null_indices,
             null_indices,
             f32_keys,
@@ -876,32 +742,21 @@ impl SortExecState {
 
         let mut gpu_rows_sorted: u64 = 0;
         if n > 1 && !self.sort_keys.is_empty() {
-            let limits = cost::device_limits();
             let do_inline = matches!(key_typid, FLOAT4OID | FLOAT8OID | INT4OID | INT8OID);
 
             enum SortOutcome {
-                InputGate, // key type / row count / empty keys — defer
+                InputGate,
                 Dispatched,
             }
 
-            let outcome = if do_inline
-                && n >= limits.gpu_sort_min_rows
-                && n <= limits.gpu_sort_max_elements
-            {
+            let outcome = if do_inline && n >= cost::device_limits().gpu_sort_min_rows {
                 let key = self.sort_keys[0].clone();
 
                 match key_typid {
                     FLOAT4OID => {
-                        let mut f32_keys = f32_keys;
                         if f32_keys.is_empty() {
                             SortOutcome::InputGate
-                        } else {
-                            let mut gpu_idx: Vec<u32> = (0..f32_keys.len() as u32).collect();
-                            if gpu::sort_kv_f32(&mut f32_keys, &mut gpu_idx).is_none() {
-                                pgrx::error!(
-                                    "pg_accel: sort_kv_f32 GPU kernel failed; refusing CPU fallback (rule 11)"
-                                );
-                            }
+                        } else if let Some(gpu_idx) = gpu_sort_chunked_f32(&f32_keys) {
                             self.apply_gpu_sort_result(
                                 &key,
                                 &non_null_indices,
@@ -910,19 +765,16 @@ impl SortExecState {
                                 n,
                             );
                             SortOutcome::Dispatched
+                        } else {
+                            pgrx::error!(
+                                "pg_accel: sort_kv_f32 GPU kernel failed; refusing CPU fallback (rule 11)"
+                            );
                         }
                     }
                     FLOAT8OID => {
-                        let mut f64_keys = f64_keys;
                         if f64_keys.is_empty() {
                             SortOutcome::InputGate
-                        } else {
-                            let mut gpu_idx: Vec<u32> = (0..f64_keys.len() as u32).collect();
-                            if gpu::sort_kv_f64(&mut f64_keys, &mut gpu_idx).is_none() {
-                                pgrx::error!(
-                                    "pg_accel: sort_kv_f64 GPU kernel failed; refusing CPU fallback (rule 11)"
-                                );
-                            }
+                        } else if let Some(gpu_idx) = gpu_sort_chunked_f64(&f64_keys) {
                             self.apply_gpu_sort_result(
                                 &key,
                                 &non_null_indices,
@@ -931,19 +783,16 @@ impl SortExecState {
                                 n,
                             );
                             SortOutcome::Dispatched
+                        } else {
+                            pgrx::error!(
+                                "pg_accel: sort_kv_f64 GPU kernel failed; refusing CPU fallback (rule 11)"
+                            );
                         }
                     }
                     INT4OID => {
-                        let mut i32_keys = i32_keys;
                         if i32_keys.is_empty() {
                             SortOutcome::InputGate
-                        } else {
-                            let mut gpu_idx: Vec<u32> = (0..i32_keys.len() as u32).collect();
-                            if gpu::sort_kv_i32(&mut i32_keys, &mut gpu_idx).is_none() {
-                                pgrx::error!(
-                                    "pg_accel: sort_kv_i32 GPU kernel failed; refusing CPU fallback (rule 11)"
-                                );
-                            }
+                        } else if let Some(gpu_idx) = gpu_sort_chunked_i32(&i32_keys) {
                             self.apply_gpu_sort_result(
                                 &key,
                                 &non_null_indices,
@@ -952,19 +801,16 @@ impl SortExecState {
                                 n,
                             );
                             SortOutcome::Dispatched
+                        } else {
+                            pgrx::error!(
+                                "pg_accel: sort_kv_i32 GPU kernel failed; refusing CPU fallback (rule 11)"
+                            );
                         }
                     }
                     INT8OID => {
-                        let mut i64_keys = i64_keys;
                         if i64_keys.is_empty() {
                             SortOutcome::InputGate
-                        } else {
-                            let mut gpu_idx: Vec<u32> = (0..i64_keys.len() as u32).collect();
-                            if gpu::sort_kv_i64(&mut i64_keys, &mut gpu_idx).is_none() {
-                                pgrx::error!(
-                                    "pg_accel: sort_kv_i64 GPU kernel failed; refusing CPU fallback (rule 11)"
-                                );
-                            }
+                        } else if let Some(gpu_idx) = gpu_sort_chunked_i64(&i64_keys) {
                             self.apply_gpu_sort_result(
                                 &key,
                                 &non_null_indices,
@@ -973,6 +819,10 @@ impl SortExecState {
                                 n,
                             );
                             SortOutcome::Dispatched
+                        } else {
+                            pgrx::error!(
+                                "pg_accel: sort_kv_i64 GPU kernel failed; refusing CPU fallback (rule 11)"
+                            );
                         }
                     }
                     _ => SortOutcome::InputGate,
@@ -986,13 +836,12 @@ impl SortExecState {
                     gpu_rows_sorted = n as u64;
                 }
                 SortOutcome::InputGate => {
-                    // Unsupported key type or out-of-range row count — defer
-                    // to PG SortSupport. This is input gating, not a GPU
-                    // kernel failure (which would error above).
-                    // SAFETY: scratch_slot has base relation's TupleDesc.
-                    unsafe {
-                        self.sort_tuples(scratch_slot, n);
-                    }
+                    pgrx::error!(
+                        "pg_accel: GpuSort could not dispatch {} rows with key type {}; \
+                         refusing to continue",
+                        n,
+                        key_typid,
+                    );
                 }
             }
         }

@@ -8,7 +8,6 @@ fn profile_no_gpu() -> PlatformProfile {
     PlatformProfile {
         cpu_cores: 8,
         has_gpu: false,
-        unified_memory: false,
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
         gpu_max_alloc_bytes: 0,
@@ -20,7 +19,6 @@ fn profile_with_gpu() -> PlatformProfile {
     PlatformProfile {
         cpu_cores: 8,
         has_gpu: true,
-        unified_memory: true,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024, // 256 MB
@@ -150,7 +148,6 @@ fn threads_at_least_one() {
     let p = PlatformProfile {
         cpu_cores: 1,
         has_gpu: false,
-        unified_memory: false,
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
         gpu_max_alloc_bytes: 0,
@@ -164,7 +161,6 @@ fn threads_single_core_with_budget() {
     let p = PlatformProfile {
         cpu_cores: 1,
         has_gpu: false,
-        unified_memory: false,
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
         gpu_max_alloc_bytes: 0,
@@ -207,11 +203,10 @@ fn cpu_only_limits_match_previous_defaults() {
 
 #[test]
 fn baseline_gpu_matches_defaults() {
-    // 32 CUs (baseline), 256 MB, discrete memory → should match defaults.
+    // 32 CUs (baseline), 256 MB should match defaults.
     let p = PlatformProfile {
         cpu_cores: 8,
         has_gpu: true,
-        unified_memory: false,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
@@ -226,32 +221,10 @@ fn baseline_gpu_matches_defaults() {
 }
 
 #[test]
-fn unified_memory_halves_thresholds() {
-    let discrete = PlatformProfile {
-        cpu_cores: 8,
-        has_gpu: true,
-        unified_memory: false,
-        estimated_gpu_gflops: 2000.0,
-        compute_units: 32,
-        gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_native_fp64: false,
-    };
-    let unified = PlatformProfile {
-        unified_memory: true,
-        ..discrete.clone()
-    };
-    let ld = DeviceLimits::from_profile(&discrete);
-    let lu = DeviceLimits::from_profile(&unified);
-    assert!(lu.gpu_min_rows < ld.gpu_min_rows);
-    assert!(lu.gpu_sort_min_rows < ld.gpu_sort_min_rows);
-}
-
-#[test]
 fn high_cu_gpu_lowers_thresholds() {
     let low = PlatformProfile {
         cpu_cores: 8,
         has_gpu: true,
-        unified_memory: false,
         estimated_gpu_gflops: 500.0,
         compute_units: 8,
         gpu_max_alloc_bytes: 64 * 1024 * 1024,
@@ -369,7 +342,6 @@ fn platform_profile_no_gpu_fields() {
     let p = profile_no_gpu();
     assert_eq!(p.cpu_cores, 8);
     assert!(!p.has_gpu);
-    assert!(!p.unified_memory);
     assert_eq!(p.estimated_gpu_gflops, 0.0);
     assert_eq!(p.compute_units, 0);
     assert_eq!(p.gpu_max_alloc_bytes, 0);
@@ -380,7 +352,6 @@ fn platform_profile_with_gpu_fields() {
     let p = profile_with_gpu();
     assert_eq!(p.cpu_cores, 8);
     assert!(p.has_gpu);
-    assert!(p.unified_memory);
     assert_eq!(p.estimated_gpu_gflops, 2000.0);
     assert_eq!(p.compute_units, 32);
     assert_eq!(p.gpu_max_alloc_bytes, 256 * 1024 * 1024);
@@ -465,32 +436,11 @@ fn window_min_rows_meets_kernel_threshold() {
 }
 
 #[test]
-fn preagg_unified_memory_cheaper_probe() {
-    let unified = PlatformProfile {
-        cpu_cores: 8,
-        has_gpu: true,
-        unified_memory: true,
-        estimated_gpu_gflops: 2000.0,
-        compute_units: 32,
-        gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_native_fp64: false,
-    };
-    let discrete = PlatformProfile {
-        unified_memory: false,
-        ..unified.clone()
-    };
-    let lu = DeviceLimits::from_profile(&unified);
-    let ld = DeviceLimits::from_profile(&discrete);
-    assert!(lu.preagg_probe_cost < ld.preagg_probe_cost);
-}
-
-#[test]
 fn limits_are_clamped() {
     // Very high CU count should hit lower clamp.
     let p = PlatformProfile {
         cpu_cores: 64,
         has_gpu: true,
-        unified_memory: true,
         estimated_gpu_gflops: 50000.0,
         compute_units: 10000,
         gpu_max_alloc_bytes: 64 * 1024 * 1024 * 1024, // 64 GB
@@ -519,28 +469,6 @@ fn gpu_op_cost_ordering() {
     let l = DeviceLimits::cpu_only();
     assert!(l.gpu_op_cost_sort >= l.gpu_op_cost_hash_agg);
     assert!(l.gpu_op_cost_hash_agg >= l.gpu_op_cost_reduce);
-}
-
-#[test]
-fn unified_memory_lowers_gpu_op_costs() {
-    let discrete = PlatformProfile {
-        cpu_cores: 8,
-        has_gpu: true,
-        unified_memory: false,
-        estimated_gpu_gflops: 2000.0,
-        compute_units: 32,
-        gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_native_fp64: false,
-    };
-    let unified = PlatformProfile {
-        unified_memory: true,
-        ..discrete.clone()
-    };
-    let ld = DeviceLimits::from_profile(&discrete);
-    let lu = DeviceLimits::from_profile(&unified);
-    assert!(lu.gpu_op_cost_reduce < ld.gpu_op_cost_reduce);
-    assert!(lu.gpu_op_cost_sort < ld.gpu_op_cost_sort);
-    assert!(lu.gpu_op_cost_window < ld.gpu_op_cost_window);
 }
 
 // -- self_scan_cost -----------------------------------------------------------
@@ -572,22 +500,17 @@ fn self_scan_cost_scales_with_cols() {
 
 // -- Phase 6 dispatch perf calibration ---------------------------------------
 //
-// These tests pin the new per-row planner cost fields introduced by the
-// Phase 6 calibration. Each was over-pessimistic before — `0.01` for
-// build/probe/yield (in `hashjoin.rs` and via `CUSTOM_SCAN_YIELD_COST`)
-// and `0.005` for partial-agg per-row reduce (in `partial_agg.rs`,
-// `preagg_partial.rs`). The over-counting added up to 200K cost units
-// for a 10M-row plain JOIN or fp64 partial-agg path, which `add_path()`
-// then discarded as strictly worse than PG's stock plan.
+// These tests pin the hardware-derived per-row planner cost fields. The
+// calibrated values keep 10M-row JOIN and fp64 partial-agg paths from being
+// priced out by coarse per-row constants.
 //
 // New values (kernel-throughput honest):
-// - hashjoin build/probe: ~50ns/row → 0.0005/row (unified) or 0.001/row
-//   (discrete). Matches the GPU hash insert/probe kernel rate (~50M
-//   rows/sec measured on M2 Max).
-// - custom_scan_yield_per_row: 0.0005/0.001. Matches measured
-//   ExecForceStoreMinimalTuple at ~50ns on M-series.
-// - gpu_partial_agg_per_row: 0.0005/0.001. Matches GPU reduce throughput
-//   (~50M rows/sec).
+// - hashjoin build/probe: 0.001/row. Safely above the GPU hash insert/probe
+//   kernel rate (~50M rows/sec measured on M2 Max).
+// - custom_scan_yield_per_row: 0.001. Matches measured
+//   ExecForceStoreMinimalTuple at ~50ns on M-series with headroom.
+// - gpu_partial_agg_per_row: 0.001. Matches GPU reduce throughput
+//   (~50M rows/sec) with headroom.
 
 #[test]
 fn phase6_hashjoin_build_per_row_pinned() {
@@ -633,36 +556,10 @@ fn phase6_partial_agg_per_row_pinned() {
 }
 
 #[test]
-fn phase6_unified_memory_halves_per_row_costs() {
-    // On a unified-memory profile (M2 Max etc.) `from_profile` halves all
-    // four per-row planner costs vs the discrete-GPU baseline because there
-    // is no DMA-copy overhead.
-    let discrete = PlatformProfile {
-        cpu_cores: 8,
-        has_gpu: true,
-        unified_memory: false,
-        estimated_gpu_gflops: 2000.0,
-        compute_units: 32,
-        gpu_max_alloc_bytes: 256 * 1024 * 1024,
-        has_native_fp64: false,
-    };
-    let unified = PlatformProfile {
-        unified_memory: true,
-        ..discrete.clone()
-    };
-    let ld = DeviceLimits::from_profile(&discrete);
-    let lu = DeviceLimits::from_profile(&unified);
-    assert!(lu.gpu_hashjoin_build_per_row < ld.gpu_hashjoin_build_per_row);
-    assert!(lu.gpu_hashjoin_probe_per_row < ld.gpu_hashjoin_probe_per_row);
-    assert!(lu.custom_scan_yield_per_row < ld.custom_scan_yield_per_row);
-    assert!(lu.gpu_partial_agg_per_row < ld.gpu_partial_agg_per_row);
-}
-
-#[test]
-fn phase6_per_row_costs_strictly_less_than_legacy() {
-    // The legacy literals were 0.01 (build/probe/yield) and 0.005
+fn phase6_per_row_costs_strictly_less_than_old_literals() {
+    // The old literals were 0.01 (build/probe/yield) and 0.005
     // (partial agg). The Phase 6 calibration must produce values strictly
-    // less than those legacies on every supported profile. Anything else
+    // less than those baselines on every supported profile. Anything else
     // re-introduces the 200K-cost-unit penalty that wiped out the GPU
     // hashjoin / partial-agg paths in `add_path()`.
     let l = DeviceLimits::cpu_only();
@@ -671,16 +568,15 @@ fn phase6_per_row_costs_strictly_less_than_legacy() {
     assert!(l.custom_scan_yield_per_row < 0.01);
     assert!(l.gpu_partial_agg_per_row < 0.005);
 
-    let unified = PlatformProfile {
+    let detected = PlatformProfile {
         cpu_cores: 8,
         has_gpu: true,
-        unified_memory: true,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
         has_native_fp64: false,
     };
-    let lu = DeviceLimits::from_profile(&unified);
+    let lu = DeviceLimits::from_profile(&detected);
     assert!(lu.gpu_hashjoin_build_per_row < 0.01);
     assert!(lu.gpu_hashjoin_probe_per_row < 0.01);
     assert!(lu.custom_scan_yield_per_row < 0.01);

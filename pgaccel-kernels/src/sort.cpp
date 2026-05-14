@@ -120,10 +120,6 @@ static T pad_value() {
 // guarded by g_initialized) and read-only thereafter.
 extern sycl::queue* g_queue;
 
-// SAFETY: g_unified_memory is written once during pgaccel_init() and
-// read-only thereafter.
-extern bool g_unified_memory;
-
 /// Get the global SYCL queue created by pgaccel_init().
 /// Returns nullptr when SYCL was not initialized or init failed.
 static sycl::queue* get_queue() {
@@ -144,19 +140,12 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
   const size_t padded = next_power_of_two(count);
 
   try {
-    // On unified memory, use malloc_shared to avoid device copy.
-    T* d_buf =
-        g_unified_memory ? sycl::malloc_shared<T>(padded, *q) : sycl::malloc_device<T>(padded, *q);
+    T* d_buf = sycl::malloc_device<T>(padded, *q);
     if (d_buf == nullptr) {
       return PGACCEL_OOM;
     }
 
-    if (g_unified_memory) {
-      // Direct host-side copy into shared allocation.
-      std::memcpy(d_buf, data, count * sizeof(T));
-    } else {
-      q->memcpy(d_buf, data, count * sizeof(T)).wait_and_throw();
-    }
+    q->memcpy(d_buf, data, count * sizeof(T)).wait_and_throw();
 
     // Fill padding with sentinel.
     if (padded > count) {
@@ -187,11 +176,7 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
     q->wait_and_throw();
 
     // Copy sorted data back (only the original count).
-    if (g_unified_memory) {
-      std::memcpy(data, d_buf, count * sizeof(T));
-    } else {
-      q->memcpy(data, d_buf, count * sizeof(T)).wait_and_throw();
-    }
+    q->memcpy(data, d_buf, count * sizeof(T)).wait_and_throw();
     sycl::free(d_buf, *q);
 
     return PGACCEL_OK;
@@ -218,11 +203,8 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
   const size_t padded = next_power_of_two(count);
 
   try {
-    // On unified memory, use malloc_shared to avoid device copy.
-    K* d_keys =
-        g_unified_memory ? sycl::malloc_shared<K>(padded, *q) : sycl::malloc_device<K>(padded, *q);
-    uint32_t* d_idx = g_unified_memory ? sycl::malloc_shared<uint32_t>(padded, *q)
-                                       : sycl::malloc_device<uint32_t>(padded, *q);
+    K* d_keys = sycl::malloc_device<K>(padded, *q);
+    uint32_t* d_idx = sycl::malloc_device<uint32_t>(padded, *q);
     if (d_keys == nullptr || d_idx == nullptr) {
       if (d_keys)
         sycl::free(d_keys, *q);
@@ -231,14 +213,8 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
       return PGACCEL_OOM;
     }
 
-    // Copy data.
-    if (g_unified_memory) {
-      std::memcpy(d_keys, keys, count * sizeof(K));
-      std::memcpy(d_idx, indices, count * sizeof(uint32_t));
-    } else {
-      q->memcpy(d_keys, keys, count * sizeof(K)).wait_and_throw();
-      q->memcpy(d_idx, indices, count * sizeof(uint32_t)).wait_and_throw();
-    }
+    q->memcpy(d_keys, keys, count * sizeof(K)).wait_and_throw();
+    q->memcpy(d_idx, indices, count * sizeof(uint32_t)).wait_and_throw();
 
     // Pad keys with sentinel, indices with max uint32.
     if (padded > count) {
@@ -287,14 +263,8 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
     // Single wait after all bitonic steps complete.
     q->wait_and_throw();
 
-    // Copy back.
-    if (g_unified_memory) {
-      std::memcpy(keys, d_keys, count * sizeof(K));
-      std::memcpy(indices, d_idx, count * sizeof(uint32_t));
-    } else {
-      q->memcpy(keys, d_keys, count * sizeof(K)).wait_and_throw();
-      q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait_and_throw();
-    }
+    q->memcpy(keys, d_keys, count * sizeof(K)).wait_and_throw();
+    q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait_and_throw();
 
     sycl::free(d_keys, *q);
     sycl::free(d_idx, *q);
@@ -370,13 +340,7 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
   const size_t padded = ngroups * RADIX_TILE;
 
   try {
-    // Double-buffered: src/dst swap each pass.
-    // On unified memory use shared allocation so host can do prefix
-    // scan without explicit copies.
-    auto alloc_u32 = [&](size_t n) {
-      return g_unified_memory ? sycl::malloc_shared<uint32_t>(n, *q)
-                              : sycl::malloc_device<uint32_t>(n, *q);
-    };
+    auto alloc_u32 = [&](size_t n) { return sycl::malloc_device<uint32_t>(n, *q); };
 
     uint32_t* buf_keys_a = alloc_u32(padded);
     uint32_t* buf_keys_b = alloc_u32(padded);
@@ -403,22 +367,13 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
 
     // Copy input into buf_a, padding with UINT32_MAX so they sort
     // to the end.  Indices padded with UINT32_MAX as well.
-    if (g_unified_memory) {
-      std::memcpy(buf_keys_a, keys, count * sizeof(uint32_t));
-      std::memcpy(buf_idx_a, indices, count * sizeof(uint32_t));
-      for (size_t i = count; i < padded; ++i) {
-        buf_keys_a[i] = std::numeric_limits<uint32_t>::max();
-        buf_idx_a[i] = std::numeric_limits<uint32_t>::max();
-      }
-    } else {
-      q->memcpy(buf_keys_a, keys, count * sizeof(uint32_t));
-      q->memcpy(buf_idx_a, indices, count * sizeof(uint32_t));
-      if (padded > count) {
-        q->fill(buf_keys_a + count, std::numeric_limits<uint32_t>::max(), padded - count);
-        q->fill(buf_idx_a + count, std::numeric_limits<uint32_t>::max(), padded - count);
-      }
-      q->wait_and_throw();
+    q->memcpy(buf_keys_a, keys, count * sizeof(uint32_t));
+    q->memcpy(buf_idx_a, indices, count * sizeof(uint32_t));
+    if (padded > count) {
+      q->fill(buf_keys_a + count, std::numeric_limits<uint32_t>::max(), padded - count);
+      q->fill(buf_idx_a + count, std::numeric_limits<uint32_t>::max(), padded - count);
     }
+    q->wait_and_throw();
 
     uint32_t* src_keys = buf_keys_a;
     uint32_t* dst_keys = buf_keys_b;
@@ -592,13 +547,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     }
 
     // After 4 passes, src_{keys,idx} hold the sorted result.
-    if (g_unified_memory) {
-      std::memcpy(keys, src_keys, count * sizeof(uint32_t));
-      std::memcpy(indices, src_idx, count * sizeof(uint32_t));
-    } else {
-      q->memcpy(keys, src_keys, count * sizeof(uint32_t)).wait_and_throw();
-      q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait_and_throw();
-    }
+    q->memcpy(keys, src_keys, count * sizeof(uint32_t)).wait_and_throw();
+    q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait_and_throw();
 
     sycl::free(d_group_hist, *q);
     sycl::free(buf_keys_a, *q);
@@ -631,14 +581,8 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
   const size_t padded = ngroups * RADIX_TILE;
 
   try {
-    auto alloc_u64 = [&](size_t n) {
-      return g_unified_memory ? sycl::malloc_shared<uint64_t>(n, *q)
-                              : sycl::malloc_device<uint64_t>(n, *q);
-    };
-    auto alloc_u32 = [&](size_t n) {
-      return g_unified_memory ? sycl::malloc_shared<uint32_t>(n, *q)
-                              : sycl::malloc_device<uint32_t>(n, *q);
-    };
+    auto alloc_u64 = [&](size_t n) { return sycl::malloc_device<uint64_t>(n, *q); };
+    auto alloc_u32 = [&](size_t n) { return sycl::malloc_device<uint32_t>(n, *q); };
 
     uint64_t* buf_keys_a = alloc_u64(padded);
     uint64_t* buf_keys_b = alloc_u64(padded);
@@ -660,22 +604,13 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
       return PGACCEL_OOM;
     }
 
-    if (g_unified_memory) {
-      std::memcpy(buf_keys_a, keys, count * sizeof(uint64_t));
-      std::memcpy(buf_idx_a, indices, count * sizeof(uint32_t));
-      for (size_t i = count; i < padded; ++i) {
-        buf_keys_a[i] = std::numeric_limits<uint64_t>::max();
-        buf_idx_a[i] = std::numeric_limits<uint32_t>::max();
-      }
-    } else {
-      q->memcpy(buf_keys_a, keys, count * sizeof(uint64_t));
-      q->memcpy(buf_idx_a, indices, count * sizeof(uint32_t));
-      if (padded > count) {
-        q->fill(buf_keys_a + count, std::numeric_limits<uint64_t>::max(), padded - count);
-        q->fill(buf_idx_a + count, std::numeric_limits<uint32_t>::max(), padded - count);
-      }
-      q->wait_and_throw();
+    q->memcpy(buf_keys_a, keys, count * sizeof(uint64_t));
+    q->memcpy(buf_idx_a, indices, count * sizeof(uint32_t));
+    if (padded > count) {
+      q->fill(buf_keys_a + count, std::numeric_limits<uint64_t>::max(), padded - count);
+      q->fill(buf_idx_a + count, std::numeric_limits<uint32_t>::max(), padded - count);
     }
+    q->wait_and_throw();
 
     uint64_t* src_keys = buf_keys_a;
     uint64_t* dst_keys = buf_keys_b;
@@ -805,13 +740,8 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
       std::swap(src_idx, dst_idx);
     }
 
-    if (g_unified_memory) {
-      std::memcpy(keys, src_keys, count * sizeof(uint64_t));
-      std::memcpy(indices, src_idx, count * sizeof(uint32_t));
-    } else {
-      q->memcpy(keys, src_keys, count * sizeof(uint64_t)).wait_and_throw();
-      q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait_and_throw();
-    }
+    q->memcpy(keys, src_keys, count * sizeof(uint64_t)).wait_and_throw();
+    q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait_and_throw();
 
     sycl::free(d_group_hist, *q);
     sycl::free(buf_keys_a, *q);

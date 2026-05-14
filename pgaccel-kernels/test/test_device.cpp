@@ -19,21 +19,14 @@ int main() {
   printf("  Max Alloc:       %zu bytes\n", info.max_alloc_bytes);
   printf("  FP64:            %s\n", info.has_native_fp64 ? "yes" : "no");
   printf("  Atomic64:        %s\n", info.has_atomic64 ? "yes" : "no");
-  printf("  Unified Memory:  %s\n", info.is_unified_memory ? "yes" : "no");
 
   printf("\n=== Platform Caps ===\n");
   printf("  Backend:         %s\n", caps.backend_name);
   printf("  FP64:            %s\n", caps.has_native_fp64 ? "yes" : "no");
   printf("  Atomic64:        %s\n", caps.has_atomic64 ? "yes" : "no");
   printf("  OOO Queue:       %s\n", caps.has_ooo_queue ? "yes" : "no");
-  printf("  Unified Memory:  %s\n", caps.is_unified_memory ? "yes" : "no");
   printf("  Compute Units:   %u\n", caps.compute_units);
   printf("  Max Alloc:       %zu bytes\n", caps.max_alloc_bytes);
-
-  printf("\n=== Convenience Predicates ===\n");
-  printf("  fp64_available:  %s\n", pgaccel_fp64_available() ? "yes" : "no");
-  printf("  unified_memory:  %s\n", pgaccel_unified_memory() ? "yes" : "no");
-  printf("  ooo_queue:       %s\n", pgaccel_ooo_queue_available() ? "yes" : "no");
 
   // Verify consistency between device_info and caps.
   bool consistent = true;
@@ -43,10 +36,6 @@ int main() {
   }
   if (info.has_atomic64 != caps.has_atomic64) {
     fprintf(stderr, "MISMATCH: has_atomic64 differs between info and caps\n");
-    consistent = false;
-  }
-  if (info.is_unified_memory != caps.is_unified_memory) {
-    fprintf(stderr, "MISMATCH: is_unified_memory differs between info and caps\n");
     consistent = false;
   }
   if (info.compute_units != caps.compute_units) {

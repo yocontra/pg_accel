@@ -15,7 +15,7 @@ use postgres::{Client, NoTls};
 
 use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
 
-const DEFAULT_CONNECTION: &str = "host=localhost port=28817 dbname=postgres";
+const DEFAULT_CONNECTION: &str = "host=localhost port=28819 dbname=postgres";
 
 fn connect() -> Client {
     Client::connect(DEFAULT_CONNECTION, NoTls).expect("connect to bench PG")

@@ -176,6 +176,62 @@ static void test_map_algebra_int32() {
   PASS("map_algebra: int32 declined (FP32-only kernel)");
 }
 
+/* ── Test: malformed map algebra bytecode is declined ─────────── */
+
+static void test_map_algebra_declines_unsupported_shapes() {
+  const size_t N = 4;
+  std::vector<float> band0 = {1.0f, 2.0f, 3.0f, 4.0f};
+  const void* bands[] = {band0.data()};
+  std::vector<float> output(N, -1.0f);
+  std::vector<uint8_t> nodata(N, 0);
+
+  {
+    pgaccel_expr expr;
+    expr.instructions = nullptr;
+    expr.inst_count = 0;
+    expr.band_count = 1;
+    pgaccel_status st =
+        pgaccel_map_algebra(bands, N, PGACCEL_PT_FLOAT32, &expr, output.data(), nodata.data());
+    ASSERT_EQ(st, PGACCEL_ERROR, "map_algebra empty expression returns visible error");
+  }
+
+  {
+    pgaccel_expr_inst code[] = {make_load_band(1)};
+    pgaccel_expr expr;
+    expr.instructions = code;
+    expr.inst_count = 1;
+    expr.band_count = 1;
+    pgaccel_status st =
+        pgaccel_map_algebra(bands, N, PGACCEL_PT_FLOAT32, &expr, output.data(), nodata.data());
+    ASSERT_EQ(st, PGACCEL_ERROR_UNSUPPORTED, "map_algebra out-of-range band declined");
+  }
+
+  {
+    pgaccel_expr_inst code[] = {make_op(PGACCEL_OP_ADD)};
+    pgaccel_expr expr;
+    expr.instructions = code;
+    expr.inst_count = 1;
+    expr.band_count = 1;
+    pgaccel_status st =
+        pgaccel_map_algebra(bands, N, PGACCEL_PT_FLOAT32, &expr, output.data(), nodata.data());
+    ASSERT_EQ(st, PGACCEL_ERROR_UNSUPPORTED, "map_algebra stack underflow declined");
+  }
+
+  {
+    std::vector<const void*> many_bands(9, band0.data());
+    pgaccel_expr_inst code[] = {make_load_band(0)};
+    pgaccel_expr expr;
+    expr.instructions = code;
+    expr.inst_count = 1;
+    expr.band_count = many_bands.size();
+    pgaccel_status st = pgaccel_map_algebra(many_bands.data(), N, PGACCEL_PT_FLOAT32, &expr,
+                                            output.data(), nodata.data());
+    ASSERT_EQ(st, PGACCEL_ERROR_UNSUPPORTED, "map_algebra >8 bands declined");
+  }
+
+  PASS("map_algebra: unsupported bytecode and band shapes are declined");
+}
+
 /* ── Test: NODATA pixels are preserved ────────────────────────── */
 
 static void test_map_algebra_nodata() {
@@ -765,6 +821,7 @@ int main() {
   test_map_algebra_simple();
   test_map_algebra_two_band();
   test_map_algebra_int32();
+  test_map_algebra_declines_unsupported_shapes();
   test_map_algebra_nodata();
   test_map_algebra_div_zero();
   test_empty_input();

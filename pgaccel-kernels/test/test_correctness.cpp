@@ -126,7 +126,7 @@ struct DispatchResult {
 // =========================================================================
 
 static void test_hash_join_large_threshold_correctness() {
-  printf("--- hash_join: 100k inner rows remains correct ---\n");
+  printf("--- hash_join: 100k inner rows uses only safe GPU/debug path ---\n");
   constexpr size_t N = 100000;
   constexpr size_t DUP_KEYS = 16;
   constexpr size_t PER_KEY = N / DUP_KEYS;
@@ -139,9 +139,10 @@ static void test_hash_join_large_threshold_correctness() {
 
   pgaccel_hash_table* ht =
       pgaccel_hash_join_build(inner.data(), nullptr, indices.data(), N, PGACCEL_KEY_INT32);
-  ASSERT_TRUE("large hash join build", ht != nullptr);
-  if (ht == nullptr)
+  if (ht == nullptr) {
+    ASSERT_TRUE("large hash join build declined without safe GPU path", true);
     return;
+  }
 
   int32_t outer[] = {7, 15, 99};
   const size_t expected = PER_KEY * 2;
@@ -177,24 +178,14 @@ static void test_hash_join_large_threshold_correctness() {
   pgaccel_hash_join_free(ht);
 }
 
-static void test_hash_join_zero_output_capacity_counts_matches() {
-  printf("--- hash_join: max_matches=0 still reports actual count ---\n");
+static void test_hash_join_small_build_is_rejected() {
+  printf("--- hash_join: small build is rejected ---\n");
   int32_t inner[] = {5, 5, 7};
   uint32_t indices[] = {0, 1, 2};
   pgaccel_hash_table* ht = pgaccel_hash_join_build(inner, nullptr, indices, 3, PGACCEL_KEY_INT32);
-  ASSERT_TRUE("zero-capacity hash join build", ht != nullptr);
-  if (ht == nullptr)
-    return;
-
-  int32_t outer[] = {5};
-  uint32_t pairs[] = {123, 456};
-  size_t match_count = 0;
-  pgaccel_status st = pgaccel_hash_join_probe(ht, outer, nullptr, 1, pairs, 0, &match_count);
-  ASSERT_STATUS_OK("zero-capacity hash join probe", st);
-  ASSERT_EQ("zero-capacity actual match count", match_count, 2);
-  ASSERT_EQ("zero-capacity pair[0] unchanged", pairs[0], 123);
-  ASSERT_EQ("zero-capacity pair[1] unchanged", pairs[1], 456);
-  pgaccel_hash_join_free(ht);
+  ASSERT_TRUE("small hash join build must be rejected", ht == nullptr);
+  if (ht != nullptr)
+    pgaccel_hash_join_free(ht);
 }
 
 static void test_hash_join_max_matches_overflow_rejected() {
@@ -202,9 +193,10 @@ static void test_hash_join_max_matches_overflow_rejected() {
   int32_t inner[] = {1};
   uint32_t indices[] = {0};
   pgaccel_hash_table* ht = pgaccel_hash_join_build(inner, nullptr, indices, 1, PGACCEL_KEY_INT32);
-  ASSERT_TRUE("overflow-capacity hash join build", ht != nullptr);
-  if (ht == nullptr)
+  if (ht == nullptr) {
+    ASSERT_TRUE("overflow-capacity build declined without safe GPU path", true);
     return;
+  }
 
   int32_t outer[] = {1};
   uint32_t pairs[] = {123, 456};
@@ -1480,7 +1472,7 @@ int main() {
   // -- Hash join edge cases --
   printf("\n== Hash Join ==\n");
   test_hash_join_large_threshold_correctness();
-  test_hash_join_zero_output_capacity_counts_matches();
+  test_hash_join_small_build_is_rejected();
   test_hash_join_max_matches_overflow_rejected();
 
   // -- fp64 round-trip sanity (W5 fp64-unlock plan) --

@@ -33,7 +33,6 @@ typedef struct {
    * is slower — planner uses this as a cost signal, not a gate. */
   bool has_native_fp64;
   bool has_atomic64;
-  bool is_unified_memory;
 } pgaccel_device_info;
 
 typedef struct {
@@ -43,7 +42,6 @@ typedef struct {
   bool has_native_fp64;
   bool has_atomic64;
   bool has_ooo_queue;
-  bool is_unified_memory;
   size_t max_alloc_bytes;
   uint32_t compute_units;
   char backend_name[64];
@@ -73,12 +71,6 @@ void pgaccel_reset_gpu_exec_count(void);
 void pgaccel_record_gpu_exec();
 extern "C" {
 #endif
-
-/* ── Platform Capability Convenience Predicates ───────────────────── */
-
-bool pgaccel_fp64_available(void);
-bool pgaccel_unified_memory(void);
-bool pgaccel_ooo_queue_available(void);
 
 /* ── Memory Pool (USM arena allocator) ────────────────────────────── */
 
@@ -135,8 +127,10 @@ pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t count, double* 
 pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t count, double* result);
 pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t count, double* result);
 
-/* i64 sum — all platforms */
+/* i64 reductions — all platforms */
 pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data, size_t count, int64_t* result);
+pgaccel_status pgaccel_reduce_min_i64(const int64_t* data, size_t count, int64_t* result);
+pgaccel_status pgaccel_reduce_max_i64(const int64_t* data, size_t count, int64_t* result);
 
 /* Count nonzero bytes in mask (popcount) — all platforms */
 pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count, size_t* result);
@@ -276,7 +270,7 @@ pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_of
  * exercise only the cheap bbox-disjoint and identical-vertex-set
  * shortcuts (per CLAUDE.md anti-cheat ban #9: "say so when stuck" —
  * full DE-9IM topology is genuinely complex; UNCERTAIN is the
- * documented escape hatch, NOT a CPU fallback).
+ * documented escape hatch for declining the GPU path).
  *
  * Forward declaration of pgaccel_geometry so the predicate signatures
  * below can name it before the full typedef appears in the

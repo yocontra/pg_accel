@@ -144,7 +144,7 @@ pub(super) unsafe extern "C-unwind" fn initialize_worker_custom_scan(
         let worker_number = unsafe { pg_sys::ParallelWorkerNumber };
         // SAFETY: state is our extended CustomScanState.
         unsafe {
-            let strategy = GpuStrategy::from_i32((*state).accel.strategy);
+            let strategy = GpuStrategy::decode((*state).accel.strategy);
             if strategy == GpuStrategy::Scan && flags & DSM_FLAG_WORKER_SPATIAL_RECHECK == 0 {
                 pgrx::error!(
                     "pg_accel: custom scan worker missing DSM spatial recheck capability; \

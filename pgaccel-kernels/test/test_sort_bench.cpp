@@ -257,8 +257,7 @@ int main(int argc, char** argv) {
   }
 
   auto info = pgaccel_get_device_info();
-  printf("device=%s backend=%s CUs=%u unified_mem=%d\n", info.device_name, info.backend_name,
-         info.compute_units, (int)info.is_unified_memory);
+  printf("device=%s backend=%s CUs=%u\n", info.device_name, info.backend_name, info.compute_units);
 
   printf("\n== Floating-point radix edge cases ==\n");
   check_scalar_float_specials<float>("float32", pgaccel_sort_f32, special_f32);

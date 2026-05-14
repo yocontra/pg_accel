@@ -63,7 +63,7 @@ DOCS=("CLAUDE.md" "ARCHITECTURE.md" "TODO.md")
 #     bare filename
 
 # Known bare filenames that count as paths even without an extension.
-BARE_FILENAMES_RE='(Justfile|Makefile|CMakeLists\.txt|Cargo\.toml|Cargo\.lock|Dockerfile)'
+BARE_FILENAMES_RE='(Justfile|Makefile|CMakeLists\.txt|Cargo\.toml|Cargo\.lock)'
 # File-extension suffixes we accept as citation targets.
 EXT_RE='\.(rs|cpp|cc|cxx|h|hpp|hxx|c|mm|metal|sql|toml|yaml|yml|json|sh|md|txt|py)'
 
@@ -198,7 +198,7 @@ scan_doc() {
             # allowlisted filename and has no slash or dot.
             if [[ "$path" != *"/"* && "$path" != *"."* ]]; then
                 case "$path" in
-                    Justfile|Makefile|Dockerfile) : ;;
+                    Justfile|Makefile) : ;;
                     *) continue ;;
                 esac
             fi

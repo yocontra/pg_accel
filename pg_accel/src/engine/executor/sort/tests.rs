@@ -186,7 +186,7 @@ fn gpu_sort_requires_gpu_sort_strategy() {
 
 #[test]
 fn gpu_sort_requires_single_key() {
-    // Multi-key sorts fall back to CPU.
+    // Multi-key GpuSort is unsupported; planner/executor must decline.
     let keys = vec![
         SortKeyDesc {
             attno: 1,
@@ -202,6 +202,5 @@ fn gpu_sort_requires_single_key() {
         },
     ];
     let state = SortExecState::new(AccelStrategy::GpuSort, 256, keys, None);
-    // Multi-key: GPU sort path won't fire (checked in consume_and_sort).
     assert!(state.sort_keys().len() > 1);
 }

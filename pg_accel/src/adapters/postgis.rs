@@ -3,38 +3,40 @@
 //! Declares the `PostGIS` spatial functions that `pg_accel` can accelerate,
 //! classified by [`AccelStrategy`].
 //!
-//! All functions use [`AccelStrategy::GpuSpatial`] for GPU offload through
-//! the three-layer pipeline (bbox filter, GPU kernel, CPU recheck).
+//! The generic PostGIS `geometry` signatures do not carry enough subtype
+//! information for the planner to prove a fully GPU-covered batch. Functions
+//! that can still emit `UNCERTAIN`, defer by shape, or require PostGIS CPU
+//! recheck stay unregistered until planner-time shape gates exist.
 
 use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
+
+const GPU_ONLY_ALLOWLIST: &[&str] = &[];
 
 /// Build the `PostGIS` vector adapter with all supported function entries.
 #[must_use]
 pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "postgis",
-        version_query: "SELECT postgis_version()",
         functions: gpu_spatial_entries(),
     }
 }
 
 /// GPU-accelerated spatial predicate functions.
 ///
-/// Only functions with a functionally-complete GPU kernel path are
-/// registered. The full TODO.md Phase 4 candidate list was audited against
-/// `pgaccel-kernels/src/spatial_*.cpp` and `src/gpu/three_layer.rs`; the
-/// results (as of this revision):
+/// Only functions with a functionally-complete GPU planner lane are registered.
+/// The full TODO.md Phase 4 candidate list was audited against
+/// `pgaccel-kernels/src/spatial_*.cpp` and `src/gpu/three_layer.rs`; partial
+/// lanes that depend on PostGIS host-side evaluation are intentionally left out.
 ///
-/// # Geometry-pair coverage inside `st_intersects`
+/// # Geometry-pair coverage inside the dormant `st_intersects` kernel
 ///
-/// Within the one registered predicate `st_intersects`, the Layer-2 scalar
+/// Within the `st_intersects` kernel, the Layer-2 scalar
 /// dispatcher in `spatial_dispatch.cpp:evaluate_predicate` handles the
 /// following geometry-type pairs directly, and explicitly routes every
-/// other pair to `UNCERTAIN` so PG's Layer-3 recheck runs via PostGIS. No
-/// pair is silently skipped; each UNSUPPORTED branch is grep-able in
-/// `spatial_dispatch.cpp`. Closing a gap means adding a scalar helper
-/// **and** a concrete branch in `evaluate_predicate` — never suppressing
-/// the UNCERTAIN fallback:
+/// other pair to `UNCERTAIN`. Since pg_accel is GPU-only, runtime
+/// `UNCERTAIN` now errors rather than rechecking through PostGIS. Closing a
+/// gap means adding a scalar helper and a concrete GPU branch in
+/// `evaluate_predicate`.
 ///
 /// | Pair (A × B)                 | Status      | Missing kernel symbol |
 /// |------------------------------|-------------|------------------------|
@@ -48,45 +50,26 @@ pub fn adapter() -> ExtensionAdapter {
 ///
 /// | Predicate        | Registered? | Reason |
 /// |------------------|-------------|--------|
-/// | `st_intersects`  | YES         | `pgaccel_spatial_intersects` (spatial_dispatch.cpp:536) wired through `three_layer::spatial_intersects`. |
-/// | `st_contains`    | YES (Polygon⊇Point fp32) | `pgaccel_point_in_ring_bulk` (spatial_predicates.cpp:512) wired through `three_layer::spatial_contains`. Polygon-A ⊇ Point-B only; non-Polygon/Point pairs short-circuit to UNCERTAIN. Constant-polygon batches collapse to 1 dispatch; varying polygons issue 1 dispatch per pair (future polygon×polygon kernel will close this). |
-/// | `st_within`      | YES (Point⊆Polygon fp32) | Same kernel as `st_contains` with args swapped (`spatial_eval` plumbing at `three_layer.rs:142-146`). |
-/// | `st_dwithin`     | YES (Point×Point fp32) | `pgaccel_sphere_distance_bulk` (spatial_predicates.cpp:540) wired through `three_layer::spatial_dwithin`. fp32 only — soft-fp64 trig hang on Metal SSCP keeps the fp64 path returning NO_DEVICE; non-Point pairs short-circuit to Uncertain so PG handles via PostGIS. |
-/// | `st_distance`    | YES (Point*Point fp32) | `pgaccel_sphere_distance_bulk` (Haversine SYCL kernel) via `dispatch_gpu_st_distance`. Point*Point pairs only — non-Point inputs (per row OR for the constant qual) defer to PG. fp32 only; fp64 returns NO_DEVICE per the soft-fp64 trig hang (Phase 7). Polygon-to-polygon distance is genuinely harder algorithmically and not wired. |
-/// | `st_area`        | YES (single-arg Polygon, fp32) | `pgaccel_st_area_bulk` (Shoelace SYCL kernel) via `dispatch_gpu_st_area` in `engine/dispatch/spatial.rs`. Single-ring Polygon only; multi-ring / non-Polygon rows return NULL so PG handles via `st_area`'s scalar implementation. |
-/// | `st_length`      | YES (LineString / Polygon perimeter, fp32) | `pgaccel_st_length_bulk` (Euclidean edge-length sum SYCL kernel) via `dispatch_gpu_st_length`. fp32 only — fp64 returns NO_DEVICE pending the soft-fp64 sqrt fix (Phase 7). LineString = open-path length; Polygon = closed-ring perimeter; mixed batches dispatch closed and open rows separately. |
-/// | `st_equals`      | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_equals_bulk` (Agent 2A task 4). DEFINITE TRUE for identical Point/Point coords or identical Polygon/Polygon ring vertex sets (≤ 32 verts host-side); DEFINITE FALSE for disjoint bbox or cross-dim pairs; UNCERTAIN otherwise → PG recheck via PostGIS `ST_Equals`. |
-/// | `st_disjoint`    | YES (negation of intersects) | `SpatialPredicate::Disjoint` (`three_layer.rs`) routes to `spatial_intersects` and swaps definite_true / definite_false. Free given the existing kernel; no separate dispatch. |
-/// | `st_covers`      | YES (alias of contains) | Reuses `pgaccel_point_in_ring_bulk` via `SpatialPredicate::Contains` — boundary-touching points fall in UNCERTAIN where PG's Layer-3 recheck applies the boundary-inclusive semantics that distinguishes covers from contains. |
-/// | `st_coveredby`   | YES (alias of within) | Same kernel as `st_covers` with args swapped via `SpatialPredicate::Within`. |
-/// | `st_touches`     | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_touches_bulk` (Agent 2A task 4). DEFINITE FALSE on disjoint bbox / identical points / identical polygons (interiors overlap); everything else UNCERTAIN → PG recheck. |
-/// | `st_crosses`     | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_crosses_bulk` (Agent 2A task 4). Same shortcut pattern; cross-dim line × polygon cases route to UNCERTAIN. |
-/// | `st_overlaps`    | YES (DEFINITE / UNCERTAIN routing) | `pgaccel_st_overlaps_bulk` (Agent 2A task 4). Cross-dim and identical inputs → DEFINITE FALSE; same-dim non-identical → UNCERTAIN → PG recheck. |
+/// | `st_intersects`  | NO          | Geometry-pair coverage is partial; unsupported pairs route to UNCERTAIN. |
+/// | `st_contains`    | NO          | Polygon-Point fp32 path only; non-Polygon/Point pairs route to UNCERTAIN. |
+/// | `st_within`      | NO          | Same partial shape coverage as `st_contains`. |
+/// | `st_dwithin`     | NO          | Point-Point fp32 path only; non-Point pairs route to UNCERTAIN. |
+/// | `st_distance`    | NO          | Partial Point*Point fp32 path only; non-Point/precision lanes defer. |
+/// | `st_area`        | NO          | Single-ring Polygon only; non-Polygon/multi-ring rows were scalar-handled. |
+/// | `st_length`      | NO          | Partial shape coverage and fp64 gap. |
+/// | `st_equals`      | NO          | Most rows route to UNCERTAIN. |
+/// | `st_disjoint`    | NO          | Negation wrapper over intersects with uncertain routing. |
+/// | `st_covers`      | NO          | Boundary semantics need a complete GPU implementation. |
+/// | `st_coveredby`   | NO          | Boundary semantics need a complete GPU implementation. |
+/// | `st_touches`     | NO          | Mostly UNCERTAIN. |
+/// | `st_crosses`     | NO          | Mostly UNCERTAIN. |
+/// | `st_overlaps`    | NO          | Mostly UNCERTAIN. |
 ///
 /// Per `CLAUDE.md` anti-cheat ban #7 ("no stubs masquerading as done"),
 /// predicates whose kernel paths are absent or return
 /// `all_uncertain()` are left unregistered rather than padded in.
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
-    const NAMES: &[&str] = &[
-        "st_intersects",
-        "st_dwithin",
-        "st_contains",
-        "st_within",
-        "st_disjoint",
-        "st_covers",
-        "st_coveredby",
-        "st_area",
-        "st_length",
-        "st_distance",
-        // Agent 2A task 4 — algorithmic predicates with DEFINITE /
-        // UNCERTAIN routing through the new pgaccel_st_*_bulk SYCL
-        // kernels. Per-row dispatch wiring lands in Phase B Agent 1B.
-        "st_equals",
-        "st_touches",
-        "st_crosses",
-        "st_overlaps",
-    ];
-    NAMES
+    GPU_ONLY_ALLOWLIST
         .iter()
         .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuSpatial))
         .collect()
@@ -106,58 +89,53 @@ mod tests {
         assert_eq!(adapter().name, "postgis");
     }
 
-    #[test]
-    fn version_query_is_valid_sql() {
-        let q = adapter().version_query;
-        assert!(q.contains("SELECT"), "version_query must contain SELECT");
-    }
-
-    #[test]
-    fn version_query_references_postgis() {
-        let q = adapter().version_query;
-        assert!(
-            q.to_lowercase().contains("postgis"),
-            "version_query should reference postgis: {q}"
-        );
-    }
-
     // -- Function count -------------------------------------------------------
 
     #[test]
     fn adapter_has_expected_function_count() {
-        // 10 original + 4 algorithmic predicates (st_equals/touches/crosses/overlaps)
-        // landed in Agent 2A task 6.
-        assert_eq!(adapter().functions.len(), 14);
+        assert_eq!(adapter().functions.len(), GPU_ONLY_ALLOWLIST.len());
     }
 
     #[test]
-    fn contains_st_area() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_area"));
+    fn adapter_names_match_gpu_only_allowlist_exactly() {
+        let names: Vec<&str> = adapter().functions.iter().map(|f| f.name).collect();
+        assert_eq!(
+            names, GPU_ONLY_ALLOWLIST,
+            "PostGIS adapter must expose only GPU-only/no-recheck functions",
+        );
     }
 
     #[test]
-    fn contains_st_length() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_length"));
+    fn partial_or_recheck_dependent_functions_are_not_registered() {
+        for name in [
+            "st_intersects",
+            "st_contains",
+            "st_within",
+            "st_dwithin",
+            "st_area",
+            "st_length",
+            "st_distance",
+            "st_disjoint",
+            "st_covers",
+            "st_coveredby",
+            "st_equals",
+            "st_touches",
+            "st_crosses",
+            "st_overlaps",
+        ] {
+            assert!(
+                !adapter().functions.iter().any(|f| f.name == name),
+                "{name} should not be registered until it has a complete GPU-only path"
+            );
+        }
     }
 
     #[test]
-    fn contains_st_distance() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_distance"));
-    }
-
-    #[test]
-    fn contains_st_covers() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_covers"));
-    }
-
-    #[test]
-    fn contains_st_coveredby() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_coveredby"));
-    }
-
-    #[test]
-    fn adapter_is_not_empty() {
-        assert!(!adapter().functions.is_empty());
+    fn adapter_is_empty_until_shape_gates_exist() {
+        assert!(
+            adapter().functions.is_empty(),
+            "PostGIS geometry predicates need planner-time shape gates before registration",
+        );
     }
 
     // -- No duplicates --------------------------------------------------------
@@ -235,18 +213,6 @@ mod tests {
     }
 
     #[test]
-    fn no_batched_eval_strategy() {
-        for f in &adapter().functions {
-            assert_ne!(
-                format!("{:?}", f.strategy),
-                "BatchedEval",
-                "BatchedEval should not appear for {}",
-                f.name
-            );
-        }
-    }
-
-    #[test]
     fn no_gpu_h3_strategy() {
         assert!(
             adapter()
@@ -269,9 +235,9 @@ mod tests {
     // -- Specific function presence -------------------------------------------
 
     #[test]
-    fn contains_st_intersects() {
+    fn does_not_contain_st_intersects() {
         assert!(
-            adapter()
+            !adapter()
                 .functions
                 .iter()
                 .any(|f| f.name == "st_intersects")
@@ -279,62 +245,25 @@ mod tests {
     }
 
     #[test]
-    fn contains_st_contains() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_contains"));
+    fn does_not_contain_st_contains() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_contains"));
     }
 
     #[test]
-    fn contains_st_within() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_within"));
-    }
-
-    // st_dwithin moved from negative-assertion to positive coverage in
-    // commit 1957feb+ — wired through pgaccel_sphere_distance_bulk fp32
-    // SYCL kernel via three_layer::spatial_dwithin.
-    #[test]
-    fn contains_st_dwithin() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_dwithin"));
-    }
-
-    // st_area / st_length / st_distance moved to positive coverage above
-    // (contains_st_area / contains_st_length / contains_st_distance).
-    //
-    // st_equals / st_touches / st_crosses / st_overlaps moved to positive
-    // coverage in Agent 2A task 6 — they now dispatch through
-    // pgaccel_st_*_bulk SYCL kernels with DEFINITE / UNCERTAIN routing
-    // (see audit table above for the per-predicate semantics).
-
-    #[test]
-    fn contains_st_disjoint() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_disjoint"));
+    fn does_not_contain_st_within() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_within"));
     }
 
     #[test]
-    fn contains_st_equals() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_equals"));
-    }
-
-    #[test]
-    fn contains_st_touches() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_touches"));
-    }
-
-    #[test]
-    fn contains_st_crosses() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_crosses"));
-    }
-
-    #[test]
-    fn contains_st_overlaps() {
-        assert!(adapter().functions.iter().any(|f| f.name == "st_overlaps"));
+    fn does_not_contain_st_dwithin() {
+        assert!(!adapter().functions.iter().any(|f| f.name == "st_dwithin"));
     }
 
     // -- gpu_spatial_entries helper -------------------------------------------
 
     #[test]
     fn gpu_spatial_entries_returns_correct_count() {
-        // 10 original + 4 algorithmic predicates from Agent 2A task 6.
-        assert_eq!(gpu_spatial_entries().len(), 14);
+        assert_eq!(gpu_spatial_entries().len(), GPU_ONLY_ALLOWLIST.len());
     }
 
     #[test]

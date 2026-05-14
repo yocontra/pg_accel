@@ -1,13 +1,13 @@
 -- pg_accel PostGIS Spatial Benchmark Suite
 -- Tests GPU-accelerated spatial predicates (GpuSpatial: st_intersects, st_contains,
--- st_within, st_dwithin) and BatchedEval spatial functions (st_distance, st_area, etc.)
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/spatial_benchmark.sql
+-- st_within, st_dwithin) and native-path spatial measurement functions.
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/spatial_benchmark.sql
 --
 -- Requires: PostGIS extension installed.
 -- The GpuSpatial path uses a three-layer GPU pipeline:
 --   Layer 1: BBox pre-filter (cheap reject)
 --   Layer 2: GPU point-in-ring / distance kernel (fp32)
---   Layer 3: CPU recheck for uncertain results (<5% of rows)
+--   Layer 3: reject uncertain results instead of running a host fallback
 
 \timing on
 \pset pager off
@@ -296,13 +296,13 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING ON, BUFFERS OFF)
   WHERE ST_Intersects(geom, ST_SetSRID(ST_MakeEnvelope(50, 50, 950, 950), 4326));
 
 -- ============================================================================
--- BENCHMARK 7: BatchedEval spatial functions (measurement, transform)
--- These run on main thread — benchmark shows deferral or batched execution.
+-- BENCHMARK 7: Native-path spatial functions (measurement, transform)
+-- These remain on PostgreSQL's executor path.
 -- ============================================================================
 
 \echo ''
 \echo '========================================'
-\echo 'BENCH 7: BatchedEval spatial functions'
+\echo 'BENCH 7: Native-path spatial functions'
 \echo '========================================'
 
 SET pg_accel.enabled = off;

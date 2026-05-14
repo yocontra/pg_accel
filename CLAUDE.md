@@ -11,7 +11,7 @@ just fmt              # cargo fmt
 just lint             # cargo clippy -- -D warnings
 just check            # cargo check --all-features
 just deny             # cargo deny check (licenses + advisories)
-just test             # cargo pgrx test pg17
+just test             # cargo pgrx test matrix (PG17/18, PG19 when pgrx supports it)
 just bench            # run benchmark suite against local pgrx PG
 
 just ci               # Full local CI: lint + test
@@ -132,7 +132,8 @@ just traces
 just traces-last 20
 ```
 
-Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to inspect spans.
+Claude agents: use `just traces` / `just traces-last` or inspect
+`~/.pgrx/data-19/pg_accel_traces.jsonl` for the repo-default PG target.
 
 ### Key span names
 
@@ -150,9 +151,9 @@ Claude agents: use the `Read` tool on `~/.pgrx/data-17/pg_accel_traces.jsonl` to
 
 ### Crash diagnosis workflow
 
-1. **Check PG logs:** `tail -50 ~/.pgrx/data-17/pg.log` — look for `signal 6` (SIGABRT), `signal 11` (SIGSEGV)
+1. **Check PG logs:** `tail -50 ~/.pgrx/data-19/pg.log` — look for `signal 6` (SIGABRT), `signal 11` (SIGSEGV)
 2. **Check macOS crash reports:** `ls -lt ~/Library/Logs/DiagnosticReports/postgres-*.ips | head -5` — parse with `grep "symbol"` for stack frames
-3. **Check trace file:** `cat ~/.pgrx/data-17/pg_accel_traces.jsonl` — last completed span shows where execution reached before crash
+3. **Check trace file:** `cat ~/.pgrx/data-19/pg_accel_traces.jsonl` — last completed span shows where execution reached before crash
 4. **Check stats:** `SELECT * FROM pg_accel_stats();` — counters for hook calls, skips, GPU failures
 5. **Common crash patterns:**
    - `apply_tlist_labeling` assert → target list mismatch in `PlanCustomPath` callback
@@ -218,11 +219,10 @@ the no-GPU fallback, not what the current session is actually using.
 
 ### How `from_profile()` derives each limit
 
-The two scale factors are `cu_scale` (at
-`pg_accel/src/engine/cost/device_limits.rs:193-197`) and the `unified_memory`
-branch inside it. `cu_scale(base)` computes
-`base × BASELINE_CUS (32) / compute_units`, halved again if the profile
-reports unified memory. Higher CU count or unified memory → lower threshold.
+The scale factor is `cu_scale` (in
+`pg_accel/src/engine/cost/device_limits.rs`). `cu_scale(base)` computes
+`base × BASELINE_CUS (32) / compute_units`. Higher CU count lowers the
+threshold.
 
 Representative formulas (cite `pg_accel/src/engine/cost/device_limits.rs:<line>`):
 

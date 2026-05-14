@@ -1,16 +1,17 @@
 //! Tracing initialization for pg_accel.
 //!
 //! Sets up a triple-output tracing subscriber:
-//! 1. **OTel JSONL file** — OTLP JSON spans written to `$PGDATA/pg_accel_traces.jsonl`,
+//! 1. **OTel JSONL file** — OTLP JSON spans written to `$PGDATA/pg_accel_otel.jsonl`,
 //!    compatible with `otel-tui --from-json-file` for live span viewing.
-//! 2. **tracing JSONL file** — tracing-subscriber JSON for Claude agent `Read` tool.
+//! 2. **tracing JSONL file** — tracing-subscriber JSON written to
+//!    `$PGDATA/pg_accel_traces.jsonl` for Claude agent `Read` tool.
 //! 3. **stderr** — compact human-readable format for PG log / terminal
 //!
 //! Controlled by `pg_accel.log_level` GUC (debug/info/notice/warning/error).
 //! Call [`init`] once from `_PG_init` after GUCs are registered.
 
-use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -19,6 +20,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use super::gucs;
 use super::gucs::PgAccelLogLevel;
+
+/// Default cap per active trace file. Startup rotation keeps at most one
+/// `.old` snapshot capped to the same size beside the fresh active file.
+const DEFAULT_TRACE_FILE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const TRACE_FILE_MAX_BYTES_ENV: &str = "PG_ACCEL_TRACE_FILE_MAX_BYTES";
+const ROTATED_TRACE_SUFFIX: &str = ".old";
 
 /// Per-process init flag. After fork(), each backend gets its own copy
 /// (COW) so the postmaster's `true` is never seen by children.
@@ -63,12 +70,10 @@ pub fn init() {
 
 fn try_init() -> Result<(), Box<dyn std::error::Error>> {
     let trace_path = trace_file_path("pg_accel_traces.jsonl");
+    let trace_max_bytes = trace_file_max_bytes();
 
     // tracing-subscriber JSON layer → JSONL file for Claude agents.
-    let trace_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&trace_path)?;
+    let trace_file = open_bounded_trace_file(&trace_path, trace_max_bytes)?;
 
     // Stash the file handle so `flush_tracing` can fsync it on exit /
     // before an abort. Ignore error if it was already set (forked backend).
@@ -76,7 +81,7 @@ fn try_init() -> Result<(), Box<dyn std::error::Error>> {
 
     let json_layer = tracing_subscriber::fmt::layer()
         .json()
-        .with_writer(FlushingWriter::new(trace_file))
+        .with_writer(FlushingWriter::new(trace_file, trace_max_bytes))
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_target(true)
         .with_thread_ids(false)
@@ -118,11 +123,8 @@ where
     use opentelemetry::trace::TracerProvider;
 
     let otel_path = trace_file_path("pg_accel_otel.jsonl");
-    let file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&otel_path)
-    {
+    let max_bytes = trace_file_max_bytes();
+    let file = match open_bounded_trace_file(&otel_path, max_bytes) {
         Ok(f) => f,
         Err(e) => {
             pgrx::log!("pg_accel: OTel trace file open failed: {e}");
@@ -130,7 +132,7 @@ where
         }
     };
 
-    let exporter = otlp_file::FileSpanExporter::new(file);
+    let exporter = otlp_file::FileSpanExporter::new(file, max_bytes);
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_simple_exporter(exporter)
         .with_resource(
@@ -185,12 +187,14 @@ pub fn flush_tracing() {
 #[derive(Clone)]
 struct FlushingWriter {
     inner: std::sync::Arc<Mutex<File>>,
+    max_bytes: u64,
 }
 
 impl FlushingWriter {
-    fn new(file: File) -> Self {
+    fn new(file: File, max_bytes: u64) -> Self {
         Self {
             inner: std::sync::Arc::new(Mutex::new(file)),
+            max_bytes,
         }
     }
 }
@@ -200,17 +204,20 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FlushingWriter {
     fn make_writer(&'a self) -> Self::Writer {
         FlushingGuard {
             guard: self.inner.lock().ok(),
+            max_bytes: self.max_bytes,
         }
     }
 }
 
 struct FlushingGuard<'a> {
     guard: Option<std::sync::MutexGuard<'a, File>>,
+    max_bytes: u64,
 }
 
 impl Write for FlushingGuard<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if let Some(g) = self.guard.as_mut() {
+            enforce_trace_file_limit(g, buf.len(), self.max_bytes);
             let n = g.write(buf)?;
             // Flush after every write so a crash preserves the line.
             g.flush()?;
@@ -227,6 +234,88 @@ impl Write for FlushingGuard<'_> {
             Ok(())
         }
     }
+}
+
+fn trace_file_max_bytes() -> u64 {
+    configured_trace_file_max_bytes(std::env::var(TRACE_FILE_MAX_BYTES_ENV).ok().as_deref())
+}
+
+fn configured_trace_file_max_bytes(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_TRACE_FILE_MAX_BYTES)
+}
+
+fn open_bounded_trace_file(path: &str, max_bytes: u64) -> io::Result<File> {
+    if let Err(e) = rotate_trace_file_if_needed(path, max_bytes) {
+        pgrx::log!("pg_accel: trace file rotation failed for {path}: {e}");
+    }
+
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
+fn rotate_trace_file_if_needed(path: &str, max_bytes: u64) -> io::Result<()> {
+    if max_bytes == 0 {
+        return Ok(());
+    }
+
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+
+    if !metadata.is_file() || metadata.len() <= max_bytes {
+        return Ok(());
+    }
+
+    let rotated = rotated_trace_path(path);
+    let _ = fs::remove_file(&rotated);
+
+    match fs::rename(path, &rotated) {
+        Ok(()) => {
+            let _ = truncate_trace_file_to(&rotated, max_bytes);
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(rename_err) => truncate_trace_file(path).map_err(|truncate_err| {
+            io::Error::new(
+                truncate_err.kind(),
+                format!("rename failed ({rename_err}); truncate failed ({truncate_err})"),
+            )
+        }),
+    }
+}
+
+fn rotated_trace_path(path: &str) -> String {
+    format!("{path}{ROTATED_TRACE_SUFFIX}")
+}
+
+fn truncate_trace_file(path: &str) -> io::Result<()> {
+    truncate_trace_file_to(path, 0)
+}
+
+fn truncate_trace_file_to(path: &str, len: u64) -> io::Result<()> {
+    OpenOptions::new().write(true).open(path)?.set_len(len)
+}
+
+fn enforce_trace_file_limit(file: &mut File, next_write_bytes: usize, max_bytes: u64) {
+    if max_bytes == 0 {
+        return;
+    }
+
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+
+    let next_write_bytes = u64::try_from(next_write_bytes).unwrap_or(u64::MAX);
+    if metadata.len().saturating_add(next_write_bytes) <= max_bytes {
+        return;
+    }
+
+    let _ = file.set_len(0);
+    let _ = file.flush();
 }
 
 fn trace_file_path(filename: &str) -> String {
@@ -259,12 +348,14 @@ mod otlp_file {
 
     pub struct FileSpanExporter {
         file: Mutex<File>,
+        max_bytes: u64,
     }
 
     impl FileSpanExporter {
-        pub fn new(file: File) -> Self {
+        pub fn new(file: File, max_bytes: u64) -> Self {
             Self {
                 file: Mutex::new(file),
+                max_bytes,
             }
         }
     }
@@ -311,6 +402,7 @@ mod otlp_file {
             line.push(b'\n');
 
             if let Ok(mut f) = self.file.lock() {
+                super::enforce_trace_file_limit(&mut f, line.len(), self.max_bytes);
                 let _ = f.write_all(&line);
                 let _ = f.flush();
             }
@@ -503,5 +595,84 @@ mod otlp_file {
         double_value: Option<f64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         bool_value: Option<bool>,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn trace_file_max_bytes_uses_default_for_missing_invalid_or_zero() {
+        assert_eq!(
+            configured_trace_file_max_bytes(None),
+            DEFAULT_TRACE_FILE_MAX_BYTES
+        );
+        assert_eq!(
+            configured_trace_file_max_bytes(Some("not-a-number")),
+            DEFAULT_TRACE_FILE_MAX_BYTES
+        );
+        assert_eq!(
+            configured_trace_file_max_bytes(Some("0")),
+            DEFAULT_TRACE_FILE_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn trace_file_max_bytes_accepts_positive_byte_value() {
+        assert_eq!(configured_trace_file_max_bytes(Some("4096")), 4096);
+        assert_eq!(configured_trace_file_max_bytes(Some(" 8192 ")), 8192);
+    }
+
+    #[test]
+    fn rotate_trace_file_moves_bounded_snapshot_to_old() {
+        let (dir, path) = temp_trace_path("pg_accel_otel.jsonl");
+        fs::write(&path, b"abcdef").expect("write test trace file");
+        let path = path.to_string_lossy().into_owned();
+
+        rotate_trace_file_if_needed(&path, 3).expect("rotate oversized trace file");
+
+        assert!(!PathBuf::from(&path).exists());
+        assert_eq!(
+            fs::read(rotated_trace_path(&path)).expect("read rotated trace file"),
+            b"abc"
+        );
+        fs::remove_dir_all(dir).expect("remove temp trace dir");
+    }
+
+    #[test]
+    fn enforce_trace_file_limit_truncates_before_next_write() {
+        let (dir, path) = temp_trace_path("pg_accel_traces.jsonl");
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open test trace file");
+
+        file.write_all(b"abcd").expect("seed test trace file");
+        enforce_trace_file_limit(&mut file, 2, 5);
+        file.write_all(b"xy").expect("write bounded trace file");
+        file.flush().expect("flush bounded trace file");
+
+        assert_eq!(fs::read(&path).expect("read bounded trace file"), b"xy");
+        fs::remove_dir_all(dir).expect("remove temp trace dir");
+    }
+
+    fn temp_trace_path(filename: &str) -> (PathBuf, PathBuf) {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pg_accel_otel_test_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&dir).expect("create temp trace dir");
+        let path = dir.join(filename);
+        (dir, path)
     }
 }

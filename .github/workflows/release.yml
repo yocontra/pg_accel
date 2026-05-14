@@ -15,31 +15,56 @@ jobs:
       ACPP_REQUIRED_SHA: 4f3cde11a302eebac28aa1ccc79ad3399cb8183c
       SOFT_FP64_REQUIRED_TAG: v1.3.0
     strategy:
+      fail-fast: false
       matrix:
-        # pg_accel is currently a Metal/macOS-only GPU extension. Linux/CUDA
-        # support requires building AdaptiveCpp + a CUDA backend in CI, which
-        # is not yet wired up. Restrict release builds to macOS for now.
+        # Release packaging currently runs on macOS; Linux/CUDA runtime
+        # validation is covered by the optional self-hosted CUDA smoke job.
         os: [macos-26]
-        pg: [15, 16, 17, 18]
+        pg: [17, 18, 19]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+        id: pg-support
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: Swatinem/rust-cache@v2
-      - name: Install Homebrew dependencies
+        if: steps.pg-support.outputs.skip != 'true'
+      - name: Install macOS build dependencies
+        if: steps.pg-support.outputs.skip != 'true'
         run: |
           brew update
           brew install just cmake llvm@20 lld@20 boost libomp
       - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.pg-support.outputs.skip != 'true'
         run: |
           just setup-gpu-metal-headers
-          just setup-gpu-acpp
-      - run: cargo install cargo-pgrx --locked --version '~0.17'
-      - run: cargo pgrx init --pg${{ matrix.pg }} download
-      - run: |
-          cargo pgrx package --package pg_accel --pg-config ~/.pgrx/${{ matrix.pg }}.*/pgrx-install/bin/pg_config --features pg${{ matrix.pg }}
+          ACPP_BACKEND=metal \
+            LLVM_PREFIX="$(brew --prefix llvm@20)" \
+            ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
+            just setup-gpu-acpp
+      - if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          source scripts/pg_versions.sh
+          cargo install cargo-pgrx --locked --version "$PG_ACCEL_PGRX_VERSION"
+      - if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          scripts/pg_source.sh build ${{ matrix.pg }}
+          cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
+      - if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          cargo pgrx package --package pg_accel --pg-config "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})" --no-default-features --features pg${{ matrix.pg }}
           cp NOTICE target/release/pg_accel-pg${{ matrix.pg }}/NOTICE
       - name: Upload artifacts
+        if: steps.pg-support.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pg_accel-pg${{ matrix.pg }}-${{ matrix.os }}

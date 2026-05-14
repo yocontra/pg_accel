@@ -11,8 +11,8 @@
 //!   1. **Bbox filter** — fast integer/float bounding-box overlap test on GPU.
 //!   2. **Geometric fast-path** — exact predicate for common simple geometries
 //!      (point-in-ring, segment intersection) on GPU.
-//!   3. **PG recheck** — uncertain pairs are deferred to PostGIS for edge
-//!      cases the GPU kernels cannot handle (collections, curves, etc.).
+//!   3. **Uncertain bucket** — unsupported or ambiguous rows are rejected by
+//!      selected pg_accel plans instead of rechecked on CPU.
 //!
 //! # Late Materialization
 //!
@@ -23,7 +23,7 @@
 //! This module is split into per-strategy files (spatial, h3, raster) plus a
 //! shared predicate_chain helper.
 
-use crate::engine::registry::AccelStrategy;
+use crate::engine::registry::{AccelStrategy, DispatchOp, FunctionAccelEntry};
 
 pub mod h3;
 pub mod predicate_chain;
@@ -35,13 +35,185 @@ mod tests;
 
 pub use predicate_chain::{Predicate, PredicateChain, evaluate_chain};
 
-/// Stack-allocated wrapper for `FunctionCallInfoBaseData` with space for two
-/// arguments. Used by the GPU spatial recheck path which calls 2-arg PostGIS
-/// functions.
-#[repr(C)]
-pub(super) struct FcinfoWith2Args {
-    pub(super) base: pgrx::pg_sys::FunctionCallInfoBaseData,
-    pub(super) _arg_space: [pgrx::pg_sys::NullableDatum; 2],
+/// Spatial operations understood by the per-batch dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialDispatchOp {
+    Area,
+    Length,
+    Distance,
+    Intersects,
+    Contains,
+    Within,
+    Equals,
+    Touches,
+    Crosses,
+    Overlaps,
+    Disjoint,
+    DWithin,
+    /// Preserves the historical two-arg spatial behavior for callers that
+    /// provide a spatial strategy without a resolvable registry entry.
+    Unknown,
+}
+
+impl SpatialDispatchOp {
+    #[must_use]
+    fn from_name(name: &str) -> Self {
+        match name {
+            "st_area" => Self::Area,
+            "st_length" => Self::Length,
+            "st_distance" => Self::Distance,
+            "st_intersects" => Self::Intersects,
+            "st_contains" => Self::Contains,
+            "st_within" => Self::Within,
+            "st_equals" => Self::Equals,
+            "st_touches" => Self::Touches,
+            "st_crosses" => Self::Crosses,
+            "st_overlaps" => Self::Overlaps,
+            "st_disjoint" => Self::Disjoint,
+            "st_dwithin" => Self::DWithin,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// H3 operations understood by the per-batch dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H3DispatchOp {
+    LatLngToCell,
+    GridDisk,
+    GridRingUnsafe,
+    CellToChildren,
+    CellToBoundary,
+    CellsToMultiPolygon,
+    Polyfill,
+    GetResolution,
+    GetBaseCell,
+    IsValidCell,
+    IsPentagon,
+    IsResClassIii,
+    CellToParent,
+    CellToCenterChild,
+    GridDistance,
+}
+
+impl H3DispatchOp {
+    #[must_use]
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "h3_latlng_to_cell" => Some(Self::LatLngToCell),
+            "h3_grid_disk" => Some(Self::GridDisk),
+            "h3_grid_ring_unsafe" => Some(Self::GridRingUnsafe),
+            "h3_cell_to_children" => Some(Self::CellToChildren),
+            "h3_cell_to_boundary" => Some(Self::CellToBoundary),
+            "h3_cells_to_multi_polygon" => Some(Self::CellsToMultiPolygon),
+            "h3_polyfill" => Some(Self::Polyfill),
+            "h3_get_resolution" => Some(Self::GetResolution),
+            "h3_get_base_cell" => Some(Self::GetBaseCell),
+            "h3_is_valid_cell" => Some(Self::IsValidCell),
+            "h3_is_pentagon" => Some(Self::IsPentagon),
+            "h3_is_res_class_iii" => Some(Self::IsResClassIii),
+            "h3_cell_to_parent" => Some(Self::CellToParent),
+            "h3_cell_to_center_child" => Some(Self::CellToCenterChild),
+            "h3_grid_distance" => Some(Self::GridDistance),
+            _ => None,
+        }
+    }
+}
+
+/// Raster operations understood by the per-batch dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RasterDispatchOp {
+    MapAlgebra,
+    Clip,
+    Reclass,
+    SummaryStats,
+    Resample,
+    Slope,
+    Aspect,
+    Hillshade,
+    Value,
+}
+
+impl RasterDispatchOp {
+    #[must_use]
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "st_mapalgebra" => Some(Self::MapAlgebra),
+            "st_clip" => Some(Self::Clip),
+            "st_reclass" => Some(Self::Reclass),
+            "st_summarystats" => Some(Self::SummaryStats),
+            "st_resample" => Some(Self::Resample),
+            "st_slope" => Some(Self::Slope),
+            "st_aspect" => Some(Self::Aspect),
+            "st_hillshade" => Some(Self::Hillshade),
+            "st_value" => Some(Self::Value),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOperation {
+    Spatial(SpatialDispatchOp),
+    H3(H3DispatchOp),
+    Raster(RasterDispatchOp),
+    Dedicated,
+    Deferred,
+}
+
+/// Fully resolved dispatch target for one function OID.
+#[derive(Debug, Clone)]
+struct ResolvedDispatch {
+    #[allow(dead_code)]
+    entry: Option<FunctionAccelEntry>,
+    #[allow(dead_code)]
+    contract: Option<DispatchOp>,
+    operation: DispatchOperation,
+}
+
+impl ResolvedDispatch {
+    #[must_use]
+    fn from_entry(strategy: AccelStrategy, entry: Option<FunctionAccelEntry>) -> Self {
+        let contract = entry.as_ref().and_then(|entry| entry.dispatch_op().ok());
+        let operation = resolve_dispatch_operation(strategy, entry.as_ref());
+        Self {
+            entry,
+            contract,
+            operation,
+        }
+    }
+}
+
+#[must_use]
+fn resolve_dispatch(strategy: AccelStrategy, fn_oid: pgrx::pg_sys::Oid) -> ResolvedDispatch {
+    let entry = crate::engine::registry::global_registry().lookup(fn_oid);
+    ResolvedDispatch::from_entry(strategy, entry)
+}
+
+#[must_use]
+fn resolve_dispatch_operation(
+    strategy: AccelStrategy,
+    entry: Option<&FunctionAccelEntry>,
+) -> DispatchOperation {
+    match strategy {
+        AccelStrategy::GpuSpatial => {
+            let op = entry.map_or(SpatialDispatchOp::Unknown, |e| {
+                SpatialDispatchOp::from_name(e.name)
+            });
+            DispatchOperation::Spatial(op)
+        }
+        AccelStrategy::GpuH3 => entry
+            .and_then(|e| H3DispatchOp::from_name(e.name))
+            .map_or(DispatchOperation::Deferred, DispatchOperation::H3),
+        AccelStrategy::GpuRaster => entry
+            .and_then(|e| RasterDispatchOp::from_name(e.name))
+            .map_or(DispatchOperation::Deferred, DispatchOperation::Raster),
+        AccelStrategy::GpuExpr
+        | AccelStrategy::GpuSort
+        | AccelStrategy::GpuReduce
+        | AccelStrategy::GpuHashJoin
+        | AccelStrategy::GpuWindow => DispatchOperation::Dedicated,
+    }
 }
 
 /// Outcome of a dispatch attempt.
@@ -57,21 +229,6 @@ pub enum DispatchResult {
     /// The batch was evaluated by an accelerated path. One Datum per input
     /// row — the existing scalar contract.
     Accelerated(Vec<(pgrx::pg_sys::Datum, bool)>),
-    /// Accelerated scalar batch where the GPU produced definite decisions
-    /// for most rows and PostgreSQL exact recheck was needed for the reported
-    /// uncertain subset.
-    ///
-    /// This is distinct from [`DispatchResult::Deferred`]: the GPU path did
-    /// run, and the recheck is Layer 3 of the spatial correctness contract,
-    /// not a CPU substitute for a failed kernel.
-    AcceleratedWithRecheck {
-        /// One scalar Datum per input row.
-        results: Vec<(pgrx::pg_sys::Datum, bool)>,
-        /// Number of rows rechecked via PostgreSQL/PostGIS exact semantics.
-        recheck_count: u64,
-        /// Wall-clock time spent in the exact recheck, in microseconds.
-        recheck_time_us: u64,
-    },
     /// Accelerated batch with a fixed number of fields per input row.
     ///
     /// `datums.len()` MUST equal `input_row_count * fields_per_row`. The
@@ -100,10 +257,10 @@ pub enum DispatchResult {
     },
     /// The batch could not be accelerated for this strategy.
     ///
-    /// This is **deferral**, not CPU fallback: the caller should let
-    /// PostgreSQL's standard executor handle these tuples normally via
-    /// scalar qual evaluation. No extraction, no CPU reimplementation —
-    /// just PG's native path. Zero overhead beyond the dispatch check.
+    /// This is **deferral**, not CPU fallback. Planner-time callers should
+    /// decline pg_accel and leave the query on PostgreSQL's native plan.
+    /// Executor-time callers in a selected pg_accel plan treat this as a
+    /// contract error.
     ///
     /// Strategies that use dedicated executor nodes (GpuSort, GpuReduce,
     /// GpuHashJoin, GpuWindow, GpuExpr) return this because they do not
@@ -136,27 +293,23 @@ pub unsafe fn dispatch(
     qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
     skip_bbox: bool,
 ) -> DispatchResult {
-    match strategy {
-        AccelStrategy::GpuSpatial => {
+    let resolved = resolve_dispatch(strategy, fn_info.fn_oid);
+
+    match resolved.operation {
+        DispatchOperation::Spatial(op) => {
             // SAFETY: Caller guarantees main backend thread.
             unsafe {
-                spatial::dispatch_gpu_spatial(batch, fn_info, is_strict, qual_datums, skip_bbox)
+                spatial::dispatch_gpu_spatial(batch, fn_info, is_strict, op, qual_datums, skip_bbox)
             }
         }
-        AccelStrategy::GpuH3 => {
+        DispatchOperation::H3(op) => {
             // SAFETY: Caller guarantees main backend thread.
-            unsafe { h3::dispatch_gpu_h3(batch, fn_info, is_strict, fn_info.fn_oid, qual_datums) }
+            unsafe { h3::dispatch_gpu_h3(batch, fn_info, is_strict, op, qual_datums) }
         }
-        AccelStrategy::GpuRaster => {
+        DispatchOperation::Raster(op) => {
             // SAFETY: Caller guarantees main backend thread.
-            unsafe {
-                raster::dispatch_gpu_raster(batch, fn_info, is_strict, fn_info.fn_oid, qual_datums)
-            }
+            unsafe { raster::dispatch_gpu_raster(batch, fn_info, is_strict, op, qual_datums) }
         }
-        AccelStrategy::GpuExpr
-        | AccelStrategy::GpuSort
-        | AccelStrategy::GpuReduce
-        | AccelStrategy::GpuHashJoin
-        | AccelStrategy::GpuWindow => DispatchResult::Deferred,
+        DispatchOperation::Dedicated | DispatchOperation::Deferred => DispatchResult::Deferred,
     }
 }

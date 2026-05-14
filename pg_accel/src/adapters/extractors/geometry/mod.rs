@@ -56,8 +56,9 @@ use self::wkb::datum_to_gserialized_bytes;
 /// Extract a full [`ExtractedGeometry`] from a `GSERIALIZED` datum.
 ///
 /// Handles POINT, LINESTRING, and POLYGON types. All other WKB types
-/// return `GeomType::Unknown` with empty coordinates, signalling that
-/// the three-layer pipeline should route them to CPU recheck.
+/// return `GeomType::Unknown` with empty coordinates, signalling that the
+/// three-layer pipeline could not GPU-classify them. Selected pg_accel plans
+/// must reject those rows rather than routing them to host-side evaluation.
 ///
 /// Coordinates are converted from f64 (PostGIS native) to f32 (GPU kernel
 /// format). The bbox is extracted from the embedded BOX2DF if present,

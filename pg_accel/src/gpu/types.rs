@@ -58,7 +58,6 @@ pub struct PgaccelDeviceInfo {
     pub max_alloc_bytes: usize,
     pub has_native_fp64: bool,
     pub has_atomic64: bool,
-    pub is_unified_memory: bool,
 }
 
 /// Platform-level capability summary (mirrors `pgaccel_platform_caps`).
@@ -71,7 +70,6 @@ pub struct PgaccelPlatformCaps {
     pub has_native_fp64: bool,
     pub has_atomic64: bool,
     pub has_ooo_queue: bool,
-    pub is_unified_memory: bool,
     pub max_alloc_bytes: usize,
     pub compute_units: u32,
     pub backend_name: [c_char; 64],

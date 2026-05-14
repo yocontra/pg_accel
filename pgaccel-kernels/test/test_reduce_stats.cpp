@@ -248,7 +248,7 @@ static void test_size(size_t N) {
 
 static void test_fp32_regression() {
   // Preserve the prior [1..100] fp32 coverage — never shorten, never loosen.
-  std::printf("\n=== fp32 regression (legacy [1..100] coverage) ===\n");
+  std::printf("\n=== fp32 regression ([1..100] coverage) ===\n");
   constexpr size_t N = 100;
   float fdata[N];
   for (size_t i = 0; i < N; ++i)

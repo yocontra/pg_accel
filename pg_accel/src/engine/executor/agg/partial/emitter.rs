@@ -101,18 +101,9 @@ impl PartialEmitter for CountEmitter {
 ///
 /// # Precision model
 ///
-/// Two emit paths are supported:
-///
-/// 1. [`PartialEmitter::emit`] — backwards-compatible path that reads the
-///    legacy `ColumnAccumulator.sum: f64` field and casts to `i64`. Accurate
-///    for SUM(int8) values whose running sum stays under 2^53; mirrors PG's
-///    own `int8_sum` semantics in that range. This path is preserved so that
-///    existing wiring keeps working without an `accumulator.rs` schema change.
-///
-/// 2. [`NumericSumEmitter::emit_with_i128`] — full-precision path. Accepts
-///    a pre-accumulated `i128` SUM directly. Buys 38 decimal digits versus
-///    f64's 15–17, sufficient for any SUM(int8) (i64::MAX × 2^61 rows fits)
-///    and for SUM(NUMERIC) with bounded scale (scale × 38 input digits).
+/// [`NumericSumEmitter::emit_with_i128`] accepts a pre-accumulated `i128` SUM
+/// directly. This preserves 38 decimal digits, sufficient for any SUM(int8)
+/// and for SUM(NUMERIC) with bounded scale.
 ///
 /// # Overflow policy
 ///
@@ -130,11 +121,8 @@ impl PartialEmitter for CountEmitter {
 ///
 /// # Wiring note
 ///
-/// `engine/ffi/planner_hooks/agg_common.rs:104` currently rejects
-/// `F_SUM_NUMERIC` from classification because the legacy f64 path loses
-/// precision. Once a caller threads a real `i128` accumulator through to
-/// [`Self::emit_with_i128`], that gate can be flipped — that integration
-/// lives outside this emitter's file ownership.
+/// `engine/ffi/planner_hooks/agg_common.rs` rejects `F_SUM_NUMERIC` until a
+/// caller threads a real `i128` accumulator through to [`Self::emit_with_i128`].
 pub struct NumericSumEmitter;
 
 impl NumericSumEmitter {
@@ -168,17 +156,8 @@ impl NumericSumEmitter {
 
 impl PartialEmitter for NumericSumEmitter {
     unsafe fn emit(&self, acc: &ColumnAccumulator) -> (pg_sys::Datum, bool) {
-        if !acc.has_value {
-            return (pg_sys::Datum::from(0u64), true);
-        }
-        // Backwards-compatible path: route the legacy f64 accumulator through
-        // the new int128 emitter at dscale=0 (SUM(int8) semantics). Any caller
-        // wanting SUM(NUMERIC) full precision should use `emit_with_i128`
-        // directly; see struct doc-comment for the wiring rationale.
-        let value = acc.sum as i64 as i128;
-        // SAFETY: Main-thread PG call; allocates in CurrentMemoryContext.
-        let datum = unsafe { int128_to_numeric(value, 0) };
-        (datum, false)
+        let _ = acc;
+        pgrx::error!("pg_accel: Numeric SUM partial emission requires an i128 accumulator");
     }
 
     fn emit_type_oid(&self) -> pg_sys::Oid {
@@ -698,8 +677,8 @@ impl PartialEmitter for BoolReductionEmitter {
 // ---------------------------------------------------------------------------
 // Tests for NumericSumEmitter + int128 helpers.
 //
-// `partial/tests.rs` covers the legacy f64 path. These tests exercise the
-// new int128 entry points, including precision boundaries f64 cannot reach.
+// These tests exercise the i128 entry points, including precision boundaries
+// f64 cannot reach.
 //
 // `#[pgrx::pg_schema]` is required so pg_test functions land in the `tests`
 // schema — the pgrx-tests harness invokes them as `tests."<fn_name>"()`
@@ -824,26 +803,6 @@ mod tests {
             s_min, "-170141183460469231731687303715884105728",
             "i128::MIN must round-trip exactly (negation handled via 0 - |v|)"
         );
-    }
-
-    #[pg_test]
-    fn numeric_sum_legacy_f64_path_still_works() {
-        // The PartialEmitter::emit path (used by existing wiring) must remain
-        // functional after the int128 refactor. Verify it produces the same
-        // value as PG's own int8 → numeric conversion for an i64-range input.
-        use super::ColumnAccumulator;
-        let emitter = NumericSumEmitter;
-        let acc = ColumnAccumulator {
-            sum: 12345.0,
-            has_value: true,
-            ..Default::default()
-        };
-        // SAFETY: live backend.
-        let (datum, isnull) =
-            unsafe { <NumericSumEmitter as super::PartialEmitter>::emit(&emitter, &acc) };
-        assert!(!isnull);
-        let s = unsafe { numeric_to_string(datum) };
-        assert_eq!(s, "12345");
     }
 
     #[pg_test]

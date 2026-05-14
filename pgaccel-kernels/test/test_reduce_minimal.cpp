@@ -79,6 +79,14 @@ int main() {
          "(expected 499500, 0, 999, 1000)\n",
          I, st, static_cast<long long>(isum), static_cast<long long>(imin),
          static_cast<long long>(imax), static_cast<long long>(icount));
+
+  int64_t direct_min = 0, direct_max = 0;
+  st = pgaccel_reduce_min_i64(ints, I, &direct_min);
+  printf("min_i64 N=%zu: status=%d min=%lld (expected 0)\n", I, st,
+         static_cast<long long>(direct_min));
+  st = pgaccel_reduce_max_i64(ints, I, &direct_max);
+  printf("max_i64 N=%zu: status=%d max=%lld (expected 999)\n", I, st,
+         static_cast<long long>(direct_max));
   delete[] ints;
 
   delete[] data;

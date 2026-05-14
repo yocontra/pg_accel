@@ -1241,9 +1241,9 @@ void free_staged_columns(sycl::queue& q, StagedColumnArrays* s, size_t /*num_agg
 /// validation before C++ error handling can run.
 static constexpr size_t SORT_AGG_MIN_ROWS = 100000;
 
-/// If a large batch cannot use the sort path, the hash fallback still uses
-/// the current per-group linear scan kernel. Keep that fallback to
-/// low-cardinality cases and return NULL for high-cardinality large batches.
+/// If a large batch cannot use the sort path, the alternate GPU accumulation
+/// kernel is admitted only for low-cardinality cases. High-cardinality large
+/// batches return unsupported rather than running a CPU-backed pg_accel plan.
 static constexpr size_t HASH_AGG_MAX_LARGE_UNSORTED_GROUPS = 4096;
 
 // ---------------------------------------------------------------------------
@@ -2061,7 +2061,7 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
 
   // Use sort-based path for large datasets except on Metal, where the
   // AdaptiveCpp backend can abort the process while validating sort/hashagg
-  // argument buffers. Fallback returns NULL for high-cardinality large batches.
+  // argument buffers. High-cardinality large batches return unsupported.
   try {
     if (row_count >= SORT_AGG_MIN_ROWS && hashagg_sort_based_available()) {
       pgaccel_agg_state* st =
@@ -2079,6 +2079,37 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
     std::fprintf(stderr, "pgaccel: hash_agg_execute failed (unknown)\n");
   }
   return nullptr;
+}
+
+pgaccel_status pgaccel_hash_agg_execute_sort_based(
+    const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
+    const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state) {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR;
+  *out_state = nullptr;
+
+  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
+                               num_aggs, false))
+    return PGACCEL_ERROR;
+
+  if (!hashagg_sort_based_available())
+    return PGACCEL_UNSUPPORTED;
+
+  try {
+    pgaccel_agg_state* state =
+        agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
+                       value_types, agg_cols, num_aggs);
+    if (state == nullptr)
+      return PGACCEL_ERROR_NO_DEVICE;
+    *out_state = state;
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg_execute_sort_based failed: %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg_execute_sort_based failed (unknown)\n");
+  }
+  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 size_t pgaccel_agg_group_count(const pgaccel_agg_state* state) {
@@ -2132,13 +2163,8 @@ pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_nu
 const double* pgaccel_agg_get_partial_results(const pgaccel_agg_state* state, size_t agg_idx) {
   if (state == nullptr || agg_idx >= state->num_aggs)
     return nullptr;
-  if (state->partial_results.size() <= agg_idx) {
-    // Fall back to finalize-mode buffer if state was produced by the
-    // legacy entry point (width=1 per group, identical layout).
-    if (state->results.size() > agg_idx)
-      return state->results[agg_idx].data();
+  if (state->partial_results.size() <= agg_idx)
     return nullptr;
-  }
   return state->partial_results[agg_idx].data();
 }
 
@@ -2147,8 +2173,7 @@ size_t pgaccel_agg_get_partial_width(const pgaccel_agg_state* state, size_t agg_
     return 0;
   if (state->partial_widths.size() > agg_idx)
     return state->partial_widths[agg_idx];
-  // Finalize-mode fallback.
-  return 1;
+  return 0;
 }
 
 const int64_t* pgaccel_agg_get_counts(const pgaccel_agg_state* state) {

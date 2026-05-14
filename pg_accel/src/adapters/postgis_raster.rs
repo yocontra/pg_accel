@@ -12,7 +12,6 @@ use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntr
 pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "postgis_raster",
-        version_query: "SELECT postgis_raster_lib_version()",
         functions: gpu_raster_entries(),
     }
 }
@@ -89,21 +88,6 @@ mod tests {
     #[test]
     fn extension_name_is_postgis_raster() {
         assert_eq!(adapter().name, "postgis_raster");
-    }
-
-    #[test]
-    fn version_query_is_valid_sql() {
-        let q = adapter().version_query;
-        assert!(q.contains("SELECT"), "version_query must contain SELECT");
-    }
-
-    #[test]
-    fn version_query_references_raster() {
-        let q = adapter().version_query;
-        assert!(
-            q.to_lowercase().contains("raster"),
-            "version_query should reference raster: {q}"
-        );
     }
 
     // -- Function count -------------------------------------------------------
@@ -192,18 +176,6 @@ mod tests {
             .filter(|f| f.strategy == AccelStrategy::GpuRaster)
             .count();
         assert_eq!(gpu_count, a.functions.len());
-    }
-
-    #[test]
-    fn no_batched_eval_strategy() {
-        for f in &adapter().functions {
-            assert_ne!(
-                format!("{:?}", f.strategy),
-                "BatchedEval",
-                "BatchedEval should not appear for {}",
-                f.name
-            );
-        }
     }
 
     #[test]
@@ -408,10 +380,5 @@ mod tests {
         for f in &adapter().functions {
             assert!(!f.schema.is_empty());
         }
-    }
-
-    #[test]
-    fn version_query_is_non_empty() {
-        assert!(!adapter().version_query.is_empty());
     }
 }

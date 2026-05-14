@@ -1,4 +1,4 @@
-//! Core engine: FFI shims, registry types, dispatch, and executor nodes.
+//! Core engine: FFI boundary, registry types, dispatch, and executor nodes.
 
 pub mod batch;
 pub mod columnar;

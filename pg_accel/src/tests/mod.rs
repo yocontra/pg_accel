@@ -1001,8 +1001,19 @@ mod tests {
         // needing PostGIS installed.
         let a = crate::adapters::postgis::adapter();
         assert_eq!(a.name, "postgis");
-        let expected = a.functions.len();
-        assert!(expected >= 1, "at least one GPU spatial function");
+        let expected_allowlist: [&str; 0] = [];
+        let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
+        assert_eq!(
+            names, expected_allowlist,
+            "PostGIS adapter must expose only GPU-only/no-recheck functions",
+        );
+
+        let expected = expected_allowlist.len();
+        assert_eq!(
+            a.functions.len(),
+            expected,
+            "generic PostGIS geometry functions stay unregistered until shape gates exist",
+        );
 
         let gpu_count = a
             .functions
@@ -1011,7 +1022,27 @@ mod tests {
             .count();
         assert_eq!(gpu_count, expected, "all entries are GPU spatial");
 
-        assert!(a.functions.iter().any(|f| f.name == "st_intersects"));
+        for blocked in [
+            "st_intersects",
+            "st_contains",
+            "st_within",
+            "st_dwithin",
+            "st_area",
+            "st_length",
+            "st_distance",
+            "st_disjoint",
+            "st_covers",
+            "st_coveredby",
+            "st_equals",
+            "st_touches",
+            "st_crosses",
+            "st_overlaps",
+        ] {
+            assert!(
+                !a.functions.iter().any(|f| f.name == blocked),
+                "{blocked} must not be registered without planner-time shape gates",
+            );
+        }
     }
 
     #[pg_test]
@@ -1019,7 +1050,10 @@ mod tests {
         let a = crate::adapters::h3::adapter();
         assert_eq!(a.name, "h3");
         let expected = a.functions.len();
-        assert!(expected >= 15, "expected scalar + varlen GPU H3 entries");
+        assert_eq!(
+            expected, 6,
+            "expected one scalar winning lane plus approved varlen/record GPU H3 entries"
+        );
 
         let gpu_count = a
             .functions
@@ -1030,14 +1064,26 @@ mod tests {
 
         let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
         assert!(names.contains(&"h3_latlng_to_cell"));
-        assert!(names.contains(&"h3_grid_distance"));
-        assert!(names.contains(&"h3_get_base_cell"));
-        assert!(names.contains(&"h3_is_valid_cell"));
-        assert!(names.contains(&"h3_is_pentagon"));
-        assert!(names.contains(&"h3_is_res_class_iii"));
         assert!(names.contains(&"h3_grid_disk"));
+        assert!(names.contains(&"h3_grid_ring_unsafe"));
+        assert!(names.contains(&"h3_cell_to_children"));
         assert!(names.contains(&"h3_cell_to_boundary"));
         assert!(names.contains(&"h3_cells_to_multi_polygon"));
+        for quarantined in [
+            "h3_grid_distance",
+            "h3_cell_to_parent",
+            "h3_cell_to_center_child",
+            "h3_get_resolution",
+            "h3_get_base_cell",
+            "h3_is_valid_cell",
+            "h3_is_pentagon",
+            "h3_is_res_class_iii",
+        ] {
+            assert!(
+                !names.contains(&quarantined),
+                "cheap scalar H3 op {quarantined} should not be registered"
+            );
+        }
     }
 
     #[pg_test]
@@ -1073,7 +1119,8 @@ mod tests {
 
         let reg = crate::engine::registry::global_registry();
 
-        // Look up st_intersects OID.
+        // PostGIS vector predicates are intentionally unregistered until
+        // planner-time geometry subtype gates exist.
         let oid = Spi::get_one::<i64>(
             "SELECT oid::bigint FROM pg_proc WHERE proname = 'st_intersects' \
              AND pronamespace = 'public'::regnamespace LIMIT 1",
@@ -1084,12 +1131,8 @@ mod tests {
             let pg_oid = pgrx::pg_sys::Oid::from(oid_val as u32);
             let entry = reg.lookup(pg_oid);
             assert!(
-                entry.is_some(),
-                "st_intersects (OID {oid_val}) should be registered when PostGIS is installed"
-            );
-            assert_eq!(
-                entry.expect("checked").strategy,
-                crate::engine::registry::AccelStrategy::GpuSpatial,
+                entry.is_none(),
+                "st_intersects (OID {oid_val}) must stay unregistered until GPU-only shape gates exist"
             );
         }
     }
@@ -1104,13 +1147,13 @@ mod tests {
             return;
         }
 
-        // Trigger registry init.
-        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 query");
+        // Trigger registry init through the scalar H3 winning lane.
+        Spi::run("SELECT h3_latlng_to_cell(POINT(0, 0), 8)").expect("h3 query");
 
         let reg = crate::engine::registry::global_registry();
 
         let oid = Spi::get_one::<i64>(
-            "SELECT oid::bigint FROM pg_proc WHERE proname = 'h3_get_resolution' \
+            "SELECT oid::bigint FROM pg_proc WHERE proname = 'h3_latlng_to_cell' \
              AND pronamespace = 'public'::regnamespace LIMIT 1",
         )
         .expect("query ok");
@@ -1120,11 +1163,24 @@ mod tests {
             let entry = reg.lookup(pg_oid);
             assert!(
                 entry.is_some(),
-                "h3_get_resolution (OID {oid_val}) should be registered when h3 is installed"
+                "h3_latlng_to_cell (OID {oid_val}) should be registered when h3 is installed"
             );
             assert_eq!(
                 entry.expect("checked").strategy,
                 crate::engine::registry::AccelStrategy::GpuH3,
+            );
+        }
+
+        let cheap_oid = Spi::get_one::<i64>(
+            "SELECT oid::bigint FROM pg_proc WHERE proname = 'h3_get_resolution' \
+             AND pronamespace = 'public'::regnamespace LIMIT 1",
+        )
+        .expect("query ok");
+        if let Some(oid_val) = cheap_oid {
+            let pg_oid = pgrx::pg_sys::Oid::from(oid_val as u32);
+            assert!(
+                reg.lookup(pg_oid).is_none(),
+                "h3_get_resolution (OID {oid_val}) should stay native, not registered"
             );
         }
     }

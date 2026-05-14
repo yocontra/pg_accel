@@ -17,10 +17,8 @@
 //!
 //! ## TupleDesc
 //!
-//! The scan slot's TupleDesc is built from the registry's
-//! `output_field_types` / `output_field_names`. Sentinel type OID `0` (used
-//! for the dynamic PostGIS `geometry` type by H3 boundary ops) is resolved
-//! at init time via `pg_proc.prorettype` lookup of the function OID.
+//! The scan slot's TupleDesc is built from the registry's concrete
+//! `output_field_types` / `output_field_names`.
 //!
 //! For `OutputShape::Record` (e.g. `ST_SummaryStats` → 6 fields) the slot
 //! holds one composite tuple per emitted row; per CLAUDE.md "Custom Scan
@@ -239,9 +237,6 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     // Map the dispatch outcome to the BufferedOutput shape.
     let (output, dispatched_ok) = match (entry.output_shape, dispatch_result) {
         (OutputShape::Scalar, DispatchResult::Accelerated(d)) => (BufferedOutput::Scalar(d), true),
-        (OutputShape::Scalar, DispatchResult::AcceleratedWithRecheck { results, .. }) => {
-            (BufferedOutput::Scalar(results), true)
-        }
         (
             OutputShape::Record { field_count: _ },
             DispatchResult::AcceleratedRecord {
@@ -258,37 +253,21 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
         (OutputShape::VarLen, DispatchResult::AcceleratedVarLen { offsets: _, datums }) => {
             (BufferedOutput::VarLen { datums }, true)
         }
-        (_, DispatchResult::AcceleratedWithRecheck { .. }) => {
-            pgrx::debug1!(
-                "pg_accel: function_scan init: scalar recheck result shape did not match \
-                 registry output shape for fn_oid={}; returning empty result",
-                u32::from(priv_data.fn_oid),
-            );
-            (BufferedOutput::Scalar(Vec::new()), false)
-        }
         (_, DispatchResult::Deferred) => {
-            // Dispatcher couldn't accelerate this call. Emit zero rows
-            // (PG's executor will return EOF after one ExecCustomScan call)
-            // and log a debug — the planner should not have routed us here
-            // if the strategy can't handle the function, but we don't crash
-            // the query if it does.
-            pgrx::debug1!(
+            pgrx::error!(
                 "pg_accel: function_scan init: dispatch deferred for fn_oid={} strategy={:?}; \
-                 returning empty result (planner mis-routing — see TODO 'FunctionScan defer audit')",
+                 planner must decline instead of producing a non-GPU pg_accel plan",
                 u32::from(priv_data.fn_oid),
                 entry.strategy,
             );
-            (BufferedOutput::Scalar(Vec::new()), false)
         }
         (shape, result) => {
-            pgrx::warning!(
+            pgrx::error!(
                 "pg_accel: function_scan init: shape/result mismatch — \
-                 registry shape {:?} but dispatch returned variant index {:?}; \
-                 emitting zero rows",
+                 registry shape {:?} but dispatch returned variant index {:?}; refusing non-GPU fallback",
                 shape,
                 std::mem::discriminant(&result),
             );
-            (BufferedOutput::Scalar(Vec::new()), false)
         }
     };
 
@@ -301,7 +280,12 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     });
 
     let _ = AccelStrategy::GpuH3; // keep import for potential extension
-    let _ = OutputShapeDisc::from_i32(priv_data.output_shape_disc);
+    if OutputShapeDisc::from_i32(priv_data.output_shape_disc).is_none() {
+        pgrx::error!(
+            "pg_accel: invalid FunctionScan output shape tag {}",
+            priv_data.output_shape_disc
+        );
+    }
     let _ = list_int_at;
 
     Box::into_raw(state).cast()
@@ -328,10 +312,8 @@ fn build_dispatch_inputs(priv_data: &FunctionScanPrivData) -> (Vec<DatumNull>, V
 
     // First arg is the batch element. The dispatcher's H3 / raster paths
     // read the per-row datum from `batch[0]` and constants from
-    // `qual_datums`. is_null is approximated as `false` for non-zero datums
-    // (PG already constant-folded; a NULL Const sets datum=0 and the
-    // planner generally substitutes a `RelabelType(NULL)` shape we don't
-    // accept here).
+    // `qual_datums`. Planner hooks reject NULL Const args until the private
+    // data format carries const nullness explicitly.
     let (datum_i64, type_oid_u32) = priv_data.args[0];
     #[allow(clippy::cast_sign_loss)]
     let first_datum = pg_sys::Datum::from(datum_i64 as usize);

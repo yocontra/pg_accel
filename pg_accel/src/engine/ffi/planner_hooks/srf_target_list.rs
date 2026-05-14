@@ -357,6 +357,14 @@ unsafe fn wrap_projectset_path(
                         NodeTag::T_Const => {
                             // SAFETY: tag confirmed Const.
                             let c = a.cast::<Const>();
+                            if unsafe { (*c).constisnull } {
+                                pgrx::debug1!(
+                                    "pg_accel: srf_target_list: NULL Const arg for fn_oid={}; \
+                                     declining until const nullness is serialized",
+                                    u32::from(srf_fn_oid),
+                                );
+                                return false;
+                            }
                             let datum = unsafe { (*c).constvalue };
                             let typid = unsafe { (*c).consttype };
                             #[allow(clippy::cast_possible_wrap)]

@@ -10,8 +10,8 @@ impl Workload for IndexRecheck {
 
     fn description(&self) -> &'static str {
         "SELECT count(*) FROM bench_gist_points \
-         WHERE ST_Within(geom, ST_MakeEnvelope(-74.1, 40.6, -73.8, 40.9, 4326)) \
-         — tests BatchedEval on GiST index recheck"
+             WHERE ST_Within(geom, ST_MakeEnvelope(-74.1, 40.6, -73.8, 40.9, 4326)) \
+             — tests GiST index recheck planning"
     }
 
     fn category(&self) -> &'static str {

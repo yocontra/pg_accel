@@ -4,13 +4,48 @@
 //! - Target-list walking
 //! - Cost estimation
 //!
-//! The body of the legacy `pgaccel_inject_gpu_agg` still lives in `mod.rs`;
+//! The body of `pgaccel_inject_gpu_agg` still lives in `mod.rs`;
 //! these helpers are additive metadata used by `partial_agg::try_inject` to
 //! build a `PartialAggSpec` without re-walking the target list twice.
 
 use pgrx::pg_sys;
 
 use crate::engine::executor::agg::AggOp;
+
+/// Whether finalize-mode grouped AVG is safe to plan.
+///
+/// Keep this `false` until the finalize-mode grouped executor emits a true
+/// average. Today that path maps `AggOp::Avg` through the SUM FFI lane and the
+/// hash-agg result has no per-group count lane available to finalize `sum / N`.
+#[must_use]
+pub(super) const fn grouped_avg_finalize_supported() -> bool {
+    false
+}
+
+/// True when an `Aggref` is one of PostgreSQL's built-in AVG aggregates.
+///
+/// # Safety
+///
+/// `aggref` must be a valid `Aggref` pointer on the main backend thread.
+pub(super) unsafe fn aggref_is_avg(aggref: *const pg_sys::Aggref) -> bool {
+    // SAFETY: caller contract.
+    matches!(unsafe { classify_aggref(aggref) }, Some((AggOp::Avg, _)))
+}
+
+/// True when an aggregate is PostgreSQL's built-in `SUM(bigint)`.
+///
+/// The aggregate OID check is the authoritative guard. `arg_type_oid` is a
+/// fallback for expression forms where the caller already resolved the input
+/// type, but relying only on a plain `Var` argument misses cast-wrapped trees.
+#[must_use]
+pub(super) fn aggref_is_sum_int8(
+    aggref: &pg_sys::Aggref,
+    op: AggOp,
+    arg_type_oid: pg_sys::Oid,
+) -> bool {
+    aggref.aggfnoid == pg_sys::Oid::from(pg_sys::F_SUM_INT8)
+        || (matches!(op, AggOp::Sum) && arg_type_oid == pg_sys::INT8OID)
+}
 
 /// Classification of an `Aggref` node into one of the partial-agg categories
 /// recognised by pg_accel. Drives `PartialColumn` construction in
@@ -85,8 +120,10 @@ pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(A
         pg_sys::F_SUM_INT4 | pg_sys::F_SUM_INT2 => {
             Some((AggOp::Sum, AggClass::IntegerSumPromotion))
         }
-        // SUM(int8) promotes to NUMERIC result but its transition state is still a
-        // plain scalar sum we can accumulate. Route it through NumericSum.
+        // SUM(int8) promotes to NUMERIC result. Keep it classified so the
+        // non-parallel direct typed i64 reduce can run; partial injectors
+        // apply a separate guard because PG's parallel combine expects its
+        // internal transition-state shape, not a scalar final sum.
         pg_sys::F_SUM_INT8 => Some((AggOp::Sum, AggClass::NumericSum)),
         // SUM(numeric) is rejected at classification: PG NUMERIC is arbitrary-precision,
         // but the partial-agg accumulator (`ColumnAccumulator.sum`) is f64 and silently
@@ -96,11 +133,8 @@ pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(A
         // Option A (full fidelity multi-limb accumulator kernel) is tracked in TODO.md
         // "Post-1.0 (deferred)" under "NUMERIC multi-limb accumulator kernel".
         //
-        // Defense in depth: the f64 accumulator path in
-        // `engine/executor/agg/partial/emitter.rs::NumericSumEmitter` is left intact
-        // for SUM(int8) (whose i64 values fit in f64 up to 2^53 with identical
-        // semantics to PG's own int8_sum until overflow, which PG handles via NUMERIC
-        // promotion too — see `int8_sum` in src/backend/utils/adt/numeric.c).
+        // Defense in depth: partial path builders reject SUM(int8)/SUM(numeric)
+        // before emitter construction until a real internal-state emitter lands.
         pg_sys::F_SUM_NUMERIC => None,
         pg_sys::F_SUM_FLOAT4 => Some((
             AggOp::Sum,

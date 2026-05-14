@@ -23,11 +23,14 @@ name = "pgrx_embed_pg_accel"
 path = "./src/bin/pgrx_embed.rs"
 
 [features]
+# Repo-level tooling targets PostgreSQL 17 by default. The pg18 feature is kept
+# visible for ABI cleanup work, but PG18 is not the default until all executor
+# bindings are ported to PostgreSQL 18's tuple descriptor and planner changes.
 default = ["pg17"]
-pg15 = ["pgrx/pg15"]
-pg16 = ["pgrx/pg16"]
 pg17 = ["pgrx/pg17"]
 pg18 = ["pgrx/pg18"]
+# Add `pg19 = ["pgrx/pg19"]` here when pgrx exposes that feature; the
+# scripts/pg_versions.sh matrix will begin exercising it automatically.
 pg_test = []
 
 [dependencies]

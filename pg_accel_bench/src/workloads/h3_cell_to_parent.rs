@@ -1,14 +1,12 @@
 use super::Workload;
 
-/// Tests bulk h3_cell_to_parent resolution change through the GPU H3 bit-shift kernel.
+/// Quarantine guard for standalone h3_cell_to_parent.
 ///
-/// Baseline runs the same function schema-qualified as
-/// `public.h3_cell_to_parent` and relies on the runner's
-/// `pg_accel.enabled = off` GUC to drop through to the h3-pg C
-/// implementation. h3-pg does not ship an underscored alias for
-/// `h3_cell_to_parent`, so schema qualification + the disabled hook
-/// are the mechanisms that isolate the baseline from pg_accel's path.
-/// See `h3_variants.rs` for the full rationale.
+/// This scalar H3 operation is near parity as a standalone GPU path, so the
+/// adapter must not expose it to normal planning. The accel-side query keeps
+/// the unqualified spelling to catch accidental re-registration, while the
+/// baseline keeps `pg_accel.enabled = off` and schema-qualifies the native
+/// h3-pg call. See `h3_variants.rs` for the full rationale.
 pub struct H3CellToParent;
 
 impl Workload for H3CellToParent {
@@ -17,8 +15,9 @@ impl Workload for H3CellToParent {
     }
 
     fn description(&self) -> &'static str {
-        "h3_cell_to_parent bulk resolution change — tests GPU H3 bit-shift kernel. \
-         Baseline uses stock h3-pg via `public.h3_cell_to_parent`."
+        "h3_cell_to_parent native-decline guard — near-parity scalar H3 must \
+         stay out of standalone GpuH3 exposure. Baseline uses stock h3-pg via \
+         `public.h3_cell_to_parent`."
     }
 
     fn category(&self) -> &'static str {

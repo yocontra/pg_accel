@@ -35,6 +35,7 @@ mod h3_bulk;
 mod h3_cell_to_parent;
 mod h3_grid_distance;
 mod h3_resolution_sweep;
+mod h3_srf_grid_disk;
 mod h3_variants;
 // --- GPU Expr ---
 mod expr_math;
@@ -83,6 +84,7 @@ pub use h3_bulk::H3Bulk;
 pub use h3_cell_to_parent::H3CellToParent;
 pub use h3_grid_distance::H3GridDistance;
 pub use h3_resolution_sweep::H3ResolutionSweep;
+pub use h3_srf_grid_disk::H3SrfGridDisk;
 pub use hash_join::HashJoin;
 pub use index_recheck::IndexRecheck;
 pub use large_sort::LargeSort;
@@ -317,11 +319,110 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
             description: "ST_Intersects 500v, ~90% selectivity",
             inside_fraction: 0.90,
         }),
+        // --- GPU Spatial 100K repro matrix ---
+        // Focused one-factor-at-a-time matrix for the 100K spatial crash
+        // band. Run with:
+        //   cargo run -p pg_accel_bench -- run --category gpu_spatial_repro --capture-plans
+        //
+        // The standard row axis gives 10K/100K/1M comparison points (plus
+        // the global 10M scale). Cache state is captured by the harness via
+        // --cache-mode; all other per-row dimensions are encoded below.
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_simple_s10_b64k_w0_jitoff",
+            description: "100K repro: generated ST_Buffer simple ~500v; selectivity=10%; min_batch=65536 (100K ~=2 batches, 10K native decline); rel_parallel_workers=0; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Simple500v,
+            selectivity_pct: 10,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 0,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_simple_s90_b64k_w0_jitoff",
+            description: "100K repro: generated ST_Buffer simple ~500v; selectivity=90%; min_batch=65536 (100K ~=2 batches, 10K native decline); rel_parallel_workers=0; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Simple500v,
+            selectivity_pct: 90,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 0,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_simple_s90_b8k_w0_jitoff",
+            description: "100K repro: generated ST_Buffer simple ~500v; selectivity=90%; min_batch=8192 (100K ~=13 batches); rel_parallel_workers=0; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Simple500v,
+            selectivity_pct: 90,
+            min_batch_size: 8_192,
+            rel_parallel_workers: 0,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_simple_s90_b64k_w4_jitoff",
+            description: "100K repro: generated ST_Buffer simple ~500v; selectivity=90%; min_batch=65536 (100K ~=2 batches); rel_parallel_workers=4; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Simple500v,
+            selectivity_pct: 90,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 4,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_simple_s90_b64k_w4_jiton",
+            description: "100K repro: generated ST_Buffer simple ~500v; selectivity=90%; min_batch=65536 (100K ~=2 batches); rel_parallel_workers=4; jit=on; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Simple500v,
+            selectivity_pct: 90,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 4,
+            jit: spatial_selectivity_sweep::ReproJit::On,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff",
+            description: "100K repro: generated ST_Buffer cooperative 1024+v; selectivity=10%; min_batch=65536 (100K ~=2 batches, 10K native decline); rel_parallel_workers=0; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Coop1024v,
+            selectivity_pct: 10,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 0,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_coop1024_s90_b64k_w0_jitoff",
+            description: "100K repro: generated ST_Buffer cooperative 1024+v; selectivity=90%; min_batch=65536 (100K ~=2 batches, 10K native decline); rel_parallel_workers=0; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Coop1024v,
+            selectivity_pct: 90,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 0,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_coop1024_s90_b8k_w0_jitoff",
+            description: "100K repro: generated ST_Buffer cooperative 1024+v; selectivity=90%; min_batch=8192 (100K ~=13 batches); rel_parallel_workers=0; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Coop1024v,
+            selectivity_pct: 90,
+            min_batch_size: 8_192,
+            rel_parallel_workers: 0,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_coop1024_s90_b64k_w4_jitoff",
+            description: "100K repro: generated ST_Buffer cooperative 1024+v; selectivity=90%; min_batch=65536 (100K ~=2 batches); rel_parallel_workers=4; jit=off; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Coop1024v,
+            selectivity_pct: 90,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 4,
+            jit: spatial_selectivity_sweep::ReproJit::Off,
+        }),
+        Box::new(spatial_selectivity_sweep::SpatialSelectivityRepro {
+            name: "spatial_sel_repro_coop1024_s90_b64k_w4_jiton",
+            description: "100K repro: generated ST_Buffer cooperative 1024+v; selectivity=90%; min_batch=65536 (100K ~=2 batches); rel_parallel_workers=4; jit=on; cache via harness",
+            polygon: spatial_selectivity_sweep::ReproPolygon::Coop1024v,
+            selectivity_pct: 90,
+            min_batch_size: 65_536,
+            rel_parallel_workers: 4,
+            jit: spatial_selectivity_sweep::ReproJit::On,
+        }),
         // --- GPU H3 (original) ---
         Box::new(H3Bulk),
         Box::new(H3CellToParent),
         Box::new(H3GridDistance),
         Box::new(H3ResolutionSweep),
+        Box::new(H3SrfGridDisk),
         // --- GPU H3 (variants) ---
         // NOTE: H3_LATLNG_RES3 and H3_LATLNG_RES9 retired per
         // action_items.md W8 / Reviewer 1 Sin #3 — they exercise the
@@ -452,6 +553,17 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("spatial_sel_10pct", "postgis"),
         ("spatial_sel_50pct", "postgis"),
         ("spatial_sel_90pct", "postgis"),
+        // GPU Spatial (100K repro matrix)
+        ("spatial_sel_repro_simple_s10_b64k_w0_jitoff", "postgis"),
+        ("spatial_sel_repro_simple_s90_b64k_w0_jitoff", "postgis"),
+        ("spatial_sel_repro_simple_s90_b8k_w0_jitoff", "postgis"),
+        ("spatial_sel_repro_simple_s90_b64k_w4_jitoff", "postgis"),
+        ("spatial_sel_repro_simple_s90_b64k_w4_jiton", "postgis"),
+        ("spatial_sel_repro_coop1024_s10_b64k_w0_jitoff", "postgis"),
+        ("spatial_sel_repro_coop1024_s90_b64k_w0_jitoff", "postgis"),
+        ("spatial_sel_repro_coop1024_s90_b8k_w0_jitoff", "postgis"),
+        ("spatial_sel_repro_coop1024_s90_b64k_w4_jitoff", "postgis"),
+        ("spatial_sel_repro_coop1024_s90_b64k_w4_jiton", "postgis"),
         // Scale sweep retired (action_items W9).
         // Mixed spatial
         ("spatial_agg", "postgis"),
@@ -463,6 +575,7 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("h3_cell_to_parent", "h3"),
         ("h3_grid_distance", "h3"),
         ("h3_resolution_sweep", "h3"),
+        ("h3_srf_grid_disk", "h3"),
         // GPU H3 (variants)
         // h3_latlng_res3 / h3_latlng_res9 retired per action_items.md W8.
         ("h3_latlng_res15", "h3"),

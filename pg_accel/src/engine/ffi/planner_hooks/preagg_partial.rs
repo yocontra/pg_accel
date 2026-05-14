@@ -375,7 +375,7 @@ pub(super) unsafe fn try_inject(
             let extracted = unsafe { super::extract_var_attno(arg_expr) };
             (extracted, u32::from(aggref_ref.aggtype))
         };
-        if matches!(op, AggOp::Sum) && arg_type_oid == pg_sys::INT8OID {
+        if agg_common::aggref_is_sum_int8(aggref_ref, op, arg_type_oid) {
             has_i64_sum = true;
         }
 
@@ -394,7 +394,9 @@ pub(super) unsafe fn try_inject(
     }
     if has_i64_sum {
         pgrx::debug1!(
-            "pg_accel preagg_partial: SUM(bigint) rejected until parallel i64 reduce is stable"
+            "pg_accel preagg_partial: SUM(bigint) rejected: PG partial combine expects the \
+             int8_avg_accum/numeric internal transition shape, while pg_accel currently \
+             only has a final scalar i64 reduce"
         );
         return;
     }
@@ -445,7 +447,7 @@ pub(super) unsafe fn try_inject(
             .iter()
             .any(|(op, _, rtype)| matches!(op, AggOp::Avg) || *rtype == float8_u32);
     // Phase 6 calibration: read from `DeviceLimits::gpu_partial_agg_per_row`
-    // (same fix as `partial_agg::try_inject` — the legacy `0.005` was 10x
+    // (same fix as `partial_agg::try_inject` — the old `0.005` was 10x
     // measured GPU reduce throughput, dominating the partial-agg cost when
     // the soft-fp64 multiplier applied).
     let limits = cost::device_limits();

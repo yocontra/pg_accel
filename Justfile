@@ -4,9 +4,9 @@ default:
 
 # === Setup ===
 
-# Install all dependencies (run once on fresh clone)
-setup: setup-tools setup-brew setup-pgrx setup-hooks
-    @echo "Setup complete. Run 'just setup-gpu' if you want GPU acceleration."
+# Install repo-local PostgreSQL and Rust tooling (run once on a fresh clone).
+setup: setup-tools setup-pg-source setup-pgrx setup-hooks
+    @echo "Setup complete. Run 'ACPP_BACKEND=cuda just setup-gpu' on CUDA Linux, or 'ACPP_BACKEND=metal just setup-gpu' on Apple Silicon."
 
 # Install prek (Rust-native pre-commit drop-in) and wire up its git hooks
 # from .pre-commit-config.yaml. Idempotent — safe to re-run.
@@ -14,8 +14,9 @@ setup-hooks:
     #!/usr/bin/env bash
     set -euo pipefail
     if ! command -v prek >/dev/null 2>&1; then
-        echo "Installing prek via Homebrew..."
-        brew install prek
+        echo "warning: prek not found; skipping git hook installation."
+        echo "         Install prek separately and rerun 'just setup-hooks' if you want local hooks."
+        exit 0
     fi
     # prek refuses to install when core.hooksPath points anywhere other than
     # the default. Clear a stale local override (set by some editors/tools)
@@ -26,66 +27,139 @@ setup-hooks:
     prek install
     echo "prek hooks installed (pre-commit + commit-msg + pre-push)."
 
-# Install asdf-managed tools (rust, cmake)
+# Install Rust-side tools used by pg_accel.
 setup-tools:
-    @command -v asdf > /dev/null || (echo "Install asdf first: https://asdf-vm.com" && exit 1)
-    asdf plugin add rust 2>/dev/null || true
-    asdf plugin add cmake 2>/dev/null || true
-    asdf plugin add just 2>/dev/null || true
-    asdf install
-
-# Install Homebrew dependencies (including PostGIS + h3 for pgrx)
-setup-brew:
-    brew install postgresql@17 postgis h3
-    cargo install cargo-pgrx --version 0.17.0 --locked
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    command -v rustc >/dev/null || { echo "error: rustc not found; install Rust first" >&2; exit 1; }
+    command -v cargo >/dev/null || { echo "error: cargo not found; install Rust first" >&2; exit 1; }
+    command -v cmake >/dev/null || { echo "error: cmake not found; install CMake first" >&2; exit 1; }
+    command -v curl >/dev/null || { echo "error: curl not found" >&2; exit 1; }
+    command -v make >/dev/null || { echo "error: make not found" >&2; exit 1; }
+    cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
     cargo install cargo-deny --locked
     cargo install cargo-audit --locked
 
-# Initialize pgrx for PG 17 and link all required extensions into it
-setup-pgrx:
+# Print system dependency hints for source PostgreSQL + AdaptiveCpp builds.
+setup-system-deps:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo pgrx init --pg17 "$(brew --prefix postgresql@17)/bin/pg_config"
+    case "$(uname -s)" in
+        Linux)
+            printf '%s\n' \
+                "Install build prerequisites with your distro package manager. For Ubuntu/Debian:" \
+                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libreadline-dev zlib1g-dev flex bison pkg-config" \
+                "" \
+                "For CUDA runs, install the NVIDIA driver + CUDA toolkit, then run:" \
+                "  ACPP_BACKEND=cuda just setup-gpu"
+            ;;
+        Darwin)
+            printf '%s\n' \
+                "Install Xcode command line tools and provide a recent LLVM/lld toolchain via LLVM_PREFIX/ACPP_LLD_PATH." \
+                "Then run:" \
+                "  ACPP_BACKEND=metal just setup-gpu-metal-headers" \
+                "  ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu"
+            ;;
+        *)
+            echo "Install a C/C++ toolchain, curl, make, cmake, git, and Rust."
+            ;;
+    esac
 
-    # Symlink PostGIS, h3, and other extensions into pgrx-managed PG.
-    # Without this, CREATE EXTENSION fails inside the pgrx instance.
-    PG17_CONFIG="$(brew --prefix postgresql@17)/bin/pg_config"
-    PG17_MINOR="$("$PG17_CONFIG" --version | awk '{ print $2 }' | cut -d. -f1,2)"
-    PGRX_LIB="$HOME/.pgrx/$PG17_MINOR/pgrx-install/lib/postgresql"
-    PGRX_EXT="$HOME/.pgrx/$PG17_MINOR/pgrx-install/share/postgresql/extension"
-    HOMEBREW_PREFIX="$(brew --prefix)"
-
-    # PostGIS
-    for f in "$(brew --prefix postgis)"/lib/postgresql@17/*.dylib; do
-        ln -sf "$f" "$PGRX_LIB/$(basename "$f")"
+# Build repo-local PostgreSQL from official source tarballs.
+setup-pg-source pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    pg_arg="{{pg}}"
+    if [ -n "$pg_arg" ]; then
+        majors="${pg_arg#pg}"
+    else
+        majors="$(pg_accel_source_pg_majors)"
+    fi
+    for pg in $majors; do
+        scripts/pg_source.sh build "$pg"
     done
-    for f in "$(brew --prefix postgis)"/share/postgresql@17/extension/*; do
-        ln -sf "$f" "$PGRX_EXT/$(basename "$f")"
+
+# Alias for building one source PostgreSQL major/version.
+pg-build pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        requested="$(pg_accel_default_pg_major)"
+    fi
+    scripts/pg_source.sh build "$requested"
+
+# Print the repo-local pg_config path for a PostgreSQL major/version.
+pg-config pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        requested="$(pg_accel_default_pg_major)"
+    fi
+    scripts/pg_source.sh pg-config "$requested"
+
+# Boot a temporary source-built PostgreSQL cluster and run SELECT version().
+pg-smoke pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        requested="$(pg_accel_default_pg_major)"
+    fi
+    scripts/pg_source.sh build "$requested"
+    pg_config="$(scripts/pg_source.sh pg-config "$requested")"
+    pgbin="$(dirname "$pg_config")"
+    tmpdir="$(mktemp -d /tmp/pgaccel-srcpg.XXXXXX)"
+    cleanup() {
+        "$pgbin/pg_ctl" -D "$tmpdir/data" -m fast stop >/dev/null 2>&1 || true
+        rm -rf "$tmpdir"
+    }
+    trap cleanup EXIT
+    "$pgbin/initdb" -D "$tmpdir/data" >/dev/null
+    "$pgbin/pg_ctl" -D "$tmpdir/data" -l "$tmpdir/pg.log" -o "-p 55432 -k $tmpdir -c listen_addresses=''" start >/dev/null
+    "$pgbin/psql" -h "$tmpdir" -p 55432 -d postgres -tAc 'select version();'
+
+# Initialize pgrx for source-built PostgreSQL majors.
+setup-pgrx pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    pg_arg="{{pg}}"
+    if [ -n "$pg_arg" ]; then
+        majors="${pg_arg#pg}"
+    else
+        majors="$(pg_accel_supported_pg_majors)"
+    fi
+    for pg in $majors; do
+        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+            continue
+        fi
+        scripts/pg_source.sh build "$pg"
+        pg_config="$(pg_accel_source_pg_config_for_required_pg "$pg")"
+        cargo pgrx init "--pg$pg" "$pg_config"
+        pg_accel_disable_uninstalled_pg_accel_preload "$pg" "$pg_config"
+        echo "pgrx PG$pg initialized from source PostgreSQL at $pg_config"
     done
 
-    # h3 + h3_postgis
-    for f in "$HOMEBREW_PREFIX"/lib/postgresql@17/h3*.dylib; do
-        ln -sf "$f" "$PGRX_LIB/$(basename "$f")"
-    done
-    for f in "$HOMEBREW_PREFIX"/share/postgresql@17/extension/h3*; do
-        ln -sf "$f" "$PGRX_EXT/$(basename "$f")"
-    done
+# Explicit alias for initializing the configured PG version matrix.
+setup-pgrx-matrix: setup-pgrx
 
-    echo "pgrx PG17 initialized with postgis, postgis_raster, h3, h3_postgis"
-
-# Install AdaptiveCpp with Metal backend (macOS Apple Silicon)
-setup-gpu: setup-gpu-deps setup-gpu-metal-headers setup-gpu-acpp
-    @echo "GPU setup complete. Run 'acpp-info' to verify."
-
-# Install GPU build dependencies via Homebrew
-setup-gpu-deps:
-    brew install llvm@20 lld@20 boost
+# Build a repo-local AdaptiveCpp toolchain. Use ACPP_BACKEND=cuda, metal, or generic.
+setup-gpu: setup-gpu-acpp
+    @echo "GPU setup complete. Run ./.pgaccel/acpp/current/bin/acpp-info to verify."
 
 # Download Apple metal-cpp headers
 setup-gpu-metal-headers:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -f "{{env('HOME')}}/local/include/Metal/Metal.hpp" ]; then
+    root="${PG_ACCEL_TOOL_ROOT:-$PWD/.pgaccel}"
+    if [ -f "$root/metal-cpp/Metal/Metal.hpp" ]; then
         echo "metal-cpp headers already installed"
         exit 0
     fi
@@ -98,86 +172,16 @@ setup-gpu-metal-headers:
     with zipfile.ZipFile('/tmp/metal-cpp.zip', 'r') as z:
         z.extractall('/tmp/metal-cpp')
     "
-    mkdir -p ~/local/include
-    cp -r /tmp/metal-cpp/Metal ~/local/include/
-    cp -r /tmp/metal-cpp/Foundation ~/local/include/
-    cp -r /tmp/metal-cpp/QuartzCore ~/local/include/
+    mkdir -p "$root/metal-cpp"
+    cp -r /tmp/metal-cpp/Metal "$root/metal-cpp/"
+    cp -r /tmp/metal-cpp/Foundation "$root/metal-cpp/"
+    cp -r /tmp/metal-cpp/QuartzCore "$root/metal-cpp/"
     rm -rf /tmp/metal-cpp /tmp/metal-cpp.zip
-    echo "metal-cpp headers installed to ~/local/include"
+    echo "metal-cpp headers installed to $root/metal-cpp"
 
-# Build and install AdaptiveCpp from the local fork-safe-metal checkout at $ACPP_SRC
+# Build and install AdaptiveCpp from source into .pgaccel/acpp/<backend>.
 setup-gpu-acpp:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ACPP_PREFIX="$HOME/local"
-    ACPP_SRC="${ACPP_SRC:-$HOME/Projects/AdaptiveCpp}"
-    REQUIRED_BRANCH="fork-safe-metal"
-    if [ ! -d "$ACPP_SRC/.git" ]; then
-        echo "$ACPP_SRC not found; cloning fork-safe-metal from yocontra/AdaptiveCpp"
-        git clone -b "$REQUIRED_BRANCH" https://github.com/yocontra/AdaptiveCpp.git "$ACPP_SRC"
-    fi
-    ACPP_REQUIRED_SHA="4f3cde11a302eebac28aa1ccc79ad3399cb8183c"
-    if ! git -C "$ACPP_SRC" merge-base --is-ancestor "$ACPP_REQUIRED_SHA" HEAD 2>/dev/null; then
-        echo "error: AdaptiveCpp at $ACPP_SRC must include SHA $ACPP_REQUIRED_SHA"
-        echo "       run: git -C $ACPP_SRC fetch origin fork-safe-metal && git -C $ACPP_SRC checkout fork-safe-metal && git -C $ACPP_SRC pull --ff-only"
-        exit 1
-    fi
-    LLVM_PREFIX=$(brew --prefix llvm@20)
-    # soft-fp64 is consumed directly from its source tree by AdaptiveCpp's
-    # libkernel build (no flatten-and-stage step — the staging adapter was
-    # removed in soft-fp64 v1.2.0 and absorbed into AdaptiveCpp's own
-    # `src/libkernel/sscp/metal/float64/`). All we need is a checkout at
-    # the pinned tag — AdaptiveCpp's CMake reads `src/`, `src/sleef/`,
-    # `include/` directly via `ACPP_SOFT_FP64_SRC_DIR`.
-    SOFT_FP64_SRC="${SOFT_FP64_SRC:-$HOME/Projects/soft-fp64}"
-    SOFT_FP64_REQUIRED_TAG="v1.3.0"
-    if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
-        git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" \
-            https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"
-    fi
-    SOFT_FP64_DESC="$(git -C "$SOFT_FP64_SRC" describe --tags --always)"
-    if [ "$SOFT_FP64_DESC" != "$SOFT_FP64_REQUIRED_TAG" ]; then
-        echo "error: soft-fp64 at '$SOFT_FP64_DESC', expected '$SOFT_FP64_REQUIRED_TAG'"
-        echo "       run: git -C $SOFT_FP64_SRC fetch --tags && git -C $SOFT_FP64_SRC checkout $SOFT_FP64_REQUIRED_TAG"
-        exit 1
-    fi
-    test -f "$SOFT_FP64_SRC/include/soft_fp64/soft_f64.h" \
-        || { echo "soft-fp64 src layout broken at $SOFT_FP64_SRC"; exit 1; }
-    mkdir -p "$ACPP_SRC/build"
-    cd "$ACPP_SRC/build"
-    cmake \
-        -DCMAKE_INSTALL_PREFIX="$ACPP_PREFIX" \
-        -DWITH_METAL_BACKEND=ON \
-        -DWITH_OPENCL_BACKEND=OFF \
-        -DWITH_LEVEL_ZERO_BACKEND=OFF \
-        -DWITH_CUDA_BACKEND=OFF \
-        -DWITH_ROCM_BACKEND=OFF \
-        -DWITH_SSCP_COMPILER=ON \
-        -DBUILD_CLANG_PLUGIN=ON \
-        -DMETAL_INCLUDE_DIR="$ACPP_PREFIX/include" \
-        -DACPP_LLD_PATH=$(brew --prefix lld@20)/bin/ld64.lld \
-        -DCLANG_EXECUTABLE_PATH="$LLVM_PREFIX/bin/clang++" \
-        -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
-        -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang" \
-        -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
-        -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
-        -DDEFAULT_TARGETS=generic \
-        -DACPP_SOFT_FP64_SRC_DIR="$SOFT_FP64_SRC" \
-        ..
-    make -j4
-    make install
-    echo "AdaptiveCpp ($REQUIRED_BRANCH) installed to $ACPP_PREFIX from $ACPP_SRC"
-    "$ACPP_PREFIX/bin/acpp-info" | awk 'NR<=8'
-    # Confirm SSCP + archive helper are in place — without these the fork
-    # path breaks silently. Better to fail here than at first bench crash.
-    "$ACPP_PREFIX/bin/acpp" --acpp-version | grep -q "plugin-with-sscp-compiler: true" || {
-        echo "ERROR: acpp was built without SSCP; pg_accel requires --acpp-targets=generic"
-        exit 1
-    }
-    [ -x "$ACPP_PREFIX/bin/acpp-metal-archive-build" ] || {
-        echo "ERROR: acpp-metal-archive-build helper missing; fork-safety fix did not install"
-        exit 1
-    }
+    ./scripts/setup_acpp.sh
 
 # === Development ===
 
@@ -189,13 +193,54 @@ fmt:
 fmt-check:
     cargo fmt -- --check
 
-# Run clippy lints
-lint:
-    cargo clippy --workspace --features pg17 --all-targets -- -D warnings
+# Run clippy lints. Defaults to PG17 until PG18/PG19 are ABI-clean.
+lint pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
 
-# Type check (pg17 + all non-pg features)
-check:
-    cargo check --workspace --features pg17 --all-targets
+# Type check one PG major. Defaults to PG17 with the same preview skip as `lint`.
+check pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+
+# Type check every supported PostgreSQL major.
+check-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    for pg in $(pg_accel_supported_pg_majors); do
+        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+            continue
+        fi
+        pg_accel_require_pgrx_pg_config "$pg"
+        cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+    done
 
 # Run cargo-deny checks (licenses + advisories)
 deny:
@@ -224,33 +269,96 @@ audit:
 doc-parity:
     ./scripts/doc_parity.sh
 
-# Pre-commit checks: fmt, lint, type-check, deny, audit, doc-parity
-pre-commit: fmt-check lint check deny audit doc-parity
+# Validate that default PG-version plumbing is centralized.
+pg-version-audit:
+    ./scripts/pg_version_audit.sh
+
+# Pre-commit checks: fmt, lint, type-check matrix, deny, audit, doc-parity
+pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit
     @echo "Pre-commit checks passed."
 
-# Run pgrx unit tests against PG 17
-test-unit pg="17":
-    cargo pgrx test --package pg_accel pg{{pg}}
+# Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
+test-unit pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    cargo pgrx test --package pg_accel "pg$pg"
 
-# Run all tests: pgrx unit tests
-test pg="17": (test-unit pg)
+# Run pgrx unit tests against every supported PG major.
+test-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    for pg in $(pg_accel_supported_pg_majors); do
+        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+            continue
+        fi
+        pg_accel_require_pgrx_pg_config "$pg"
+        cargo pgrx test --package pg_accel "pg$pg"
+    done
+
+# Run all tests: pgrx unit-test matrix
+test: test-matrix
     @echo "All tests passed."
 
 # Run benchmark suite against local pgrx PG. The runner seeds and cleans up
 # each workload/scale itself. Long benches can fill the PG log; `log-rails`
 # truncates oversized logs first.
-bench iterations="10" warmup="5": log-rails
-    cargo run -p pg_accel_bench --release -- run \
+bench iterations="10" warmup="5" pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    PG_ACCEL_PG_MAJOR="$pg" cargo run -p pg_accel_bench --release -- run \
         --iterations {{iterations}} --warmup {{warmup}} \
-        --connection "host=localhost port=28817 dbname=postgres" \
+        --connection "host=localhost port=$port dbname=postgres" \
         --format markdown --timing raw --skip-guc-verify
 
 # Run the rigorous benchmark suite: realistic GUCs, plan capture,
 # raw wall-clock timing (no EXPLAIN ANALYZE overhead).
-bench-rigorous iterations="30" warmup="5": log-rails
-    cargo run --release -p pg_accel_bench -- run \
+bench-rigorous iterations="30" warmup="5" pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- run \
         --iterations {{iterations}} --warmup {{warmup}} \
-        --connection "host=localhost port=28817 dbname=postgres" \
+        --connection "host=localhost port=$port dbname=postgres" \
         --format markdown \
         --realistic-gucs --capture-plans --timing raw
 
@@ -259,15 +367,24 @@ bench-rigorous iterations="30" warmup="5": log-rails
 # LOG_RAILS_MAX_MB (default: 500 MB). Called automatically before
 # `bench` / `bench-rigorous`; run manually anytime PG has been
 # logging under `log_statement` / heavy fprintf.
-log-rails:
+log-rails pg="":
     #!/usr/bin/env bash
     set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
     MAX_MB="${LOG_RAILS_MAX_MB:-500}"
     MAX_BYTES=$((MAX_MB * 1024 * 1024))
-    for f in "$HOME/.pgrx/17.log" \
-             "$HOME/.pgrx/data-17/pg_accel_otel.jsonl" \
-             "$HOME/.pgrx/data-17/pg_accel_traces.jsonl" \
-             "$HOME/.pgrx/data-17/pg_accel_panic.log"; do
+    data_dir="$(pg_accel_pgrx_data_dir_for_pg "$pg")"
+    for f in "$(pg_accel_pgrx_log_for_pg "$pg")" \
+             "$data_dir/pg_accel_otel.jsonl" \
+             "$data_dir/pg_accel_traces.jsonl" \
+             "$data_dir/pg_accel_panic.log"; do
         [ -f "$f" ] || continue
         sz=$(stat -f%z "$f" 2>/dev/null || echo 0)
         if [ "$sz" -gt "$MAX_BYTES" ]; then
@@ -276,27 +393,39 @@ log-rails:
         fi
     done
     # Suppress NOTICE/WARNING-level spam in the PG server log. The h3
-    # extension emits a deprecation WARNING per-row for legacy function
-    # names, which ballooned the log by ~1 GB per workload during long
-    # bench runs. ERROR-level and above still land in the log.
-    if command -v psql > /dev/null 2>&1 && pg_isready -h localhost -p 28817 -q 2>/dev/null; then
-        psql -h localhost -p 28817 -d postgres -tAc \
+    # extension emits per-row warnings for renamed entry points, which
+    # ballooned the log by ~1 GB per workload during long bench runs.
+    # ERROR-level and above still land in the log.
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    if command -v psql > /dev/null 2>&1 && pg_isready -h localhost -p "$port" -q 2>/dev/null; then
+        psql -h localhost -p "$port" -d postgres -tAc \
             "ALTER SYSTEM SET log_min_messages = 'error';" > /dev/null 2>&1 || true
-        psql -h localhost -p 28817 -d postgres -tAc \
+        psql -h localhost -p "$port" -d postgres -tAc \
             "SELECT pg_reload_conf();" > /dev/null 2>&1 || true
     fi
 
 # Hard-truncate all pgrx PG + pg_accel logs (no size check).
-clean-logs:
+clean-logs pg="":
     #!/usr/bin/env bash
     set -euo pipefail
-    for f in "$HOME/.pgrx/17.log" \
-             "$HOME/.pgrx/data-17/pg_accel_otel.jsonl" \
-             "$HOME/.pgrx/data-17/pg_accel_traces.jsonl" \
-             "$HOME/.pgrx/data-17/pg_accel_panic.log"; do
-        [ -f "$f" ] || continue
-        : > "$f"
-        echo "cleaned $f"
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -n "$requested" ]; then
+        majors="${requested#pg}"
+    else
+        majors="$(pg_accel_supported_pg_majors)"
+    fi
+    for pg in $majors; do
+        pg_accel_require_supported_pg "$pg"
+        data_dir="$(pg_accel_pgrx_data_dir_for_pg "$pg")"
+        for f in "$(pg_accel_pgrx_log_for_pg "$pg")" \
+                 "$data_dir/pg_accel_otel.jsonl" \
+                 "$data_dir/pg_accel_traces.jsonl" \
+                 "$data_dir/pg_accel_panic.log"; do
+            [ -f "$f" ] || continue
+            : > "$f"
+            echo "cleaned $f"
+        done
     done
 
 # Clear the AdaptiveCpp Metal SSCP JIT cache. Forces a cold-cache run on
@@ -323,14 +452,19 @@ clear-jit:
 
 # Build GPU kernel library (AdaptiveCpp/SYCL -> CUDA/ROCm/L0/Metal/CPU)
 gpu-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    acpp_prefix="${ACPP_PREFIX:-$(pg_accel_acpp_prefix)}"
+    [ -d "$acpp_prefix/lib/cmake/AdaptiveCpp" ] || {
+        echo "error: AdaptiveCpp not found at $acpp_prefix" >&2
+        echo "       run: ACPP_BACKEND=cuda just setup-gpu" >&2
+        exit 1
+    }
     cmake -B pgaccel-kernels/build -S pgaccel-kernels \
-        -DCMAKE_PREFIX_PATH="$HOME/local" \
-        -DCMAKE_C_COMPILER=$(brew --prefix llvm@20)/bin/clang \
-        -DCMAKE_CXX_COMPILER=$(brew --prefix llvm@20)/bin/clang++ \
-        -DCMAKE_CXX_FLAGS="-I$(brew --prefix libomp)/include" \
-        -DCMAKE_SHARED_LINKER_FLAGS="-L$(brew --prefix libomp)/lib" \
-        -DCMAKE_EXE_LINKER_FLAGS="-L$(brew --prefix libomp)/lib" \
-    && cmake --build pgaccel-kernels/build --parallel
+        -DCMAKE_PREFIX_PATH="$acpp_prefix" \
+        ${PGACCEL_KERNEL_CMAKE_FLAGS:-}
+    cmake --build pgaccel-kernels/build --parallel
 
 # Run GPU kernel tests
 gpu-test: gpu-build
@@ -341,7 +475,7 @@ gpu-test: gpu-build
     && ./pgaccel-kernels/build/test_spatial_dispatch \
     && ./pgaccel-kernels/build/test_h3 \
     && ./pgaccel-kernels/build/test_raster \
-    && PGACCEL_HASH_JOIN_ENABLE_CPU_FALLBACK=1 ./pgaccel-kernels/build/test_correctness \
+    && ./pgaccel-kernels/build/test_correctness \
     && ./pgaccel-kernels/build/test_exec_gpu \
     && ./pgaccel-kernels/build/test_hash_agg_keys \
     && ./pgaccel-kernels/build/test_fork \
@@ -431,28 +565,79 @@ audit-cpu-cheats:
 
 # === CI ===
 
-# Run full CI locally (pre-commit checks + all tests)
-ci: pre-commit test-unit
+# Run full CI locally (pre-commit checks + all supported PG tests)
+ci: pre-commit test-matrix
+
+# Run SQL integration tests against the pgrx-managed PostgreSQL cluster.
+sql-test pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    PG_ACCEL_PG_MAJOR="$pg" sql/tests/run_all.sh
 
 # Build installable pgrx package
-package pg="17":
+package pg="":
     #!/usr/bin/env bash
     set -euo pipefail
-    pg_config="$(cargo pgrx info pg-config pg{{pg}})"
-    cargo pgrx package --package pg_accel --pg-config "$pg_config" --features pg{{pg}}
-    cp NOTICE target/release/pg_accel-pg{{pg}}/NOTICE
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
+    cp NOTICE "target/release/pg_accel-pg$pg/NOTICE"
+
+# Build installable pgrx packages for every supported PG major.
+package-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    for pg in $(pg_accel_supported_pg_majors); do
+        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+            continue
+        fi
+        pg_accel_require_pgrx_pg_config "$pg"
+        pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+        cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
+        cp NOTICE "target/release/pg_accel-pg$pg/NOTICE"
+    done
 
 # Install into the pgrx-managed cluster and prove a fresh CREATE EXTENSION path.
-extension-smoke pg="17":
+extension-smoke pg="":
     #!/usr/bin/env bash
     set -euo pipefail
-    pg_config="$(cargo pgrx info pg-config pg{{pg}})"
-    cargo pgrx install --package pg_accel --features pg{{pg}} --pg-config "$pg_config"
-    cargo pgrx start --package pg_accel pg{{pg}}
-    data_dir="$HOME/.pgrx/data-{{pg}}"
-    port="$(awk -F= '/^port[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2 }' "$data_dir/postgresql.conf")"
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    cargo pgrx install --package pg_accel --no-default-features --features "pg$pg" --pg-config "$pg_config"
+    cargo pgrx start --package pg_accel "pg$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
     : "${port:?could not read pgrx PostgreSQL port}"
-    db="pg_accel_smoke_{{pg}}"
+    db="pg_accel_smoke_$pg"
     dropdb -h localhost -p "$port" --if-exists "$db"
     createdb -h localhost -p "$port" "$db"
     psql -h localhost -p "$port" -d "$db" -v ON_ERROR_STOP=1 \
@@ -461,14 +646,53 @@ extension-smoke pg="17":
         -c "SELECT * FROM pg_accel_stats();"
     dropdb -h localhost -p "$port" "$db"
 
+# Install into each pgrx-managed cluster and prove fresh CREATE EXTENSION paths.
+extension-smoke-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    for pg in $(pg_accel_supported_pg_majors); do
+        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+            continue
+        fi
+        just extension-smoke "$pg"
+    done
+
 # Live OTel span viewer TUI (reads OTLP JSON file)
-otel-tui:
-    otel-tui --from-json-file ~/.pgrx/data-17/pg_accel_otel.jsonl
+otel-tui pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    otel-tui --from-json-file "$(pg_accel_pgrx_data_dir_for_pg "$pg")/pg_accel_otel.jsonl"
 
 # Live trace viewer (tail tracing-subscriber JSONL)
-traces:
-    tail -f ~/.pgrx/data-17/pg_accel_traces.jsonl | python3 -m json.tool --no-ensure-ascii
+traces pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    tail -f "$(pg_accel_pgrx_data_dir_for_pg "$pg")/pg_accel_traces.jsonl" | python3 -m json.tool --no-ensure-ascii
 
 # View last N trace entries
-traces-last n="20":
-    tail -{{n}} ~/.pgrx/data-17/pg_accel_traces.jsonl | python3 -m json.tool --no-ensure-ascii
+traces-last n="20" pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    tail -{{n}} "$(pg_accel_pgrx_data_dir_for_pg "$pg")/pg_accel_traces.jsonl" | python3 -m json.tool --no-ensure-ascii

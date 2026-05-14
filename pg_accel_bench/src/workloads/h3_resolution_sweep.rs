@@ -1,6 +1,6 @@
 use super::Workload;
 
-/// Tests h3_latlng_to_cell computation at resolution 9 through the GPU H3 kernel.
+/// Winning H3 lane: h3_latlng_to_cell at resolution 9 through the GPU H3 kernel.
 ///
 /// Baseline uses h3-pg's `h3_lat_lng_to_cell` alias so the PG-parallel
 /// comparand runs stock h3-pg C code. See `h3_variants.rs` for the
@@ -13,7 +13,7 @@ impl Workload for H3ResolutionSweep {
     }
 
     fn description(&self) -> &'static str {
-        "h3_latlng_to_cell at resolution 9 — tests GPU H3 cell computation. \
+        "h3_latlng_to_cell at resolution 9 — protects the GPU H3 cell win. \
          Baseline uses h3-pg `h3_lat_lng_to_cell`."
     }
 

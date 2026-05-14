@@ -123,8 +123,6 @@ pub struct DeviceLimits {
     // doesn't add a separate yield term, so this is an honest delta over
     // what PG implicitly counts.
     //
-    // Hardware scaling: unified memory halves transfer overhead so the
-    // discrete-GPU baseline is 2x.
     /// Per-inner-row GPU hash-join build cost (kernel insert amortised).
     /// Replaces the `0.005 + 0.002 + 0.003 = 0.01` literal that
     /// triple-counted ExecCopy + key extract + GPU insert.
@@ -161,11 +159,11 @@ pub struct DeviceLimits {
     // -- Per-kernel-class break-even thresholds -----------------------------
     // These thresholds express the minimum input size (or work product) at
     // which a given GPU kernel class is expected to beat PG's parallel path
-    // on the reference profile (M2 Max, 32 CUs, unified memory). They are
+    // on the reference profile (M2 Max, 32 CUs). They are
     // calibrated from the 2026-04-11 benchmark run:
     //
-    // - `reduce_*`: reduce_f32 wins at ≥ ~25k rows in unified memory, but
-    //   fp64 and i64 pay extra precision / emulation overhead.
+    // - `reduce_*`: reduce_f32 wins earliest; fp64 and i64 pay extra
+    //   precision / emulation overhead.
     // - `hashagg_min_rows_per_group`: below this avg rows/group ratio the
     //   state fits in L2 and PG wins via vectorized CPU scan.
     // - `sort_break_even_rows_{int,float}`: sort below this loses to PG
@@ -180,10 +178,9 @@ pub struct DeviceLimits {
     // - `hashjoin_min_build_rows`: minimum inner build side; below, PG's
     //   native HashJoin avoids DSM round-trip and wins.
     //
-    // All derived from `cu_scale` / unified-memory factor where possible,
-    // and clamped so they remain sane on unusual hardware. These replace
-    // ad-hoc uses of `gucs::min_batch_size()` in extension-internal dispatch
-    // paths (the GUC remains for the historical public default).
+    // All derived from `cu_scale` where possible, and clamped so they remain
+    // sane on unusual hardware. These replace ad-hoc uses of
+    // `gucs::min_batch_size()` in extension-internal dispatch paths.
     /// Minimum rows for GPU reduce over fp32 values.
     pub reduce_f32_break_even_rows: usize,
     /// Minimum rows for GPU reduce over fp64 values.
@@ -239,14 +236,11 @@ impl DeviceLimits {
     pub fn from_profile(profile: &PlatformProfile) -> Self {
         let cus = profile.compute_units.max(1);
         let mem = profile.gpu_max_alloc_bytes;
-        let unified = profile.unified_memory;
 
-        // Scale factor: more CUs → lower thresholds (better GPU).
-        // unified_memory halves thresholds (no DMA copy overhead).
+        // Scale factor: more CUs -> lower thresholds (better GPU).
         let cu_scale = |base: usize| -> usize {
             let scaled = (base as u64 * Self::BASELINE_CUS as u64) / cus as u64;
-            let adjusted = if unified { scaled / 2 } else { scaled };
-            adjusted as usize
+            scaled as usize
         };
 
         let gpu_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
@@ -273,15 +267,9 @@ impl DeviceLimits {
             100_000
         };
 
-        // Max elements per reduce dispatch. On unified memory, there is
-        // no VRAM boundary — each chunk carries fixed launch + allocation
-        // overhead (malloc_device + memcpy + kernel submit + frees), so
-        // chunking is pure loss. Use a large cap that fits typical analytic
-        // workloads in one kernel. On discrete GPUs, use 1/32nd of VRAM
-        // capped at 256K (preserves the original behaviour).
-        let gpu_reduce_max_chunk = if unified {
-            100_000_000
-        } else if mem > 0 {
+        // Max elements per reduce dispatch. All backends stage through device
+        // allocations, so chunk from the device allocation budget.
+        let gpu_reduce_max_chunk = if mem > 0 {
             (mem / 32 / 8).clamp(64_000, 256_000)
         } else {
             256_000
@@ -313,7 +301,7 @@ impl DeviceLimits {
         let optimal_batch_max = if mem > 0 {
             let base = mem / (8 * 1024);
             let clamped = base.clamp(2048, 65_536);
-            if unified { clamped } else { clamped / 2 }
+            clamped / 2
         } else {
             8192
         };
@@ -381,10 +369,9 @@ impl DeviceLimits {
             // Dimension materialization is CPU-side tuple extraction + hash
             // table build; large dimensions were under-costed at 0.01 and
             // selected losing count-only join plans.
-            // Unified memory halves probe cost (no DMA).
             preagg_dim_materialize_cost: 0.10,
             preagg_fact_scan_cost: 0.001,
-            preagg_probe_cost: if unified { 0.0015 } else { 0.003 },
+            preagg_probe_cost: 0.003,
             preagg_agg_cost: 0.002,
             preagg_yield_cost: 0.03,
             optimal_batch_min: 256,
@@ -393,24 +380,23 @@ impl DeviceLimits {
             // (~1ms at heap scan speed) vs CHECK_FOR_INTERRUPTS overhead.
             fused_interrupt_interval: 65_536,
 
-            // Per-strategy GPU op costs, scaled for unified memory.
-            // Unified memory halves transfer overhead, reducing op cost.
-            gpu_op_cost_reduce: if unified { 0.000_25 } else { 0.000_5 },
-            gpu_op_cost_hash_agg: if unified { 0.001 } else { 0.002 },
-            gpu_op_cost_sort: if unified { 0.001_5 } else { 0.003 },
-            gpu_op_cost_window: if unified { 0.000_5 } else { 0.001 },
-            gpu_op_cost_filter: if unified { 0.000_5 } else { 0.001 },
+            // Per-strategy GPU op costs include explicit staging overhead.
+            gpu_op_cost_reduce: 0.000_5,
+            gpu_op_cost_hash_agg: 0.002,
+            gpu_op_cost_sort: 0.003,
+            gpu_op_cost_window: 0.001,
+            gpu_op_cost_filter: 0.001,
 
             // Phase 6 dispatch-perf calibration: per-row hash-join +
             // partial-agg + CustomScan-yield costs derived from kernel
             // throughput rather than over-pessimistic CPU-side bookkeeping.
-            // Base `0.001 / row` (= 1µs / row in PG's cost-unit convention,
+            // Base `0.001 / row` (= 1µs / row in PG's cost-unit convention),
             // safely above the measured ~50ns / row to leave headroom for
-            // micro-bench noise). Unified memory halves transfer overhead.
-            gpu_hashjoin_build_per_row: if unified { 0.000_5 } else { 0.001 },
-            gpu_hashjoin_probe_per_row: if unified { 0.000_5 } else { 0.001 },
-            custom_scan_yield_per_row: if unified { 0.000_5 } else { 0.001 },
-            gpu_partial_agg_per_row: if unified { 0.000_5 } else { 0.001 },
+            // micro-bench noise and explicit staging overhead.
+            gpu_hashjoin_build_per_row: 0.001,
+            gpu_hashjoin_probe_per_row: 0.001,
+            custom_scan_yield_per_row: 0.001,
+            gpu_partial_agg_per_row: 0.001,
 
             // Cost ratio gates vs PG's cheapest NON-parallel path. We compare
             // against the serial baseline (not the parallel Gather plan) so
@@ -518,10 +504,8 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
-            // Phase 6 dispatch-perf calibration. Discrete-profile defaults
-            // (no GPU detected → conservative — never under-charge a path
-            // that won't actually run on GPU). When a GPU is detected,
-            // `from_profile` halves these on unified memory.
+            // Phase 6 dispatch-perf calibration. CPU-only fallback keeps the
+            // same conservative values as detected GPU profiles.
             gpu_hashjoin_build_per_row: 0.001,
             gpu_hashjoin_probe_per_row: 0.001,
             custom_scan_yield_per_row: 0.001,

@@ -39,6 +39,16 @@ static int g_fail = 0;
     }                                                                                 \
   } while (0)
 
+#define ASSERT_EQ_INT(desc, actual, expected)                                                      \
+  do {                                                                                             \
+    if ((actual) == (expected)) {                                                                  \
+      g_pass++;                                                                                    \
+    } else {                                                                                       \
+      fprintf(stderr, "FAIL: %s — got %d, expected %d\n", (desc), (int)(actual), (int)(expected)); \
+      g_fail++;                                                                                    \
+    }                                                                                              \
+  } while (0)
+
 // ---------------------------------------------------------------------------
 // Test: UUID key group-by + SUM
 // ---------------------------------------------------------------------------
@@ -290,6 +300,119 @@ static void test_hash_agg_int64_baseline() {
   pgaccel_agg_free(state);
 }
 
+// ---------------------------------------------------------------------------
+// Test: 1M-row INT32 key sort-based hashagg repro + SUM/COUNT
+// ---------------------------------------------------------------------------
+//
+// Forces the sort-based path directly so Metal/AdaptiveCpp can prove it
+// declines cleanly before unsafe argument-buffer setup, while supported
+// backends must produce correct grouped SUM and COUNT output.
+static void test_sort_based_hash_agg_int32_1m_sum_count() {
+  printf("--- test_sort_based_hash_agg_int32_1m_sum_count ---\n");
+
+  constexpr size_t N = 1000000;
+  constexpr size_t NUM_GROUPS = 8192;
+  constexpr int32_t KEY_BASE = -4096;
+
+  std::vector<int32_t> keys(N);
+  std::vector<uint8_t> key_nulls(N, 0);
+  std::vector<int32_t> values(N);
+  std::vector<int64_t> expected_sums(NUM_GROUPS, 0);
+  std::vector<int64_t> expected_counts(NUM_GROUPS, 0);
+
+  for (size_t i = 0; i < N; ++i) {
+    const size_t gid = (i * 8191 + 17) & (NUM_GROUPS - 1);
+    keys[i] = static_cast<int32_t>(KEY_BASE + static_cast<int32_t>(gid));
+    values[i] = static_cast<int32_t>(i % 97) - 48;
+    expected_sums[gid] += values[i];
+    expected_counts[gid] += 1;
+  }
+
+  const void* val_arrays[2] = {values.data(), nullptr};
+  const uint8_t* val_null_arrays[2] = {nullptr, nullptr};
+  int val_types[2] = {PGACCEL_VAL_INT32, PGACCEL_VAL_INT32};
+  pgaccel_agg_col agg_cols[2] = {{PGACCEL_AGG_SUM, 0}, {PGACCEL_AGG_COUNT, SIZE_MAX}};
+
+  pgaccel_agg_state* state = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status st = pgaccel_hash_agg_execute_sort_based(
+      keys.data(), key_nulls.data(), N, PGACCEL_KEY_INT32, val_arrays, val_null_arrays, val_types,
+      agg_cols, 2, &state);
+
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (std::strcmp(caps.backend_name, "metal") == 0) {
+    ASSERT_EQ_INT("Metal sort-based hashagg returns UNSUPPORTED", st, PGACCEL_UNSUPPORTED);
+    ASSERT_TRUE("Metal sort-based hashagg leaves state null", state == nullptr);
+    ASSERT_EQ_SZ("Metal unsupported path launches no GPU kernels", pgaccel_gpu_exec_count(),
+                 (uint64_t)0);
+    return;
+  }
+
+  ASSERT_EQ_INT("sort-based hashagg status OK", st, PGACCEL_OK);
+  ASSERT_TRUE("sort-based hashagg returned non-null state", state != nullptr);
+  ASSERT_TRUE("sort-based hashagg launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (st != PGACCEL_OK || state == nullptr) {
+    if (state != nullptr)
+      pgaccel_agg_free(state);
+    return;
+  }
+
+  const size_t ngroups = pgaccel_agg_group_count(state);
+  ASSERT_EQ_SZ("sort-based hashagg group_count == 8192", ngroups, NUM_GROUPS);
+
+  const auto* keys_out = static_cast<const int32_t*>(pgaccel_agg_get_group_keys(state));
+  const double* sums = pgaccel_agg_get_results(state, 0);
+  const double* counts = pgaccel_agg_get_results(state, 1);
+  const int64_t* row_counts = pgaccel_agg_get_counts(state);
+  ASSERT_TRUE("sort-based hashagg keys/results non-null",
+              keys_out != nullptr && sums != nullptr && counts != nullptr && row_counts != nullptr);
+
+  bool all_groups_seen = true;
+  bool sums_correct = true;
+  bool counts_correct = true;
+  std::vector<uint8_t> seen(NUM_GROUPS, 0);
+
+  if (keys_out != nullptr && sums != nullptr && counts != nullptr && row_counts != nullptr &&
+      ngroups == NUM_GROUPS) {
+    for (size_t g = 0; g < ngroups; ++g) {
+      const int64_t gid_signed = static_cast<int64_t>(keys_out[g]) - KEY_BASE;
+      if (gid_signed < 0 || gid_signed >= static_cast<int64_t>(NUM_GROUPS)) {
+        fprintf(stderr, "  output group %zu has unexpected key %d\n", g, keys_out[g]);
+        all_groups_seen = false;
+        continue;
+      }
+      const size_t gid = static_cast<size_t>(gid_signed);
+      seen[gid] = 1;
+      if (sums[g] != static_cast<double>(expected_sums[gid])) {
+        fprintf(stderr, "  key %d: sum %.0f != expected %lld\n", keys_out[g], sums[g],
+                (long long)expected_sums[gid]);
+        sums_correct = false;
+      }
+      if (counts[g] != static_cast<double>(expected_counts[gid]) ||
+          row_counts[g] != expected_counts[gid]) {
+        fprintf(stderr, "  key %d: count %.0f / row_count %lld != expected %lld\n", keys_out[g],
+                counts[g], (long long)row_counts[g], (long long)expected_counts[gid]);
+        counts_correct = false;
+      }
+    }
+
+    for (size_t gid = 0; gid < NUM_GROUPS; ++gid) {
+      if (!seen[gid]) {
+        fprintf(stderr, "  missing output group for key %d\n",
+                static_cast<int32_t>(KEY_BASE + static_cast<int32_t>(gid)));
+        all_groups_seen = false;
+        break;
+      }
+    }
+  }
+
+  ASSERT_TRUE("sort-based hashagg saw every expected group", all_groups_seen);
+  ASSERT_TRUE("sort-based hashagg SUM results match expected", sums_correct);
+  ASSERT_TRUE("sort-based hashagg COUNT results match expected", counts_correct);
+
+  pgaccel_agg_free(state);
+}
+
 static void test_hash_agg_f64_zero_nan_normalization() {
   printf("--- test_hash_agg_f64_zero_nan_normalization ---\n");
 
@@ -491,6 +614,7 @@ int main() {
   test_hash_agg_invalid_inputs_return_null();
   test_hash_agg_count_star_without_value_cols();
   test_hash_agg_int64_baseline();
+  test_sort_based_hash_agg_int32_1m_sum_count();
   test_hash_agg_f64_zero_nan_normalization();
   test_hash_agg_int64_null_sentinel_collision();
   test_hash_agg_uuid_keys();

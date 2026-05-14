@@ -32,17 +32,11 @@ struct OversizedAlloc {
   size_t size;
 };
 
-enum class AllocMode {
-  SharedUSM,  // sycl::malloc_shared (unified memory, e.g. Apple Silicon)
-  DeviceUSM,  // sycl::malloc_device (discrete GPU) + explicit prefetch
-};
-
 struct Pool {
   std::vector<Block> blocks;
   std::vector<OversizedAlloc> oversized;  // direct allocations > block_size
   size_t block_size = DEFAULT_BLOCK_SIZE;
   size_t total_allocated = 0;
-  AllocMode mode = AllocMode::SharedUSM;
   bool initialized = false;
   sycl::queue* queue = nullptr;  // borrowed from device_manager.cpp
 };
@@ -71,13 +65,7 @@ static void* raw_alloc(size_t bytes) {
     // backing: SYCL is the only supported allocator.
     return nullptr;
   }
-  switch (g_pool.mode) {
-    case AllocMode::SharedUSM:
-      return sycl::malloc_shared(bytes, get_queue());
-    case AllocMode::DeviceUSM:
-      return sycl::malloc_device(bytes, get_queue());
-  }
-  return nullptr;
+  return sycl::malloc_device(bytes, get_queue());
 }
 
 static void raw_free(void* ptr) {
@@ -85,12 +73,7 @@ static void raw_free(void* ptr) {
     return;
   if (!g_pool.queue)
     return;
-  switch (g_pool.mode) {
-    case AllocMode::SharedUSM:
-    case AllocMode::DeviceUSM:
-      sycl::free(ptr, get_queue());
-      return;
-  }
+  sycl::free(ptr, get_queue());
 }
 
 static void ensure_pool_initialized() {
@@ -107,16 +90,8 @@ static void ensure_pool_initialized() {
   }
   g_pool.initialized = true;
 
-  // Query the device manager's public API to determine platform capabilities.
   // The device manager owns the primary queue; the pool borrows it for USM
-  // allocations so pgaccel_shutdown() owns all Metal context teardown.
-  pgaccel_platform_caps caps = pgaccel_get_caps();
-
-  if (caps.is_unified_memory) {
-    g_pool.mode = AllocMode::SharedUSM;
-  } else {
-    g_pool.mode = AllocMode::DeviceUSM;
-  }
+  // allocations so pgaccel_shutdown() owns all GPU context teardown.
 }
 
 static Block allocate_block(size_t capacity) {
@@ -214,8 +189,7 @@ extern "C" void pgaccel_prefetch(void* ptr, size_t bytes) {
     return;
 
   ensure_pool_initialized();
-  // Prefetch is only meaningful on discrete GPUs with device memory.
-  if (g_pool.mode == AllocMode::DeviceUSM && g_pool.queue) {
+  if (g_pool.queue) {
     get_queue().prefetch(ptr, bytes);
   }
 }

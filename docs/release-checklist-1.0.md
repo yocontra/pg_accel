@@ -25,7 +25,7 @@ required item is unchecked.
 
 ## Phase 3 - Parallel Planner Coverage
 
-- [ ] PreAgg executor refactor and `preagg_parallel_safe` default are merged. Evidence SHA: `<sha>`.
+- [ ] PreAgg executor requires attached fact child plans and has no heap-direct fallback. Evidence SHA: `<sha>`.
 - [ ] HashAgg per-group partial-state kernel, bridge, and executor are merged. Evidence SHA: `<sha>`.
 - [ ] Grouped HashAgg planner-side wiring is merged and tested. Evidence SHA: `<sha>`.
 - [ ] Parallel COUNT/DISTINCT and representative grouped aggregates pick the intended GPU paths. Evidence SHA/artifact: `<sha-or-url>`.
@@ -59,15 +59,15 @@ required item is unchecked.
 
 ## Phase 8 - Build And Packaging
 
-- [ ] Fresh-machine setup path succeeds on Apple Silicon: `just setup-gpu-acpp`, `just package`, install, `CREATE EXTENSION`. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] Fresh-machine setup path succeeds: `just setup-pg-source`, `just setup-pgrx`, `ACPP_BACKEND=<metal|cuda> just setup-gpu`, `just package`, install, `CREATE EXTENSION`. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Required cargo tools are pinned or installed by setup scripts. Evidence SHA: `<sha>`.
-- [ ] Extension package includes fresh install SQL and any upgrade SQL scripts. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] Extension package includes fresh install SQL for PG17/18 and PG19 once pgrx exposes `pg19`. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] README installation requirements match the actual build. Evidence SHA: `<sha>`.
 
 ## Phase 9 - Verification Matrix
 
 - [ ] `just ci` is green on the release candidate commit. Evidence SHA/CI: `<sha-or-url>`.
-- [ ] pgrx PG17 test suite passes with PostGIS, postgis_raster, h3, and h3_postgis available. Evidence SHA/CI: `<sha-or-url>`.
+- [ ] pgrx PG17/18 test suites pass with PostGIS, postgis_raster, h3, and h3_postgis available; PG19 is green or explicitly skipped by the pgrx preview gate. Evidence SHA/CI: `<sha-or-url>`.
 - [ ] Standalone kernel tests pass on Metal. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Representative benchmark smoke and full benchmark sweep artifacts are attached. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Documentation parity check passes. Evidence SHA/CI: `<sha-or-url>`.
@@ -78,9 +78,7 @@ required item is unchecked.
 - [ ] GitHub Actions required jobs `macOS arm64 just ci` and `Linux x86_64 check/test` pass. Evidence CI: `<url>`.
 - [ ] Optional CUDA smoke is either green on a labeled self-hosted runner or explicitly skipped for lack of hardware. Evidence CI: `<url-or-rationale>`.
 - [ ] `pg_accel.control` and crate version resolve to `1.0.0`. Evidence SHA: `<sha>`.
-- [ ] `cargo pgrx schema -p pg_accel pg17 --features pg17` generates `pg_accel--1.0.0.sql` with the expected SQL entities. Evidence artifact: `<url>`.
-- [ ] Upgrade script `pg_accel--0.1.0--1.0.0.sql` is tested against an installed 0.1.0 cluster. Evidence SHA/artifact: `<sha-or-url>`.
-- [ ] Historical 0.1.0 SQL baseline is identified or the release notes state that 0.1.0 was unreleased and unsupported for in-place upgrades. Evidence SHA: `<sha>`.
+- [ ] `cargo pgrx schema -p pg_accel pg18 --no-default-features --features pg18` generates `pg_accel--1.0.0.sql` with the expected SQL entities; repeat for PG19 once pgrx supports it. Evidence artifact: `<url>`.
 - [ ] `v1.0.0-rc1` is tagged and monitored for one week. Evidence tag: `<tag-url>`.
 - [ ] `v1.0.0` release notes and binary/SQL artifacts are published. Evidence release: `<release-url>`.
 

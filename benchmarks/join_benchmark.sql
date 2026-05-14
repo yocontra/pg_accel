@@ -3,7 +3,7 @@
 -- accelerated via GpuHashJoin (hash build + probe on GPU). The planner
 -- detects Var = Var conditions and injects CustomPath when row counts
 -- and cost model thresholds are met.
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/join_benchmark.sql
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/join_benchmark.sql
 
 \timing on
 \pset pager off

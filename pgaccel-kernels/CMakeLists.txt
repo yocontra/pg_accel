@@ -9,13 +9,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# AdaptiveCpp installs to ~/local by default (see: just setup-gpu-acpp).
-# Pass -DCMAKE_PREFIX_PATH=$HOME/local when configuring, or use: just gpu-build
+# AdaptiveCpp installs to .pgaccel/acpp/current by default (see:
+# ACPP_BACKEND=cuda just setup-gpu). Pass -DCMAKE_PREFIX_PATH explicitly for
+# system toolchains, or use: just gpu-build.
 find_package(AdaptiveCpp REQUIRED)
 
 set(KERNEL_SOURCES
     src/device_manager.cpp
-    src/platform_caps.cpp
     src/bbox_ops.cpp
     src/mem_pool.cpp
     src/sort.cpp

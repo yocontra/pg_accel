@@ -1,6 +1,6 @@
 -- pg_accel Sort Benchmark Suite
 -- Tests GPU sort vs PostgreSQL native across multiple scenarios.
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/sort_benchmark.sql
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/sort_benchmark.sql
 --
 -- Key insight: GPU sort wins biggest when PG must spill to disk (low work_mem)
 -- and when rows are WIDE (more data to shuffle during merge passes).

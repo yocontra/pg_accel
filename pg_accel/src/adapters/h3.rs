@@ -2,74 +2,62 @@
 //!
 //! Declares H3 discrete global grid functions that `pg_accel` can accelerate.
 //!
-//! All functions use [`AccelStrategy::GpuH3`] — pure integer/trig math
-//! suitable for GPU bulk execution.
+//! Normal planner exposure is intentionally narrower than kernel coverage.
+//! Benchmark results identify the bulk lat/lng -> cell path as the scalar H3
+//! winner. Cheap scalar H3 kernels stay implemented in dispatch for future
+//! fused GPU pipelines, but they are not registered here, so ordinary
+//! PostgreSQL planning declines pg_accel and runs native h3-pg instead.
 //!
 //! # Registration scope
 //!
-//! An operator is only registered here when a real GPU kernel, bridge FFI
-//! declaration, and dispatch arm all exist. Registering a name whose kernel
-//! is absent would classify the function as `GpuH3` at plan time and then
-//! crash (or silently fall through) at execute time — there is no CPU
+//! A function is registered only when normal exposure is expected to be a GPU
+//! win and a real GPU kernel, bridge FFI declaration, and dispatch arm all
+//! exist. Registering a name whose kernel is absent would classify the
+//! function as `GpuH3` at plan time and then crash (or silently fall through)
+//! at execute time. Registering a cheap scalar function would steal work from
+//! PostgreSQL's native h3-pg path without a meaningful win. There is no CPU
 //! fallback (`CLAUDE.md` rules 11 and 12).
 //!
-//! ## Currently registered (kernel + bridge + dispatch present)
+//! ## Registered for normal planning
 //!
-//! | Operator                    | Kernel symbol                            | Source                                                       |
-//! |-----------------------------|------------------------------------------|--------------------------------------------------------------|
-//! | `h3_latlng_to_cell`         | `pgaccel_h3_lat_lng_to_cell_bulk`        | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_grid_distance`          | `pgaccel_h3_grid_distance_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_cell_to_parent`         | `pgaccel_h3_cell_to_parent_bulk`         | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_cell_to_center_child`   | `pgaccel_h3_cell_to_center_child_bulk`   | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_get_resolution`         | `pgaccel_h3_get_resolution_bulk`         | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_get_base_cell`          | `pgaccel_h3_get_base_cell_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_is_valid_cell`          | `pgaccel_h3_is_valid_cell_bulk`          | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_is_pentagon`            | `pgaccel_h3_is_pentagon_bulk`            | `pgaccel-kernels/src/h3_ops.cpp`                             |
-//! | `h3_is_res_class_iii`       | `pgaccel_h3_is_res_class_iii_bulk`       | `pgaccel-kernels/src/h3_ops.cpp`                             |
+//! | Operator                      | Kernel symbol                         | Output shape |
+//! |-------------------------------|---------------------------------------|--------------|
+//! | `h3_latlng_to_cell`           | `pgaccel_h3_lat_lng_to_cell_bulk`     | scalar       |
+//! | `h3_grid_disk`                | `pgaccel_h3_grid_disk_*`              | varlen       |
+//! | `h3_grid_ring_unsafe`         | `pgaccel_h3_grid_ring_unsafe_*`       | varlen       |
+//! | `h3_cell_to_children`         | `pgaccel_h3_cell_to_children_*`       | varlen       |
+//! | `h3_cell_to_boundary`         | `pgaccel_h3_cell_to_boundary_*`       | varlen       |
+//! | `h3_cells_to_multi_polygon`   | `pgaccel_h3_cells_to_multi_polygon_*` | record       |
 //!
-//! ## Deliberately NOT registered — no kernel exists
+//! ## Scalar kernels quarantined from normal planning
 //!
-//! TODO.md Phase 4 lists additional operators that remain blocked on a GPU
-//! kernel and/or variable-output plumbing. Registering any of them before the
-//! kernel lands would violate anti-cheat ban #7 (stubs as done).
+//! These names have dispatch/kernel support, but are not adapter-registered.
+//! They should only be exposed again as part of a larger fused GPU pipeline
+//! with benchmark evidence.
 //!
-//! | Operator                      | Class       | Blocker                                                   |
-//! |-------------------------------|-------------|-----------------------------------------------------------|
-//! | `h3_grid_disk`                | grid-gen    | No kernel; variable-length output (res-dependent fan-out) |
-//! | `h3_grid_ring_unsafe`         | grid-gen    | No kernel; variable-length output                         |
-//! | `h3_polyfill`                 | grid-gen    | No kernel; variable-length output driven by geometry area |
-//! | `h3_cell_to_children`         | hierarchy   | No kernel; fan-out of 7^(child_res - cell_res) cells      |
-//! | `h3_cell_to_boundary`         | geometry    | No kernel; emits PostGIS polygon (GSERIALIZED plumbing)   |
-//! | `h3_cells_to_multi_polygon`   | geometry    | No kernel; emits PostGIS multipolygon                     |
-//!
-//! Variable-length outputs additionally require adapter-layer plumbing that
-//! the current `FunctionAccelEntry` shape does not express (output sizing is
-//! implicit in the scalar-result assumption). Landing any of the grid-gen or
-//! geometry operators will need both a kernel AND a new result-shape field
-//! on the registry entry; landing `h3_cell_to_center_child` only needs the
-//! kernel.
+//! | Operator                    | Reason                                      |
+//! |-----------------------------|---------------------------------------------|
+//! | `h3_grid_distance`          | near parity as a standalone scalar op       |
+//! | `h3_cell_to_parent`         | near parity as a standalone scalar op       |
+//! | `h3_cell_to_center_child`   | cheap bit manipulation                      |
+//! | `h3_get_resolution`         | cheap bit extraction                        |
+//! | `h3_get_base_cell`          | cheap bit extraction                        |
+//! | `h3_is_valid_cell`          | cheap metadata predicate                    |
+//! | `h3_is_pentagon`            | cheap metadata predicate                    |
+//! | `h3_is_res_class_iii`       | cheap metadata predicate                    |
 
 use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry, OutputShape};
 
 /// Build the `h3-pg` adapter with all supported function entries.
 #[must_use]
 pub fn adapter() -> ExtensionAdapter {
-    // GPU-acceleratable: pure integer/trig math, scalar results.
+    // Scalar H3 normal exposure is restricted to the measured winning lane.
     //
-    // Every name below has a matching kernel symbol in
-    // `pgaccel-kernels/src/h3_ops.cpp` and a dispatch arm in
-    // `src/engine/dispatch/h3.rs`. Do not add entries here without landing
-    // both first — see the module doc-comment.
-    const SCALAR_GPU_NAMES: &[&str] = &[
+    // Other scalar H3 kernels remain implemented in dispatch for future fused
+    // paths, but are intentionally absent from this registry so normal
+    // PostgreSQL planning uses native h3-pg unless a fused GPU pipeline lands.
+    const SCALAR_WINNER_GPU_NAMES: &[&str] = &[
         "h3_latlng_to_cell", // bulk lat/lng -> cell index (pgaccel_h3_lat_lng_to_cell_bulk)
-        "h3_grid_distance",  // pairwise integer distance (pgaccel_h3_grid_distance_bulk)
-        "h3_cell_to_parent", // bit shift               (pgaccel_h3_cell_to_parent_bulk)
-        "h3_cell_to_center_child", // bit shift             (pgaccel_h3_cell_to_center_child_bulk)
-        "h3_get_resolution", // bit mask                (pgaccel_h3_get_resolution_bulk)
-        "h3_get_base_cell",  // bit mask                (pgaccel_h3_get_base_cell_bulk)
-        "h3_is_valid_cell",  // mode + base check       (pgaccel_h3_is_valid_cell_bulk)
-        "h3_is_pentagon",    // pentagon-base + leading-zero (pgaccel_h3_is_pentagon_bulk)
-        "h3_is_res_class_iii", // res odd                 (pgaccel_h3_is_res_class_iii_bulk)
     ];
 
     // Variable-output ops: each input row produces a CSR-laid-out chunk of
@@ -81,22 +69,16 @@ pub fn adapter() -> ExtensionAdapter {
     const VARLEN_GPU_NAMES: &[&str] = &[
         "h3_grid_disk",              // k-ring expansion (Vec<u64> per cell)
         "h3_grid_ring_unsafe",       // k-th ring only
-        "h3_polyfill",               // polygon -> cells
         "h3_cell_to_children",       // child cells at child_res
         "h3_cell_to_boundary",       // hex/pentagon vertex pairs (lat/lng)
         "h3_cells_to_multi_polygon", // boundary union (lat/lng)
     ];
 
-    let mut functions: Vec<FunctionAccelEntry> = SCALAR_GPU_NAMES
+    let mut functions: Vec<FunctionAccelEntry> = SCALAR_WINNER_GPU_NAMES
         .iter()
         .map(|&name| FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuH3))
         .collect();
     for &name in VARLEN_GPU_NAMES {
-        // F3 FunctionScan TupleDesc metadata (Phase 2). The h3index type is
-        // an extension-defined SQL type whose OID isn't known at compile
-        // time; the value 0 acts as a sentinel meaning "look up the return
-        // type via `pg_proc` at FunctionScan begin time".
-        //
         // Boundary / multi_polygon ops emit PG built-in `polygon` (OID
         // 604) bytes via the encoders at
         // `adapters/extractors/geometry/polygon_encoder.rs`. h3-pg
@@ -107,7 +89,7 @@ pub fn adapter() -> ExtensionAdapter {
         let (out_shape, out_types, out_names): (OutputShape, Vec<u32>, Vec<&'static str>) =
             match name {
                 // SETOF h3index — single bigint-like column.
-                "h3_grid_disk" | "h3_grid_ring_unsafe" | "h3_polyfill" | "h3_cell_to_children" => (
+                "h3_grid_disk" | "h3_grid_ring_unsafe" | "h3_cell_to_children" => (
                     OutputShape::VarLen,
                     // h3index is stored as bigint (INT8) in PG. Hard-coding the
                     // bigint OID is safe because the h3-pg extension declares
@@ -148,7 +130,6 @@ pub fn adapter() -> ExtensionAdapter {
 
     ExtensionAdapter {
         name: "h3",
-        version_query: "SELECT h3_pg_version()",
         functions,
     }
 }
@@ -167,26 +148,11 @@ mod tests {
         assert_eq!(adapter().name, "h3");
     }
 
-    #[test]
-    fn version_query_is_valid_sql() {
-        let q = adapter().version_query;
-        assert!(q.contains("SELECT"), "version_query must contain SELECT");
-    }
-
-    #[test]
-    fn version_query_references_h3() {
-        let q = adapter().version_query;
-        assert!(
-            q.to_lowercase().contains("h3"),
-            "version_query should reference h3: {q}"
-        );
-    }
-
     // -- Function count -------------------------------------------------------
 
     #[test]
     fn adapter_has_expected_function_count() {
-        assert_eq!(adapter().functions.len(), 15);
+        assert_eq!(adapter().functions.len(), 6);
     }
 
     #[test]
@@ -269,19 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn no_batched_eval_strategy() {
-        // BatchedEval was removed; confirm no numeric variant leaks in.
-        for f in &adapter().functions {
-            assert_ne!(
-                format!("{:?}", f.strategy),
-                "BatchedEval",
-                "BatchedEval should not appear for {}",
-                f.name
-            );
-        }
-    }
-
-    #[test]
     fn no_gpu_spatial_strategy() {
         assert!(
             adapter()
@@ -314,32 +267,32 @@ mod tests {
     }
 
     #[test]
-    fn contains_h3_grid_distance() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_grid_distance")
-        );
+    fn cheap_scalar_h3_ops_are_quarantined_from_normal_registry() {
+        const QUARANTINED_SCALAR_OPS: &[&str] = &[
+            "h3_grid_distance",
+            "h3_cell_to_parent",
+            "h3_cell_to_center_child",
+            "h3_get_resolution",
+            "h3_get_base_cell",
+            "h3_is_valid_cell",
+            "h3_is_pentagon",
+            "h3_is_res_class_iii",
+        ];
+        let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
+        for op in QUARANTINED_SCALAR_OPS {
+            assert!(
+                !registered.contains(op),
+                "cheap scalar H3 op `{op}` must stay out of normal planner exposure",
+            );
+        }
     }
 
     #[test]
-    fn contains_h3_cell_to_parent() {
+    fn h3_polyfill_is_quarantined_until_signature_matches_dispatch() {
+        let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
         assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_cell_to_parent")
-        );
-    }
-
-    #[test]
-    fn contains_h3_get_resolution() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_get_resolution")
+            !registered.contains("h3_polyfill"),
+            "h3_polyfill must stay unregistered until the h3-pg holes-array signature is GPU-covered",
         );
     }
 
@@ -373,9 +326,9 @@ mod tests {
     // `GpuH3` and then either crash or silently drop rows at execute time
     // (see `CLAUDE.md` rules 11 and 12, no-CPU-fallback enforcement).
     //
-    // If a kernel lands for one of these later, remove it from this list AND
-    // add it to `GPU_NAMES` in the same change — this test will then fail and
-    // alert the author to update both sides.
+    // If a kernel lands for one of these later, remove it from this list.
+    // Registration still requires benchmark evidence that normal exposure is
+    // a win; otherwise the kernel belongs in the scalar quarantine list above.
     #[test]
     fn unimplemented_ops_are_not_registered() {
         // All previously-listed kernel-less operators landed in Phase A
@@ -396,25 +349,16 @@ mod tests {
     }
 
     #[test]
-    fn registered_ops_match_kernel_set_exactly() {
-        // The adapter must register exactly the operators that have real
-        // kernels. Drift in either direction — adding a name without a kernel,
-        // or dropping a name that still has a kernel — is caught here.
+    fn registered_ops_match_normal_exposure_set_exactly() {
+        // The adapter must register exactly the operators approved for normal
+        // planner exposure. Scalar kernels that are too cheap or near parity
+        // must not appear here just because a kernel exists.
         let registered: HashSet<&str> = adapter().functions.iter().map(|f| f.name).collect();
         let expected: HashSet<&str> = [
             "h3_latlng_to_cell",
-            "h3_grid_distance",
-            "h3_cell_to_parent",
-            "h3_cell_to_center_child",
-            "h3_get_resolution",
-            "h3_get_base_cell",
-            "h3_is_valid_cell",
-            "h3_is_pentagon",
-            "h3_is_res_class_iii",
             // Var-output kernels landed in Phase A (Agent 5A).
             "h3_grid_disk",
             "h3_grid_ring_unsafe",
-            "h3_polyfill",
             "h3_cell_to_children",
             "h3_cell_to_boundary",
             "h3_cells_to_multi_polygon",
@@ -423,7 +367,7 @@ mod tests {
         .collect();
         assert_eq!(
             registered, expected,
-            "adapter registrations drifted from real kernel set",
+            "adapter registrations drifted from approved normal-exposure set",
         );
     }
 
@@ -443,7 +387,6 @@ mod tests {
         const VARLEN_OPS: &[&str] = &[
             "h3_grid_disk",
             "h3_grid_ring_unsafe",
-            "h3_polyfill",
             "h3_cell_to_children",
             "h3_cell_to_boundary",
         ];
@@ -509,56 +452,6 @@ mod tests {
             entry.output_field_types,
             vec![pgrx::pg_sys::POLYGONOID.to_u32()],
             "must declare output type as PG built-in polygon (OID 604)",
-        );
-    }
-
-    #[test]
-    fn contains_h3_cell_to_center_child() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_cell_to_center_child")
-        );
-    }
-
-    #[test]
-    fn contains_h3_get_base_cell() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_get_base_cell")
-        );
-    }
-
-    #[test]
-    fn contains_h3_is_valid_cell() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_is_valid_cell")
-        );
-    }
-
-    #[test]
-    fn contains_h3_is_pentagon() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_is_pentagon")
-        );
-    }
-
-    #[test]
-    fn contains_h3_is_res_class_iii() {
-        assert!(
-            adapter()
-                .functions
-                .iter()
-                .any(|f| f.name == "h3_is_res_class_iii")
         );
     }
 }

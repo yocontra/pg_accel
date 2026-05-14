@@ -2,7 +2,7 @@
 -- Generated for pg_accel benchmark suite
 -- Compare: SET pg_accel.enabled = true vs SET pg_accel.enabled = false
 -- IMPORTANT: Run with default max_parallel_workers_per_gather (do NOT disable parallel)
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/olap_tpch_benchmark.sql
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/olap_tpch_benchmark.sql
 
 \timing on
 \pset pager off

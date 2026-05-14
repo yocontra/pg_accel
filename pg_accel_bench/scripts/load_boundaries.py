@@ -4,7 +4,7 @@
 Requires: psycopg2, PostGIS extension.
 
 Usage:
-    python3 load_boundaries.py --connection "host=localhost port=28817 dbname=pg_accel_test user=postgres"
+    python3 load_boundaries.py --connection "host=localhost dbname=postgres"
     python3 load_boundaries.py --boundary-dir /tmp/boundaries
 
 The script creates a `real_boundaries` table and bulk-loads census + neighborhood
@@ -168,7 +168,7 @@ def main():
     parser = argparse.ArgumentParser(description="Load boundary GeoJSON into PostgreSQL")
     parser.add_argument(
         "--connection", "-c",
-        default="host=localhost port=28817 dbname=pg_accel_test user=postgres",
+        default="host=localhost dbname=postgres",
         help="PostgreSQL connection string",
     )
     parser.add_argument(

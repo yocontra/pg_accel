@@ -1,6 +1,10 @@
 use super::Workload;
 
 /// Parametric raster map-algebra benchmark.
+///
+/// Queries consume the derived raster through ST_SummaryStats and aggregate a
+/// stats digest. Avoid count-only wrappers here: the benchmark proof depends
+/// on the map-algebra/raster output being evaluated.
 pub struct RasterVariant {
     pub name: &'static str,
     pub description: &'static str,
@@ -74,12 +78,25 @@ pub const RASTER_NDVI: RasterVariant = RasterVariant {
          ) FROM generate_series(1, {rows})",
         "ANALYZE bench_raster",
     ],
-    query: "SELECT count(*) FROM (\
-              SELECT ST_MapAlgebra(\
-                rast, 1, rast, 2, \
-                '([rast1]-[rast2])/([rast1]+[rast2]+0.001)'::text, \
-                '32BF'::text\
-              ) AS result \
+    query: "SELECT COALESCE(\
+              sum(\
+                ((stats).count)::double precision + \
+                COALESCE((stats).sum, 0.0) + \
+                COALESCE((stats).mean, 0.0) + \
+                COALESCE((stats).stddev, 0.0) + \
+                COALESCE((stats).min, 0.0) + \
+                COALESCE((stats).max, 0.0)\
+              ), \
+              0.0\
+            ) FROM (\
+              SELECT ST_SummaryStats(\
+                ST_MapAlgebra(\
+                  rast, 1, rast, 2, \
+                  '([rast1]-[rast2])/([rast1]+[rast2]+0.001)'::text, \
+                  '32BF'::text\
+                ), \
+                1, true\
+              ) AS stats \
               FROM bench_raster\
             ) t",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster"],
@@ -102,8 +119,21 @@ pub const RASTER_SLOPE: RasterVariant = RasterVariant {
          ) FROM generate_series(1, {rows})",
         "ANALYZE bench_raster_elev",
     ],
-    query: "SELECT count(*) FROM (\
-              SELECT ST_Slope(rast, 1, '32BF'::text) AS result \
+    query: "SELECT COALESCE(\
+              sum(\
+                ((stats).count)::double precision + \
+                COALESCE((stats).sum, 0.0) + \
+                COALESCE((stats).mean, 0.0) + \
+                COALESCE((stats).stddev, 0.0) + \
+                COALESCE((stats).min, 0.0) + \
+                COALESCE((stats).max, 0.0)\
+              ), \
+              0.0\
+            ) FROM (\
+              SELECT ST_SummaryStats(\
+                ST_Slope(rast, 1, '32BF'::text), \
+                1, true\
+              ) AS stats \
               FROM bench_raster_elev\
             ) t",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster_elev"],
@@ -126,22 +156,35 @@ pub const RASTER_RECLASS: RasterVariant = RasterVariant {
          ) FROM generate_series(1, {rows})",
         "ANALYZE bench_raster_rc",
     ],
-    query: "SELECT count(*) FROM (\
-              SELECT ST_Reclass(\
-                rast, \
-                1, \
-                '0-50:1, 50-100:2, 100-150:3, 150-200:4, 200-255:5'::text, \
-                '32BF'::text, 0\
-              ) AS result \
+    query: "SELECT COALESCE(\
+              sum(\
+                ((stats).count)::double precision + \
+                COALESCE((stats).sum, 0.0) + \
+                COALESCE((stats).mean, 0.0) + \
+                COALESCE((stats).stddev, 0.0) + \
+                COALESCE((stats).min, 0.0) + \
+                COALESCE((stats).max, 0.0)\
+              ), \
+              0.0\
+            ) FROM (\
+              SELECT ST_SummaryStats(\
+                ST_Reclass(\
+                  rast, \
+                  1, \
+                  '0-50:1, 50-100:2, 100-150:3, 150-200:4, 200-255:5'::text, \
+                  '32BF'::text, 0\
+                ), \
+                1, true\
+              ) AS stats \
               FROM bench_raster_rc\
             ) t",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster_rc"],
 };
 
-/// Deep algebra: sqrt(pow(B1,2)+pow(B2,2))*log(B3+1) — ~50 FLOPs/pixel
+/// Deep algebra: sqrt(pow(B1,2)+pow(B2,2))*log(B1+B2+1) — ~50 FLOPs/pixel
 pub const RASTER_ALGEBRA_DEEP: RasterVariant = RasterVariant {
     name: "raster_algebra_deep",
-    description: "sqrt(pow(B1,2)+pow(B2,2))*log(B3+1) — deep algebra, ~50 FLOPs/pixel",
+    description: "sqrt(pow(B1,2)+pow(B2,2))*log(B1+B2+1) — deep algebra, ~50 FLOPs/pixel",
     setup_stmts: &[
         "DROP TABLE IF EXISTS bench_raster_deep",
         "CREATE TABLE bench_raster_deep (\
@@ -161,12 +204,25 @@ pub const RASTER_ALGEBRA_DEEP: RasterVariant = RasterVariant {
          ) FROM generate_series(1, {rows})",
         "ANALYZE bench_raster_deep",
     ],
-    query: "SELECT count(*) FROM (\
-              SELECT ST_MapAlgebra(\
-                rast, 1, rast, 2, \
-                'sqrt(pow([rast1],2)+pow([rast2],2))'::text, \
-                '32BF'::text\
-              ) AS result \
+    query: "SELECT COALESCE(\
+              sum(\
+                ((stats).count)::double precision + \
+                COALESCE((stats).sum, 0.0) + \
+                COALESCE((stats).mean, 0.0) + \
+                COALESCE((stats).stddev, 0.0) + \
+                COALESCE((stats).min, 0.0) + \
+                COALESCE((stats).max, 0.0)\
+              ), \
+              0.0\
+            ) FROM (\
+              SELECT ST_SummaryStats(\
+                ST_MapAlgebra(\
+                  rast, 1, rast, 2, \
+                  'sqrt(pow([rast1],2)+pow([rast2],2))*log([rast1]+[rast2]+1)'::text, \
+                  '32BF'::text\
+                ), \
+                1, true\
+              ) AS stats \
               FROM bench_raster_deep\
             ) t",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_raster_deep"],

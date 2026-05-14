@@ -237,6 +237,15 @@ impl AggColumn {
         self.gpu_values_i64.clear();
     }
 
+    pub(super) fn typed_reduce_min_rows(&self) -> usize {
+        let limits = cost::device_limits();
+        match self.type_oid {
+            pg_sys::FLOAT4OID => limits.reduce_f32_break_even_rows,
+            pg_sys::INT8OID => limits.reduce_i64_break_even_rows,
+            _ => limits.reduce_f64_break_even_rows,
+        }
+    }
+
     /// Dispatch buffered values through GPU reduce.
     ///
     /// For small batches below the GPU threshold, accumulates directly
@@ -247,14 +256,16 @@ impl AggColumn {
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn dispatch_gpu_reduce(&mut self) {
         let n = self.gpu_value_count();
-        let limits = cost::device_limits();
-        if n < limits.gpu_reduce_min_rows {
-            // Small batch: single-pass accumulation (no GPU overhead).
+        if n < self.typed_reduce_min_rows() {
+            // Sub-parity batch for this value type: keep correctness by
+            // draining locally. The planner should normally decline these
+            // before a GpuAgg path is built.
             self.drain_small_batch();
             return;
         }
 
         // Process in chunks to avoid GPU runtime limits on large ranges.
+        let limits = cost::device_limits();
         if n > limits.gpu_reduce_max_chunk {
             self.dispatch_gpu_reduce_chunked();
             return;
@@ -369,22 +380,44 @@ impl AggColumn {
     }
 
     fn dispatch_gpu_reduce_i64(&mut self) {
-        let AggOp::Sum = self.op else {
-            tracing::debug!(
-                "pg_accel: no standalone INT8 GPU reduce kernel for {:?}; declining GPU reduce",
-                self.op
-            );
-            self.drain_small_batch();
-            return;
-        };
-
-        if let Some(result) = gpu::reduce_sum_i64(&self.gpu_values_i64) {
-            self.apply_gpu_i64_sum_result(result);
-        } else {
-            pgrx::error!(
-                "pg_accel: GPU reduce_sum_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
-                self.op,
-            );
+        match self.op {
+            AggOp::Sum => {
+                if let Some(result) = gpu::reduce_sum_i64(&self.gpu_values_i64) {
+                    self.apply_gpu_i64_sum_result(result);
+                } else {
+                    pgrx::error!(
+                        "pg_accel: GPU reduce_sum_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                        self.op,
+                    );
+                }
+            }
+            AggOp::Min => {
+                if let Some(result) = gpu::reduce_min_i64(&self.gpu_values_i64) {
+                    self.apply_gpu_i64_min_result(result);
+                } else {
+                    pgrx::error!(
+                        "pg_accel: GPU reduce_min_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                        self.op,
+                    );
+                }
+            }
+            AggOp::Max => {
+                if let Some(result) = gpu::reduce_max_i64(&self.gpu_values_i64) {
+                    self.apply_gpu_i64_max_result(result);
+                } else {
+                    pgrx::error!(
+                        "pg_accel: GPU reduce_max_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                        self.op,
+                    );
+                }
+            }
+            _ => {
+                tracing::debug!(
+                    "pg_accel: no standalone INT8 GPU reduce kernel for {:?}; declining GPU reduce",
+                    self.op
+                );
+                self.drain_small_batch();
+            }
         }
     }
 
@@ -522,36 +555,80 @@ impl AggColumn {
     }
 
     pub(super) fn dispatch_gpu_reduce_chunked_i64(&mut self) {
-        let AggOp::Sum = self.op else {
-            tracing::debug!(
-                "pg_accel: no standalone INT8 GPU reduce kernel for {:?}; declining GPU reduce",
-                self.op
-            );
-            self.drain_small_batch();
-            return;
-        };
-
         let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
         let values = std::mem::take(&mut self.gpu_values_i64);
-        for chunk in values.chunks(max_chunk) {
-            if let Some(partial) = gpu::reduce_sum_i64(chunk) {
-                self.gpu_dispatched = true;
-                self.int_has_value = true;
-                self.int_sum = self
-                    .int_sum
-                    .checked_add(i128::from(partial))
-                    .unwrap_or_else(|| {
-                        pgrx::error!("pg_accel: INT8 aggregate overflowed i128 accumulator")
-                    });
-                let y = partial as f64 - self.acc.sum_comp;
-                let t = self.acc.sum + y;
-                self.acc.sum_comp = (t - self.acc.sum) - y;
-                self.acc.sum = t;
-            } else {
-                pgrx::error!(
-                    "pg_accel: GPU reduce_sum_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
-                    self.op,
+        match self.op {
+            AggOp::Sum => {
+                for chunk in values.chunks(max_chunk) {
+                    if let Some(partial) = gpu::reduce_sum_i64(chunk) {
+                        self.gpu_dispatched = true;
+                        self.int_has_value = true;
+                        self.int_sum = self
+                            .int_sum
+                            .checked_add(i128::from(partial))
+                            .unwrap_or_else(|| {
+                                pgrx::error!("pg_accel: INT8 aggregate overflowed i128 accumulator")
+                            });
+                        let y = partial as f64 - self.acc.sum_comp;
+                        let t = self.acc.sum + y;
+                        self.acc.sum_comp = (t - self.acc.sum) - y;
+                        self.acc.sum = t;
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU reduce_sum_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                }
+            }
+            AggOp::Min => {
+                for chunk in values.chunks(max_chunk) {
+                    if let Some(partial) = gpu::reduce_min_i64(chunk) {
+                        self.gpu_dispatched = true;
+                        self.int_has_value = true;
+                        if partial < self.int_min {
+                            self.int_min = partial;
+                        }
+                        let partial_f64 = partial as f64;
+                        if partial_f64 < self.acc.min_val {
+                            self.acc.min_val = partial_f64;
+                        }
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU reduce_min_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                }
+            }
+            AggOp::Max => {
+                for chunk in values.chunks(max_chunk) {
+                    if let Some(partial) = gpu::reduce_max_i64(chunk) {
+                        self.gpu_dispatched = true;
+                        self.int_has_value = true;
+                        if partial > self.int_max {
+                            self.int_max = partial;
+                        }
+                        let partial_f64 = partial as f64;
+                        if partial_f64 > self.acc.max_val {
+                            self.acc.max_val = partial_f64;
+                        }
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU reduce_max_i64 kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!(
+                    "pg_accel: no standalone INT8 GPU reduce kernel for {:?}; declining GPU reduce",
+                    self.op
                 );
+                for val in values {
+                    self.accumulate_i64(val);
+                }
             }
         }
         self.acc.has_value = true;
@@ -582,6 +659,24 @@ impl AggColumn {
         self.int_sum = i128::from(result);
         self.int_has_value = true;
         self.acc.sum = result as f64;
+        self.acc.has_value = true;
+        self.clear_gpu_buffers();
+    }
+
+    pub(super) fn apply_gpu_i64_min_result(&mut self, result: i64) {
+        self.gpu_dispatched = true;
+        self.int_min = result;
+        self.int_has_value = true;
+        self.acc.min_val = result as f64;
+        self.acc.has_value = true;
+        self.clear_gpu_buffers();
+    }
+
+    pub(super) fn apply_gpu_i64_max_result(&mut self, result: i64) {
+        self.gpu_dispatched = true;
+        self.int_max = result;
+        self.int_has_value = true;
+        self.acc.max_val = result as f64;
         self.acc.has_value = true;
         self.clear_gpu_buffers();
     }
@@ -1205,6 +1300,15 @@ impl AggExecState {
         }
     }
 
+    fn reject_grouped_avg_finalize_if_present(&self) {
+        if self.columns.iter().any(|col| matches!(col.op, AggOp::Avg)) {
+            pgrx::error!(
+                "pg_accel: grouped AVG is not supported by finalize-mode GPU hash aggregation; \
+                 planner should have declined this path instead of emitting raw SUM"
+            );
+        }
+    }
+
     // -- Pipeline fusion (scan+agg) ------------------------------------------
 
     /// Configure pipeline fusion: the agg walks the heap itself instead of
@@ -1464,6 +1568,8 @@ impl AggExecState {
     /// aggregation. Stores results in `self.grouped_result`.
     #[allow(clippy::too_many_lines)]
     unsafe fn execute_grouped_agg_vectorized(&mut self) {
+        self.reject_grouped_avg_finalize_if_present();
+
         let vscan = self.vscan.as_mut().expect("vscan must be set");
 
         // SAFETY: main backend thread, scan_desc is valid.
@@ -2070,8 +2176,6 @@ impl AggExecState {
             return;
         }
 
-        let reduce_f32_break_even_rows = cost::device_limits().reduce_f32_break_even_rows;
-
         // Group eligible columns by their source attno so we only fuse
         // aggregates that read the same input. Count/Passthrough are not
         // eligible (they don't buffer values).
@@ -2101,7 +2205,7 @@ impl AggExecState {
             // All columns in the group share an attno so their GPU buffers
             // are populated from the same tuple stream — lengths must match.
             let n = self.columns[col_indices[0]].gpu_value_count();
-            if n < reduce_f32_break_even_rows {
+            if n < self.columns[col_indices[0]].typed_reduce_min_rows() {
                 continue;
             }
             let same_len = col_indices
@@ -2290,6 +2394,8 @@ impl AggExecState {
         &mut self,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        self.reject_grouped_avg_finalize_if_present();
+
         let gr = match self.grouped_result.as_mut() {
             Some(gr) if gr.next_group < gr.group_count => gr,
             _ => return std::ptr::null_mut(),
@@ -2426,6 +2532,8 @@ impl AggExecState {
         clippy::cast_precision_loss
     )]
     unsafe fn execute_grouped_agg(&mut self, child_ps: *mut pg_sys::PlanState) {
+        self.reject_grouped_avg_finalize_if_present();
+
         let group_key_info = match &self.group_key {
             Some(info) => info.clone(),
             None => return,
@@ -2621,7 +2729,7 @@ impl AggExecState {
     /// **partial-mode** GPU kernel and emits per-group transition-state
     /// tuples ready for PG's combine functions (`float8_combine` /
     /// `numeric_avg_combine`). Otherwise dispatches the finalize-mode
-    /// kernel (legacy path).
+    /// kernel.
     ///
     /// # Safety
     ///
@@ -2933,7 +3041,7 @@ impl AggExecState {
 
             // Per-agg partial-state Datums.
             //
-            // For width-1 funcs we read the legacy single-f64 lane and
+            // For width-1 funcs we read the single-f64 transition lane and
             // emit it according to the column's result type (matches
             // ScalarPassthrough / CountEmitter / IntegerSumPromotion).
             //

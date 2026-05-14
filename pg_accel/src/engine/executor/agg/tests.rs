@@ -395,6 +395,48 @@ fn dispatch_gpu_reduce_count_does_not_buffer() {
 }
 
 #[test]
+fn typed_reduce_thresholds_match_value_type() {
+    let limits = cost::device_limits();
+    let mut f32_col = tcol(AggOp::Sum, 1);
+    f32_col.type_oid = pg_sys::FLOAT4OID;
+    assert_eq!(
+        f32_col.typed_reduce_min_rows(),
+        limits.reduce_f32_break_even_rows
+    );
+
+    let mut i64_col = tcol(AggOp::Sum, 1);
+    i64_col.type_oid = pg_sys::INT8OID;
+    assert_eq!(
+        i64_col.typed_reduce_min_rows(),
+        limits.reduce_i64_break_even_rows
+    );
+
+    let mut f64_col = tcol(AggOp::Sum, 1);
+    f64_col.type_oid = pg_sys::FLOAT8OID;
+    assert_eq!(
+        f64_col.typed_reduce_min_rows(),
+        limits.reduce_f64_break_even_rows
+    );
+}
+
+#[test]
+fn i64_min_max_gpu_results_finalize_as_int8() {
+    let mut min_col = AggColumn::with_result_type(AggOp::Min, 1, pg_sys::INT8OID);
+    min_col.type_oid = pg_sys::INT8OID;
+    min_col.apply_gpu_i64_min_result(9_007_199_254_740_993);
+    let (datum, is_null) = min_col.finalize();
+    assert!(!is_null);
+    assert_eq!(datum.value() as i64, 9_007_199_254_740_993);
+
+    let mut max_col = AggColumn::with_result_type(AggOp::Max, 1, pg_sys::INT8OID);
+    max_col.type_oid = pg_sys::INT8OID;
+    max_col.apply_gpu_i64_max_result(9_007_199_254_740_993);
+    let (datum, is_null) = max_col.finalize();
+    assert!(!is_null);
+    assert_eq!(datum.value() as i64, 9_007_199_254_740_993);
+}
+
+#[test]
 fn dispatch_gpu_reduce_passthrough_does_not_buffer() {
     let col = tcol(AggOp::Passthrough, 0);
     assert!(col.gpu_values.is_empty());
@@ -420,20 +462,18 @@ fn agg_op_roundtrip() {
         AggOp::Count,
         AggOp::Passthrough,
     ] {
-        assert_eq!(AggOp::from_i32(op.to_i32()), op);
+        assert_eq!(AggOp::from_i32(op.to_i32()), Some(op));
     }
 }
 
 // -- Edge case tests -------------------------------------------------------
 
 #[test]
-fn agg_op_from_i32_unknown_maps_to_passthrough() {
-    assert_eq!(AggOp::from_i32(-1), AggOp::Passthrough);
-    // 0..13 are all valid AggOp variants today (Sum..BoolOr); 14+ are
-    // out of range and must fall through to Passthrough.
-    assert_eq!(AggOp::from_i32(14), AggOp::Passthrough);
-    assert_eq!(AggOp::from_i32(i32::MAX), AggOp::Passthrough);
-    assert_eq!(AggOp::from_i32(i32::MIN), AggOp::Passthrough);
+fn agg_op_from_i32_unknown_is_invalid() {
+    assert_eq!(AggOp::from_i32(-1), None);
+    assert_eq!(AggOp::from_i32(14), None);
+    assert_eq!(AggOp::from_i32(i32::MAX), None);
+    assert_eq!(AggOp::from_i32(i32::MIN), None);
 }
 
 #[test]
@@ -1010,11 +1050,10 @@ fn partial_ffi_stddev_emits_three_lanes() {
 }
 
 #[test]
-fn partial_ffi_finalize_state_falls_back_to_width_1() {
-    // States produced by the legacy `hash_agg_execute` (finalize mode)
-    // have empty partial_widths/partial_results; the C-side accessor
-    // must fall back to the finalize-mode buffer with width=1 so callers
-    // can use `partial_results` / `partial_width` uniformly.
+fn partial_ffi_finalize_state_has_no_partial_buffers() {
+    // Finalize-mode states and partial-mode states now expose distinct FFI
+    // surfaces. Callers must not treat finalized aggregate buffers as partial
+    // transition-state lanes.
     const ROWS_PER_GROUP: usize = 250;
     const NUM_GROUPS: usize = 4;
     let (keys, key_nulls, values, val_nulls) = build_batch_int64_f64(NUM_GROUPS, ROWS_PER_GROUP);
@@ -1043,12 +1082,7 @@ fn partial_ffi_finalize_state_falls_back_to_width_1() {
         return;
     };
 
-    // Finalize state still answers partial_width with 1 + finalize buffer.
-    assert_eq!(result.partial_width(0), 1);
-    let parts = result.partial_results(0).expect("fallback buffer");
-    let finalize_parts = result.results(0).expect("finalize buffer");
-    assert_eq!(parts.len(), finalize_parts.len());
-    for (a, b) in parts.iter().zip(finalize_parts.iter()) {
-        assert!((a - b).abs() < f64::EPSILON);
-    }
+    assert_eq!(result.partial_width(0), 0);
+    assert!(result.partial_results(0).is_none());
+    assert!(result.results(0).is_some());
 }

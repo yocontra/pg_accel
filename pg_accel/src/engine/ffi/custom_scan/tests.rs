@@ -23,9 +23,9 @@ fn strategy_labels() {
 }
 
 #[test]
-fn strategy_from_i32_unknown_defaults_to_scan() {
-    assert_eq!(GpuStrategy::from_i32(99), GpuStrategy::Scan);
-    assert_eq!(GpuStrategy::from_i32(-1), GpuStrategy::Scan);
+fn strategy_from_i32_unknown_is_invalid() {
+    assert_eq!(GpuStrategy::from_i32(99), None);
+    assert_eq!(GpuStrategy::from_i32(-1), None);
 }
 
 #[test]
@@ -35,24 +35,22 @@ fn resolve_thread_count_returns_positive() {
 
 #[test]
 fn strategy_from_i32_all_valid_values() {
-    assert_eq!(GpuStrategy::from_i32(0), GpuStrategy::Scan);
-    assert_eq!(GpuStrategy::from_i32(1), GpuStrategy::Join);
-    assert_eq!(GpuStrategy::from_i32(2), GpuStrategy::Agg);
-    assert_eq!(GpuStrategy::from_i32(3), GpuStrategy::Sort);
-    assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Window);
-    assert_eq!(GpuStrategy::from_i32(5), GpuStrategy::PreAgg);
-    assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::FunctionScan);
-    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::SrfTargetList);
+    assert_eq!(GpuStrategy::from_i32(0), Some(GpuStrategy::Scan));
+    assert_eq!(GpuStrategy::from_i32(1), Some(GpuStrategy::Join));
+    assert_eq!(GpuStrategy::from_i32(2), Some(GpuStrategy::Agg));
+    assert_eq!(GpuStrategy::from_i32(3), Some(GpuStrategy::Sort));
+    assert_eq!(GpuStrategy::from_i32(4), Some(GpuStrategy::Window));
+    assert_eq!(GpuStrategy::from_i32(5), Some(GpuStrategy::PreAgg));
+    assert_eq!(GpuStrategy::from_i32(6), Some(GpuStrategy::FunctionScan));
+    assert_eq!(GpuStrategy::from_i32(7), Some(GpuStrategy::SrfTargetList));
 }
 
 #[test]
 fn strategy_from_i32_boundary_values() {
-    // Negative values default to Scan.
-    assert_eq!(GpuStrategy::from_i32(i32::MIN), GpuStrategy::Scan);
-    assert_eq!(GpuStrategy::from_i32(-100), GpuStrategy::Scan);
-    // Values above the last variant (SrfTargetList=7) default to Scan.
-    assert_eq!(GpuStrategy::from_i32(8), GpuStrategy::Scan);
-    assert_eq!(GpuStrategy::from_i32(i32::MAX), GpuStrategy::Scan);
+    assert_eq!(GpuStrategy::from_i32(i32::MIN), None);
+    assert_eq!(GpuStrategy::from_i32(-100), None);
+    assert_eq!(GpuStrategy::from_i32(8), None);
+    assert_eq!(GpuStrategy::from_i32(i32::MAX), None);
 }
 
 #[test]
@@ -133,7 +131,7 @@ fn resolve_thread_count_at_most_cores() {
 
 #[test]
 fn strategy_from_i32_window_variant() {
-    assert_eq!(GpuStrategy::from_i32(4), GpuStrategy::Window);
+    assert_eq!(GpuStrategy::from_i32(4), Some(GpuStrategy::Window));
 }
 
 #[test]
@@ -152,12 +150,12 @@ fn strategy_window_debug() {
 }
 
 #[test]
-fn strategy_from_i32_above_functionscan_defaults_to_scan() {
+fn strategy_from_i32_above_functionscan_is_invalid() {
     // Phase 2 F3 added FunctionScan=6; the SRF target-list strategy is 7.
-    assert_eq!(GpuStrategy::from_i32(6), GpuStrategy::FunctionScan);
-    assert_eq!(GpuStrategy::from_i32(7), GpuStrategy::SrfTargetList);
-    assert_eq!(GpuStrategy::from_i32(8), GpuStrategy::Scan);
-    assert_eq!(GpuStrategy::from_i32(100), GpuStrategy::Scan);
+    assert_eq!(GpuStrategy::from_i32(6), Some(GpuStrategy::FunctionScan));
+    assert_eq!(GpuStrategy::from_i32(7), Some(GpuStrategy::SrfTargetList));
+    assert_eq!(GpuStrategy::from_i32(8), None);
+    assert_eq!(GpuStrategy::from_i32(100), None);
 }
 
 // -----------------------------------------------------------------------
@@ -176,7 +174,8 @@ fn strategy_roundtrip_all_variants() {
         let raw = variant as i32;
         let recovered = GpuStrategy::from_i32(raw);
         assert_eq!(
-            variant, recovered,
+            Some(variant),
+            recovered,
             "roundtrip failed for {variant:?} (raw={raw})"
         );
     }
@@ -260,19 +259,18 @@ fn accel_state_created_has_expected_defaults() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
-        spatial_rechecks: 0,
-        spatial_recheck_time_us: 0,
         parallel_worker_number: -1,
         dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
-    assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Scan);
+    assert_eq!(
+        GpuStrategy::from_i32(state.strategy),
+        Some(GpuStrategy::Scan)
+    );
     assert_eq!(state.batch_size, 0);
     assert_eq!(state.rows_dispatched, 0);
     assert_eq!(state.batches_executed, 0);
     assert_eq!(state.dispatch_time_us, 0);
-    assert_eq!(state.spatial_rechecks, 0);
-    assert_eq!(state.spatial_recheck_time_us, 0);
     assert_eq!(state.parallel_worker_number, -1);
     assert_eq!(state.dsm_flags, 0);
     assert!(state.executor.is_null());
@@ -287,17 +285,21 @@ fn accel_state_strategy_field_maps_to_gpu_strategy() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
-        spatial_rechecks: 0,
-        spatial_recheck_time_us: 0,
         parallel_worker_number: -1,
         dsm_flags: 0,
         executor: std::ptr::null_mut(),
     };
     state.strategy = GpuStrategy::Sort as i32;
-    assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Sort);
+    assert_eq!(
+        GpuStrategy::from_i32(state.strategy),
+        Some(GpuStrategy::Sort)
+    );
 
     state.strategy = GpuStrategy::Window as i32;
-    assert_eq!(GpuStrategy::from_i32(state.strategy), GpuStrategy::Window);
+    assert_eq!(
+        GpuStrategy::from_i32(state.strategy),
+        Some(GpuStrategy::Window)
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -313,8 +315,6 @@ fn accel_state_counter_accumulation() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
-        spatial_rechecks: 0,
-        spatial_recheck_time_us: 0,
         parallel_worker_number: -1,
         dsm_flags: 0,
         executor: std::ptr::null_mut(),
@@ -339,8 +339,6 @@ fn accel_state_counters_no_overflow_at_large_values() {
         rows_dispatched: u64::MAX - 10,
         batches_executed: u64::MAX - 1,
         dispatch_time_us: u64::MAX / 2,
-        spatial_rechecks: 0,
-        spatial_recheck_time_us: 0,
         parallel_worker_number: -1,
         dsm_flags: 0,
         executor: std::ptr::null_mut(),
@@ -362,8 +360,6 @@ fn accel_state_dispatch_time_to_ms_conversion() {
         rows_dispatched: 1000,
         batches_executed: 4,
         dispatch_time_us: 12_345,
-        spatial_rechecks: 0,
-        spatial_recheck_time_us: 0,
         parallel_worker_number: -1,
         dsm_flags: 0,
         executor: std::ptr::null_mut(),
@@ -383,8 +379,6 @@ fn accel_state_dispatch_time_zero_us_is_zero_ms() {
         rows_dispatched: 0,
         batches_executed: 0,
         dispatch_time_us: 0,
-        spatial_rechecks: 0,
-        spatial_recheck_time_us: 0,
         parallel_worker_number: -1,
         dsm_flags: 0,
         executor: std::ptr::null_mut(),
@@ -604,6 +598,56 @@ fn custom_private_data_hash_join_fields() {
     assert_eq!(data.hash_inner_attno, 3);
     assert_eq!(data.hash_key_type, 1);
     assert_eq!(data.accel_strategy, AccelStrategy::GpuHashJoin);
+    assert_eq!(data.hash_join_validation_error(), None);
+}
+
+#[test]
+fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
+    let mut data = CustomPrivateData {
+        gpu_strategy: GpuStrategy::Join,
+        batch_size: 512,
+        fn_oid: pg_sys::Oid::INVALID,
+        target_attno: 1,
+        accel_strategy: AccelStrategy::GpuHashJoin,
+        sort_keys: vec![],
+        sort_limit: None,
+        agg_columns: vec![],
+        group_key: None,
+        group_key_tlist_pos: 0,
+        hash_inner_attno: 3,
+        hash_key_type: 1,
+        window_specs: vec![],
+        window_scan_relid: 0,
+        self_scan_relid: 0,
+        partial: None,
+    };
+
+    data.target_attno = 0;
+    assert_eq!(
+        data.hash_join_validation_error(),
+        Some("join key attno must be positive")
+    );
+
+    data.target_attno = 1;
+    data.hash_inner_attno = 0;
+    assert_eq!(
+        data.hash_join_validation_error(),
+        Some("join key attno must be positive")
+    );
+
+    data.hash_inner_attno = 3;
+    data.hash_key_type = 99;
+    assert_eq!(
+        data.hash_join_validation_error(),
+        Some("join key type is unsupported")
+    );
+
+    data.hash_key_type = 1;
+    data.gpu_strategy = GpuStrategy::Scan;
+    assert_eq!(
+        data.hash_join_validation_error(),
+        Some("hash join accel requires join strategy")
+    );
 }
 
 // -----------------------------------------------------------------------
@@ -799,6 +843,43 @@ fn exec_methods_parallel_callbacks_are_wired() {
 }
 
 #[test]
+fn strip_child_cpu_quals_clears_plain_plan_qual() {
+    let mut plan = unsafe { std::mem::zeroed::<pg_sys::Plan>() };
+    plan.qual = 0xDEAD_BEEF_usize as *mut pg_sys::List;
+
+    unsafe {
+        strip_child_cpu_quals(&raw mut plan);
+    }
+
+    assert!(plan.qual.is_null());
+}
+
+#[test]
+fn strip_child_cpu_quals_clears_bitmap_recheck_qual() {
+    let mut bitmap = unsafe { std::mem::zeroed::<pg_sys::BitmapHeapScan>() };
+    bitmap.scan.plan.type_ = pg_sys::NodeTag::T_BitmapHeapScan;
+    bitmap.scan.plan.qual = 0xDEAD_BEEF_usize as *mut pg_sys::List;
+    bitmap.bitmapqualorig = 0xBAD_CAFE_usize as *mut pg_sys::List;
+
+    unsafe {
+        strip_child_cpu_quals(&raw mut bitmap.scan.plan);
+    }
+
+    assert!(bitmap.scan.plan.qual.is_null());
+    assert!(bitmap.bitmapqualorig.is_null());
+}
+
+#[test]
+fn scan_exec_path_has_no_pg_execscan_or_passthrough_fallback() {
+    let source = include_str!("mod.rs");
+
+    assert!(!source.contains("pg_sys::ExecScan("));
+    assert!(!source.contains("gpu_scan_access"));
+    assert!(!source.contains("gpu_scan_recheck"));
+    assert!(!source.contains("passthrough_exec"));
+}
+
+#[test]
 fn dsm_estimate_allocates_worker_recheck_coordinate() {
     // The DSM hooks are not just no-op sentinels: workers attach a tiny
     // coordinate block so spatial Layer-3 recheck work is explicitly marked
@@ -922,28 +1003,28 @@ fn window_spec_ints_matches_window_func_spec_field_count() {
 
 #[test]
 fn accel_strategy_from_i32_all_variants() {
-    assert_eq!(AccelStrategy::from_i32(1), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(2), AccelStrategy::GpuRaster);
-    assert_eq!(AccelStrategy::from_i32(3), AccelStrategy::GpuH3);
-    assert_eq!(AccelStrategy::from_i32(4), AccelStrategy::GpuSort);
-    assert_eq!(AccelStrategy::from_i32(5), AccelStrategy::GpuReduce);
-    assert_eq!(AccelStrategy::from_i32(6), AccelStrategy::GpuExpr);
-    assert_eq!(AccelStrategy::from_i32(7), AccelStrategy::GpuHashJoin);
-    assert_eq!(AccelStrategy::from_i32(8), AccelStrategy::GpuWindow);
+    assert_eq!(AccelStrategy::from_i32(1), Some(AccelStrategy::GpuSpatial));
+    assert_eq!(AccelStrategy::from_i32(2), Some(AccelStrategy::GpuRaster));
+    assert_eq!(AccelStrategy::from_i32(3), Some(AccelStrategy::GpuH3));
+    assert_eq!(AccelStrategy::from_i32(4), Some(AccelStrategy::GpuSort));
+    assert_eq!(AccelStrategy::from_i32(5), Some(AccelStrategy::GpuReduce));
+    assert_eq!(AccelStrategy::from_i32(6), Some(AccelStrategy::GpuExpr));
+    assert_eq!(AccelStrategy::from_i32(7), Some(AccelStrategy::GpuHashJoin));
+    assert_eq!(AccelStrategy::from_i32(8), Some(AccelStrategy::GpuWindow));
 }
 
 #[test]
-fn accel_strategy_unknown_defaults_to_gpu_spatial() {
-    assert_eq!(AccelStrategy::from_i32(-1), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(0), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(99), AccelStrategy::GpuSpatial);
-    assert_eq!(AccelStrategy::from_i32(i32::MAX), AccelStrategy::GpuSpatial);
+fn accel_strategy_unknown_is_invalid() {
+    assert_eq!(AccelStrategy::from_i32(-1), None);
+    assert_eq!(AccelStrategy::from_i32(0), None);
+    assert_eq!(AccelStrategy::from_i32(99), None);
+    assert_eq!(AccelStrategy::from_i32(i32::MAX), None);
 }
 
 #[test]
 fn accel_strategy_roundtrip() {
     for raw in 1..=8 {
-        let strategy = AccelStrategy::from_i32(raw);
+        let strategy = AccelStrategy::from_i32(raw).expect("known strategy");
         assert_eq!(strategy as i32, raw);
     }
 }
@@ -1061,18 +1142,17 @@ fn agg_op_roundtrip_all_variants() {
         let raw = op.to_i32();
         let recovered = AggOp::from_i32(raw);
         assert_eq!(
-            std::mem::discriminant(&op),
-            std::mem::discriminant(&recovered),
+            Some(op),
+            recovered,
             "roundtrip failed for {op:?} (raw={raw})"
         );
     }
 }
 
 #[test]
-fn agg_op_unknown_maps_to_passthrough() {
-    assert!(matches!(AggOp::from_i32(-1), AggOp::Passthrough));
-    assert!(matches!(AggOp::from_i32(5), AggOp::Passthrough));
-    assert!(matches!(AggOp::from_i32(99), AggOp::Passthrough));
+fn agg_op_unknown_is_invalid() {
+    assert_eq!(AggOp::from_i32(-1), None);
+    assert_eq!(AggOp::from_i32(99), None);
 }
 
 // -----------------------------------------------------------------------
@@ -1272,13 +1352,10 @@ fn preagg_parallel_attached_sentinel_is_ascii_ppsa() {
 }
 
 // ---------------------------------------------------------------------------
-// B5a PreAgg parallel-safe round-trip tests
+// PreAgg parallel-safe round-trip tests
 //
-// Round-trip the new `parallel_safe_planner_attached` flag through
-// serialize/deserialize_preagg_private. Both branches (true / false) must
-// reproduce the input exactly. Default-off (false) MUST emit no extra
-// sentinel bytes so existing plans on the wire stay byte-identical to
-// pre-B5a (regression guard for ban #1).
+// Round-trip the required `parallel_safe_planner_attached` marker through
+// serialize/deserialize_preagg_private.
 //
 // Note: `#[pg_test]` registers each function as a SQL function under the
 // containing module's pgrx schema. To keep them at schema `tests` (the
@@ -1288,7 +1365,7 @@ fn preagg_parallel_attached_sentinel_is_ascii_ppsa() {
 
 #[cfg(feature = "pg_test")]
 mod b5a_round_trip {
-    //! Helpers + tests for the B5a `parallel_safe_planner_attached` flag.
+    //! Helpers + tests for the PreAgg `parallel_safe_planner_attached` flag.
     //! See file-level comment above; tests appear at the outer module
     //! scope (immediately below this submodule) so the SQL function
     //! resolver finds them under schema `tests`.
@@ -1374,49 +1451,9 @@ mod tests {
     use super::*;
     use pgrx::pg_test;
 
-    /// Default-off: `parallel_safe_planner_attached = false` round-trips
-    /// to `false` AND the wire layout contains no PREAGG_PARALLEL_ATTACHED
-    /// sentinel bytes (byte-identical to pre-B5a).
-    #[pg_test]
-    fn parallel_attached_false_roundtrips_and_omits_sentinel() {
-        let (relid, oid, depths, aggs, gks) = sample_inputs();
-
-        // SAFETY: pg_test runs inside a PG memory context; serialize allocates
-        // List nodes via palloc.
-        let list = unsafe {
-            serialize_preagg_private(
-                relid, oid, &depths, &aggs, &gks, None, None,
-                /*parallel_safe_planner_attached=*/ false,
-            )
-        };
-
-        // Verify no PREAGG_PARALLEL_ATTACHED sentinel is anywhere in the
-        // serialized list. This is the byte-identical guard.
-        // SAFETY: list_length on a valid PG List.
-        let len = unsafe { pg_sys::list_length(list) };
-        for i in 0..len {
-            // SAFETY: i bounded by list_length.
-            let v = unsafe { list_int_at(list, i) };
-            assert_ne!(
-                v, PREAGG_PARALLEL_ATTACHED_SENTINEL,
-                "default-off serialization MUST NOT emit PREAGG_PARALLEL_ATTACHED_SENTINEL \
-                 (byte-identical to pre-B5a layout) — found at index {i}"
-            );
-        }
-
-        // Round-trip: deserialize and confirm the flag is false.
-        // SAFETY: list is a valid List built above.
-        let parsed = unsafe { deserialize_preagg_private(list) };
-        assert!(
-            !parsed.parallel_safe_planner_attached,
-            "default-off must round-trip to false"
-        );
-        assert_inputs_round_tripped(&parsed);
-    }
-
-    /// GUC-on: `parallel_safe_planner_attached = true` round-trips to `true`
-    /// AND the serialized list contains the PREAGG_PARALLEL_ATTACHED sentinel
-    /// followed by `1`.
+    /// `parallel_safe_planner_attached = true` round-trips to `true` and the
+    /// serialized list contains the PREAGG_PARALLEL_ATTACHED sentinel followed
+    /// by `1`.
     #[pg_test]
     fn parallel_attached_true_roundtrips_and_emits_sentinel() {
         let (relid, oid, depths, aggs, gks) = sample_inputs();
@@ -1452,7 +1489,7 @@ mod tests {
         let parsed = unsafe { deserialize_preagg_private(list) };
         assert!(
             parsed.parallel_safe_planner_attached,
-            "GUC-on must round-trip to true"
+            "attached fact path marker must round-trip to true"
         );
         assert_inputs_round_tripped(&parsed);
     }
@@ -1574,43 +1611,5 @@ mod tests {
         assert_eq!(partial.per_column[0].transtype_oid, pg_sys::FLOAT8OID);
         assert!(matches!(partial.per_column[1].op, AggOp::Avg));
         assert_eq!(partial.per_column[1].transtype_oid, pg_sys::FLOAT8ARRAYOID);
-    }
-
-    /// GUC roundtrip via SET / SHOW / SELECT current_setting.
-    /// Confirms `pg_accel.preagg_parallel_safe` is registered as USERSET
-    /// and reads back the value the session set. Default is `true` since
-    /// B5b landed — both planner and executor sides are wired so the
-    /// parallel chain is the recommended path. Operators can still flip
-    /// the GUC off for A/B regression testing against the legacy
-    /// heap-direct serial path.
-    #[pg_test]
-    fn preagg_parallel_safe_guc_roundtrip() {
-        use pgrx::Spi;
-
-        // Default value is on (B5a planner + B5b executor).
-        let default_val: bool =
-            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
-                .expect("read default")
-                .expect("non-NULL default");
-        assert!(
-            default_val,
-            "pg_accel.preagg_parallel_safe must default to true post-B5b"
-        );
-
-        // SET off, read back.
-        Spi::run("SET pg_accel.preagg_parallel_safe = off;").expect("SET off");
-        let off_val: bool =
-            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
-                .expect("read off")
-                .expect("non-NULL off");
-        assert!(!off_val, "after SET off, GUC must read false");
-
-        // SET on, read back.
-        Spi::run("SET pg_accel.preagg_parallel_safe = on;").expect("SET on");
-        let on_val: bool =
-            Spi::get_one::<bool>("SELECT current_setting('pg_accel.preagg_parallel_safe')::bool")
-                .expect("read on")
-                .expect("non-NULL on");
-        assert!(on_val, "after SET on, GUC must read true");
     }
 }

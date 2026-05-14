@@ -5,6 +5,7 @@ Cargo.lock
 
 # pgrx
 .pgrx/
+.pgaccel/
 pg_accel/pg_data/
 
 # C++ / CMake
@@ -31,9 +32,6 @@ compile_commands.json
 # OS
 .DS_Store
 Thumbs.db
-
-# Docker
-docker/data/
 
 # Environment
 .env

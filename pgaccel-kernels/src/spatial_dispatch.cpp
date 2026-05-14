@@ -109,7 +109,7 @@ static int8_t segments_intersect(float p1x, float p1y, float p2x, float p2y, flo
     return 1; /* proper intersection */
   }
 
-  /* Collinear / endpoint touch — uncertain, let CPU recheck. */
+  /* Collinear / endpoint touch — uncertain, caller must reject this GPU path. */
   if (std::fabs(d1) < EPSILON || std::fabs(d2) < EPSILON || std::fabs(d3) < EPSILON ||
       std::fabs(d4) < EPSILON) {
     return 0; /* UNCERTAIN */
@@ -356,17 +356,13 @@ static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* surv_p
     }
   };
 
-  if (g_unified_memory) {
-    fill(slab);
-  } else {
-    std::vector<uint8_t> staged(cursor);
-    fill(staged.data());
-    try {
-      q.memcpy(slab, staged.data(), cursor).wait_and_throw();
-    } catch (...) {
-      sycl::free(slab, q);
-      throw;
-    }
+  std::vector<uint8_t> staged(cursor);
+  fill(staged.data());
+  try {
+    q.memcpy(slab, staged.data(), cursor).wait_and_throw();
+  } catch (...) {
+    sycl::free(slab, q);
+    throw;
   }
 
   if (out_header)
@@ -419,6 +415,7 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* surv_pts, size_t
      }).wait_and_throw();
 
     pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off), surv_count);
+    pgaccel_record_gpu_exec();
 
     sycl::free(slab, *q);
     slab = nullptr;
@@ -592,6 +589,7 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
      }).wait_and_throw();
 
     pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off), surv_count);
+    pgaccel_record_gpu_exec();
 
     sycl::free(slab, *q);
     slab = nullptr;

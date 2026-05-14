@@ -9,7 +9,11 @@ use crate::engine::registry::{self, AccelStrategy};
 use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 
-use super::{JoinExecState, PendingMatch};
+use super::{
+    JoinExecState, PendingMatch, hash_join_match_buffer_u32s,
+    hash_join_match_count_within_capacity, hash_join_max_matches, hash_join_non_null_rows,
+    hash_join_row_indices_representable, hash_join_table_capacity,
+};
 
 impl JoinExecState {
     /// GPU hash join: build hash table from inner, probe with outer.
@@ -27,6 +31,10 @@ impl JoinExecState {
         inner_ps: *mut pg_sys::PlanState,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: PostgreSQL sets ParallelWorkerNumber to -1 outside
+        // parallel workers and to the worker id inside one.
+        self.record_hash_join_worker_metadata(unsafe { pg_sys::ParallelWorkerNumber });
+
         // Get the inner plan's result slot — its tuple descriptor matches
         // inner tuples. We must NOT use result_slot (scan slot) for inner
         // key extraction because it has the outer plan's descriptor.
@@ -74,22 +82,61 @@ impl JoinExecState {
 
             let inner_count = self.hash_inner_tuples.len();
             if inner_count == 0 {
+                let redundant = self.record_hash_join_build_metadata(0, 0, 0);
+                let telemetry = self.hash_join_telemetry();
+                tracing::info!(
+                    target: "pg_accel::hash_join",
+                    phase = "build",
+                    build_count = telemetry.build_count,
+                    redundant_inner_build = redundant,
+                    redundant_inner_builds = telemetry.redundant_inner_builds,
+                    build_rows = 0usize,
+                    build_non_null_rows = 0usize,
+                    hash_table_capacity = 0usize,
+                    worker_count = telemetry.worker_count,
+                    worker_number = telemetry.worker_number,
+                    key_type = ?self.hash_key_type,
+                    "exec.hash_join_build_empty"
+                );
                 return std::ptr::null_mut();
             }
 
+            if !hash_join_row_indices_representable(inner_count) {
+                pgrx::error!(
+                    "pg_accel: hash-join inner row count {} exceeds u32 index capacity; planner should have declined",
+                    inner_count
+                );
+            }
+            let inner_count_u32 = match u32::try_from(inner_count) {
+                Ok(count) => count,
+                Err(_) => {
+                    pgrx::error!(
+                        "pg_accel: hash-join inner row count {} exceeds u32 index capacity; planner should have declined",
+                        inner_count
+                    );
+                }
+            };
+
             // Validate attno vs slot descriptor before key extraction.
-            let inner_natts = unsafe { (*(*inner_result_slot).tts_tupleDescriptor).natts };
-            if self.hash_inner_attno > inner_natts {
-                // Attno out of range — skip hash table build.
+            let inner_tupdesc = unsafe { (*inner_result_slot).tts_tupleDescriptor };
+            if inner_tupdesc.is_null() {
+                pgrx::error!("pg_accel: hash join inner slot has no tuple descriptor");
+            }
+            let inner_natts = unsafe { (*inner_tupdesc).natts };
+            if self.hash_inner_attno <= 0 || self.hash_inner_attno > inner_natts {
+                pgrx::error!(
+                    "pg_accel: hash join inner key attno {} out of range 1..={}; refusing CPU fallback",
+                    self.hash_inner_attno,
+                    inner_natts,
+                );
             }
 
             // Bulk-extract keys from inner tuples using direct MinimalTuple
             // reads (avoids per-tuple ExecForceStoreMinimalTuple overhead).
             // SAFETY: inner_result_slot has a valid tuple descriptor matching
             // the inner tuples.
-            let inner_tupdesc = unsafe { (*inner_result_slot).tts_tupleDescriptor };
             let inner_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.hash_inner_attno) };
-            let indices: Vec<u32> = (0..inner_count as u32).collect();
+            let indices: Vec<u32> = (0..inner_count_u32).collect();
 
             // Extract only the key type we need — one allocation, one pass.
             let mut int32_keys: Vec<i32> = Vec::new();
@@ -147,6 +194,34 @@ impl JoinExecState {
                 }
             }
 
+            let build_non_null_rows = hash_join_non_null_rows(&null_mask);
+            let Some(hash_table_capacity) = hash_join_table_capacity(build_non_null_rows) else {
+                pgrx::error!(
+                    "pg_accel: hash-join build capacity overflow for {} non-null inner rows; planner should have declined",
+                    build_non_null_rows
+                );
+            };
+            let redundant = self.record_hash_join_build_metadata(
+                inner_count,
+                build_non_null_rows,
+                hash_table_capacity,
+            );
+            let telemetry = self.hash_join_telemetry();
+            tracing::info!(
+                target: "pg_accel::hash_join",
+                phase = "build",
+                build_count = telemetry.build_count,
+                redundant_inner_build = redundant,
+                redundant_inner_builds = telemetry.redundant_inner_builds,
+                build_rows = telemetry.build_rows,
+                build_non_null_rows = telemetry.build_non_null_rows,
+                hash_table_capacity = telemetry.hash_table_capacity,
+                worker_count = telemetry.worker_count,
+                worker_number = telemetry.worker_number,
+                key_type = ?self.hash_key_type,
+                "exec.hash_join_build_start"
+            );
+
             // Build hash table via GPU.
             let keys_ptr: *const std::ffi::c_void = match self.hash_key_type {
                 PgaccelKeyType::Int32 => int32_keys.as_ptr().cast(),
@@ -159,6 +234,29 @@ impl JoinExecState {
 
             self.hash_table =
                 GpuHashTable::build(keys_ptr, &null_mask, &indices, self.hash_key_type);
+            let build_succeeded = self.hash_table.is_some();
+            let telemetry = self.hash_join_telemetry();
+            tracing::info!(
+                target: "pg_accel::hash_join",
+                phase = "build",
+                build_succeeded,
+                build_count = telemetry.build_count,
+                build_rows = telemetry.build_rows,
+                build_non_null_rows = telemetry.build_non_null_rows,
+                hash_table_capacity = telemetry.hash_table_capacity,
+                worker_count = telemetry.worker_count,
+                worker_number = telemetry.worker_number,
+                key_type = ?self.hash_key_type,
+                "exec.hash_join_build_finish"
+            );
+            if !build_succeeded {
+                pgrx::error!(
+                    "pg_accel: GPU hash-join build failed for {} inner rows ({} non-null, planned hash capacity {}); refusing to fall back to CPU (rule 11)",
+                    inner_count,
+                    build_non_null_rows,
+                    hash_table_capacity,
+                );
+            }
         }
 
         // Phase 2: Probe with outer tuples in batches.
@@ -257,11 +355,24 @@ impl JoinExecState {
             let outer_count = outer_tuples.len();
             self.rows_dispatched += outer_count as u64;
 
+            if !hash_join_row_indices_representable(outer_count) {
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        // SAFETY: Free owned copy.
+                        unsafe { pg_sys::pfree(mt.cast()) };
+                    }
+                }
+                pgrx::error!(
+                    "pg_accel: hash-join outer batch row count {} exceeds u32 index capacity; planner should have declined",
+                    outer_count
+                );
+            }
+
             // Per CLAUDE.md rule 11: no CPU fallback on GPU kernel failure.
             // Previously we silently dropped all outer tuples when the hash
             // table build failed, producing an empty join result. Raise a PG
             // ERROR so the failure is surfaced instead.
-            let Some(ht) = &self.hash_table else {
+            if self.hash_table.is_none() {
                 // Free outer tuples before erroring so they don't leak on
                 // error-context teardown (PG will clean the MemoryContext,
                 // but be explicit).
@@ -274,7 +385,7 @@ impl JoinExecState {
                 pgrx::error!(
                     "pg_accel: GPU hash-join build failed; refusing to fall back to CPU (rule 11)"
                 );
-            };
+            }
 
             // Extract outer keys for GPU probe.
             // Bulk-extract outer keys using direct MinimalTuple reads.
@@ -286,6 +397,17 @@ impl JoinExecState {
             // SAFETY: outer_extract_slot has a valid tuple descriptor
             // matching the outer tuples.
             let outer_tupdesc = unsafe { (*outer_extract_slot).tts_tupleDescriptor };
+            if outer_tupdesc.is_null() {
+                pgrx::error!("pg_accel: hash join outer slot has no tuple descriptor");
+            }
+            let outer_natts = unsafe { (*outer_tupdesc).natts };
+            if self.hash_outer_attno <= 0 || self.hash_outer_attno > outer_natts {
+                pgrx::error!(
+                    "pg_accel: hash join outer key attno {} out of range 1..={}; refusing CPU fallback",
+                    self.hash_outer_attno,
+                    outer_natts,
+                );
+            }
             let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno) };
 
             let mut o_int32_keys: Vec<i32> = Vec::new();
@@ -335,10 +457,77 @@ impl JoinExecState {
             // Probe: max matches. For equijoins, each outer typically matches
             // 0-1 inner rows, but duplicates can inflate this. Use 4× outer
             // as a reasonable upper bound (covers moderate skew).
-            let max_matches = outer_count * 4;
+            let Some(max_matches) = hash_join_max_matches(outer_count) else {
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        // SAFETY: Free owned copy.
+                        unsafe { pg_sys::pfree(mt.cast()) };
+                    }
+                }
+                pgrx::error!(
+                    "pg_accel: hash-join max_matches overflow for {} outer rows; planner should have declined",
+                    outer_count
+                );
+            };
+            let Some(match_buffer_u32s) = hash_join_match_buffer_u32s(max_matches) else {
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        // SAFETY: Free owned copy.
+                        unsafe { pg_sys::pfree(mt.cast()) };
+                    }
+                }
+                pgrx::error!(
+                    "pg_accel: hash-join match buffer overflow for max_matches={}; planner should have declined",
+                    max_matches
+                );
+            };
+            self.record_hash_join_probe_metadata(outer_count, max_matches, match_buffer_u32s);
+            let telemetry = self.hash_join_telemetry();
+            tracing::debug!(
+                target: "pg_accel::hash_join",
+                phase = "probe",
+                probe_batches = telemetry.probe_batches,
+                probe_rows = telemetry.last_probe_rows,
+                max_matches = telemetry.last_max_matches,
+                match_buffer_u32s = telemetry.last_match_buffer_u32s,
+                build_rows = telemetry.build_rows,
+                build_non_null_rows = telemetry.build_non_null_rows,
+                hash_table_capacity = telemetry.hash_table_capacity,
+                worker_count = telemetry.worker_count,
+                worker_number = telemetry.worker_number,
+                key_type = ?self.hash_key_type,
+                "exec.hash_join_probe_start"
+            );
+            let Some(ht) = self.hash_table.as_ref() else {
+                pgrx::error!(
+                    "pg_accel: GPU hash-join build failed; refusing to fall back to CPU (rule 11)"
+                );
+            };
             let probe_result = ht.probe(o_keys_ptr, &o_null_mask, max_matches);
 
             if let Some(pairs) = probe_result {
+                let match_count = pairs.len();
+                if !hash_join_match_count_within_capacity(match_count, max_matches) {
+                    pgrx::error!(
+                        "pg_accel: hash-join probe returned {} matches, exceeding max_matches={}; refusing unsafe match buffer consumption",
+                        match_count,
+                        max_matches,
+                    );
+                }
+                self.record_hash_join_probe_result(match_count);
+                let telemetry = self.hash_join_telemetry();
+                tracing::debug!(
+                    target: "pg_accel::hash_join",
+                    phase = "probe",
+                    probe_batches = telemetry.probe_batches,
+                    probe_rows = telemetry.last_probe_rows,
+                    match_count = telemetry.last_match_count,
+                    max_matches = telemetry.last_max_matches,
+                    match_buffer_u32s = telemetry.last_match_buffer_u32s,
+                    worker_count = telemetry.worker_count,
+                    worker_number = telemetry.worker_number,
+                    "exec.hash_join_probe_finish"
+                );
                 for (outer_idx, inner_idx) in pairs {
                     let outer_idx = outer_idx as usize;
                     let inner_idx = inner_idx as usize;
@@ -361,9 +550,25 @@ impl JoinExecState {
                 // failure. Previously we silently dropped the outer batch,
                 // producing missing join rows. Raise a PG ERROR so the
                 // failure is surfaced instead of yielding wrong results.
+                let telemetry = self.hash_join_telemetry();
+                tracing::warn!(
+                    target: "pg_accel::hash_join",
+                    phase = "probe",
+                    probe_rows = telemetry.last_probe_rows,
+                    max_matches = telemetry.last_max_matches,
+                    match_buffer_u32s = telemetry.last_match_buffer_u32s,
+                    build_rows = telemetry.build_rows,
+                    build_non_null_rows = telemetry.build_non_null_rows,
+                    hash_table_capacity = telemetry.hash_table_capacity,
+                    worker_count = telemetry.worker_count,
+                    worker_number = telemetry.worker_number,
+                    "exec.hash_join_probe_failed"
+                );
                 pgrx::error!(
-                    "pg_accel: GPU hash-join probe kernel failed on batch of {} outer tuples; refusing to fall back to CPU (rule 11)",
+                    "pg_accel: GPU hash-join probe kernel failed on batch of {} outer tuples (max_matches={}, match_buffer_u32s={}); refusing to fall back to CPU (rule 11)",
                     outer_tuples.len(),
+                    max_matches,
+                    match_buffer_u32s,
                 );
             }
 

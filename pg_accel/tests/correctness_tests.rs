@@ -624,6 +624,13 @@ fn adapter_postgis_raster_no_panic() {
 #[test]
 fn adapter_no_empty_function_lists() {
     for adapter in all_adapters() {
+        if adapter.name == "postgis" {
+            assert!(
+                adapter.functions.is_empty(),
+                "PostGIS vector functions need shape gates before registration",
+            );
+            continue;
+        }
         assert!(
             !adapter.functions.is_empty(),
             "Adapter '{}' has an empty function list",
@@ -667,9 +674,11 @@ fn adapter_h3_gpu_strategy_for_gpu_functions() {
     let a = h3::adapter();
     let gpu_names = [
         "h3_latlng_to_cell",
-        "h3_grid_distance",
-        "h3_cell_to_parent",
-        "h3_get_resolution",
+        "h3_grid_disk",
+        "h3_grid_ring_unsafe",
+        "h3_cell_to_children",
+        "h3_cell_to_boundary",
+        "h3_cells_to_multi_polygon",
     ];
     for name in &gpu_names {
         let entry = a.functions.iter().find(|f| f.name == *name);
@@ -695,6 +704,44 @@ fn adapter_postgis_gpu_spatial_strategy() {
 }
 
 #[test]
+fn adapter_postgis_exact_gpu_only_surface() {
+    let a = postgis::adapter();
+    let expected_allowlist: [&str; 0] = [];
+    let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
+    assert_eq!(
+        names, expected_allowlist,
+        "PostGIS adapter must expose only GPU-only/no-recheck functions",
+    );
+}
+
+#[test]
+fn adapter_postgis_recheck_dependent_functions_denied() {
+    let a = postgis::adapter();
+    let names: HashSet<&str> = a.functions.iter().map(|f| f.name).collect();
+    for blocked in [
+        "st_intersects",
+        "st_contains",
+        "st_within",
+        "st_dwithin",
+        "st_area",
+        "st_length",
+        "st_distance",
+        "st_disjoint",
+        "st_covers",
+        "st_coveredby",
+        "st_equals",
+        "st_touches",
+        "st_crosses",
+        "st_overlaps",
+    ] {
+        assert!(
+            !names.contains(blocked),
+            "{blocked} must not be registered without planner-time shape gates",
+        );
+    }
+}
+
+#[test]
 fn adapter_postgis_raster_gpu_strategy() {
     let a = postgis_raster::adapter();
     for entry in &a.functions {
@@ -715,8 +762,8 @@ fn adapter_combined_function_count() {
         + postgis_raster::adapter().functions.len();
     assert_eq!(total, expected);
     assert!(
-        total >= 38,
-        "adapter surface unexpectedly shrank; expected at least 38 registered functions"
+        total >= 15,
+        "adapter surface unexpectedly shrank; expected at least 15 GPU-only registered functions"
     );
 }
 
@@ -756,17 +803,6 @@ fn adapter_schemas_are_valid() {
                 func.schema,
             );
         }
-    }
-}
-
-#[test]
-fn adapter_version_queries_non_empty() {
-    for adapter in all_adapters() {
-        assert!(
-            !adapter.version_query.is_empty(),
-            "Adapter '{}' has empty version_query",
-            adapter.name,
-        );
     }
 }
 

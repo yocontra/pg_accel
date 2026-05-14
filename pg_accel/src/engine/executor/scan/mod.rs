@@ -22,6 +22,7 @@ use pgrx::pg_sys;
 
 use crate::engine::columnar::ColumnarBatchOwner;
 use crate::engine::dispatch::{self, DispatchResult};
+use crate::engine::executor::{ExecMetrics, ResultDrain};
 use crate::engine::expr_compiler::{self, CompiledExpr, TemplateKernel};
 use crate::engine::gucs;
 use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
@@ -52,10 +53,8 @@ pub struct ScanExecState {
     /// and should be returned to the parent.
     result_mask: Vec<bool>,
 
-    /// Current read position in `tuple_buffer` / `result_mask`. Points to
-    /// the next tuple to consider returning. Tuples where `result_mask` is
-    /// `false` are skipped.
-    result_pos: usize,
+    /// Cursor for returning passing rows from `tuple_buffer` / `result_mask`.
+    result_drain: ResultDrain,
 
     /// Set to `true` once the child plan returns a null (empty) slot,
     /// indicating no more tuples.
@@ -98,8 +97,8 @@ pub struct ScanExecState {
     gist_recheck: bool,
 
     /// Compiled GPU expression for GpuExpr strategy. Set by
-    /// `begin_custom_scan` after expression compilation. `None` means
-    /// no expression was compiled (fall back to scalar qual).
+    /// `begin_custom_scan` after expression compilation. `None` is an
+    /// executor/planner contract error for a selected GpuExpr plan.
     compiled_expr: Option<expr_compiler::CompiledExpr>,
 
     /// Pre-extracted datums from the target column, captured from the
@@ -120,30 +119,8 @@ pub struct ScanExecState {
     /// pfree calls, reducing allocation overhead from O(n) to O(1).
     batch_mcxt: pg_sys::MemoryContext,
 
-    /// Cached extraction info for inline filter columns. Initialized lazily
-    /// on first call to `inline_filter_scan`, then reused across calls.
-    inline_filter_infos: Option<Vec<AttExtractInfo>>,
-
-    // -- Counters for EXPLAIN ANALYZE --
-    /// Total rows pulled from child and dispatched.
-    pub rows_dispatched: u64,
-
-    /// Number of batches sent through dispatch.
-    pub batches_executed: u64,
-
-    /// Cumulative microseconds spent in dispatch.
-    pub dispatch_time_us: u64,
-
-    /// Rows that required PostgreSQL/PostGIS exact recheck after spatial GPU
-    /// evaluation in this backend.
-    pub spatial_rechecks: u64,
-
-    /// Cumulative microseconds spent in spatial exact recheck.
-    pub spatial_recheck_time_us: u64,
-
-    /// Recheck count for the most recent batch, used when recording per-batch
-    /// GPU stats.
-    last_spatial_recheck_count: u64,
+    /// Cumulative counters surfaced through EXPLAIN ANALYZE.
+    metrics: ExecMetrics,
 
     /// PostgreSQL parallel worker number that owns this executor, or -1 for
     /// leader/non-parallel execution.
@@ -170,7 +147,7 @@ impl ScanExecState {
             batch_size,
             tuple_buffer: Vec::with_capacity(batch_size),
             result_mask: Vec::with_capacity(batch_size),
-            result_pos: 0,
+            result_drain: ResultDrain::new(),
             child_exhausted: false,
             qual,
             econtext,
@@ -185,13 +162,7 @@ impl ScanExecState {
             datum_buffer: Vec::with_capacity(batch_size),
             scan_desc: std::ptr::null_mut(),
             batch_mcxt: std::ptr::null_mut(),
-            inline_filter_infos: None,
-            rows_dispatched: 0,
-            batches_executed: 0,
-            dispatch_time_us: 0,
-            spatial_rechecks: 0,
-            spatial_recheck_time_us: 0,
-            last_spatial_recheck_count: 0,
+            metrics: ExecMetrics::new(),
             parallel_worker_number: -1,
             dsm_flags: 0,
         }
@@ -268,9 +239,9 @@ impl ScanExecState {
         self.scan_desc
     }
 
-    /// Detect whether the child plan is a GiST index scan and enable
-    /// batched recheck mode. When enabled, the GPU spatial pipeline
-    /// skips bbox filtering (Layer 1) since GiST already performed it.
+    /// Detect whether the child plan is a GiST index scan and skip bbox
+    /// filtering. This is an index prefilter hint, not permission to run a
+    /// host-side predicate evaluation inside pg_accel.
     ///
     /// # Safety
     ///
@@ -303,7 +274,7 @@ impl ScanExecState {
 
         if u32::from(relam) == GIST_AM_OID {
             self.gist_recheck = true;
-            tracing::debug!("pg_accel: GiST child detected, enabling batched recheck");
+            tracing::debug!("pg_accel: GiST child detected, skipping GPU bbox layer");
         }
     }
 
@@ -335,6 +306,48 @@ impl ScanExecState {
         &self.qual_datums
     }
 
+    /// Returns a snapshot of cumulative dispatch metrics.
+    #[must_use]
+    pub fn metrics(&self) -> ExecMetrics {
+        self.metrics
+    }
+
+    /// Returns total rows pulled from the child and dispatched.
+    #[must_use]
+    pub fn rows_dispatched(&self) -> u64 {
+        self.metrics.rows_dispatched()
+    }
+
+    /// Returns number of batches sent through dispatch.
+    #[must_use]
+    pub fn batches_executed(&self) -> u64 {
+        self.metrics.batches_executed()
+    }
+
+    /// Returns cumulative dispatch time in microseconds.
+    #[must_use]
+    pub fn dispatch_time_us(&self) -> u64 {
+        self.metrics.dispatch_time_us()
+    }
+
+    /// Record one completed scan dispatch batch.
+    pub(super) fn record_dispatch_batch(&mut self, rows: u64, elapsed_us: u64) {
+        self.metrics.record_batch(rows, elapsed_us);
+    }
+
+    /// Clear result mask state and rewind the drain cursor.
+    pub(super) fn clear_results(&mut self) {
+        self.result_mask.clear();
+        self.result_drain.reset();
+    }
+
+    /// Clear all per-batch row/result buffers and rewind the drain cursor.
+    pub(super) fn clear_batch_buffers(&mut self) {
+        self.tuple_buffer.clear();
+        self.datum_buffer.clear();
+        self.clear_results();
+    }
+
     /// Returns the qual pointer (for transfer during rescan).
     #[must_use]
     pub fn qual_ptr(&self) -> *mut pg_sys::ExprState {
@@ -357,25 +370,6 @@ impl ScanExecState {
     #[must_use]
     pub fn parallel_worker_number(&self) -> i32 {
         self.parallel_worker_number
-    }
-
-    /// Returns total spatial exact rechecks performed by this executor.
-    #[must_use]
-    pub fn spatial_rechecks(&self) -> u64 {
-        self.spatial_rechecks
-    }
-
-    /// Returns cumulative spatial exact recheck time in microseconds.
-    #[must_use]
-    pub fn spatial_recheck_time_us(&self) -> u64 {
-        self.spatial_recheck_time_us
-    }
-
-    /// Record Layer-3 spatial exact recheck work for the current batch.
-    pub(super) fn record_spatial_recheck_batch(&mut self, rows: u64, time_us: u64) {
-        self.last_spatial_recheck_count = rows;
-        self.spatial_rechecks = self.spatial_rechecks.saturating_add(rows);
-        self.spatial_recheck_time_us = self.spatial_recheck_time_us.saturating_add(time_us);
     }
 }
 
@@ -410,13 +404,13 @@ impl crate::engine::executor::state::ExecutorState for ScanExecState {
         unsafe { self.next(child_ps, scan_slot) }
     }
     fn rows_dispatched(&self) -> u64 {
-        self.rows_dispatched
+        self.rows_dispatched()
     }
     fn batches_executed(&self) -> u64 {
-        self.batches_executed
+        self.batches_executed()
     }
     fn dispatch_time_us(&self) -> u64 {
-        self.dispatch_time_us
+        self.dispatch_time_us()
     }
 }
 

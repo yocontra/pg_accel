@@ -40,10 +40,8 @@ fn pg_accel_device_info() -> TableIterator<
     let gpu_device_name = cchar_buf_to_string(&device.device_name);
     let gpu_available = !gpu_device_name.is_empty() || device.compute_units > 0;
 
-    let memory_model = if profile.unified_memory {
-        "unified"
-    } else if profile.has_gpu && !profile.unified_memory {
-        "discrete"
+    let memory_model = if profile.has_gpu {
+        "explicit_device"
     } else {
         "cpu_only"
     };

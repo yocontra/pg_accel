@@ -10,7 +10,7 @@ CUDA / ROCm / Level Zero / Metal).
 
 The build links against a forked AdaptiveCpp: `yocontra/AdaptiveCpp` branch
 `fork-safe-metal` at commit `ceb641a535b4706f71ded2690baedaf8cf711b30` (plus
-earlier fixes tracked in `TODO.md` Phase 1: `667338f74`, `0992997c`,
+earlier fork/runtime fixes: `667338f74`, `0992997c`,
 `579ee8256`, `ea355d63`, `792d045e8b218241ef54af74244bf5fa92b2f80f`). See `NOTICE` for the full third-party
 attribution list (AdaptiveCpp BSD-2-Clause, soft-fp64 MIT, SLEEF BSL-1.0,
 PostgreSQL headers, pgrx MIT/Apache-2.0).
@@ -227,8 +227,8 @@ parameter selecting between the fp32 and fp64 template instantiations
 (`pgaccel-kernels/src/spatial_predicates.cpp:26-32, :204-210, :240-247, :284-291`).
 fp64 is always available: native on CUDA/ROCm/Level Zero, soft-fp64 on Metal
 via AdaptiveCpp's SSCP lowering (`pgaccel-kernels/src/reduce.cpp:3-9`). The
-soft-fp64 path currently has a known runtime blocker on Metal — the
-HL-extraction phi-default bug tracked in `TODO.md` Phase 1 — but the
+soft-fp64 path currently has a known runtime blocker on Metal in the
+AdaptiveCpp HL-extraction phi-default path, but the
 compile/link path is green on every fp64 kernel.
 
 **Cost model integration.** `DeviceLimits::soft_fp64_cost_multiplier`
@@ -300,7 +300,6 @@ strategies. Each adapter represents one PostgreSQL extension
 ```rust
 ExtensionAdapter {
     name: "postgis",
-    version_query: "SELECT postgis_version()",
     functions: vec![
         FunctionAccelEntry { schema: "public", name: "st_intersects",
                              strategy: AccelStrategy::GpuSpatial },

@@ -3,7 +3,7 @@
 //! Each sub-module exposes an `adapter()` constructor returning an
 //! [`ExtensionAdapter`](crate::engine::registry::ExtensionAdapter). The
 //! registry calls these during [`lazy_init`](crate::engine::registry::lazy_init)
-//! and probes each adapter's `version_query` to decide whether to activate it.
+//! and checks `pg_extension` to decide whether to activate it.
 
 #[allow(dead_code)]
 pub mod extractors;
@@ -18,10 +18,9 @@ use crate::engine::registry::AccelStrategy;
 /// (see [`crate::engine::cost::apply_fp64_penalty`]).
 ///
 /// Classification rules (by adapter):
-/// - **PostGIS spatial** (`GpuSpatial`): `true` — the fp64 recheck path is
-///   enabled for every predicate the adapter advertises
-///   (currently `st_intersects`), and the recheck dominates when the bbox
-///   filter is not selective.
+/// - **PostGIS spatial** (`GpuSpatial`): currently `false` for normal adapter
+///   exposure because generic PostGIS vector predicates are unregistered until
+///   planner-time geometry subtype gates exist.
 /// - **H3** (`GpuH3`): `true` for cell operations that take/return
 ///   double-precision lat/lng (`h3_latlng_to_cell`); `false` for pure
 ///   integer/bit-twiddling cell ops (`h3_grid_distance`, `h3_cell_to_parent`,
@@ -38,7 +37,7 @@ use crate::engine::registry::AccelStrategy;
 #[must_use]
 pub fn uses_fp64(strategy: AccelStrategy, name: &str) -> bool {
     match strategy {
-        AccelStrategy::GpuSpatial => true,
+        AccelStrategy::GpuSpatial => false,
         AccelStrategy::GpuH3 => matches!(name, "h3_latlng_to_cell"),
         AccelStrategy::GpuRaster
         | AccelStrategy::GpuSort
@@ -54,8 +53,8 @@ mod uses_fp64_tests {
     use super::*;
 
     #[test]
-    fn spatial_always_uses_fp64() {
-        assert!(uses_fp64(AccelStrategy::GpuSpatial, "st_intersects"));
+    fn spatial_unregistered_for_normal_exposure() {
+        assert!(!uses_fp64(AccelStrategy::GpuSpatial, "st_intersects"));
     }
 
     #[test]

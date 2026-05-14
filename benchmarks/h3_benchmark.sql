@@ -1,8 +1,8 @@
 -- pg_accel H3 Benchmark Suite
 -- Tests GPU-accelerated H3 discrete global grid functions (GpuH3: h3_latlng_to_cell,
--- h3_grid_distance, h3_cell_to_parent, h3_get_resolution) and BatchedEval H3 functions
--- (h3_cell_to_latlng, h3_cell_to_boundary, h3_grid_disk, h3_compact_cells).
--- Run: psql -h localhost -p 28817 -d postgres -f benchmarks/h3_benchmark.sql
+-- h3_grid_distance, h3_cell_to_parent, h3_get_resolution) and native-path H3
+-- functions with complex outputs (h3_cell_to_latlng, h3_cell_to_boundary).
+-- Run: psql -h localhost -p 28819 -d postgres -f benchmarks/h3_benchmark.sql
 --
 -- Requires: h3 extension (h3-pg) installed.
 
@@ -264,13 +264,13 @@ EXPLAIN (ANALYZE, COSTS OFF, TIMING ON, BUFFERS OFF)
   WHERE a.id <= 1000 AND b.id <= 1000 AND a.id < b.id;
 
 -- ============================================================================
--- BENCHMARK 6: BatchedEval H3 functions (complex output, palloc-heavy)
--- These run on main thread via BatchedEval, not GPU.
+-- BENCHMARK 6: Native-path H3 functions (complex output, palloc-heavy)
+-- These remain on PostgreSQL's executor path.
 -- ============================================================================
 
 \echo ''
 \echo '========================================'
-\echo 'BENCH 6: BatchedEval H3 functions'
+\echo 'BENCH 6: Native-path H3 functions'
 \echo '========================================'
 
 SET pg_accel.enabled = off;

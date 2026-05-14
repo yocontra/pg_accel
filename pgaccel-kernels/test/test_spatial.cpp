@@ -627,6 +627,42 @@ static void test_point_in_ring_fp64_gpu_dispatch() {
 // point_in_polygon_bulk tests
 // ---------------------------------------------------------------------------
 
+struct PipCounts {
+  size_t inside = 0;
+  size_t outside = 0;
+  size_t uncertain = 0;
+  size_t untouched = 0;
+};
+
+static PipCounts count_pip_results(const std::vector<int8_t>& results) {
+  PipCounts counts;
+  for (int8_t r : results) {
+    if (r == 1) {
+      counts.inside++;
+    } else if (r == -1) {
+      counts.outside++;
+    } else if (r == 0) {
+      counts.uncertain++;
+    } else {
+      counts.untouched++;
+    }
+  }
+  return counts;
+}
+
+static std::vector<float> make_regular_ring(size_t unique_vertices, float radius) {
+  constexpr float two_pi = 6.28318530717958647692f;
+  std::vector<float> ring((unique_vertices + 1) * 2);
+  for (size_t i = 0; i < unique_vertices; ++i) {
+    const float angle = two_pi * static_cast<float>(i) / static_cast<float>(unique_vertices);
+    ring[i * 2] = radius * std::cos(angle);
+    ring[i * 2 + 1] = radius * std::sin(angle);
+  }
+  ring[unique_vertices * 2] = ring[0];
+  ring[unique_vertices * 2 + 1] = ring[1];
+  return ring;
+}
+
 static void test_point_in_polygon_bulk_simple_path() {
   printf("--- point_in_polygon_bulk: simple kernel path ---\n");
 
@@ -650,19 +686,65 @@ static void test_point_in_polygon_bulk_simple_path() {
   ASSERT_EQ("simple PIP inside[2]", results[2], 1);
 }
 
+static void test_point_in_polygon_bulk_simple_slab_large_batch() {
+  printf("--- point_in_polygon_bulk: simple slab large batch ---\n");
+
+  constexpr size_t point_count = 100000;
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  float diamond[] = {
+      0.0f, 1.0f, 1.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f, 0.0f, 1.0f,
+  };
+  uint32_t rings[] = {0};
+
+  std::vector<float> pts(point_count * 2);
+  for (size_t i = 0; i < point_count; ++i) {
+    switch (i % 5) {
+      case 0:
+        pts[i * 2] = 0.0f;
+        pts[i * 2 + 1] = 0.0f;
+        break;
+      case 1:
+        pts[i * 2] = 0.40f;
+        pts[i * 2 + 1] = 0.20f;
+        break;
+      case 2:
+        pts[i * 2] = 0.90f;
+        pts[i * 2 + 1] = 0.90f;
+        break;
+      case 3:
+        pts[i * 2] = -0.90f;
+        pts[i * 2 + 1] = -0.90f;
+        break;
+      default:
+        pts[i * 2] = 2.0f;
+        pts[i * 2 + 1] = 2.0f;
+        break;
+    }
+  }
+
+  std::vector<int8_t> results(point_count, 99);
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts.data(), point_count, bbox, diamond, 5, rings,
+                                                   1, results.data());
+
+  ASSERT_EQ("simple slab status OK", s, PGACCEL_OK);
+  const uint64_t after = pgaccel_gpu_exec_count();
+  ASSERT_EQ("simple slab dispatched one GPU kernel", (int)(after == before + 1), 1);
+
+  const PipCounts counts = count_pip_results(results);
+  ASSERT_EQ("simple slab inside count", counts.inside, (size_t)40000);
+  ASSERT_EQ("simple slab outside count", counts.outside, (size_t)60000);
+  ASSERT_EQ("simple slab uncertain count", counts.uncertain, (size_t)0);
+  ASSERT_EQ("simple slab wrote every result", counts.untouched, (size_t)0);
+}
+
 static void test_point_in_polygon_bulk_coop_path() {
   printf("--- point_in_polygon_bulk: cooperative kernel path ---\n");
 
   constexpr size_t unique_vertices = 1024;
-  constexpr float two_pi = 6.28318530717958647692f;
-  std::vector<float> ring((unique_vertices + 1) * 2);
-  for (size_t i = 0; i < unique_vertices; ++i) {
-    const float angle = two_pi * static_cast<float>(i) / static_cast<float>(unique_vertices);
-    ring[i * 2] = std::cos(angle);
-    ring[i * 2 + 1] = std::sin(angle);
-  }
-  ring[unique_vertices * 2] = ring[0];
-  ring[unique_vertices * 2 + 1] = ring[1];
+  std::vector<float> ring = make_regular_ring(unique_vertices, 1.0f);
 
   float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
   uint32_t rings[] = {0};
@@ -682,6 +764,66 @@ static void test_point_in_polygon_bulk_coop_path() {
   ASSERT_EQ("coop PIP in-bbox outside", results[1], -1);
   ASSERT_EQ("coop PIP bbox outside", results[2], -1);
   ASSERT_EQ("coop PIP inside[3]", results[3], 1);
+}
+
+static void test_point_in_polygon_bulk_coop_slab_large_batch_with_hole() {
+  printf("--- point_in_polygon_bulk: cooperative slab large batch with hole ---\n");
+
+  constexpr size_t point_count = 100000;
+  constexpr size_t unique_vertices = 2048;
+
+  std::vector<float> polygon = make_regular_ring(unique_vertices, 1.0f);
+  const size_t hole_offset = polygon.size() / 2;
+  const float hole[] = {
+      -0.15f, -0.15f, 0.15f, -0.15f, 0.15f, 0.15f, -0.15f, 0.15f, -0.15f, -0.15f,
+  };
+  polygon.insert(polygon.end(), hole, hole + sizeof(hole) / sizeof(hole[0]));
+
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  uint32_t rings[] = {0, static_cast<uint32_t>(hole_offset)};
+
+  std::vector<float> pts(point_count * 2);
+  for (size_t i = 0; i < point_count; ++i) {
+    switch (i % 5) {
+      case 0:
+        pts[i * 2] = 0.50f;
+        pts[i * 2 + 1] = 0.00f;
+        break;
+      case 1:
+        pts[i * 2] = -0.50f;
+        pts[i * 2 + 1] = 0.25f;
+        break;
+      case 2:
+        pts[i * 2] = 0.00f;
+        pts[i * 2 + 1] = 0.00f;
+        break;
+      case 3:
+        pts[i * 2] = 0.95f;
+        pts[i * 2 + 1] = 0.95f;
+        break;
+      default:
+        pts[i * 2] = 1.50f;
+        pts[i * 2 + 1] = 0.00f;
+        break;
+    }
+  }
+
+  std::vector<int8_t> results(point_count, 99);
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts.data(), point_count, bbox, polygon.data(),
+                                                   polygon.size() / 2, rings, 2, results.data());
+
+  ASSERT_EQ("coop slab status OK", s, PGACCEL_OK);
+  const uint64_t after = pgaccel_gpu_exec_count();
+  ASSERT_EQ("coop slab dispatched one GPU kernel", (int)(after == before + 1), 1);
+
+  const PipCounts counts = count_pip_results(results);
+  ASSERT_EQ("coop slab inside count", counts.inside, (size_t)40000);
+  ASSERT_EQ("coop slab outside count", counts.outside, (size_t)60000);
+  ASSERT_EQ("coop slab uncertain count", counts.uncertain, (size_t)0);
+  ASSERT_EQ("coop slab wrote every result", counts.untouched, (size_t)0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,7 +1276,9 @@ int main() {
   test_point_in_ring_fp64_bulk();
   test_point_in_ring_fp64_gpu_dispatch();
   test_point_in_polygon_bulk_simple_path();
+  test_point_in_polygon_bulk_simple_slab_large_batch();
   test_point_in_polygon_bulk_coop_path();
+  test_point_in_polygon_bulk_coop_slab_large_batch_with_hole();
 
   test_sphere_distance_basic();
   test_sphere_distance_edge_cases();

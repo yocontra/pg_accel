@@ -1,8 +1,12 @@
 #include <sycl/sycl.hpp>
 
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <new>
 #include <stdexcept>
+#include <vector>
 
 #include "pgaccel_ffi.h"
 
@@ -85,6 +89,75 @@ static sycl::queue& get_queue() {
   return *g_queue;
 }
 
+static constexpr size_t PGACCEL_MAP_ALGEBRA_MAX_BANDS = 8;
+static constexpr int PGACCEL_MAP_ALGEBRA_MAX_STACK = 16;
+
+static pgaccel_status validate_map_algebra_expr(const void* const* band_pixels,
+                                                const pgaccel_expr* expr) {
+  if (expr->inst_count == 0) {
+    return PGACCEL_ERROR;
+  }
+  if (expr->band_count == 0 || expr->band_count > PGACCEL_MAP_ALGEBRA_MAX_BANDS) {
+    return PGACCEL_ERROR_UNSUPPORTED;
+  }
+  for (size_t b = 0; b < expr->band_count; ++b) {
+    if (band_pixels[b] == nullptr) {
+      return PGACCEL_ERROR_INIT;
+    }
+  }
+
+  int depth = 0;
+  for (size_t i = 0; i < expr->inst_count; ++i) {
+    const pgaccel_expr_inst inst = expr->instructions[i];
+    switch (inst.op) {
+      case PGACCEL_OP_LOAD_BAND:
+        if (inst.arg.band_index < 0 ||
+            static_cast<size_t>(inst.arg.band_index) >= expr->band_count) {
+          return PGACCEL_ERROR_UNSUPPORTED;
+        }
+        ++depth;
+        break;
+      case PGACCEL_OP_LOAD_CONST:
+        ++depth;
+        break;
+      case PGACCEL_OP_SQRT:
+      case PGACCEL_OP_ABS:
+      case PGACCEL_OP_LOG:
+        if (depth < 1) {
+          return PGACCEL_ERROR_UNSUPPORTED;
+        }
+        break;
+      case PGACCEL_OP_ADD:
+      case PGACCEL_OP_SUB:
+      case PGACCEL_OP_MUL:
+      case PGACCEL_OP_DIV:
+      case PGACCEL_OP_POW:
+      case PGACCEL_OP_GT:
+      case PGACCEL_OP_LT:
+      case PGACCEL_OP_EQ:
+        if (depth < 2) {
+          return PGACCEL_ERROR_UNSUPPORTED;
+        }
+        --depth;
+        break;
+      case PGACCEL_OP_SELECT:
+        if (depth < 3) {
+          return PGACCEL_ERROR_UNSUPPORTED;
+        }
+        depth -= 2;
+        break;
+      default:
+        return PGACCEL_ERROR_UNSUPPORTED;
+    }
+
+    if (depth > PGACCEL_MAP_ALGEBRA_MAX_STACK) {
+      return PGACCEL_ERROR_UNSUPPORTED;
+    }
+  }
+
+  return depth == 1 ? PGACCEL_OK : PGACCEL_ERROR_UNSUPPORTED;
+}
+
 /* map_algebra GPU dispatcher.
  *
  * Per CLAUDE.md rules 11/12 there is no host-loop fast-path or
@@ -114,6 +187,11 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
   // unsupported-input route, NOT a silent CPU compute path).
   if (pixel_type != PGACCEL_PT_FLOAT32) {
     return PGACCEL_ERROR_UNSUPPORTED;
+  }
+
+  const pgaccel_status validation = validate_map_algebra_expr(band_pixels, expr);
+  if (validation != PGACCEL_OK) {
+    return validation;
   }
 
   size_t band_count = expr->band_count;
@@ -165,7 +243,7 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
       // Copy band pointers to device — we only support up to 8
       // bands in the kernel (fits in a fixed-size array, avoids
       // extra pointer indirection through device memory).
-      constexpr size_t MAX_BANDS = 8;
+      constexpr size_t MAX_BANDS = PGACCEL_MAP_ALGEBRA_MAX_BANDS;
       if (band_count > MAX_BANDS) {
         for (auto* p : d_bands)
           sycl::free(p, q);
@@ -300,9 +378,8 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
       return PGACCEL_OK;
     } catch (const std::exception& e) {
       fprintf(stderr, "pgaccel: SYCL map_algebra failed: %s\n", e.what());
-      // No CPU fallback (CLAUDE.md rule 11). Surface the kernel failure
-      // to the caller so the planner / executor can route to PG instead
-      // of silently miscomputing on CPU. Suppress the stats counter so
+      // Surface the kernel failure to the caller so the planner / executor
+      // can route to PG instead of silently miscomputing. Suppress the stats counter so
       // EXPLAIN ANALYZE doesn't credit a failed dispatch.
       return PGACCEL_ERROR;
     }

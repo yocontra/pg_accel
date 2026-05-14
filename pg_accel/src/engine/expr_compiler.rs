@@ -124,9 +124,9 @@ pub enum CompiledExpr {
     Template(TemplateKernel),
     /// General bytecode program for the GPU interpreter.
     Bytecode(ExprProgram),
-    /// Expression cannot be evaluated on GPU — defer to PG's scalar
-    /// executor (`ExecEvalExpr`). This is not CPU reimplementation;
-    /// PG handles the expression natively with zero overhead.
+    /// Expression cannot be evaluated on GPU. Planner-time callers should
+    /// decline pg_accel; executor-time callers treat this as an error rather
+    /// than running `ExecEvalExpr` inside pg_accel.
     DeferToPg,
 }
 

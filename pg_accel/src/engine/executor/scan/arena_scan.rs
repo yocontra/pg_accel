@@ -41,15 +41,12 @@ impl ScanExecState {
             // the context's block list, instead of O(n) individual pfree calls.
             unsafe { pg_sys::MemoryContextReset(self.batch_mcxt) };
         }
-        self.tuple_buffer.clear();
-        self.datum_buffer.clear();
-        self.result_mask.clear();
-        self.result_pos = 0;
+        self.clear_batch_buffers();
 
         let target = self.batch_size.max(gucs::min_batch_size().max(1) as usize);
 
         if self.scan_desc.is_null() {
-            // Child plan scan (spatial/h3/raster or legacy).
+            // Child plan scan (spatial/h3/raster).
             unsafe { self.fill_batch_child(child_ps, target) };
         } else {
             // Direct heap scan (GpuExpr with scanrelid > 0).

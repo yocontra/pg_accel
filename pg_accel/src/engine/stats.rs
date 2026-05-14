@@ -1,7 +1,7 @@
 //! Per-backend acceleration statistics.
 //!
 //! Each PostgreSQL backend is a separate process with a single thread, so we
-//! use `thread_local!` + `RefCell` for the legacy cumulative struct. Counters
+//! use `thread_local!` + `RefCell` for cumulative per-backend stats. Counters
 //! added for benchmark-mode dispatch assertions (planner rejects, GPU buffer
 //! cache hits/misses, degenerate-guard trips) use `AtomicU64` so cheap
 //! snapshots can be taken from the SRF or helper SQL functions without a
@@ -22,7 +22,8 @@ pub struct AccelStats {
     pub total_dispatch_us: u64,
     pub stock_exec_count: u64,
     pub gpu_rows_processed: u64,
-    /// Rows that required CPU recheck after GPU evaluation.
+    /// Rows the GPU marked uncertain. GPU-only execution should reject these
+    /// instead of rechecking on CPU.
     pub gpu_uncertain_count: u64,
     pub thread_budget_exhausted_count: u64,
     pub planner_hook_calls: u64,

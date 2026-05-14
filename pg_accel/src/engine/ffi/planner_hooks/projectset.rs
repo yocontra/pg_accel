@@ -199,6 +199,15 @@ pub(super) unsafe fn try_inject_function_scan(
         }
         // SAFETY: tag confirmed Const.
         let cst = arg_node.cast::<pg_sys::Const>();
+        if unsafe { (*cst).constisnull } {
+            pgrx::debug1!(
+                "pg_accel: projectset hook: NULL Const arg {} for fn_oid={}; \
+                 declining until const nullness is serialized",
+                i,
+                u32::from(fn_oid),
+            );
+            return;
+        }
         let datum = unsafe { (*cst).constvalue };
         let typ_oid = unsafe { (*cst).consttype };
         // PG Datum is `usize` on 64-bit; store as i64 to fit the

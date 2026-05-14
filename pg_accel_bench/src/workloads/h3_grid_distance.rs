@@ -1,12 +1,12 @@
 use super::Workload;
 
-/// Tests pairwise h3_grid_distance through the GPU H3 distance kernel.
+/// Quarantine guard for standalone h3_grid_distance.
 ///
-/// Baseline schema-qualifies as `public.h3_grid_distance` and relies
-/// on the runner's `pg_accel.enabled = off` GUC to bypass pg_accel's
-/// planner hook. h3-pg does not ship an alias for this function, so
-/// name-based adapter bypass (as done in h3_bulk) is not available.
-/// See `h3_variants.rs` for the full rationale.
+/// This scalar H3 operation is near parity as a standalone GPU path, so the
+/// adapter must not expose it to normal planning. The accel-side query keeps
+/// the unqualified spelling to catch accidental re-registration, while the
+/// baseline keeps `pg_accel.enabled = off` and schema-qualifies the native
+/// h3-pg call. See `h3_variants.rs` for the full rationale.
 pub struct H3GridDistance;
 
 impl Workload for H3GridDistance {
@@ -15,8 +15,9 @@ impl Workload for H3GridDistance {
     }
 
     fn description(&self) -> &'static str {
-        "pairwise h3_grid_distance — tests GPU H3 distance kernel. \
-         Baseline uses stock h3-pg via `public.h3_grid_distance`."
+        "pairwise h3_grid_distance native-decline guard — near-parity scalar \
+         H3 must stay out of standalone GpuH3 exposure. Baseline uses stock \
+         h3-pg via `public.h3_grid_distance`."
     }
 
     fn category(&self) -> &'static str {

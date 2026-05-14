@@ -16,7 +16,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <numeric>
+#include <type_traits>
 
 #include "pgaccel_ffi.h"
 
@@ -37,8 +39,8 @@ static sycl::queue* get_queue() {
 
 // ---------------------------------------------------------------------------
 // Manual tree reduction via nd_range + local_accessor + barrier.
-// AdaptiveCpp Metal requires sycl::malloc_device/shared for GPU-visible data;
-// raw host pointers silently read as zero even on Apple Silicon unified memory.
+// AdaptiveCpp Metal requires sycl::malloc_device for GPU-visible data; raw host
+// pointers can otherwise silently read as zero on shared-memory systems.
 // ---------------------------------------------------------------------------
 
 static constexpr size_t WG_SIZE = 256;
@@ -49,9 +51,8 @@ static constexpr size_t WG_SIZE = 256;
 template <typename T, typename BinOp>
 pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count, T* result, T identity,
                                 BinOp op) {
-  // NOTE: Raw host pointers are NOT accessible from Metal GPU kernels even
-  // on Apple Silicon unified memory — SYCL requires malloc_shared/malloc_device.
-  // Always copy via malloc_device.
+  // NOTE: Raw host pointers are not accessible from Metal GPU kernels. Always
+  // copy through malloc_device.
   T* d_data = sycl::malloc_device<T>(count, q);
   if (!d_data)
     return PGACCEL_OOM;
@@ -419,6 +420,66 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data, size_t cou
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
+extern "C" pgaccel_status pgaccel_reduce_min_i64(const int64_t* data, size_t count,
+                                                 int64_t* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    *result = 0;
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0];
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = reduce_min_sycl<int64_t>(*q, data, count, result);
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception&) {
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+extern "C" pgaccel_status pgaccel_reduce_max_i64(const int64_t* data, size_t count,
+                                                 int64_t* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    *result = 0;
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0];
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = reduce_max_sycl<int64_t>(*q, data, count, result);
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception&) {
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
 // ---------------------------------------------------------------------------
 // Public API — mask popcount (all platforms)
 // ---------------------------------------------------------------------------
@@ -638,17 +699,39 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data, size_t co
   if (!data)
     return PGACCEL_ERROR;
 
-  pgaccel_status st = pgaccel_reduce_sum_f64(data, count, out_sum);
-  if (st != PGACCEL_OK)
-    return st;
-  st = pgaccel_reduce_min_f64(data, count, out_min);
-  if (st != PGACCEL_OK)
-    return st;
-  st = pgaccel_reduce_max_f64(data, count, out_max);
-  if (st != PGACCEL_OK)
-    return st;
-  *out_count = static_cast<int64_t>(count);
-  return PGACCEL_OK;
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (std::strcmp(caps.backend_name, "metal") == 0) {
+    // AdaptiveCpp Metal SSCP currently mis-assigns resource locations for the
+    // soft-fp64 struct-valued multi-reduce kernel. Keep this path GPU-only by
+    // composing the proven typed f64 kernels instead of falling back to CPU.
+    pgaccel_status st = pgaccel_reduce_sum_f64(data, count, out_sum);
+    if (st != PGACCEL_OK)
+      return st;
+    st = pgaccel_reduce_min_f64(data, count, out_min);
+    if (st != PGACCEL_OK)
+      return st;
+    st = pgaccel_reduce_max_f64(data, count, out_max);
+    if (st != PGACCEL_OK)
+      return st;
+    *out_count = static_cast<int64_t>(count);
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st =
+          tree_reduce_multi_sycl<double>(*q, data, count, out_sum, out_min, out_max, out_count);
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: reduce_multi_f64 SYCL failed: %s\n", e.what());
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data, size_t count,

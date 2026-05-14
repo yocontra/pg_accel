@@ -287,8 +287,7 @@ pub fn encode_multipolygon(
 //                           OUT holes polygon[]) RETURNS SETOF record
 // ```
 //
-// Layout per `src/include/utils/geo_decls.h:151-157` (PG17,
-// `/opt/homebrew/include/postgresql@17/server/utils/geo_decls.h:151`):
+// Layout per `src/include/utils/geo_decls.h:151-157` in PostgreSQL 17:
 //
 // ```c
 // typedef struct {

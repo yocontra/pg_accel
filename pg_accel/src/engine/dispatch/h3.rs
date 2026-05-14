@@ -3,12 +3,11 @@
 use crate::adapters::extractors::array::{ParseError as ArrayParseError, parse_array};
 use crate::adapters::extractors::geometry::{encode_pg_polygon, extract_geometry};
 use crate::engine::gucs;
-use crate::engine::registry;
 use crate::gpu;
 use crate::gpu::three_layer::GeomType;
 
 #[allow(unused_imports)]
-use super::{DispatchResult, FcinfoWith2Args};
+use super::{DispatchResult, H3DispatchOp};
 
 // ---------------------------------------------------------------------------
 // Strategy: GpuH3
@@ -32,12 +31,9 @@ pub unsafe fn dispatch_gpu_h3(
     batch: &[(pgrx::pg_sys::Datum, bool)],
     _fn_info: &pgrx::pg_sys::FmgrInfo,
     _is_strict: bool,
-    fn_oid: pgrx::pg_sys::Oid,
+    op: H3DispatchOp,
     qual_datums: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)],
 ) -> DispatchResult {
-    // Look up the function name to route to the correct GPU kernel.
-    let fn_name = registry::global_registry().lookup(fn_oid).map(|e| e.name);
-
     // First constant arg, if present (most H3 ops take a single scalar
     // const after the cell column: k for grid_disk, res for parent, etc.).
     let qual_datum: Option<(pgrx::pg_sys::Datum, bool)> =
@@ -51,17 +47,17 @@ pub unsafe fn dispatch_gpu_h3(
     // here: the boundary / multi_polygon ops emit raw lat/lng arrays
     // that need PostGIS GSERIALIZED encoding which the codebase does not
     // expose today (see adapters/h3.rs module doc + Phase B follow-up).
-    match fn_name {
-        Some("h3_grid_disk") => {
+    match op {
+        H3DispatchOp::GridDisk => {
             return unsafe { dispatch_gpu_h3_var_grid_disk(batch, qual_datum) };
         }
-        Some("h3_grid_ring_unsafe") => {
+        H3DispatchOp::GridRingUnsafe => {
             return unsafe { dispatch_gpu_h3_var_grid_ring_unsafe(batch, qual_datum) };
         }
-        Some("h3_cell_to_children") => {
+        H3DispatchOp::CellToChildren => {
             return unsafe { dispatch_gpu_h3_var_cell_to_children(batch, qual_datum) };
         }
-        Some("h3_cell_to_boundary") => {
+        H3DispatchOp::CellToBoundary => {
             // Phase 2 F3: per-cell hexagon/pentagon boundary -> POLYGON
             // geometry. Single output Datum per input row. The boundary
             // kernel emits raw lat/lng coord pairs in DOUBLE units; we
@@ -69,7 +65,7 @@ pub unsafe fn dispatch_gpu_h3(
             // and wrap the resulting bytes in a PG varlena.
             return unsafe { dispatch_gpu_h3_cell_to_boundary(batch) };
         }
-        Some("h3_cells_to_multi_polygon") => {
+        H3DispatchOp::CellsToMultiPolygon => {
             // Phase 2 B3: per-row bigint[] cell-array -> MULTIPOLYGON
             // geometry. Walks each row's array via `parse_array`,
             // collects cells into a u64 buffer, runs the two-pass kernel
@@ -77,7 +73,7 @@ pub unsafe fn dispatch_gpu_h3(
             // CSR as a GSERIALIZED MULTIPOLYGON via the F2 encoder.
             return unsafe { dispatch_gpu_h3_cells_to_multi_polygon(batch) };
         }
-        Some("h3_polyfill") => {
+        H3DispatchOp::Polyfill => {
             // Phase 2 F3: polygon geometry -> SETOF h3index. The geometry
             // arg is a per-row column (NOT a plan-time const); we extract
             // each row's polygon via `extract_geometry` and call the
@@ -93,7 +89,7 @@ pub unsafe fn dispatch_gpu_h3(
 
     // h3_latlng_to_cell takes point geometries, not cell indices —
     // handle it separately with geometry extraction.
-    if fn_name == Some("h3_latlng_to_cell") {
+    if op == H3DispatchOp::LatLngToCell {
         let resolution = qual_datum
             .filter(|(_, is_null)| !is_null)
             .map(|(d, _)| d.value() as i32);
@@ -170,26 +166,33 @@ pub unsafe fn dispatch_gpu_h3(
     }
 
     // Route to the correct GPU kernel based on function name.
-    let gpu_results: Option<GpuH3Result> = match fn_name {
+    //
+    // This match is deliberately wider than the normal planner registry in
+    // `adapters/h3.rs`. Cheap scalar H3 kernels are kept here so a future
+    // fused GPU pipeline can reuse them, but adapter registration remains the
+    // admission gate for standalone PostgreSQL plans.
+    let gpu_results: Option<GpuH3Result> = match op {
         // 1-arg: cell → i32 resolution
-        Some("h3_get_resolution") => {
+        H3DispatchOp::GetResolution => {
             crate::gpu::h3_get_resolution_bulk(&cells).map(GpuH3Result::I32)
         }
         // 1-arg: cell → i32 base cell index
-        Some("h3_get_base_cell") => crate::gpu::h3_get_base_cell_bulk(&cells).map(GpuH3Result::I32),
+        H3DispatchOp::GetBaseCell => {
+            crate::gpu::h3_get_base_cell_bulk(&cells).map(GpuH3Result::I32)
+        }
         // 1-arg: cell → bool valid; mapped via Bool variant for the
         // result-emit loop to construct a PG bool Datum.
-        Some("h3_is_valid_cell") => {
+        H3DispatchOp::IsValidCell => {
             crate::gpu::h3_is_valid_cell_bulk(&cells).map(GpuH3Result::Bool)
         }
         // 1-arg: cell → bool pentagon (Bool variant for PG bool Datum)
-        Some("h3_is_pentagon") => crate::gpu::h3_is_pentagon_bulk(&cells).map(GpuH3Result::Bool),
+        H3DispatchOp::IsPentagon => crate::gpu::h3_is_pentagon_bulk(&cells).map(GpuH3Result::Bool),
         // 1-arg: cell → bool resolution-class-III (Bool variant for PG bool Datum)
-        Some("h3_is_res_class_iii") => {
+        H3DispatchOp::IsResClassIii => {
             crate::gpu::h3_is_res_class_iii_bulk(&cells).map(GpuH3Result::Bool)
         }
         // 2-arg: cell + resolution constant → parent cell (u64)
-        Some("h3_cell_to_parent") => {
+        H3DispatchOp::CellToParent => {
             let res = qual_datum
                 .filter(|(_, is_null)| !is_null)
                 .map(|(d, _)| d.value() as i32);
@@ -198,7 +201,7 @@ pub unsafe fn dispatch_gpu_h3(
             })
         }
         // 2-arg: cell + resolution constant → center child cell (u64)
-        Some("h3_cell_to_center_child") => {
+        H3DispatchOp::CellToCenterChild => {
             let res = qual_datum
                 .filter(|(_, is_null)| !is_null)
                 .map(|(d, _)| d.value() as i32);
@@ -207,7 +210,7 @@ pub unsafe fn dispatch_gpu_h3(
             })
         }
         // 2-arg: cell_a + cell_b constant → distance (i32)
-        Some("h3_grid_distance") => {
+        H3DispatchOp::GridDistance => {
             let other_cell = qual_datum
                 .filter(|(_, is_null)| !is_null)
                 .map(|(d, _)| d.value() as u64);
@@ -225,33 +228,33 @@ pub unsafe fn dispatch_gpu_h3(
     // Supported function + missing qual arg → defer (input gate).
     // Supported function + present args → GPU kernel MUST succeed (rule 11).
     let Some(gpu_res) = gpu_results else {
-        match fn_name {
-            Some("h3_get_resolution") => {
+        match op {
+            H3DispatchOp::GetResolution => {
                 pgrx::error!(
                     "pg_accel: h3_get_resolution GPU kernel failed; refusing CPU fallback (rule 11)"
                 );
             }
-            Some("h3_get_base_cell") => {
+            H3DispatchOp::GetBaseCell => {
                 pgrx::error!(
                     "pg_accel: h3_get_base_cell GPU kernel failed; refusing CPU fallback (rule 11)"
                 );
             }
-            Some("h3_is_valid_cell") => {
+            H3DispatchOp::IsValidCell => {
                 pgrx::error!(
                     "pg_accel: h3_is_valid_cell GPU kernel failed; refusing CPU fallback (rule 11)"
                 );
             }
-            Some("h3_is_pentagon") => {
+            H3DispatchOp::IsPentagon => {
                 pgrx::error!(
                     "pg_accel: h3_is_pentagon GPU kernel failed; refusing CPU fallback (rule 11)"
                 );
             }
-            Some("h3_is_res_class_iii") => {
+            H3DispatchOp::IsResClassIii => {
                 pgrx::error!(
                     "pg_accel: h3_is_res_class_iii GPU kernel failed; refusing CPU fallback (rule 11)"
                 );
             }
-            Some("h3_cell_to_parent") => {
+            H3DispatchOp::CellToParent => {
                 if qual_datum.is_some_and(|(_, n)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_cell_to_parent GPU kernel failed; refusing CPU fallback (rule 11)"
@@ -259,7 +262,7 @@ pub unsafe fn dispatch_gpu_h3(
                 }
                 return DispatchResult::Deferred;
             }
-            Some("h3_cell_to_center_child") => {
+            H3DispatchOp::CellToCenterChild => {
                 if qual_datum.is_some_and(|(_, n)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_cell_to_center_child GPU kernel failed; refusing CPU fallback (rule 11)"
@@ -267,7 +270,7 @@ pub unsafe fn dispatch_gpu_h3(
                 }
                 return DispatchResult::Deferred;
             }
-            Some("h3_grid_distance") => {
+            H3DispatchOp::GridDistance => {
                 if qual_datum.is_some_and(|(_, n)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_grid_distance GPU kernel failed; refusing CPU fallback (rule 11)"
@@ -481,10 +484,8 @@ unsafe fn dispatch_gpu_h3_var_cell_to_children(
 ///
 /// **Note:** PG's built-in `polygon` type does not carry an SRID
 /// (POLYGON struct is `npts + bbox + Point[]` with no SRID slot — see
-/// utils/geo_decls.h:151-157). The SRID is only consumed by the legacy
-/// GSERIALIZED encoders that the h3 dispatch arms used to call; the
-/// active encoders (`encode_pg_polygon` / `encode_pg_polygon_array`)
-/// ignore it.
+/// utils/geo_decls.h:151-157). The active encoders
+/// (`encode_pg_polygon` / `encode_pg_polygon_array`) ignore the SRID.
 #[allow(dead_code)]
 const H3_BOUNDARY_SRID: i32 = 4326;
 

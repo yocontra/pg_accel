@@ -8,7 +8,9 @@ operations, and batched executor nodes. Rust (pgrx 0.17) + C++/SYCL (AdaptiveCpp
 ### Prerequisites
 
 - Rust stable (via asdf or rustup)
-- PostgreSQL 17
+- Repo-local PostgreSQL built from source via `just setup-pg-source`.
+  PG17 is the default tested major; preview majors are opt-in until their
+  pgrx/ABI support is clean.
 - cmake (for GPU kernels)
 - [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.17
 - [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
@@ -16,17 +18,18 @@ operations, and batched executor nodes. Rust (pgrx 0.17) + C++/SYCL (AdaptiveCpp
 ### Quick Start
 
 ```bash
-just setup          # Install deps, init pgrx for PG 17
-just setup-gpu      # Optional: install AdaptiveCpp with Metal backend
+just setup-system-deps  # Print distro/toolchain prerequisites
+just setup              # Build source PostgreSQL and initialize pgrx
+ACPP_BACKEND=cuda just setup-gpu   # Linux/NVIDIA
+# or: ACPP_BACKEND=metal just setup-gpu
 ```
 
 ### Manual Setup
 
 ```bash
-brew install postgresql@17
-cargo install cargo-pgrx --locked
-cargo install cargo-deny --locked
-cargo pgrx init --pg17 $(brew --prefix postgresql@17)/bin/pg_config
+just setup-pg-source 17
+just setup-pgrx 17
+ACPP_BACKEND=cuda just setup-gpu
 ```
 
 ## Build Commands
@@ -39,7 +42,7 @@ All commands are in the [Justfile](Justfile):
 | `just lint` | Lint (`cargo clippy -- -D warnings`) |
 | `just check` | Type check (`cargo check --all-features`) |
 | `just deny` | License + advisory check (`cargo deny check`) |
-| `just test` | Unit tests (`cargo pgrx test pg17`) |
+| `just test` | Unit tests across the supported PostgreSQL matrix |
 | `just ci` | Full local CI: lint + test |
 | `just package` | Build installable `.so` (`cargo pgrx package`) |
 | `just gpu-build` | cmake build for GPU kernels (requires AdaptiveCpp) |
@@ -52,7 +55,8 @@ to use. To add support for a new extension (e.g., pgvector):
 
 1. Create a new file in `src/adapters/` (e.g., `pgvector.rs`).
 
-2. Define an `ExtensionAdapter` with a version query and function list:
+2. Define an `ExtensionAdapter` with a name and function list. The name must
+   match `pg_extension.extname`; the registry uses `pg_extension` for activation.
 
 ```rust
 use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
@@ -60,7 +64,6 @@ use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntr
 pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
         name: "pgvector",
-        version_query: "SELECT extversion FROM pg_extension WHERE extname = 'vector'",
         functions: vec![
             FunctionAccelEntry {
                 schema: "public",
@@ -164,17 +167,16 @@ Read `CLAUDE.md` for the full safety rules and architecture details.
 
 1. **All PG C functions on main backend thread only.** Never call PG functions from rayon.
 2. **rayon is only for**: GPU kernel orchestration, sort-key extraction, top-k merge.
-3. **Two strategies only**: `BatchedEval` (main thread) and `Gpu*` (GPU kernel + CPU recheck).
+3. **GPU strategies only**: registered acceleration paths must run a GPU kernel; uncertain rows reject/error.
 4. **Custom Scan has three vtables**: `CustomPathMethods`, `CustomScanMethods`, `CustomExecMethods`. Never confuse them.
 5. **No `unwrap()` outside tests.** Use `unwrap_or`, `?`, or explicit error handling.
 6. **`CHECK_FOR_INTERRUPTS()` between batches** on main thread.
 7. **Thread budget via shared memory LWLock.** Always release in `before_shmem_exit`.
 8. **`PARALLEL SAFE` != thread-safe.** PG parallel = forked processes, not threads.
 
-## Agent Coordination
+## Coordination
 
-pg_accel uses a multi-agent development model:
-
-- **10 agents per phase.** Each owns specific files — no two agents edit the same file.
-- **Plans live in `plans/`.** Each agent updates their checklist and implementation log.
-- **Phase gates are binary.** All items must pass before the next phase starts.
+For larger changes, split work by ownership boundary and keep each patch focused.
+Do not let two concurrent changes edit the same file unless the integration
+owner has explicitly planned the merge. Public pull requests should include the
+motivation, affected subsystems, test coverage, and any runtime behavior notes.

@@ -196,9 +196,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
     // Phase 2 F3: FunctionScan injection. Fires on RTE_FUNCTION rels with a
-    // registered SRF / record-returning function (h3_polyfill,
+    // registered SRF / record-returning function (h3_grid_disk,
     // h3_cell_to_boundary, st_summarystats). The injector itself rejects
-    // other rtekinds, so this is a cheap dispatch.
+    // other rtekinds, so this is a cheap dispatch. h3_polyfill is not
+    // registered until pg_accel covers h3-pg's polygon[] holes signature.
     // SAFETY: All pointers are valid planner arguments.
     unsafe { super::projectset::try_inject_function_scan(root, rel, rti, rte) };
 
@@ -454,15 +455,14 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // Custom Scan appear cheaper than the index scan it was based on,
     // causing regressions when the index scan would be far faster.
     //
-    // BitmapHeapScan fallback (TODO.md Phase 4 "BitmapHeapScan
-    // injection"): when PG has pruned the seq scan in favour of a
-    // bitmap-driven plan (typical for selective predicates), try
-    // wrapping the cheapest `T_BitmapHeapPath` instead. The bitmap
-    // child still pre-filters via the index, and the GPU then evaluates
-    // the full qual on the bitmap-filtered rows. The recheck qual
-    // PG would normally re-run on the heap is stripped in
-    // `make_custom_scan_plan` (custom_scan/mod.rs) because the GPU
-    // evaluates the same predicate.
+    // BitmapHeapScan injection: when PG has pruned the seq scan in favour
+    // of a bitmap-driven plan (typical for selective predicates), try
+    // wrapping the cheapest `T_BitmapHeapPath` instead. The bitmap child
+    // still pre-filters via the index, and the GPU then evaluates the full
+    // qual on the bitmap-filtered rows. Both `plan.qual` and
+    // `bitmapqualorig` are stripped in `make_custom_scan_plan`
+    // (custom_scan/mod.rs), so a selected pg_accel node never uses PG's CPU
+    // bitmap recheck as the predicate implementation.
     //
     // Registry-backed scan strategies (GpuSpatial / GpuH3 / GpuRaster) use
     // `scanrelid=0` and consume the child via `ExecProcNode`, which works
