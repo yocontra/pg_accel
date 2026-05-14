@@ -257,6 +257,7 @@ pub struct Methodology {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DispatchClassification {
     pub plan_selected: bool,
     pub gpu_kernel_dispatched: bool,
@@ -715,6 +716,7 @@ fn infer_dispatch_classification(
     }
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn classify_gpu_resident_pipeline_status(
     w: &WorkloadResult,
     full_plan: Option<&str>,

@@ -337,9 +337,8 @@ mod gpu_build {
     }
 
     fn acpp_prefix() -> PathBuf {
-        std::env::var_os("ACPP_PREFIX")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
+        std::env::var_os("ACPP_PREFIX").map_or_else(
+            || {
                 let repo_acpp = PathBuf::from(
                     std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
                 )
@@ -351,7 +350,9 @@ mod gpu_build {
                 } else {
                     home_dir().join("local")
                 }
-            })
+            },
+            PathBuf::from,
+        )
     }
 
     fn repo_acpp_targets() -> Option<String> {

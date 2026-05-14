@@ -419,7 +419,7 @@ fn collect_artifact_entries(
     for entry in fs::read_dir(dir)? {
         children.push(entry?);
     }
-    children.sort_by_key(|entry| entry.path());
+    children.sort_by_key(std::fs::DirEntry::path);
 
     for entry in children {
         let path = entry.path();
