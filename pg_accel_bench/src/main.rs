@@ -11,6 +11,7 @@ mod artifacts;
 mod bench_model;
 mod config;
 mod explain_audit;
+mod h3_protection_test;
 mod parallel_stress_test;
 mod plan_shape_test;
 mod report;

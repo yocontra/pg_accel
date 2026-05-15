@@ -751,6 +751,142 @@ fn check_balanced_parens(sql: &str, label: &str, issues: &mut Vec<String>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// H3 winning-lane vs parity-lane classifier (TODO Phase 5)
+//
+// `h3_bulk` and `h3_resolution_sweep` are the strongest GPU lanes the bench
+// suite exposes today (`h3_bulk @ 10M` ~6s accel vs 90s PG parallel,
+// `h3_resolution_sweep @ 1M` ~0.32s vs 8.4s on the 2026-05-14 full run).
+// `h3_cell_to_parent` and `h3_grid_distance` are near-parity standalone
+// scalar ops — registering them for normal planner exposure costs more
+// than it saves, so the adapter must keep declining them.
+//
+// This classifier is the programmatic source of truth: it lets the bench
+// runner / report and the integration tests assert that a specific H3
+// workload is being held to the right standard (must dispatch + meet a
+// speedup threshold, or must stay native and decline GPU dispatch).
+// Changing a workload from winning -> parity (or vice versa) without
+// updating this map fails the unit tests below.
+// ---------------------------------------------------------------------------
+
+/// Lane classification for an H3 workload.
+///
+/// `Winning` ops are expected to dispatch a GPU kernel and beat the PG-parallel
+/// baseline on warm runs at the canonical scales documented in
+/// `TODO.md` Phase 5. `Parity` ops are intentionally not registered for GPU
+/// dispatch and must run through stock h3-pg on both sides of the bench.
+///
+/// Derives `PartialEq` but not `Eq` because `min_warm_speedup` is an `f64`.
+/// Tests use match-destructuring against the variants rather than
+/// `assert_eq!` on the enum value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum H3LaneClass {
+    /// Winning lane — must dispatch GPU kernel and meet `min_warm_speedup`.
+    Winning {
+        /// Minimum acceptable median speedup vs PG parallel on warm runs.
+        ///
+        /// Set conservatively below the lowest 2026-05-14 measurement so a
+        /// transient regression of the win still fails the gate; chosen
+        /// per-op to reflect the canonical baseline (`h3_bulk @ 10M` ~15x,
+        /// `h3_resolution_sweep @ 1M` ~26x — thresholds are well below).
+        min_warm_speedup: f64,
+    },
+    /// Parity / quarantined lane — must NOT dispatch a GPU kernel under normal
+    /// planner exposure. Speedup is expected to be ~1.0x; the gate is "no
+    /// dispatch" rather than "no regression".
+    Parity,
+}
+
+/// Return the H3 lane class for `name`, or `None` if the workload is not a
+/// known H3 workload.
+///
+/// The matching is exhaustive over the H3 workloads registered by
+/// [`all_workloads`]; adding a new H3 workload without a matching entry
+/// here will fail `test_h3_lane_class_covers_every_h3_workload` below.
+#[must_use]
+pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
+    // Winning lanes that share the LatLngToCell kernel
+    // (`h3_bulk @ 10M` ~15x, `h3_resolution_sweep @ 1M` ~26x,
+    // `h3_latlng_res15 @ 10M` ~5x, `h3_fp64_ops` shares the kernel and is
+    // a `count(h3_latlng_to_cell)` shape on the fp64 calibration grid).
+    // Threshold is well below the lowest scale measurement
+    // (`h3_bulk @ 10K` ~8ms vs 51-64ms gives 6x, not 1.5x) so measurement
+    // noise alone does not flip the gate.
+    const LATLNG_TO_CELL_WINNERS: &[&str] = &[
+        "h3_bulk",
+        "h3_resolution_sweep",
+        "h3_latlng_res15",
+        "h3_fp64_ops",
+    ];
+    // `h3_srf_grid_disk` is the target-list-SRF win when planner gates accept
+    // the shape. Threshold is intentionally lower (1.1x) because the SRF path
+    // is newer and the 100K cap on its row scales (see
+    // `H3SrfGridDisk::row_scales`) means we have less wall-clock evidence
+    // than the bulk lanes.
+    const SRF_VARLEN_WINNERS: &[&str] = &["h3_srf_grid_disk"];
+    // Parity / quarantined lanes. The h3 adapter intentionally does not
+    // register these names for normal planner exposure (see
+    // `pg_accel/src/adapters/h3.rs` /
+    // `cheap_scalar_h3_ops_are_quarantined_from_normal_registry`). Both the
+    // accel side and the baseline side run stock h3-pg C; the bench keeps
+    // these workloads to catch accidental re-registration.
+    const PARITY_LANES: &[&str] = &[
+        "h3_cell_to_parent",
+        "h3_grid_distance",
+        "h3_dist_near",
+        "h3_dist_far",
+        "h3_parent_deep",
+    ];
+
+    if LATLNG_TO_CELL_WINNERS.contains(&name) {
+        Some(H3LaneClass::Winning {
+            min_warm_speedup: 1.5,
+        })
+    } else if SRF_VARLEN_WINNERS.contains(&name) {
+        Some(H3LaneClass::Winning {
+            min_warm_speedup: 1.1,
+        })
+    } else if PARITY_LANES.contains(&name) {
+        Some(H3LaneClass::Parity)
+    } else {
+        None
+    }
+}
+
+/// Canonical list of H3 winning-lane workload names.
+///
+/// Used by the bench runner and integration tests to enumerate the H3
+/// workloads that must keep proving their wins. Built from
+/// [`h3_lane_class`] so the two stay in sync.
+#[must_use]
+pub fn h3_winning_lane_names() -> Vec<&'static str> {
+    // Lifted from the match arms in `h3_lane_class` so the canonical list
+    // and the classifier are stitched together programmatically; a divergence
+    // is caught by `test_h3_lane_class_winning_names_are_complete`.
+    vec![
+        "h3_bulk",
+        "h3_resolution_sweep",
+        "h3_latlng_res15",
+        "h3_srf_grid_disk",
+        "h3_fp64_ops",
+    ]
+}
+
+/// Canonical list of H3 parity-lane workload names.
+///
+/// Used by integration tests to enumerate the H3 workloads that must NOT
+/// dispatch a GPU kernel under normal planner exposure.
+#[must_use]
+pub fn h3_parity_lane_names() -> Vec<&'static str> {
+    vec![
+        "h3_cell_to_parent",
+        "h3_grid_distance",
+        "h3_dist_near",
+        "h3_dist_far",
+        "h3_parent_deep",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +959,169 @@ mod tests {
     fn test_h3_srf_grid_disk_caps_default_scales() {
         let wl = find_workload("h3_srf_grid_disk").expect("registered h3_srf_grid_disk");
         assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+    }
+
+    // -----------------------------------------------------------------------
+    // H3 lane classifier (TODO Phase 5 H3 winning lane protection)
+    // -----------------------------------------------------------------------
+
+    /// Every registered H3 workload (category `gpu_h3` or name prefix `h3_`)
+    /// MUST have a lane classification. Otherwise an agent that adds a new
+    /// h3 workload silently bypasses the per-op threshold and result-diff
+    /// gates.
+    #[test]
+    fn test_h3_lane_class_covers_every_h3_workload() {
+        let mut unclassified = Vec::new();
+        for w in &all_workloads() {
+            let is_h3 = w.category() == "gpu_h3" || w.name().starts_with("h3_");
+            if !is_h3 {
+                continue;
+            }
+            if h3_lane_class(w.name()).is_none() {
+                unclassified.push(w.name());
+            }
+        }
+        assert!(
+            unclassified.is_empty(),
+            "H3 workloads missing from h3_lane_class(): {unclassified:?}. \
+             Every H3 workload must be classified as Winning {{ min_warm_speedup }} \
+             or Parity so Phase 5 protection gates apply uniformly."
+        );
+    }
+
+    /// `h3_winning_lane_names()` and `h3_parity_lane_names()` must agree with
+    /// `h3_lane_class()`. A drift here means a downstream integration test
+    /// would assert against the wrong list.
+    #[test]
+    fn test_h3_lane_class_winning_names_are_complete() {
+        for name in h3_winning_lane_names() {
+            match h3_lane_class(name) {
+                Some(H3LaneClass::Winning { min_warm_speedup }) => {
+                    assert!(
+                        min_warm_speedup >= 1.0,
+                        "h3 winning lane `{name}` has min_warm_speedup={min_warm_speedup} < 1.0; \
+                         a winning lane that admits a sub-1.0x speedup is a parity lane, not a win."
+                    );
+                }
+                other => panic!(
+                    "h3 winning lane `{name}` is not classified as Winning in h3_lane_class(): {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_h3_lane_class_parity_names_are_complete() {
+        for name in h3_parity_lane_names() {
+            assert_eq!(
+                h3_lane_class(name),
+                Some(H3LaneClass::Parity),
+                "h3 parity lane `{name}` is not classified as Parity in h3_lane_class()"
+            );
+        }
+    }
+
+    /// Sanity-check that the canonical winning lanes include the two strongest
+    /// 2026-05-14 wins. If `h3_bulk` or `h3_resolution_sweep` ever drops out
+    /// of the winning list, the bench is no longer protecting the lane.
+    #[test]
+    fn test_h3_canonical_winning_lanes_present() {
+        let winners = h3_winning_lane_names();
+        for canonical in ["h3_bulk", "h3_resolution_sweep"] {
+            assert!(
+                winners.contains(&canonical),
+                "canonical Phase 5 winning lane `{canonical}` missing from h3_winning_lane_names(); \
+                 see TODO.md Phase 5 `H3 winning lane protection`."
+            );
+        }
+    }
+
+    /// `h3_cell_to_parent` and `h3_grid_distance` are the documented near-parity
+    /// scalar ops. They must stay on the parity list or the adapter's
+    /// quarantine check is silently bypassed.
+    #[test]
+    fn test_h3_canonical_parity_lanes_present() {
+        let parity = h3_parity_lane_names();
+        for canonical in ["h3_cell_to_parent", "h3_grid_distance"] {
+            assert!(
+                parity.contains(&canonical),
+                "canonical Phase 5 parity lane `{canonical}` missing from h3_parity_lane_names(); \
+                 these scalar H3 ops must remain quarantined."
+            );
+        }
+    }
+
+    /// The winning and parity sets must be disjoint. A workload cannot be
+    /// both a protected GPU win and a quarantined native-only op.
+    #[test]
+    fn test_h3_lane_classes_are_disjoint() {
+        let winners: std::collections::HashSet<&str> =
+            h3_winning_lane_names().into_iter().collect();
+        let parity: std::collections::HashSet<&str> = h3_parity_lane_names().into_iter().collect();
+        let intersection: Vec<&&str> = winners.intersection(&parity).collect();
+        assert!(
+            intersection.is_empty(),
+            "h3 workloads appear in both winning and parity lane lists: {intersection:?}"
+        );
+    }
+
+    /// Every name in `h3_winning_lane_names()` and `h3_parity_lane_names()`
+    /// must resolve to an actual registered workload. Otherwise the lane list
+    /// references a phantom workload and integration tests would silently
+    /// skip it.
+    #[test]
+    fn test_h3_lane_names_resolve_to_registered_workloads() {
+        for name in h3_winning_lane_names()
+            .into_iter()
+            .chain(h3_parity_lane_names())
+        {
+            assert!(
+                find_workload(name).is_some(),
+                "h3 lane list references unknown workload `{name}` — \
+                 not present in all_workloads()."
+            );
+        }
+    }
+
+    /// All H3 lane workloads must report category `gpu_h3` so per-category
+    /// rollups in the report keep counting them under the H3 bucket. A drift
+    /// (e.g. an h3 workload accidentally tagged `gpu`) would hide a
+    /// regression in the wrong category.
+    ///
+    /// `h3_fp64_ops` is intentionally in the `fp64_matrix` category — it
+    /// lives in the fp64 calibration grid, not the gpu_h3 lane rollup — so
+    /// it is explicitly excluded from this check.
+    #[test]
+    fn test_h3_lane_workloads_have_gpu_h3_category() {
+        const ALLOWED_NON_H3_CATEGORIES: &[(&str, &str)] = &[("h3_fp64_ops", "fp64_matrix")];
+        for name in h3_winning_lane_names()
+            .into_iter()
+            .chain(h3_parity_lane_names())
+        {
+            let wl = find_workload(name)
+                .unwrap_or_else(|| panic!("expected to resolve H3 lane workload `{name}`"));
+            let allowed = ALLOWED_NON_H3_CATEGORIES
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, cat)| *cat);
+            if let Some(expected_cat) = allowed {
+                assert_eq!(
+                    wl.category(),
+                    expected_cat,
+                    "h3 lane workload `{name}` reports category `{}`; expected `{expected_cat}` \
+                     (explicit exception in ALLOWED_NON_H3_CATEGORIES)",
+                    wl.category()
+                );
+            } else {
+                assert_eq!(
+                    wl.category(),
+                    "gpu_h3",
+                    "h3 lane workload `{name}` reports category `{}` instead of `gpu_h3`; \
+                     add an exception to ALLOWED_NON_H3_CATEGORIES if this is intentional",
+                    wl.category()
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

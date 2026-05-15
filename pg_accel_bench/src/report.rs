@@ -2410,6 +2410,243 @@ mod tests {
         assert!(md.contains("| Function/SRF kernel dispatched | 0 |"));
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 5 H3 winning-lane protection — dispatch classification gates
+    //
+    // These tests pin the report classifier behavior for the H3 winning lanes
+    // documented in TODO.md Phase 5. They are unit tests against
+    // `dispatch_classification`, not live-PG runs — so they fail loudly if
+    // anyone weakens the criterion for crediting an H3 winner OR weakens
+    // the rejection of a parity-only row that lacks dispatch evidence.
+    // -----------------------------------------------------------------------
+
+    /// Build the "happy path" H3 winning-lane mock the protection tests share.
+    /// Caller can mutate the returned result to flip individual fields and
+    /// verify the classifier responds correctly.
+    fn mock_h3_winning_workload(name: &str, rows: usize) -> WorkloadResult {
+        let mut wl = mock_workload_result(name, rows, 10.0, 100.0);
+        wl.category = "gpu_h3".to_owned();
+        wl.kernel_class = "h3_latlng".to_owned();
+        wl.plan_selected = false;
+        wl.gpu_kernel_dispatched = false;
+        wl.function_srf_kernel_dispatched = false;
+        wl.dispatch_counter_captured = true;
+        wl.gpu_kernel_execution_delta = 1;
+        wl.accel_output_rows_consumed = 10;
+        wl.pg_accel_stock_exec_delta = 0;
+        wl.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
+             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+                .to_owned(),
+        );
+        wl
+    }
+
+    /// `h3_bulk` is the canonical H3 winning lane (~6s accel vs 90s PG
+    /// parallel @ 10M on 2026-05-14). A representative happy-path measurement
+    /// MUST be credited as `function_srf_kernel_dispatched` and counted in the
+    /// GPU-dispatched geomean. Regression here would silently drop the bulk
+    /// win from the headline.
+    #[test]
+    fn test_h3_bulk_winning_lane_credited_as_function_srf_dispatch() {
+        let workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
+        let classification = workload.dispatch_classification();
+        assert!(
+            classification.function_srf_kernel_dispatched,
+            "h3_bulk happy-path must be credited as function/SRF dispatch; \
+             got classification={classification:?}"
+        );
+        assert!(
+            classification.gpu_kernel_dispatched,
+            "h3_bulk happy-path must be credited as GPU-dispatched (function/SRF \
+             path), got classification={classification:?}"
+        );
+        assert!(
+            !classification.planner_declined,
+            "h3_bulk happy-path must NOT be marked planner_declined; \
+             got classification={classification:?}"
+        );
+        assert_eq!(
+            classification.function_kernel_count, 1,
+            "h3_bulk happy-path kernel delta=1 must carry into function_kernel_count"
+        );
+    }
+
+    /// `h3_resolution_sweep` is the second canonical H3 winning lane
+    /// (~0.32s accel vs 8.4s PG parallel @ 1M on 2026-05-14). Same gate.
+    #[test]
+    fn test_h3_resolution_sweep_winning_lane_credited_as_function_srf_dispatch() {
+        let workload = mock_h3_winning_workload("h3_resolution_sweep", 1_000_000);
+        let classification = workload.dispatch_classification();
+        assert!(
+            classification.function_srf_kernel_dispatched,
+            "h3_resolution_sweep happy-path must be credited as function/SRF dispatch"
+        );
+        assert!(
+            classification.gpu_kernel_dispatched,
+            "h3_resolution_sweep happy-path must be credited as GPU-dispatched"
+        );
+    }
+
+    /// If the kernel counter delta is zero for an H3 winning-lane workload,
+    /// the row must NOT be credited as GPU-dispatched. This is the regression
+    /// gate: if the function/SRF dispatch hook breaks and stops incrementing
+    /// the counter, `h3_bulk` falls out of the headline geomean.
+    #[test]
+    fn test_h3_bulk_with_zero_kernel_delta_is_not_dispatched() {
+        let mut workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
+        workload.gpu_kernel_execution_delta = 0;
+        let classification = workload.dispatch_classification();
+        assert!(
+            !classification.function_srf_kernel_dispatched,
+            "h3_bulk with zero kernel delta must NOT be credited as function/SRF dispatch; \
+             this gate detects the case where the function dispatch hook silently \
+             stopped firing. Got: {classification:?}"
+        );
+        assert!(
+            !classification.gpu_kernel_dispatched,
+            "h3_bulk with zero kernel delta must NOT be credited as GPU-dispatched"
+        );
+        assert!(
+            classification.planner_declined,
+            "h3_bulk with no dispatch evidence must be classified as planner_declined; \
+             a regression would silently route h3_bulk to native PG without alerting"
+        );
+    }
+
+    /// Same gate for `h3_resolution_sweep`.
+    #[test]
+    fn test_h3_resolution_sweep_with_zero_kernel_delta_is_not_dispatched() {
+        let mut workload = mock_h3_winning_workload("h3_resolution_sweep", 1_000_000);
+        workload.gpu_kernel_execution_delta = 0;
+        let classification = workload.dispatch_classification();
+        assert!(
+            !classification.function_srf_kernel_dispatched,
+            "h3_resolution_sweep with zero kernel delta must NOT be credited as dispatch"
+        );
+        assert!(classification.planner_declined);
+    }
+
+    /// If a stock-executor fallback fires (`pg_accel_stock_exec_delta > 0`),
+    /// the row must NOT be credited as GPU-dispatched even when the kernel
+    /// counter is positive. This catches the silent "GPU ran AND CPU
+    /// fell back" path which is a Phase 1 anti-cheat rail.
+    #[test]
+    fn test_h3_bulk_with_stock_exec_fallback_is_not_dispatched() {
+        let mut workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
+        workload.pg_accel_stock_exec_delta = 1;
+        let classification = workload.dispatch_classification();
+        assert!(
+            !classification.function_srf_kernel_dispatched,
+            "h3_bulk that also fell back to the stock executor must NOT be credited"
+        );
+        assert!(!classification.gpu_kernel_dispatched);
+    }
+
+    /// `h3_cell_to_parent` is a parity lane — pg_accel does not register it,
+    /// so an h3_cell_to_parent workload in the bench should look like
+    /// stock h3-pg on both sides (no Custom Scan, no kernel delta). The
+    /// dispatch classifier must mark such a row as `planner_declined`.
+    #[test]
+    fn test_h3_cell_to_parent_parity_row_classified_as_planner_declined() {
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 10.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_cell_to_parent".to_owned();
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.function_srf_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 0;
+        workload.accel_output_rows_consumed = 1;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_cell_to_parent(cell, 4)), count(*)\n  \
+             Group Key: h3_cell_to_parent(bench_h3_parent.cell, 4)\n"
+                .to_owned(),
+        );
+
+        let classification = workload.dispatch_classification();
+        assert!(
+            !classification.function_srf_kernel_dispatched,
+            "h3_cell_to_parent must NOT be credited as function/SRF dispatch — \
+             it is a parity lane that must stay native. Got: {classification:?}"
+        );
+        assert!(
+            !classification.gpu_kernel_dispatched,
+            "h3_cell_to_parent must NOT be credited as GPU-dispatched"
+        );
+        assert!(
+            classification.planner_declined,
+            "h3_cell_to_parent native-only run must be marked planner_declined"
+        );
+    }
+
+    /// If `h3_cell_to_parent` accidentally starts incrementing the kernel
+    /// counter (e.g. an agent re-registers it in the h3 adapter), the row
+    /// will look like a function/SRF dispatch in the report — that surfaces
+    /// clearly in the dispatch classification because the report-side
+    /// heuristic is purely name-prefix + counter-driven. The lane policy
+    /// itself (parity vs winning) is enforced by `h3_lane_class()` in
+    /// `pg_accel_bench/src/workloads/mod.rs`. This test pins what the bench
+    /// report WILL show in that regression scenario so a future runner-side
+    /// cross-check has a stable surface to assert against.
+    #[test]
+    fn test_h3_cell_to_parent_with_unexpected_kernel_delta_classifier_visible() {
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 12.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_cell_to_parent".to_owned();
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.function_srf_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet =
+            Some("HashAggregate\n  Output: (h3_cell_to_parent(cell, 4)), count(*)\n".to_owned());
+
+        let classification = workload.dispatch_classification();
+        assert!(
+            classification.function_srf_kernel_dispatched,
+            "report classifier must surface parity-lane kernel deltas as function/SRF \
+             dispatch so a regression in the h3 adapter quarantine (where a parity-lane \
+             scalar op accidentally gets re-registered and fires a kernel) is loudly \
+             visible in the bench report. The lane policy itself (parity vs winning) \
+             is enforced by h3_lane_class() in workloads/mod.rs."
+        );
+        // The lane policy is the orthogonal gate; assert it disagrees with the
+        // dispatch classification so a future cross-check can flag this as a
+        // protected-lane violation.
+        assert_eq!(
+            crate::workloads::h3_lane_class("h3_cell_to_parent"),
+            Some(crate::workloads::H3LaneClass::Parity),
+            "h3_cell_to_parent must remain a parity lane; dispatch classifier crediting \
+             it as function/SRF is a regression signal, not an admission of winning"
+        );
+    }
+
+    /// Phase 5 acceptance: every canonical H3 winning lane must be classified
+    /// as Winning by `h3_lane_class` (a cross-module pin so the report tests
+    /// stay aligned with the workload registry).
+    #[test]
+    fn test_h3_winning_lanes_have_lane_class_winning() {
+        for name in crate::workloads::h3_winning_lane_names() {
+            match crate::workloads::h3_lane_class(name) {
+                Some(crate::workloads::H3LaneClass::Winning { min_warm_speedup }) => {
+                    assert!(
+                        min_warm_speedup >= 1.0,
+                        "H3 winning lane `{name}` must require >= 1.0x speedup; \
+                         got min_warm_speedup={min_warm_speedup}"
+                    );
+                }
+                other => panic!(
+                    "report-side winning-lane gate failed: `{name}` not classified \
+                     as Winning by h3_lane_class(); got {other:?}"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn test_geomean_by_dispatch_source_splits_custom_scan_vs_function_srf() {
         // Custom Scan win: reduce_sum_i64-style row with a Custom Scan plan
