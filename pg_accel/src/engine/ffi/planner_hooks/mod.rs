@@ -909,6 +909,12 @@ const AGG_FLOAT4OID: u32 = 700;
 const AGG_FLOAT8OID: u32 = 701;
 const AGG_INT4OID: u32 = 23;
 const AGG_INT8OID: u32 = 20;
+/// Smallint OID (21). Accepted only for bit_and / bit_or / bit_xor input;
+/// extraction widens to i64 in `observe_i32`.
+const AGG_INT2OID: u32 = 21;
+/// Boolean OID (16). Accepted only for bool_and / bool_or input; extraction
+/// reads a 1-byte datum and routes through `observe_bool`.
+const AGG_BOOLOID: u32 = 16;
 
 fn reduce_break_even_rows_for_type(type_oid: u32) -> usize {
     let limits = cost::device_limits();
@@ -2287,6 +2293,15 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             b"min" => AggOp::Min,
             b"max" => AggOp::Max,
             b"count" => AggOp::Count,
+            // Bitwise / boolean reductions ride the typed reduce_bit_* /
+            // reduce_bool_* kernels (see pg_accel/src/gpu/reduce.rs). Only
+            // the non-grouped lane is wired; the grouped path is rejected
+            // a few lines below (no per-group bit/bool lane in the kernel).
+            b"bit_and" => AggOp::BitAnd,
+            b"bit_or" => AggOp::BitOr,
+            b"bit_xor" => AggOp::BitXor,
+            b"bool_and" => AggOp::BoolAnd,
+            b"bool_or" => AggOp::BoolOr,
             _ => {
                 pgrx::debug1!("pg_accel: gpu_agg rejected: unsupported func");
                 return;
@@ -2367,12 +2382,20 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             AGG_FLOAT8OID
         };
 
-        if attno != 0
-            && !matches!(
+        // Bitwise reductions accept INT2/INT4/INT8 input; boolean reductions
+        // accept BOOLOID. Numeric aggregates (SUM/AVG/MIN/MAX/etc.) keep the
+        // previous FLOAT4/FLOAT8/INT4/INT8 envelope.
+        let allowed_input_type = match op {
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor => {
+                matches!(typid, AGG_INT2OID | AGG_INT4OID | AGG_INT8OID)
+            }
+            AggOp::BoolAnd | AggOp::BoolOr => typid == AGG_BOOLOID,
+            _ => matches!(
                 typid,
                 AGG_FLOAT4OID | AGG_FLOAT8OID | AGG_INT4OID | AGG_INT8OID
-            )
-        {
+            ),
+        };
+        if attno != 0 && !allowed_input_type {
             // SAFETY: planner hook runs on the main backend thread.
             if let Some(policy) =
                 unsafe { planner_type_policy(pg_sys::Oid::from(typid)).rejection() }
@@ -2420,6 +2443,26 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             has_gpu_value_reduce = true;
             required_reduce_rows = required_reduce_rows.max(reduce_break_even_rows_for_type(typid));
         }
+        // Bitwise / boolean reductions also count as a value-reduce column;
+        // their break-even rows live in DeviceLimits.reduce_bit_break_even_rows
+        // / reduce_bool_break_even_rows respectively (see
+        // pg_accel/src/engine/cost/device_limits.rs:446-450).
+        if group_key_info.is_none() && attno != 0 {
+            let limits = cost::device_limits();
+            match op {
+                AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor => {
+                    has_gpu_value_reduce = true;
+                    required_reduce_rows =
+                        required_reduce_rows.max(limits.reduce_bit_break_even_rows);
+                }
+                AggOp::BoolAnd | AggOp::BoolOr => {
+                    has_gpu_value_reduce = true;
+                    required_reduce_rows =
+                        required_reduce_rows.max(limits.reduce_bool_break_even_rows);
+                }
+                _ => {}
+            }
+        }
         agg_descs.push((op, attno, u32::from(aggref_ref.aggtype)));
     }
 
@@ -2436,6 +2479,21 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             rows,
             required_reduce_rows,
         );
+        return;
+    }
+    // Grouped bit/bool reductions need a per-group lane in the GPU hash-agg
+    // kernel; that lane doesn't exist yet (agg_op_to_ffi maps them to Count
+    // as a safety net, see pg_accel/src/engine/executor/agg/ffi_bridge.rs).
+    // Decline so PG handles GROUP BY k, bit_and(x) natively.
+    if group_key_info.is_some()
+        && agg_descs.iter().any(|(op, _, _)| {
+            matches!(
+                op,
+                AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor | AggOp::BoolAnd | AggOp::BoolOr
+            )
+        })
+    {
+        pgrx::debug1!("pg_accel: gpu_agg rejected: grouped bit/bool has no per-group kernel lane");
         return;
     }
     if group_key_info.is_some() && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {

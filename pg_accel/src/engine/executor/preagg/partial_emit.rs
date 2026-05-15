@@ -20,7 +20,8 @@ use pgrx::pg_sys;
 
 use crate::engine::executor::agg::AggOp;
 use crate::engine::executor::agg::partial::emitter::{
-    CountEmitter, Float8StatsEmitter, IntegerSumPromotion, NumericSumEmitter, ScalarPassthrough,
+    BitOp, BitReductionEmitter, BoolOp, BoolReductionEmitter, CountEmitter, Float8StatsEmitter,
+    IntegerSumPromotion, NumericSumEmitter, ScalarPassthrough,
 };
 use crate::engine::executor::agg::partial::{
     ColumnAccumulator, PartialAggSpec, PartialColumn, PartialEmitter,
@@ -136,15 +137,26 @@ fn build_emitters(columns: &[PartialColumn]) -> Vec<Box<dyn PartialEmitter>> {
                 AggOp::Min | AggOp::Max => Box::new(ScalarPassthrough {
                     transtype: c.transtype_oid,
                 }),
-                // BIT_* / BOOL_* / Passthrough fall back to scalar
-                // passthrough at the transtype. When W3 wires dedicated
-                // combine functions, swap in a typed emitter.
-                AggOp::BitAnd
-                | AggOp::BitOr
-                | AggOp::BitXor
-                | AggOp::BoolAnd
-                | AggOp::BoolOr
-                | AggOp::Passthrough => Box::new(ScalarPassthrough {
+                // Bitwise / boolean reductions emit through their own typed
+                // emitter so the partial datum carries `acc.bit_acc` /
+                // `acc.bool_acc` — `ScalarPassthrough` reads `acc.sum`,
+                // which is zero for these aggregates and would silently
+                // emit wrong combine inputs.
+                AggOp::BitAnd => Box::new(BitReductionEmitter {
+                    transtype: c.transtype_oid,
+                    op: BitOp::And,
+                }),
+                AggOp::BitOr => Box::new(BitReductionEmitter {
+                    transtype: c.transtype_oid,
+                    op: BitOp::Or,
+                }),
+                AggOp::BitXor => Box::new(BitReductionEmitter {
+                    transtype: c.transtype_oid,
+                    op: BitOp::Or,
+                }),
+                AggOp::BoolAnd => Box::new(BoolReductionEmitter { op: BoolOp::And }),
+                AggOp::BoolOr => Box::new(BoolReductionEmitter { op: BoolOp::Or }),
+                AggOp::Passthrough => Box::new(ScalarPassthrough {
                     transtype: c.transtype_oid,
                 }),
             }

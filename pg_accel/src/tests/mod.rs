@@ -2808,4 +2808,208 @@ mod tests {
         // Gather ∘ Parallel HashJoin candidate against the GPU partial path.
         assert!(!plan.is_empty(), "EXPLAIN returned no rows");
     }
+
+    // =========================================================================
+    // BOOL_AND / BOOL_OR / BIT_AND / BIT_OR / BIT_XOR
+    //
+    // Cover the typed GPU reduce kernels (`reduce_bool_*`, `reduce_bit_*`)
+    // and the BOOLOID / INT2 / INT4 / INT8 extraction lanes. Each test
+    // compares the result with pg_accel disabled (PG native) against
+    // pg_accel enabled, asserting an exact match. Empty-input NULL is
+    // checked explicitly because the kernels seed identity values
+    // (BIT_AND=!0, BIT_OR=0, etc.) and we rely on `has_value` to flip
+    // the empty case back to SQL NULL.
+    // =========================================================================
+
+    /// Run `query` once with pg_accel disabled and once with it enabled,
+    /// asserting both produce the same Datum (as text). This is the
+    /// canonical "parity" check for the new bit/bool reductions.
+    fn assert_parity_text(query: &str) {
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let off = Spi::get_one::<String>(query).expect("query should succeed");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let on = Spi::get_one::<String>(query).expect("query should succeed");
+        assert_eq!(off, on, "pg_accel parity mismatch for: {query}");
+    }
+
+    #[pg_test]
+    fn test_bool_and_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_band (b bool)").expect("CREATE TABLE");
+        // 500 trues, 1 false, 500 trues, 1 NULL. NULL is ignored by
+        // bool_and per SQL semantics; the false flips the answer.
+        Spi::run("INSERT INTO t_band SELECT (g <> 500)::bool FROM generate_series(1, 1001) g")
+            .expect("INSERT");
+        Spi::run("INSERT INTO t_band VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_band").expect("ANALYZE");
+        assert_parity_text("SELECT bool_and(b)::text FROM t_band");
+    }
+
+    #[pg_test]
+    fn test_bool_or_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_bor (b bool)").expect("CREATE TABLE");
+        // All false except row 750. Confirms bool_or finds the lone true.
+        Spi::run("INSERT INTO t_bor SELECT (g = 750)::bool FROM generate_series(1, 1001) g")
+            .expect("INSERT");
+        Spi::run("INSERT INTO t_bor VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_bor").expect("ANALYZE");
+        assert_parity_text("SELECT bool_or(b)::text FROM t_bor");
+    }
+
+    #[pg_test]
+    fn test_bool_and_all_true_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_band_t (b bool)").expect("CREATE TABLE");
+        Spi::run("INSERT INTO t_band_t SELECT true FROM generate_series(1, 500)").expect("INSERT");
+        Spi::run("ANALYZE t_band_t").expect("ANALYZE");
+        assert_parity_text("SELECT bool_and(b)::text FROM t_band_t");
+    }
+
+    #[pg_test]
+    fn test_bool_and_empty_returns_null() {
+        // Empty input → SQL NULL per PG semantics. Acceptance condition
+        // for the `has_value=false` path in `finalize()`.
+        Spi::run("CREATE TEMP TABLE t_band_e (b bool)").expect("CREATE TABLE");
+        Spi::run("ANALYZE t_band_e").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let result =
+            Spi::get_one::<bool>("SELECT bool_and(b) FROM t_band_e").expect("query should succeed");
+        assert!(
+            result.is_none(),
+            "bool_and over empty table must be NULL, got {result:?}"
+        );
+    }
+
+    #[pg_test]
+    fn test_bool_or_empty_returns_null() {
+        Spi::run("CREATE TEMP TABLE t_bor_e (b bool)").expect("CREATE TABLE");
+        Spi::run("ANALYZE t_bor_e").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let result =
+            Spi::get_one::<bool>("SELECT bool_or(b) FROM t_bor_e").expect("query should succeed");
+        assert!(
+            result.is_none(),
+            "bool_or over empty table must be NULL, got {result:?}"
+        );
+    }
+
+    #[pg_test]
+    fn test_bool_and_all_null_returns_null() {
+        // All-NULL → identical to empty for bool_and: SQL NULL.
+        Spi::run("CREATE TEMP TABLE t_band_n (b bool)").expect("CREATE TABLE");
+        Spi::run("INSERT INTO t_band_n SELECT NULL FROM generate_series(1, 100)").expect("INSERT");
+        Spi::run("ANALYZE t_band_n").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let result =
+            Spi::get_one::<bool>("SELECT bool_and(b) FROM t_band_n").expect("query should succeed");
+        assert!(
+            result.is_none(),
+            "bool_and over all-NULLs must be NULL, got {result:?}"
+        );
+    }
+
+    #[pg_test]
+    fn test_bit_and_int4_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_band4 (x int4)").expect("CREATE TABLE");
+        // All values share bits 0x100 and 0x002; bit_and reveals 0x102.
+        Spi::run(
+            "INSERT INTO t_band4 SELECT 0x102 | (g & 0xFF00) \
+             FROM generate_series(1, 1024) g",
+        )
+        .expect("INSERT");
+        Spi::run("INSERT INTO t_band4 VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_band4").expect("ANALYZE");
+        assert_parity_text("SELECT bit_and(x)::text FROM t_band4");
+    }
+
+    #[pg_test]
+    fn test_bit_or_int4_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_bor4 (x int4)").expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_bor4 SELECT (1::int4 << (g % 30)) \
+             FROM generate_series(0, 1024) g",
+        )
+        .expect("INSERT");
+        Spi::run("INSERT INTO t_bor4 VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_bor4").expect("ANALYZE");
+        assert_parity_text("SELECT bit_or(x)::text FROM t_bor4");
+    }
+
+    #[pg_test]
+    fn test_bit_xor_int4_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_bxor4 (x int4)").expect("CREATE TABLE");
+        // XOR over the same value an even number of times → 0;
+        // odd number of times → the value. The kernel must agree.
+        Spi::run(
+            "INSERT INTO t_bxor4 SELECT (g % 7 + 1)::int4 \
+             FROM generate_series(1, 1024) g",
+        )
+        .expect("INSERT");
+        Spi::run("INSERT INTO t_bxor4 VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_bxor4").expect("ANALYZE");
+        assert_parity_text("SELECT bit_xor(x)::text FROM t_bxor4");
+    }
+
+    #[pg_test]
+    fn test_bit_and_int2_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_band2 (x int2)").expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_band2 SELECT (0x102 | (g & 0xFF))::int2 \
+             FROM generate_series(1, 1024) g",
+        )
+        .expect("INSERT");
+        Spi::run("INSERT INTO t_band2 VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_band2").expect("ANALYZE");
+        assert_parity_text("SELECT bit_and(x)::text FROM t_band2");
+    }
+
+    #[pg_test]
+    fn test_bit_or_int8_matches_pg_native() {
+        Spi::run("CREATE TEMP TABLE t_bor8 (x int8)").expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_bor8 SELECT (1::int8 << (g % 62)) \
+             FROM generate_series(0, 1024) g",
+        )
+        .expect("INSERT");
+        Spi::run("INSERT INTO t_bor8 VALUES (NULL)").expect("INSERT NULL");
+        Spi::run("ANALYZE t_bor8").expect("ANALYZE");
+        assert_parity_text("SELECT bit_or(x)::text FROM t_bor8");
+    }
+
+    #[pg_test]
+    fn test_bit_and_empty_returns_null() {
+        Spi::run("CREATE TEMP TABLE t_band_empty (x int4)").expect("CREATE TABLE");
+        Spi::run("ANALYZE t_band_empty").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let result = Spi::get_one::<i32>("SELECT bit_and(x) FROM t_band_empty")
+            .expect("query should succeed");
+        assert!(
+            result.is_none(),
+            "bit_and over empty table must be NULL, got {result:?}"
+        );
+    }
+
+    #[pg_test]
+    fn test_bit_or_empty_returns_null() {
+        Spi::run("CREATE TEMP TABLE t_bor_empty (x int4)").expect("CREATE TABLE");
+        Spi::run("ANALYZE t_bor_empty").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let result =
+            Spi::get_one::<i32>("SELECT bit_or(x) FROM t_bor_empty").expect("query should succeed");
+        assert!(
+            result.is_none(),
+            "bit_or over empty table must be NULL, got {result:?}"
+        );
+    }
+
+    #[pg_test]
+    fn test_bit_xor_empty_returns_null() {
+        Spi::run("CREATE TEMP TABLE t_bxor_empty (x int4)").expect("CREATE TABLE");
+        Spi::run("ANALYZE t_bxor_empty").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let result = Spi::get_one::<i32>("SELECT bit_xor(x) FROM t_bxor_empty")
+            .expect("query should succeed");
+        assert!(
+            result.is_none(),
+            "bit_xor over empty table must be NULL, got {result:?}"
+        );
+    }
 }

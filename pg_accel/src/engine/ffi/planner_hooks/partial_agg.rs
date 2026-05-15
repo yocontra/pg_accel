@@ -379,6 +379,25 @@ pub(super) unsafe fn try_inject(
         );
         return;
     }
+    // The GPU hash-agg kernel does not have per-group bit/bool reduction
+    // lanes yet (agg_op_to_ffi_partial maps them to Count as a safety net,
+    // see pg_accel/src/engine/executor/agg/ffi_bridge.rs). Reject grouped
+    // bit/bool aggregates so the planner falls back to PG's native plan
+    // rather than dispatching a kernel that would produce a per-group count
+    // instead of the bit/bool reduction.
+    if group_key_info.is_some()
+        && agg_descs.iter().any(|(op, _, _)| {
+            matches!(
+                op,
+                AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor | AggOp::BoolAnd | AggOp::BoolOr
+            )
+        })
+    {
+        pgrx::debug1!(
+            "pg_accel partial_agg: grouped bit/bool reduction rejected — kernel lacks per-group lane",
+        );
+        return;
+    }
     if group_key_info.is_some() && group_key_tlist_pos < 0 {
         pgrx::debug1!("pg_accel partial_agg: grouped partial target lacks group key Var");
         return;

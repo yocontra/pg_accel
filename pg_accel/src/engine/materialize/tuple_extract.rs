@@ -361,6 +361,35 @@ pub unsafe fn extract_i64(
     }
 }
 
+/// Extract a column of `bool` values from a batch of `MinimalTuple`s.
+///
+/// PostgreSQL stores `BOOLOID` as a 1-byte pass-by-value type; the Datum
+/// returned by `slot_getattr` carries the truth value in the low byte
+/// (0 = false, 1 = true). The output `Vec<u8>` carries `0`/`1` bytes
+/// directly so callers can feed it to the GPU bool-reduction kernel or
+/// convert each byte to a Rust `bool` for the scalar accumulator.
+///
+/// # Safety
+///
+/// Same requirements as [`extract_i32`].
+pub unsafe fn extract_bool(
+    tuples: &[pg_sys::MinimalTuple],
+    info: &AttExtractInfo,
+    fallback_slot: *mut pg_sys::TupleTableSlot,
+) -> (Vec<u8>, Vec<u8>) {
+    // SAFETY: caller guarantees all preconditions.
+    unsafe {
+        extract_typed::<u8, u8>(
+            tuples,
+            info,
+            fallback_slot,
+            0,
+            |v| v & 1,
+            |d| (d.value() as u8) & 1,
+        )
+    }
+}
+
 /// Extract a column of `f32` values from a batch of `MinimalTuple`s.
 ///
 /// # Safety

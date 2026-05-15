@@ -299,11 +299,8 @@ impl AggColumn {
     /// / `AggOp::BoolOr`). The value flows into the `u8` GPU buffer when
     /// `buffer_gpu` is set, otherwise into the scalar `bool_acc`.
     ///
-    /// Reserved for the next-phase bool-column extraction path — the
-    /// scan-side helpers don't yet route BOOLOID through here; once that
-    /// lands this helper is the funnel for both buffered-GPU and scalar
-    /// observations.
-    #[allow(dead_code)]
+    /// Funnel for both the bulk MinimalTuple BOOLOID extractor and the
+    /// heap-tuple / fused-scan fast paths.
     pub(super) fn observe_bool(&mut self, val: bool, buffer_gpu: bool) {
         self.acc.count += 1;
         self.acc.has_value = true;
@@ -891,30 +888,6 @@ impl AggColumn {
         self.clear_gpu_buffers();
     }
 
-    /// Apply an i64 result from a typed bitwise GPU reduction (BIT_AND /
-    /// BIT_OR / BIT_XOR). Currently unused — `dispatch_gpu_reduce_bit_bool`
-    /// folds partials directly into `accumulate_bitwise`, but this helper is
-    /// kept for symmetry with the f64/i64 sum/min/max apply helpers and as a
-    /// hook for the eventual single-launch typed-result path.
-    #[allow(dead_code)]
-    pub(super) fn apply_gpu_bit_result(&mut self, result: i64) {
-        self.gpu_dispatched = true;
-        self.acc.bit_acc = result;
-        self.acc.has_value = true;
-        self.clear_gpu_buffers();
-    }
-
-    /// Apply a bool result from a typed boolean GPU reduction (BOOL_AND /
-    /// BOOL_OR). See `apply_gpu_bit_result` for the rationale on keeping this
-    /// alongside `accumulate_bool`.
-    #[allow(dead_code)]
-    pub(super) fn apply_gpu_bool_result(&mut self, result: bool) {
-        self.gpu_dispatched = true;
-        self.acc.bool_acc = result;
-        self.acc.has_value = true;
-        self.clear_gpu_buffers();
-    }
-
     pub(super) fn apply_gpu_i64_sum_result(&mut self, result: i64) {
         self.gpu_dispatched = true;
         self.int_sum = i128::from(result);
@@ -1467,6 +1440,24 @@ impl AggExecState {
                                 col.observe_i32(val, gpu_flags[i]);
                             }
                         }
+                        pg_sys::BOOLOID => {
+                            // BOOLOID datum is a single 0/1 byte; route
+                            // through `observe_bool` so the dedicated
+                            // u8 GPU buffer (bool kernel) or the scalar
+                            // bool accumulator picks it up. Reading via
+                            // the f64 path would mis-interpret garbage
+                            // bits past the 1-byte payload.
+                            // SAFETY: same as above.
+                            let (values, nulls) = unsafe {
+                                tuple_extract::extract_bool(&tuples, &info, last_child_slot)
+                            };
+                            for (j, &val) in values.iter().enumerate() {
+                                if nulls[j] == 1 {
+                                    continue;
+                                }
+                                col.observe_bool(val != 0, gpu_flags[i]);
+                            }
+                        }
                         _ => {
                             // SAFETY: same as above.
                             let (values, nulls) = unsafe {
@@ -1837,6 +1828,16 @@ impl AggExecState {
                             // Widen to i64 to dispatch the typed i64 reduce
                             // kernel; avoids soft-fp64 on Metal.
                             col.observe_i32(v, gpu_flags[i]);
+                        }
+                    }
+                    t if t == pg_sys::BOOLOID => {
+                        // BOOLOID is stored as one byte; reading 8 bytes
+                        // as f64 would mix in unrelated payload. Route
+                        // through observe_bool so BOOL_AND / BOOL_OR
+                        // accumulate the actual truth value.
+                        let val = unsafe { tuple_extract::try_fast_read_heap_pub::<u8>(hdr, info) };
+                        if let Some(v) = val {
+                            col.observe_bool((v & 1) != 0, gpu_flags[i]);
                         }
                     }
                     _ => {
@@ -2456,6 +2457,14 @@ impl AggExecState {
                         if let Some(v) = val {
                             // Widen to i64; see comment in scan path above.
                             col.observe_i32(v, gpu_flags[i]);
+                        }
+                    }
+                    t if t == pg_sys::BOOLOID => {
+                        // 1-byte BOOLOID: see comment in fast-path loop.
+                        let val =
+                            unsafe { tuple_extract::try_fast_read_heap_pub::<u8>(t_data, info) };
+                        if let Some(v) = val {
+                            col.observe_bool((v & 1) != 0, gpu_flags[i]);
                         }
                     }
                     _ => {

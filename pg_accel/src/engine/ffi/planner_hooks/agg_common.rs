@@ -54,12 +54,11 @@ pub(super) fn aggref_is_sum_int8(
 #[allow(dead_code)] // reason: variant payloads (transtype, op) form the
 // planner contract. partial_agg.rs reads
 // AggClass::Float8Stats { serialize_fn } today; the
-// ScalarPassthrough { transtype }, BitReduction
-// { transtype, op }, and BoolReduction { op } payloads
-// are constructed but not yet consumed — Phase 3a/b
-// will read them when the executor grows group-keyed
-// partial-state emit. Keep the payloads to avoid an
-// ABI break when that work lands.
+// ScalarPassthrough { transtype } and BitReduction
+// { transtype, op } / BoolReduction { op } payloads
+// are still emitted for partial-emit symmetry. Keep the
+// payloads to avoid an ABI break when group-keyed
+// partial-state emit lands.
 pub(super) enum AggClass {
     /// SUM/MIN/MAX where transtype == rtype (plain numeric scalars).
     ScalarPassthrough { transtype: pg_sys::Oid },
@@ -79,12 +78,14 @@ pub(super) enum AggClass {
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)] // reason: variants are payload of AggClass::BitReduction;
-// both are constructed by classify_aggref but the
-// executor doesn't yet branch on which one — same Phase
-// 3a/b unblock as AggClass.
+// classify_aggref constructs them but the executor
+// branches on `AggOp::Bit{And,Or,Xor}` directly today.
+// Keep them so partial-state emit can switch on the
+// reduction kind once that path lands.
 pub(super) enum BitOp {
     And,
     Or,
+    Xor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -221,38 +222,80 @@ pub(super) unsafe fn classify_aggref(aggref: *const pg_sys::Aggref) -> Option<(A
             Some((AggOp::VarPop, AggClass::Float8Stats { serialize_fn }))
         }
 
-        // --- BIT_AND / BIT_OR -------------------------------------------
+        // --- BIT_AND / BIT_OR / BIT_XOR --------------------------------
+        // The kernel + bridge + executor accumulation paths landed in
+        // commit 3f0ac44. The executor scan paths now extract INT2/INT4/INT8
+        // via observe_i32 / observe_i64 and BOOLOID via observe_bool, so the
+        // classifier maps these aggregate OIDs to the typed AggOp variants
+        // instead of routing through the f64 lane (which would mis-read
+        // narrow integer / boolean datums).
         pg_sys::F_BIT_AND_INT2 => Some((
-            AggOp::Passthrough,
+            AggOp::BitAnd,
             AggClass::BitReduction {
                 transtype: pg_sys::INT2OID,
                 op: BitOp::And,
             },
         )),
         pg_sys::F_BIT_AND_INT4 => Some((
-            AggOp::Passthrough,
+            AggOp::BitAnd,
             AggClass::BitReduction {
                 transtype: pg_sys::INT4OID,
                 op: BitOp::And,
             },
         )),
         pg_sys::F_BIT_AND_INT8 => Some((
-            AggOp::Passthrough,
+            AggOp::BitAnd,
             AggClass::BitReduction {
                 transtype: pg_sys::INT8OID,
                 op: BitOp::And,
             },
         )),
+        pg_sys::F_BIT_OR_INT2 => Some((
+            AggOp::BitOr,
+            AggClass::BitReduction {
+                transtype: pg_sys::INT2OID,
+                op: BitOp::Or,
+            },
+        )),
+        pg_sys::F_BIT_OR_INT4 => Some((
+            AggOp::BitOr,
+            AggClass::BitReduction {
+                transtype: pg_sys::INT4OID,
+                op: BitOp::Or,
+            },
+        )),
+        pg_sys::F_BIT_OR_INT8 => Some((
+            AggOp::BitOr,
+            AggClass::BitReduction {
+                transtype: pg_sys::INT8OID,
+                op: BitOp::Or,
+            },
+        )),
+        pg_sys::F_BIT_XOR_INT2 => Some((
+            AggOp::BitXor,
+            AggClass::BitReduction {
+                transtype: pg_sys::INT2OID,
+                op: BitOp::Xor,
+            },
+        )),
+        pg_sys::F_BIT_XOR_INT4 => Some((
+            AggOp::BitXor,
+            AggClass::BitReduction {
+                transtype: pg_sys::INT4OID,
+                op: BitOp::Xor,
+            },
+        )),
+        pg_sys::F_BIT_XOR_INT8 => Some((
+            AggOp::BitXor,
+            AggClass::BitReduction {
+                transtype: pg_sys::INT8OID,
+                op: BitOp::Xor,
+            },
+        )),
 
         // --- BOOL_AND / BOOL_OR -----------------------------------------
-        pg_sys::F_BOOL_AND => Some((
-            AggOp::Passthrough,
-            AggClass::BoolReduction { op: BoolOp::And },
-        )),
-        pg_sys::F_BOOL_OR => Some((
-            AggOp::Passthrough,
-            AggClass::BoolReduction { op: BoolOp::Or },
-        )),
+        pg_sys::F_BOOL_AND => Some((AggOp::BoolAnd, AggClass::BoolReduction { op: BoolOp::And })),
+        pg_sys::F_BOOL_OR => Some((AggOp::BoolOr, AggClass::BoolReduction { op: BoolOp::Or })),
 
         _ => None,
     }

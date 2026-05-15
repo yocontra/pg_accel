@@ -471,7 +471,10 @@ fn agg_op_roundtrip() {
 #[test]
 fn agg_op_from_i32_unknown_is_invalid() {
     assert_eq!(AggOp::from_i32(-1), None);
-    assert_eq!(AggOp::from_i32(14), None);
+    // `14` is now the BitXor encoding (see ops.rs::to_i32). The first
+    // unknown discriminant is 15 — bump the boundary test accordingly so
+    // it still asserts "next-unused integer maps to None".
+    assert_eq!(AggOp::from_i32(15), None);
     assert_eq!(AggOp::from_i32(i32::MAX), None);
     assert_eq!(AggOp::from_i32(i32::MIN), None);
 }

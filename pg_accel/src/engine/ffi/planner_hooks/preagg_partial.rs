@@ -413,6 +413,24 @@ pub(super) unsafe fn try_inject(
         );
         return;
     }
+    // Grouped bit/bool reductions: no per-group lane in the GPU hash-agg
+    // kernel; agg_op_to_ffi_partial maps them to Count as a safety net.
+    // Reject here so PG handles the grouped case natively. Non-grouped
+    // bit/bool reductions ride the typed reduce_bit_* / reduce_bool_*
+    // kernels in the executor.
+    if has_group_by
+        && agg_descs.iter().any(|(op, _, _)| {
+            matches!(
+                op,
+                AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor | AggOp::BoolAnd | AggOp::BoolOr
+            )
+        })
+    {
+        pgrx::debug1!(
+            "pg_accel preagg_partial: grouped bit/bool reduction rejected — kernel lacks per-group lane",
+        );
+        return;
+    }
 
     if has_group_by && !cost::hashagg_input_rows_safe(rows, cost::device_limits()) {
         pgrx::debug1!(
