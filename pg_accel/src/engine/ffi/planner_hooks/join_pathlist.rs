@@ -8,13 +8,44 @@ use pgrx::pg_sys::{
 use super::super::custom_scan;
 use super::hashjoin;
 use super::{
-    AccelMatch, EquiJoinKey, PREV_SET_JOIN_PATHLIST_HOOK, create_custom_path,
+    AccelMatch, EquiJoinKey, HookElapsedGuard, PREV_SET_JOIN_PATHLIST_HOOK, create_custom_path,
     find_accelerable_match, find_equi_join_key,
 };
 use crate::engine::cost;
 use crate::engine::gucs;
 use crate::engine::registry;
 use crate::engine::stats;
+
+/// Phase 0 fast-decline helper: returns `true` when *no* join strategy
+/// can possibly be injected by the hook body.
+///
+/// The downstream body explicitly rejects spatial / raster / h3 join paths
+/// (Gate 3b below) because no GPU spatial / raster / h3 merge or hash
+/// join kernel exists in `pgaccel-kernels/src/` today. The only remaining
+/// strategy is `GpuHashJoin`, which is itself gated by
+/// `selected_gpu_hashjoin_kernel_available()`. That predicate is pinned
+/// to `false` by the unit test
+/// `selected_gpu_hashjoin_kernel_is_not_available_yet` and stays `false`
+/// until a real GPU build/probe kernel lands.
+///
+/// So at the time of writing, every join-pathlist invocation that
+/// reaches the lower body will return without injecting. Bailing here
+/// saves the merge-path scan, equi-join restrictlist walk, registry
+/// lookup, and per-strategy cost computation. The 2026-05-14 SSBM Q2.3
+/// diagnosis attributes ~37 ms of planning time to this redundant
+/// per-join-order work.
+///
+/// Re-entry condition: when a real `GpuHashJoin` kernel lands and the
+/// kernel-availability flag flips to `true`, OR when a spatial-join
+/// kernel lands and Gate 3b stops unconditionally rejecting those
+/// strategies, this fast-decline gate must be removed (or refined to
+/// check only the no-longer-available strategy classes). The matching
+/// unit test `selected_gpu_hashjoin_kernel_is_not_available_yet` is the
+/// canary: when it starts failing because the kernel landed, the
+/// engineer removing it MUST also adjust this gate.
+fn join_hook_can_inject_anything() -> bool {
+    selected_gpu_hashjoin_kernel_available()
+}
 
 // ---------------------------------------------------------------------------
 // Join hook
@@ -46,6 +77,12 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         }
     }
 
+    // Phase 0 planner-hook overhead audit: time every invocation so the
+    // bench harness can detect no-dispatch queries that pay
+    // disproportionate hook overhead (TODO.md 2026-05-14 SSBM Q2.3
+    // diagnosis: 37-40 ms planning vs 0.2 ms with `pg_accel.enabled=off`).
+    let _hook_finish = HookElapsedGuard::new("join_pathlist");
+
     // Record this planner hook invocation (main backend thread only).
     stats::record_planner_hook_call();
 
@@ -70,12 +107,13 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     }
 
     // Observability (NestedLoop scalar inequality): runs BEFORE the early
-    // max-output gate. NLJ inequality joins typically produce O(n*m) rows
-    // and almost always exceed `gpu_join_max_output_rows`, so deferring the
-    // observer past that gate would hide the entire opportunity class. The
-    // NLJ scalar inequality kernel is the launchpad for TODO.md Phase 4
-    // "NestedLoop scalar recognition"; the counter `nestloop_scalar_no_gpu_kernel`
-    // tells the next implementor how many of these the planner sees.
+    // max-output gate AND before the fast-decline. NLJ inequality joins
+    // typically produce O(n*m) rows and almost always exceed
+    // `gpu_join_max_output_rows`, so deferring the observer past either gate
+    // would hide the entire opportunity class. The NLJ scalar inequality
+    // kernel is the launchpad for TODO.md Phase 4 "NestedLoop scalar
+    // recognition"; the counter `nestloop_scalar_no_gpu_kernel` tells the
+    // next implementor how many of these the planner sees.
     //
     // We only run this for INNER joins — outer/semi/anti NLJ have richer
     // null-padding semantics that the eventual GPU kernel would need to
@@ -89,7 +127,35 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         }
     }
 
-    // Gate 1c: Early max-output check. Large-output GpuHashJoin is a known
+    // Gate 1c: Phase 0 fast-decline. SSBM-shaped 4-way joins fire this hook
+    // dozens of times per query (one per join order the planner considers).
+    // The 2026-05-14 audit measured `ssbm_q2_3 @ 1M` at 37-40 ms planning
+    // time with the full walk vs ~0.2 ms with `pg_accel.enabled=off`, and
+    // the 2026-05-15 verification reproduced 30-39 ms planning on a small
+    // SSBM-shape fixture (`pg_accel_traces.jsonl` `planner.hook_elapsed_us`
+    // breakdown).
+    //
+    // Every join strategy is currently unreachable in the lower body:
+    //   - GpuSpatial / GpuRaster / GpuH3 are rejected by Gate 3b (no GPU
+    //     spatial/raster/h3 merge or hash join kernel exists);
+    //   - GpuHashJoin is gated by `selected_gpu_hashjoin_kernel_available()`
+    //     (pinned `false` by the canary unit test).
+    //
+    // `join_hook_can_inject_anything()` aggregates that into one branch.
+    // When it returns `false`, bail O(1) before walking
+    // `joinrel->pathlist` (mergejoin observability), the restrictlist
+    // (equi-join detection), or doing the registry lookup. Avoids the
+    // O(join_orders × per-rel pathlist) work that dominates planning time
+    // on multi-way star joins.
+    //
+    // The NLJ-inequality observability above runs first so the counter
+    // signal still increments even when the rest of the hook is bypassed.
+    if !join_hook_can_inject_anything() {
+        stats::record_planner_fast_decline("join_pathlist_no_eligible_strategy");
+        return;
+    }
+
+    // Gate 1d: Early max-output check. Large-output GpuHashJoin is a known
     // crash/loser lane; `gpu_join_max_output_rows` is a real upper bound, not
     // the older min-ish gate. Keep this before expensive join recognition.
     // SAFETY: joinrel is a valid RelOptInfo provided by the planner.

@@ -54,6 +54,49 @@ pub(super) static mut PREV_SET_JOIN_PATHLIST_HOOK: pg_sys::set_join_pathlist_hoo
 static mut PREV_CREATE_UPPER_PATHS_HOOK: pg_sys::create_upper_paths_hook_type = None;
 
 // ---------------------------------------------------------------------------
+// Planner-hook elapsed-time guard (Phase 0 overhead audit, 2026-05-14)
+// ---------------------------------------------------------------------------
+
+/// RAII guard that records elapsed wall-clock time when a planner hook
+/// invocation returns, regardless of which `return` path it took.
+///
+/// Construct one near the top of every planner hook entry point (after
+/// chaining the previous hook). On `Drop` it stamps the elapsed
+/// microseconds into the `PLANNER_HOOK_TOTAL_US` counter via
+/// [`stats::record_planner_hook_elapsed`]. The bench harness reads
+/// `pg_accel_planner_overhead_us()` to assert that no-dispatch queries
+/// (SSBM star joins, expression-only filters, native aggregates) stay
+/// near zero overhead.
+///
+/// Costs ~50 ns (one `Instant::now`, one atomic add, one tracing event at
+/// `trace` level which is filtered out by the default `notice` filter
+/// per CLAUDE.md). Cheap enough to use on every hook invocation without
+/// inflating the overhead it is trying to measure.
+pub(in crate::engine::ffi::planner_hooks) struct HookElapsedGuard {
+    hook: &'static str,
+    start: std::time::Instant,
+}
+
+impl HookElapsedGuard {
+    /// Begin timing one planner hook invocation. The matching elapsed
+    /// sample is recorded automatically on `Drop`.
+    #[must_use]
+    pub(in crate::engine::ffi::planner_hooks) fn new(hook: &'static str) -> Self {
+        Self {
+            hook,
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for HookElapsedGuard {
+    fn drop(&mut self) {
+        let elapsed_us = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        stats::record_planner_hook_elapsed(self.hook, elapsed_us);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Hook installation
 // ---------------------------------------------------------------------------
 
@@ -108,6 +151,10 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         }
     }
 
+    // Phase 0 audit: time this invocation (TODO.md 2026-05-14). Bench harness
+    // reads `pg_accel_planner_overhead_us()` to detect no-dispatch regressions.
+    let _hook_finish = HookElapsedGuard::new("upper_paths");
+
     // SAFETY: root is the planner-provided pointer for this hook invocation.
     let Some(mut hook_context) =
         (unsafe { HookContext::begin(root, "upper_paths", upper_stage_candidate(stage)) })
@@ -119,6 +166,24 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     // Dispatch by upper relation stage.
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
+            // Phase 0 fast-decline: if the query's GROUP BY contains an
+            // unsupported group-key type (text/varchar/timestamp/date/etc.),
+            // the lower body of `pgaccel_inject_gpu_agg` walks the entire
+            // target list, runs `grouped_query_has_avg`, and then rejects on
+            // `GroupKeyInfo::key_type_from_oid(...) -> None` only after
+            // touching every Aggref. For SSBM Q2.3-shaped queries that group
+            // by `(d_year, p_brand1)` with p_brand1 = text, this is wasted
+            // O(tlist) work the planner pays on every UPPERREL_GROUP_AGG
+            // invocation. Bail O(group_clause_len) instead.
+            //
+            // SAFETY: root is the planner-provided pointer.
+            if unsafe { grouped_query_has_unsupported_group_key(root) } {
+                stats::record_planner_fast_decline("upper_paths_unsupported_group_key");
+                pgrx::debug1!(
+                    "pg_accel: upper_paths fast-decline: GROUP BY has unsupported key type"
+                );
+                return;
+            }
             hook_context.accept();
             // 1) Standard (non-parallel) GpuAgg path.
             //
@@ -155,6 +220,108 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         _ => {}
     }
     let _ = extra;
+}
+
+/// Phase 0 fast-decline helper for `pgaccel_create_upper_paths` /
+/// `UPPERREL_GROUP_AGG`. Walks only the `Query.groupClause` (O(group cols))
+/// and returns `true` if any group key resolves to a type that
+/// [`GroupKeyInfo::key_type_from_oid`] does not classify as supported.
+///
+/// Mirrors the late-stage rejection in `pgaccel_inject_gpu_agg`
+/// (`mod.rs:1780`, `mod.rs:1814`, `mod.rs:1837`) but runs before the full
+/// target-list walk, so SSBM Q2.3-shaped queries that group by
+/// `(d_year, p_brand1)` with p_brand1 = text bail O(group_cols) instead of
+/// O(tlist + restrictinfo + path scan + Aggref count).
+///
+/// Returns `false` when:
+/// - the query has no GROUP BY (plain aggregate — the lower body must run);
+/// - the parse or target list cannot be walked safely;
+/// - every group key resolves to a supported type.
+///
+/// # Safety
+///
+/// `root` must be a valid `PlannerInfo*` from the planner. Called on the
+/// main backend thread.
+unsafe fn grouped_query_has_unsupported_group_key(root: *mut PlannerInfo) -> bool {
+    use crate::engine::executor::agg::GroupKeyInfo;
+
+    if root.is_null() {
+        return false;
+    }
+    // SAFETY: caller guarantees root is a valid PlannerInfo pointer.
+    let parse = unsafe { (*root).parse };
+    if parse.is_null() {
+        return false;
+    }
+    // SAFETY: parse is a valid planner-owned Query.
+    let query = unsafe { &*parse };
+    if query.groupClause.is_null() {
+        return false;
+    }
+    // SAFETY: groupClause is a planner-owned List of SortGroupClause.
+    let group_len = unsafe { pg_sys::list_length(query.groupClause) };
+    if group_len == 0 {
+        return false;
+    }
+    let tlist = query.targetList;
+    if tlist.is_null() {
+        return false;
+    }
+    // SAFETY: targetList is a planner-owned List of TargetEntry.
+    let tlist_len = unsafe { pg_sys::list_length(tlist) };
+
+    // Walk every SortGroupClause and resolve its tleSortGroupRef back to a
+    // Var in the target list. Bail-out on the first unsupported type OID.
+    for i in 0..group_len {
+        // SAFETY: i in [0, group_len).
+        let sc =
+            unsafe { pg_sys::list_nth(query.groupClause, i).cast::<pg_sys::SortGroupClause>() };
+        if sc.is_null() {
+            return false;
+        }
+        // SAFETY: sc is a valid SortGroupClause.
+        let sgref = unsafe { (*sc).tleSortGroupRef };
+
+        let mut type_oid: Option<pg_sys::Oid> = None;
+        for j in 0..tlist_len {
+            // SAFETY: j in [0, tlist_len).
+            let tle = unsafe { pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>() };
+            if tle.is_null() {
+                continue;
+            }
+            // SAFETY: tle is a valid TargetEntry.
+            if unsafe { (*tle).ressortgroupref } != sgref {
+                continue;
+            }
+            // SAFETY: tle.expr is a planner-owned Expr.
+            let expr = unsafe { (*tle).expr };
+            if expr.is_null() {
+                return false;
+            }
+            // SAFETY: reading node tag.
+            let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
+            if tag == NodeTag::T_Var {
+                // SAFETY: tag confirms this is a Var.
+                #[allow(clippy::cast_ptr_alignment)]
+                let var = expr.cast::<pg_sys::Var>();
+                type_oid = Some(unsafe { (*var).vartype });
+            }
+            break;
+        }
+
+        let Some(oid) = type_oid else {
+            // Group key is not a plain Var (could be an expression).
+            // The lower body's check is more thorough; defer to it
+            // rather than over-decline. This means we only fast-decline
+            // when we are CERTAIN the group key types are unsupported.
+            return false;
+        };
+        if GroupKeyInfo::key_type_from_oid(oid).is_none() {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn upper_stage_candidate(stage: UpperRelationKind::Type) -> &'static str {

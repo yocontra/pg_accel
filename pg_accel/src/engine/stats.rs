@@ -64,6 +64,26 @@ static GPU_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 /// uploaded fresh.
 static GPU_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
+/// Cumulative microseconds spent inside the three pg_accel planner hooks
+/// (`pgaccel_set_rel_pathlist`, `pgaccel_set_join_pathlist`,
+/// `pgaccel_create_upper_paths`). Each hook invocation adds its elapsed
+/// time once, regardless of whether a CustomPath was injected or the hook
+/// fast-declined. Read via `pg_accel_planner_overhead_us()` from SQL; the
+/// bench harness uses it to detect Phase 0 regressions in planner-hook
+/// overhead on no-dispatch queries (SSBM-shaped joins, expression-only
+/// filters, native aggregates).
+static PLANNER_HOOK_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+
+/// Number of planner hook invocations that hit the O(1) early-decline
+/// fast path (Phase 0 audit, 2026-05-14). Incremented by
+/// `record_planner_fast_decline()` from hot decline gates like
+/// "no GPU hashjoin kernel + no spatial adapters" or "GROUP BY has an
+/// unsupported group-key type". Read alongside
+/// `PLANNER_HOOK_TOTAL_US` to confirm the audit is working — high
+/// fast-decline counter + low total microseconds means hooks bail early
+/// instead of walking full pathlists.
+static PLANNER_FAST_DECLINE: AtomicU64 = AtomicU64::new(0);
+
 // ---------------------------------------------------------------------------
 // Helpers to increment counters
 // ---------------------------------------------------------------------------
@@ -232,6 +252,59 @@ pub fn read_gpu_cache_misses() -> u64 {
     GPU_CACHE_MISSES.load(Ordering::Relaxed)
 }
 
+/// Add an elapsed-microseconds sample for one planner hook invocation.
+///
+/// Call from every planner hook entry point — `pgaccel_set_rel_pathlist`,
+/// `pgaccel_set_join_pathlist`, `pgaccel_create_upper_paths` — at the
+/// exit point (both fast-decline and full-walk branches) so the total
+/// reflects all time spent in pg_accel's planner code. The argument is
+/// the elapsed `std::time::Instant` duration, converted to microseconds
+/// by the caller.
+///
+/// Emits a `stats.planner_hook_elapsed` tracing event for debug visibility;
+/// keep this at `trace` level so it does not flood the JSONL trace file
+/// during normal operation (filter is `notice` by default per CLAUDE.md).
+#[inline]
+pub fn record_planner_hook_elapsed(hook: &'static str, elapsed_us: u64) {
+    PLANNER_HOOK_TOTAL_US.fetch_add(elapsed_us, Ordering::Relaxed);
+    tracing::trace!(
+        target: "pg_accel::stats",
+        hook,
+        elapsed_us,
+        "stats.planner_hook_elapsed"
+    );
+}
+
+/// Record that a planner hook returned via the O(1) early-decline path.
+///
+/// Use from the Phase 0 fast-decline gates so the bench harness can
+/// confirm the audit is producing the expected hot-path drop without
+/// reading the trace file. The `reason` string identifies which fast
+/// gate fired; keep it static so aggregation by reason works.
+#[inline]
+pub fn record_planner_fast_decline(reason: &'static str) {
+    PLANNER_FAST_DECLINE.fetch_add(1, Ordering::Relaxed);
+    tracing::trace!(
+        target: "pg_accel::stats",
+        reason,
+        "stats.planner_fast_decline"
+    );
+}
+
+/// Snapshot of the cumulative planner-hook elapsed-time counter.
+#[inline]
+#[must_use]
+pub fn read_planner_hook_total_us() -> u64 {
+    PLANNER_HOOK_TOTAL_US.load(Ordering::Relaxed)
+}
+
+/// Snapshot of the planner fast-decline counter.
+#[inline]
+#[must_use]
+pub fn read_planner_fast_decline() -> u64 {
+    PLANNER_FAST_DECLINE.load(Ordering::Relaxed)
+}
+
 /// Cheap snapshot of the monotonic GPU kernel execution counter.
 ///
 /// Delegates to the C++ thread-local counter exposed via `crate::gpu`.
@@ -283,6 +356,8 @@ fn pg_accel_stats() -> TableIterator<
         name!(degenerate_guard_trigger_count, i64),
         name!(gpu_cache_hit_count, i64),
         name!(gpu_cache_miss_count, i64),
+        name!(planner_hook_total_us, i64),
+        name!(planner_fast_decline_count, i64),
     ),
 > {
     let gpu_execs = crate::gpu::gpu_exec_count();
@@ -291,6 +366,8 @@ fn pg_accel_stats() -> TableIterator<
     let degenerate_guard = read_degenerate_guard();
     let gpu_cache_hits = read_gpu_cache_hits();
     let gpu_cache_misses = read_gpu_cache_misses();
+    let planner_total_us = read_planner_hook_total_us();
+    let planner_fast_decline = read_planner_fast_decline();
     let row = STATS.with(|s| {
         let st = s.borrow();
         (
@@ -311,9 +388,31 @@ fn pg_accel_stats() -> TableIterator<
             degenerate_guard as i64,
             gpu_cache_hits as i64,
             gpu_cache_misses as i64,
+            planner_total_us as i64,
+            planner_fast_decline as i64,
         )
     });
     TableIterator::new(std::iter::once(row))
+}
+
+/// Returns the cumulative microseconds spent inside pg_accel planner hooks
+/// since the backend started. Cheap atomic load. The Phase 0 planner-hook
+/// overhead audit (TODO.md 2026-05-14) uses this to spot regressions in
+/// no-dispatch query overhead without re-decoding the full `pg_accel_stats()`
+/// SRF.
+#[pg_extern]
+fn pg_accel_planner_overhead_us() -> i64 {
+    read_planner_hook_total_us() as i64
+}
+
+/// Returns the count of planner hook invocations that hit the Phase 0
+/// O(1) early-decline fast path. Used together with
+/// `pg_accel_planner_overhead_us()` to verify SSBM-shaped queries take
+/// the cheap decline path. Higher fast-decline count + lower total
+/// microseconds is the success signal.
+#[pg_extern]
+fn pg_accel_planner_fast_decline_count() -> i64 {
+    read_planner_fast_decline() as i64
 }
 
 /// Returns the monotonic count of GPU kernel executions since this backend

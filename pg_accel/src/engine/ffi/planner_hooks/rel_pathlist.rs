@@ -162,6 +162,11 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         }
     }
 
+    // Phase 0 audit: time this hook invocation (TODO.md 2026-05-14). Bench
+    // harness reads `pg_accel_planner_overhead_us()` to detect SSBM-style
+    // no-dispatch regressions in planner overhead.
+    let _hook_finish = super::HookElapsedGuard::new("rel_pathlist");
+
     // Record this planner hook invocation (main backend thread only).
     stats::record_planner_hook_call();
 
