@@ -122,30 +122,30 @@ kernels dispatched, and which rows returned to PostgreSQL.
 
 ## Phase 1 - Stop All Backend Crashes Before Re-Entry
 
-Selected GPU plans that can disconnect PostgreSQL are release blockers. The
-first fix is to make the planner decline those shapes; the second fix is to
-repair the GPU path and re-enter only after correctness and benchmark proof.
+Selected GPU plans that can disconnect PostgreSQL are release blockers. All
+previously-known crash families are gated at the planner or kernel layer:
 
-### Spatial predicate backend crashes
+- Grouped aggregation Metal argument-buffer crashes — slab pattern applied
+  to all four hashagg kernel lambdas
+  (`pgaccel-kernels/src/hash_agg.cpp:393-805`); sort-based path
+  Metal-gated off (`hash_agg.cpp:331-334`); grouped `AVG` finalize
+  preemptively rejected (`pg_accel/src/engine/executor/agg/execute.rs:1303-1310`).
+- Hash join Metal host-pointer probe crashes — host-pointer SYCL probe path
+  deleted; kernel is a fail-closed stub
+  (`pgaccel-kernels/src/hash_join.cpp:14-46`); planner gate at
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:153-168`.
+- Spatial bulk point-in-polygon high-capture lambda crashes — slab pattern
+  applied to both simple and cooperative kernels
+  (`pgaccel-kernels/src/spatial_dispatch.cpp:295-622`); cold-fork
+  regression coverage in `pgaccel-kernels/test/test_fork_cold.cpp:233-264`.
+- Parallel partial `SUM(bigint)` reduce worker crash — planner gate at
+  `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:46-56`
+  (`parallel_partial_sum_bigint_rejected`) and mirror in
+  `preagg_partial.rs:378-402`.
 
-- Evidence: the 2026-05-13 benchmark run repeatedly crashed at the 100K row
-  scale for polygon/selectivity fixtures, including `spatial_mega_1kv`,
-  `vsweep_mid`, `vsweep_high`, `vsweep_pathological`,
-  `spatial_concentric`, `spatial_star_1kv`, `spatial_multihole`,
-  `spatial_zigzag`, `spatial_sel_1pct`, `spatial_sel_10pct`,
-  `spatial_sel_50pct`, and `spatial_sel_90pct`. Many of the same workloads
-  completed at 1M and 10M, so this is not a monotonic memory ceiling.
-- Root cause target: the affected workloads route to the bulk
-  point-in-polygon fast path. PostgreSQL logs show EXPLAIN succeeds and the
-  actual query aborts in Metal/AdaptiveCpp argument-buffer reflection. The
-  simple and cooperative bulk PIP kernels both use high-capture SYCL
-  lambdas; they need the same slab-style argument workaround used by other
-  kernels.
-- Work: fix the high-capture point-in-polygon dispatch path or keep the
-  affected 100K benchmark lanes quarantined; re-run the selectivity sweep
-  against simple and 1024+ vertex cooperative polygons after the fix.
-- Acceptance: every affected 100K spatial workload completes with correct
-  counts, no panic-log entry, and stable repeat runs.
+If a new backend-crashing shape appears, add it here. Repair work that is
+necessary to unlock GPU dispatch for a gated shape (rather than to stop a
+crash) lives in the feature phase that owns the shape, not here.
 
 ## Phase 2 - AdaptiveCpp Runtime, Metal, CUDA, And Fork Stability
 
