@@ -195,39 +195,34 @@ incidental log noise.
 
 ### Metal pipeline-state XPC edge case
 
-- Scope: rare forked workers may still hit `MTLCompilerService` even after
-  archive support.
-- Instrumentation landed: `pgaccel_archive_stats_snapshot()` /
+- Resolved upstream (AdaptiveCpp `0ebc10e5` on branch `fork-safe-metal`,
+  2026-05-15): `compile_msl_to_metallib` now uses process-private temp
+  filenames (`<id>.<pid>.<rand>.metal` / `.air` / `.metallib.tmp`)
+  for every intermediate, and publishes the final `<id>.metallib`
+  via `std::filesystem::rename` (atomic on POSIX same-filesystem).
+  Sibling workers no longer unlink each other's in-flight inputs.
+  Rename-conflict path accepts the pre-existing file (same source
+  hash → same bytes). Cleanup runs against process-private filenames
+  that can't collide with siblings.
+- Verified post-fix: cold-cache 8-worker × 20-iteration fork stress
+  (`PGACCEL_FORK_STRESS_WORKERS=8 PGACCEL_FORK_STRESS_ITERS=20 just
+  gpu-stress-archive`) shows `workers_succeeded=8/8`,
+  `xpc_compiler_service_hits=0`, zero pipeline-state failures, zero
+  archive load/build failures. Matches the warm-cache deterministic
+  PASS — Phase 2 acceptance fully met.
+- Instrumentation retained (`490a1f4`):
+  `pgaccel_archive_stats_snapshot()` /
   `pgaccel_archive_jit_cache_dir()` FFI
   (`pgaccel-kernels/include/pgaccel_ffi.h:67-105`,
   `pgaccel-kernels/src/archive_stats.cpp`) report
-  metallib/metalar/jit/orphan-metallib counts. `just gpu-stress-archive`
-  drives an 8-worker × 20-iteration cold/warm fork stress harness
-  (`pgaccel-kernels/test/test_fork_archive_stress.cpp`) that captures
-  per-child stderr for XPC markers.
-- Evidence (2026-05-15): cold-cache stress reproduces XPC fallback at
-  12-75% per-worker. The trigger is NOT archive build/load; the
-  `acpp-metal-archive-build` helper is never reached in failing workers.
-  Failure chain: AdaptiveCpp's `compile_msl_to_metallib` in
-  `/Users/contra/Projects/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:127`
-  calls `std::remove(metal_path)` on the shared `<id>.metal` source
-  file as soon as one worker's `xcrun metallib` finishes. Sibling
-  workers' concurrent `xcrun metal` reads fail with "no such file or
-  directory" → `compile_msl_to_metallib` returns `{}` →
-  `build_metal_library_from_source` is invoked
-  (`metal_code_object.cpp:500`) → MTLCompilerService XPC path is taken,
-  which is dead in the forked child.
-- Warm-cache 8×20 stress is deterministic PASS (zero XPC hits).
-- Fix path is upstream AdaptiveCpp (`yocontra/AdaptiveCpp`,
-  `fork-safe-metal` branch), not pg_accel:
-  (a) keep `<id>.metal` on disk by inverting the existing
-  `ACPP_METAL_KEEP_SOURCE` default at `metal_code_object.cpp:126-128`,
-  or (b) write the source to a process-private tmp name and atomic-
-  rename to `<id>.metal` only after `<id>.metallib` is finalised.
-- pg_accel deployment mitigation: pre-warm the JIT cache before forking
-  N workers. `shared_preload_libraries` already does this for a single
-  backend at startup, but bulk-parallel cold launches against a fresh
-  cache (e.g. after `make clear-jit`) can still race.
+  metallib/metalar/jit/orphan-metallib counts. `just
+  gpu-stress-archive` continues to drive the regression test;
+  re-running on any future AdaptiveCpp rebase is the canary.
+- Operator note: pg_accel still benefits from a warm JIT cache before
+  forking N workers, but the fix removes the requirement.
+  `shared_preload_libraries` + the new atomic-publish path together
+  make bulk-parallel cold launches (e.g. after `make clear-jit`)
+  safe.
 
 ### Out-of-order executor overlap
 
