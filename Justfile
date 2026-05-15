@@ -545,6 +545,30 @@ gpu-test-cold name timeout_s="300":
 # between large changes.
 gpu-test-cold-all: clear-jit gpu-test
 
+# 8-worker x 20-iteration fork stress test for the Metal MTLBinaryArchive
+# fork-safety path. Acceptance gate for TODO.md Phase 2 "Metal pipeline-state
+# XPC edge case": zero MTLCompilerService errors over the 8x20 matrix.
+#
+# Override sizing with environment:
+#   PGACCEL_FORK_STRESS_WORKERS=16 PGACCEL_FORK_STRESS_ITERS=40 just gpu-stress-archive
+#
+# Always cold-starts (clears the JIT cache) so the archive build path is
+# actually exercised. Output is teed to /tmp/gpu-stress-archive.log for
+# durable evidence.
+gpu-stress-archive workers="8" iters="20":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just clear-jit
+    log="/tmp/gpu-stress-archive.log"
+    echo "=== gpu-stress-archive workers={{workers}} iters={{iters}} ===" | tee "$log"
+    PGACCEL_FORK_STRESS_WORKERS={{workers}} PGACCEL_FORK_STRESS_ITERS={{iters}} \
+        timeout 600 ./pgaccel-kernels/build/test_fork_archive_stress 2>&1 | tee -a "$log" || rc=$?
+    echo "--- summary (last 25 lines) ---"
+    tail -25 "$log"
+    echo "---"
+    grep -E "RESULT:|xpc_compiler_service_hits|pipeline_state_failures|archive_build_failures" "$log" || true
+    exit "${rc:-0}"
+
 # Audit pgaccel-kernels/src/*.cpp for `extern "C" pgaccel_*` symbols
 # that are labelled GPU-accelerated but whose body is a host-side
 # `for` loop with no `q.submit` / `parallel_for` / sycl_ helper call.

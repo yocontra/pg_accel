@@ -64,6 +64,50 @@ pgaccel_platform_caps pgaccel_get_caps(void);
 uint64_t pgaccel_gpu_exec_count(void);
 void pgaccel_reset_gpu_exec_count(void);
 
+/* ── MTLBinaryArchive observability ───────────────────────────────────
+ *
+ * Phase 2 "Metal pipeline-state XPC edge case" instrumentation. The
+ * AdaptiveCpp Metal backend produces a `<id>.metalar` next to each
+ * `<id>.metallib` so forked children can hydrate the pipeline state
+ * without re-entering MTLCompilerService. The snapshot below scans the
+ * AdaptiveCpp JIT cache directory and reports how many `.metallib` and
+ * `.metalar` files exist right now. A forked-child dispatch that adds a
+ * `.metallib` but no `.metalar` is the canonical signature of the helper
+ * subprocess (`acpp-metal-archive-build`) failing — those children are
+ * the ones at risk of an `MTLCompilerService` XPC fallback at pipeline
+ * creation time.
+ *
+ * These functions are pure I/O over `~/.acpp/apps/global/jit-cache` (or
+ * the path returned by AdaptiveCpp's `get_jit_cache_dir`) so they are
+ * fork-safe and cheap. Callers (typically a stress harness) snapshot
+ * the cache before/after a forked dispatch matrix to detect missing
+ * archive files. `pgaccel_archive_jit_cache_dir` returns the path itself
+ * for logging.
+ *
+ * Note: there is no direct programmatic hook into the AdaptiveCpp runtime
+ * for the archive-builder exit code from inside pg_accel — those signals
+ * surface only as `HIPSYCL_DEBUG_*` stderr output. Stress tests capture
+ * the child's stderr pipe and grep for the runtime's archive failure
+ * lines (see `pgaccel-kernels/test/test_fork_archive_stress.cpp`).
+ */
+
+typedef struct {
+  uint64_t metallib_files;  /* count of *.metallib in cache dir              */
+  uint64_t metalar_files;   /* count of *.metalar in cache dir               */
+  uint64_t jit_files;       /* count of *.jit (AdaptiveCpp HCF cache files)  */
+  uint64_t orphan_metallib; /* metallib without a matching <id>.metalar     */
+} pgaccel_archive_snapshot;
+
+/* Snapshot the AdaptiveCpp JIT cache. Returns PGACCEL_OK on success; on
+ * failure (no HOME env, cache dir missing) all counters are 0 and the
+ * status is PGACCEL_ERROR. */
+pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapshot* out);
+
+/* Returns the JIT cache directory used by AdaptiveCpp for `.metalar` /
+ * `.metallib` files. Buffer must be at least 512 bytes; on success it is
+ * NUL-terminated. */
+pgaccel_status pgaccel_archive_jit_cache_dir(char* buf, size_t buf_len);
+
 #ifdef __cplusplus
 }
 /// Called by kernels after successful GPU execution. Increments thread-local

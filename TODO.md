@@ -193,9 +193,37 @@ incidental log noise.
 
 - Scope: rare forked workers may still hit `MTLCompilerService` even after
   archive support.
-- Work: instrument archive build/load return codes under stress.
-- Acceptance: either the issue is reproducible with a fix path, or an
-  8-worker x 20-iteration stress run shows zero XPC errors.
+- Instrumentation landed: `pgaccel_archive_stats_snapshot()` /
+  `pgaccel_archive_jit_cache_dir()` FFI
+  (`pgaccel-kernels/include/pgaccel_ffi.h:67-105`,
+  `pgaccel-kernels/src/archive_stats.cpp`) report
+  metallib/metalar/jit/orphan-metallib counts. `just gpu-stress-archive`
+  drives an 8-worker × 20-iteration cold/warm fork stress harness
+  (`pgaccel-kernels/test/test_fork_archive_stress.cpp`) that captures
+  per-child stderr for XPC markers.
+- Evidence (2026-05-15): cold-cache stress reproduces XPC fallback at
+  12-75% per-worker. The trigger is NOT archive build/load; the
+  `acpp-metal-archive-build` helper is never reached in failing workers.
+  Failure chain: AdaptiveCpp's `compile_msl_to_metallib` in
+  `/Users/contra/Projects/AdaptiveCpp/src/runtime/metal/metal_code_object.cpp:127`
+  calls `std::remove(metal_path)` on the shared `<id>.metal` source
+  file as soon as one worker's `xcrun metallib` finishes. Sibling
+  workers' concurrent `xcrun metal` reads fail with "no such file or
+  directory" → `compile_msl_to_metallib` returns `{}` →
+  `build_metal_library_from_source` is invoked
+  (`metal_code_object.cpp:500`) → MTLCompilerService XPC path is taken,
+  which is dead in the forked child.
+- Warm-cache 8×20 stress is deterministic PASS (zero XPC hits).
+- Fix path is upstream AdaptiveCpp (`yocontra/AdaptiveCpp`,
+  `fork-safe-metal` branch), not pg_accel:
+  (a) keep `<id>.metal` on disk by inverting the existing
+  `ACPP_METAL_KEEP_SOURCE` default at `metal_code_object.cpp:126-128`,
+  or (b) write the source to a process-private tmp name and atomic-
+  rename to `<id>.metal` only after `<id>.metallib` is finalised.
+- pg_accel deployment mitigation: pre-warm the JIT cache before forking
+  N workers. `shared_preload_libraries` already does this for a single
+  backend at startup, but bulk-parallel cold launches against a fresh
+  cache (e.g. after `make clear-jit`) can still race.
 
 ### Out-of-order executor overlap
 

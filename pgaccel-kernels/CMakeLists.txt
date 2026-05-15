@@ -16,6 +16,7 @@ find_package(AdaptiveCpp REQUIRED)
 
 set(KERNEL_SOURCES
     src/device_manager.cpp
+    src/archive_stats.cpp
     src/bbox_ops.cpp
     src/mem_pool.cpp
     src/sort.cpp
@@ -119,6 +120,9 @@ target_link_libraries(test_fork_cold PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_fork_warmed test/test_fork_warmed.cpp)
 target_link_libraries(test_fork_warmed PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_fork_archive_stress test/test_fork_archive_stress.cpp)
+target_link_libraries(test_fork_archive_stress PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
 target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
