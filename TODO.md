@@ -634,14 +634,15 @@ raster map algebra, and prepared geometry structures.
   asserting `pg_accel_kernel_executions()` delta for winners is
   non-zero, parity lane delta is zero, result-set equality across
   `pg_accel.enabled=on/off`, and a warm dispatch latency budget.
-- Remaining work: a runner-side gate in
-  `pg_accel_bench/src/report.rs::render_geomean_headline` that consumes
-  `h3_lane_class()` and fails the bench output when a Winner misses
-  its `min_warm_speedup`. The classifier is the source of truth; this
-  hard CI gate is the next step. Also: cold-start cost remains
-  unbounded by design (per Phase 2 the first compile of
-  `pgaccel_h3_lat_lng_to_cell_bulk` can take minutes); only warm
-  dispatch latency is gated today.
+- Landed (e0cdc0d): hard CI gate. `BenchReport::evaluate_h3_lane_gate()`
+  + `main::enforce_h3_lane_gate(&report)` set a non-zero process exit
+  when (a) any Winner has `gpu_kernel_dispatched == false`, (b) any
+  Winner has `speedup_median_vs_parallel < 1.0`, or (c) any Parity
+  lane unexpectedly dispatched. Uniform 1.0x floor (matches the Phase
+  0 ship bar); per-Winner advisory thresholds rendered alongside.
+  Cold-start cost remains unbounded by design (per Phase 2 the first
+  compile of `pgaccel_h3_lat_lng_to_cell_bulk` can take minutes);
+  only warm dispatch latency is gated today.
 - Acceptance: winning H3 operations remain crash-free, keep GPU dispatch,
   and meet speedup thresholds on warm runs; parity-only H3 operations are
   declined or costed honestly.
