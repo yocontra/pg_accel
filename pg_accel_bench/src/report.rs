@@ -996,6 +996,17 @@ impl BenchReport {
 
         self.render_kernel_coverage(&mut out);
 
+        // -------------------------------------------------------------------
+        // H3 lane gate (TODO Phase 5 H3 winning lane protection)
+        // -------------------------------------------------------------------
+        //
+        // Renders the `### H3 Lane Gate Failures` section when any H3 Winner
+        // regressed below the uniform 1.0x floor (or failed to dispatch) or
+        // any H3 Parity workload dispatched a GPU kernel. When the gate is
+        // green this is a no-op; when it fails, the bench process is expected
+        // to exit non-zero (see `main::cmd_run`).
+        self.render_h3_lane_gate(&mut out);
+
         // GUC settings
         if let Some(gucs) = &self.gucs
             && !gucs.settings.is_empty()
@@ -1991,6 +2002,172 @@ impl BenchReport {
         }
         out.push('\n');
     }
+
+    /// Evaluate the H3 lane gate against the report's workloads.
+    ///
+    /// The gate enforces three contracts derived from
+    /// [`crate::workloads::h3_lane_class`] (the source of truth for H3 lane
+    /// classification):
+    ///
+    /// 1. **Winner below floor**: every H3 [`Winning`](crate::workloads::H3LaneClass::Winning)
+    ///    row that DID dispatch a GPU kernel must have a median speedup of at
+    ///    least [`H3_LANE_GATE_MIN_WARM_SPEEDUP`]. This is the Phase 0 ship bar
+    ///    — a Winner that drops below PG-parallel parity is, by definition,
+    ///    not winning.
+    /// 2. **Winner missed dispatch**: every H3 Winner row that did NOT dispatch
+    ///    a GPU kernel fails the gate. A Winner that silently routes to the
+    ///    PG-native plan is the failure mode `test_h3_bulk_with_zero_kernel_delta_is_not_dispatched`
+    ///    exists to catch — and the report-level gate makes it a CI failure.
+    /// 3. **Parity dispatched unexpectedly**: every H3 [`Parity`](crate::workloads::H3LaneClass::Parity)
+    ///    row that DID dispatch a GPU kernel fails the gate. Parity ops are
+    ///    deliberately not registered for normal planner exposure; an
+    ///    accidental re-registration is a quarantine breach.
+    ///
+    /// Returns an empty vector when every H3 row passes (or when no H3 rows
+    /// are present — the gate is a release-time tool, not a unit-test tool).
+    #[must_use]
+    pub fn evaluate_h3_lane_gate(&self) -> Vec<H3LaneGateFailure> {
+        let report = self.with_normalized_dispatch();
+        let mut failures = Vec::new();
+        for w in &report.workloads {
+            let Some(class) = crate::workloads::h3_lane_class(&w.name) else {
+                continue;
+            };
+            match class {
+                crate::workloads::H3LaneClass::Winning { min_warm_speedup } => {
+                    if !w.gpu_kernel_dispatched {
+                        failures.push(H3LaneGateFailure {
+                            workload: w.name.clone(),
+                            rows: w.rows,
+                            kind: H3LaneGateFailureKind::WinnerMissedDispatch,
+                            speedup_median: w.speedup_median_vs_parallel,
+                            gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
+                            advisory_min_warm_speedup: min_warm_speedup,
+                        });
+                    } else if !w.speedup_median_vs_parallel.is_finite()
+                        || w.speedup_median_vs_parallel < H3_LANE_GATE_MIN_WARM_SPEEDUP
+                    {
+                        failures.push(H3LaneGateFailure {
+                            workload: w.name.clone(),
+                            rows: w.rows,
+                            kind: H3LaneGateFailureKind::WinnerBelowFloor,
+                            speedup_median: w.speedup_median_vs_parallel,
+                            gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
+                            advisory_min_warm_speedup: min_warm_speedup,
+                        });
+                    }
+                }
+                crate::workloads::H3LaneClass::Parity => {
+                    if w.gpu_kernel_dispatched {
+                        // Parity rows have no per-Winner advisory; sentinel
+                        // value `1.0` is rendered as `n/a` in the report but
+                        // kept f64 for table-column homogeneity.
+                        let advisory =
+                            crate::workloads::h3_winner_min_warm_speedup(&w.name).unwrap_or(1.0);
+                        failures.push(H3LaneGateFailure {
+                            workload: w.name.clone(),
+                            rows: w.rows,
+                            kind: H3LaneGateFailureKind::ParityUnexpectedlyDispatched,
+                            speedup_median: w.speedup_median_vs_parallel,
+                            gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
+                            advisory_min_warm_speedup: advisory,
+                        });
+                    }
+                }
+            }
+        }
+        failures
+    }
+
+    /// Append the `### H3 Lane Gate Failures` section to `out` when the gate
+    /// produced any failures. Renders nothing when the gate passes.
+    fn render_h3_lane_gate(&self, out: &mut String) {
+        let failures = self.evaluate_h3_lane_gate();
+        if failures.is_empty() {
+            return;
+        }
+        out.push_str("### H3 Lane Gate Failures\n\n");
+        out.push_str(
+            "Hard gate against the H3 lane classifier in \
+             `pg_accel_bench/src/workloads/mod.rs::h3_lane_class`. Every \
+             Winning lane must dispatch a GPU kernel and beat PG-parallel \
+             parity; every Parity lane must stay native. A failure here \
+             means the bench process exits non-zero — CI will fail.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "Gate floor: **{H3_LANE_GATE_MIN_WARM_SPEEDUP:.2}x** (uniform across \
+             all H3 Winners; per-Winner advisory thresholds shown below)."
+        );
+        out.push('\n');
+        let _ = writeln!(
+            out,
+            "| Workload | Scale | Failure | Observed Speedup | Gate Floor | Per-Winner Advisory |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        for f in &failures {
+            let observed = if f.speedup_median.is_finite() {
+                format!("{:.2}x", f.speedup_median)
+            } else {
+                "n/a".to_owned()
+            };
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {:.2}x | {:.2}x |",
+                f.workload,
+                format_rows(f.rows),
+                f.kind.label(),
+                observed,
+                f.gate_floor,
+                f.advisory_min_warm_speedup,
+            );
+        }
+        out.push('\n');
+    }
+}
+
+/// Uniform floor enforced by the H3 lane gate.
+///
+/// Set to `1.0x` so a Winner that drops below PG-parallel parity always
+/// fails. Per-Winner advisory thresholds (from
+/// [`crate::workloads::h3_winner_min_warm_speedup`]) are reported next to
+/// each failing row but do NOT participate in the pass/fail decision —
+/// the gate boundary stays at the Phase 0 ship bar.
+pub const H3_LANE_GATE_MIN_WARM_SPEEDUP: f64 = 1.0;
+
+/// Kind of failure observed by [`BenchReport::evaluate_h3_lane_gate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H3LaneGateFailureKind {
+    /// An H3 Winner dispatched a GPU kernel but its median speedup is below
+    /// the gate floor (or non-finite).
+    WinnerBelowFloor,
+    /// An H3 Winner did NOT dispatch a GPU kernel at all.
+    WinnerMissedDispatch,
+    /// An H3 Parity workload dispatched a GPU kernel under normal planner
+    /// exposure (a quarantine breach).
+    ParityUnexpectedlyDispatched,
+}
+
+impl H3LaneGateFailureKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WinnerBelowFloor => "winner_below_floor",
+            Self::WinnerMissedDispatch => "winner_missed_dispatch",
+            Self::ParityUnexpectedlyDispatched => "parity_unexpectedly_dispatched",
+        }
+    }
+}
+
+/// One H3 lane gate failure record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct H3LaneGateFailure {
+    pub workload: String,
+    pub rows: usize,
+    pub kind: H3LaneGateFailureKind,
+    pub speedup_median: f64,
+    pub gate_floor: f64,
+    pub advisory_min_warm_speedup: f64,
 }
 
 /// Build a benchmark report, carrying the observed-GUC snapshot, timing mode,
@@ -2622,6 +2799,173 @@ mod tests {
             Some(crate::workloads::H3LaneClass::Parity),
             "h3_cell_to_parent must remain a parity lane; dispatch classifier crediting \
              it as function/SRF is a regression signal, not an admission of winning"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5 H3 winning-lane protection — report-level hard gate
+    //
+    // These three tests pin `BenchReport::evaluate_h3_lane_gate` to the
+    // contract documented on the function: a Winner that regresses below
+    // `H3_LANE_GATE_MIN_WARM_SPEEDUP` (1.0x), a Winner that fails to
+    // dispatch, and a Parity row that dispatches all surface as gate
+    // failures. The bench process turns these into a non-zero exit code in
+    // `main::enforce_h3_lane_gate`, so a regression that prints red text in
+    // the report can no longer leave CI green.
+    // -----------------------------------------------------------------------
+
+    /// `h3_bulk` is a canonical H3 Winner. Dispatched, but with a
+    /// `speedup_median_vs_parallel` of 0.5x (well below the 1.0x gate floor)
+    /// MUST produce exactly one `WinnerBelowFloor` failure.
+    #[test]
+    fn test_h3_winner_below_threshold_triggers_gate_fail() {
+        // 20ms accel vs 10ms parallel → median speedup ~0.5x
+        let mut workload = mock_workload_result("h3_bulk", 1_000_000, 20.0, 10.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        // The gate reads `gpu_kernel_dispatched` AFTER `with_normalized_dispatch`
+        // re-runs the classifier, so seed the inputs the classifier consumes.
+        workload.plan_selected = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
+             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+                .to_owned(),
+        );
+
+        let report = mock_report(vec![workload]);
+        let failures = report.evaluate_h3_lane_gate();
+        assert_eq!(
+            failures.len(),
+            1,
+            "regressed h3_bulk Winner must produce exactly one gate failure; got: {failures:?}"
+        );
+        assert_eq!(failures[0].workload, "h3_bulk");
+        assert_eq!(failures[0].kind, H3LaneGateFailureKind::WinnerBelowFloor);
+        assert!(
+            failures[0].speedup_median < H3_LANE_GATE_MIN_WARM_SPEEDUP,
+            "failure record must carry the observed sub-floor speedup; got {sp}",
+            sp = failures[0].speedup_median,
+        );
+
+        // The markdown must render the `### H3 Lane Gate Failures` section.
+        let md = report.to_markdown();
+        assert!(
+            md.contains("### H3 Lane Gate Failures"),
+            "markdown must surface the gate failure section; full md:\n{md}"
+        );
+        assert!(
+            md.contains("winner_below_floor"),
+            "failure section must label the failure kind; full md:\n{md}"
+        );
+        assert!(
+            md.contains("h3_bulk"),
+            "failure section must name the failing workload; full md:\n{md}"
+        );
+    }
+
+    /// `h3_cell_to_parent` is a canonical H3 Parity workload. If a row shows
+    /// `gpu_kernel_dispatched=true` (a quarantine breach), the gate MUST
+    /// produce a `ParityUnexpectedlyDispatched` failure.
+    #[test]
+    fn test_h3_parity_unexpectedly_dispatched_triggers_gate_fail() {
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 12.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_cell_to_parent".to_owned();
+        // Quarantine breach: the parity-lane row fired a kernel.
+        workload.plan_selected = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet =
+            Some("HashAggregate\n  Output: (h3_cell_to_parent(cell, 4)), count(*)\n".to_owned());
+
+        let report = mock_report(vec![workload]);
+        let failures = report.evaluate_h3_lane_gate();
+        assert_eq!(
+            failures.len(),
+            1,
+            "parity-lane dispatch must produce exactly one gate failure; got: {failures:?}"
+        );
+        assert_eq!(failures[0].workload, "h3_cell_to_parent");
+        assert_eq!(
+            failures[0].kind,
+            H3LaneGateFailureKind::ParityUnexpectedlyDispatched
+        );
+
+        let md = report.to_markdown();
+        assert!(
+            md.contains("### H3 Lane Gate Failures"),
+            "markdown must surface gate failure section; md:\n{md}"
+        );
+        assert!(
+            md.contains("parity_unexpectedly_dispatched"),
+            "failure section must label parity breach kind; md:\n{md}"
+        );
+    }
+
+    /// Happy path: every H3 Winner dispatches AND beats the gate floor; no
+    /// Parity row dispatches. The gate produces zero failures and the
+    /// `### H3 Lane Gate Failures` section is omitted from the markdown.
+    #[test]
+    fn test_h3_winners_all_above_threshold_passes() {
+        // Build a representative happy-path Winner for every name in
+        // `h3_winning_lane_names()`. Each is 10ms accel vs 50ms parallel →
+        // median speedup ~5x, well above the 1.0x gate floor and the highest
+        // per-Winner advisory threshold (1.5x).
+        let mut workloads = Vec::new();
+        for name in crate::workloads::h3_winning_lane_names() {
+            let mut wl = mock_workload_result(name, 1_000_000, 10.0, 50.0);
+            wl.category = if name == "h3_fp64_ops" {
+                "fp64_matrix".to_owned()
+            } else {
+                "gpu_h3".to_owned()
+            };
+            wl.kernel_class = "h3_latlng".to_owned();
+            wl.plan_selected = false;
+            wl.dispatch_counter_captured = true;
+            wl.gpu_kernel_execution_delta = 1;
+            wl.accel_output_rows_consumed = 10;
+            wl.pg_accel_stock_exec_delta = 0;
+            wl.plan_snippet = Some(
+                "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
+                 Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+                    .to_owned(),
+            );
+            workloads.push(wl);
+        }
+        // And an h3_cell_to_parent parity row that stays native (no kernel
+        // delta) — the gate must NOT flag it.
+        let mut parity = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 10.0);
+        parity.category = "gpu_h3".to_owned();
+        parity.kernel_class = "h3_cell_to_parent".to_owned();
+        parity.plan_selected = false;
+        parity.dispatch_counter_captured = true;
+        parity.gpu_kernel_execution_delta = 0;
+        parity.accel_output_rows_consumed = 1;
+        parity.pg_accel_stock_exec_delta = 0;
+        parity.plan_snippet =
+            Some("HashAggregate\n  Output: (h3_cell_to_parent(cell, 4)), count(*)\n".to_owned());
+        workloads.push(parity);
+
+        let report = mock_report(workloads);
+        let failures = report.evaluate_h3_lane_gate();
+        assert!(
+            failures.is_empty(),
+            "happy-path H3 lane suite must produce no gate failures; got: {failures:?}"
+        );
+
+        // The markdown must NOT render the failure section when the gate is
+        // green — otherwise the section becomes noise that reviewers learn to
+        // ignore.
+        let md = report.to_markdown();
+        assert!(
+            !md.contains("### H3 Lane Gate Failures"),
+            "markdown must omit the gate failure section when no failures exist; md:\n{md}"
         );
     }
 

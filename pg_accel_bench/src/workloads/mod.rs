@@ -853,6 +853,26 @@ pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
     }
 }
 
+/// Per-Winner advisory threshold extracted from [`h3_lane_class`].
+///
+/// Returns `Some(min_warm_speedup)` when `name` resolves to
+/// [`H3LaneClass::Winning`], `None` otherwise (parity lane, non-H3 workload,
+/// or unknown name).
+///
+/// The bench report uses this for the per-row advisory column under the
+/// `### H3 Lane Gate` section. The hard gate predicate itself uses a uniform
+/// floor (`1.0x` — the Phase 0 ship bar) so a Winner that regresses below
+/// PG-parallel parity ALWAYS fails the gate, regardless of its individual
+/// `min_warm_speedup`. Per-Winner thresholds are richer evidence but are not
+/// the gate boundary — see `H3_LANE_GATE_MIN_WARM_SPEEDUP` in `report.rs`.
+#[must_use]
+pub fn h3_winner_min_warm_speedup(name: &str) -> Option<f64> {
+    match h3_lane_class(name) {
+        Some(H3LaneClass::Winning { min_warm_speedup }) => Some(min_warm_speedup),
+        Some(H3LaneClass::Parity) | None => None,
+    }
+}
+
 /// Canonical list of H3 winning-lane workload names.
 ///
 /// Used by the bench runner and integration tests to enumerate the H3
@@ -1081,6 +1101,40 @@ mod tests {
                  not present in all_workloads()."
             );
         }
+    }
+
+    /// `h3_winner_min_warm_speedup` must return `Some(threshold)` for every
+    /// winning-lane name and `None` for every parity-lane name. This pins
+    /// the report-side gate's advisory column to the same source of truth
+    /// as the classifier.
+    #[test]
+    fn test_h3_winner_min_warm_speedup_matches_lane_class() {
+        for name in h3_winning_lane_names() {
+            let advisory = h3_winner_min_warm_speedup(name)
+                .unwrap_or_else(|| panic!("expected Some advisory threshold for winner `{name}`"));
+            match h3_lane_class(name) {
+                Some(H3LaneClass::Winning { min_warm_speedup }) => {
+                    assert!(
+                        (advisory - min_warm_speedup).abs() < f64::EPSILON,
+                        "h3_winner_min_warm_speedup({name})={advisory} disagrees with \
+                         H3LaneClass::Winning {{ min_warm_speedup: {min_warm_speedup} }}"
+                    );
+                }
+                other => panic!("winning lane `{name}` not classified as Winning: got {other:?}"),
+            }
+        }
+        for name in h3_parity_lane_names() {
+            assert_eq!(
+                h3_winner_min_warm_speedup(name),
+                None,
+                "parity lane `{name}` must have no winner advisory threshold"
+            );
+        }
+        assert_eq!(
+            h3_winner_min_warm_speedup("not_a_real_workload"),
+            None,
+            "unknown workload name must return None"
+        );
     }
 
     /// All H3 lane workloads must report category `gpu_h3` so per-category

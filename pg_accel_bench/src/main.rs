@@ -542,6 +542,7 @@ fn cmd_run(
     };
     let report = runner::run_all_with_config(connection, &workloads, &config)?;
     print_report(&report, format)?;
+    enforce_h3_lane_gate(&report)?;
     Ok(())
 }
 
@@ -588,18 +589,55 @@ fn cmd_crash_repro(
     };
     let report = runner::run_one_report_with_config(connection, workload.as_ref(), rows, &config)?;
     print_report(&report, format)?;
-    if report.crashes.is_empty() {
-        Ok(())
-    } else {
-        Err("crash-repro: workload failed; see artifact directory for logs".into())
+    if !report.crashes.is_empty() {
+        return Err("crash-repro: workload failed; see artifact directory for logs".into());
     }
+    enforce_h3_lane_gate(&report)?;
+    Ok(())
 }
 
 fn cmd_report(format: &ReportFormat) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = std::io::read_to_string(std::io::stdin())?;
     let report: BenchReport = serde_json::from_str(&stdin)?;
     print_report(&report, format)?;
+    enforce_h3_lane_gate(&report)?;
     Ok(())
+}
+
+/// Hard-fail the bench process when the H3 lane gate produces any failure.
+///
+/// The markdown renderer already appended an `### H3 Lane Gate Failures`
+/// section to the report; this function turns that visual signal into a
+/// non-zero process exit code so CI catches the regression. Without this,
+/// a Winner regressing below `H3_LANE_GATE_MIN_WARM_SPEEDUP` would print
+/// red text and still let CI go green — exactly the regression vector the
+/// gate exists to close (see TODO.md Phase 5 H3 winning lane protection).
+fn enforce_h3_lane_gate(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
+    let failures = report.evaluate_h3_lane_gate();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "[h3-lane-gate] FAIL: {} H3 lane gate failure(s) — see `### H3 Lane Gate Failures` \
+         in the markdown report for details. Gate floor: {floor:.2}x.",
+        failures.len(),
+        floor = report::H3_LANE_GATE_MIN_WARM_SPEEDUP,
+    );
+    for f in &failures {
+        eprintln!(
+            "[h3-lane-gate]   {} @ {} rows — {} (observed speedup_median={:.4}x, floor={:.2}x)",
+            f.workload,
+            f.rows,
+            f.kind.label(),
+            f.speedup_median,
+            f.gate_floor,
+        );
+    }
+    Err(format!(
+        "h3 lane gate: {} failure(s); see report `### H3 Lane Gate Failures` section",
+        failures.len()
+    )
+    .into())
 }
 
 fn resolve_workloads(
