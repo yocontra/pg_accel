@@ -480,26 +480,52 @@ window work.
   `get_op_btree_interpretation`, and increments
   `planner_rejected("nestloop_scalar_no_gpu_kernel", ...)`. No GPU kernel
   exists yet.
-- Remaining kernel work to land a real GPU NLJ inequality plan:
-  1. New C++ kernel `pgaccel-kernels/src/nested_loop_ineq.cpp` doing a
-     tiled cross-product scan: for each outer tile (M rows), broadcast
-     against the full inner side (N rows), evaluate the inequality
-     predicate per (i, j) pair via `expr_eval` templates, emit matched
-     pairs through atomic-counter compaction.
-  2. New `AccelStrategy::GpuNestedLoopIneq` variant + dispatch entry in
-     `pg_accel/src/engine/dispatch.rs` and `pg_accel/src/engine/registry/`.
-  3. New executor node (or extension of `executor/join/`) that consumes
-     the matched-pair stream and projects both outer and inner relation
-     columns — unlike hash join, NLJ needs both-sides slot deformation.
-  4. Cost model entries in `DeviceLimits` (per rule #10):
-     `gpu_nlj_min_outer_rows`, `gpu_nlj_min_inner_rows`,
-     `gpu_nlj_max_output_rows`, `gpu_nlj_per_pair_cost`. Break-even is
-     `outer × inner × per_pair_cost ≥ launch + transfer + emit`.
-  5. Selectivity gate: the kernel only wins at high selectivity
-     (output ≪ outer × inner). Near 100% selectivity is a cross product
-     and CPU NLJ wins on memory ordering.
-- Acceptance: a representative correlated inequality join receives a GPU
-  plan and measurably improves over PostgreSQL.
+- Kernel + bridge + cost + canary landed (4138b53):
+  - `pgaccel-kernels/src/nested_loop_ineq.cpp` — SYCL tiled
+    cross-product scan with 4 entry points
+    (`pgaccel_nlj_ineq_{i64,f64}` + `pgaccel_nlj_between_{i64,f64}`)
+    + atomic-counter compaction. Overflow is surfaced as
+    `NljDispatchResult::Overflow { observed, cap }` — anti-cheat #4
+    forbids silent truncation. 190 oracle-verified cold-cache tests
+    pass.
+  - `pg_accel/src/gpu/nested_loop_ineq.rs` — safe Rust wrappers.
+  - `AccelStrategy::GpuNestedLoopIneq = 9` in
+    `pg_accel/src/engine/registry/types.rs` with `from_i32(9)`
+    mapping + `KernelOp::NestedLoopIneq` round-trip.
+  - Cost model: 4 new `DeviceLimits` fields
+    (`gpu_nlj_min_outer_rows`, `gpu_nlj_min_inner_rows`,
+    `gpu_nlj_max_output_rows`, `gpu_nlj_per_pair_cost`) in both
+    `from_profile` (cu_scale-derived) and `cpu_only` (fallback).
+    `nlj_break_even()` + `nlj_selectivity_useful()` helpers in
+    `engine/cost/formulas.rs`. Surfaced via
+    `pg_accel_device_limits()` SRF.
+  - `selected_gpu_nlj_kernel_available()` gate (pinned `false`) with
+    canary test `selected_gpu_nlj_kernel_is_not_available_yet` —
+    flipping the gate must invert the canary in the same commit.
+- Remaining work to make a SQL query actually select the strategy
+  (file:line citations in the 4138b53 commit message):
+  1. Executor node with both-sides slot deformation (NLJ projects
+     from outer AND inner relation rows, unlike GpuHashJoin
+     probe-only). Reference: `pg_accel/src/engine/executor/join/`
+     for the strategy + per-slot extractor pattern.
+  2. `make_custom_scan_plan` callback updates in
+     `pg_accel/src/engine/ffi/custom_scan/` to encode both
+     `outer_varno/attno` + `inner_varno/attno` in `custom_private`.
+  3. Planner `add_path` call site flip in
+     `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` —
+     currently `observe_nestloop_scalar_opportunity` just
+     increments the counter; the flip constructs a CustomPath when
+     `nlj_break_even()` + `nlj_selectivity_useful()` both pass.
+  4. Flip `selected_gpu_nlj_kernel_available()` from `false` →
+     `true` and invert the canary in the same commit.
+  5. `#[pg_test]` integration: synthetic 1000 events × 100
+     non-overlapping windows → 1000 matches; EXPLAIN ANALYZE
+     shows `Custom Scan` with `Strategy: GpuNestedLoopIneq`;
+     result set matches `pg_accel.enabled=off`.
+  6. Bench cell in `pg_accel_bench/src/workloads/` at 10K/100K/1M
+     vs PG parallel NestedLoop.
+- Acceptance: a representative correlated inequality join receives
+  a GPU plan and measurably improves over PostgreSQL.
 
 ### Aggregate FILTER / DISTINCT / ordered semantics
 
