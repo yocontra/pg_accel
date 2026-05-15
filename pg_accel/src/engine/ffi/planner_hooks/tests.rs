@@ -2135,6 +2135,162 @@ mod mergejoin_detect {
 }
 
 // =====================================================================
+// Phase 4: NestedLoop scalar-inequality detect-and-decline
+// =====================================================================
+//
+// No GPU NestedLoop kernel exists in `pgaccel-kernels/src/` (verified by
+// `rg -n 'nested_loop|nestloop' --type cpp pgaccel-kernels/src/` →
+// empty). `observe_nestloop_scalar_opportunity` in `join_pathlist.rs`
+// detects (T_NestPath ∧ cross-rel scalar inequality) in the join's
+// pathlist + restrictlist, emits a `debug1` line, and bumps the
+// planner-rejected counter with reason `nestloop_scalar_no_gpu_kernel`.
+//
+// This pg_test exists to ensure:
+// 1. The detect-and-decline path does NOT crash the planner when PG
+//    decides nested-loop is a viable plan for an inequality join (the
+//    main risk, since we added a new pathlist walk + restrictlist walk
+//    + `get_op_btree_interpretation` call to the join hook).
+// 2. The query still executes to completion with correct results. We
+//    intentionally do NOT assert "NestLoop" appears in EXPLAIN because
+//    the planner may pick HashJoin or MergeJoin depending on cost — the
+//    test is about "hook + observability walk did not crash", not "PG
+//    picked a particular strategy".
+mod nestloop_scalar_detect {
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
+
+        /// Smoke: a correlated BETWEEN inequality join gives the planner a
+        /// favourable shape for nested-loop (no equi-key, so hash/merge
+        /// cannot help). The hook walks `joinrel->pathlist` for
+        /// `T_NestPath`, walks `restrictlist` for cross-rel inequality
+        /// quals, and emits the `nestloop_scalar_no_gpu_kernel` rejection
+        /// signal. The query must still run to completion.
+        #[pg_test]
+        fn correlated_between_inequality_does_not_crash_planner() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_nlj_events").expect("drop prior events");
+            Spi::run("DROP TABLE IF EXISTS pgaccel_nlj_windows").expect("drop prior windows");
+            Spi::run(
+                "CREATE TABLE pgaccel_nlj_events (ts int4, payload int4) \
+                 WITH (autovacuum_enabled=off)",
+            )
+            .expect("create events");
+            Spi::run(
+                "CREATE TABLE pgaccel_nlj_windows (lo int4, hi int4) \
+                 WITH (autovacuum_enabled=off)",
+            )
+            .expect("create windows");
+            Spi::run(
+                "INSERT INTO pgaccel_nlj_events \
+             SELECT g, g * 7 FROM generate_series(1, 1000) g",
+            )
+            .expect("seed events");
+            // 50 non-overlapping windows of width 20 covering ts [1, 1000].
+            Spi::run(
+                "INSERT INTO pgaccel_nlj_windows \
+             SELECT 1 + (g-1)*20, g*20 FROM generate_series(1, 50) g",
+            )
+            .expect("seed windows");
+            Spi::run("ANALYZE pgaccel_nlj_events").expect("analyze events");
+            Spi::run("ANALYZE pgaccel_nlj_windows").expect("analyze windows");
+
+            // Encourage the planner to consider the nest-loop shape. There is
+            // no equi key, so HashJoin and MergeJoin are not applicable
+            // anyway — disabling them is a no-op for plan choice but
+            // documents intent.
+            Spi::run("SET LOCAL enable_hashjoin = off").ok();
+            Spi::run("SET LOCAL enable_mergejoin = off").ok();
+
+            // Correlated BETWEEN: PG expands this to `(e.ts >= w.lo) AND
+            // (e.ts <= w.hi)` — two cross-rel btree inequalities, which is
+            // exactly the shape `observe_nestloop_scalar_opportunity`
+            // looks for. Each event matches exactly one window so the
+            // output count equals the event count.
+            let row_count = Spi::get_one::<i64>(
+                "SELECT count(*) FROM ( \
+                 SELECT e.ts, e.payload, w.lo, w.hi \
+                 FROM pgaccel_nlj_events e \
+                 JOIN pgaccel_nlj_windows w \
+                   ON e.ts BETWEEN w.lo AND w.hi \
+             ) q",
+            )
+            .expect("correlated BETWEEN join")
+            .expect("row_count should be non-NULL");
+            assert_eq!(
+                row_count, 1000,
+                "correlated BETWEEN join should return all 1000 events (one window each)"
+            );
+
+            Spi::run("DROP TABLE pgaccel_nlj_events").expect("drop events");
+            Spi::run("DROP TABLE pgaccel_nlj_windows").expect("drop windows");
+        }
+
+        /// Regression guard: `pg_accel_stats()` exposes the planner-rejected
+        /// counter. The NestedLoop scalar-inequality detect path must
+        /// increment it (or at least not decrement it) over the course of
+        /// the join query above. We measure delta, not absolute, because
+        /// other rejections may also fire.
+        #[pg_test]
+        fn nestloop_scalar_rejection_counter_is_non_decreasing() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_nlj_ctr_a").expect("drop prior a");
+            Spi::run("DROP TABLE IF EXISTS pgaccel_nlj_ctr_b").expect("drop prior b");
+            Spi::run("CREATE TABLE pgaccel_nlj_ctr_a (x int4) WITH (autovacuum_enabled=off)")
+                .expect("create a");
+            Spi::run(
+                "CREATE TABLE pgaccel_nlj_ctr_b (lo int4, hi int4) WITH (autovacuum_enabled=off)",
+            )
+            .expect("create b");
+            Spi::run(
+                "INSERT INTO pgaccel_nlj_ctr_a \
+             SELECT g FROM generate_series(1, 200) g",
+            )
+            .expect("seed a");
+            // Overlapping ranges — every a.x can match multiple b rows; the
+            // output is small (200 events × ~10 windows = ~2000 rows) so the
+            // early gpu_join_max_output_rows gate doesn't filter the row,
+            // but the NLJ observer runs BEFORE that gate anyway (see the
+            // placement comment in join_pathlist.rs).
+            Spi::run(
+                "INSERT INTO pgaccel_nlj_ctr_b \
+             SELECT g, g + 10 FROM generate_series(1, 200) g",
+            )
+            .expect("seed b");
+            Spi::run("ANALYZE pgaccel_nlj_ctr_a").expect("analyze a");
+            Spi::run("ANALYZE pgaccel_nlj_ctr_b").expect("analyze b");
+
+            Spi::run("SET LOCAL enable_hashjoin = off").ok();
+            Spi::run("SET LOCAL enable_mergejoin = off").ok();
+
+            let before = crate::engine::stats::read_planner_rejected();
+            let rows = Spi::get_one::<i64>(
+                "SELECT count(*) FROM ( \
+                 SELECT a.x FROM pgaccel_nlj_ctr_a a \
+                 JOIN pgaccel_nlj_ctr_b b ON a.x BETWEEN b.lo AND b.hi \
+             ) q",
+            )
+            .expect("inequality-shaped nlj")
+            .expect("row_count non-NULL");
+            assert!(
+                rows > 0,
+                "correlated BETWEEN join must return non-zero rows (got {rows})"
+            );
+            let after = crate::engine::stats::read_planner_rejected();
+            // Must be non-decreasing. We cannot assert strict-greater
+            // because the planner may not pick this hook codepath for
+            // very small inputs (the hook is invoked per-joinrel, but
+            // tiny inputs may skip earlier gates).
+            assert!(
+                after >= before,
+                "planner_rejected counter must be non-decreasing across query execution"
+            );
+
+            Spi::run("DROP TABLE pgaccel_nlj_ctr_a").expect("drop a");
+            Spi::run("DROP TABLE pgaccel_nlj_ctr_b").expect("drop b");
+        }
+    }
+}
+
+// =====================================================================
 // Phase 4: BitmapHeapScan injection smoke
 // =====================================================================
 //

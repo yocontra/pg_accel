@@ -445,6 +445,32 @@ window work.
 
 - Scope: spatial nested loops are handled, but scalar nested loops with
   indexable or correlated inequality quals are not accelerated.
+- Status: detect-and-decline observability is landed in
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` via
+  `observe_nestloop_scalar_opportunity` (mirrors the merge-join pattern).
+  The hook walks `joinrel->pathlist` for `T_NestPath` entries, walks
+  `extra.restrictlist` for cross-rel scalar btree inequalities using
+  `get_op_btree_interpretation`, and increments
+  `planner_rejected("nestloop_scalar_no_gpu_kernel", ...)`. No GPU kernel
+  exists yet.
+- Remaining kernel work to land a real GPU NLJ inequality plan:
+  1. New C++ kernel `pgaccel-kernels/src/nested_loop_ineq.cpp` doing a
+     tiled cross-product scan: for each outer tile (M rows), broadcast
+     against the full inner side (N rows), evaluate the inequality
+     predicate per (i, j) pair via `expr_eval` templates, emit matched
+     pairs through atomic-counter compaction.
+  2. New `AccelStrategy::GpuNestedLoopIneq` variant + dispatch entry in
+     `pg_accel/src/engine/dispatch.rs` and `pg_accel/src/engine/registry/`.
+  3. New executor node (or extension of `executor/join/`) that consumes
+     the matched-pair stream and projects both outer and inner relation
+     columns — unlike hash join, NLJ needs both-sides slot deformation.
+  4. Cost model entries in `DeviceLimits` (per rule #10):
+     `gpu_nlj_min_outer_rows`, `gpu_nlj_min_inner_rows`,
+     `gpu_nlj_max_output_rows`, `gpu_nlj_per_pair_cost`. Break-even is
+     `outer × inner × per_pair_cost ≥ launch + transfer + emit`.
+  5. Selectivity gate: the kernel only wins at high selectivity
+     (output ≪ outer × inner). Near 100% selectivity is a cross product
+     and CPU NLJ wins on memory ordering.
 - Acceptance: a representative correlated inequality join receives a GPU
   plan and measurably improves over PostgreSQL.
 

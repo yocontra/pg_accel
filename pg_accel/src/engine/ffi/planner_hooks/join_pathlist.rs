@@ -69,6 +69,26 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
+    // Observability (NestedLoop scalar inequality): runs BEFORE the early
+    // max-output gate. NLJ inequality joins typically produce O(n*m) rows
+    // and almost always exceed `gpu_join_max_output_rows`, so deferring the
+    // observer past that gate would hide the entire opportunity class. The
+    // NLJ scalar inequality kernel is the launchpad for TODO.md Phase 4
+    // "NestedLoop scalar recognition"; the counter `nestloop_scalar_no_gpu_kernel`
+    // tells the next implementor how many of these the planner sees.
+    //
+    // We only run this for INNER joins — outer/semi/anti NLJ have richer
+    // null-padding semantics that the eventual GPU kernel would need to
+    // model separately. Restricting here keeps the counter signal clean.
+    //
+    // SAFETY: joinrel/extra are valid planner pointers; restrictlist may
+    // be null but the helper handles that.
+    if jointype == pg_sys::JoinType::JOIN_INNER {
+        unsafe {
+            observe_nestloop_scalar_opportunity(joinrel, (*extra).restrictlist, outerrel, innerrel);
+        }
+    }
+
     // Gate 1c: Early max-output check. Large-output GpuHashJoin is a known
     // crash/loser lane; `gpu_join_max_output_rows` is a real upper bound, not
     // the older min-ish gate. Keep this before expensive join recognition.
@@ -461,6 +481,299 @@ unsafe fn observe_mergejoin_opportunity(joinrel: *mut RelOptInfo) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// NestedLoop scalar-inequality opportunity classification (observability only)
+// ---------------------------------------------------------------------------
+
+/// Classification of a joinrel for "scalar NestedLoop inequality" opportunity.
+///
+/// "Scalar NestedLoop inequality" means: a `T_NestPath` is in `joinrel->pathlist`
+/// (PG considers a nested loop viable here) AND at least one `RestrictInfo` is a
+/// correlated, two-argument scalar comparison whose operator is a btree
+/// inequality (`<`, `<=`, `>=`, `>`) with `oprresulttype = bool`, where the two
+/// arguments resolve to `Var`s in *different* relations (i.e., a cross-rel
+/// inequality predicate).
+///
+/// Examples (recognised):
+/// - `A.x < B.y`
+/// - `A.ts BETWEEN B.lo AND B.hi`  (PG expands BETWEEN to `>=` and `<=`)
+/// - `A.lo <= B.x AND B.x <= A.hi` (interval overlap / range-contains)
+///
+/// Excluded:
+/// - Equality (`=`) — handled by GpuHashJoin recognition.
+/// - Spatial / range / GIST operators — those are not btree inequalities and
+///   `get_op_btree_interpretation` returns no matching strategy.
+/// - Single-relation quals (e.g. `A.x < 100`) — those are scan-level filters,
+///   not join conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NestedLoopShape {
+    /// Joinrel has no `T_NestPath` in its pathlist, or no correlated scalar
+    /// inequality in the restrictlist. Nothing to observe.
+    None,
+    /// At least one `T_NestPath` exists AND at least one correlated scalar
+    /// inequality clause is present. `nest_count` is the number of nest
+    /// paths observed; `ineq_count` is the number of cross-rel inequality
+    /// restrict clauses.
+    HasScalarInequality { nest_count: i32, ineq_count: i32 },
+}
+
+/// Pure classifier for [`NestedLoopShape`] given path-tag counts and qual
+/// counts.
+///
+/// Separated from the FFI wrapper so it can be unit-tested without a live
+/// planner. The FFI side is responsible for filling `nest_count` and
+/// `ineq_count` honestly.
+///
+/// Preconditions (caller-enforced): both counts >= 0.
+pub(super) const fn classify_nestloop_shape(nest_count: i32, ineq_count: i32) -> NestedLoopShape {
+    if nest_count > 0 && ineq_count > 0 {
+        NestedLoopShape::HasScalarInequality {
+            nest_count,
+            ineq_count,
+        }
+    } else {
+        NestedLoopShape::None
+    }
+}
+
+/// Return `true` if `opno` is a btree inequality strategy (`<`, `<=`, `>=`, `>`).
+///
+/// Uses `get_op_btree_interpretation` so the check is opfamily-aware and
+/// covers cross-type operators (`int4 < int8`, etc.). Equality is excluded —
+/// it has a dedicated GpuHashJoin path.
+///
+/// # Safety
+///
+/// `opno` must be a valid PG operator OID (or `InvalidOid` in which case this
+/// returns `false`). Calls `get_op_btree_interpretation` which must run on
+/// the main backend thread.
+unsafe fn is_btree_inequality_opno(opno: pg_sys::Oid) -> bool {
+    if opno == pg_sys::InvalidOid {
+        return false;
+    }
+    // SAFETY: caller guarantees we are on the main backend thread.
+    let interps = unsafe { pg_sys::get_op_btree_interpretation(opno) };
+    if interps.is_null() {
+        return false;
+    }
+    // SAFETY: valid planner List of OpBtreeInterpretation*.
+    let n = unsafe { pg_sys::list_length(interps) };
+    for i in 0..n {
+        // SAFETY: i < n.
+        let entry = unsafe { pg_sys::list_nth(interps, i).cast::<pg_sys::OpBtreeInterpretation>() };
+        if entry.is_null() {
+            continue;
+        }
+        // SAFETY: entry is a valid OpBtreeInterpretation pointer.
+        #[allow(clippy::cast_sign_loss)]
+        let strategy = unsafe { (*entry).strategy } as u32;
+        if matches!(
+            strategy,
+            pg_sys::BTLessStrategyNumber
+                | pg_sys::BTLessEqualStrategyNumber
+                | pg_sys::BTGreaterEqualStrategyNumber
+                | pg_sys::BTGreaterStrategyNumber
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Count correlated scalar-inequality `RestrictInfo` entries in a join's
+/// `restrictlist`. "Correlated" means each side of the comparison resolves
+/// (after stripping `RelabelType`) to a `Var` whose `varno` is in a different
+/// one of `{outerrel.relids, innerrel.relids}`.
+///
+/// # Safety
+///
+/// All pointers must be valid planner pointers; `restrictlist` may be null.
+unsafe fn count_correlated_scalar_inequalities(
+    restrictlist: *mut List,
+    outerrel: *mut RelOptInfo,
+    innerrel: *mut RelOptInfo,
+) -> i32 {
+    if restrictlist.is_null() || outerrel.is_null() || innerrel.is_null() {
+        return 0;
+    }
+    // SAFETY: valid RelOptInfo pointers.
+    let outer_relids = unsafe { (*outerrel).relids };
+    let inner_relids = unsafe { (*innerrel).relids };
+
+    let mut ineq_count: i32 = 0;
+    // SAFETY: restrictlist is a valid List of RestrictInfo*.
+    let len = unsafe { pg_sys::list_length(restrictlist) };
+    for i in 0..len {
+        // SAFETY: i in [0, len).
+        let ri = unsafe { pg_sys::list_nth(restrictlist, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is a valid RestrictInfo.
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            continue;
+        }
+        // SAFETY: clause is a valid Node.
+        let tag = unsafe { (*clause.cast::<pg_sys::Node>()).type_ };
+        if tag != NodeTag::T_OpExpr {
+            continue;
+        }
+        // SAFETY: tag confirmed OpExpr.
+        #[allow(clippy::cast_ptr_alignment)]
+        let opexpr = clause.cast::<pg_sys::OpExpr>();
+        // SAFETY: opexpr is valid.
+        let result_type = unsafe { (*opexpr).opresulttype };
+        // Only consider boolean-returning OpExprs (OID 16).
+        if u32::from(result_type) != 16 {
+            continue;
+        }
+        // SAFETY: opexpr is valid.
+        let opno = unsafe { (*opexpr).opno };
+        // SAFETY: on main backend thread via planner hook.
+        if !unsafe { is_btree_inequality_opno(opno) } {
+            continue;
+        }
+        // SAFETY: opexpr->args is a List.
+        let args = unsafe { (*opexpr).args };
+        if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+            continue;
+        }
+        // SAFETY: args has 2 elements.
+        let left = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+        let right = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+        if left.is_null() || right.is_null() {
+            continue;
+        }
+        // SAFETY: both Node pointers are valid.
+        let left_var = unsafe { super::unwrap_var(left) };
+        let right_var = unsafe { super::unwrap_var(right) };
+        if left_var.is_null() || right_var.is_null() {
+            // One side is a Const / Param / function call — that's a
+            // single-rel scan filter, not a join inequality. Skip.
+            continue;
+        }
+        // SAFETY: Var nodes are valid.
+        let left_varno = unsafe { (*left_var).varno } as i32;
+        let right_varno = unsafe { (*right_var).varno } as i32;
+        // SAFETY: bms_is_member on a valid Bitmapset (relids).
+        let left_outer = unsafe { pg_sys::bms_is_member(left_varno, outer_relids) };
+        let left_inner = unsafe { pg_sys::bms_is_member(left_varno, inner_relids) };
+        let right_outer = unsafe { pg_sys::bms_is_member(right_varno, outer_relids) };
+        let right_inner = unsafe { pg_sys::bms_is_member(right_varno, inner_relids) };
+        // Correlated = one side is outer, other side is inner. Reject
+        // same-side quals — those are scan filters that PG pushes down.
+        if (left_outer && right_inner) || (left_inner && right_outer) {
+            ineq_count += 1;
+        }
+    }
+    ineq_count
+}
+
+/// Walk `joinrel->pathlist` and emit the NestedLoop scalar-inequality
+/// opportunity signal when a `T_NestPath` is present AND `restrictlist`
+/// contains at least one cross-rel scalar inequality.
+///
+/// This is observability only — no GPU NestedLoop kernel exists in
+/// `pgaccel-kernels/src/` (verified by `rg -n 'nested_loop|nestloop' --type
+/// cpp pgaccel-kernels/src/` → empty). Falls through to the normal hash-join
+/// recognition in the caller, which will itself bail when no equi-join key is
+/// present.
+///
+/// ## Why this is currently a decline, not an implementation
+///
+/// A real GPU NestedLoop scalar-inequality kernel requires:
+///   1. New C++ kernel in `pgaccel-kernels/src/nested_loop_ineq.cpp` doing a
+///      tiled cross-product scan: for each outer tile (M rows), broadcast
+///      against the full inner side (N rows), evaluate the inequality
+///      predicate per (i, j) pair, and emit matched pairs. SYCL nd_range
+///      with one work-item per (i, j) pair, output via atomic-counter
+///      compaction. Predicate evaluation reuses `expr_eval` templates.
+///   2. A new `AccelStrategy::GpuNestedLoopIneq` variant + dispatch entry in
+///      `src/engine/dispatch.rs` and registry types in `src/engine/registry/`.
+///   3. A new executor node `src/engine/executor/nlj/` (or extend
+///      `executor/join/`) to consume the matched-pair stream and project
+///      both rels' columns into the output slot. Unlike hash join, NLJ
+///      needs both outer-rel and inner-rel slot deformation.
+///   4. Cost model entries in `DeviceLimits` (the rule #10 home for all
+///      thresholds): `gpu_nlj_min_outer_rows`, `gpu_nlj_min_inner_rows`,
+///      `gpu_nlj_max_output_rows`, `gpu_nlj_per_pair_cost`. Break-even is
+///      `outer × inner × per_pair_cost ≥ launch + transfer + emit`, which
+///      means roughly outer >= a few thousand AND inner >= a few thousand
+///      AND output rows < `gpu_join_max_output_rows`.
+///   5. Predicate pushdown: the kernel only wins if the inequality has high
+///      selectivity (output << outer × inner). At selectivity = 1.0 the
+///      kernel is a cross product and CPU NLJ wins on memory ordering.
+///
+/// Until those land, the only honest action is to emit `debug1` and bump
+/// `planner_rejected("nestloop_scalar_no_gpu_kernel", ...)` so a future
+/// implementor can quantify the opportunity by reading `pg_accel_stats()`.
+///
+/// # Safety
+///
+/// All pointer args must be valid planner pointers. Called only from
+/// `pgaccel_set_join_pathlist` on the main backend thread.
+unsafe fn observe_nestloop_scalar_opportunity(
+    joinrel: *mut RelOptInfo,
+    restrictlist: *mut List,
+    outerrel: *mut RelOptInfo,
+    innerrel: *mut RelOptInfo,
+) {
+    if joinrel.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees valid joinrel.
+    let joinrel_ref = unsafe { &*joinrel };
+    let pathlist = joinrel_ref.pathlist;
+    if pathlist.is_null() {
+        return;
+    }
+    // SAFETY: valid planner List.
+    let n = unsafe { pg_sys::list_length(pathlist) };
+    if n == 0 {
+        return;
+    }
+
+    let mut nest_count: i32 = 0;
+    for i in 0..n {
+        // SAFETY: i < n.
+        let p = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if p.is_null() {
+            continue;
+        }
+        // SAFETY: p is a valid Path.
+        let tag = unsafe { (*p.cast::<pg_sys::Node>()).type_ };
+        if matches!(tag, NodeTag::T_NestPath) {
+            nest_count += 1;
+        }
+    }
+
+    if nest_count == 0 {
+        return;
+    }
+
+    // SAFETY: planner-owned pointers, on main thread.
+    let ineq_count =
+        unsafe { count_correlated_scalar_inequalities(restrictlist, outerrel, innerrel) };
+
+    if let NestedLoopShape::HasScalarInequality {
+        nest_count,
+        ineq_count,
+    } = classify_nestloop_shape(nest_count, ineq_count)
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let n_rows_est = joinrel_ref.rows.max(0.0) as u64;
+        pgrx::debug1!(
+            "pg_accel join: NestedLoop scalar-inequality opportunity skipped: \
+             {nest_count} T_NestPath candidate(s), {ineq_count} cross-rel \
+             scalar inequality qual(s), output rows~={n_rows_est}; no GPU \
+             nested-loop kernel exists (see TODO.md Phase 4 'NestedLoop \
+             scalar recognition')"
+        );
+        stats::increment_planner_rejected("nestloop_scalar_no_gpu_kernel", n_rows_est);
+    }
+}
+
 /// Inject parallel (partial) GPU hashjoin variants for every eligible
 /// partial outer path in `outerrel->partial_pathlist`, paired with a
 /// parallel-safe non-partial inner path.
@@ -657,7 +970,10 @@ unsafe fn pick_parallel_safe_inner_path(innerrel_ref: &RelOptInfo) -> *mut Path 
 
 #[cfg(test)]
 mod tests {
-    use super::{JoinShape, classify_join_shape, selected_gpu_hashjoin_kernel_available};
+    use super::{
+        JoinShape, NestedLoopShape, classify_join_shape, classify_nestloop_shape,
+        selected_gpu_hashjoin_kernel_available,
+    };
 
     // -- classify_join_shape -----------------------------------------------
     //
@@ -711,6 +1027,82 @@ mod tests {
         assert!(
             !selected_gpu_hashjoin_kernel_available(),
             "planner must not expose GpuHashJoin until build/probe are real GPU paths"
+        );
+    }
+
+    // -- classify_nestloop_shape -------------------------------------------
+    //
+    // Pure classifier for the NestedLoop scalar-inequality observability
+    // path. Only the cross-product of (nest_count > 0, ineq_count > 0)
+    // produces an observation — otherwise the joinrel has no NLJ ineq
+    // opportunity worth recording.
+
+    #[test]
+    fn classify_nestloop_none_when_both_counts_zero() {
+        assert_eq!(classify_nestloop_shape(0, 0), NestedLoopShape::None);
+    }
+
+    #[test]
+    fn classify_nestloop_none_when_only_nestpath_present() {
+        // T_NestPath in pathlist but no cross-rel inequality qual — could be
+        // a plain equi NestLoop the planner is also considering. Don't
+        // record it here; equi joins are GpuHashJoin's lane.
+        assert_eq!(classify_nestloop_shape(3, 0), NestedLoopShape::None);
+    }
+
+    #[test]
+    fn classify_nestloop_none_when_only_inequality_present() {
+        // Inequality clause present but no T_NestPath — PG didn't consider
+        // an NLJ plan here (e.g. small inner rel with a hash plan winning
+        // outright). Nothing for the NLJ launchpad to record.
+        assert_eq!(classify_nestloop_shape(0, 1), NestedLoopShape::None);
+    }
+
+    #[test]
+    fn classify_nestloop_has_scalar_inequality_when_both_positive() {
+        assert_eq!(
+            classify_nestloop_shape(1, 1),
+            NestedLoopShape::HasScalarInequality {
+                nest_count: 1,
+                ineq_count: 1,
+            }
+        );
+        assert_eq!(
+            classify_nestloop_shape(2, 3),
+            NestedLoopShape::HasScalarInequality {
+                nest_count: 2,
+                ineq_count: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_nestloop_is_const_eval_compatible() {
+        const NONE: NestedLoopShape = classify_nestloop_shape(0, 0);
+        const HAS: NestedLoopShape = classify_nestloop_shape(1, 2);
+        assert_eq!(NONE, NestedLoopShape::None);
+        assert_eq!(
+            HAS,
+            NestedLoopShape::HasScalarInequality {
+                nest_count: 1,
+                ineq_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn nestloop_rejection_reason_matches_stats_key() {
+        // Regression guard: the stats key the FFI wrapper passes to
+        // `stats::increment_planner_rejected` must match the
+        // `RejectionReason::NestedLoopScalarNoGpuKernel.stats_key()`
+        // constant. If they diverge, `pg_accel_stats()` aggregations
+        // keyed on the reason go silently stale.
+        use super::super::RejectionReason;
+        const EXPECTED_REASON: &str = "nestloop_scalar_no_gpu_kernel";
+        assert_eq!(EXPECTED_REASON, "nestloop_scalar_no_gpu_kernel");
+        assert_eq!(
+            RejectionReason::NestedLoopScalarNoGpuKernel.stats_key(),
+            EXPECTED_REASON,
         );
     }
 }

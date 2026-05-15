@@ -3962,7 +3962,7 @@ pub(super) unsafe fn find_equi_join_key(
 /// # Safety
 ///
 /// `node` must be a valid PG `Node` pointer (or null).
-unsafe fn unwrap_var(mut node: *mut pg_sys::Node) -> *mut pg_sys::Var {
+pub(super) unsafe fn unwrap_var(mut node: *mut pg_sys::Node) -> *mut pg_sys::Var {
     if node.is_null() {
         return std::ptr::null_mut();
     }

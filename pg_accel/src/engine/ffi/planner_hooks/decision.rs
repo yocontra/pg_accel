@@ -30,6 +30,7 @@ pub(super) enum RejectionReason {
     CostModelDeclined,
     HashJoinNoSelectedGpuKernel,
     MergeJoinNoGpuKernel,
+    NestedLoopScalarNoGpuKernel,
     SortIncrementalOpportunity,
     SortHeapFullOutput,
     UnsupportedType(&'static str),
@@ -53,6 +54,7 @@ impl RejectionReason {
             Self::CostModelDeclined => "cost_model_declined",
             Self::HashJoinNoSelectedGpuKernel => "hashjoin_no_selected_gpu_kernel",
             Self::MergeJoinNoGpuKernel => "mergejoin_no_gpu_kernel",
+            Self::NestedLoopScalarNoGpuKernel => "nestloop_scalar_no_gpu_kernel",
             Self::SortIncrementalOpportunity => "sort_incremental_opportunity",
             Self::SortHeapFullOutput => "sort_heap_full_output",
             Self::UnsupportedType(reason) | Self::Other(reason) => reason,
@@ -370,6 +372,10 @@ mod tests {
         assert_eq!(
             RejectionReason::MergeJoinNoGpuKernel.stats_key(),
             "mergejoin_no_gpu_kernel"
+        );
+        assert_eq!(
+            RejectionReason::NestedLoopScalarNoGpuKernel.stats_key(),
+            "nestloop_scalar_no_gpu_kernel"
         );
         assert_eq!(
             RejectionReason::SortIncrementalOpportunity.stats_key(),
