@@ -111,10 +111,14 @@ kernels dispatched, and which rows returned to PostgreSQL.
   multiple seconds per sample at 10M rows.
 - Work: add resumable benchmark manifests, correctness diffs, and durable
   resume/audit report linkage. (Source log budgeting is resolved.)
-- Work: add a planner-hook overhead audit for no-dispatch queries. Star
-  schemas, expression-only filters, and native aggregate rows must either
-  get an actual GPU-resident path or return through a cheap early decline
-  path with near-native planning time.
+- Resolved (23fb1bb): planner-hook overhead audit. SSBM Q2.3-shape 4-way
+  text-grouped join went from 34.686 ms to 0.120-0.137 ms planning time
+  (~280× speedup) via `join_hook_can_inject_anything()` Gate 1c
+  fast-decline and `grouped_query_has_unsupported_group_key`
+  upper-paths fast-decline. New `pg_accel_planner_overhead_us()` and
+  `pg_accel_planner_fast_decline_count()` SRFs surface ongoing
+  measurement. `HookElapsedGuard` RAII times every hook invocation
+  (~50ns cost). 2 pg_test regression tests pin the gates.
 - Acceptance: a full benchmark cannot create unbounded logs, can be resumed
   or audited from saved artifacts, reports every crash/skip without relying
   on terminal scrollback, and keeps the default suite bounded while preserving
@@ -521,14 +525,28 @@ window work.
 
 ### Boolean and bitwise aggregate kernels
 
-- Scope: boolean and bitwise reductions can be recognized by the planner but
-  need real typed reduction lanes.
-- Work: add kernels and dispatch plumbing for `bool_and`, `bool_or`,
-  `bit_and`, `bit_or`, and `bit_xor` across supported integer widths, with
-  PostgreSQL-compatible NULL and empty-input behavior.
-- Acceptance: typed boolean/bitwise aggregate tests dispatch the intended
-  kernels, produce PostgreSQL-identical results, and are costed out when
-  launch overhead exceeds PostgreSQL-native execution.
+- Landed (3f0ac44): GPU kernels for `bool_and`/`bool_or`/`bit_and`/
+  `bit_or`/`bit_xor` across i16/i32/i64 (`pgaccel-kernels/src/reduce.cpp`,
+  cold-tested 11/11 PASS via `test_reduce_bool_bit`). FFI bridge, Rust
+  wrappers (`reduce_bool_{and,or}`, `reduce_bit_{and,or,xor}_i{16,32,64}`),
+  `AggOp::BitXor` variant, executor accumulation paths
+  (`accumulate_bitwise`/`accumulate_bool`, identity-seeded `bit_acc`/
+  `bool_acc`), `dispatch_gpu_reduce_bit_bool`, typed finalize. Cost
+  gates: `reduce_bit_break_even_rows` and `reduce_bool_break_even_rows`
+  in `DeviceLimits` (surfaced via `pg_accel_device_limits()`).
+- Deferred until BOOLOID/INT2/INT4 input-extraction lane lands in
+  `execute.rs::next()`: the planner classifier flip in
+  `pg_accel/src/engine/ffi/planner_hooks/agg_common.rs` that would map
+  `F_BIT_{AND,OR,XOR}_INT{2,4,8}` / `F_BOOL_{AND,OR}` to the new `AggOp`
+  variants. Flipping the classifier today would route real SQL queries
+  through the executor's f64 extractor on a BOOLOID datum, reading
+  garbage bits. Kernels + bridge + accumulation + cost gates are
+  correct in isolation; the next agent wires extraction then flips
+  the classifier in one step.
+- Acceptance (still pending the deferred piece): typed boolean/bitwise
+  aggregate tests dispatch the intended kernels, produce
+  PostgreSQL-identical results, and are costed out when launch
+  overhead exceeds PostgreSQL-native execution.
 
 ### Full sort algorithm and cost gating
 
@@ -837,26 +855,26 @@ PostgreSQL native execution, and PG-Strom-supported workloads.
 
 ### Reduce typed dispatch and transfer cost
 
-- Evidence: `reduce_sum_f32` and `reduce_sum_i64` lost badly at
-  100K/1M/10M; 10M was roughly 1.6s accelerated vs 90-100ms PostgreSQL
-  parallel. In contrast, some f64 min/max and multi-reduce paths were near
-  parity, which points at type dispatch and staging rather than all
-  reductions being bad.
-- Evidence: the 2026-05-14 full-run pass showed the issue is broader than
-  accidental f64 dispatch for integer/f32 sums. `reduce_min_f64 @ 1M` was
-  about 142-186 ms accelerated vs 16-21 ms PostgreSQL, `reduce_max_f64 @ 1M`
-  was about 135-178 ms vs 17-18 ms, and `reduce_sum_f32 @ 10M` was about
-  98-128 ms vs 84-87 ms.
-- Root cause target: the aggregate executor extracted numeric inputs into
-  `Vec<f64>` and tried the f64 path first for SUM/AVG/MIN/MAX. On Metal,
-  soft-fp64 made the f64 path "available", so f32 and i64 SUM could pay
-  soft-fp64 cost and i64 could lose exactness beyond `2^53`.
-- Work: reduce host-device copy cost with larger batches, persistent
-  staging, scan+reduce fusion, or direct device partial reduction; rebenchmark
-  the f32/i64/f64 matrix and gate any sub-parity cells.
-- Acceptance: f32/i64/f64 reduce matrices at 100K/1M/10M choose GPU only
-  where they beat PostgreSQL, no integer precision is lost, and traces show
-  the expected typed kernel instead of accidental soft-fp64.
+- Landed (7cfe208): INT2/INT4 widened to i64 at observe time and routed
+  through `gpu.reduce_*_i64` (was: routed through `Vec<f64>` →
+  `gpu.reduce_*_f64` = soft-fp64 on Metal + precision loss beyond 2^53).
+  FLOAT4 and INT8 typed dispatch had already landed pre-session. New
+  `exec.reduce_dispatch` debug span carries `n`, `type_oid`, `op` so any
+  future regression to soft-fp64 surfaces in `pg_accel_traces.jsonl`.
+  finalize() for INT2/INT4 emits NUMERIC via `int128_to_numeric` (no
+  f64 drift) or typed int{2,4}/int8 (no f64 round-trip). 5 typed
+  break-even tests + 3 finalize tests pin the routing.
+- Separate planner-injection bug (not Phase 7 scope): `reduce_min_f64`
+  and `reduce_max_f64` at 100K+ get rewritten by PG to
+  `ORDER BY x LIMIT 1` and routed to `Strategy: GpuSort` instead of
+  reduce. Measured 50603 ms dispatch on `reduce_min_f64 @ 1M`. Track
+  separately — the typed dispatch fix doesn't apply because GpuReduce
+  isn't what runs for these cases.
+- Acceptance: f32/i64/f64 reduce matrices at 100K/1M/10M choose GPU
+  only where they beat PostgreSQL, no integer precision is lost, and
+  traces show the expected typed kernel instead of accidental soft-fp64.
+  The typed-dispatch piece is closed; the MIN/MAX→GpuSort routing
+  needs separate planner work.
 
 ### Calibrate `pg_accel.soft_fp64_cost_multiplier`
 
