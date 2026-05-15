@@ -1254,6 +1254,62 @@ static void test_st_overlaps_bulk() {
   ASSERT_EQ("Identical polygons → -1", results[2], -1);
 }
 
+static void test_algorithmic_predicate_slab_dispatch() {
+  printf("--- algorithmic predicates: slab GPU dispatch ---\n");
+
+  const float pt_xy[] = {0.0f, 0.0f};
+  const float pt_bbox[] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float far_xy[] = {99.0f, 99.0f};
+  const float far_bbox[] = {99.0f, 99.0f, 99.0f, 99.0f};
+  const float poly_xy[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  const float poly_bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+
+  pgaccel_geometry g_a[3];
+  pgaccel_geometry g_b[3];
+  g_a[0] = make_point_geom(pt_xy, pt_bbox);
+  g_b[0] = make_point_geom(pt_xy, pt_bbox);
+  g_a[1] = make_point_geom(pt_xy, pt_bbox);
+  g_b[1] = make_point_geom(far_xy, far_bbox);
+  g_a[2] = make_polygon_geom(poly_xy, 5, poly_bbox);
+  g_b[2] = make_polygon_geom(poly_xy, 5, poly_bbox);
+
+  pgaccel_reset_gpu_exec_count();
+  uint64_t before = pgaccel_gpu_exec_count();
+
+  int8_t equals[3] = {99, 99, 99};
+  pgaccel_status s = pgaccel_st_equals_bulk(g_a, g_b, 3, equals);
+  ASSERT_EQ("equals slab status OK", s, PGACCEL_OK);
+  ASSERT_EQ("equals identical point", equals[0], 1);
+  ASSERT_EQ("equals disjoint point", equals[1], -1);
+  ASSERT_EQ("equals identical polygon", equals[2], 1);
+
+  int8_t touches[3] = {99, 99, 99};
+  s = pgaccel_st_touches_bulk(g_a, g_b, 3, touches);
+  ASSERT_EQ("touches slab status OK", s, PGACCEL_OK);
+  ASSERT_EQ("touches identical point", touches[0], -1);
+  ASSERT_EQ("touches disjoint point", touches[1], -1);
+  ASSERT_EQ("touches identical polygon", touches[2], -1);
+
+  int8_t crosses[3] = {99, 99, 99};
+  s = pgaccel_st_crosses_bulk(g_a, g_b, 3, crosses);
+  ASSERT_EQ("crosses slab status OK", s, PGACCEL_OK);
+  ASSERT_EQ("crosses identical point", crosses[0], -1);
+  ASSERT_EQ("crosses disjoint point", crosses[1], -1);
+  ASSERT_EQ("crosses identical polygon", crosses[2], -1);
+
+  int8_t overlaps[3] = {99, 99, 99};
+  s = pgaccel_st_overlaps_bulk(g_a, g_b, 3, overlaps);
+  ASSERT_EQ("overlaps slab status OK", s, PGACCEL_OK);
+  ASSERT_EQ("overlaps identical point", overlaps[0], -1);
+  ASSERT_EQ("overlaps disjoint point", overlaps[1], -1);
+  ASSERT_EQ("overlaps identical polygon", overlaps[2], -1);
+
+  uint64_t after = pgaccel_gpu_exec_count();
+  ASSERT_EQ("four algorithmic predicate kernels dispatched", (int)(after == before + 4), 1);
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -1306,6 +1362,7 @@ int main() {
   test_st_touches_bulk();
   test_st_crosses_bulk();
   test_st_overlaps_bulk();
+  test_algorithmic_predicate_slab_dispatch();
 
   printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
   if (g_tests_failed > 0) {

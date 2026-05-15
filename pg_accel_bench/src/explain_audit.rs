@@ -41,6 +41,10 @@ pub enum RatchetExpectation {
     /// `RequiredToday` or `RequiredAfterPhase`).
     #[allow(dead_code)]
     OptionalForever,
+    /// The row is a known unsafe crash band and must be visible in the audit
+    /// report without executing EXPLAIN. This is a quarantine marker, not a
+    /// production planner behavior change.
+    Quarantined(&'static str),
 }
 
 /// One row of the audit matrix.
@@ -79,6 +83,7 @@ enum RowStatus {
     Fail,
     SkipGated,
     OptionalNotMet,
+    Quarantined,
 }
 
 impl AuditOutcome {
@@ -90,6 +95,7 @@ impl AuditOutcome {
             (RatchetExpectation::RequiredToday, false) => RowStatus::Fail,
             (RatchetExpectation::RequiredAfterPhase(_), _) => RowStatus::SkipGated,
             (RatchetExpectation::OptionalForever, false) => RowStatus::OptionalNotMet,
+            (RatchetExpectation::Quarantined(_), _) => RowStatus::Quarantined,
         }
     }
 }
@@ -247,6 +253,24 @@ fn build_matrix() -> Vec<AuditRow> {
             query: "SELECT * FROM bench_part WHERE v > 0.5 LIMIT 100",
             expectation: RatchetExpectation::RequiredAfterPhase("4 Append/MergeAppend injection"),
         },
+        AuditRow {
+            name: "spatial_100k_simple_unsafe_band",
+            description: "100K spatial repro, simple polygon — declined/quarantined",
+            setup: vec![],
+            query: "workload=spatial_sel_repro_simple_s90_b64k_w4_jiton rows=100000",
+            expectation: RatchetExpectation::Quarantined(
+                "100K spatial crash band: do not EXPLAIN or dispatch until fixed",
+            ),
+        },
+        AuditRow {
+            name: "spatial_100k_coop1024_unsafe_band",
+            description: "100K spatial repro, cooperative 1024+v polygon — declined/quarantined",
+            setup: vec![],
+            query: "workload=spatial_sel_repro_coop1024_s90_b64k_w4_jiton rows=100000",
+            expectation: RatchetExpectation::Quarantined(
+                "100K spatial crash band: do not EXPLAIN or dispatch until fixed",
+            ),
+        },
     ]
 }
 
@@ -351,6 +375,23 @@ pub fn run_audit(connection: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let mut outcomes: Vec<AuditOutcome> = Vec::with_capacity(matrix.len());
 
     for row in matrix {
+        if let RatchetExpectation::Quarantined(reason) = &row.expectation {
+            let reason = *reason;
+            outcomes.push(AuditOutcome {
+                name: row.name.to_owned(),
+                description: row.description.to_owned(),
+                expectation: RatchetExpectation::Quarantined(reason),
+                shape_matched: false,
+                explain: format!(
+                    "QUARANTINED: {reason}\n\
+                     DECLINED: known unsafe-band workload is not executed by explain-audit.\n\
+                     {query}\n",
+                    query = row.query
+                ),
+            });
+            continue;
+        }
+
         // Per-row setup (e.g. enable_seqscan tweaks). Always wrap in a
         // savepoint-style reset by re-applying the global GUCs after.
         for stmt in &row.setup {
@@ -400,6 +441,7 @@ fn print_report(outcomes: &[AuditOutcome]) {
                 _ => "[SKIP]".to_owned(),
             },
             RowStatus::OptionalNotMet => "[OPTIONAL-NOT-MET]".to_owned(),
+            RowStatus::Quarantined => "[QUARANTINED-declined]".to_owned(),
         };
         println!("{prefix} {} — {}", o.name, o.description);
         // Indent the EXPLAIN output for readability.
@@ -407,7 +449,10 @@ fn print_report(outcomes: &[AuditOutcome]) {
             println!("    {line}");
         }
         match o.status() {
-            RowStatus::Pass | RowStatus::SkipGated | RowStatus::OptionalNotMet => {}
+            RowStatus::Pass
+            | RowStatus::SkipGated
+            | RowStatus::OptionalNotMet
+            | RowStatus::Quarantined => {}
             RowStatus::Fail => {
                 println!(
                     "    !! RequiredToday row failed: no `Custom Scan (GpuAccel...)` \
@@ -424,12 +469,14 @@ fn print_report(outcomes: &[AuditOutcome]) {
             RatchetExpectation::RequiredToday => "required-today".to_owned(),
             RatchetExpectation::RequiredAfterPhase(p) => format!("required-after({p})"),
             RatchetExpectation::OptionalForever => "optional-forever".to_owned(),
+            RatchetExpectation::Quarantined(p) => format!("quarantined({p})"),
         };
         let status = match o.status() {
             RowStatus::Pass => "PASS",
             RowStatus::Fail => "FAIL",
             RowStatus::SkipGated => "skip",
             RowStatus::OptionalNotMet => "optional-not-met",
+            RowStatus::Quarantined => "quarantined",
         };
         println!("  {:32}  {:32}  {status}", o.name, tag);
     }
@@ -539,9 +586,9 @@ mod tests {
     }
 
     #[test]
-    fn matrix_covers_nine_rows() {
-        // Ship-gate matrix size — see TODO.md Phase 9.
-        assert_eq!(build_matrix().len(), 9);
+    fn matrix_covers_expected_rows() {
+        // Ship-gate matrix size: Phase 9 rows plus visible spatial crash gates.
+        assert_eq!(build_matrix().len(), 11);
     }
 
     #[test]
@@ -595,5 +642,37 @@ mod tests {
         };
         assert_eq!(pass.status(), RowStatus::Pass);
         assert_eq!(nope.status(), RowStatus::OptionalNotMet);
+    }
+
+    #[test]
+    fn ratchet_status_quarantined() {
+        let o = AuditOutcome {
+            name: "x".into(),
+            description: "x".into(),
+            expectation: RatchetExpectation::Quarantined("unsafe band"),
+            shape_matched: true,
+            explain: String::new(),
+        };
+        assert_eq!(o.status(), RowStatus::Quarantined);
+    }
+
+    #[test]
+    fn spatial_100k_unsafe_band_rows_are_quarantined() {
+        let matrix = build_matrix();
+        let rows: Vec<_> = matrix
+            .iter()
+            .filter(|row| row.name.starts_with("spatial_100k_"))
+            .collect();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert!(row.description.contains("declined/quarantined"));
+            assert!(row.query.contains("rows=100000"));
+            assert!(matches!(
+                row.expectation,
+                RatchetExpectation::Quarantined(
+                    "100K spatial crash band: do not EXPLAIN or dispatch until fixed"
+                )
+            ));
+        }
     }
 }

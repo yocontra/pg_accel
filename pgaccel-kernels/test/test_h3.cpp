@@ -1233,35 +1233,69 @@ static void test_cell_to_boundary_multi_cell_emit() {
   }
 }
 
+static const char* selected_test(int argc, char** argv) {
+  const char* filter = std::getenv("PGACCEL_H3_TEST");
+  for (int i = 1; i < argc; i++) {
+    if (std::strcmp(argv[i], "--test") == 0 && i + 1 < argc)
+      return argv[i + 1];
+    if (std::strncmp(argv[i], "--test=", 7) == 0)
+      return argv[i] + 7;
+    if (std::strncmp(argv[i], "--only=", 7) == 0)
+      return argv[i] + 7;
+  }
+  return filter;
+}
+
+static bool should_run_test(const char* selected, const char* name) {
+  return selected == nullptr || selected[0] == '\0' || std::strcmp(selected, name) == 0;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-int main() {
+int main(int argc, char** argv) {
   printf("=== pg_accel H3 kernel tests ===\n\n");
 
-  test_get_resolution();
-  test_get_base_cell();
-  test_is_valid_cell();
-  test_is_pentagon();
-  test_is_res_class_iii();
-  test_cell_to_parent();
-  test_cell_to_center_child();
-  test_grid_distance();
-  test_lat_lng_to_cell();
-  test_lat_lng_to_cell_fp64_bulk();
-  test_null_pointers();
+  const char* selected = selected_test(argc, argv);
+  bool ran_any = false;
+#define RUN_TEST(fn)                      \
+  do {                                    \
+    if (should_run_test(selected, #fn)) { \
+      ran_any = true;                     \
+      fn();                               \
+    }                                     \
+  } while (0)
+
+  RUN_TEST(test_get_resolution);
+  RUN_TEST(test_get_base_cell);
+  RUN_TEST(test_is_valid_cell);
+  RUN_TEST(test_is_pentagon);
+  RUN_TEST(test_is_res_class_iii);
+  RUN_TEST(test_cell_to_parent);
+  RUN_TEST(test_cell_to_center_child);
+  RUN_TEST(test_grid_distance);
+  RUN_TEST(test_lat_lng_to_cell);
+  RUN_TEST(test_lat_lng_to_cell_fp64_bulk);
+  RUN_TEST(test_null_pointers);
 
   // Variable-output kernels (Agent 5A)
-  test_grid_disk();
-  test_grid_ring_unsafe();
-  test_cell_to_children();
-  test_cell_to_boundary();
-  test_polyfill();
-  test_cells_to_multi_polygon();
+  RUN_TEST(test_grid_disk);
+  RUN_TEST(test_grid_ring_unsafe);
+  RUN_TEST(test_cell_to_children);
+  RUN_TEST(test_cell_to_boundary);
+  RUN_TEST(test_polyfill);
+  RUN_TEST(test_cells_to_multi_polygon);
 
   // Regression tests for Agent K Round 3 kernel-layer bugs.
-  test_grid_disk_single_cell_input();
-  test_cell_to_boundary_multi_cell_emit();
+  RUN_TEST(test_grid_disk_single_cell_input);
+  RUN_TEST(test_cell_to_boundary_multi_cell_emit);
+
+#undef RUN_TEST
+
+  if (!ran_any) {
+    fprintf(stderr, "FAIL: no H3 test matched '%s'\n", selected ? selected : "");
+    g_fail++;
+  }
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

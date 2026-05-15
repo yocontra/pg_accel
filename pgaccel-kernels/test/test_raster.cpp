@@ -138,6 +138,47 @@ static void test_map_algebra_two_band() {
   PASS("map_algebra: sqrt(band0^2 + band1^2) two-band");
 }
 
+/* ── Test: map algebra with max supported band pointer table ───── */
+
+static void test_map_algebra_max_band_pointer_table() {
+  const size_t N = 128;
+  constexpr size_t BAND_COUNT = 8;
+  std::vector<std::vector<float>> band_data(BAND_COUNT, std::vector<float>(N));
+  std::vector<const void*> bands(BAND_COUNT);
+  for (size_t b = 0; b < BAND_COUNT; ++b) {
+    bands[b] = band_data[b].data();
+    for (size_t i = 0; i < N; ++i) {
+      band_data[b][i] = static_cast<float>((b + 1) * (i + 1));
+    }
+  }
+
+  pgaccel_expr_inst code[] = {
+      make_load_band(0),       make_load_band(1), make_op(PGACCEL_OP_ADD), make_load_band(2),
+      make_op(PGACCEL_OP_ADD), make_load_band(3), make_op(PGACCEL_OP_ADD), make_load_band(4),
+      make_op(PGACCEL_OP_ADD), make_load_band(5), make_op(PGACCEL_OP_ADD), make_load_band(6),
+      make_op(PGACCEL_OP_ADD), make_load_band(7), make_op(PGACCEL_OP_ADD),
+  };
+  pgaccel_expr expr;
+  expr.instructions = code;
+  expr.inst_count = 15;
+  expr.band_count = BAND_COUNT;
+
+  std::vector<float> output(N, 0.0f);
+  std::vector<uint8_t> nodata(N, 0);
+
+  pgaccel_status st =
+      pgaccel_map_algebra(bands.data(), N, PGACCEL_PT_FLOAT32, &expr, output.data(), nodata.data());
+  ASSERT_EQ(st, PGACCEL_OK, "map_algebra max-band pointer table status");
+
+  for (size_t i = 0; i < N; ++i) {
+    float expected = 36.0f * static_cast<float>(i + 1);
+    ASSERT_NEAR(output[i], expected, 0.01, "map_algebra max-band sum");
+    ASSERT_EQ(nodata[i], 0, "map_algebra max-band nodata clear");
+  }
+
+  PASS("map_algebra: 8-band pointer table sum");
+}
+
 /* ── Test: map algebra with int32 pixel type ──────────────────── */
 //
 // As of the 2026-05-02 cheat audit, only FP32 pixels are accelerated.
@@ -820,6 +861,7 @@ int main() {
 
   test_map_algebra_simple();
   test_map_algebra_two_band();
+  test_map_algebra_max_band_pointer_table();
   test_map_algebra_int32();
   test_map_algebra_declines_unsupported_shapes();
   test_map_algebra_nodata();

@@ -209,23 +209,28 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
         return PGACCEL_ERROR_OOM;
       std::memcpy(d_inst, expr->instructions, n_inst * sizeof(pgaccel_expr_inst));
 
-      // Allocate per-band device buffers.
-      std::vector<float*> d_bands(band_count);
+      constexpr size_t MAX_BANDS = PGACCEL_MAP_ALGEBRA_MAX_BANDS;
+      if (band_count > MAX_BANDS || pixel_count > SIZE_MAX / band_count) {
+        sycl::free(d_inst, q);
+        return PGACCEL_ERROR_UNSUPPORTED;
+      }
+
+      // Store all bands in one flat device allocation. This keeps the
+      // map_algebra Metal closure to a single band data pointer instead
+      // of capturing a struct of up to eight device pointers.
+      const size_t band_stride = pixel_count;
+      float* d_bands = sycl::malloc_device<float>(band_count * band_stride, q);
+      if (!d_bands) {
+        sycl::free(d_inst, q);
+        return PGACCEL_ERROR_OOM;
+      }
       for (size_t b = 0; b < band_count; ++b) {
-        d_bands[b] = sycl::malloc_device<float>(pixel_count, q);
-        if (!d_bands[b]) {
-          for (size_t j = 0; j < b; ++j)
-            sycl::free(d_bands[j], q);
-          sycl::free(d_inst, q);
-          return PGACCEL_ERROR_OOM;
-        }
-        q.memcpy(d_bands[b], band_pixels[b], pixel_count * sizeof(float));
+        q.memcpy(d_bands + b * band_stride, band_pixels[b], pixel_count * sizeof(float));
       }
       float* d_out = sycl::malloc_device<float>(pixel_count, q);
       uint8_t* d_mask = sycl::malloc_device<uint8_t>(pixel_count, q);
       if (!d_out || !d_mask) {
-        for (auto* p : d_bands)
-          sycl::free(p, q);
+        sycl::free(d_bands, q);
         if (d_out)
           sycl::free(d_out, q);
         if (d_mask)
@@ -240,34 +245,10 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
       }
       q.wait_and_throw();
 
-      // Copy band pointers to device — we only support up to 8
-      // bands in the kernel (fits in a fixed-size array, avoids
-      // extra pointer indirection through device memory).
-      constexpr size_t MAX_BANDS = PGACCEL_MAP_ALGEBRA_MAX_BANDS;
-      if (band_count > MAX_BANDS) {
-        for (auto* p : d_bands)
-          sycl::free(p, q);
-        sycl::free(d_out, q);
-        sycl::free(d_mask, q);
-        sycl::free(d_inst, q);
-        return PGACCEL_ERROR_UNSUPPORTED;
-      }
-      float* band_ptrs[MAX_BANDS] = {};
-      for (size_t b = 0; b < band_count; ++b) {
-        band_ptrs[b] = d_bands[b];
-      }
-
       const size_t n = pixel_count;
       const size_t ni = n_inst;
       const size_t bc = band_count;
-
-      // Capture a plain pointer array into the kernel.
-      struct BandArr {
-        float* p[MAX_BANDS];
-      };
-      BandArr ba = {};
-      for (size_t b = 0; b < MAX_BANDS; ++b)
-        ba.p[b] = band_ptrs[b];
+      const size_t bs = band_stride;
 
       // Metal is fp32-only — kernel body uses float throughout.
       const float nan_f = sycl::bit_cast<float>(static_cast<uint32_t>(0x7fc00000u));
@@ -280,7 +261,7 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
            }
            float band_vals[MAX_BANDS];
            for (size_t b = 0; b < bc; ++b) {
-             band_vals[b] = ba.p[b][i];
+             band_vals[b] = d_bands[b * bs + i];
            }
            float stack_vals[16];
            int sp = 0;
@@ -368,8 +349,7 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
       }
       q.wait_and_throw();
 
-      for (auto* p : d_bands)
-        sycl::free(p, q);
+      sycl::free(d_bands, q);
       sycl::free(d_out, q);
       sycl::free(d_mask, q);
       sycl::free(d_inst, q);

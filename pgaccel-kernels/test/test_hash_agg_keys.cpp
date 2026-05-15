@@ -413,6 +413,80 @@ static void test_sort_based_hash_agg_int32_1m_sum_count() {
   pgaccel_agg_free(state);
 }
 
+// ---------------------------------------------------------------------------
+// Opt-in diagnostic: Metal radix-sort works, sort-based hashagg remains gated
+// ---------------------------------------------------------------------------
+//
+// Enable with PGACCEL_HASHAGG_METAL_DIAG=1. This keeps the normal suite from
+// adding another large Metal JIT lane, but gives a direct repro that the
+// unsupported behavior is an explicit prelaunch sort-based-hashagg gate rather
+// than a hidden radix-sort regression.
+static void test_metal_sort_based_hashagg_unsupported_diagnostic() {
+  if (std::getenv("PGACCEL_HASHAGG_METAL_DIAG") == nullptr) {
+    return;
+  }
+
+  printf("--- test_metal_sort_based_hashagg_unsupported_diagnostic ---\n");
+
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (std::strcmp(caps.backend_name, "metal") != 0) {
+    printf("  skipped: backend=%s\n", caps.backend_name);
+    return;
+  }
+
+  constexpr size_t N = 131072;
+  constexpr size_t NUM_GROUPS = 1024;
+  constexpr int32_t KEY_BASE = -512;
+
+  std::vector<int32_t> sort_keys(N);
+  std::vector<int32_t> agg_keys(N);
+  std::vector<uint32_t> indices(N);
+  std::vector<uint8_t> key_nulls(N, 0);
+  std::vector<int32_t> values(N, 1);
+
+  for (size_t i = 0; i < N; ++i) {
+    const size_t gid = (i * 1021 + 13) & (NUM_GROUPS - 1);
+    const int32_t key = static_cast<int32_t>(KEY_BASE + static_cast<int32_t>(gid));
+    sort_keys[i] = key;
+    agg_keys[i] = key;
+    indices[i] = static_cast<uint32_t>(i);
+  }
+
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status sort_st = pgaccel_sort_kv_i32(sort_keys.data(), indices.data(), N);
+  ASSERT_EQ_INT("Metal radix kv-sort diagnostic status OK", sort_st, PGACCEL_OK);
+  ASSERT_TRUE("Metal radix kv-sort diagnostic launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+
+  bool sorted = (sort_st == PGACCEL_OK);
+  for (size_t i = 1; sorted && i < N; ++i) {
+    if (sort_keys[i] < sort_keys[i - 1]) {
+      sorted = false;
+    }
+  }
+  ASSERT_TRUE("Metal radix kv-sort diagnostic output sorted", sorted);
+
+  const void* val_arrays[1] = {values.data()};
+  const uint8_t* val_null_arrays[1] = {nullptr};
+  int val_types[1] = {PGACCEL_VAL_INT32};
+  pgaccel_agg_col agg_cols[1] = {{PGACCEL_AGG_COUNT, SIZE_MAX}};
+
+  pgaccel_agg_state* state = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status hashagg_st = pgaccel_hash_agg_execute_sort_based(
+      agg_keys.data(), key_nulls.data(), N, PGACCEL_KEY_INT32, val_arrays, val_null_arrays,
+      val_types, agg_cols, 1, &state);
+
+  ASSERT_EQ_INT("Metal sort-based hashagg diagnostic returns UNSUPPORTED", hashagg_st,
+                PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("Metal sort-based hashagg diagnostic leaves state null", state == nullptr);
+  ASSERT_EQ_SZ("Metal sort-based hashagg diagnostic launches no GPU kernels",
+               pgaccel_gpu_exec_count(), (uint64_t)0);
+
+  if (state != nullptr) {
+    pgaccel_agg_free(state);
+  }
+}
+
 static void test_hash_agg_f64_zero_nan_normalization() {
   printf("--- test_hash_agg_f64_zero_nan_normalization ---\n");
 
@@ -615,6 +689,7 @@ int main() {
   test_hash_agg_count_star_without_value_cols();
   test_hash_agg_int64_baseline();
   test_sort_based_hash_agg_int32_1m_sum_count();
+  test_metal_sort_based_hashagg_unsupported_diagnostic();
   test_hash_agg_f64_zero_nan_normalization();
   test_hash_agg_int64_null_sentinel_collision();
   test_hash_agg_uuid_keys();

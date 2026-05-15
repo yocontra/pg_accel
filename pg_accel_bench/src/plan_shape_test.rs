@@ -69,6 +69,17 @@ fn assert_plan_contains(c: &mut Client, sql: &str, needles: &[&str]) {
     }
 }
 
+/// Assert that `EXPLAIN sql` contains none of the substrings in `needles`.
+fn assert_plan_lacks(c: &mut Client, sql: &str, needles: &[&str]) {
+    let plan = explain(c, sql);
+    for n in needles {
+        assert!(
+            !plan.contains(&n.to_lowercase()),
+            "plan for `{sql}` unexpectedly contains `{n}`:\n{plan}"
+        );
+    }
+}
+
 /// Setup the bench fixture and the tiny fact/dim pair used by the hash-join
 /// assertion. Idempotent — each `CREATE TABLE` is `IF NOT EXISTS`.
 fn ensure_fixtures(c: &mut Client) {
@@ -87,6 +98,23 @@ fn ensure_fixtures(c: &mut Client) {
          ON CONFLICT DO NOTHING",
         "ANALYZE bench_fact",
         "ANALYZE bench_dim",
+    ] {
+        c.simple_query(stmt).expect(stmt);
+    }
+}
+
+/// Setup the grouped HashAgg crash-gate fixture. The 100K scale is the first
+/// unsafe band for grouped GPU HashAgg, so this query must stay native until
+/// a real safe implementation lands.
+fn ensure_hashagg_gate_fixture(c: &mut Client) {
+    for stmt in [
+        "CREATE UNLOGGED TABLE IF NOT EXISTS bench_hashagg_gate \
+         (id bigint, grp int4, val double precision)",
+        "TRUNCATE bench_hashagg_gate",
+        "INSERT INTO bench_hashagg_gate (id, grp, val) \
+         SELECT g, (g % 10000)::int4, random() \
+         FROM generate_series(1, 100000) g",
+        "ANALYZE bench_hashagg_gate",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -137,9 +165,27 @@ fn plan_shape_parallel_hashjoin() {
     ensure_fixtures(&mut c);
     force_parallel(&mut c);
 
-    assert_plan_contains(
+    let sql = "SELECT f.*, d.name FROM bench_fact f JOIN bench_dim d USING(id)";
+    assert_plan_contains(&mut c, sql, &["Hash Join"]);
+    assert_plan_lacks(
         &mut c,
-        "SELECT f.*, d.name FROM bench_fact f JOIN bench_dim d USING(id)",
-        &["Gather", "CustomScan(pg_accel)"],
+        sql,
+        &["CustomScan(pg_accel)", "GpuHashJoin", "GpuAccelHashJoin"],
+    );
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn plan_shape_grouped_hashagg_100k_declines_gpu() {
+    let mut c = connect();
+    ensure_hashagg_gate_fixture(&mut c);
+    force_parallel(&mut c);
+
+    let sql = "SELECT grp, SUM(val), COUNT(*) FROM bench_hashagg_gate GROUP BY grp";
+    assert_plan_contains(&mut c, sql, &["HashAggregate"]);
+    assert_plan_lacks(
+        &mut c,
+        sql,
+        &["CustomScan(pg_accel)", "GpuAgg", "GpuAccelAgg"],
     );
 }

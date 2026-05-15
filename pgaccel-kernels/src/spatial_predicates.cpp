@@ -1362,6 +1362,21 @@ enum class AlgorithmicPredicate {
   Overlaps,
 };
 
+struct AlgorithmicPredicateKernelSlabHeader {
+  size_t bboxes_a_off;
+  size_t bboxes_b_off;
+  size_t types_a_off;
+  size_t types_b_off;
+  size_t point_eq_off;
+  size_t ring_eq_off;
+  size_t results_off;
+  int pred_id;
+};
+
+static size_t align_up_size(size_t value, size_t alignment) {
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
 pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
                                                    const pgaccel_geometry* geoms_b, size_t count,
                                                    AlgorithmicPredicate pred, int8_t* results) {
@@ -1375,39 +1390,47 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
     return PGACCEL_ERROR_NO_DEVICE;
 
   try {
-    // Per-row metadata laid out for a flat-args kernel:
-    //   bboxes_a[i*4 .. i*4+4], bboxes_b[i*4 .. i*4+4]
-    //   types_a[i], types_b[i]                 (int)
-    //   point_eq[i]                            (uint8 — Point/Point coord match)
-    //   ring_eq[i]                             (uint8 — Polygon/Polygon ring match)
-    // Polygon ring equality is computed host-side because per-row
-    // ring buffers would require variable-stride USM per element.
-    float* d_bboxes_a = sycl::malloc_shared<float>(count * 4, *q);
-    float* d_bboxes_b = sycl::malloc_shared<float>(count * 4, *q);
-    int* d_types_a = sycl::malloc_shared<int>(count, *q);
-    int* d_types_b = sycl::malloc_shared<int>(count, *q);
-    uint8_t* d_point_eq = sycl::malloc_shared<uint8_t>(count, *q);
-    uint8_t* d_ring_eq = sycl::malloc_shared<uint8_t>(count, *q);
-    int8_t* d_results = sycl::malloc_shared<int8_t>(count, *q);
+    // Keep the Metal kernel ABI low-capture: one shared USM slab is captured,
+    // and typed views are reconstructed from header offsets inside the kernel.
+    // Polygon ring equality is computed host-side because per-row ring buffers
+    // would require variable-stride USM per element.
+    AlgorithmicPredicateKernelSlabHeader header{};
+    size_t cursor = align_up_size(sizeof(header), alignof(float));
+    header.bboxes_a_off = cursor;
+    cursor += count * 4 * sizeof(float);
+    cursor = align_up_size(cursor, alignof(float));
+    header.bboxes_b_off = cursor;
+    cursor += count * 4 * sizeof(float);
+    cursor = align_up_size(cursor, alignof(int));
+    header.types_a_off = cursor;
+    cursor += count * sizeof(int);
+    cursor = align_up_size(cursor, alignof(int));
+    header.types_b_off = cursor;
+    cursor += count * sizeof(int);
+    cursor = align_up_size(cursor, alignof(uint8_t));
+    header.point_eq_off = cursor;
+    cursor += count * sizeof(uint8_t);
+    cursor = align_up_size(cursor, alignof(uint8_t));
+    header.ring_eq_off = cursor;
+    cursor += count * sizeof(uint8_t);
+    cursor = align_up_size(cursor, alignof(int8_t));
+    header.results_off = cursor;
+    cursor += count * sizeof(int8_t);
+    header.pred_id = static_cast<int>(pred);
 
-    if (!d_bboxes_a || !d_bboxes_b || !d_types_a || !d_types_b || !d_point_eq || !d_ring_eq ||
-        !d_results) {
-      if (d_bboxes_a)
-        sycl::free(d_bboxes_a, *q);
-      if (d_bboxes_b)
-        sycl::free(d_bboxes_b, *q);
-      if (d_types_a)
-        sycl::free(d_types_a, *q);
-      if (d_types_b)
-        sycl::free(d_types_b, *q);
-      if (d_point_eq)
-        sycl::free(d_point_eq, *q);
-      if (d_ring_eq)
-        sycl::free(d_ring_eq, *q);
-      if (d_results)
-        sycl::free(d_results, *q);
+    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(cursor, *q);
+    if (!d_slab) {
       return PGACCEL_OOM;
     }
+    std::memset(d_slab, 0, cursor);
+    std::memcpy(d_slab, &header, sizeof(header));
+
+    float* d_bboxes_a = reinterpret_cast<float*>(d_slab + header.bboxes_a_off);
+    float* d_bboxes_b = reinterpret_cast<float*>(d_slab + header.bboxes_b_off);
+    int* d_types_a = reinterpret_cast<int*>(d_slab + header.types_a_off);
+    int* d_types_b = reinterpret_cast<int*>(d_slab + header.types_b_off);
+    uint8_t* d_point_eq = d_slab + header.point_eq_off;
+    uint8_t* d_ring_eq = d_slab + header.ring_eq_off;
 
     for (size_t i = 0; i < count; ++i) {
       const pgaccel_geometry& a = geoms_a[i];
@@ -1477,108 +1500,107 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
       d_ring_eq[i] = ring_eq;
     }
 
-    const int pred_id = static_cast<int>(pred);
-
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const auto* h = reinterpret_cast<const AlgorithmicPredicateKernelSlabHeader*>(d_slab);
+       const auto* bboxes_a = reinterpret_cast<const float*>(d_slab + h->bboxes_a_off);
+       const auto* bboxes_b = reinterpret_cast<const float*>(d_slab + h->bboxes_b_off);
+       const auto* types_a = reinterpret_cast<const int*>(d_slab + h->types_a_off);
+       const auto* types_b = reinterpret_cast<const int*>(d_slab + h->types_b_off);
+       const uint8_t* point_eq = d_slab + h->point_eq_off;
+       const uint8_t* ring_eqs = d_slab + h->ring_eq_off;
+       auto* slab_results = reinterpret_cast<int8_t*>(d_slab + h->results_off);
        const size_t i = id[0];
-       const float* ba = &d_bboxes_a[i * 4];
-       const float* bb = &d_bboxes_b[i * 4];
-       const int ta = d_types_a[i];
-       const int tb = d_types_b[i];
-       const uint8_t pt_eq = d_point_eq[i];
-       const uint8_t ring_eq = d_ring_eq[i];
+       const float* ba = &bboxes_a[i * 4];
+       const float* bb = &bboxes_b[i * 4];
+       const int ta = types_a[i];
+       const int tb = types_b[i];
+       const uint8_t pt_eq = point_eq[i];
+       const uint8_t ring_eq = ring_eqs[i];
 
        if (ta == static_cast<int>(PGACCEL_GEOM_UNKNOWN) ||
            tb == static_cast<int>(PGACCEL_GEOM_UNKNOWN)) {
-         d_results[i] = 0;
+         slab_results[i] = 0;
          return;
        }
 
        const bool disjoint =
            (ba[2] < bb[0]) || (bb[2] < ba[0]) || (ba[3] < bb[1]) || (bb[3] < ba[1]);
 
-       if (pred_id == static_cast<int>(AlgorithmicPredicate::Equals)) {
+       if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Equals)) {
          if (disjoint) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           d_results[i] = pt_eq ? int8_t(1) : int8_t(-1);
+           slab_results[i] = pt_eq ? int8_t(1) : int8_t(-1);
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
              tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
-           d_results[i] = 1;
+           slab_results[i] = 1;
            return;
          }
          if (ta != tb) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
-         d_results[i] = 0;
-       } else if (pred_id == static_cast<int>(AlgorithmicPredicate::Touches)) {
+         slab_results[i] = 0;
+       } else if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Touches)) {
          if (disjoint) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
              tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
-         d_results[i] = 0;
-       } else if (pred_id == static_cast<int>(AlgorithmicPredicate::Crosses)) {
+         slab_results[i] = 0;
+       } else if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Crosses)) {
          if (disjoint) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
              tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
-         d_results[i] = 0;
+         slab_results[i] = 0;
        } else /* Overlaps */ {
          if (disjoint) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta != tb) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) && pt_eq) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
-           d_results[i] = -1;
+           slab_results[i] = -1;
            return;
          }
-         d_results[i] = 0;
+         slab_results[i] = 0;
        }
      }).wait_and_throw();
 
-    std::memcpy(results, d_results, count * sizeof(int8_t));
-
-    sycl::free(d_bboxes_a, *q);
-    sycl::free(d_bboxes_b, *q);
-    sycl::free(d_types_a, *q);
-    sycl::free(d_types_b, *q);
-    sycl::free(d_point_eq, *q);
-    sycl::free(d_ring_eq, *q);
-    sycl::free(d_results, *q);
+    std::memcpy(results, d_slab + header.results_off, count * sizeof(int8_t));
+    sycl::free(d_slab, *q);
 
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;

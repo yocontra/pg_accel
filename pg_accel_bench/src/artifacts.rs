@@ -9,17 +9,26 @@ use serde::Serialize;
 
 use crate::report::{BenchReport, CrashedScale, GucSettings};
 
-const ARTIFACT_SCHEMA_VERSION: u32 = 1;
+const ARTIFACT_SCHEMA_VERSION: u32 = 2;
 const ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_INDEX_JSON: &str = "artifact_index.json";
 const ARTIFACT_CHECKLIST_MD: &str = "artifact_checklist.md";
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
+const LOG_DELTA_BYTES: u64 = 256 * 1024;
 const MAX_LOG_CANDIDATES: usize = 32;
 
 #[derive(Clone, Debug)]
 pub struct ArtifactWriter {
     root: PathBuf,
     log_candidates: Vec<PathBuf>,
+    log_start_offsets: Vec<LogStartOffset>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct LogStartOffset {
+    path: String,
+    existed: bool,
+    len_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -52,9 +61,11 @@ struct Manifest {
     artifact_index_path: &'static str,
     artifact_checklist_path: &'static str,
     log_tail_bytes: u64,
+    log_delta_bytes: u64,
     telemetry_tail_bytes: u64,
     max_log_candidates: usize,
     log_candidates: Vec<String>,
+    log_start_offsets: Vec<LogStartOffset>,
     telemetry_candidates: Vec<String>,
 }
 
@@ -86,9 +97,12 @@ impl ArtifactWriter {
         fs::create_dir_all(root.join("plan_snippets"))?;
         fs::create_dir_all(root.join("log_tails"))?;
 
+        let log_candidates = unique_paths(log_candidates);
+        let log_start_offsets = capture_log_start_offsets(&log_candidates);
         let writer = Self {
             root,
-            log_candidates: unique_paths(log_candidates),
+            log_candidates,
+            log_start_offsets,
         };
         writer.write_manifest()?;
         writer
@@ -173,12 +187,24 @@ impl ArtifactWriter {
                 continue;
             }
             let tail = read_tail(candidate, LOG_TAIL_BYTES)?;
+            let metadata = candidate.metadata()?;
+            let current_len = metadata.len();
+            let start_offset = self
+                .log_start_offsets
+                .get(idx)
+                .map_or(0, |offset| offset.len_bytes);
+            let delta_start = if current_len >= start_offset {
+                start_offset
+            } else {
+                0
+            };
+            let delta = read_delta(candidate, delta_start, LOG_DELTA_BYTES)?;
             let source_name = candidate
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("log");
-            let file_name = format!("{idx:02}-{}.tail", sanitize_label(source_name));
-            let out_path = dir.join(file_name);
+            let safe_source_name = sanitize_label(source_name);
+            let tail_path = dir.join(format!("{idx:02}-{safe_source_name}.tail"));
 
             let mut out = String::new();
             let _ = writeln!(out, "source: {}", candidate.display());
@@ -188,8 +214,31 @@ impl ArtifactWriter {
             if !tail.ends_with('\n') {
                 out.push('\n');
             }
-            fs::write(&out_path, out)?;
-            written.push(self.relative_display_path(&out_path));
+            fs::write(&tail_path, out)?;
+            written.push(self.relative_display_path(&tail_path));
+
+            let delta_path = dir.join(format!("{idx:02}-{safe_source_name}.delta"));
+            let mut out = String::new();
+            let _ = writeln!(out, "source: {}", candidate.display());
+            let _ = writeln!(out, "run_start_offset_bytes: {start_offset}");
+            let _ = writeln!(out, "delta_start_offset_bytes: {delta_start}");
+            let _ = writeln!(out, "capture_end_offset_bytes: {current_len}");
+            let _ = writeln!(out, "delta_max_bytes: {LOG_DELTA_BYTES}");
+            let _ = writeln!(
+                out,
+                "truncated_to_last_delta_bytes: {}",
+                current_len.saturating_sub(delta_start) > LOG_DELTA_BYTES
+            );
+            if current_len < start_offset {
+                out.push_str("note: source file shrank since run start; delta starts at byte 0.\n");
+            }
+            out.push_str("---\n");
+            out.push_str(&delta);
+            if !delta.ends_with('\n') {
+                out.push('\n');
+            }
+            fs::write(&delta_path, out)?;
+            written.push(self.relative_display_path(&delta_path));
         }
 
         if written.is_empty() {
@@ -300,6 +349,7 @@ impl ArtifactWriter {
             artifact_index_path: ARTIFACT_INDEX_JSON,
             artifact_checklist_path: ARTIFACT_CHECKLIST_MD,
             log_tail_bytes: LOG_TAIL_BYTES,
+            log_delta_bytes: LOG_DELTA_BYTES,
             telemetry_tail_bytes: LOG_TAIL_BYTES,
             max_log_candidates: MAX_LOG_CANDIDATES,
             log_candidates: self
@@ -307,6 +357,7 @@ impl ArtifactWriter {
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            log_start_offsets: self.log_start_offsets.clone(),
             telemetry_candidates: self
                 .log_candidates
                 .iter()
@@ -322,6 +373,11 @@ impl ArtifactWriter {
             readme,
             "Log/telemetry tails are capped at `{LOG_TAIL_BYTES}` bytes per file, with at most \
              `{MAX_LOG_CANDIDATES}` unique candidate files considered.\n"
+        );
+        let _ = writeln!(
+            readme,
+            "Each log capture also writes a bounded delta capped at `{LOG_DELTA_BYTES}` bytes, \
+             using the source file size observed when the artifact writer started.\n"
         );
         readme.push_str(
             "- `artifact_index.json`: machine-readable inventory of generated artifact files, \
@@ -346,8 +402,8 @@ impl ArtifactWriter {
              config basics, and `EXPLAIN` without `ANALYZE` captured before risky execution.\n",
         );
         readme.push_str(
-            "- `log_tails/`: bounded PostgreSQL and pg_accel log/telemetry tails per failure \
-             and at run completion.\n",
+            "- `log_tails/`: bounded PostgreSQL and pg_accel log/telemetry tails plus \
+             run-start deltas per failure and at run completion.\n",
         );
         fs::write(self.root.join("README.md"), readme)?;
         self.write_artifact_index()
@@ -558,6 +614,44 @@ fn read_tail(path: &Path, max_bytes: u64) -> io::Result<String> {
     Ok(text)
 }
 
+fn read_delta(path: &Path, start_offset: u64, max_bytes: u64) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut start = start_offset.min(len);
+    if len.saturating_sub(start) > max_bytes {
+        start = len - max_bytes;
+    }
+    file.seek(SeekFrom::Start(start))?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if start > start_offset
+        && let Some(first_newline) = text.find('\n')
+    {
+        text.drain(..=first_newline);
+    }
+    Ok(text)
+}
+
+fn capture_log_start_offsets(candidates: &[PathBuf]) -> Vec<LogStartOffset> {
+    candidates
+        .iter()
+        .map(|path| match path.metadata() {
+            Ok(metadata) if metadata.is_file() => LogStartOffset {
+                path: path.display().to_string(),
+                existed: true,
+                len_bytes: metadata.len(),
+            },
+            _ => LogStartOffset {
+                path: path.display().to_string(),
+                existed: false,
+                len_bytes: 0,
+            },
+        })
+        .collect()
+}
+
 fn write_json<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
@@ -686,8 +780,15 @@ mod tests {
         assert_eq!(manifest["artifact_index_path"], ARTIFACT_INDEX_JSON);
         assert_eq!(manifest["artifact_checklist_path"], ARTIFACT_CHECKLIST_MD);
         assert_eq!(manifest["log_tail_bytes"], LOG_TAIL_BYTES);
+        assert_eq!(manifest["log_delta_bytes"], LOG_DELTA_BYTES);
         assert_eq!(manifest["telemetry_tail_bytes"], LOG_TAIL_BYTES);
         assert_eq!(manifest["max_log_candidates"], MAX_LOG_CANDIDATES);
+        assert_eq!(
+            manifest["log_start_offsets"][0]["path"],
+            telemetry.display().to_string()
+        );
+        assert_eq!(manifest["log_start_offsets"][0]["existed"], true);
+        assert_eq!(manifest["log_start_offsets"][0]["len_bytes"], 3);
         assert_eq!(
             manifest["telemetry_candidates"][0],
             telemetry.display().to_string()
@@ -696,6 +797,7 @@ mod tests {
         let readme = fs::read_to_string(artifacts.path().join("README.md"))
             .expect("README should be readable");
         assert!(readme.contains("Log/telemetry tails are capped"));
+        assert!(readme.contains("bounded delta"));
         assert!(readme.contains(ARTIFACT_INDEX_JSON));
         assert!(readme.contains(ARTIFACT_CHECKLIST_MD));
         assert!(readme.contains("pre_risk_contexts/"));
@@ -766,6 +868,7 @@ mod tests {
         assert!(paths.contains(&"plan_snippets/hash-join-100.txt"));
         assert!(paths.contains(&"pre_risk_contexts/hash-join-100.json"));
         assert!(paths.contains(&"log_tails/run-complete/00-pg_accel_otel.jsonl.tail"));
+        assert!(paths.contains(&"log_tails/run-complete/00-pg_accel_otel.jsonl.delta"));
         assert!(!paths.contains(&ARTIFACT_INDEX_JSON));
         assert!(!paths.contains(&ARTIFACT_CHECKLIST_MD));
 
@@ -794,5 +897,53 @@ mod tests {
             writer.existing_pre_risk_context_artifact("hash/join", 100),
             Some("pre_risk_contexts/hash-join-100.json".to_owned())
         );
+    }
+
+    #[test]
+    fn log_delta_capture_starts_at_writer_creation_offset() {
+        let artifacts = TestDir::new("delta");
+        let sources = TestDir::new("log_delta_source");
+        let log = sources.path().join("postgres.log");
+        fs::write(&log, "stale panic\n").expect("initial log source should be written");
+
+        let writer = ArtifactWriter::new(artifacts.path().to_path_buf(), vec![log.clone()])
+            .expect("artifact writer should initialize");
+        fs::write(&log, "stale panic\nfresh panic\n")
+            .expect("updated log source should be written");
+
+        let captured = writer
+            .capture_log_tails("crash-001")
+            .expect("log artifacts should be captured");
+        assert_eq!(
+            captured,
+            vec![
+                "log_tails/crash-001/00-postgres.log.tail".to_owned(),
+                "log_tails/crash-001/00-postgres.log.delta".to_owned(),
+            ]
+        );
+
+        let tail = fs::read_to_string(artifacts.path().join(&captured[0]))
+            .expect("tail artifact should be readable");
+        assert!(tail.contains("stale panic"));
+        assert!(tail.contains("fresh panic"));
+
+        let delta = fs::read_to_string(artifacts.path().join(&captured[1]))
+            .expect("delta artifact should be readable");
+        assert!(delta.contains("run_start_offset_bytes: 12"));
+        assert!(!delta.contains("stale panic"));
+        assert!(delta.contains("fresh panic"));
+
+        let index_text = fs::read_to_string(artifacts.path().join(ARTIFACT_INDEX_JSON))
+            .expect("artifact index should be readable");
+        let index: Value =
+            serde_json::from_str(&index_text).expect("artifact index should be valid json");
+        let paths: Vec<&str> = index["entries"]
+            .as_array()
+            .expect("entries should be an array")
+            .iter()
+            .map(|entry| entry["path"].as_str().expect("path should be a string"))
+            .collect();
+        assert!(paths.contains(&"log_tails/crash-001/00-postgres.log.tail"));
+        assert!(paths.contains(&"log_tails/crash-001/00-postgres.log.delta"));
     }
 }
