@@ -117,66 +117,11 @@ kernels dispatched, and which rows returned to PostgreSQL.
   on terminal scrollback, and keeps the default suite bounded while preserving
   rigorous coverage for long winning/proof lanes.
 
-### Function/SRF benchmark proof hardening
-
-- Evidence: function and SRF workloads can win without a Custom Scan plan,
-  so plan-shape-only dispatch classification undercounts H3 execution and
-  can overcount wrapper plans that report `GPU Dispatched: false`.
-- Evidence: some benchmark query shapes use
-  `count(*) FROM (SELECT expensive_expr AS result ...)`, which can fail to
-  prove that the expensive expression result was consumed.
-- Work: add or finish benchmark workloads for raster map-algebra and
-  scalar/vector function dispatch that force result consumption through
-  `sum`, `ST_SummaryStats`, materialized output, or explicit correctness
-  diffs.
-- Acceptance: benchmark reports distinguish Custom Scan dispatch from
-  function/SRF kernel dispatch; no workload is credited as a GPU win unless
-  its output is consumed and correctness-checked.
-
 ## Phase 1 - Stop All Backend Crashes Before Re-Entry
 
 Selected GPU plans that can disconnect PostgreSQL are release blockers. The
 first fix is to make the planner decline those shapes; the second fix is to
 repair the GPU path and re-enter only after correctness and benchmark proof.
-
-### Grouped aggregation backend crashes
-
-- Evidence: `just bench` on 2026-05-13 passed 10K/100K grouped-agg scales,
-  then repeatedly lost the PostgreSQL backend connection at 1M and 10M rows
-  for `grouped_agg`, `grouped_agg_high_card`, `gpu_hashagg_med_card`,
-  `hashagg_10g`, `hashagg_100g`, `hashagg_1kg`, and `hashagg_10kg`.
-- Root cause target: large grouped aggregates enter the C++ sort-based
-  hashagg path around 100K rows. Server logs show a Metal/AdaptiveCpp abort
-  from argument-buffer setup (`bufferIndex 1 does not identify an argument
-  buffer`), which bypasses Rust/C++ error recovery and kills the backend.
-- Adjacent correctness bug: grouped `AVG` can emit a raw sum instead of an
-  average. This does not explain the no-AVG hashagg sweep crashes, but
-  grouped AVG must be disabled or fixed before grouped GPU aggregation is
-  exposed.
-- Work: repair or replace the sort-based hashagg path and grouped `AVG`
-  finalization before GPU re-entry; keep unsafe grouped aggregation sizes
-  gated to PostgreSQL-native plans until the 1M/10M acceptance cells pass.
-- Acceptance: every hashagg workload above completes at 1M and 10M rows with
-  GPU plan selection, no backend disconnects, no panic-log entries, and
-  result diffs against PostgreSQL native output.
-
-### Hash join backend crashes
-
-- Evidence: the 2026-05-13 benchmark run lost backend connections for
-  `hash_join @ 10M`, `gpu_hashjoin_large_build @ 100K/1M`, and
-  `hashjoin_100k_1m @ 100K/1M/10M`.
-- Root cause target: large build sides hit the C++ sort-merge threshold at
-  `100000` rows. That path marks the table with `capacity == 0` and then
-  probes with SYCL kernels that dereference host pointers for sorted keys,
-  sorted indices, outer keys/null masks, and match output. On Metal this is
-  invalid and matches the GPU test diagnostic.
-- Work: capture build/probe cardinalities, hash-table capacity, match buffer
-  size, worker count, whether each worker redundantly builds the inner
-  relation, and whether `match_count` ever exceeds `max_matches` before Rust
-  slices `match_count * 2` results.
-- Acceptance: the crashing cells complete with correct counts and no backend
-  disconnects; non-winning hashjoin cells produce PostgreSQL-native plans
-  rather than selected pg_accel plans.
 
 ### Spatial predicate backend crashes
 
@@ -198,24 +143,6 @@ repair the GPU path and re-enter only after correctness and benchmark proof.
   against simple and 1024+ vertex cooperative polygons after the fix.
 - Acceptance: every affected 100K spatial workload completes with correct
   counts, no panic-log entry, and stable repeat runs.
-
-### Parallel partial `SUM(bigint)` reduce crash
-
-- Evidence: `reduce_sum_i64 @ 1M` in
-  `benchmarks/artifacts/crash-repro-1778669374` selected a parallel
-  `Finalize Aggregate -> Gather -> Custom Scan (GpuAccelAgg)` plan for
-  `PARTIAL sum(vi8)` and killed a parallel worker with signal 11 during
-  `EXPLAIN (ANALYZE, VERBOSE, BUFFERS) SELECT SUM(vi8) FROM bench_reduce_var`.
-  Logs also show AdaptiveCpp JIT/cache warnings before recovery.
-- Root cause target: the crash is specific to parallel partial
-  `SUM(bigint)` reduce in a PostgreSQL worker/Metal JIT path, not to exact
-  i64 arithmetic alone. Non-partial forced GPU smoke still covers the exact
-  typed i64 kernel.
-- Work: isolate the PostgreSQL worker crash before re-enabling parallel
-  partial `SUM(bigint)` GPU plans.
-- Acceptance: f32/i64/f64 reduce matrices at 100K/1M/10M choose GPU only
-  where they beat PostgreSQL, no integer precision is lost, and traces show
-  the expected typed kernel.
 
 ## Phase 2 - AdaptiveCpp Runtime, Metal, CUDA, And Fork Stability
 
@@ -431,29 +358,73 @@ window work.
 
 ### Grouped hash aggregation
 
-- Scope: repair or replace the crashing sort-based hashagg path and expose
-  grouped aggregates only where the GPU path owns grouping and accumulation.
-- Work: fix grouped `AVG`, support `SUM`, `COUNT`, `MIN`, `MAX`, typed
-  integer/floating variants, and high-cardinality groups.
+- Status: the Metal argument-buffer crash is already gated. The slab-arg
+  pattern is applied to all four hashagg kernel lambdas
+  (`pgaccel-kernels/src/hash_agg.cpp:393-805`), the sort-based path is
+  Metal-gated off (`pgaccel-kernels/src/hash_agg.cpp:331-334`
+  `hashagg_sort_based_available()`), and grouped `AVG` finalize is
+  preemptively rejected
+  (`pg_accel/src/engine/executor/agg/execute.rs:1303-1310`
+  `reject_grouped_avg_finalize_if_present`). `grouped_agg @ 10M` now runs to
+  completion natively without crashing. What remains is the kernel work
+  needed to unlock GPU dispatch at the target scales.
+- Root cause for the gate: the remaining Metal `agg_hash` kernel
+  (`pgaccel-kernels/src/hash_agg.cpp:562-674`) is O(n*g) — one work-item
+  per group scanning all n rows. At 1M rows × 4096 groups that is ~4 billion
+  ops, at 10M × 10K it is ~100 billion ops; the 100K-row planner gate
+  (`pg_accel/src/engine/cost/formulas.rs:118-122`
+  `hashagg_input_rows_safe`) and 4096-group cap
+  (`pgaccel-kernels/src/hash_agg.cpp:1247`
+  `HASH_AGG_MAX_LARGE_UNSORTED_GROUPS`) are protective.
+- Work: replace `agg_hash` with a real parallel hash-table kernel —
+  open-addressing in shared memory, atomic CAS for slot acquisition,
+  `atomic_ref<double>` accumulators (supported on Metal via AdaptiveCpp),
+  one work-item per row instead of one per group. Cover `SUM`, `COUNT`,
+  `MIN`, `MAX`, and the typed integer/floating variants.
+- Work: fix grouped `AVG` finalize. Either route grouped `AVG` through
+  partial-mode always (kernel already emits `[N, sum]` lanes correctly at
+  `pgaccel-kernels/src/hash_agg.cpp:911-920`), or extend
+  `emit_grouped_tuple` (`pg_accel/src/engine/executor/agg/execute.rs:2477`)
+  to read the per-group counts buffer (`gr.result.counts()`,
+  `pgaccel-kernels/src/hash_agg.cpp:67`) and divide.
+- Work: remove the planner gate and the 4096-group cap only after the new
+  kernel benchmarks well at 1M/10M for `num_groups ∈ {10, 100, 1K, 10K}`,
+  and rewrite the gating tests in
+  `pg_accel/src/engine/ffi/planner_hooks/tests.rs:1315-1345`.
 - Acceptance: `grouped_agg`, `grouped_agg_high_card`,
   `gpu_hashagg_med_card`, `hashagg_10g`, `hashagg_100g`, `hashagg_1kg`, and
-  `hashagg_10kg` complete at 1M and 10M with GPU dispatch, correct results,
-  and speedup at or above 1.0 where selected.
+  `hashagg_10kg` complete at 1M and 10M with GPU dispatch, correctness
+  diffs against PostgreSQL, and speedup at or above 1.0 where selected.
 
-### Hash join performance after crash fixes
+### Real GPU hash join build/probe
 
-- Evidence: non-crashing hashjoin cells were also slow. Small-build sweep
-  cases were often 5-20x slower than PostgreSQL parallel, and
-  `gpu_hashjoin_filter @ 1M/10M` lost by several multiples.
-- Root cause target: the executor still copies inner tuples, copies outer
-  batches, extracts keys, copies tuples again for matches, and reconstructs
-  output rows one by one. PostgreSQL parallel hash join avoids much of this
-  overhead.
-- Work: add shared or reusable inner build, tune build-side thresholds,
-  batch probe output, and teach the planner to decline GPU join when
-  PostgreSQL parallel hash join is cheaper.
-- Acceptance: the join sweep has no crashes; GPU plans are selected only for
-  cells with measured speedup at or above 1.0.
+- Status: the prior host-pointer SYCL probe path has been deleted. The
+  kernel at `pgaccel-kernels/src/hash_join.cpp:14-46` is a fail-closed stub
+  (`build` returns `nullptr`, `probe` returns `PGACCEL_UNSUPPORTED`). The
+  planner gate at
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:153-168` exits
+  via `selected_gpu_hashjoin_kernel_available()` (`:310-312`, returns
+  `false` unconditionally) before either `add_path` or
+  `inject_gpu_hashjoin_partial_paths` runs, so no `GpuHashJoin` CustomPath
+  is ever offered to PG. Previously-crashing cells now complete via PG
+  native HashJoin without disconnects.
+- Existing plumbing the new kernel can light up: `HashJoinTelemetry` in
+  `pg_accel/src/engine/executor/join/mod.rs:60-93` (build/probe
+  cardinalities, hash-table capacity, match buffer size, worker count,
+  redundant-inner-build counter); per-build/probe trace spans in
+  `pg_accel/src/engine/executor/join/probe.rs:204-251` and `:484-530`;
+  `match_count > max_matches` overflow check at `probe.rs:510-516` raising
+  `pgrx::error!`. All unreachable until the gate flips.
+- Work: build a real GPU build/probe — GPU-resident retained inner buffers
+  via the bridge USM-device path other kernels already use, batched probe
+  output, shared or reusable inner build for parallel workers, planner
+  cost model that declines GPU join when PG parallel hash join is cheaper.
+  Flip `selected_gpu_hashjoin_kernel_available()` only after benchmark
+  parity at the target row counts.
+- Acceptance: join sweep has no crashes; GPU plans are selected only for
+  cells with measured speedup at or above 1.0; build-side reuse evidence in
+  `HashJoinTelemetry.redundant_inner_builds` is zero or matches the
+  intended share-per-worker design.
 
 ### GPU semi/anti join and Bloom prefilters
 
