@@ -800,6 +800,121 @@ fn finalize_encodes_int4_result_type() {
     assert_eq!(datum.value() as i32, 42);
 }
 
+// -- Phase 7: typed reduce dispatch (no soft-fp64 for INT4) ----------------
+//
+// Validates that INT2/INT4 input columns are reduced through the typed i64
+// path (`gpu.reduce_*_i64`) instead of leaking through `gpu_values: Vec<f64>`
+// + `gpu.reduce_*_f64`, which on Metal would silently pay the soft-fp64
+// penalty (~32x). See Phase 7 in TODO.md and rule 11 in CLAUDE.md.
+
+#[test]
+fn typed_reduce_min_rows_uses_i64_break_even_for_int4() {
+    let mut col = tcol(AggOp::Sum, 1);
+    col.type_oid = pg_sys::INT4OID;
+    let limits = cost::device_limits();
+    assert_eq!(
+        col.typed_reduce_min_rows(),
+        limits.reduce_i64_break_even_rows
+    );
+}
+
+#[test]
+fn typed_reduce_min_rows_uses_i64_break_even_for_int2() {
+    let mut col = tcol(AggOp::Sum, 1);
+    col.type_oid = pg_sys::INT2OID;
+    let limits = cost::device_limits();
+    assert_eq!(
+        col.typed_reduce_min_rows(),
+        limits.reduce_i64_break_even_rows
+    );
+}
+
+#[test]
+fn typed_reduce_min_rows_uses_i64_break_even_for_int8() {
+    let mut col = tcol(AggOp::Sum, 1);
+    col.type_oid = pg_sys::INT8OID;
+    let limits = cost::device_limits();
+    assert_eq!(
+        col.typed_reduce_min_rows(),
+        limits.reduce_i64_break_even_rows
+    );
+}
+
+#[test]
+fn typed_reduce_min_rows_uses_f32_break_even_for_float4() {
+    let mut col = tcol(AggOp::Sum, 1);
+    col.type_oid = pg_sys::FLOAT4OID;
+    let limits = cost::device_limits();
+    assert_eq!(
+        col.typed_reduce_min_rows(),
+        limits.reduce_f32_break_even_rows
+    );
+}
+
+#[test]
+fn typed_reduce_min_rows_uses_f64_break_even_for_float8() {
+    let mut col = tcol(AggOp::Sum, 1);
+    col.type_oid = pg_sys::FLOAT8OID;
+    let limits = cost::device_limits();
+    assert_eq!(
+        col.typed_reduce_min_rows(),
+        limits.reduce_f64_break_even_rows
+    );
+}
+
+#[test]
+fn finalize_int4_sum_with_int8_result_uses_int128_state() {
+    // Build a column representing `SUM(int4_col)` → bigint in PG.
+    let mut col = AggColumn::with_result_type(
+        AggOp::Sum,
+        1,
+        pg_sys::Oid::from(20_u32), // INT8OID — PG's SUM(int4) → bigint
+    );
+    col.type_oid = pg_sys::INT4OID;
+    // Three INT4 values that, if folded through `accumulate(val as f64)`,
+    // would lose no precision here, but on a 10M-row run can drift —
+    // assert the i128-precision int_sum path is reached and returned.
+    col.acc.has_value = true;
+    col.int_has_value = true;
+    col.int_sum = 7_500_000_000_i128; // > i32::MAX, only representable via int_sum
+    let (datum, is_null) = col.finalize();
+    assert!(!is_null);
+    // PG INT8OID datum holds the raw i64 bits.
+    assert_eq!(datum.value() as i64, 7_500_000_000);
+}
+
+#[test]
+fn finalize_int4_min_int4_result_from_int_state() {
+    let mut col = AggColumn::with_result_type(
+        AggOp::Min,
+        1,
+        pg_sys::Oid::from(23_u32), // INT4OID — PG's MIN(int4) → int4
+    );
+    col.type_oid = pg_sys::INT4OID;
+    col.acc.has_value = true;
+    col.int_has_value = true;
+    col.int_min = -123;
+    let (datum, is_null) = col.finalize();
+    assert!(!is_null);
+    assert_eq!(datum.value() as i32, -123);
+}
+
+#[test]
+fn finalize_int4_max_int4_result_from_int_state() {
+    let mut col = AggColumn::with_result_type(
+        AggOp::Max,
+        1,
+        pg_sys::Oid::from(23_u32), // INT4OID — PG's MAX(int4) → int4
+    );
+    col.type_oid = pg_sys::INT4OID;
+    col.acc.has_value = true;
+    col.int_has_value = true;
+    col.int_max = 4242;
+    let (datum, is_null) = col.finalize();
+    assert!(!is_null);
+    assert_eq!(datum.value() as i32, 4242);
+}
+
 // -- apply_gpu_result tests ------------------------------------------------
 
 #[test]

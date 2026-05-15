@@ -220,6 +220,15 @@ impl AggColumn {
         }
     }
 
+    /// Observe an INT2/INT4 value: widen to i64 and route through the i64
+    /// buffer / accumulator so SUM/MIN/MAX dispatch the typed `gpu.reduce_*_i64`
+    /// kernels instead of soft-fp64 `gpu.reduce_*_f64`. The exact int128 sum
+    /// state stays available for `finalize()` so SUM(int2/int4) returning
+    /// NUMERIC keeps full precision.
+    fn observe_i32(&mut self, val: i32, buffer_gpu: bool) {
+        self.observe_i64(i64::from(val), buffer_gpu);
+    }
+
     fn gpu_value_count(&self) -> usize {
         self.gpu_values
             .len()
@@ -241,7 +250,13 @@ impl AggColumn {
         let limits = cost::device_limits();
         match self.type_oid {
             pg_sys::FLOAT4OID => limits.reduce_f32_break_even_rows,
-            pg_sys::INT8OID => limits.reduce_i64_break_even_rows,
+            // INT2/INT4 are widened to i64 at observe time and dispatched
+            // through the i64 reduce kernels — gate them on the i64
+            // break-even threshold to stay consistent with what is
+            // actually executed.
+            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
+                limits.reduce_i64_break_even_rows
+            }
             _ => limits.reduce_f64_break_even_rows,
         }
     }
@@ -271,9 +286,23 @@ impl AggColumn {
             return;
         }
 
+        // Trace span carries the input type so soft-fp64 mis-dispatches show
+        // up plainly in `pg_accel_traces.jsonl`. The dispatched kernel adds
+        // its own typed span (`gpu.reduce_sum_i64` etc.) inside the call.
+        let _span = tracing::debug_span!(
+            "exec.reduce_dispatch",
+            n,
+            type_oid = self.type_oid.to_u32(),
+            op = ?self.op,
+        )
+        .entered();
+
         match self.type_oid {
             pg_sys::FLOAT4OID => self.dispatch_gpu_reduce_f32(),
-            pg_sys::INT8OID => self.dispatch_gpu_reduce_i64(),
+            // INT2/INT4 buffers are widened to i64 at observe time, so the
+            // i64 path can reduce them with no soft-fp64 cost. Only true
+            // FLOAT8 / unknown columns fall through to the f64 kernel.
+            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => self.dispatch_gpu_reduce_i64(),
             pg_sys::FLOAT8OID => self.dispatch_gpu_reduce_f64(),
             _ => self.dispatch_gpu_reduce_f64(),
         }
@@ -432,7 +461,10 @@ impl AggColumn {
                 self.dispatch_gpu_reduce_chunked_f32();
                 return;
             }
-            pg_sys::INT8OID => {
+            // INT2/INT4 widened to i64 at observe time share the i64
+            // chunked path; only true FLOAT8/unknown columns fall through
+            // to the f64 chunked dispatcher below.
+            pg_sys::INT2OID | pg_sys::INT4OID | pg_sys::INT8OID => {
                 self.dispatch_gpu_reduce_chunked_i64();
                 return;
             }
@@ -744,6 +776,57 @@ impl AggColumn {
                 }
                 AggOp::Max if self.result_type_oid == pg_sys::INT8OID => {
                     return (pg_sys::Datum::from(self.int_max), false);
+                }
+                _ => {}
+            }
+        }
+
+        // INT2/INT4 path mirrors INT8: values are widened to i64 at observe
+        // time, the exact int128 sum and i64 min/max state are populated,
+        // and the result-side encoding matches what PG expects.
+        //
+        //   - `SUM(int2)` → INT8OID
+        //   - `SUM(int4)` → NUMERICOID
+        //   - `MIN/MAX(int2)` → INT2OID, `MIN/MAX(int4)` → INT4OID
+        //   - `AVG(int2)` / `AVG(int4)` → NUMERICOID  (handled by f64 path
+        //     below — AVG's transition state is float8 in PG, not int128)
+        if matches!(self.type_oid, pg_sys::INT2OID | pg_sys::INT4OID) && self.int_has_value {
+            match self.op {
+                AggOp::Sum if self.result_type_oid == NUMERICOID => {
+                    // SAFETY: main backend thread; allocates a Numeric in
+                    // CurrentMemoryContext.
+                    let datum = unsafe { int128_to_numeric(self.int_sum, 0) };
+                    return (datum, false);
+                }
+                AggOp::Sum if self.result_type_oid == pg_sys::INT8OID => {
+                    let Ok(v) = i64::try_from(self.int_sum) else {
+                        pgrx::error!("pg_accel: INT2/INT4 SUM does not fit in INT8 result")
+                    };
+                    return (pg_sys::Datum::from(v), false);
+                }
+                AggOp::Min if self.result_type_oid == pg_sys::INT4OID => {
+                    let Ok(v) = i32::try_from(self.int_min) else {
+                        pgrx::error!("pg_accel: INT4 MIN does not fit in INT4 result")
+                    };
+                    return (pg_sys::Datum::from(v), false);
+                }
+                AggOp::Max if self.result_type_oid == pg_sys::INT4OID => {
+                    let Ok(v) = i32::try_from(self.int_max) else {
+                        pgrx::error!("pg_accel: INT4 MAX does not fit in INT4 result")
+                    };
+                    return (pg_sys::Datum::from(v), false);
+                }
+                AggOp::Min if self.result_type_oid == pg_sys::INT2OID => {
+                    let Ok(v) = i16::try_from(self.int_min) else {
+                        pgrx::error!("pg_accel: INT2 MIN does not fit in INT2 result")
+                    };
+                    return (pg_sys::Datum::from(v), false);
+                }
+                AggOp::Max if self.result_type_oid == pg_sys::INT2OID => {
+                    let Ok(v) = i16::try_from(self.int_max) else {
+                        pgrx::error!("pg_accel: INT2 MAX does not fit in INT2 result")
+                    };
+                    return (pg_sys::Datum::from(v), false);
                 }
                 _ => {}
             }
@@ -1110,6 +1193,20 @@ impl AggExecState {
                                 col.observe_i64(val, gpu_flags[i]);
                             }
                         }
+                        pg_sys::INT4OID => {
+                            // INT4 widens to i64 so the typed i64 reduce
+                            // kernel runs instead of soft-fp64.
+                            // SAFETY: same as above.
+                            let (values, nulls) = unsafe {
+                                tuple_extract::extract_i32(&tuples, &info, last_child_slot)
+                            };
+                            for (j, &val) in values.iter().enumerate() {
+                                if nulls[j] == 1 {
+                                    continue;
+                                }
+                                col.observe_i32(val, gpu_flags[i]);
+                            }
+                        }
                         _ => {
                             // SAFETY: same as above.
                             let (values, nulls) = unsafe {
@@ -1468,14 +1565,18 @@ impl AggExecState {
                         let val =
                             unsafe { tuple_extract::try_fast_read_heap_pub::<i16>(hdr, info) };
                         if let Some(v) = val {
-                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                            // Widen to i64 to dispatch the typed i64 reduce
+                            // kernel; avoids soft-fp64 on Metal.
+                            col.observe_i32(i32::from(v), gpu_flags[i]);
                         }
                     }
                     t if t == pg_sys::INT4OID => {
                         let val =
                             unsafe { tuple_extract::try_fast_read_heap_pub::<i32>(hdr, info) };
                         if let Some(v) = val {
-                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                            // Widen to i64 to dispatch the typed i64 reduce
+                            // kernel; avoids soft-fp64 on Metal.
+                            col.observe_i32(v, gpu_flags[i]);
                         }
                     }
                     _ => {
@@ -2085,14 +2186,16 @@ impl AggExecState {
                         let val =
                             unsafe { tuple_extract::try_fast_read_heap_pub::<i16>(t_data, info) };
                         if let Some(v) = val {
-                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                            // Widen to i64; see comment in scan path above.
+                            col.observe_i32(i32::from(v), gpu_flags[i]);
                         }
                     }
                     t if t == pg_sys::INT4OID => {
                         let val =
                             unsafe { tuple_extract::try_fast_read_heap_pub::<i32>(t_data, info) };
                         if let Some(v) = val {
-                            col.observe_f64(f64::from(v), gpu_flags[i]);
+                            // Widen to i64; see comment in scan path above.
+                            col.observe_i32(v, gpu_flags[i]);
                         }
                     }
                     _ => {
@@ -2307,15 +2410,19 @@ impl AggExecState {
                 })
             }
             pg_sys::INT2OID | pg_sys::INT4OID => {
-                let values: Vec<i64> = col.gpu_values.iter().map(|&v| v as i64).collect();
-                gpu::reduce_multi_i64(&values).map(|result| FusedMultiResult {
+                // INT2/INT4 values are widened to i64 at observe time and
+                // live in `gpu_values_i64`. Reading them as i64 keeps the
+                // exact int_* state populated so SUM(int4) → NUMERIC keeps
+                // full precision in finalize().
+                let values = &col.gpu_values_i64;
+                gpu::reduce_multi_i64(values).map(|result| FusedMultiResult {
                     sum: result.sum as f64,
                     min: result.min as f64,
                     max: result.max as f64,
                     count: result.count,
-                    int_sum: None,
-                    int_min: None,
-                    int_max: None,
+                    int_sum: Some(i128::from(result.sum)),
+                    int_min: Some(result.min),
+                    int_max: Some(result.max),
                 })
             }
             _ => gpu::reduce_multi_f64(&col.gpu_values).map(|result| FusedMultiResult {
