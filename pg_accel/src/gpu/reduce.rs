@@ -307,6 +307,67 @@ pub fn reduce_stats_f32(data: &[f32]) -> Option<(u64, f64, f64)> {
     status.is_ok().then_some((out_count, out_sum, out_sum_sq))
 }
 
+// ---------------------------------------------------------------------------
+// Boolean and bitwise reductions (Phase 4)
+// ---------------------------------------------------------------------------
+//
+// Each kernel returns `None` when the GPU dispatch fails (the executor must
+// raise a PG ERROR — no CPU fallback). NULL inputs are filtered out by the
+// caller before the slice reaches the GPU; the empty-input → SQL NULL case
+// is materialised by the executor by checking `has_value` before emitting
+// the result datum (we still return the kernel identity here so callers
+// pivoting to fold-into-running-state semantics see a sane value).
+
+/// GPU-accelerated logical AND over a `bool` column (encoded as 0/1 bytes).
+///
+/// `data` MUST contain only 0 or 1 bytes. NULL inputs have already been
+/// filtered by the caller; the kernel does not know about NULLs.
+#[must_use]
+pub fn reduce_bool_and(data: &[u8]) -> Option<bool> {
+    let _span = tracing::debug_span!("gpu.reduce_bool_and", n = data.len()).entered();
+    let mut result: u8 = 1;
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_bool_and(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result != 0)
+}
+
+/// GPU-accelerated logical OR over a `bool` column (encoded as 0/1 bytes).
+#[must_use]
+pub fn reduce_bool_or(data: &[u8]) -> Option<bool> {
+    let _span = tracing::debug_span!("gpu.reduce_bool_or", n = data.len()).entered();
+    let mut result: u8 = 0;
+    // SAFETY: data is a valid slice, result is a valid pointer.
+    let status =
+        unsafe { bridge::pgaccel_reduce_bool_or(data.as_ptr(), data.len(), &raw mut result) };
+    status.is_ok().then_some(result != 0)
+}
+
+macro_rules! impl_bit_reduction {
+    ($name:ident, $bridge_fn:ident, $t:ty) => {
+        #[must_use]
+        pub fn $name(data: &[$t]) -> Option<$t> {
+            let _span =
+                tracing::debug_span!(concat!("gpu.", stringify!($name)), n = data.len()).entered();
+            let mut result: $t = 0;
+            // SAFETY: data is a valid slice, result is a valid pointer; the
+            // FFI function reads count elements through data.
+            let status = unsafe { bridge::$bridge_fn(data.as_ptr(), data.len(), &raw mut result) };
+            status.is_ok().then_some(result)
+        }
+    };
+}
+
+impl_bit_reduction!(reduce_bit_and_i16, pgaccel_reduce_bit_and_i16, i16);
+impl_bit_reduction!(reduce_bit_and_i32, pgaccel_reduce_bit_and_i32, i32);
+impl_bit_reduction!(reduce_bit_and_i64, pgaccel_reduce_bit_and_i64, i64);
+impl_bit_reduction!(reduce_bit_or_i16, pgaccel_reduce_bit_or_i16, i16);
+impl_bit_reduction!(reduce_bit_or_i32, pgaccel_reduce_bit_or_i32, i32);
+impl_bit_reduction!(reduce_bit_or_i64, pgaccel_reduce_bit_or_i64, i64);
+impl_bit_reduction!(reduce_bit_xor_i16, pgaccel_reduce_bit_xor_i16, i16);
+impl_bit_reduction!(reduce_bit_xor_i32, pgaccel_reduce_bit_xor_i32, i32);
+impl_bit_reduction!(reduce_bit_xor_i64, pgaccel_reduce_bit_xor_i64, i64);
+
 /// GPU-accelerated fused (count, sum, sum_sq) reduction — single pass.
 /// Input is f64.
 #[must_use]

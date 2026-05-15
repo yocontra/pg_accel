@@ -379,6 +379,63 @@ unsafe extern "C" {
         out_sum_sq: *mut f64,
     ) -> PgaccelStatus;
 
+    // -- Boolean and bitwise reductions (Phase 4) --
+    //
+    // Caller filters NULL inputs out of `data` before calling. `count == 0`
+    // returns the kernel identity element; callers materialise SQL NULL by
+    // tracking `has_value` separately.
+    pub fn pgaccel_reduce_bool_and(data: *const u8, count: usize, result: *mut u8)
+    -> PgaccelStatus;
+    pub fn pgaccel_reduce_bool_or(data: *const u8, count: usize, result: *mut u8) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_bit_and_i16(
+        data: *const i16,
+        count: usize,
+        result: *mut i16,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_bit_and_i32(
+        data: *const i32,
+        count: usize,
+        result: *mut i32,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_bit_and_i64(
+        data: *const i64,
+        count: usize,
+        result: *mut i64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_bit_or_i16(
+        data: *const i16,
+        count: usize,
+        result: *mut i16,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_bit_or_i32(
+        data: *const i32,
+        count: usize,
+        result: *mut i32,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_bit_or_i64(
+        data: *const i64,
+        count: usize,
+        result: *mut i64,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_reduce_bit_xor_i16(
+        data: *const i16,
+        count: usize,
+        result: *mut i16,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_bit_xor_i32(
+        data: *const i32,
+        count: usize,
+        result: *mut i32,
+    ) -> PgaccelStatus;
+    pub fn pgaccel_reduce_bit_xor_i64(
+        data: *const i64,
+        count: usize,
+        result: *mut i64,
+    ) -> PgaccelStatus;
+
     // -- H3 cell operations --
 
     pub fn pgaccel_h3_get_resolution_bulk(

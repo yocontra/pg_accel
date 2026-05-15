@@ -141,6 +141,7 @@ fn build_emitters(columns: &[PartialColumn]) -> Vec<Box<dyn PartialEmitter>> {
                 // combine functions, swap in a typed emitter.
                 AggOp::BitAnd
                 | AggOp::BitOr
+                | AggOp::BitXor
                 | AggOp::BoolAnd
                 | AggOp::BoolOr
                 | AggOp::Passthrough => Box::new(ScalarPassthrough {

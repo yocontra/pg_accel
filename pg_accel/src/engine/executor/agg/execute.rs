@@ -63,6 +63,8 @@ pub(super) struct AggColumn {
     pub(super) gpu_values_f32: Vec<f32>,
     /// Int64 buffer for GPU reduce dispatch.
     pub(super) gpu_values_i64: Vec<i64>,
+    /// Uint8 buffer for GPU bool reductions (0/1 bytes).
+    pub(super) gpu_values_u8: Vec<u8>,
     /// Exact int64-source SUM state for `SUM(bigint)` finalization.
     pub(super) int_sum: i128,
     /// Exact int64-source MIN state.
@@ -89,6 +91,16 @@ impl AggColumn {
     }
 
     pub(super) fn with_result_type(op: AggOp, attno: i32, result_type_oid: pg_sys::Oid) -> Self {
+        // Identity values for bit/bool reductions match PG transition-state
+        // init: bit_and starts at `!0` (all ones), bit_or/bit_xor at `0`,
+        // bool_and at `true`, bool_or at `false`. `has_value` is still
+        // `false` so finalize emits SQL NULL on empty input.
+        let bit_acc = match op {
+            AggOp::BitAnd => !0_i64,
+            AggOp::BitOr | AggOp::BitXor => 0,
+            _ => 0,
+        };
+        let bool_acc = matches!(op, AggOp::BoolAnd);
         Self {
             op,
             attno,
@@ -102,12 +114,13 @@ impl AggColumn {
                 min_val: f64::INFINITY,
                 max_val: f64::NEG_INFINITY,
                 has_value: false,
-                bit_acc: 0,
-                bool_acc: false,
+                bit_acc,
+                bool_acc,
             },
             gpu_values: Vec::new(),
             gpu_values_f32: Vec::new(),
             gpu_values_i64: Vec::new(),
+            gpu_values_u8: Vec::new(),
             int_sum: 0,
             int_min: i64::MAX,
             int_max: i64::MIN,
@@ -118,11 +131,27 @@ impl AggColumn {
     }
 
     /// Whether this column should buffer values for GPU reduce dispatch.
+    ///
+    /// Boolean / bitwise reductions buffer through the typed `gpu_values_u8` /
+    /// `gpu_values_i64` buffers; the scalar `accumulate*` path is reserved for
+    /// sub-threshold batches.
     pub(super) fn wants_gpu_buffer(&self, strategy: AccelStrategy) -> bool {
         strategy == AccelStrategy::GpuReduce
             && self.op != AggOp::Count
             && self.op != AggOp::Passthrough
             && self.attno > 0
+    }
+
+    /// Per-op break-even threshold for typed reductions. Bool/bit aggregates
+    /// override the type-based threshold so they reflect the bool/bit
+    /// kernel's break-even rather than f64/i64.
+    pub(super) fn typed_reduce_min_rows_for_op(&self) -> usize {
+        let limits = cost::device_limits();
+        match self.op {
+            AggOp::BoolAnd | AggOp::BoolOr => limits.reduce_bool_break_even_rows,
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor => limits.reduce_bit_break_even_rows,
+            _ => self.typed_reduce_min_rows(),
+        }
     }
 
     /// Add a single value using Kahan summation for SUM/AVG.
@@ -159,8 +188,38 @@ impl AggColumn {
             | AggOp::Passthrough
             | AggOp::BitAnd
             | AggOp::BitOr
+            | AggOp::BitXor
             | AggOp::BoolAnd
-            | AggOp::BoolOr => {}
+            | AggOp::BoolOr => {
+                // Bitwise / boolean reductions are dispatched through
+                // `accumulate_bitwise` / `accumulate_bool`; the f64 fast path
+                // does not see them. Falling through here is a deliberate
+                // no-op so that a stray observe_f*() call cannot corrupt the
+                // bit_acc / bool_acc state.
+            }
+        }
+    }
+
+    /// Bitwise accumulator update. Handles BIT_AND, BIT_OR, BIT_XOR. The
+    /// scan path normalises integer columns (INT2/INT4/INT8) into an `i64`
+    /// holding the sign-extended value; this preserves all bits for the
+    /// reduction (the typed-width zero-extension happens at finalize time).
+    pub(super) fn accumulate_bitwise(&mut self, val: i64) {
+        match self.op {
+            AggOp::BitAnd => self.acc.bit_acc &= val,
+            AggOp::BitOr => self.acc.bit_acc |= val,
+            AggOp::BitXor => self.acc.bit_acc ^= val,
+            _ => {}
+        }
+    }
+
+    /// Boolean accumulator update. Handles BOOL_AND, BOOL_OR. PG ignores
+    /// NULL inputs; the caller skips NULLs before reaching this point.
+    pub(super) fn accumulate_bool(&mut self, val: bool) {
+        match self.op {
+            AggOp::BoolAnd => self.acc.bool_acc &= val,
+            AggOp::BoolOr => self.acc.bool_acc |= val,
+            _ => {}
         }
     }
 
@@ -187,7 +246,14 @@ impl AggColumn {
                 });
         }
 
-        self.accumulate(val as f64);
+        // Bitwise ops accumulate the i64 value bit-for-bit. SUM/AVG/MIN/MAX
+        // continue through the f64 path; the explicit i64 lanes above keep
+        // INT8 SUM/MIN/MAX precise.
+        if matches!(self.op, AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor) {
+            self.accumulate_bitwise(val);
+        } else {
+            self.accumulate(val as f64);
+        }
     }
 
     fn observe_f64(&mut self, val: f64, buffer_gpu: bool) {
@@ -229,11 +295,31 @@ impl AggColumn {
         self.observe_i64(i64::from(val), buffer_gpu);
     }
 
+    /// Observe a boolean input. Used by BOOL_AND / BOOL_OR (`AggOp::BoolAnd`
+    /// / `AggOp::BoolOr`). The value flows into the `u8` GPU buffer when
+    /// `buffer_gpu` is set, otherwise into the scalar `bool_acc`.
+    ///
+    /// Reserved for the next-phase bool-column extraction path — the
+    /// scan-side helpers don't yet route BOOLOID through here; once that
+    /// lands this helper is the funnel for both buffered-GPU and scalar
+    /// observations.
+    #[allow(dead_code)]
+    pub(super) fn observe_bool(&mut self, val: bool, buffer_gpu: bool) {
+        self.acc.count += 1;
+        self.acc.has_value = true;
+        if buffer_gpu {
+            self.gpu_values_u8.push(u8::from(val));
+        } else {
+            self.accumulate_bool(val);
+        }
+    }
+
     fn gpu_value_count(&self) -> usize {
         self.gpu_values
             .len()
             .saturating_add(self.gpu_values_f32.len())
             .saturating_add(self.gpu_values_i64.len())
+            .saturating_add(self.gpu_values_u8.len())
     }
 
     fn has_gpu_values(&self) -> bool {
@@ -244,6 +330,7 @@ impl AggColumn {
         self.gpu_values.clear();
         self.gpu_values_f32.clear();
         self.gpu_values_i64.clear();
+        self.gpu_values_u8.clear();
     }
 
     pub(super) fn typed_reduce_min_rows(&self) -> usize {
@@ -270,6 +357,22 @@ impl AggColumn {
     /// should not have injected a GpuReduce path if GPU is unavailable.
     #[allow(clippy::cast_possible_truncation)]
     pub(super) fn dispatch_gpu_reduce(&mut self) {
+        // Bit/bool aggregates take a dedicated typed kernel path. The buffer
+        // count uses op-specific break-even because their kernels are far
+        // cheaper than f64 reduce.
+        if matches!(
+            self.op,
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor | AggOp::BoolAnd | AggOp::BoolOr
+        ) {
+            let n = self.gpu_value_count();
+            if n < self.typed_reduce_min_rows_for_op() {
+                self.drain_small_batch();
+                return;
+            }
+            self.dispatch_gpu_reduce_bit_bool();
+            return;
+        }
+
         let n = self.gpu_value_count();
         if n < self.typed_reduce_min_rows() {
             // Sub-parity batch for this value type: keep correctness by
@@ -308,6 +411,103 @@ impl AggColumn {
         }
     }
 
+    /// Dispatch a bit/bool aggregate through its typed GPU kernel. Handles
+    /// chunked dispatch for buffers larger than `gpu_reduce_max_chunk` by
+    /// folding kernel outputs back into the running accumulator (the bit/bool
+    /// reduction operators are associative). On kernel failure, surfaces a
+    /// PG error per CLAUDE.md rule 11 — no CPU fallback.
+    pub(super) fn dispatch_gpu_reduce_bit_bool(&mut self) {
+        let max_chunk = cost::device_limits().gpu_reduce_max_chunk;
+        match self.op {
+            AggOp::BoolAnd | AggOp::BoolOr => {
+                let values = std::mem::take(&mut self.gpu_values_u8);
+                let n = values.len();
+                if n == 0 {
+                    return;
+                }
+                for chunk in values.chunks(max_chunk) {
+                    let r = match self.op {
+                        AggOp::BoolAnd => gpu::reduce_bool_and(chunk),
+                        AggOp::BoolOr => gpu::reduce_bool_or(chunk),
+                        _ => None,
+                    };
+                    if let Some(partial) = r {
+                        self.accumulate_bool(partial);
+                        self.gpu_dispatched = true;
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU bool reduction kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                }
+                self.acc.has_value = true;
+            }
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor => {
+                let values = std::mem::take(&mut self.gpu_values_i64);
+                let n = values.len();
+                if n == 0 {
+                    return;
+                }
+                for chunk in values.chunks(max_chunk) {
+                    let partial = self.run_bit_kernel_chunk(chunk);
+                    if let Some(p) = partial {
+                        self.accumulate_bitwise(p);
+                        self.gpu_dispatched = true;
+                    } else {
+                        pgrx::error!(
+                            "pg_accel: GPU bit reduction kernel failed; refusing to fall back to CPU (rule 11). Aggregate op: {:?}",
+                            self.op,
+                        );
+                    }
+                }
+                self.acc.has_value = true;
+            }
+            _ => {}
+        }
+        self.clear_gpu_buffers();
+    }
+
+    /// Run the typed bit-reduction kernel that matches `self.type_oid`.
+    /// Returns an i64 holding the sign-extended result of the kernel.
+    fn run_bit_kernel_chunk(&self, chunk: &[i64]) -> Option<i64> {
+        // For INT2 and INT4 columns we still buffer as i64 in `gpu_values_i64`
+        // (the unified extractor path widens at observe time). Run the
+        // bit-width-specific kernel so the result is exactly what PG's
+        // `int2and` / `int4and` family would emit; widen with sign extension
+        // on the way out so the running `bit_acc` (i64) stays consistent.
+        match (self.op, self.type_oid) {
+            (AggOp::BitAnd, t) if t == pg_sys::INT2OID => {
+                let buf: Vec<i16> = chunk.iter().map(|&v| v as i16).collect();
+                gpu::reduce_bit_and_i16(&buf).map(i64::from)
+            }
+            (AggOp::BitAnd, t) if t == pg_sys::INT4OID => {
+                let buf: Vec<i32> = chunk.iter().map(|&v| v as i32).collect();
+                gpu::reduce_bit_and_i32(&buf).map(i64::from)
+            }
+            (AggOp::BitAnd, _) => gpu::reduce_bit_and_i64(chunk),
+            (AggOp::BitOr, t) if t == pg_sys::INT2OID => {
+                let buf: Vec<i16> = chunk.iter().map(|&v| v as i16).collect();
+                gpu::reduce_bit_or_i16(&buf).map(i64::from)
+            }
+            (AggOp::BitOr, t) if t == pg_sys::INT4OID => {
+                let buf: Vec<i32> = chunk.iter().map(|&v| v as i32).collect();
+                gpu::reduce_bit_or_i32(&buf).map(i64::from)
+            }
+            (AggOp::BitOr, _) => gpu::reduce_bit_or_i64(chunk),
+            (AggOp::BitXor, t) if t == pg_sys::INT2OID => {
+                let buf: Vec<i16> = chunk.iter().map(|&v| v as i16).collect();
+                gpu::reduce_bit_xor_i16(&buf).map(i64::from)
+            }
+            (AggOp::BitXor, t) if t == pg_sys::INT4OID => {
+                let buf: Vec<i32> = chunk.iter().map(|&v| v as i32).collect();
+                gpu::reduce_bit_xor_i32(&buf).map(i64::from)
+            }
+            (AggOp::BitXor, _) => gpu::reduce_bit_xor_i64(chunk),
+            _ => None,
+        }
+    }
+
     fn dispatch_gpu_reduce_f32(&mut self) {
         let use_stats_for_avg = self.op == AggOp::Avg && self.needs_full_stats;
         let gpu_result = match self.op {
@@ -339,6 +539,7 @@ impl AggColumn {
             | AggOp::Passthrough
             | AggOp::BitAnd
             | AggOp::BitOr
+            | AggOp::BitXor
             | AggOp::BoolAnd
             | AggOp::BoolOr => {
                 self.drain_small_batch();
@@ -390,6 +591,7 @@ impl AggColumn {
             | AggOp::Passthrough
             | AggOp::BitAnd
             | AggOp::BitOr
+            | AggOp::BitXor
             | AggOp::BoolAnd
             | AggOp::BoolOr => {
                 // Count/Passthrough/bitwise/bool never need GPU — drain directly.
@@ -508,6 +710,7 @@ impl AggColumn {
                 | AggOp::Passthrough
                 | AggOp::BitAnd
                 | AggOp::BitOr
+                | AggOp::BitXor
                 | AggOp::BoolAnd
                 | AggOp::BoolOr => None,
             };
@@ -567,6 +770,7 @@ impl AggColumn {
                 | AggOp::Passthrough
                 | AggOp::BitAnd
                 | AggOp::BitOr
+                | AggOp::BitXor
                 | AggOp::BoolAnd
                 | AggOp::BoolOr => None,
             };
@@ -680,9 +884,34 @@ impl AggColumn {
             | AggOp::Passthrough
             | AggOp::BitAnd
             | AggOp::BitOr
+            | AggOp::BitXor
             | AggOp::BoolAnd
             | AggOp::BoolOr => {}
         }
+        self.clear_gpu_buffers();
+    }
+
+    /// Apply an i64 result from a typed bitwise GPU reduction (BIT_AND /
+    /// BIT_OR / BIT_XOR). Currently unused — `dispatch_gpu_reduce_bit_bool`
+    /// folds partials directly into `accumulate_bitwise`, but this helper is
+    /// kept for symmetry with the f64/i64 sum/min/max apply helpers and as a
+    /// hook for the eventual single-launch typed-result path.
+    #[allow(dead_code)]
+    pub(super) fn apply_gpu_bit_result(&mut self, result: i64) {
+        self.gpu_dispatched = true;
+        self.acc.bit_acc = result;
+        self.acc.has_value = true;
+        self.clear_gpu_buffers();
+    }
+
+    /// Apply a bool result from a typed boolean GPU reduction (BOOL_AND /
+    /// BOOL_OR). See `apply_gpu_bit_result` for the rationale on keeping this
+    /// alongside `accumulate_bool`.
+    #[allow(dead_code)]
+    pub(super) fn apply_gpu_bool_result(&mut self, result: bool) {
+        self.gpu_dispatched = true;
+        self.acc.bool_acc = result;
+        self.acc.has_value = true;
         self.clear_gpu_buffers();
     }
 
@@ -727,6 +956,9 @@ impl AggColumn {
         for val in std::mem::take(&mut self.gpu_values_i64) {
             self.accumulate_i64(val);
         }
+        for val in std::mem::take(&mut self.gpu_values_u8) {
+            self.accumulate_bool(val != 0);
+        }
     }
 
     /// Convert a Datum to f64 using the resolved type OID.
@@ -751,10 +983,32 @@ impl AggColumn {
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub(super) fn finalize(&self) -> (pg_sys::Datum, bool) {
         if !self.acc.has_value {
+            // PG semantics: empty input → SQL NULL for every aggregate except
+            // COUNT (which returns 0). bool_and / bool_or / bit_and / bit_or
+            // / bit_xor all match this; the `_` arm below covers them.
             return match self.op {
                 AggOp::Count => (pg_sys::Datum::from(0_i64), false),
                 _ => (pg_sys::Datum::from(0), true),
             };
+        }
+
+        // Boolean and bitwise reductions take a dedicated finalize path
+        // — they don't fit the f64 `raw_f64` lane (which is shared by
+        // numeric-typed aggregates).
+        match self.op {
+            AggOp::BoolAnd | AggOp::BoolOr => {
+                // BOOLOID datum: 0 or 1 in the low byte.
+                return (pg_sys::Datum::from(u64::from(self.acc.bool_acc)), false);
+            }
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor => {
+                let datum = match self.result_type_oid {
+                    pg_sys::INT2OID => pg_sys::Datum::from((self.acc.bit_acc as i16) as u64),
+                    pg_sys::INT4OID => pg_sys::Datum::from((self.acc.bit_acc as i32) as u64),
+                    _ => pg_sys::Datum::from(self.acc.bit_acc as u64),
+                };
+                return (datum, false);
+            }
+            _ => {}
         }
 
         if self.type_oid == pg_sys::INT8OID && self.int_has_value {
@@ -882,7 +1136,13 @@ impl AggColumn {
                     return (pg_sys::Datum::from(0), true);
                 }
             }
-            AggOp::BitAnd | AggOp::BitOr | AggOp::BoolAnd | AggOp::BoolOr | AggOp::Passthrough => {
+            AggOp::BitAnd | AggOp::BitOr | AggOp::BitXor | AggOp::BoolAnd | AggOp::BoolOr => {
+                // Unreachable: the bit/bool branch above handles these and
+                // returns early. Defensive arm so the compiler sees an
+                // exhaustive match.
+                return (pg_sys::Datum::from(0), true);
+            }
+            AggOp::Passthrough => {
                 return (pg_sys::Datum::from(0), true);
             }
         };

@@ -224,6 +224,40 @@ pgaccel_status pgaccel_reduce_stats_f32(const float* data, size_t count, uint64_
 pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t count, uint64_t* out_count,
                                         double* out_sum, double* out_sum_sq);
 
+/* ── Boolean and bitwise reductions (Phase 4) ───────────────────────
+ *
+ * bool_and / bool_or — logical AND / OR over a 0/1 byte mask. NULL inputs
+ * must be filtered out by the caller before the buffer is handed to the
+ * kernel (PG-compatible semantics: NULL is ignored, empty input → NULL,
+ * which the caller materialises by checking `count == 0` before calling).
+ *
+ * Identity values match PG transition-state init: bool_and = true (1),
+ * bool_or = false (0).
+ *
+ * bit_and / bit_or / bit_xor — bitwise reduction over a typed integer
+ * buffer. Identity values:
+ *     bit_and = ~0 (all bits set)
+ *     bit_or  =  0
+ *     bit_xor =  0
+ * The kernel signature matches PG's `int{2,4,8}_{and,or,xor}` aggregate
+ * transition functions; widths smaller than i16 (smallint) are not
+ * exposed because PG has no narrower integer-bitwise aggregate.
+ */
+pgaccel_status pgaccel_reduce_bool_and(const uint8_t* data, size_t count, uint8_t* result);
+pgaccel_status pgaccel_reduce_bool_or(const uint8_t* data, size_t count, uint8_t* result);
+
+pgaccel_status pgaccel_reduce_bit_and_i16(const int16_t* data, size_t count, int16_t* result);
+pgaccel_status pgaccel_reduce_bit_and_i32(const int32_t* data, size_t count, int32_t* result);
+pgaccel_status pgaccel_reduce_bit_and_i64(const int64_t* data, size_t count, int64_t* result);
+
+pgaccel_status pgaccel_reduce_bit_or_i16(const int16_t* data, size_t count, int16_t* result);
+pgaccel_status pgaccel_reduce_bit_or_i32(const int32_t* data, size_t count, int32_t* result);
+pgaccel_status pgaccel_reduce_bit_or_i64(const int64_t* data, size_t count, int64_t* result);
+
+pgaccel_status pgaccel_reduce_bit_xor_i16(const int16_t* data, size_t count, int16_t* result);
+pgaccel_status pgaccel_reduce_bit_xor_i32(const int32_t* data, size_t count, int32_t* result);
+pgaccel_status pgaccel_reduce_bit_xor_i64(const int64_t* data, size_t count, int64_t* result);
+
 /* ── Spatial Predicate Kernels ────────────────────────────────────── */
 /*
  * Three-result model:

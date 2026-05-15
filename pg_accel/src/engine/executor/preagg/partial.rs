@@ -170,6 +170,7 @@ impl AggAccum {
             | AggOp::VarPop
             | AggOp::BitAnd
             | AggOp::BitOr
+            | AggOp::BitXor
             | AggOp::BoolAnd
             | AggOp::BoolOr => {
                 self.sum += val;
@@ -215,6 +216,7 @@ impl AggAccum {
             | AggOp::VarPop
             | AggOp::BitAnd
             | AggOp::BitOr
+            | AggOp::BitXor
             | AggOp::BoolAnd
             | AggOp::BoolOr => self.sum,
         }

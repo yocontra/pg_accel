@@ -1087,3 +1087,240 @@ extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t co
   *out_count = static_cast<uint64_t>(count);
   return PGACCEL_OK;
 }
+
+// ---------------------------------------------------------------------------
+// Boolean and bitwise reductions (Phase 4)
+//
+// Semantics:
+//   bool_and / bool_or — logical AND/OR over a uint8 mask of {0, 1} values.
+//     PG-compatible: NULL inputs are filtered out by the caller before the
+//     buffer reaches this kernel. Empty input is signalled by `count == 0`,
+//     and the caller produces SQL NULL when no rows were observed. The
+//     bool_and identity is `1` (true) and bool_or identity is `0` (false).
+//
+//   bit_and / bit_or / bit_xor — bitwise reduction across integer columns.
+//     Caller is responsible for NULL filtering. Identity values match PG's
+//     `int{2,4,8}_{and,or,xor}` transition state initialisation: `~0` for
+//     AND (all-ones), `0` for OR and XOR. Empty input → caller returns SQL
+//     NULL.
+//
+// The kernels reuse the generic tree_reduce_sycl template since the per-pair
+// associative operator is the only difference vs sum/min/max. The output type
+// matches the input element width; widening is the caller's responsibility.
+// ---------------------------------------------------------------------------
+
+extern "C" pgaccel_status pgaccel_reduce_bool_and(const uint8_t* data, size_t count,
+                                                  uint8_t* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    // Caller treats this as SQL NULL; we still return identity for safety.
+    *result = 1;
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0] ? 1 : 0;
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = tree_reduce_sycl<uint8_t>(
+          *q, data, count, result, uint8_t{1},
+          [](uint8_t a, uint8_t b) -> uint8_t { return (a && b) ? 1 : 0; });
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: reduce_bool_and SYCL failed: %s\n", e.what());
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bool_or(const uint8_t* data, size_t count,
+                                                 uint8_t* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    *result = 0;
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0] ? 1 : 0;
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = tree_reduce_sycl<uint8_t>(
+          *q, data, count, result, uint8_t{0},
+          [](uint8_t a, uint8_t b) -> uint8_t { return (a || b) ? 1 : 0; });
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: reduce_bool_or SYCL failed: %s\n", e.what());
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+// Bitwise reductions are templated on the integer width. We provide explicit
+// extern "C" wrappers for int16/int32/int64 so the Rust FFI surface mirrors
+// PG's `int2_and`/`int4_and`/`int8_and` family. Identity values:
+//   AND identity is `~T{0}` (all bits set);
+//   OR / XOR identity is `T{0}`.
+
+namespace {
+template <typename T>
+pgaccel_status reduce_bit_and_kernel(const T* data, size_t count, T* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    *result = static_cast<T>(~T{0});
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0];
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = tree_reduce_sycl<T>(*q, data, count, result, static_cast<T>(~T{0}),
+                                              [](T a, T b) -> T { return static_cast<T>(a & b); });
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: reduce_bit_and SYCL failed: %s\n", e.what());
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+template <typename T>
+pgaccel_status reduce_bit_or_kernel(const T* data, size_t count, T* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    *result = T{0};
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0];
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = tree_reduce_sycl<T>(*q, data, count, result, T{0},
+                                              [](T a, T b) -> T { return static_cast<T>(a | b); });
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: reduce_bit_or SYCL failed: %s\n", e.what());
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+template <typename T>
+pgaccel_status reduce_bit_xor_kernel(const T* data, size_t count, T* result) {
+  if (!result)
+    return PGACCEL_ERROR;
+  if (count == 0) {
+    *result = T{0};
+    return PGACCEL_OK;
+  }
+  if (!data)
+    return PGACCEL_ERROR;
+  if (count == 1) {
+    *result = data[0];
+    return PGACCEL_OK;
+  }
+
+  try {
+    sycl::queue* q = get_queue();
+    if (q) {
+      pgaccel_status st = tree_reduce_sycl<T>(*q, data, count, result, T{0},
+                                              [](T a, T b) -> T { return static_cast<T>(a ^ b); });
+      if (st == PGACCEL_OK) {
+        pgaccel_record_gpu_exec();
+        return st;
+      }
+    }
+  } catch (const std::exception& e) {
+    fprintf(stderr, "pgaccel: reduce_bit_xor SYCL failed: %s\n", e.what());
+  } catch (...) {}
+
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+}  // anonymous namespace
+
+extern "C" pgaccel_status pgaccel_reduce_bit_and_i16(const int16_t* data, size_t count,
+                                                     int16_t* result) {
+  return reduce_bit_and_kernel<int16_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_and_i32(const int32_t* data, size_t count,
+                                                     int32_t* result) {
+  return reduce_bit_and_kernel<int32_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_and_i64(const int64_t* data, size_t count,
+                                                     int64_t* result) {
+  return reduce_bit_and_kernel<int64_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_or_i16(const int16_t* data, size_t count,
+                                                    int16_t* result) {
+  return reduce_bit_or_kernel<int16_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_or_i32(const int32_t* data, size_t count,
+                                                    int32_t* result) {
+  return reduce_bit_or_kernel<int32_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_or_i64(const int64_t* data, size_t count,
+                                                    int64_t* result) {
+  return reduce_bit_or_kernel<int64_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_xor_i16(const int16_t* data, size_t count,
+                                                     int16_t* result) {
+  return reduce_bit_xor_kernel<int16_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_xor_i32(const int32_t* data, size_t count,
+                                                     int32_t* result) {
+  return reduce_bit_xor_kernel<int32_t>(data, count, result);
+}
+
+extern "C" pgaccel_status pgaccel_reduce_bit_xor_i64(const int64_t* data, size_t count,
+                                                     int64_t* result) {
+  return reduce_bit_xor_kernel<int64_t>(data, count, result);
+}

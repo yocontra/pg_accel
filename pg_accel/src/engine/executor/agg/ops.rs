@@ -29,6 +29,9 @@ pub enum AggOp {
     BitAnd,
     /// `BIT_OR` aggregate (bitwise OR over integer column).
     BitOr,
+    /// `BIT_XOR` aggregate (bitwise XOR over integer column). Available in
+    /// PostgreSQL 14+; transition function is `int{2,4,8}xor`.
+    BitXor,
     /// `BOOL_AND` aggregate (logical AND over bool column).
     BoolAnd,
     /// `BOOL_OR` aggregate (logical OR over bool column).
@@ -54,6 +57,7 @@ impl AggOp {
             Self::BitOr => 11,
             Self::BoolAnd => 12,
             Self::BoolOr => 13,
+            Self::BitXor => 14,
         }
     }
 
@@ -74,6 +78,7 @@ impl AggOp {
             11 => Some(Self::BitOr),
             12 => Some(Self::BoolAnd),
             13 => Some(Self::BoolOr),
+            14 => Some(Self::BitXor),
             _ => None,
         }
     }

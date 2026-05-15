@@ -130,6 +130,9 @@ target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 add_executable(test_reduce_stats test/test_reduce_stats.cpp)
 target_link_libraries(test_reduce_stats PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_reduce_bool_bit test/test_reduce_bool_bit.cpp)
+target_link_libraries(test_reduce_bool_bit PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_exec_gpu test/test_exec_gpu.cpp)
 target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
 
@@ -170,6 +173,7 @@ add_test(NAME test_fork_warmed COMMAND test_fork_warmed)
 add_test(NAME test_fork_cold COMMAND test_fork_cold)
 add_test(NAME test_sycl_basic COMMAND test_sycl_basic)
 add_test(NAME test_reduce_stats COMMAND test_reduce_stats)
+add_test(NAME test_reduce_bool_bit COMMAND test_reduce_bool_bit)
 add_test(NAME test_hash_agg_partial COMMAND test_hash_agg_partial)
 add_test(NAME test_hash_agg_keys COMMAND test_hash_agg_keys)
 add_test(NAME test_window COMMAND test_window)

@@ -187,6 +187,16 @@ pub struct DeviceLimits {
     pub reduce_f64_break_even_rows: usize,
     /// Minimum rows for GPU reduce over i64 values.
     pub reduce_i64_break_even_rows: usize,
+    /// Minimum rows for GPU bitwise reduction (`bit_and`, `bit_or`,
+    /// `bit_xor`) over i16/i32/i64 columns. Bitwise ops are extremely
+    /// cheap per row on the CPU (1 instruction in a tight loop) so the
+    /// break-even is much higher than typed `sum`/`min`/`max`.
+    pub reduce_bit_break_even_rows: usize,
+    /// Minimum rows for GPU boolean reduction (`bool_and`, `bool_or`)
+    /// over a bool column. Boolean ops are even cheaper than bitwise
+    /// (early termination on first `false`/`true`) so PG's parallel
+    /// scan typically wins until the buffer is very large.
+    pub reduce_bool_break_even_rows: usize,
     /// Minimum average rows-per-group for GPU hash aggregation to beat PG.
     /// Below this the per-group state fits in CPU L2.
     pub hashagg_min_rows_per_group: usize,
@@ -429,6 +439,15 @@ impl DeviceLimits {
             reduce_f32_break_even_rows: cu_scale(25_000).clamp(4_000, 250_000),
             reduce_f64_break_even_rows: cu_scale(50_000).clamp(8_000, 500_000),
             reduce_i64_break_even_rows: cu_scale(75_000).clamp(10_000, 750_000),
+            // Bitwise ops are ~1 inst/row on CPU and PG parallel reduces
+            // 4× as fast as scalar SUM; break-even is roughly 4× the i64
+            // sum threshold. Clamp keeps the floor large enough that small
+            // queries skip GPU dispatch overhead (~50µs warmup).
+            reduce_bit_break_even_rows: cu_scale(300_000).clamp(50_000, 3_000_000),
+            // Bool ops short-circuit on CPU (first false breaks bool_and,
+            // first true breaks bool_or) so they need an even larger batch
+            // before GPU launch overhead amortises.
+            reduce_bool_break_even_rows: cu_scale(500_000).clamp(100_000, 5_000_000),
             // HashAgg: below ~32 rows/group PG's vectorized L2 aggregate
             // beats GPU per-group atomics. Above, GPU amortises probe +
             // yield overhead.
@@ -517,6 +536,8 @@ impl DeviceLimits {
             reduce_f32_break_even_rows: 25_000,
             reduce_f64_break_even_rows: 50_000,
             reduce_i64_break_even_rows: 75_000,
+            reduce_bit_break_even_rows: 300_000,
+            reduce_bool_break_even_rows: 500_000,
             hashagg_min_rows_per_group: 32,
             hashagg_max_state_bytes_per_group: 256,
             sort_break_even_rows_int: 100_000,

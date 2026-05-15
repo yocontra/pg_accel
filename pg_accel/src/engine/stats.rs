@@ -613,6 +613,14 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.reduce_i64_break_even_rows.to_string(),
         ),
         (
+            "reduce_bit_break_even_rows".into(),
+            limits.reduce_bit_break_even_rows.to_string(),
+        ),
+        (
+            "reduce_bool_break_even_rows".into(),
+            limits.reduce_bool_break_even_rows.to_string(),
+        ),
+        (
             "hashagg_min_rows_per_group".into(),
             limits.hashagg_min_rows_per_group.to_string(),
         ),
