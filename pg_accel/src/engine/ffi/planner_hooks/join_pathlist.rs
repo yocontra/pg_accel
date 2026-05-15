@@ -397,6 +397,61 @@ fn selected_gpu_hashjoin_kernel_available() -> bool {
     false
 }
 
+/// Whether a real GPU NestedLoop scalar-inequality kernel + executor
+/// path is wired through `add_path`.
+///
+/// Pinned to `false` while the executor node and Custom Scan
+/// `make_custom_scan_plan` callback are still pending. The
+/// underlying GPU kernel + bridge + cost model landed in this
+/// commit and are individually tested:
+///
+/// - C++ kernel: `pgaccel-kernels/src/nested_loop_ineq.cpp`
+///   (covered by `pgaccel-kernels/test/test_nested_loop_ineq.cpp`).
+/// - Rust bridge: `pg_accel/src/gpu/nested_loop_ineq.rs` —
+///   `dispatch_ineq_i64` / `dispatch_ineq_f64` /
+///   `dispatch_between_i64` / `dispatch_between_f64`.
+/// - Cost model: `cost::nlj_break_even` /
+///   `cost::nlj_selectivity_useful` against
+///   `DeviceLimits::gpu_nlj_{min_outer_rows, min_inner_rows,
+///   max_output_rows, per_pair_cost}`.
+///
+/// What is missing to flip this gate to `true`:
+///
+/// 1. Executor node with BOTH-sides slot deformation. Unlike
+///    `GpuHashJoin` (which only projects inner-build into the outer
+///    probe slot), NLJ needs `outer_attno`-based extraction from
+///    `outer_ps` AND `inner_attno`-based extraction from `inner_ps`
+///    so the result tuple can include columns from both relations.
+///    The hashjoin executor in `pg_accel/src/engine/executor/join/`
+///    is a starting template (probe.rs already does inner-tuple
+///    storage) but needs to be extended for the both-sides projection.
+///
+/// 2. CustomPath construction call site in
+///    `pgaccel_set_join_pathlist` above — after the new
+///    `AccelStrategy::GpuNestedLoopIneq` variant, the
+///    `observe_nestloop_scalar_opportunity` body should also call
+///    `add_path` with a CustomPath built via `create_custom_path`
+///    when both `nlj_break_even(...)` and `nlj_selectivity_useful(...)`
+///    return `true`. The current call only emits the rejection
+///    counter; the next agent flips it to also inject.
+///
+/// 3. `make_custom_scan_plan` callback updates in
+///    `pg_accel/src/engine/ffi/custom_scan/` to set up the
+///    `custom_scan_tlist` with both-relation Vars so the executor's
+///    tuple-deform mapping covers outer AND inner columns.
+///
+/// When all three land, this function returns `true` and the canary
+/// test `selected_gpu_nlj_kernel_is_not_available_yet` flips with it.
+#[allow(dead_code)]
+// reason: kernel + bridge + cost model landed ahead of the executor;
+// this gate is referenced by the canary test and by the future
+// `pgaccel_set_join_pathlist` add_path call-site (which is the
+// second half of the Phase 4 NLJ landing).
+#[must_use]
+fn selected_gpu_nlj_kernel_available() -> bool {
+    false
+}
+
 /// Build the `custom_private` integer list for a `GpuHashJoin` / spatial
 /// `CustomPath`. Shared by both the non-parallel and partial injection sites
 /// so the layout consumed by `make_custom_scan_plan` (and thence the executor)
@@ -1094,6 +1149,48 @@ mod tests {
             !selected_gpu_hashjoin_kernel_available(),
             "planner must not expose GpuHashJoin until build/probe are real GPU paths"
         );
+    }
+
+    #[test]
+    fn selected_gpu_nlj_kernel_is_not_available_yet() {
+        // Phase 4 NLJ scalar inequality landing canary. Pinned to
+        // `false` while the executor + make_custom_scan_plan + add_path
+        // call-site work (see `selected_gpu_nlj_kernel_available` doc)
+        // is still pending. The kernel + bridge + cost model are real
+        // and individually tested, but the planner MUST NOT expose
+        // `GpuNestedLoopIneq` as a selected path until the executor can
+        // both-sides-deform tuples.
+        //
+        // When the next agent lands the executor and flips
+        // `selected_gpu_nlj_kernel_available()` to `true`, this assertion
+        // will fail — at which point the engineer making the flip MUST
+        // either delete this canary (preferred — the assertion is now
+        // expressing the previous-state regression guard) or invert it.
+        // The matching planner-side gate is at
+        // `join_pathlist.rs:selected_gpu_nlj_kernel_available()`.
+        assert!(
+            !super::selected_gpu_nlj_kernel_available(),
+            "planner must not expose GpuNestedLoopIneq until the executor + \
+             make_custom_scan_plan + add_path callsite are wired"
+        );
+    }
+
+    #[test]
+    fn accel_strategy_gpu_nlj_variant_is_distinct() {
+        // ABI / wire compat: the new variant `GpuNestedLoopIneq = 9`
+        // must round-trip through `AccelStrategy::from_i32`. If any
+        // refactor changes the discriminant, downstream `custom_private`
+        // integer lists (encoded via `makeInteger(strategy as i32)`)
+        // misroute strategies in plans serialised under the prior wire
+        // value — a silent correctness regression at plan time.
+        use crate::engine::registry::AccelStrategy;
+        assert_eq!(
+            AccelStrategy::from_i32(9),
+            Some(AccelStrategy::GpuNestedLoopIneq)
+        );
+        // Bordering valid discriminants stay mapped correctly.
+        assert_eq!(AccelStrategy::from_i32(8), Some(AccelStrategy::GpuWindow));
+        assert_eq!(AccelStrategy::from_i32(10), None);
     }
 
     // -- classify_nestloop_shape -------------------------------------------

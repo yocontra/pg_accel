@@ -31,6 +31,7 @@ set(KERNEL_SOURCES
     src/hash_agg.cpp
     src/window.cpp
     src/fused_ops.cpp
+    src/nested_loop_ineq.cpp
 )
 
 # Static library for embedding into the Rust extension.
@@ -159,6 +160,12 @@ add_sycl_to_target(TARGET test_fp64_mul_probe)
 add_executable(test_oom_invariant test/test_oom_invariant.cpp)
 target_link_libraries(test_oom_invariant PRIVATE pgaccel_kernels_shared)
 
+# NLJ scalar-inequality kernel coverage (Phase 4 NestedLoop recognition
+# launchpad — pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs
+# `observe_nestloop_scalar_opportunity`).
+add_executable(test_nested_loop_ineq test/test_nested_loop_ineq.cpp)
+target_link_libraries(test_nested_loop_ineq PRIVATE pgaccel_kernels_shared)
+
 enable_testing()
 add_test(NAME test_device COMMAND test_device)
 add_test(NAME test_bbox COMMAND test_bbox)
@@ -180,6 +187,9 @@ add_test(NAME test_window COMMAND test_window)
 add_test(NAME test_expr_templates COMMAND test_expr_templates)
 add_test(NAME test_oom_invariant COMMAND test_oom_invariant)
 add_test(NAME test_fp64_mul_probe COMMAND test_fp64_mul_probe)
+add_test(NAME test_nested_loop_ineq COMMAND test_nested_loop_ineq)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
-install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h DESTINATION include)
+install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h
+              include/pgaccel_nested_loop_ineq.h
+        DESTINATION include)

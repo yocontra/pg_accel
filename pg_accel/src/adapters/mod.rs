@@ -44,7 +44,10 @@ pub fn uses_fp64(strategy: AccelStrategy, name: &str) -> bool {
         | AccelStrategy::GpuReduce
         | AccelStrategy::GpuExpr
         | AccelStrategy::GpuHashJoin
-        | AccelStrategy::GpuWindow => false,
+        | AccelStrategy::GpuWindow
+        // NLJ inequality: op-level (planner classifies fp64 from the
+        // actual key Oid at injection time); function-level fp64 is N/A.
+        | AccelStrategy::GpuNestedLoopIneq => false,
     }
 }
 

@@ -27,6 +27,18 @@ pub enum AccelStrategy {
     GpuHashJoin = 7,
     /// GPU window functions - currently running SUM/COUNT over numeric windows.
     GpuWindow = 8,
+    /// GPU NestedLoop scalar-inequality join (BETWEEN, range overlap, `<`,
+    /// `<=`, `>=`, `>` between Var-Var across rels). Variant added in the
+    /// Phase 4 NLJ kernel landing — see
+    /// `pg_accel/src/gpu/nested_loop_ineq.rs` and
+    /// `pgaccel-kernels/src/nested_loop_ineq.cpp`. The strategy is not
+    /// planner-selectable yet: the kernel + bridge + cost model are in
+    /// place but the executor node (both-sides slot deformation) is
+    /// pending — see
+    /// `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs`
+    /// `selected_gpu_nlj_kernel_available()` which returns `false` and
+    /// keeps `observe_nestloop_scalar_opportunity` recording the decline.
+    GpuNestedLoopIneq = 9,
 }
 
 impl AccelStrategy {
@@ -42,6 +54,7 @@ impl AccelStrategy {
             6 => Some(Self::GpuExpr),
             7 => Some(Self::GpuHashJoin),
             8 => Some(Self::GpuWindow),
+            9 => Some(Self::GpuNestedLoopIneq),
             _ => None,
         }
     }

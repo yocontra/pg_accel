@@ -582,3 +582,131 @@ fn phase6_per_row_costs_strictly_less_than_old_literals() {
     assert!(lu.custom_scan_yield_per_row < 0.01);
     assert!(lu.gpu_partial_agg_per_row < 0.005);
 }
+
+// -- NLJ break-even / selectivity gates -----------------------------------
+//
+// Pure-Rust unit tests for the new helpers introduced by the Phase 4 NLJ
+// scalar-inequality kernel landing. The DeviceLimits values used here come
+// from the `cpu_only()` fallback (we're under `#[cfg(test)]` so the
+// device_limits() OnceLock initialiser returns the fallback constants).
+// The fallback NLJ defaults are: min_outer=1000, min_inner=1000,
+// max_output=100_000, per_pair_cost=1e-7.
+
+#[test]
+fn nlj_break_even_rejects_undersized_outer() {
+    let l = DeviceLimits::cpu_only();
+    // Outer below floor → reject even when work product is huge.
+    assert!(!nlj_break_even(
+        l.gpu_nlj_min_outer_rows - 1,
+        1_000_000,
+        100,
+        &l
+    ));
+}
+
+#[test]
+fn nlj_break_even_rejects_undersized_inner() {
+    let l = DeviceLimits::cpu_only();
+    assert!(!nlj_break_even(
+        1_000_000,
+        l.gpu_nlj_min_inner_rows - 1,
+        100,
+        &l
+    ));
+}
+
+#[test]
+fn nlj_break_even_rejects_output_overflow() {
+    let l = DeviceLimits::cpu_only();
+    assert!(!nlj_break_even(
+        10_000,
+        10_000,
+        l.gpu_nlj_max_output_rows + 1,
+        &l
+    ));
+}
+
+#[test]
+fn nlj_break_even_accepts_balanced_amortising_load() {
+    let l = DeviceLimits::cpu_only();
+    // 10K × 10K = 100M pairs. With per_pair = 1e-7 the amortised cost is
+    // 10.0 PG cost units, well above the 100.0-unit GPU_LAUNCH_OVERHEAD?
+    // Let's verify: 100M × 1e-7 = 10.0 < 100 → rejects. Bumping to
+    // 100K × 100K = 10G pairs gives 10G × 1e-7 = 1000.0 > 100, so accepts.
+    let big_outer = 100_000usize;
+    let big_inner = 100_000usize;
+    let small_output = 1_000usize; // well within max_output_rows
+    assert!(nlj_break_even(big_outer, big_inner, small_output, &l));
+}
+
+#[test]
+fn nlj_break_even_rejects_small_work_product() {
+    let l = DeviceLimits::cpu_only();
+    // 1K × 1K = 1M pairs. With per_pair = 1e-7 → 0.1 PG cost units,
+    // well below GPU_LAUNCH_OVERHEAD (which is on the order of 100).
+    // Floors are exactly at min, so the work-product gate must reject.
+    assert!(!nlj_break_even(
+        l.gpu_nlj_min_outer_rows,
+        l.gpu_nlj_min_inner_rows,
+        100,
+        &l
+    ));
+}
+
+#[test]
+fn nlj_selectivity_useful_accepts_high_filtration() {
+    // 10K × 100 = 1M pairs; 1000 matches → 1/1000 selectivity → way
+    // below the 0.5 default cap → useful.
+    assert!(nlj_selectivity_useful(10_000, 100, 1_000, 0.5));
+}
+
+#[test]
+fn nlj_selectivity_useful_rejects_near_cartesian_load() {
+    // 100 × 100 = 10K pairs; 9_000 matches → 0.9 selectivity → above
+    // the 0.5 default cap → reject (Cartesian-like loads lose to CPU).
+    assert!(!nlj_selectivity_useful(100, 100, 9_000, 0.5));
+}
+
+#[test]
+fn nlj_selectivity_useful_handles_empty_sides() {
+    assert!(!nlj_selectivity_useful(0, 100, 0, 0.5));
+    assert!(!nlj_selectivity_useful(100, 0, 0, 0.5));
+}
+
+#[test]
+fn nlj_selectivity_useful_at_exact_cap_is_useful() {
+    // 100 × 100 = 10K; 5_000 matches → exactly 0.5 → useful (inclusive).
+    assert!(nlj_selectivity_useful(100, 100, 5_000, 0.5));
+}
+
+#[test]
+fn device_limits_surface_nlj_fields_in_cpu_only() {
+    // Regression guard: the SRF and cost formulas read these fields by
+    // name. If the struct loses one, the public surface drifts.
+    let l = DeviceLimits::cpu_only();
+    assert_eq!(l.gpu_nlj_min_outer_rows, 1_000);
+    assert_eq!(l.gpu_nlj_min_inner_rows, 1_000);
+    assert_eq!(l.gpu_nlj_max_output_rows, 100_000);
+    assert!((l.gpu_nlj_per_pair_cost - 1.0e-7).abs() < 1e-12);
+}
+
+#[test]
+fn device_limits_surface_nlj_fields_in_from_profile() {
+    // GPU-derived fields must clamp into the documented ranges.
+    let detected = PlatformProfile {
+        cpu_cores: 8,
+        has_gpu: true,
+        estimated_gpu_gflops: 2000.0,
+        compute_units: 32,
+        gpu_max_alloc_bytes: 64 * 1024 * 1024 * 1024,
+        has_native_fp64: false,
+    };
+    let l = DeviceLimits::from_profile(&detected);
+    assert!(l.gpu_nlj_min_outer_rows >= 200);
+    assert!(l.gpu_nlj_min_outer_rows <= 50_000);
+    assert!(l.gpu_nlj_min_inner_rows >= 200);
+    assert!(l.gpu_nlj_min_inner_rows <= 50_000);
+    // Output cap should equal gpu_join_max_output_rows on GPU.
+    assert_eq!(l.gpu_nlj_max_output_rows, l.gpu_join_max_output_rows);
+    assert!(l.gpu_nlj_per_pair_cost > 0.0);
+}

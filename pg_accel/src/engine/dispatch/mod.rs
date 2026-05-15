@@ -212,7 +212,14 @@ fn resolve_dispatch_operation(
         | AccelStrategy::GpuSort
         | AccelStrategy::GpuReduce
         | AccelStrategy::GpuHashJoin
-        | AccelStrategy::GpuWindow => DispatchOperation::Dedicated,
+        | AccelStrategy::GpuWindow
+        // NLJ inequality is an executor-node strategy (like
+        // GpuHashJoin). It does not flow through the registry-driven
+        // dispatch table — its CustomScan callbacks own the dispatch
+        // directly via `gpu::nested_loop_ineq::dispatch_*`. Classifying
+        // it as `Dedicated` here keeps the registry path coherent
+        // until the executor lands and wires its own entry.
+        | AccelStrategy::GpuNestedLoopIneq => DispatchOperation::Dedicated,
     }
 }
 

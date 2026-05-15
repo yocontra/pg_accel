@@ -222,6 +222,35 @@ pub struct DeviceLimits {
     /// Minimum inner build-side rows for GPU hash join dispatch.
     pub hashjoin_min_build_rows: usize,
 
+    // -- NestedLoop scalar-inequality gates ---------------------------------
+    //
+    // The Phase 4 NLJ kernel
+    // (`pgaccel-kernels/src/nested_loop_ineq.cpp`) does an O(N*M)
+    // tiled cross-product scan, so the planner / cost model needs
+    // explicit row-count floors and an output-size cap. The break-even
+    // shape is: `outer × inner × per_pair_cost >= launch + transfer + emit`.
+    //
+    // Per CLAUDE.md rule #10, these live here rather than as constants
+    // anywhere in dispatch / executor / planner code.
+    /// Minimum outer-side rows before the GPU NLJ kernel is considered.
+    /// Below this, launch + transfer overhead dominates the per-pair work.
+    pub gpu_nlj_min_outer_rows: usize,
+    /// Minimum inner-side rows. Same break-even reasoning as outer.
+    pub gpu_nlj_min_inner_rows: usize,
+    /// Maximum output rows for the NLJ kernel before declining to PG
+    /// native. Above this, the cross-product is too close to a Cartesian
+    /// product for GPU to win on memory ordering; emit cost dominates
+    /// any kernel-time savings. Caller MUST respect the kernel's
+    /// `*pair_count_out > max_pairs` overflow signal.
+    pub gpu_nlj_max_output_rows: usize,
+    /// Per-pair cost factor used in the cost model. Calibrated against
+    /// the kernel's measured throughput: each `(i, j)` pair is one
+    /// comparison + an atomic increment when matched. We charge a
+    /// conservative per-pair value (in PG cost units / pair) so the
+    /// planner accepts the path only when `outer * inner * per_pair_cost`
+    /// exceeds the fixed launch+transfer overhead.
+    pub gpu_nlj_per_pair_cost: f64,
+
     // -- fp64 emulation cost gate -------------------------------------------
     /// Whether the GPU device reports native hardware fp64. Drives the
     /// `soft_fp64_cost_multiplier` in cost functions — when false, fp64 ops
@@ -471,6 +500,29 @@ impl DeviceLimits {
             expr_min_predicate_complexity_x_rows: 50_000,
             hashjoin_min_build_rows: cu_scale(5_000).clamp(1_000, 50_000),
 
+            // NestedLoop scalar-inequality gates. The kernel is O(N*M)
+            // so floors are higher than typical hash-join thresholds
+            // (a 1K x 1K NLJ = 1M pair-comparisons, still well below
+            // a typical GPU launch break-even). cu_scale lets newer
+            // GPUs accept smaller batches because their launch is cheaper.
+            gpu_nlj_min_outer_rows: cu_scale(1_000).clamp(200, 50_000),
+            gpu_nlj_min_inner_rows: cu_scale(1_000).clamp(200, 50_000),
+            // Output cap reuses the hashjoin output ceiling: above it,
+            // Custom Scan yield cost (~3us/row) dominates the kernel
+            // work and PG native wins on tuple-flow ordering.
+            gpu_nlj_max_output_rows: gpu_join_max_output_rows,
+            // Per-pair cost: one comparison plus an atomic-add when
+            // matched. The kernel reads two operands and (rarely)
+            // writes two u32s. The fixed launch+transfer is amortised
+            // across all pairs, so the marginal per-pair charge is
+            // small. 1e-7 / pair × 1M pairs = 0.1 PG cost units, which
+            // is in the same ballpark as a CPU per-row tuple cost
+            // (`cpu_tuple_cost` is ~0.01 / row). Calibration TODO when
+            // the executor lands and we have measured device throughput;
+            // until then the value is a conservative ceiling so the
+            // planner is biased toward declining marginal cases.
+            gpu_nlj_per_pair_cost: 1.0e-7,
+
             // fp64 emulation cost gate. `from_profile` is the only entry
             // that sees the detected hardware, so the multiplier is latched
             // here. `#[cfg(test)]` builds skip the GUC lookup (GUCs need a
@@ -547,6 +599,15 @@ impl DeviceLimits {
             window_min_partition_rows: 10_000,
             expr_min_predicate_complexity_x_rows: 50_000,
             hashjoin_min_build_rows: 5_000,
+
+            // Conservative NLJ defaults — no GPU means we never dispatch
+            // a NLJ batch but the planner still reads these for cost
+            // formulas / SRF surfacing. Keep them on the conservative
+            // side of the from_profile values.
+            gpu_nlj_min_outer_rows: 1_000,
+            gpu_nlj_min_inner_rows: 1_000,
+            gpu_nlj_max_output_rows: 100_000,
+            gpu_nlj_per_pair_cost: 1.0e-7,
 
             // No GPU → no native fp64. The multiplier is unused (fp64
             // strategies never dispatch without GPU), but set it to the

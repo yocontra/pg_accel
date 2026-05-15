@@ -24,9 +24,9 @@ pub use device_limits::{DeviceLimits, DeviceLimitsSource, device_limits, device_
 pub use formulas::{
     SELF_SCAN_EXTRACT_COST_PER_COLUMN, SELF_SCAN_HEAP_COST_PER_ROW, SelfScanCostBreakdown,
     SelfScanCostInput, apply_fp64_penalty, conservative_input_rows, estimate_self_scan_cost,
-    estimate_threads, hashagg_input_rows_safe, hashjoin_cardinality_safe, optimal_batch_size,
-    self_scan_cost, self_scan_cost_fp64_aware, should_batch, should_use_gpu, sort_limit_present,
-    spatial_polygon_rows_safe,
+    estimate_threads, hashagg_input_rows_safe, hashjoin_cardinality_safe, nlj_break_even,
+    nlj_selectivity_useful, optimal_batch_size, self_scan_cost, self_scan_cost_fp64_aware,
+    should_batch, should_use_gpu, sort_limit_present, spatial_polygon_rows_safe,
 };
 pub use model::{
     CostCoefficients, ExecutorLimits, HardwareCaps, KernelHealthRegistry, MemoryModel,

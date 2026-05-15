@@ -40,6 +40,11 @@ pub enum KernelOp {
     HashJoin,
     /// Dedicated GPU window executor path.
     Window,
+    /// Dedicated GPU NestedLoop scalar-inequality executor path.
+    /// See `pg_accel/src/gpu/nested_loop_ineq.rs` and the launchpad
+    /// notes in `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs`
+    /// (`selected_gpu_nlj_kernel_available`).
+    NestedLoopIneq,
 }
 
 impl KernelOp {
@@ -65,6 +70,7 @@ impl KernelOp {
             AccelStrategy::GpuExpr => Self::Expr,
             AccelStrategy::GpuHashJoin => Self::HashJoin,
             AccelStrategy::GpuWindow => Self::Window,
+            AccelStrategy::GpuNestedLoopIneq => Self::NestedLoopIneq,
         }
     }
 
@@ -80,6 +86,7 @@ impl KernelOp {
             Self::Expr => AccelStrategy::GpuExpr,
             Self::HashJoin => AccelStrategy::GpuHashJoin,
             Self::Window => AccelStrategy::GpuWindow,
+            Self::NestedLoopIneq => AccelStrategy::GpuNestedLoopIneq,
         }
     }
 }

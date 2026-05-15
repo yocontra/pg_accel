@@ -498,13 +498,19 @@ fn accel_strategy_from_i32_known_values() {
     assert_eq!(AccelStrategy::from_i32(6), Some(AccelStrategy::GpuExpr));
     assert_eq!(AccelStrategy::from_i32(7), Some(AccelStrategy::GpuHashJoin));
     assert_eq!(AccelStrategy::from_i32(8), Some(AccelStrategy::GpuWindow));
+    assert_eq!(
+        AccelStrategy::from_i32(9),
+        Some(AccelStrategy::GpuNestedLoopIneq)
+    );
 }
 
 #[test]
 fn accel_strategy_from_i32_unknown_is_invalid() {
     assert_eq!(AccelStrategy::from_i32(0), None);
     assert_eq!(AccelStrategy::from_i32(-1), None);
-    assert_eq!(AccelStrategy::from_i32(9), None);
+    // Discriminant 10 reserved for the next strategy. If a new variant
+    // lands here, bump this test alongside the enum.
+    assert_eq!(AccelStrategy::from_i32(10), None);
     assert_eq!(AccelStrategy::from_i32(100), None);
     assert_eq!(AccelStrategy::from_i32(i32::MAX), None);
     assert_eq!(AccelStrategy::from_i32(i32::MIN), None);

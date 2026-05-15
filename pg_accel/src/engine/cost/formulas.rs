@@ -149,6 +149,85 @@ pub fn conservative_input_rows(rows: f64, tuples: f64) -> usize {
     rows.max(tuples).max(0.0) as usize
 }
 
+/// Whether a NestedLoop scalar-inequality join is GPU-eligible by size.
+///
+/// The kernel does an O(N×M) tiled cross-product scan. To be worth
+/// dispatching, both sides must clear the per-side minimum, the estimated
+/// output must fit under `gpu_nlj_max_output_rows`, and the work product
+/// must exceed the kernel-launch overhead. The break-even formula is:
+///
+/// ```text
+///   outer_rows × inner_rows × per_pair_cost  ≥  launch_overhead
+/// ```
+///
+/// where `launch_overhead` is approximated by `GPU_LAUNCH_OVERHEAD` (the
+/// same baseline used by other planner gates). Returns `true` when the
+/// kernel is expected to amortise its launch over the per-pair work.
+///
+/// The selectivity gate (output ≪ outer × inner) is enforced separately
+/// via `estimated_output_rows ≤ limits.gpu_nlj_max_output_rows`. Near
+/// 100% selectivity the kernel is a Cartesian product and CPU NLJ wins
+/// on memory ordering; the planner declines that case explicitly.
+#[must_use]
+#[inline]
+pub fn nlj_break_even(
+    outer_rows: usize,
+    inner_rows: usize,
+    estimated_output_rows: usize,
+    limits: &DeviceLimits,
+) -> bool {
+    if outer_rows < limits.gpu_nlj_min_outer_rows {
+        return false;
+    }
+    if inner_rows < limits.gpu_nlj_min_inner_rows {
+        return false;
+    }
+    if estimated_output_rows > limits.gpu_nlj_max_output_rows {
+        return false;
+    }
+    // `outer × inner` may not fit in usize on extreme inputs (e.g.
+    // 5M × 5M = 25T). Use f64 for the product so the comparison stays
+    // honest at the upper end. Both inputs are >= gpu_nlj_min_* (≥ 200)
+    // here, so the f64 cast is safe for cost-model arithmetic.
+    let work_product = (outer_rows as f64) * (inner_rows as f64);
+    let amortised_cost = work_product * limits.gpu_nlj_per_pair_cost;
+    amortised_cost >= super::GPU_LAUNCH_OVERHEAD
+}
+
+/// Whether a NestedLoop scalar-inequality join has a useful selectivity gate.
+///
+/// The kernel only wins when the output is much smaller than the
+/// cross-product. At selectivity = 1.0 (every pair matches) the kernel
+/// is a Cartesian product and CPU NLJ wins on memory ordering. This
+/// helper returns `true` when `selectivity <= max_selectivity` — i.e.
+/// when the kernel is genuinely filtering down the pair stream.
+///
+/// `selectivity = estimated_output_rows / (outer_rows * inner_rows)`.
+///
+/// The default `max_selectivity = 0.5` rejects the upper half of the
+/// selectivity spectrum (any join where >= 50% of pairs match falls
+/// back to PG); this is the conservative side of the bench-launchpad
+/// target of "1000 events × non-overlapping windows = 1000 matches"
+/// (selectivity ≈ 1/100, well inside the gate).
+#[must_use]
+#[inline]
+pub fn nlj_selectivity_useful(
+    outer_rows: usize,
+    inner_rows: usize,
+    estimated_output_rows: usize,
+    max_selectivity: f64,
+) -> bool {
+    if outer_rows == 0 || inner_rows == 0 {
+        return false;
+    }
+    let product = (outer_rows as f64) * (inner_rows as f64);
+    if product <= 0.0 {
+        return false;
+    }
+    let selectivity = (estimated_output_rows as f64) / product;
+    selectivity <= max_selectivity
+}
+
 /// Whether a sort path has a LIMIT and therefore avoids the known full-sort
 /// loser lane.
 ///

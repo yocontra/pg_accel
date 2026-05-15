@@ -658,6 +658,22 @@ fn pg_accel_device_limits() -> TableIterator<
             "hashjoin_min_build_rows".into(),
             limits.hashjoin_min_build_rows.to_string(),
         ),
+        (
+            "gpu_nlj_min_outer_rows".into(),
+            limits.gpu_nlj_min_outer_rows.to_string(),
+        ),
+        (
+            "gpu_nlj_min_inner_rows".into(),
+            limits.gpu_nlj_min_inner_rows.to_string(),
+        ),
+        (
+            "gpu_nlj_max_output_rows".into(),
+            limits.gpu_nlj_max_output_rows.to_string(),
+        ),
+        (
+            "gpu_nlj_per_pair_cost".into(),
+            limits.gpu_nlj_per_pair_cost.to_string(),
+        ),
         ("has_native_fp64".into(), limits.has_native_fp64.to_string()),
         (
             "soft_fp64_cost_multiplier".into(),

@@ -705,6 +705,9 @@ pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_
  * so the dispatcher can include just the window API without the rest of
  * the FFI surface). */
 
+/* NLJ scalar-inequality declarations live in pgaccel_nested_loop_ineq.h
+ * (separate header so the dispatcher only depends on the relevant subset). */
+
 /* ── ABI pins ─────────────────────────────────────────────────────── */
 /*
  * Pin struct sizes to detect accidental layout changes on either side of

@@ -962,6 +962,68 @@ unsafe extern "C" {
         results: *mut f32,
         pass_count: *mut usize,
     ) -> PgaccelStatus;
+
+    // -- NestedLoop scalar inequality kernel --
+    //
+    // Mirrors `pgaccel-kernels/include/pgaccel_nested_loop_ineq.h`.
+    // The kernel evaluates one scalar btree inequality (or a BETWEEN-shape
+    // double inequality) per (outer_i, inner_j) pair and emits matching
+    // index pairs into `pairs_out`. Callers MUST strip NULL rows from the
+    // key arrays before invocation (PG INNER-join semantics exclude NULLs).
+    // Overflow is signalled when `*pair_count_out > max_pairs` — the caller
+    // must reject the result and let PG plan natively.
+
+    /// Single-predicate i64 inequality NLJ. `op` selects `<`, `<=`, `>=`, `>`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_nlj_ineq_i64(
+        outer_keys: *const i64,
+        n_outer: usize,
+        inner_keys: *const i64,
+        n_inner: usize,
+        op: i32,
+        pairs_out: *mut u32,
+        max_pairs: usize,
+        pair_count_out: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// Single-predicate f64 inequality NLJ.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_nlj_ineq_f64(
+        outer_keys: *const f64,
+        n_outer: usize,
+        inner_keys: *const f64,
+        n_inner: usize,
+        op: i32,
+        pairs_out: *mut u32,
+        max_pairs: usize,
+        pair_count_out: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// BETWEEN-shape i64 NLJ. Predicate: `inner_lo[j] <= outer[i] <= inner_hi[j]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_nlj_between_i64(
+        outer_keys: *const i64,
+        n_outer: usize,
+        inner_lo: *const i64,
+        inner_hi: *const i64,
+        n_inner: usize,
+        pairs_out: *mut u32,
+        max_pairs: usize,
+        pair_count_out: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// BETWEEN-shape f64 NLJ.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_nlj_between_f64(
+        outer_keys: *const f64,
+        n_outer: usize,
+        inner_lo: *const f64,
+        inner_hi: *const f64,
+        n_inner: usize,
+        pairs_out: *mut u32,
+        max_pairs: usize,
+        pair_count_out: *mut usize,
+    ) -> PgaccelStatus;
 }
 
 // ---------------------------------------------------------------------------
