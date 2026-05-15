@@ -860,17 +860,24 @@ PostgreSQL native execution, and PG-Strom-supported workloads.
   finalize() for INT2/INT4 emits NUMERIC via `int128_to_numeric` (no
   f64 drift) or typed int{2,4}/int8 (no f64 round-trip). 5 typed
   break-even tests + 3 finalize tests pin the routing.
-- Separate planner-injection bug (not Phase 7 scope): `reduce_min_f64`
-  and `reduce_max_f64` at 100K+ get rewritten by PG to
-  `ORDER BY x LIMIT 1` and routed to `Strategy: GpuSort` instead of
-  reduce. Measured 50603 ms dispatch on `reduce_min_f64 @ 1M`. Track
-  separately — the typed dispatch fix doesn't apply because GpuReduce
-  isn't what runs for these cases.
+- Resolved (f70c267): MIN/MAX f64 was getting rewritten by PG's
+  `preprocess_minmax_aggregates` (`planagg.c:316`) into an
+  ORDER-BY-LIMIT-1 sub-plan, and pg_accel was matching that as a
+  top-K candidate and dispatching `Strategy: GpuSort`. Measured
+  50,603 ms outlier on `reduce_min_f64 @ 1M`. Fix:
+  `min_max_rewrite_shape(limit_tuples, num_pathkeys)` in
+  `rel_pathlist.rs` gates `try_inject_gpu_sort_path` before
+  `heap_topk_sort_candidate` with the narrow predicate
+  `limit_tuples in (0, 2) && num_pathkeys == 1`. Verified live:
+  `MIN(vf8) @ 1M` drops to 24-34 ms (native parallel agg), top-K
+  `LIMIT 100` still routes through GpuSort, 6 new boundary unit
+  tests + 2 pgrx integration tests, `RejectionReason::
+  MinMaxRewriteNotASort` counter exposes the gate in stats.
 - Acceptance: f32/i64/f64 reduce matrices at 100K/1M/10M choose GPU
   only where they beat PostgreSQL, no integer precision is lost, and
-  traces show the expected typed kernel instead of accidental soft-fp64.
-  The typed-dispatch piece is closed; the MIN/MAX→GpuSort routing
-  needs separate planner work.
+  traces show the expected typed kernel instead of accidental
+  soft-fp64. Both the typed-dispatch piece (7cfe208) and the
+  MIN/MAX→GpuSort routing (f70c267) are closed.
 
 ### Calibrate `pg_accel.soft_fp64_cost_multiplier`
 
