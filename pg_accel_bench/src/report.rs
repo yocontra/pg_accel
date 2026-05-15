@@ -1599,6 +1599,75 @@ impl BenchReport {
         );
         out.push('\n');
 
+        // ----- Per-dispatch-source split (TODO Phase 0 acceptance) ---------
+        //
+        // Custom Scan dispatch and Function/SRF kernel dispatch share the
+        // headline geomean, but a single combined number hides which path
+        // earned the win. This sub-table prints the geomean / wins / losses
+        // for each dispatch source separately so reviewers can see at a
+        // glance whether the headline is being carried by Custom Scan
+        // execution, the function/SRF kernel hook, or both.
+        let custom_scan_dispatched: Vec<&WorkloadResult> = dispatched
+            .iter()
+            .copied()
+            .filter(|w| !w.function_srf_kernel_dispatched)
+            .collect();
+        let function_srf_dispatched: Vec<&WorkloadResult> = dispatched
+            .iter()
+            .copied()
+            .filter(|w| w.function_srf_kernel_dispatched)
+            .collect();
+
+        out.push_str("### Geomean by Dispatch Source\n\n");
+        out.push_str(
+            "Splits the `overall (GPU-dispatched)` row into two buckets: \
+             pg_accel Custom Scan execution and function/SRF kernel dispatch. \
+             Custom Scan rows have a `Custom Scan` plan node; function/SRF \
+             rows have non-zero `function_kernel_count` without a Custom \
+             Scan node. Either bucket counts as a GPU-dispatched win, but \
+             they exercise different code paths and the report must not \
+             collapse them into a single bar.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "| Dispatch Source | Workloads | Geomean ({speedup_label}) | Sig Wins | \
+             Sig Losses | Total Sig | Not Sig |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|");
+
+        let cs_speedups: Vec<f64> = custom_scan_dispatched
+            .iter()
+            .map(|w| speedup_of(w))
+            .collect();
+        let cs_gm = stats::geomean(&cs_speedups);
+        let cs_counts = classify_significance(&custom_scan_dispatched, family_size, 0.05);
+        let _ = writeln!(
+            out,
+            "| Custom Scan dispatch | {} | {cs_gm:.2}x | {} | {} | {} | {} |",
+            custom_scan_dispatched.len(),
+            cs_counts.sig_wins,
+            cs_counts.sig_losses,
+            cs_counts.total_sig,
+            cs_counts.not_significant,
+        );
+
+        let fn_speedups: Vec<f64> = function_srf_dispatched
+            .iter()
+            .map(|w| speedup_of(w))
+            .collect();
+        let fn_gm = stats::geomean(&fn_speedups);
+        let fn_counts = classify_significance(&function_srf_dispatched, family_size, 0.05);
+        let _ = writeln!(
+            out,
+            "| Function/SRF kernel dispatch | {} | {fn_gm:.2}x | {} | {} | {} | {} |",
+            function_srf_dispatched.len(),
+            fn_counts.sig_wins,
+            fn_counts.sig_losses,
+            fn_counts.total_sig,
+            fn_counts.not_significant,
+        );
+        out.push('\n');
+
         // ----- CRASH summary rows (action_items L) -----
         if !report.crashes.is_empty() {
             out.push_str("### Crashed scales\n\n");
@@ -2339,6 +2408,93 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("geomean across 0 GPU-dispatched workloads"));
         assert!(md.contains("| Function/SRF kernel dispatched | 0 |"));
+    }
+
+    #[test]
+    fn test_geomean_by_dispatch_source_splits_custom_scan_vs_function_srf() {
+        // Custom Scan win: reduce_sum_i64-style row with a Custom Scan plan
+        // and runtime kernel delta.
+        let mut custom_scan_workload =
+            mock_workload_result("gpu_reduce_sum_i64", 1_000_000, 5.0, 50.0);
+        custom_scan_workload.category = "gpu_reduce".to_owned();
+        custom_scan_workload.kernel_class = "reduce".to_owned();
+        custom_scan_workload.plan_selected = true;
+        custom_scan_workload.gpu_kernel_dispatched = true;
+        custom_scan_workload.function_srf_kernel_dispatched = false;
+        custom_scan_workload.dispatch_counter_captured = true;
+        custom_scan_workload.gpu_kernel_execution_delta = 1;
+        custom_scan_workload.pg_accel_rows_dispatched_delta = 1_000_000;
+        custom_scan_workload.pg_accel_gpu_rows_processed_delta = 1_000_000;
+        custom_scan_workload.accel_output_rows_consumed = 1;
+        custom_scan_workload.plan_snippet =
+            Some("Custom Scan (GpuAccelReduce)\n  Strategy: GpuReduce\n".to_owned());
+
+        // Function/SRF win: H3 bulk row with no Custom Scan plan but kernel
+        // delta and consumed output.
+        let mut function_srf_workload = mock_workload_result("h3_bulk", 1_000_000, 7.0, 70.0);
+        function_srf_workload.category = "gpu_h3".to_owned();
+        function_srf_workload.kernel_class = "h3_latlng".to_owned();
+        function_srf_workload.plan_selected = false;
+        function_srf_workload.gpu_kernel_dispatched = false;
+        function_srf_workload.function_srf_kernel_dispatched = false;
+        function_srf_workload.dispatch_counter_captured = true;
+        function_srf_workload.gpu_kernel_execution_delta = 1;
+        function_srf_workload.accel_output_rows_consumed = 12;
+        function_srf_workload.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
+             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+                .to_owned(),
+        );
+
+        let report = mock_report(vec![custom_scan_workload, function_srf_workload]);
+        let md = report.to_markdown();
+
+        // The split table must exist and credit each path separately.
+        assert!(
+            md.contains("### Geomean by Dispatch Source"),
+            "report missing Geomean by Dispatch Source section: {md}"
+        );
+        // One Custom Scan workload, one function/SRF workload.
+        assert!(
+            md.contains("| Custom Scan dispatch | 1 |"),
+            "Custom Scan dispatch row count wrong: {md}"
+        );
+        assert!(
+            md.contains("| Function/SRF kernel dispatch | 1 |"),
+            "Function/SRF kernel dispatch row count wrong: {md}"
+        );
+        // The combined headline still counts both.
+        assert!(
+            md.contains("geomean across 2 GPU-dispatched workloads"),
+            "combined headline must still see both workloads: {md}"
+        );
+    }
+
+    #[test]
+    fn test_geomean_by_dispatch_source_renders_zero_buckets() {
+        // No GPU-dispatched workloads at all: both buckets must still render
+        // with zero counts and a NaN geomean so the report shape is stable.
+        let mut workload = mock_workload_result("native_only", 100_000, 10.0, 10.0);
+        workload.plan_selected = false;
+        workload.gpu_kernel_dispatched = false;
+        workload.function_srf_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.plan_snippet = Some("Aggregate\n  -> Seq Scan on public.bench\n".to_owned());
+        let report = mock_report(vec![workload]);
+
+        let md = report.to_markdown();
+        assert!(
+            md.contains("### Geomean by Dispatch Source"),
+            "split table must render even when nothing is dispatched: {md}"
+        );
+        assert!(
+            md.contains("| Custom Scan dispatch | 0 |"),
+            "Custom Scan dispatch zero bucket missing: {md}"
+        );
+        assert!(
+            md.contains("| Function/SRF kernel dispatch | 0 |"),
+            "Function/SRF kernel dispatch zero bucket missing: {md}"
+        );
     }
 
     #[test]
