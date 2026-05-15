@@ -598,16 +598,32 @@ raster map algebra, and prepared geometry structures.
 - Evidence: other H3 operations are not automatically wins:
   `h3_cell_to_parent` and `h3_grid_distance` were near parity after warmup
   through the scales observed on 2026-05-13.
-- Latest focused repros: `h3_bulk @ 100K` in
-  `benchmarks/artifacts/crash-repro-1778669901` measured 154.18 ms vs
-  638.93 ms (`4.14x`), and `h3_resolution_sweep @ 100K` in
-  `benchmarks/artifacts/crash-repro-1778669909` measured 109.14 ms vs
-  603.76 ms (`5.53x`). Both reports currently say geomean across `0`
-  dispatched workloads because function/SRF GPU execution is not represented
-  as a Custom Scan.
-- Work: lock in H3 plan-shape tests, result diffs, operation-specific
-  benchmark thresholds, function/SRF dispatch counters, and bounded
-  cold-start cost.
+- Latest focused repros: `h3_bulk @ 100K` measured 154.18 ms vs
+  638.93 ms (`4.14x`), and `h3_resolution_sweep @ 100K` measured 109.14
+  ms vs 603.76 ms (`5.53x`). The "geomean across 0 dispatched workloads"
+  artifact is resolved (`3d6e6b0 feat(bench): split geomean by dispatch
+  source` now credits function/SRF kernel dispatch alongside Custom Scan
+  dispatch).
+- Landed (ef6d46c): `H3LaneClass` classifier in
+  `pg_accel_bench/src/workloads/mod.rs` distinguishes winning lanes
+  (`h3_bulk`, `h3_resolution_sweep`, `h3_latlng_res15`,
+  `h3_srf_grid_disk`, `h3_fp64_ops`) from parity lanes
+  (`h3_cell_to_parent`, `h3_grid_distance`, `h3_dist_near`,
+  `h3_dist_far`, `h3_parent_deep`). 16 unit tests pin canonical
+  membership and dispatch-classification expectations.
+  `pg_accel_bench/src/h3_protection_test.rs` adds integration tests
+  (gated behind `--features integration_tests`, live PG required)
+  asserting `pg_accel_kernel_executions()` delta for winners is
+  non-zero, parity lane delta is zero, result-set equality across
+  `pg_accel.enabled=on/off`, and a warm dispatch latency budget.
+- Remaining work: a runner-side gate in
+  `pg_accel_bench/src/report.rs::render_geomean_headline` that consumes
+  `h3_lane_class()` and fails the bench output when a Winner misses
+  its `min_warm_speedup`. The classifier is the source of truth; this
+  hard CI gate is the next step. Also: cold-start cost remains
+  unbounded by design (per Phase 2 the first compile of
+  `pgaccel_h3_lat_lng_to_cell_bulk` can take minutes); only warm
+  dispatch latency is gated today.
 - Acceptance: winning H3 operations remain crash-free, keep GPU dispatch,
   and meet speedup thresholds on warm runs; parity-only H3 operations are
   declined or costed honestly.
