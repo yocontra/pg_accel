@@ -1,5 +1,7 @@
 use super::Workload;
 
+const ROW_SCALES: &[usize] = &[10_000, 100_000];
+
 /// Variable-output H3 SRF guard: table-driven `h3_grid_disk` expansion.
 ///
 /// The accelerated query keeps the registered `h3_grid_disk(cell, k)`
@@ -82,6 +84,10 @@ impl Workload for H3SrfGridDisk {
              ) expanded"
                 .to_owned(),
         )
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        ROW_SCALES
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

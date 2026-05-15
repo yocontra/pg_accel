@@ -333,6 +333,7 @@ fn leading_indent(line: &str) -> usize {
 /// statement fails, or any EXPLAIN query returns an error.
 pub fn run_audit(connection: &str) -> Result<bool, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
+    client.simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")?;
     // 1. Idempotent fixture setup.
     for stmt in COMMON_FIXTURES {
         client

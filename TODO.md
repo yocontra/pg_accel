@@ -75,13 +75,53 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `reduce_sum_i64 @ 1M` (`0.48x`) after the release-install rerun. The
   harness must explain cache, connection, GUC, plan, and ordering
   differences before using non-dispatch timings as benchmark conclusions.
+- Evidence: the 2026-05-14 1M diagnosis found that fresh benchmark
+  backends treated `SET pg_accel.enabled = on` as a placeholder GUC until a
+  pg_accel SQL function was called. Warmups for many generic workloads could
+  therefore run as plain PostgreSQL, while the measured accel phase loaded
+  pg_accel via `pg_accel_stats()` immediately before counter capture. Plan
+  capture had the same issue and could record native plans from a backend
+  where planner hooks were never installed.
+- Evidence: after preloading pg_accel before accel-side warmup and plan
+  capture, `ssbm_q2_3 @ 1M` remained a planner-declined no-dispatch row:
+  `plan_selected=false`, `gpu_kernel_dispatched=false`, zero dispatch
+  counters, and identical native `GroupAggregate` plans. The accel-side
+  `EXPLAIN ANALYZE` showed planning time around 37-40 ms with hooks enabled,
+  versus about 0.7 ms in the previous not-loaded capture and about 0.2 ms
+  with `pg_accel.enabled=off` in the same loaded backend. No-dispatch 1M
+  losses are therefore planner-hook/admission overhead, not GPU kernel
+  losses.
+- Evidence: after repairing the SSBM part generator so Q2.3 is no longer an
+  empty dimension-filter query, the focused `ssbm_q2_3 @ 1M` repro still
+  classified as `planner_declined` with zero GPU counters and measured about
+  53 ms accelerated vs 22 ms PostgreSQL parallel. That is the real 1M SSBM
+  blocker: no GPU-resident star-schema path is selected, while enabled
+  planner hooks add overhead before declining.
+- Evidence: the 2026-05-14 full-run pass showed the default 10x/5x suite
+  still contains proof lanes that dominate wall time even when they are
+  stable. `h3_bulk @ 10M` spent about 76-101s per PostgreSQL baseline sample
+  while the accelerated path was about 4.9-5.7s; `h3_resolution_sweep @ 10M`
+  spent about 72-88s baseline vs 1.0-1.6s accelerated; and
+  `h3_latlng_res15 @ 10M` spent about 64-66s baseline vs 11-12s
+  accelerated. Several spatial repro and full-sort parity cells also spend
+  multiple seconds per sample at 10M rows.
 - Work: add bounded telemetry rotation for `pg_accel_otel.jsonl`, resumable
   benchmark manifests, artifact indexes, explicit dispatch classification,
   device metadata, telemetry limits, GUC snapshots, crash logs, plan dumps,
-  correctness diffs, and markdown/JSON summaries.
+  correctness diffs, markdown/JSON summaries, and workload lane tags that
+  split bounded default smoke runs from long rigorous/proof runs.
+- Work: keep pg_accel preloaded on accel-side benchmark and plan-capture
+  backends before warmup; keep the PostgreSQL baseline backend unloaded so it
+  remains a true native comparison. Add a regression test or smoke check that
+  proves accel warmup/capture backends have planner hooks installed.
+- Work: add a planner-hook overhead audit for no-dispatch queries. Star
+  schemas, expression-only filters, and native aggregate rows must either
+  get an actual GPU-resident path or return through a cheap early decline
+  path with near-native planning time.
 - Acceptance: a full benchmark cannot create unbounded logs, can be resumed
-  or audited from saved artifacts, and reports every crash/skip without
-  relying on terminal scrollback.
+  or audited from saved artifacts, reports every crash/skip without relying
+  on terminal scrollback, and keeps the default suite bounded while preserving
+  rigorous coverage for long winning/proof lanes.
 
 ### Live extension install provenance
 
@@ -408,9 +448,22 @@ window work.
 ### Real GPU `GpuPreAgg`
 
 - Scope: build real GPU `PreAgg` from the star-schema recognizer.
+- Evidence: the 2026-05-14 1M diagnosis shows SSBM is not a GPU performance
+  result yet. `ssbm_q2_3 @ 1M` selects no pg_accel path, dispatches zero GPU
+  kernels, and still loses because planner hooks add tens of milliseconds
+  before declining to the same native PostgreSQL plan.
+- Evidence: before the SSBM part-generator repair, the synthetic fixture was
+  invalid for Q2.3: `p_brand1 = 'MFGR#2239'` matched zero `ssbm_part` rows
+  because mfgr/category/brand were correlated by `i % 5` and `i % 40`.
+  Q2.1 and Q4.3 category filters had the same risk. The generator now varies
+  mfgr, category, and brand independently enough for the benchmark constants,
+  but cardinality checks still need to be enforced in the harness.
 - Work: support dimension joins, group keys, partial aggregates,
   cardinality reduction, GPU-resident fact batches, and finalization without
   heap walking under a pg_accel plan name.
+- Work: add setup or report sanity checks that flag zero-row dimension filters
+  before timing, then keep SSBM work focused on the missing GPU-resident
+  `GpuPreAgg` path rather than treating no-dispatch rows as GPU losses.
 - Acceptance: star-schema benchmark queries select `GpuPreAgg`, dispatch GPU
   kernels, match PostgreSQL output, and beat PostgreSQL parallel plans.
 
@@ -542,6 +595,16 @@ raster map algebra, and prepared geometry structures.
   for the project mission. `h3_bulk @ 10M` ran around 6.0s accelerated vs
   90-91s PostgreSQL parallel, and `h3_resolution_sweep @ 1M` ran around
   0.32s vs 8.4s.
+- Evidence: the 2026-05-14 full-run pass confirmed `h3_bulk` is still a
+  strong win at 10K/100K/1M and a long 10M proof lane: 10K was about 8 ms vs
+  51-64 ms, 100K was about 85-107 ms vs 523-610 ms, 1M was about
+  603-647 ms vs 6.8-7.2s, and the first 10M samples were about 4.9-5.7s vs
+  76-101s.
+- Evidence: the same pass showed `h3_resolution_sweep @ 10M` at about
+  1.0-1.6s accelerated vs 72-88s PostgreSQL baseline and
+  `h3_latlng_res15 @ 10M` at about 11-12s accelerated vs 64-66s baseline.
+  These are valid H3 wins but should live in a rigorous/proof lane, not make
+  the default suite take tens of minutes per workload family.
 - Evidence: other H3 operations are not automatically wins:
   `h3_cell_to_parent` and `h3_grid_distance` were near parity after warmup
   through the scales observed on 2026-05-13.
@@ -582,9 +645,17 @@ raster map algebra, and prepared geometry structures.
 
 - Scope: complete H3 SRF planning for target-list cases that include more
   than one SRF or mix SRF output with ordinary projected columns.
+- Evidence: before the large-input planner gate, the 2026-05-14 focused
+  `h3_srf_grid_disk @ 100K` repro selected the per-row target-list SRF path
+  and ran around 93-95s accelerated vs about 4.1s through h3-pg. The current
+  mitigation declines variable-length SRF target-list CustomPaths for large
+  estimated inputs and caps the default benchmark scales for this workload,
+  but that is a gate, not a batched SRF implementation.
 - Work: implement PostgreSQL-compatible row multiplication, NULL handling,
-  and output ordering for multi-SRF target lists, or reject unsupported
-  shapes with a visible planner-decline reason.
+  and output ordering for multi-SRF target lists; add a batched
+  variable-output SRF executor before re-enabling GPU dispatch for large
+  `h3_grid_disk` target-list shapes, or reject unsupported shapes with a
+  visible planner-decline reason.
 - Acceptance: multi-SRF H3 target-list queries either dispatch with
   correctness diffs against PostgreSQL/h3-pg or decline without selected
   pg_accel plan labels.
@@ -594,6 +665,12 @@ raster map algebra, and prepared geometry structures.
 - Evidence: most non-crashing spatial polygon/selectivity cells lost by
   10-60%, even when stable. 10K warmup also showed visible cold
   JIT/dispatch spikes.
+- Evidence: the 2026-05-14 full-run pass still had sub-parity spatial cells
+  after the crash gates: simple 90% worker-4 repros at 100K were about
+  35-66 ms accelerated vs 20-22 ms PostgreSQL, cooperative 1024 90%
+  worker-4 repros at 1M were about 155-188 ms vs 140-158 ms, and
+  high-selectivity/polygon-heavy 10M cells were mostly parity while taking
+  multi-second samples.
 - Root cause target: geometry serialization/staging and selectivity likely
   dominate for simple or moderately selective predicates; polygon vertex
   count alone is not enough to predict break-even.
@@ -759,6 +836,11 @@ PostgreSQL native execution, and PG-Strom-supported workloads.
   parallel. In contrast, some f64 min/max and multi-reduce paths were near
   parity, which points at type dispatch and staging rather than all
   reductions being bad.
+- Evidence: the 2026-05-14 full-run pass showed the issue is broader than
+  accidental f64 dispatch for integer/f32 sums. `reduce_min_f64 @ 1M` was
+  about 142-186 ms accelerated vs 16-21 ms PostgreSQL, `reduce_max_f64 @ 1M`
+  was about 135-178 ms vs 17-18 ms, and `reduce_sum_f32 @ 10M` was about
+  98-128 ms vs 84-87 ms.
 - Root cause target: the aggregate executor extracted numeric inputs into
   `Vec<f64>` and tried the f64 path first for SUM/AVG/MIN/MAX. On Metal,
   soft-fp64 made the f64 path "available", so f32 and i64 SUM could pay

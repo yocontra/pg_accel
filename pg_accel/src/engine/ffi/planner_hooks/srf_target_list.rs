@@ -99,6 +99,13 @@ use crate::engine::gucs;
 use crate::engine::registry::{self, OutputShape};
 use crate::engine::stats;
 
+// The current target-list SRF executor dispatches one variable-length SRF
+// expansion per input row. Bench evidence from 2026-05-14 showed
+// h3_srf_grid_disk @ 100K selecting this path at ~93-95s vs native PG at
+// ~4.1s. Keep tiny correctness/proof plans eligible until a batched SRF
+// expansion executor lands.
+const SRF_TLIST_VARLEN_MAX_GPU_INPUT_ROWS: f64 = 5_000.0;
+
 /// `create_upper_paths_hook` arm for `UPPERREL_FINAL`.
 ///
 /// Inspects the input rel's `pathlist` for `T_ProjectSetPath` nodes
@@ -429,6 +436,20 @@ unsafe fn wrap_projectset_path(
         OutputShape::Record { field_count } => (OutputShapeDisc::Record, field_count),
         OutputShape::VarLen => (OutputShapeDisc::VarLen, 0),
     };
+    let input_rows = unsafe { (*subpath).rows };
+    if matches!(entry.output_shape, OutputShape::VarLen)
+        && input_rows.is_finite()
+        && input_rows >= SRF_TLIST_VARLEN_MAX_GPU_INPUT_ROWS
+    {
+        pgrx::debug1!(
+            "pg_accel: srf_target_list: declining variable-length SRF {} \
+             for estimated input rows={} (limit={})",
+            entry.name,
+            input_rows,
+            SRF_TLIST_VARLEN_MAX_GPU_INPUT_ROWS,
+        );
+        return false;
+    }
 
     let priv_data = SrfTargetListPrivData {
         fn_oid: srf_fn_oid,
@@ -762,6 +783,19 @@ mod tests {
         Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
     }
 
+    fn explain_text(sql: &str) -> String {
+        Spi::connect(|client| {
+            let mut lines: Vec<String> = Vec::new();
+            let table = client.select(sql, None, &[]).expect("EXPLAIN query ok");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        })
+    }
+
     /// `SELECT id, h3_grid_disk(cell, 1) FROM cells` with 2 input
     /// rows must expand to 2 * 7 = 14 output rows (k=1 disk = 7 cells
     /// per non-pentagon input). Verifies the multi-row expansion
@@ -812,23 +846,10 @@ mod tests {
         )
         .expect("setup ok");
 
-        let plan = Spi::connect(|client| {
-            let mut lines: Vec<String> = Vec::new();
-            let table = client
-                .select(
-                    "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \
-                     FROM _srf_tlist_explain2",
-                    None,
-                    &[],
-                )
-                .expect("EXPLAIN query ok");
-            for row in table {
-                if let Some(line) = row.get::<String>(1).ok().flatten() {
-                    lines.push(line);
-                }
-            }
-            lines.join("\n")
-        });
+        let plan = explain_text(
+            "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \
+             FROM _srf_tlist_explain2",
+        );
         assert!(
             !plan.is_empty(),
             "EXPLAIN returned no rows (likely backend crash); the SRF-in-target-list \
@@ -847,7 +868,42 @@ mod tests {
         assert!(
             !plan.contains("ProjectSet"),
             "Expected EXPLAIN plan to NOT contain native 'ProjectSet' (replaced by \
-             GpuAccelSrfTargetList); got:\n{plan}",
+            GpuAccelSrfTargetList); got:\n{plan}",
+        );
+    }
+
+    /// Larger analyzed variable-length target-list SRF scans must stay native
+    /// until the executor batches expansion work instead of dispatching once
+    /// per input row.
+    #[pg_test]
+    fn pg_test_srf_tlist_large_varlen_declines_custom_scan() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+        Spi::run(
+            "CREATE TEMP TABLE _srf_tlist_large AS \
+             SELECT i AS id, '8928308280fffff'::h3index AS cell \
+             FROM generate_series(1, 6000) AS g(i); \
+             ANALYZE _srf_tlist_large",
+        )
+        .expect("setup ok");
+
+        let plan = explain_text(
+            "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \
+             FROM _srf_tlist_large",
+        );
+        assert!(
+            !plan.is_empty(),
+            "EXPLAIN returned no rows for large SRF target-list decline test",
+        );
+        assert!(
+            !plan.contains("GpuAccelSrfTargetList"),
+            "Expected large variable-length SRF target-list scan to stay native; got:\n{plan}",
+        );
+        assert!(
+            plan.contains("ProjectSet"),
+            "Expected native ProjectSet for large variable-length SRF target-list scan; got:\n{plan}",
         );
     }
 

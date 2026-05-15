@@ -4,8 +4,8 @@ default:
 
 # === Setup ===
 
-# Install repo-local PostgreSQL and Rust tooling (run once on a fresh clone).
-setup: setup-tools setup-pg-source setup-pgrx setup-hooks
+# Install repo-local PostgreSQL, test extensions, and Rust tooling (run once on a fresh clone).
+setup: setup-tools setup-pg-source setup-pg-extensions setup-pgrx setup-hooks
     @echo "Setup complete. Run 'ACPP_BACKEND=cuda just setup-gpu' on CUDA Linux, or 'ACPP_BACKEND=metal just setup-gpu' on Apple Silicon."
 
 # Install prek (Rust-native pre-commit drop-in) and wire up its git hooks
@@ -49,14 +49,15 @@ setup-system-deps:
         Linux)
             printf '%s\n' \
                 "Install build prerequisites with your distro package manager. For Ubuntu/Debian:" \
-                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libreadline-dev zlib1g-dev flex bison pkg-config" \
+                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libreadline-dev zlib1g-dev flex bison pkg-config postgresql-17-postgis-3" \
                 "" \
                 "For CUDA runs, install the NVIDIA driver + CUDA toolkit, then run:" \
                 "  ACPP_BACKEND=cuda just setup-gpu"
             ;;
         Darwin)
             printf '%s\n' \
-                "Install Xcode command line tools and provide a recent LLVM/lld toolchain via LLVM_PREFIX/ACPP_LLD_PATH." \
+                "Install Xcode command line tools and Homebrew packages: brew install postgis." \
+                "Provide a recent LLVM/lld toolchain via LLVM_PREFIX/ACPP_LLD_PATH." \
                 "Then run:" \
                 "  ACPP_BACKEND=metal just setup-gpu-metal-headers" \
                 "  ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu"
@@ -79,6 +80,25 @@ setup-pg-source pg="":
     fi
     for pg in $majors; do
         scripts/pg_source.sh build "$pg"
+    done
+
+# Install h3, postgis, and postgis_raster into repo-local PostgreSQL.
+setup-pg-extensions pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    pg_arg="{{pg}}"
+    if [ -n "$pg_arg" ]; then
+        majors="${pg_arg#pg}"
+    else
+        majors="$(pg_accel_supported_pg_majors)"
+    fi
+    for pg in $majors; do
+        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+            continue
+        fi
+        scripts/pg_source.sh build "$pg"
+        scripts/setup_pg_extensions.sh "$pg"
     done
 
 # Alias for building one source PostgreSQL major/version.
@@ -293,7 +313,8 @@ test-unit pg="":
         exit 0
     fi
     pg_accel_require_pgrx_pg_config "$pg"
-    cargo pgrx test --package pg_accel "pg$pg"
+    scripts/setup_pg_extensions.sh "$pg"
+    RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" cargo pgrx test --package pg_accel "pg$pg"
 
 # Run pgrx unit tests against every supported PG major.
 test-matrix:
@@ -304,8 +325,7 @@ test-matrix:
         if pg_accel_skip_if_preview_without_pgrx "$pg"; then
             continue
         fi
-        pg_accel_require_pgrx_pg_config "$pg"
-        cargo pgrx test --package pg_accel "pg$pg"
+        just test-unit "$pg"
     done
 
 # Run all tests: pgrx unit-test matrix
@@ -330,9 +350,11 @@ bench iterations="10" warmup="5" pg="":
         exit 0
     fi
     pg_accel_require_pgrx_pg_config "$pg"
+    just install-pg-accel "$pg"
     just log-rails "$pg"
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
-    PG_ACCEL_PG_MAJOR="$pg" cargo run -p pg_accel_bench --release -- run \
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run -p pg_accel_bench --release -- run \
         --iterations {{iterations}} --warmup {{warmup}} \
         --connection "host=localhost port=$port dbname=postgres" \
         --format markdown --timing raw --skip-guc-verify
@@ -354,9 +376,11 @@ bench-rigorous iterations="30" warmup="5" pg="":
         exit 0
     fi
     pg_accel_require_pgrx_pg_config "$pg"
+    just install-pg-accel "$pg"
     just log-rails "$pg"
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
-    PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- run \
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- run \
         --iterations {{iterations}} --warmup {{warmup}} \
         --connection "host=localhost port=$port dbname=postgres" \
         --format markdown \
@@ -579,6 +603,12 @@ sql-test pg="":
     else
         pg="${requested#pg}"
     fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    scripts/setup_pg_extensions.sh "$pg"
     PG_ACCEL_PG_MAJOR="$pg" sql/tests/run_all.sh
 
 # Build installable pgrx package
@@ -597,6 +627,7 @@ package pg="":
         exit 0
     fi
     pg_accel_require_pgrx_pg_config "$pg"
+    scripts/setup_pg_extensions.sh "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
     cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
     cp NOTICE "target/release/pg_accel-pg$pg/NOTICE"
@@ -616,6 +647,29 @@ package-matrix:
         cp NOTICE "target/release/pg_accel-pg$pg/NOTICE"
     done
 
+# Install the current pg_accel release build into the pgrx-managed cluster and
+# restart the cluster so shared_preload_libraries maps the same binary.
+install-pg-accel pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    scripts/setup_pg_extensions.sh "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    cargo pgrx stop --package pg_accel "pg$pg" >/dev/null 2>&1 || true
+    PG_CONFIG="$pg_config" cargo pgrx install --package pg_accel --release --no-default-features --features "pg$pg" --pg-config "$pg_config"
+    cargo pgrx start --package pg_accel "pg$pg"
+
 # Install into the pgrx-managed cluster and prove a fresh CREATE EXTENSION path.
 extension-smoke pg="":
     #!/usr/bin/env bash
@@ -632,9 +686,7 @@ extension-smoke pg="":
         exit 0
     fi
     pg_accel_require_pgrx_pg_config "$pg"
-    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-    cargo pgrx install --package pg_accel --no-default-features --features "pg$pg" --pg-config "$pg_config"
-    cargo pgrx start --package pg_accel "pg$pg"
+    just install-pg-accel "$pg"
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
     : "${port:?could not read pgrx PostgreSQL port}"
     db="pg_accel_smoke_$pg"

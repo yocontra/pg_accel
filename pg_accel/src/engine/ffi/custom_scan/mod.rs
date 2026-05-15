@@ -887,7 +887,7 @@ fn build_partial_emitters(
         let emitter: Box<dyn PartialEmitter> = match col.op {
             AggOp::Count => Box::new(CountEmitter),
             AggOp::Sum if col.transtype_oid == pg_sys::INT8OID => Box::new(IntegerSumPromotion),
-            AggOp::Sum if col.transtype_oid == pg_sys::NUMERICOID => {
+            AggOp::Sum if unsupported_partial_sum_transtype(col.transtype_oid) => {
                 pgrx::error!(
                     "pg_accel: partial SUM(bigint/numeric) is not supported; planner should \
                      have declined this path before executor init"
@@ -914,6 +914,11 @@ fn build_partial_emitters(
         out.push(emitter);
     }
     out
+}
+
+#[must_use]
+fn unsupported_partial_sum_transtype(transtype_oid: pg_sys::Oid) -> bool {
+    transtype_oid == pg_sys::NUMERICOID || transtype_oid == pg_sys::INTERNALOID
 }
 
 /// Convert a window `CustomPath` into a `CustomScan` plan node.

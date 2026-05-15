@@ -48,6 +48,8 @@ mod raster_variants;
 // --- GPU Window ---
 mod window_analytics;
 mod window_variants;
+
+use crate::config::ROW_SCALES;
 // --- SSBM ---
 mod ssbm;
 // --- Mixed ---
@@ -158,6 +160,16 @@ pub trait Workload: Send + Sync {
     /// function whose name is not in the pg_accel adapter's list.
     fn baseline_query_sql(&self) -> Option<String> {
         None
+    }
+
+    /// Row scales to run for this workload in the default benchmark suite.
+    ///
+    /// Most workloads use the global four-scale matrix. A workload may cap
+    /// scales when the benchmark itself has unbounded native runtime, but
+    /// every returned scale must come from [`ROW_SCALES`] so reports stay
+    /// comparable.
+    fn row_scales(&self) -> &'static [usize] {
+        ROW_SCALES
     }
 
     /// SQL statements to tear down benchmark tables.
@@ -779,6 +791,38 @@ mod tests {
     #[test]
     fn test_find_workload_not_found() {
         assert!(find_workload("nonexistent_workload").is_none());
+    }
+
+    #[test]
+    fn test_every_workload_row_scales_are_supported_and_sorted() {
+        for w in &all_workloads() {
+            let scales = w.row_scales();
+            assert!(
+                !scales.is_empty(),
+                "workload '{}' has no row scales",
+                w.name()
+            );
+            for &rows in scales {
+                assert!(
+                    ROW_SCALES.contains(&rows),
+                    "workload '{}' uses unsupported row scale {rows}",
+                    w.name(),
+                );
+            }
+            for pair in scales.windows(2) {
+                assert!(
+                    pair[0] < pair[1],
+                    "workload '{}' row scales must be sorted and unique: {scales:?}",
+                    w.name(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_h3_srf_grid_disk_caps_default_scales() {
+        let wl = find_workload("h3_srf_grid_disk").expect("registered h3_srf_grid_disk");
+        assert_eq!(wl.row_scales(), &[10_000, 100_000]);
     }
 
     // -----------------------------------------------------------------------

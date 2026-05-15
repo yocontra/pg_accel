@@ -103,7 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           brew update
-          brew install just llvm@20 lld@20 boost libomp
+          brew install just llvm@20 lld@20 boost libomp postgis
 
       - name: Install cargo tools
         if: steps.pg-support.outputs.skip != 'true'
@@ -132,6 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           just setup-pg-source ${{ matrix.pg }}
+          just setup-pg-extensions ${{ matrix.pg }}
           just setup-pgrx ${{ matrix.pg }}
 
       - name: Run PostgreSQL ${{ matrix.pg }} Rust gate

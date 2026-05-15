@@ -74,7 +74,7 @@ impl GpuHashTable {
             return None;
         }
         let outer_count = outer_null_mask.len();
-        let buf_len = max_matches * 2;
+        let buf_len = max_matches.checked_mul(2)?;
         let mut match_pairs = vec![0u32; buf_len];
         let mut match_count: usize = 0;
 
@@ -96,10 +96,44 @@ impl GpuHashTable {
             return None;
         }
 
-        let pairs = match_pairs[..match_count * 2]
+        let pair_u32s = probe_pair_slice_len(match_count, max_matches, match_pairs.len())?;
+        let pairs = match_pairs[..pair_u32s]
             .chunks_exact(2)
             .map(|c| (c[0], c[1]))
             .collect();
         Some(pairs)
+    }
+}
+
+#[must_use]
+fn probe_pair_slice_len(
+    match_count: usize,
+    max_matches: usize,
+    match_buffer_u32s: usize,
+) -> Option<usize> {
+    if match_count > max_matches {
+        return None;
+    }
+    let pair_u32s = match_count.checked_mul(2)?;
+    (pair_u32s <= match_buffer_u32s).then_some(pair_u32s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::probe_pair_slice_len;
+
+    #[test]
+    fn probe_pair_slice_len_rejects_over_reported_match_count() {
+        assert_eq!(probe_pair_slice_len(4, 4, 8), Some(8));
+        assert_eq!(probe_pair_slice_len(5, 4, 8), None);
+    }
+
+    #[test]
+    fn probe_pair_slice_len_rejects_overflow_and_short_buffers() {
+        assert_eq!(
+            probe_pair_slice_len((usize::MAX / 2) + 1, usize::MAX, usize::MAX),
+            None
+        );
+        assert_eq!(probe_pair_slice_len(4, 4, 7), None);
     }
 }

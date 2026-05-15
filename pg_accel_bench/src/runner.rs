@@ -1383,6 +1383,7 @@ pub fn run_with_timing_and_cache(
         Client::connect(connection, NoTls)?,
         Client::connect(connection, NoTls)?,
     ];
+    prime_pg_accel_backend(&mut mode_clients[0])?;
     let mut counter_before: Option<DispatchStatsSnapshot> = None;
     let mut counter_capture_error: Option<String> = None;
     let mut accel_output_rows_consumed = 0_u64;
@@ -1523,6 +1524,14 @@ fn capture_dispatch_stats(
         gpu_rows_processed: i64_to_u64(row.get(3)),
         gpu_kernel_executions: i64_to_u64(row.get(4)),
     })
+}
+
+fn prime_pg_accel_backend(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    // `SET pg_accel.enabled` alone can be a placeholder GUC in a fresh
+    // backend. Touch an extension function before warmup/plan capture so
+    // `_PG_init` installs planner hooks before any timed iteration.
+    client.simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")?;
+    Ok(())
 }
 
 fn i64_to_u64(value: i64) -> u64 {
@@ -1693,8 +1702,9 @@ const MIN_ITERATIONS: usize = 10;
 
 /// Build a full report by running every workload at all row scales.
 ///
-/// Each workload is run at 1K, 10K, 100K, and 1M rows. Results include
-/// hardware profile auto-detection and GUC settings capture.
+/// Each workload is run at its declared row scales, defaulting to the global
+/// 10K, 100K, 1M, and 10M matrix. Results include hardware profile
+/// auto-detection and GUC settings capture.
 ///
 /// # Errors
 ///
@@ -1749,11 +1759,12 @@ pub fn run_all_with_config(
 
     initialize_plans_file(config);
 
-    let mut results = Vec::with_capacity(workloads.len() * ROW_SCALES.len());
+    let result_capacity = workloads.iter().map(|w| w.row_scales().len()).sum();
+    let mut results = Vec::with_capacity(result_capacity);
     let mut crashes: Vec<report::CrashedScale> = Vec::new();
 
     for w in workloads {
-        for &rows in ROW_SCALES {
+        for &rows in w.row_scales() {
             eprintln!("\n[scale] {} @ {} rows", w.name(), format_rows(rows));
             match run_workload_with_config(connection, w.as_ref(), rows, config, artifacts.as_ref())
             {
@@ -2614,7 +2625,10 @@ fn capture_plan_snippet(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
     match mode {
-        BenchMode::Accel => client.batch_execute("SET pg_accel.enabled = on")?,
+        BenchMode::Accel => {
+            prime_pg_accel_backend(&mut client)?;
+            client.batch_execute("SET pg_accel.enabled = on")?;
+        }
         BenchMode::PgParallel => client.batch_execute("SET pg_accel.enabled = off")?,
     }
     client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
@@ -2725,6 +2739,7 @@ fn capture_plan(
     path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
+    prime_pg_accel_backend(&mut client)?;
     client.batch_execute("SET pg_accel.enabled = on")?;
     client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
     for sql in workload.pre_query_sql() {

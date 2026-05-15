@@ -39,5 +39,6 @@ Thumbs.db
 
 # Test artifacts
 /tmp/.pgaccel_*
+benchmarks/artifacts/
 pgaccel-kernels/build/
 .claude/worktrees/

@@ -398,6 +398,9 @@ fn within_routes_through_contains_with_swap() {
     // contains call.
     let poly = make_polygon(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0), (0.0, 0.0)]);
     let pt = make_point(2.0, 2.0);
+    // Kernel initialization can happen on the first call in unit tests.
+    // Warm it once so this assertion compares routing, not first-dispatch state.
+    let _ = spatial_contains(&[poly.clone()], &[pt.clone()], false);
     let via_within = spatial_eval(
         SpatialPredicate::Within,
         &[pt.clone()],

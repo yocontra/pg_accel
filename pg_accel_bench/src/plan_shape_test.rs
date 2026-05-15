@@ -18,7 +18,11 @@ use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
 const DEFAULT_CONNECTION: &str = "host=localhost port=28819 dbname=postgres";
 
 fn connect() -> Client {
-    Client::connect(DEFAULT_CONNECTION, NoTls).expect("connect to bench PG")
+    let mut client = Client::connect(DEFAULT_CONNECTION, NoTls).expect("connect to bench PG");
+    client
+        .simple_query("SELECT 1 FROM pg_accel_stats() LIMIT 1")
+        .expect("load pg_accel extension in backend");
+    client
 }
 
 /// Apply SQL settings that force the planner to prefer parallel plans

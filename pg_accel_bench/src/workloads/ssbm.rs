@@ -117,9 +117,9 @@ pub fn ssbm_setup_sql(rows: usize) -> Vec<String> {
              SELECT \
                 i AS p_partkey, \
                 'part_' || i AS p_name, \
-                'MFGR#' || (i % 5 + 1) AS p_mfgr, \
-                'MFGR#' || (i % 5 + 1) || (i % 5 + 1) AS p_category, \
-                'MFGR#' || (i % 5 + 1) || (i % 5 + 1) || (i % 40 + 1) AS p_brand1, \
+                'MFGR#' || ((i - 1) % 5 + 1) AS p_mfgr, \
+                'MFGR#' || ((i - 1) % 5 + 1) || (((i - 1) / 5) % 5 + 1) AS p_category, \
+                'MFGR#' || ((i - 1) % 5 + 1) || (((i - 1) / 5) % 5 + 1) || (((i - 1) / 25) % 40 + 1) AS p_brand1, \
                 (ARRAY['red','green','blue','yellow','black','white','orange'])[(i % 7) + 1] AS p_color, \
                 'TYPE' || (i % 150 + 1) AS p_type, \
                 i % 50 + 1 AS p_size, \

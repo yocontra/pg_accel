@@ -1334,6 +1334,14 @@ fn custom_private_data_partial_some_carries_per_column_spec() {
 }
 
 #[test]
+fn stale_partial_sum_guard_rejects_internal_transition_state() {
+    assert!(unsupported_partial_sum_transtype(pg_sys::INTERNALOID));
+    assert!(unsupported_partial_sum_transtype(pg_sys::NUMERICOID));
+    assert!(!unsupported_partial_sum_transtype(pg_sys::INT8OID));
+    assert!(!unsupported_partial_sum_transtype(pg_sys::FLOAT8OID));
+}
+
+#[test]
 fn partial_sentinel_is_ascii_paag() {
     // PARTIAL_SENTINEL is `b"PAAG"` packed as a big-endian i32.
     let bytes = 0x5041_4147u32.to_be_bytes();
