@@ -10,7 +10,7 @@ use postgres::{Client, NoTls};
 use rand::Rng;
 use serde::Serialize;
 
-use crate::artifacts::ArtifactWriter;
+use crate::artifacts::{ArtifactWriter, PreRiskContext};
 #[allow(unused_imports)]
 pub use crate::config::{
     BenchConfig, CacheMode, GucProfile, ObservedGucs, PostmasterMismatch, ROW_SCALES, TimingMode,
@@ -2225,6 +2225,14 @@ fn write_crash_context_artifact(
     append_optional_artifact_excerpt(
         &mut text,
         artifact_writer.root(),
+        "Pre-Risk Context",
+        artifact_writer
+            .existing_pre_risk_context_artifact(context.workload.name(), context.rows)
+            .as_deref(),
+    );
+    append_optional_artifact_excerpt(
+        &mut text,
+        artifact_writer.root(),
         "GUC Snapshot",
         existing_artifact_path(artifact_writer.root(), "guc_snapshot.json").as_deref(),
     );
@@ -2287,6 +2295,11 @@ fn append_crash_artifact_paths(
     }
     if let Some(path) = existing_artifact_path(artifact_writer.root(), "provenance.json") {
         let _ = writeln!(text, "provenance: {path}");
+    }
+    if let Some(path) =
+        artifact_writer.existing_pre_risk_context_artifact(context.workload.name(), context.rows)
+    {
+        let _ = writeln!(text, "pre_risk_context: {path}");
     }
     if context.log_tail_artifacts.is_empty() {
         text.push_str("log_tails: <not available>\n");
@@ -2539,6 +2552,16 @@ fn run_workload_with_config(
     // Capture thermal state BEFORE the timed loop (action_items M13).
     let thermal = capture_thermal_state();
 
+    if let Some(artifact_writer) = artifacts
+        && let Err(e) =
+            capture_and_write_pre_risk_context(connection, workload, rows, config, artifact_writer)
+    {
+        eprintln!(
+            "[artifacts] pre-risk context write failed for {} @ {rows}: {e}",
+            workload.name()
+        );
+    }
+
     // Always capture a plan snippet so the runner can tag the workload
     // as dispatched/not-dispatched even if --capture-plans is off. This
     // feeds the dispatch classification (action_items C8 / Reviewer 1
@@ -2612,6 +2635,90 @@ fn run_workload_with_config(
     result.table_stats = vacuum_stats;
     cleanup(connection, workload)?;
     Ok(result)
+}
+
+fn capture_and_write_pre_risk_context(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+    config: &BenchConfig,
+    artifact_writer: &ArtifactWriter,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pre_query_sql = workload.pre_query_sql();
+    let setup_sql = workload.setup_sql(rows);
+    let accel_query_sql = workload.query_sql();
+    let baseline_query_sql = workload.baseline_query_sql();
+    let explain_sql = format!("EXPLAIN (VERBOSE, COSTS OFF) {accel_query_sql}");
+
+    let mut backend_pid = None;
+    let mut backend_pid_error = None;
+    let mut explain = None;
+    let mut explain_error = None;
+
+    match Client::connect(connection, NoTls) {
+        Ok(mut client) => {
+            if let Err(e) = prime_pg_accel_backend(&mut client).and_then(|()| {
+                client.batch_execute("SET pg_accel.enabled = on")?;
+                client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
+                for sql in &pre_query_sql {
+                    client.batch_execute(sql)?;
+                }
+                Ok(())
+            }) {
+                explain_error = Some(format!("pre-EXPLAIN session setup failed: {e}"));
+            }
+
+            match client.query_one("SELECT pg_backend_pid()", &[]) {
+                Ok(row) => backend_pid = Some(row.get(0)),
+                Err(e) => backend_pid_error = Some(e.to_string()),
+            }
+
+            if explain_error.is_none() {
+                match client.query(&explain_sql, &[]) {
+                    Ok(rows_out) => {
+                        let mut buf = String::new();
+                        for row in &rows_out {
+                            let line: &str = row.get(0);
+                            buf.push_str(line);
+                            buf.push('\n');
+                        }
+                        explain = Some(buf);
+                    }
+                    Err(e) => explain_error = Some(e.to_string()),
+                }
+            }
+        }
+        Err(e) => {
+            let error = e.to_string();
+            backend_pid_error = Some(error.clone());
+            explain_error = Some(error);
+        }
+    }
+
+    let context = PreRiskContext {
+        workload: workload.name(),
+        rows,
+        seed: config.seed,
+        iterations: config.iterations,
+        warmup: config.warmup,
+        timing_mode: timing_mode_cli_arg(config.timing_mode),
+        cache_mode: cache_mode_cli_arg(config.cache_mode),
+        realistic_gucs: config.guc_profile.is_some(),
+        skip_guc_verify: config.skip_guc_verify,
+        capture_plans: config.plans_capture_path.is_some(),
+        backend_pid,
+        backend_pid_error: backend_pid_error.as_deref(),
+        setup_sql: &setup_sql,
+        pre_query_sql: &pre_query_sql,
+        accel_query_sql: &accel_query_sql,
+        baseline_query_sql: baseline_query_sql.as_deref(),
+        explain_sql: &explain_sql,
+        explain: explain.as_deref(),
+        explain_error: explain_error.as_deref(),
+    };
+
+    artifact_writer.write_pre_risk_context(workload.name(), rows, &context)?;
+    Ok(())
 }
 
 /// Capture a short plan snippet (first 30 lines of

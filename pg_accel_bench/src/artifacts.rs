@@ -23,6 +23,29 @@ pub struct ArtifactWriter {
 }
 
 #[derive(Serialize)]
+pub struct PreRiskContext<'a> {
+    pub workload: &'a str,
+    pub rows: usize,
+    pub seed: u64,
+    pub iterations: usize,
+    pub warmup: usize,
+    pub timing_mode: &'a str,
+    pub cache_mode: &'a str,
+    pub realistic_gucs: bool,
+    pub skip_guc_verify: bool,
+    pub capture_plans: bool,
+    pub backend_pid: Option<i32>,
+    pub backend_pid_error: Option<&'a str>,
+    pub setup_sql: &'a [String],
+    pub pre_query_sql: &'a [String],
+    pub accel_query_sql: &'a str,
+    pub baseline_query_sql: Option<&'a str>,
+    pub explain_sql: &'a str,
+    pub explain: Option<&'a str>,
+    pub explain_error: Option<&'a str>,
+}
+
+#[derive(Serialize)]
 struct Manifest {
     schema_version: u32,
     created_unix_seconds: u64,
@@ -107,6 +130,31 @@ impl ArtifactWriter {
         fs::write(&path, snippet)?;
         self.write_artifact_index()?;
         Ok(path)
+    }
+
+    pub fn write_pre_risk_context(
+        &self,
+        workload: &str,
+        rows: usize,
+        context: &PreRiskContext<'_>,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = self.pre_risk_context_path(workload, rows);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_json(&path, context)?;
+        self.write_artifact_index()?;
+        Ok(path)
+    }
+
+    #[must_use]
+    pub fn existing_pre_risk_context_artifact(
+        &self,
+        workload: &str,
+        rows: usize,
+    ) -> Option<String> {
+        let path = self.pre_risk_context_path(workload, rows);
+        path.is_file().then(|| self.relative_display_path(&path))
     }
 
     #[must_use]
@@ -294,6 +342,10 @@ impl ArtifactWriter {
         );
         readme.push_str("- `plan_snippets/`: EXPLAIN snippets captured before timed execution.\n");
         readme.push_str(
+            "- `pre_risk_contexts/`: same-backend `pg_backend_pid()`, workload SQL, \
+             config basics, and `EXPLAIN` without `ANALYZE` captured before risky execution.\n",
+        );
+        readme.push_str(
             "- `log_tails/`: bounded PostgreSQL and pg_accel log/telemetry tails per failure \
              and at run completion.\n",
         );
@@ -327,6 +379,12 @@ impl ArtifactWriter {
         self.root
             .join("plan_snippets")
             .join(format!("{}-{rows}.txt", sanitize_label(workload)))
+    }
+
+    fn pre_risk_context_path(&self, workload: &str, rows: usize) -> PathBuf {
+        self.root
+            .join("pre_risk_contexts")
+            .join(format!("{}-{rows}.json", sanitize_label(workload)))
     }
 
     fn relative_display_path(&self, path: &Path) -> String {
@@ -640,6 +698,7 @@ mod tests {
         assert!(readme.contains("Log/telemetry tails are capped"));
         assert!(readme.contains(ARTIFACT_INDEX_JSON));
         assert!(readme.contains(ARTIFACT_CHECKLIST_MD));
+        assert!(readme.contains("pre_risk_contexts/"));
     }
 
     #[test]
@@ -654,6 +713,31 @@ mod tests {
         writer
             .write_plan_snippet("hash/join", 100, "Custom Scan\n")
             .expect("plan snippet should be written");
+        let pre_query_sql = vec!["SET work_mem = '4MB'".to_owned()];
+        let context = PreRiskContext {
+            workload: "hash/join",
+            rows: 100,
+            seed: 42,
+            iterations: 1,
+            warmup: 0,
+            timing_mode: "raw",
+            cache_mode: "warm",
+            realistic_gucs: false,
+            skip_guc_verify: false,
+            capture_plans: false,
+            backend_pid: Some(1234),
+            backend_pid_error: None,
+            setup_sql: &[],
+            pre_query_sql: &pre_query_sql,
+            accel_query_sql: "SELECT count(*) FROM bench",
+            baseline_query_sql: None,
+            explain_sql: "EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM bench",
+            explain: Some("Aggregate\n"),
+            explain_error: None,
+        };
+        writer
+            .write_pre_risk_context("hash/join", 100, &context)
+            .expect("pre-risk context should be written");
         writer
             .capture_log_tails("run-complete")
             .expect("log tail should be captured");
@@ -680,6 +764,7 @@ mod tests {
         assert!(paths.contains(&"crashes.json"));
         assert!(paths.contains(&"crashes.md"));
         assert!(paths.contains(&"plan_snippets/hash-join-100.txt"));
+        assert!(paths.contains(&"pre_risk_contexts/hash-join-100.json"));
         assert!(paths.contains(&"log_tails/run-complete/00-pg_accel_otel.jsonl.tail"));
         assert!(!paths.contains(&ARTIFACT_INDEX_JSON));
         assert!(!paths.contains(&ARTIFACT_CHECKLIST_MD));
@@ -702,6 +787,12 @@ mod tests {
             .expect("artifact checklist should be readable");
         assert!(checklist.contains("| [x] | `manifest.json` |"));
         assert!(checklist.contains("| [x] | `plan_snippets/hash-join-100.txt` |"));
+        assert!(checklist.contains("| [x] | `pre_risk_contexts/hash-join-100.json` |"));
         assert!(checklist.contains("not listed in their own file table"));
+
+        assert_eq!(
+            writer.existing_pre_risk_context_artifact("hash/join", 100),
+            Some("pre_risk_contexts/hash-join-100.json".to_owned())
+        );
     }
 }

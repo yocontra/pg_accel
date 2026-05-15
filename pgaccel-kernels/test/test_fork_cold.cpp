@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <system_error>
+#include <vector>
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
@@ -48,6 +49,64 @@ static const float TOLERANCE = 1.0f;
 
 static bool approx_eq(float a, float b, float tol) {
   return std::fabs(a - b) < tol;
+}
+
+struct PipCounts {
+  size_t inside = 0;
+  size_t outside = 0;
+  size_t uncertain = 0;
+  size_t untouched = 0;
+  size_t other = 0;
+};
+
+static PipCounts count_pip_results(const std::vector<int8_t>& results) {
+  PipCounts counts;
+  for (int8_t result : results) {
+    if (result == 1) {
+      counts.inside++;
+    } else if (result == -1) {
+      counts.outside++;
+    } else if (result == 0) {
+      counts.uncertain++;
+    } else if (result == 99) {
+      counts.untouched++;
+    } else {
+      counts.other++;
+    }
+  }
+  return counts;
+}
+
+static void fill_pip_selectivity_points(std::vector<float>& points, size_t inside_count) {
+  const size_t point_count = points.size() / 2;
+  const size_t outside_count = point_count - inside_count;
+  const size_t in_bbox_outside_count = outside_count / 2;
+
+  for (size_t i = 0; i < point_count; ++i) {
+    if (i < inside_count) {
+      points[i * 2] = (i & 1) ? 0.25f : -0.20f;
+      points[i * 2 + 1] = (i & 1) ? 0.10f : -0.15f;
+    } else if (i < inside_count + in_bbox_outside_count) {
+      points[i * 2] = 0.95f;
+      points[i * 2 + 1] = 0.95f;
+    } else {
+      points[i * 2] = 1.50f;
+      points[i * 2 + 1] = 1.50f;
+    }
+  }
+}
+
+static std::vector<float> make_regular_ring(size_t unique_vertices, float radius) {
+  constexpr double kPi = 3.14159265358979323846264338327950288;
+  std::vector<float> ring((unique_vertices + 1) * 2);
+  for (size_t i = 0; i < unique_vertices; ++i) {
+    const double angle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(unique_vertices);
+    ring[i * 2] = static_cast<float>(radius * std::cos(angle));
+    ring[i * 2 + 1] = static_cast<float>(radius * std::sin(angle));
+  }
+  ring[unique_vertices * 2] = ring[0];
+  ring[unique_vertices * 2 + 1] = ring[1];
+  return ring;
 }
 
 int main() {
@@ -171,6 +230,50 @@ int main() {
       }
       printf("Child: cold fp64 spatial (PIP) OK\n");
     }
+    // spatial cooperative PIP cold-fork regression
+    {
+      constexpr size_t point_count = 100000;
+      constexpr size_t unique_vertices = 1024;
+      constexpr size_t expected_inside = point_count * 90 / 100;
+
+      std::vector<float> ring = make_regular_ring(unique_vertices, 1.0f);
+      float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+      uint32_t rings[] = {0};
+
+      std::vector<float> points(point_count * 2);
+      fill_pip_selectivity_points(points, expected_inside);
+      std::vector<int8_t> results(point_count, 99);
+
+      const uint64_t pip_gpu_before = pgaccel_gpu_exec_count();
+      st = pgaccel_point_in_polygon_bulk(points.data(), point_count, bbox, ring.data(),
+                                         unique_vertices + 1, rings, 1, results.data());
+      const uint64_t pip_gpu_after = pgaccel_gpu_exec_count();
+      if (st != PGACCEL_OK) {
+        fprintf(stderr, "Child: coop PIP 1024v/100K status=%d\n", st);
+        _exit(17);
+      }
+      if (pip_gpu_after <= pip_gpu_before) {
+        fprintf(stderr,
+                "Child: coop PIP 1024v/100K did not advance gpu_exec count "
+                "(before=%llu after=%llu)\n",
+                (unsigned long long)pip_gpu_before, (unsigned long long)pip_gpu_after);
+        _exit(18);
+      }
+
+      const PipCounts counts = count_pip_results(results);
+      if (counts.inside + counts.outside + counts.uncertain != point_count ||
+          counts.inside != expected_inside || counts.outside != point_count - expected_inside ||
+          counts.uncertain != 0 || counts.untouched != 0 || counts.other != 0) {
+        fprintf(stderr,
+                "Child: coop PIP 1024v/100K wrong counts: inside=%zu outside=%zu "
+                "uncertain=%zu untouched=%zu other=%zu\n",
+                counts.inside, counts.outside, counts.uncertain, counts.untouched, counts.other);
+        _exit(19);
+      }
+
+      printf("Child: cold coop PIP 1024v/100K OK (gpu_exec %llu -> %llu)\n",
+             (unsigned long long)pip_gpu_before, (unsigned long long)pip_gpu_after);
+    }
     // h3_f64
     {
       double lat = 37.7749, lng = -122.4194;
@@ -278,6 +381,15 @@ int main() {
         break;
       case 7:
         printf("FAIL: GPU exec count was 0 — SYCL did not dispatch.\n");
+        break;
+      case 17:
+        printf("FAIL: Cold cooperative point-in-polygon dispatch failed.\n");
+        break;
+      case 18:
+        printf("FAIL: Cold cooperative point-in-polygon did not advance GPU exec count.\n");
+        break;
+      case 19:
+        printf("FAIL: Cold cooperative point-in-polygon produced wrong results.\n");
         break;
       default:
         printf("FAIL: Child exited with code %d\n", rc);

@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <vector>
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
@@ -222,6 +223,94 @@ static int run_fp64_fork_matrix(const char* label) {
   return 0;
 }
 
+// 100K point-in-polygon regression for the simple one-thread-per-point
+// dispatch path from a freshly-forked backend.
+static int run_pip_simple_fork_regression(const char* label) {
+  constexpr size_t point_count = 100000;
+  constexpr size_t expected_inside = 40000;
+  constexpr size_t expected_outside = 60000;
+
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  float diamond[] = {
+      0.0f, 1.0f, 1.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f, 0.0f, 1.0f,
+  };
+
+  std::vector<float> points(point_count * 2);
+  for (size_t i = 0; i < point_count; ++i) {
+    switch (i % 5) {
+      case 0:
+        points[i * 2] = 0.0f;
+        points[i * 2 + 1] = 0.0f;
+        break;
+      case 1:
+        points[i * 2] = 0.40f;
+        points[i * 2 + 1] = 0.20f;
+        break;
+      case 2:
+        points[i * 2] = 0.90f;
+        points[i * 2 + 1] = 0.90f;
+        break;
+      case 3:
+        points[i * 2] = -0.90f;
+        points[i * 2 + 1] = -0.90f;
+        break;
+      default:
+        points[i * 2] = 2.0f;
+        points[i * 2 + 1] = 2.0f;
+        break;
+    }
+  }
+
+  std::vector<int8_t> results(point_count, 99);
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
+
+  pgaccel_status st = pgaccel_point_in_polygon_bulk(points.data(), point_count, bbox, diamond, 5,
+                                                    nullptr, 0, results.data());
+  if (st != PGACCEL_OK) {
+    fprintf(stderr, "[%s] PIP simple 100K failed: status=%d\n", label, st);
+    return 1;
+  }
+
+  const uint64_t after = pgaccel_gpu_exec_count();
+  if (after <= before) {
+    fprintf(stderr, "[%s] PIP simple 100K did not advance GPU exec count: before=%llu after=%llu\n",
+            label, (unsigned long long)before, (unsigned long long)after);
+    return 1;
+  }
+
+  size_t inside = 0;
+  size_t outside = 0;
+  size_t uncertain = 0;
+  size_t untouched = 0;
+  size_t other = 0;
+  for (int8_t result : results) {
+    if (result == 1)
+      ++inside;
+    else if (result == -1)
+      ++outside;
+    else if (result == 0)
+      ++uncertain;
+    else if (result == 99)
+      ++untouched;
+    else
+      ++other;
+  }
+
+  if (inside != expected_inside || outside != expected_outside || uncertain != 0 ||
+      untouched != 0 || other != 0) {
+    fprintf(stderr,
+            "[%s] PIP simple 100K wrong counts: inside=%zu outside=%zu uncertain=%zu "
+            "untouched=%zu other=%zu\n",
+            label, inside, outside, uncertain, untouched, other);
+    return 1;
+  }
+
+  printf("[%s] PIP simple 100K OK: inside=%zu outside=%zu gpu_exec_delta=%llu\n", label, inside,
+         outside, (unsigned long long)(after - before));
+  return 0;
+}
+
 // Count .metalar files in AdaptiveCpp JIT cache. Used to assert the
 // archive-build helper actually ran for each fp64 kernel family
 // dispatched from the forked child.
@@ -307,6 +396,10 @@ int main() {
     const size_t metalar_after = count_metalar_files();
     printf("[child] metalar files after fp64 matrix: %zu (delta=%zu)\n", metalar_after,
            metalar_after - metalar_before);
+
+    if (run_pip_simple_fork_regression("child") != 0) {
+      _exit(9);
+    }
 
     uint64_t child_gpu = pgaccel_gpu_exec_count();
     printf("\nChild: gpu_exec=%llu\n", (unsigned long long)child_gpu);

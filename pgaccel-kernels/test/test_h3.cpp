@@ -900,6 +900,32 @@ static void test_cell_to_children() {
     ASSERT_EQ("c2c pent r4 count", off[1], 5);
   }
 
+  // Mixed rows exercise the shared-slab layout used by the size and emit
+  // kernels: cells[count], offsets[count+1], then aligned output.
+  {
+    uint64_t cells[3] = {parent_r3, make_pentagon_cell(3), 0};
+    uint32_t off[4] = {99, 99, 99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(cells, 3, 4, off);
+    ASSERT_STATUS_OK("c2c mixed size status", s);
+    ASSERT_EQ("c2c mixed off[0]", off[0], 0);
+    ASSERT_EQ("c2c mixed off[1]", off[1], 7);
+    ASSERT_EQ("c2c mixed off[2]", off[2], 12);
+    ASSERT_EQ("c2c mixed off[3]", off[3], 12);
+
+    std::vector<uint64_t> out(off[3], 0);
+    s = pgaccel_h3_cell_to_children_emit(cells, 3, 4, off, out.data());
+    ASSERT_STATUS_OK("c2c mixed emit status", s);
+
+    bool wrote_expected_rows = true;
+    for (uint32_t i = off[0]; i < off[2]; i++) {
+      if (out[i] == 0) {
+        wrote_expected_rows = false;
+        break;
+      }
+    }
+    ASSERT_TRUE("c2c mixed emit writes non-empty rows", wrote_expected_rows);
+  }
+
   // Invalid: child_res < cell.res → 0 cells.
   {
     uint32_t off[2] = {99, 99};

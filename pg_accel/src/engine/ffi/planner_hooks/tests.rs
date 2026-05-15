@@ -918,6 +918,37 @@ fn scan_cost_formula_gpu_spatial_cheaper_than_base() {
 }
 
 #[test]
+fn spatial_unsafe_band_rejects_80k_to_150k_when_vertices_meet_threshold() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let vertices = limits.gpu_spatial_unsafe_band_min_vertices;
+
+    assert!(cost::spatial_polygon_rows_safe(79_999, vertices, &limits));
+    assert!(!cost::spatial_polygon_rows_safe(80_000, vertices, &limits));
+    assert!(!cost::spatial_polygon_rows_safe(100_000, vertices, &limits));
+    assert!(!cost::spatial_polygon_rows_safe(150_000, vertices, &limits));
+    assert!(cost::spatial_polygon_rows_safe(150_001, vertices, &limits));
+}
+
+#[test]
+fn spatial_unsafe_band_allows_below_vertex_threshold() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let vertices_below_threshold = limits
+        .gpu_spatial_unsafe_band_min_vertices
+        .saturating_sub(1);
+
+    assert!(cost::spatial_polygon_rows_safe(
+        80_000,
+        vertices_below_threshold,
+        &limits
+    ));
+    assert!(cost::spatial_polygon_rows_safe(
+        150_000,
+        vertices_below_threshold,
+        &limits
+    ));
+}
+
+#[test]
 fn scan_cost_formula_gpu_expr_not_cheaper_at_100k() {
     // Simulate: GpuExpr at 100K rows, modest base_total.
     // No cost discount (1.0) + yield cost makes GPU more expensive.
@@ -1280,6 +1311,39 @@ fn agg_cost_grouped_adds_hash_overhead() {
     assert!((cost_grouped - cost_plain - expected_diff).abs() < 1e-6);
 }
 
+#[test]
+fn grouped_hashagg_crash_gate_rejects_100k_plus_rows() {
+    let limits = cost::DeviceLimits::cpu_only();
+
+    assert!(
+        cost::hashagg_input_rows_safe(99_999, &limits),
+        "grouped hashagg should stay eligible below the unsafe threshold"
+    );
+    assert!(
+        !cost::hashagg_input_rows_safe(100_000, &limits),
+        "grouped hashagg must reject the first known unsafe row count"
+    );
+    assert!(
+        !cost::hashagg_input_rows_safe(250_000, &limits),
+        "grouped hashagg must remain rejected at and above planner min rows"
+    );
+}
+
+#[test]
+fn grouped_hashagg_gate_only_applies_to_grouped_agg() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let rows = 100_000;
+    let rejects =
+        |has_group_keys: bool| has_group_keys && !cost::hashagg_input_rows_safe(rows, &limits);
+
+    assert!(!cost::hashagg_input_rows_safe(rows, &limits));
+    assert!(rejects(true));
+    assert!(
+        !rejects(false),
+        "plain reductions should not inherit the grouped hashagg crash gate"
+    );
+}
+
 // =====================================================================
 // Empty registry fast-reject
 // =====================================================================
@@ -1355,6 +1419,54 @@ fn partial_sum_int8_guard_uses_aggregate_oid() {
         AggOp::Sum,
         pg_sys::InvalidOid
     ));
+}
+
+#[test]
+fn partial_sum_int8_guard_preserves_non_partial_sum_bigint() {
+    let aggref = pg_sys::Aggref {
+        aggfnoid: pg_sys::Oid::from(pg_sys::F_SUM_INT8),
+        ..pg_sys::Aggref::default()
+    };
+    let rejects = |is_partial: bool| {
+        is_partial && super::agg_common::aggref_is_sum_int8(&aggref, AggOp::Sum, pg_sys::InvalidOid)
+    };
+
+    assert!(
+        !rejects(false),
+        "non-partial SUM(bigint) must keep the direct typed i64 reduce path"
+    );
+}
+
+#[test]
+fn partial_sum_int8_guard_does_not_reject_sum_int4() {
+    let aggref = pg_sys::Aggref {
+        aggfnoid: pg_sys::Oid::from(pg_sys::F_SUM_INT4),
+        ..pg_sys::Aggref::default()
+    };
+    let rejects = |is_partial: bool| {
+        is_partial && super::agg_common::aggref_is_sum_int8(&aggref, AggOp::Sum, pg_sys::INT4OID)
+    };
+
+    assert!(
+        !rejects(true),
+        "partial SUM(int4) should not trip the SUM(bigint)-specific guard"
+    );
+}
+
+#[test]
+fn partial_sum_int8_guard_rejects_partial_sum_bigint_by_arg_type() {
+    let aggref = pg_sys::Aggref {
+        aggfnoid: pg_sys::InvalidOid,
+        ..pg_sys::Aggref::default()
+    };
+    let rejects = |is_partial: bool| {
+        is_partial && super::agg_common::aggref_is_sum_int8(&aggref, AggOp::Sum, pg_sys::INT8OID)
+    };
+
+    assert!(
+        rejects(true),
+        "partial SUM(bigint) must reject even when only the resolved arg type is available"
+    );
 }
 
 #[test]

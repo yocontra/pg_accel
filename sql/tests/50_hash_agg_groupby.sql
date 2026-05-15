@@ -197,7 +197,7 @@ END $$;
 DROP TABLE _g6_on, _g6_off;
 
 -- =========================================================================
--- Test 7: AVG aggregate
+-- Test 7: Grouped AVG crash gate -- must not select GpuAccelAgg
 -- =========================================================================
 
 SET pg_accel.enabled = on;
@@ -353,6 +353,82 @@ DO $$ BEGIN
 END $$;
 \echo 'PASS: 50_hash_agg_groupby_t10_row_count'
 DROP TABLE _g10_on, _g10_off;
+
+-- =========================================================================
+-- Test 11: Parallel-looking SUM(bigint) must not finalize over GpuAccelAgg
+-- =========================================================================
+
+CREATE TEMP TABLE _agg_bigint_parallel AS
+SELECT i::int8 AS v
+FROM generate_series(1, 20000) i;
+ALTER TABLE _agg_bigint_parallel SET (parallel_workers = 2);
+ANALYZE _agg_bigint_parallel;
+
+SET pg_accel.enabled = on;
+SET max_parallel_workers_per_gather = 2;
+SET min_parallel_table_scan_size = 0;
+SET min_parallel_index_scan_size = 0;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+
+CREATE TEMP TABLE _g11_plan (ord int, line text);
+DO $$
+DECLARE
+    r record;
+    n int := 0;
+BEGIN
+    FOR r IN EXPLAIN
+        SELECT sum(v) AS s
+        FROM _agg_bigint_parallel
+    LOOP
+        n := n + 1;
+        INSERT INTO _g11_plan VALUES (n, r."QUERY PLAN");
+    END LOOP;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM _g11_plan finalize_line
+        JOIN _g11_plan gather_line
+          ON gather_line.ord > finalize_line.ord
+        JOIN _g11_plan gpu_line
+          ON gpu_line.ord > gather_line.ord
+        WHERE finalize_line.line ILIKE '%Finalize%'
+          AND gather_line.line ILIKE '%Gather%'
+          AND gpu_line.line ILIKE '%Custom Scan (GpuAccelAgg)%'
+    ) THEN
+        RAISE EXCEPTION '50_hash_agg_groupby test 11 FAILED: SUM(bigint) selected Finalize -> Gather -> GpuAccelAgg';
+    END IF;
+END $$;
+
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET min_parallel_index_scan_size;
+RESET min_parallel_table_scan_size;
+RESET max_parallel_workers_per_gather;
+
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _g11_off AS
+SELECT sum(v) AS s, count(*) AS cnt
+FROM _agg_bigint_parallel;
+
+SET pg_accel.enabled = on;
+CREATE TEMP TABLE _g11_on AS
+SELECT sum(v) AS s, count(*) AS cnt
+FROM _agg_bigint_parallel;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM _g11_on a, _g11_off b
+        WHERE a.s IS DISTINCT FROM b.s
+           OR a.cnt IS DISTINCT FROM b.cnt
+    ) THEN
+        RAISE EXCEPTION '50_hash_agg_groupby test 11 FAILED: SUM(bigint) results differ';
+    END IF;
+END $$;
+\echo 'PASS: 50_hash_agg_groupby_t11_sum_bigint_parallel_gate'
+DROP TABLE _g11_on, _g11_off, _g11_plan, _agg_bigint_parallel;
 
 -- Cleanup shared data
 DROP TABLE _agg_data;

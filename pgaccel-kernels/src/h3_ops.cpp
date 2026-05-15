@@ -1720,25 +1720,38 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t
   try {
     sycl::queue& q = get_queue();
 
-    // SAFETY: USM device allocations freed at end of scope
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint32_t* d_counts = sycl::malloc_device<uint32_t>(count, q);
+    // Keep Metal SSCP captures below the argbuffer-reflection threshold:
+    // one shared slab plus {count, child_res}. The kernel recomputes typed
+    // subviews from count, mirroring the lat/lng slab pattern above.
+    const size_t cells_bytes = count * sizeof(uint64_t);
+    const size_t counts_off = cells_bytes;
+    const size_t counts_bytes = count * sizeof(uint32_t);
+    const size_t slab_bytes = counts_off + counts_bytes;
 
-    if (!d_cells || !d_counts) {
-      sycl::free(d_cells, q);
-      sycl::free(d_counts, q);
+    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+    if (!d_slab) {
       return PGACCEL_ERROR_OOM;
     }
 
-    q.memcpy(d_cells, cells, count * sizeof(uint64_t)).wait_and_throw();
+    std::memcpy(d_slab, cells, cells_bytes);
 
     const int32_t cr = child_res;
-    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
-    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
-    const int max_res = H3_MAX_RESOLUTION;
+    const size_t row_count = count;
 
     q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       h.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+         const size_t k_cells_off = 0;
+         const size_t k_counts_off = row_count * sizeof(uint64_t);
+         const uint64_t* d_cells = reinterpret_cast<const uint64_t*>(d_slab + k_cells_off);
+         uint32_t* d_counts = reinterpret_cast<uint32_t*>(d_slab + k_counts_off);
+
+         const uint64_t pent_low = (1ULL << 4) | (1ULL << 14) | (1ULL << 24) | (1ULL << 33) |
+                                   (1ULL << 49) | (1ULL << 50) | (1ULL << 58) | (1ULL << 63);
+         const uint64_t pent_high = (1ULL << (72 - 64)) | (1ULL << (83 - 64)) |
+                                    (1ULL << (97 - 64)) | (1ULL << (107 - 64)) |
+                                    (1ULL << (117 - 64));
+         const int max_res = 15;
+
          const size_t i = id[0];
          const uint64_t cell = d_cells[i];
          if (cell == 0) {
@@ -1782,22 +1795,20 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t
      }).wait_and_throw();
 
     std::vector<uint32_t> counts(count);
-    q.memcpy(counts.data(), d_counts, count * sizeof(uint32_t)).wait_and_throw();
+    std::memcpy(counts.data(), d_slab + counts_off, counts_bytes);
 
     out_offsets[0] = 0;
     uint64_t acc = 0;
     for (size_t i = 0; i < count; i++) {
       acc += counts[i];
       if (acc > UINT32_MAX) {
-        sycl::free(d_cells, q);
-        sycl::free(d_counts, q);
+        sycl::free(d_slab, q);
         return PGACCEL_ERROR_UNSUPPORTED;
       }
       out_offsets[i + 1] = static_cast<uint32_t>(acc);
     }
 
-    sycl::free(d_cells, q);
-    sycl::free(d_counts, q);
+    sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const std::exception&) {
@@ -1823,30 +1834,45 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
   try {
     sycl::queue& q = get_queue();
 
-    // SAFETY: USM device allocations freed at end of scope
-    uint64_t* d_cells = sycl::malloc_device<uint64_t>(count, q);
-    uint32_t* d_offsets = sycl::malloc_device<uint32_t>(count + 1, q);
-    uint64_t* d_out = sycl::malloc_device<uint64_t>(total, q);
+    // Same Metal SSCP capture workaround as the size pass: one slab pointer,
+    // count, and child_res. Output starts on an 8-byte boundary.
+    const size_t cells_bytes = count * sizeof(uint64_t);
+    const size_t offsets_off = cells_bytes;
+    const size_t offsets_bytes = (count + 1) * sizeof(uint32_t);
+    const size_t out_off = (offsets_off + offsets_bytes + 7) & ~size_t{7};
+    const size_t out_bytes = total * sizeof(uint64_t);
+    const size_t slab_bytes = out_off + out_bytes;
 
-    if (!d_cells || !d_offsets || !d_out) {
-      sycl::free(d_cells, q);
-      sycl::free(d_offsets, q);
-      sycl::free(d_out, q);
+    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+    if (!d_slab) {
       return PGACCEL_ERROR_OOM;
     }
 
-    q.memcpy(d_cells, cells, count * sizeof(uint64_t));
-    q.memcpy(d_offsets, offsets, (count + 1) * sizeof(uint32_t));
-    q.wait_and_throw();
+    std::memcpy(d_slab, cells, cells_bytes);
+    std::memcpy(d_slab + offsets_off, offsets, offsets_bytes);
+    std::memset(d_slab + out_off, 0, out_bytes);
 
     const int32_t cr = child_res;
-    const int max_res = H3_MAX_RESOLUTION;
-    const uint64_t res_mask = H3_RES_MASK;
-    const uint64_t pent_low = H3_PENTAGON_BASE_LOW;
-    const uint64_t pent_high = H3_PENTAGON_BASE_HIGH;
+    const size_t row_count = count;
 
     q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       h.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+         const size_t k_cells_off = 0;
+         const size_t k_offsets_off = row_count * sizeof(uint64_t);
+         const size_t k_offsets_bytes = (row_count + 1) * sizeof(uint32_t);
+         const size_t k_out_off = (k_offsets_off + k_offsets_bytes + 7) & ~size_t{7};
+         const uint64_t* d_cells = reinterpret_cast<const uint64_t*>(d_slab + k_cells_off);
+         const uint32_t* d_offsets = reinterpret_cast<const uint32_t*>(d_slab + k_offsets_off);
+         uint64_t* d_out = reinterpret_cast<uint64_t*>(d_slab + k_out_off);
+
+         const int max_res = 15;
+         const uint64_t res_mask = 0xFULL << 52;
+         const uint64_t pent_low = (1ULL << 4) | (1ULL << 14) | (1ULL << 24) | (1ULL << 33) |
+                                   (1ULL << 49) | (1ULL << 50) | (1ULL << 58) | (1ULL << 63);
+         const uint64_t pent_high = (1ULL << (72 - 64)) | (1ULL << (83 - 64)) |
+                                    (1ULL << (97 - 64)) | (1ULL << (107 - 64)) |
+                                    (1ULL << (117 - 64));
+
          const size_t i = id[0];
          const uint64_t cell = d_cells[i];
          const uint32_t start = d_offsets[i];
@@ -1954,11 +1980,9 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
        });
      }).wait_and_throw();
 
-    q.memcpy(out_children, d_out, total * sizeof(uint64_t)).wait_and_throw();
+    std::memcpy(out_children, d_slab + out_off, out_bytes);
 
-    sycl::free(d_cells, q);
-    sycl::free(d_offsets, q);
-    sycl::free(d_out, q);
+    sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const std::exception&) {
