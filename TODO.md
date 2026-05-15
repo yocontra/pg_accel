@@ -105,15 +105,9 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `h3_latlng_res15 @ 10M` spent about 64-66s baseline vs 11-12s
   accelerated. Several spatial repro and full-sort parity cells also spend
   multiple seconds per sample at 10M rows.
-- Work: add bounded telemetry rotation for `pg_accel_otel.jsonl`, resumable
-  benchmark manifests, artifact indexes, explicit dispatch classification,
-  device metadata, telemetry limits, GUC snapshots, crash logs, plan dumps,
-  correctness diffs, markdown/JSON summaries, and workload lane tags that
-  split bounded default smoke runs from long rigorous/proof runs.
-- Work: keep pg_accel preloaded on accel-side benchmark and plan-capture
-  backends before warmup; keep the PostgreSQL baseline backend unloaded so it
-  remains a true native comparison. Add a regression test or smoke check that
-  proves accel warmup/capture backends have planner hooks installed.
+- Work: add source log rotation or log-size budgeting for
+  `pg_accel_otel.jsonl`, resumable benchmark manifests, correctness diffs,
+  and durable resume/audit report linkage.
 - Work: add a planner-hook overhead audit for no-dispatch queries. Star
   schemas, expression-only filters, and native aggregate rows must either
   get an actual GPU-resident path or return through a cheap early decline
@@ -123,35 +117,6 @@ kernels dispatched, and which rows returned to PostgreSQL.
   on terminal scrollback, and keeps the default suite bounded while preserving
   rigorous coverage for long winning/proof lanes.
 
-### Live extension install provenance
-
-- Evidence: benchmark runs have previously mixed pgrx-managed clusters and
-  machine-level PostgreSQL installs, which made it unclear which pg_accel
-  dylib the live backend had loaded. The source-built PostgreSQL path should
-  make the intended `pg_config` explicit for every install and test command.
-- Evidence: the historical PG17 benchmark connection (`localhost:28817`) was
-  a pgrx-managed cluster at `~/.pgrx/data-17`. Restarting or reinstalling into
-  a different cluster can leave the benchmark backend holding a stale
-  pg_accel dylib and produce old EXPLAIN output.
-- Work: add an install/provenance smoke that prints
-  `pg_config --pkglibdir`, extension SQL path/version/build hash, mapped
-  dylib path from the backend, SHA-256 of the loaded file, postmaster PID,
-  data directory, port, and cluster restart target before accepting any
-  benchmark or audit result.
-- Acceptance: benchmarks abort early if the live backend is not loading the
-  just-built extension binary and SQL/control metadata.
-
-### Panic and crash diagnostics for benchmark runs
-
-- Evidence: backend crashes currently leave `pg_accel_panic.log` entries
-  such as non-string panic payloads or `PgLwLock was not initialized`, but
-  backtraces may be disabled and `pg.log` may not contain the real source.
-- Work: force benchmark repro recipes to set `RUST_BACKTRACE=1`, record the
-  workload name, scale, EXPLAIN snippet, pre-query GUCs, PostgreSQL log
-  excerpt, panic log, and function-level backtrace in one artifact.
-- Acceptance: every future benchmark crash has enough saved evidence to
-  reproduce or gate the lane without rerunning the whole matrix.
-
 ### Function/SRF benchmark proof hardening
 
 - Evidence: function and SRF workloads can win without a Custom Scan plan,
@@ -160,10 +125,10 @@ kernels dispatched, and which rows returned to PostgreSQL.
 - Evidence: some benchmark query shapes use
   `count(*) FROM (SELECT expensive_expr AS result ...)`, which can fail to
   prove that the expensive expression result was consumed.
-- Work: add benchmark workloads for H3 variable-output SRFs, raster
-  map-algebra, and scalar/vector function dispatch that force result
-  consumption through `sum`, `array_length`, `ST_SummaryStats`,
-  materialized output, or explicit correctness diffs.
+- Work: add or finish benchmark workloads for raster map-algebra and
+  scalar/vector function dispatch that force result consumption through
+  `sum`, `ST_SummaryStats`, materialized output, or explicit correctness
+  diffs.
 - Acceptance: benchmark reports distinguish Custom Scan dispatch from
   function/SRF kernel dispatch; no workload is credited as a GPU win unless
   its output is consumed and correctness-checked.
@@ -188,10 +153,9 @@ repair the GPU path and re-enter only after correctness and benchmark proof.
   average. This does not explain the no-AVG hashagg sweep crashes, but
   grouped AVG must be disabled or fixed before grouped GPU aggregation is
   exposed.
-- Work: use `hashagg_10g @ 1M` to isolate a no-AVG crash, capture
-  `RUST_BACKTRACE=1`, `pg_accel_panic.log`, PostgreSQL server log, and
-  `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)`. Add a C++ 1M-row `int4` key plus
-  `SUM/COUNT` repro so the sort-based path is tested outside PostgreSQL.
+- Work: repair or replace the sort-based hashagg path and grouped `AVG`
+  finalization before GPU re-entry; keep unsafe grouped aggregation sizes
+  gated to PostgreSQL-native plans until the 1M/10M acceptance cells pass.
 - Acceptance: every hashagg workload above completes at 1M and 10M rows with
   GPU plan selection, no backend disconnects, no panic-log entries, and
   result diffs against PostgreSQL native output.
@@ -229,10 +193,9 @@ repair the GPU path and re-enter only after correctness and benchmark proof.
   simple and cooperative bulk PIP kernels both use high-capture SYCL
   lambdas; they need the same slab-style argument workaround used by other
   kernels.
-- Work: build a 100K selectivity-sweep repro, compare generated polygon,
-  selectivity, batch count, worker shape, and JIT/cache state against
-  10K/1M. Include simple-path polygons and cooperative 1024+ vertex polygons
-  in C++ fork tests.
+- Work: fix the high-capture point-in-polygon dispatch path or keep the
+  affected 100K benchmark lanes quarantined; re-run the selectivity sweep
+  against simple and 1024+ vertex cooperative polygons after the fix.
 - Acceptance: every affected 100K spatial workload completes with correct
   counts, no panic-log entry, and stable repeat runs.
 
@@ -248,8 +211,8 @@ repair the GPU path and re-enter only after correctness and benchmark proof.
   `SUM(bigint)` reduce in a PostgreSQL worker/Metal JIT path, not to exact
   i64 arithmetic alone. Non-partial forced GPU smoke still covers the exact
   typed i64 kernel.
-- Work: keep partial `SUM(bigint)` out of selected planner paths until the
-  worker crash is isolated and covered by a regression test.
+- Work: isolate the PostgreSQL worker crash before re-enabling parallel
+  partial `SUM(bigint)` GPU plans.
 - Acceptance: f32/i64/f64 reduce matrices at 100K/1M/10M choose GPU only
   where they beat PostgreSQL, no integer precision is lost, and traces show
   the expected typed kernel.
@@ -272,9 +235,8 @@ incidental log noise.
   AdaptiveCpp's Metal emitter for `pgaccel_h3_lat_lng_to_cell_bulk` after
   the source hash changed, then passed cleanly.
 - Work: raise or tune `ACPP_METAL_ARCHIVE_MAX_BYTES` for known large
-  kernels, suppress or fix generated-MSL warning noise, make raw
-  host-pointer behavior an explicit negative test, and track first-dispatch
-  latency per kernel in benchmark artifacts.
+  kernels, suppress or fix generated-MSL warning noise, and track
+  first-dispatch latency per kernel in benchmark artifacts.
 - Acceptance: GPU tests are quiet except for intentional diagnostics,
   benchmark warmup no longer hides recurring multi-second JIT, and no
   resource-leak messages appear in passing Metal runs.
@@ -461,9 +423,9 @@ window work.
 - Work: support dimension joins, group keys, partial aggregates,
   cardinality reduction, GPU-resident fact batches, and finalization without
   heap walking under a pg_accel plan name.
-- Work: add setup or report sanity checks that flag zero-row dimension filters
-  before timing, then keep SSBM work focused on the missing GPU-resident
-  `GpuPreAgg` path rather than treating no-dispatch rows as GPU losses.
+- Work: add report sanity checks that flag zero-row dimension filters before
+  timing, then keep SSBM work focused on the missing GPU-resident `GpuPreAgg`
+  path rather than treating no-dispatch rows as GPU losses.
 - Acceptance: star-schema benchmark queries select `GpuPreAgg`, dispatch GPU
   kernels, match PostgreSQL output, and beat PostgreSQL parallel plans.
 
@@ -654,8 +616,8 @@ raster map algebra, and prepared geometry structures.
 - Work: implement PostgreSQL-compatible row multiplication, NULL handling,
   and output ordering for multi-SRF target lists; add a batched
   variable-output SRF executor before re-enabling GPU dispatch for large
-  `h3_grid_disk` target-list shapes, or reject unsupported shapes with a
-  visible planner-decline reason.
+  `h3_grid_disk` target-list shapes. Unsupported multi-SRF shapes must keep
+  visible planner-decline reasons.
 - Acceptance: multi-SRF H3 target-list queries either dispatch with
   correctness diffs against PostgreSQL/h3-pg or decline without selected
   pg_accel plan labels.
