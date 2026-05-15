@@ -63,9 +63,13 @@ kernels dispatched, and which rows returned to PostgreSQL.
 
 ### Benchmark harness and artifact hygiene
 
-- Evidence: before the 2026-05-13 benchmark, `pg_accel_otel.jsonl` had grown
-  to about 17.9 GB and `log-rails` had to truncate it. Long benchmark runs
-  also expose multi-minute quiet setup phases and crash recovery gaps.
+- Resolved: `pg_accel_otel.jsonl` and `pg_accel_traces.jsonl` are now
+  capped per-file by `pg_accel.otel_log_max_mb` (default 256 MiB) and
+  rotated with retention `pg_accel.otel_log_max_rotations` (default 4).
+  The 17.9 GiB regression cannot recur unless an operator raises the cap
+  to ~16 GiB explicitly. Long benchmark runs still expose multi-minute
+  quiet setup phases and crash recovery gaps — covered by the remaining
+  work items below.
 - Evidence: older runner classification could mark a Custom Scan as
   dispatched even when `EXPLAIN ANALYZE` reported `GPU Dispatched: false`,
   and undercount H3 function/SRF GPU work because it is not a Custom Scan.
@@ -105,9 +109,8 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `h3_latlng_res15 @ 10M` spent about 64-66s baseline vs 11-12s
   accelerated. Several spatial repro and full-sort parity cells also spend
   multiple seconds per sample at 10M rows.
-- Work: add source log rotation or log-size budgeting for
-  `pg_accel_otel.jsonl`, resumable benchmark manifests, correctness diffs,
-  and durable resume/audit report linkage.
+- Work: add resumable benchmark manifests, correctness diffs, and durable
+  resume/audit report linkage. (Source log budgeting is resolved.)
 - Work: add a planner-hook overhead audit for no-dispatch queries. Star
   schemas, expression-only filters, and native aggregate rows must either
   get an actual GPU-resident path or return through a cheap early decline
