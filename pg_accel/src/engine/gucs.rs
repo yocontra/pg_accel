@@ -40,6 +40,23 @@ static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
 /// declined to inject for this particular query.
 static ASSERT_DISPATCH: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Per-file size cap (in MiB) for the JSONL trace artifacts that pg_accel
+/// emits to `$PGDATA` (`pg_accel_otel.jsonl` and `pg_accel_traces.jsonl`).
+///
+/// When a file is about to exceed this cap the writer rotates it to
+/// `<file>.1`, ages the previous rotations up to
+/// `pg_accel.otel_log_max_rotations`, and starts a fresh active file.
+/// Default 256 MiB matches `DEFAULT_OTEL_LOG_MAX_MB` in
+/// `src/engine/otel.rs`. The 2026-05-13 benchmark caught this file at
+/// ~17.9 GiB on a long-running session that never rotated — see TODO.md.
+static OTEL_LOG_MAX_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
+
+/// Number of rotated copies of each JSONL trace artifact to retain. A
+/// value of `0` disables retention (still rotates, but immediately
+/// discards prior rotations). Default 4 keeps recent history without
+/// allowing unbounded disk usage.
+static OTEL_LOG_MAX_ROTATIONS: GucSetting<i32> = GucSetting::<i32>::new(4);
+
 // ---------------------------------------------------------------------------
 // Log-level enum
 // ---------------------------------------------------------------------------
@@ -137,6 +154,34 @@ pub fn init_gucs() {
         GucContext::Userset,
         GucFlags::default(),
     );
+
+    GucRegistry::define_int_guc(
+        c"pg_accel.otel_log_max_mb",
+        c"Per-file size cap for pg_accel_otel.jsonl and pg_accel_traces.jsonl, in MiB.",
+        c"When an active trace file would exceed this cap, the writer \
+          renames it to <file>.1 (ageing prior rotations) and reopens a \
+          fresh file. Prevents long-running benchmark sessions from \
+          producing multi-GiB JSONL artifacts. Default 256 MiB.",
+        &OTEL_LOG_MAX_MB,
+        1,
+        65_536,
+        GucContext::Userset,
+        GucFlags::UNIT_MB,
+    );
+
+    GucRegistry::define_int_guc(
+        c"pg_accel.otel_log_max_rotations",
+        c"Number of rotated copies of each trace artifact to retain.",
+        c"When the active trace file rotates, the writer ages \
+          <file>.N-1 → <file>.N and drops anything older. Set to 0 to \
+          disable retention (still bounds the active file but discards \
+          rotations immediately). Default 4.",
+        &OTEL_LOG_MAX_ROTATIONS,
+        0,
+        32,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +235,25 @@ pub fn log_level() -> PgAccelLogLevel {
 #[must_use]
 pub fn assert_dispatch() -> bool {
     ASSERT_DISPATCH.get()
+}
+
+/// Per-file size cap, in MiB, for `pg_accel_otel.jsonl` and
+/// `pg_accel_traces.jsonl`.
+///
+/// Returns the raw GUC value; callers in `engine::otel` apply min-clamp
+/// and convert to bytes.
+#[inline]
+#[must_use]
+pub fn otel_log_max_mb() -> i32 {
+    OTEL_LOG_MAX_MB.get()
+}
+
+/// Number of historical rotated copies to keep alongside each active
+/// trace file. A value of `0` discards rotations immediately.
+#[inline]
+#[must_use]
+pub fn otel_log_max_rotations() -> i32 {
+    OTEL_LOG_MAX_ROTATIONS.get()
 }
 
 #[cfg(feature = "pg_test")]
