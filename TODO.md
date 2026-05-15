@@ -12,7 +12,7 @@ natively.
 Current integration pins:
 
 - AdaptiveCpp: `yocontra/AdaptiveCpp`, branch `fork-safe-metal`, minimum
-  SHA `4f3cde11a302eebac28aa1ccc79ad3399cb8183c`.
+  SHA `0ebc10e5a596c4760b29bab1bdae45a4809f2ace`.
 - soft-fp64: `yocontra/soft-fp`, tag `v1.3.0`, consumed by AdaptiveCpp via
   `ACPP_SOFT_FP64_SRC_DIR`.
 
@@ -63,13 +63,6 @@ kernels dispatched, and which rows returned to PostgreSQL.
 
 ### Benchmark harness and artifact hygiene
 
-- Resolved: `pg_accel_otel.jsonl` and `pg_accel_traces.jsonl` are now
-  capped per-file by `pg_accel.otel_log_max_mb` (default 256 MiB) and
-  rotated with retention `pg_accel.otel_log_max_rotations` (default 4).
-  The 17.9 GiB regression cannot recur unless an operator raises the cap
-  to ~16 GiB explicitly. Long benchmark runs still expose multi-minute
-  quiet setup phases and crash recovery gaps — covered by the remaining
-  work items below.
 - Evidence: older runner classification could mark a Custom Scan as
   dispatched even when `EXPLAIN ANALYZE` reported `GPU Dispatched: false`,
   and undercount H3 function/SRF GPU work because it is not a Custom Scan.
@@ -110,15 +103,7 @@ kernels dispatched, and which rows returned to PostgreSQL.
   accelerated. Several spatial repro and full-sort parity cells also spend
   multiple seconds per sample at 10M rows.
 - Work: add resumable benchmark manifests, correctness diffs, and durable
-  resume/audit report linkage. (Source log budgeting is resolved.)
-- Resolved (23fb1bb): planner-hook overhead audit. SSBM Q2.3-shape 4-way
-  text-grouped join went from 34.686 ms to 0.120-0.137 ms planning time
-  (~280× speedup) via `join_hook_can_inject_anything()` Gate 1c
-  fast-decline and `grouped_query_has_unsupported_group_key`
-  upper-paths fast-decline. New `pg_accel_planner_overhead_us()` and
-  `pg_accel_planner_fast_decline_count()` SRFs surface ongoing
-  measurement. `HookElapsedGuard` RAII times every hook invocation
-  (~50ns cost). 2 pg_test regression tests pin the gates.
+  resume/audit report linkage.
 - Acceptance: a full benchmark cannot create unbounded logs, can be resumed
   or audited from saved artifacts, reports every crash/skip without relying
   on terminal scrollback, and keeps the default suite bounded while preserving
@@ -192,37 +177,6 @@ incidental log noise.
   stable, investigate mmap or parent-loaded metallib reuse.
 - Acceptance: 10-child fork stress shows first-dispatch JIT wall time at or
   below 50 ms, or the limiting cost is conclusively explained.
-
-### Metal pipeline-state XPC edge case
-
-- Resolved upstream (AdaptiveCpp `0ebc10e5` on branch `fork-safe-metal`,
-  2026-05-15): `compile_msl_to_metallib` now uses process-private temp
-  filenames (`<id>.<pid>.<rand>.metal` / `.air` / `.metallib.tmp`)
-  for every intermediate, and publishes the final `<id>.metallib`
-  via `std::filesystem::rename` (atomic on POSIX same-filesystem).
-  Sibling workers no longer unlink each other's in-flight inputs.
-  Rename-conflict path accepts the pre-existing file (same source
-  hash → same bytes). Cleanup runs against process-private filenames
-  that can't collide with siblings.
-- Verified post-fix: cold-cache 8-worker × 20-iteration fork stress
-  (`PGACCEL_FORK_STRESS_WORKERS=8 PGACCEL_FORK_STRESS_ITERS=20 just
-  gpu-stress-archive`) shows `workers_succeeded=8/8`,
-  `xpc_compiler_service_hits=0`, zero pipeline-state failures, zero
-  archive load/build failures. Matches the warm-cache deterministic
-  PASS — Phase 2 acceptance fully met.
-- Instrumentation retained (`490a1f4`):
-  `pgaccel_archive_stats_snapshot()` /
-  `pgaccel_archive_jit_cache_dir()` FFI
-  (`pgaccel-kernels/include/pgaccel_ffi.h:67-105`,
-  `pgaccel-kernels/src/archive_stats.cpp`) report
-  metallib/metalar/jit/orphan-metallib counts. `just
-  gpu-stress-archive` continues to drive the regression test;
-  re-running on any future AdaptiveCpp rebase is the canary.
-- Operator note: pg_accel still benefits from a warm JIT cache before
-  forking N workers, but the fix removes the requirement.
-  `shared_preload_libraries` + the new atomic-publish path together
-  make bulk-parallel cold launches (e.g. after `make clear-jit`)
-  safe.
 
 ### Out-of-order executor overlap
 
@@ -388,73 +342,59 @@ window work.
 
 ### Grouped hash aggregation
 
-- Status: the Metal argument-buffer crash is already gated. The slab-arg
-  pattern is applied to all four hashagg kernel lambdas
-  (`pgaccel-kernels/src/hash_agg.cpp:393-805`), the sort-based path is
-  Metal-gated off (`pgaccel-kernels/src/hash_agg.cpp:331-334`
-  `hashagg_sort_based_available()`), and grouped `AVG` finalize is
-  preemptively rejected
-  (`pg_accel/src/engine/executor/agg/execute.rs:1303-1310`
-  `reject_grouped_avg_finalize_if_present`). `grouped_agg @ 10M` now runs to
-  completion natively without crashing. What remains is the kernel work
-  needed to unlock GPU dispatch at the target scales.
-- Root cause for the gate: the remaining Metal `agg_hash` kernel
-  (`pgaccel-kernels/src/hash_agg.cpp:562-674`) is O(n*g) — one work-item
-  per group scanning all n rows. At 1M rows × 4096 groups that is ~4 billion
-  ops, at 10M × 10K it is ~100 billion ops; the 100K-row planner gate
-  (`pg_accel/src/engine/cost/formulas.rs:118-122`
-  `hashagg_input_rows_safe`) and 4096-group cap
-  (`pgaccel-kernels/src/hash_agg.cpp:1247`
-  `HASH_AGG_MAX_LARGE_UNSORTED_GROUPS`) are protective.
+- Existing state: the remaining Metal `agg_hash` kernel
+  (`pgaccel-kernels/src/hash_agg.cpp:562-674`) is O(n*g) — one
+  work-item per group scanning all n rows. At 1M rows × 4096 groups
+  that is ~4 billion ops, at 10M × 10K it is ~100 billion ops. The
+  100K-row planner gate (`formulas.rs:118-122
+  hashagg_input_rows_safe`) and 4096-group cap (`hash_agg.cpp:1247
+  HASH_AGG_MAX_LARGE_UNSORTED_GROUPS`) are protective.
 - Work: replace `agg_hash` with a real parallel hash-table kernel —
   open-addressing in shared memory, atomic CAS for slot acquisition,
-  `atomic_ref<double>` accumulators (supported on Metal via AdaptiveCpp),
-  one work-item per row instead of one per group. Cover `SUM`, `COUNT`,
-  `MIN`, `MAX`, and the typed integer/floating variants.
-- Work: fix grouped `AVG` finalize. Either route grouped `AVG` through
-  partial-mode always (kernel already emits `[N, sum]` lanes correctly at
-  `pgaccel-kernels/src/hash_agg.cpp:911-920`), or extend
-  `emit_grouped_tuple` (`pg_accel/src/engine/executor/agg/execute.rs:2477`)
-  to read the per-group counts buffer (`gr.result.counts()`,
-  `pgaccel-kernels/src/hash_agg.cpp:67`) and divide.
-- Work: remove the planner gate and the 4096-group cap only after the new
-  kernel benchmarks well at 1M/10M for `num_groups ∈ {10, 100, 1K, 10K}`,
-  and rewrite the gating tests in
-  `pg_accel/src/engine/ffi/planner_hooks/tests.rs:1315-1345`.
+  `atomic_ref<double>` accumulators (supported on Metal via
+  AdaptiveCpp), one work-item per row instead of one per group.
+  Cover `SUM`, `COUNT`, `MIN`, `MAX`, and the typed integer/floating
+  variants.
+- Work: fix grouped `AVG` finalize. Either route grouped `AVG`
+  through partial-mode always (kernel already emits `[N, sum]` lanes
+  at `hash_agg.cpp:911-920`), or extend `emit_grouped_tuple`
+  (`execute.rs:2477`) to read the per-group counts buffer
+  (`gr.result.counts()`, `hash_agg.cpp:67`) and divide.
+- Work: remove the planner gate and the 4096-group cap only after
+  the new kernel benchmarks well at 1M/10M for
+  `num_groups ∈ {10, 100, 1K, 10K}`, and rewrite the gating tests
+  in `planner_hooks/tests.rs:1315-1345`.
 - Acceptance: `grouped_agg`, `grouped_agg_high_card`,
-  `gpu_hashagg_med_card`, `hashagg_10g`, `hashagg_100g`, `hashagg_1kg`, and
-  `hashagg_10kg` complete at 1M and 10M with GPU dispatch, correctness
-  diffs against PostgreSQL, and speedup at or above 1.0 where selected.
+  `gpu_hashagg_med_card`, `hashagg_10g`, `hashagg_100g`,
+  `hashagg_1kg`, and `hashagg_10kg` complete at 1M and 10M with GPU
+  dispatch, correctness diffs against PostgreSQL, and speedup at or
+  above 1.0 where selected.
 
 ### Real GPU hash join build/probe
 
-- Status: the prior host-pointer SYCL probe path has been deleted. The
-  kernel at `pgaccel-kernels/src/hash_join.cpp:14-46` is a fail-closed stub
-  (`build` returns `nullptr`, `probe` returns `PGACCEL_UNSUPPORTED`). The
-  planner gate at
-  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:153-168` exits
-  via `selected_gpu_hashjoin_kernel_available()` (`:310-312`, returns
-  `false` unconditionally) before either `add_path` or
-  `inject_gpu_hashjoin_partial_paths` runs, so no `GpuHashJoin` CustomPath
-  is ever offered to PG. Previously-crashing cells now complete via PG
-  native HashJoin without disconnects.
-- Existing plumbing the new kernel can light up: `HashJoinTelemetry` in
-  `pg_accel/src/engine/executor/join/mod.rs:60-93` (build/probe
-  cardinalities, hash-table capacity, match buffer size, worker count,
-  redundant-inner-build counter); per-build/probe trace spans in
-  `pg_accel/src/engine/executor/join/probe.rs:204-251` and `:484-530`;
-  `match_count > max_matches` overflow check at `probe.rs:510-516` raising
-  `pgrx::error!`. All unreachable until the gate flips.
-- Work: build a real GPU build/probe — GPU-resident retained inner buffers
-  via the bridge USM-device path other kernels already use, batched probe
-  output, shared or reusable inner build for parallel workers, planner
-  cost model that declines GPU join when PG parallel hash join is cheaper.
-  Flip `selected_gpu_hashjoin_kernel_available()` only after benchmark
+- Existing state: kernel at `pgaccel-kernels/src/hash_join.cpp:14-46`
+  is a fail-closed stub (`build` returns `nullptr`, `probe` returns
+  `PGACCEL_UNSUPPORTED`); planner gate at
+  `join_pathlist.rs:153-168` declines via
+  `selected_gpu_hashjoin_kernel_available()` (`:310-312`, returns
+  `false` unconditionally). Existing plumbing the new kernel can
+  light up: `HashJoinTelemetry`
+  (`pg_accel/src/engine/executor/join/mod.rs:60-93`), per-build/probe
+  trace spans (`join/probe.rs:204-251` and `:484-530`),
+  `match_count > max_matches` overflow check at
+  `probe.rs:510-516` raising `pgrx::error!`. All unreachable until
+  the gate flips.
+- Work: build a real GPU build/probe — GPU-resident retained inner
+  buffers via the bridge USM-device path other kernels already use,
+  batched probe output, shared or reusable inner build for parallel
+  workers, planner cost model that declines GPU join when PG
+  parallel hash join is cheaper. Flip
+  `selected_gpu_hashjoin_kernel_available()` only after benchmark
   parity at the target row counts.
-- Acceptance: join sweep has no crashes; GPU plans are selected only for
-  cells with measured speedup at or above 1.0; build-side reuse evidence in
-  `HashJoinTelemetry.redundant_inner_builds` is zero or matches the
-  intended share-per-worker design.
+- Acceptance: join sweep has no crashes; GPU plans are selected only
+  for cells with measured speedup at or above 1.0; build-side reuse
+  evidence in `HashJoinTelemetry.redundant_inner_builds` is zero or
+  matches the intended share-per-worker design.
 
 ### GPU semi/anti join and Bloom prefilters
 
@@ -470,52 +410,29 @@ window work.
 
 ### NestedLoop scalar recognition
 
-- Scope: spatial nested loops are handled, but scalar nested loops with
-  indexable or correlated inequality quals are not accelerated.
-- Status: detect-and-decline observability is landed in
-  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` via
-  `observe_nestloop_scalar_opportunity` (mirrors the merge-join pattern).
-  The hook walks `joinrel->pathlist` for `T_NestPath` entries, walks
-  `extra.restrictlist` for cross-rel scalar btree inequalities using
-  `get_op_btree_interpretation`, and increments
-  `planner_rejected("nestloop_scalar_no_gpu_kernel", ...)`. No GPU kernel
-  exists yet.
-- Kernel + bridge + cost + canary landed (4138b53):
-  - `pgaccel-kernels/src/nested_loop_ineq.cpp` — SYCL tiled
-    cross-product scan with 4 entry points
-    (`pgaccel_nlj_ineq_{i64,f64}` + `pgaccel_nlj_between_{i64,f64}`)
-    + atomic-counter compaction. Overflow is surfaced as
-    `NljDispatchResult::Overflow { observed, cap }` — anti-cheat #4
-    forbids silent truncation. 190 oracle-verified cold-cache tests
-    pass.
-  - `pg_accel/src/gpu/nested_loop_ineq.rs` — safe Rust wrappers.
-  - `AccelStrategy::GpuNestedLoopIneq = 9` in
-    `pg_accel/src/engine/registry/types.rs` with `from_i32(9)`
-    mapping + `KernelOp::NestedLoopIneq` round-trip.
-  - Cost model: 4 new `DeviceLimits` fields
-    (`gpu_nlj_min_outer_rows`, `gpu_nlj_min_inner_rows`,
-    `gpu_nlj_max_output_rows`, `gpu_nlj_per_pair_cost`) in both
-    `from_profile` (cu_scale-derived) and `cpu_only` (fallback).
-    `nlj_break_even()` + `nlj_selectivity_useful()` helpers in
-    `engine/cost/formulas.rs`. Surfaced via
-    `pg_accel_device_limits()` SRF.
-  - `selected_gpu_nlj_kernel_available()` gate (pinned `false`) with
-    canary test `selected_gpu_nlj_kernel_is_not_available_yet` —
-    flipping the gate must invert the canary in the same commit.
-- Remaining work to make a SQL query actually select the strategy
-  (file:line citations in the 4138b53 commit message):
+- Scope: scalar correlated inequality joins (BETWEEN, range overlap)
+  that PG plans as Nested Loop. SYCL kernel + cost + canary gate
+  already in (`AccelStrategy::GpuNestedLoopIneq`,
+  `pgaccel-kernels/src/nested_loop_ineq.cpp`,
+  `nlj_break_even()` + `nlj_selectivity_useful()` cost helpers).
+  Today no SQL query selects the strategy because
+  `selected_gpu_nlj_kernel_available()` is pinned `false`; the
+  canary test `selected_gpu_nlj_kernel_is_not_available_yet`
+  guards the flip.
+- Work to make a SQL query actually select the strategy:
   1. Executor node with both-sides slot deformation (NLJ projects
      from outer AND inner relation rows, unlike GpuHashJoin
-     probe-only). Reference: `pg_accel/src/engine/executor/join/`
-     for the strategy + per-slot extractor pattern.
+     probe-only). Reference pattern:
+     `pg_accel/src/engine/executor/join/`.
   2. `make_custom_scan_plan` callback updates in
      `pg_accel/src/engine/ffi/custom_scan/` to encode both
      `outer_varno/attno` + `inner_varno/attno` in `custom_private`.
   3. Planner `add_path` call site flip in
      `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` —
      currently `observe_nestloop_scalar_opportunity` just
-     increments the counter; the flip constructs a CustomPath when
-     `nlj_break_even()` + `nlj_selectivity_useful()` both pass.
+     increments the counter; flip it to construct a CustomPath
+     when `nlj_break_even()` + `nlj_selectivity_useful()` both
+     pass.
   4. Flip `selected_gpu_nlj_kernel_available()` from `false` →
      `true` and invert the canary in the same commit.
   5. `#[pg_test]` integration: synthetic 1000 events × 100
@@ -543,31 +460,6 @@ window work.
   match PostgreSQL for NULLs, duplicates, collations/order-sensitive cases
   where applicable, and benchmark-selected cells are at or above PostgreSQL
   parallel parity.
-
-### Boolean and bitwise aggregate kernels
-
-- Landed (3f0ac44): GPU kernels for `bool_and`/`bool_or`/`bit_and`/
-  `bit_or`/`bit_xor` across i16/i32/i64 (`pgaccel-kernels/src/reduce.cpp`,
-  cold-tested 11/11 PASS via `test_reduce_bool_bit`). FFI bridge, Rust
-  wrappers (`reduce_bool_{and,or}`, `reduce_bit_{and,or,xor}_i{16,32,64}`),
-  `AggOp::BitXor` variant, executor accumulation paths
-  (`accumulate_bitwise`/`accumulate_bool`, identity-seeded `bit_acc`/
-  `bool_acc`), `dispatch_gpu_reduce_bit_bool`, typed finalize. Cost
-  gates: `reduce_bit_break_even_rows` and `reduce_bool_break_even_rows`
-  in `DeviceLimits` (surfaced via `pg_accel_device_limits()`).
-- Deferred until BOOLOID/INT2/INT4 input-extraction lane lands in
-  `execute.rs::next()`: the planner classifier flip in
-  `pg_accel/src/engine/ffi/planner_hooks/agg_common.rs` that would map
-  `F_BIT_{AND,OR,XOR}_INT{2,4,8}` / `F_BOOL_{AND,OR}` to the new `AggOp`
-  variants. Flipping the classifier today would route real SQL queries
-  through the executor's f64 extractor on a BOOLOID datum, reading
-  garbage bits. Kernels + bridge + accumulation + cost gates are
-  correct in isolation; the next agent wires extraction then flips
-  the classifier in one step.
-- Acceptance (still pending the deferred piece): typed boolean/bitwise
-  aggregate tests dispatch the intended kernels, produce
-  PostgreSQL-identical results, and are costed out when launch
-  overhead exceeds PostgreSQL-native execution.
 
 ### Full sort algorithm and cost gating
 
@@ -617,56 +509,6 @@ window work.
 This phase covers the non-relational compute-heavy lanes that should be
 pg_accel strengths: H3, spatial predicates/joins, geometry constructors,
 raster map algebra, and prepared geometry structures.
-
-### H3 winning lane protection
-
-- Evidence: `h3_bulk` and `h3_resolution_sweep` remain the strongest fits
-  for the project mission. `h3_bulk @ 10M` ran around 6.0s accelerated vs
-  90-91s PostgreSQL parallel, and `h3_resolution_sweep @ 1M` ran around
-  0.32s vs 8.4s.
-- Evidence: the 2026-05-14 full-run pass confirmed `h3_bulk` is still a
-  strong win at 10K/100K/1M and a long 10M proof lane: 10K was about 8 ms vs
-  51-64 ms, 100K was about 85-107 ms vs 523-610 ms, 1M was about
-  603-647 ms vs 6.8-7.2s, and the first 10M samples were about 4.9-5.7s vs
-  76-101s.
-- Evidence: the same pass showed `h3_resolution_sweep @ 10M` at about
-  1.0-1.6s accelerated vs 72-88s PostgreSQL baseline and
-  `h3_latlng_res15 @ 10M` at about 11-12s accelerated vs 64-66s baseline.
-  These are valid H3 wins but should live in a rigorous/proof lane, not make
-  the default suite take tens of minutes per workload family.
-- Evidence: other H3 operations are not automatically wins:
-  `h3_cell_to_parent` and `h3_grid_distance` were near parity after warmup
-  through the scales observed on 2026-05-13.
-- Latest focused repros: `h3_bulk @ 100K` measured 154.18 ms vs
-  638.93 ms (`4.14x`), and `h3_resolution_sweep @ 100K` measured 109.14
-  ms vs 603.76 ms (`5.53x`). The "geomean across 0 dispatched workloads"
-  artifact is resolved (`3d6e6b0 feat(bench): split geomean by dispatch
-  source` now credits function/SRF kernel dispatch alongside Custom Scan
-  dispatch).
-- Landed (ef6d46c): `H3LaneClass` classifier in
-  `pg_accel_bench/src/workloads/mod.rs` distinguishes winning lanes
-  (`h3_bulk`, `h3_resolution_sweep`, `h3_latlng_res15`,
-  `h3_srf_grid_disk`, `h3_fp64_ops`) from parity lanes
-  (`h3_cell_to_parent`, `h3_grid_distance`, `h3_dist_near`,
-  `h3_dist_far`, `h3_parent_deep`). 16 unit tests pin canonical
-  membership and dispatch-classification expectations.
-  `pg_accel_bench/src/h3_protection_test.rs` adds integration tests
-  (gated behind `--features integration_tests`, live PG required)
-  asserting `pg_accel_kernel_executions()` delta for winners is
-  non-zero, parity lane delta is zero, result-set equality across
-  `pg_accel.enabled=on/off`, and a warm dispatch latency budget.
-- Landed (e0cdc0d): hard CI gate. `BenchReport::evaluate_h3_lane_gate()`
-  + `main::enforce_h3_lane_gate(&report)` set a non-zero process exit
-  when (a) any Winner has `gpu_kernel_dispatched == false`, (b) any
-  Winner has `speedup_median_vs_parallel < 1.0`, or (c) any Parity
-  lane unexpectedly dispatched. Uniform 1.0x floor (matches the Phase
-  0 ship bar); per-Winner advisory thresholds rendered alongside.
-  Cold-start cost remains unbounded by design (per Phase 2 the first
-  compile of `pgaccel_h3_lat_lng_to_cell_bulk` can take minutes);
-  only warm dispatch latency is gated today.
-- Acceptance: winning H3 operations remain crash-free, keep GPU dispatch,
-  and meet speedup thresholds on warm runs; parity-only H3 operations are
-  declined or costed honestly.
 
 ### H3 LATERAL SRF expansion
 
@@ -874,36 +716,6 @@ PostgreSQL native execution, and PG-Strom-supported workloads.
 - Step 5, ratchet: add benchmark assertions that fail CI if a selected GPU
   cell regresses below parity, crashes, silently misses GPU dispatch, or loses
   GPU plan selection for a lane that is supposed to win.
-
-### Reduce typed dispatch and transfer cost
-
-- Landed (7cfe208): INT2/INT4 widened to i64 at observe time and routed
-  through `gpu.reduce_*_i64` (was: routed through `Vec<f64>` →
-  `gpu.reduce_*_f64` = soft-fp64 on Metal + precision loss beyond 2^53).
-  FLOAT4 and INT8 typed dispatch had already landed pre-session. New
-  `exec.reduce_dispatch` debug span carries `n`, `type_oid`, `op` so any
-  future regression to soft-fp64 surfaces in `pg_accel_traces.jsonl`.
-  finalize() for INT2/INT4 emits NUMERIC via `int128_to_numeric` (no
-  f64 drift) or typed int{2,4}/int8 (no f64 round-trip). 5 typed
-  break-even tests + 3 finalize tests pin the routing.
-- Resolved (f70c267): MIN/MAX f64 was getting rewritten by PG's
-  `preprocess_minmax_aggregates` (`planagg.c:316`) into an
-  ORDER-BY-LIMIT-1 sub-plan, and pg_accel was matching that as a
-  top-K candidate and dispatching `Strategy: GpuSort`. Measured
-  50,603 ms outlier on `reduce_min_f64 @ 1M`. Fix:
-  `min_max_rewrite_shape(limit_tuples, num_pathkeys)` in
-  `rel_pathlist.rs` gates `try_inject_gpu_sort_path` before
-  `heap_topk_sort_candidate` with the narrow predicate
-  `limit_tuples in (0, 2) && num_pathkeys == 1`. Verified live:
-  `MIN(vf8) @ 1M` drops to 24-34 ms (native parallel agg), top-K
-  `LIMIT 100` still routes through GpuSort, 6 new boundary unit
-  tests + 2 pgrx integration tests, `RejectionReason::
-  MinMaxRewriteNotASort` counter exposes the gate in stats.
-- Acceptance: f32/i64/f64 reduce matrices at 100K/1M/10M choose GPU
-  only where they beat PostgreSQL, no integer precision is lost, and
-  traces show the expected typed kernel instead of accidental
-  soft-fp64. Both the typed-dispatch piece (7cfe208) and the
-  MIN/MAX→GpuSort routing (f70c267) are closed.
 
 ### Calibrate `pg_accel.soft_fp64_cost_multiplier`
 
