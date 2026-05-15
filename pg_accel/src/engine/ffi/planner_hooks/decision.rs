@@ -33,6 +33,12 @@ pub(super) enum RejectionReason {
     NestedLoopScalarNoGpuKernel,
     SortIncrementalOpportunity,
     SortHeapFullOutput,
+    /// Single-column ORDER BY with LIMIT 1: looks like PG's MIN/MAX →
+    /// IndexScan+Limit rewrite (or a legitimate user LIMIT 1 by a single
+    /// column). Either way GpuSort is the wrong shape — a 1-row top-K is
+    /// O(N) reduce-cheap on PG's native plan and orders of magnitude faster
+    /// than a full GPU sort, so decline and let PG run native.
+    MinMaxRewriteNotASort,
     UnsupportedType(&'static str),
     Other(&'static str),
 }
@@ -57,6 +63,7 @@ impl RejectionReason {
             Self::NestedLoopScalarNoGpuKernel => "nestloop_scalar_no_gpu_kernel",
             Self::SortIncrementalOpportunity => "sort_incremental_opportunity",
             Self::SortHeapFullOutput => "sort_heap_full_output",
+            Self::MinMaxRewriteNotASort => "min_max_rewrite_not_a_sort",
             Self::UnsupportedType(reason) | Self::Other(reason) => reason,
         }
     }
@@ -384,6 +391,10 @@ mod tests {
         assert_eq!(
             RejectionReason::SortHeapFullOutput.stats_key(),
             "sort_heap_full_output"
+        );
+        assert_eq!(
+            RejectionReason::MinMaxRewriteNotASort.stats_key(),
+            "min_max_rewrite_not_a_sort"
         );
         assert_eq!(
             RejectionReason::UnsupportedType("unsupported_jsonb_type").stats_key(),

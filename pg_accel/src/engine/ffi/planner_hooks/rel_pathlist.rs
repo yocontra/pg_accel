@@ -721,6 +721,48 @@ pub(super) fn heap_topk_sort_candidate(limit_tuples: f64, rows: usize) -> bool {
         && limit_rows <= row_count * GPU_SORT_MAX_HEAP_TOPK_FRACTION
 }
 
+/// Whether a (`limit_tuples`, `num_pathkeys`) pair looks like PostgreSQL's
+/// MIN/MAX → IndexScan+Limit rewrite — equivalently, a single-column
+/// ORDER BY with LIMIT 1.
+///
+/// PostgreSQL rewrites `SELECT MIN(x) FROM t` / `SELECT MAX(x) FROM t` into
+/// an InitPlan shaped `SELECT x FROM t WHERE x IS NOT NULL ORDER BY x
+/// [DESC] LIMIT 1` (see `preprocess_minmax_aggregates` in
+/// `src/backend/optimizer/plan/planagg.c`). The base-relation planner hook
+/// sees this as a regular ORDER BY + LIMIT 1 single-key sort and would
+/// otherwise route it through `Strategy: GpuSort`, which runs a full GPU
+/// sort just to return the first row.
+///
+/// At LIMIT 1, GPU sort is the wrong shape regardless of provenance:
+/// - The MIN/MAX rewrite: PG's IndexScan+Limit (or sequential scan + Limit)
+///   is single-digit-millisecond on a real index, while GpuSort is
+///   hundreds-of-milliseconds for a full sort of the same input.
+/// - A user-written `SELECT * FROM t ORDER BY x LIMIT 1`: same story.
+///   GPU sort wins at large bounded top-K (LIMIT >= 2) where the win
+///   amortises over the result; at LIMIT 1 the GPU launch + sort cost
+///   dominates.
+///
+/// Predicate exact: `num_pathkeys == 1 && limit_tuples == 1.0`. This is
+/// deliberately narrow — `LIMIT 100` over a single-column ORDER BY remains
+/// a valid GpuSort path (handled by `heap_topk_sort_candidate`); multi-key
+/// LIMIT 1 is not the MIN/MAX rewrite (PG only rewrites single-aggregate
+/// MIN/MAX queries) so we leave it to the other gates.
+#[must_use]
+#[inline]
+pub(super) fn min_max_rewrite_shape(limit_tuples: f64, num_pathkeys: i32) -> bool {
+    // LIMIT 1 is the canonical MIN/MAX rewrite output cardinality. Use a
+    // finite-equality check rather than a range so that LIMIT 2+ stays in
+    // the legitimate top-K lane.
+    if !limit_tuples.is_finite() {
+        return false;
+    }
+    // PG's `preprocess_limit` lowers `LIMIT 1` to `limit_tuples == 1.0`.
+    // Allow the open interval (0, 2) to catch any fractional rounding
+    // (e.g. `limit_tuples = 1.0` exactly) while excluding LIMIT 0 (no rows)
+    // and LIMIT >= 2.
+    (limit_tuples > 0.0) && (limit_tuples < 2.0) && (num_pathkeys == 1)
+}
+
 /// Classification of how `root->sort_pathkeys` relates to the pathkeys of
 /// paths already attached to the base relation.
 ///
@@ -931,13 +973,36 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
+    // Gate: reject the MIN/MAX → ORDER BY LIMIT 1 rewrite. PG transforms
+    // `SELECT MIN(col) FROM t` into a subplan shaped `SELECT col FROM t
+    // ORDER BY col LIMIT 1` (see `preprocess_minmax_aggregates` in
+    // `src/backend/optimizer/plan/planagg.c`). That subplan reaches us as a
+    // single-key ORDER BY + LIMIT 1 here, and previously got routed through
+    // `Strategy: GpuSort` — which runs a full GPU sort to return one row,
+    // taking 100s of ms vs PG's 10-20 ms native IndexScan/SeqScan + Limit.
+    // Decline so PG can run its native plan untouched. See
+    // `min_max_rewrite_shape` for the exact predicate.
+    let limit_tuples = root_ref.limit_tuples;
+    if min_max_rewrite_shape(limit_tuples, num_pathkeys) {
+        pgrx::debug1!(
+            "pg_accel sort: LIMIT 1 on {} rows with single ORDER BY key — \
+             MIN/MAX rewrite shape; deferring to PostgreSQL native plan",
+            rows
+        );
+        let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        stats::increment_planner_rejected(
+            super::RejectionReason::MinMaxRewriteNotASort.stats_key(),
+            rejected_rows,
+        );
+        return;
+    }
+
     // Gate: reject full-output standalone heap sorts. A positive LIMIT by
     // itself is not enough: LIMIT values close to the relation cardinality
     // still push nearly every heap tuple through the Custom Scan and are the
     // same loser lane as no-limit ORDER BY. Keep only bounded top-k shapes
     // exposed from this hook; GPU-resident rank/finalization/full-sort uses
     // should enter through a later internal pipeline instead.
-    let limit_tuples = root_ref.limit_tuples;
     if !heap_topk_sort_candidate(limit_tuples, rows) {
         pgrx::debug1!(
             "pg_accel sort: LIMIT {:?} on {} rows is not a bounded top-k heap sort; \
@@ -1321,7 +1386,7 @@ unsafe fn inject_gpu_sort_partial_paths(
 mod tests {
     use super::{
         GPU_SORT_MAX_HEAP_TOPK_FRACTION, GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape,
-        heap_topk_sort_candidate,
+        heap_topk_sort_candidate, min_max_rewrite_shape,
     };
 
     /// Regression guard: the planner sort gate and the executor sort
@@ -1435,6 +1500,67 @@ mod tests {
     fn heap_topk_gate_allows_bounded_topk() {
         assert!(heap_topk_sort_candidate(1_000.0, 1_000_000));
         assert!(heap_topk_sort_candidate(250_000.0, 1_000_000));
+    }
+
+    // -- min_max_rewrite_shape --------------------------------------------
+    //
+    // PG's `preprocess_minmax_aggregates` rewrites `SELECT MIN(x) FROM t`
+    // (and MAX) to a subplan shaped `ORDER BY x LIMIT 1`. The base-relation
+    // planner hook must NOT route this shape through `Strategy: GpuSort` —
+    // a full GPU sort to fetch one row is hundreds of ms vs ~10-20 ms for
+    // PG's native IndexScan/SeqScan + Limit. The gate is a pure function
+    // of `(limit_tuples, num_pathkeys)` so it is unit-testable without a
+    // live planner.
+
+    #[test]
+    fn min_max_rewrite_gate_matches_limit_1_single_key() {
+        // The canonical MIN/MAX rewrite output: LIMIT 1 + 1 ORDER BY key.
+        assert!(min_max_rewrite_shape(1.0, 1));
+    }
+
+    #[test]
+    fn min_max_rewrite_gate_rejects_multi_key_sort() {
+        // Multi-key ORDER BY LIMIT 1 is not the MIN/MAX rewrite (PG only
+        // rewrites single-aggregate MIN/MAX). Other gates handle these.
+        assert!(!min_max_rewrite_shape(1.0, 2));
+        assert!(!min_max_rewrite_shape(1.0, 4));
+    }
+
+    #[test]
+    fn min_max_rewrite_gate_rejects_bounded_topk_with_limit_above_one() {
+        // Legitimate top-K — LIMIT 100, LIMIT 1000 etc. — stays in the
+        // GpuSort lane handled by `heap_topk_sort_candidate`.
+        assert!(!min_max_rewrite_shape(2.0, 1));
+        assert!(!min_max_rewrite_shape(100.0, 1));
+        assert!(!min_max_rewrite_shape(1_000.0, 1));
+    }
+
+    #[test]
+    fn min_max_rewrite_gate_rejects_no_limit() {
+        // No LIMIT, or LIMIT 0, or non-finite limit_tuples means PG didn't
+        // emit the MIN/MAX rewrite shape. Other gates handle full sorts.
+        assert!(!min_max_rewrite_shape(0.0, 1));
+        assert!(!min_max_rewrite_shape(-1.0, 1));
+        assert!(!min_max_rewrite_shape(f64::INFINITY, 1));
+        assert!(!min_max_rewrite_shape(f64::NAN, 1));
+    }
+
+    #[test]
+    fn min_max_rewrite_gate_rejects_zero_pathkeys() {
+        // Zero pathkeys means no ORDER BY at all; nothing to gate.
+        assert!(!min_max_rewrite_shape(1.0, 0));
+    }
+
+    #[test]
+    fn min_max_rewrite_gate_uses_stable_stats_key() {
+        // The pgrx integration test and any external consumer reading
+        // `pg_accel_stats()` rely on this exact string. If you rename it,
+        // update those consumers in the same commit.
+        use super::super::RejectionReason;
+        assert_eq!(
+            RejectionReason::MinMaxRewriteNotASort.stats_key(),
+            "min_max_rewrite_not_a_sort"
+        );
     }
 
     /// The GpuSort partial-path injector must be early-exit-safe on a null

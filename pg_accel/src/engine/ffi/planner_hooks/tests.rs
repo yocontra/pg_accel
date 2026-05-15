@@ -1996,6 +1996,133 @@ mod incremental_sort_detect {
 }
 
 // =====================================================================
+// MIN/MAX → ORDER BY LIMIT 1 rewrite decline
+// =====================================================================
+//
+// PostgreSQL rewrites `SELECT MIN(col) FROM t` (and MAX) into a subplan
+// shaped `SELECT col FROM t ORDER BY col [DESC] LIMIT 1`
+// (`preprocess_minmax_aggregates` in
+// `src/backend/optimizer/plan/planagg.c`). The base-relation planner hook
+// would otherwise route this through `Strategy: GpuSort`, running a full
+// GPU sort to return one row at hundreds-of-ms latency vs ~10-20 ms for
+// PG's native IndexScan/SeqScan + Limit.
+//
+// `try_inject_gpu_sort_path` declines the inject via
+// `min_max_rewrite_shape(limit_tuples, num_pathkeys)` and records the
+// rejection with `RejectionReason::MinMaxRewriteNotASort` (stats key
+// `min_max_rewrite_not_a_sort`). This test asserts the plan no longer
+// shows `Custom Scan (GpuSort)` for the MIN-rewrite shape.
+mod min_max_rewrite_decline {
+    #[pgrx::pg_schema]
+    mod tests {
+        use pgrx::prelude::{Spi, pg_test};
+
+        /// Collect EXPLAIN text for a query into a single string.
+        fn explain(query: &str) -> String {
+            pgrx::Spi::connect(|client| {
+                let mut lines: Vec<String> = Vec::new();
+                let table = client
+                    .select(&format!("EXPLAIN (FORMAT TEXT) {query}"), None, &[])
+                    .expect("EXPLAIN should succeed");
+                for row in table {
+                    if let Some(line) = row.get::<String>(1).ok().flatten() {
+                        lines.push(line);
+                    }
+                }
+                lines.join("\n")
+            })
+        }
+
+        /// EXPLAIN for `SELECT MIN(x) FROM t` (and MAX, fp64) must not show
+        /// `Custom Scan (GpuSort)`. PG's native MIN/MAX → ORDER BY LIMIT 1
+        /// rewrite should be left alone — IndexScan/SeqScan + Limit is the
+        /// correct shape at LIMIT 1.
+        #[pg_test]
+        fn min_max_rewrite_does_not_route_to_gpu_sort() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_minmax_rewrite").expect("drop prior");
+            Spi::run(
+                "CREATE TABLE pgaccel_minmax_rewrite (vf8 float8) \
+                 WITH (autovacuum_enabled=off)",
+            )
+            .expect("create");
+            Spi::run(
+                "INSERT INTO pgaccel_minmax_rewrite \
+                 SELECT random() FROM generate_series(1, 100000) g",
+            )
+            .expect("seed");
+            Spi::run("ANALYZE pgaccel_minmax_rewrite").expect("analyze");
+            Spi::run("SET pg_accel.enabled = on").expect("enable");
+
+            let min_plan = explain("SELECT MIN(vf8) FROM pgaccel_minmax_rewrite");
+            assert!(
+                !min_plan.contains("Strategy: GpuSort"),
+                "MIN(vf8) should NOT route through GpuSort; got plan:\n{min_plan}"
+            );
+
+            let max_plan = explain("SELECT MAX(vf8) FROM pgaccel_minmax_rewrite");
+            assert!(
+                !max_plan.contains("Strategy: GpuSort"),
+                "MAX(vf8) should NOT route through GpuSort; got plan:\n{max_plan}"
+            );
+
+            // Direct LIMIT 1 ORDER BY (the same shape PG emits for the
+            // MIN/MAX rewrite) must also decline GpuSort. A 1-row top-K is
+            // not what GpuSort is good for; PG's IndexScan/SeqScan + Limit
+            // wins on cost.
+            let limit1_plan =
+                explain("SELECT vf8 FROM pgaccel_minmax_rewrite ORDER BY vf8 LIMIT 1");
+            assert!(
+                !limit1_plan.contains("Strategy: GpuSort"),
+                "ORDER BY vf8 LIMIT 1 should NOT route through GpuSort; \
+                 got plan:\n{limit1_plan}"
+            );
+
+            Spi::run("DROP TABLE pgaccel_minmax_rewrite").expect("drop");
+        }
+
+        /// Regression guard: legitimate bounded top-K (LIMIT well above 1)
+        /// must still go through the GpuSort lane when the row count clears
+        /// the planner's `gpu_sort_planner_min_rows` threshold. We don't
+        /// assert `Custom Scan (GpuSort)` literally appears, because the
+        /// cost model and small test fixtures may legitimately decline —
+        /// the assertion that matters is "this query is not blanket-rejected
+        /// with reason min_max_rewrite_not_a_sort". This is enforced by the
+        /// unit tests `min_max_rewrite_gate_rejects_bounded_topk_with_limit_above_one`
+        /// in `rel_pathlist::tests`. Here we just confirm the query runs to
+        /// completion and returns the right rows.
+        #[pg_test]
+        fn bounded_topk_limit_100_still_executes() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_minmax_topk").expect("drop prior");
+            Spi::run(
+                "CREATE TABLE pgaccel_minmax_topk (x float8) \
+                 WITH (autovacuum_enabled=off)",
+            )
+            .expect("create");
+            Spi::run(
+                "INSERT INTO pgaccel_minmax_topk \
+                 SELECT random() FROM generate_series(1, 100000) g",
+            )
+            .expect("seed");
+            Spi::run("ANALYZE pgaccel_minmax_topk").expect("analyze");
+            Spi::run("SET pg_accel.enabled = on").expect("enable");
+
+            let row_count = Spi::get_one::<i64>(
+                "SELECT count(*) FROM (SELECT x FROM pgaccel_minmax_topk \
+                 ORDER BY x LIMIT 100) q",
+            )
+            .expect("select ORDER BY LIMIT 100")
+            .expect("row_count should be non-NULL");
+            assert_eq!(
+                row_count, 100,
+                "bounded top-K LIMIT 100 should return 100 rows"
+            );
+
+            Spi::run("DROP TABLE pgaccel_minmax_topk").expect("drop");
+        }
+    }
+}
+
+// =====================================================================
 // MergeJoin detect-and-decline smoke (TODO.md Phase 4)
 // =====================================================================
 //
