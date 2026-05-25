@@ -15,9 +15,6 @@
 
 mod tuplesort;
 
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-
 use pgrx::pg_sys;
 
 use crate::engine::cost;
@@ -29,8 +26,53 @@ use crate::gpu;
 
 use tuplesort::{
     FLOAT4OID, FLOAT8OID, INT4OID, INT8OID, gpu_sort_chunked_f32, gpu_sort_chunked_f64,
-    gpu_sort_chunked_i32, gpu_sort_chunked_i64,
+    gpu_sort_chunked_i32, gpu_sort_chunked_i64, gpu_topk_f32, gpu_topk_f64, gpu_topk_i32,
+    gpu_topk_i64,
 };
+
+/// Maximum LIMIT this executor handles with the bounded GPU top-k path.
+///
+/// The implementation keeps at most this many rows per relation-level top-k
+/// request. Larger LIMIT values remain declined by the planner so they do not
+/// silently fall back to full-output GPU sort.
+pub const GPU_SORT_TOPK_MAX_LIMIT: usize = 128;
+
+fn sort_key_is_desc(key: &SortKeyDesc) -> bool {
+    // Known GT operator OIDs: float4gt(623), float8gt(674), int4gt(521), int8gt(413).
+    let sort_op_raw = u32::from(key.sort_op);
+    matches!(sort_op_raw, 623 | 674 | 521 | 413)
+}
+
+fn topk_tuple_indices(
+    key: &SortKeyDesc,
+    non_null_indices: &[usize],
+    null_indices: &[usize],
+    gpu_indices: &[u32],
+    n: usize,
+    k: usize,
+) -> Vec<usize> {
+    let limit = k.min(n);
+    let mut selected = Vec::with_capacity(limit);
+
+    if key.nulls_first {
+        selected.extend(null_indices.iter().copied().take(limit));
+    }
+
+    let remaining = limit.saturating_sub(selected.len());
+    selected.extend(
+        gpu_indices
+            .iter()
+            .take(remaining)
+            .filter_map(|&gi| non_null_indices.get(gi as usize).copied()),
+    );
+
+    if !key.nulls_first {
+        let remaining = limit.saturating_sub(selected.len());
+        selected.extend(null_indices.iter().copied().take(remaining));
+    }
+
+    selected
+}
 
 // ---------------------------------------------------------------------------
 // Sort key descriptor
@@ -102,6 +144,10 @@ pub struct SortExecState {
     pub batches_executed: u64,
     /// Cumulative microseconds in sort dispatch.
     pub dispatch_time_us: u64,
+    /// Whether the bounded top-k GPU kernel ran.
+    pub gpu_dispatched: bool,
+    /// Number of non-null key rows submitted to the top-k GPU kernel.
+    pub gpu_rows_dispatched: u64,
 }
 
 impl SortExecState {
@@ -130,7 +176,114 @@ impl SortExecState {
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
+            gpu_dispatched: false,
+            gpu_rows_dispatched: 0,
         }
+    }
+
+    fn effective_topk_limit(&self, total_rows: usize) -> usize {
+        let Some(limit) = self.limit else {
+            pgrx::error!(
+                "pg_accel: GpuSort reached executor without a bounded LIMIT; \
+                 full-output GPU sort is not an exposed planner path"
+            );
+        };
+        if limit > GPU_SORT_TOPK_MAX_LIMIT {
+            pgrx::error!(
+                "pg_accel: GpuSort LIMIT {} exceeds implemented top-k limit {}; \
+                 planner should have declined this shape",
+                limit,
+                GPU_SORT_TOPK_MAX_LIMIT,
+            );
+        }
+        limit.min(total_rows)
+    }
+
+    fn non_null_topk_needed(
+        key: &SortKeyDesc,
+        null_count: usize,
+        non_null_count: usize,
+        k: usize,
+    ) -> usize {
+        if k == 0 {
+            return 0;
+        }
+        if key.nulls_first {
+            k.saturating_sub(null_count).min(non_null_count)
+        } else {
+            k.min(non_null_count)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_gpu_topk(
+        &mut self,
+        key_typid: u32,
+        non_null_indices: &[usize],
+        null_indices: &[usize],
+        f32_keys: &[f32],
+        f64_keys: &[f64],
+        i32_keys: &[i32],
+        i64_keys: &[i64],
+        n: usize,
+    ) -> u64 {
+        let key = self.sort_keys[0].clone();
+        let k = self.effective_topk_limit(n);
+        let non_null_needed =
+            Self::non_null_topk_needed(&key, null_indices.len(), non_null_indices.len(), k);
+        let descending = sort_key_is_desc(&key);
+
+        let gpu_idx = if non_null_needed == 0 {
+            Vec::new()
+        } else {
+            match key_typid {
+                FLOAT4OID => gpu_topk_f32(f32_keys, non_null_needed, descending).unwrap_or_else(|| {
+                    pgrx::error!(
+                        "pg_accel: topk_kv_f32 GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }),
+                FLOAT8OID => gpu_topk_f64(f64_keys, non_null_needed, descending).unwrap_or_else(|| {
+                    pgrx::error!(
+                        "pg_accel: topk_kv_f64 GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }),
+                INT4OID => gpu_topk_i32(i32_keys, non_null_needed, descending).unwrap_or_else(|| {
+                    pgrx::error!(
+                        "pg_accel: topk_kv_i32 GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }),
+                INT8OID => gpu_topk_i64(i64_keys, non_null_needed, descending).unwrap_or_else(|| {
+                    pgrx::error!(
+                        "pg_accel: topk_kv_i64 GPU kernel failed; refusing CPU fallback (rule 11)"
+                    );
+                }),
+                _ => {
+                    pgrx::error!(
+                        "pg_accel: unsupported GpuSort key type {} reached top-k executor",
+                        key_typid,
+                    );
+                }
+            }
+        };
+
+        if gpu_idx.len() < non_null_needed {
+            pgrx::error!(
+                "pg_accel: top-k GPU kernel returned {} indices for requested {}; \
+                 refusing to emit an incomplete ORDER BY result",
+                gpu_idx.len(),
+                non_null_needed,
+            );
+        }
+
+        self.apply_gpu_topk_result(&key, non_null_indices, null_indices, &gpu_idx, n, k);
+
+        self.gpu_dispatched = non_null_needed > 0;
+        self.gpu_rows_dispatched = if self.gpu_dispatched {
+            non_null_indices.len() as u64
+        } else {
+            0
+        };
+        self.gpu_rows_dispatched
     }
 
     /// Fetch the next sorted tuple.
@@ -229,7 +382,17 @@ impl SortExecState {
         } else {
             Vec::new()
         };
-        let mut f64_keys: Vec<f64> = if do_inline && inline_typid != FLOAT4OID {
+        let mut f64_keys: Vec<f64> = if do_inline && inline_typid == FLOAT8OID {
+            Vec::with_capacity(1024)
+        } else {
+            Vec::new()
+        };
+        let mut i32_keys: Vec<i32> = if do_inline && inline_typid == INT4OID {
+            Vec::with_capacity(1024)
+        } else {
+            Vec::new()
+        };
+        let mut i64_keys: Vec<i64> = if do_inline && inline_typid == INT8OID {
             Vec::with_capacity(1024)
         } else {
             Vec::new()
@@ -275,11 +438,10 @@ impl SortExecState {
                                 f64_keys.push(f64::from_bits(datum.value() as u64));
                             }
                             INT4OID => {
-                                f64_keys.push(f64::from(datum.value() as i32));
+                                i32_keys.push(datum.value() as i32);
                             }
                             INT8OID => {
-                                // i64 → f64 is lossless for |v| ≤ 2^53.
-                                f64_keys.push(datum.value() as i64 as f64);
+                                i64_keys.push(datum.value() as i64);
                             }
                             _ => unreachable!(),
                         }
@@ -301,77 +463,32 @@ impl SortExecState {
         // -- Phase 2: Sort --
         let mut gpu_rows_sorted: u64 = 0;
         if n > 1 && !self.sort_keys.is_empty() {
-            // Try GPU sort using inline-extracted keys (zero-copy key extraction).
-            // No max-elements gate: gpu_sort_chunked handles arbitrary sizes
-            // by splitting into chunks and k-way merging.
-            let limits = cost::device_limits();
-            let gpu_done = if do_inline && n >= limits.gpu_sort_min_rows {
-                let key = self.sort_keys[0].clone();
-                match inline_typid {
-                    FLOAT4OID => {
-                        if f32_keys.is_empty() {
-                            false
-                        } else if let Some(gpu_idx) = gpu_sort_chunked_f32(&f32_keys) {
-                            self.apply_gpu_sort_result(
-                                &key,
-                                &non_null_indices,
-                                &null_indices,
-                                &gpu_idx,
-                                n,
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    FLOAT8OID | INT4OID | INT8OID => {
-                        if f64_keys.is_empty() {
-                            false
-                        } else if let Some(gpu_idx) = gpu_sort_chunked_f64(&f64_keys) {
-                            self.apply_gpu_sort_result(
-                                &key,
-                                &non_null_indices,
-                                &null_indices,
-                                &gpu_idx,
-                                n,
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    }
-                    _ => false,
-                }
+            // Planner-selected GpuSort is now a bounded top-k shape only.
+            // The kernel keeps per-tile candidates on GPU and sorts only
+            // those candidates, then the executor retains the selected tuples.
+            let gpu_done = if do_inline {
+                gpu_rows_sorted = self.dispatch_gpu_topk(
+                    inline_typid,
+                    &non_null_indices,
+                    &null_indices,
+                    &f32_keys,
+                    &f64_keys,
+                    &i32_keys,
+                    &i64_keys,
+                    n,
+                );
+                true
             } else {
                 false
             };
 
-            if gpu_done {
-                gpu_rows_sorted = n as u64;
-            } else {
+            if !gpu_done {
                 pgrx::error!(
-                    "pg_accel: GPU sort kernel failed for {n} rows \
+                    "pg_accel: GPU top-k sort could not dispatch for {n} rows \
                      (strategy=GpuSort, type={inline_typid}). \
                      Refusing to continue."
                 );
             }
-        }
-
-        // -- Phase 3: Truncate for LIMIT (top-k) --
-        if let Some(k) = self.limit
-            && k < self.sorted_tuples.len()
-        {
-            // pfree the tuples beyond the limit.
-            for mt in &self.sorted_tuples[k..] {
-                if !mt.is_null() {
-                    // SAFETY: MinimalTuples were palloc'd by
-                    // ExecCopySlotMinimalTuple. pfree returns them.
-                    unsafe {
-                        pg_sys::pfree((*mt).cast());
-                    }
-                }
-            }
-            self.sorted_tuples.truncate(k);
         }
 
         self.sort_done = true;
@@ -574,8 +691,7 @@ impl SortExecState {
     ) {
         // GPU sorted ascending with NaN as largest. If DESC, reverse.
         // Known GT operator OIDs: float4gt(623), float8gt(674), int4gt(521), int8gt(413).
-        let sort_op_raw = u32::from(key.sort_op);
-        let is_desc = matches!(sort_op_raw, 623 | 674 | 521 | 413);
+        let is_desc = sort_key_is_desc(key);
 
         let sorted_non_null: Vec<pg_sys::MinimalTuple> = if is_desc {
             gpu_indices
@@ -606,6 +722,45 @@ impl SortExecState {
         self.sorted_tuples = reordered;
     }
 
+    /// Retain only the bounded top-k tuple set selected by the GPU top-k path.
+    ///
+    /// `gpu_indices` is ordered in final non-null key order and indexes into
+    /// `non_null_indices`, not directly into `sorted_tuples`.
+    fn apply_gpu_topk_result(
+        &mut self,
+        key: &SortKeyDesc,
+        non_null_indices: &[usize],
+        null_indices: &[usize],
+        gpu_indices: &[u32],
+        n: usize,
+        k: usize,
+    ) {
+        let selected_indices =
+            topk_tuple_indices(key, non_null_indices, null_indices, gpu_indices, n, k);
+        let mut keep = vec![false; n];
+        for &idx in &selected_indices {
+            if idx < keep.len() {
+                keep[idx] = true;
+            }
+        }
+
+        let selected: Vec<pg_sys::MinimalTuple> = selected_indices
+            .iter()
+            .filter_map(|&idx| self.sorted_tuples.get(idx).copied())
+            .collect();
+
+        for (idx, mt) in self.sorted_tuples.iter().enumerate() {
+            if !keep.get(idx).copied().unwrap_or(false) && !mt.is_null() {
+                // SAFETY: MinimalTuples were palloc'd by ExecCopySlotMinimalTuple.
+                unsafe {
+                    pg_sys::pfree((*mt).cast());
+                }
+            }
+        }
+
+        self.sorted_tuples = selected;
+    }
+
     /// Returns the acceleration strategy.
     #[must_use]
     pub fn strategy(&self) -> AccelStrategy {
@@ -616,6 +771,12 @@ impl SortExecState {
     #[must_use]
     pub fn sort_keys(&self) -> &[SortKeyDesc] {
         &self.sort_keys
+    }
+
+    /// Returns the bounded top-k limit, if any.
+    #[must_use]
+    pub fn limit(&self) -> Option<usize> {
+        self.limit
     }
 
     /// Attach a [`SortScan`] for direct heap scan mode.
@@ -749,92 +910,24 @@ impl SortExecState {
                 Dispatched,
             }
 
-            let outcome = if do_inline && n >= cost::device_limits().gpu_sort_min_rows {
-                let key = self.sort_keys[0].clone();
-
-                match key_typid {
-                    FLOAT4OID => {
-                        if f32_keys.is_empty() {
-                            SortOutcome::InputGate
-                        } else if let Some(gpu_idx) = gpu_sort_chunked_f32(&f32_keys) {
-                            self.apply_gpu_sort_result(
-                                &key,
-                                &non_null_indices,
-                                &null_indices,
-                                &gpu_idx,
-                                n,
-                            );
-                            SortOutcome::Dispatched
-                        } else {
-                            pgrx::error!(
-                                "pg_accel: sort_kv_f32 GPU kernel failed; refusing CPU fallback (rule 11)"
-                            );
-                        }
-                    }
-                    FLOAT8OID => {
-                        if f64_keys.is_empty() {
-                            SortOutcome::InputGate
-                        } else if let Some(gpu_idx) = gpu_sort_chunked_f64(&f64_keys) {
-                            self.apply_gpu_sort_result(
-                                &key,
-                                &non_null_indices,
-                                &null_indices,
-                                &gpu_idx,
-                                n,
-                            );
-                            SortOutcome::Dispatched
-                        } else {
-                            pgrx::error!(
-                                "pg_accel: sort_kv_f64 GPU kernel failed; refusing CPU fallback (rule 11)"
-                            );
-                        }
-                    }
-                    INT4OID => {
-                        if i32_keys.is_empty() {
-                            SortOutcome::InputGate
-                        } else if let Some(gpu_idx) = gpu_sort_chunked_i32(&i32_keys) {
-                            self.apply_gpu_sort_result(
-                                &key,
-                                &non_null_indices,
-                                &null_indices,
-                                &gpu_idx,
-                                n,
-                            );
-                            SortOutcome::Dispatched
-                        } else {
-                            pgrx::error!(
-                                "pg_accel: sort_kv_i32 GPU kernel failed; refusing CPU fallback (rule 11)"
-                            );
-                        }
-                    }
-                    INT8OID => {
-                        if i64_keys.is_empty() {
-                            SortOutcome::InputGate
-                        } else if let Some(gpu_idx) = gpu_sort_chunked_i64(&i64_keys) {
-                            self.apply_gpu_sort_result(
-                                &key,
-                                &non_null_indices,
-                                &null_indices,
-                                &gpu_idx,
-                                n,
-                            );
-                            SortOutcome::Dispatched
-                        } else {
-                            pgrx::error!(
-                                "pg_accel: sort_kv_i64 GPU kernel failed; refusing CPU fallback (rule 11)"
-                            );
-                        }
-                    }
-                    _ => SortOutcome::InputGate,
-                }
+            let outcome = if do_inline {
+                gpu_rows_sorted = self.dispatch_gpu_topk(
+                    key_typid,
+                    &non_null_indices,
+                    &null_indices,
+                    &f32_keys,
+                    &f64_keys,
+                    &i32_keys,
+                    &i64_keys,
+                    n,
+                );
+                SortOutcome::Dispatched
             } else {
                 SortOutcome::InputGate
             };
 
             match outcome {
-                SortOutcome::Dispatched => {
-                    gpu_rows_sorted = n as u64;
-                }
+                SortOutcome::Dispatched => {}
                 SortOutcome::InputGate => {
                     pgrx::error!(
                         "pg_accel: GpuSort could not dispatch {} rows with key type {}; \
@@ -844,22 +937,6 @@ impl SortExecState {
                     );
                 }
             }
-        }
-
-        // Top-k truncation.
-        if let Some(k) = self.limit
-            && k < self.sorted_tuples.len()
-        {
-            for mt in &self.sorted_tuples[k..] {
-                if !mt.is_null() {
-                    // SAFETY: MinimalTuples were palloc'd by
-                    // ExecCopySlotMinimalTuple in SortScan.
-                    unsafe {
-                        pg_sys::pfree((*mt).cast());
-                    }
-                }
-            }
-            self.sorted_tuples.truncate(k);
         }
 
         self.sort_done = true;

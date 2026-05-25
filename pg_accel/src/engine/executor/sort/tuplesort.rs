@@ -146,6 +146,7 @@ pub(super) fn gpu_sort_chunked_f64(keys: &[f64]) -> Option<Vec<u32>> {
 }
 
 /// GPU-sort i32 keys in chunks, returning the merged global permutation.
+#[allow(dead_code)]
 pub(super) fn gpu_sort_chunked_i32(keys: &[i32]) -> Option<Vec<u32>> {
     let chunk_size = cost::device_limits().gpu_sort_max_elements;
     let n = keys.len();
@@ -194,6 +195,7 @@ pub(super) fn gpu_sort_chunked_i32(keys: &[i32]) -> Option<Vec<u32>> {
 }
 
 /// GPU-sort i64 keys in chunks, returning the merged global permutation.
+#[allow(dead_code)]
 pub(super) fn gpu_sort_chunked_i64(keys: &[i64]) -> Option<Vec<u32>> {
     let chunk_size = cost::device_limits().gpu_sort_max_elements;
     let n = keys.len();
@@ -239,4 +241,20 @@ pub(super) fn gpu_sort_chunked_i64(keys: &[i64]) -> Option<Vec<u32>> {
     }
 
     Some(merged)
+}
+
+pub(super) fn gpu_topk_f32(keys: &[f32], k: usize, largest: bool) -> Option<Vec<u32>> {
+    gpu::topk_kv_f32(keys, k, largest)
+}
+
+pub(super) fn gpu_topk_f64(keys: &[f64], k: usize, largest: bool) -> Option<Vec<u32>> {
+    gpu::topk_kv_f64(keys, k, largest)
+}
+
+pub(super) fn gpu_topk_i32(keys: &[i32], k: usize, largest: bool) -> Option<Vec<u32>> {
+    gpu::topk_kv_i32(keys, k, largest)
+}
+
+pub(super) fn gpu_topk_i64(keys: &[i64], k: usize, largest: bool) -> Option<Vec<u32>> {
+    gpu::topk_kv_i64(keys, k, largest)
 }

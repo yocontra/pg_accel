@@ -99,12 +99,49 @@ use crate::engine::gucs;
 use crate::engine::registry::{self, OutputShape};
 use crate::engine::stats;
 
-// The current target-list SRF executor dispatches one variable-length SRF
-// expansion per input row. Bench evidence from 2026-05-14 showed
-// h3_srf_grid_disk @ 100K selecting this path at ~93-95s vs native PG at
-// ~4.1s. Keep tiny correctness/proof plans eligible until a batched SRF
-// expansion executor lands.
-const SRF_TLIST_VARLEN_MAX_GPU_INPUT_ROWS: f64 = 5_000.0;
+// Minimal benchmarkable target-list SRF vertical slice. Other registered H3
+// VarLen functions still have FunctionScan coverage, but target-list ProjectSet
+// batching is admitted only for `h3_grid_disk(cell, const_k)` until they get
+// shape-specific correctness/perf tests.
+const SRF_TLIST_SUPPORTED_FN: &str = "h3_grid_disk";
+
+/// Maximum estimated rows a target-list SRF Custom Scan may return to
+/// PostgreSQL.
+///
+/// The current executor is a real GPU path, but every expanded SRF result is
+/// still emitted as a PostgreSQL tuple. Large `h3_grid_disk` target-list
+/// shapes are dominated by downstream tuple materialization, sort, and
+/// aggregate work, so keep them native until the SRF output can feed a
+/// GPU-resident aggregate/finalization path.
+const SRF_TLIST_MAX_CPU_OUTPUT_ROWS: f64 = 2_000_000.0;
+
+#[must_use]
+#[inline]
+fn srf_tlist_cpu_output_allowed(rows: f64) -> bool {
+    rows.is_finite() && rows > 0.0 && rows <= SRF_TLIST_MAX_CPU_OUTPUT_ROWS
+}
+
+/// Cheap parse-level test for target-list SRF work.
+///
+/// This intentionally does not touch GPU state or the adapter registry. It is
+/// used by the `UPPERREL_FINAL` hook to avoid expensive availability checks on
+/// ordinary queries.
+///
+/// # Safety
+///
+/// `root` must be null or a valid planner-provided `PlannerInfo *`.
+pub(super) unsafe fn query_has_target_srfs(root: *mut PlannerInfo) -> bool {
+    if root.is_null() {
+        return false;
+    }
+    // SAFETY: caller provides a valid PlannerInfo pointer.
+    let parse = unsafe { (*root).parse };
+    if parse.is_null() {
+        return false;
+    }
+    // SAFETY: parse is a valid Query pointer.
+    unsafe { (*parse).hasTargetSRFs }
+}
 
 /// `create_upper_paths_hook` arm for `UPPERREL_FINAL`.
 ///
@@ -129,9 +166,6 @@ pub(super) unsafe fn try_inject_srf_target_list(
     if !gucs::enabled() {
         return;
     }
-    if !cost::gpu_is_usable() {
-        return;
-    }
     if root.is_null() || input_rel.is_null() || output_rel.is_null() {
         return;
     }
@@ -145,6 +179,9 @@ pub(super) unsafe fn try_inject_srf_target_list(
     // SAFETY: parse is a valid Query node.
     let has_target_srfs = unsafe { (*parse).hasTargetSRFs };
     if !has_target_srfs {
+        return;
+    }
+    if !cost::gpu_is_usable() {
         return;
     }
 
@@ -344,6 +381,13 @@ unsafe fn wrap_projectset_path(
                             found_var = true;
                             // SAFETY: tag confirmed Var.
                             let v = a.cast::<Var>();
+                            if !unsafe { var_type_is_byval(v) } {
+                                pgrx::debug1!(
+                                    "pg_accel: srf_target_list: SRF arg type is not pass-by-value; \
+                                     declining batched target-list path"
+                                );
+                                return false;
+                            }
                             let varno = unsafe { (*v).varno };
                             let varattno = i32::from(unsafe { (*v).varattno });
                             // Look up the child slot attno for this Var.
@@ -393,6 +437,13 @@ unsafe fn wrap_projectset_path(
                 // Pass-through Var. Map to child slot attno.
                 // SAFETY: tag confirmed Var.
                 let v = node.cast::<Var>();
+                if !unsafe { var_type_is_byval(v) } {
+                    pgrx::debug1!(
+                        "pg_accel: srf_target_list: passthrough Var type is not \
+                         pass-by-value; declining batched target-list path"
+                    );
+                    return false;
+                }
                 let varno = unsafe { (*v).varno };
                 let varattno = i32::from(unsafe { (*v).varattno });
                 if let Some(child_attno) = lookup_child_attno(&child_lookup, varno, varattno) {
@@ -431,25 +482,20 @@ unsafe fn wrap_projectset_path(
         Some(e) => e,
         None => return false,
     };
+    if entry.name != SRF_TLIST_SUPPORTED_FN {
+        pgrx::debug1!(
+            "pg_accel: srf_target_list: {} target-list batching is not supported; \
+             only {} is admitted",
+            entry.name,
+            SRF_TLIST_SUPPORTED_FN,
+        );
+        return false;
+    }
     let (shape_disc, shape_field_count) = match entry.output_shape {
         OutputShape::Scalar => return false, // already filtered, defensive
         OutputShape::Record { field_count } => (OutputShapeDisc::Record, field_count),
         OutputShape::VarLen => (OutputShapeDisc::VarLen, 0),
     };
-    let input_rows = unsafe { (*subpath).rows };
-    if matches!(entry.output_shape, OutputShape::VarLen)
-        && input_rows.is_finite()
-        && input_rows >= SRF_TLIST_VARLEN_MAX_GPU_INPUT_ROWS
-    {
-        pgrx::debug1!(
-            "pg_accel: srf_target_list: declining variable-length SRF {} \
-             for estimated input rows={} (limit={})",
-            entry.name,
-            input_rows,
-            SRF_TLIST_VARLEN_MAX_GPU_INPUT_ROWS,
-        );
-        return false;
-    }
 
     let priv_data = SrfTargetListPrivData {
         fn_oid: srf_fn_oid,
@@ -470,6 +516,17 @@ unsafe fn wrap_projectset_path(
     let projset_pathkeys = unsafe { (*projectset).path.pathkeys };
     let projset_parallel_safe = unsafe { (*projectset).path.parallel_safe };
     let projset_parallel_workers = unsafe { (*projectset).path.parallel_workers };
+
+    if !srf_tlist_cpu_output_allowed(projset_rows) {
+        pgrx::debug1!(
+            "pg_accel: srf_target_list: estimated expanded rows {} exceed \
+             CPU-output cap {}; deferring to native ProjectSet",
+            projset_rows,
+            SRF_TLIST_MAX_CPU_OUTPUT_ROWS,
+        );
+        stats::increment_planner_rejected("srf_tlist_cpu_output_too_large", projset_rows as u64);
+        return false;
+    }
 
     // SAFETY: palloc0 in CurrentMemoryContext.
     let cpath = unsafe { pg_sys::palloc0(std::mem::size_of::<CustomPath>()).cast::<CustomPath>() };
@@ -573,6 +630,22 @@ fn lookup_child_attno(lookup: &[(i32, i32, i32)], varno: i32, varattno: i32) -> 
         }
     }
     None
+}
+
+/// Batched target-list SRF stores child-slot Datums after the child slot may
+/// be reused, so this minimal vertical slice admits only pass-by-value Vars.
+///
+/// # Safety
+/// `var` must point to a planner-owned `Var`.
+unsafe fn var_type_is_byval(var: *const Var) -> bool {
+    if var.is_null() {
+        return false;
+    }
+    let typid = unsafe { (*var).vartype };
+    if typid == pg_sys::InvalidOid {
+        return false;
+    }
+    unsafe { pg_sys::get_typbyval(typid) }
 }
 
 /// Return `true` iff every top-level `FuncExpr` with `funcretset == true`
@@ -725,6 +798,26 @@ unsafe fn args_supported(args: *mut pg_sys::List) -> bool {
     var_count == 1
 }
 
+#[cfg(test)]
+mod pure_tests {
+    use super::*;
+
+    #[test]
+    fn srf_tlist_cpu_output_gate_keeps_small_expansions() {
+        assert!(srf_tlist_cpu_output_allowed(14.0));
+        assert!(srf_tlist_cpu_output_allowed(SRF_TLIST_MAX_CPU_OUTPUT_ROWS));
+    }
+
+    #[test]
+    fn srf_tlist_cpu_output_gate_rejects_large_or_invalid_expansions() {
+        assert!(!srf_tlist_cpu_output_allowed(
+            SRF_TLIST_MAX_CPU_OUTPUT_ROWS + 1.0
+        ));
+        assert!(!srf_tlist_cpu_output_allowed(f64::NAN));
+        assert!(!srf_tlist_cpu_output_allowed(0.0));
+    }
+}
+
 /// Integration tests for the SRF-in-target-list planner hook + executor.
 ///
 /// **Scope** (executor wiring landed): these tests verify that
@@ -845,6 +938,7 @@ mod tests {
              INSERT INTO _srf_tlist_explain2 VALUES (1, '8928308280fffff'::h3index)",
         )
         .expect("setup ok");
+        Spi::run("ANALYZE _srf_tlist_explain2").expect("analyze ok");
 
         let plan = explain_text(
             "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \

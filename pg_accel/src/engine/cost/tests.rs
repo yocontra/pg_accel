@@ -2,6 +2,9 @@
 
 #![allow(clippy::unwrap_used, dead_code)]
 
+use super::formulas::{
+    SortAdmissionInput, SortAlgorithm, SortDeclineReason, SortKeyClass, sort_admission,
+};
 use super::*;
 
 fn profile_no_gpu() -> PlatformProfile {
@@ -193,6 +196,9 @@ fn cpu_only_limits_match_previous_defaults() {
     assert_eq!(l.gpu_hash_agg_min_rows, 250_000);
     assert_eq!(l.gpu_hash_agg_unsafe_input_rows, 100_000);
     assert_eq!(l.gpu_hash_agg_max_groups, 10_000);
+    assert_eq!(l.gpu_sort_topk_max_limit, 128);
+    assert!((l.gpu_sort_heap_topk_max_fraction - 0.25).abs() < f64::EPSILON);
+    assert_eq!(l.gpu_sort_heap_topk_max_width_bytes, 16);
     assert_eq!(l.gpu_expr_min_rows, 250_000);
     assert_eq!(l.gpu_hash_join_build_max_rows, 99_999);
     assert_eq!(l.gpu_pipeline_fusion_min_rows, 10_000);
@@ -300,6 +306,146 @@ fn sort_limit_gate_rejects_full_no_limit_sort() {
     assert!(!sort_limit_present(0.0));
     assert!(!sort_limit_present(f64::NAN));
     assert!(sort_limit_present(1.0));
+}
+
+#[test]
+fn sort_admission_declines_full_output_heap_sort() {
+    let l = DeviceLimits::cpu_only();
+    let decision = sort_admission(
+        SortAdmissionInput {
+            rows: 1_000_000,
+            limit_tuples: None,
+            estimated_row_width: 8,
+            key_count: 1,
+            key_class: Some(SortKeyClass::Integer),
+            algorithm: SortAlgorithm::StandaloneFullOutput,
+            materialized_output_fraction: 1.0,
+            chunk_count: 1,
+            cold_jit: true,
+        },
+        &l,
+    );
+
+    assert!(!decision.eligible);
+    assert_eq!(
+        decision.reason,
+        Some(SortDeclineReason::FullOutputMaterialization)
+    );
+    assert_eq!(decision.materialized_output_fraction, 1.0);
+}
+
+#[test]
+fn sort_admission_allows_small_limit_topk() {
+    let l = DeviceLimits::cpu_only();
+    let rows = 1_000_000;
+    let limit = 100.0;
+    let decision = sort_admission(
+        SortAdmissionInput {
+            rows,
+            limit_tuples: Some(limit),
+            estimated_row_width: 8,
+            key_count: 1,
+            key_class: Some(SortKeyClass::Integer),
+            algorithm: SortAlgorithm::StandaloneTopK,
+            materialized_output_fraction: limit / rows as f64,
+            chunk_count: 1,
+            cold_jit: false,
+        },
+        &l,
+    );
+
+    assert!(decision.eligible);
+    assert_eq!(decision.reason, None);
+    assert!(decision.materialized_output_fraction <= l.gpu_sort_heap_topk_max_fraction);
+}
+
+#[test]
+fn sort_admission_rejects_topk_that_materializes_too_much() {
+    let l = DeviceLimits::cpu_only();
+    let decision = sort_admission(
+        SortAdmissionInput {
+            rows: 1_000_000,
+            limit_tuples: Some(100.0),
+            estimated_row_width: 8,
+            key_count: 1,
+            key_class: Some(SortKeyClass::Integer),
+            algorithm: SortAlgorithm::StandaloneTopK,
+            materialized_output_fraction: l.gpu_sort_heap_topk_max_fraction + 0.01,
+            chunk_count: 1,
+            cold_jit: false,
+        },
+        &l,
+    );
+
+    assert!(!decision.eligible);
+    assert_eq!(
+        decision.reason,
+        Some(SortDeclineReason::MaterializesTooMuch)
+    );
+}
+
+#[test]
+fn sort_admission_wide_rows_pay_materialization_penalty_and_decline() {
+    let l = DeviceLimits::cpu_only();
+    let narrow = sort_admission(
+        SortAdmissionInput {
+            rows: 1_000_000,
+            limit_tuples: Some(100.0),
+            estimated_row_width: 8,
+            key_count: 1,
+            key_class: Some(SortKeyClass::Integer),
+            algorithm: SortAlgorithm::StandaloneTopK,
+            materialized_output_fraction: 0.000_1,
+            chunk_count: 1,
+            cold_jit: false,
+        },
+        &l,
+    );
+    let wide = sort_admission(
+        SortAdmissionInput {
+            estimated_row_width: l.gpu_sort_heap_topk_max_width_bytes + 1,
+            ..SortAdmissionInput {
+                rows: 1_000_000,
+                limit_tuples: Some(100.0),
+                estimated_row_width: 8,
+                key_count: 1,
+                key_class: Some(SortKeyClass::Integer),
+                algorithm: SortAlgorithm::StandaloneTopK,
+                materialized_output_fraction: 0.000_1,
+                chunk_count: 1,
+                cold_jit: false,
+            }
+        },
+        &l,
+    );
+
+    assert!(narrow.eligible);
+    assert!(!wide.eligible);
+    assert_eq!(wide.reason, Some(SortDeclineReason::RowTooWide));
+    assert!(wide.estimated_cost.get() > narrow.estimated_cost.get());
+}
+
+#[test]
+fn sort_admission_internal_uses_pipeline_materialization_fraction_without_limit() {
+    let l = DeviceLimits::cpu_only();
+    let decision = sort_admission(
+        SortAdmissionInput {
+            rows: 1_000_000,
+            limit_tuples: None,
+            estimated_row_width: 64,
+            key_count: 1,
+            key_class: Some(SortKeyClass::Integer),
+            algorithm: SortAlgorithm::Internal,
+            materialized_output_fraction: 0.05,
+            chunk_count: 1,
+            cold_jit: false,
+        },
+        &l,
+    );
+
+    assert!(decision.eligible);
+    assert_eq!(decision.reason, None);
+    assert_eq!(decision.materialized_output_fraction, 0.05);
 }
 
 #[test]

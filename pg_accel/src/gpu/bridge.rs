@@ -260,6 +260,46 @@ unsafe extern "C" {
     /// Key-value sort (i64 keys).
     pub fn pgaccel_sort_kv_i64(keys: *mut i64, indices: *mut u32, count: usize) -> PgaccelStatus;
 
+    /// Bounded key-value top-k (f32 keys).
+    pub fn pgaccel_topk_kv_f32(
+        keys: *const f32,
+        count: usize,
+        k: usize,
+        largest: u8,
+        out_indices: *mut u32,
+        out_count: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// Bounded key-value top-k (f64 keys).
+    pub fn pgaccel_topk_kv_f64(
+        keys: *const f64,
+        count: usize,
+        k: usize,
+        largest: u8,
+        out_indices: *mut u32,
+        out_count: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// Bounded key-value top-k (i32 keys).
+    pub fn pgaccel_topk_kv_i32(
+        keys: *const i32,
+        count: usize,
+        k: usize,
+        largest: u8,
+        out_indices: *mut u32,
+        out_count: *mut usize,
+    ) -> PgaccelStatus;
+
+    /// Bounded key-value top-k (i64 keys).
+    pub fn pgaccel_topk_kv_i64(
+        keys: *const i64,
+        count: usize,
+        k: usize,
+        largest: u8,
+        out_indices: *mut u32,
+        out_count: *mut usize,
+    ) -> PgaccelStatus;
+
     // -- Reduce kernels --
 
     pub fn pgaccel_reduce_sum_f32(
@@ -497,6 +537,14 @@ unsafe extern "C" {
         use_fp64: i32,
         cell_ids: *mut u64,
         valid: *mut u8,
+    ) -> PgaccelStatus;
+
+    pub fn pgaccel_h3_lat_lng_count_bulk(
+        lat_array: *const f64,
+        lng_array: *const f64,
+        count: usize,
+        resolution: i32,
+        out_state: *mut *mut PgaccelAggState,
     ) -> PgaccelStatus;
 
     // -- H3 variable-output kernels (Agent 5A; two-pass size+emit per pgaccel_ffi.h:405) --
@@ -816,6 +864,15 @@ unsafe extern "C" {
         match_count: *mut usize,
     ) -> PgaccelStatus;
 
+    /// Count matching pairs without materializing pair output.
+    pub fn pgaccel_hash_join_count(
+        ht: *const PgaccelHashTable,
+        outer_keys: *const std::ffi::c_void,
+        outer_null_mask: *const u8,
+        outer_count: usize,
+        match_count: *mut usize,
+    ) -> PgaccelStatus;
+
     // -- Hash aggregation kernels --
 
     /// Perform grouped aggregation on columnar data.
@@ -830,6 +887,15 @@ unsafe extern "C" {
         value_types: *const i32,
         agg_cols: *const PgaccelAggCol,
         num_aggs: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Perform grouped COUNT(*) over int64 group keys. This symbol is
+    /// fail-closed and has no host hash-table grouping fallback in the C++
+    /// implementation.
+    pub fn pgaccel_hash_count_i64_execute(
+        group_keys: *const i64,
+        group_null_mask: *const u8,
+        row_count: usize,
     ) -> *mut PgaccelAggState;
 
     /// Get the number of groups in the aggregation result.

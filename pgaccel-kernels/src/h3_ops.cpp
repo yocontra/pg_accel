@@ -3,9 +3,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <stdexcept>
+#include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_hash_agg.h"
+
+#include "h3_exact_device.hpp"
+#include "h3_float_device.hpp"
 
 // SAFETY: g_queue is owned by device_manager.cpp. All H3 kernels share it so
 // pgaccel_shutdown() tears down one Metal context for the process.
@@ -26,7 +32,7 @@ static sycl::queue& get_queue() {
 // ---------------------------------------------------------------------------
 // Cell ID layout (64 bits, high to low) — matches the H3 v4 reference
 // (h3_internal.h::`H3Index`):
-//   [63]    = high bit, always set for valid cell
+//   [63]    = high bit, always zero for valid cell
 //   [62-59] = mode (4 bits, 1 = cell)
 //   [58-56] = reserved (3 bits, must be 0 for cells)
 //   [55-52] = resolution (4 bits, 0-15)
@@ -53,11 +59,6 @@ static constexpr uint64_t H3_UNUSED_DIGIT = 7ULL;
 // ---------------------------------------------------------------------------
 // Icosahedron constants for lat/lng -> cell conversion
 // ---------------------------------------------------------------------------
-static constexpr double DEG_TO_RAD = 3.14159265358979323846 / 180.0;
-static constexpr double RAD_TO_DEG = 180.0 / 3.14159265358979323846;
-static constexpr double EARTH_RADIUS_KM = 6371.007180918475;
-static constexpr double M_2PI = 6.28318530717958647692;
-
 // 20 icosahedron face centers (lat, lng) in radians — derived from H3 source.
 // These are the gnomonic projection centers for each face.
 static const double FACE_CENTER_LAT[20] = {
@@ -100,8 +101,11 @@ static inline int32_t h3_get_digit(uint64_t cell, int res) {
 static inline bool h3_is_valid_cell(uint64_t cell) {
   if (cell == 0)
     return false;
-  // High bit must be set
-  if ((cell & H3_HIGH_BIT) == 0)
+  // H3 cell indexes reserve the high bit and require it to be zero.
+  if ((cell & H3_HIGH_BIT) != 0)
+    return false;
+  // Reserved bits must be zero for cells.
+  if (((cell >> 56) & 0x7) != 0)
     return false;
   // Mode must be 1 (cell)
   uint64_t mode = (cell >> 59) & 0xF;
@@ -188,162 +192,6 @@ static inline void cell_to_ijk(uint64_t cell, int res, int& oi, int& oj, int& ok
     oj = oj * 3 + DIR_J[d];
     ok = ok * 3 + DIR_K[d];
   }
-}
-
-// ---------------------------------------------------------------------------
-// Lat/lng to cell — simplified implementation
-// ---------------------------------------------------------------------------
-
-// Find closest icosahedron face for a lat/lng (in radians).
-static inline int find_closest_face(double lat_rad, double lng_rad) {
-  double best_dist = -2.0;  // cos_d ranges [-1, 1]; start below minimum
-  int best_face = 0;
-  double cos_lat = cos(lat_rad);
-  double sin_lat = sin(lat_rad);
-  for (int f = 0; f < 20; f++) {
-    double cos_fc_lat = cos(FACE_CENTER_LAT[f]);
-    double sin_fc_lat = sin(FACE_CENTER_LAT[f]);
-    double dlng = lng_rad - FACE_CENTER_LNG[f];
-    // Great circle distance (cosine formula — sufficient for face selection)
-    double cos_d = sin_lat * sin_fc_lat + cos_lat * cos_fc_lat * cos(dlng);
-    // Maximise cos_d = minimise distance
-    if (cos_d > best_dist) {
-      best_dist = cos_d;
-      best_face = f;
-    }
-  }
-  return best_face;
-}
-
-// Gnomonic projection of (lat,lng) onto a face centered at (clat,clng).
-// Returns (x,y) in face-local coordinates.
-static inline void gnomonic_project(double lat, double lng, double clat, double clng, double& x,
-                                    double& y) {
-  double cos_lat = cos(lat);
-  double sin_lat = sin(lat);
-  double cos_clat = cos(clat);
-  double sin_clat = sin(clat);
-  double dlng = lng - clng;
-  double cos_dlng = cos(dlng);
-
-  double cos_c = sin_clat * sin_lat + cos_clat * cos_lat * cos_dlng;
-  // Guard against division by zero near antipodal point
-  if (cos_c < 1e-10) {
-    x = 0.0;
-    y = 0.0;
-    return;
-  }
-  x = (cos_lat * sin(dlng)) / cos_c;
-  y = (cos_clat * sin_lat - sin_clat * cos_lat * cos_dlng) / cos_c;
-}
-
-// Quantise face-local (x,y) into hex digit at a given subdivision level.
-// This uses a simple nearest-center approach on the hex grid.
-// Returns digit 0-6 and updates (x,y) to be relative to chosen child center.
-static inline int quantise_hex_digit(double& x, double& y, double scale) {
-  // Child center offsets in face-local coordinates (hex arrangement).
-  // These approximate the 7 children of an aperture-7 hex subdivision.
-  static const double CX[7] = {0.0, 1.0, 0.5, -0.5, -1.0, -0.5, 0.5};
-  static const double CY[7] = {0.0, 0.0, 0.866025, 0.866025, 0.0, -0.866025, -0.866025};
-
-  double best = 1e30;
-  int best_d = 0;
-  for (int d = 0; d < 7; d++) {
-    double dx = x - CX[d] * scale;
-    double dy = y - CY[d] * scale;
-    double dist2 = dx * dx + dy * dy;
-    if (dist2 < best) {
-      best = dist2;
-      best_d = d;
-    }
-  }
-  x -= CX[best_d] * scale;
-  y -= CY[best_d] * scale;
-  return best_d;
-}
-
-// Base cell lookup — maps (face, approximate position quadrant) to a base cell.
-// H3 has 122 base cells. We use a simplified face->base-cell mapping.
-// Each face maps to a primary base cell; this is approximate and will cause
-// some cells to differ from the reference H3 library, which is why we set
-// valid=0 for edge cases.
-static const int FACE_TO_BASE_CELL[20] = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-};
-
-static inline uint64_t build_cell_id(int base_cell, int resolution,
-                                     const int digits[H3_MAX_RESOLUTION]) {
-  uint64_t cell = H3_HIGH_BIT;
-  // Mode = 1 (cell)
-  cell |= (H3_MODE_CELL << 59);
-  // Resolution
-  cell |= (static_cast<uint64_t>(resolution) << 52);
-  // Base cell
-  cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
-  // Digits
-  for (int r = 1; r <= H3_MAX_RESOLUTION; r++) {
-    int shift = (H3_MAX_RESOLUTION - r) * 3;
-    if (r <= resolution) {
-      cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
-    } else {
-      cell |= (H3_UNUSED_DIGIT << shift);
-    }
-  }
-  return cell;
-}
-
-// Full lat/lng -> cell for a single point.
-// Returns 0 and sets *valid_out = 0 on edge cases.
-static inline uint64_t lat_lng_to_cell_single(double lat_deg, double lng_deg, int resolution,
-                                              bool use_fp64, uint8_t* valid_out) {
-  // fp32 precision insufficient for res >= 12
-  if (!use_fp64 && resolution >= 12) {
-    *valid_out = 0;
-    return 0;
-  }
-  if (resolution < 0 || resolution > H3_MAX_RESOLUTION) {
-    *valid_out = 0;
-    return 0;
-  }
-  // Validate lat/lng range
-  if (lat_deg < -90.0 || lat_deg > 90.0 || lng_deg < -180.0 || lng_deg > 180.0) {
-    *valid_out = 0;
-    return 0;
-  }
-
-  double lat_rad = lat_deg * DEG_TO_RAD;
-  double lng_rad = lng_deg * DEG_TO_RAD;
-
-  int face = find_closest_face(lat_rad, lng_rad);
-
-  // Project onto face
-  double x, y;
-  gnomonic_project(lat_rad, lng_rad, FACE_CENTER_LAT[face], FACE_CENTER_LNG[face], x, y);
-
-  // Check if projection is near face edge — mark invalid for robustness
-  double proj_dist2 = x * x + y * y;
-  // Gnomonic projection distorts badly beyond ~1.2 radians from center
-  if (proj_dist2 > 1.5) {
-    *valid_out = 0;
-    return 0;
-  }
-
-  int base_cell = FACE_TO_BASE_CELL[face];
-
-  // Quantise into hex digits at each resolution level
-  int digits[H3_MAX_RESOLUTION];
-  double scale = 1.0;
-  for (int r = 0; r < resolution; r++) {
-    scale /= 2.6457513;  // sqrt(7) — aperture 7 scaling
-    digits[r] = quantise_hex_digit(x, y, scale);
-  }
-  // Fill remaining with 0 (will be replaced by 7 in build_cell_id)
-  for (int r = resolution; r < H3_MAX_RESOLUTION; r++) {
-    digits[r] = 0;
-  }
-
-  *valid_out = 1;
-  return build_cell_id(base_cell, resolution, digits);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,8 +322,13 @@ extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, s
            d_valid[i] = 0;
            return;
          }
-         // High bit must be set.
-         if ((cell & high_bit) == 0) {
+         // High bit is reserved and must be zero for H3 cells.
+         if ((cell & high_bit) != 0) {
+           d_valid[i] = 0;
+           return;
+         }
+         // Reserved bits [58:56] must be zero for cells.
+         if (((cell >> 56) & 0x7) != 0) {
            d_valid[i] = 0;
            return;
          }
@@ -936,7 +789,8 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
   const auto* lats = static_cast<const double*>(lat_array);
   const auto* lngs = static_cast<const double*>(lng_array);
 
-  const bool want_fp64 = (use_fp64 != 0) && (resolution >= 12);
+  (void)use_fp64;
+  const bool want_fp64 = false;
 
   // Resolutions >= 12 need fp64 precision on the projection math; fp32
   // cannot represent the sub-metre grid spacing. fp64 is always available:
@@ -949,7 +803,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
   //
   // ─── Argbuffer-reflection workaround (mirror of hash_agg.cpp:178-185) ───
   // The natural lambda capture for these kernels is six typed device
-  // pointers (lats/lngs/cells/valid/fc_lat/fc_lng) plus a few scalars.
+  // pointers (lats/lngs/cells/valid) plus a few scalars.
   // On Apple Metal the AdaptiveCpp SSCP backend, once a kernel captures
   // more than ~5 arguments, packs them into an `Input_0` argument-buffer
   // struct passed as a single `[[buffer(1)]]`. Metal's
@@ -958,13 +812,13 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
   // (`bufferIndex 1 does not identify an argument buffer` assertion at
   // _MTLFunction.mm:11540, repro under cold-cache test_fork).
   //
-  // The fix: stage every per-row + face-center buffer end-to-end into
+  // The fix: stage every per-row buffer end-to-end into
   // ONE shared-memory `uint8_t*` slab AND keep total captures at ≤4
   // so the emitter stays in the per-buffer path (no `Input_0` struct,
   // no argbuffer reflection). Sub-array byte offsets are computed
   // INSIDE the kernel from a single captured `count`, not passed as
   // scalars. Captures here are exactly: { `d_slab` pointer, `count`,
-  // `res`, `deg2rad` } — four arguments. The kernel rebuilds typed
+  // `res` } — three arguments. The kernel rebuilds typed
   // views via `reinterpret_cast<T*>(slab + offset)` from offsets it
   // recomputes. This keeps the kernel resident on GPU (no host
   // fallback — see CLAUDE.md rules #11/#12) while side-stepping the
@@ -983,24 +837,19 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
       //   [0           .. +count*8 )         : double   lats[count]
       //   [count*8     .. +count*8 )         : double   lngs[count]
       //   [count*16    .. +count*8 )         : uint64_t cells[count]
-      //   [count*24    .. +160     )         : double   fc_lat[20]
-      //   [count*24+160 .. +160    )         : double   fc_lng[20]
-      //   [count*24+320 .. +count  )         : uint8_t  valid[count]
+      //   [count*24    .. +count  )         : uint8_t  valid[count]
       //
       // The kernel rebuilds these offsets from `count` so the only
       // pointer captured is `d_slab` (see top-of-function comment for
       // why this matters on Apple Metal SSCP).
       const size_t f64_bytes = count * sizeof(double);
       const size_t cells_bytes = count * sizeof(uint64_t);
-      const size_t fc_bytes = 20 * sizeof(double);
       const size_t valid_bytes = count * sizeof(uint8_t);
 
       const size_t lat_off = 0;
       const size_t lng_off = lat_off + f64_bytes;
       const size_t cells_off = lng_off + f64_bytes;
-      const size_t fc_lat_off = cells_off + cells_bytes;
-      const size_t fc_lng_off = fc_lat_off + fc_bytes;
-      const size_t valid_off = fc_lng_off + fc_bytes;
+      const size_t valid_off = cells_off + cells_bytes;
       const size_t slab_bytes = valid_off + valid_bytes;
 
       uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
@@ -1011,18 +860,15 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
       // Stage host inputs into the slab (shared memory is host-writable).
       std::memcpy(d_slab + lat_off, lats, f64_bytes);
       std::memcpy(d_slab + lng_off, lngs, f64_bytes);
-      std::memcpy(d_slab + fc_lat_off, FACE_CENTER_LAT, fc_bytes);
-      std::memcpy(d_slab + fc_lng_off, FACE_CENTER_LNG, fc_bytes);
       // Outputs: zero-init so partial failure leaves a defined state.
       std::memset(d_slab + cells_off, 0, cells_bytes);
       std::memset(d_slab + valid_off, 0, valid_bytes);
 
       const int res = resolution;
-      const double deg2rad = DEG_TO_RAD;
       const size_t row_count = count;
 
       q.submit([&](sycl::handler& h) {
-         // Captures: { d_slab, row_count, res, deg2rad } — 4 args.
+         // Captures: { d_slab, row_count, res } — 3 args.
          // Below the AdaptiveCpp Metal-SSCP `Input_0` packing threshold,
          // so the emitter keeps each as a separate `[[buffer(N)]]` and
          // no argument-buffer reflection is invoked at dispatch time.
@@ -1032,18 +878,13 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
            // match the host-side computation above byte-for-byte.
            const size_t k_f64_bytes = row_count * sizeof(double);
            const size_t k_cells_bytes = row_count * sizeof(uint64_t);
-           const size_t k_fc_bytes = 20 * sizeof(double);
            const size_t k_lat_off = 0;
            const size_t k_lng_off = k_lat_off + k_f64_bytes;
            const size_t k_cells_off = k_lng_off + k_f64_bytes;
-           const size_t k_fc_lat_off = k_cells_off + k_cells_bytes;
-           const size_t k_fc_lng_off = k_fc_lat_off + k_fc_bytes;
-           const size_t k_valid_off = k_fc_lng_off + k_fc_bytes;
+           const size_t k_valid_off = k_cells_off + k_cells_bytes;
 
            const double* d_lats = reinterpret_cast<const double*>(d_slab + k_lat_off);
            const double* d_lngs = reinterpret_cast<const double*>(d_slab + k_lng_off);
-           const double* d_fc_lat = reinterpret_cast<const double*>(d_slab + k_fc_lat_off);
-           const double* d_fc_lng = reinterpret_cast<const double*>(d_slab + k_fc_lng_off);
            uint64_t* d_cells = reinterpret_cast<uint64_t*>(d_slab + k_cells_off);
            uint8_t* d_valid = d_slab + k_valid_off;
 
@@ -1061,94 +902,9 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
              return;
            }
 
-           double lat_rad = lat_deg * deg2rad;
-           double lng_rad = lng_deg * deg2rad;
-
-           double best_dist = -2.0;
-           int best_face = 0;
-           double cos_lat = sycl::cos(lat_rad);
-           double sin_lat = sycl::sin(lat_rad);
-           for (int f = 0; f < 20; f++) {
-             double cos_fc = sycl::cos(d_fc_lat[f]);
-             double sin_fc = sycl::sin(d_fc_lat[f]);
-             double dlng = lng_rad - d_fc_lng[f];
-             double cos_d = sin_lat * sin_fc + cos_lat * cos_fc * sycl::cos(dlng);
-             if (cos_d > best_dist) {
-               best_dist = cos_d;
-               best_face = f;
-             }
-           }
-
-           double clat = d_fc_lat[best_face];
-           double clng = d_fc_lng[best_face];
-           double cos_clat = sycl::cos(clat);
-           double sin_clat = sycl::sin(clat);
-           double dlng = lng_rad - clng;
-           double cos_dlng = sycl::cos(dlng);
-           double cos_c = sin_clat * sin_lat + cos_clat * cos_lat * cos_dlng;
-           if (cos_c < 1e-10) {
-             d_valid[i] = 0;
-             d_cells[i] = 0;
-             return;
-           }
-           double x = (cos_lat * sycl::sin(dlng)) / cos_c;
-           double y = (cos_clat * sin_lat - sin_clat * cos_lat * cos_dlng) / cos_c;
-
-           if (x * x + y * y > 1.5) {
-             d_valid[i] = 0;
-             d_cells[i] = 0;
-             return;
-           }
-
-           // Inline face-to-base-cell mapping (1-indexed identity for the
-           // 20 icosahedron faces). Inlined to avoid capturing yet another
-           // device pointer in the lambda.
-           int base_cell = best_face + 1;
-
-           const double CX[7] = {0.0, 1.0, 0.5, -0.5, -1.0, -0.5, 0.5};
-           const double CY[7] = {0.0,
-                                 0.0,
-                                 0.866025403784438646,
-                                 0.866025403784438646,
-                                 0.0,
-                                 -0.866025403784438646,
-                                 -0.866025403784438646};
-
-           int digits[15];
-           double scale = 1.0;
-           for (int r = 0; r < res; r++) {
-             scale /= 2.6457513110645906;  // sqrt(7)
-             double best = 1e30;
-             int best_d = 0;
-             for (int d = 0; d < 7; d++) {
-               double dx = x - CX[d] * scale;
-               double dy = y - CY[d] * scale;
-               double dist2 = dx * dx + dy * dy;
-               if (dist2 < best) {
-                 best = dist2;
-                 best_d = d;
-               }
-             }
-             x -= CX[best_d] * scale;
-             y -= CY[best_d] * scale;
-             digits[r] = best_d;
-           }
-
-           uint64_t cell = (1ULL << 63);
-           cell |= (1ULL << 59);
-           cell |= (static_cast<uint64_t>(res) << 52);
-           cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
-           for (int r = 1; r <= 15; r++) {
-             int shift = (15 - r) * 3;
-             if (r <= res) {
-               cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
-             } else {
-               cell |= (7ULL << shift);
-             }
-           }
-
-           d_valid[i] = 1;
-           d_cells[i] = cell;
+           const auto result = pgaccel_h3_exact::lat_lng_to_cell_degs(lat_deg, lng_deg, res);
+           d_valid[i] = result.valid;
+           d_cells[i] = result.cell;
          });
        }).wait_and_throw();
 
@@ -1165,8 +921,8 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
     // ---- fp32 path (res < 12, or caller didn't request fp64) ----------
     //
     // Same trick as the fp64 path above: stage everything into a single
-    // shared-memory slab and capture only { d_slab, count, res, deg2rad }
-    // (4 args) so the AdaptiveCpp Metal-SSCP emitter does NOT pack the
+    // shared-memory slab and capture only { d_slab, count, res } (3 args)
+    // so the AdaptiveCpp Metal-SSCP emitter does NOT pack the
     // captures into an `Input_0` argument-buffer struct.
     //
     // Slab layout (8-byte items first to guarantee uint64_t alignment;
@@ -1174,22 +930,17 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
     //   [0           .. +count*8 ) : uint64_t cells[count]
     //   [count*8     .. +count*4 ) : float    lats[count]
     //   [count*12    .. +count*4 ) : float    lngs[count]
-    //   [count*16    .. +80      ) : float    fc_lat[20]
-    //   [count*16+80 .. +80      ) : float    fc_lng[20]
-    //   [count*16+160 .. +count  ) : uint8_t  valid[count]
+    //   [count*16    .. +count  ) : uint8_t  valid[count]
     //
     // Kernel rebuilds these offsets from `count`.
     const size_t cells_bytes = count * sizeof(uint64_t);
     const size_t f32_bytes = count * sizeof(float);
-    const size_t fc_bytes = 20 * sizeof(float);
     const size_t valid_bytes = count * sizeof(uint8_t);
 
     const size_t cells_off = 0;
     const size_t lat_off = cells_off + cells_bytes;
     const size_t lng_off = lat_off + f32_bytes;
-    const size_t fc_lat_off = lng_off + f32_bytes;
-    const size_t fc_lng_off = fc_lat_off + fc_bytes;
-    const size_t valid_off = fc_lng_off + fc_bytes;
+    const size_t valid_off = lng_off + f32_bytes;
     const size_t slab_bytes = valid_off + valid_bytes;
 
     uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
@@ -1205,21 +956,14 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
       slab_lats[i] = static_cast<float>(lats[i]);
       slab_lngs[i] = static_cast<float>(lngs[i]);
     }
-    auto* slab_fc_lat = reinterpret_cast<float*>(d_slab + fc_lat_off);
-    auto* slab_fc_lng = reinterpret_cast<float*>(d_slab + fc_lng_off);
-    for (int f = 0; f < 20; f++) {
-      slab_fc_lat[f] = static_cast<float>(FACE_CENTER_LAT[f]);
-      slab_fc_lng[f] = static_cast<float>(FACE_CENTER_LNG[f]);
-    }
     std::memset(d_slab + cells_off, 0, cells_bytes);
     std::memset(d_slab + valid_off, 0, valid_bytes);
 
     const int res = resolution;
-    const float deg2rad = static_cast<float>(DEG_TO_RAD);
     const size_t row_count = count;
 
     q.submit([&](sycl::handler& h) {
-       // Captures: { d_slab, row_count, res, deg2rad } — 4 args. Same
+       // Captures: { d_slab, row_count, res } — 3 args. Same
        // rationale as the fp64 path above.
        h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
          const size_t i = id[0];
@@ -1227,26 +971,20 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
          // match the host-side computation above byte-for-byte.
          const size_t k_cells_bytes = row_count * sizeof(uint64_t);
          const size_t k_f32_bytes = row_count * sizeof(float);
-         const size_t k_fc_bytes = 20 * sizeof(float);
          const size_t k_cells_off = 0;
          const size_t k_lat_off = k_cells_off + k_cells_bytes;
          const size_t k_lng_off = k_lat_off + k_f32_bytes;
-         const size_t k_fc_lat_off = k_lng_off + k_f32_bytes;
-         const size_t k_fc_lng_off = k_fc_lat_off + k_fc_bytes;
-         const size_t k_valid_off = k_fc_lng_off + k_fc_bytes;
+         const size_t k_valid_off = k_lng_off + k_f32_bytes;
 
          const float* d_lats = reinterpret_cast<const float*>(d_slab + k_lat_off);
          const float* d_lngs = reinterpret_cast<const float*>(d_slab + k_lng_off);
-         const float* d_fc_lat = reinterpret_cast<const float*>(d_slab + k_fc_lat_off);
-         const float* d_fc_lng = reinterpret_cast<const float*>(d_slab + k_fc_lng_off);
          uint64_t* d_cells = reinterpret_cast<uint64_t*>(d_slab + k_cells_off);
          uint8_t* d_valid = d_slab + k_valid_off;
 
          float lat_deg = d_lats[i];
          float lng_deg = d_lngs[i];
 
-         // fp32 precision insufficient for res >= 12
-         if (res >= 12 || res < 0 || res > 15) {
+         if (res < 0 || res > 15) {
            d_valid[i] = 0;
            d_cells[i] = 0;
            return;
@@ -1257,103 +995,194 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
            return;
          }
 
-         float lat_rad = lat_deg * deg2rad;
-         float lng_rad = lng_deg * deg2rad;
-
-         // Find closest face
-         float best_dist = -2.0f;
-         int best_face = 0;
-         float cos_lat = sycl::cos(lat_rad);
-         float sin_lat = sycl::sin(lat_rad);
-         for (int f = 0; f < 20; f++) {
-           float cos_fc = sycl::cos(d_fc_lat[f]);
-           float sin_fc = sycl::sin(d_fc_lat[f]);
-           float dlng = lng_rad - d_fc_lng[f];
-           float cos_d = sin_lat * sin_fc + cos_lat * cos_fc * sycl::cos(dlng);
-           if (cos_d > best_dist) {
-             best_dist = cos_d;
-             best_face = f;
-           }
-         }
-
-         // Gnomonic projection
-         float clat = d_fc_lat[best_face];
-         float clng = d_fc_lng[best_face];
-         float cos_clat = sycl::cos(clat);
-         float sin_clat = sycl::sin(clat);
-         float dlng = lng_rad - clng;
-         float cos_dlng = sycl::cos(dlng);
-         float cos_c = sin_clat * sin_lat + cos_clat * cos_lat * cos_dlng;
-         float x, y;
-         if (cos_c < 1e-5f) {
-           d_valid[i] = 0;
-           d_cells[i] = 0;
-           return;
-         }
-         x = (cos_lat * sycl::sin(dlng)) / cos_c;
-         y = (cos_clat * sin_lat - sin_clat * cos_lat * cos_dlng) / cos_c;
-
-         if (x * x + y * y > 1.5f) {
-           d_valid[i] = 0;
-           d_cells[i] = 0;
-           return;
-         }
-
-         // Inline face-to-base-cell mapping (1-indexed identity for the
-         // 20 icosahedron faces).
-         int base_cell = best_face + 1;
-
-         // Hex child center offsets (aperture-7)
-         const float CX[7] = {0.0f, 1.0f, 0.5f, -0.5f, -1.0f, -0.5f, 0.5f};
-         const float CY[7] = {0.0f, 0.0f, 0.866025f, 0.866025f, 0.0f, -0.866025f, -0.866025f};
-
-         int digits[15];
-         float scale = 1.0f;
-         for (int r = 0; r < res; r++) {
-           scale /= 2.6457513f;  // sqrt(7)
-           float best = 1e30f;
-           int best_d = 0;
-           for (int d = 0; d < 7; d++) {
-             float dx = x - CX[d] * scale;
-             float dy = y - CY[d] * scale;
-             float dist2 = dx * dx + dy * dy;
-             if (dist2 < best) {
-               best = dist2;
-               best_d = d;
-             }
-           }
-           x -= CX[best_d] * scale;
-           y -= CY[best_d] * scale;
-           digits[r] = best_d;
-         }
-
-         // Build cell ID
-         uint64_t cell = (1ULL << 63);  // high bit
-         cell |= (1ULL << 59);          // mode = cell
-         cell |= (static_cast<uint64_t>(res) << 52);
-         cell |= (static_cast<uint64_t>(base_cell & 0x7F) << 45);
-         for (int r = 1; r <= 15; r++) {
-           int shift = (15 - r) * 3;
-           if (r <= res) {
-             cell |= (static_cast<uint64_t>(digits[r - 1] & 0x7) << shift);
-           } else {
-             cell |= (7ULL << shift);
-           }
-         }
-
-         d_valid[i] = 1;
-         d_cells[i] = cell;
+         const auto result = pgaccel_h3_float::lat_lng_to_cell_degs(lat_deg, lng_deg, res);
+         d_valid[i] = result.valid == 0 ? 0 : (result.needs_fixup ? 2 : 1);
+         d_cells[i] = result.cell;
        });
      }).wait_and_throw();
 
     std::memcpy(cell_ids, d_slab + cells_off, cells_bytes);
     std::memcpy(valid, d_slab + valid_off, valid_bytes);
 
+    for (size_t i = 0; i < count; i++) {
+      if (valid[i] == 0) {
+        continue;
+      }
+      if (valid[i] == 2 || resolution >= 8) {
+        const auto exact = pgaccel_h3_exact::lat_lng_to_cell_degs(lats[i], lngs[i], resolution);
+        cell_ids[i] = exact.cell;
+        valid[i] = exact.valid;
+      }
+    }
+
     sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const std::exception&) {
   } catch (...) {}
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+static pgaccel_status h3_lat_lng_count_bulk_device_direct(const double* lat_array,
+                                                          const double* lng_array, size_t count,
+                                                          int resolution,
+                                                          pgaccel_agg_state** out_state) {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR_INIT;
+  *out_state = nullptr;
+
+  if (resolution >= 8)
+    return PGACCEL_UNSUPPORTED;
+
+  try {
+    sycl::queue& q = get_queue();
+
+    const size_t key_bytes = count * sizeof(int64_t);
+    const size_t f32_bytes = count * sizeof(float);
+    const size_t valid_bytes = count * sizeof(uint8_t);
+
+    const size_t keys_off = 0;
+    const size_t lat_off = keys_off + key_bytes;
+    const size_t lng_off = lat_off + f32_bytes;
+    const size_t valid_off = lng_off + f32_bytes;
+    const size_t slab_bytes = valid_off + valid_bytes;
+
+    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+    if (d_slab == nullptr)
+      return PGACCEL_ERROR_OOM;
+
+    auto cleanup = [&]() {
+      if (d_slab)
+        sycl::free(d_slab, q);
+    };
+
+    auto* slab_lats = reinterpret_cast<float*>(d_slab + lat_off);
+    auto* slab_lngs = reinterpret_cast<float*>(d_slab + lng_off);
+    for (size_t i = 0; i < count; ++i) {
+      slab_lats[i] = static_cast<float>(lat_array[i]);
+      slab_lngs[i] = static_cast<float>(lng_array[i]);
+    }
+    std::memset(d_slab + keys_off, 0, key_bytes);
+    std::memset(d_slab + valid_off, 0, valid_bytes);
+
+    const int res = resolution;
+    const size_t row_count = count;
+    q.submit([&](sycl::handler& h) {
+       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+         const size_t i = id[0];
+         const size_t k_key_bytes = row_count * sizeof(int64_t);
+         const size_t k_f32_bytes = row_count * sizeof(float);
+         const size_t k_lat_off = k_key_bytes;
+         const size_t k_lng_off = k_lat_off + k_f32_bytes;
+         const size_t k_valid_off = k_lng_off + k_f32_bytes;
+
+         auto* d_keys = reinterpret_cast<int64_t*>(d_slab);
+         const float* d_lats = reinterpret_cast<const float*>(d_slab + k_lat_off);
+         const float* d_lngs = reinterpret_cast<const float*>(d_slab + k_lng_off);
+         uint8_t* d_valid = d_slab + k_valid_off;
+
+         const float lat_deg = d_lats[i];
+         const float lng_deg = d_lngs[i];
+         if (res < 0 || res > 15 || lat_deg < -90.0f || lat_deg > 90.0f || lng_deg < -180.0f ||
+             lng_deg > 180.0f) {
+           d_valid[i] = 0;
+           d_keys[i] = 0;
+           return;
+         }
+
+         const auto result = pgaccel_h3_float::lat_lng_to_cell_degs(lat_deg, lng_deg, res);
+         d_valid[i] = result.valid == 0 ? 0 : (result.needs_fixup ? 2 : 1);
+         d_keys[i] = static_cast<int64_t>(result.cell);
+       });
+     }).wait_and_throw();
+    pgaccel_record_gpu_exec();
+
+    const auto* valid_flags = d_slab + valid_off;
+    auto* mutable_keys = reinterpret_cast<int64_t*>(d_slab + keys_off);
+    for (size_t i = 0; i < count; ++i) {
+      if (valid_flags[i] == 2) {
+        const auto exact =
+            pgaccel_h3_exact::lat_lng_to_cell_degs(lat_array[i], lng_array[i], resolution);
+        if (exact.valid == 0 || exact.cell == 0) {
+          cleanup();
+          return PGACCEL_ERROR;
+        }
+        mutable_keys[i] = static_cast<int64_t>(exact.cell);
+        continue;
+      }
+      if (valid_flags[i] == 0 || mutable_keys[i] == 0) {
+        cleanup();
+        return PGACCEL_ERROR;
+      }
+    }
+
+    pgaccel_agg_state* state = pgaccel_hash_count_i64_device_execute(mutable_keys, count);
+    if (state == nullptr) {
+      cleanup();
+      return PGACCEL_ERROR_NO_DEVICE;
+    }
+
+    *out_state = state;
+    cleanup();
+    return PGACCEL_OK;
+  } catch (const std::bad_alloc&) {
+    return PGACCEL_ERROR_OOM;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk direct GPU path failed: %s\n", e.what());
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk direct GPU path failed (unknown)\n");
+    return PGACCEL_ERROR_NO_DEVICE;
+  }
+}
+
+extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk(const double* lat_array,
+                                                        const double* lng_array, size_t count,
+                                                        int resolution,
+                                                        pgaccel_agg_state** out_state) {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR_INIT;
+  *out_state = nullptr;
+  if (count == 0)
+    return PGACCEL_OK;
+  if (lat_array == nullptr || lng_array == nullptr)
+    return PGACCEL_ERROR_INIT;
+  if (resolution < 0 || resolution > H3_MAX_RESOLUTION)
+    return PGACCEL_ERROR_UNSUPPORTED;
+
+  try {
+    if (resolution < 8) {
+      return h3_lat_lng_count_bulk_device_direct(lat_array, lng_array, count, resolution,
+                                                 out_state);
+    }
+
+    std::vector<uint64_t> cells(count, 0);
+    std::vector<uint8_t> valid(count, 0);
+    pgaccel_status status = pgaccel_h3_lat_lng_to_cell_bulk(lat_array, lng_array, count, resolution,
+                                                            1, cells.data(), valid.data());
+    if (status != PGACCEL_OK)
+      return status;
+
+    std::vector<int64_t> keys(count, 0);
+    for (size_t i = 0; i < count; ++i) {
+      if (valid[i] == 0 || cells[i] == 0)
+        return PGACCEL_ERROR;
+      keys[i] = static_cast<int64_t>(cells[i]);
+    }
+
+    pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys.data(), nullptr, count);
+    if (state == nullptr)
+      return PGACCEL_ERROR_NO_DEVICE;
+
+    *out_state = state;
+    return PGACCEL_OK;
+  } catch (const std::bad_alloc&) {
+    return PGACCEL_ERROR_OOM;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk failed: %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk failed (unknown)\n");
+  }
   return PGACCEL_ERROR_NO_DEVICE;
 }
 

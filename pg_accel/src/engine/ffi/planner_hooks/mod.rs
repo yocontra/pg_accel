@@ -9,7 +9,7 @@ use pgrx::pg_sys::{
     RelOptInfo, RestrictInfo, UpperRelationKind, add_path, lappend,
 };
 
-use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
+use crate::engine::executor::agg::{AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE};
 use crate::engine::executor::preagg::DimFilter;
 use crate::engine::executor::sort::SortKeyDesc;
 use crate::engine::executor::window::{WindowFunc, WindowFuncSpec};
@@ -141,8 +141,6 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     output_rel: *mut RelOptInfo,
     extra: *mut std::ffi::c_void,
 ) {
-    crate::engine::otel::init();
-
     // Chain previous hook first.
     // SAFETY: Previous hook, if set, accepts the same planner-provided args.
     unsafe {
@@ -177,10 +175,25 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // invocation. Bail O(group_clause_len) instead.
             //
             // SAFETY: root is the planner-provided pointer.
-            if unsafe { grouped_query_has_unsupported_group_key(root) } {
+            if let Some(blocker) = unsafe { grouped_query_unsupported_group_key_blocker(root) } {
+                let rows_est = if input_rel.is_null() {
+                    0
+                } else {
+                    unsafe { (*input_rel).rows.max(0.0) as u64 }
+                };
+                stats::increment_planner_rejected(
+                    "preagg_group_key_not_gpu_hashagg_supported",
+                    rows_est,
+                );
                 stats::record_planner_fast_decline("upper_paths_unsupported_group_key");
                 pgrx::debug1!(
-                    "pg_accel: upper_paths fast-decline: GROUP BY has unsupported key type"
+                    "pg_accel: upper_paths fast-decline: PreAgg/GpuAgg blocked by GROUP BY key \
+                     type oid={} at key {}/{}; GPU hashagg currently requires supported numeric \
+                     grouping, so SSBM Q2.3's text brand key stays on PostgreSQL until constant \
+                     text group projection is implemented",
+                    u32::from(blocker.type_oid),
+                    blocker.key_index + 1,
+                    blocker.group_key_count,
                 );
                 return;
             }
@@ -205,6 +218,13 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             unsafe { pgaccel_inject_gpu_window(root, input_rel, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_FINAL => {
+            // Most final upper-rel hooks have no SRF work at all. Check the
+            // parse flag before GPU/SPI gates so native ORDER BY/LIMIT queries
+            // do not initialize the GPU runtime just to decline.
+            if !unsafe { srf_target_list::query_has_target_srfs(root) } {
+                stats::record_planner_fast_decline("upper_paths_no_target_srf");
+                return;
+            }
             if !hook_context.require_gpu_usable() || !hook_context.require_transaction_for_spi() {
                 return;
             }
@@ -222,9 +242,16 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     let _ = extra;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UnsupportedGroupKeyBlocker {
+    type_oid: pg_sys::Oid,
+    key_index: i32,
+    group_key_count: i32,
+}
+
 /// Phase 0 fast-decline helper for `pgaccel_create_upper_paths` /
 /// `UPPERREL_GROUP_AGG`. Walks only the `Query.groupClause` (O(group cols))
-/// and returns `true` if any group key resolves to a type that
+/// and returns blocker details if any group key resolves to a type that
 /// [`GroupKeyInfo::key_type_from_oid`] does not classify as supported.
 ///
 /// Mirrors the late-stage rejection in `pgaccel_inject_gpu_agg`
@@ -233,7 +260,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
 /// `(d_year, p_brand1)` with p_brand1 = text bail O(group_cols) instead of
 /// O(tlist + restrictinfo + path scan + Aggref count).
 ///
-/// Returns `false` when:
+/// Returns `None` when:
 /// - the query has no GROUP BY (plain aggregate — the lower body must run);
 /// - the parse or target list cannot be walked safely;
 /// - every group key resolves to a supported type.
@@ -242,30 +269,32 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
 ///
 /// `root` must be a valid `PlannerInfo*` from the planner. Called on the
 /// main backend thread.
-unsafe fn grouped_query_has_unsupported_group_key(root: *mut PlannerInfo) -> bool {
+unsafe fn grouped_query_unsupported_group_key_blocker(
+    root: *mut PlannerInfo,
+) -> Option<UnsupportedGroupKeyBlocker> {
     use crate::engine::executor::agg::GroupKeyInfo;
 
     if root.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: caller guarantees root is a valid PlannerInfo pointer.
     let parse = unsafe { (*root).parse };
     if parse.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: parse is a valid planner-owned Query.
     let query = unsafe { &*parse };
     if query.groupClause.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: groupClause is a planner-owned List of SortGroupClause.
     let group_len = unsafe { pg_sys::list_length(query.groupClause) };
     if group_len == 0 {
-        return false;
+        return None;
     }
     let tlist = query.targetList;
     if tlist.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: targetList is a planner-owned List of TargetEntry.
     let tlist_len = unsafe { pg_sys::list_length(tlist) };
@@ -277,7 +306,7 @@ unsafe fn grouped_query_has_unsupported_group_key(root: *mut PlannerInfo) -> boo
         let sc =
             unsafe { pg_sys::list_nth(query.groupClause, i).cast::<pg_sys::SortGroupClause>() };
         if sc.is_null() {
-            return false;
+            return None;
         }
         // SAFETY: sc is a valid SortGroupClause.
         let sgref = unsafe { (*sc).tleSortGroupRef };
@@ -296,7 +325,7 @@ unsafe fn grouped_query_has_unsupported_group_key(root: *mut PlannerInfo) -> boo
             // SAFETY: tle.expr is a planner-owned Expr.
             let expr = unsafe { (*tle).expr };
             if expr.is_null() {
-                return false;
+                return None;
             }
             // SAFETY: reading node tag.
             let tag = unsafe { (*expr.cast::<pg_sys::Node>()).type_ };
@@ -314,14 +343,18 @@ unsafe fn grouped_query_has_unsupported_group_key(root: *mut PlannerInfo) -> boo
             // The lower body's check is more thorough; defer to it
             // rather than over-decline. This means we only fast-decline
             // when we are CERTAIN the group key types are unsupported.
-            return false;
+            return None;
         };
         if GroupKeyInfo::key_type_from_oid(oid).is_none() {
-            return true;
+            return Some(UnsupportedGroupKeyBlocker {
+                type_oid: oid,
+                key_index: i,
+                group_key_count: group_len,
+            });
         }
     }
 
-    false
+    None
 }
 
 fn upper_stage_candidate(stage: UpperRelationKind::Type) -> &'static str {
@@ -331,6 +364,68 @@ fn upper_stage_candidate(stage: UpperRelationKind::Type) -> &'static str {
         pg_sys::UpperRelationKind::UPPERREL_FINAL => "GpuSrfTargetList",
         _ => "UpperPath",
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GroupedHashAggAdmission {
+    AdmitLegacySmall,
+    AdmitRowParallel,
+    RejectUnsupportedKey,
+    RejectUnsupportedAggShape,
+    RejectTooManyGroups,
+    RejectTooFewRowsPerGroup,
+}
+
+const METAL_HASHAGG_MAX_LARGE_UNSORTED_GROUPS: usize = 4096;
+
+fn grouped_hashagg_group_cap(limits: &cost::DeviceLimits) -> usize {
+    if !cost::gpu_is_usable() {
+        return limits.gpu_hash_agg_max_groups;
+    }
+
+    let caps = crate::gpu::get_caps();
+    let backend = unsafe { std::ffi::CStr::from_ptr(caps.backend_name.as_ptr()) };
+    if backend.to_bytes() == b"metal" {
+        METAL_HASHAGG_MAX_LARGE_UNSORTED_GROUPS
+    } else {
+        limits.gpu_hash_agg_max_groups
+    }
+}
+
+#[must_use]
+pub(super) fn grouped_hashagg_admission(
+    rows: usize,
+    est_groups: usize,
+    key_type: i32,
+    agg_shape_supported: bool,
+    limits: &cost::DeviceLimits,
+) -> GroupedHashAggAdmission {
+    if key_type == H3_LATLNG_GROUP_KEY_TYPE {
+        return if agg_shape_supported {
+            GroupedHashAggAdmission::AdmitRowParallel
+        } else {
+            GroupedHashAggAdmission::RejectUnsupportedAggShape
+        };
+    }
+
+    if rows < limits.gpu_hash_agg_unsafe_input_rows {
+        return GroupedHashAggAdmission::AdmitLegacySmall;
+    }
+
+    if !matches!(key_type, 0..=2) {
+        return GroupedHashAggAdmission::RejectUnsupportedKey;
+    }
+    if !agg_shape_supported {
+        return GroupedHashAggAdmission::RejectUnsupportedAggShape;
+    }
+    if est_groups == 0 || est_groups > grouped_hashagg_group_cap(limits) {
+        return GroupedHashAggAdmission::RejectTooManyGroups;
+    }
+    if rows / est_groups < limits.hashagg_min_rows_per_group {
+        return GroupedHashAggAdmission::RejectTooFewRowsPerGroup;
+    }
+
+    GroupedHashAggAdmission::AdmitRowParallel
 }
 
 // ---------------------------------------------------------------------------
@@ -1877,8 +1972,9 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     let input_ref = unsafe { &*input_rel };
     let agg_rows_estimate = input_ref.rows.max(0.0) as u64;
 
-    // Gate: Check GROUP BY — we support plain aggregates, single-column,
-    // and two-column GROUP BY (composite key encoding: two int4 → one int8).
+    // Gate: Check GROUP BY — grouped GPU hash aggregation currently supports
+    // one numeric key. Multi-key GROUP BY stays with PostgreSQL until the
+    // executor has a row-parallel composite-key path.
     let parse = root_ref.parse;
     if parse.is_null() {
         return;
@@ -1891,16 +1987,29 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         // SAFETY: groupClause is a valid List.
         unsafe { pg_sys::list_length(query.groupClause) }
     };
-    // Reject GROUP BY with more than 2 columns.
-    if group_len > 2 {
+    // Reject GROUP BY with more than one column.
+    if group_len > 1 {
         pgrx::debug1!(
-            "pg_accel: gpu_agg rejected: GROUP BY has {} cols (max 2)",
+            "pg_accel: gpu_agg rejected: GROUP BY has {} cols (max 1)",
             group_len
         );
         return;
     }
 
-    // Extract group key info for single- or two-column GROUP BY.
+    struct ResolvedGroupCol {
+        attno: i32,
+        type_oid: pg_sys::Oid,
+        key_type_override: Option<i32>,
+        h3_resolution: Option<i32>,
+        varno: pg_sys::Index,
+        tlist_pos: i32,
+    }
+
+    let mut group_key_tlist_pos_hint: i32 = -1;
+    let mut h3_group_key_resolution: Option<i32> = None;
+    let mut h3_group_key_varno: pg_sys::Index = 0;
+
+    // Extract group key info for single-column GROUP BY.
     let group_key_info: Option<GroupKeyInfo> = if group_len >= 1 {
         let tlist = query.targetList;
         let tlist_len = if tlist.is_null() {
@@ -1909,8 +2018,8 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             unsafe { pg_sys::list_length(tlist) }
         };
 
-        // Helper: resolve a SortGroupClause to (attno, type_oid).
-        let resolve_group_col = |idx: i32| -> Option<(i32, pg_sys::Oid)> {
+        // Helper: resolve a SortGroupClause to a base column and key type.
+        let resolve_group_col = |idx: i32| -> Option<ResolvedGroupCol> {
             // SAFETY: groupClause has at least idx+1 elements.
             let sc = unsafe {
                 pg_sys::list_nth(query.groupClause, idx).cast::<pg_sys::SortGroupClause>()
@@ -1934,28 +2043,91 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 }
                 // SAFETY: reading node tag.
                 let gk_tag = unsafe { (*gk_expr.cast::<pg_sys::Node>()).type_ };
-                if gk_tag != NodeTag::T_Var {
-                    return None;
+                if gk_tag == NodeTag::T_Var {
+                    let gk_var = gk_expr.cast::<pg_sys::Var>();
+                    let gk_typid = unsafe { (*gk_var).vartype };
+                    let gk_attno = i32::from(unsafe { (*gk_var).varattno });
+                    return Some(ResolvedGroupCol {
+                        attno: gk_attno,
+                        type_oid: gk_typid,
+                        key_type_override: None,
+                        h3_resolution: None,
+                        varno: unsafe { (*gk_var).varno as pg_sys::Index },
+                        tlist_pos: j,
+                    });
                 }
-                let gk_var = gk_expr.cast::<pg_sys::Var>();
-                let gk_typid = unsafe { (*gk_var).vartype };
-                let gk_attno = i32::from(unsafe { (*gk_var).varattno });
-                return Some((gk_attno, gk_typid));
+                if gk_tag == NodeTag::T_FuncExpr {
+                    let func = gk_expr.cast::<pg_sys::FuncExpr>();
+                    let name_ptr = unsafe { pg_sys::get_func_name((*func).funcid) };
+                    if name_ptr.is_null() {
+                        return None;
+                    }
+                    let Ok(name) = (unsafe { std::ffi::CStr::from_ptr(name_ptr) }).to_str() else {
+                        return None;
+                    };
+                    if name != "h3_latlng_to_cell" {
+                        return None;
+                    }
+                    let args = unsafe { (*func).args };
+                    if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+                        return None;
+                    }
+                    let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                    let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+                    if arg0.is_null()
+                        || arg1.is_null()
+                        || unsafe { (*arg0).type_ } != NodeTag::T_Var
+                        || unsafe { (*arg1).type_ } != NodeTag::T_Const
+                    {
+                        return None;
+                    }
+                    let var = arg0.cast::<pg_sys::Var>();
+                    let point_type_oid = u32::from(unsafe { (*var).vartype });
+                    if point_type_oid != 600 {
+                        return None;
+                    }
+                    let res_const = arg1.cast::<pg_sys::Const>();
+                    if unsafe { (*res_const).constisnull } {
+                        return None;
+                    }
+                    let resolution = unsafe { (*res_const).constvalue.value() as i32 };
+                    if !(0..=15).contains(&resolution) {
+                        return None;
+                    }
+                    return Some(ResolvedGroupCol {
+                        attno: i32::from(unsafe { (*var).varattno }),
+                        type_oid: unsafe { (*func).funcresulttype },
+                        key_type_override: Some(H3_LATLNG_GROUP_KEY_TYPE),
+                        h3_resolution: Some(resolution),
+                        varno: unsafe { (*var).varno as pg_sys::Index },
+                        tlist_pos: j,
+                    });
+                }
+                return None;
             }
             None
         };
 
         if group_len == 1 {
-            let Some((gk_attno, gk_typid)) = resolve_group_col(0) else {
+            let Some(resolved) = resolve_group_col(0) else {
                 pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY col not a Var");
                 return;
             };
-            let Some(key_type) = GroupKeyInfo::key_type_from_oid(gk_typid) else {
+            group_key_tlist_pos_hint = resolved.tlist_pos;
+            h3_group_key_resolution = resolved.h3_resolution;
+            if resolved.key_type_override == Some(H3_LATLNG_GROUP_KEY_TYPE) {
+                h3_group_key_varno = resolved.varno;
+            }
+            let Some(key_type) = resolved
+                .key_type_override
+                .or_else(|| GroupKeyInfo::key_type_from_oid(resolved.type_oid))
+            else {
                 // SAFETY: planner hook runs on the main backend thread.
-                if let Some(policy) = unsafe { planner_type_policy(gk_typid).rejection() } {
+                if let Some(policy) = unsafe { planner_type_policy(resolved.type_oid).rejection() }
+                {
                     record_planner_type_rejection(
                         "agg group key",
-                        gk_typid,
+                        resolved.type_oid,
                         policy,
                         agg_rows_estimate,
                     );
@@ -1964,22 +2136,25 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 return;
             };
             Some(GroupKeyInfo {
-                attno: gk_attno,
-                type_oid: gk_typid,
+                attno: resolved.attno,
+                type_oid: resolved.type_oid,
                 key_type,
             })
         } else {
             // Two-column GROUP BY: composite key encoding.
             // Both columns must be int2 or int4 so we can pack them into a
             // single int8 key (high 32 bits = col1, low 32 bits = col2).
-            let Some((attno1, typid1)) = resolve_group_col(0) else {
+            let Some(resolved1) = resolve_group_col(0) else {
                 pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY col1 not a Var");
                 return;
             };
-            let Some((_attno2, typid2)) = resolve_group_col(1) else {
+            let Some(resolved2) = resolve_group_col(1) else {
                 pgrx::debug1!("pg_accel: gpu_agg rejected: GROUP BY col2 not a Var");
                 return;
             };
+            let attno1 = resolved1.attno;
+            let typid1 = resolved1.type_oid;
+            let typid2 = resolved2.type_oid;
             // Only int2/int4 types can be packed into a composite int8 key.
             let is_small_int = |oid: pg_sys::Oid| {
                 matches!(u32::from(oid), 21 | 23) // INT2OID | INT4OID
@@ -2067,7 +2242,13 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
 
     // Gate: Grouped aggregation has higher overhead (hash table build + probe
     // + per-group yield) than plain reduce. Require more rows to break even.
-    if group_key_info.is_some() && rows < cost::device_limits().gpu_hash_agg_min_rows {
+    let h3_group_key_candidate = group_key_info
+        .as_ref()
+        .is_some_and(|gk| gk.key_type == H3_LATLNG_GROUP_KEY_TYPE);
+    if group_key_info.is_some()
+        && !h3_group_key_candidate
+        && rows < cost::device_limits().gpu_hash_agg_min_rows
+    {
         pgrx::debug1!(
             "pg_accel: gpu_agg rejected: grouped agg rows {} < min {}",
             rows,
@@ -2075,15 +2256,6 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         );
         return;
     }
-    if group_key_info.is_some() && !cost::hashagg_input_rows_safe(rows, cost::device_limits()) {
-        pgrx::debug1!(
-            "pg_accel: gpu_agg rejected: grouped agg rows {} >= unsafe threshold {}",
-            rows,
-            cost::device_limits().gpu_hash_agg_unsafe_input_rows
-        );
-        return;
-    }
-
     // Gate: Reject GpuAgg wrapping pathologically small multi-join outputs.
     // When the input is a join path with too few rows to amortize GPU
     // kernel launch, PG's native parallel agg wins. The original gate
@@ -2128,6 +2300,7 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     }
 
     // Gate: If GROUP BY, estimate group count via estimate_num_groups().
+    let mut estimated_groups: usize = 1;
     if group_key_info.is_some() && !query.groupClause.is_null() {
         // SAFETY: root, groupClause are valid; input_ref.rows is the input cardinality.
         let est_groups = unsafe {
@@ -2139,16 +2312,18 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                 std::ptr::null_mut(),
             )
         } as usize;
+        estimated_groups = est_groups.max(1);
+        let hashagg_group_cap = grouped_hashagg_group_cap(cost::device_limits());
         pgrx::debug1!(
             "pg_accel: gpu_agg group check: est_groups={}, max={}",
             est_groups,
-            cost::device_limits().gpu_hash_agg_max_groups
+            hashagg_group_cap
         );
-        if est_groups > cost::device_limits().gpu_hash_agg_max_groups {
+        if est_groups > hashagg_group_cap {
             pgrx::debug1!(
                 "pg_accel: gpu_agg rejected: estimated {} groups > {}",
                 est_groups,
-                cost::device_limits().gpu_hash_agg_max_groups
+                hashagg_group_cap
             );
             return;
         }
@@ -2185,7 +2360,7 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // Collect (AggOp, attno, result_type_oid) for each target list entry.
     let mut agg_descs: Vec<(AggOp, i32, u32)> = Vec::with_capacity(tlist_len as usize);
     // Track 0-based position of group key Var(s) in the target list.
-    let mut group_key_tlist_pos: i32 = -1;
+    let mut group_key_tlist_pos: i32 = group_key_tlist_pos_hint;
     // fp64 classification for the soft-fp64 cost multiplier: set to true if
     // any aggregate in the tlist uses a float8 transition state or operates
     // on a float8 input column. AVG/STDDEV/VAR all use f64 accumulators,
@@ -2198,6 +2373,7 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     let mut has_i64_sum = false;
     let mut has_gpu_value_reduce = false;
     let mut required_reduce_rows = cost::device_limits().gpu_reduce_min_rows;
+    let mut grouped_hashagg_shape_supported = true;
 
     // SAFETY: tlist is a valid List of TargetEntry (non-partial) or Expr (partial).
     for i in 0..tlist_len {
@@ -2219,7 +2395,11 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         if tag != NodeTag::T_Aggref {
             // In grouped mode, the group key Var is expected in the target list.
             // Skip it (it's handled separately via group_key_info).
-            if group_key_info.is_some() && tag == NodeTag::T_Var {
+            let group_key_tlist_pos_raw = group_key_tlist_pos & 0xffff;
+            if group_key_info.is_some()
+                && ((tag == NodeTag::T_Var && group_key_tlist_pos < 0)
+                    || (tag == NodeTag::T_FuncExpr && i == group_key_tlist_pos_raw))
+            {
                 if group_key_tlist_pos < 0 {
                     group_key_tlist_pos = i;
                 }
@@ -2409,6 +2589,16 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             }
             return;
         }
+        if group_key_info.is_some() {
+            let grouped_value_ok = match op {
+                AggOp::Sum | AggOp::Min | AggOp::Max => {
+                    attno > 0 && matches!(typid, AGG_INT8OID | AGG_FLOAT8OID)
+                }
+                AggOp::Count => attno == 0 || matches!(typid, AGG_INT8OID | AGG_FLOAT8OID),
+                _ => false,
+            };
+            grouped_hashagg_shape_supported &= grouped_value_ok;
+        }
         // fp64 classification: this aggregate uses fp64 machinery if either
         //   (a) its transition state is FLOAT8OID (SUM(float8), SUM(float4),
         //       AVG/STDDEV/VAR on any numeric type — all of which store f64
@@ -2469,6 +2659,24 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     if agg_descs.is_empty() {
         return;
     }
+    if h3_group_key_resolution.is_some()
+        && !agg_descs
+            .iter()
+            .all(|(op, attno, _)| matches!(op, AggOp::Count) && *attno == 0)
+    {
+        pgrx::debug1!("pg_accel: gpu_agg rejected: H3 group key supports COUNT(*) only");
+        return;
+    }
+    let count_star_only = group_key_info.is_none()
+        && agg_descs
+            .iter()
+            .all(|(op, attno, _)| matches!(op, AggOp::Count) && *attno == 0);
+    if !is_partial
+        && count_star_only
+        && unsafe { try_inject_hashjoin_count(root, input_rel, output_rel, agg_descs[0].2) }
+    {
+        return;
+    }
     if group_key_info.is_none() && !has_gpu_value_reduce {
         pgrx::debug1!("pg_accel: gpu_agg rejected: plain aggregate has no GPU value-reduce column");
         return;
@@ -2501,6 +2709,25 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             "pg_accel: gpu_agg rejected: grouped AVG maps incorrectly in the current executor"
         );
         return;
+    }
+    if let Some(ref gk) = group_key_info {
+        let admission = grouped_hashagg_admission(
+            rows,
+            estimated_groups,
+            gk.key_type,
+            grouped_hashagg_shape_supported,
+            cost::device_limits(),
+        );
+        if !matches!(
+            admission,
+            GroupedHashAggAdmission::AdmitLegacySmall | GroupedHashAggAdmission::AdmitRowParallel
+        ) {
+            pgrx::debug1!(
+                "pg_accel: gpu_agg rejected: grouped hashagg admission failed: {:?}",
+                admission
+            );
+            return;
+        }
     }
 
     // Find the input path. Prefer a GPU-producing child (GpuScan/GpuJoin) so
@@ -2541,6 +2768,9 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     let child_is_gpu_producing = gpu_agg_child_is_gpu_producing(cheapest);
     let child_is_our_scan =
         child_is_gpu_scan && rows >= cost::device_limits().gpu_pipeline_fusion_min_rows;
+    let h3_group_key = group_key_info
+        .as_ref()
+        .is_some_and(|gk| gk.key_type == H3_LATLNG_GROUP_KEY_TYPE);
 
     // Detect self-scan opportunity: child is a plain path on a base
     // relation (SeqScan) with NO restriction quals. The executor will
@@ -2568,10 +2798,59 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         };
     let child_is_plain_path =
         unsafe { (*cheapest.cast::<pg_sys::Node>()).type_ == NodeTag::T_Path };
-    let child_is_nonparallel_path = !unsafe { (*cheapest).parallel_aware }
-        && unsafe { (*cheapest).parallel_workers } <= 0
-        && !unsafe { (*cheapest).parallel_safe };
-    let self_scan_relid: pg_sys::Index = if !child_is_gpu_producing
+    // `parallel_safe` only means the path may run inside a worker; it does
+    // not make a plain `Path` a parallel execution path. For self-scan we
+    // only need to exclude actual parallel-aware/worker paths.
+    let child_is_nonparallel_path =
+        !unsafe { (*cheapest).parallel_aware } && unsafe { (*cheapest).parallel_workers } <= 0;
+    let h3_self_scan_relid: pg_sys::Index = if h3_group_key
+        && !child_is_gpu_producing
+        && h3_group_key_varno > 0
+        && rows >= cost::device_limits().gpu_reduce_min_rows
+    {
+        let root_ref = unsafe { &*root };
+        let source_rel = if root_ref.simple_rel_array.is_null()
+            || h3_group_key_varno as i32 >= root_ref.simple_rel_array_size
+        {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                *root_ref
+                    .simple_rel_array
+                    .offset(h3_group_key_varno as isize)
+            }
+        };
+        let source_rte = if root_ref.simple_rte_array.is_null()
+            || h3_group_key_varno as i32 >= root_ref.simple_rel_array_size
+        {
+            std::ptr::null_mut()
+        } else {
+            unsafe {
+                *root_ref
+                    .simple_rte_array
+                    .offset(h3_group_key_varno as isize)
+            }
+        };
+        let source_has_quals = !source_rel.is_null()
+            && !unsafe { (*source_rel).baserestrictinfo }.is_null()
+            && unsafe { pg_sys::list_length((*source_rel).baserestrictinfo) } > 0;
+        if !source_rel.is_null()
+            && !source_rte.is_null()
+            && unsafe { (*source_rel).reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL }
+            && unsafe { (*source_rte).rtekind == pg_sys::RTEKind::RTE_RELATION }
+            && unsafe { (*source_rte).relid != pg_sys::InvalidOid }
+            && !source_has_quals
+        {
+            h3_group_key_varno
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let self_scan_relid: pg_sys::Index = if h3_self_scan_relid > 0 {
+        h3_self_scan_relid
+    } else if !child_is_gpu_producing
         && is_baserel
         && rte_is_relation
         && child_is_plain_path
@@ -2624,7 +2903,9 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // Per-row cost: vectorized paths (self-scan or fused GpuExpr child)
     // do direct heap walk + columnar extract, eliminating ExecProcNode
     // and MinimalTuple overhead. Same architecture as hash join.
-    let agg_per_row_base = if has_i64_sum {
+    let agg_per_row_base = if h3_group_key {
+        0.005
+    } else if has_i64_sum {
         0.03
     } else if is_vectorized {
         0.001
@@ -2638,14 +2919,23 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
     // accordingly. Applied to the reduce (agg) component; launch overhead
     // is unchanged. Both plain `GpuReduce` and `GpuHashAgg` paths go
     // through this site — one fix covers both.
-    let agg_per_row =
-        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits());
+    let agg_per_row = if h3_group_key {
+        agg_per_row_base
+    } else {
+        cost::apply_fp64_penalty(agg_per_row_base, agg_uses_fp64, cost::device_limits())
+    };
     // For grouped agg, add hash table build + probe + per-group
     // accumulation cost per row. GPU batched hash reduction is cheap
     // (bitonic partition + segmented reduce), so this is low. The hash
     // overhead itself is integer work (probe + compare), so it is NOT
     // subject to the fp64 penalty — only the value accumulation is.
-    let hash_overhead = if group_key_info.is_some() { 0.002 } else { 0.0 };
+    let hash_overhead = if h3_group_key {
+        0.003
+    } else if group_key_info.is_some() {
+        0.002
+    } else {
+        0.0
+    };
     let reduce_cost = base.rows * (agg_per_row + hash_overhead);
     // For self-scanning paths, compute our own scan cost instead of
     // inheriting the child's SeqScan cost. Our heap walk + arena copy
@@ -2770,7 +3060,13 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             // For composite key (key_type=3), append second column attno.
             priv_list = lappend(priv_list, pg_sys::makeInteger(group_key2_attno).cast());
             // Group key's 0-based position in the output target list.
-            priv_list = lappend(priv_list, pg_sys::makeInteger(group_key_tlist_pos).cast());
+            let packed_tlist_pos = if gk.key_type == H3_LATLNG_GROUP_KEY_TYPE {
+                let resolution = h3_group_key_resolution.unwrap_or(0);
+                group_key_tlist_pos | (resolution << 16)
+            } else {
+                group_key_tlist_pos
+            };
+            priv_list = lappend(priv_list, pg_sys::makeInteger(packed_tlist_pos).cast());
         } else {
             priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // no group key
         }
@@ -2803,6 +3099,205 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
             self_scan_relid,
         );
     }
+}
+
+struct HashJoinCountCandidate {
+    outer_path: *mut Path,
+    inner_path: *mut Path,
+    equi: EquiJoinKey,
+    outer_rows: f64,
+    inner_rows: f64,
+    output_rows: f64,
+}
+
+/// Inject a count-only `GpuHashJoin` upper path for:
+///
+/// ```sql
+/// SELECT count(*) FROM outer JOIN inner ON outer.k = inner.k
+/// ```
+///
+/// The path attaches the two join children directly and sets the hash-join
+/// count-only private flag, so the executor emits one int8 count row without
+/// materializing joined heap tuples.
+///
+/// # Safety
+///
+/// Planner-owned pointers must be valid.
+unsafe fn try_inject_hashjoin_count(
+    _root: *mut PlannerInfo,
+    input_rel: *mut RelOptInfo,
+    output_rel: *mut RelOptInfo,
+    result_type_oid: u32,
+) -> bool {
+    if result_type_oid != u32::from(pg_sys::INT8OID) {
+        return false;
+    }
+
+    let Some(candidate) = (unsafe { find_hashjoin_count_candidate(input_rel) }) else {
+        return false;
+    };
+
+    if !hashjoin::selected_count_only_backend_supported() {
+        stats::increment_planner_rejected(
+            "hashjoin_count_backend_unsupported",
+            candidate.output_rows.max(0.0) as u64,
+        );
+        return false;
+    }
+
+    let limits = cost::device_limits();
+    let build_rows = candidate.inner_rows.max(0.0) as usize;
+    if build_rows > limits.gpu_hash_join_build_max_rows {
+        stats::increment_planner_rejected("hashjoin_count_build_too_large", build_rows as u64);
+        return false;
+    }
+    if candidate.output_rows > f64::from(u32::MAX) {
+        stats::increment_planner_rejected(
+            "hashjoin_count_output_counter_too_large",
+            u64::from(u32::MAX),
+        );
+        return false;
+    }
+
+    let uses_fp64 = hashjoin::key_type_is_fp64(candidate.equi.key_type);
+    if uses_fp64 || !hashjoin::selected_key_type_supported(candidate.equi.key_type) {
+        return false;
+    }
+
+    let outer_ref = unsafe { &*candidate.outer_path };
+    let inner_ref = unsafe { &*candidate.inner_path };
+    let build_cost = candidate.inner_rows * hashjoin::build_cost_per_inner_row(uses_fp64, limits);
+    let probe_cost = candidate.outer_rows * hashjoin::probe_cost_per_outer_row(uses_fp64, limits);
+    let startup_cost = outer_ref.startup_cost + cost::GPU_LAUNCH_OVERHEAD + build_cost;
+    let total_cost = (outer_ref.total_cost
+        + inner_ref.total_cost
+        + cost::GPU_LAUNCH_OVERHEAD
+        + build_cost
+        + probe_cost)
+        .max(startup_cost);
+
+    unsafe {
+        let cpath = create_custom_path(
+            output_rel,
+            candidate.outer_path,
+            startup_cost,
+            total_cost,
+            1.0,
+            custom_scan::join_path_methods(),
+        );
+
+        let mut child_list: *mut List = std::ptr::null_mut();
+        child_list = lappend(child_list, candidate.outer_path.cast());
+        child_list = lappend(child_list, candidate.inner_path.cast());
+        (*cpath).custom_paths = child_list;
+
+        let mut priv_list: *mut List = std::ptr::null_mut();
+        priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // fn_oid
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(candidate.equi.outer_attno).cast(),
+        );
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(registry::AccelStrategy::GpuHashJoin as i32).cast(),
+        );
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(candidate.equi.inner_attno).cast(),
+        );
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(candidate.equi.key_type).cast(),
+        );
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(candidate.equi.outer_varno).cast(),
+        );
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(candidate.equi.inner_varno).cast(),
+        );
+        priv_list = lappend(priv_list, pg_sys::makeInteger(1).cast()); // count-only
+        (*cpath).custom_private = priv_list;
+
+        add_path(output_rel, cpath.cast());
+    }
+
+    pgrx::debug1!(
+        "pg_accel: injected count-only GpuHashJoin path, outer_rows={:.0}, inner_rows={:.0}, join_rows={:.0}",
+        candidate.outer_rows,
+        candidate.inner_rows,
+        candidate.output_rows,
+    );
+    true
+}
+
+/// Find the narrow native HashPath shape that the count-only hash-join path
+/// can replace. Deliberately rejects nested/merge/non-inner/multi-shape plans.
+///
+/// # Safety
+///
+/// `input_rel` must be a valid upper-path input relation.
+unsafe fn find_hashjoin_count_candidate(
+    input_rel: *mut RelOptInfo,
+) -> Option<HashJoinCountCandidate> {
+    if input_rel.is_null() {
+        return None;
+    }
+    let input_ref = unsafe { &*input_rel };
+    let pathlist = input_ref.pathlist;
+    if pathlist.is_null() {
+        return None;
+    }
+
+    let n = unsafe { pg_sys::list_length(pathlist) };
+    let mut best: Option<HashJoinCountCandidate> = None;
+    let mut best_cost = f64::INFINITY;
+
+    for i in 0..n {
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+        let tag = unsafe { (*path.cast::<pg_sys::Node>()).type_ };
+        if tag != NodeTag::T_HashPath {
+            continue;
+        }
+
+        let jp = path.cast::<pg_sys::JoinPath>();
+        if unsafe { (*jp).jointype } != pg_sys::JoinType::JOIN_INNER {
+            continue;
+        }
+        let outer_path = unsafe { (*jp).outerjoinpath };
+        let inner_path = unsafe { (*jp).innerjoinpath };
+        if outer_path.is_null() || inner_path.is_null() {
+            continue;
+        }
+        let restrict = unsafe { (*jp).joinrestrictinfo };
+        let Some(equi) =
+            (unsafe { find_equi_join_from_restrictinfo(restrict, outer_path, inner_path) })
+        else {
+            continue;
+        };
+        if !hashjoin::selected_key_type_supported(equi.key_type) {
+            continue;
+        }
+
+        let path_cost = unsafe { (*path).total_cost };
+        if path_cost < best_cost {
+            best_cost = path_cost;
+            best = Some(HashJoinCountCandidate {
+                outer_path,
+                inner_path,
+                equi,
+                outer_rows: unsafe { (*outer_path).rows.max(0.0) },
+                inner_rows: unsafe { (*inner_path).rows.max(0.0) },
+                output_rows: unsafe { (*path).rows.max(0.0) },
+            });
+        }
+    }
+
+    best
 }
 
 // ---------------------------------------------------------------------------
@@ -4138,10 +4633,13 @@ pub(super) unsafe fn find_equi_join_key(
                 continue;
             };
 
-        // Map PG type OID to key type tag.
+        // Map PG type OID to key type tag. INT2 deliberately stays out of
+        // selected hash-join exposure: the join executor's INT32 extraction
+        // lane reads int4-width values, so accepting int2 here would route to
+        // a mismatched key buffer.
         let key_type = match u32::from(key_oid) {
-            // int2 (21), int4 (23)
-            21 | 23 => 0, // Int32
+            // int4 (23)
+            23 => 0, // Int32
             // int8 (20)
             20 => 1, // Int64
             // float4 (700), float8 (701)

@@ -189,8 +189,9 @@ pub unsafe extern "C-unwind" fn _PG_init() {
         GucFlags::default(),
     );
 
-    // 1b. Initialize OTel tracing (must be after GUCs so log_level is available).
-    engine::otel::init();
+    // 1b. Tracing is initialized lazily when a Custom Scan actually executes.
+    // Planner-declined native queries must not pay the OTel subscriber/file
+    // setup cost just because the extension was loaded in the backend.
 
     // 2–3. Shared memory + exit callback.
     // Gated out of the test binary because PG server symbols
@@ -213,13 +214,14 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // before any queries. Saves previous hooks and installs ours.
     unsafe { engine::ffi::planner_hooks::install() };
 
-    // 5. Pre-fork Metal warmup: call MTLCreateSystemDefaultDevice() in the
-    //    postmaster so SkyLight/IOKit state is initialized before fork.
-    //    Without this, forked backends crash when MTLCreateSystemDefaultDevice
-    //    tries to initialize SkyLight (forbidden after fork on macOS Sequoia+).
-    //    This does NOT spawn threads — full GPU init (pgaccel_init) is
-    //    deferred to each backend's first query.
-    crate::gpu::prefork_warmup();
+    // 5. Pre-fork Metal warmup: call MTLCreateSystemDefaultDevice() only in
+    //    the postmaster so SkyLight/IOKit state is initialized before fork.
+    //    When the extension is loaded inside a regular backend or parallel
+    //    worker, this is no longer "pre-fork" work and it shows up as native
+    //    query planning/execution overhead for planner-declined queries.
+    if !unsafe { pgrx::pg_sys::IsUnderPostmaster } {
+        crate::gpu::prefork_warmup();
+    }
 
     // 6. Log startup summary.
     let cpu_cores = std::thread::available_parallelism()

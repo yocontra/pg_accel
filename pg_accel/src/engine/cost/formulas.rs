@@ -228,6 +228,275 @@ pub fn nlj_selectivity_useful(
     selectivity <= max_selectivity
 }
 
+/// Sort key class used by the GPU sort admission model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKeyClass {
+    /// Integer-like order keys.
+    Integer,
+    /// Floating-point order keys.
+    Float,
+    /// Any key class not supported by the current GPU sort executor.
+    Unsupported,
+}
+
+/// Sort algorithm class being considered by the planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortAlgorithm {
+    /// Standalone heap-backed sort that would materialize every output row.
+    StandaloneFullOutput,
+    /// Standalone heap-backed bounded top-k sort.
+    StandaloneTopK,
+    /// Internal/GPU-resident sort where materialization is handled elsewhere.
+    Internal,
+}
+
+/// Reason a GPU sort candidate was declined by [`sort_admission`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDeclineReason {
+    EmptyInput,
+    MissingLimit,
+    LimitTooSmall,
+    LimitNotSelective,
+    LimitAboveTopKCap,
+    TooFewRows,
+    TooManyKeys,
+    UnsupportedKeyClass,
+    TooManyChunks,
+    FullOutputMaterialization,
+    MaterializesTooMuch,
+    RowTooWide,
+}
+
+/// Inputs to the GPU sort admission/cost helper.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SortAdmissionInput {
+    /// Estimated input rows.
+    pub rows: usize,
+    /// Optional PostgreSQL `limit_tuples` estimate.
+    pub limit_tuples: Option<f64>,
+    /// Estimated projected row width in bytes.
+    pub estimated_row_width: usize,
+    /// Number of sort keys requested by the path.
+    pub key_count: usize,
+    /// Key class when known by the caller.
+    pub key_class: Option<SortKeyClass>,
+    /// Algorithm/output shape under consideration.
+    pub algorithm: SortAlgorithm,
+    /// Fraction of input rows expected to be materialized back to PostgreSQL.
+    pub materialized_output_fraction: f64,
+    /// Number of sort chunks required by the executor/pipeline.
+    pub chunk_count: usize,
+    /// Whether this path is expected to pay cold JIT/kernel setup cost.
+    pub cold_jit: bool,
+}
+
+/// Result from [`sort_admission`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SortAdmissionDecision {
+    /// Whether the candidate is eligible for GPU planning.
+    pub eligible: bool,
+    /// Conservative cost estimate for the candidate.
+    pub estimated_cost: PgCost,
+    /// Sanitized materialized-output fraction used by the helper.
+    pub materialized_output_fraction: f64,
+    /// Decline reason when `eligible == false`.
+    pub reason: Option<SortDeclineReason>,
+}
+
+impl SortAdmissionDecision {
+    #[must_use]
+    #[inline]
+    fn eligible(estimated_cost: f64, materialized_output_fraction: f64) -> Self {
+        Self {
+            eligible: true,
+            estimated_cost: PgCost::new(estimated_cost),
+            materialized_output_fraction,
+            reason: None,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    fn declined(
+        reason: SortDeclineReason,
+        estimated_cost: f64,
+        materialized_output_fraction: f64,
+    ) -> Self {
+        Self {
+            eligible: false,
+            estimated_cost: PgCost::new(estimated_cost),
+            materialized_output_fraction,
+            reason: Some(reason),
+        }
+    }
+}
+
+#[must_use]
+#[inline]
+fn finite_positive_limit(limit_tuples: Option<f64>) -> Option<f64> {
+    limit_tuples.and_then(|limit| {
+        if limit.is_finite() && limit > 0.0 {
+            Some(limit.ceil())
+        } else {
+            None
+        }
+    })
+}
+
+#[must_use]
+#[inline]
+fn clamp_fraction(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Conservative GPU sort admission and cost estimate.
+///
+/// Standalone full-output heap sorts are declined for now: they materialize
+/// every result tuple through Custom Scan and currently lose badly. Standalone
+/// top-k remains eligible only when LIMIT materially reduces output, projected
+/// rows are narrow, the key shape is supported, and no chunked/full-output
+/// path is required. Internal sort users can pass [`SortAlgorithm::Internal`]
+/// with their own materialization fraction.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn sort_admission(input: SortAdmissionInput, limits: &DeviceLimits) -> SortAdmissionDecision {
+    let rows_f = input.rows as f64;
+    let limit_rows = finite_positive_limit(input.limit_tuples);
+    let limit_fraction = if input.rows == 0 {
+        1.0
+    } else {
+        clamp_fraction(limit_rows.unwrap_or(rows_f) / rows_f)
+    };
+    let materialized_fraction = clamp_fraction(input.materialized_output_fraction);
+    let effective_fraction = match input.algorithm {
+        SortAlgorithm::StandaloneFullOutput => 1.0,
+        SortAlgorithm::StandaloneTopK => materialized_fraction.max(limit_fraction),
+        SortAlgorithm::Internal => materialized_fraction,
+    };
+    let chunks = input.chunk_count.max(1);
+    let key_count = input.key_count.max(1);
+    let key_multiplier = key_count as f64;
+    let key_class_multiplier = match input.key_class {
+        Some(SortKeyClass::Float) => 1.2,
+        Some(SortKeyClass::Unsupported) => 2.0,
+        Some(SortKeyClass::Integer) | None => 1.0,
+    };
+    let output_rows = rows_f * effective_fraction;
+    let width_units = (input.estimated_row_width.max(8) as f64) / 8.0;
+    let sort_cost = rows_f * limits.gpu_op_cost_sort * key_multiplier * key_class_multiplier;
+    let materialize_cost = output_rows * limits.custom_scan_yield_per_row * width_units;
+    let chunk_cost = chunks as f64 * GPU_LAUNCH_OVERHEAD;
+    let cold_jit_cost = if input.cold_jit {
+        GPU_LAUNCH_OVERHEAD * 4.0
+    } else {
+        0.0
+    };
+    let estimated_cost = sort_cost + materialize_cost + chunk_cost + cold_jit_cost;
+
+    if input.rows == 0 {
+        return SortAdmissionDecision::declined(
+            SortDeclineReason::EmptyInput,
+            estimated_cost,
+            effective_fraction,
+        );
+    }
+    if input.key_count == 0 || input.key_count > 1 {
+        return SortAdmissionDecision::declined(
+            SortDeclineReason::TooManyKeys,
+            estimated_cost,
+            effective_fraction,
+        );
+    }
+    if matches!(input.key_class, Some(SortKeyClass::Unsupported)) {
+        return SortAdmissionDecision::declined(
+            SortDeclineReason::UnsupportedKeyClass,
+            estimated_cost,
+            effective_fraction,
+        );
+    }
+    if input.rows < limits.gpu_sort_planner_min_rows {
+        return SortAdmissionDecision::declined(
+            SortDeclineReason::TooFewRows,
+            estimated_cost,
+            effective_fraction,
+        );
+    }
+
+    match input.algorithm {
+        SortAlgorithm::StandaloneFullOutput => SortAdmissionDecision::declined(
+            SortDeclineReason::FullOutputMaterialization,
+            estimated_cost,
+            effective_fraction,
+        ),
+        SortAlgorithm::StandaloneTopK => {
+            let Some(limit_rows) = limit_rows else {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::MissingLimit,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            };
+            if limit_rows < 2.0 {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::LimitTooSmall,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            if limit_rows >= rows_f || limit_fraction > limits.gpu_sort_heap_topk_max_fraction {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::LimitNotSelective,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            if materialized_fraction > limits.gpu_sort_heap_topk_max_fraction {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::MaterializesTooMuch,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            if limit_rows > limits.gpu_sort_topk_max_limit as f64 {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::LimitAboveTopKCap,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            if input.estimated_row_width > limits.gpu_sort_heap_topk_max_width_bytes {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::RowTooWide,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            if chunks > 1 || input.rows > limits.gpu_sort_max_elements {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::TooManyChunks,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            SortAdmissionDecision::eligible(estimated_cost, effective_fraction)
+        }
+        SortAlgorithm::Internal => {
+            if materialized_fraction >= 1.0 {
+                return SortAdmissionDecision::declined(
+                    SortDeclineReason::FullOutputMaterialization,
+                    estimated_cost,
+                    effective_fraction,
+                );
+            }
+            SortAdmissionDecision::eligible(estimated_cost, effective_fraction)
+        }
+    }
+}
+
 /// Whether a sort path has a LIMIT and therefore avoids the known full-sort
 /// loser lane.
 ///

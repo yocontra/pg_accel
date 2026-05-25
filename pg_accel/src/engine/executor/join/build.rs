@@ -9,7 +9,7 @@ use crate::engine::registry::{self, AccelStrategy};
 use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 
-use super::{JoinExecState, TlistMapEntry};
+use super::{JoinExecState, NLJ_SHAPE_BETWEEN, TlistMapEntry};
 
 impl JoinExecState {
     /// Configure hash join context.
@@ -33,6 +33,47 @@ impl JoinExecState {
             key_type = ?key_type,
             worker_count = 1u32,
             "exec.hash_join_context"
+        );
+    }
+
+    /// Configure count-only output for `COUNT(*)` over `GpuHashJoin`.
+    pub fn set_hash_join_count_mode(&mut self, count_only: bool) {
+        self.hash_count_only = count_only;
+        tracing::debug!(
+            target: "pg_accel::hash_join",
+            phase = "context",
+            count_only,
+            "exec.hash_join_count_mode"
+        );
+    }
+
+    /// Configure the one-column BETWEEN/range-containment NLJ context.
+    ///
+    /// The supported shape is:
+    ///
+    /// ```text
+    /// child0.value BETWEEN child1.lo AND child1.hi
+    /// ```
+    pub fn set_nlj_between_context(
+        &mut self,
+        outer_value_attno: i32,
+        inner_lo_attno: i32,
+        inner_hi_attno: i32,
+        key_type: PgaccelKeyType,
+    ) {
+        self.nlj_shape = NLJ_SHAPE_BETWEEN;
+        self.nlj_outer_value_attno = outer_value_attno;
+        self.nlj_inner_lo_attno = inner_lo_attno;
+        self.nlj_inner_hi_attno = inner_hi_attno;
+        self.nlj_key_type = key_type;
+        tracing::debug!(
+            target: "pg_accel::nlj_ineq",
+            phase = "context",
+            outer_value_attno,
+            inner_lo_attno,
+            inner_hi_attno,
+            key_type = ?key_type,
+            "exec.nlj_between_context"
         );
     }
 

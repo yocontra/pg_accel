@@ -15,7 +15,7 @@ use crate::gpu;
 use crate::gpu::{PgaccelAggCol, PgaccelAggFunc};
 
 use super::ffi_bridge::{agg_op_to_ffi, agg_op_to_ffi_partial};
-use super::keys::{GroupKeyInfo, append_key_bytes};
+use super::keys::{GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, append_key_bytes};
 use super::ops::AggOp;
 use super::partial::emitter::int128_to_numeric;
 use super::partial::{ColumnAccumulator, PartialEmitter};
@@ -1161,7 +1161,7 @@ impl AggColumn {
 
 struct GroupedAggResult {
     /// The GPU hash aggregation result handle.
-    result: gpu::HashAggResult,
+    storage: GroupedAggStorage,
     /// Index of the next group to emit.
     next_group: usize,
     /// Total number of groups.
@@ -1169,6 +1169,41 @@ struct GroupedAggResult {
     /// FFI key type tag.
     key_type: i32,
 }
+
+enum GroupedAggStorage {
+    Gpu(gpu::HashAggResult),
+}
+
+impl GroupedAggResult {
+    fn group_keys_ptr(&self) -> *const std::ffi::c_void {
+        match &self.storage {
+            GroupedAggStorage::Gpu(result) => result.group_keys_ptr(),
+        }
+    }
+
+    fn result_value(&self, agg_idx: usize, group_idx: usize) -> Option<f64> {
+        match &self.storage {
+            GroupedAggStorage::Gpu(result) => result
+                .results(agg_idx)
+                .and_then(|r| r.get(group_idx).copied()),
+        }
+    }
+
+    fn partial_width(&self, agg_idx: usize) -> usize {
+        match &self.storage {
+            GroupedAggStorage::Gpu(result) => result.partial_width(agg_idx),
+        }
+    }
+
+    fn partial_results(&self, agg_idx: usize) -> Option<&[f64]> {
+        match &self.storage {
+            GroupedAggStorage::Gpu(result) => result.partial_results(agg_idx),
+        }
+    }
+}
+
+const GROUP_KEY_TLIST_POS_MASK: usize = 0xffff;
+const GROUP_KEY_H3_RES_SHIFT: usize = 16;
 
 // ---------------------------------------------------------------------------
 // Multi-aggregate executor state
@@ -1617,6 +1652,18 @@ impl AggExecState {
         self.group_key.is_some()
     }
 
+    fn group_key_output_pos(&self) -> usize {
+        self.group_key_tlist_pos & GROUP_KEY_TLIST_POS_MASK
+    }
+
+    fn h3_group_resolution(&self) -> Option<i32> {
+        let gk = self.group_key.as_ref()?;
+        if gk.key_type != H3_LATLNG_GROUP_KEY_TYPE {
+            return None;
+        }
+        Some((self.group_key_tlist_pos >> GROUP_KEY_H3_RES_SHIFT) as i32)
+    }
+
     /// Returns the group key info, if present.
     #[must_use]
     pub fn group_key_info(&self) -> Option<&GroupKeyInfo> {
@@ -1945,6 +1992,15 @@ impl AggExecState {
         // SAFETY: scan_desc is valid after scan_all.
         let tupdesc = unsafe { vscan.tupdesc() };
 
+        let group_key_type = self
+            .group_key
+            .as_ref()
+            .expect("grouped agg needs key")
+            .key_type;
+        if group_key_type == H3_LATLNG_GROUP_KEY_TYPE {
+            unsafe { self.execute_h3_latlng_count_vectorized(total, tupdesc, start) };
+            return;
+        }
         let group_key_info = self.group_key.as_ref().expect("grouped agg needs key");
         let key_size = group_key_info.key_size();
         let num_aggs = self.columns.len();
@@ -2131,7 +2187,7 @@ impl AggExecState {
                 total
             );
             self.grouped_result = Some(GroupedAggResult {
-                result: hash_result,
+                storage: GroupedAggStorage::Gpu(hash_result),
                 next_group: 0,
                 group_count,
                 key_type: group_key_info.key_type,
@@ -2145,6 +2201,55 @@ impl AggExecState {
                 total,
             );
         }
+    }
+
+    unsafe fn execute_h3_latlng_count_vectorized(
+        &mut self,
+        total: usize,
+        tupdesc: pg_sys::TupleDesc,
+        start: std::time::Instant,
+    ) {
+        let Some(group_key_info) = self.group_key.as_ref() else {
+            return;
+        };
+        let Some(resolution) = self.h3_group_resolution() else {
+            pgrx::error!("pg_accel: H3 grouped aggregate missing encoded resolution");
+        };
+        if self.columns.len() != 1
+            || self.columns[0].op != AggOp::Count
+            || self.columns[0].attno > 0
+        {
+            pgrx::error!(
+                "pg_accel: H3 grouped aggregate supports only COUNT(*) in the selected path"
+            );
+        }
+
+        let vscan = self.vscan.as_ref().expect("vscan must be set");
+        let point_info = unsafe { AttExtractInfo::new(tupdesc, group_key_info.attno) };
+        let (lats, lngs, nulls) = unsafe { vscan.extract_pg_point_lat_lng(&point_info) };
+        if nulls.iter().any(|&n| n != 0) {
+            pgrx::error!(
+                "pg_accel: H3 grouped aggregate encountered NULL point despite planner admission"
+            );
+        }
+
+        let dispatch_start = std::time::Instant::now();
+        let Some(hash_result) = gpu::h3_lat_lng_count_bulk(&lats, &lngs, resolution) else {
+            pgrx::error!("pg_accel: H3 lat/lng grouped-count GPU path failed");
+        };
+        let group_count = hash_result.group_count();
+
+        self.rows_dispatched = total as u64;
+        self.batches_executed = 1;
+        self.dispatch_time_us =
+            start.elapsed().as_micros() as u64 + dispatch_start.elapsed().as_micros() as u64;
+        self.gpu_dispatched = true;
+        self.grouped_result = Some(GroupedAggResult {
+            storage: GroupedAggStorage::Gpu(hash_result),
+            next_group: 0,
+            group_count,
+            key_type: H3_LATLNG_GROUP_KEY_TYPE,
+        });
     }
 
     /// Build the final result tuple from accumulated column values.
@@ -2772,6 +2877,7 @@ impl AggExecState {
     ) -> *mut pg_sys::TupleTableSlot {
         self.reject_grouped_avg_finalize_if_present();
 
+        let gk_pos = self.group_key_output_pos();
         let gr = match self.grouped_result.as_mut() {
             Some(gr) if gr.next_group < gr.group_count => gr,
             _ => return std::ptr::null_mut(),
@@ -2791,8 +2897,7 @@ impl AggExecState {
             let isnull = (*result_slot).tts_isnull;
 
             // Group key at its correct target list position.
-            let gk_pos = self.group_key_tlist_pos;
-            let keys_ptr = gr.result.group_keys_ptr();
+            let keys_ptr = gr.group_keys_ptr();
             if keys_ptr.is_null() {
                 *isnull.add(gk_pos) = true;
             } else {
@@ -2806,7 +2911,7 @@ impl AggExecState {
                             _ => pg_sys::Datum::from(key),
                         }
                     }
-                    1 => {
+                    1 | H3_LATLNG_GROUP_KEY_TYPE => {
                         // SAFETY: keys_ptr points to group_count i64 values.
                         let key = *(keys_ptr.cast::<i64>()).add(gidx);
                         pg_sys::Datum::from(key)
@@ -2850,7 +2955,7 @@ impl AggExecState {
                 if slot_idx == gk_pos {
                     slot_idx += 1;
                 }
-                if let Some(raw_f64) = gr.result.results(i).and_then(|r| r.get(gidx).copied()) {
+                if let Some(raw_f64) = gr.result_value(i, gidx) {
                     let datum = if col.op == AggOp::Count {
                         pg_sys::Datum::from(raw_f64 as i64)
                     } else {
@@ -3083,7 +3188,7 @@ impl AggExecState {
                 row_count
             );
             self.grouped_result = Some(GroupedAggResult {
-                result: hash_result,
+                storage: GroupedAggStorage::Gpu(hash_result),
                 next_group: 0,
                 group_count,
                 key_type: group_key_info.key_type,
@@ -3317,7 +3422,7 @@ impl AggExecState {
                 row_count
             );
             self.grouped_result = Some(GroupedAggResult {
-                result: hash_result,
+                storage: GroupedAggStorage::Gpu(hash_result),
                 next_group: 0,
                 group_count,
                 key_type: group_key_info.key_type,
@@ -3352,6 +3457,7 @@ impl AggExecState {
         &mut self,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
+        let gk_pos = self.group_key_output_pos();
         let gr = match self.grouped_result.as_mut() {
             Some(gr) if gr.next_group < gr.group_count => gr,
             _ => return std::ptr::null_mut(),
@@ -3373,8 +3479,7 @@ impl AggExecState {
             // Group-key Datum at its tlist position. Identical to the
             // finalize-mode path so callers building target lists can
             // share the same helpers.
-            let gk_pos = self.group_key_tlist_pos;
-            let keys_ptr = gr.result.group_keys_ptr();
+            let keys_ptr = gr.group_keys_ptr();
             if keys_ptr.is_null() {
                 *isnull.add(gk_pos) = true;
             } else {
@@ -3388,7 +3493,7 @@ impl AggExecState {
                             _ => pg_sys::Datum::from(key),
                         }
                     }
-                    1 => {
+                    1 | H3_LATLNG_GROUP_KEY_TYPE => {
                         // SAFETY: keys_ptr points to group_count i64 values.
                         let key = *(keys_ptr.cast::<i64>()).add(gidx);
                         pg_sys::Datum::from(key)
@@ -3432,8 +3537,8 @@ impl AggExecState {
                 if slot_idx == gk_pos {
                     slot_idx += 1;
                 }
-                let width = gr.result.partial_width(i);
-                let Some(parts) = gr.result.partial_results(i) else {
+                let width = gr.partial_width(i);
+                let Some(parts) = gr.partial_results(i) else {
                     *isnull.add(slot_idx) = true;
                     slot_idx += 1;
                     continue;

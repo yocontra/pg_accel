@@ -88,6 +88,17 @@ pgaccel_hash_agg_execute(const void* group_keys, const uint8_t* group_null_mask,
                          const int* value_types,            /* [num_aggs] pgaccel_val_tag */
                          const pgaccel_agg_col* agg_cols, size_t num_aggs);
 
+/// Perform grouped COUNT(*) over int64 group keys using a GPU ordering path.
+/// This entry point is intentionally fail-closed: it does not fall back to the
+/// legacy host hash-table group-assignment path.
+pgaccel_agg_state* pgaccel_hash_count_i64_execute(const int64_t* group_keys,
+                                                  const uint8_t* group_null_mask, size_t row_count);
+
+/// Perform grouped COUNT(*) over an existing USM-accessible int64 key buffer.
+/// The buffer is sorted in place; output group order is not part of the API
+/// contract. Intended for fused GPU pipelines that already have keys resident.
+pgaccel_agg_state* pgaccel_hash_count_i64_device_execute(int64_t* group_keys, size_t row_count);
+
 /// Diagnostic/test entry point: force the sort-based grouped aggregation
 /// path and never fall back to the unsorted hash path.
 ///

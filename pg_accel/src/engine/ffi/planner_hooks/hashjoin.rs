@@ -38,6 +38,45 @@ pub(super) const fn key_type_is_fp64(key_type: i32) -> bool {
     key_type == KEY_TYPE_FLOAT64
 }
 
+/// True for key types implemented by the selected GPU hash-join build/probe
+/// path.
+///
+/// The C++ kernel currently supports integer equality keys only. Float64,
+/// UUID, INET/CIDR, text, composite, and expression keys stay declined so the
+/// selected planner path cannot route to a missing or semantically incomplete
+/// GPU implementation.
+#[must_use]
+#[inline]
+pub(super) const fn selected_key_type_supported(key_type: i32) -> bool {
+    matches!(key_type, 0 | 1)
+}
+
+/// Backend gate for count-only hash-join aggregate replacement.
+///
+/// The Metal implementation is correct and covered by the C++ tests, but the
+/// selected SQL path remains slower than PostgreSQL parallel HashJoin on the
+/// canonical 100K benchmark even after removing per-match global atomics.
+/// Keep the kernel available for direct testing while preventing a known
+/// planner-selected regression on M-series.
+#[must_use]
+#[inline]
+pub(super) fn count_only_backend_supported(backend_name: &[u8]) -> bool {
+    backend_name != b"metal"
+}
+
+#[must_use]
+#[inline]
+pub(super) fn selected_count_only_backend_supported() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        count_only_backend_supported(b"metal")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        count_only_backend_supported(b"")
+    }
+}
+
 /// Per-row GPU op cost for the `should_batch` gate.
 ///
 /// Wraps the hashjoin constant with `apply_fp64_penalty` so a Float64 key on
@@ -163,6 +202,30 @@ mod tests {
         assert!(!key_type_is_fp64(0)); // Int32
         assert!(!key_type_is_fp64(1)); // Int64
         assert!(!key_type_is_fp64(3)); // CompositeInt4x2 (agg group-key; not a hash-join key type today)
+    }
+
+    #[test]
+    fn selected_key_type_support_is_integer_only() {
+        assert!(selected_key_type_supported(0)); // Int32
+        assert!(selected_key_type_supported(1)); // Int64
+        assert!(!selected_key_type_supported(2)); // Float64
+        assert!(!selected_key_type_supported(3)); // CompositeInt4x2
+        assert!(!selected_key_type_supported(4)); // UUID
+        assert!(!selected_key_type_supported(5)); // INET/CIDR
+    }
+
+    #[test]
+    fn count_only_backend_gate_rejects_metal() {
+        assert!(!count_only_backend_supported(b"metal"));
+        assert!(count_only_backend_supported(b"cuda"));
+        assert!(count_only_backend_supported(b"hip"));
+        assert!(count_only_backend_supported(b""));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn selected_count_only_backend_rejects_macos_metal() {
+        assert!(!selected_count_only_backend_supported());
     }
 
     #[test]

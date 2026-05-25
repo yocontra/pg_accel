@@ -1,6 +1,6 @@
 use super::Workload;
 
-/// Tests GPU hash join on orders × customers with GROUP BY.
+/// Tests count-only GPU hash join on orders × customers.
 pub struct HashJoin;
 
 impl Workload for HashJoin {
@@ -9,7 +9,7 @@ impl Workload for HashJoin {
     }
 
     fn description(&self) -> &'static str {
-        "Equi-join orders x customers with GROUP BY + SUM — tests GPU hash join"
+        "COUNT(*) over orders x customers equi-join — tests fused GPU hash join count"
     }
 
     fn category(&self) -> &'static str {
@@ -54,10 +54,9 @@ impl Workload for HashJoin {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT c.name, count(*), sum(o.amount) \
+        "SELECT count(*) \
          FROM bench_orders o \
-         JOIN bench_customers c ON o.customer_id = c.customer_id \
-         GROUP BY c.name"
+         JOIN bench_customers c ON o.customer_id = c.customer_id"
             .to_owned()
     }
 

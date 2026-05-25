@@ -16,35 +16,25 @@ use crate::engine::gucs;
 use crate::engine::registry;
 use crate::engine::stats;
 
-/// Phase 0 fast-decline helper: returns `true` when *no* join strategy
+/// Temporary exposure cap for row-returning heap `GpuHashJoin` plans.
+///
+/// The hash join kernel is real GPU work, but the current Custom Scan path
+/// still reconstructs every joined row back into PostgreSQL slots. Benchmarks
+/// on M-series show the 100K-output `hash_join` cell loses badly to native
+/// HashJoin, so planner exposure stays limited to small row-returning joins
+/// until a GPU-resident join->preagg pipeline avoids per-row yield cost.
+const HASHJOIN_MAX_HEAP_OUTPUT_ROWS: usize = 25_000;
+const NLJ_GPU_PAIR_INDEX_MAX: usize = u32::MAX as usize;
+
+/// Phase 0 fast-decline helper: returns `false` only when *no* join strategy
 /// can possibly be injected by the hook body.
 ///
-/// The downstream body explicitly rejects spatial / raster / h3 join paths
-/// (Gate 3b below) because no GPU spatial / raster / h3 merge or hash
-/// join kernel exists in `pgaccel-kernels/src/` today. The only remaining
-/// strategy is `GpuHashJoin`, which is itself gated by
-/// `selected_gpu_hashjoin_kernel_available()`. That predicate is pinned
-/// to `false` by the unit test
-/// `selected_gpu_hashjoin_kernel_is_not_available_yet` and stays `false`
-/// until a real GPU build/probe kernel lands.
-///
-/// So at the time of writing, every join-pathlist invocation that
-/// reaches the lower body will return without injecting. Bailing here
-/// saves the merge-path scan, equi-join restrictlist walk, registry
-/// lookup, and per-strategy cost computation. The 2026-05-14 SSBM Q2.3
-/// diagnosis attributes ~37 ms of planning time to this redundant
-/// per-join-order work.
-///
-/// Re-entry condition: when a real `GpuHashJoin` kernel lands and the
-/// kernel-availability flag flips to `true`, OR when a spatial-join
-/// kernel lands and Gate 3b stops unconditionally rejecting those
-/// strategies, this fast-decline gate must be removed (or refined to
-/// check only the no-longer-available strategy classes). The matching
-/// unit test `selected_gpu_hashjoin_kernel_is_not_available_yet` is the
-/// canary: when it starts failing because the kernel landed, the
-/// engineer removing it MUST also adjust this gate.
+/// A narrow selected GpuHashJoin kernel now exists for INT32/INT64 equality
+/// keys, so the hook must inspect the restrictlist before it can decline.
+/// Spatial/raster/H3 joins still decline below because no selected join
+/// executor is wired for those strategies.
 fn join_hook_can_inject_anything() -> bool {
-    selected_gpu_hashjoin_kernel_available()
+    selected_gpu_hashjoin_kernel_available() || selected_gpu_nlj_kernel_available()
 }
 
 // ---------------------------------------------------------------------------
@@ -67,8 +57,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     jointype: pg_sys::JoinType::Type,
     extra: *mut JoinPathExtraData,
 ) {
-    crate::engine::otel::init();
-
     // Chain previous hook first.
     // SAFETY: Previous hook, if set, accepts the same planner-provided args.
     unsafe {
@@ -121,52 +109,18 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     //
     // SAFETY: joinrel/extra are valid planner pointers; restrictlist may
     // be null but the helper handles that.
-    if jointype == pg_sys::JoinType::JOIN_INNER {
+    if jointype == pg_sys::JoinType::JOIN_INNER && !selected_gpu_nlj_kernel_available() {
         unsafe {
             observe_nestloop_scalar_opportunity(joinrel, (*extra).restrictlist, outerrel, innerrel);
         }
     }
 
-    // Gate 1c: Phase 0 fast-decline. SSBM-shaped 4-way joins fire this hook
-    // dozens of times per query (one per join order the planner considers).
-    // The 2026-05-14 audit measured `ssbm_q2_3 @ 1M` at 37-40 ms planning
-    // time with the full walk vs ~0.2 ms with `pg_accel.enabled=off`, and
-    // the 2026-05-15 verification reproduced 30-39 ms planning on a small
-    // SSBM-shape fixture (`pg_accel_traces.jsonl` `planner.hook_elapsed_us`
-    // breakdown).
-    //
-    // Every join strategy is currently unreachable in the lower body:
-    //   - GpuSpatial / GpuRaster / GpuH3 are rejected by Gate 3b (no GPU
-    //     spatial/raster/h3 merge or hash join kernel exists);
-    //   - GpuHashJoin is gated by `selected_gpu_hashjoin_kernel_available()`
-    //     (pinned `false` by the canary unit test).
-    //
-    // `join_hook_can_inject_anything()` aggregates that into one branch.
-    // When it returns `false`, bail O(1) before walking
-    // `joinrel->pathlist` (mergejoin observability), the restrictlist
-    // (equi-join detection), or doing the registry lookup. Avoids the
-    // O(join_orders × per-rel pathlist) work that dominates planning time
-    // on multi-way star joins.
-    //
-    // The NLJ-inequality observability above runs first so the counter
-    // signal still increments even when the rest of the hook is bypassed.
+    // Gate 1c: fast-decline remains for builds where every selected join
+    // strategy is unavailable. With the integer GpuHashJoin kernel enabled,
+    // this normally falls through so key-shape gating can happen below.
     if !join_hook_can_inject_anything() {
         stats::record_planner_fast_decline("join_pathlist_no_eligible_strategy");
         return;
-    }
-
-    // Gate 1d: Early max-output check. Large-output GpuHashJoin is a known
-    // crash/loser lane; `gpu_join_max_output_rows` is a real upper bound, not
-    // the older min-ish gate. Keep this before expensive join recognition.
-    // SAFETY: joinrel is a valid RelOptInfo provided by the planner.
-    {
-        #[allow(clippy::cast_sign_loss)]
-        let est_rows = unsafe { (*joinrel).rows.max(0.0) } as usize;
-        let max = cost::device_limits().gpu_join_max_output_rows;
-        if est_rows > max {
-            pgrx::debug1!("pg_accel join: output rows={est_rows} > max={max}, deferring to PG");
-            return;
-        }
     }
 
     let _span = tracing::info_span!("planner.join_pathlist", join_type = jointype).entered();
@@ -194,6 +148,13 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // planner List (possibly null).
     unsafe { observe_mergejoin_opportunity(joinrel) };
 
+    let nlj_between =
+        if jointype == pg_sys::JoinType::JOIN_INNER && selected_gpu_nlj_kernel_available() {
+            unsafe { find_nlj_between_key(extra_ref.restrictlist, outerrel, innerrel) }
+        } else {
+            None
+        };
+
     // Equi-join detection: independent of adapter registry. Check for
     // Var = Var conditions usable for GPU hash join. This enables GPU-
     // accelerated joins for standard OLAP patterns like fact×dim joins
@@ -201,27 +162,36 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     let equi = unsafe { find_equi_join_key(extra_ref.restrictlist, outerrel, innerrel) };
 
     // Extension-function match: requires adapter registry (PostGIS, H3,
-    // raster). Only initialise when equi-join didn't match.
-    registry::lazy_init();
-    let accel = if registry::is_ready() {
-        let reg = registry::global_registry();
-        if reg.is_empty() {
-            None
+    // raster). Only initialise when neither selected built-in join path
+    // matched; plain equi/NLJ joins do not need SPI-backed adapter discovery.
+    let accel = if equi.is_none() && nlj_between.is_none() {
+        registry::lazy_init();
+        if registry::is_ready() {
+            let reg = registry::global_registry();
+            if reg.is_empty() {
+                None
+            } else {
+                find_accelerable_match(extra_ref.restrictlist)
+            }
         } else {
-            find_accelerable_match(extra_ref.restrictlist)
+            None
         }
     } else {
         None
     };
 
-    // If neither spatial predicate nor equi-join detected, bail.
-    if accel.is_none() && equi.is_none() {
+    // If no selected join strategy detected, bail.
+    if accel.is_none() && equi.is_none() && nlj_between.is_none() {
         return;
     }
 
-    let strategy = accel
-        .as_ref()
-        .map_or(registry::AccelStrategy::GpuHashJoin, |a| a.strategy);
+    let strategy = if equi.is_some() {
+        registry::AccelStrategy::GpuHashJoin
+    } else if let Some(accel_info) = accel.as_ref() {
+        accel_info.strategy
+    } else {
+        registry::AccelStrategy::GpuNestedLoopIneq
+    };
 
     // Gate 3b: Skip spatial join injection — no GPU spatial join kernel
     // exists yet (ST_Contains/ST_Within/ST_DWithin all return 100% uncertain,
@@ -236,21 +206,31 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Gate 3c: Do not expose `GpuHashJoin` as a selected planner path while
-    // the executor-side C API has no safe selected GPU build/probe contract.
-    // PG-Strom-shaped join work resumes here once the kernel contract is a
-    // real GPU build/probe path or GPU-resident hash-table reuse.
-    if matches!(strategy, registry::AccelStrategy::GpuHashJoin)
-        && !selected_gpu_hashjoin_kernel_available()
-    {
+    // Gate 3c: expose GpuHashJoin only for the key types implemented by the
+    // selected GPU build/probe kernel. Other equi-join shapes stay with
+    // PostgreSQL until their kernel semantics are complete.
+    if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
         #[allow(clippy::cast_sign_loss)]
         let n_rows_est = joinrel_ref.rows.max(0.0) as u64;
-        pgrx::debug1!(
-            "pg_accel join: GpuHashJoin skipped: no selected real-GPU hash join \
-             build/probe kernel is available"
-        );
-        stats::increment_planner_rejected("hashjoin_no_selected_gpu_kernel", n_rows_est);
-        return;
+        if !selected_gpu_hashjoin_kernel_available() {
+            pgrx::debug1!(
+                "pg_accel join: GpuHashJoin skipped: no selected real-GPU hash join \
+                 build/probe kernel is available"
+            );
+            stats::increment_planner_rejected("hashjoin_no_selected_gpu_kernel", n_rows_est);
+            return;
+        }
+        let key_type_supported = equi
+            .as_ref()
+            .is_some_and(|k| hashjoin::selected_key_type_supported(k.key_type));
+        if !key_type_supported {
+            pgrx::debug1!(
+                "pg_accel join: GpuHashJoin skipped: key type is not implemented by \
+                 selected GPU hash join build/probe"
+            );
+            stats::increment_planner_rejected("hashjoin_key_type_no_gpu_kernel", n_rows_est);
+            return;
+        }
     }
 
     let limits = cost::device_limits();
@@ -274,6 +254,69 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             );
             return;
         }
+        let max_heap_output = HASHJOIN_MAX_HEAP_OUTPUT_ROWS.min(limits.gpu_join_max_output_rows);
+        if output_rows > max_heap_output {
+            pgrx::debug1!(
+                "pg_accel join: GpuHashJoin row-returning output_rows={} > \
+                 heap-output cap {}; deferring to PostgreSQL until join->preagg \
+                 can keep rows GPU-resident",
+                output_rows,
+                max_heap_output,
+            );
+            stats::increment_planner_rejected("hashjoin_heap_output_too_large", output_rows as u64);
+            return;
+        }
+    }
+
+    if matches!(strategy, registry::AccelStrategy::GpuNestedLoopIneq) {
+        #[allow(clippy::cast_sign_loss)]
+        let outer_rows = cost::conservative_input_rows(outerrel_ref.rows, outerrel_ref.tuples);
+        #[allow(clippy::cast_sign_loss)]
+        let inner_rows = cost::conservative_input_rows(innerrel_ref.rows, innerrel_ref.tuples);
+        if !nlj_kernel_indices_fit(outer_rows, inner_rows) {
+            pgrx::debug1!(
+                "pg_accel join: GpuNestedLoopIneq rejected because input rows exceed \
+                 u32 kernel index range outer_rows={} inner_rows={} max_index={}",
+                outer_rows,
+                inner_rows,
+                NLJ_GPU_PAIR_INDEX_MAX,
+            );
+            stats::increment_planner_rejected(
+                "nlj_input_index_overflow",
+                outer_rows.max(inner_rows) as u64,
+            );
+            return;
+        }
+        // PostgreSQL's generic selectivity for `outer.x BETWEEN inner.lo AND
+        // inner.hi` often estimates a large fraction of the cross product even
+        // for non-overlapping range windows. For the selected BETWEEN kernel,
+        // use the one-window-per-event launchpad estimate, but do not hide
+        // unsafe plans by clipping the estimate to the output cap.
+        let Some(output_rows) =
+            nlj_between_modeled_output_rows(outer_rows, limits.gpu_nlj_max_output_rows)
+        else {
+            pgrx::debug1!(
+                "pg_accel join: GpuNestedLoopIneq rejected because modeled output_rows={} \
+                 exceeds max_output={}",
+                outer_rows,
+                limits.gpu_nlj_max_output_rows,
+            );
+            stats::increment_planner_rejected("nlj_between_output_too_large", outer_rows as u64);
+            return;
+        };
+        if !cost::nlj_break_even(outer_rows, inner_rows, output_rows, limits)
+            || !cost::nlj_selectivity_useful(outer_rows, inner_rows, output_rows, 0.5)
+        {
+            pgrx::debug1!(
+                "pg_accel join: GpuNestedLoopIneq rejected by cost gate outer_rows={} \
+                 inner_rows={} output_rows={} max_output={}",
+                outer_rows,
+                inner_rows,
+                output_rows,
+                limits.gpu_nlj_max_output_rows,
+            );
+            return;
+        }
     }
 
     // Gate 4: Cost model gating — skip if batching is not worthwhile.
@@ -294,9 +337,12 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         registry::AccelStrategy::GpuHashJoin => {
             hashjoin::per_row_cost_for_batch_gate(hashjoin_uses_fp64, limits)
         }
+        registry::AccelStrategy::GpuNestedLoopIneq => limits.gpu_nlj_per_pair_cost,
         _ => cost::GPU_SPATIAL_PER_ROW_COST,
     };
-    if !cost::should_batch(join_rows_gate, per_row_cost, min_batch) {
+    if !matches!(strategy, registry::AccelStrategy::GpuNestedLoopIneq)
+        && !cost::should_batch(join_rows_gate, per_row_cost, min_batch)
+    {
         return;
     }
 
@@ -327,17 +373,30 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     //   + GPU hash insert amortized (0.003) = 0.01. Penalised via
     //   `apply_fp64_penalty` when the join key is Float64 on a soft-fp64
     //   device so fp64 hash-key work is not under-costed.
-    let build_cost =
-        innerrel_ref.rows * hashjoin::build_cost_per_inner_row(hashjoin_uses_fp64, limits);
+    let build_cost = if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
+        innerrel_ref.rows * hashjoin::build_cost_per_inner_row(hashjoin_uses_fp64, limits)
+    } else {
+        0.0
+    };
     // - Probe: per outer row: ExecCopySlotMinimalTuple (0.005) + key extract
     //   (0.002) + GPU probe (0.003) = 0.01. Same soft-fp64 penalty policy as
     //   the build side.
-    let probe_cost =
-        outerrel_ref.rows * hashjoin::probe_cost_per_outer_row(hashjoin_uses_fp64, limits);
+    let probe_cost = if matches!(strategy, registry::AccelStrategy::GpuHashJoin) {
+        outerrel_ref.rows * hashjoin::probe_cost_per_outer_row(hashjoin_uses_fp64, limits)
+    } else {
+        (outerrel_ref.rows.max(0.0) * innerrel_ref.rows.max(0.0)) * limits.gpu_nlj_per_pair_cost
+    };
+    let estimated_output_rows = if matches!(strategy, registry::AccelStrategy::GpuNestedLoopIneq) {
+        let outer_rows = cost::conservative_input_rows(outerrel_ref.rows, outerrel_ref.tuples);
+        nlj_between_modeled_output_rows(outer_rows, limits.gpu_nlj_max_output_rows)
+            .unwrap_or(outer_rows) as f64
+    } else {
+        joinrel_ref.rows
+    };
     // - Yield: per output row: ExecForceStoreMinimalTuple + slot_getattr for
     //   building the virtual result tuple. This is a hardware-derived device
     //   limit and is not affected by soft-fp64.
-    let yield_cost = joinrel_ref.rows * limits.custom_scan_yield_per_row;
+    let yield_cost = estimated_output_rows * limits.custom_scan_yield_per_row;
 
     // SAFETY: outer_path is non-null, verified above.
     let startup_cost = unsafe { (*outer_path).startup_cost } + gpu_launch + build_cost;
@@ -356,7 +415,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             outer_path,
             startup_cost,
             total_cost,
-            joinrel_ref.rows,
+            estimated_output_rows,
             custom_scan::join_path_methods(),
         );
 
@@ -366,7 +425,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         child_list = lappend(child_list, inner_path.cast());
         (*cpath).custom_paths = child_list;
 
-        (*cpath).custom_private = build_join_priv_list(equi.as_ref(), accel.as_ref());
+        (*cpath).custom_private =
+            build_join_priv_list(equi.as_ref(), accel.as_ref(), nlj_between.as_ref());
 
         add_path(joinrel, cpath.cast());
     }
@@ -394,62 +454,41 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
 
 #[must_use]
 fn selected_gpu_hashjoin_kernel_available() -> bool {
-    false
+    true
 }
 
-/// Whether a real GPU NestedLoop scalar-inequality kernel + executor
-/// path is wired through `add_path`.
-///
-/// Pinned to `false` while the executor node and Custom Scan
-/// `make_custom_scan_plan` callback are still pending. The
-/// underlying GPU kernel + bridge + cost model landed in this
-/// commit and are individually tested:
-///
-/// - C++ kernel: `pgaccel-kernels/src/nested_loop_ineq.cpp`
-///   (covered by `pgaccel-kernels/test/test_nested_loop_ineq.cpp`).
-/// - Rust bridge: `pg_accel/src/gpu/nested_loop_ineq.rs` —
-///   `dispatch_ineq_i64` / `dispatch_ineq_f64` /
-///   `dispatch_between_i64` / `dispatch_between_f64`.
-/// - Cost model: `cost::nlj_break_even` /
-///   `cost::nlj_selectivity_useful` against
-///   `DeviceLimits::gpu_nlj_{min_outer_rows, min_inner_rows,
-///   max_output_rows, per_pair_cost}`.
-///
-/// What is missing to flip this gate to `true`:
-///
-/// 1. Executor node with BOTH-sides slot deformation. Unlike
-///    `GpuHashJoin` (which only projects inner-build into the outer
-///    probe slot), NLJ needs `outer_attno`-based extraction from
-///    `outer_ps` AND `inner_attno`-based extraction from `inner_ps`
-///    so the result tuple can include columns from both relations.
-///    The hashjoin executor in `pg_accel/src/engine/executor/join/`
-///    is a starting template (probe.rs already does inner-tuple
-///    storage) but needs to be extended for the both-sides projection.
-///
-/// 2. CustomPath construction call site in
-///    `pgaccel_set_join_pathlist` above — after the new
-///    `AccelStrategy::GpuNestedLoopIneq` variant, the
-///    `observe_nestloop_scalar_opportunity` body should also call
-///    `add_path` with a CustomPath built via `create_custom_path`
-///    when both `nlj_break_even(...)` and `nlj_selectivity_useful(...)`
-///    return `true`. The current call only emits the rejection
-///    counter; the next agent flips it to also inject.
-///
-/// 3. `make_custom_scan_plan` callback updates in
-///    `pg_accel/src/engine/ffi/custom_scan/` to set up the
-///    `custom_scan_tlist` with both-relation Vars so the executor's
-///    tuple-deform mapping covers outer AND inner columns.
-///
-/// When all three land, this function returns `true` and the canary
-/// test `selected_gpu_nlj_kernel_is_not_available_yet` flips with it.
-#[allow(dead_code)]
-// reason: kernel + bridge + cost model landed ahead of the executor;
-// this gate is referenced by the canary test and by the future
-// `pgaccel_set_join_pathlist` add_path call-site (which is the
-// second half of the Phase 4 NLJ landing).
+/// Whether the selected `outer BETWEEN inner.lo AND inner.hi` NestedLoop
+/// inequality path is wired end-to-end.
 #[must_use]
 fn selected_gpu_nlj_kernel_available() -> bool {
-    false
+    true
+}
+
+#[must_use]
+const fn nlj_kernel_indices_fit(outer_rows: usize, inner_rows: usize) -> bool {
+    outer_rows <= NLJ_GPU_PAIR_INDEX_MAX && inner_rows <= NLJ_GPU_PAIR_INDEX_MAX
+}
+
+#[must_use]
+const fn nlj_between_modeled_output_rows(
+    outer_rows: usize,
+    max_output_rows: usize,
+) -> Option<usize> {
+    if outer_rows <= max_output_rows {
+        Some(outer_rows)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NljBetweenKey {
+    outer_attno: i32,
+    inner_lo_attno: i32,
+    inner_hi_attno: i32,
+    key_type: i32,
+    outer_varno: i32,
+    inner_varno: i32,
 }
 
 /// Build the `custom_private` integer list for a `GpuHashJoin` / spatial
@@ -471,6 +510,7 @@ fn selected_gpu_nlj_kernel_available() -> bool {
 unsafe fn build_join_priv_list(
     equi: Option<&EquiJoinKey>,
     accel: Option<&AccelMatch>,
+    nlj_between: Option<&NljBetweenKey>,
 ) -> *mut List {
     let mut priv_list: *mut List = std::ptr::null_mut();
     // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
@@ -486,6 +526,26 @@ unsafe fn build_join_priv_list(
             priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.key_type).cast());
             priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.outer_varno).cast());
             priv_list = lappend(priv_list, pg_sys::makeInteger(equi_info.inner_varno).cast());
+        } else if let Some(nlj_info) = nlj_between {
+            priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // fn_oid
+            priv_list = lappend(priv_list, pg_sys::makeInteger(nlj_info.outer_attno).cast());
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(registry::AccelStrategy::GpuNestedLoopIneq as i32).cast(),
+            );
+            priv_list = lappend(priv_list, pg_sys::makeInteger(2).cast()); // BETWEEN shape
+            priv_list = lappend(priv_list, pg_sys::makeInteger(nlj_info.key_type).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast()); // op unused
+            priv_list = lappend(priv_list, pg_sys::makeInteger(nlj_info.outer_varno).cast());
+            priv_list = lappend(priv_list, pg_sys::makeInteger(nlj_info.inner_varno).cast());
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(nlj_info.inner_lo_attno).cast(),
+            );
+            priv_list = lappend(
+                priv_list,
+                pg_sys::makeInteger(nlj_info.inner_hi_attno).cast(),
+            );
         } else if let Some(accel_info) = accel {
             priv_list = lappend(
                 priv_list,
@@ -669,13 +729,22 @@ pub(super) const fn classify_nestloop_shape(nest_count: i32, ineq_count: i32) ->
 /// returns `false`). Calls `get_op_btree_interpretation` which must run on
 /// the main backend thread.
 unsafe fn is_btree_inequality_opno(opno: pg_sys::Oid) -> bool {
+    unsafe { btree_inequality_strategy(opno).is_some() }
+}
+
+/// Return the btree strategy number for `<`, `<=`, `>=`, or `>`.
+///
+/// # Safety
+///
+/// Must run in a backend planner context.
+unsafe fn btree_inequality_strategy(opno: pg_sys::Oid) -> Option<u32> {
     if opno == pg_sys::InvalidOid {
-        return false;
+        return None;
     }
     // SAFETY: caller guarantees we are on the main backend thread.
     let interps = unsafe { pg_sys::get_op_btree_interpretation(opno) };
     if interps.is_null() {
-        return false;
+        return None;
     }
     // SAFETY: valid planner List of OpBtreeInterpretation*.
     let n = unsafe { pg_sys::list_length(interps) };
@@ -695,10 +764,164 @@ unsafe fn is_btree_inequality_opno(opno: pg_sys::Oid) -> bool {
                 | pg_sys::BTGreaterEqualStrategyNumber
                 | pg_sys::BTGreaterStrategyNumber
         ) {
-            return true;
+            return Some(strategy);
         }
     }
-    false
+    None
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NljBound {
+    outer_attno: i32,
+    inner_attno: i32,
+    key_type: i32,
+    outer_varno: i32,
+    inner_varno: i32,
+}
+
+impl NljBound {
+    fn same_outer_key(self, other: Self) -> bool {
+        self.outer_attno == other.outer_attno
+            && self.key_type == other.key_type
+            && self.outer_varno == other.outer_varno
+            && self.inner_varno == other.inner_varno
+    }
+}
+
+fn nlj_key_type_from_oid(type_oid: pg_sys::Oid) -> Option<i32> {
+    match u32::from(type_oid) {
+        23 => Some(0),  // int4
+        20 => Some(1),  // int8
+        700 => Some(2), // float4, promoted through the f64 NLJ dispatch path
+        701 => Some(2), // float8
+        _ => None,
+    }
+}
+
+/// Detect the selected NLJ shape:
+/// `outer.value >= inner.lo AND outer.value <= inner.hi`.
+///
+/// # Safety
+///
+/// All pointer args must be planner-owned pointers from the join hook.
+unsafe fn find_nlj_between_key(
+    restrictlist: *mut List,
+    outerrel: *mut RelOptInfo,
+    innerrel: *mut RelOptInfo,
+) -> Option<NljBetweenKey> {
+    if restrictlist.is_null() || outerrel.is_null() || innerrel.is_null() {
+        return None;
+    }
+
+    let outer_relids = unsafe { (*outerrel).relids };
+    let inner_relids = unsafe { (*innerrel).relids };
+    let mut lowers: Vec<NljBound> = Vec::new();
+    let mut uppers: Vec<NljBound> = Vec::new();
+
+    let len = unsafe { pg_sys::list_length(restrictlist) };
+    for i in 0..len {
+        let ri = unsafe { pg_sys::list_nth(restrictlist, i).cast::<RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null()
+            || unsafe { (*clause.cast::<pg_sys::Node>()).type_ } != NodeTag::T_OpExpr
+        {
+            continue;
+        }
+
+        let opexpr = clause.cast::<pg_sys::OpExpr>();
+        if u32::from(unsafe { (*opexpr).opresulttype }) != 16 {
+            continue;
+        }
+        let Some(strategy) = (unsafe { btree_inequality_strategy((*opexpr).opno) }) else {
+            continue;
+        };
+        if !matches!(
+            strategy,
+            pg_sys::BTLessEqualStrategyNumber | pg_sys::BTGreaterEqualStrategyNumber
+        ) {
+            continue;
+        }
+
+        let args = unsafe { (*opexpr).args };
+        if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+            continue;
+        }
+        let left = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+        let right = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+        let left_var = unsafe { super::unwrap_var(left) };
+        let right_var = unsafe { super::unwrap_var(right) };
+        if left_var.is_null() || right_var.is_null() {
+            continue;
+        }
+
+        let left_varno = unsafe { (*left_var).varno } as i32;
+        let right_varno = unsafe { (*right_var).varno } as i32;
+        let left_outer = unsafe { pg_sys::bms_is_member(left_varno, outer_relids) };
+        let left_inner = unsafe { pg_sys::bms_is_member(left_varno, inner_relids) };
+        let right_outer = unsafe { pg_sys::bms_is_member(right_varno, outer_relids) };
+        let right_inner = unsafe { pg_sys::bms_is_member(right_varno, inner_relids) };
+
+        let (outer_var, inner_var, outer_on_left) = if left_outer && right_inner {
+            (left_var, right_var, true)
+        } else if left_inner && right_outer {
+            (right_var, left_var, false)
+        } else {
+            continue;
+        };
+
+        let outer_attno = i32::from(unsafe { (*outer_var).varattno });
+        let inner_attno = i32::from(unsafe { (*inner_var).varattno });
+        if outer_attno <= 0 || inner_attno <= 0 {
+            continue;
+        }
+        let outer_type = unsafe { (*outer_var).vartype };
+        let inner_type = unsafe { (*inner_var).vartype };
+        if outer_type != inner_type {
+            continue;
+        }
+        let Some(key_type) = nlj_key_type_from_oid(outer_type) else {
+            continue;
+        };
+
+        let bound = NljBound {
+            outer_attno,
+            inner_attno,
+            key_type,
+            outer_varno: unsafe { (*outer_var).varno },
+            inner_varno: unsafe { (*inner_var).varno },
+        };
+
+        let is_lower = (outer_on_left && strategy == pg_sys::BTGreaterEqualStrategyNumber)
+            || (!outer_on_left && strategy == pg_sys::BTLessEqualStrategyNumber);
+        let is_upper = (outer_on_left && strategy == pg_sys::BTLessEqualStrategyNumber)
+            || (!outer_on_left && strategy == pg_sys::BTGreaterEqualStrategyNumber);
+
+        if is_lower {
+            lowers.push(bound);
+        } else if is_upper {
+            uppers.push(bound);
+        }
+
+        for lo in &lowers {
+            for hi in &uppers {
+                if lo.same_outer_key(*hi) {
+                    return Some(NljBetweenKey {
+                        outer_attno: lo.outer_attno,
+                        inner_lo_attno: lo.inner_attno,
+                        inner_hi_attno: hi.inner_attno,
+                        key_type: lo.key_type,
+                        outer_varno: lo.outer_varno,
+                        inner_varno: lo.inner_varno,
+                    });
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Count correlated scalar-inequality `RestrictInfo` entries in a join's
@@ -1027,7 +1250,7 @@ unsafe fn inject_gpu_hashjoin_partial_paths(
             // Same custom_private layout as the non-parallel variant — the
             // executor has no way to distinguish the two at exec time and
             // doesn't need to (each worker runs a complete join).
-            (*cpath).custom_private = build_join_priv_list(Some(equi), None);
+            (*cpath).custom_private = build_join_priv_list(Some(equi), None, None);
 
             add_partial_path(joinrel, cpath.cast());
         }
@@ -1144,35 +1367,58 @@ mod tests {
     }
 
     #[test]
-    fn selected_gpu_hashjoin_kernel_is_not_available_yet() {
+    fn selected_gpu_hashjoin_kernel_is_available_for_integer_keys() {
         assert!(
-            !selected_gpu_hashjoin_kernel_available(),
-            "planner must not expose GpuHashJoin until build/probe are real GPU paths"
+            selected_gpu_hashjoin_kernel_available(),
+            "planner can expose GpuHashJoin for the key types accepted by the selected-key gate"
         );
     }
 
     #[test]
-    fn selected_gpu_nlj_kernel_is_not_available_yet() {
-        // Phase 4 NLJ scalar inequality landing canary. Pinned to
-        // `false` while the executor + make_custom_scan_plan + add_path
-        // call-site work (see `selected_gpu_nlj_kernel_available` doc)
-        // is still pending. The kernel + bridge + cost model are real
-        // and individually tested, but the planner MUST NOT expose
-        // `GpuNestedLoopIneq` as a selected path until the executor can
-        // both-sides-deform tuples.
-        //
-        // When the next agent lands the executor and flips
-        // `selected_gpu_nlj_kernel_available()` to `true`, this assertion
-        // will fail — at which point the engineer making the flip MUST
-        // either delete this canary (preferred — the assertion is now
-        // expressing the previous-state regression guard) or invert it.
-        // The matching planner-side gate is at
-        // `join_pathlist.rs:selected_gpu_nlj_kernel_available()`.
+    fn selected_gpu_nlj_kernel_is_available_for_between_shape() {
         assert!(
-            !super::selected_gpu_nlj_kernel_available(),
-            "planner must not expose GpuNestedLoopIneq until the executor + \
-             make_custom_scan_plan + add_path callsite are wired"
+            super::selected_gpu_nlj_kernel_available(),
+            "planner can expose the selected GpuNestedLoopIneq BETWEEN shape"
         );
+    }
+
+    #[test]
+    fn nlj_between_output_model_is_not_silent_cap() {
+        assert_eq!(
+            super::nlj_between_modeled_output_rows(1_000, 100_000),
+            Some(1_000)
+        );
+        assert_eq!(
+            super::nlj_between_modeled_output_rows(100_000, 100_000),
+            Some(100_000)
+        );
+        assert_eq!(
+            super::nlj_between_modeled_output_rows(100_001, 100_000),
+            None
+        );
+    }
+
+    #[test]
+    fn nlj_kernel_index_gate_matches_u32_pair_contract() {
+        assert!(super::nlj_kernel_indices_fit(u32::MAX as usize, 1));
+        assert!(super::nlj_kernel_indices_fit(1, u32::MAX as usize));
+        assert!(!super::nlj_kernel_indices_fit(u32::MAX as usize + 1, 1));
+        assert!(!super::nlj_kernel_indices_fit(1, u32::MAX as usize + 1));
+    }
+
+    #[test]
+    fn nlj_key_type_gate_matches_executor_dispatch_lanes() {
+        assert_eq!(super::nlj_key_type_from_oid(pgrx::pg_sys::INT4OID), Some(0));
+        assert_eq!(super::nlj_key_type_from_oid(pgrx::pg_sys::INT8OID), Some(1));
+        assert_eq!(
+            super::nlj_key_type_from_oid(pgrx::pg_sys::FLOAT4OID),
+            Some(2)
+        );
+        assert_eq!(
+            super::nlj_key_type_from_oid(pgrx::pg_sys::FLOAT8OID),
+            Some(2)
+        );
+        assert_eq!(super::nlj_key_type_from_oid(pgrx::pg_sys::INT2OID), None);
     }
 
     #[test]

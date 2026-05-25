@@ -4,11 +4,13 @@ const ROW_SCALES: &[usize] = &[10_000, 100_000];
 
 /// Variable-output H3 SRF guard: table-driven `h3_grid_disk` expansion.
 ///
-/// The accelerated query keeps the registered `h3_grid_disk(cell, k)`
-/// spelling so the SRF target-list hook can dispatch the GPU varlen path.
-/// The baseline calls a setup-local wrapper whose name is not in pg_accel's
-/// adapter registry and whose function-local GUC keeps the wrapped h3-pg call
-/// on the native path.
+/// The default benchmark scales deliberately keep the registered
+/// `h3_grid_disk(cell, k)` spelling while expecting the planner to decline
+/// the GPU SRF path: returning the expanded row set to PostgreSQL loses until
+/// a downstream aggregate/count path can stay GPU-resident. Focused
+/// integration tests cover the small selected SRF shape. The baseline calls a
+/// setup-local wrapper whose name is not in pg_accel's adapter registry and
+/// whose function-local GUC keeps the wrapped h3-pg call on the native path.
 pub struct H3SrfGridDisk;
 
 impl Workload for H3SrfGridDisk {
@@ -17,9 +19,9 @@ impl Workload for H3SrfGridDisk {
     }
 
     fn description(&self) -> &'static str {
-        "h3_grid_disk target-list SRF expansion with consumed output \
-         (count, count distinct, min/max over emitted cells). Baseline uses \
-         a native h3-pg wrapper not registered by pg_accel."
+        "h3_grid_disk target-list SRF native-decline guard at benchmark \
+         scales until GPU aggregate/count fusion can consume expanded rows. \
+         Baseline uses a native h3-pg wrapper not registered by pg_accel."
     }
 
     fn category(&self) -> &'static str {

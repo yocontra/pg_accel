@@ -11,8 +11,11 @@ use crate::report::{BenchReport, CrashedScale, GucSettings};
 
 const ARTIFACT_SCHEMA_VERSION: u32 = 2;
 const ARTIFACT_INDEX_SCHEMA_VERSION: u32 = 1;
+const RESUME_AUDIT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const ARTIFACT_INDEX_JSON: &str = "artifact_index.json";
 const ARTIFACT_CHECKLIST_MD: &str = "artifact_checklist.md";
+const RUN_MANIFEST_JSON: &str = "manifest.json";
+const RESUME_AUDIT_MANIFEST_JSON: &str = "resume_audit_manifest.json";
 const LOG_TAIL_BYTES: u64 = 64 * 1024;
 const LOG_DELTA_BYTES: u64 = 256 * 1024;
 const MAX_LOG_CANDIDATES: usize = 32;
@@ -84,6 +87,57 @@ struct ArtifactIndexEntry {
     path: String,
     size_bytes: u64,
     modified_unix_seconds: u64,
+}
+
+#[derive(Serialize)]
+struct ResumeAuditManifest {
+    schema_version: u32,
+    generated_unix_seconds: u64,
+    artifact_root: String,
+    known_paths: ResumeKnownPaths,
+    bounded_log_policy: BoundedLogPolicy,
+    log_offset_provenance: Vec<LogStartOffset>,
+    inventory: ResumeArtifactInventory,
+}
+
+#[derive(Serialize)]
+struct ResumeKnownPaths {
+    #[serde(rename = "run_manifest_path")]
+    run_manifest: &'static str,
+    #[serde(rename = "resume_audit_manifest_path")]
+    resume_audit_manifest: &'static str,
+    #[serde(rename = "artifact_index_path")]
+    artifact_index: &'static str,
+    #[serde(rename = "artifact_checklist_path")]
+    artifact_checklist: &'static str,
+}
+
+#[derive(Serialize)]
+struct BoundedLogPolicy {
+    log_tail_bytes: u64,
+    log_delta_bytes: u64,
+    telemetry_tail_bytes: u64,
+    max_log_candidates: usize,
+    log_candidates: Vec<String>,
+    telemetry_candidates: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ResumeArtifactInventory {
+    #[serde(rename = "completed_artifacts")]
+    completed: Vec<String>,
+    #[serde(rename = "pre_risk_artifacts")]
+    pre_risk: Vec<String>,
+    #[serde(rename = "plan_artifacts")]
+    plan: Vec<String>,
+    #[serde(rename = "crash_artifacts")]
+    crash: Vec<String>,
+    #[serde(rename = "log_artifacts")]
+    log: Vec<String>,
+    #[serde(rename = "provenance_artifacts")]
+    provenance: Vec<String>,
+    #[serde(rename = "failure_artifacts")]
+    failure: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -365,7 +419,7 @@ impl ArtifactWriter {
                 .map(|p| p.display().to_string())
                 .collect(),
         };
-        write_json_io(&self.root.join("manifest.json"), &manifest)?;
+        write_json_io(&self.root.join(RUN_MANIFEST_JSON), &manifest)?;
 
         let mut readme = String::new();
         readme.push_str("# pg_accel Benchmark Artifacts\n\n");
@@ -386,6 +440,10 @@ impl ArtifactWriter {
         readme.push_str(
             "- `artifact_checklist.md`: markdown checklist view of the generated artifact \
              inventory.\n",
+        );
+        readme.push_str(
+            "- `resume_audit_manifest.json`: durable resume/audit manifest linking \
+             bounded log policy, run-start log offsets, and generated evidence files.\n",
         );
         readme.push_str("- `report.json`, `report.md`, `report.csv`: rendered benchmark report.\n");
         readme.push_str("- `crashes.json`, `crashes.md`: crash inventory and repro commands.\n");
@@ -412,7 +470,15 @@ impl ArtifactWriter {
     fn write_artifact_index(&self) -> io::Result<()> {
         let mut entries = Vec::new();
         collect_artifact_entries(&self.root, &self.root, &mut entries)?;
+        entries.retain(|entry| entry.path != RESUME_AUDIT_MANIFEST_JSON);
         entries.sort_by(|left, right| left.path.cmp(&right.path));
+        self.write_resume_audit_manifest(&entries)?;
+        if let Some(entry) =
+            artifact_index_entry(&self.root, &self.root.join(RESUME_AUDIT_MANIFEST_JSON))?
+        {
+            entries.push(entry);
+            entries.sort_by(|left, right| left.path.cmp(&right.path));
+        }
 
         let total_size_bytes = entries.iter().map(|entry| entry.size_bytes).sum();
         let index = ArtifactIndex {
@@ -429,6 +495,40 @@ impl ArtifactWriter {
             self.root.join(ARTIFACT_CHECKLIST_MD),
             artifact_checklist_markdown(&index),
         )
+    }
+
+    fn write_resume_audit_manifest(&self, entries: &[ArtifactIndexEntry]) -> io::Result<()> {
+        let manifest = ResumeAuditManifest {
+            schema_version: RESUME_AUDIT_MANIFEST_SCHEMA_VERSION,
+            generated_unix_seconds: unix_timestamp_secs(),
+            artifact_root: self.root.display().to_string(),
+            known_paths: ResumeKnownPaths {
+                run_manifest: RUN_MANIFEST_JSON,
+                resume_audit_manifest: RESUME_AUDIT_MANIFEST_JSON,
+                artifact_index: ARTIFACT_INDEX_JSON,
+                artifact_checklist: ARTIFACT_CHECKLIST_MD,
+            },
+            bounded_log_policy: BoundedLogPolicy {
+                log_tail_bytes: LOG_TAIL_BYTES,
+                log_delta_bytes: LOG_DELTA_BYTES,
+                telemetry_tail_bytes: LOG_TAIL_BYTES,
+                max_log_candidates: MAX_LOG_CANDIDATES,
+                log_candidates: self
+                    .log_candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect(),
+                telemetry_candidates: self
+                    .log_candidates
+                    .iter()
+                    .filter(|p| is_telemetry_candidate(p))
+                    .map(|p| p.display().to_string())
+                    .collect(),
+            },
+            log_offset_provenance: self.log_start_offsets.clone(),
+            inventory: resume_artifact_inventory(entries),
+        };
+        write_json_io(&self.root.join(RESUME_AUDIT_MANIFEST_JSON), &manifest)
     }
 
     fn plan_snippet_path(&self, workload: &str, rows: usize) -> PathBuf {
@@ -540,27 +640,33 @@ fn collect_artifact_entries(
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             collect_artifact_entries(root, &path, entries)?;
-        } else if file_type.is_file() {
-            let relative_path = relative_artifact_path(root, &path);
-            if matches!(
-                relative_path.as_str(),
-                ARTIFACT_INDEX_JSON | ARTIFACT_CHECKLIST_MD
-            ) {
-                continue;
-            }
-            let metadata = entry.metadata()?;
-            entries.push(ArtifactIndexEntry {
-                path: relative_path,
-                size_bytes: metadata.len(),
-                modified_unix_seconds: metadata
-                    .modified()
-                    .map(system_time_to_unix_secs)
-                    .unwrap_or(0),
-            });
+        } else if file_type.is_file()
+            && let Some(entry) = artifact_index_entry(root, &path)?
+        {
+            entries.push(entry);
         }
     }
 
     Ok(())
+}
+
+fn artifact_index_entry(root: &Path, path: &Path) -> io::Result<Option<ArtifactIndexEntry>> {
+    let relative_path = relative_artifact_path(root, path);
+    if matches!(
+        relative_path.as_str(),
+        ARTIFACT_INDEX_JSON | ARTIFACT_CHECKLIST_MD
+    ) {
+        return Ok(None);
+    }
+    let metadata = path.metadata()?;
+    Ok(Some(ArtifactIndexEntry {
+        path: relative_path,
+        size_bytes: metadata.len(),
+        modified_unix_seconds: metadata
+            .modified()
+            .map(system_time_to_unix_secs)
+            .unwrap_or(0),
+    }))
 }
 
 fn relative_artifact_path(root: &Path, path: &Path) -> String {
@@ -568,6 +674,38 @@ fn relative_artifact_path(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+fn resume_artifact_inventory(entries: &[ArtifactIndexEntry]) -> ResumeArtifactInventory {
+    ResumeArtifactInventory {
+        completed: inventory_paths(entries, |path| {
+            matches!(
+                path,
+                "report.json" | "report.md" | "report.csv" | "guc_snapshot.json"
+            )
+        }),
+        pre_risk: inventory_paths(entries, |path| path.starts_with("pre_risk_contexts/")),
+        plan: inventory_paths(entries, |path| path.starts_with("plan_snippets/")),
+        crash: inventory_paths(entries, |path| {
+            matches!(path, "crashes.json" | "crashes.md") || path.starts_with("log_tails/crash-")
+        }),
+        log: inventory_paths(entries, |path| path.starts_with("log_tails/")),
+        provenance: inventory_paths(entries, |path| {
+            matches!(path, "provenance.json" | "provenance-warnings.txt")
+        }),
+        failure: inventory_paths(entries, |path| path.starts_with("failure-")),
+    }
+}
+
+fn inventory_paths(
+    entries: &[ArtifactIndexEntry],
+    mut include: impl FnMut(&str) -> bool,
+) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| include(&entry.path))
+        .map(|entry| entry.path.clone())
+        .collect()
 }
 
 fn artifact_checklist_markdown(index: &ArtifactIndex) -> String {
@@ -800,7 +938,53 @@ mod tests {
         assert!(readme.contains("bounded delta"));
         assert!(readme.contains(ARTIFACT_INDEX_JSON));
         assert!(readme.contains(ARTIFACT_CHECKLIST_MD));
+        assert!(readme.contains(RESUME_AUDIT_MANIFEST_JSON));
         assert!(readme.contains("pre_risk_contexts/"));
+
+        let resume_text = fs::read_to_string(artifacts.path().join(RESUME_AUDIT_MANIFEST_JSON))
+            .expect("resume audit manifest should be readable");
+        let resume: Value =
+            serde_json::from_str(&resume_text).expect("resume audit manifest should be valid json");
+        assert_eq!(
+            resume["schema_version"],
+            RESUME_AUDIT_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(
+            resume["known_paths"]["run_manifest_path"],
+            RUN_MANIFEST_JSON
+        );
+        assert_eq!(
+            resume["known_paths"]["resume_audit_manifest_path"],
+            RESUME_AUDIT_MANIFEST_JSON
+        );
+        assert_eq!(
+            resume["known_paths"]["artifact_index_path"],
+            ARTIFACT_INDEX_JSON
+        );
+        assert_eq!(
+            resume["known_paths"]["artifact_checklist_path"],
+            ARTIFACT_CHECKLIST_MD
+        );
+        assert_eq!(
+            resume["bounded_log_policy"]["log_tail_bytes"],
+            LOG_TAIL_BYTES
+        );
+        assert_eq!(
+            resume["bounded_log_policy"]["log_delta_bytes"],
+            LOG_DELTA_BYTES
+        );
+        assert_eq!(
+            resume["bounded_log_policy"]["telemetry_candidates"][0],
+            telemetry.display().to_string()
+        );
+        assert_eq!(
+            resume["log_offset_provenance"][0]["path"],
+            telemetry.display().to_string()
+        );
+        assert_eq!(
+            resume["inventory"]["crash_artifacts"],
+            serde_json::json!(["crashes.json", "crashes.md"])
+        );
     }
 
     #[test]
@@ -862,6 +1046,7 @@ mod tests {
             })
             .collect();
         assert!(paths.contains(&"manifest.json"));
+        assert!(paths.contains(&RESUME_AUDIT_MANIFEST_JSON));
         assert!(paths.contains(&"README.md"));
         assert!(paths.contains(&"crashes.json"));
         assert!(paths.contains(&"crashes.md"));
@@ -889,6 +1074,7 @@ mod tests {
         let checklist = fs::read_to_string(artifacts.path().join(ARTIFACT_CHECKLIST_MD))
             .expect("artifact checklist should be readable");
         assert!(checklist.contains("| [x] | `manifest.json` |"));
+        assert!(checklist.contains("| [x] | `resume_audit_manifest.json` |"));
         assert!(checklist.contains("| [x] | `plan_snippets/hash-join-100.txt` |"));
         assert!(checklist.contains("| [x] | `pre_risk_contexts/hash-join-100.json` |"));
         assert!(checklist.contains("not listed in their own file table"));
@@ -945,5 +1131,91 @@ mod tests {
             .collect();
         assert!(paths.contains(&"log_tails/crash-001/00-postgres.log.tail"));
         assert!(paths.contains(&"log_tails/crash-001/00-postgres.log.delta"));
+
+        let resume_text = fs::read_to_string(artifacts.path().join(RESUME_AUDIT_MANIFEST_JSON))
+            .expect("resume audit manifest should be readable");
+        let resume: Value =
+            serde_json::from_str(&resume_text).expect("resume audit manifest should be valid json");
+        assert_eq!(
+            resume["inventory"]["crash_artifacts"],
+            serde_json::json!([
+                "crashes.json",
+                "crashes.md",
+                "log_tails/crash-001/00-postgres.log.delta",
+                "log_tails/crash-001/00-postgres.log.tail",
+            ])
+        );
+    }
+
+    #[test]
+    fn resume_inventory_categorizes_sorted_artifact_paths() {
+        let entries = vec![
+            ArtifactIndexEntry {
+                path: "README.md".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "crashes.json".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "failure-setup.txt".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "log_tails/crash-002/00-postgres.log.delta".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "log_tails/run-complete/00-postgres.log.tail".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "plan_snippets/hash-join-100.txt".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "pre_risk_contexts/hash-join-100.json".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "provenance-warnings.txt".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
+                path: "report.json".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+        ];
+
+        let inventory = resume_artifact_inventory(&entries);
+        assert_eq!(inventory.completed, vec!["report.json"]);
+        assert_eq!(
+            inventory.pre_risk,
+            vec!["pre_risk_contexts/hash-join-100.json"]
+        );
+        assert_eq!(inventory.plan, vec!["plan_snippets/hash-join-100.txt"]);
+        assert_eq!(
+            inventory.crash,
+            vec!["crashes.json", "log_tails/crash-002/00-postgres.log.delta"]
+        );
+        assert_eq!(
+            inventory.log,
+            vec![
+                "log_tails/crash-002/00-postgres.log.delta",
+                "log_tails/run-complete/00-postgres.log.tail",
+            ]
+        );
+        assert_eq!(inventory.provenance, vec!["provenance-warnings.txt"]);
+        assert_eq!(inventory.failure, vec!["failure-setup.txt"]);
     }
 }

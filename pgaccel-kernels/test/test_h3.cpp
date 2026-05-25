@@ -3,9 +3,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_hash_agg.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -45,15 +47,15 @@ static int g_fail = 0;
 // Helper: build a known H3 cell ID manually for testing
 // ---------------------------------------------------------------------------
 // Cell ID layout:
-//   bit 63       = 1
+//   bit 63       = 0 (reserved)
 //   bits 62-59   = mode (1 for cell)
 //   bits 58-56   = reserved (0)
 //   bits 55-52   = resolution
 //   bits 51-45   = base cell
 //   bits 44-0    = 15 x 3-bit digits (unused = 7)
 static uint64_t make_cell(int base_cell, int resolution, const int* digits) {
-  uint64_t cell = (1ULL << 63);  // high bit
-  cell |= (1ULL << 59);          // mode = 1
+  uint64_t cell = 0;
+  cell |= (1ULL << 59);  // mode = 1
   cell |= ((uint64_t)(resolution & 0xF) << 52);
   cell |= ((uint64_t)(base_cell & 0x7F) << 45);
   // H3 v4 layout: digit r ∈ [1..15] at bits [(15-r)*3+2 .. (15-r)*3].
@@ -68,6 +70,137 @@ static uint64_t make_cell(int base_cell, int resolution, const int* digits) {
     }
   }
   return cell;
+}
+
+static int h3_cell_mode(uint64_t cell) {
+  return static_cast<int>((cell >> 59) & 0xFULL);
+}
+
+static int h3_cell_base(uint64_t cell) {
+  return static_cast<int>((cell >> 45) & 0x7FULL);
+}
+
+static double h3_rad_to_deg(double radians) {
+  return radians * 57.295779513082320876;
+}
+
+static double h3_deg_to_rad(double degrees) {
+  return degrees * 0.01745329251994329577;
+}
+
+static void h3_lat_lng_to_unit(double lat_deg, double lng_deg, double& x, double& y, double& z) {
+  const double lat = h3_deg_to_rad(lat_deg);
+  const double lng = h3_deg_to_rad(lng_deg);
+  const double c = std::cos(lat);
+  x = c * std::cos(lng);
+  y = c * std::sin(lng);
+  z = std::sin(lat);
+}
+
+static void h3_add_face_midpoint(std::vector<double>& lats, std::vector<double>& lngs, double lat_a,
+                                 double lng_a, double lat_b, double lng_b) {
+  double ax, ay, az, bx, by, bz;
+  h3_lat_lng_to_unit(lat_a, lng_a, ax, ay, az);
+  h3_lat_lng_to_unit(lat_b, lng_b, bx, by, bz);
+  double mx = ax + bx;
+  double my = ay + by;
+  double mz = az + bz;
+  const double inv_norm = 1.0 / std::sqrt(mx * mx + my * my + mz * mz);
+  mx *= inv_norm;
+  my *= inv_norm;
+  mz *= inv_norm;
+  lats.push_back(h3_rad_to_deg(std::asin(mz)));
+  lngs.push_back(h3_rad_to_deg(std::atan2(my, mx)));
+}
+
+static void h3_add_deterministic_random_points(std::vector<double>& lats, std::vector<double>& lngs,
+                                               size_t count) {
+  uint64_t state = 0x9e3779b97f4a7c15ULL;
+  for (size_t i = 0; i < count; ++i) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    const double u =
+        static_cast<double>((state >> 11) & ((1ULL << 53) - 1)) / static_cast<double>(1ULL << 53);
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    const double v =
+        static_cast<double>((state >> 11) & ((1ULL << 53) - 1)) / static_cast<double>(1ULL << 53);
+    lats.push_back(-85.0 + u * 170.0);
+    lngs.push_back(-179.5 + v * 359.0);
+  }
+}
+
+static void h3_add_edge_coverage_points(std::vector<double>& lats, std::vector<double>& lngs) {
+  const double fixed[][2] = {
+      // Equator and prime-meridian axes.
+      {0.0, 0.0},
+      {0.0, 90.0},
+      {0.0, -90.0},
+      {0.000001, 179.999999},
+      {-0.000001, -179.999999},
+      // Near-pole inputs remain inside the valid coordinate range.
+      {89.999999, 0.0},
+      {89.999999, 179.999999},
+      {89.999999, -179.999999},
+      {-89.999999, 0.0},
+      {-89.999999, 179.999999},
+      {-89.999999, -179.999999},
+      // Antimeridian-adjacent rows at mixed latitudes.
+      {45.0, 179.999999},
+      {45.0, -179.999999},
+      {-45.0, 179.999999},
+      {-45.0, -179.999999},
+      {10.0, 179.999},
+      {-10.0, -179.999},
+  };
+  for (const auto& p : fixed) {
+    lats.push_back(p[0]);
+    lngs.push_back(p[1]);
+  }
+
+  // H3 icosahedron face centers from the in-repo exact-device implementation.
+  const double face_centers_rad[20][2] = {
+      {0.803582649718989942, 1.248397419617396099},
+      {1.307747883455638156, 2.536945009877921159},
+      {1.054751253523952054, -1.347517358900396623},
+      {0.600191595538186799, -0.450603909469755746},
+      {0.491715428198773866, 0.401988202911306943},
+      {0.172745327415618701, 1.678146885280433686},
+      {0.605929321571350690, 2.953923329812411617},
+      {0.427370518328979641, -1.888876200336285401},
+      {-0.079066118549212831, -0.733429513380867741},
+      {-0.230961644455383637, 0.506495587332349035},
+      {0.079066118549212831, 2.408163140208925497},
+      {0.230961644455383637, -2.635097066257444203},
+      {-0.172745327415618701, -1.463445768309359553},
+      {-0.605929321571350690, -0.187669323777381622},
+      {-0.427370518328979641, 1.252716453253507838},
+      {-0.600191595538186799, 2.690988744120037492},
+      {-0.491715428198773866, -2.739604450678486295},
+      {-0.803582649718989942, -1.893195233972397139},
+      {-1.307747883455638156, -0.604647643711872080},
+      {-1.054751253523952054, 1.794075294689396615},
+  };
+
+  double face_lats[20];
+  double face_lngs[20];
+  double face_x[20], face_y[20], face_z[20];
+  for (int i = 0; i < 20; ++i) {
+    face_lats[i] = h3_rad_to_deg(face_centers_rad[i][0]);
+    face_lngs[i] = h3_rad_to_deg(face_centers_rad[i][1]);
+    lats.push_back(face_lats[i]);
+    lngs.push_back(face_lngs[i]);
+    h3_lat_lng_to_unit(face_lats[i], face_lngs[i], face_x[i], face_y[i], face_z[i]);
+  }
+
+  // Adjacent face centers have dot product around 0.745; their normalized
+  // midpoint lies on the spherical face-edge bisector.
+  for (int a = 0; a < 20; ++a) {
+    for (int b = a + 1; b < 20; ++b) {
+      const double dot = face_x[a] * face_x[b] + face_y[a] * face_y[b] + face_z[a] * face_z[b];
+      if (dot > 0.70) {
+        h3_add_face_midpoint(lats, lngs, face_lats[a], face_lngs[a], face_lats[b], face_lngs[b]);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,10 +411,12 @@ static void test_lat_lng_to_cell() {
     ASSERT_EQ("parent consistency", cell_r3_via_parent, cell_r3_direct);
   }
 
-  // fp32 at high res should be marked invalid
+  // High-res requests stay SQL-correct even when the historical fp32 flag is
+  // false: the H3 bulk path now computes a GPU candidate and exact-fixes
+  // high-resolution cells rather than surfacing invalid rows to SQL.
   s = pgaccel_h3_lat_lng_to_cell_bulk(&lat, &lng, 1, 12, false, &cell_id, &valid);
   ASSERT_STATUS_OK("fp32 res 12 status", s);
-  ASSERT_EQ("fp32 res 12 marked invalid", valid, 0);
+  ASSERT_TRUE("fp32-flag res 12 valid", valid == 1);
 
   // fp64 at high res: post fp64-unlock (W1/W2/W3/W4), every backend
   // (including Metal via soft-fp64) must dispatch fp64 paths. An
@@ -342,6 +477,254 @@ static void test_lat_lng_to_cell() {
   // Empty count
   s = pgaccel_h3_lat_lng_to_cell_bulk(nullptr, nullptr, 0, 5, true, nullptr, nullptr);
   ASSERT_STATUS_OK("empty count status", s);
+}
+
+static void test_lat_lng_to_cell_bulk_edge_randomized() {
+  printf("--- test_lat_lng_to_cell_bulk_edge_randomized ---\n");
+
+  std::vector<double> lats;
+  std::vector<double> lngs;
+  h3_add_edge_coverage_points(lats, lngs);
+  h3_add_deterministic_random_points(lats, lngs, 64);
+
+  ASSERT_TRUE("edge/random point vectors aligned", lats.size() == lngs.size());
+  ASSERT_TRUE("edge/random point set non-empty", !lats.empty());
+
+  const size_t N = lats.size();
+  std::vector<uint64_t> cells_a(N, 0), cells_b(N, 0);
+  std::vector<uint8_t> valid_a(N, 0), valid_b(N, 0);
+  std::vector<int32_t> resolutions(N, -1);
+
+  for (int res = 0; res <= 15; ++res) {
+    pgaccel_status s = pgaccel_h3_lat_lng_to_cell_bulk(
+        lats.data(), lngs.data(), N, res, /*use_fp64=*/1, cells_a.data(), valid_a.data());
+    char buf[128];
+    snprintf(buf, sizeof(buf), "edge/random lat_lng_to_cell res=%d status", res);
+    ASSERT_STATUS_OK(buf, s);
+
+    s = pgaccel_h3_lat_lng_to_cell_bulk(lats.data(), lngs.data(), N, res, /*use_fp64=*/1,
+                                        cells_b.data(), valid_b.data());
+    snprintf(buf, sizeof(buf), "edge/random repeat res=%d status", res);
+    ASSERT_STATUS_OK(buf, s);
+
+    s = pgaccel_h3_get_resolution_bulk(cells_a.data(), N, resolutions.data());
+    snprintf(buf, sizeof(buf), "edge/random get_resolution res=%d status", res);
+    ASSERT_STATUS_OK(buf, s);
+
+    bool all_valid = true;
+    bool deterministic = true;
+    bool cells_look_valid = true;
+    bool res_ok = true;
+    for (size_t i = 0; i < N; ++i) {
+      if (valid_a[i] == 0 || cells_a[i] == 0) {
+        all_valid = false;
+      }
+      if (valid_a[i] != valid_b[i] || cells_a[i] != cells_b[i]) {
+        deterministic = false;
+      }
+      if (valid_a[i] != 0 && (h3_cell_mode(cells_a[i]) != 1 || h3_cell_base(cells_a[i]) > 121)) {
+        cells_look_valid = false;
+      }
+      if (valid_a[i] != 0 && resolutions[i] != res) {
+        res_ok = false;
+      }
+    }
+
+    snprintf(buf, sizeof(buf), "edge/random res=%d all inputs valid", res);
+    ASSERT_TRUE(buf, all_valid);
+    snprintf(buf, sizeof(buf), "edge/random res=%d repeated outputs deterministic", res);
+    ASSERT_TRUE(buf, deterministic);
+    snprintf(buf, sizeof(buf), "edge/random res=%d valid-looking H3 cells", res);
+    ASSERT_TRUE(buf, cells_look_valid);
+    snprintf(buf, sizeof(buf), "edge/random res=%d resolution field matches", res);
+    ASSERT_TRUE(buf, res_ok);
+  }
+}
+
+static void test_lat_lng_count_bulk() {
+  printf("--- test_lat_lng_count_bulk ---\n");
+
+  constexpr size_t UNIQUE_POINTS = 64;
+  constexpr size_t N = 4096;
+  constexpr int RESOLUTION = 7;
+  double base_lats[UNIQUE_POINTS];
+  double base_lngs[UNIQUE_POINTS];
+  for (size_t i = 0; i < UNIQUE_POINTS; ++i) {
+    base_lats[i] = -50.0 + static_cast<double>(i % 16) * 4.5;
+    base_lngs[i] = -150.0 + static_cast<double>(i / 16) * 75.0;
+  }
+
+  std::vector<double> lats(N);
+  std::vector<double> lngs(N);
+  for (size_t i = 0; i < N; ++i) {
+    const size_t p = (i * 17) % UNIQUE_POINTS;
+    lats[i] = base_lats[p];
+    lngs[i] = base_lngs[p];
+  }
+
+  std::vector<uint64_t> cells(N, 0);
+  std::vector<uint8_t> valid(N, 0);
+  pgaccel_status s = pgaccel_h3_lat_lng_to_cell_bulk(lats.data(), lngs.data(), N, RESOLUTION,
+                                                     /*use_fp64=*/1, cells.data(), valid.data());
+  ASSERT_STATUS_OK("lat_lng_count reference cell status", s);
+
+  std::unordered_map<uint64_t, int64_t> expected;
+  bool all_valid = (s == PGACCEL_OK);
+  for (size_t i = 0; i < N && all_valid; ++i) {
+    if (valid[i] == 0 || cells[i] == 0) {
+      all_valid = false;
+      break;
+    }
+    expected[cells[i]] += 1;
+  }
+  ASSERT_TRUE("lat_lng_count reference cells all valid", all_valid);
+
+  pgaccel_agg_state* state = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  s = pgaccel_h3_lat_lng_count_bulk(lats.data(), lngs.data(), N, RESOLUTION, &state);
+  ASSERT_STATUS_OK("lat_lng_count fused status", s);
+  ASSERT_TRUE("lat_lng_count fused state non-null", state != nullptr);
+  ASSERT_TRUE("lat_lng_count fused launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (state == nullptr) {
+    return;
+  }
+
+  ASSERT_EQ("lat_lng_count fused group count", pgaccel_agg_group_count(state), expected.size());
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(state));
+  const double* counts = pgaccel_agg_get_results(state, 0);
+  const int64_t* row_counts = pgaccel_agg_get_counts(state);
+  ASSERT_TRUE("lat_lng_count fused output buffers non-null",
+              keys_out != nullptr && counts != nullptr && row_counts != nullptr);
+
+  bool counts_match = true;
+  int64_t total_counts = 0;
+  int64_t total_row_counts = 0;
+  bool saw_duplicate_group = false;
+  if (keys_out != nullptr && counts != nullptr && row_counts != nullptr) {
+    for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+      const uint64_t cell = static_cast<uint64_t>(keys_out[g]);
+      auto it = expected.find(cell);
+      if (it == expected.end() || std::abs(counts[g] - static_cast<double>(it->second)) > 1e-9 ||
+          row_counts[g] != it->second) {
+        counts_match = false;
+        break;
+      }
+      total_counts += static_cast<int64_t>(counts[g]);
+      total_row_counts += row_counts[g];
+      saw_duplicate_group = saw_duplicate_group || row_counts[g] > 1;
+    }
+  }
+  ASSERT_TRUE("lat_lng_count fused counts match reference cells", counts_match);
+  ASSERT_EQ("lat_lng_count fused count total", total_counts, static_cast<int64_t>(N));
+  ASSERT_EQ("lat_lng_count fused row-count total", total_row_counts, static_cast<int64_t>(N));
+  ASSERT_TRUE("lat_lng_count duplicate groups preserved", saw_duplicate_group);
+
+  pgaccel_agg_free(state);
+}
+
+static void assert_lat_lng_count_matches_reference(const std::vector<double>& lats,
+                                                   const std::vector<double>& lngs, int resolution,
+                                                   const char* label) {
+  ASSERT_TRUE("lat_lng_count helper aligned input", lats.size() == lngs.size());
+  const size_t N = lats.size();
+
+  std::vector<uint64_t> cells(N, 0);
+  std::vector<uint8_t> valid(N, 0);
+  pgaccel_status s = pgaccel_h3_lat_lng_to_cell_bulk(lats.data(), lngs.data(), N, resolution,
+                                                     /*use_fp64=*/1, cells.data(), valid.data());
+  char buf[160];
+  snprintf(buf, sizeof(buf), "%s reference cells res=%d status", label, resolution);
+  ASSERT_STATUS_OK(buf, s);
+
+  std::unordered_map<uint64_t, int64_t> expected;
+  bool all_valid = (s == PGACCEL_OK);
+  for (size_t i = 0; i < N && all_valid; ++i) {
+    if (valid[i] == 0 || cells[i] == 0) {
+      all_valid = false;
+      break;
+    }
+    expected[cells[i]] += 1;
+  }
+  snprintf(buf, sizeof(buf), "%s reference cells res=%d all valid", label, resolution);
+  ASSERT_TRUE(buf, all_valid);
+
+  pgaccel_agg_state* state = nullptr;
+  s = pgaccel_h3_lat_lng_count_bulk(lats.data(), lngs.data(), N, resolution, &state);
+  snprintf(buf, sizeof(buf), "%s fused count res=%d status", label, resolution);
+  ASSERT_STATUS_OK(buf, s);
+  snprintf(buf, sizeof(buf), "%s fused count res=%d state non-null", label, resolution);
+  ASSERT_TRUE(buf, state != nullptr);
+  if (state == nullptr) {
+    return;
+  }
+
+  snprintf(buf, sizeof(buf), "%s fused count res=%d group count", label, resolution);
+  ASSERT_EQ(buf, pgaccel_agg_group_count(state), expected.size());
+
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(state));
+  const double* counts = pgaccel_agg_get_results(state, 0);
+  const int64_t* row_counts = pgaccel_agg_get_counts(state);
+  snprintf(buf, sizeof(buf), "%s fused count res=%d output buffers", label, resolution);
+  ASSERT_TRUE(buf, keys_out != nullptr && counts != nullptr && row_counts != nullptr);
+
+  bool counts_match = true;
+  int64_t total_counts = 0;
+  int64_t total_row_counts = 0;
+  bool saw_duplicate_group = false;
+  if (keys_out != nullptr && counts != nullptr && row_counts != nullptr) {
+    for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+      const uint64_t cell = static_cast<uint64_t>(keys_out[g]);
+      auto it = expected.find(cell);
+      if (it == expected.end() || std::abs(counts[g] - static_cast<double>(it->second)) > 1e-9 ||
+          row_counts[g] != it->second) {
+        counts_match = false;
+        break;
+      }
+      total_counts += static_cast<int64_t>(counts[g]);
+      total_row_counts += row_counts[g];
+      saw_duplicate_group = saw_duplicate_group || row_counts[g] > 1;
+    }
+  }
+
+  snprintf(buf, sizeof(buf), "%s fused count res=%d counts match reference", label, resolution);
+  ASSERT_TRUE(buf, counts_match);
+  snprintf(buf, sizeof(buf), "%s fused count res=%d count total", label, resolution);
+  ASSERT_EQ(buf, total_counts, static_cast<int64_t>(N));
+  snprintf(buf, sizeof(buf), "%s fused count res=%d row-count total", label, resolution);
+  ASSERT_EQ(buf, total_row_counts, static_cast<int64_t>(N));
+  snprintf(buf, sizeof(buf), "%s fused count res=%d duplicate groups", label, resolution);
+  ASSERT_TRUE(buf, saw_duplicate_group);
+
+  pgaccel_agg_free(state);
+}
+
+static void test_lat_lng_count_bulk_all_res_duplicate_edges() {
+  printf("--- test_lat_lng_count_bulk_all_res_duplicate_edges ---\n");
+
+  const double unique_lats[] = {
+      0.0,     0.0,      0.0,   37.7749, -33.8688,  51.5074,    89.9999,   -89.9999,
+      45.0,    45.0,     -45.0, -45.0,   12.3456,   -12.3456,   66.1234,   -66.1234,
+      23.4567, -23.4567, 10.0,  -10.0,   35.659494, -33.856159, 48.858844, 40.689247,
+  };
+  const double unique_lngs[] = {
+      0.0,      90.0,      -90.0,    -122.4194, 151.2093,   -0.1278,    0.0,      0.0,
+      179.9999, -179.9999, 179.9999, -179.9999, 179.999,    -179.999,   45.6789,  -45.6789,
+      123.4567, -123.4567, 179.5,    -179.5,    139.700472, 151.215256, 2.294351, -74.044502,
+  };
+  constexpr size_t UNIQUE = sizeof(unique_lats) / sizeof(unique_lats[0]);
+  constexpr size_t N = 384;
+
+  std::vector<double> lats(N);
+  std::vector<double> lngs(N);
+  for (size_t i = 0; i < N; ++i) {
+    const size_t p = (i * 11 + 7) % UNIQUE;
+    lats[i] = unique_lats[p];
+    lngs[i] = unique_lngs[p];
+  }
+
+  for (int res = 0; res <= 15; ++res) {
+    assert_lat_lng_count_matches_reference(lats, lngs, res, "all-res duplicate edge count");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1658,9 @@ int main(int argc, char** argv) {
   RUN_TEST(test_cell_to_center_child);
   RUN_TEST(test_grid_distance);
   RUN_TEST(test_lat_lng_to_cell);
+  RUN_TEST(test_lat_lng_to_cell_bulk_edge_randomized);
+  RUN_TEST(test_lat_lng_count_bulk);
+  RUN_TEST(test_lat_lng_count_bulk_all_res_duplicate_edges);
   RUN_TEST(test_lat_lng_to_cell_fp64_bulk);
   RUN_TEST(test_null_pointers);
 

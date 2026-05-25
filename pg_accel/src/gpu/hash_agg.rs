@@ -21,6 +21,16 @@ impl Drop for HashAggResult {
 }
 
 impl HashAggResult {
+    /// Take ownership of a raw aggregation state returned by libpgaccel.
+    ///
+    /// # Safety
+    ///
+    /// `state` must either be null or point to a live `PgaccelAggState`
+    /// allocation whose ownership is transferred to the returned wrapper.
+    pub(crate) unsafe fn from_raw(state: *mut PgaccelAggState) -> Option<Self> {
+        (!state.is_null()).then_some(Self { state })
+    }
+
     /// Number of distinct groups.
     #[must_use]
     pub fn group_count(&self) -> usize {
@@ -137,6 +147,22 @@ pub fn hash_agg_execute(
         return None;
     }
     Some(HashAggResult { state })
+}
+
+/// Execute fail-closed grouped COUNT(*) over int64 keys.
+///
+/// This does not fall back to the legacy host hash-table group-assignment
+/// path.
+#[allow(dead_code)] // reason: generic count-only FFI wrapper; H3 currently uses fused lat/lng+count
+pub fn hash_count_i64_execute(keys: &[i64], nulls: Option<&[u8]>) -> Option<HashAggResult> {
+    if keys.is_empty() {
+        return None;
+    }
+    let null_ptr = nulls.map_or(std::ptr::null(), |n| n.as_ptr());
+    let state =
+        unsafe { bridge::pgaccel_hash_count_i64_execute(keys.as_ptr(), null_ptr, keys.len()) };
+    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
+    unsafe { HashAggResult::from_raw(state) }
 }
 
 impl HashAggResult {

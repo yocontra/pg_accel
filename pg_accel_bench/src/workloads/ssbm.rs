@@ -1,12 +1,60 @@
 use super::Workload;
 
+const SSBM_Q23_EXACT_BRAND_MIN_PARTS: usize = 1_000;
+
+fn ssbm_dimension_counts(rows: usize) -> (usize, usize, usize) {
+    let part_count = (rows / 30).clamp(SSBM_Q23_EXACT_BRAND_MIN_PARTS, 800_000);
+    let supp_count = (rows / 3000).clamp(20, 200_000);
+    let cust_count = (rows / 200).clamp(30, 3_000_000);
+    (part_count, supp_count, cust_count)
+}
+
+fn ssbm_dimension_sanity_sql() -> String {
+    "DO $$ \
+     DECLARE \
+        missing text; \
+     BEGIN \
+        SELECT label INTO missing \
+        FROM (VALUES \
+            ('ssbm_part.p_mfgr IN (''MFGR#1'', ''MFGR#2'') (SSBM Q4.1/Q4.2)', EXISTS (SELECT 1 FROM ssbm_part WHERE p_mfgr IN ('MFGR#1', 'MFGR#2'))), \
+            ('ssbm_part.p_category = ''MFGR#12'' (SSBM Q2.1)', EXISTS (SELECT 1 FROM ssbm_part WHERE p_category = 'MFGR#12')), \
+            ('ssbm_part.p_category = ''MFGR#14'' (SSBM Q4.3)', EXISTS (SELECT 1 FROM ssbm_part WHERE p_category = 'MFGR#14')), \
+            ('ssbm_part.p_brand1 = ''MFGR#2239'' (SSBM Q2.3)', EXISTS (SELECT 1 FROM ssbm_part WHERE p_brand1 = 'MFGR#2239')), \
+            ('ssbm_part.p_brand1 BETWEEN ''MFGR#2221'' AND ''MFGR#2228'' (SSBM Q2.2)', EXISTS (SELECT 1 FROM ssbm_part WHERE p_brand1 BETWEEN 'MFGR#2221' AND 'MFGR#2228')), \
+            ('ssbm_supplier.s_region = ''AMERICA'' (SSBM Q2.1/Q4)', EXISTS (SELECT 1 FROM ssbm_supplier WHERE s_region = 'AMERICA')), \
+            ('ssbm_supplier.s_region = ''ASIA'' (SSBM Q2.2/Q3.1)', EXISTS (SELECT 1 FROM ssbm_supplier WHERE s_region = 'ASIA')), \
+            ('ssbm_supplier.s_region = ''EUROPE'' (SSBM Q2.3)', EXISTS (SELECT 1 FROM ssbm_supplier WHERE s_region = 'EUROPE')), \
+            ('ssbm_supplier.s_nation = ''UNITED STATES'' (SSBM Q3.2/Q4.3)', EXISTS (SELECT 1 FROM ssbm_supplier WHERE s_nation = 'UNITED STATES')), \
+            ('ssbm_supplier.s_city IN (''UNITED ST0'', ''UNITED ST1'') (SSBM Q3.3/Q3.4)', EXISTS (SELECT 1 FROM ssbm_supplier WHERE s_city IN ('UNITED ST0', 'UNITED ST1'))), \
+            ('ssbm_customer.c_region = ''AMERICA'' (SSBM Q4)', EXISTS (SELECT 1 FROM ssbm_customer WHERE c_region = 'AMERICA')), \
+            ('ssbm_customer.c_region = ''ASIA'' (SSBM Q3.1)', EXISTS (SELECT 1 FROM ssbm_customer WHERE c_region = 'ASIA')), \
+            ('ssbm_customer.c_nation = ''UNITED STATES'' (SSBM Q3.2)', EXISTS (SELECT 1 FROM ssbm_customer WHERE c_nation = 'UNITED STATES')), \
+            ('ssbm_customer.c_city IN (''UNITED ST0'', ''UNITED ST1'') (SSBM Q3.3/Q3.4)', EXISTS (SELECT 1 FROM ssbm_customer WHERE c_city IN ('UNITED ST0', 'UNITED ST1'))), \
+            ('ssbm_date.d_year = 1992 (SSBM Q3)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1992)), \
+            ('ssbm_date.d_year = 1993 (SSBM Q1.1/Q3)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1993)), \
+            ('ssbm_date.d_year = 1994 (SSBM Q1.3/Q3)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1994)), \
+            ('ssbm_date.d_year = 1995 (SSBM Q3)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1995)), \
+            ('ssbm_date.d_year = 1996 (SSBM Q3)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1996)), \
+            ('ssbm_date.d_year = 1997 (SSBM Q3/Q4)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1997)), \
+            ('ssbm_date.d_year = 1998 (SSBM Q4)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_year = 1998)), \
+            ('ssbm_date.d_yearmonthnum = 199401 (SSBM Q1.2)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_yearmonthnum = 199401)), \
+            ('ssbm_date.d_weeknuminyear = 6 AND d_year = 1994 (SSBM Q1.3)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_weeknuminyear = 6 AND d_year = 1994)), \
+            ('ssbm_date.d_yearmonth = ''Dec1997'' (SSBM Q3.4)', EXISTS (SELECT 1 FROM ssbm_date WHERE d_yearmonth = 'Dec1997')) \
+        ) AS checks(label, ok) \
+        WHERE NOT ok \
+        LIMIT 1; \
+        IF missing IS NOT NULL THEN \
+            RAISE EXCEPTION 'SSBM setup sanity check failed: % matched zero dimension rows. Fix ssbm_setup_sql generator constants before benchmarking GPU pre-aggregation.', missing; \
+        END IF; \
+     END $$"
+        .to_owned()
+}
+
 /// Shared setup SQL for all SSBM workloads. Creates the star schema (date, part,
 /// supplier, customer, lineorder) and populates with synthetic data scaled to `rows`.
 #[allow(clippy::too_many_lines)]
 pub fn ssbm_setup_sql(rows: usize) -> Vec<String> {
-    let part_count = (rows / 30).clamp(200, 800_000);
-    let supp_count = (rows / 3000).clamp(20, 200_000);
-    let cust_count = (rows / 200).clamp(30, 3_000_000);
+    let (part_count, supp_count, cust_count) = ssbm_dimension_counts(rows);
 
     vec![
         // -- Drop any leftover tables (idempotent) --
@@ -94,23 +142,23 @@ pub fn ssbm_setup_sql(rows: usize) -> Vec<String> {
         "INSERT INTO ssbm_date \
          SELECT \
             19920101 + i AS d_datekey, \
-            'date_' || i AS d_date, \
-            (ARRAY['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])[i % 7 + 1] AS d_dayofweek, \
-            (ARRAY['January','February','March','April','May','June','July','August','September','October','November','December'])[(i / 30) % 12 + 1] AS d_month, \
-            1992 + i / 365 AS d_year, \
-            (1992 + i / 365) * 100 + (i / 30) % 12 + 1 AS d_yearmonthnum, \
-            'Jan' || (1992 + i / 365) AS d_yearmonth, \
-            i % 7 + 1 AS d_daynuminweek, \
-            i % 30 + 1 AS d_daynuminmonth, \
-            i % 365 + 1 AS d_daynuminyear, \
-            (i / 30) % 12 + 1 AS d_monthnuminyear, \
-            i / 7 % 52 + 1 AS d_weeknuminyear, \
-            CASE WHEN (i / 30) % 12 + 1 IN (11, 12) THEN 'Christmas' WHEN (i / 30) % 12 + 1 IN (6, 7, 8) THEN 'Summer' ELSE 'Other' END AS d_sellingseason, \
-            CASE WHEN i % 7 = 6 THEN 1 ELSE 0 END AS d_lastdayinweekfl, \
-            CASE WHEN i % 30 = 29 THEN 1 ELSE 0 END AS d_lastdayinmonthfl, \
-            CASE WHEN i % 365 IN (0, 185) THEN 1 ELSE 0 END AS d_holidayfl, \
-            CASE WHEN i % 7 < 5 THEN 1 ELSE 0 END AS d_weekdayfl \
-         FROM generate_series(0, 2555) AS i"
+            to_char(dt, 'YYYY-MM-DD') AS d_date, \
+            to_char(dt, 'FMDay') AS d_dayofweek, \
+            to_char(dt, 'FMMonth') AS d_month, \
+            EXTRACT(YEAR FROM dt)::int4 AS d_year, \
+            EXTRACT(YEAR FROM dt)::int4 * 100 + EXTRACT(MONTH FROM dt)::int4 AS d_yearmonthnum, \
+            to_char(dt, 'MonYYYY') AS d_yearmonth, \
+            EXTRACT(ISODOW FROM dt)::int4 AS d_daynuminweek, \
+            EXTRACT(DAY FROM dt)::int4 AS d_daynuminmonth, \
+            EXTRACT(DOY FROM dt)::int4 AS d_daynuminyear, \
+            EXTRACT(MONTH FROM dt)::int4 AS d_monthnuminyear, \
+            ((EXTRACT(DOY FROM dt)::int4 - 1) / 7 + 1) AS d_weeknuminyear, \
+            CASE WHEN EXTRACT(MONTH FROM dt)::int4 IN (11, 12) THEN 'Christmas' WHEN EXTRACT(MONTH FROM dt)::int4 IN (6, 7, 8) THEN 'Summer' ELSE 'Other' END AS d_sellingseason, \
+            CASE WHEN EXTRACT(ISODOW FROM dt)::int4 = 7 THEN 1 ELSE 0 END AS d_lastdayinweekfl, \
+            CASE WHEN EXTRACT(DAY FROM dt + 1)::int4 = 1 THEN 1 ELSE 0 END AS d_lastdayinmonthfl, \
+            CASE WHEN EXTRACT(DOY FROM dt)::int4 IN (1, 186) THEN 1 ELSE 0 END AS d_holidayfl, \
+            CASE WHEN EXTRACT(ISODOW FROM dt)::int4 <= 5 THEN 1 ELSE 0 END AS d_weekdayfl \
+         FROM (SELECT i, date '1992-01-01' + i AS dt FROM generate_series(0, 2555) AS g(i)) AS dates"
             .to_owned(),
         format!(
             "INSERT INTO ssbm_part \
@@ -151,6 +199,7 @@ pub fn ssbm_setup_sql(rows: usize) -> Vec<String> {
                 (ARRAY['AUTOMOBILE','BUILDING','FURNITURE','HOUSEHOLD','MACHINERY'])[(i % 5) + 1] AS c_mktsegment \
              FROM generate_series(1, {cust_count}) AS i"
         ),
+        ssbm_dimension_sanity_sql(),
         // -- Populate fact table --
         format!(
             "INSERT INTO ssbm_lineorder \
@@ -232,6 +281,243 @@ impl Workload for SsbmQ1_1 {
 
     fn cleanup_sql(&self) -> Vec<String> {
         ssbm_cleanup_sql()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    struct GeneratedDate {
+        year: i32,
+        month: usize,
+        day_of_year: usize,
+    }
+
+    fn part_category(partkey: usize) -> String {
+        format!(
+            "MFGR#{}{}",
+            (partkey - 1) % 5 + 1,
+            ((partkey - 1) / 5) % 5 + 1
+        )
+    }
+
+    fn part_mfgr(partkey: usize) -> String {
+        format!("MFGR#{}", (partkey - 1) % 5 + 1)
+    }
+
+    fn part_brand1(partkey: usize) -> String {
+        format!(
+            "{}{}",
+            part_category(partkey),
+            ((partkey - 1) / 25) % 40 + 1
+        )
+    }
+
+    fn supplier_region(suppkey: usize) -> &'static str {
+        ["AMERICA", "ASIA", "ASIA", "ASIA", "EUROPE"][suppkey % 5]
+    }
+
+    fn supplier_nation(suppkey: usize) -> &'static str {
+        ["UNITED STATES", "CHINA", "INDIA", "JAPAN", "GERMANY"][suppkey % 5]
+    }
+
+    fn supplier_city(suppkey: usize) -> &'static str {
+        [
+            "UNITED ST0",
+            "UNITED ST1",
+            "UNITED ST2",
+            "UNITED ST3",
+            "UNITED ST4",
+            "CHINA    0",
+            "CHINA    1",
+            "CHINA    2",
+            "CHINA    3",
+            "CHINA    4",
+        ][suppkey % 10]
+    }
+
+    fn customer_region(custkey: usize) -> &'static str {
+        supplier_region(custkey)
+    }
+
+    fn customer_nation(custkey: usize) -> &'static str {
+        supplier_nation(custkey)
+    }
+
+    fn customer_city(custkey: usize) -> &'static str {
+        supplier_city(custkey)
+    }
+
+    fn is_leap_year(year: i32) -> bool {
+        year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    }
+
+    fn days_in_year(year: i32) -> usize {
+        if is_leap_year(year) { 366 } else { 365 }
+    }
+
+    fn days_in_month(year: i32, month: usize) -> usize {
+        match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if is_leap_year(year) => 29,
+            2 => 28,
+            _ => unreachable!("invalid month"),
+        }
+    }
+
+    fn generated_date(mut offset: usize) -> GeneratedDate {
+        let mut year = 1992;
+        while offset >= days_in_year(year) {
+            offset -= days_in_year(year);
+            year += 1;
+        }
+
+        let day_of_year = offset + 1;
+        let mut month = 1;
+        while offset >= days_in_month(year, month) {
+            offset -= days_in_month(year, month);
+            month += 1;
+        }
+
+        GeneratedDate {
+            year,
+            month,
+            day_of_year,
+        }
+    }
+
+    fn generated_yearmonthnum(offset: usize) -> i32 {
+        let date = generated_date(offset);
+        date.year * 100 + date.month as i32
+    }
+
+    fn generated_yearmonth(offset: usize) -> String {
+        let date = generated_date(offset);
+        let month = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ][date.month - 1];
+        format!("{month}{}", date.year)
+    }
+
+    fn generated_weeknuminyear(offset: usize) -> usize {
+        (generated_date(offset).day_of_year - 1) / 7 + 1
+    }
+
+    #[test]
+    fn setup_keeps_guarded_part_filters_present_at_small_scales() {
+        let (part_count, _, _) = ssbm_dimension_counts(1);
+        assert!(
+            (1..=part_count)
+                .any(|partkey| matches!(part_mfgr(partkey).as_str(), "MFGR#1" | "MFGR#2")),
+            "SSBM Q4.1/Q4.2 manufacturer filter MFGR#1/MFGR#2 must exist at the smallest scale"
+        );
+        assert!(
+            (1..=part_count).any(|partkey| part_category(partkey) == "MFGR#12"),
+            "SSBM Q2.1 category MFGR#12 must exist at the smallest scale"
+        );
+        assert!(
+            (1..=part_count).any(|partkey| part_category(partkey) == "MFGR#14"),
+            "SSBM Q4.3 category MFGR#14 must exist at the smallest scale"
+        );
+        assert!(
+            (1..=part_count).any(|partkey| part_brand1(partkey) == "MFGR#2239"),
+            "SSBM Q2.3 brand MFGR#2239 must exist at the smallest scale"
+        );
+        assert!(
+            (1..=part_count).any(|partkey| {
+                let brand = part_brand1(partkey);
+                brand.as_str() >= "MFGR#2221" && brand.as_str() <= "MFGR#2228"
+            }),
+            "SSBM Q2.2 brand range MFGR#2221..MFGR#2228 must exist at the smallest scale"
+        );
+    }
+
+    #[test]
+    fn setup_keeps_guarded_geography_filters_present_at_small_scales() {
+        let (_, supp_count, cust_count) = ssbm_dimension_counts(1);
+        for region in ["AMERICA", "ASIA", "EUROPE"] {
+            assert!(
+                (1..=supp_count).any(|suppkey| supplier_region(suppkey) == region),
+                "guarded supplier region {region} must exist at the smallest scale"
+            );
+        }
+        assert!(
+            (1..=supp_count).any(|suppkey| supplier_nation(suppkey) == "UNITED STATES"),
+            "guarded supplier nation UNITED STATES must exist at the smallest scale"
+        );
+        assert!(
+            (1..=supp_count)
+                .any(|suppkey| matches!(supplier_city(suppkey), "UNITED ST0" | "UNITED ST1")),
+            "guarded supplier cities UNITED ST0/UNITED ST1 must exist at the smallest scale"
+        );
+
+        for region in ["AMERICA", "ASIA"] {
+            assert!(
+                (1..=cust_count).any(|custkey| customer_region(custkey) == region),
+                "guarded customer region {region} must exist at the smallest scale"
+            );
+        }
+        assert!(
+            (1..=cust_count).any(|custkey| customer_nation(custkey) == "UNITED STATES"),
+            "guarded customer nation UNITED STATES must exist at the smallest scale"
+        );
+        assert!(
+            (1..=cust_count)
+                .any(|custkey| matches!(customer_city(custkey), "UNITED ST0" | "UNITED ST1")),
+            "guarded customer cities UNITED ST0/UNITED ST1 must exist at the smallest scale"
+        );
+    }
+
+    #[test]
+    fn setup_keeps_guarded_date_filters_present() {
+        let mut offsets = 0..=2555;
+        for year in 1992..=1998 {
+            assert!(
+                offsets
+                    .clone()
+                    .any(|offset| generated_date(offset).year == year),
+                "guarded date year {year} must exist"
+            );
+        }
+        assert!(
+            offsets
+                .clone()
+                .any(|offset| generated_yearmonthnum(offset) == 199_401),
+            "SSBM Q1.2 date yearmonthnum 199401 must exist"
+        );
+        assert!(
+            offsets.clone().any(|offset| {
+                let date = generated_date(offset);
+                date.year == 1994 && generated_weeknuminyear(offset) == 6
+            }),
+            "SSBM Q1.3 date year 1994/week 6 must exist"
+        );
+        assert!(
+            offsets.any(|offset| generated_yearmonth(offset) == "Dec1997"),
+            "SSBM Q3.4 date yearmonth Dec1997 must exist"
+        );
+    }
+
+    #[test]
+    fn setup_runs_dimension_sanity_checks_before_fact_generation() {
+        let setup = ssbm_setup_sql(1);
+        let sanity_pos = setup
+            .iter()
+            .position(|sql| sql.contains("SSBM setup sanity check failed"))
+            .expect("SSBM setup should include dimension sanity guard");
+        let fact_pos = setup
+            .iter()
+            .position(|sql| sql.contains("INSERT INTO ssbm_lineorder"))
+            .expect("SSBM setup should include fact generation");
+
+        assert!(sanity_pos < fact_pos);
+        assert!(setup[sanity_pos].contains("MFGR#2239"));
+        assert!(setup[sanity_pos].contains("MFGR#12"));
+        assert!(setup[sanity_pos].contains("MFGR#14"));
+        assert!(setup[sanity_pos].contains("Dec1997"));
     }
 }
 

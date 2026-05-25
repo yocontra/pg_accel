@@ -5,6 +5,13 @@
 
 use pgrx::pg_sys;
 
+/// Synthetic grouped-aggregate key type for
+/// `GROUP BY h3_latlng_to_cell(point_col, const_res)`.
+///
+/// The executor computes the H3 cell IDs through the GPU H3 bulk kernel and
+/// stores the resulting h3index values as int64-compatible keys.
+pub const H3_LATLNG_GROUP_KEY_TYPE: i32 = 6;
+
 // ---------------------------------------------------------------------------
 // Group key info for grouped aggregation
 // ---------------------------------------------------------------------------
@@ -18,7 +25,9 @@ use pgrx::pg_sys;
 ///       dispatch — kernel never sees `key_type == 3`),
 ///   4 = UUID (16 bytes, host order),
 ///   5 = INET / CIDR (24-byte canonical: family + bits + 16-byte
-///       address payload, IPv4 zero-extended).
+///       address payload, IPv4 zero-extended),
+///   6 = H3 lat/lng expression key (planner/executor synthetic key, stored
+///       as int64-compatible h3index values after GPU evaluation).
 #[derive(Debug, Clone)]
 pub struct GroupKeyInfo {
     /// 1-based attribute number of the group key column.
@@ -77,10 +86,10 @@ impl GroupKeyInfo {
     #[must_use]
     pub const fn key_size(&self) -> usize {
         match self.key_type {
-            0 => 4,     // i32
-            1 | 2 => 8, // i64 or f64
-            4 => 16,    // UUID
-            5 => 24,    // INET / CIDR canonical key
+            0 => 4,                                // i32
+            1 | 2 | H3_LATLNG_GROUP_KEY_TYPE => 8, // i64, f64, or h3index
+            4 => 16,                               // UUID
+            5 => 24,                               // INET / CIDR canonical key
             _ => 0,
         }
     }

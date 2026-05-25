@@ -40,6 +40,22 @@ pub struct DeviceLimits {
     /// Maximum elements for GPU sort dispatch.
     /// Falls back to PG sort above this limit to avoid GPU runtime aborts.
     pub gpu_sort_max_elements: usize,
+    /// Maximum LIMIT for standalone heap-backed GPU top-k sort exposure.
+    ///
+    /// This mirrors the executor's currently implemented top-k bound. Larger
+    /// limits are left to PostgreSQL until the GPU sort path can materialize
+    /// only the final narrow result set or run inside a GPU-resident pipeline.
+    pub gpu_sort_topk_max_limit: usize,
+    /// Maximum output fraction for standalone heap-backed GPU top-k sort.
+    ///
+    /// Full-output ORDER BY and weak LIMIT clauses are declined because they
+    /// still materialize most heap tuples through the Custom Scan path.
+    pub gpu_sort_heap_topk_max_fraction: f64,
+    /// Maximum projected tuple width for standalone heap-backed GPU top-k.
+    ///
+    /// Wide rows make heap materialization dominate the sort kernel. Keep the
+    /// public planner path narrow until late-fetch/full-output work lands.
+    pub gpu_sort_heap_topk_max_width_bytes: usize,
     /// Maximum output rows for GPU hash join injection.
     /// Custom Scan yield overhead (~3μs/row) makes large-output joins
     /// strictly slower than PG's native HashJoin.
@@ -356,6 +372,9 @@ impl DeviceLimits {
             gpu_hash_agg_max_groups,
             gpu_reduce_max_chunk,
             gpu_sort_max_elements,
+            gpu_sort_topk_max_limit: 128,
+            gpu_sort_heap_topk_max_fraction: 0.25,
+            gpu_sort_heap_topk_max_width_bytes: 16,
             gpu_join_max_output_rows,
             // 2026-05-13 safety band: many polygon/selectivity fixtures crash
             // at the 100K scale, while adjacent 10K/1M cells do not show the
@@ -552,6 +571,9 @@ impl DeviceLimits {
             gpu_hash_agg_max_groups: 10_000,
             gpu_reduce_max_chunk: 256_000,
             gpu_sort_max_elements: 2_000_000,
+            gpu_sort_topk_max_limit: 128,
+            gpu_sort_heap_topk_max_fraction: 0.25,
+            gpu_sort_heap_topk_max_width_bytes: 16,
             gpu_join_max_output_rows: 100_000,
             gpu_spatial_unsafe_band_min_rows: 80_000,
             gpu_spatial_unsafe_band_max_rows: 150_000,

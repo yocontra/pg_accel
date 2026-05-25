@@ -1168,20 +1168,20 @@ fn device_limits_cpu_only_batch_min_lte_max() {
 // =====================================================================
 
 #[test]
-fn equi_join_key_type_mapping_int2_to_int32() {
+fn equi_join_key_type_mapping_int2_is_unsupported_for_hashjoin() {
     let key_type = match 21u32 {
-        21 | 23 => Some(0),   // Int32
+        23 => Some(0),        // Int32
         20 => Some(1),        // Int64
         700 | 701 => Some(2), // Float64
         _ => None,
     };
-    assert_eq!(key_type, Some(0));
+    assert_eq!(key_type, None);
 }
 
 #[test]
 fn equi_join_key_type_mapping_int4_to_int32() {
     let key_type = match 23u32 {
-        21 | 23 => Some(0),
+        23 => Some(0),
         20 => Some(1),
         700 | 701 => Some(2),
         _ => None,
@@ -1192,7 +1192,7 @@ fn equi_join_key_type_mapping_int4_to_int32() {
 #[test]
 fn equi_join_key_type_mapping_int8_to_int64() {
     let key_type = match 20u32 {
-        21 | 23 => Some(0),
+        23 => Some(0),
         20 => Some(1),
         700 | 701 => Some(2),
         _ => None,
@@ -1203,7 +1203,7 @@ fn equi_join_key_type_mapping_int8_to_int64() {
 #[test]
 fn equi_join_key_type_mapping_float4_to_float64() {
     let key_type = match 700u32 {
-        21 | 23 => Some(0),
+        23 => Some(0),
         20 => Some(1),
         700 | 701 => Some(2),
         _ => None,
@@ -1214,7 +1214,7 @@ fn equi_join_key_type_mapping_float4_to_float64() {
 #[test]
 fn equi_join_key_type_mapping_float8_to_float64() {
     let key_type = match 701u32 {
-        21 | 23 => Some(0),
+        23 => Some(0),
         20 => Some(1),
         700 | 701 => Some(2),
         _ => None,
@@ -1225,7 +1225,7 @@ fn equi_join_key_type_mapping_float8_to_float64() {
 #[test]
 fn equi_join_key_type_mapping_text_unsupported() {
     let key_type = match 25u32 {
-        21 | 23 => Some(0),
+        23 => Some(0),
         20 => Some(1),
         700 | 701 => Some(2),
         _ => None,
@@ -1341,6 +1341,53 @@ fn grouped_hashagg_gate_only_applies_to_grouped_agg() {
     assert!(
         !rejects(false),
         "plain reductions should not inherit the grouped hashagg crash gate"
+    );
+}
+
+#[test]
+fn grouped_hashagg_admission_allows_safe_row_parallel_shape() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let admission = grouped_hashagg_admission(
+        limits.gpu_hash_agg_min_rows,
+        1_000,
+        1,    // int64 key
+        true, // SUM/COUNT/MIN/MAX over int64/float64 only
+        &limits,
+    );
+
+    assert_eq!(admission, GroupedHashAggAdmission::AdmitRowParallel);
+}
+
+#[test]
+fn grouped_hashagg_admission_rejects_unsupported_row_parallel_shape() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let rows = limits.gpu_hash_agg_min_rows;
+
+    assert_eq!(
+        grouped_hashagg_admission(rows, 1_000, 4, true, &limits),
+        GroupedHashAggAdmission::RejectUnsupportedKey,
+        "UUID keys are not in the row-parallel hashagg slice"
+    );
+    assert_eq!(
+        grouped_hashagg_admission(rows, 1_000, 1, false, &limits),
+        GroupedHashAggAdmission::RejectUnsupportedAggShape,
+        "AVG/bit/bool/int4/fp32 grouped shapes stay gated"
+    );
+    assert_eq!(
+        grouped_hashagg_admission(rows, limits.gpu_hash_agg_max_groups + 1, 1, true, &limits),
+        GroupedHashAggAdmission::RejectTooManyGroups
+    );
+}
+
+#[test]
+fn grouped_hashagg_admission_enforces_rows_per_group_floor() {
+    let limits = cost::DeviceLimits::cpu_only();
+    let rows = limits.gpu_hash_agg_min_rows;
+    let too_many_small_groups = rows / limits.hashagg_min_rows_per_group + 1;
+
+    assert_eq!(
+        grouped_hashagg_admission(rows, too_many_small_groups, 1, true, &limits),
+        GroupedHashAggAdmission::RejectTooFewRowsPerGroup
     );
 }
 
@@ -2568,12 +2615,12 @@ mod append_inject {
 // The 2026-05-14 SSBM Q2.3 diagnosis found planning time inflated to
 // 37-40 ms with pg_accel hooks installed versus ~0.2 ms with
 // `pg_accel.enabled=off`, even though the query selected no pg_accel
-// path and dispatched zero GPU kernels. The fast-decline gates added to
-// `pgaccel_set_join_pathlist` (no eligible join strategy) and
-// `pgaccel_create_upper_paths` / `UPPERREL_GROUP_AGG` (unsupported
-// GROUP BY type) must produce a measurable jump in the fast-decline
-// counter for SSBM-shaped queries so the bench harness can confirm the
-// audit fired without re-parsing planning time strings.
+// path and dispatched zero GPU kernels. The upper-paths fast-decline gate
+// for `UPPERREL_GROUP_AGG` (unsupported GROUP BY type) must still produce a
+// measurable jump in the fast-decline counter for SSBM-shaped queries so the
+// bench harness can confirm the audit fired without re-parsing planning time
+// strings. Join-pathlist now has an INT32/INT64 hash-join kernel and must
+// inspect equi-join key shape before declining.
 mod phase0_overhead_audit {
     #[pgrx::pg_schema]
     mod tests {
@@ -2582,11 +2629,9 @@ mod phase0_overhead_audit {
         /// SSBM Q2.3-shape regression. A 4-way join with GROUP BY on a
         /// text column (`p_brand1`) is the canonical no-dispatch shape:
         ///
-        /// - join hook fires once per join order considered, but the
-        ///   registry has no PostGIS/h3-pg/raster adapters and the
-        ///   `selected_gpu_hashjoin_kernel_available()` flag is `false`
-        ///   so the join-pathlist fast-decline gate must fire on every
-        ///   invocation;
+        /// - join hook fires once per join order considered and key-shape /
+        ///   cost/cardinality gates decide whether the narrow integer
+        ///   hash-join path is legal;
         /// - upper-paths hook fires once with `UPPERREL_GROUP_AGG` and
         ///   the upper-paths fast-decline gate must catch the text
         ///   `p_brand1` group key before walking the target list.
@@ -2666,11 +2711,12 @@ mod phase0_overhead_audit {
             // (which include planner_fast_decline) are NOT reset, so we
             // take a `before` snapshot instead.
             let before_fast = crate::engine::stats::read_planner_fast_decline();
+            let before_rejected = crate::engine::stats::read_planner_rejected();
             let before_total_us = crate::engine::stats::read_planner_hook_total_us();
 
-            // Run the SSBM Q2.3-shape query. p_brand1 is text → upper_paths
-            // fast-decline. Joins are equi-joins, no PostGIS/h3-pg adapters
-            // → join_pathlist fast-decline.
+            // Run the SSBM Q2.3-shape query. p_brand1 is text -> upper_paths
+            // fast-decline. Join-pathlist may inspect integer equi-joins now
+            // that a narrow hash-join kernel exists.
             let row_count = Spi::get_one::<i64>(
                 "SELECT count(*) FROM ( \
                    SELECT SUM(lo_revenue), d_year, p_brand1 \
@@ -2693,21 +2739,24 @@ mod phase0_overhead_audit {
             );
 
             let after_fast = crate::engine::stats::read_planner_fast_decline();
+            let after_rejected = crate::engine::stats::read_planner_rejected();
             let after_total_us = crate::engine::stats::read_planner_hook_total_us();
 
-            // The fast-decline counter must increase — every join-pathlist
-            // invocation on this no-adapter, no-hashjoin-kernel build hits
-            // `join_pathlist_no_eligible_strategy`, and the
-            // `UPPERREL_GROUP_AGG` arm hits
-            // `upper_paths_unsupported_group_key`. A 4-way join produces
-            // many join_pathlist calls, so the delta is typically > 5,
-            // but we only assert the strict-greater bound to stay robust
-            // to PG planner version differences.
+            // The fast-decline counter must increase via the
+            // `UPPERREL_GROUP_AGG` unsupported text group key. We do not
+            // require join-pathlist fast-decline here because integer
+            // equi-join keys now have a selected GPU implementation.
             assert!(
                 after_fast > before_fast,
                 "Phase 0 audit: planner_fast_decline counter must \
                  increase after a no-dispatch SSBM-shape query \
                  (before={before_fast}, after={after_fast})"
+            );
+            assert!(
+                after_rejected > before_rejected,
+                "SSBM Q2.3-shape text GROUP BY should record a precise \
+                 planner_rejected blocker for the PreAgg/GpuAgg hashagg path \
+                 (before={before_rejected}, after={after_rejected})"
             );
 
             // Total planner-hook microseconds must increase by a finite
@@ -2778,18 +2827,13 @@ mod phase0_overhead_audit {
 
             let after_fast = crate::engine::stats::read_planner_fast_decline();
             // The numeric-GROUP-BY query may legitimately increment the
-            // fast-decline counter via the *join* hook (this query has
-            // no joins, so we expect zero) but MUST NOT increment it via
-            // `upper_paths_unsupported_group_key`. We can't directly
-            // distinguish the two reasons from this counter, so the
-            // strongest assertion we can make is that a numeric-key
-            // query stays under a bounded delta. Empirically a 1-table
-            // grouped agg adds 0 to fast_decline (no join hook, supported
-            // group key) — assert strict <= small bound to catch a
-            // future regression where the upper-paths gate over-declines.
+            // fast-decline counter through unrelated upper-path stages such
+            // as FINAL-without-SRF. It MUST NOT take the unsupported group-key
+            // fast-decline, so keep a tight bound that allows those native
+            // planner-stage declines while still catching over-decline.
             let delta = after_fast.saturating_sub(before_fast);
             assert!(
-                delta <= 1,
+                delta <= 2,
                 "numeric GROUP BY must not over-trigger fast-decline \
                  (before={before_fast}, after={after_fast}, delta={delta})"
             );

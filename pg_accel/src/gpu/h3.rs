@@ -1,4 +1,4 @@
-use super::bridge;
+use super::{HashAggResult, PgaccelAggState, bridge};
 
 // ---------------------------------------------------------------------------
 // H3 wrappers
@@ -184,6 +184,43 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
         }
     }
     Some(cell_ids)
+}
+
+/// GPU-accelerated bulk H3 lat/lng grouped COUNT(*).
+///
+/// Converts each input point to an H3 cell and returns a normal hash
+/// aggregation state whose group keys are H3 cell IDs and whose first result
+/// column contains COUNT(*).
+pub fn h3_lat_lng_count_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> Option<HashAggResult> {
+    let count = lats.len().min(lngs.len());
+    if count == 0 {
+        return None;
+    }
+
+    let mut state: *mut PgaccelAggState = std::ptr::null_mut();
+    let status = unsafe {
+        bridge::pgaccel_h3_lat_lng_count_bulk(
+            lats.as_ptr(),
+            lngs.as_ptr(),
+            count,
+            resolution,
+            std::ptr::addr_of_mut!(state),
+        )
+    };
+    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    unsafe {
+        bridge::pgaccel_pool_reset();
+    }
+    if !status.is_ok() {
+        if !state.is_null() {
+            // SAFETY: state was allocated by the C++ hashagg layer.
+            unsafe { bridge::pgaccel_agg_free(state) };
+        }
+        return None;
+    }
+
+    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
+    unsafe { HashAggResult::from_raw(state) }
 }
 
 // ---------------------------------------------------------------------------

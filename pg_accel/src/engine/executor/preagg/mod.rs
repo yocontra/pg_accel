@@ -23,9 +23,12 @@ use pgrx::pg_sys;
 
 use crate::engine::cost;
 use crate::engine::executor::agg::AggOp;
-use crate::engine::executor::agg::partial::PartialAggSpec;
+use crate::engine::executor::agg::ffi_bridge::{agg_op_to_ffi, agg_op_to_ffi_partial};
+use crate::engine::executor::agg::partial::{ColumnAccumulator, PartialAggSpec};
+use crate::engine::executor::agg::values::oid_to_val_tag;
 use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
+use crate::gpu::{self, HashAggResult, PgaccelAggCol};
 
 pub use partial::{DimColumn, DimFilter, DimHashTable};
 
@@ -115,6 +118,8 @@ pub struct PreAggExecState {
     grouped_accums: HashMap<Vec<i64>, Vec<AggAccum>>,
     /// Group key order (to emit results in insertion order).
     group_key_order: Vec<Vec<i64>>,
+    /// GPU partial hash-agg result for the narrow parallel PreAgg path.
+    gpu_grouped_result: Option<PreAggGpuGroupedResult>,
 
     // --- Fact table scan ---
     /// Fact-side child `PlanState` provided by the standard Custom Scan
@@ -172,6 +177,7 @@ impl PreAggExecState {
             plain_accums,
             grouped_accums: HashMap::new(),
             group_key_order: Vec::new(),
+            gpu_grouped_result: None,
             fact_child: std::ptr::null_mut(),
             fact_slot_attno_map: HashMap::new(),
             scan_done: false,
@@ -200,6 +206,20 @@ impl PreAggExecState {
             .get(&rel_attno)
             .copied()
             .unwrap_or(0)
+    }
+
+    #[inline]
+    fn can_use_gpu_grouped(&self) -> bool {
+        self.group_keys.len() == 1
+            && self
+                .group_keys
+                .first()
+                .and_then(|gk| group_key_type_tag(gk.type_oid))
+                .is_some()
+            && self
+                .agg_descs
+                .iter()
+                .all(|desc| matches!(desc.op, AggOp::Sum | AggOp::Count | AggOp::Min | AggOp::Max))
     }
 
     /// Attach a fact-side child `PlanState` (B5b parallel-safe path).
@@ -397,6 +417,15 @@ impl PreAggExecState {
             }
         } else {
             // Grouped aggregate: emit one row per group.
+            if self.gpu_grouped_result.is_some() {
+                return if self.partial.is_some() {
+                    // SAFETY: result_slot is valid.
+                    unsafe { self.emit_grouped_partial_gpu(result_slot) }
+                } else {
+                    // SAFETY: result_slot is valid.
+                    unsafe { self.emit_grouped_result_gpu(result_slot) }
+                };
+            }
             if self.result_idx >= self.group_key_order.len() {
                 return std::ptr::null_mut();
             }
@@ -488,6 +517,11 @@ impl PreAggExecState {
         let interrupt_interval = limits.fused_interrupt_interval;
 
         let is_grouped = !self.group_keys.is_empty();
+        let mut gpu_staging = if self.can_use_gpu_grouped() {
+            Some(PreAggGpuPartialStaging::new(self.agg_descs.len()))
+        } else {
+            None
+        };
         let mut rows_scanned: u64 = 0;
 
         loop {
@@ -664,7 +698,11 @@ impl PreAggExecState {
             }
 
             // --- Accumulate ---
-            if is_grouped {
+            if let Some(staging) = gpu_staging.as_mut() {
+                // SAFETY: slot is materialized and dim_match_indices came
+                // from successful dimension probes.
+                unsafe { self.stage_gpu_partial_row(staging, slot, &dim_match_indices) };
+            } else if is_grouped {
                 // SAFETY: slot is materialized.
                 let group_key = unsafe { self.build_group_key_slot(slot, &dim_match_indices) };
                 let accums = self
@@ -689,14 +727,165 @@ impl PreAggExecState {
         }
 
         self.rows_dispatched = rows_scanned;
+        if let Some(staging) = gpu_staging {
+            self.dispatch_gpu_grouped_partial(staging);
+        }
         pgrx::debug1!(
             "pg_accel: preagg slot-scan complete: {} fact rows, {} groups",
             rows_scanned,
-            if is_grouped {
+            if let Some(gr) = &self.gpu_grouped_result {
+                gr.group_count
+            } else if is_grouped {
                 self.grouped_accums.len()
             } else {
                 1
             }
+        );
+    }
+
+    /// Stage one joined row into the GPU partial hash-agg input buffers.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be materialized. `dim_match_indices` must be the
+    /// successful probe result for this row.
+    unsafe fn stage_gpu_partial_row(
+        &self,
+        staging: &mut PreAggGpuPartialStaging,
+        slot: *mut pg_sys::TupleTableSlot,
+        dim_match_indices: &[u32],
+    ) {
+        let Some(group_key) = self.group_keys.first() else {
+            return;
+        };
+        let Some(key_type) = group_key_type_tag(group_key.type_oid) else {
+            return;
+        };
+        staging.key_type = key_type;
+        let key = unsafe { self.read_group_key_i64_slot(slot, group_key, dim_match_indices) };
+        staging.key_null_mask.push(u8::from(key.is_none()));
+        append_group_key_bytes(
+            &mut staging.key_buf,
+            key.unwrap_or(0),
+            key_type,
+            group_key.type_oid,
+        );
+
+        for (i, desc) in self.agg_descs.iter().enumerate() {
+            if matches!(desc.op, AggOp::Count) && desc.attno <= 0 {
+                staging.value_bufs[i].extend_from_slice(&0f64.to_ne_bytes());
+                staging.value_null_masks[i].push(0);
+                staging.value_type_tags[i] = 0;
+                continue;
+            }
+
+            let Some(info) = self.fact_agg_infos.get(i) else {
+                append_null_value_bytes(&mut staging.value_bufs[i], 0);
+                staging.value_null_masks[i].push(1);
+                continue;
+            };
+            if info.typid == pg_sys::InvalidOid {
+                append_null_value_bytes(&mut staging.value_bufs[i], 0);
+                staging.value_null_masks[i].push(1);
+                continue;
+            }
+
+            let val_tag = oid_to_val_tag(info.typid);
+            staging.value_type_tags[i] = val_tag;
+            let slot_attno = info.att_index() as i32 + 1;
+            let idx = (slot_attno - 1) as usize;
+            let is_null = unsafe { *(*slot).tts_isnull.add(idx) };
+            staging.value_null_masks[i].push(u8::from(is_null));
+            if is_null {
+                append_null_value_bytes(&mut staging.value_bufs[i], val_tag);
+            } else {
+                let datum = unsafe { *(*slot).tts_values.add(idx) };
+                append_value_bytes_for_hashagg(
+                    &mut staging.value_bufs[i],
+                    datum,
+                    val_tag,
+                    info.typid,
+                );
+            }
+        }
+
+        staging.row_count += 1;
+    }
+
+    fn dispatch_gpu_grouped_partial(&mut self, staging: PreAggGpuPartialStaging) {
+        if staging.row_count == 0 {
+            return;
+        }
+
+        let is_partial = self.partial.is_some();
+        let ffi_agg_cols: Vec<PgaccelAggCol> = self
+            .agg_descs
+            .iter()
+            .enumerate()
+            .map(|(i, col)| PgaccelAggCol {
+                func: if is_partial {
+                    agg_op_to_ffi_partial(col.op)
+                } else {
+                    agg_op_to_ffi(col.op)
+                },
+                col_idx: if col.op == AggOp::Count && col.attno <= 0 {
+                    usize::MAX
+                } else {
+                    i
+                },
+            })
+            .collect();
+        let value_col_ptrs: Vec<*const std::ffi::c_void> = staging
+            .value_bufs
+            .iter()
+            .map(|buf| buf.as_ptr().cast::<std::ffi::c_void>())
+            .collect();
+        let value_null_ptrs: Vec<*const u8> =
+            staging.value_null_masks.iter().map(Vec::as_ptr).collect();
+
+        let dispatch_start = std::time::Instant::now();
+        let result = if is_partial {
+            gpu::hash_agg_execute_partial(
+                staging.key_buf.as_ptr().cast(),
+                staging.key_null_mask.as_ptr(),
+                staging.row_count,
+                staging.key_type,
+                &value_col_ptrs,
+                &value_null_ptrs,
+                &staging.value_type_tags,
+                &ffi_agg_cols,
+            )
+        } else {
+            gpu::hash_agg_execute(
+                staging.key_buf.as_ptr().cast(),
+                staging.key_null_mask.as_ptr(),
+                staging.row_count,
+                staging.key_type,
+                &value_col_ptrs,
+                &value_null_ptrs,
+                &staging.value_type_tags,
+                &ffi_agg_cols,
+            )
+        };
+        let Some(result) = result else {
+            pgrx::error!(
+                "pg_accel: PreAgg GPU hash-agg failed; refusing CPU fallback. rows={}",
+                staging.row_count,
+            );
+        };
+        self.dispatch_time_us += dispatch_start.elapsed().as_micros() as u64;
+
+        let group_count = result.group_count();
+        self.gpu_grouped_result = Some(PreAggGpuGroupedResult {
+            result,
+            next_group: 0,
+            group_count,
+            key_type: staging.key_type,
+        });
+        pgrx::debug1!(
+            "pg_accel: preagg GPU hash-agg dispatched: {} input rows, {} groups",
+            staging.row_count,
+            group_count,
         );
     }
 
@@ -799,6 +988,52 @@ impl PreAggExecState {
             }
         }
         key
+    }
+
+    unsafe fn read_group_key_i64_slot(
+        &self,
+        slot: *mut pg_sys::TupleTableSlot,
+        gk: &GroupKeyDesc,
+        dim_match_indices: &[u32],
+    ) -> Option<i64> {
+        if gk.source == 0 {
+            for (attno, info) in &self.fact_group_key_infos {
+                if *attno == gk.attno {
+                    if info.typid == pg_sys::InvalidOid {
+                        return None;
+                    }
+                    let slot_attno = info.att_index() as i32 + 1;
+                    return unsafe { slot_read_i64(slot, slot_attno, info.typid) };
+                }
+            }
+            for (idx, depth) in self.depths.iter().enumerate() {
+                if depth.outer_attno == gk.attno
+                    && let Some(info) = self.fact_join_key_infos.get(idx)
+                {
+                    if info.typid == pg_sys::InvalidOid {
+                        return None;
+                    }
+                    let slot_attno = info.att_index() as i32 + 1;
+                    return unsafe { slot_read_i64(slot, slot_attno, info.typid) };
+                }
+            }
+            return None;
+        }
+
+        let depth_idx = (gk.source - 1) as usize;
+        let dim = self.dim_tables.get(depth_idx)?;
+        let row_idx = *dim_match_indices.get(depth_idx)? as usize;
+        let depth = self.depths.get(depth_idx)?;
+        let col_idx = depth
+            .group_col_attnos
+            .iter()
+            .position(|&a| a == gk.attno)
+            .and_then(|pos| dim.group_col_indices.get(pos).copied())?;
+        let col = dim.columns.get(col_idx)?;
+        if row_idx >= col.null_mask.len() || col.null_mask[row_idx] {
+            return None;
+        }
+        col.values_i64.get(row_idx).copied()
     }
 
     /// Extract a fact-side group key value from a materialized slot.
@@ -1004,6 +1239,302 @@ impl PreAggExecState {
         unsafe { pg_sys::ExecStoreVirtualTuple(result_slot) };
         result_slot
     }
+
+    /// Emit one finalized grouped row from the GPU hash-agg result.
+    ///
+    /// # Safety
+    ///
+    /// `result_slot` must be a valid `TupleTableSlot`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    unsafe fn emit_grouped_result_gpu(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let Some(gr) = self.gpu_grouped_result.as_mut() else {
+            return std::ptr::null_mut();
+        };
+        if gr.next_group >= gr.group_count {
+            return std::ptr::null_mut();
+        }
+        let group_idx = gr.next_group;
+        gr.next_group += 1;
+
+        unsafe { pg_sys::ExecClearTuple(result_slot) };
+        let values = unsafe { (*result_slot).tts_values };
+        let isnull = unsafe { (*result_slot).tts_isnull };
+
+        let Some(gk) = self.group_keys.first() else {
+            return std::ptr::null_mut();
+        };
+        unsafe {
+            if let Some(datum) = group_key_datum_from_gpu(&gr.result, group_idx, gr.key_type, gk) {
+                *values.add(0) = datum;
+                *isnull.add(0) = false;
+            } else {
+                *values.add(0) = pg_sys::Datum::from(0u64);
+                *isnull.add(0) = true;
+            }
+        }
+
+        for (agg_idx, desc) in self.agg_descs.iter().enumerate() {
+            let col = self.group_keys.len() + agg_idx;
+            let Some(raw_f64) = gr
+                .result
+                .results(agg_idx)
+                .and_then(|results| results.get(group_idx).copied())
+            else {
+                unsafe {
+                    *values.add(col) = pg_sys::Datum::from(0u64);
+                    *isnull.add(col) = true;
+                }
+                continue;
+            };
+
+            let mut accum = AggAccum::new(desc.op);
+            match desc.op {
+                AggOp::Count => {
+                    accum.count = raw_f64 as i64;
+                }
+                AggOp::Min => {
+                    accum.min = raw_f64;
+                    accum.count = 1;
+                }
+                AggOp::Max => {
+                    accum.max = raw_f64;
+                    accum.count = 1;
+                }
+                _ => {
+                    accum.sum = raw_f64;
+                    accum.count = 1;
+                }
+            }
+            let (datum, is_null) = encode_agg_result(&accum, desc.type_oid);
+            unsafe {
+                *values.add(col) = datum;
+                *isnull.add(col) = is_null;
+            }
+        }
+
+        unsafe { pg_sys::ExecStoreVirtualTuple(result_slot) };
+        result_slot
+    }
+
+    /// Emit one partial-state row from the GPU hash-agg partial result.
+    ///
+    /// # Safety
+    ///
+    /// `result_slot` must be a valid `TupleTableSlot`.
+    unsafe fn emit_grouped_partial_gpu(
+        &mut self,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        let Some(gr) = self.gpu_grouped_result.as_mut() else {
+            return std::ptr::null_mut();
+        };
+        if gr.next_group >= gr.group_count {
+            return std::ptr::null_mut();
+        }
+        let group_idx = gr.next_group;
+        gr.next_group += 1;
+
+        unsafe { pg_sys::ExecClearTuple(result_slot) };
+        let values = unsafe { (*result_slot).tts_values };
+        let isnull = unsafe { (*result_slot).tts_isnull };
+
+        let Some(gk) = self.group_keys.first() else {
+            return std::ptr::null_mut();
+        };
+        unsafe {
+            if let Some(datum) = group_key_datum_from_gpu(&gr.result, group_idx, gr.key_type, gk) {
+                *values.add(0) = datum;
+                *isnull.add(0) = false;
+            } else {
+                *values.add(0) = pg_sys::Datum::from(0u64);
+                *isnull.add(0) = true;
+            }
+        }
+
+        if let Some(partial) = self.partial.as_mut() {
+            for (agg_idx, acc) in partial.per_column_accumulators.iter_mut().enumerate() {
+                *acc = ColumnAccumulator::default();
+                let width = gr.result.partial_width(agg_idx);
+                let Some(parts) = gr.result.partial_results(agg_idx) else {
+                    continue;
+                };
+                let base = group_idx * width;
+                if base >= parts.len() {
+                    continue;
+                }
+                match width {
+                    1 => {
+                        let lane = parts[base];
+                        match self.agg_descs.get(agg_idx).map(|d| d.op) {
+                            Some(AggOp::Count) => {
+                                acc.count = lane.max(0.0) as u64;
+                                acc.has_value = true;
+                            }
+                            Some(AggOp::Min) => {
+                                acc.sum = lane;
+                                acc.min_val = lane;
+                                acc.count = 1;
+                                acc.has_value = true;
+                            }
+                            Some(AggOp::Max) => {
+                                acc.sum = lane;
+                                acc.max_val = lane;
+                                acc.count = 1;
+                                acc.has_value = true;
+                            }
+                            _ => {
+                                acc.sum = lane;
+                                acc.count = 1;
+                                acc.has_value = true;
+                            }
+                        }
+                    }
+                    2 => {
+                        acc.count = parts[base].max(0.0) as u64;
+                        acc.sum = parts.get(base + 1).copied().unwrap_or(0.0);
+                        acc.has_value = acc.count > 0;
+                    }
+                    3 => {
+                        acc.count = parts[base].max(0.0) as u64;
+                        acc.sum = parts.get(base + 1).copied().unwrap_or(0.0);
+                        acc.sum_sq = parts.get(base + 2).copied().unwrap_or(0.0);
+                        acc.has_value = acc.count > 0;
+                    }
+                    _ => {}
+                }
+            }
+            unsafe { partial.finalize_partial(result_slot, self.group_keys.len()) };
+        }
+
+        unsafe { pg_sys::ExecStoreVirtualTuple(result_slot) };
+        result_slot
+    }
+}
+
+struct PreAggGpuPartialStaging {
+    key_buf: Vec<u8>,
+    key_null_mask: Vec<u8>,
+    key_type: i32,
+    value_bufs: Vec<Vec<u8>>,
+    value_null_masks: Vec<Vec<u8>>,
+    value_type_tags: Vec<i32>,
+    row_count: usize,
+}
+
+impl PreAggGpuPartialStaging {
+    fn new(num_aggs: usize) -> Self {
+        Self {
+            key_buf: Vec::new(),
+            key_null_mask: Vec::new(),
+            key_type: 0,
+            value_bufs: vec![Vec::new(); num_aggs],
+            value_null_masks: vec![Vec::new(); num_aggs],
+            value_type_tags: vec![0; num_aggs],
+            row_count: 0,
+        }
+    }
+}
+
+struct PreAggGpuGroupedResult {
+    result: HashAggResult,
+    next_group: usize,
+    group_count: usize,
+    key_type: i32,
+}
+
+fn group_key_type_tag(type_oid: pg_sys::Oid) -> Option<i32> {
+    match type_oid {
+        pg_sys::INT2OID | pg_sys::INT4OID => Some(0),
+        pg_sys::INT8OID => Some(1),
+        pg_sys::FLOAT4OID | pg_sys::FLOAT8OID => Some(2),
+        _ => None,
+    }
+}
+
+fn append_group_key_bytes(buf: &mut Vec<u8>, key: i64, key_type: i32, type_oid: pg_sys::Oid) {
+    match key_type {
+        0 => {
+            let val = match type_oid {
+                pg_sys::INT2OID => (key as i16) as i32,
+                _ => key as i32,
+            };
+            buf.extend_from_slice(&val.to_ne_bytes());
+        }
+        1 => buf.extend_from_slice(&key.to_ne_bytes()),
+        2 => {
+            let val = f64::from_bits(key as u64);
+            buf.extend_from_slice(&val.to_ne_bytes());
+        }
+        _ => {}
+    }
+}
+
+fn append_null_value_bytes(buf: &mut Vec<u8>, val_tag: i32) {
+    match val_tag {
+        1 => buf.push(0),
+        2 | 4 => buf.extend_from_slice(&[0u8; 4]),
+        3 | 5 => buf.extend_from_slice(&[0u8; 8]),
+        _ => buf.extend_from_slice(&[0u8; 8]),
+    }
+}
+
+fn append_value_bytes_for_hashagg(
+    buf: &mut Vec<u8>,
+    datum: pg_sys::Datum,
+    val_tag: i32,
+    type_oid: pg_sys::Oid,
+) {
+    let raw = datum.value();
+    match val_tag {
+        1 => buf.push(u8::from(raw != 0)),
+        2 => {
+            let val = match type_oid {
+                pg_sys::INT2OID => (raw as i16) as i32,
+                _ => raw as i32,
+            };
+            buf.extend_from_slice(&val.to_ne_bytes());
+        }
+        3 => buf.extend_from_slice(&(raw as i64).to_ne_bytes()),
+        4 => buf.extend_from_slice(&f32::from_bits(raw as u32).to_ne_bytes()),
+        5 => buf.extend_from_slice(&f64::from_bits(raw as u64).to_ne_bytes()),
+        _ => buf.extend_from_slice(&[0u8; 8]),
+    }
+}
+
+unsafe fn group_key_datum_from_gpu(
+    result: &HashAggResult,
+    group_idx: usize,
+    key_type: i32,
+    gk: &GroupKeyDesc,
+) -> Option<pg_sys::Datum> {
+    let keys_ptr = result.group_keys_ptr();
+    if keys_ptr.is_null() {
+        return None;
+    }
+    Some(match key_type {
+        0 => {
+            let key = unsafe { *(keys_ptr.cast::<i32>()).add(group_idx) };
+            match gk.type_oid {
+                pg_sys::INT2OID => pg_sys::Datum::from(key as i16),
+                _ => pg_sys::Datum::from(key),
+            }
+        }
+        1 => {
+            let key = unsafe { *(keys_ptr.cast::<i64>()).add(group_idx) };
+            pg_sys::Datum::from(key)
+        }
+        2 => {
+            let key = unsafe { *(keys_ptr.cast::<f64>()).add(group_idx) };
+            match gk.type_oid {
+                pg_sys::FLOAT4OID => pg_sys::Datum::from((key as f32).to_bits()),
+                _ => pg_sys::Datum::from(key.to_bits()),
+            }
+        }
+        _ => return None,
+    })
 }
 
 impl crate::engine::executor::state::ExecutorState for PreAggExecState {

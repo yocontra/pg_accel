@@ -15,6 +15,7 @@ mod sort_variants;
 // --- GPU HashJoin ---
 mod gpu_hashjoin_filter;
 mod gpu_hashjoin_large_build;
+mod gpu_nlj_between;
 mod hash_join;
 mod hashjoin_sweep;
 // --- GPU Spatial ---
@@ -76,6 +77,7 @@ pub use gpu_expr_null_heavy::GpuExprNullHeavy;
 pub use gpu_hashagg_med_card::GpuHashaggMedCard;
 pub use gpu_hashjoin_filter::GpuHashjoinFilter;
 pub use gpu_hashjoin_large_build::GpuHashjoinLargeBuild;
+pub use gpu_nlj_between::GpuNljBetween;
 pub use gpu_reduce_scaling::GpuReduceScaling;
 pub use gpu_reduce_sum::GpuReduceSum;
 pub use gpu_sort_multikey::GpuSortMultikey;
@@ -227,6 +229,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(HashJoin),
         Box::new(GpuHashjoinLargeBuild),
         Box::new(GpuHashjoinFilter),
+        Box::new(GpuNljBetween),
         // --- GPU HashJoin (sweep) ---
         Box::new(hashjoin_sweep::HashJoinSweep {
             name: "hashjoin_100_1m",
@@ -818,12 +821,6 @@ pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
         "h3_latlng_res15",
         "h3_fp64_ops",
     ];
-    // `h3_srf_grid_disk` is the target-list-SRF win when planner gates accept
-    // the shape. Threshold is intentionally lower (1.1x) because the SRF path
-    // is newer and the 100K cap on its row scales (see
-    // `H3SrfGridDisk::row_scales`) means we have less wall-clock evidence
-    // than the bulk lanes.
-    const SRF_VARLEN_WINNERS: &[&str] = &["h3_srf_grid_disk"];
     // Parity / quarantined lanes. The h3 adapter intentionally does not
     // register these names for normal planner exposure (see
     // `pg_accel/src/adapters/h3.rs` /
@@ -836,15 +833,15 @@ pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
         "h3_dist_near",
         "h3_dist_far",
         "h3_parent_deep",
+        // Target-list SRF expansion returns a large row set to PostgreSQL.
+        // Keep it native until downstream aggregate/sort work can stay
+        // GPU-resident; the executor/kernel remain covered by focused tests.
+        "h3_srf_grid_disk",
     ];
 
     if LATLNG_TO_CELL_WINNERS.contains(&name) {
         Some(H3LaneClass::Winning {
             min_warm_speedup: 1.5,
-        })
-    } else if SRF_VARLEN_WINNERS.contains(&name) {
-        Some(H3LaneClass::Winning {
-            min_warm_speedup: 1.1,
         })
     } else if PARITY_LANES.contains(&name) {
         Some(H3LaneClass::Parity)
@@ -887,7 +884,6 @@ pub fn h3_winning_lane_names() -> Vec<&'static str> {
         "h3_bulk",
         "h3_resolution_sweep",
         "h3_latlng_res15",
-        "h3_srf_grid_disk",
         "h3_fp64_ops",
     ]
 }
@@ -904,6 +900,7 @@ pub fn h3_parity_lane_names() -> Vec<&'static str> {
         "h3_dist_near",
         "h3_dist_far",
         "h3_parent_deep",
+        "h3_srf_grid_disk",
     ]
 }
 

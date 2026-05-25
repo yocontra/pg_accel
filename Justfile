@@ -6,7 +6,7 @@ default:
 
 # Install repo-local PostgreSQL, test extensions, and Rust tooling (run once on a fresh clone).
 setup: setup-tools setup-pg-source setup-pg-extensions setup-pgrx setup-hooks
-    @echo "Setup complete. Run 'ACPP_BACKEND=cuda just setup-gpu' on CUDA Linux, or 'ACPP_BACKEND=metal just setup-gpu' on Apple Silicon."
+    @echo "Setup complete. Run 'ACPP_BACKEND=cuda just setup-gpu' on CUDA Linux, or 'just setup-gpu-metal' on Apple Silicon."
 
 # Install prek (Rust-native pre-commit drop-in) and wire up its git hooks
 # from .pre-commit-config.yaml. Idempotent — safe to re-run.
@@ -57,10 +57,9 @@ setup-system-deps:
         Darwin)
             printf '%s\n' \
                 "Install Xcode command line tools and Homebrew packages: brew install postgis." \
-                "Provide a recent LLVM/lld toolchain via LLVM_PREFIX/ACPP_LLD_PATH." \
+                "For Metal runs, install a supported LLVM/lld toolchain: brew install llvm@20 lld." \
                 "Then run:" \
-                "  ACPP_BACKEND=metal just setup-gpu-metal-headers" \
-                "  ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu"
+                "  just setup-gpu-metal"
             ;;
         *)
             echo "Install a C/C++ toolchain, curl, make, cmake, git, and Rust."
@@ -174,6 +173,13 @@ setup-pgrx-matrix: setup-pgrx
 setup-gpu: setup-gpu-acpp
     @echo "GPU setup complete. Run ./.pgaccel/acpp/current/bin/acpp-info to verify."
 
+# Build a repo-local AdaptiveCpp Metal toolchain on macOS.
+setup-gpu-metal: setup-gpu-metal-headers
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ACPP_BACKEND=metal ./scripts/setup_acpp.sh
+    echo "GPU Metal setup complete. Run ./.pgaccel/acpp/current/bin/acpp-info to verify."
+
 # Download Apple metal-cpp headers
 setup-gpu-metal-headers:
     #!/usr/bin/env bash
@@ -185,17 +191,34 @@ setup-gpu-metal-headers:
     fi
     echo "Downloading Apple metal-cpp headers..."
     python3 -c "
-    import urllib.request, zipfile, os
+    import pathlib
+    import shutil
+    import urllib.request
+    import zipfile
+
+    archive = pathlib.Path('/tmp/metal-cpp.zip')
+    extract_dir = pathlib.Path('/tmp/metal-cpp')
+    shutil.rmtree(extract_dir, ignore_errors=True)
     urllib.request.urlretrieve(
         'https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15.2_iOS18.2.zip',
-        '/tmp/metal-cpp.zip')
-    with zipfile.ZipFile('/tmp/metal-cpp.zip', 'r') as z:
-        z.extractall('/tmp/metal-cpp')
+        archive)
+    with zipfile.ZipFile(archive, 'r') as z:
+        z.extractall(extract_dir)
+
+    header = next(extract_dir.glob('**/Metal/Metal.hpp'), None)
+    if header is None:
+        raise SystemExit('metal-cpp archive did not contain Metal/Metal.hpp')
+    source_root = header.parent.parent
+    target_root = pathlib.Path('$root') / 'metal-cpp'
+    target_root.mkdir(parents=True, exist_ok=True)
+    for name in ('Metal', 'Foundation', 'QuartzCore'):
+        source = source_root / name
+        target = target_root / name
+        if not source.exists():
+            raise SystemExit(f'metal-cpp archive missing {name}')
+        shutil.rmtree(target, ignore_errors=True)
+        shutil.copytree(source, target)
     "
-    mkdir -p "$root/metal-cpp"
-    cp -r /tmp/metal-cpp/Metal "$root/metal-cpp/"
-    cp -r /tmp/metal-cpp/Foundation "$root/metal-cpp/"
-    cp -r /tmp/metal-cpp/QuartzCore "$root/metal-cpp/"
     rm -rf /tmp/metal-cpp /tmp/metal-cpp.zip
     echo "metal-cpp headers installed to $root/metal-cpp"
 
@@ -466,8 +489,25 @@ clear-jit:
     set -euo pipefail
     cache_dir="$HOME/.acpp/apps/global/jit-cache"
     if [ -d "$cache_dir" ]; then
-        find "$cache_dir" -mindepth 1 -delete
-        echo "cleared $cache_dir"
+        mkdir -p .pgaccel/logs
+        log=".pgaccel/logs/clear-jit-$(date +%Y%m%d-%H%M%S).log"
+        total=0
+        deleted=0
+        failed=0
+        while IFS= read -r -d '' entry; do
+            total=$((total + 1))
+            if rm -rf "$entry" >>"$log" 2>&1; then
+                deleted=$((deleted + 1))
+            else
+                failed=$((failed + 1))
+            fi
+        done < <(find "$cache_dir" -mindepth 1 -maxdepth 1 -print0)
+        if [ "$failed" -gt 0 ]; then
+            echo "clear-jit: deleted $deleted/$total entries; failed $failed (raw log: $log)" >&2
+            exit 1
+        fi
+        rm -f "$log"
+        echo "cleared $cache_dir ($deleted entries)"
     else
         echo "no JIT cache at $cache_dir (nothing to clear)"
     fi
@@ -486,30 +526,41 @@ gpu-build:
         exit 1
     }
     cmake -B pgaccel-kernels/build -S pgaccel-kernels \
-        -DCMAKE_PREFIX_PATH="$acpp_prefix" \
+        -DAdaptiveCpp_DIR="$acpp_prefix/lib/cmake/AdaptiveCpp" \
         ${PGACCEL_KERNEL_CMAKE_FLAGS:-}
     cmake --build pgaccel-kernels/build --parallel
 
-# Run GPU kernel tests
+# Run standalone GPU kernel tests (warm cache, quiet console).
 gpu-test: gpu-build
-    just clear-jit
-    ./pgaccel-kernels/build/test_device \
-    && ./pgaccel-kernels/build/test_bbox \
-    && ./pgaccel-kernels/build/test_spatial \
-    && ./pgaccel-kernels/build/test_spatial_dispatch \
-    && ./pgaccel-kernels/build/test_h3 \
-    && ./pgaccel-kernels/build/test_raster \
-    && ./pgaccel-kernels/build/test_correctness \
-    && ./pgaccel-kernels/build/test_exec_gpu \
-    && ./pgaccel-kernels/build/test_hash_agg_keys \
-    && ./pgaccel-kernels/build/test_fork \
-    && ./pgaccel-kernels/build/test_fork_warmed \
-    && ./pgaccel-kernels/build/test_fork_cold \
-    && ./pgaccel-kernels/build/test_sycl_basic \
-    && ./pgaccel-kernels/build/test_reduce_stats \
-    && ./pgaccel-kernels/build/test_hash_agg_partial \
-    && ./pgaccel-kernels/build/test_window \
-    && ./pgaccel-kernels/build/test_expr_templates
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p .pgaccel/logs
+    tests=(
+        device
+        bbox
+        spatial
+        spatial_dispatch
+        h3
+        raster
+        correctness
+        exec_gpu
+        hash_agg_keys
+        fork
+        fork_warmed
+        fork_cold
+        sycl_basic
+        reduce_stats
+        hash_agg_partial
+        window
+        expr_templates
+    )
+    for test_name in "${tests[@]}"; do
+        log=".pgaccel/logs/gpu-test-${test_name}-$(date +%Y%m%d-%H%M%S).log"
+        python3 scripts/filter_gpu_output.py \
+            --label "test_${test_name}" \
+            --log "$log" \
+            -- "./pgaccel-kernels/build/test_${test_name}"
+    done
 
 # Wipe the AdaptiveCpp Metal SSCP JIT cache, then run a single named
 # kernel test binary with a 5-minute timeout. Use this from the
@@ -523,27 +574,22 @@ gpu-test: gpu-build
 #   just gpu-test-cold correctness     # runs test_correctness cold
 #   just gpu-test-cold spatial 60      # custom timeout in seconds
 #
-# Output is teed to /tmp/gpu-test-cold-<name>.log and the FAIL/Results
-# summary is grep'd at the end so you can see pass/fail without
-# scrolling through JIT compile warnings.
+# Run one GPU kernel test cold with quiet console and raw log preservation.
 gpu-test-cold name timeout_s="300":
     #!/usr/bin/env bash
     set -euo pipefail
     just clear-jit
-    log="/tmp/gpu-test-cold-{{name}}.log"
-    cd pgaccel-kernels/build
-    timeout {{timeout_s}} ./test_{{name}} >"$log" 2>&1 || rc=$?
-    echo "--- summary (last 15 + Results/FAIL) ---"
-    tail -15 "$log" || true
-    echo "---"
-    grep -E "Results:|FAIL:" "$log" || echo "(no Results/FAIL lines found)"
-    exit "${rc:-0}"
+    mkdir -p .pgaccel/logs
+    log=".pgaccel/logs/gpu-test-cold-{{name}}-$(date +%Y%m%d-%H%M%S).log"
+    python3 scripts/filter_gpu_output.py \
+        --label "test_{{name}} cold" \
+        --log "$log" \
+        -- timeout {{timeout_s}} "./pgaccel-kernels/build/test_{{name}}"
 
-# Wipe JIT cache and run the full standalone GPU test suite cold.
-# Same single-invocation, single-prompt benefit as gpu-test-cold for the
-# whole suite. Use this for "is the kernel layer healthy" checks
-# between large changes.
-gpu-test-cold-all: clear-jit gpu-test
+# Run the full standalone GPU test suite cold.
+gpu-test-cold-all:
+    just clear-jit
+    just gpu-test
 
 # 8-worker x 20-iteration fork stress test for the Metal MTLBinaryArchive
 # fork-safety path. Acceptance gate for TODO.md Phase 2 "Metal pipeline-state
@@ -552,22 +598,20 @@ gpu-test-cold-all: clear-jit gpu-test
 # Override sizing with environment:
 #   PGACCEL_FORK_STRESS_WORKERS=16 PGACCEL_FORK_STRESS_ITERS=40 just gpu-stress-archive
 #
-# Always cold-starts (clears the JIT cache) so the archive build path is
-# actually exercised. Output is teed to /tmp/gpu-stress-archive.log for
-# durable evidence.
+# Always cold-starts so the archive build path is exercised.
+# Run the Metal archive fork-safety stress test with quiet console output.
 gpu-stress-archive workers="8" iters="20":
     #!/usr/bin/env bash
     set -euo pipefail
     just clear-jit
-    log="/tmp/gpu-stress-archive.log"
-    echo "=== gpu-stress-archive workers={{workers}} iters={{iters}} ===" | tee "$log"
-    PGACCEL_FORK_STRESS_WORKERS={{workers}} PGACCEL_FORK_STRESS_ITERS={{iters}} \
-        timeout 600 ./pgaccel-kernels/build/test_fork_archive_stress 2>&1 | tee -a "$log" || rc=$?
-    echo "--- summary (last 25 lines) ---"
-    tail -25 "$log"
-    echo "---"
-    grep -E "RESULT:|xpc_compiler_service_hits|pipeline_state_failures|archive_build_failures" "$log" || true
-    exit "${rc:-0}"
+    mkdir -p .pgaccel/logs
+    log=".pgaccel/logs/gpu-stress-archive-$(date +%Y%m%d-%H%M%S).log"
+    echo "=== gpu-stress-archive workers={{workers}} iters={{iters}} ==="
+    python3 scripts/filter_gpu_output.py \
+        --label "gpu-stress-archive" \
+        --log "$log" \
+        -- env PGACCEL_FORK_STRESS_WORKERS={{workers}} PGACCEL_FORK_STRESS_ITERS={{iters}} \
+            timeout 600 ./pgaccel-kernels/build/test_fork_archive_stress
 
 # Audit pgaccel-kernels/src/*.cpp for `extern "C" pgaccel_*` symbols
 # that are labelled GPU-accelerated but whose body is a host-side
@@ -692,6 +736,16 @@ install-pg-accel pg="":
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
     cargo pgrx stop --package pg_accel "pg$pg" >/dev/null 2>&1 || true
     PG_CONFIG="$pg_config" cargo pgrx install --package pg_accel --release --no-default-features --features "pg$pg" --pg-config "$pg_config"
+    conf="$(pg_accel_pgrx_data_dir_for_pg "$pg")/postgresql.conf"
+    if [ -f "$conf" ]; then
+        if grep -Eq "^[[:space:]]*#[[:space:]]*shared_preload_libraries[[:space:]]*=[[:space:]]*'pg_accel'[[:space:]]*# disabled by setup-pgrx until pg_accel is installed" "$conf"; then
+            tmp="$(mktemp "$conf.XXXXXX")"
+            sed "s|^[[:space:]]*#[[:space:]]*shared_preload_libraries[[:space:]]*=[[:space:]]*'pg_accel'[[:space:]]*# disabled by setup-pgrx until pg_accel is installed|shared_preload_libraries = 'pg_accel'|" "$conf" > "$tmp"
+            mv "$tmp" "$conf"
+        elif ! grep -Eq "^[[:space:]]*shared_preload_libraries[[:space:]]*=.*pg_accel" "$conf"; then
+            printf "\nshared_preload_libraries = 'pg_accel'\n" >> "$conf"
+        fi
+    fi
     cargo pgrx start --package pg_accel "pg$pg"
 
 # Install into the pgrx-managed cluster and prove a fresh CREATE EXTENSION path.

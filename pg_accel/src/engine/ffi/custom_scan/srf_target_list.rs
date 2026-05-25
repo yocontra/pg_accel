@@ -11,10 +11,10 @@
 //!    `node->custom_ps[0]` by `begin_custom_scan`), and prepares the
 //!    expansion buffer (initially empty).
 //! 2. `next_tuple(node)` implements the canonical PG ProjectSet expansion
-//!    semantics from `nodeProjectSet.c::ExecProjectSet`: pull one input
-//!    tuple from the child via `ExecProcNode`, dispatch the SRF, then
-//!    drain expanded rows one at a time. When the buffer is empty,
-//!    pull the next input row and re-dispatch.
+//!    semantics from `nodeProjectSet.c::ExecProjectSet`: pull a batch of input
+//!    tuples from the child via `ExecProcNode`, dispatch the SRF once for that
+//!    batch, then drain expanded rows one at a time. When the buffer is empty,
+//!    pull the next batch and re-dispatch.
 //! 3. `drop_state(executor)` reclaims the box from `end_custom_scan`.
 //!
 //! ## Output tuple shape
@@ -59,33 +59,42 @@ use crate::engine::registry::{self, OutputShape};
 /// row's passthrough Datums captured so we can emit one output tuple per
 /// expanded SRF row.
 struct ExpansionBuffer {
-    /// Per-output-position Datums copied from the source input slot. For
-    /// passthrough positions this is the value to repeat for every expanded
-    /// row; for the SRF position itself the entry is `(Datum::from(0u32), true)`
-    /// (placeholder, overwritten per row from `expansion`).
-    passthrough_row: Vec<(pg_sys::Datum, bool)>,
-    /// Per-row SRF expansion. Each entry is one expanded row's contribution
-    /// to the SRF column. For `OutputShape::VarLen` and `OutputShape::Scalar`
-    /// this is exactly one `(Datum, is_null)` pair per row. For
-    /// `OutputShape::Record { field_count }`, the SRF column itself becomes
-    /// a composite tuple synthesised via `heap_form_tuple` per row, so
-    /// `expansion[i]` is the resulting `(HeapTupleHeader Datum, false)` pair.
+    /// Per-input-row passthrough Datums captured from the child slot before
+    /// the child reuses it for the next `ExecProcNode` call.
+    passthrough_rows: Vec<Vec<(pg_sys::Datum, bool)>>,
+    /// CSR offsets into `expansion`. `offsets.len() == passthrough_rows.len()+1`.
+    /// Empty ranges represent PostgreSQL SRF "no output for this input row"
+    /// semantics, including strict NULL arguments.
+    offsets: Vec<u32>,
+    /// Flat SRF expansion Datums for the whole batch.
     expansion: Vec<(pg_sys::Datum, bool)>,
-    /// Cursor into `expansion`: next row index to emit.
-    cursor: usize,
+    /// Cursor into `expansion`: next flat output row to emit.
+    output_cursor: usize,
+    /// Cursor into `passthrough_rows`, advanced alongside `output_cursor`.
+    source_row_cursor: usize,
 }
 
 impl ExpansionBuffer {
     fn empty() -> Self {
         Self {
-            passthrough_row: Vec::new(),
+            passthrough_rows: Vec::new(),
+            offsets: vec![0],
             expansion: Vec::new(),
-            cursor: 0,
+            output_cursor: 0,
+            source_row_cursor: 0,
         }
     }
 
     fn is_exhausted(&self) -> bool {
-        self.cursor >= self.expansion.len()
+        self.output_cursor >= self.expansion.len()
+    }
+
+    fn advance_source_row(&mut self) {
+        while self.source_row_cursor + 1 < self.offsets.len()
+            && self.output_cursor >= self.offsets[self.source_row_cursor + 1] as usize
+        {
+            self.source_row_cursor += 1;
+        }
     }
 }
 
@@ -101,11 +110,17 @@ pub(super) struct SrfTargetListExecState {
     fmgr_info: pg_sys::FmgrInfo,
     /// Acceleration strategy resolved from the registry.
     strategy: crate::engine::registry::AccelStrategy,
+    /// Number of input child rows to collect before one GPU SRF dispatch.
+    batch_size: usize,
     /// Current expansion buffer for the most-recently-pulled input row.
     /// Empty (`expansion.is_empty()`) means "need next input row".
     expansion: ExpansionBuffer,
     /// Total emitted rows so far (EXPLAIN ANALYZE counter).
     rows_dispatched: u64,
+    /// Total GPU SRF dispatch batches so far (EXPLAIN ANALYZE counter).
+    batches_executed: u64,
+    /// Total wall-clock time spent inside SRF batch dispatch.
+    dispatch_time_us: u64,
     /// Set when the child plan signals EOF — subsequent `next_tuple` calls
     /// return cleared slots without further `ExecProcNode` calls.
     child_exhausted: bool,
@@ -128,7 +143,10 @@ pub(super) struct SrfTargetListExecState {
 /// Must be called on the main backend thread. `node` must be a valid
 /// `CustomScanState` whose `ss.ps.plan` is a `CustomScan` with an
 /// SRF-target-list-shaped `custom_private`.
-pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut c_void {
+pub(super) unsafe fn init_state(
+    node: *mut pg_sys::CustomScanState,
+    batch_size: usize,
+) -> *mut c_void {
     // SAFETY: node->ss.ps.plan is a valid CustomScan plan node set by
     // ExecInitCustomScan; custom_private layout was produced by
     // plan_custom_path_srf_target_list.
@@ -185,8 +203,11 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut c_vo
         output_shape: entry.output_shape,
         fmgr_info: fmgr_buf,
         strategy: entry.strategy,
+        batch_size: batch_size.max(1),
         expansion: ExpansionBuffer::empty(),
         rows_dispatched: 0,
+        batches_executed: 0,
+        dispatch_time_us: 0,
         child_exhausted: false,
     });
 
@@ -251,44 +272,15 @@ pub(super) unsafe fn next_tuple(
                 pg_sys::ExecClearTuple(slot);
                 return slot;
             }
-            let input_slot = pg_sys::ExecProcNode(child_state);
-            if input_slot.is_null() || tuple_is_null(input_slot) {
-                state.child_exhausted = true;
-                pg_sys::ExecClearTuple(slot);
-                return slot;
-            }
-            // Dispatch + populate state.expansion / state.passthrough_row.
-            // If the SRF emits zero rows, the loop continues to pull the next
-            // input row (matching nodeProjectSet.c's "no rows from this scan
-            // tuple, loop back" branch).
-            if !dispatch_and_buffer(state, input_slot) {
-                // Empty SRF output for this input: discard and continue loop.
+            // Dispatch + populate state.expansion for a batch. If every SRF
+            // range is empty, continue until either a later batch emits rows
+            // or the child reaches EOF.
+            if !dispatch_and_buffer_batch(state, child_state) {
                 continue;
             }
             // Buffer is non-empty: next iteration will hit the
             // !is_exhausted() arm and emit the first row.
         }
-    }
-}
-
-/// Mirror of PG's `ReleaseTupleDesc` macro
-/// (`/Users/contra/.pgrx/17.9/src/include/access/tupdesc.h`):
-/// only call `DecrTupleDescRefCount` when the tupdesc is refcounted
-/// (`tdrefcount >= 0`). Some `lookup_rowtype_tupdesc` returns are
-/// non-refcounted descriptors that live till process exit, in which case
-/// `Pin/Release` are no-ops.
-///
-/// # Safety
-/// `tupdesc` must be a valid `TupleDesc` obtained from a PG cache lookup.
-unsafe fn release_tupdesc_refcount(tupdesc: pg_sys::TupleDesc) {
-    if tupdesc.is_null() {
-        return;
-    }
-    // SAFETY: tupdesc is a valid TupleDescData; reading tdrefcount.
-    let refcount = unsafe { (*tupdesc).tdrefcount };
-    if refcount >= 0 {
-        // SAFETY: refcount semantics validated; safe on the main thread.
-        unsafe { pg_sys::DecrTupleDescRefCount(tupdesc) };
     }
 }
 
@@ -326,77 +318,91 @@ unsafe fn child_plan_state(node: *mut pg_sys::CustomScanState) -> *mut pg_sys::P
     unsafe { pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>() }
 }
 
-/// Dispatch the SRF for one input row, capturing the per-row passthrough
-/// values into `state.expansion.passthrough_row` and the SRF's expanded
-/// outputs into `state.expansion.expansion`.
-///
-/// Returns `true` when the SRF produced at least one output row (caller
-/// should drain via `emit_one_row`); `false` when the SRF emitted zero rows
-/// (caller should pull the next input row).
+/// Pull up to `batch_size` child rows, dispatch the SRF once, and buffer the
+/// returned CSR expansion. Returns `true` if at least one output row is ready
+/// to emit; `false` means the batch was empty or every input row had an empty
+/// SRF result.
 ///
 /// # Safety
-/// All operations execute on the main backend thread; `state` is borrowed
-/// mutably and `input_slot` is a fresh tuple from `ExecProcNode`.
-unsafe fn dispatch_and_buffer(
+/// `child_state` must be the valid child `PlanState` for this Custom Scan.
+unsafe fn dispatch_and_buffer_batch(
     state: &mut SrfTargetListExecState,
-    input_slot: *mut pg_sys::TupleTableSlot,
+    child_state: *mut pg_sys::PlanState,
 ) -> bool {
-    // Reset the expansion buffer.
     state.expansion = ExpansionBuffer::empty();
 
-    // Force materialization of the input slot's tts_values / tts_isnull.
-    // SAFETY: slot_getallattrs walks the slot's TupleDesc and fills the
-    // virtual arrays. Safe on the main backend thread.
-    unsafe {
-        pg_sys::slot_getallattrs(input_slot);
-    }
-
-    // Capture passthrough Datums by attno (1-based) from the input slot.
     let priv_data = &state.priv_data;
     let n_out = priv_data.passthrough_attnos.len();
-    let mut passthrough = Vec::with_capacity(n_out);
-    let input_natts = unsafe { (*(*input_slot).tts_tupleDescriptor).natts };
-    for &attno in &priv_data.passthrough_attnos {
-        if attno <= 0 || attno > input_natts {
-            // SRF position (attno == 0) or invalid attno → null placeholder.
-            passthrough.push((pg_sys::Datum::from(0u32), true));
-            continue;
+    let mut passthrough_rows: Vec<Vec<(pg_sys::Datum, bool)>> =
+        Vec::with_capacity(state.batch_size);
+    let mut batch: Vec<(pg_sys::Datum, bool)> = Vec::with_capacity(state.batch_size);
+    let mut has_dispatchable_arg = false;
+
+    while batch.len() < state.batch_size {
+        let input_slot = unsafe { pg_sys::ExecProcNode(child_state) };
+        if input_slot.is_null() || unsafe { tuple_is_null(input_slot) } {
+            state.child_exhausted = true;
+            break;
         }
-        // 1-based attno → 0-based array index.
-        let idx = (attno - 1) as usize;
-        // SAFETY: tts_values and tts_isnull arrays are sized to natts;
-        // idx is in bounds.
-        let datum = unsafe { *(*input_slot).tts_values.add(idx) };
-        let is_null = unsafe { *(*input_slot).tts_isnull.add(idx) };
-        passthrough.push((datum, is_null));
-    }
-    state.expansion.passthrough_row = passthrough;
 
-    // Extract the SRF arg from the input slot (1-based attno).
-    let srf_attno = priv_data.srf_arg_attno;
-    if srf_attno <= 0 || srf_attno > input_natts {
-        pgrx::warning!(
-            "pg_accel: srf_target_list dispatch: srf_arg_attno={} out of bounds \
-             for input natts={}; declining",
-            srf_attno,
-            input_natts,
-        );
+        unsafe {
+            pg_sys::slot_getallattrs(input_slot);
+        }
+        let input_desc = unsafe { (*input_slot).tts_tupleDescriptor };
+        let input_natts = if input_desc.is_null() {
+            0
+        } else {
+            unsafe { (*input_desc).natts }
+        };
+
+        let mut passthrough = Vec::with_capacity(n_out);
+        for &attno in &priv_data.passthrough_attnos {
+            if attno <= 0 || attno > input_natts {
+                passthrough.push((pg_sys::Datum::from(0usize), true));
+                continue;
+            }
+            let idx = (attno - 1) as usize;
+            let datum = unsafe { *(*input_slot).tts_values.add(idx) };
+            let is_null = unsafe { *(*input_slot).tts_isnull.add(idx) };
+            passthrough.push((datum, is_null));
+        }
+
+        let srf_attno = priv_data.srf_arg_attno;
+        if srf_attno <= 0 || srf_attno > input_natts {
+            pgrx::error!(
+                "pg_accel: srf_target_list batch dispatch: srf_arg_attno={} out of bounds \
+                 for input natts={}; planner/executor contract broken",
+                srf_attno,
+                input_natts,
+            );
+        }
+        let srf_arg_idx = (srf_attno - 1) as usize;
+        let srf_arg_datum = unsafe { *(*input_slot).tts_values.add(srf_arg_idx) };
+        let mut srf_arg_isnull = unsafe { *(*input_slot).tts_isnull.add(srf_arg_idx) };
+
+        // STRICT semantics: NULL argument produces an empty SRF range for the
+        // corresponding input row. Keep the row in the batch so dispatcher
+        // offsets remain aligned with input rows.
+        if srf_arg_isnull && state.fmgr_info.fn_strict {
+            srf_arg_isnull = true;
+        } else if !srf_arg_isnull && srf_arg_datum.value() != 0 {
+            has_dispatchable_arg = true;
+        }
+
+        passthrough_rows.push(passthrough);
+        batch.push((srf_arg_datum, srf_arg_isnull));
+    }
+
+    if batch.is_empty() {
         return false;
     }
-    let srf_arg_idx = (srf_attno - 1) as usize;
-    // SAFETY: srf_arg_idx is in bounds (checked above).
-    let srf_arg_datum = unsafe { *(*input_slot).tts_values.add(srf_arg_idx) };
-    let srf_arg_isnull = unsafe { *(*input_slot).tts_isnull.add(srf_arg_idx) };
 
-    // STRICT semantics: if the SRF arg is NULL and the function is strict,
-    // emit zero rows for this input (PG's ExecMakeFunctionResultSet behaviour).
-    if srf_arg_isnull && state.fmgr_info.fn_strict {
+    if !has_dispatchable_arg {
+        state.expansion.passthrough_rows = passthrough_rows;
+        state.expansion.offsets = vec![0; batch.len() + 1];
         return false;
     }
 
-    let batch: Vec<(pg_sys::Datum, bool)> = vec![(srf_arg_datum, srf_arg_isnull)];
-
-    // Convert qual_args (i64 + type_oid) into the dispatcher's expected shape.
     let qual_datums: Vec<(pg_sys::Datum, bool, pg_sys::Oid)> = priv_data
         .qual_args
         .iter()
@@ -407,8 +413,7 @@ unsafe fn dispatch_and_buffer(
         })
         .collect();
 
-    // SAFETY: dispatch::dispatch is safe on the main backend thread; the
-    // FmgrInfo was populated above from a valid pg_proc entry.
+    let started = std::time::Instant::now();
     let result = unsafe {
         dispatch::dispatch(
             state.strategy,
@@ -416,121 +421,41 @@ unsafe fn dispatch_and_buffer(
             &state.fmgr_info,
             state.fmgr_info.fn_strict,
             &qual_datums,
-            true, // skip_bbox: irrelevant for SRF dispatch
+            true,
         )
     };
+    state.batches_executed = state.batches_executed.saturating_add(1);
+    state.dispatch_time_us = state
+        .dispatch_time_us
+        .saturating_add(started.elapsed().as_micros() as u64);
 
-    // Map the dispatch outcome to per-row expanded Datums. For our 1-input-row
-    // dispatch:
-    //   - VarLen: offsets = [0, n_out]; datums[0..n_out] is the expansion
-    //   - Record: datums.len() == n_out * fields_per_row; we synthesize one
-    //     composite tuple per row via heap_form_tuple
-    //   - Scalar: 1 input → 1 output (single-emit SRF degenerates here)
-    //   - Deferred: zero rows
     match (state.output_shape, result) {
-        (OutputShape::VarLen, DispatchResult::AcceleratedVarLen { offsets: _, datums }) => {
-            if datums.is_empty() {
-                return false;
-            }
-            state.expansion.expansion = datums;
-            true
-        }
-        (
-            OutputShape::Record { field_count },
-            DispatchResult::AcceleratedRecord {
-                fields_per_row,
-                datums,
-            },
-        ) => {
-            // Validate shape. fields_per_row must match registry's field_count.
-            if fields_per_row != field_count || field_count == 0 {
-                pgrx::warning!(
-                    "pg_accel: srf_target_list dispatch: Record shape mismatch \
-                     (registry field_count={}, dispatched fields_per_row={})",
-                    field_count,
-                    fields_per_row,
+        (OutputShape::VarLen, DispatchResult::AcceleratedVarLen { offsets, datums }) => {
+            if offsets.len() != batch.len() + 1 {
+                pgrx::error!(
+                    "pg_accel: srf_target_list batch dispatch returned offsets.len()={} \
+                     for input batch len {}; refusing malformed GPU result",
+                    offsets.len(),
+                    batch.len(),
                 );
-                return false;
             }
-            let fc = field_count as usize;
-            if datums.len() % fc != 0 {
-                pgrx::warning!(
-                    "pg_accel: srf_target_list dispatch: Record datums.len()={} not \
-                     divisible by fields_per_row={}",
+            let total = offsets.last().copied().unwrap_or(0) as usize;
+            if total != datums.len() {
+                pgrx::error!(
+                    "pg_accel: srf_target_list batch dispatch returned total={} \
+                     but datums.len()={}; refusing malformed GPU result",
+                    total,
                     datums.len(),
-                    fc,
                 );
-                return false;
             }
-            let n_rows = datums.len() / fc;
-            if n_rows == 0 {
-                return false;
-            }
-            // Synthesize a composite tuple per row: heap_form_tuple over the
-            // SRF's output TupleDesc, wrapped as a Datum.
-            // SAFETY: TupleDescGetAttr / heap_form_tuple are safe on the main
-            // backend thread; the tupdesc must come from the SRF's declared
-            // return type. We resolve via get_func_rettype + lookup_rowtype_tupdesc.
-            let tupdesc = unsafe {
-                let rettype = pg_sys::get_func_rettype(state.priv_data.fn_oid);
-                if rettype == pg_sys::InvalidOid {
-                    pgrx::warning!(
-                        "pg_accel: srf_target_list dispatch: cannot resolve return type \
-                         for fn_oid={}; declining",
-                        u32::from(state.priv_data.fn_oid),
-                    );
-                    return false;
-                }
-                pg_sys::lookup_rowtype_tupdesc(rettype, -1)
-            };
-            if tupdesc.is_null() {
-                return false;
-            }
-            let mut expanded = Vec::with_capacity(n_rows);
-            for row_idx in 0..n_rows {
-                let base = row_idx * fc;
-                let mut values: Vec<pg_sys::Datum> = Vec::with_capacity(fc);
-                let mut nulls: Vec<bool> = Vec::with_capacity(fc);
-                for k in 0..fc {
-                    let (d, n) = datums[base + k];
-                    values.push(d);
-                    nulls.push(n);
-                }
-                // SAFETY: tupdesc is valid; values/nulls arrays are sized to natts.
-                let htup = unsafe {
-                    pg_sys::heap_form_tuple(tupdesc, values.as_mut_ptr(), nulls.as_mut_ptr())
-                };
-                if htup.is_null() {
-                    // SAFETY: release the tupdesc reference balancing the
-                    // lookup_rowtype_tupdesc above, mirroring PG's
-                    // ReleaseTupleDesc macro (only decrement when refcounted).
-                    unsafe { release_tupdesc_refcount(tupdesc) };
-                    return false;
-                }
-                // Wrap the HeapTupleHeader as a Datum (PG record format).
-                // SAFETY: htup->t_data points to a valid HeapTupleHeader after
-                // heap_form_tuple; HeapTupleHeaderGetDatum is the standard
-                // record-passing convention.
-                let header = unsafe { (*htup).t_data };
-                expanded.push((pg_sys::Datum::from(header as usize), false));
-            }
-            // SAFETY: balances the lookup_rowtype_tupdesc above; mirrors
-            // PG's ReleaseTupleDesc macro.
-            unsafe { release_tupdesc_refcount(tupdesc) };
-            state.expansion.expansion = expanded;
-            true
-        }
-        (OutputShape::Scalar, DispatchResult::Accelerated(datums)) => {
-            // Scalar SRF: 1 output per input. Stash and emit.
-            if datums.is_empty() {
-                return false;
-            }
+            state.expansion.passthrough_rows = passthrough_rows;
+            state.expansion.offsets = offsets;
             state.expansion.expansion = datums;
-            true
+            !state.expansion.expansion.is_empty()
         }
         (_, DispatchResult::Deferred) => {
             pgrx::error!(
-                "pg_accel: srf_target_list dispatch: deferred for fn_oid={} strategy={:?}; \
+                "pg_accel: srf_target_list batch dispatch deferred for fn_oid={} strategy={:?}; \
                  planner must decline instead of producing a non-GPU pg_accel plan",
                 u32::from(state.priv_data.fn_oid),
                 state.strategy,
@@ -538,8 +463,8 @@ unsafe fn dispatch_and_buffer(
         }
         (shape, result) => {
             pgrx::error!(
-                "pg_accel: srf_target_list dispatch: shape/result mismatch — \
-                 registry shape {:?} but dispatch returned variant index {:?}; refusing non-GPU fallback",
+                "pg_accel: srf_target_list batch dispatch shape/result mismatch: \
+                 registry shape {:?}, result {:?}; refusing non-GPU fallback",
                 shape,
                 std::mem::discriminant(&result),
             );
@@ -552,17 +477,23 @@ unsafe fn dispatch_and_buffer(
 ///
 /// # Safety
 /// Caller must guarantee `!state.expansion.is_exhausted()` and that `slot`
-/// has a TupleDesc with `natts == passthrough_row.len()`.
+/// has a TupleDesc with `natts == passthrough_rows[source].len()`.
 unsafe fn emit_one_row(
     state: &mut SrfTargetListExecState,
     slot: *mut pg_sys::TupleTableSlot,
 ) -> *mut pg_sys::TupleTableSlot {
-    let row_idx = state.expansion.cursor;
-    state.expansion.cursor = state.expansion.cursor.saturating_add(1);
+    state.expansion.advance_source_row();
+    let output_idx = state.expansion.output_cursor;
+    let source_idx = state.expansion.source_row_cursor;
+    state.expansion.output_cursor = state.expansion.output_cursor.saturating_add(1);
     state.rows_dispatched = state.rows_dispatched.saturating_add(1);
 
     let srf_pos = state.priv_data.srf_tlist_pos as usize;
-    let n_cols = state.expansion.passthrough_row.len();
+    let Some(passthrough_row) = state.expansion.passthrough_rows.get(source_idx) else {
+        unsafe { pg_sys::ExecClearTuple(slot) };
+        return slot;
+    };
+    let n_cols = passthrough_row.len();
 
     // SAFETY: slot is valid and has tts_values/tts_isnull arrays sized to
     // its TupleDesc natts (==n_cols by init_state validation).
@@ -573,13 +504,12 @@ unsafe fn emit_one_row(
         if values.is_null() || nulls.is_null() {
             return slot;
         }
-        for k in 0..n_cols {
+        for (k, &(d, n)) in passthrough_row.iter().enumerate().take(n_cols) {
             if k == srf_pos {
-                let (d, n) = state.expansion.expansion[row_idx];
-                *values.add(k) = d;
-                *nulls.add(k) = n;
+                let (expanded_datum, expanded_isnull) = state.expansion.expansion[output_idx];
+                *values.add(k) = expanded_datum;
+                *nulls.add(k) = expanded_isnull;
             } else {
-                let (d, n) = state.expansion.passthrough_row[k];
                 *values.add(k) = d;
                 *nulls.add(k) = n;
             }
@@ -616,6 +546,8 @@ pub(super) unsafe fn rescan(executor: *mut c_void) {
     let state = unsafe { &mut *executor.cast::<SrfTargetListExecState>() };
     state.expansion = ExpansionBuffer::empty();
     state.rows_dispatched = 0;
+    state.batches_executed = 0;
+    state.dispatch_time_us = 0;
     state.child_exhausted = false;
 }
 
@@ -630,4 +562,28 @@ pub(super) unsafe fn rows_dispatched(executor: *mut c_void) -> u64 {
     // SAFETY: executor was Box::into_raw'd as SrfTargetListExecState.
     let state = unsafe { &*executor.cast::<SrfTargetListExecState>() };
     state.rows_dispatched
+}
+
+/// Read the dispatch-batch counter for EXPLAIN ANALYZE.
+///
+/// # Safety
+/// `executor` must have been produced by [`init_state`].
+pub(super) unsafe fn batches_executed(executor: *mut c_void) -> u64 {
+    if executor.is_null() {
+        return 0;
+    }
+    let state = unsafe { &*executor.cast::<SrfTargetListExecState>() };
+    state.batches_executed
+}
+
+/// Read accumulated dispatch time in microseconds for EXPLAIN ANALYZE.
+///
+/// # Safety
+/// `executor` must have been produced by [`init_state`].
+pub(super) unsafe fn dispatch_time_us(executor: *mut c_void) -> u64 {
+    if executor.is_null() {
+        return 0;
+    }
+    let state = unsafe { &*executor.cast::<SrfTargetListExecState>() };
+    state.dispatch_time_us
 }

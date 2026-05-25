@@ -47,12 +47,27 @@ kernels dispatched, and which rows returned to PostgreSQL.
 - Planner rule: decline cases where launch, JIT, materialization, soft-fp64,
   data transfer, per-worker duplication, or output reconstruction makes GPU
   execution slower.
-- Current benchmark state from 2026-05-13: H3 is the clear winning lane
-  (`h3_bulk @ 1M` was roughly 0.79s accelerated vs 9.0s PostgreSQL
-  parallel; `h3_bulk @ 10M` began around 6.0s vs 90s). Reduce f32/i64,
-  large full sorts, hash joins, grouped aggregation, and most spatial
-  polygon/selectivity cases either crash, lose, or must be gated to native
-  PostgreSQL planning until a real GPU implementation wins.
+- Current benchmark state from the 2026-05-18/19 focused GPU-path pass:
+  `gpu_nlj_between @ 50K` is a selected Custom Scan win (27.31 ms vs
+  1312.80 ms, 48.07x, artifact
+  `benchmarks/artifacts/crash-repro-1779092055`). `h3_bulk` selects the
+  grouped H3 aggregate path and currently runs the direct/pure-GPU route for
+  resolution < 8: one GPU lat/lng-to-cell kernel writes H3 keys into a
+  USM-accessible slab, then `pgaccel_hash_count_i64_device_execute` sorts
+  and count-compacts those keys without staging host cell/key vectors.
+  Remaining host work is input fp32 staging, rare exact fixups, per-block
+  prefix metadata, and final PostgreSQL result materialization. Current
+  pure-route evidence: 112.08 ms vs 470.87 ms, 4.20x at 100K
+  (`benchmarks/artifacts/crash-repro-1779159425`) and 987.79 ms vs
+  6247.63 ms, 6.32x at 1M
+  (`benchmarks/artifacts/crash-repro-1779159454`), with no crashes and a
+  deterministic 100K aggregate diff returning zero mismatches against
+  h3-pg. Earlier best evidence was 38.55 ms at 100K
+  (`benchmarks/artifacts/crash-repro-1779120959`) and 270.30 ms at 1M
+  (`benchmarks/artifacts/crash-repro-1779120976`); recover that timing
+  before broadening admission. Hash join, grouped generic hash
+  aggregation, top-k, SSBM Q2.3, and the default H3 SRF benchmark remain
+  stable no-crash planner-decline or not-yet-winning rows on M2/Metal.
 - Ship bar: no selected GPU benchmark cell may crash; every selected GPU
   cell in the release matrix must be at `speedup_x >= 1.0` against
   PostgreSQL parallel, with explicit exceptions only for
@@ -60,6 +75,128 @@ kernels dispatched, and which rows returned to PostgreSQL.
 - Acceptance: benchmark reports separate `plan_selected`,
   `gpu_kernel_dispatched`, `gpu_resident_pipeline`, `function_kernel_count`,
   `rows_returned_to_cpu`, and `planner_declined`.
+
+### Planner pure-GPU audit
+
+- Scope: every planner-selected `GpuStrategy` must be audited as a
+  GPU-resident pipeline. "Pure GPU" means the selected pg_accel path does not
+  consume rows through `ExecProcNode`, `heap_getnext`, `ExecCopySlotMinimalTuple`,
+  host `HashMap`/`Vec` staging, CPU result reordering, or row-by-row tuple
+  reconstruction except for the final unavoidable PostgreSQL output boundary.
+  Current audit found these non-pure paths:
+- `GpuScan` (`GpuSpatial`, `GpuRaster`, `GpuH3`, `GpuExpr`): not pure GPU.
+  Base-rel paths wrap seq/bitmap child paths
+  (`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:454-473`), child
+  mode pulls `ExecProcNode` and copies `MinimalTuple`s
+  (`pg_accel/src/engine/executor/scan/arena_scan.rs:108-177`), direct mode
+  still heap-walks on CPU
+  (`pg_accel/src/engine/executor/scan/arena_scan.rs:66-93`), and output drains
+  `MinimalTuple`s back into slots
+  (`pg_accel/src/engine/executor/scan/exec.rs:456-472`). Standalone `GpuExpr`
+  exposure is disabled from normal base-rel planning
+  (`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:294-299`).
+  Work: replace scan input with GPU-resident columnar batches, GPU qual and
+  projection output masks, and downstream batch handoff; keep bitmap/index
+  pruning only as GPU batch producers or explicit CPU-boundary declines.
+- `GpuSort`: not pure GPU. Planner exposes bounded single-key top-k only and
+  mirrors partial wrappers
+  (`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:690-697`,
+  `:1313-1450`); executor materializes all input tuples, sends only key
+  vectors to GPU, then reorders/trims host `MinimalTuple`s and emits through
+  PostgreSQL slots (`pg_accel/src/engine/executor/sort/mod.rs:121-124`,
+  `:403-491`, `:679-761`). Work: make sort consume and produce GPU batch
+  handles, keep payload columns on device, implement GPU gather/top-k payload
+  compaction, and decline standalone heap `ORDER BY` until final transfer is
+  bounded and winning.
+- `GpuAgg` / `GpuReduce`: not pure GPU. Non-grouped agg drains child tuples and
+  builds host value vectors before GPU reduce
+  (`pg_accel/src/engine/executor/agg/execute.rs:1365-1538`); grouped paths use
+  direct heap/slot scans and host key/value/null buffers before
+  `gpu::hash_agg_execute` (`:1976-2204`, `:3030-3204`); grouped emit reads GPU
+  handles into PostgreSQL tuples one group at a time (`:2874-2970`). H3 bulk is
+  closest, but still stages lat/lng/null inputs on host and materializes final
+  groups (`:2227-2252`). Work: define GPU scan-to-reduce/grouped-agg batch
+  contracts, device-side null/key/value staging, device prefix/compaction, and
+  GPU-to-GPU handoff for joins, sorts, and windows.
+- `GpuJoin` / `GpuHashJoin`: not pure GPU. Planner caps row-returning output
+  because the executor reconstructs joined rows into PostgreSQL slots
+  (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:19-26`,
+  `:238-268`); build/probe paths still collect child rows through
+  `ExecProcNode`, host key/null vectors, and `MinimalTuple` buffers
+  (`pg_accel/src/engine/executor/join/probe.rs:327-554`, `:584-911`).
+  Partial paths mirror the injection but rebuild work per worker
+  (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:434-452`). Work:
+  retain device build-side buffers, probe directly from GPU/columnar child
+  batches, emit device pair buffers or aggregate counts without host tuple
+  reconstruction, and share/reuse build-side state across workers where safe.
+- `GpuNestedLoopIneq`: selected and winning at 50K, but not pure GPU. Planner
+  gate is enabled (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:460-465`);
+  executor collects both children into host `MinimalTuple`s, extracts/remaps
+  host key arrays, copies matched tuples into pending pairs, and reconstructs
+  joined slots (`pg_accel/src/engine/executor/join/nlj.rs:83-96`, `:127-140`,
+  `:227-239`, `:292-319`, `:323-427`). Work: GPU-resident input batches,
+  device pair buffers with overflow metadata, GPU gather/projection or fused
+  count/preagg consumers, and no host pair remap except final bounded output.
+- Spatial/raster/H3 joins and merge joins: planner-visible opportunities still
+  decline rather than selecting pure GPU paths. Spatial/raster/H3 joins are
+  skipped (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:196-207`);
+  merge joins are observation-only (`:134-149`). Work: GPU spatial join
+  kernels, GPU merge join, and planner admission only when downstream output
+  remains GPU-resident or cardinality-reduced.
+- `GpuPreAgg`: not pure GPU and not active from normal upper planning. The
+  executor materializes dimension tables into host `HashMap`s and scans/probes
+  fact rows through `ExecProcNode`/materialized slots
+  (`pg_accel/src/engine/executor/preagg/mod.rs:6-10`, `:117-127`,
+  `:241-378`, `:460-744`); partial preagg scaffolds explicitly avoid CPU child
+  wrappers (`pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:5-30`),
+  and normal upper planning does not call serial PreAgg until the child is
+  GPU-resident (`pg_accel/src/engine/ffi/planner_hooks/mod.rs:203-207`).
+  Work: device dimension hash tables, GPU fact scan/probe/filter/grouping, GPU
+  partial/final aggregate state, and shared scan-state for parallel workers.
+- `GpuWindow`: not pure GPU. Planner admits upper window paths, but executor
+  buffers all input `MinimalTuple`s, extracts host columns, stores host result
+  vectors, and emits one virtual PostgreSQL tuple per row
+  (`pg_accel/src/engine/executor/window/mod.rs:61-87`, `:126-253`,
+  `:409-575`, `:577-760`). Work: GPU-resident partition/order metadata,
+  segmented kernels, batch-boundary frame state, and downstream GPU batch
+  handoff; parallel windows need partition-aware worker ownership
+  (`pg_accel/src/engine/ffi/planner_hooks/window.rs:7-13`).
+- `GpuFunctionScan`: not a pure GPU pipeline. It dispatches registered SRFs
+  once, but only for constant arguments
+  (`pg_accel/src/engine/ffi/planner_hooks/projectset.rs:23-27`), buffers
+  emitted host `Datum`s (`pg_accel/src/engine/ffi/custom_scan/function_scan.rs:35-68`),
+  and drains rows through PostgreSQL slots one at a time (`:337-452`). Work:
+  produce GPU batch handles for SRF outputs, support table-correlated argument
+  batches, and materialize only final bounded outputs.
+- `GpuAccelSrfTargetList`: not pure GPU. It wraps a `ProjectSet` child, drives
+  it through `ExecProcNode`, dispatches the SRF per input batch, and emits every
+  expanded row as a PostgreSQL tuple
+  (`pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs:60-84`,
+  `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs:321-453`,
+  `:475-519`). Large outputs are capped because CPU materialization dominates
+  (`pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs:520-528`).
+  Work: batched variable-output SRF kernels with row-id/offset tables on GPU,
+  GPU-resident downstream aggregate/sort consumers, and multi-SRF/cartesian
+  semantics before broad admission.
+- Partial/Gather and partition/Append surfaces: not pure GPU. Partial
+  `GpuSort`, partial `GpuHashJoin`, and partial aggregate scaffolds currently
+  wrap PostgreSQL partial children or duplicate per-worker host work unless the
+  child is already GPU-producing
+  (`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:1313-1450`,
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:1121-1255`,
+  `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:406-417`,
+  `pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:16-30`). Partition
+  children can receive per-child scan paths, but there is no GPU-resident
+  append/merge batch operator; PostgreSQL combines child outputs on CPU. Work:
+  only select partial paths when child input and inter-worker state are
+  GPU-resident, add GPU batch append/merge handoff where needed, or keep
+  explicit planner-decline counters.
+- Acceptance: add a planner audit test/report that walks every selected
+  `GpuStrategy` and emits `gpu_resident_pipeline=false` with the exact boundary
+  reason above until fixed. A path can be marked pure GPU only when benchmark
+  artifacts show GPU kernel dispatch, correctness diff, no crashes,
+  `rows_returned_to_cpu` bounded to final output, and no `ExecProcNode`,
+  heap-walk, or host `HashMap` staging between selected pg_accel operators.
 
 ### Benchmark harness and artifact hygiene
 
@@ -102,8 +239,23 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `h3_latlng_res15 @ 10M` spent about 64-66s baseline vs 11-12s
   accelerated. Several spatial repro and full-sort parity cells also spend
   multiple seconds per sample at 10M rows.
-- Work: add resumable benchmark manifests, correctness diffs, and durable
-  resume/audit report linkage.
+- Evidence: the 2026-05-18 focused pass recorded no benchmark crashes for:
+  `gpu_nlj_between @ 50K` (`crash-repro-1779092055`), `hash_join @ 100K`
+  (`crash-repro-1779092044`), `hashagg_100g @ 1M`
+  (`crash-repro-1779092148`), `h3_bulk @ 100K`
+  (`crash-repro-1779093355`), `h3_srf_grid_disk @ 10K`
+  (`crash-repro-1779093366`), `topk_wide @ 1M`
+  (`crash-repro-1779093376`), and `ssbm_q2_3 @ 100K`
+  (`crash-repro-1779093387`). The no-dispatch rows are not GPU performance
+  conclusions; they prove planner decline and stability.
+- Current state: benchmark artifacts now include `manifest.json`,
+  `artifact_index.json`, `artifact_checklist.md`, and
+  `resume_audit_manifest.json`, with bounded log policy, run-start log
+  offsets, and generated evidence inventory captured for audit/retry
+  workflows.
+- Work: attach correctness diff artifacts to every release benchmark cell and
+  wire the generated resume/audit manifest into an actual resume/retry
+  entrypoint.
 - Acceptance: a full benchmark cannot create unbounded logs, can be resumed
   or audited from saved artifacts, reports every crash/skip without relying
   on terminal scrollback, and keeps the default suite bounded while preserving
@@ -153,9 +305,17 @@ incidental log noise.
   artifact. Standalone `test_h3` later spent roughly four minutes in
   AdaptiveCpp's Metal emitter for `pgaccel_h3_lat_lng_to_cell_bulk` after
   the source hash changed, then passed cleanly.
+- Evidence: the 2026-05-24 noise cleanup added a quiet GPU test runner and
+  routed `just gpu-test`, `just gpu-test-cold`, and
+  `just gpu-stress-archive` through raw-log-preserving summaries under
+  `.pgaccel/logs`. Escalated `just gpu-test-cold h3 300` cleared 161 JIT
+  cache entries and passed `test_h3` with `650 passed, 0 failed`; known
+  Metal/JIT warning spam was folded into a summary while the raw log was
+  preserved.
 - Work: raise or tune `ACPP_METAL_ARCHIVE_MAX_BYTES` for known large
-  kernels, suppress or fix generated-MSL warning noise, and track
-  first-dispatch latency per kernel in benchmark artifacts.
+  kernels, fix generated-MSL warning noise at the AdaptiveCpp/soft-fp64
+  source where possible, and track first-dispatch latency per kernel in
+  benchmark artifacts.
 - Acceptance: GPU tests are quiet except for intentional diagnostics,
   benchmark warmup no longer hides recurring multi-second JIT, and no
   resource-leak messages appear in passing Metal runs.
@@ -343,18 +503,42 @@ window work.
 ### Grouped hash aggregation
 
 - Existing state: the remaining Metal `agg_hash` kernel
-  (`pgaccel-kernels/src/hash_agg.cpp:562-674`) is O(n*g) — one
+  (`pgaccel-kernels/src/hash_agg.cpp:2467`) is O(n*g) — one
   work-item per group scanning all n rows. At 1M rows × 4096 groups
   that is ~4 billion ops, at 10M × 10K it is ~100 billion ops. The
-  100K-row planner gate (`formulas.rs:118-122
+  100K-row planner gate (`formulas.rs:120-122
   hashagg_input_rows_safe`) and 4096-group cap (`hash_agg.cpp:1247
   HASH_AGG_MAX_LARGE_UNSORTED_GROUPS`) are protective.
+- Evidence: the H3 count fast-path work on 2026-05-18 tried two
+  Metal-targeted open-addressing kernels: a claimed/full state table and
+  an owner-row-index table using only 32-bit atomics. AdaptiveCpp's Metal
+  output generated uninitialized MSL around `atomic_compare_exchange` and
+  produced no valid groups (`first_owner=UINT32_MAX`, `first_count=rows`),
+  so Metal remains on the GPU sort-backed count path while CAS lowering is
+  fixed or avoided.
+- Evidence: the no-CAS direct H3/grouped-count route is correct and wired
+  for resolution < 8, but it does not beat the earlier staged best. Forced
+  direct H3/grouped count measured roughly 111-118 ms at 100K
+  (`benchmarks/artifacts/crash-repro-1779148975`,
+  `benchmarks/artifacts/crash-repro-1779149150`,
+  `benchmarks/artifacts/crash-repro-1779149310`,
+  `benchmarks/artifacts/crash-repro-1779149487`); after restoring it as the
+  default pure route and adding a values-only `u64` sort plus work-group
+  count compaction, the best current focused numbers are 112.08 ms at 100K
+  (`benchmarks/artifacts/crash-repro-1779159425`) and 987.79 ms at 1M
+  (`benchmarks/artifacts/crash-repro-1779159454`) versus the earlier staged
+  best of 38.55 ms and 270.30 ms.
 - Work: replace `agg_hash` with a real parallel hash-table kernel —
   open-addressing in shared memory, atomic CAS for slot acquisition,
   `atomic_ref<double>` accumulators (supported on Metal via
   AdaptiveCpp), one work-item per row instead of one per group.
   Cover `SUM`, `COUNT`, `MIN`, `MAX`, and the typed integer/floating
   variants.
+- Work: reduce a minimal AdaptiveCpp/Metal CAS repro from the owner-row
+  count kernel or design a no-CAS count/grouping primitive that beats the
+  staged H3 path before making it selectable. Keep high-cardinality
+  duplicate-count tests green before reopening CAS-backed Metal hashagg
+  admission.
 - Work: fix grouped `AVG` finalize. Either route grouped `AVG`
   through partial-mode always (kernel already emits `[N, sum]` lanes
   at `hash_agg.cpp:911-920`), or extend `emit_grouped_tuple`
@@ -370,31 +554,29 @@ window work.
   dispatch, correctness diffs against PostgreSQL, and speedup at or
   above 1.0 where selected.
 
-### Real GPU hash join build/probe
+### GPU-resident hash join build/probe
 
-- Existing state: kernel at `pgaccel-kernels/src/hash_join.cpp:14-46`
-  is a fail-closed stub (`build` returns `nullptr`, `probe` returns
-  `PGACCEL_UNSUPPORTED`); planner gate at
-  `join_pathlist.rs:153-168` declines via
-  `selected_gpu_hashjoin_kernel_available()` (`:310-312`, returns
-  `false` unconditionally). Existing plumbing the new kernel can
-  light up: `HashJoinTelemetry`
-  (`pg_accel/src/engine/executor/join/mod.rs:60-93`), per-build/probe
-  trace spans (`join/probe.rs:204-251` and `:484-530`),
-  `match_count > max_matches` overflow check at
-  `probe.rs:510-516` raising `pgrx::error!`. All unreachable until
-  the gate flips.
-- Work: build a real GPU build/probe — GPU-resident retained inner
-  buffers via the bridge USM-device path other kernels already use,
-  batched probe output, shared or reusable inner build for parallel
-  workers, planner cost model that declines GPU join when PG
-  parallel hash join is cheaper. Flip
-  `selected_gpu_hashjoin_kernel_available()` only after benchmark
-  parity at the target row counts.
-- Acceptance: join sweep has no crashes; GPU plans are selected only
-  for cells with measured speedup at or above 1.0; build-side reuse
-  evidence in `HashJoinTelemetry.redundant_inner_builds` is zero or
-  matches the intended share-per-worker design.
+- Current state: selected `GpuHashJoin` is wired to a real INT32/INT64 GPU
+  build/probe kernel, and `selected_gpu_hashjoin_kernel_available()` returns
+  `true` (`pgaccel-kernels/src/hash_join.cpp:1-12`,
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:455-458`). The path
+  is still not pure GPU: row-returning joins are capped because the executor
+  reconstructs joined rows into PostgreSQL slots
+  (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:19-26`, `:238-268`),
+  build/probe still stages child rows and key/null buffers on the host
+  (`pg_accel/src/engine/executor/join/probe.rs:327-554`, `:584-911`), and
+  partial injection duplicates work per worker (`join_pathlist.rs:434-452`,
+  `:1121-1255`).
+- Work: move build-side keys and payloads into retained device buffers, probe
+  directly from GPU/columnar child batches, emit device pair buffers or
+  aggregate counts without host `MinimalTuple` reconstruction, and share/reuse
+  build-side state across workers where safe. Row-returning plans should remain
+  capped or declined until GPU gather/projection or join->preagg keeps output
+  device-resident.
+- Acceptance: join sweep has no crashes; selected GPU plans have correctness
+  diffs and speedup at or above 1.0; `HashJoinTelemetry.redundant_inner_builds`
+  proves the intended reuse model; high-output joins either feed GPU-resident
+  preagg/semi/anti paths or decline with `hashjoin_heap_output_too_large`.
 
 ### GPU semi/anti join and Bloom prefilters
 
@@ -408,41 +590,24 @@ window work.
   work, avoid full join-output reconstruction, match PostgreSQL semantics for
   NULLs and anti joins, and beat PostgreSQL parallel plans where selected.
 
-### NestedLoop scalar recognition
+### NestedLoop inequality pure-GPU follow-up
 
-- Scope: scalar correlated inequality joins (BETWEEN, range overlap)
-  that PG plans as Nested Loop. SYCL kernel + cost + canary gate
-  already in (`AccelStrategy::GpuNestedLoopIneq`,
-  `pgaccel-kernels/src/nested_loop_ineq.cpp`,
-  `nlj_break_even()` + `nlj_selectivity_useful()` cost helpers).
-  Today no SQL query selects the strategy because
-  `selected_gpu_nlj_kernel_available()` is pinned `false`; the
-  canary test `selected_gpu_nlj_kernel_is_not_available_yet`
-  guards the flip.
-- Work to make a SQL query actually select the strategy:
-  1. Executor node with both-sides slot deformation (NLJ projects
-     from outer AND inner relation rows, unlike GpuHashJoin
-     probe-only). Reference pattern:
-     `pg_accel/src/engine/executor/join/`.
-  2. `make_custom_scan_plan` callback updates in
-     `pg_accel/src/engine/ffi/custom_scan/` to encode both
-     `outer_varno/attno` + `inner_varno/attno` in `custom_private`.
-  3. Planner `add_path` call site flip in
-     `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` —
-     currently `observe_nestloop_scalar_opportunity` just
-     increments the counter; flip it to construct a CustomPath
-     when `nlj_break_even()` + `nlj_selectivity_useful()` both
-     pass.
-  4. Flip `selected_gpu_nlj_kernel_available()` from `false` →
-     `true` and invert the canary in the same commit.
-  5. `#[pg_test]` integration: synthetic 1000 events × 100
-     non-overlapping windows → 1000 matches; EXPLAIN ANALYZE
-     shows `Custom Scan` with `Strategy: GpuNestedLoopIneq`;
-     result set matches `pg_accel.enabled=off`.
-  6. Bench cell in `pg_accel_bench/src/workloads/` at 10K/100K/1M
-     vs PG parallel NestedLoop.
-- Acceptance: a representative correlated inequality join receives
-  a GPU plan and measurably improves over PostgreSQL.
+- Current state: selected `GpuNestedLoopIneq` BETWEEN path is wired and
+  benchmark-winning for `gpu_nlj_between @ 50K` (27.31 ms vs 1312.80 ms,
+  48.07x, artifact `benchmarks/artifacts/crash-repro-1779092055`). Planner gate
+  now returns `true`
+  (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:460-465`).
+- Gap: the path is not pure GPU. The executor still collects both child inputs
+  through `ExecProcNode`, host-extracts/remaps key arrays, copies matched tuples
+  into pending pairs, and reconstructs joined rows from `MinimalTuple` pairs
+  (`pg_accel/src/engine/executor/join/nlj.rs:83-96`, `:127-140`, `:227-239`,
+  `:292-319`, `:323-427`).
+- Work: add GPU-resident input batches, a device pair buffer and
+  projection/gather path, fused count/preagg consumers, benchmark rows at
+  10K/100K/1M, and planner admission by measured output/cardinality.
+- Acceptance: selected NLJ either stays row-count bounded with no crash and
+  speedup at or above 1.0, or feeds a GPU-resident downstream consumer without
+  host pair materialization.
 
 ### Aggregate FILTER / DISTINCT / ordered semantics
 
@@ -509,6 +674,40 @@ window work.
 This phase covers the non-relational compute-heavy lanes that should be
 pg_accel strengths: H3, spatial predicates/joins, geometry constructors,
 raster map algebra, and prepared geometry structures.
+
+### H3 bulk aggregation
+
+- Scope: keep the `h3_bulk` grouped aggregate lane on a faithful H3 Core
+  implementation. The lat/lng-to-cell kernel must be generated from or kept
+  traceable to the H3 C source that h3-pg wraps; do not reintroduce
+  approximate face/base-cell rewrites for this path.
+- Current state: resolution 7 `h3_bulk` is correct against h3-pg on a
+  deterministic 100K aggregate diff and wins the focused benchmark on
+  M2/Metal, but the pure/direct route is slower than the earlier staged
+  best. The executor no longer uses the Rust `HashMap` grouping path or
+  intermediate host cell/key vectors for resolution < 8: it calls fused
+  `pgaccel_h3_lat_lng_count_bulk`, which runs GPU lat/lng-to-cell into a
+  shared key slab and then a GPU sort-backed grouped count through
+  `pgaccel_hash_count_i64_device_execute`. Current pure-route evidence is
+  4.20x at 100K (`benchmarks/artifacts/crash-repro-1779159425`) and 6.32x
+  at 1M (`benchmarks/artifacts/crash-repro-1779159454`). Earlier
+  preloaded-pgrx evidence was 11.63x at 100K
+  (`benchmarks/artifacts/crash-repro-1779120959`) and 24.45x at 1M
+  (`benchmarks/artifacts/crash-repro-1779120976`).
+- Work: keep the pure route honest but recover the lost timing before
+  broadening admission. The current all-GPU-ish sort/reduce still pays for
+  eight-pass radix sorting, host-scanned per-block histogram/prefix metadata,
+  and high-cardinality result materialization; the work-group count
+  compactor did not improve 100K or 1M wall time. Next candidates are a real
+  GPU prefix/scan primitive for radix/group offsets, an H3-specialized
+  duplicate detector that avoids full count compaction when nearly all cells
+  are unique, or a Metal-safe hash aggregate once the CAS issue in grouped
+  hash aggregation is resolved. Add randomized diff coverage for resolution
+  0-15, face edges, pentagons, poles, and antimeridian-adjacent points.
+- Acceptance: no crashes, zero h3-pg diff rows, and warm benchmark evidence
+  for each enabled H3 bulk resolution. The planner should select this path
+  only where end-to-end output cardinality and grouping cost still beat
+  PostgreSQL parallel execution.
 
 ### H3 LATERAL SRF expansion
 

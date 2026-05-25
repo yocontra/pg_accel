@@ -170,7 +170,21 @@ License text (PostgreSQL License):
 
 ----------------------------------------------------------------------
 
-5. pgrx
+5. H3 Core Library
+----------------------------------------------------------------------
+SPDX:    Apache-2.0
+Role:    H3 lat/lng-to-cell indexing logic and lookup tables are used by
+         the GPU H3 bulk kernel. The device headers are derived from the
+         H3 C core call chain that h3-pg exposes through PostgreSQL.
+Source:  https://github.com/uber/h3
+         Local build provenance: h3-pg 4.2.3 fetches H3 Core into
+         `.pgaccel/build/h3-pg-probe/build/_deps/h3-src`.
+
+License text (Apache-2.0) — identical to the Apache-2.0 text under entry 6.
+
+----------------------------------------------------------------------
+
+6. pgrx
 ----------------------------------------------------------------------
 SPDX:    MIT OR Apache-2.0
 Role:    Rust extension framework. Links into the compiled `.so` /

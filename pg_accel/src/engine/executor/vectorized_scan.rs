@@ -293,6 +293,47 @@ impl VectorizedScan {
         (values, nulls)
     }
 
+    /// Extract a PostgreSQL built-in `point` column as `(lat, lng)` f64
+    /// arrays for the H3 lat/lng GPU kernel.
+    ///
+    /// PG stores `point` as two float8 values: x first, then y. The H3 kernel
+    /// expects latitude first and longitude second, so this returns
+    /// `(lats, lngs, null_mask)`.
+    ///
+    /// # Safety
+    ///
+    /// `info` must match a fixed-width `point` column.
+    #[must_use]
+    pub unsafe fn extract_pg_point_lat_lng(
+        &self,
+        info: &AttExtractInfo,
+    ) -> (Vec<f64>, Vec<f64>, Vec<u8>) {
+        let n = self.row_count;
+        let mut lats = Vec::with_capacity(n);
+        let mut lngs = Vec::with_capacity(n);
+        let mut nulls = Vec::with_capacity(n);
+
+        for i in 0..n {
+            // SAFETY: i < row_count, arena is finalized.
+            let hdr = unsafe { self.header(i) };
+            let raw: Option<[u8; 16]> =
+                unsafe { tuple_extract::try_fast_read_heap_pub::<[u8; 16]>(hdr, info) };
+            if let Some(bytes) = raw {
+                let lng = f64::from_ne_bytes(bytes[0..8].try_into().unwrap_or([0; 8]));
+                let lat = f64::from_ne_bytes(bytes[8..16].try_into().unwrap_or([0; 8]));
+                lats.push(lat);
+                lngs.push(lng);
+                nulls.push(0);
+            } else {
+                lats.push(0.0);
+                lngs.push(0.0);
+                nulls.push(1);
+            }
+        }
+
+        (lats, lngs, nulls)
+    }
+
     /// Extract a column as 16-byte UUID values (host byte order).
     ///
     /// # Safety

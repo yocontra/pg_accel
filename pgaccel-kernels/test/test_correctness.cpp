@@ -60,7 +60,7 @@ static int g_tests_failed = 0;
 // ---------------------------------------------------------------------------
 
 static uint64_t make_cell(int base_cell, int resolution, const int* digits) {
-  uint64_t cell = (1ULL << 63);
+  uint64_t cell = 0;
   cell |= (1ULL << 59);
   cell |= ((uint64_t)(resolution & 0xF) << 52);
   cell |= ((uint64_t)(base_cell & 0x7F) << 45);

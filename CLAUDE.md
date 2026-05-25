@@ -17,9 +17,16 @@ just bench            # run benchmark suite against local pgrx PG
 just ci               # Full local CI: lint + test
 just package          # cargo pgrx package (installable .so)
 just gpu-build        # cmake build for GPU kernels (AdaptiveCpp/SYCL)
-just gpu-test         # Run standalone GPU kernel tests
+just gpu-test         # Run standalone GPU kernel tests (warm cache, quiet console)
+just gpu-test-cold-all # Cold-cache GPU run for JIT/archive/fork-safety
 make clear-jit        # Clear AdaptiveCpp Metal SSCP JIT cache (~/.acpp/apps/global/jit-cache)
 ```
+
+Treat noisy output as a bug. If a command emits repeated warning spam, fix the
+recipe or wrapper so the console stays actionable while preserving a raw log.
+Only filter understood patterns, keep full logs under `.pgaccel/logs`, and make
+failure/error/result lines visible without scrolling. Do not normalize "noisy
+but harmless" runs; fix noise papercuts as they appear.
 
 **Always use `make clear-jit` to clear the JIT cache.** Never use `rm -rf
 ~/.acpp/apps/global/jit-cache/*` and do NOT invoke `just clear-jit` directly

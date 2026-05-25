@@ -103,6 +103,33 @@ impl GpuHashTable {
             .collect();
         Some(pairs)
     }
+
+    /// Count matches for an outer key batch without materializing row pairs.
+    pub fn count_matches(
+        &self,
+        outer_keys: *const std::ffi::c_void,
+        outer_null_mask: &[u8],
+    ) -> Option<usize> {
+        if self.ht.is_null() || outer_null_mask.is_empty() {
+            return Some(0);
+        }
+        let outer_count = outer_null_mask.len();
+        let mut match_count: usize = 0;
+
+        let status = unsafe {
+            // SAFETY: ht is non-null (checked above). outer_keys points to
+            // outer_count elements matching the table key type.
+            bridge::pgaccel_hash_join_count(
+                self.ht,
+                outer_keys,
+                outer_null_mask.as_ptr(),
+                outer_count,
+                std::ptr::addr_of_mut!(match_count),
+            )
+        };
+
+        status.is_ok().then_some(match_count)
+    }
 }
 
 #[must_use]

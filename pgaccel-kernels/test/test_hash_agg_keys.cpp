@@ -674,6 +674,111 @@ static void test_hash_agg_count_star_without_value_cols() {
   pgaccel_agg_free(state);
 }
 
+static void test_hash_count_i64_high_cardinality_gpu_path() {
+  printf("--- test_hash_count_i64_high_cardinality_gpu_path ---\n");
+
+  constexpr size_t N = 100000;
+  constexpr int64_t BASE = 0x0870000000000000LL;
+  std::vector<int64_t> keys(N);
+  uint64_t expected_xor = 0;
+  uint64_t expected_sum = 0;
+  for (size_t i = 0; i < N; ++i) {
+    keys[i] = BASE + (static_cast<int64_t>(i) << 24);
+    expected_xor ^= static_cast<uint64_t>(keys[i]);
+    expected_sum += static_cast<uint64_t>(keys[i]);
+  }
+
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys.data(), nullptr, N);
+  ASSERT_TRUE("hash_count_i64 returned non-null state", state != nullptr);
+  ASSERT_TRUE("hash_count_i64 launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (!state) {
+    return;
+  }
+
+  ASSERT_EQ_SZ("hash_count_i64 high-cardinality group_count == rows",
+               pgaccel_agg_group_count(state), N);
+
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(state));
+  const double* counts = pgaccel_agg_get_results(state, 0);
+  const int64_t* row_counts = pgaccel_agg_get_counts(state);
+  ASSERT_TRUE("hash_count_i64 output buffers non-null",
+              keys_out != nullptr && counts != nullptr && row_counts != nullptr);
+
+  bool all_counts_one = true;
+  uint64_t actual_xor = 0;
+  uint64_t actual_sum = 0;
+  if (keys_out != nullptr && counts != nullptr && row_counts != nullptr) {
+    for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+      actual_xor ^= static_cast<uint64_t>(keys_out[g]);
+      actual_sum += static_cast<uint64_t>(keys_out[g]);
+      if (std::abs(counts[g] - 1.0) > 1e-9 || row_counts[g] != 1) {
+        all_counts_one = false;
+        break;
+      }
+    }
+  }
+  ASSERT_TRUE("hash_count_i64 high-cardinality every count is one", all_counts_one);
+  ASSERT_TRUE("hash_count_i64 high-cardinality key xor matches", actual_xor == expected_xor);
+  ASSERT_TRUE("hash_count_i64 high-cardinality key sum matches", actual_sum == expected_sum);
+
+  pgaccel_agg_free(state);
+}
+
+static void test_hash_count_i64_duplicate_counts_gpu_path() {
+  printf("--- test_hash_count_i64_duplicate_counts_gpu_path ---\n");
+
+  constexpr size_t N = 131072;
+  constexpr size_t NUM_GROUPS = 4096;
+  constexpr int64_t BASE = 0x0871000000000000LL;
+  std::vector<int64_t> keys(N);
+  for (size_t i = 0; i < N; ++i) {
+    keys[i] = BASE + (static_cast<int64_t>(i % NUM_GROUPS) << 24);
+  }
+
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys.data(), nullptr, N);
+  ASSERT_TRUE("hash_count_i64 duplicate-count state non-null", state != nullptr);
+  ASSERT_TRUE("hash_count_i64 duplicate-count launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (!state) {
+    return;
+  }
+
+  ASSERT_EQ_SZ("hash_count_i64 duplicate-count group_count", pgaccel_agg_group_count(state),
+               NUM_GROUPS);
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(state));
+  const double* counts = pgaccel_agg_get_results(state, 0);
+  const int64_t* row_counts = pgaccel_agg_get_counts(state);
+  ASSERT_TRUE("hash_count_i64 duplicate-count output buffers non-null",
+              keys_out != nullptr && counts != nullptr && row_counts != nullptr);
+
+  std::vector<uint8_t> seen(NUM_GROUPS, 0);
+  bool counts_correct = true;
+  if (keys_out != nullptr && counts != nullptr && row_counts != nullptr) {
+    for (size_t g = 0; g < pgaccel_agg_group_count(state); ++g) {
+      const int64_t gid_signed = (keys_out[g] - BASE) >> 24;
+      if (gid_signed < 0 || gid_signed >= static_cast<int64_t>(NUM_GROUPS)) {
+        counts_correct = false;
+        continue;
+      }
+      const size_t gid = static_cast<size_t>(gid_signed);
+      seen[gid] = 1;
+      const int64_t expected = static_cast<int64_t>(N / NUM_GROUPS);
+      if (std::abs(counts[g] - static_cast<double>(expected)) > 1e-9 || row_counts[g] != expected) {
+        counts_correct = false;
+      }
+    }
+  }
+  bool all_groups_seen = true;
+  for (uint8_t v : seen) {
+    all_groups_seen &= v != 0;
+  }
+  ASSERT_TRUE("hash_count_i64 duplicate-count saw every group", all_groups_seen);
+  ASSERT_TRUE("hash_count_i64 duplicate-count counts match", counts_correct);
+
+  pgaccel_agg_free(state);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -687,6 +792,8 @@ int main() {
 
   test_hash_agg_invalid_inputs_return_null();
   test_hash_agg_count_star_without_value_cols();
+  test_hash_count_i64_high_cardinality_gpu_path();
+  test_hash_count_i64_duplicate_counts_gpu_path();
   test_hash_agg_int64_baseline();
   test_sort_based_hash_agg_int32_1m_sum_count();
   test_metal_sort_based_hashagg_unsupported_diagnostic();

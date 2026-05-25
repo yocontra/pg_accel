@@ -33,11 +33,8 @@ pub enum AccelStrategy {
     /// `pg_accel/src/gpu/nested_loop_ineq.rs` and
     /// `pgaccel-kernels/src/nested_loop_ineq.cpp`. The strategy is not
     /// planner-selectable yet: the kernel + bridge + cost model are in
-    /// place but the executor node (both-sides slot deformation) is
-    /// pending — see
-    /// `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs`
-    /// `selected_gpu_nlj_kernel_available()` which returns `false` and
-    /// keeps `observe_nestloop_scalar_opportunity` recording the decline.
+    /// place and the selected BETWEEN shape is planner-selectable via
+    /// `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs`.
     GpuNestedLoopIneq = 9,
 }
 

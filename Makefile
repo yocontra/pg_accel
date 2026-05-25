@@ -1,7 +1,7 @@
 # Thin wrapper around Justfile for make users.
 # All logic lives in Justfile — this just delegates.
 
-.PHONY: pre-commit test test-unit bench fmt lint check clear-jit
+.PHONY: pre-commit test test-unit bench fmt lint check clear-jit gpu-build gpu-test gpu-test-cold-all setup-gpu-metal
 
 pre-commit:
 	just pre-commit
@@ -29,3 +29,15 @@ check:
 # archive-builder behaviour, kernel re-compilation after a code change).
 clear-jit:
 	just clear-jit
+
+gpu-build:
+	just gpu-build
+
+gpu-test:
+	just gpu-test
+
+gpu-test-cold-all:
+	just gpu-test-cold-all
+
+setup-gpu-metal:
+	just setup-gpu-metal

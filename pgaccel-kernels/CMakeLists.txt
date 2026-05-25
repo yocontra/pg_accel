@@ -10,8 +10,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # AdaptiveCpp installs to .pgaccel/acpp/current by default (see:
-# ACPP_BACKEND=cuda just setup-gpu). Pass -DCMAKE_PREFIX_PATH explicitly for
-# system toolchains, or use: just gpu-build.
+# ACPP_BACKEND=cuda just setup-gpu or just setup-gpu-metal). Use
+# -DAdaptiveCpp_DIR=... for system toolchains, or use: just gpu-build.
 find_package(AdaptiveCpp REQUIRED)
 
 set(KERNEL_SOURCES
@@ -72,11 +72,13 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #                         sentinel (sorts NULLs to the end); MIN/MAX
 #                         accumulators initialise to ±infinity so the
 #                         first real value supersedes the sentinel.
+#   fused_ops          — MIN/MAX fused reductions initialise to ±infinity.
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
     src/sort.cpp
     src/hash_agg.cpp
+    src/fused_ops.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
 # Standalone test binary
@@ -100,6 +102,9 @@ target_link_libraries(test_window PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_hash_agg_keys test/test_hash_agg_keys.cpp)
 target_link_libraries(test_hash_agg_keys PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_hash_join test/test_hash_join.cpp)
+target_link_libraries(test_hash_join PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_hash_agg_partial test/test_hash_agg_partial.cpp)
 target_link_libraries(test_hash_agg_partial PRIVATE pgaccel_kernels_shared)
@@ -183,6 +188,7 @@ add_test(NAME test_reduce_stats COMMAND test_reduce_stats)
 add_test(NAME test_reduce_bool_bit COMMAND test_reduce_bool_bit)
 add_test(NAME test_hash_agg_partial COMMAND test_hash_agg_partial)
 add_test(NAME test_hash_agg_keys COMMAND test_hash_agg_keys)
+add_test(NAME test_hash_join COMMAND test_hash_join)
 add_test(NAME test_window COMMAND test_window)
 add_test(NAME test_expr_templates COMMAND test_expr_templates)
 add_test(NAME test_oom_invariant COMMAND test_oom_invariant)

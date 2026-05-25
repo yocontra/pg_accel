@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 use postgres::{Client, NoTls};
 
 use crate::workloads::{
-    H3Bulk, H3CellToParent, H3GridDistance, H3LaneClass, H3ResolutionSweep, Workload,
-    find_workload, h3_lane_class, h3_parity_lane_names, h3_winning_lane_names,
+    H3Bulk, H3CellToParent, H3GridDistance, H3LaneClass, H3ResolutionSweep, H3SrfGridDisk,
+    Workload, find_workload, h3_lane_class, h3_parity_lane_names, h3_winning_lane_names,
 };
 
 const DEFAULT_CONNECTION: &str = "host=localhost port=28819 dbname=postgres";
@@ -98,6 +98,13 @@ fn execute_to_rows(c: &mut Client, sql: &str) -> Vec<String> {
     out
 }
 
+/// Return a plain-text EXPLAIN plan for `sql`.
+#[cfg(feature = "integration_tests")]
+fn explain_text(c: &mut Client, sql: &str) -> String {
+    let explain = format!("EXPLAIN (FORMAT TEXT) {sql}");
+    execute_to_rows(c, &explain).join("\n")
+}
+
 /// Apply the workload's setup statements to a fresh connection. Idempotent
 /// because every workload starts with `DROP TABLE IF EXISTS` in `setup_sql`.
 #[cfg(feature = "integration_tests")]
@@ -115,6 +122,30 @@ fn apply_cleanup(c: &mut Client, wl: &dyn Workload) {
     for stmt in wl.cleanup_sql() {
         let _ = c.simple_query(&stmt);
     }
+}
+
+/// Assert that an H3 winning workload actually dispatches a GPU kernel.
+#[cfg(feature = "integration_tests")]
+fn assert_workload_dispatches_kernel_counter(name: &str) {
+    let wl = find_workload(name).unwrap_or_else(|| panic!("workload `{name}` not registered"));
+    let mut c = connect();
+    apply_setup(&mut c, wl.as_ref(), SETUP_ROWS);
+    c.simple_query("SET pg_accel.enabled = on")
+        .expect("enable pg_accel");
+
+    let _ = c.simple_query(&wl.query_sql()).expect("warmup query");
+
+    let before = kernel_executions(&mut c);
+    let _ = c.simple_query(&wl.query_sql()).expect("measured query");
+    let after = kernel_executions(&mut c);
+
+    apply_cleanup(&mut c, wl.as_ref());
+
+    assert!(
+        after > before,
+        "{name} must increment pg_accel_kernel_executions() \
+         (before={before}, after={after}); flat counter = lost H3 winning-lane dispatch."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +272,17 @@ fn h3_resolution_sweep_dispatch_increments_kernel_counter() {
     );
 }
 
+/// The remaining scalar winning lanes share the same H3 LatLngToCell GPU
+/// kernel. They still need explicit dispatch evidence so a renamed workload
+/// or adapter registration drift cannot hide behind the aggregate H3 report.
+#[cfg(feature = "integration_tests")]
+#[test]
+fn h3_additional_winning_scalar_lanes_dispatch_kernel_counter() {
+    for name in ["h3_latlng_res15", "h3_fp64_ops"] {
+        assert_workload_dispatches_kernel_counter(name);
+    }
+}
+
 /// `h3_cell_to_parent` is a parity lane: pg_accel does not register it, so
 /// running its bench query with `pg_accel.enabled=on` must NOT increment the
 /// GPU kernel counter. If this assertion fires, an agent has re-registered
@@ -295,6 +337,88 @@ fn h3_grid_distance_stays_native_under_accel_on() {
         after, before,
         "h3_grid_distance must NOT increment pg_accel_kernel_executions() \
          (before={before}, after={after}); non-zero delta = parity lane re-registered."
+    );
+}
+
+/// Small `h3_grid_disk` target-list SRF shapes are the only selected SRF
+/// lane right now. This asserts visible planner selection, NULL-as-empty
+/// SRF semantics, and an actual kernel-counter delta.
+#[cfg(feature = "integration_tests")]
+#[test]
+fn h3_srf_grid_disk_small_shape_dispatches_kernel_counter() {
+    let mut c = connect();
+    c.simple_query("SET pg_accel.enabled = on")
+        .expect("enable pg_accel");
+    c.simple_query(
+        "CREATE TEMP TABLE _h3_srf_grid_disk_small(id int, cell h3index); \
+         INSERT INTO _h3_srf_grid_disk_small VALUES \
+           (1, '8928308280fffff'::h3index), \
+           (2, '89283082813ffff'::h3index), \
+           (3, NULL); \
+         ANALYZE _h3_srf_grid_disk_small",
+    )
+    .expect("setup small h3_grid_disk SRF fixture");
+
+    let query = "SELECT count(*) \
+                 FROM (\
+                   SELECT h3_grid_disk(cell, 1) AS disk_cell \
+                   FROM _h3_srf_grid_disk_small\
+                 ) expanded";
+    let plan = explain_text(&mut c, query);
+    assert!(
+        plan.contains("GpuAccelSrfTargetList"),
+        "small h3_grid_disk SRF shape must select GpuAccelSrfTargetList; got:\n{plan}"
+    );
+
+    let warm_rows = execute_to_rows(&mut c, query);
+    assert_eq!(
+        warm_rows,
+        vec!["14".to_owned()],
+        "two non-NULL k=1 grid disks must emit 14 rows and the NULL input row \
+         must emit an empty SRF range; got {warm_rows:?}"
+    );
+
+    let before = kernel_executions(&mut c);
+    let measured_rows = execute_to_rows(&mut c, query);
+    let after = kernel_executions(&mut c);
+
+    assert_eq!(
+        measured_rows,
+        vec!["14".to_owned()],
+        "measured h3_grid_disk SRF count changed after warmup"
+    );
+    assert!(
+        after > before,
+        "small h3_grid_disk SRF query must increment pg_accel_kernel_executions() \
+         (before={before}, after={after}); flat counter = selected plan did not dispatch."
+    );
+}
+
+/// The default `h3_srf_grid_disk` benchmark shape intentionally remains
+/// native until expanded SRF output can be fused into a GPU-resident
+/// aggregate/count path. This keeps the workload benchmarkable as a visible
+/// decline guard instead of timing a huge row-return path that loses.
+#[cfg(feature = "integration_tests")]
+#[test]
+fn h3_srf_grid_disk_benchmark_shape_stays_native() {
+    let wl = H3SrfGridDisk;
+    let mut c = connect();
+    apply_setup(&mut c, &wl, SETUP_ROWS);
+    c.simple_query("SET pg_accel.enabled = on")
+        .expect("enable pg_accel");
+
+    let plan = explain_text(&mut c, &wl.query_sql());
+
+    apply_cleanup(&mut c, &wl);
+
+    assert!(
+        !plan.contains("GpuAccelSrfTargetList"),
+        "default h3_srf_grid_disk benchmark shape must stay native until \
+         aggregate/count fusion exists; got:\n{plan}"
+    );
+    assert!(
+        plan.contains("ProjectSet"),
+        "default h3_srf_grid_disk benchmark shape should show native ProjectSet; got:\n{plan}"
     );
 }
 

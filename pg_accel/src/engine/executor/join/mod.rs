@@ -8,6 +8,7 @@
 //! only fallback when no GPU implementation is available.
 
 mod build;
+mod nlj;
 mod probe;
 
 use pgrx::pg_sys;
@@ -18,6 +19,8 @@ use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
 use crate::engine::registry::{self, AccelStrategy};
 use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
+
+pub(crate) const NLJ_SHAPE_BETWEEN: i32 = 2;
 
 /// Resolve the PostGIS function name registered in the adapter to a
 /// concrete [`three_layer::SpatialPredicate`].
@@ -122,6 +125,11 @@ pub(super) fn hash_join_row_indices_representable(row_count: usize) -> bool {
 }
 
 #[must_use]
+pub(super) const fn hash_join_key_type_supported(key_type: PgaccelKeyType) -> bool {
+    matches!(key_type, PgaccelKeyType::Int32 | PgaccelKeyType::Int64)
+}
+
+#[must_use]
 pub(super) fn hash_join_match_count_within_capacity(
     match_count: usize,
     max_matches: usize,
@@ -132,6 +140,7 @@ pub(super) fn hash_join_match_count_within_capacity(
 /// Rust-side batch join executor state.
 ///
 /// Not `repr(C)` — lives on the Rust heap, opaque to PG.
+#[allow(clippy::struct_excessive_bools)]
 pub struct JoinExecState {
     /// Acceleration strategy for this join node.
     strategy: AccelStrategy,
@@ -208,6 +217,27 @@ pub struct JoinExecState {
     /// Structured hash-join metadata for traces and tests.
     hash_join_telemetry: HashJoinTelemetry,
 
+    /// True when this Custom Scan represents `COUNT(*)` over a hash join and
+    /// should emit a single aggregate row instead of joined heap tuples.
+    hash_count_only: bool,
+
+    /// Whether the count-only row has already been emitted.
+    hash_count_returned: bool,
+
+    // -- NestedLoop inequality context (set via `set_nlj_between_context`) --
+    /// NLJ predicate shape. Currently only `NLJ_SHAPE_BETWEEN` is selectable.
+    nlj_shape: i32,
+    /// Attribute number of the value column on child 0 / outer side.
+    nlj_outer_value_attno: i32,
+    /// Attribute number of the lower-bound column on child 1 / inner side.
+    nlj_inner_lo_attno: i32,
+    /// Attribute number of the upper-bound column on child 1 / inner side.
+    nlj_inner_hi_attno: i32,
+    /// Key type for the NLJ dispatch.
+    nlj_key_type: PgaccelKeyType,
+    /// Whether the one-shot NLJ dispatch has consumed both children.
+    nlj_dispatched: bool,
+
     // -- Counters for EXPLAIN ANALYZE --
     /// Total outer rows pulled.
     pub rows_dispatched: u64,
@@ -254,6 +284,14 @@ impl JoinExecState {
             hash_outer_slot: std::ptr::null_mut(),
             hash_inner_slot: std::ptr::null_mut(),
             hash_join_telemetry: HashJoinTelemetry::default(),
+            hash_count_only: false,
+            hash_count_returned: false,
+            nlj_shape: 0,
+            nlj_outer_value_attno: 0,
+            nlj_inner_lo_attno: 0,
+            nlj_inner_hi_attno: 0,
+            nlj_key_type: PgaccelKeyType::Int32,
+            nlj_dispatched: false,
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
@@ -269,10 +307,13 @@ impl JoinExecState {
         self.current_outer = std::ptr::null_mut();
         self.outer_exhausted = false;
         self.inner_needs_rescan = false;
+        self.free_pending_matches();
         self.pending_matches.clear();
         self.pending_cursor = 0;
         self.hash_table = None;
         self.hash_built = false;
+        self.hash_count_returned = false;
+        self.nlj_dispatched = false;
         // Free inner tuples from previous scan.
         for &mt in &self.hash_inner_tuples {
             if !mt.is_null() {
@@ -289,6 +330,11 @@ impl JoinExecState {
     #[must_use]
     pub(crate) fn hash_join_telemetry(&self) -> HashJoinTelemetry {
         self.hash_join_telemetry
+    }
+
+    #[must_use]
+    pub(crate) fn hash_join_count_only(&self) -> bool {
+        self.hash_count_only
     }
 
     pub(super) fn record_hash_join_worker_metadata(&mut self, worker_number: i32) {
@@ -335,6 +381,21 @@ impl JoinExecState {
         self.hash_join_telemetry.last_match_count = match_count;
     }
 
+    fn free_pending_matches(&self) {
+        for m in &self.pending_matches {
+            if !m.outer_tuple.is_null() {
+                // SAFETY: outer_tuple was allocated by ExecCopySlotMinimalTuple
+                // or heap_copy_minimal_tuple.
+                unsafe { pg_sys::pfree(m.outer_tuple.cast()) };
+            }
+            if !m.inner_tuple.is_null() {
+                // SAFETY: inner_tuple was allocated by ExecCopySlotMinimalTuple
+                // or heap_copy_minimal_tuple.
+                unsafe { pg_sys::pfree(m.inner_tuple.cast()) };
+            }
+        }
+    }
+
     /// Fetch the next matching join tuple.
     ///
     /// Implements a nested-loop join: for each outer tuple, scan all
@@ -360,7 +421,15 @@ impl JoinExecState {
             }
             AccelStrategy::GpuHashJoin => {
                 // SAFETY: Caller guarantees main backend thread.
-                unsafe { self.next_hash_join(outer_ps, inner_ps, result_slot) }
+                if self.hash_count_only {
+                    unsafe { self.next_hash_join_count(outer_ps, inner_ps, result_slot) }
+                } else {
+                    unsafe { self.next_hash_join(outer_ps, inner_ps, result_slot) }
+                }
+            }
+            AccelStrategy::GpuNestedLoopIneq => {
+                // SAFETY: Caller guarantees main backend thread.
+                unsafe { self.next_nlj_ineq(outer_ps, inner_ps, result_slot) }
             }
             _ => {
                 pgrx::error!(
@@ -848,16 +917,13 @@ impl JoinExecState {
     /// Must be called on the main backend thread.
     pub unsafe fn rescan(&mut self) {
         // SAFETY: Free owned MinimalTuples in pending_matches.
-        for m in &self.pending_matches {
-            if !m.inner_tuple.is_null() {
-                unsafe { pg_sys::pfree(m.inner_tuple.cast()) };
-            }
-        }
+        self.free_pending_matches();
         self.pending_matches.clear();
         self.pending_cursor = 0;
         self.current_outer = std::ptr::null_mut();
         self.outer_exhausted = false;
         self.inner_needs_rescan = false;
+        self.nlj_dispatched = false;
 
         // Reset hash join state for rescan.
         self.hash_table = None;

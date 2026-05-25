@@ -129,6 +129,7 @@ fn gpu_hash_join_strategy_defaults() {
     assert!(!state.hash_built);
     assert!(state.hash_table.is_none());
     assert!(state.hash_inner_tuples.is_empty());
+    assert!(!state.hash_join_count_only());
 }
 
 #[test]
@@ -165,6 +166,14 @@ fn set_hash_join_context_can_be_called_multiple_times() {
     assert_eq!(state.hash_outer_attno, 10);
     assert_eq!(state.hash_inner_attno, 20);
     assert!(matches!(state.hash_key_type, PgaccelKeyType::Int64));
+}
+
+#[test]
+fn set_hash_join_count_mode_marks_count_only_path() {
+    let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+    assert!(!state.hash_join_count_only());
+    state.set_hash_join_count_mode(true);
+    assert!(state.hash_join_count_only());
 }
 
 // -- Pending matches buffer ------------------------------------------------
@@ -274,6 +283,15 @@ fn hash_join_match_count_guard_rejects_duplicate_overflow() {
 fn hash_join_row_indices_must_fit_u32() {
     assert!(hash_join_row_indices_representable(u32::MAX as usize));
     assert!(!hash_join_row_indices_representable(u32::MAX as usize + 1));
+}
+
+#[test]
+fn hash_join_key_type_support_is_integer_only() {
+    assert!(hash_join_key_type_supported(PgaccelKeyType::Int32));
+    assert!(hash_join_key_type_supported(PgaccelKeyType::Int64));
+    assert!(!hash_join_key_type_supported(PgaccelKeyType::Float64));
+    assert!(!hash_join_key_type_supported(PgaccelKeyType::Uuid));
+    assert!(!hash_join_key_type_supported(PgaccelKeyType::Inet));
 }
 
 #[test]

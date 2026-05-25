@@ -151,9 +151,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     rti: pg_sys::Index,
     rte: *mut RangeTblEntry,
 ) {
-    // Lazy-init tracing in this backend (no-op after first call).
-    crate::engine::otel::init();
-
     // Chain previous hook first.
     // SAFETY: Previous hook, if set, accepts the same planner-provided args.
     unsafe {
@@ -185,13 +182,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         stats::record_command_type_skip();
         return;
     }
-
-    // Gate 1b: GPU must be available and enabled — no CPU-only fallback.
-    if !cost::gpu_is_usable() {
-        pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
-        return;
-    }
-    pgrx::debug1!("pg_accel: set_rel_pathlist: GPU usable, checking rel");
 
     // SAFETY: rel and rte are valid pointers provided by the planner.
     let rel_ref = unsafe { &*rel };
@@ -269,6 +259,15 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
             return;
         }
     }
+
+    // Gate 3b: GPU must be available and enabled for extension-function scan
+    // strategies. Keep this behind the cheap relation / row / clause checks so
+    // planner-declined native queries do not initialise the GPU runtime.
+    if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
+        return;
+    }
+    pgrx::debug1!("pg_accel: set_rel_pathlist: GPU usable, checking restrictions");
 
     // Extension-function match: requires the adapter registry (PostGIS,
     // H3, raster). Generic numeric GpuExpr is intentionally not exposed as
@@ -697,28 +696,55 @@ pub(super) const SORT_FLOAT8OID: u32 = 701;
 /// planner injects paths the executor bails on, wasting a plan.
 pub(super) const GPU_SORT_MAX_PATHKEYS: i32 = 1;
 
-/// Maximum output fraction for a standalone heap-backed `GpuSort` path.
-///
-/// The normal base-relation planner hook may expose bounded top-k shapes,
-/// but not generic full-output ORDER BY over heap tuples. Full sort remains
-/// an internal primitive until a GPU-resident/top-k/rank/finalization pipeline
-/// can keep intermediate rows off the PostgreSQL tuple path.
-const GPU_SORT_MAX_HEAP_TOPK_FRACTION: f64 = 0.25;
+#[must_use]
+#[inline]
+pub(super) fn sort_topk_backend_supported(backend_name: &[u8]) -> bool {
+    // The Metal/AdaptiveCpp top-k SQL path can still crash a backend even
+    // under the bounded LIMIT cap. Keep direct kernel tests available, but
+    // leave selected SQL ORDER BY plans native on Metal until that path is
+    // repaired.
+    backend_name != b"metal"
+}
+
+#[must_use]
+fn selected_gpu_sort_topk_kernel_supported() -> bool {
+    // On macOS the supported AdaptiveCpp backend is Metal. Keep this gate
+    // compile-time cheap so no-dispatch ORDER BY queries do not initialise
+    // the GPU runtime just to learn that standalone top-k is unavailable.
+    #[cfg(target_os = "macos")]
+    {
+        sort_topk_backend_supported(b"metal")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        sort_topk_backend_supported(b"")
+    }
+}
 
 #[must_use]
 #[inline]
 pub(super) fn heap_topk_sort_candidate(limit_tuples: f64, rows: usize) -> bool {
-    if rows == 0 || !cost::sort_limit_present(limit_tuples) {
-        return false;
-    }
-
-    let limit_rows = limit_tuples.ceil();
     #[allow(clippy::cast_precision_loss)]
-    let row_count = rows as f64;
-
-    limit_rows >= 1.0
-        && limit_rows < row_count
-        && limit_rows <= row_count * GPU_SORT_MAX_HEAP_TOPK_FRACTION
+    let materialized_output_fraction = if rows == 0 {
+        1.0
+    } else {
+        limit_tuples.ceil() / rows as f64
+    };
+    cost::formulas::sort_admission(
+        cost::formulas::SortAdmissionInput {
+            rows,
+            limit_tuples: Some(limit_tuples),
+            estimated_row_width: 0,
+            key_count: 1,
+            key_class: None,
+            algorithm: cost::formulas::SortAlgorithm::StandaloneTopK,
+            materialized_output_fraction,
+            chunk_count: 1,
+            cold_jit: false,
+        },
+        cost::device_limits(),
+    )
+    .eligible
 }
 
 /// Whether a (`limit_tuples`, `num_pathkeys`) pair looks like PostgreSQL's
@@ -886,12 +912,6 @@ unsafe fn longest_presorted_prefix(
 /// `root` and `rel` must be valid planner-provided pointers.
 #[allow(clippy::too_many_lines)]
 unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo) {
-    // Gate: GPU must be available and enabled.
-    if !cost::gpu_is_usable() {
-        pgrx::debug1!("pg_accel sort: gpu not usable");
-        return;
-    }
-
     // SAFETY: root is a valid PlannerInfo pointer.
     let root_ref = unsafe { &*root };
     let rel_ref = unsafe { &*rel };
@@ -1015,9 +1035,24 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         return;
     }
 
-    // Width is used for cost estimation but not as a hard gate —
-    // the cost model decides whether GPU sort is beneficial.
-    let _output_width = unsafe { (*(*rel).reltarget).width } as usize;
+    // Backend support is checked after the pure shape gates so no-dispatch
+    // benchmark rows keep their truthful decline reason. On macOS this still
+    // keeps the Metal top-k kernel unavailable for selected SQL plans until
+    // the backend-specific candidate bug is fixed.
+    if !selected_gpu_sort_topk_kernel_supported() {
+        pgrx::debug1!(
+            "pg_accel sort: selected top-k kernel unsupported on this GPU backend; \
+             deferring standalone ORDER BY to PostgreSQL"
+        );
+        let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        stats::increment_planner_rejected("sort_topk_backend_unsupported", rejected_rows);
+        return;
+    }
+
+    if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel sort: gpu not usable");
+        return;
+    }
 
     // Extract sort key info from the single PathKey.
     // SAFETY: sort_pathkeys has exactly 1 element (checked above).
@@ -1104,6 +1139,46 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
     let uses_fp64 = var_typid == SORT_FLOAT8OID;
     if uses_fp64 && !crate::fp64_enabled() {
         pgrx::debug1!("pg_accel sort: float8 sort skipped — fp64_enabled=false");
+        return;
+    }
+
+    let output_width = unsafe { (*(*rel).reltarget).width.max(0) } as usize;
+    let key_class = if matches!(var_typid, SORT_FLOAT4OID | SORT_FLOAT8OID) {
+        cost::formulas::SortKeyClass::Float
+    } else {
+        cost::formulas::SortKeyClass::Integer
+    };
+    #[allow(clippy::cast_precision_loss)]
+    let materialized_output_fraction = limit_tuples.ceil() / rows.max(1) as f64;
+    let admission = cost::formulas::sort_admission(
+        cost::formulas::SortAdmissionInput {
+            rows,
+            limit_tuples: Some(limit_tuples),
+            estimated_row_width: output_width,
+            key_count: num_pathkeys as usize,
+            key_class: Some(key_class),
+            algorithm: cost::formulas::SortAlgorithm::StandaloneTopK,
+            materialized_output_fraction,
+            chunk_count: 1,
+            cold_jit: false,
+        },
+        limits,
+    );
+    if !admission.eligible {
+        pgrx::debug1!(
+            "pg_accel sort: admission declined {:?} for LIMIT {:?}, rows={}, width={}; \
+             deferring standalone ORDER BY to PostgreSQL",
+            admission.reason,
+            limit_tuples,
+            rows,
+            output_width
+        );
+        let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        let reason = match admission.reason {
+            Some(cost::formulas::SortDeclineReason::RowTooWide) => "sort_heap_topk_wide_output",
+            _ => "sort_heap_full_output",
+        };
+        stats::increment_planner_rejected(reason, rejected_rows);
         return;
     }
 
@@ -1385,9 +1460,10 @@ unsafe fn inject_gpu_sort_partial_paths(
 #[cfg(test)]
 mod tests {
     use super::{
-        GPU_SORT_MAX_HEAP_TOPK_FRACTION, GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape,
-        heap_topk_sort_candidate, min_max_rewrite_shape,
+        GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape, heap_topk_sort_candidate,
+        min_max_rewrite_shape, sort_topk_backend_supported,
     };
+    use crate::engine::cost::DeviceLimits;
 
     /// Regression guard: the planner sort gate and the executor sort
     /// dispatcher must agree on the supported pathkey count. The executor
@@ -1402,6 +1478,21 @@ mod tests {
             GPU_SORT_MAX_PATHKEYS, 1,
             "executor only supports single-key GPU sort; see comment above GPU_SORT_MAX_PATHKEYS"
         );
+    }
+
+    #[test]
+    fn heap_topk_width_cap_stays_narrow_until_late_fetch_lands() {
+        assert_eq!(
+            DeviceLimits::cpu_only().gpu_sort_heap_topk_max_width_bytes,
+            16
+        );
+    }
+
+    #[test]
+    fn metal_topk_backend_stays_planner_declined_until_kernel_fixed() {
+        assert!(!sort_topk_backend_supported(b"metal"));
+        assert!(sort_topk_backend_supported(b"cuda"));
+        assert!(sort_topk_backend_supported(b"hip"));
     }
 
     // -- classify_sort_shape ------------------------------------------------
@@ -1492,14 +1583,26 @@ mod tests {
     #[test]
     fn heap_topk_gate_rejects_non_selective_limit() {
         let rows = 1_000_000;
-        let non_selective_limit = 1_000_000.0 * (GPU_SORT_MAX_HEAP_TOPK_FRACTION + 0.01);
+        let non_selective_limit =
+            1_000_000.0 * (DeviceLimits::cpu_only().gpu_sort_heap_topk_max_fraction + 0.01);
         assert!(!heap_topk_sort_candidate(non_selective_limit, rows));
     }
 
     #[test]
+    fn heap_topk_gate_rejects_limit_above_implemented_topk_bound() {
+        assert!(!heap_topk_sort_candidate(
+            DeviceLimits::cpu_only().gpu_sort_topk_max_limit as f64 + 1.0,
+            1_000_000
+        ));
+    }
+
+    #[test]
     fn heap_topk_gate_allows_bounded_topk() {
-        assert!(heap_topk_sort_candidate(1_000.0, 1_000_000));
-        assert!(heap_topk_sort_candidate(250_000.0, 1_000_000));
+        assert!(heap_topk_sort_candidate(2.0, 1_000_000));
+        assert!(heap_topk_sort_candidate(
+            DeviceLimits::cpu_only().gpu_sort_topk_max_limit as f64,
+            1_000_000
+        ));
     }
 
     // -- min_max_rewrite_shape --------------------------------------------

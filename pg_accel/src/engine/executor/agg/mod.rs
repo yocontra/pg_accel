@@ -27,7 +27,7 @@ pub(crate) mod values;
 mod tests;
 
 pub use execute::AggExecState;
-pub use keys::GroupKeyInfo;
+pub use keys::{GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE};
 pub use ops::AggOp;
 pub use partial::{ColumnAccumulator, PartialAggSpec, PartialColumn, PartialEmitter};
 

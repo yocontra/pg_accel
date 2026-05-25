@@ -16,7 +16,7 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::super::gucs;
-use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo};
+use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE};
 use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
@@ -518,9 +518,10 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
             pg_sys::makeInteger(AccelStrategy::GpuSort as c_int).cast(),
         );
 
-        // Read sort keys and limit from the path's custom_private and
+        // Read sort keys, limit, and self-scan relid from the path's custom_private and
         // serialize them into the scan node's custom_private.
-        // Path layout: [fn_oid, target_attno, accel_strategy, num_keys, ...sort_key_data..., limit_tuples]
+        // Path layout: [fn_oid, target_attno, accel_strategy, num_keys,
+        //               ...sort_key_data..., limit_tuples, self_scan_relid]
         // Sort key data starts at index 3 (after the 3-element header).
         let path_priv = (*best_path).custom_private;
         let sort_keys = deserialize_path_sort_keys_at(path_priv, 3);
@@ -530,6 +531,9 @@ unsafe extern "C-unwind" fn plan_custom_path_sort(
         // In the path layout, limit is at: 3 (header) + 1 (num_keys) + num_keys * SORT_KEY_INTS
         let path_limit = deserialize_path_limit_at(path_priv, 3, &sort_keys);
         list = pg_sys::lappend(list, pg_sys::makeInteger(path_limit).cast());
+        let path_self_scan_relid =
+            deserialize_path_sort_self_scan_relid_at(path_priv, 3, &sort_keys);
+        list = pg_sys::lappend(list, pg_sys::makeInteger(path_self_scan_relid).cast());
 
         (*cscan).custom_private = list;
     }
@@ -565,6 +569,32 @@ unsafe fn deserialize_path_limit_at(
     }
     // SAFETY: Index is within bounds (checked above).
     unsafe { list_int_at(custom_private, limit_idx as c_int) }
+}
+
+/// Extract self_scan_relid from the path's `custom_private` with a base offset.
+///
+/// The relid is serialized immediately after limit_tuples:
+/// `[...header..., num_keys, ...sort_key_data..., limit_tuples, self_scan_relid]`
+///
+/// # Safety
+///
+/// `custom_private` must be null or a valid PG `List`.
+unsafe fn deserialize_path_sort_self_scan_relid_at(
+    custom_private: *mut pg_sys::List,
+    header_offset: usize,
+    sort_keys: &[SortKeyDesc],
+) -> c_int {
+    if custom_private.is_null() {
+        return 0;
+    }
+    // SAFETY: custom_private is a valid List.
+    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
+    let relid_idx = header_offset + 1 + sort_keys.len() * SORT_KEY_INTS + 1;
+    if relid_idx >= list_len {
+        return 0;
+    }
+    // SAFETY: Index is within bounds (checked above).
+    unsafe { list_int_at(custom_private, relid_idx as c_int) }
 }
 
 /// Deserialize sort key descriptors starting at a given index in the list.
@@ -680,7 +710,8 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
             let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
             let gk_tlist_pos = list_int_at(path_priv, (gk_base + 5) as c_int);
-            if gk_attno <= 0 || !matches!(gk_key_type, 0 | 1 | 2 | 4 | 5) {
+            if gk_attno <= 0 || !matches!(gk_key_type, 0 | 1 | 2 | 4 | 5 | H3_LATLNG_GROUP_KEY_TYPE)
+            {
                 pgrx::error!("pg_accel: invalid aggregate private group-key layout");
             }
             Some((gk_attno, gk_type_oid, gk_key_type, gk_tlist_pos))
@@ -1577,6 +1608,11 @@ unsafe fn make_custom_scan_plan(
             if path_priv_len > 4 {
                 let raw_inner_attno = list_int_at(path_priv, 3);
                 let key_type = list_int_at(path_priv, 4);
+                let count_only = if path_priv_len > 7 {
+                    list_int_at(path_priv, 7)
+                } else {
+                    0
+                };
 
                 // Read original varnos for disambiguating attno matches
                 // in multi-table child outputs (e.g., nested CustomScans).
@@ -1665,6 +1701,87 @@ unsafe fn make_custom_scan_plan(
 
                 list = pg_sys::lappend(list, pg_sys::makeInteger(remapped_inner).cast());
                 list = pg_sys::lappend(list, pg_sys::makeInteger(key_type).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(count_only).cast());
+            }
+        }
+
+        // For GpuNestedLoopIneq, serialize the constrained BETWEEN/range
+        // payload after the base 6 fields. Path layout:
+        // [fn_oid=0, outer_value_attno, strategy, shape, key_type, op,
+        //  outer_varno, inner_varno, inner_lo_attno, inner_hi_attno]
+        if accel_strategy_raw == AccelStrategy::GpuNestedLoopIneq as c_int {
+            let path_priv_len = pg_sys::list_length(path_priv) as usize;
+            if path_priv_len > 9 {
+                let shape = list_int_at(path_priv, 3);
+                let key_type = list_int_at(path_priv, 4);
+                let op = list_int_at(path_priv, 5);
+                let outer_varno = list_int_at(path_priv, 6);
+                let inner_varno = list_int_at(path_priv, 7);
+                let raw_inner_lo_attno = list_int_at(path_priv, 8);
+                let raw_inner_hi_attno = list_int_at(path_priv, 9);
+
+                let remap_via_child = |child_idx: c_int,
+                                       orig_attno: c_int,
+                                       orig_varno: c_int|
+                 -> c_int {
+                    if custom_plans.is_null() {
+                        return orig_attno;
+                    }
+                    let n_children = pg_sys::list_length(custom_plans);
+                    if child_idx >= n_children {
+                        return orig_attno;
+                    }
+                    let child = pg_sys::list_nth(custom_plans, child_idx).cast::<pg_sys::Plan>();
+                    if child.is_null() {
+                        return orig_attno;
+                    }
+
+                    let child_scanrelid = (*child.cast::<pg_sys::Scan>()).scanrelid;
+                    let search_tlist = if child_scanrelid == 0
+                        && (*child.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_CustomScan
+                    {
+                        (*child.cast::<pg_sys::CustomScan>()).custom_scan_tlist
+                    } else {
+                        (*child).targetlist
+                    };
+
+                    if search_tlist.is_null() {
+                        return orig_attno;
+                    }
+                    let tlen = pg_sys::list_length(search_tlist);
+                    for j in 0..tlen {
+                        let tle = pg_sys::list_nth(search_tlist, j).cast::<pg_sys::TargetEntry>();
+                        if tle.is_null() {
+                            continue;
+                        }
+                        let expr = (*tle).expr;
+                        if expr.is_null() {
+                            continue;
+                        }
+                        if (*expr.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_Var {
+                            let var = expr.cast::<pg_sys::Var>();
+                            let v_attno = i32::from((*var).varattno);
+                            let v_varno = (*var).varno;
+                            if v_attno == orig_attno && (orig_varno == 0 || v_varno == orig_varno) {
+                                return i32::from((*tle).resno);
+                            }
+                        }
+                    }
+                    orig_attno
+                };
+
+                let remapped_outer = remap_via_child(0, target_attno, outer_varno);
+                let remapped_lo = remap_via_child(1, raw_inner_lo_attno, inner_varno);
+                let remapped_hi = remap_via_child(1, raw_inner_hi_attno, inner_varno);
+
+                let cell4 = pg_sys::list_nth(list, 4).cast::<pg_sys::Integer>();
+                (*cell4).ival = remapped_outer;
+
+                list = pg_sys::lappend(list, pg_sys::makeInteger(shape).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(key_type).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(op).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(remapped_lo).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(remapped_hi).cast());
             }
         }
 
@@ -2502,6 +2619,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     _estate: *mut pg_sys::EState,
     eflags: c_int,
 ) {
+    crate::engine::otel::init();
     let _span = tracing::debug_span!("ffi.begin_custom_scan").entered();
     // Record that a query was routed through the accelerated custom scan path.
     // This runs once per CustomScan node init on the main backend thread.
@@ -2576,7 +2694,8 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     // per row using a buffered cursor.
     if privdata.gpu_strategy == GpuStrategy::SrfTargetList {
         // SAFETY: node is a valid CustomScanState on the main backend thread.
-        let exec = unsafe { srf_target_list::init_state(node) };
+        let exec =
+            unsafe { srf_target_list::init_state(node, privdata.batch_size.max(1) as usize) };
         // SAFETY: state points to our extended GpuAccelScanState; writing
         // executor pointer + zero counters.
         unsafe {
@@ -2845,6 +2964,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 privdata.hash_inner_attno,
                 key_type,
             );
+            exec.set_hash_join_count_mode(privdata.hash_count_only);
 
             // Initialize tlist mapping and temp slots for combined output.
             let custom_ps = (*node).custom_ps;
@@ -2859,6 +2979,52 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 privdata.target_attno,
                 privdata.hash_inner_attno,
                 privdata.hash_key_type,
+                exec.tlist_map.len(),
+            );
+            Box::into_raw(exec).cast()
+        } else if privdata.accel_strategy == AccelStrategy::GpuNestedLoopIneq {
+            if let Some(reason) = privdata.nlj_validation_error() {
+                pgrx::error!(
+                    "pg_accel: malformed GpuNestedLoopIneq private data ({reason}; outer_attno={}, inner_lo_attno={}, inner_hi_attno={}, key_type={}, shape={}); refusing CPU fallback",
+                    privdata.target_attno,
+                    privdata.nlj_inner_lo_attno,
+                    privdata.nlj_inner_hi_attno,
+                    privdata.nlj_key_type,
+                    privdata.nlj_shape,
+                );
+            }
+            let key_type = match privdata.nlj_key_type {
+                1 => PgaccelKeyType::Int64,
+                2 => PgaccelKeyType::Float64,
+                0 => PgaccelKeyType::Int32,
+                _ => unreachable!("nlj_validation_error rejects invalid key types"),
+            };
+            let mut exec = Box::new(JoinExecState::new(
+                AccelStrategy::GpuNestedLoopIneq,
+                batch_size,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ));
+            exec.set_nlj_between_context(
+                privdata.target_attno,
+                privdata.nlj_inner_lo_attno,
+                privdata.nlj_inner_hi_attno,
+                key_type,
+            );
+
+            let custom_ps = (*node).custom_ps;
+            if !custom_ps.is_null() && pg_sys::list_length(custom_ps) >= 2 {
+                let outer_ps = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
+                let inner_ps = pg_sys::list_nth(custom_ps, 1).cast::<pg_sys::PlanState>();
+                exec.init_hash_join_slots(cscan, outer_ps, inner_ps);
+            }
+
+            pgrx::debug1!(
+                "pg_accel: begin_custom_scan: GpuNestedLoopIneq BETWEEN outer_attno={}, inner_lo_attno={}, inner_hi_attno={}, key_type={}, tlist_map={}",
+                privdata.target_attno,
+                privdata.nlj_inner_lo_attno,
+                privdata.nlj_inner_hi_attno,
+                privdata.nlj_key_type,
                 exec.tlist_map.len(),
             );
             Box::into_raw(exec).cast()
@@ -3204,6 +3370,8 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         // SAFETY: propagate row counter for EXPLAIN ANALYZE.
         unsafe {
             (*state).accel.rows_dispatched = srf_target_list::rows_dispatched(executor);
+            (*state).accel.batches_executed = srf_target_list::batches_executed(executor);
+            (*state).accel.dispatch_time_us = srf_target_list::dispatch_time_us(executor);
         }
         return slot;
     }
@@ -3453,18 +3621,18 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
             );
             (*state).accel.executor = Box::into_raw(exec).cast();
         } else if gpu_strategy == GpuStrategy::Sort {
-            let sort_keys = if (*state).accel.executor.is_null() {
-                vec![]
+            let (sort_keys, limit) = if (*state).accel.executor.is_null() {
+                (vec![], None)
             } else {
                 // SAFETY: executor was Box::into_raw'd as SortExecState.
                 let old = Box::from_raw((*state).accel.executor.cast::<SortExecState>());
-                old.sort_keys().to_vec()
+                (old.sort_keys().to_vec(), old.limit())
             };
             let exec = Box::new(SortExecState::new(
                 AccelStrategy::GpuSort,
                 batch_size,
                 sort_keys,
-                None,
+                limit,
             ));
             (*state).accel.executor = Box::into_raw(exec).cast();
         } else if gpu_strategy == GpuStrategy::Window {

@@ -149,6 +149,7 @@ pgaccel_status pgaccel_sort_f32(float* data, size_t count);
 pgaccel_status pgaccel_sort_f64(double* data, size_t count);
 pgaccel_status pgaccel_sort_i32(int32_t* data, size_t count);
 pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count);
+pgaccel_status pgaccel_sort_u64(uint64_t* data, size_t count);
 
 /*
  * Key-value sort: sorts keys[] and permutes indices[] to match.
@@ -158,6 +159,19 @@ pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count)
 pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count);
 pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count);
 pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count);
+
+/*
+ * Bounded key-value top-k: returns row indices for the first k rows in ORDER
+ * BY order without sorting the full input. `largest != 0` means descending.
+ */
+pgaccel_status pgaccel_topk_kv_f32(const float* keys, size_t count, size_t k, uint8_t largest,
+                                   uint32_t* out_indices, size_t* out_count);
+pgaccel_status pgaccel_topk_kv_f64(const double* keys, size_t count, size_t k, uint8_t largest,
+                                   uint32_t* out_indices, size_t* out_count);
+pgaccel_status pgaccel_topk_kv_i32(const int32_t* keys, size_t count, size_t k, uint8_t largest,
+                                   uint32_t* out_indices, size_t* out_count);
+pgaccel_status pgaccel_topk_kv_i64(const int64_t* keys, size_t count, size_t k, uint8_t largest,
+                                   uint32_t* out_indices, size_t* out_count);
 
 /* ── Reduce Kernels ──────────────────────────────────────────────── */
 
@@ -472,6 +486,11 @@ pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a, const uint
 pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array, const void* lng_array,
                                                size_t count, int resolution, int use_fp64,
                                                uint64_t* cell_ids, uint8_t* valid);
+
+struct pgaccel_agg_state;
+pgaccel_status pgaccel_h3_lat_lng_count_bulk(const double* lat_array, const double* lng_array,
+                                             size_t count, int resolution,
+                                             struct pgaccel_agg_state** out_state);
 
 /* ── H3 Variable-Output Kernels (two-pass output-size + emit) ──────── */
 /*

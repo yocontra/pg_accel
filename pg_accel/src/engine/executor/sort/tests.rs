@@ -25,6 +25,8 @@ fn new_state_defaults() {
     assert_eq!(state.emit_pos, 0);
     assert_eq!(state.rows_dispatched, 0);
     assert_eq!(state.batches_executed, 0);
+    assert!(!state.gpu_dispatched);
+    assert_eq!(state.gpu_rows_dispatched, 0);
 }
 
 #[test]
@@ -127,6 +129,7 @@ fn sort_keys_stored() {
 fn limit_stored() {
     let state = make_state_with_key(256, Some(10));
     assert_eq!(state.limit, Some(10));
+    assert_eq!(state.limit(), Some(10));
 }
 
 #[test]
@@ -203,4 +206,46 @@ fn gpu_sort_requires_single_key() {
     ];
     let state = SortExecState::new(AccelStrategy::GpuSort, 256, keys, None);
     assert!(state.sort_keys().len() > 1);
+}
+
+#[test]
+fn topk_max_limit_is_small_bounded_shape() {
+    assert_eq!(GPU_SORT_TOPK_MAX_LIMIT, 128);
+}
+
+#[test]
+fn topk_tuple_indices_nulls_first_satisfy_limit_before_gpu_needed() {
+    let key = SortKeyDesc {
+        attno: 1,
+        sort_op: pg_sys::Oid::from(97u32),
+        collation: pg_sys::Oid::from(0u32),
+        nulls_first: true,
+    };
+    let selected = topk_tuple_indices(&key, &[1, 3, 5], &[0, 2, 4], &[], 6, 2);
+    assert_eq!(selected, vec![0, 2]);
+}
+
+#[test]
+fn topk_tuple_indices_nulls_last_append_after_non_nulls() {
+    let key = SortKeyDesc {
+        attno: 1,
+        sort_op: pg_sys::Oid::from(97u32),
+        collation: pg_sys::Oid::from(0u32),
+        nulls_first: false,
+    };
+    let selected = topk_tuple_indices(&key, &[10, 20], &[30, 40], &[1, 0], 4, 3);
+    assert_eq!(selected, vec![20, 10, 30]);
+}
+
+#[test]
+fn topk_tuple_indices_desc_uses_gpu_order_without_reversing_again() {
+    let key = SortKeyDesc {
+        attno: 1,
+        sort_op: pg_sys::Oid::from(521u32), // int4gt
+        collation: pg_sys::Oid::from(0u32),
+        nulls_first: false,
+    };
+    assert!(sort_key_is_desc(&key));
+    let selected = topk_tuple_indices(&key, &[7, 8, 9], &[], &[2, 0], 3, 2);
+    assert_eq!(selected, vec![9, 7]);
 }

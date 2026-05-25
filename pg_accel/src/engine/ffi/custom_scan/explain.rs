@@ -9,7 +9,9 @@ use pgrx::pg_sys;
 
 use super::{GpuAccelScanState, GpuStrategy};
 use crate::engine::executor::agg::AggExecState;
+use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::preagg::PreAggExecState;
+use crate::engine::executor::sort::SortExecState;
 
 /// `ExplainCustomScan`: emit EXPLAIN output.
 ///
@@ -86,6 +88,34 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                 if agg_state.partial_emitters.is_some() {
                     pg_sys::ExplainPropertyBool(c"Partial".as_ptr(), true, es);
                 }
+            }
+
+            if strategy == GpuStrategy::Join && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as JoinExecState.
+                let join_state = &*(*state).accel.executor.cast::<JoinExecState>();
+                pg_sys::ExplainPropertyBool(
+                    c"Hash Join Count Only".as_ptr(),
+                    join_state.hash_join_count_only(),
+                    es,
+                );
+            }
+
+            // For Sort strategy, distinguish rows consumed from rows actually
+            // submitted to the bounded top-k GPU kernel.
+            if strategy == GpuStrategy::Sort && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as SortExecState.
+                let sort_state = &*(*state).accel.executor.cast::<SortExecState>();
+                pg_sys::ExplainPropertyBool(
+                    c"GPU Dispatched".as_ptr(),
+                    sort_state.gpu_dispatched,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"GPU Rows Dispatched".as_ptr(),
+                    std::ptr::null(),
+                    sort_state.gpu_rows_dispatched as i64,
+                    es,
+                );
             }
 
             // For PreAgg strategy, report fused pipeline metrics.

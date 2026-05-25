@@ -9,7 +9,7 @@ use pgrx::pg_sys;
 
 use super::GpuStrategy;
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
+use crate::engine::executor::agg::{AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE};
 use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
@@ -71,6 +71,7 @@ pub(super) const fn decode_accel_strategy(raw: c_int) -> Result<AccelStrategy, D
         6 => Ok(AccelStrategy::GpuExpr),
         7 => Ok(AccelStrategy::GpuHashJoin),
         8 => Ok(AccelStrategy::GpuWindow),
+        9 => Ok(AccelStrategy::GpuNestedLoopIneq),
         _ => Err(DecodeError::InvalidAccelStrategy { raw }),
     }
 }
@@ -330,6 +331,20 @@ pub(super) struct CustomPrivateData {
     pub(super) hash_inner_attno: i32,
     /// Key type for hash join (0=i32, 1=i64, 2=f64). Only for `GpuHashJoin`.
     pub(super) hash_key_type: i32,
+    /// True for the fused `COUNT(*)` over `GpuHashJoin` path.
+    pub(super) hash_count_only: bool,
+    /// NLJ predicate shape. `2` = BETWEEN/range-containment.
+    pub(super) nlj_shape: i32,
+    /// NLJ key type (0=i32 promoted to i64, 1=i64, 2=f64).
+    pub(super) nlj_key_type: i32,
+    /// NLJ inequality opcode for single-predicate shapes. Reserved for the
+    /// non-BETWEEN shape; decoded now so the private-data layout stays stable.
+    #[allow(dead_code)]
+    pub(super) nlj_op: i32,
+    /// Inner lower-bound attno for BETWEEN NLJ.
+    pub(super) nlj_inner_lo_attno: i32,
+    /// Inner upper-bound attno for BETWEEN NLJ.
+    pub(super) nlj_inner_hi_attno: i32,
     /// Window function specifications. Only meaningful when `gpu_strategy == Window`.
     pub(super) window_specs: Vec<WindowFuncSpec>,
     /// Scan relation index for direct heap scan (Window vectorized path).
@@ -362,6 +377,26 @@ impl CustomPrivateData {
         }
         None
     }
+
+    #[must_use]
+    pub(super) fn nlj_validation_error(&self) -> Option<&'static str> {
+        if self.accel_strategy != AccelStrategy::GpuNestedLoopIneq {
+            return None;
+        }
+        if self.gpu_strategy != GpuStrategy::Join {
+            return Some("NLJ accel requires join strategy");
+        }
+        if self.nlj_shape != 2 {
+            return Some("NLJ shape is unsupported");
+        }
+        if self.target_attno <= 0 || self.nlj_inner_lo_attno <= 0 || self.nlj_inner_hi_attno <= 0 {
+            return Some("NLJ attnos must be positive");
+        }
+        if !matches!(self.nlj_key_type, 0..=2) {
+            return Some("NLJ key type is unsupported");
+        }
+        None
+    }
 }
 
 struct PlanPayloadReader<'reader, 'source> {
@@ -377,6 +412,12 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     const WINDOW_SPECS: usize = Self::WINDOW_COUNT + 1;
     const HASH_INNER_ATTNO: usize = PLAN_PAYLOAD_START;
     const HASH_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
+    const HASH_COUNT_ONLY: usize = PLAN_PAYLOAD_START + 2;
+    const NLJ_SHAPE: usize = PLAN_PAYLOAD_START;
+    const NLJ_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
+    const NLJ_OP: usize = PLAN_PAYLOAD_START + 2;
+    const NLJ_INNER_LO_ATTNO: usize = PLAN_PAYLOAD_START + 3;
+    const NLJ_INNER_HI_ATTNO: usize = PLAN_PAYLOAD_START + 4;
 
     #[must_use]
     const fn new(fields: &'reader IntListReader<'source>) -> Self {
@@ -462,7 +503,7 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
         let key_type = group_key.read_int();
         let tlist_pos = group_key.read_int();
 
-        if attno > 0 && matches!(key_type, 0 | 1 | 2 | 4 | 5) {
+        if attno > 0 && matches!(key_type, 0 | 1 | 2 | 4 | 5 | H3_LATLNG_GROUP_KEY_TYPE) {
             (
                 Some(GroupKeyInfo {
                     attno,
@@ -541,14 +582,32 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     }
 
     #[must_use]
-    fn hash_join_info(&self) -> (i32, i32) {
+    fn hash_join_info(&self) -> (i32, i32, bool) {
         if self.fields.contains_range(Self::HASH_INNER_ATTNO, 2) {
             (
                 self.fields.int_at(Self::HASH_INNER_ATTNO),
                 self.fields.int_at(Self::HASH_KEY_TYPE),
+                self.fields
+                    .get(Self::HASH_COUNT_ONLY)
+                    .is_some_and(|value| value != 0),
             )
         } else {
-            (0, 0)
+            (0, 0, false)
+        }
+    }
+
+    #[must_use]
+    fn nlj_info(&self) -> (i32, i32, i32, i32, i32) {
+        if self.fields.contains_range(Self::NLJ_SHAPE, 5) {
+            (
+                self.fields.int_at(Self::NLJ_SHAPE),
+                self.fields.int_at(Self::NLJ_KEY_TYPE),
+                self.fields.int_at(Self::NLJ_OP),
+                self.fields.int_at(Self::NLJ_INNER_LO_ATTNO),
+                self.fields.int_at(Self::NLJ_INNER_HI_ATTNO),
+            )
+        } else {
+            (0, 0, 0, 0, 0)
         }
     }
 }
@@ -655,11 +714,21 @@ pub(super) unsafe fn deserialize_custom_private(
 
     // For Join strategy with GpuHashJoin accel, read hash join info at index 6+.
     // Layout: [...base 6 fields..., inner_attno, key_type]
-    let (hash_inner_attno, hash_key_type) = if accel_strategy == AccelStrategy::GpuHashJoin {
-        payload.hash_join_info()
-    } else {
-        (0, 0)
-    };
+    let (hash_inner_attno, hash_key_type, hash_count_only) =
+        if accel_strategy == AccelStrategy::GpuHashJoin {
+            payload.hash_join_info()
+        } else {
+            (0, 0, false)
+        };
+
+    // For Join strategy with GpuNestedLoopIneq accel, read NLJ info at index 6+.
+    // Layout: [...base 6 fields..., shape, key_type, op, inner_lo_attno, inner_hi_attno]
+    let (nlj_shape, nlj_key_type, nlj_op, nlj_inner_lo_attno, nlj_inner_hi_attno) =
+        if accel_strategy == AccelStrategy::GpuNestedLoopIneq {
+            payload.nlj_info()
+        } else {
+            (0, 0, 0, 0, 0)
+        };
 
     // For Agg strategy, find `self_scan_relid` (immediately follows the
     // group-key block) and optionally a PartialAggSpec sentinel block.
@@ -692,6 +761,12 @@ pub(super) unsafe fn deserialize_custom_private(
         group_key_tlist_pos,
         hash_inner_attno,
         hash_key_type,
+        hash_count_only,
+        nlj_shape,
+        nlj_key_type,
+        nlj_op,
+        nlj_inner_lo_attno,
+        nlj_inner_hi_attno,
         window_specs,
         window_scan_relid,
         self_scan_relid,

@@ -1,10 +1,9 @@
 /*
  * pgaccel_hash_join.h — hash join diagnostic types and API.
  *
- * Normal GpuHashJoin planning must wait for a real GPU build/probe
- * implementation or GPU-resident hash-table reuse. This API returns
- * unsupported/null when no GPU implementation is available; it does not run
- * a CPU hash join fallback.
+ * GpuHashJoin has a deliberately narrow selected-path implementation:
+ * INT32/INT64 equality keys only. Other key types return unsupported/null;
+ * there is no CPU hash join fallback.
  * NULL keys are excluded from the build side (SQL: NULL = NULL is not TRUE).
  *
  * Three-result model per probe:
@@ -60,10 +59,11 @@ typedef struct pgaccel_hash_table pgaccel_hash_table;
 
 /// Build a hash table from inner relation keys.
 ///
-/// Returns NULL when no real GPU build/probe implementation is available for
-/// the requested shape.
+/// Returns NULL when no GPU build/probe implementation is available for the
+/// requested shape.
 ///
-/// `keys` points to an array of `count` values of the specified type.
+/// `keys` points to an array of `count` values of the specified type. Only
+/// PGACCEL_KEY_INT32 and PGACCEL_KEY_INT64 are implemented for hash join.
 /// `null_mask[i] == 1` means key[i] is NULL (excluded from table).
 /// `indices` is an array of original row indices (0-based) — stored
 /// alongside keys so probe results can map back to inner tuples.
@@ -95,6 +95,17 @@ pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void*
                                        const uint8_t* outer_null_mask, size_t outer_count,
                                        uint32_t* match_pairs, /* [max_matches*2] output */
                                        size_t max_matches,
+                                       size_t* match_count /* output: actual matches */
+);
+
+/// Count matching pairs without materializing `(outer_idx, inner_idx)` rows.
+///
+/// This is the selected path for `COUNT(*)` over a supported `GpuHashJoin`.
+/// It runs the same GPU probe walk as `pgaccel_hash_join_probe`, but only
+/// returns the total match count. If the count exceeds the implementation's
+/// bounded counter, returns `PGACCEL_UNSUPPORTED` instead of wrapping.
+pgaccel_status pgaccel_hash_join_count(const pgaccel_hash_table* ht, const void* outer_keys,
+                                       const uint8_t* outer_null_mask, size_t outer_count,
                                        size_t* match_count /* output: actual matches */
 );
 

@@ -2563,11 +2563,24 @@ mod tests {
              FROM generate_series(1, 200000)",
         )
         .expect("create temp table");
+        Spi::run("ANALYZE _gpu_sort_t").expect("analyze sort table");
 
         crate::gpu::reset_gpu_exec_count();
 
-        let _ = Spi::run("SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 1024").expect("sort query ok");
+        let _ = Spi::run("SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 128").expect("sort query ok");
 
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(
+                crate::gpu::gpu_exec_count(),
+                0,
+                "Metal standalone top-k SQL path must stay planner-declined until the \
+                 backend-crashing path is fixed"
+            );
+            return;
+        }
+
+        #[cfg(not(target_os = "macos"))]
         crate::gpu::assert_gpu_executed(1);
     }
 

@@ -184,6 +184,35 @@ struct MeasurementOutcome {
     output_rows: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunnerDispatchClassification {
+    gpu_kernel_dispatched: bool,
+    function_srf_kernel_dispatched: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+struct RunnerDispatchInput {
+    plan_selected: bool,
+    plan_explicitly_not_dispatched: bool,
+    function_kernel_candidate: bool,
+    dispatch_counter_captured: bool,
+    gpu_kernel_execution_delta: u64,
+    pg_accel_stock_exec_delta: u64,
+    accel_output_rows_consumed: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+struct DispatchWarningInput<'a> {
+    workload: &'a str,
+    rows: usize,
+    plan_selected: bool,
+    plan_text_dispatched: bool,
+    plan_explicitly_not_dispatched: bool,
+    function_kernel_candidate: bool,
+}
+
 /// Run the extension-binary provenance smoke without an artifact directory.
 ///
 /// This is used by audit commands that do not otherwise create benchmark
@@ -2584,6 +2613,8 @@ fn run_workload_with_config(
     let plan_text_dispatched = plan_snippet
         .as_deref()
         .is_some_and(plan_indicates_gpu_dispatch);
+    let plan_explicitly_not_dispatched =
+        plan_snippet.as_deref().and_then(explicit_gpu_dispatched) == Some(false);
     if let Some(path) = &config.plans_capture_path
         && let Err(e) = capture_plan(connection, workload, rows, path)
     {
@@ -2609,24 +2640,26 @@ fn run_workload_with_config(
         &result.kernel_class,
         workload.description(),
     );
-    let counter_proves_kernel =
-        result.dispatch_counter_captured && result.gpu_kernel_execution_delta > 0;
-    let stock_fallback_seen = result.pg_accel_stock_exec_delta > 0;
-    let function_output_consumed = result.accel_output_rows_consumed > 0;
-    result.function_srf_kernel_dispatched = function_kernel_candidate
-        && !plan_selected
-        && counter_proves_kernel
-        && function_output_consumed
-        && !stock_fallback_seen;
-    result.gpu_kernel_dispatched = counter_proves_kernel
-        && (!function_kernel_candidate || plan_selected || function_output_consumed)
-        && !stock_fallback_seen;
-    emit_dispatch_classification_warning(
-        workload.name(),
-        rows,
+    let dispatch_classification = classify_runner_dispatch(RunnerDispatchInput {
         plan_selected,
-        plan_text_dispatched,
+        plan_explicitly_not_dispatched,
         function_kernel_candidate,
+        dispatch_counter_captured: result.dispatch_counter_captured,
+        gpu_kernel_execution_delta: result.gpu_kernel_execution_delta,
+        pg_accel_stock_exec_delta: result.pg_accel_stock_exec_delta,
+        accel_output_rows_consumed: result.accel_output_rows_consumed,
+    });
+    result.function_srf_kernel_dispatched = dispatch_classification.function_srf_kernel_dispatched;
+    result.gpu_kernel_dispatched = dispatch_classification.gpu_kernel_dispatched;
+    emit_dispatch_classification_warning(
+        DispatchWarningInput {
+            workload: workload.name(),
+            rows,
+            plan_selected,
+            plan_text_dispatched,
+            plan_explicitly_not_dispatched,
+            function_kernel_candidate,
+        },
         &result,
     );
     result.plan_snippet = plan_snippet;
@@ -2769,18 +2802,35 @@ pub fn plan_contains_custom_scan(plan: &str) -> bool {
     plan.contains("Custom Scan")
 }
 
-fn emit_dispatch_classification_warning(
-    workload: &str,
-    rows: usize,
-    plan_selected: bool,
-    plan_text_dispatched: bool,
-    function_kernel_candidate: bool,
-    result: &WorkloadResult,
-) {
+fn classify_runner_dispatch(input: RunnerDispatchInput) -> RunnerDispatchClassification {
+    let counter_proves_kernel =
+        input.dispatch_counter_captured && input.gpu_kernel_execution_delta > 0;
+    let stock_fallback_seen = input.pg_accel_stock_exec_delta > 0;
+    let function_output_consumed = input.accel_output_rows_consumed > 0;
+    let function_srf_kernel_dispatched = input.function_kernel_candidate
+        && !input.plan_explicitly_not_dispatched
+        && !input.plan_selected
+        && counter_proves_kernel
+        && function_output_consumed
+        && !stock_fallback_seen;
+    let gpu_kernel_dispatched = !input.plan_explicitly_not_dispatched
+        && counter_proves_kernel
+        && (!input.function_kernel_candidate || input.plan_selected || function_output_consumed)
+        && !stock_fallback_seen;
+
+    RunnerDispatchClassification {
+        gpu_kernel_dispatched,
+        function_srf_kernel_dispatched,
+    }
+}
+
+fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result: &WorkloadResult) {
     if !result.dispatch_counter_captured {
         eprintln!(
-            "[dispatch] WARNING: {workload} @ {rows}: runtime counter capture unavailable; \
+            "[dispatch] WARNING: {} @ {}: runtime counter capture unavailable; \
              not crediting GPU dispatch ({})",
+            input.workload,
+            input.rows,
             result
                 .dispatch_counter_error
                 .as_deref()
@@ -2790,32 +2840,45 @@ fn emit_dispatch_classification_warning(
     }
     if result.pg_accel_stock_exec_delta > 0 {
         eprintln!(
-            "[dispatch] WARNING: {workload} @ {rows}: pg_accel stock executor fallback delta={} \
+            "[dispatch] WARNING: {} @ {}: pg_accel stock executor fallback delta={} \
              with kernel_delta={}; excluding from GPU-dispatched wins",
-            result.pg_accel_stock_exec_delta, result.gpu_kernel_execution_delta
+            input.workload,
+            input.rows,
+            result.pg_accel_stock_exec_delta,
+            result.gpu_kernel_execution_delta
         );
         return;
     }
-    if plan_selected && result.gpu_kernel_execution_delta == 0 {
+    if input.plan_selected && result.gpu_kernel_execution_delta == 0 {
         eprintln!(
-            "[dispatch] WARNING: {workload} @ {rows}: pg_accel plan selected but runtime \
-             kernel counter delta is zero; counting as plan-selected only"
+            "[dispatch] WARNING: {} @ {}: pg_accel plan selected but runtime \
+             kernel counter delta is zero; counting as plan-selected only",
+            input.workload, input.rows
         );
     }
-    if plan_text_dispatched && result.gpu_kernel_execution_delta == 0 {
+    if input.plan_explicitly_not_dispatched && result.gpu_kernel_execution_delta > 0 {
         eprintln!(
-            "[dispatch] WARNING: {workload} @ {rows}: plan text claimed GPU dispatch but \
-             runtime kernel counter delta is zero"
+            "[dispatch] WARNING: {} @ {}: plan text reported GPU Dispatched: false \
+             but runtime kernel counter delta is {}; counting as plan-selected only",
+            input.workload, input.rows, result.gpu_kernel_execution_delta
         );
     }
-    if function_kernel_candidate
-        && !plan_selected
+    if input.plan_text_dispatched && result.gpu_kernel_execution_delta == 0 {
+        eprintln!(
+            "[dispatch] WARNING: {} @ {}: plan text claimed GPU dispatch but \
+             runtime kernel counter delta is zero",
+            input.workload, input.rows
+        );
+    }
+    if input.function_kernel_candidate
+        && !input.plan_selected
         && result.gpu_kernel_execution_delta > 0
         && result.accel_output_rows_consumed == 0
     {
         eprintln!(
-            "[dispatch] WARNING: {workload} @ {rows}: function/SRF kernel counter advanced \
-             but no accel output rows were consumed; excluding from GPU-dispatched wins"
+            "[dispatch] WARNING: {} @ {}: function/SRF kernel counter advanced \
+             but no accel output rows were consumed; excluding from GPU-dispatched wins",
+            input.workload, input.rows
         );
     }
 }
@@ -2825,9 +2888,20 @@ fn plan_indicates_gpu_dispatch(plan: &str) -> bool {
 }
 
 fn explicit_gpu_dispatched(plan: &str) -> Option<bool> {
-    if plan.contains("GPU Dispatched: false") {
+    let lower = plan.to_ascii_lowercase();
+    if lower.contains("gpu dispatched: false")
+        || lower.contains("\"gpu dispatched\": false")
+        || lower.contains("\"gpu dispatched\":false")
+        || lower.contains("\"gpu dispatched\":\"false\"")
+        || lower.contains("\"gpu dispatched\": \"false\"")
+    {
         Some(false)
-    } else if plan.contains("GPU Dispatched: true") {
+    } else if lower.contains("gpu dispatched: true")
+        || lower.contains("\"gpu dispatched\": true")
+        || lower.contains("\"gpu dispatched\":true")
+        || lower.contains("\"gpu dispatched\":\"true\"")
+        || lower.contains("\"gpu dispatched\": \"true\"")
+    {
         Some(true)
     } else {
         None
@@ -3104,6 +3178,45 @@ mod tests {
     fn test_plan_dispatch_marker_true_counts_without_custom_scan() {
         let plan = "Function Scan on h3_cells\n  GPU Dispatched: true\n";
         assert!(plan_indicates_gpu_dispatch(plan));
+    }
+
+    #[test]
+    fn test_json_plan_dispatch_marker_false_overrides_custom_scan() {
+        let plan = r#"[{"Plan":{"Node Type":"Custom Scan","GPU Dispatched":false}}]"#;
+        assert!(plan_contains_custom_scan(plan));
+        assert!(!plan_indicates_gpu_dispatch(plan));
+    }
+
+    #[test]
+    fn test_runner_dispatch_false_marker_overrides_kernel_counter() {
+        let classification = classify_runner_dispatch(RunnerDispatchInput {
+            plan_selected: true,
+            plan_explicitly_not_dispatched: true,
+            function_kernel_candidate: false,
+            dispatch_counter_captured: true,
+            gpu_kernel_execution_delta: 1,
+            pg_accel_stock_exec_delta: 0,
+            accel_output_rows_consumed: 1,
+        });
+
+        assert!(!classification.gpu_kernel_dispatched);
+        assert!(!classification.function_srf_kernel_dispatched);
+    }
+
+    #[test]
+    fn test_runner_function_srf_dispatch_without_custom_scan() {
+        let classification = classify_runner_dispatch(RunnerDispatchInput {
+            plan_selected: false,
+            plan_explicitly_not_dispatched: false,
+            function_kernel_candidate: true,
+            dispatch_counter_captured: true,
+            gpu_kernel_execution_delta: 3,
+            pg_accel_stock_exec_delta: 0,
+            accel_output_rows_consumed: 12,
+        });
+
+        assert!(classification.gpu_kernel_dispatched);
+        assert!(classification.function_srf_kernel_dispatched);
     }
 
     #[test]

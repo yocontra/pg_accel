@@ -10,7 +10,7 @@ use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
 
 use super::{
-    JoinExecState, PendingMatch, hash_join_match_buffer_u32s,
+    JoinExecState, PendingMatch, hash_join_key_type_supported, hash_join_match_buffer_u32s,
     hash_join_match_count_within_capacity, hash_join_max_matches, hash_join_non_null_rows,
     hash_join_row_indices_representable, hash_join_table_capacity,
 };
@@ -101,6 +101,13 @@ impl JoinExecState {
                 return std::ptr::null_mut();
             }
 
+            if !hash_join_key_type_supported(self.hash_key_type) {
+                pgrx::error!(
+                    "pg_accel: hash_join key type {:?} is not implemented by the selected GPU build/probe path; planner should have declined",
+                    self.hash_key_type,
+                );
+            }
+
             if !hash_join_row_indices_representable(inner_count) {
                 pgrx::error!(
                     "pg_accel: hash-join inner row count {} exceeds u32 index capacity; planner should have declined",
@@ -141,7 +148,6 @@ impl JoinExecState {
             // Extract only the key type we need — one allocation, one pass.
             let mut int32_keys: Vec<i32> = Vec::new();
             let mut long_keys: Vec<i64> = Vec::new();
-            let mut double_keys: Vec<f64> = Vec::new();
             let null_mask: Vec<u8>;
 
             // SAFETY: hash_inner_tuples contains valid MinimalTuple pointers.
@@ -169,27 +175,10 @@ impl JoinExecState {
                     long_keys = k;
                     null_mask = n;
                 }
-                PgaccelKeyType::Float64 => {
-                    let (k, n) = unsafe {
-                        tuple_extract::extract_f64(
-                            &self.hash_inner_tuples,
-                            &inner_info,
-                            inner_result_slot,
-                        )
-                    };
-                    double_keys = k;
-                    null_mask = n;
-                }
-                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
-                    // UUID and INET keys are supported in hash_agg but not
-                    // in hash_join's templated build/probe path yet (the
-                    // build_cpu<T> / probe_cpu<T> templates assume an
-                    // arithmetic T). The planner classifier rejects both
-                    // for join keys, so this arm should be unreachable in
-                    // practice. Surface the bug explicitly per CLAUDE.md
-                    // rule 11 if reached.
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
                     pgrx::error!(
-                        "pg_accel: hash_join UUID/INET keys not implemented; planner should have declined"
+                        "pg_accel: hash_join key type {:?} not implemented; planner should have declined",
+                        self.hash_key_type,
                     );
                 }
             }
@@ -226,9 +215,11 @@ impl JoinExecState {
             let keys_ptr: *const std::ffi::c_void = match self.hash_key_type {
                 PgaccelKeyType::Int32 => int32_keys.as_ptr().cast(),
                 PgaccelKeyType::Int64 => long_keys.as_ptr().cast(),
-                PgaccelKeyType::Float64 => double_keys.as_ptr().cast(),
-                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
-                    pgrx::error!("pg_accel: hash_join UUID/INET keys not implemented")
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!(
+                        "pg_accel: hash_join key type {:?} not implemented",
+                        self.hash_key_type,
+                    )
                 }
             };
 
@@ -412,7 +403,6 @@ impl JoinExecState {
 
             let mut o_int32_keys: Vec<i32> = Vec::new();
             let mut o_long_keys: Vec<i64> = Vec::new();
-            let mut o_double_keys: Vec<f64> = Vec::new();
             let o_null_mask: Vec<u8>;
 
             // SAFETY: outer_tuples contains valid MinimalTuple pointers.
@@ -431,16 +421,10 @@ impl JoinExecState {
                     o_long_keys = k;
                     o_null_mask = n;
                 }
-                PgaccelKeyType::Float64 => {
-                    let (k, n) = unsafe {
-                        tuple_extract::extract_f64(&outer_tuples, &outer_info, outer_extract_slot)
-                    };
-                    o_double_keys = k;
-                    o_null_mask = n;
-                }
-                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
                     pgrx::error!(
-                        "pg_accel: hash_join UUID/INET outer keys not implemented; planner should have declined"
+                        "pg_accel: hash_join outer key type {:?} not implemented; planner should have declined",
+                        self.hash_key_type,
                     );
                 }
             }
@@ -448,9 +432,11 @@ impl JoinExecState {
             let o_keys_ptr: *const std::ffi::c_void = match self.hash_key_type {
                 PgaccelKeyType::Int32 => o_int32_keys.as_ptr().cast(),
                 PgaccelKeyType::Int64 => o_long_keys.as_ptr().cast(),
-                PgaccelKeyType::Float64 => o_double_keys.as_ptr().cast(),
-                PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
-                    pgrx::error!("pg_accel: hash_join UUID/INET outer keys not implemented")
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!(
+                        "pg_accel: hash_join outer key type {:?} not implemented",
+                        self.hash_key_type,
+                    )
                 }
             };
 
@@ -591,6 +577,337 @@ impl JoinExecState {
 
             pgrx::check_for_interrupts!();
             // Loop back to drain pending_matches.
+        }
+    }
+
+    /// GPU hash join count-only path: build from inner, probe outer batches,
+    /// and emit one `COUNT(*)` tuple without materializing joined rows.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the main backend thread.
+    #[allow(clippy::too_many_lines)]
+    pub(super) unsafe fn next_hash_join_count(
+        &mut self,
+        outer_ps: *mut pg_sys::PlanState,
+        inner_ps: *mut pg_sys::PlanState,
+        result_slot: *mut pg_sys::TupleTableSlot,
+    ) -> *mut pg_sys::TupleTableSlot {
+        if self.hash_count_returned {
+            return std::ptr::null_mut();
+        }
+
+        self.record_hash_join_worker_metadata(unsafe { pg_sys::ParallelWorkerNumber });
+
+        let inner_result_slot = if inner_ps.is_null() {
+            result_slot
+        } else {
+            let slot = unsafe { (*inner_ps).ps_ResultTupleSlot };
+            if slot.is_null() {
+                let ss = inner_ps.cast::<pg_sys::ScanState>();
+                let scan_slot = unsafe { (*ss).ss_ScanTupleSlot };
+                if scan_slot.is_null() {
+                    result_slot
+                } else {
+                    scan_slot
+                }
+            } else {
+                slot
+            }
+        };
+
+        if !self.hash_built {
+            self.hash_built = true;
+
+            loop {
+                let inner_slot = unsafe { pg_sys::ExecProcNode(inner_ps) };
+                if inner_slot.is_null() || unsafe { Self::slot_is_empty(inner_slot) } {
+                    break;
+                }
+                let mt = unsafe { pg_sys::ExecCopySlotMinimalTuple(inner_slot) };
+                self.hash_inner_tuples.push(mt);
+
+                if self.hash_inner_tuples.len().is_multiple_of(10000) {
+                    pgrx::check_for_interrupts!();
+                }
+            }
+
+            let inner_count = self.hash_inner_tuples.len();
+            if !hash_join_key_type_supported(self.hash_key_type) {
+                pgrx::error!(
+                    "pg_accel: hash_join key type {:?} is not implemented by the selected GPU count path; planner should have declined",
+                    self.hash_key_type,
+                );
+            }
+            if inner_count == 0 {
+                self.record_hash_join_build_metadata(0, 0, 0);
+                self.hash_count_returned = true;
+                unsafe { Self::emit_hash_join_count(result_slot, 0) };
+                return result_slot;
+            }
+            if !hash_join_row_indices_representable(inner_count) {
+                pgrx::error!(
+                    "pg_accel: hash-join inner row count {} exceeds u32 index capacity; planner should have declined",
+                    inner_count
+                );
+            }
+            let inner_count_u32 = match u32::try_from(inner_count) {
+                Ok(count) => count,
+                Err(_) => {
+                    pgrx::error!(
+                        "pg_accel: hash-join inner row count {} exceeds u32 index capacity; planner should have declined",
+                        inner_count
+                    );
+                }
+            };
+
+            let inner_tupdesc = unsafe { (*inner_result_slot).tts_tupleDescriptor };
+            if inner_tupdesc.is_null() {
+                pgrx::error!("pg_accel: hash join inner slot has no tuple descriptor");
+            }
+            let inner_natts = unsafe { (*inner_tupdesc).natts };
+            if self.hash_inner_attno <= 0 || self.hash_inner_attno > inner_natts {
+                pgrx::error!(
+                    "pg_accel: hash join inner key attno {} out of range 1..={}; refusing CPU fallback",
+                    self.hash_inner_attno,
+                    inner_natts,
+                );
+            }
+
+            let inner_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.hash_inner_attno) };
+            let indices: Vec<u32> = (0..inner_count_u32).collect();
+            let mut int32_keys: Vec<i32> = Vec::new();
+            let mut long_keys: Vec<i64> = Vec::new();
+            let null_mask: Vec<u8>;
+
+            match self.hash_key_type {
+                PgaccelKeyType::Int32 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i32(
+                            &self.hash_inner_tuples,
+                            &inner_info,
+                            inner_result_slot,
+                        )
+                    };
+                    int32_keys = k;
+                    null_mask = n;
+                }
+                PgaccelKeyType::Int64 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i64(
+                            &self.hash_inner_tuples,
+                            &inner_info,
+                            inner_result_slot,
+                        )
+                    };
+                    long_keys = k;
+                    null_mask = n;
+                }
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!(
+                        "pg_accel: hash_join key type {:?} not implemented; planner should have declined",
+                        self.hash_key_type,
+                    );
+                }
+            }
+
+            let build_non_null_rows = hash_join_non_null_rows(&null_mask);
+            let Some(hash_table_capacity) = hash_join_table_capacity(build_non_null_rows) else {
+                pgrx::error!(
+                    "pg_accel: hash-join build capacity overflow for {} non-null inner rows; planner should have declined",
+                    build_non_null_rows
+                );
+            };
+            self.record_hash_join_build_metadata(
+                inner_count,
+                build_non_null_rows,
+                hash_table_capacity,
+            );
+            let keys_ptr: *const std::ffi::c_void = match self.hash_key_type {
+                PgaccelKeyType::Int32 => int32_keys.as_ptr().cast(),
+                PgaccelKeyType::Int64 => long_keys.as_ptr().cast(),
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!(
+                        "pg_accel: hash_join key type {:?} not implemented",
+                        self.hash_key_type,
+                    )
+                }
+            };
+
+            self.hash_table =
+                GpuHashTable::build(keys_ptr, &null_mask, &indices, self.hash_key_type);
+            if self.hash_table.is_none() {
+                pgrx::error!(
+                    "pg_accel: GPU hash-join count build failed for {} inner rows ({} non-null, planned hash capacity {}); refusing to fall back to CPU",
+                    inner_count,
+                    build_non_null_rows,
+                    hash_table_capacity,
+                );
+            }
+        }
+
+        let mut total_matches: usize = 0;
+        loop {
+            let mut outer_tuples: Vec<pg_sys::MinimalTuple> = Vec::with_capacity(self.batch_size);
+            for _ in 0..self.batch_size {
+                let outer_slot = unsafe { pg_sys::ExecProcNode(outer_ps) };
+                if outer_slot.is_null() || unsafe { Self::slot_is_empty(outer_slot) } {
+                    self.outer_exhausted = true;
+                    break;
+                }
+                let mt = unsafe { pg_sys::ExecCopySlotMinimalTuple(outer_slot) };
+                outer_tuples.push(mt);
+            }
+
+            if outer_tuples.is_empty() {
+                break;
+            }
+
+            let start = std::time::Instant::now();
+            let outer_count = outer_tuples.len();
+            self.rows_dispatched = self.rows_dispatched.saturating_add(outer_count as u64);
+
+            if !hash_join_row_indices_representable(outer_count) {
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        unsafe { pg_sys::pfree(mt.cast()) };
+                    }
+                }
+                pgrx::error!(
+                    "pg_accel: hash-join outer batch row count {} exceeds u32 index capacity; planner should have declined",
+                    outer_count
+                );
+            }
+
+            let outer_extract_slot = if self.hash_outer_slot.is_null() {
+                result_slot
+            } else {
+                self.hash_outer_slot
+            };
+            let outer_tupdesc = unsafe { (*outer_extract_slot).tts_tupleDescriptor };
+            if outer_tupdesc.is_null() {
+                pgrx::error!("pg_accel: hash join outer slot has no tuple descriptor");
+            }
+            let outer_natts = unsafe { (*outer_tupdesc).natts };
+            if self.hash_outer_attno <= 0 || self.hash_outer_attno > outer_natts {
+                pgrx::error!(
+                    "pg_accel: hash join outer key attno {} out of range 1..={}; refusing CPU fallback",
+                    self.hash_outer_attno,
+                    outer_natts,
+                );
+            }
+            let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno) };
+
+            let mut o_int32_keys: Vec<i32> = Vec::new();
+            let mut o_long_keys: Vec<i64> = Vec::new();
+            let o_null_mask: Vec<u8>;
+            match self.hash_key_type {
+                PgaccelKeyType::Int32 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i32(&outer_tuples, &outer_info, outer_extract_slot)
+                    };
+                    o_int32_keys = k;
+                    o_null_mask = n;
+                }
+                PgaccelKeyType::Int64 => {
+                    let (k, n) = unsafe {
+                        tuple_extract::extract_i64(&outer_tuples, &outer_info, outer_extract_slot)
+                    };
+                    o_long_keys = k;
+                    o_null_mask = n;
+                }
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!(
+                        "pg_accel: hash_join outer key type {:?} not implemented; planner should have declined",
+                        self.hash_key_type,
+                    );
+                }
+            }
+
+            let o_keys_ptr: *const std::ffi::c_void = match self.hash_key_type {
+                PgaccelKeyType::Int32 => o_int32_keys.as_ptr().cast(),
+                PgaccelKeyType::Int64 => o_long_keys.as_ptr().cast(),
+                PgaccelKeyType::Float64 | PgaccelKeyType::Uuid | PgaccelKeyType::Inet => {
+                    pgrx::error!(
+                        "pg_accel: hash_join outer key type {:?} not implemented",
+                        self.hash_key_type,
+                    )
+                }
+            };
+
+            self.record_hash_join_probe_metadata(outer_count, 0, 0);
+            let Some(ht) = self.hash_table.as_ref() else {
+                pgrx::error!(
+                    "pg_accel: GPU hash-join count build failed; refusing to fall back to CPU"
+                );
+            };
+            let Some(batch_matches) = ht.count_matches(o_keys_ptr, &o_null_mask) else {
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        unsafe { pg_sys::pfree(mt.cast()) };
+                    }
+                }
+                pgrx::error!(
+                    "pg_accel: GPU hash-join count probe failed on batch of {} outer tuples; refusing CPU fallback",
+                    outer_count,
+                );
+            };
+            self.record_hash_join_probe_result(batch_matches);
+            total_matches = if let Some(total) = total_matches.checked_add(batch_matches) {
+                total
+            } else {
+                for mt in outer_tuples {
+                    if !mt.is_null() {
+                        unsafe { pg_sys::pfree(mt.cast()) };
+                    }
+                }
+                pgrx::error!("pg_accel: hash-join COUNT(*) overflowed usize");
+            };
+
+            for mt in outer_tuples {
+                if !mt.is_null() {
+                    unsafe { pg_sys::pfree(mt.cast()) };
+                }
+            }
+
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            self.dispatch_time_us = self.dispatch_time_us.saturating_add(elapsed_us);
+            self.batches_executed = self.batches_executed.saturating_add(1);
+            stats::record_batch(outer_count as u64, elapsed_us);
+            stats::record_gpu_batch(outer_count as u64, 0);
+
+            pgrx::check_for_interrupts!();
+            if self.outer_exhausted {
+                break;
+            }
+        }
+
+        self.hash_count_returned = true;
+        if total_matches > i64::MAX as usize {
+            pgrx::error!("pg_accel: hash-join COUNT(*) result exceeds int8");
+        }
+        unsafe { Self::emit_hash_join_count(result_slot, total_matches as i64) };
+        result_slot
+    }
+
+    unsafe fn emit_hash_join_count(result_slot: *mut pg_sys::TupleTableSlot, count: i64) {
+        if result_slot.is_null() {
+            pgrx::error!("pg_accel: hash-join count output slot is null");
+        }
+        unsafe {
+            pg_sys::ExecClearTuple(result_slot);
+            let tupdesc = (*result_slot).tts_tupleDescriptor;
+            if tupdesc.is_null() || (*tupdesc).natts < 1 {
+                pgrx::error!("pg_accel: hash-join count output slot has no count column");
+            }
+            *(*result_slot).tts_values = pg_sys::Datum::from(count);
+            *(*result_slot).tts_isnull = false;
+            let natts = (*tupdesc).natts as usize;
+            for i in 1..natts {
+                *(*result_slot).tts_values.add(i) = pg_sys::Datum::from(0);
+                *(*result_slot).tts_isnull.add(i) = true;
+            }
+            pg_sys::ExecStoreVirtualTuple(result_slot);
         }
     }
 }
