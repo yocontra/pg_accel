@@ -51,7 +51,7 @@ impl Workload for H3ResolutionSweep {
         // h3-pg alias `h3_lat_lng_to_cell` is not in pg_accel's
         // adapter list — guaranteed bypass of the planner hook.
         Some(
-            "SELECT public.h3_lat_lng_to_cell(geom, 9), COUNT(*) \
+            "SELECT public.h3_lat_lng_to_cell(geom, 9) AS h3_latlng_to_cell, COUNT(*) \
              FROM bench_h3_sweep GROUP BY 1"
                 .to_owned(),
         )

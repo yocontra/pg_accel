@@ -8,6 +8,7 @@
 //! borrow of the thread-local.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pgrx::prelude::*;
@@ -35,6 +36,8 @@ pub struct AccelStats {
 
 thread_local! {
     static STATS: RefCell<AccelStats> = RefCell::new(AccelStats::default());
+    static LAST_PLANNER_REJECTION_REASON: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+    static PLANNER_REJECTION_REASON_COUNTS: RefCell<BTreeMap<&'static str, u64>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +184,13 @@ pub fn increment_planner_considered(reason: &'static str, n_rows_estimate: u64) 
 #[inline]
 pub fn increment_planner_rejected(reason: &'static str, n_rows_estimate: u64) {
     PLANNER_REJECTED.fetch_add(1, Ordering::Relaxed);
+    LAST_PLANNER_REJECTION_REASON.with(|slot| {
+        *slot.borrow_mut() = Some(reason);
+    });
+    PLANNER_REJECTION_REASON_COUNTS.with(|counts| {
+        let mut counts = counts.borrow_mut();
+        *counts.entry(reason).or_insert(0) += 1;
+    });
     tracing::info!(
         target: "pg_accel::stats",
         reason,
@@ -201,6 +211,20 @@ pub fn read_planner_considered() -> u64 {
 #[must_use]
 pub fn read_planner_rejected() -> u64 {
     PLANNER_REJECTED.load(Ordering::Relaxed)
+}
+
+/// Last planner rejection reason seen by this backend, if any.
+#[inline]
+#[must_use]
+pub fn read_last_planner_rejection_reason() -> Option<&'static str> {
+    LAST_PLANNER_REJECTION_REASON.with(|slot| *slot.borrow())
+}
+
+/// Count of planner rejections with a specific reason observed by this backend.
+#[inline]
+#[must_use]
+pub fn read_planner_rejection_reason_count(reason: &str) -> u64 {
+    PLANNER_REJECTION_REASON_COUNTS.with(|counts| counts.borrow().get(reason).copied().unwrap_or(0))
 }
 
 /// Increment the degenerate-guard trigger counter.
@@ -431,6 +455,29 @@ fn pg_accel_reset_stats() {
     STATS.with(|s| {
         *s.borrow_mut() = AccelStats::default();
     });
+    LAST_PLANNER_REJECTION_REASON.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    PLANNER_REJECTION_REASON_COUNTS.with(|counts| {
+        counts.borrow_mut().clear();
+    });
+}
+
+/// Returns the last planner rejection reason observed by this backend.
+///
+/// Benchmark plan capture resets stats immediately before `EXPLAIN`, then
+/// reads this value after planning so native-decline matrix rows can prove the
+/// policy gate that declined a pg_accel plan.
+#[pg_extern]
+fn pg_accel_last_planner_rejection_reason() -> Option<String> {
+    read_last_planner_rejection_reason().map(str::to_owned)
+}
+
+/// Returns the number of times this backend has observed a planner rejection
+/// with the given reason since `pg_accel_reset_stats()`.
+#[pg_extern]
+fn pg_accel_planner_rejection_count(reason: String) -> i64 {
+    read_planner_rejection_reason_count(&reason) as i64
 }
 
 /// Returns the effective [`DeviceLimits`](crate::engine::cost::DeviceLimits)
@@ -502,6 +549,10 @@ fn pg_accel_device_limits() -> TableIterator<
         (
             "gpu_spatial_min_vertices".into(),
             limits.gpu_spatial_min_vertices.to_string(),
+        ),
+        (
+            "gpu_spatial_max_output_fraction".into(),
+            limits.gpu_spatial_max_output_fraction.to_string(),
         ),
         (
             "gpu_expr_min_rows".into(),
@@ -697,6 +748,8 @@ mod tests {
     /// Reset thread-local stats before each test so ordering does not matter.
     fn reset() {
         STATS.with(|s| *s.borrow_mut() = AccelStats::default());
+        LAST_PLANNER_REJECTION_REASON.with(|slot| *slot.borrow_mut() = None);
+        PLANNER_REJECTION_REASON_COUNTS.with(|counts| counts.borrow_mut().clear());
     }
 
     fn snapshot() -> AccelStats {
@@ -787,6 +840,8 @@ mod tests {
         assert_eq!(after.planner_hook_calls, 0);
         assert_eq!(after.command_type_skips, 0);
         assert_eq!(after.window_gpu_failures, 0);
+        assert_eq!(read_last_planner_rejection_reason(), None);
+        assert_eq!(read_planner_rejection_reason_count("test_reason"), 0);
     }
 
     // -- combined scenario ----------------------------------------------------
@@ -932,9 +987,17 @@ mod tests {
 
     #[test]
     fn planner_rejected_counter_increments() {
+        reset();
         let before = read_planner_rejected();
         increment_planner_rejected("test_reason", 1_000_000);
         assert!(read_planner_rejected() >= before + 1);
+        assert_eq!(read_last_planner_rejection_reason(), Some("test_reason"));
+        assert_eq!(read_planner_rejection_reason_count("test_reason"), 1);
+        assert_eq!(read_planner_rejection_reason_count("other_reason"), 0);
+        increment_planner_rejected("test_reason", 1);
+        increment_planner_rejected("other_reason", 1);
+        assert_eq!(read_planner_rejection_reason_count("test_reason"), 2);
+        assert_eq!(read_planner_rejection_reason_count("other_reason"), 1);
     }
 
     #[test]

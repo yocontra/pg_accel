@@ -47,6 +47,20 @@ typedef struct {
   char backend_name[64];
 } pgaccel_platform_caps;
 
+typedef struct {
+  uint64_t serial_wall_ns;
+  uint64_t overlap_wall_ns;
+  uint64_t sort_start_ns;
+  uint64_t sort_end_ns;
+  uint64_t window_start_ns;
+  uint64_t window_end_ns;
+  uint64_t final_start_ns;
+  uint64_t final_end_ns;
+  uint64_t sort_kernel_count;
+  bool spans_overlap;
+  bool wall_time_improved;
+} pgaccel_ooo_overlap_report;
+
 pgaccel_status pgaccel_init(void);
 pgaccel_status pgaccel_shutdown(void);
 
@@ -57,6 +71,14 @@ pgaccel_status pgaccel_shutdown(void);
 void pgaccel_prefork_warmup(void);
 pgaccel_device_info pgaccel_get_device_info(void);
 pgaccel_platform_caps pgaccel_get_caps(void);
+
+/* Out-of-order queue probe for the sort/window overlap gate. Runs one explicit
+ * bitonic sort DAG and one independent window row-number kernel, first
+ * serialized through event dependencies and then overlapped on AdaptiveCpp
+ * execution lanes. The final marker kernel depends on both DAGs so Metal
+ * routes cross-lane waits through MTLSharedEvent/submit_queue_wait_for. */
+pgaccel_status pgaccel_sort_window_overlap_probe(size_t count, uint32_t spin_iters_per_sort_step,
+                                                 pgaccel_ooo_overlap_report* out);
 
 /// GPU execution observability — thread-local counter.
 /// pgaccel_gpu_exec_count: how many kernel invocations actually ran on GPU.

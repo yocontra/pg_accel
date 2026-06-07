@@ -133,6 +133,18 @@ fn limit_stored() {
 }
 
 #[test]
+fn materialization_evidence_counts_full_input_and_retained_topk_output() {
+    let mut state = make_state_with_key(256, Some(2));
+    state.rows_dispatched = 5;
+    state.sorted_tuples = vec![std::ptr::null_mut(); 2];
+
+    assert_eq!(state.input_rows_materialized(), 5);
+    assert_eq!(state.retained_output_tuples(), 2);
+    assert_eq!(state.rows_pruned_after_topk(), 3);
+    assert!(state.full_input_materialized());
+}
+
+#[test]
 fn no_sort_keys_means_passthrough() {
     let state = make_state(AccelStrategy::GpuSort, 256);
     assert!(state.sort_keys().is_empty());

@@ -23,7 +23,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  ACPP_REQUIRED_SHA: 4f3cde11a302eebac28aa1ccc79ad3399cb8183c
+  ACPP_REQUIRED_SHA: 0ebc10e5a596c4760b29bab1bdae45a4809f2ace
   SOFT_FP64_REQUIRED_TAG: v1.3.0
 
 jobs:
@@ -144,6 +144,13 @@ jobs:
           just lint ${{ matrix.pg }}
           just check ${{ matrix.pg }}
           just test-unit ${{ matrix.pg }}
+
+      - name: Run benchmark harness release-gate tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 17
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p pg_accel_bench --locked
 
       - name: Run standalone GPU kernel gate
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 17
@@ -275,6 +282,13 @@ jobs:
           scripts/pg_source.sh build ${{ matrix.pg }}
           cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
 
+      - name: Install coverage tooling
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 17
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-llvm-cov --locked
+
       - name: Build pinned AdaptiveCpp generic toolchain
         if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp-linux.outputs.cache-hit != 'true'
         shell: bash
@@ -295,6 +309,31 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace --no-default-features --features pg${{ matrix.pg }} --no-run
+
+      - name: Run benchmark harness release-gate tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 17
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p pg_accel_bench --locked
+
+      - name: Run coverage gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 17
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg17
+          COVERAGE_MIN_LINES: 90
+        run: |
+          set -euo pipefail
+          just coverage ${{ matrix.pg }}
+
+      - name: Upload coverage artifacts
+        if: always() && steps.pg-support.outputs.skip != 'true' && matrix.pg == 17
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-coverage-pg17-linux-x86_64
+          path: artifacts/coverage-pg17
+          if-no-files-found: warn
 
   cuda-smoke:
     name: CUDA smoke

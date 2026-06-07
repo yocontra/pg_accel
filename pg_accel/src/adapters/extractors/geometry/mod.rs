@@ -74,6 +74,22 @@ pub fn extract_geometry(datum: Datum) -> Option<ExtractedGeometry> {
     extract_geometry_from_bytes(bytes.as_slice())
 }
 
+/// Extract the SRID from a PostGIS `GSERIALIZED` datum.
+///
+/// PostGIS stores the SRID in the first three bytes after the varlena header
+/// and the geometry flags in the fourth byte. The full extractor does not
+/// surface SRID because kernels operate only on coordinates, but planner gates
+/// need it to avoid selecting GPU paths for mixed-SRID predicates.
+#[must_use]
+pub fn extract_srid(datum: Datum) -> Option<i32> {
+    let bytes = datum_to_gserialized_bytes(datum)?;
+    if bytes.len() < MIN_HEADER_LEN {
+        return None;
+    }
+    let srid = (u32::from(bytes[4]) << 16) | (u32::from(bytes[5]) << 8) | u32::from(bytes[6]);
+    i32::try_from(srid).ok()
+}
+
 pub(super) fn extract_geometry_from_bytes(bytes: &[u8]) -> Option<ExtractedGeometry> {
     if bytes.len() < MIN_HEADER_LEN {
         return None;

@@ -11,6 +11,7 @@ use rand::Rng;
 use serde::Serialize;
 
 use crate::artifacts::{ArtifactWriter, PreRiskContext};
+use crate::bench_model::CachePurgeState;
 #[allow(unused_imports)]
 pub use crate::config::{
     BenchConfig, CacheMode, GucProfile, ObservedGucs, PostmasterMismatch, ROW_SCALES, TimingMode,
@@ -20,9 +21,11 @@ use crate::report::{self, IterationResult, WorkloadResult};
 use crate::workloads::Workload;
 
 const PROVENANCE_SCHEMA_VERSION: u32 = 1;
+const CORRECTNESS_DIFF_SCHEMA_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUST_BACKTRACE_ARTIFACT: &str = "rust_backtrace.txt";
 const CRASH_CONTEXT_EMBED_BYTES: usize = 128 * 1024;
+const CORRECTNESS_DIFF_SAMPLE_LIMIT: i64 = 20;
 
 #[derive(Debug, Clone)]
 struct RustBacktraceSetting {
@@ -211,6 +214,25 @@ struct DispatchWarningInput<'a> {
     plan_text_dispatched: bool,
     plan_explicitly_not_dispatched: bool,
     function_kernel_candidate: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct CorrectnessDiffArtifact {
+    schema_version: u32,
+    workload: String,
+    rows: usize,
+    status: String,
+    order_sensitive: bool,
+    accel_rows: Option<i64>,
+    baseline_rows: Option<i64>,
+    accel_minus_baseline_count: Option<i64>,
+    baseline_minus_accel_count: Option<i64>,
+    sample_limit: i64,
+    accel_minus_baseline_samples: Vec<String>,
+    baseline_minus_accel_samples: Vec<String>,
+    accel_query_sql: String,
+    baseline_query_sql: String,
+    error: Option<String>,
 }
 
 /// Run the extension-binary provenance smoke without an artifact directory.
@@ -1420,13 +1442,23 @@ pub fn run_with_timing_and_cache(
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
 
-        if cache_mode == CacheMode::Cold {
+        let cache_purge = if cache_mode == CacheMode::Cold {
             // Drop the OS page cache before every iteration. DISCARD ALL
             // alone is insufficient (Reviewer 2 §3(ii)).
-            if let Err(e) = purge_os_page_cache() {
-                eprintln!("[cache] purge failed: {e}");
+            match purge_os_page_cache() {
+                Ok(true) => CachePurgeState::Completed,
+                Ok(false) => {
+                    eprintln!("[cache] purge unavailable; cold iteration recorded as unpurged");
+                    CachePurgeState::Unavailable
+                }
+                Err(e) => {
+                    eprintln!("[cache] purge failed: {e}");
+                    CachePurgeState::Failed
+                }
             }
-        }
+        } else {
+            CachePurgeState::NotRequested
+        };
 
         // Randomize order to eliminate cache-warming bias.
         let mut order: [usize; 2] = [0, 1];
@@ -1497,6 +1529,7 @@ pub fn run_with_timing_and_cache(
             results.push(IterationResult {
                 accel_ms,
                 parallel_ms,
+                cache_purge,
             });
         }
     }
@@ -1851,6 +1884,103 @@ pub fn run_all_with_config(
     Ok(report)
 }
 
+/// One workload/row-scale cell requested by an artifact resume run.
+pub struct WorkloadRunCell<'a> {
+    pub workload: &'a dyn Workload,
+    pub rows: usize,
+}
+
+/// Retry a selected set of workload/row cells and return an aggregate report.
+///
+/// This is the artifact-resume path. It intentionally does not enforce the
+/// full-run statistical minimum because the source artifact can be either a
+/// publication benchmark or a short crash-repro run; the saved pre-risk
+/// context carries the original iteration count.
+pub fn run_cells_with_config(
+    connection: &str,
+    cells: &[WorkloadRunCell<'_>],
+    config: &BenchConfig,
+) -> Result<report::BenchReport, Box<dyn std::error::Error>> {
+    let workload_names: Vec<&str> = cells.iter().map(|cell| cell.workload.name()).collect();
+    let run_context = prepare_run_context(connection, &workload_names, config)?;
+    let observed_gucs = run_context.observed_gucs;
+    let artifacts = run_context.artifacts;
+
+    initialize_plans_file(config);
+
+    let mut results = Vec::with_capacity(cells.len());
+    let mut crashes: Vec<report::CrashedScale> = Vec::new();
+
+    for cell in cells {
+        eprintln!(
+            "\n[resume] retrying {} @ {} rows",
+            cell.workload.name(),
+            format_rows(cell.rows)
+        );
+        match run_workload_with_config(
+            connection,
+            cell.workload,
+            cell.rows,
+            config,
+            artifacts.as_ref(),
+        ) {
+            Ok(mut result) => {
+                result.rows = cell.rows;
+                results.push(result);
+            }
+            Err(e) => {
+                let err_msg = format!("{e}");
+                eprintln!(
+                    "[CRASH] {} @ {} — {err_msg}",
+                    cell.workload.name(),
+                    format_rows(cell.rows)
+                );
+                let crash = record_crash(
+                    connection,
+                    cell.workload,
+                    cell.rows,
+                    config,
+                    artifacts.as_ref(),
+                    crashes.len() + 1,
+                    &err_msg,
+                );
+                crashes.push(crash);
+                if let Some(artifact_writer) = artifacts.as_ref()
+                    && let Err(write_err) = artifact_writer.write_crashes(&crashes)
+                {
+                    eprintln!("[artifacts] crash list write failed: {write_err}");
+                }
+                let _ = cleanup(connection, cell.workload);
+                wait_for_pg(connection)?;
+            }
+        }
+    }
+
+    let mut report = report::generate_report(
+        results,
+        crashes,
+        Some(connection),
+        config.iterations,
+        config.warmup,
+        observed_gucs,
+        config.timing_mode,
+        config.cache_mode,
+    );
+    if let Some(artifact_writer) = artifacts.as_ref() {
+        report.artifact_dir = Some(artifact_writer.root().display().to_string());
+        if let Err(e) = artifact_writer.capture_log_tails("resume-complete") {
+            eprintln!("[artifacts] resume-complete log/telemetry tail capture failed: {e}");
+        }
+        if let Err(e) = artifact_writer.write_crashes(&report.crashes) {
+            eprintln!("[artifacts] final crash list write failed: {e}");
+        }
+        if let Err(e) = artifact_writer.write_report(&report) {
+            eprintln!("[artifacts] report write failed: {e}");
+        }
+    }
+    Ok(report)
+}
+
 /// Run one workload at one row scale and return a one-row report. This is
 /// the crash-repro path; it intentionally does not enforce the statistical
 /// minimum iteration count so operators can reproduce a backend failure with
@@ -2154,6 +2284,7 @@ struct CrashContext<'a> {
     error: &'a str,
     repro_command: &'a str,
     plan_snippet_artifact: Option<&'a str>,
+    correctness_diff_artifact: Option<&'a str>,
     log_tail_artifacts: &'a [String],
 }
 
@@ -2169,6 +2300,9 @@ fn record_crash(
     let repro_command = repro_command(connection, workload.name(), rows, config);
     let plan_snippet_artifact = artifacts.and_then(|artifact_writer| {
         artifact_writer.existing_plan_snippet_artifact(workload.name(), rows)
+    });
+    let correctness_diff_artifact = artifacts.and_then(|artifact_writer| {
+        artifact_writer.existing_correctness_diff_artifact(workload.name(), rows)
     });
     let label = format!("crash-{crash_index:03}-{}-{rows}", workload.name());
     let mut log_tail_artifacts = Vec::new();
@@ -2188,6 +2322,7 @@ fn record_crash(
             error,
             repro_command: &repro_command,
             plan_snippet_artifact: plan_snippet_artifact.as_deref(),
+            correctness_diff_artifact: correctness_diff_artifact.as_deref(),
             log_tail_artifacts: &log_tail_artifacts,
         };
         match write_crash_context_artifact(artifact_writer, &context) {
@@ -2202,6 +2337,7 @@ fn record_crash(
         error: error.to_owned(),
         repro_command: Some(repro_command),
         plan_snippet_artifact,
+        correctness_diff_artifact,
         log_tail_artifacts,
     }
 }
@@ -2250,6 +2386,12 @@ fn write_crash_context_artifact(
         artifact_writer.root(),
         "EXPLAIN Snippet",
         context.plan_snippet_artifact,
+    );
+    append_optional_artifact_excerpt(
+        &mut text,
+        artifact_writer.root(),
+        "Correctness Diff",
+        context.correctness_diff_artifact,
     );
     append_optional_artifact_excerpt(
         &mut text,
@@ -2316,6 +2458,12 @@ fn append_crash_artifact_paths(
             let _ = writeln!(text, "plan_snippet: {path}");
         }
         None => text.push_str("plan_snippet: <not captured before failure>\n"),
+    }
+    match context.correctness_diff_artifact {
+        Some(path) => {
+            let _ = writeln!(text, "correctness_diff: {path}");
+        }
+        None => text.push_str("correctness_diff: <not captured before failure>\n"),
     }
     if let Some(path) = existing_artifact_path(artifact_writer.root(), "guc_snapshot.json") {
         let _ = writeln!(text, "guc_snapshot: {path}");
@@ -2577,6 +2725,7 @@ fn run_workload_with_config(
         let mut vclient = Client::connect(connection, NoTls)?;
         vacuum_and_capture_stats(&mut vclient, &tables).unwrap_or_default()
     };
+    let sanity_checks = capture_benchmark_sanity_checks(connection, workload)?;
 
     // Capture thermal state BEFORE the timed loop (action_items M13).
     let thermal = capture_thermal_state();
@@ -2591,14 +2740,25 @@ fn run_workload_with_config(
         );
     }
 
+    let correctness_diff_artifact = if let Some(artifact_writer) = artifacts {
+        Some(capture_and_write_correctness_diff(
+            connection,
+            workload,
+            rows,
+            artifact_writer,
+        )?)
+    } else {
+        None
+    };
+
     // Always capture a plan snippet so the runner can tag the workload
     // as dispatched/not-dispatched even if --capture-plans is off. This
     // feeds the dispatch classification (action_items C8 / Reviewer 1
     // Sin #5). The full-plans file (plans.txt) is still written if
     // plans_capture_path is set.
-    let plan_snippet = capture_plan_snippet(connection, workload, BenchMode::Accel).ok();
+    let plan_snippet = capture_plan_snippet(connection, workload, rows, BenchMode::Accel).ok();
     let baseline_plan_snippet =
-        capture_plan_snippet(connection, workload, BenchMode::PgParallel).ok();
+        capture_plan_snippet(connection, workload, rows, BenchMode::PgParallel).ok();
     if let (Some(artifact_writer), Some(snippet)) = (artifacts, plan_snippet.as_deref())
         && let Err(e) = artifact_writer.write_plan_snippet(workload.name(), rows, snippet)
     {
@@ -2664,10 +2824,381 @@ fn run_workload_with_config(
     );
     result.plan_snippet = plan_snippet;
     result.baseline_plan_snippet = baseline_plan_snippet;
+    result.correctness_diff_artifact = correctness_diff_artifact;
     result.thermal = thermal;
     result.table_stats = vacuum_stats;
+    result.sanity_checks = sanity_checks;
     cleanup(connection, workload)?;
     Ok(result)
+}
+
+fn capture_benchmark_sanity_checks(
+    connection: &str,
+    workload: &dyn Workload,
+) -> Result<Vec<report::SanityCheck>, Box<dyn std::error::Error>> {
+    if workload.category() != "ssbm" {
+        return Ok(Vec::new());
+    }
+
+    let mut client = Client::connect(connection, NoTls)?;
+    let checks = client.query(SSBM_DIMENSION_SANITY_SQL, &[])?;
+    let mut out = Vec::with_capacity(checks.len());
+    for row in checks {
+        let label: String = row.get(0);
+        let count: i64 = row.get(1);
+        out.push(report::SanityCheck {
+            label,
+            count,
+            passed: count > 0,
+        });
+    }
+    let failed: Vec<&report::SanityCheck> = out.iter().filter(|check| !check.passed).collect();
+    if !failed.is_empty() {
+        let labels = failed
+            .iter()
+            .map(|check| format!("{}={}", check.label, check.count))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "SSBM dimension sanity check failed before timing for {}: {labels}",
+            workload.name()
+        )
+        .into());
+    }
+    Ok(out)
+}
+
+const SSBM_DIMENSION_SANITY_SQL: &str = "\
+SELECT label, row_count::bigint \
+FROM (VALUES \
+    ('ssbm_part.p_mfgr IN (MFGR#1, MFGR#2) (SSBM Q4.1/Q4.2)', (SELECT count(*) FROM ssbm_part WHERE p_mfgr IN ('MFGR#1', 'MFGR#2'))), \
+    ('ssbm_part.p_category = MFGR#12 (SSBM Q2.1)', (SELECT count(*) FROM ssbm_part WHERE p_category = 'MFGR#12')), \
+    ('ssbm_part.p_category = MFGR#14 (SSBM Q4.3)', (SELECT count(*) FROM ssbm_part WHERE p_category = 'MFGR#14')), \
+    ('ssbm_part.p_brand1 = MFGR#2239 (SSBM Q2.3)', (SELECT count(*) FROM ssbm_part WHERE p_brand1 = 'MFGR#2239')), \
+    ('ssbm_part.p_brand1 BETWEEN MFGR#2221 AND MFGR#2228 (SSBM Q2.2)', (SELECT count(*) FROM ssbm_part WHERE p_brand1 BETWEEN 'MFGR#2221' AND 'MFGR#2228')), \
+    ('ssbm_supplier.s_region = AMERICA (SSBM Q2.1/Q4)', (SELECT count(*) FROM ssbm_supplier WHERE s_region = 'AMERICA')), \
+    ('ssbm_supplier.s_region = ASIA (SSBM Q2.2/Q3.1)', (SELECT count(*) FROM ssbm_supplier WHERE s_region = 'ASIA')), \
+    ('ssbm_supplier.s_region = EUROPE (SSBM Q2.3)', (SELECT count(*) FROM ssbm_supplier WHERE s_region = 'EUROPE')), \
+    ('ssbm_supplier.s_nation = UNITED STATES (SSBM Q3.2/Q4.3)', (SELECT count(*) FROM ssbm_supplier WHERE s_nation = 'UNITED STATES')), \
+    ('ssbm_supplier.s_city IN (UNITED ST0, UNITED ST1) (SSBM Q3.3/Q3.4)', (SELECT count(*) FROM ssbm_supplier WHERE s_city IN ('UNITED ST0', 'UNITED ST1'))), \
+    ('ssbm_customer.c_region = AMERICA (SSBM Q4)', (SELECT count(*) FROM ssbm_customer WHERE c_region = 'AMERICA')), \
+    ('ssbm_customer.c_region = ASIA (SSBM Q3.1)', (SELECT count(*) FROM ssbm_customer WHERE c_region = 'ASIA')), \
+    ('ssbm_customer.c_nation = UNITED STATES (SSBM Q3.2)', (SELECT count(*) FROM ssbm_customer WHERE c_nation = 'UNITED STATES')), \
+    ('ssbm_customer.c_city IN (UNITED ST0, UNITED ST1) (SSBM Q3.3/Q3.4)', (SELECT count(*) FROM ssbm_customer WHERE c_city IN ('UNITED ST0', 'UNITED ST1'))), \
+    ('ssbm_date.d_year = 1992 (SSBM Q3)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1992)), \
+    ('ssbm_date.d_year = 1993 (SSBM Q1.1/Q3)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1993)), \
+    ('ssbm_date.d_year = 1994 (SSBM Q1.3/Q3)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1994)), \
+    ('ssbm_date.d_year = 1995 (SSBM Q3)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1995)), \
+    ('ssbm_date.d_year = 1996 (SSBM Q3)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1996)), \
+    ('ssbm_date.d_year = 1997 (SSBM Q3/Q4)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1997)), \
+    ('ssbm_date.d_year = 1998 (SSBM Q4)', (SELECT count(*) FROM ssbm_date WHERE d_year = 1998)), \
+    ('ssbm_date.d_yearmonthnum = 199401 (SSBM Q1.2)', (SELECT count(*) FROM ssbm_date WHERE d_yearmonthnum = 199401)), \
+    ('ssbm_date.d_weeknuminyear = 6 AND d_year = 1994 (SSBM Q1.3)', (SELECT count(*) FROM ssbm_date WHERE d_weeknuminyear = 6 AND d_year = 1994)), \
+    ('ssbm_date.d_yearmonth = Dec1997 (SSBM Q3.4)', (SELECT count(*) FROM ssbm_date WHERE d_yearmonth = 'Dec1997')) \
+) AS checks(label, row_count) \
+ORDER BY label";
+
+const CORRECTNESS_ACCEL_TABLE: &str = "pg_temp.pgaccel_correctness_accel";
+const CORRECTNESS_BASELINE_TABLE: &str = "pg_temp.pgaccel_correctness_baseline";
+
+fn capture_and_write_correctness_diff(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+    artifact_writer: &ArtifactWriter,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let artifact = match capture_correctness_diff(connection, workload, rows) {
+        Ok(artifact) => artifact,
+        Err(e) => correctness_error_artifact(workload, rows, e.to_string()),
+    };
+    let path = artifact_writer.write_correctness_diff(workload.name(), rows, &artifact)?;
+    let relative_path = path
+        .strip_prefix(artifact_writer.root())
+        .unwrap_or(&path)
+        .display()
+        .to_string();
+    if artifact.status == "pass" {
+        return Ok(relative_path);
+    }
+    Err(format!(
+        "correctness diff failed for {} @ {} rows: status={} accel_minus_baseline={:?} baseline_minus_accel={:?} error={}",
+        workload.name(),
+        rows,
+        artifact.status,
+        artifact.accel_minus_baseline_count,
+        artifact.baseline_minus_accel_count,
+        artifact.error.as_deref().unwrap_or("-")
+    )
+    .into())
+}
+
+fn capture_correctness_diff(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+) -> Result<CorrectnessDiffArtifact, Box<dyn std::error::Error>> {
+    let accel_query_sql = workload.query_sql();
+    let baseline_query_sql = workload
+        .baseline_query_sql()
+        .unwrap_or_else(|| accel_query_sql.clone());
+    let order_sensitive =
+        has_top_level_order_by(&accel_query_sql) || has_top_level_order_by(&baseline_query_sql);
+    let pre_query_sql = workload.pre_query_sql();
+
+    let mut client = Client::connect(connection, NoTls)?;
+    prime_pg_accel_backend(&mut client)?;
+    create_correctness_table(
+        &mut client,
+        CORRECTNESS_ACCEL_TABLE,
+        &accel_query_sql,
+        BenchMode::Accel,
+        &pre_query_sql,
+        order_sensitive,
+    )?;
+    create_correctness_table(
+        &mut client,
+        CORRECTNESS_BASELINE_TABLE,
+        &baseline_query_sql,
+        BenchMode::PgParallel,
+        &pre_query_sql,
+        order_sensitive,
+    )?;
+
+    let accel_rows = correctness_table_count(&mut client, CORRECTNESS_ACCEL_TABLE)?;
+    let baseline_rows = correctness_table_count(&mut client, CORRECTNESS_BASELINE_TABLE)?;
+    let accel_minus_baseline_count = correctness_diff_count(
+        &mut client,
+        CORRECTNESS_ACCEL_TABLE,
+        CORRECTNESS_BASELINE_TABLE,
+    )?;
+    let baseline_minus_accel_count = correctness_diff_count(
+        &mut client,
+        CORRECTNESS_BASELINE_TABLE,
+        CORRECTNESS_ACCEL_TABLE,
+    )?;
+    let accel_minus_baseline_samples = correctness_diff_samples(
+        &mut client,
+        CORRECTNESS_ACCEL_TABLE,
+        CORRECTNESS_BASELINE_TABLE,
+    )?;
+    let baseline_minus_accel_samples = correctness_diff_samples(
+        &mut client,
+        CORRECTNESS_BASELINE_TABLE,
+        CORRECTNESS_ACCEL_TABLE,
+    )?;
+    client.batch_execute(
+        "DROP TABLE IF EXISTS pg_temp.pgaccel_correctness_accel; \
+         DROP TABLE IF EXISTS pg_temp.pgaccel_correctness_baseline",
+    )?;
+
+    let status = if accel_minus_baseline_count == 0 && baseline_minus_accel_count == 0 {
+        "pass"
+    } else {
+        "fail"
+    };
+    Ok(CorrectnessDiffArtifact {
+        schema_version: CORRECTNESS_DIFF_SCHEMA_VERSION,
+        workload: workload.name().to_owned(),
+        rows,
+        status: status.to_owned(),
+        order_sensitive,
+        accel_rows: Some(accel_rows),
+        baseline_rows: Some(baseline_rows),
+        accel_minus_baseline_count: Some(accel_minus_baseline_count),
+        baseline_minus_accel_count: Some(baseline_minus_accel_count),
+        sample_limit: CORRECTNESS_DIFF_SAMPLE_LIMIT,
+        accel_minus_baseline_samples,
+        baseline_minus_accel_samples,
+        accel_query_sql,
+        baseline_query_sql,
+        error: None,
+    })
+}
+
+fn create_correctness_table(
+    client: &mut Client,
+    table: &str,
+    query: &str,
+    mode: BenchMode,
+    pre_query_sql: &[String],
+    order_sensitive: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for sql in pre_query_sql {
+        client.batch_execute(sql)?;
+    }
+    match mode {
+        BenchMode::Accel => client.batch_execute(
+            "SET pg_accel.enabled = on; \
+             SET max_parallel_workers_per_gather = DEFAULT",
+        )?,
+        BenchMode::PgParallel => client.batch_execute(
+            "SET pg_accel.enabled = off; \
+             SET max_parallel_workers_per_gather = DEFAULT",
+        )?,
+    }
+
+    let projection = correctness_projection_sql(query, order_sensitive);
+    let create_table = table.strip_prefix("pg_temp.").unwrap_or(table);
+    client.batch_execute(&format!(
+        "DROP TABLE IF EXISTS {table}; CREATE TEMP TABLE {create_table} AS {projection}"
+    ))?;
+    Ok(())
+}
+
+fn correctness_projection_sql(query: &str, order_sensitive: bool) -> String {
+    let query = trim_sql_semicolon(query);
+    if order_sensitive {
+        format!(
+            "SELECT row_number() OVER () AS ord, to_jsonb(q)::text AS row_repr \
+             FROM ({query}) AS q"
+        )
+    } else {
+        format!("SELECT NULL::bigint AS ord, to_jsonb(q)::text AS row_repr FROM ({query}) AS q")
+    }
+}
+
+fn correctness_table_count(
+    client: &mut Client,
+    table: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let row = client.query_one(&format!("SELECT count(*)::bigint FROM {table}"), &[])?;
+    Ok(row.get(0))
+}
+
+fn correctness_diff_count(
+    client: &mut Client,
+    left: &str,
+    right: &str,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let row = client.query_one(
+        &format!(
+            "SELECT count(*)::bigint FROM (\
+               SELECT ord, row_repr FROM {left} \
+               EXCEPT ALL \
+               SELECT ord, row_repr FROM {right}\
+             ) d"
+        ),
+        &[],
+    )?;
+    Ok(row.get(0))
+}
+
+fn correctness_diff_samples(
+    client: &mut Client,
+    left: &str,
+    right: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let rows = client.query(
+        &format!(
+            "SELECT to_jsonb(d)::text \
+               FROM (\
+                 SELECT ord, row_repr FROM {left} \
+                 EXCEPT ALL \
+                 SELECT ord, row_repr FROM {right}\
+               ) d \
+              ORDER BY ord NULLS FIRST, row_repr \
+              LIMIT {CORRECTNESS_DIFF_SAMPLE_LIMIT}"
+        ),
+        &[],
+    )?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
+fn correctness_error_artifact(
+    workload: &dyn Workload,
+    rows: usize,
+    error: String,
+) -> CorrectnessDiffArtifact {
+    let accel_query_sql = workload.query_sql();
+    let baseline_query_sql = workload
+        .baseline_query_sql()
+        .unwrap_or_else(|| accel_query_sql.clone());
+    CorrectnessDiffArtifact {
+        schema_version: CORRECTNESS_DIFF_SCHEMA_VERSION,
+        workload: workload.name().to_owned(),
+        rows,
+        status: "error".to_owned(),
+        order_sensitive: has_top_level_order_by(&accel_query_sql)
+            || has_top_level_order_by(&baseline_query_sql),
+        accel_rows: None,
+        baseline_rows: None,
+        accel_minus_baseline_count: None,
+        baseline_minus_accel_count: None,
+        sample_limit: CORRECTNESS_DIFF_SAMPLE_LIMIT,
+        accel_minus_baseline_samples: Vec::new(),
+        baseline_minus_accel_samples: Vec::new(),
+        accel_query_sql,
+        baseline_query_sql,
+        error: Some(error),
+    }
+}
+
+fn trim_sql_semicolon(sql: &str) -> &str {
+    sql.trim().trim_end_matches(';').trim_end()
+}
+
+fn has_top_level_order_by(sql: &str) -> bool {
+    let mut depth = 0_i32;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut previous = '\0';
+    let bytes = sql.as_bytes();
+    let mut idx = 0_usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single_quote {
+            if ch == '\'' && previous != '\\' {
+                in_single_quote = false;
+            }
+            previous = ch;
+            idx += 1;
+            continue;
+        }
+        if in_double_quote {
+            if ch == '"' {
+                in_double_quote = false;
+            }
+            previous = ch;
+            idx += 1;
+            continue;
+        }
+        match ch {
+            '\'' => in_single_quote = true,
+            '"' => in_double_quote = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 && starts_with_order_by(sql, idx) {
+            return true;
+        }
+        previous = ch;
+        idx += 1;
+    }
+    false
+}
+
+fn starts_with_order_by(sql: &str, start: usize) -> bool {
+    let rest = &sql[start..];
+    if rest.len() < "order by".len() || !rest[.."order by".len()].eq_ignore_ascii_case("order by") {
+        return false;
+    }
+    let before_ok = start == 0
+        || !sql[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_identifier_char);
+    let after_idx = start + "order by".len();
+    let after_ok = after_idx >= sql.len()
+        || !sql[after_idx..]
+            .chars()
+            .next()
+            .is_some_and(is_identifier_char);
+    before_ok && after_ok
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn capture_and_write_pre_risk_context(
@@ -2761,6 +3292,7 @@ fn capture_and_write_pre_risk_context(
 fn capture_plan_snippet(
     connection: &str,
     workload: &dyn Workload,
+    rows: usize,
     mode: BenchMode,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
@@ -2774,6 +3306,9 @@ fn capture_plan_snippet(
     client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
     for sql in workload.pre_query_sql() {
         client.batch_execute(&sql)?;
+    }
+    if matches!(mode, BenchMode::Accel) {
+        let _ = client.simple_query("SELECT pg_accel_reset_stats()");
     }
     let query = match mode {
         BenchMode::Accel => workload.query_sql(),
@@ -2792,7 +3327,37 @@ fn capture_plan_snippet(
         buf.push_str(line);
         buf.push('\n');
     }
+    if matches!(mode, BenchMode::Accel) {
+        if let Some(reason) = capture_last_planner_rejection_reason(&mut client) {
+            buf.push_str("pg_accel planner rejection reason: ");
+            buf.push_str(&reason);
+            buf.push('\n');
+        } else if let Some(reason) = benchmark_threshold_decline_reason(workload.name(), rows)
+            && !plan_contains_custom_scan(&buf)
+        {
+            buf.push_str("pg_accel benchmark threshold decline reason: ");
+            buf.push_str(reason);
+            buf.push('\n');
+            let _ = writeln!(
+                buf,
+                "pg_accel benchmark threshold decline evidence: workload={} rows={rows}",
+                workload.name()
+            );
+        }
+    }
     Ok(buf)
+}
+
+fn benchmark_threshold_decline_reason(name: &str, rows: usize) -> Option<&'static str> {
+    crate::workloads::benchmark_threshold_matrix_entry(name, rows)
+        .and_then(|entry| entry.expectation.decline_reason())
+}
+
+fn capture_last_planner_rejection_reason(client: &mut Client) -> Option<String> {
+    client
+        .query_one("SELECT pg_accel_last_planner_rejection_reason()", &[])
+        .ok()
+        .and_then(|row| row.get::<_, Option<String>>(0))
 }
 
 /// Return true if a plan text snippet contains a Custom Scan node (which
@@ -3298,12 +3863,46 @@ mod tests {
     }
 
     #[test]
+    fn correctness_scratch_tables_are_pg_temp_qualified() {
+        assert!(CORRECTNESS_ACCEL_TABLE.starts_with("pg_temp."));
+        assert!(CORRECTNESS_BASELINE_TABLE.starts_with("pg_temp."));
+        assert!(!CORRECTNESS_ACCEL_TABLE.contains("public."));
+        assert!(!CORRECTNESS_BASELINE_TABLE.contains("public."));
+    }
+
+    #[test]
     fn test_sanitize_artifact_component() {
         assert_eq!(
             sanitize_artifact_component("crash-001-gpu/hash agg @ 1M"),
             "crash-001-gpu-hash-agg---1M"
         );
         assert_eq!(sanitize_artifact_component("***"), "artifact");
+    }
+
+    #[test]
+    fn test_correctness_projection_strips_trailing_semicolon() {
+        let projection = correctness_projection_sql("SELECT 1 AS x;\n", false);
+        assert!(projection.contains("FROM (SELECT 1 AS x) AS q"));
+        assert!(projection.contains("NULL::bigint AS ord"));
+    }
+
+    #[test]
+    fn test_correctness_projection_includes_order_ordinal_when_needed() {
+        let projection = correctness_projection_sql("SELECT id FROM t ORDER BY id", true);
+        assert!(projection.contains("row_number() OVER () AS ord"));
+        assert!(projection.contains("to_jsonb(q)::text AS row_repr"));
+    }
+
+    #[test]
+    fn test_top_level_order_by_detection_ignores_window_and_strings() {
+        assert!(has_top_level_order_by("SELECT id FROM t ORDER BY id"));
+        assert!(!has_top_level_order_by(
+            "SELECT row_number() OVER (ORDER BY id) FROM t"
+        ));
+        assert!(!has_top_level_order_by(
+            "SELECT 'order by id' AS literal FROM t"
+        ));
+        assert!(!has_top_level_order_by("SELECT order_by_col FROM t"));
     }
 
     #[test]

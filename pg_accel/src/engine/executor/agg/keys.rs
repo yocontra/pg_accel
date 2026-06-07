@@ -113,8 +113,8 @@ pub(super) fn append_key_bytes(
             };
             buf.extend_from_slice(&val.to_ne_bytes());
         }
-        1 => {
-            // i64 key
+        1 | H3_LATLNG_GROUP_KEY_TYPE => {
+            // i64 key, including precomputed H3 index fallback keys.
             let val = raw as i64;
             buf.extend_from_slice(&val.to_ne_bytes());
         }
@@ -250,6 +250,15 @@ mod tests {
             key_type: 4,
         };
         assert_eq!(info.key_size(), 16);
+    }
+
+    #[test]
+    fn append_key_bytes_h3_uses_i64_layout() {
+        let value = 0x0872_8308_2bff_ffff_i64;
+        let datum = pg_sys::Datum::from(value);
+        let mut buf: Vec<u8> = Vec::new();
+        append_key_bytes(&mut buf, datum, H3_LATLNG_GROUP_KEY_TYPE, pg_sys::INT8OID);
+        assert_eq!(buf, value.to_ne_bytes());
     }
 
     #[test]

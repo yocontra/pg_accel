@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bench_model::CachePurgeState;
 use crate::stats;
 
 const NO_DISPATCH_TIMING_SKEW_THRESHOLD: f64 = 0.10;
@@ -26,6 +27,9 @@ pub struct IterationResult {
     pub accel_ms: f64,
     /// Execution time in milliseconds with PG parallel workers (pg_accel off).
     pub parallel_ms: f64,
+    /// Outcome of the OS page-cache purge requested for this iteration.
+    #[serde(default)]
+    pub cache_purge: CachePurgeState,
 }
 
 /// Aggregated results for one workload at one row scale (two-way: accel vs PG parallel).
@@ -83,6 +87,10 @@ pub struct WorkloadResult {
     /// plan artifact exposes it.
     #[serde(default)]
     pub gpu_resident_pipeline: GpuResidentPipelineStatus,
+    /// CPU/PostgreSQL boundary that prevents the selected pg_accel plan from
+    /// being treated as a GPU-resident pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_resident_boundary_reason: Option<String>,
     /// Whether the harness successfully captured pg_accel runtime counters
     /// around the measured accel-side executions.
     #[serde(default)]
@@ -175,6 +183,10 @@ pub struct WorkloadResult {
     /// accel-mode no-dispatch plan.
     #[serde(default)]
     pub baseline_plan_snippet: Option<String>,
+    /// Relative path to the accel-vs-baseline correctness diff artifact for
+    /// this workload/scale, when artifact capture was enabled.
+    #[serde(default)]
+    pub correctness_diff_artifact: Option<String>,
     /// Thermal state captured immediately before this workload ran.
     /// `None` on platforms where capture is unavailable.
     #[serde(default)]
@@ -184,6 +196,11 @@ pub struct WorkloadResult {
     /// baseline's planner had fresh statistics.
     #[serde(default)]
     pub table_stats: Vec<TableStats>,
+    /// Benchmark sanity checks captured after setup and before timing.
+    /// SSBM uses these to prove dimension filters are non-empty before
+    /// no-dispatch rows are interpreted as missing GPU PreAgg work.
+    #[serde(default)]
+    pub sanity_checks: Vec<SanityCheck>,
 }
 
 /// Hardware and software profile for reproducibility.
@@ -213,6 +230,8 @@ pub struct CrashedScale {
     pub repro_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_snippet_artifact: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correctness_diff_artifact: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub log_tail_artifacts: Vec<String>,
 }
@@ -276,6 +295,9 @@ pub enum GpuResidentPipelineStatus {
     /// captured plan artifacts.
     #[default]
     NotReported,
+    /// Captured plan text explicitly reported that the selected path still
+    /// crosses a CPU/PostgreSQL boundary before final output.
+    NotResident,
     /// Captured plan text exposed explicit fused/PreAgg pipeline evidence.
     Reported,
     /// The row was credited through a function/SRF kernel rather than a
@@ -292,6 +314,7 @@ impl GpuResidentPipelineStatus {
     const fn as_str(self) -> &'static str {
         match self {
             Self::NotReported => "not_reported",
+            Self::NotResident => "not_resident",
             Self::Reported => "reported",
             Self::NotApplicableFunctionSrf => "not_applicable_function_srf",
             Self::PlannerDeclined => "planner_declined",
@@ -326,6 +349,13 @@ pub struct TableStats {
     /// Max `n_distinct` across all columns in the table. Handy summary of
     /// whether the stats collector thinks the columns are selective.
     pub max_n_distinct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SanityCheck {
+    pub label: String,
+    pub count: i64,
+    pub passed: bool,
 }
 
 impl WorkloadResult {
@@ -386,6 +416,7 @@ impl WorkloadResult {
             function_kernel_count: 0,
             rows_returned_to_cpu: 0,
             gpu_resident_pipeline: GpuResidentPipelineStatus::NotReported,
+            gpu_resident_boundary_reason: None,
             dispatch_counter_captured: false,
             gpu_kernel_execution_delta: 0,
             pg_accel_rows_dispatched_delta: 0,
@@ -424,8 +455,10 @@ impl WorkloadResult {
             cv_ratio,
             plan_snippet: None,
             baseline_plan_snippet: None,
+            correctness_diff_artifact: None,
             thermal: None,
             table_stats: Vec::new(),
+            sanity_checks: Vec::new(),
             iterations,
         }
     }
@@ -743,10 +776,25 @@ fn classify_gpu_resident_pipeline_status(
     if !plan_selected || !gpu_kernel_dispatched {
         return GpuResidentPipelineStatus::NotReported;
     }
-    if plan_contains_gpu_resident_pipeline_evidence(w.plan_snippet.as_deref().unwrap_or_default())
+    let snippet = w.plan_snippet.as_deref().unwrap_or_default();
+    if plan_contains_gpu_resident_pipeline_evidence(snippet)
         || full_plan.is_some_and(plan_contains_gpu_resident_pipeline_evidence)
     {
         return GpuResidentPipelineStatus::Reported;
+    }
+    if plan_gpu_resident_pipeline_value(snippet) == Some(false)
+        || full_plan.and_then(plan_gpu_resident_pipeline_value) == Some(false)
+        || extract_gpu_resident_boundary_reason(snippet).is_some()
+        || full_plan
+            .and_then(extract_gpu_resident_boundary_reason)
+            .is_some()
+        || infer_gpu_resident_boundary_reason_from_plan(snippet).is_some()
+        || full_plan
+            .and_then(infer_gpu_resident_boundary_reason_from_plan)
+            .is_some()
+        || infer_gpu_resident_boundary_reason_from_workload(w).is_some()
+    {
+        return GpuResidentPipelineStatus::NotResident;
     }
     GpuResidentPipelineStatus::NotReported
 }
@@ -767,9 +815,15 @@ pub fn is_function_kernel_candidate(
     let kernel = kernel_class.to_ascii_lowercase();
     name.starts_with("h3_")
         || name.contains("_h3_")
+        || name.starts_with("raster_")
         || category == "gpu_h3"
+        || category == "gpu_raster"
         || kernel.starts_with("h3")
+        || kernel.starts_with("raster")
         || description.to_ascii_lowercase().contains("h3_")
+        || description.to_ascii_lowercase().contains("st_mapalgebra")
+        || description.to_ascii_lowercase().contains("st_slope")
+        || description.to_ascii_lowercase().contains("st_reclass")
 }
 
 fn dispatch_counter_capture_known(w: &WorkloadResult) -> bool {
@@ -888,14 +942,212 @@ fn plan_explicit_gpu_dispatched(plan: &str) -> Option<bool> {
 }
 
 fn plan_contains_gpu_resident_pipeline_evidence(plan: &str) -> bool {
+    if plan_gpu_resident_pipeline_value(plan) == Some(true) {
+        return true;
+    }
+    if plan_gpu_resident_pipeline_value(plan) == Some(false) {
+        return false;
+    }
     let lower = plan.to_ascii_lowercase();
-    lower.contains("strategy: gpupreagg")
-        || lower.contains("gpuaccelpreagg")
-        || lower.contains("fact rows scanned")
-        || lower.contains("has scan expr")
-        || lower.contains("pipeline fusion")
-        || lower.contains("gpu-resident")
-        || lower.contains("gpu resident")
+    lower.contains("gpu resident pipeline: true")
+        || lower.contains("gpu-resident pipeline: true")
+        || lower.contains("gpu_resident_pipeline: true")
+        || lower.contains("\"gpu resident pipeline\": true")
+        || lower.contains("\"gpu resident pipeline\":true")
+        || lower.contains("\"gpu_resident_pipeline\": true")
+        || lower.contains("\"gpu_resident_pipeline\":true")
+        || lower.contains("pipeline fusion: true")
+}
+
+fn plan_gpu_resident_pipeline_value(plan: &str) -> Option<bool> {
+    let lower = plan.to_ascii_lowercase();
+    if lower.contains("gpu resident pipeline: false")
+        || lower.contains("gpu-resident pipeline: false")
+        || lower.contains("gpu_resident_pipeline: false")
+        || lower.contains("\"gpu resident pipeline\": false")
+        || lower.contains("\"gpu resident pipeline\":false")
+        || lower.contains("\"gpu resident pipeline\":\"false\"")
+        || lower.contains("\"gpu resident pipeline\": \"false\"")
+        || lower.contains("\"gpu_resident_pipeline\": false")
+        || lower.contains("\"gpu_resident_pipeline\":false")
+        || lower.contains("\"gpu_resident_pipeline\":\"false\"")
+        || lower.contains("\"gpu_resident_pipeline\": \"false\"")
+    {
+        Some(false)
+    } else if lower.contains("gpu resident pipeline: true")
+        || lower.contains("gpu-resident pipeline: true")
+        || lower.contains("gpu_resident_pipeline: true")
+        || lower.contains("\"gpu resident pipeline\": true")
+        || lower.contains("\"gpu resident pipeline\":true")
+        || lower.contains("\"gpu resident pipeline\":\"true\"")
+        || lower.contains("\"gpu resident pipeline\": \"true\"")
+        || lower.contains("\"gpu_resident_pipeline\": true")
+        || lower.contains("\"gpu_resident_pipeline\":true")
+        || lower.contains("\"gpu_resident_pipeline\":\"true\"")
+        || lower.contains("\"gpu_resident_pipeline\": \"true\"")
+    {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+fn extract_gpu_resident_boundary_reason(plan: &str) -> Option<String> {
+    for line in plan.lines() {
+        let trimmed = line.trim().trim_end_matches(',');
+        let lower = trimmed.to_ascii_lowercase();
+        let value = if lower.starts_with("gpu resident boundary:") {
+            trimmed.split_once(':').map(|(_, value)| value)
+        } else if lower.starts_with("\"gpu resident boundary\":") {
+            trimmed.split_once(':').map(|(_, value)| value)
+        } else if lower.starts_with("\"gpu_resident_boundary_reason\":") {
+            trimmed.split_once(':').map(|(_, value)| value)
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            let reason = value
+                .trim()
+                .trim_matches('"')
+                .trim_end_matches('"')
+                .trim()
+                .to_owned();
+            if !reason.is_empty() {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+fn classify_gpu_resident_boundary_reason(
+    w: &WorkloadResult,
+    full_plan: Option<&str>,
+) -> Option<String> {
+    if matches!(
+        w.gpu_resident_pipeline,
+        GpuResidentPipelineStatus::Reported
+            | GpuResidentPipelineStatus::PlannerDeclined
+            | GpuResidentPipelineStatus::NotApplicableFunctionSrf
+    ) {
+        return None;
+    }
+    w.plan_snippet
+        .as_deref()
+        .and_then(extract_gpu_resident_boundary_reason)
+        .or_else(|| full_plan.and_then(extract_gpu_resident_boundary_reason))
+        .or_else(|| {
+            w.plan_snippet
+                .as_deref()
+                .and_then(infer_gpu_resident_boundary_reason_from_plan)
+        })
+        .or_else(|| full_plan.and_then(infer_gpu_resident_boundary_reason_from_plan))
+        .or_else(|| infer_gpu_resident_boundary_reason_from_workload(w).map(str::to_owned))
+}
+
+fn infer_gpu_resident_boundary_reason_from_plan(plan: &str) -> Option<String> {
+    let lower = plan.to_ascii_lowercase();
+    let strategy = if lower.contains("strategy: gpuscan")
+        || lower.contains("\"strategy\": \"gpuscan\"")
+        || lower.contains("\"strategy\":\"gpuscan\"")
+    {
+        "GpuScan"
+    } else if lower.contains("strategy: gpujoin")
+        || lower.contains("\"strategy\": \"gpujoin\"")
+        || lower.contains("\"strategy\":\"gpujoin\"")
+    {
+        "GpuJoin"
+    } else if lower.contains("strategy: gpuagg")
+        || lower.contains("\"strategy\": \"gpuagg\"")
+        || lower.contains("\"strategy\":\"gpuagg\"")
+    {
+        "GpuAgg"
+    } else if lower.contains("strategy: gpusort")
+        || lower.contains("\"strategy\": \"gpusort\"")
+        || lower.contains("\"strategy\":\"gpusort\"")
+    {
+        "GpuSort"
+    } else if lower.contains("strategy: gpuwindow")
+        || lower.contains("\"strategy\": \"gpuwindow\"")
+        || lower.contains("\"strategy\":\"gpuwindow\"")
+    {
+        "GpuWindow"
+    } else if lower.contains("strategy: gpupreagg")
+        || lower.contains("\"strategy\": \"gpupreagg\"")
+        || lower.contains("\"strategy\":\"gpupreagg\"")
+    {
+        "GpuPreAgg"
+    } else if lower.contains("strategy: gpufunctionscan")
+        || lower.contains("\"strategy\": \"gpufunctionscan\"")
+        || lower.contains("\"strategy\":\"gpufunctionscan\"")
+    {
+        "GpuFunctionScan"
+    } else if lower.contains("strategy: gpuaccelsrftargetlist")
+        || lower.contains("\"strategy\": \"gpuaccelsrftargetlist\"")
+        || lower.contains("\"strategy\":\"gpuaccelsrftargetlist\"")
+    {
+        "GpuAccelSrfTargetList"
+    } else {
+        return None;
+    };
+    gpu_resident_boundary_reason_for_strategy(strategy).map(str::to_owned)
+}
+
+fn infer_gpu_resident_boundary_reason_from_workload(w: &WorkloadResult) -> Option<&'static str> {
+    let name = w.name.as_str();
+    let category = w.category.as_str();
+    let kernel = w.kernel_class.as_str();
+    if kernel == "sort" || name.contains("sort") || name.contains("topk") {
+        gpu_resident_boundary_reason_for_strategy("GpuSort")
+    } else if kernel.contains("join") || name.contains("join") || name.contains("nlj") {
+        gpu_resident_boundary_reason_for_strategy("GpuJoin")
+    } else if kernel == "hash_agg"
+        || kernel == "reduce"
+        || name.contains("agg")
+        || name.contains("reduce")
+    {
+        gpu_resident_boundary_reason_for_strategy("GpuAgg")
+    } else if kernel == "window" || name.contains("window") {
+        gpu_resident_boundary_reason_for_strategy("GpuWindow")
+    } else if category == "gpu_spatial"
+        || category == "gpu_raster"
+        || category == "gpu_h3"
+        || category == "gpu_expr"
+    {
+        gpu_resident_boundary_reason_for_strategy("GpuScan")
+    } else {
+        None
+    }
+}
+
+fn gpu_resident_boundary_reason_for_strategy(strategy: &str) -> Option<&'static str> {
+    Some(match strategy {
+        "GpuScan" => {
+            "GpuScan consumes heap or child tuples on CPU via heap_getnext/ExecProcNode/MinimalTuple staging and emits PostgreSQL slots"
+        }
+        "GpuJoin" => {
+            "GpuJoin collects child rows through ExecProcNode into host MinimalTuple/key buffers and reconstructs joined PostgreSQL slots"
+        }
+        "GpuAgg" => {
+            "GpuAgg drains child tuples and stages host value/key/null Vec buffers before GPU reduce or grouped aggregation"
+        }
+        "GpuSort" => {
+            "GpuSort materializes input tuples on CPU, sends key vectors only, reorders host MinimalTuples, and emits PostgreSQL slots"
+        }
+        "GpuWindow" => {
+            "GpuWindow buffers input MinimalTuples, extracts host columns, stores host result vectors, and emits PostgreSQL slots"
+        }
+        "GpuPreAgg" => {
+            "GpuPreAgg materializes dimensions in host HashMap state and scans/probes fact rows through ExecProcNode/materialized slots"
+        }
+        "GpuFunctionScan" => {
+            "GpuFunctionScan dispatches constant arguments once, buffers host Datums, and drains output through PostgreSQL slots"
+        }
+        "GpuAccelSrfTargetList" => {
+            "GpuAccelSrfTargetList drives ProjectSet input through ExecProcNode, buffers per-row SRF output, and emits expanded PostgreSQL tuples"
+        }
+        _ => return None,
+    })
 }
 
 fn plan_shape_signature(plan: &str) -> Vec<String> {
@@ -940,6 +1192,29 @@ fn markdown_cell(input: &str) -> String {
     input.replace('|', "\\|").replace('\n', "<br>")
 }
 
+fn iteration_indexes_with_cache_purge(
+    iterations: &[IterationResult],
+    state: CachePurgeState,
+) -> Vec<usize> {
+    iterations
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, iteration)| (iteration.cache_purge == state).then_some(idx + 1))
+        .collect()
+}
+
+fn format_iteration_indexes(indexes: &[usize]) -> String {
+    if indexes.is_empty() {
+        "-".to_owned()
+    } else {
+        indexes
+            .iter()
+            .map(|idx| idx.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 fn dispatch_evidence_label(w: &WorkloadResult) -> &'static str {
     if w.function_srf_kernel_dispatched {
         "function_srf_dispatch"
@@ -952,6 +1227,86 @@ fn dispatch_evidence_label(w: &WorkloadResult) -> &'static str {
     } else {
         "uncredited_gpu_counter_or_unknown"
     }
+}
+
+fn threshold_matrix_expectation_label(
+    expectation: crate::workloads::BenchmarkLaneExpectation,
+) -> String {
+    match expectation {
+        crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
+            format!("{} >= {min_warm_speedup:.2}x", expectation.label())
+        }
+        crate::workloads::BenchmarkLaneExpectation::NativeDecline { reason } => {
+            let reason = expectation.decline_reason().unwrap_or(reason);
+            format!("{} ({reason})", expectation.label())
+        }
+    }
+}
+
+fn threshold_matrix_status(
+    w: &WorkloadResult,
+    expectation: crate::workloads::BenchmarkLaneExpectation,
+    cache_mode: &str,
+) -> &'static str {
+    match expectation {
+        crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
+            if gpu_winner_evidence_verified(w, min_warm_speedup, cache_mode) {
+                "pass"
+            } else {
+                "FAIL"
+            }
+        }
+        crate::workloads::BenchmarkLaneExpectation::NativeDecline { reason } => {
+            if !w.plan_selected
+                && !w.gpu_kernel_dispatched
+                && native_decline_reason_verified(w, reason)
+            {
+                "pass"
+            } else {
+                "FAIL"
+            }
+        }
+    }
+}
+
+fn gpu_winner_evidence_verified(
+    w: &WorkloadResult,
+    min_warm_speedup: f64,
+    cache_mode: &str,
+) -> bool {
+    let classification = w.dispatch_classification();
+    let threshold = min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
+    classification.gpu_kernel_dispatched
+        && w.dispatch_counter_captured
+        && w.gpu_kernel_execution_delta > 0
+        && classification.rows_returned_to_cpu > 0
+        && w.speedup_median_vs_parallel.is_finite()
+        && w.speedup_median_vs_parallel >= threshold
+        && operation_cache_gate_verified(w, cache_mode)
+}
+
+fn native_decline_reason_verified(w: &WorkloadResult, reason: &str) -> bool {
+    plan_snippet_decline_reason_matches(w, "pg_accel planner rejection reason: ", reason)
+        || plan_snippet_decline_reason_matches(
+            w,
+            "pg_accel benchmark threshold decline reason: ",
+            reason,
+        )
+}
+
+fn plan_snippet_decline_reason_matches(w: &WorkloadResult, prefix: &str, reason: &str) -> bool {
+    w.plan_snippet.as_deref().is_some_and(|plan| {
+        plan.lines()
+            .any(|line| line.trim().strip_prefix(prefix) == Some(reason))
+    })
+}
+
+fn operation_cache_gate_required(name: &str) -> bool {
+    name.starts_with("h3_") || name.starts_with("raster_")
+}
+
+fn operation_cache_gate_verified(w: &WorkloadResult, cache_mode: &str) -> bool {
+    !operation_cache_gate_required(&w.name) || cache_mode.trim().eq_ignore_ascii_case("both")
 }
 
 fn no_dispatch_audit_action(w: &WorkloadResult) -> &'static str {
@@ -975,6 +1330,8 @@ impl BenchReport {
                 .and_then(|plans| extract_full_plan_block(plans, &w.name, w.rows));
             let classification = w.dispatch_classification_with_plan_artifact(full_plan.as_deref());
             w.apply_dispatch_classification(classification);
+            w.gpu_resident_boundary_reason =
+                classify_gpu_resident_boundary_reason(w, full_plan.as_deref());
         }
         report
     }
@@ -1020,6 +1377,8 @@ impl BenchReport {
         self.render_geomean_headline(&mut out);
         self.render_dispatch_classification(&mut out);
         self.render_dispatch_evidence(&mut out);
+        self.render_planner_threshold_matrix(&mut out);
+        self.render_sanity_checks(&mut out);
 
         // -------------------------------------------------------------------
         // Kernel coverage table (action_items W11 / Reviewer 1 Sin #17)
@@ -1034,6 +1393,15 @@ impl BenchReport {
         self.render_kernel_coverage(&mut out);
 
         // -------------------------------------------------------------------
+        // Benchmark ship gate (TODO Phase 7 Benchmark win plan)
+        // -------------------------------------------------------------------
+        //
+        // Renders when any selected pg_accel row crashes, misses GPU dispatch,
+        // or dispatches below PostgreSQL-parallel parity. The CLI turns this
+        // same predicate into a non-zero process exit for CI.
+        self.render_benchmark_ship_gate(&mut out);
+
+        // -------------------------------------------------------------------
         // H3 lane gate (TODO Phase 5 H3 winning lane protection)
         // -------------------------------------------------------------------
         //
@@ -1043,6 +1411,7 @@ impl BenchReport {
         // green this is a no-op; when it fails, the bench process is expected
         // to exit non-zero (see `main::cmd_run`).
         self.render_h3_lane_gate(&mut out);
+        self.render_cache_purge_audit(&mut out);
 
         // GUC settings
         if let Some(gucs) = &self.gucs
@@ -1389,11 +1758,11 @@ impl BenchReport {
             );
             let _ = writeln!(
                 out,
-                "| Workload | Scale | Error | Plan Snippet | Log Tails | Repro |"
+                "| Workload | Scale | Error | Plan Snippet | Correctness Diff | Log Tails | Repro |"
             );
             let _ = writeln!(
                 out,
-                "|----------|-------|-------|--------------|-----------|-------|"
+                "|----------|-------|-------|--------------|------------------|-----------|-------|"
             );
             for c in &self.crashes {
                 let short_err = if c.error.len() > 80 {
@@ -1402,6 +1771,7 @@ impl BenchReport {
                     c.error.clone()
                 };
                 let plan = c.plan_snippet_artifact.as_deref().unwrap_or("-");
+                let correctness = c.correctness_diff_artifact.as_deref().unwrap_or("-");
                 let logs = if c.log_tail_artifacts.is_empty() {
                     "-".to_owned()
                 } else {
@@ -1410,11 +1780,12 @@ impl BenchReport {
                 let repro = c.repro_command.as_deref().unwrap_or("-");
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {} | {} | {} | `{}` |",
+                    "| {} | {} | {} | {} | {} | {} | `{}` |",
                     c.workload,
                     format_rows(c.rows),
                     short_err,
                     plan,
+                    correctness,
                     logs,
                     repro,
                 );
@@ -1447,12 +1818,13 @@ impl BenchReport {
              gpu_kernel_execution_delta,pg_accel_rows_dispatched_delta,\
              pg_accel_batches_executed_delta,pg_accel_gpu_rows_processed_delta,\
              pg_accel_stock_exec_delta,\
-             accel_output_rows_consumed,rows,\
+             accel_output_rows_consumed,rows,correctness_diff_artifact,\
              baseline_dispatched,no_dispatch_timing_skew,no_dispatch_plan_mismatch,\
              accel_mean_ms,accel_stddev_ms,accel_median_ms,accel_p25_ms,accel_p75_ms,accel_p95_ms,\
              accel_cv_pct,accel_min_ms,accel_max_ms,\
              parallel_mean_ms,parallel_stddev_ms,parallel_median_ms,parallel_p25_ms,parallel_p75_ms,\
              parallel_p95_ms,parallel_cv_pct,parallel_min_ms,parallel_max_ms,\
+             sanity_check_count,sanity_check_failed,\
              speedup_vs_parallel,speedup_median_vs_parallel,p_value_vs_parallel,\
              cohens_d_vs_parallel,effect_size_meaningful,cv_ratio,significant\n",
         );
@@ -1467,14 +1839,16 @@ impl BenchReport {
             } else {
                 "no"
             };
+            let sanity_check_count = w.sanity_checks.len();
+            let sanity_check_failed = w.sanity_checks.iter().filter(|check| !check.passed).count();
             let _ = writeln!(
                 out,
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
-                 {},{},{},{},{},{},{},{},\
+                 {},{},{},{},{},{},{},{},{},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},\
                  {:.4},{:.4},{:.4},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},\
-                 {:.4},{:.4},{:.4},{:.4},\
+                 {:.4},{:.4},{:.4},{:.4},{},{},\
                  {:.4},{:.4},{:.6e},\
                  {:.4},{},{:.4},{}",
                 w.name,
@@ -1496,6 +1870,7 @@ impl BenchReport {
                 w.pg_accel_stock_exec_delta,
                 w.accel_output_rows_consumed,
                 w.rows,
+                w.correctness_diff_artifact.as_deref().unwrap_or(""),
                 baseline_dispatched,
                 timing_skew,
                 plan_mismatch,
@@ -1517,6 +1892,8 @@ impl BenchReport {
                 w.parallel_cv_pct,
                 w.parallel_min_ms,
                 w.parallel_max_ms,
+                sanity_check_count,
+                sanity_check_failed,
                 w.speedup_vs_parallel,
                 w.speedup_median_vs_parallel,
                 w.p_value_vs_parallel,
@@ -1766,6 +2143,164 @@ impl BenchReport {
         }
     }
 
+    fn render_planner_threshold_matrix(&self, out: &mut String) {
+        let report = self.with_normalized_dispatch();
+        let mut rows: Vec<(
+            &WorkloadResult,
+            crate::workloads::BenchmarkThresholdMatrixEntry,
+        )> = report
+            .workloads
+            .iter()
+            .filter_map(|w| {
+                crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows)
+                    .map(|entry| (w, entry))
+            })
+            .collect();
+        rows.sort_by(|(a, left), (b, right)| {
+            left.lane
+                .cmp(right.lane)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.rows.cmp(&b.rows))
+        });
+        if rows.is_empty() {
+            return;
+        }
+
+        out.push_str("## Planner Threshold Matrix\n\n");
+        out.push_str(
+            "Each row ties planner admission to a concrete release-lane matrix cell: \
+             row count, type, cardinality, selectivity, result count, index/pruning \
+             shape, retained prepared geometry, batch count, row width, output size, \
+             dispatch/output proof, correctness proof, cache/warm-run proof, and \
+             measured break-even basis. Expected GPU winners must dispatch, consume \
+             output, and meet their warm-run threshold; native-decline cells must not \
+             select pg_accel.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "| Lane | Workload | Scale | Type | Cardinality | Selectivity | Result Count | \
+             Index/Pruning | Prepared Geometry | Batches | Row Width | Output | \
+             Dispatch/Output Evidence | Correctness Evidence | Cache Gate | \
+             Threshold Basis | Expected | Observed | Speedup | Status |"
+        );
+        let _ = writeln!(
+            out,
+            "|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---:|---|"
+        );
+        for (workload, entry) in rows {
+            let status =
+                threshold_matrix_status(workload, entry.expectation, &self.methodology.cache_mode);
+            let expected = threshold_matrix_expectation_label(entry.expectation);
+            let observed = dispatch_evidence_label(workload);
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.2}x | {} |",
+                markdown_cell(entry.lane),
+                markdown_cell(entry.workload),
+                format_rows(entry.rows),
+                markdown_cell(entry.data_type),
+                markdown_cell(entry.cardinality),
+                markdown_cell(entry.selectivity),
+                markdown_cell(&entry.result_count),
+                markdown_cell(entry.index_pruning_shape),
+                markdown_cell(entry.prepared_geometry),
+                markdown_cell(&entry.batch_count),
+                markdown_cell(entry.row_width),
+                markdown_cell(entry.output_size),
+                markdown_cell(entry.dispatch_evidence),
+                markdown_cell(entry.correctness_evidence),
+                markdown_cell(entry.cache_gate),
+                markdown_cell(entry.threshold_basis),
+                markdown_cell(&expected),
+                observed,
+                workload.speedup_median_vs_parallel,
+                status,
+            );
+        }
+        out.push('\n');
+    }
+
+    fn render_cache_purge_audit(&self, out: &mut String) {
+        let mut rows: Vec<(&WorkloadResult, Vec<usize>, Vec<usize>)> = Vec::new();
+        for workload in &self.workloads {
+            let unavailable = iteration_indexes_with_cache_purge(
+                &workload.iterations,
+                CachePurgeState::Unavailable,
+            );
+            let failed =
+                iteration_indexes_with_cache_purge(&workload.iterations, CachePurgeState::Failed);
+            if !unavailable.is_empty() || !failed.is_empty() {
+                rows.push((workload, unavailable, failed));
+            }
+        }
+        if rows.is_empty() {
+            return;
+        }
+
+        out.push_str("## Cache Purge Audit\n\n");
+        out.push_str(
+            "Cold-cache iterations whose OS page-cache purge could not be proven are \
+             marked here and in `report.json` so skips/failures do not depend on \
+             terminal scrollback.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "| Workload | Scale | Unavailable purge iterations | Failed purge iterations |"
+        );
+        let _ = writeln!(out, "|---|---:|---|---|");
+        for (workload, unavailable, failed) in rows {
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} |",
+                markdown_cell(&workload.name),
+                format_rows(workload.rows),
+                markdown_cell(&format_iteration_indexes(&unavailable)),
+                markdown_cell(&format_iteration_indexes(&failed)),
+            );
+        }
+        out.push('\n');
+    }
+
+    fn render_sanity_checks(&self, out: &mut String) {
+        let rows: Vec<(&WorkloadResult, &SanityCheck)> = self
+            .workloads
+            .iter()
+            .flat_map(|workload| {
+                workload
+                    .sanity_checks
+                    .iter()
+                    .map(move |check| (workload, check))
+            })
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+
+        let failed = rows.iter().filter(|(_, check)| !check.passed).count();
+        out.push_str("## Benchmark Sanity Checks\n\n");
+        let _ = writeln!(
+            out,
+            "Captured after setup and before timing. Zero-row dimension filters are release-blocking \
+             because they can make no-dispatch SSBM rows look like GPU performance results. \
+             Failed checks: **{failed}**.\n"
+        );
+        let _ = writeln!(out, "| Workload | Scale | Check | Count | Status |");
+        let _ = writeln!(out, "|---|---|---|---:|---|");
+        for (workload, check) in rows {
+            let status = if check.passed { "pass" } else { "FAIL" };
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {} |",
+                workload.name,
+                format_rows(workload.rows),
+                markdown_cell(&check.label),
+                check.count,
+                status,
+            );
+        }
+        out.push('\n');
+    }
+
     fn render_dispatch_classification(&self, out: &mut String) {
         let report = self.with_normalized_dispatch();
         let total = report.workloads.len();
@@ -1829,6 +2364,11 @@ impl BenchReport {
                     && w.gpu_resident_pipeline == GpuResidentPipelineStatus::NotReported
             })
             .count();
+        let gpu_resident_boundary_recorded = report
+            .workloads
+            .iter()
+            .filter(|w| w.plan_selected && w.gpu_resident_boundary_reason.is_some())
+            .count();
 
         out.push_str("## Dispatch Classification\n\n");
         out.push_str(
@@ -1883,6 +2423,11 @@ impl BenchReport {
             "| GPU-dispatched Custom Scan without resident-pipeline evidence | \
              {gpu_resident_not_reported} |"
         );
+        let _ = writeln!(
+            out,
+            "| Custom Scan rows with recorded CPU boundary | \
+             {gpu_resident_boundary_recorded} |"
+        );
         out.push('\n');
     }
 
@@ -1901,20 +2446,27 @@ impl BenchReport {
         let _ = writeln!(
             out,
             "| Workload | Scale | Classification | Function kernel count | Rows returned to CPU | \
-             GPU-resident pipeline | Kernel delta | Rows dispatched | GPU rows processed | Stock fallback |"
+             Correctness diff | GPU-resident pipeline | Resident boundary | Kernel delta | Rows dispatched | GPU rows processed | Stock fallback |"
         );
-        let _ = writeln!(out, "|---|---|---|---:|---:|---|---:|---:|---:|---:|");
+        let _ = writeln!(
+            out,
+            "|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|"
+        );
         for w in &report.workloads {
             let classification = dispatch_evidence_label(w);
+            let resident_boundary = w.gpu_resident_boundary_reason.as_deref().unwrap_or("-");
+            let correctness_diff = w.correctness_diff_artifact.as_deref().unwrap_or("-");
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 markdown_cell(&w.name),
                 format_rows(w.rows),
                 classification,
                 w.function_kernel_count,
                 w.rows_returned_to_cpu,
+                markdown_cell(correctness_diff),
                 w.gpu_resident_pipeline.as_str(),
+                markdown_cell(resident_boundary),
                 w.gpu_kernel_execution_delta,
                 w.pg_accel_rows_dispatched_delta,
                 w.pg_accel_gpu_rows_processed_delta,
@@ -2056,8 +2608,9 @@ impl BenchReport {
     /// Evaluate the H3 lane gate against the report's workloads.
     ///
     /// The gate enforces three contracts derived from
-    /// [`crate::workloads::h3_lane_class`] (the source of truth for H3 lane
-    /// classification):
+    /// [`crate::workloads::benchmark_threshold_matrix_entry`] for the measured
+    /// row scale, falling back to [`crate::workloads::h3_lane_class`] only when
+    /// a matrix entry is unavailable:
     ///
     /// 1. **Winner below floor**: every H3 [`Winning`](crate::workloads::H3LaneClass::Winning)
     ///    row that DID dispatch a GPU kernel must have a median speedup of at
@@ -2083,8 +2636,15 @@ impl BenchReport {
             let Some(class) = crate::workloads::h3_lane_class(&w.name) else {
                 continue;
             };
-            match class {
-                crate::workloads::H3LaneClass::Winning { min_warm_speedup } => {
+            let matrix_expectation =
+                crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows)
+                    .map(|entry| entry.expectation);
+            let advisory_min_warm_speedup =
+                crate::workloads::h3_winner_min_warm_speedup(&w.name).unwrap_or(1.0);
+            match matrix_expectation {
+                Some(crate::workloads::BenchmarkLaneExpectation::GpuWinner {
+                    min_warm_speedup,
+                }) => {
                     if !w.gpu_kernel_dispatched {
                         failures.push(H3LaneGateFailure {
                             workload: w.name.clone(),
@@ -2107,26 +2667,268 @@ impl BenchReport {
                         });
                     }
                 }
-                crate::workloads::H3LaneClass::Parity => {
+                Some(crate::workloads::BenchmarkLaneExpectation::NativeDecline { .. }) => {
                     if w.gpu_kernel_dispatched {
-                        // Parity rows have no per-Winner advisory; sentinel
-                        // value `1.0` is rendered as `n/a` in the report but
-                        // kept f64 for table-column homogeneity.
-                        let advisory =
-                            crate::workloads::h3_winner_min_warm_speedup(&w.name).unwrap_or(1.0);
                         failures.push(H3LaneGateFailure {
                             workload: w.name.clone(),
                             rows: w.rows,
                             kind: H3LaneGateFailureKind::ParityUnexpectedlyDispatched,
                             speedup_median: w.speedup_median_vs_parallel,
                             gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
-                            advisory_min_warm_speedup: advisory,
+                            advisory_min_warm_speedup,
                         });
                     }
                 }
+                None => match class {
+                    crate::workloads::H3LaneClass::Winning { min_warm_speedup } => {
+                        if !w.gpu_kernel_dispatched {
+                            failures.push(H3LaneGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: H3LaneGateFailureKind::WinnerMissedDispatch,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
+                                advisory_min_warm_speedup: min_warm_speedup,
+                            });
+                        } else if !w.speedup_median_vs_parallel.is_finite()
+                            || w.speedup_median_vs_parallel < H3_LANE_GATE_MIN_WARM_SPEEDUP
+                        {
+                            failures.push(H3LaneGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: H3LaneGateFailureKind::WinnerBelowFloor,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
+                                advisory_min_warm_speedup: min_warm_speedup,
+                            });
+                        }
+                    }
+                    crate::workloads::H3LaneClass::Parity => {
+                        if w.gpu_kernel_dispatched {
+                            failures.push(H3LaneGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: H3LaneGateFailureKind::ParityUnexpectedlyDispatched,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: H3_LANE_GATE_MIN_WARM_SPEEDUP,
+                                advisory_min_warm_speedup,
+                            });
+                        }
+                    }
+                },
             }
         }
         failures
+    }
+
+    /// Evaluate the benchmark-wide ship gate.
+    ///
+    /// This is the generic Phase 7 ratchet: any selected pg_accel row that
+    /// crashes, fails to prove GPU dispatch, or dispatches below PostgreSQL
+    /// parallel parity is a release-blocking failure. Expected-lane selection
+    /// requirements that are workload-family-specific, such as H3 Winners,
+    /// remain in their dedicated lane gates.
+    #[must_use]
+    pub fn evaluate_benchmark_ship_gate(&self) -> Vec<BenchmarkShipGateFailure> {
+        let report = self.with_normalized_dispatch();
+        let mut failures = Vec::new();
+
+        for c in &report.crashes {
+            failures.push(BenchmarkShipGateFailure {
+                workload: c.workload.clone(),
+                rows: c.rows,
+                kind: BenchmarkShipGateFailureKind::Crash,
+                speedup_median: f64::NAN,
+                gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                detail: c.error.clone(),
+            });
+        }
+
+        for w in &report.workloads {
+            if w.custom_scan_selected_not_dispatched {
+                failures.push(BenchmarkShipGateFailure {
+                    workload: w.name.clone(),
+                    rows: w.rows,
+                    kind: BenchmarkShipGateFailureKind::SelectedPlanMissedDispatch,
+                    speedup_median: w.speedup_median_vs_parallel,
+                    gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                    detail: "pg_accel Custom Scan selected without credited GPU kernel dispatch"
+                        .to_owned(),
+                });
+                continue;
+            }
+
+            if let Some(entry) = crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows)
+            {
+                match entry.expectation {
+                    crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
+                        let classification = w.dispatch_classification();
+                        if !w.gpu_kernel_dispatched {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::ExpectedWinnerMissedSelection,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                                detail: format!(
+                                    "expected GPU winner missed dispatch/selection in lane `{}` \
+                                     ({})",
+                                    entry.lane, entry.threshold_basis
+                                ),
+                            });
+                            continue;
+                        }
+                        if !w.dispatch_counter_captured
+                            || w.gpu_kernel_execution_delta == 0
+                            || classification.rows_returned_to_cpu == 0
+                        {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP),
+                                detail: format!(
+                                    "expected GPU winner in lane `{}` lacks dispatch-counter or \
+                                     output-consumption evidence ({})",
+                                    entry.lane, entry.dispatch_evidence
+                                ),
+                            });
+                            continue;
+                        }
+                        let winner_threshold =
+                            min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
+                        if !w.speedup_median_vs_parallel.is_finite()
+                            || w.speedup_median_vs_parallel < winner_threshold
+                        {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: winner_threshold,
+                                detail: format!(
+                                    "expected GPU winner in lane `{}` below warm-run threshold \
+                                     ({})",
+                                    entry.lane, entry.cache_gate
+                                ),
+                            });
+                            continue;
+                        }
+                        if !operation_cache_gate_verified(w, &report.methodology.cache_mode) {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: winner_threshold,
+                                detail: format!(
+                                    "expected GPU winner in lane `{}` requires cache-mode both \
+                                     evidence for bounded cold-start cost ({})",
+                                    entry.lane, entry.cache_gate
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                    crate::workloads::BenchmarkLaneExpectation::NativeDecline { reason } => {
+                        if w.gpu_kernel_dispatched {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                                detail: format!(
+                                    "native-decline lane `{}` unexpectedly dispatched GPU work; \
+                                     expected decline reason `{reason}`",
+                                    entry.lane
+                                ),
+                            });
+                            continue;
+                        }
+                        if !native_decline_reason_verified(w, reason) {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::NativeDeclineReasonMissing,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                                detail: format!(
+                                    "native-decline lane `{}` did not prove expected planner \
+                                     rejection reason `{reason}`",
+                                    entry.lane
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if w.gpu_kernel_dispatched
+                && (!w.speedup_median_vs_parallel.is_finite()
+                    || w.speedup_median_vs_parallel < BENCHMARK_SHIP_GATE_MIN_SPEEDUP)
+            {
+                failures.push(BenchmarkShipGateFailure {
+                    workload: w.name.clone(),
+                    rows: w.rows,
+                    kind: BenchmarkShipGateFailureKind::DispatchedBelowParity,
+                    speedup_median: w.speedup_median_vs_parallel,
+                    gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                    detail: "credited GPU dispatch below PostgreSQL parallel parity".to_owned(),
+                });
+            }
+        }
+
+        failures
+    }
+
+    /// Append the `### Benchmark Ship Gate Failures` section to `out` when the
+    /// generic release gate produced any failures.
+    fn render_benchmark_ship_gate(&self, out: &mut String) {
+        let failures = self.evaluate_benchmark_ship_gate();
+        if failures.is_empty() {
+            return;
+        }
+        out.push_str("### Benchmark Ship Gate Failures\n\n");
+        out.push_str(
+            "Hard release gate for selected pg_accel benchmark rows. Any crash, \
+             selected Custom Scan without credited GPU dispatch, expected GPU \
+             winner that stays native, expected winner missing dispatch/output \
+             evidence, threshold evidence, or required cache-mode evidence, \
+             native-decline lane that dispatches, or credited GPU dispatch below \
+             PostgreSQL-parallel parity exits non-zero in the CLI.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "Gate floor: **{BENCHMARK_SHIP_GATE_MIN_SPEEDUP:.2}x** median speedup."
+        );
+        out.push('\n');
+        let _ = writeln!(
+            out,
+            "| Workload | Scale | Failure | Observed Speedup | Gate Floor | Detail |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|");
+        for f in &failures {
+            let observed = if f.speedup_median.is_finite() {
+                format!("{:.2}x", f.speedup_median)
+            } else {
+                "n/a".to_owned()
+            };
+            let detail = f.detail.replace('|', "\\|");
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} | {:.2}x | {} |",
+                f.workload,
+                format_rows(f.rows),
+                f.kind.label(),
+                observed,
+                f.gate_floor,
+                detail,
+            );
+        }
+        out.push('\n');
     }
 
     /// Append the `### H3 Lane Gate Failures` section to `out` when the gate
@@ -2138,11 +2940,12 @@ impl BenchReport {
         }
         out.push_str("### H3 Lane Gate Failures\n\n");
         out.push_str(
-            "Hard gate against the H3 lane classifier in \
-             `pg_accel_bench/src/workloads/mod.rs::h3_lane_class`. Every \
-             Winning lane must dispatch a GPU kernel and beat PG-parallel \
-             parity; every Parity lane must stay native. A failure here \
-             means the bench process exits non-zero — CI will fail.\n\n",
+            "Hard gate against the H3 row-scale threshold matrix, with \
+             `pg_accel_bench/src/workloads/mod.rs::h3_lane_class` as the \
+             fallback classifier. Expected Winning rows must dispatch a GPU \
+             kernel and beat PG-parallel parity; native-decline rows must stay \
+             native. A failure here means the bench process exits non-zero — \
+             CI will fail.\n\n",
         );
         let _ = writeln!(
             out,
@@ -2184,6 +2987,70 @@ impl BenchReport {
 /// each failing row but do NOT participate in the pass/fail decision —
 /// the gate boundary stays at the Phase 0 ship bar.
 pub const H3_LANE_GATE_MIN_WARM_SPEEDUP: f64 = 1.0;
+
+/// Generic release gate floor for selected GPU benchmark rows.
+///
+/// Any credited GPU dispatch below PostgreSQL parallel parity fails the
+/// benchmark process. Workloads that intentionally stay native are excluded
+/// because they do not dispatch a GPU kernel and are handled by planner
+/// decline evidence instead.
+pub const BENCHMARK_SHIP_GATE_MIN_SPEEDUP: f64 = 1.0;
+
+/// Kind of failure observed by [`BenchReport::evaluate_benchmark_ship_gate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkShipGateFailureKind {
+    /// The benchmark harness recorded a crash for this workload/scale.
+    Crash,
+    /// A pg_accel Custom Scan was selected but no GPU kernel dispatch was
+    /// credited by plan/counter evidence.
+    SelectedPlanMissedDispatch,
+    /// A GPU-dispatched row fell below the PostgreSQL-parallel parity floor.
+    DispatchedBelowParity,
+    /// A benchmark matrix cell declared as a GPU winner stayed native or did
+    /// not prove credited GPU dispatch.
+    ExpectedWinnerMissedSelection,
+    /// A benchmark matrix cell declared as a GPU winner dispatched but did not
+    /// show the required dispatch counter and consumed-output evidence.
+    ExpectedWinnerMissingEvidence,
+    /// A benchmark matrix cell declared as a GPU winner dispatched but missed
+    /// its operation-specific warm-run threshold.
+    ExpectedWinnerBelowThreshold,
+    /// A benchmark matrix cell declared as an H3/raster GPU winner did not use
+    /// a cache mode that proves bounded cold-start cost.
+    ExpectedWinnerMissingCacheEvidence,
+    /// A benchmark matrix cell declared as native-decline dispatched GPU work.
+    NativeDeclineUnexpectedDispatch,
+    /// A native-decline matrix cell did not prove its expected planner reason.
+    NativeDeclineReasonMissing,
+}
+
+impl BenchmarkShipGateFailureKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Crash => "crash",
+            Self::SelectedPlanMissedDispatch => "selected_plan_missed_dispatch",
+            Self::DispatchedBelowParity => "dispatched_below_parity",
+            Self::ExpectedWinnerMissedSelection => "expected_winner_missed_selection",
+            Self::ExpectedWinnerMissingEvidence => "expected_winner_missing_evidence",
+            Self::ExpectedWinnerBelowThreshold => "expected_winner_below_threshold",
+            Self::ExpectedWinnerMissingCacheEvidence => "expected_winner_missing_cache_evidence",
+            Self::NativeDeclineUnexpectedDispatch => "native_decline_unexpected_dispatch",
+            Self::NativeDeclineReasonMissing => "native_decline_reason_missing",
+        }
+    }
+}
+
+/// One benchmark ship-gate failure record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkShipGateFailure {
+    pub workload: String,
+    pub rows: usize,
+    pub kind: BenchmarkShipGateFailureKind,
+    pub speedup_median: f64,
+    pub gate_floor: f64,
+    pub detail: String,
+}
 
 /// Kind of failure observed by [`BenchReport::evaluate_h3_lane_gate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2428,6 +3295,7 @@ mod tests {
                 IterationResult {
                     accel_ms: accel_ms + jitter,
                     parallel_ms: baseline_ms + jitter,
+                    cache_purge: CachePurgeState::NotRequested,
                 }
             })
             .collect();
@@ -2474,6 +3342,11 @@ mod tests {
         }
     }
 
+    fn with_cache_mode(mut report: BenchReport, mode: &str) -> BenchReport {
+        report.methodology.cache_mode = mode.to_owned();
+        report
+    }
+
     fn mark_no_dispatch(
         mut result: WorkloadResult,
         accel_plan: &str,
@@ -2501,6 +3374,7 @@ mod tests {
         let iters = vec![IterationResult {
             accel_ms: 5.0,
             parallel_ms: 10.0,
+            cache_purge: CachePurgeState::NotRequested,
         }];
         let result = WorkloadResult::from_iterations(
             "one".to_owned(),
@@ -2516,10 +3390,58 @@ mod tests {
     }
 
     #[test]
+    fn test_report_renders_cache_purge_audit_rows() {
+        let mut workload = mock_workload_result("gpu_reduce_sum", 10_000, 10.0, 20.0);
+        workload.iterations[0].cache_purge = CachePurgeState::Unavailable;
+        workload.iterations[3].cache_purge = CachePurgeState::Failed;
+        let report = with_cache_mode(mock_report(vec![workload]), "cold");
+
+        let markdown = report.to_markdown();
+
+        assert!(markdown.contains("## Cache Purge Audit"));
+        assert!(markdown.contains("| gpu_reduce_sum | 10K | 1 | 4 |"));
+    }
+
+    #[test]
     fn test_markdown_contains_header() {
         let report = mock_report(vec![mock_workload_result("wl1", 1000, 5.0, 15.0)]);
         let md = report.to_markdown();
         assert!(md.contains("# pg_accel Benchmark Report"));
+    }
+
+    #[test]
+    fn test_markdown_renders_sanity_checks() {
+        let mut result = mock_workload_result("ssbm_q2_3", 100_000, 10.0, 20.0);
+        result.category = "ssbm".to_owned();
+        result.sanity_checks = vec![SanityCheck {
+            label: "ssbm_part.p_brand1 = MFGR#2239 (SSBM Q2.3)".to_owned(),
+            count: 25,
+            passed: true,
+        }];
+        let report = mock_report(vec![result]);
+        let md = report.to_markdown();
+        assert!(md.contains("## Benchmark Sanity Checks"));
+        assert!(md.contains("ssbm_part.p_brand1 = MFGR#2239"));
+        assert!(md.contains("| ssbm_q2_3 | 100K |"));
+    }
+
+    #[test]
+    fn test_markdown_renders_planner_threshold_matrix() {
+        let workload = mark_no_dispatch(
+            mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0),
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi\n\
+             pg_accel benchmark threshold decline reason: sort_multikey_no_gpu_kernel\n\
+             pg_accel benchmark threshold decline evidence: workload=gpu_sort_multikey rows=100000",
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
+        );
+        let report = mock_report(vec![workload]);
+        let md = report.to_markdown();
+
+        assert!(md.contains("## Planner Threshold Matrix"));
+        assert!(md.contains("Prepared Geometry"));
+        assert!(md.contains("Index/Pruning"));
+        assert!(md.contains("sort_multikey_no_gpu_kernel"));
+        assert!(md.contains("| standalone_heap_sort | gpu_sort_multikey | 100K |"));
     }
 
     #[test]
@@ -2656,6 +3578,288 @@ mod tests {
         assert!(md.contains("| Function/SRF kernel dispatched | 0 |"));
     }
 
+    #[test]
+    fn test_benchmark_ship_gate_flags_crashes() {
+        let mut report = mock_report(Vec::new());
+        report.crashes.push(CrashedScale {
+            workload: "gpu_hashjoin_large_build".to_owned(),
+            rows: 100_000,
+            error: "backend disconnected".to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: Vec::new(),
+        });
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].kind, BenchmarkShipGateFailureKind::Crash);
+    }
+
+    #[test]
+    fn test_crashed_scales_render_correctness_diff_artifact() {
+        let mut report = mock_report(Vec::new());
+        report.crashes.push(CrashedScale {
+            workload: "bad_correctness".to_owned(),
+            rows: 100_000,
+            error: "correctness diff failed".to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: Some(
+                "correctness_diffs/bad-correctness-100000.json".to_owned(),
+            ),
+            log_tail_artifacts: Vec::new(),
+        });
+
+        let md = report.to_markdown();
+        assert!(md.contains("Correctness Diff"));
+        assert!(md.contains("correctness_diffs/bad-correctness-100000.json"));
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_flags_selected_plan_without_dispatch() {
+        let mut workload = mock_workload_result("gpu_reduce_sum", 100_000, 10.0, 20.0);
+        workload.plan_selected = true;
+        workload.gpu_kernel_dispatched = false;
+        workload.dispatch_counter_captured = true;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuReduce\n  GPU Dispatched: false".to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::SelectedPlanMissedDispatch
+        );
+        assert!(
+            report
+                .to_markdown()
+                .contains("### Benchmark Ship Gate Failures")
+        );
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_flags_dispatched_rows_below_parity() {
+        let mut workload = mock_workload_result("generic_gpu_dispatch", 100_000, 20.0, 10.0);
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuReduce\n  GPU Dispatched: true".to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::DispatchedBelowParity
+        );
+        assert!(failures[0].speedup_median < BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_flags_expected_winner_missing_evidence() {
+        let mut workload = mock_workload_result("reduce_sum_i64", 100_000, 10.0, 20.0);
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 0;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuReduce\n  GPU Dispatched: true".to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence
+        );
+        assert!(failures[0].detail.contains("dispatch-counter"));
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_flags_expected_winner_below_threshold() {
+        let mut workload = mock_workload_result("h3_bulk", 1_000_000, 10.0, 12.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.plan_selected = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
+             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+                .to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold
+        );
+        assert!((failures[0].gate_floor - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_requires_h3_raster_cache_mode_both_for_winners() {
+        let mut workload = mock_workload_result("h3_bulk", 1_000_000, 10.0, 50.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true".to_owned(),
+        );
+
+        let warm_report = mock_report(vec![workload.clone()]);
+        let failures = warm_report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence
+        );
+        assert!(failures[0].detail.contains("cache-mode both"));
+
+        let cache_both_report = with_cache_mode(mock_report(vec![workload]), "both");
+        assert!(cache_both_report.evaluate_benchmark_ship_gate().is_empty());
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_flags_expected_winner_missed_selection() {
+        let workload = mark_no_dispatch(
+            mock_workload_result("reduce_sum_i64", 100_000, 10.0, 20.0),
+            "Aggregate\n  -> Seq Scan on bench_reduce_var",
+            "Aggregate\n  -> Seq Scan on bench_reduce_var",
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerMissedSelection
+        );
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_flags_native_decline_unexpected_dispatch() {
+        let mut workload = mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 20.0);
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelSort)\n  Strategy: GpuSort\n  GPU Dispatched: true".to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch
+        );
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_allows_planner_declined_native_rows() {
+        let workload = mark_no_dispatch(
+            mock_workload_result("mergejoin_decline", 100_000, 10.0, 10.0),
+            "Aggregate\n  ->  Merge Join\n\
+             pg_accel benchmark threshold decline reason: mergejoin_no_gpu_kernel\n\
+             pg_accel benchmark threshold decline evidence: workload=mergejoin_decline rows=100000",
+            "Aggregate\n  ->  Merge Join",
+        );
+        let report = mock_report(vec![workload]);
+
+        assert!(report.evaluate_benchmark_ship_gate().is_empty());
+        assert!(
+            !report
+                .to_markdown()
+                .contains("### Benchmark Ship Gate Failures")
+        );
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_requires_spatial_decline_reason() {
+        let missing_reason = mark_no_dispatch(
+            mock_workload_result("spatial_sel_10pct", 1_000_000, 10.0, 10.0),
+            "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan",
+            "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan",
+        );
+        let report = mock_report(vec![missing_reason]);
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
+        );
+
+        let with_reason = mark_no_dispatch(
+            mock_workload_result("spatial_sel_10pct", 1_000_000, 10.0, 10.0),
+            "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan\n\
+             pg_accel planner rejection reason: spatial_no_registered_gpu_predicate",
+            "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan",
+        );
+        let report = mock_report(vec![with_reason]);
+        assert!(report.evaluate_benchmark_ship_gate().is_empty());
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_requires_threshold_decline_reason_evidence() {
+        let missing_generic_reason = mark_no_dispatch(
+            mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0),
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
+        );
+        let report = mock_report(vec![missing_generic_reason]);
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
+        );
+
+        let with_generic_reason = mark_no_dispatch(
+            mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0),
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi\n\
+             pg_accel benchmark threshold decline reason: sort_multikey_no_gpu_kernel\n\
+             pg_accel benchmark threshold decline evidence: workload=gpu_sort_multikey rows=100000",
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
+        );
+        let report = mock_report(vec![with_generic_reason]);
+        assert!(report.evaluate_benchmark_ship_gate().is_empty());
+
+        let missing_reason = mark_no_dispatch(
+            mock_workload_result("h3_bulk", 10_000, 10.0, 10.0),
+            "HashAggregate\n  -> Seq Scan on bench_h3_points",
+            "HashAggregate\n  -> Seq Scan on bench_h3_points",
+        );
+        let report = mock_report(vec![missing_reason]);
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
+        );
+
+        let with_reason = mark_no_dispatch(
+            mock_workload_result("h3_bulk", 10_000, 10.0, 10.0),
+            "HashAggregate\n  -> Seq Scan on bench_h3_points\n\
+             pg_accel benchmark threshold decline reason: h3_rows_below_grouped_agg_min\n\
+             pg_accel benchmark threshold decline evidence: workload=h3_bulk rows=10000",
+            "HashAggregate\n  -> Seq Scan on bench_h3_points",
+        );
+        let report = mock_report(vec![with_reason]);
+        assert!(report.evaluate_benchmark_ship_gate().is_empty());
+    }
+
     // -----------------------------------------------------------------------
     // Phase 5 H3 winning-lane protection — dispatch classification gates
     //
@@ -2686,6 +3890,19 @@ mod tests {
                 .to_owned(),
         );
         wl
+    }
+
+    #[test]
+    fn test_threshold_matrix_renders_evidence_columns() {
+        let workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
+        let report = mock_report(vec![workload]);
+        let md = report.to_markdown();
+
+        assert!(md.contains("## Planner Threshold Matrix"));
+        assert!(md.contains("Dispatch/Output Evidence"));
+        assert!(md.contains("Correctness Evidence"));
+        assert!(md.contains("Cache Gate"));
+        assert!(md.contains("H3 Custom Scan or function/SRF"));
     }
 
     /// `h3_bulk` is the canonical H3 winning lane (~6s accel vs 90s PG
@@ -2974,6 +4191,58 @@ mod tests {
         assert!(
             md.contains("parity_unexpectedly_dispatched"),
             "failure section must label parity breach kind; md:\n{md}"
+        );
+    }
+
+    #[test]
+    fn test_h3_below_grouped_floor_passes_as_native_decline() {
+        let mut workload = mock_workload_result("h3_bulk", 10_000, 10.0, 30.0);
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.plan_selected = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 0;
+        workload.accel_output_rows_consumed = 9_998;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some(
+            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n\
+             pg_accel benchmark threshold decline reason: h3_rows_below_grouped_agg_min\n\
+             pg_accel benchmark threshold decline evidence: workload=h3_bulk rows=10000"
+                .to_owned(),
+        );
+
+        let report = mock_report(vec![workload]);
+        assert!(
+            report.evaluate_benchmark_ship_gate().is_empty(),
+            "below-floor h3_bulk row must satisfy the generic native-decline ship gate"
+        );
+        let failures = report.evaluate_h3_lane_gate();
+        assert!(
+            failures.is_empty(),
+            "below-floor h3_bulk row must follow the threshold matrix native-decline expectation; got: {failures:?}"
+        );
+
+        let md = report.to_markdown();
+        assert!(
+            !md.contains("### H3 Lane Gate Failures"),
+            "below-floor native-decline row must not render an H3 gate failure; md:\n{md}"
+        );
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_allows_small_raster_native_decline() {
+        let workload = mark_no_dispatch(
+            mock_workload_result("raster_reclass", 100, 10.0, 10.0),
+            "Aggregate\n  ->  Seq Scan on bench_raster_tiles\n\
+             pg_accel benchmark threshold decline reason: raster_rows_below_standalone_min\n\
+             pg_accel benchmark threshold decline evidence: workload=raster_reclass rows=100",
+            "Aggregate\n  ->  Seq Scan on bench_raster_tiles",
+        );
+        let report = mock_report(vec![workload]);
+
+        assert!(
+            report.evaluate_benchmark_ship_gate().is_empty(),
+            "small raster native-decline row must satisfy the operation-specific threshold matrix"
         );
     }
 
@@ -3289,7 +4558,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_classification_reports_gpu_resident_preagg_evidence() {
+    fn test_dispatch_classification_marks_selected_strategy_not_resident_without_true_audit() {
         let mut workload = mock_workload_result("ssbm_q1", 1_000_000, 10.0, 50.0);
         workload.plan_selected = true;
         workload.dispatch_counter_captured = true;
@@ -3308,8 +4577,85 @@ mod tests {
         assert!(classification.gpu_kernel_dispatched);
         assert_eq!(
             classification.gpu_resident_pipeline,
+            GpuResidentPipelineStatus::NotResident
+        );
+    }
+
+    #[test]
+    fn test_dispatch_classification_honors_explicit_gpu_resident_true() {
+        let mut workload = mock_workload_result("ssbm_q1", 1_000_000, 10.0, 50.0);
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 2;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelPreAgg)\n  Strategy: GpuPreAgg\n  GPU Resident Pipeline: true\n"
+                .to_owned(),
+        );
+
+        let classification = workload.dispatch_classification();
+
+        assert_eq!(
+            classification.gpu_resident_pipeline,
             GpuResidentPipelineStatus::Reported
         );
+    }
+
+    #[test]
+    fn test_report_preserves_gpu_resident_boundary_reason() {
+        let mut workload = mock_workload_result("gpu_reduce_sum", 100_000, 10.0, 50.0);
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 2;
+        workload.accel_output_rows_consumed = 1;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Resident Pipeline: false\n  \
+             GPU Resident Boundary: GpuAgg drains child tuples and stages host value/key/null Vec buffers before GPU reduce or grouped aggregation\n"
+                .to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let json = report.to_json().expect("json");
+        let markdown = report.to_markdown();
+
+        assert!(json.contains("\"gpu_resident_pipeline\": \"not_resident\""));
+        assert!(json.contains("\"gpu_resident_boundary_reason\""));
+        assert!(markdown.contains("GpuAgg drains child tuples"));
+        assert!(markdown.contains("| Custom Scan rows with recorded CPU boundary | 1 |"));
+    }
+
+    #[test]
+    fn test_report_preserves_boundary_reason_for_selected_not_dispatched_rows() {
+        let mut workload = mock_workload_result("plan_only", 100_000, 10.0, 10.0);
+        workload.plan_selected = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 1;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: false\n  \
+             GPU Resident Pipeline: false\n  \
+             GPU Resident Boundary: GpuAgg drains child tuples and stages host value/key/null Vec buffers before GPU reduce or grouped aggregation\n"
+                .to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let json = report.to_json().expect("json");
+        let markdown = report.to_markdown();
+
+        assert!(json.contains("\"gpu_resident_pipeline\": \"selected_not_dispatched\""));
+        assert!(json.contains("\"gpu_resident_boundary_reason\""));
+        assert!(markdown.contains("custom_scan_selected_not_dispatched"));
+        assert!(markdown.contains("GpuAgg drains child tuples"));
+    }
+
+    #[test]
+    fn test_gpu_resident_false_does_not_count_as_positive_evidence() {
+        let plan =
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Resident Pipeline: false\n";
+
+        assert!(!plan_contains_gpu_resident_pipeline_evidence(plan));
+        assert_eq!(plan_gpu_resident_pipeline_value(plan), Some(false));
+        assert!(infer_gpu_resident_boundary_reason_from_plan(plan).is_some());
     }
 
     #[test]
@@ -3336,6 +4682,7 @@ mod tests {
         assert!(json_str.contains("\"function_kernel_count\""));
         assert!(json_str.contains("\"rows_returned_to_cpu\""));
         assert!(json_str.contains("\"gpu_resident_pipeline\""));
+        assert!(json_str.contains("\"correctness_diff_artifact\""));
         // Must NOT contain single-threaded fields
         assert!(!json_str.contains("\"single_mean_ms\""));
     }
@@ -3354,6 +4701,9 @@ mod tests {
         assert!(lines[0].contains("function_kernel_count"));
         assert!(lines[0].contains("rows_returned_to_cpu"));
         assert!(lines[0].contains("gpu_resident_pipeline"));
+        assert!(lines[0].contains("correctness_diff_artifact"));
+        assert!(lines[0].contains("sanity_check_count"));
+        assert!(lines[0].contains("sanity_check_failed"));
         assert!(lines[0].contains("accel_mean_ms"));
     }
 
@@ -3378,6 +4728,22 @@ mod tests {
         let header_cols = lines[0].split(',').count();
         let data_cols = lines[1].split(',').count();
         assert_eq!(header_cols, data_cols);
+    }
+
+    #[test]
+    fn test_correctness_diff_artifact_renders_in_reports() {
+        let mut workload = mock_workload_result("diff_artifact", 100_000, 10.0, 20.0);
+        workload.correctness_diff_artifact =
+            Some("correctness_diffs/diff-artifact-100000.json".to_owned());
+        let report = mock_report(vec![workload]);
+
+        let json = report.to_json().expect("json");
+        let csv = report.to_csv();
+        let markdown = report.to_markdown();
+
+        assert!(json.contains("correctness_diffs/diff-artifact-100000.json"));
+        assert!(csv.contains("correctness_diffs/diff-artifact-100000.json"));
+        assert!(markdown.contains("correctness_diffs/diff-artifact-100000.json"));
     }
 
     #[test]

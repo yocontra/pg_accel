@@ -42,8 +42,9 @@ static pid_t g_init_pid = 0;
 static pgaccel_device_info g_device_info = {};
 static pgaccel_platform_caps g_caps = {};
 
-// Accessed by other translation units (sort.cpp, mem_pool.cpp) via extern.
+// Accessed by other translation units (sort.cpp, window.cpp, mem_pool.cpp) via extern.
 sycl::queue* g_queue = nullptr;
+sycl::queue* g_ooo_queue = nullptr;
 
 // ---------------------------------------------------------------------------
 // Backend name detection
@@ -107,7 +108,7 @@ static int score_device(const sycl::device& dev) {
 static void populate_caps(const sycl::device& dev, const std::string& backend) {
   g_caps.has_native_fp64 = dev.has(sycl::aspect::fp64);
   g_caps.has_atomic64 = dev.has(sycl::aspect::atomic64);
-  g_caps.has_ooo_queue = (backend != "metal");
+  g_caps.has_ooo_queue = false;
   g_caps.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
   g_caps.compute_units = dev.get_info<sycl::info::device::max_compute_units>();
   std::strncpy(g_caps.backend_name, backend.c_str(), sizeof(g_caps.backend_name) - 1);
@@ -150,6 +151,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
     // fork internally at its dispatch chokepoints and recovers (Metal /
     // ROCm) or raises a clean error (CUDA / Level Zero) on the next use.
     g_queue = nullptr;
+    g_ooo_queue = nullptr;
     fprintf(stderr,
             "pgaccel: fork detected (parent=%d, child=%d)"
             " — attempting fresh GPU init\n",
@@ -229,6 +231,10 @@ extern "C" pgaccel_status pgaccel_init(void) {
 
         g_queue = new sycl::queue(best, async_handler,
                                   sycl::property_list{sycl::property::queue::in_order{}});
+        g_ooo_queue = new sycl::queue(best, async_handler,
+                                      sycl::property_list{
+                                          sycl::property::queue::enable_profiling{}});
+        g_caps.has_ooo_queue = !g_ooo_queue->is_in_order();
 
         // Silent success: backend init fires per-forked-backend, so
         // logging here produces O(queries) log lines. See Justfile
@@ -263,18 +269,30 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
     return PGACCEL_OK;
   }
 
-  // SAFETY: g_queue is only modified during init/shutdown which are
+  // SAFETY: queues are only modified during init/shutdown which are
   // guaranteed to be called from the PG backend main thread (single writer).
-  if (g_queue != nullptr) {
+  if (g_queue != nullptr || g_ooo_queue != nullptr) {
     try {
-      g_queue->wait();
+      if (g_ooo_queue != nullptr)
+        g_ooo_queue->wait();
+      if (g_queue != nullptr)
+        g_queue->wait();
       pgaccel_pool_reset();
-      g_queue->wait();
+      if (g_ooo_queue != nullptr)
+        g_ooo_queue->wait();
+      if (g_queue != nullptr)
+        g_queue->wait();
     } catch (...) {
       // Best-effort flush; nothing useful to do on failure.
     }
-    delete g_queue;
-    g_queue = nullptr;
+    if (g_ooo_queue != nullptr) {
+      delete g_ooo_queue;
+      g_ooo_queue = nullptr;
+    }
+    if (g_queue != nullptr) {
+      delete g_queue;
+      g_queue = nullptr;
+    }
   }
 
   std::memset(&g_device_info, 0, sizeof(g_device_info));

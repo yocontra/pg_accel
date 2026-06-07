@@ -2,6 +2,80 @@
 
 ## [Unreleased]
 
+### Changed
+- Public setup, release packaging, and attribution docs now pin AdaptiveCpp to
+  `yocontra/AdaptiveCpp` `fork-safe-metal`
+  `0ebc10e5a596c4760b29bab1bdae45a4809f2ace`, with the fork-pinned install
+  path called out explicitly until the Metal/fork/soft-fp64 changes are
+  upstreamed.
+- Setup now applies a local AdaptiveCpp patch that preserves semicolon
+  separated `DEFAULT_TARGETS` values in generated JSON config, preventing
+  multi-target defaults such as `omp;metal` from collapsing to `ompmetal`.
+- NUMERIC aggregate families now report the stable planner decline reason
+  `numeric_agg_no_gpu_kernel`, and the benchmark suite includes a bounded
+  `numeric_agg_decline` workload for release evidence until a multi-limb GPU
+  accumulator/comparator lane exists.
+- MergeJoin-shaped ordered equi-join opportunities remain PostgreSQL-native
+  with planner reason `mergejoin_no_gpu_kernel`, backed by a bounded
+  `mergejoin_decline` benchmark workload.
+- Multi-key ORDER BY and IncrementalSort-shaped opportunities remain
+  PostgreSQL-native with explicit planner reasons
+  `sort_multikey_no_gpu_kernel` and `sort_incremental_opportunity`; the
+  existing `gpu_sort_multikey` workload documents that release-decline lane.
+- BitmapHeapScan-prefiltered scalar expression opportunities now report
+  `bitmap_heap_gpuexpr_no_gpu_pipeline`, with a bounded
+  `bitmap_heap_gpuexpr_decline` workload proving the native-decline lane until
+  GpuExpr can fuse with GPU-resident scan batches.
+- Parallel `GpuHashJoin` now declines large inner sides with
+  `hashjoin_parallel_inner_rebuild_too_large` instead of injecting per-worker
+  private rebuilds, and the benchmark suite includes
+  `parallel_hashjoin_rebuild_decline` until shared GPU-resident inner state
+  exists.
+- Benchmark reports now include a planner threshold matrix covering row count,
+  type, cardinality, selectivity, result count, index/pruning shape, retained
+  prepared geometry, batch count, row width, output size, dispatch/output
+  evidence, correctness evidence, cache gate, and measured break-even basis for
+  release lanes. H3 and raster cells now use operation-specific lanes for
+  lat/lng-to-cell, SRF expansion, map algebra, terrain slope, reclass, and deep
+  algebra, with captured dispatch counters, consumed output rows,
+  correctness-diff artifacts, and required `--cache-mode both` cold-start
+  gates replacing generic function-dispatch claims; H3 grouped winners below
+  the grouped-aggregate admission floor remain native-decline rows with
+  benchmark-threshold decline reason evidence in the captured plan snippet.
+  Spatial cells distinguish simple
+  polygons, unsafe
+  100K rows, high-output predicates, and the current PostGIS
+  no-registered-GPU-predicate gate, so the report treats those rows as
+  intentional PostgreSQL-native plans instead of missed GPU winners. The
+  generic ship gate fails CI for crashes, selected pg_accel plans without
+  credited GPU dispatch, expected-winner cells that stay native, expected
+  winners missing counter/output evidence or their warm-run threshold,
+  native-decline cells that dispatch or lack exact visible decline-reason
+  evidence, or GPU-dispatched rows below PostgreSQL-parallel parity; the H3
+  lane gate remains the family-specific H3 advisory ratchet.
+- CI now has a PG17 `cargo-llvm-cov` coverage gate that writes LCOV, JSON, and
+  summary artifacts under `artifacts/coverage-pg17` and fails when line
+  coverage drops below `COVERAGE_MIN_LINES` (default 90).
+- `just metal-stress` now runs the M-series Metal stress gate: standalone
+  spatial/H3/raster/join/sort/window kernel tests, archive fork stress,
+  mixed benchmark cells, a statement-timeout cancellation probe, and
+  panic/resource-leak log checks with durable artifacts.
+- `just cuda-stress` mirrors the stress-gate artifact flow for NVIDIA CUDA
+  runners, requiring `nvidia-smi`, an AdaptiveCpp CUDA target, mixed benchmark
+  cells, cancellation, and panic/resource-leak log checks.
+- `just release-verify` now orchestrates the release verification matrix into
+  one artifact directory, including provenance, EXPLAIN audit, workload
+  validation, `pg_accel_stats()`, deferred-site audit, fork stress, benchmark
+  sweep, and backend-specific stress gates when hardware is present.
+- `just release-checklist-audit` now fails while the v1.0 release checklist
+  has missing gate rows, unchecked items, or placeholder evidence tokens.
+- `pg_accel_bench fp64-calibrate` now runs the canonical
+  `pg_accel.soft_fp64_cost_multiplier` sweep, disqualifies candidates with
+  sub-parity or non-dispatching fp64 cells, and writes selected/runner-up,
+  parity-close, and `pg_accel.fp64_enabled=false` proof artifacts. The current
+  M2 Max 100K probe disqualifies all `{16,24,32,40,48,56,64}` candidates
+  because the required 100K fp64 cells still stay native or fall below parity.
+
 ### Phase II infrastructure round (2026-05-03, 8 agents → 5 merge commits)
 
 This round developed the dispatch / planner / executor infrastructure each

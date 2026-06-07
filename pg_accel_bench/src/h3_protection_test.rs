@@ -46,6 +46,9 @@ const DEFAULT_CONNECTION: &str = "host=localhost port=28819 dbname=postgres";
 // to detect *regressions in the protection signals* (kernel counter,
 // classification, result diff), not to reproduce the headline speedup.
 const SETUP_ROWS: usize = 10_000;
+const H3_DIFF_ROWS: usize = 5_000;
+const H3_DIFF_EDGE_ROWS: usize = 15;
+const H3_DIFF_RESOLUTIONS: [i32; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 // Warm-dispatch latency budget. The 2026-05-14 full-run pass measured
 // `h3_bulk @ 10K` at ~8 ms accelerated; this gate is 2000x that and is
@@ -98,11 +101,76 @@ fn execute_to_rows(c: &mut Client, sql: &str) -> Vec<String> {
     out
 }
 
+#[cfg(feature = "integration_tests")]
+fn assert_h3_latlng_rows_match_native(c: &mut Client, resolution: i32) {
+    c.simple_query("SET pg_accel.enabled = on")
+        .expect("enable pg_accel");
+    let accel_rows = execute_to_rows(
+        c,
+        &format!(
+            "SELECT id, (h3_latlng_to_cell(geom, {resolution}))::text AS cell \
+             FROM bench_h3_diff ORDER BY id"
+        ),
+    );
+
+    c.simple_query("SET pg_accel.enabled = off")
+        .expect("disable pg_accel");
+    let native_rows = execute_to_rows(
+        c,
+        &format!(
+            "SELECT id, (public.h3_lat_lng_to_cell(geom, {resolution}))::text AS cell \
+             FROM bench_h3_diff ORDER BY id"
+        ),
+    );
+
+    assert_eq!(
+        accel_rows.len(),
+        native_rows.len(),
+        "res {resolution}: accel row count {} differs from native h3-pg row count {}",
+        accel_rows.len(),
+        native_rows.len()
+    );
+
+    let expected_rows = H3_DIFF_ROWS + H3_DIFF_EDGE_ROWS;
+    assert_eq!(
+        accel_rows.len(),
+        expected_rows,
+        "res {resolution}: expected {expected_rows} result rows, got {}",
+        accel_rows.len()
+    );
+
+    let mut mismatches: Vec<String> = Vec::new();
+    for (i, (accel, native)) in accel_rows.iter().zip(native_rows.iter()).enumerate() {
+        if accel != native {
+            mismatches.push(format!(
+                "res {resolution} row {i}: accel=`{accel}` native=`{native}`"
+            ));
+            if mismatches.len() >= 5 {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        mismatches.is_empty(),
+        "h3_latlng_to_cell result diff vs stock h3-pg: {} mismatches (first 5):\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
+}
+
 /// Return a plain-text EXPLAIN plan for `sql`.
 #[cfg(feature = "integration_tests")]
 fn explain_text(c: &mut Client, sql: &str) -> String {
     let explain = format!("EXPLAIN (FORMAT TEXT) {sql}");
     execute_to_rows(c, &explain).join("\n")
+}
+
+#[cfg(feature = "integration_tests")]
+fn last_planner_rejection_reason(c: &mut Client) -> Option<String> {
+    c.query_one("SELECT pg_accel_last_planner_rejection_reason()", &[])
+        .ok()
+        .and_then(|row| row.get::<_, Option<String>>(0))
 }
 
 /// Apply the workload's setup statements to a fresh connection. Idempotent
@@ -422,6 +490,104 @@ fn h3_srf_grid_disk_benchmark_shape_stays_native() {
     );
 }
 
+/// Scalar `h3_latlng_to_cell` predicates are not safe standalone scan filters:
+/// the scan executor consumes boolean masks, while this function returns an
+/// h3index. Keep both bad argument shapes and valid scalar predicates native
+/// with explicit rejection reasons until fused GPU expression filtering owns
+/// the surrounding comparison/null-test semantics.
+#[cfg(feature = "integration_tests")]
+#[test]
+fn h3_latlng_scan_predicates_stay_native_with_visible_declines() {
+    let mut c = connect();
+    c.simple_query(
+        "SET pg_accel.enabled = on; \
+         SET pg_accel.min_batch_size = 1; \
+         CREATE TEMP TABLE _h3_latlng_scan_decline(\
+           id int4, geom point NOT NULL, res int4 NOT NULL, lng float8, lat float8); \
+         INSERT INTO _h3_latlng_scan_decline \
+           SELECT g::int4, point(\
+             -122.0 + (g % 100)::float8 / 10000.0, \
+              37.0 + (g / 100)::float8 / 10000.0), \
+             7, \
+             -122.0 + (g % 100)::float8 / 10000.0, \
+              37.0 + (g / 100)::float8 / 10000.0 \
+           FROM generate_series(1, 1000) AS g; \
+         ANALYZE _h3_latlng_scan_decline",
+    )
+    .expect("setup H3 scan-decline fixture");
+
+    for (label, sql, expected_reason) in [
+        (
+            "invalid resolution",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE h3_latlng_to_cell(geom, 16) IS NOT NULL",
+            "h3_latlng_unsupported_shape",
+        ),
+        (
+            "non-constant resolution",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE h3_latlng_to_cell(geom, res) IS NOT NULL",
+            "h3_latlng_unsupported_shape",
+        ),
+        (
+            "non-point-column argument",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE h3_latlng_to_cell(point(lng, lat), 7) IS NOT NULL",
+            "h3_latlng_unsupported_shape",
+        ),
+        (
+            "valid scalar predicate",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE h3_latlng_to_cell(geom, 7) IS NOT NULL",
+            "h3_latlng_scalar_predicate_no_gpu_pipeline",
+        ),
+        (
+            "equality scalar predicate",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE h3_latlng_to_cell(geom, 7) = '8928308280fffff'::h3index",
+            "h3_latlng_scalar_predicate_no_gpu_pipeline",
+        ),
+        (
+            "boolean-wrapper scalar predicate",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE (h3_latlng_to_cell(geom, 7) IS NOT NULL) AND id > 0",
+            "h3_latlng_scalar_predicate_no_gpu_pipeline",
+        ),
+        (
+            "boolean-test scalar predicate",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE (h3_latlng_to_cell(geom, 7) IS NOT NULL) IS TRUE",
+            "h3_latlng_scalar_predicate_no_gpu_pipeline",
+        ),
+        (
+            "case scalar predicate",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE CASE WHEN id > 0 THEN h3_latlng_to_cell(geom, 7) IS NOT NULL ELSE false END",
+            "h3_latlng_scalar_predicate_no_gpu_pipeline",
+        ),
+        (
+            "coalesce scalar predicate",
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE COALESCE(h3_latlng_to_cell(geom, 7) IS NOT NULL, false)",
+            "h3_latlng_scalar_predicate_no_gpu_pipeline",
+        ),
+    ] {
+        c.simple_query("SELECT pg_accel_reset_stats()")
+            .expect("reset stats");
+        let plan = explain_text(&mut c, sql);
+        let plan_lc = plan.to_lowercase();
+        assert!(
+            !plan_lc.contains("gpuaccelscan") && !plan_lc.contains("gpuh3"),
+            "{label} H3 scan predicate should stay native; got:\n{plan}"
+        );
+        assert_eq!(
+            last_planner_rejection_reason(&mut c).as_deref(),
+            Some(expected_reason),
+            "{label} H3 scan predicate should expose the expected planner decline; plan:\n{plan}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Result-diff test (live PG)
 // ---------------------------------------------------------------------------
@@ -439,7 +605,8 @@ fn h3_latlng_to_cell_result_matches_native_h3() {
     let mut c = connect();
 
     // Build a deterministic fixture. We bypass the workload's setup_sql
-    // because we need `setseed(0.42)` BEFORE the random() call.
+    // because we need `setseed(0.42)` BEFORE the random() call, then add
+    // fixed edge coordinates around poles and the antimeridian.
     c.simple_query(
         "DROP TABLE IF EXISTS bench_h3_diff; \
          SELECT setseed(0.42); \
@@ -447,62 +614,32 @@ fn h3_latlng_to_cell_result_matches_native_h3() {
          INSERT INTO bench_h3_diff (geom) \
            SELECT point(random() * 360 - 180, random() * 180 - 90) \
            FROM generate_series(1, 5000); \
+         INSERT INTO bench_h3_diff (geom) VALUES \
+           (point(0, 0)), \
+           (point(179.999999, 0)), \
+           (point(-179.999999, 0)), \
+           (point(180, 0)), \
+           (point(-180, 0)), \
+           (point(0, 89.999999)), \
+           (point(0, -89.999999)), \
+           (point(179.999999, 89.999999)), \
+           (point(-179.999999, -89.999999)), \
+           (point(-122.4194, 37.7749)), \
+           (point(-73.9857, 40.7484)), \
+           (point(139.6917, 35.6895)), \
+           (point(151.2093, -33.8688)), \
+           (point(37.6173, 55.7558)), \
+           (point(18.4241, -33.9249)); \
          ANALYZE bench_h3_diff",
     )
     .expect("setup result-diff fixture");
 
-    // Run the accel-side query (pg_accel adapter intercepts
-    // `h3_latlng_to_cell`).
-    c.simple_query("SET pg_accel.enabled = on")
-        .expect("enable pg_accel");
-    let accel_rows = execute_to_rows(
-        &mut c,
-        "SELECT id, (h3_latlng_to_cell(geom, 7))::text AS cell \
-         FROM bench_h3_diff ORDER BY id",
-    );
-
-    // Run the same query via stock h3-pg (the `h3_lat_lng_to_cell` alias is
-    // NOT registered by pg_accel, so the planner cannot intercept it).
-    c.simple_query("SET pg_accel.enabled = off")
-        .expect("disable pg_accel");
-    let native_rows = execute_to_rows(
-        &mut c,
-        "SELECT id, (public.h3_lat_lng_to_cell(geom, 7))::text AS cell \
-         FROM bench_h3_diff ORDER BY id",
-    );
+    for resolution in H3_DIFF_RESOLUTIONS {
+        assert_h3_latlng_rows_match_native(&mut c, resolution);
+    }
 
     c.simple_query("DROP TABLE IF EXISTS bench_h3_diff")
         .expect("cleanup");
-
-    assert_eq!(
-        accel_rows.len(),
-        native_rows.len(),
-        "accel row count {} differs from native h3-pg row count {}",
-        accel_rows.len(),
-        native_rows.len()
-    );
-    assert_eq!(
-        accel_rows.len(),
-        5000,
-        "expected 5000 result rows, got {}",
-        accel_rows.len()
-    );
-    // Compare row-by-row (both queries are ORDER BY id).
-    let mut mismatches: Vec<String> = Vec::new();
-    for (i, (accel, native)) in accel_rows.iter().zip(native_rows.iter()).enumerate() {
-        if accel != native {
-            mismatches.push(format!("row {i}: accel=`{accel}` native=`{native}`"));
-            if mismatches.len() >= 5 {
-                break;
-            }
-        }
-    }
-    assert!(
-        mismatches.is_empty(),
-        "h3_latlng_to_cell result diff vs stock h3-pg: {} mismatches (first 5):\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
-    );
 }
 
 // ---------------------------------------------------------------------------

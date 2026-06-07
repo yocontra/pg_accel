@@ -8,6 +8,8 @@
 
 use pgrx::pg_sys::{self, NodeTag};
 
+use crate::engine::{cost, stats};
+
 use super::agg_common;
 
 /// Inject the non-parallel GpuAgg `CustomPath` into `output_rel`.
@@ -25,6 +27,12 @@ pub(super) unsafe fn inject(
 ) {
     // SAFETY: root is a planner-provided pointer for this hook invocation.
     if unsafe { grouped_query_has_avg(root) } && !agg_common::grouped_avg_finalize_supported() {
+        if cost::gpu_is_usable() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::GroupedAvgNoGpuFinalize.stats_key(),
+                super::rel_rows_estimate(input_rel).unwrap_or(0),
+            );
+        }
         pgrx::debug1!(
             "pg_accel: gpu_agg rejected: grouped AVG is hard-gated until hash-agg emits true averages"
         );

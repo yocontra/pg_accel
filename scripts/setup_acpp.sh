@@ -157,7 +157,38 @@ apply_metal_cpp_compat_patch() {
     fi
 }
 
+apply_default_targets_json_patch() {
+    local patch cmake_file
+    patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/default-targets-json.patch"
+    cmake_file="$ACPP_SRC/CMakeLists.txt"
+    [ -f "$patch" ] || return 0
+    [ -f "$cmake_file" ] || return 0
+    if grep -q 'ACPP_DEFAULT_TARGETS_JSON' "$cmake_file"; then
+        return 0
+    fi
+    echo "Applying AdaptiveCpp DEFAULT_TARGETS JSON serialization patch"
+    git -C "$ACPP_SRC" apply "$patch"
+}
+
+apply_sleef_helper_address_space_patch() {
+    local patch emitter_file cmake_file
+    patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/sleef-helper-address-space-specialization.patch"
+    emitter_file="$ACPP_SRC/src/compiler/llvm-to-backend/metal/Emitter.hpp"
+    cmake_file="$ACPP_SRC/src/libkernel/sscp/metal/CMakeLists.txt"
+    [ -f "$patch" ] || return 0
+    [ -f "$emitter_file" ] || return 0
+    [ -f "$cmake_file" ] || return 0
+    if grep -q 'functionAddressSpaceSpecializations' "$emitter_file" &&
+        grep -q 'SF64_DISABLE_SLEEF_INLINE' "$cmake_file"; then
+        return 0
+    fi
+    echo "Applying AdaptiveCpp SLEEF helper address-space specialization patch"
+    git -C "$ACPP_SRC" apply "$patch"
+}
+
 apply_metal_cpp_compat_patch
+apply_default_targets_json_patch
+apply_sleef_helper_address_space_patch
 
 if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
     git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"

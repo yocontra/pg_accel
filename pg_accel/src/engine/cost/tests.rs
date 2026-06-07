@@ -199,6 +199,7 @@ fn cpu_only_limits_match_previous_defaults() {
     assert_eq!(l.gpu_sort_topk_max_limit, 128);
     assert!((l.gpu_sort_heap_topk_max_fraction - 0.25).abs() < f64::EPSILON);
     assert_eq!(l.gpu_sort_heap_topk_max_width_bytes, 16);
+    assert!((l.gpu_spatial_max_output_fraction - 0.80).abs() < f64::EPSILON);
     assert_eq!(l.gpu_expr_min_rows, 250_000);
     assert_eq!(l.gpu_hash_join_build_max_rows, 99_999);
     assert_eq!(l.gpu_pipeline_fusion_min_rows, 10_000);
@@ -223,6 +224,7 @@ fn baseline_gpu_matches_defaults() {
     assert_eq!(l.gpu_sort_min_rows, 100_000);
     assert_eq!(l.gpu_window_min_rows, 100_000);
     assert_eq!(l.gpu_reduce_min_rows, 25_000);
+    assert!((l.gpu_spatial_max_output_fraction - 0.80).abs() < f64::EPSILON);
     assert!((l.preagg_dim_materialize_cost - 0.10).abs() < f64::EPSILON);
 }
 

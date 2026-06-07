@@ -224,5 +224,41 @@ Validates that the cost model correctly avoids GPU dispatch for trivial queries.
 - **Sig?** = paired t-test result. `YES` (p < 0.01), `marginal` (p < 0.05), `no` (p >= 0.05).
 - **Regression workloads** should show ~1.00x speedup, proving no overhead for
   queries that don't benefit from acceleration.
+- **Planner threshold matrix** reports the row count, type, cardinality,
+  selectivity, result count, index/pruning shape, retained prepared geometry,
+  batch count, row width, output size, dispatch/output evidence, correctness
+  evidence, cache gate, and measured break-even basis for each release-lane
+  benchmark cell. Expected GPU winners must prove a captured dispatch counter,
+  consumed output rows, and the operation-specific warm-run speedup threshold;
+  H3 and raster expected winners must also come from `--cache-mode both`
+  artifacts to bound cold-start cost. Native-decline cells must stay on
+  PostgreSQL-native plans and prove their exact expected decline reason in the
+  captured plan snippet. When the engine does not expose a planner rejection
+  reason, threshold-matrix declines record
+  `pg_accel benchmark threshold decline reason: ...` while the plan remains
+  native. H3 and raster rows use
+  operation-specific lanes for lat/lng-to-cell, SRF expansion, map algebra,
+  terrain slope, reclass, and deep algebra instead of generic function-dispatch
+  claims; H3 grouped winners below the measured grouped-aggregate admission
+  floor remain native-decline rows.
+  Spatial rows also record the PostGIS
+  predicate-registration gate,
+  because the normal adapter exposes no recheck-free spatial predicates until
+  the GPU geometry coverage is complete.
+- **Benchmark ship gate** fails the CLI/report path when any benchmark cell
+  crashes, selects a pg_accel Custom Scan without credited GPU dispatch,
+  misses an expected GPU winner, lacks required dispatch/output/cache evidence,
+  unexpectedly dispatches a native-decline cell, or dispatches GPU work below
+  PostgreSQL-parallel parity (`< 1.00x` median speedup). Family-specific gates,
+  such as H3 winner/parity lane checks, add advisory detail on top of this
+  generic floor.
+- **fp64 multiplier calibration** uses
+  `pg_accel_bench fp64-calibrate --multipliers 16,24,32,40,48,56,64` to run
+  the immutable 8-workload fp64 matrix at its canonical sizes. The command
+  rejects any candidate with a crash, missing GPU dispatch, stock executor
+  fallback, or median speedup below `1.00x`, then writes selected/runner-up,
+  parity-close (`<= 1.10x`), and `pg_accel.fp64_enabled=false` EXPLAIN proof
+  artifacts. `--max-size` is for local probes only and does not satisfy
+  release evidence.
 - **Outliers** (> 3 sigma) are flagged in detailed output but included in statistics.
   Use `--format json` to inspect per-iteration timings.

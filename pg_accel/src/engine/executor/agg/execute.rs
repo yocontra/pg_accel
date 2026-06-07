@@ -1670,6 +1670,15 @@ impl AggExecState {
         self.group_key.as_ref()
     }
 
+    /// Rewrite the group-key source attno and ABI key type for child-plan
+    /// fallback paths.
+    pub fn set_group_key_source(&mut self, attno: i32, key_type: i32) {
+        if let Some(group_key) = &mut self.group_key {
+            group_key.attno = attno;
+            group_key.key_type = key_type;
+        }
+    }
+
     /// Returns the aggregate descriptors `(AggOp, attno, result_type_oid)` for rescan.
     #[must_use]
     pub fn agg_descs(&self) -> Vec<(AggOp, i32, u32)> {

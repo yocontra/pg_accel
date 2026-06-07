@@ -1581,6 +1581,57 @@ unsafe fn build_float8_array(values: &[f64]) -> pgrx::pg_sys::Datum {
     pg_sys::Datum::from(arr_ptr)
 }
 
+#[cfg(test)]
+mod tests {
+    use crate::gpu::PgaccelOp;
+
+    use super::MapAlgebraParser;
+
+    fn load_band_slots(program: &super::MapAlgebraProgram) -> Vec<usize> {
+        program
+            .instructions
+            .iter()
+            .filter(|inst| inst.op == PgaccelOp::LoadBand)
+            .map(|inst| inst.arg.to_bits() as usize)
+            .collect()
+    }
+
+    #[test]
+    fn map_algebra_parser_builds_ndvi_two_band_ir() {
+        let program = MapAlgebraParser::new("([rast1]-[rast2])/([rast1]+[rast2]+0.001)", &[0, 1])
+            .parse()
+            .expect("NDVI-style two-band map algebra should parse");
+
+        assert_eq!(program.source_bands, vec![0, 1]);
+        assert_eq!(load_band_slots(&program), vec![0, 1, 0, 1]);
+        assert!(
+            program
+                .instructions
+                .iter()
+                .any(|inst| inst.op == PgaccelOp::Div),
+            "NDVI expression should compile to a division"
+        );
+        assert!(
+            program
+                .instructions
+                .iter()
+                .any(|inst| inst.op == PgaccelOp::LoadConst && (inst.arg - 0.001).abs() < 1e-12),
+            "NDVI denominator epsilon should be preserved as a constant"
+        );
+    }
+
+    #[test]
+    fn map_algebra_parser_rejects_ambiguous_numbered_raster_refs() {
+        let program = MapAlgebraParser::new("[rast1] + [rast2]", &[0, 0]).parse();
+
+        assert!(
+            program.is_none(),
+            "numbered refs that map to the same source band are ambiguous until true multi-raster \
+             map algebra is implemented"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // pg_test integration for the Phase 2 B3 ST_Value(rast, geometry[]) arm
 // ---------------------------------------------------------------------------

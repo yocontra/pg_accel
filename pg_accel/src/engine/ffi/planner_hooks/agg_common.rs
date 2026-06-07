@@ -22,6 +22,44 @@ pub(super) const fn grouped_avg_finalize_supported() -> bool {
     false
 }
 
+/// Stable planner rejection reason for NUMERIC aggregate families that would
+/// need PostgreSQL-compatible arbitrary-precision accumulator state.
+pub(super) const NUMERIC_AGG_NO_GPU_KERNEL_REASON: &str = "numeric_agg_no_gpu_kernel";
+
+/// True for PostgreSQL built-in NUMERIC aggregate OIDs that pg_accel must
+/// decline until it has a real multi-limb accumulator/comparator lane.
+#[must_use]
+pub(super) const fn aggref_uses_numeric_accumulator_oid(aggfnoid_raw: u32) -> bool {
+    matches!(
+        aggfnoid_raw,
+        pg_sys::F_SUM_NUMERIC
+            | pg_sys::F_AVG_NUMERIC
+            | pg_sys::F_MAX_NUMERIC
+            | pg_sys::F_MIN_NUMERIC
+            | pg_sys::F_VARIANCE_NUMERIC
+            | pg_sys::F_STDDEV_NUMERIC
+            | pg_sys::F_VAR_SAMP_NUMERIC
+            | pg_sys::F_STDDEV_SAMP_NUMERIC
+            | pg_sys::F_VAR_POP_NUMERIC
+            | pg_sys::F_STDDEV_POP_NUMERIC
+    )
+}
+
+/// True when an `Aggref` is one of PostgreSQL's built-in NUMERIC aggregate
+/// families that require arbitrary-precision state or ordering.
+///
+/// # Safety
+///
+/// `aggref` must be a valid `Aggref` pointer on the main backend thread.
+pub(super) unsafe fn aggref_uses_numeric_accumulator(aggref: *const pg_sys::Aggref) -> bool {
+    if aggref.is_null() {
+        return false;
+    }
+    // SAFETY: caller contract.
+    let aggfnoid_raw = u32::from(unsafe { (*aggref).aggfnoid });
+    aggref_uses_numeric_accumulator_oid(aggfnoid_raw)
+}
+
 /// True when an `Aggref` is one of PostgreSQL's built-in AVG aggregates.
 ///
 /// # Safety

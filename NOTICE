@@ -9,7 +9,7 @@ identifiers follow https://spdx.org/licenses/.
 The AdaptiveCpp fork pin referenced below is:
   repository: https://github.com/yocontra/AdaptiveCpp
   branch:     fork-safe-metal
-  commit:     4f3cde11a302eebac28aa1ccc79ad3399cb8183c
+  commit:     0ebc10e5a596c4760b29bab1bdae45a4809f2ace
 Source bundles for any license linked below can be obtained from that pin
 (the `external/`, `src/`, and `LICENSE`/`COPYING` files under that tree).
 
@@ -57,7 +57,7 @@ Role:    SYCL runtime + compiler toolchain. The `libacpp-rt.dylib`
          compiler frontend produces the device code cached in
          `~/.acpp/apps/global/jit-cache/`.
 Source:  https://github.com/yocontra/AdaptiveCpp (branch fork-safe-metal,
-         commit 4f3cde11a302eebac28aa1ccc79ad3399cb8183c). Verbatim
+         commit 0ebc10e5a596c4760b29bab1bdae45a4809f2ace). Verbatim
          license text is in the `LICENSE` file at the root of that tree.
 
 License text (BSD-2-Clause):

@@ -1,0 +1,497 @@
+diff --git a/src/compiler/llvm-to-backend/metal/Emitter.cpp b/src/compiler/llvm-to-backend/metal/Emitter.cpp
+index 403d33d8..8dd56449 100644
+--- a/src/compiler/llvm-to-backend/metal/Emitter.cpp
++++ b/src/compiler/llvm-to-backend/metal/Emitter.cpp
+@@ -49,6 +49,8 @@
+ #include "HLTree.hpp"
+ #include "HLExtractionPass.hpp"
+
++#include <algorithm>
++
+ using namespace llvm;
+
+ namespace hipsycl {
+@@ -311,6 +313,7 @@ constant uint& constant __acpp_sscp_metal_dynamic_local_memory_size [[buffer(0)]
+
+   auto callGraph = buildCallGraph();
+   auto sortedFunctions = topologicalSort(callGraph);
++  analyzeFunctionAddressSpaceSpecializations(sortedFunctions);
+
+   // Emit forward declarations for every non-kernel function before any
+   // bodies. InstCombine (during the libkernel bitcode build at -O3) can
+@@ -320,16 +323,28 @@ constant uint& constant __acpp_sscp_metal_dynamic_local_memory_size [[buffer(0)]
+   // `__acpp_sscp_copysign_f64` calling `sf64_copysign`. Topological sort
+   // can't pick an order that satisfies such cycles, so MSL refuses to
+   // compile on "use before declaration". Forward decls break the cycle.
++  auto emitForwardDeclaration =
++      [&](Function& F, const AddressSpaceSignature* addressSpaces) {
++        os << mapType(F.getReturnType()) << " "
++           << specializedFunctionName(F, addressSpaces) << " (";
++        bool first = true;
++        for (Argument& A : F.args()) {
++          if (!first) os << ", ";
++          first = false;
++          os << mapArgumentType(A, addressSpaces) << " " << valueName(&A);
++        }
++        os << ");\n";
++      };
++
+   for (Function* F : sortedFunctions) {
+     if (kernelNames.count(F->getName().str()) > 0) continue;
+-    os << mapType(F->getReturnType()) << " " << F->getName().str() << " (";
+-    bool first = true;
+-    for (Argument& A : F->args()) {
+-      if (!first) os << ", ";
+-      first = false;
+-      os << mapType(A.getType()) << " " << valueName(&A);
++    emitForwardDeclaration(*F, nullptr);
++    auto specializations = functionAddressSpaceSpecializations.find(F);
++    if (specializations != functionAddressSpaceSpecializations.end()) {
++      for (const auto& signature : specializations->second) {
++        emitForwardDeclaration(*F, &signature);
++      }
+     }
+-    os << ");\n";
+   }
+   os << "\n";
+
+@@ -344,6 +359,17 @@ constant uint& constant __acpp_sscp_metal_dynamic_local_memory_size [[buffer(0)]
+     if (!emitFunction(*F, *hlPass.tree)) {
+       return false;
+     }
++
++    if (kernelNames.count(F->getName().str()) == 0) {
++      auto specializations = functionAddressSpaceSpecializations.find(F);
++      if (specializations != functionAddressSpaceSpecializations.end()) {
++        for (const auto& signature : specializations->second) {
++          if (!emitFunction(*F, *hlPass.tree, &signature)) {
++            return false;
++          }
++        }
++      }
++    }
+   }
+
+   if (errorMsg.has_value()) {
+@@ -354,14 +380,21 @@ constant uint& constant __acpp_sscp_metal_dynamic_local_memory_size [[buffer(0)]
+   return true;
+ }
+
+-bool MetalEmitter::emitFunction(Function& F, const Node& node) {
++bool MetalEmitter::emitFunction(Function& F, const Node& node,
++                                const AddressSpaceSignature* addressSpaces) {
++  const AddressSpaceSignature* previousAddressSpaces = currentFunctionAddressSpaces;
++  currentFunctionAddressSpaces = addressSpaces;
++  inferredPtrAS.clear();
+   collectVariablesInfo(F);
+
+   bool success = emitArgStruct(F) &&
+-    emitSignature(F) &&
++    emitSignature(F, addressSpaces) &&
+     emitDeclarations() &&
+     emitNode(node, 1);
+
++  currentFunctionAddressSpaces = previousAddressSpaces;
++  inferredPtrAS.clear();
++
+   if (!success) {
+     return false;
+   }
+@@ -856,7 +889,8 @@ bool MetalEmitter::emitArgStruct(Function& F) {
+   return true;
+ }
+
+-bool MetalEmitter::emitSignature(Function& F) {
++bool MetalEmitter::emitSignature(Function& F,
++                                 const AddressSpaceSignature* addressSpaces) {
+   bool isKernel = kernelNames.count(F.getName().str()) > 0;
+
+   bool useArgStruct = isKernel && F.arg_size() > opt.maxArgsForFlatMode;
+@@ -865,7 +899,7 @@ bool MetalEmitter::emitSignature(Function& F) {
+   }
+
+   std::string returnType = isKernel ? "void" : mapType(F.getReturnType());
+-  os << returnType << " " << F.getName().str() << " (";
++  os << returnType << " " << specializedFunctionName(F, addressSpaces) << " (";
+
+   bool first = true;
+   int bufIdx = 1; // index=0 is reserved for dynamic local memory size if needed, so start from 1
+@@ -876,7 +910,7 @@ bool MetalEmitter::emitSignature(Function& F) {
+     for (Argument &A : F.args()) {
+       if (!first) os << ", ";
+       first = false;
+-      auto typeName = mapType(A.getType());
++      auto typeName = mapArgumentType(A, addressSpaces);
+
+       if (isKernel) {
+         if (!A.getType()->isPointerTy()) {
+@@ -2063,6 +2097,11 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
+     }
+   }
+
++  if (!callee->isDeclaration() && kernelNames.count(calleeName) == 0) {
++    auto signature = getCallAddressSpaceSignature(CI);
++    calleeName = specializedFunctionName(*callee, &signature);
++  }
++
+   int argsSize = CI->arg_size();
+   if (callee->isDeclaration()) {
+     auto returnType = callee->getReturnType();
+@@ -2415,6 +2454,22 @@ std::string MetalEmitter::mapType(const llvm::Value* V) {
+   }
+ }
+
++std::string MetalEmitter::mapArgumentType(const llvm::Argument& A,
++                                          const AddressSpaceSignature* addressSpaces) {
++  if (!A.getType()->isPointerTy()) {
++    return mapType(A.getType());
++  }
++
++  if (addressSpaces && A.getArgNo() < addressSpaces->size()) {
++    unsigned AS = (*addressSpaces)[A.getArgNo()];
++    if (AS != NonPointerAddressSpace) {
++      return getAddressSpaceKeyword(AS) + " void*";
++    }
++  }
++
++  return mapType(A.getType());
++}
++
+ std::string MetalEmitter::getAddressSpaceKeyword(unsigned AS) {
+   auto it = addressSpaceMap.find(AS);
+   if (it != addressSpaceMap.end()) {
+@@ -2425,6 +2480,91 @@ std::string MetalEmitter::getAddressSpaceKeyword(unsigned AS) {
+   }
+ }
+
++MetalEmitter::AddressSpaceSignature
++MetalEmitter::getDefaultAddressSpaceSignature(const Function& F) const {
++  AddressSpaceSignature signature;
++  signature.reserve(F.arg_size());
++  for (const Argument& A : F.args()) {
++    if (A.getType()->isPointerTy()) {
++      signature.push_back(A.getType()->getPointerAddressSpace());
++    } else {
++      signature.push_back(NonPointerAddressSpace);
++    }
++  }
++  return signature;
++}
++
++MetalEmitter::AddressSpaceSignature
++MetalEmitter::getCallAddressSpaceSignature(const CallInst* CI) {
++  AddressSpaceSignature signature;
++  Function* callee = CI->getCalledFunction();
++  signature.reserve(callee ? callee->arg_size() : CI->arg_size());
++
++  for (unsigned i = 0; i < CI->arg_size(); ++i) {
++    Value* arg = CI->getArgOperand(i);
++    if (!arg->getType()->isPointerTy()) {
++      signature.push_back(NonPointerAddressSpace);
++      continue;
++    }
++
++    unsigned AS = getPhysicalPointerAddressSpace(arg);
++    if (AS == 0 && callee && i < callee->arg_size()) {
++      AS = callee->getArg(i)->getType()->getPointerAddressSpace();
++    }
++    signature.push_back(AS);
++  }
++
++  return signature;
++}
++
++bool MetalEmitter::needsAddressSpaceSpecialization(
++    const Function& F, const AddressSpaceSignature& signature) const {
++  auto defaultSignature = getDefaultAddressSpaceSignature(F);
++  size_t count = std::min(defaultSignature.size(), signature.size());
++  for (size_t i = 0; i < count; ++i) {
++    if (signature[i] == NonPointerAddressSpace ||
++        defaultSignature[i] == NonPointerAddressSpace) {
++      continue;
++    }
++    if (signature[i] != defaultSignature[i]) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool MetalEmitter::addFunctionAddressSpaceSpecialization(
++    const Function& F, const AddressSpaceSignature& signature) {
++  if (!needsAddressSpaceSpecialization(F, signature)) {
++    return false;
++  }
++
++  auto& signatures = functionAddressSpaceSpecializations[&F];
++  if (std::find(signatures.begin(), signatures.end(), signature) != signatures.end()) {
++    return false;
++  }
++  signatures.push_back(signature);
++  return true;
++}
++
++std::string MetalEmitter::specializedFunctionName(
++    const Function& F, const AddressSpaceSignature* addressSpaces) const {
++  std::string name = F.getName().str();
++  if (!addressSpaces || !needsAddressSpaceSpecialization(F, *addressSpaces)) {
++    return name;
++  }
++
++  name += "__acpp_as";
++  unsigned argIndex = 0;
++  for (unsigned AS : *addressSpaces) {
++    if (AS != NonPointerAddressSpace) {
++      name += "_p" + std::to_string(argIndex) + "_" + std::to_string(AS);
++    }
++    ++argIndex;
++  }
++  return name;
++}
++
+ const Value* MetalEmitter::stripToRootObject(const Value* V) {
+   const Value* Cur = V;
+   while (true) {
+@@ -2466,6 +2606,15 @@ unsigned MetalEmitter::getPhysicalPointerAddressSpace(const Value* V) {
+   if (AS != 0) {
+     return AS;
+   }
++  if (auto* Arg = dyn_cast<Argument>(V)) {
++    if (currentFunctionAddressSpaces &&
++        Arg->getArgNo() < currentFunctionAddressSpaces->size()) {
++      unsigned specializedAS = (*currentFunctionAddressSpaces)[Arg->getArgNo()];
++      if (specializedAS != NonPointerAddressSpace && specializedAS != 0) {
++        return specializedAS;
++      }
++    }
++  }
+   auto it = inferredPtrAS.find(V);
+   if (it != inferredPtrAS.end()) {
+     return it->second;
+@@ -2568,6 +2717,53 @@ void MetalEmitter::analyzeCallInsts() {
+   }
+ }
+
++void MetalEmitter::analyzeFunctionAddressSpaceSpecializations(
++    const std::vector<Function*>& sortedFunctions) {
++  functionAddressSpaceSpecializations.clear();
++
++  const AddressSpaceSignature* previousAddressSpaces = currentFunctionAddressSpaces;
++  bool changed = true;
++  while (changed) {
++    changed = false;
++    for (Function* F : sortedFunctions) {
++      std::vector<AddressSpaceSignature> callerSignatures;
++      callerSignatures.push_back(getDefaultAddressSpaceSignature(*F));
++      auto existing = functionAddressSpaceSpecializations.find(F);
++      if (existing != functionAddressSpaceSpecializations.end()) {
++        callerSignatures.insert(callerSignatures.end(),
++                                existing->second.begin(),
++                                existing->second.end());
++      }
++
++      for (const auto& callerSignature : callerSignatures) {
++        currentFunctionAddressSpaces = &callerSignature;
++        inferredPtrAS.clear();
++
++        for (BasicBlock& BB : *F) {
++          for (Instruction& I : BB) {
++            auto* CI = dyn_cast<CallInst>(&I);
++            if (!CI) {
++              continue;
++            }
++
++            Function* Callee = CI->getCalledFunction();
++            if (!Callee || Callee->isDeclaration() ||
++                kernelNames.count(Callee->getName().str()) > 0) {
++              continue;
++            }
++
++            auto calleeSignature = getCallAddressSpaceSignature(CI);
++            changed |= addFunctionAddressSpaceSpecialization(*Callee, calleeSignature);
++          }
++        }
++      }
++    }
++  }
++
++  currentFunctionAddressSpaces = previousAddressSpaces;
++  inferredPtrAS.clear();
++}
++
+ // Scan the module for i64 storage that backs an atomic op (LLVM atomic
+ // instructions OR libkernel `__acpp_sscp_atomic_*_{i64,u64}` helpers - the
+ // SYCL atomic_ref<uint64_t> surface lowers to the helper calls, not to
+diff --git a/src/compiler/llvm-to-backend/metal/Emitter.hpp b/src/compiler/llvm-to-backend/metal/Emitter.hpp
+index 5acf285f..794aab60 100644
+--- a/src/compiler/llvm-to-backend/metal/Emitter.hpp
++++ b/src/compiler/llvm-to-backend/metal/Emitter.hpp
+@@ -12,9 +12,11 @@
+ #define EMITTER_HPP
+
+ #include <string>
++#include <unordered_map>
+ #include <unordered_set>
+ #include <sstream>
+ #include <map>
++#include <vector>
+
+ #include "HLTree.hpp"
+
+@@ -24,6 +26,8 @@ namespace llvm {
+ class Module;
+ class ModuleSlotTracker;
+ class Function;
++class Argument;
++class CallInst;
+ class Value;
+ class Constant;
+ class BasicBlock;
+@@ -58,14 +62,19 @@ public:
+   }
+
+ private:
+-  bool emitFunction(llvm::Function& F, const hl::Node& node);
++  static constexpr unsigned NonPointerAddressSpace = ~0u;
++  using AddressSpaceSignature = std::vector<unsigned>;
++
++  bool emitFunction(llvm::Function& F, const hl::Node& node,
++                    const AddressSpaceSignature* addressSpaces = nullptr);
+   void emitEarlyFp64Helpers();
+   void emitTypes();
+   void emitIntrinsicHelpers();
+   void emitGlobalConstants();
+   std::string emitConstantInitializer(const llvm::Constant* C);
+   bool emitArgStruct(llvm::Function& F);
+-  bool emitSignature(llvm::Function& F);
++  bool emitSignature(llvm::Function& F,
++                     const AddressSpaceSignature* addressSpaces = nullptr);
+   bool emitDeclarations();
+   bool emitNode(const hl::Node& node, int level);
+   bool emitBasicBlock(const llvm::BasicBlock* BB, int level);
+@@ -83,11 +92,22 @@ private:
+   std::string getSignedType(llvm::Type* T);
+   std::string mapType(const llvm::Type* T);
+   std::string mapType(const llvm::Value* V);
++  std::string mapArgumentType(const llvm::Argument& A,
++                              const AddressSpaceSignature* addressSpaces);
+   std::string getAddressSpaceKeyword(unsigned AS);
+   void analyzeCallInsts();
++  void analyzeFunctionAddressSpaceSpecializations(const std::vector<llvm::Function*>& sortedFunctions);
+   void analyzeAtomicI64Storage();
+   void collectVariablesInfo(const llvm::Function& F);
+   unsigned getPhysicalPointerAddressSpace(const llvm::Value* V);
++  AddressSpaceSignature getDefaultAddressSpaceSignature(const llvm::Function& F) const;
++  AddressSpaceSignature getCallAddressSpaceSignature(const llvm::CallInst* CI);
++  bool addFunctionAddressSpaceSpecialization(const llvm::Function& F,
++                                             const AddressSpaceSignature& signature);
++  bool needsAddressSpaceSpecialization(const llvm::Function& F,
++                                       const AddressSpaceSignature& signature) const;
++  std::string specializedFunctionName(const llvm::Function& F,
++                                      const AddressSpaceSignature* addressSpaces) const;
+   const llvm::Value* stripToRootObject(const llvm::Value* V);
+   std::unordered_map<llvm::Function*, std::vector<llvm::Function*>> buildCallGraph();
+   std::vector<llvm::Function*> topologicalSort(const std::unordered_map<llvm::Function*, std::vector<llvm::Function*>>& callGraph);
+@@ -113,6 +133,8 @@ private:
+   std::unordered_map<const llvm::Value*, std::string> valuesToDeclare;
+   //
+   std::unordered_map<const llvm::Value*, unsigned> inferredPtrAS;
++  std::unordered_map<const llvm::Function*, std::vector<AddressSpaceSignature>> functionAddressSpaceSpecializations;
++  const AddressSpaceSignature* currentFunctionAddressSpaces = nullptr;
+
+   // Change 1: set of SSA values whose i64 storage backs an atomic_ref<uint64_t>
+   // (or equivalent SYCL atomic i64 op). mapType(Value*) consults this to emit
+@@ -148,4 +170,4 @@ private:
+ } // namespace compiler
+ } // namespace hipsycl
+
+-#endif // EMITTER_HPP
+\ No newline at end of file
++#endif // EMITTER_HPP
+diff --git a/src/compiler/llvm-to-backend/metal/LLVMToMetal.cpp b/src/compiler/llvm-to-backend/metal/LLVMToMetal.cpp
+index fd79f52e..f44f01be 100644
+--- a/src/compiler/llvm-to-backend/metal/LLVMToMetal.cpp
++++ b/src/compiler/llvm-to-backend/metal/LLVMToMetal.cpp
+@@ -1064,6 +1064,23 @@ bool LLVMToMetalTranslator::translateToBackendFormat(llvm::Module& FlavoredModul
+   // `xcrun metal` chokes on. Walk the call graph from each kernel,
+   // delete soft-fp64 functions that aren't transitively reached.
+   {
++    auto isPrunableSoftF64Function = [](llvm::StringRef Name) {
++      bool isSoftF64Surface =
++          Name.starts_with("sf64_") ||
++          Name.starts_with("__acpp_sscp_soft_f64_") ||
++          (Name.starts_with("__acpp_sscp_") &&
++           (Name.ends_with("_f64") || Name.ends_with("_f64_precise")));
++      // With SF64_DISABLE_SLEEF_INLINE the linked module also contains
++      // outlined C++ SLEEF helpers. If the surface forwarder that pulled them
++      // in is unreachable, those helpers must be pruned as well; otherwise
++      // MetalEmitter still emits them and can see calls to already-dropped
++      // sf64_* callees.
++      bool isSleefHelper =
++          Name.starts_with("_ZN9soft_fp645sleef") ||
++          Name.starts_with("_ZN12_GLOBAL__N_1");
++      return isSoftF64Surface || isSleefHelper;
++    };
++
+     llvm::SmallPtrSet<llvm::Function*, 32> reachable;
+     llvm::SmallVector<llvm::Function*, 16> worklist;
+     // Roots:
+@@ -1093,7 +1110,8 @@ bool LLVMToMetalTranslator::translateToBackendFormat(llvm::Module& FlavoredModul
+       for (llvm::BasicBlock& BB : *F) {
+         for (llvm::Instruction& I : BB) {
+           if (auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+-            llvm::Function* Callee = CB->getCalledFunction();
++            llvm::Value* Called = CB->getCalledOperand()->stripPointerCasts();
++            llvm::Function* Callee = llvm::dyn_cast<llvm::Function>(Called);
+             if (Callee && !Callee->isDeclaration() &&
+                 reachable.insert(Callee).second) {
+               worklist.push_back(Callee);
+@@ -1102,18 +1120,13 @@ bool LLVMToMetalTranslator::translateToBackendFormat(llvm::Module& FlavoredModul
+         }
+       }
+     }
+-    // Drop unreachable soft-fp64 surface functions only - leave other
++    // Drop unreachable soft-fp64/SLEEF functions only - leave other
+     // AdaptiveCpp libkernel functions alone.
+     llvm::SmallVector<llvm::Function*, 64> drop;
+     for (llvm::Function& F : FlavoredModule) {
+       if (F.isDeclaration()) continue;
+       llvm::StringRef Name = F.getName();
+-      bool isSoftF64Surface =
+-          Name.starts_with("sf64_") ||
+-          Name.starts_with("__acpp_sscp_soft_f64_") ||
+-          (Name.starts_with("__acpp_sscp_") &&
+-           (Name.ends_with("_f64") || Name.ends_with("_f64_precise")));
+-      if (isSoftF64Surface && !reachable.contains(&F)) {
++      if (isPrunableSoftF64Function(Name) && !reachable.contains(&F)) {
+         drop.push_back(&F);
+       }
+     }
+@@ -1154,7 +1167,7 @@ bool LLVMToMetalTranslator::translateToBackendFormat(llvm::Module& FlavoredModul
+       }
+       HIPSYCL_DEBUG_INFO
+           << "LLVMToMetal: reachability prune dropped " << drop.size()
+-          << " unreachable soft-fp64 surface functions\n";
++          << " unreachable soft-fp64/SLEEF functions\n";
+     }
+   }
+
+diff --git a/src/libkernel/sscp/metal/CMakeLists.txt b/src/libkernel/sscp/metal/CMakeLists.txt
+index 6bca2456..bea965b5 100644
+--- a/src/libkernel/sscp/metal/CMakeLists.txt
++++ b/src/libkernel/sscp/metal/CMakeLists.txt
+@@ -129,9 +129,13 @@ if(WITH_LLVM_TO_METAL)
+   # unresolvable. Mode 0 ("disabled") compiles SF64_FE_RAISE to a no-op
+   # and removes the thread_local variable. Host-side fenv observability
+   # is unaffected (it's surfaced from outside the kernel anyway).
++  # `SF64_DISABLE_SLEEF_INLINE` keeps SLEEF polynomial/DD helpers outlined
++  # so the Metal source emitter can compile them as specialized helper
++  # functions instead of dumping 80K-line fp64 bodies into each kernel.
+   list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
+        -DSOFT_FP64_FENV_MODE=0
+-       -DSOFT_FP64_SNAN_PROPAGATE=0)
++       -DSOFT_FP64_SNAN_PROPAGATE=0
++       -DSF64_DISABLE_SLEEF_INLINE)
+
+   # Build soft-fp64's OpenCL compatibility surface as well. The strict
+   # `sf64_*` ABI remains subnormal-preserving; FTZ is disabled for Metal so

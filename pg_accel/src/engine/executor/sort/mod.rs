@@ -779,6 +779,31 @@ impl SortExecState {
         self.limit
     }
 
+    /// Number of input heap tuples copied/materialized before top-k pruning.
+    #[must_use]
+    pub fn input_rows_materialized(&self) -> u64 {
+        self.rows_dispatched
+    }
+
+    /// Number of tuple copies retained for emission after top-k pruning.
+    #[must_use]
+    pub fn retained_output_tuples(&self) -> usize {
+        self.sorted_tuples.len()
+    }
+
+    /// Number of materialized tuple copies freed/dropped after top-k selection.
+    #[must_use]
+    pub fn rows_pruned_after_topk(&self) -> u64 {
+        let retained = u64::try_from(self.retained_output_tuples()).unwrap_or(u64::MAX);
+        self.rows_dispatched.saturating_sub(retained)
+    }
+
+    /// Whether this node copied the full input before emitting top-k output.
+    #[must_use]
+    pub fn full_input_materialized(&self) -> bool {
+        self.rows_dispatched > 0
+    }
+
     /// Attach a [`SortScan`] for direct heap scan mode.
     ///
     /// When set, `next_vectorized()` is used instead of `next()` to bypass

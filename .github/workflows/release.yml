@@ -12,7 +12,7 @@ jobs:
   build:
     name: Build (${{ matrix.os }}, PG ${{ matrix.pg }})
     env:
-      ACPP_REQUIRED_SHA: 4f3cde11a302eebac28aa1ccc79ad3399cb8183c
+      ACPP_REQUIRED_SHA: 0ebc10e5a596c4760b29bab1bdae45a4809f2ace
       SOFT_FP64_REQUIRED_TAG: v1.3.0
     strategy:
       fail-fast: false

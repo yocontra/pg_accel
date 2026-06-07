@@ -11,21 +11,26 @@ mod artifacts;
 mod bench_model;
 mod config;
 mod explain_audit;
+mod fp64_calibration;
 mod h3_protection_test;
 mod parallel_stress_test;
 mod plan_shape_test;
 mod report;
+mod resume;
 mod runner;
 mod stats;
 mod workloads;
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
 use crate::report::BenchReport;
 
 const DEFAULT_CONNECTION: &str = "host=localhost dbname=postgres";
+
+type ResumeWorkloadCell = (Box<dyn workloads::Workload>, usize);
 
 #[derive(Parser)]
 #[command(name = "pg_accel_bench", about = "Benchmark harness for pg_accel")]
@@ -200,6 +205,31 @@ enum Command {
         artifacts_dir: Option<PathBuf>,
     },
 
+    /// Retry crashed cells from a saved benchmark artifact directory.
+    #[command(visible_alias = "retry-artifacts")]
+    Resume {
+        /// Source artifact directory containing resume_audit_manifest.json.
+        #[arg(long)]
+        artifacts_dir: PathBuf,
+
+        /// PostgreSQL connection string for the retry run.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for retry artifacts. If omitted, a fresh
+        /// `benchmarks/artifacts/resume-<timestamp>` directory is created.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Output format: `markdown`, `json`, or `csv`.
+        #[arg(long, default_value = "markdown")]
+        format: ReportFormat,
+
+        /// Print the retry plan without executing PostgreSQL work.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Print a previously-stored report (reads JSON from stdin).
     Report {
         /// Output format: `markdown` or `json`.
@@ -248,6 +278,60 @@ enum Command {
         /// PostgreSQL connection string.
         #[arg(long, default_value = DEFAULT_CONNECTION)]
         connection: String,
+    },
+
+    /// Sweep pg_accel.soft_fp64_cost_multiplier across the full fp64 matrix.
+    ///
+    /// Runs the immutable 8-workload fp64 matrix at the canonical sizes,
+    /// disqualifies any candidate with a sub-parity or non-GPU cell, then
+    /// writes selected/runner-up/parity-close/proof artifacts.
+    Fp64Calibrate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Comma-separated candidate multipliers to sweep.
+        #[arg(long, default_value = "16,24,32,40,48,56,64")]
+        multipliers: String,
+
+        /// Optional development cap for row sizes, e.g. 100k, 1M, 10M.
+        ///
+        /// Omit this for release evidence; a capped run does not satisfy the
+        /// TODO acceptance criteria.
+        #[arg(long)]
+        max_size: Option<String>,
+
+        /// Number of warmup iterations before each measured fp64 cell.
+        #[arg(long, default_value_t = 5)]
+        warmup: usize,
+
+        /// Seed for deterministic random data generation.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+
+        /// Apply the realistic GUC profile before running.
+        #[arg(long)]
+        realistic_gucs: bool,
+
+        /// Capture full EXPLAIN ANALYZE plans for every cell.
+        #[arg(long)]
+        capture_plans: bool,
+
+        /// Timing mode: `raw`, `explain`, or `both`.
+        #[arg(long, default_value = "raw")]
+        timing: TimingArg,
+
+        /// Cache cleanliness mode: `warm`, `cold`, or `both`.
+        #[arg(long, default_value = "warm")]
+        cache_mode: CacheModeArg,
+
+        /// Skip the postmaster-GUC mismatch hard-fail.
+        #[arg(long)]
+        skip_guc_verify: bool,
+
+        /// Directory for calibration artifacts.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
     },
 }
 
@@ -452,6 +536,13 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             skip_guc_verify,
             artifacts_dir,
         ),
+        Command::Resume {
+            artifacts_dir,
+            connection,
+            output_dir,
+            format,
+            dry_run,
+        } => cmd_resume(&connection, &artifacts_dir, output_dir, &format, dry_run),
         Command::Report { format } => cmd_report(&format),
         Command::Validate {
             workload,
@@ -460,6 +551,31 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => cmd_validate(workload.as_deref(), category.as_deref(), rows),
         Command::ExplainAudit { connection } => cmd_explain_audit(&connection),
         Command::Provenance { connection } => cmd_provenance(&connection),
+        Command::Fp64Calibrate {
+            connection,
+            multipliers,
+            max_size,
+            warmup,
+            seed,
+            realistic_gucs,
+            capture_plans,
+            timing,
+            cache_mode,
+            skip_guc_verify,
+            artifacts_dir,
+        } => cmd_fp64_calibrate(
+            &connection,
+            &multipliers,
+            max_size.as_deref(),
+            warmup,
+            seed,
+            realistic_gucs,
+            capture_plans,
+            &timing,
+            &cache_mode,
+            skip_guc_verify,
+            artifacts_dir,
+        ),
     }
 }
 
@@ -487,6 +603,59 @@ fn cmd_explain_audit(connection: &str) -> Result<(), Box<dyn std::error::Error>>
     } else {
         Err("explain-audit: at least one RequiredToday row failed".into())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_fp64_calibrate(
+    connection: &str,
+    multipliers: &str,
+    max_size: Option<&str>,
+    warmup: usize,
+    seed: u64,
+    realistic_gucs: bool,
+    capture_plans: bool,
+    timing: &TimingArg,
+    cache_mode: &CacheModeArg,
+    skip_guc_verify: bool,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let multipliers = fp64_calibration::parse_multiplier_list(multipliers)?;
+    let sizes = fp64_calibration::sizes_with_optional_cap(max_size)?;
+    let artifact_root =
+        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("fp64-calibrate"));
+
+    let options = fp64_calibration::Fp64CalibrationOptions {
+        multipliers,
+        sizes,
+        warmup,
+        seed,
+        timing_mode: runner::TimingMode::from(timing),
+        cache_mode: runner::CacheMode::from(cache_mode),
+        guc_profile: if realistic_gucs {
+            Some(runner::GucProfile::realistic())
+        } else {
+            None
+        },
+        skip_guc_verify,
+        capture_plans,
+        artifact_root,
+    };
+    let summary = fp64_calibration::run_fp64_calibration(connection, &options)?;
+
+    print!("{}", summary.to_markdown());
+    if summary.selected_candidate().is_none() {
+        return Err("fp64 calibration: no multiplier satisfied every fp64 matrix cell".into());
+    }
+    if summary
+        .fp64_disabled_proof
+        .as_ref()
+        .is_some_and(|proof| proof.custom_scan_selected)
+    {
+        return Err(
+            "fp64 calibration: pg_accel.fp64_enabled=false proof still selected Custom Scan".into(),
+        );
+    }
+    Ok(())
 }
 
 fn cmd_setup(
@@ -542,6 +711,7 @@ fn cmd_run(
     };
     let report = runner::run_all_with_config(connection, &workloads, &config)?;
     print_report(&report, format)?;
+    enforce_benchmark_ship_gate(&report)?;
     enforce_h3_lane_gate(&report)?;
     Ok(())
 }
@@ -592,6 +762,88 @@ fn cmd_crash_repro(
     if !report.crashes.is_empty() {
         return Err("crash-repro: workload failed; see artifact directory for logs".into());
     }
+    enforce_benchmark_ship_gate(&report)?;
+    enforce_h3_lane_gate(&report)?;
+    Ok(())
+}
+
+fn cmd_resume(
+    connection: &str,
+    artifacts_dir: &Path,
+    output_dir: Option<PathBuf>,
+    format: &ReportFormat,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let plan = resume::load_retry_plan(artifacts_dir)?;
+    print_resume_plan(&plan);
+    if plan.cells.is_empty() {
+        eprintln!(
+            "[resume] no crashed cells found in {}",
+            artifacts_dir.display()
+        );
+        return Ok(());
+    }
+
+    let retry_config = plan
+        .config
+        .clone()
+        .ok_or("resume plan has retry cells but no saved benchmark config")?;
+    let retry_artifacts = output_dir.unwrap_or_else(|| artifacts::default_run_dir("resume"));
+
+    if dry_run {
+        eprintln!(
+            "[resume] dry run: would retry {} cell(s) into {}",
+            plan.cells.len(),
+            retry_artifacts.display()
+        );
+        return Ok(());
+    }
+
+    fs::create_dir_all(&retry_artifacts)?;
+    let source_artifact = resume::write_resume_source_artifact(&retry_artifacts, &plan)?;
+    eprintln!(
+        "[resume] source linkage written to {}",
+        source_artifact.display()
+    );
+
+    let workload_boxes = resolve_resume_workloads(&plan)?;
+    let cells: Vec<runner::WorkloadRunCell<'_>> = workload_boxes
+        .iter()
+        .map(|(workload, rows)| runner::WorkloadRunCell {
+            workload: workload.as_ref(),
+            rows: *rows,
+        })
+        .collect();
+    let config = runner::BenchConfig {
+        iterations: retry_config.iterations,
+        warmup: retry_config.warmup,
+        seed: retry_config.seed,
+        timing_mode: retry_config.timing_mode,
+        cache_mode: retry_config.cache_mode,
+        plans_capture_path: if retry_config.capture_plans {
+            Some(retry_artifacts.join("plans.txt"))
+        } else {
+            None
+        },
+        guc_profile: if retry_config.realistic_gucs {
+            Some(runner::GucProfile::realistic())
+        } else {
+            None
+        },
+        skip_guc_verify: retry_config.skip_guc_verify,
+        artifacts_dir: Some(retry_artifacts),
+    };
+
+    let report = runner::run_cells_with_config(connection, &cells, &config)?;
+    print_report(&report, format)?;
+    if !report.crashes.is_empty() {
+        return Err(format!(
+            "resume: {} retried cell(s) still crashed; see retry artifact directory",
+            report.crashes.len()
+        )
+        .into());
+    }
+    enforce_benchmark_ship_gate(&report)?;
     enforce_h3_lane_gate(&report)?;
     Ok(())
 }
@@ -600,8 +852,40 @@ fn cmd_report(format: &ReportFormat) -> Result<(), Box<dyn std::error::Error>> {
     let stdin = std::io::read_to_string(std::io::stdin())?;
     let report: BenchReport = serde_json::from_str(&stdin)?;
     print_report(&report, format)?;
+    enforce_benchmark_ship_gate(&report)?;
     enforce_h3_lane_gate(&report)?;
     Ok(())
+}
+
+/// Hard-fail the bench process when the generic benchmark ship gate produces
+/// any failure.
+fn enforce_benchmark_ship_gate(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
+    let failures = report.evaluate_benchmark_ship_gate();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "[benchmark-ship-gate] FAIL: {} benchmark ship gate failure(s) — see \
+         `### Benchmark Ship Gate Failures` in the markdown report for details. \
+         Gate floor: {floor:.2}x.",
+        failures.len(),
+        floor = report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+    );
+    for f in &failures {
+        eprintln!(
+            "[benchmark-ship-gate]   {} @ {} rows — {} (observed speedup_median={:.4}x, floor={:.2}x)",
+            f.workload,
+            f.rows,
+            f.kind.label(),
+            f.speedup_median,
+            f.gate_floor,
+        );
+    }
+    Err(format!(
+        "benchmark ship gate: {} failure(s); see report `### Benchmark Ship Gate Failures` section",
+        failures.len()
+    )
+    .into())
 }
 
 /// Hard-fail the bench process when the H3 lane gate produces any failure.
@@ -638,6 +922,58 @@ fn enforce_h3_lane_gate(report: &BenchReport) -> Result<(), Box<dyn std::error::
         failures.len()
     )
     .into())
+}
+
+fn print_resume_plan(plan: &resume::RetryPlan) {
+    let summary = &plan.manifest_summary;
+    eprintln!(
+        "[resume] source={} manifest={} completed={} correctness={} pre-risk={} plans={} crash={} logs={} provenance={} failures={}",
+        plan.source_dir.display(),
+        plan.source_manifest.display(),
+        summary.completed,
+        summary.correctness,
+        summary.pre_risk,
+        summary.plan,
+        summary.crash,
+        summary.log,
+        summary.provenance,
+        summary.failure,
+    );
+    if let Some(config) = &plan.config {
+        eprintln!(
+            "[resume] config: iterations={} warmup={} seed={} timing={} cache={} realistic_gucs={} skip_guc_verify={} capture_plans={}",
+            config.iterations,
+            config.warmup,
+            config.seed,
+            config.timing_arg(),
+            config.cache_arg(),
+            config.realistic_gucs,
+            config.skip_guc_verify,
+            config.capture_plans,
+        );
+    }
+    for cell in &plan.cells {
+        eprintln!(
+            "[resume] retry cell: {} @ {} rows",
+            cell.workload, cell.rows
+        );
+    }
+}
+
+fn resolve_resume_workloads(
+    plan: &resume::RetryPlan,
+) -> Result<Vec<ResumeWorkloadCell>, Box<dyn std::error::Error>> {
+    let mut out = Vec::with_capacity(plan.cells.len());
+    for cell in &plan.cells {
+        let workload = workloads::find_workload(&cell.workload).ok_or_else(|| {
+            format!(
+                "resume artifact references unknown workload: {}",
+                cell.workload
+            )
+        })?;
+        out.push((workload, cell.rows));
+    }
+    Ok(out)
 }
 
 fn resolve_workloads(

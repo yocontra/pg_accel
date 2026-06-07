@@ -185,6 +185,22 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
+    if matches!(
+        jointype,
+        pg_sys::JoinType::JOIN_SEMI | pg_sys::JoinType::JOIN_ANTI
+    ) {
+        #[allow(clippy::cast_sign_loss)]
+        let n_rows_est = joinrel_ref.rows.max(0.0) as u64;
+        stats::increment_planner_rejected(
+            super::RejectionReason::SemiAntiNoGpuMembershipFilter.stats_key(),
+            n_rows_est,
+        );
+        pgrx::debug1!(
+            "pg_accel join: semi/anti join skipped until GPU membership filters are implemented"
+        );
+        return;
+    }
+
     let strategy = if equi.is_some() {
         registry::AccelStrategy::GpuHashJoin
     } else if let Some(accel_info) = accel.as_ref() {
@@ -263,7 +279,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
                 output_rows,
                 max_heap_output,
             );
-            stats::increment_planner_rejected("hashjoin_heap_output_too_large", output_rows as u64);
+            stats::increment_planner_rejected(
+                super::RejectionReason::HashJoinHeapOutputTooLarge.stats_key(),
+                output_rows as u64,
+            );
             return;
         }
     }
@@ -301,7 +320,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
                 outer_rows,
                 limits.gpu_nlj_max_output_rows,
             );
-            stats::increment_planner_rejected("nlj_between_output_too_large", outer_rows as u64);
+            stats::increment_planner_rejected(
+                super::RejectionReason::NljBetweenOutputTooLarge.stats_key(),
+                outer_rows as u64,
+            );
             return;
         };
         if !cost::nlj_break_even(outer_rows, inner_rows, output_rows, limits)
@@ -1124,12 +1146,17 @@ unsafe fn observe_nestloop_scalar_opportunity(
 ///
 /// ## Parallelism model
 ///
-/// Each worker runs a complete `GpuHashJoin` instance over:
+/// For small inner sides, each worker runs a complete `GpuHashJoin` instance over:
 /// - its share of the outer rows (outer is drawn from `outerrel.partial_pathlist`);
 /// - the *full* inner side, rebuilt per-worker (pgrx does not expose PG's
 ///   shared-hashtable APIs, so we fall back to the per-worker-hashtable
 ///   pattern). The inner path must be parallel_safe so a worker can execute
 ///   it inside the same parallel context.
+///
+/// Large inner sides decline explicitly instead of injecting this private
+/// rebuild shape. That keeps large-inner joins on PostgreSQL's native
+/// parallel hash join until pg_accel can share or reuse a GPU-resident build
+/// table across workers.
 ///
 /// The resulting `CustomPath` is `parallel_aware=false`, `parallel_safe=true`,
 /// and inherits `parallel_workers` from the outer partial child (clamped to
@@ -1183,6 +1210,35 @@ unsafe fn inject_gpu_hashjoin_partial_paths(
     // SAFETY: non-null, validated above.
     let inner_ref = unsafe { &*inner_path };
     if !hashjoin::partial_is_eligible(true, inner_ref.parallel_safe) {
+        return;
+    }
+
+    let mut max_worker_count = 1_usize;
+    for i in 0..n_outer {
+        // SAFETY: i < list_length.
+        let outer_partial = unsafe { pg_sys::list_nth(outer_partial_list, i).cast::<Path>() };
+        if outer_partial.is_null() {
+            continue;
+        }
+        // SAFETY: non-null.
+        let outer_ref = unsafe { &*outer_partial };
+        max_worker_count = max_worker_count.max(outer_ref.parallel_workers.max(1) as usize);
+    }
+
+    let inner_rows =
+        cost::conservative_input_rows(innerrel_ref.rows.max(inner_ref.rows), innerrel_ref.tuples);
+    if hashjoin::partial_private_inner_rebuild_declines(inner_rows, max_worker_count, limits) {
+        stats::increment_planner_rejected(
+            super::RejectionReason::HashJoinParallelInnerRebuildTooLarge.stats_key(),
+            inner_rows as u64,
+        );
+        pgrx::debug1!(
+            "pg_accel join: partial GpuHashJoin skipped because inner_rows={} \
+             with {} workers would rebuild private GPU hash tables; waiting for \
+             shared GPU-resident inner state",
+            inner_rows,
+            max_worker_count,
+        );
         return;
     }
 
@@ -1364,6 +1420,19 @@ mod tests {
         // emits so a rename shows up as a test diff.
         const EXPECTED_REASON: &str = "mergejoin_no_gpu_kernel";
         assert_eq!(EXPECTED_REASON, "mergejoin_no_gpu_kernel");
+    }
+
+    #[test]
+    fn parallel_inner_rebuild_rejection_reason_matches_stats_key() {
+        // Regression guard: the stats key emitted by the partial
+        // GpuHashJoin large-inner gate must stay stable for benchmark trace
+        // aggregation.
+        use super::super::RejectionReason;
+        const EXPECTED_REASON: &str = "hashjoin_parallel_inner_rebuild_too_large";
+        assert_eq!(
+            RejectionReason::HashJoinParallelInnerRebuildTooLarge.stats_key(),
+            EXPECTED_REASON,
+        );
     }
 
     #[test]

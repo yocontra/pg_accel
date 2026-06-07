@@ -488,6 +488,22 @@ fn sort_type_oids_reject_non_sortable() {
     }
 }
 
+#[test]
+fn gpu_avg_input_type_gate_accepts_float_avg_only() {
+    assert!(gpu_avg_input_type_supported(AGG_FLOAT4OID));
+    assert!(gpu_avg_input_type_supported(AGG_FLOAT8OID));
+}
+
+#[test]
+fn gpu_avg_input_type_gate_declines_pg_numeric_accumulator_variants() {
+    for oid in [AGG_INT2OID, AGG_INT4OID, AGG_INT8OID, 1700, 1186] {
+        assert!(
+            !gpu_avg_input_type_supported(oid),
+            "AVG input OID {oid} should stay on PostgreSQL native accumulator semantics"
+        );
+    }
+}
+
 // =====================================================================
 // Explicit unsupported type policy
 // =====================================================================
@@ -570,6 +586,48 @@ fn unsupported_type_policy_reason_codes_are_stable() {
     for (policy, label, reason) in cases {
         assert_eq!(policy.label(), label);
         assert_eq!(policy.reason(), reason);
+    }
+}
+
+#[test]
+fn setop_decline_reason_codes_are_stable() {
+    assert_eq!(SETOP_NO_GPU_KERNEL_REASON, "setop_no_gpu_kernel");
+    assert_eq!(
+        RECURSIVEUNION_NO_GPU_KERNEL_REASON,
+        "recursiveunion_no_gpu_kernel"
+    );
+    assert_eq!(
+        setop_reason_for_recursive_union(false),
+        "setop_no_gpu_kernel"
+    );
+    assert_eq!(
+        setop_reason_for_recursive_union(true),
+        "recursiveunion_no_gpu_kernel"
+    );
+}
+
+#[test]
+fn numeric_aggregate_decline_reason_codes_are_stable() {
+    assert_eq!(
+        agg_common::NUMERIC_AGG_NO_GPU_KERNEL_REASON,
+        "numeric_agg_no_gpu_kernel"
+    );
+    for oid in [
+        pg_sys::F_SUM_NUMERIC,
+        pg_sys::F_AVG_NUMERIC,
+        pg_sys::F_MAX_NUMERIC,
+        pg_sys::F_MIN_NUMERIC,
+        pg_sys::F_VARIANCE_NUMERIC,
+        pg_sys::F_STDDEV_NUMERIC,
+        pg_sys::F_VAR_SAMP_NUMERIC,
+        pg_sys::F_STDDEV_SAMP_NUMERIC,
+        pg_sys::F_VAR_POP_NUMERIC,
+        pg_sys::F_STDDEV_POP_NUMERIC,
+    ] {
+        assert!(
+            agg_common::aggref_uses_numeric_accumulator_oid(oid),
+            "NUMERIC aggregate oid {oid} should report the stable NUMERIC decline reason"
+        );
     }
 }
 
@@ -708,7 +766,7 @@ fn should_batch_gpu_raster_sufficient_rows() {
 }
 
 #[test]
-fn extension_scan_gate_h3_latlng_requires_bulk_rows() {
+fn extension_scan_gate_h3_latlng_stays_out_of_standalone_scan() {
     let limits = cost::DeviceLimits::cpu_only();
     let min_rows = rel_pathlist::h3_standalone_scan_min_rows(&limits);
 
@@ -728,7 +786,7 @@ fn extension_scan_gate_h3_latlng_requires_bulk_rows() {
             min_rows,
             &limits,
         ),
-        Ok(())
+        Err("h3_function_not_compute_heavy")
     );
 }
 
@@ -946,6 +1004,22 @@ fn spatial_unsafe_band_allows_below_vertex_threshold() {
         vertices_below_threshold,
         &limits
     ));
+}
+
+#[test]
+fn spatial_output_fraction_rejects_high_output_heap_scans() {
+    let limits = cost::DeviceLimits::cpu_only();
+
+    assert!(cost::spatial_output_fraction_allowed(
+        79_999.0, 100_000.0, &limits
+    ));
+    assert!(cost::spatial_output_fraction_allowed(
+        80_000.0, 100_000.0, &limits
+    ));
+    assert!(!cost::spatial_output_fraction_allowed(
+        80_001.0, 100_000.0, &limits
+    ));
+    assert_eq!(cost::spatial_output_fraction(90_000.0, 100_000.0), 0.9);
 }
 
 #[test]
@@ -1978,12 +2052,12 @@ mod incremental_sort_detect {
     mod tests {
         use pgrx::prelude::{Spi, pg_test};
 
-        /// Smoke: a 2-key ORDER BY query runs without the planner crashing,
-        /// regardless of whether PG ends up using IncrementalSort or a plain
-        /// Sort. The classifier and FFI call in `try_inject_gpu_sort_path`
-        /// must be robust to the `num_pathkeys > GPU_SORT_MAX_PATHKEYS` path.
+        /// Smoke: a 2-key ORDER BY query runs without the planner crashing
+        /// and records an explicit planner decline. The classifier and FFI
+        /// call in `try_inject_gpu_sort_path` must be robust to the
+        /// `num_pathkeys > GPU_SORT_MAX_PATHKEYS` path.
         #[pg_test]
-        fn multi_key_order_by_does_not_crash_planner() {
+        fn multi_key_order_by_records_planner_decline() {
             Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_smoke").expect("drop prior");
             Spi::run(
                 "CREATE TABLE pgaccel_incsort_smoke (a int4, b int4) WITH (autovacuum_enabled=off)",
@@ -1995,6 +2069,7 @@ mod incremental_sort_detect {
             )
             .expect("seed");
             Spi::run("ANALYZE pgaccel_incsort_smoke").expect("analyze");
+            Spi::run("SET pg_accel.enabled = on").expect("enable pg_accel");
 
             // EXPLAIN a 2-key ORDER BY: this hits the IncrementalSort
             // classifier branch in try_inject_gpu_sort_path. We only assert
@@ -2003,14 +2078,33 @@ mod incremental_sort_detect {
             // give PG a plain Sort here and that is still a valid plan — the
             // test is about "planner did not crash", not "PG picked a
             // particular strategy".
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let before = crate::engine::stats::read_planner_rejected();
             let row_count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM (SELECT * FROM pgaccel_incsort_smoke ORDER BY a, b LIMIT 10) q",
-        )
-        .expect("select ORDER BY a, b")
-        .expect("row_count should be non-NULL");
+                "SELECT count(*) FROM (\
+                    SELECT * FROM pgaccel_incsort_smoke ORDER BY a, b LIMIT 10\
+                 ) q",
+            )
+            .expect("select ORDER BY a, b")
+            .expect("row_count should be non-NULL");
+            let after = crate::engine::stats::read_planner_rejected();
             assert_eq!(
                 row_count, 10,
                 "multi-key ORDER BY + LIMIT should return 10 rows"
+            );
+            assert!(
+                after > before,
+                "multi-key ORDER BY should record an explicit planner rejection \
+                 (before={before}, after={after})"
+            );
+            let multikey_declines = Spi::get_one::<i64>(
+                "SELECT pg_accel_planner_rejection_count('sort_multikey_no_gpu_kernel')",
+            )
+            .expect("rejection count query should succeed")
+            .expect("rejection count should not be NULL");
+            assert!(
+                multikey_declines > 0,
+                "multi-key ORDER BY should expose the missing cascaded GPU sort kernel"
             );
 
             Spi::run("DROP TABLE pgaccel_incsort_smoke").expect("drop");
@@ -2253,12 +2347,11 @@ mod mergejoin_detect {
         }
 
         /// Regression guard: `pg_accel_stats()` exposes the planner-rejected
-        /// counter. The MergeJoin detect path must increment it (or at least
-        /// not decrement it) over the course of the join query above. We
-        /// measure delta, not absolute, because other rejections may also
-        /// fire.
+        /// counter. The MergeJoin detect path must increment it over the
+        /// course of a forced merge-join-shape query. We measure delta, not
+        /// absolute, because other rejections may also fire.
         #[pg_test]
-        fn mergejoin_rejection_counter_is_non_decreasing() {
+        fn mergejoin_rejection_counter_increments_for_merge_path_shape() {
             Spi::run("DROP TABLE IF EXISTS pgaccel_mj_ctr_l").expect("drop prior l");
             Spi::run("DROP TABLE IF EXISTS pgaccel_mj_ctr_r").expect("drop prior r");
             Spi::run("CREATE TABLE pgaccel_mj_ctr_l (k int4) WITH (autovacuum_enabled=off)")
@@ -2267,12 +2360,12 @@ mod mergejoin_detect {
                 .expect("create r");
             Spi::run(
                 "INSERT INTO pgaccel_mj_ctr_l \
-             SELECT g FROM generate_series(1, 500) g",
+             SELECT g FROM generate_series(1, 5000) g",
             )
             .expect("seed l");
             Spi::run(
                 "INSERT INTO pgaccel_mj_ctr_r \
-             SELECT g FROM generate_series(1, 500) g",
+             SELECT g FROM generate_series(1, 5000) g",
             )
             .expect("seed r");
             Spi::run("CREATE INDEX ON pgaccel_mj_ctr_l (k)").expect("idx l");
@@ -2283,6 +2376,7 @@ mod mergejoin_detect {
             Spi::run("SET LOCAL enable_hashjoin = off").ok();
             Spi::run("SET LOCAL enable_nestloop = off").ok();
 
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
             let before = crate::engine::stats::read_planner_rejected();
             let rows = Spi::get_one::<i64>(
                 "SELECT count(*) FROM ( \
@@ -2291,15 +2385,21 @@ mod mergejoin_detect {
             )
             .expect("mergejoin-shaped join")
             .expect("row_count non-NULL");
-            assert_eq!(rows, 500);
+            assert_eq!(rows, 5000);
             let after = crate::engine::stats::read_planner_rejected();
-            // Must be non-decreasing. We cannot assert strict-greater because
-            // row counts may be below GPU gates that would skip the hook
-            // before reaching the observe call, or the hook may be invoked
-            // 0 times if PG decides the top path is trivial.
             assert!(
-                after >= before,
-                "planner_rejected counter must be non-decreasing across query execution"
+                after > before,
+                "mergejoin-shaped query should record an explicit planner rejection \
+                 (before={before}, after={after})"
+            );
+            let mergejoin_declines = Spi::get_one::<i64>(
+                "SELECT pg_accel_planner_rejection_count('mergejoin_no_gpu_kernel')",
+            )
+            .expect("rejection count query should succeed")
+            .expect("rejection count should not be NULL");
+            assert!(
+                mergejoin_declines > 0,
+                "mergejoin-shaped query should expose the missing merge-join kernel"
             );
 
             Spi::run("DROP TABLE pgaccel_mj_ctr_l").expect("drop l");
@@ -2521,6 +2621,71 @@ mod bitmap_heap_inject {
             );
 
             Spi::run("DROP TABLE pgaccel_bmp_smoke").expect("drop");
+        }
+
+        /// Smoke: bitmap-prefiltered scalar expression shapes have an
+        /// explicit planner decline while standalone GpuExpr remains disabled.
+        #[pg_test]
+        fn bitmap_gpuexpr_candidate_records_planner_decline() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_bmp_expr_decline").expect("drop prior");
+            Spi::run(
+                "CREATE TABLE pgaccel_bmp_expr_decline ( \
+                    bucket int4 NOT NULL, \
+                    score float4 NOT NULL, \
+                    qty int4 NOT NULL \
+                 ) WITH (autovacuum_enabled=off)",
+            )
+            .expect("create");
+            Spi::run(
+                "INSERT INTO pgaccel_bmp_expr_decline \
+                 SELECT \
+                   (g % 1000)::int4, \
+                   ((g * 37) % 1000)::float4, \
+                   ((g * 13) % 100)::int4 \
+                 FROM generate_series(1, 200000) g",
+            )
+            .expect("seed");
+            Spi::run("CREATE INDEX ON pgaccel_bmp_expr_decline (bucket)").expect("idx");
+            Spi::run("ANALYZE pgaccel_bmp_expr_decline").expect("analyze");
+
+            Spi::run("SET LOCAL pg_accel.enabled = on").ok();
+            Spi::run("SET LOCAL enable_seqscan = off").ok();
+            Spi::run("SET LOCAL enable_indexscan = off").ok();
+
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let before = crate::engine::stats::read_planner_rejected();
+            let row_count = Spi::get_one::<i64>(
+                "SELECT count(*) \
+                 FROM pgaccel_bmp_expr_decline \
+                 WHERE bucket BETWEEN 100 AND 300 \
+                   AND score > 500.0::float4 \
+                   AND qty < 50",
+            )
+            .expect("bitmap GpuExpr decline select")
+            .expect("row_count non-NULL");
+            assert!(
+                row_count > 0,
+                "bitmap GpuExpr decline query should return non-zero rows"
+            );
+            let after = crate::engine::stats::read_planner_rejected();
+            assert!(
+                after > before,
+                "bitmap + GpuExpr candidate should record a planner decline \
+                 (before={before}, after={after})"
+            );
+            let bitmap_declines = Spi::get_one::<i64>(
+                "SELECT pg_accel_planner_rejection_count(\
+                    'bitmap_heap_gpuexpr_no_gpu_pipeline'\
+                 )",
+            )
+            .expect("rejection count query should succeed")
+            .expect("rejection count should not be NULL");
+            assert!(
+                bitmap_declines > 0,
+                "bitmap + GpuExpr candidate should expose the missing GPU pipeline reason"
+            );
+
+            Spi::run("DROP TABLE pgaccel_bmp_expr_decline").expect("drop");
         }
     }
 }

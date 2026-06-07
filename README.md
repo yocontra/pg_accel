@@ -92,7 +92,7 @@ GROUP BY b.name;
 | Rust | stable | For building from source |
 | cmake | 3.20+ | For GPU kernel build |
 | Apple Silicon or NVIDIA CUDA | M1+ for Metal, NVIDIA GPU for CUDA | Runtime GPU backend |
-| AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` | Required for source/package builds |
+| AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` @ `0ebc10e5a596c4760b29bab1bdae45a4809f2ace` | Required for source/package builds |
 
 Source and package builds compile the SYCL kernel library unconditionally.
 Runtime GPU acceleration requires an AdaptiveCpp backend visible to the native
@@ -270,13 +270,17 @@ pg_accel does not run PostGIS predicate evaluation under an accelerator plan.
 
 ## Current limitations
 
-- **Sort**: Single numeric key only (int4, int8, float4, float8). Multi-key, text, and full-output heap sorts are planner-deferred to PostgreSQL until real GPU dispatch wins end-to-end.
+- **Sort**: Single numeric key only (int4, int8, float4, float8). Multi-key sorts are planner-deferred with `sort_multikey_no_gpu_kernel`, IncrementalSort opportunities with `sort_incremental_opportunity`, and text/full-output heap sorts stay with PostgreSQL until real GPU dispatch wins end-to-end.
 - **GPU platform**: Native PostgreSQL process with an AdaptiveCpp backend: Metal
   on Apple Silicon or CUDA on Linux/NVIDIA. No GPU = no acceleration (queries
   pass through to PG untouched).
 - **Spatial GPU**: Normal planning currently leaves PostGIS vector predicates and functions to PostgreSQL/PostGIS unless a future shape gate proves exact GPU-only coverage. Uncertain GPU classifications are rejected, not rechecked on CPU inside pg_accel.
+- **BitmapHeapScan + GpuExpr**: Bitmap-prefiltered scalar expression opportunities stay PostgreSQL-native with planner reason `bitmap_heap_gpuexpr_no_gpu_pipeline` until GpuExpr can fuse with GPU-resident scan batches.
 - **Unsupported expression types**: Generic GpuExpr, PreAgg filters/inputs, aggregate grouping, windows, and joins only accept their wired scalar/key types. JSON/JSONB, ARRAY, INTERVAL, DOMAIN, COMPOSITE, and user-defined custom types are planner-policy rejects, not partial GPU support.
+- **NUMERIC aggregates**: Arbitrary-precision `numeric` aggregate families (`sum`, `avg`, `min`, `max`, variance/stddev) stay on PostgreSQL with planner reason `numeric_agg_no_gpu_kernel` until pg_accel has a PostgreSQL-compatible multi-limb accumulator/comparator lane.
 - **Hash join**: Equi-join only (single key: int4, int8, float8). Multi-key and non-equi joins use PostgreSQL.
+- **Parallel hash join**: Partial `GpuHashJoin` can use private per-worker inner builds only for small inner sides. Large-inner partial candidates decline with `hashjoin_parallel_inner_rebuild_too_large` until pg_accel can share or reuse GPU-resident inner hash tables across workers.
+- **Merge join**: Ordered equi-join opportunities are observed but stay PostgreSQL-native with planner reason `mergejoin_no_gpu_kernel` until a GPU merge-join kernel and downstream GPU-resident consumers exist.
 - **Grouped aggregation**: Single numeric group key. Multi-key GROUP BY deferred to PostgreSQL.
 - **Window functions**: Running `SUM`/`COUNT` only. Ranking and offset functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`) are intentionally left to PostgreSQL after benchmark gating showed GPU loses on Apple Silicon.
 
@@ -284,8 +288,11 @@ pg_accel does not run PostGIS predicate evaluation under an accelerator plan.
 
 GPU acceleration requires a native AdaptiveCpp backend visible to PostgreSQL:
 Metal on Apple Silicon or CUDA on Linux/NVIDIA. `just setup-gpu` builds the
-`yocontra/AdaptiveCpp` `fork-safe-metal` branch into `.pgaccel/acpp/<backend>`
-and pins the soft-fp64 source checkout to `v1.3.0`.
+`yocontra/AdaptiveCpp` `fork-safe-metal` branch at
+`0ebc10e5a596c4760b29bab1bdae45a4809f2ace` into
+`.pgaccel/acpp/<backend>` and pins the soft-fp64 source checkout to `v1.3.0`.
+This release intentionally uses the fork-pinned setup path until the required
+Metal, fork-safety, and soft-fp64 changes are available upstream.
 
 ```bash
 # Linux/NVIDIA

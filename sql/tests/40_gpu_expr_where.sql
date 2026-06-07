@@ -20,6 +20,28 @@ CREATE TEMP TABLE _expr_w1_off AS
 SELECT count(*) AS cnt FROM _expr_w1 WHERE val > 500.0;
 
 SET pg_accel.enabled = on;
+SELECT pg_accel_reset_stats();
+DO $$
+DECLARE
+    r text;
+    plan_text text := '';
+    rejection_reason text;
+BEGIN
+    FOR r IN EXPLAIN SELECT count(*) FROM _expr_w1 WHERE val > 500.0 LOOP
+        plan_text := plan_text || E'\n' || r;
+    END LOOP;
+    IF plan_text LIKE '%Custom Scan%' THEN
+        RAISE EXCEPTION '40_gpu_expr_where FAILED: standalone GpuExpr selected Custom Scan: %',
+            plan_text;
+    END IF;
+    SELECT pg_accel_last_planner_rejection_reason() INTO rejection_reason;
+    IF rejection_reason IS DISTINCT FROM 'standalone_gpuexpr_no_gpu_pipeline' THEN
+        RAISE EXCEPTION
+            '40_gpu_expr_where FAILED: expected standalone GpuExpr decline, got %',
+            rejection_reason;
+    END IF;
+END $$;
+
 CREATE TEMP TABLE _expr_w1_on AS
 SELECT count(*) AS cnt FROM _expr_w1 WHERE val > 500.0;
 

@@ -706,11 +706,11 @@ fn adapter_postgis_gpu_spatial_strategy() {
 #[test]
 fn adapter_postgis_exact_gpu_only_surface() {
     let a = postgis::adapter();
-    let expected_allowlist: [&str; 0] = [];
+    let expected_allowlist = ["st_intersects"];
     let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
     assert_eq!(
         names, expected_allowlist,
-        "PostGIS adapter must expose only GPU-only/no-recheck functions",
+        "PostGIS adapter must expose only functions with planner-time GPU-only shape gates",
     );
 }
 
@@ -719,7 +719,6 @@ fn adapter_postgis_recheck_dependent_functions_denied() {
     let a = postgis::adapter();
     let names: HashSet<&str> = a.functions.iter().map(|f| f.name).collect();
     for blocked in [
-        "st_intersects",
         "st_contains",
         "st_within",
         "st_dwithin",

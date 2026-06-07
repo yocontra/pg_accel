@@ -318,6 +318,36 @@ fn hash_join_build_metadata_tracks_redundant_builds() {
 }
 
 #[test]
+fn hash_join_reuse_evidence_distinguishes_probe_batch_reuse_from_shared_inner_reuse() {
+    let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
+
+    assert!(!state.hash_join_reuses_build_across_probe_batches());
+    assert!(
+        !state.hash_join_shared_inner_reuse(),
+        "current hash join does not retain/share the build side across workers or executions"
+    );
+
+    state.record_hash_join_build_metadata(10, 8, 16);
+    state.record_hash_join_probe_metadata(4, 16, 32);
+    assert!(
+        !state.hash_join_reuses_build_across_probe_batches(),
+        "one probe batch has no cross-batch reuse evidence"
+    );
+
+    state.record_hash_join_probe_metadata(6, 24, 48);
+    assert!(
+        state.hash_join_reuses_build_across_probe_batches(),
+        "one build feeding multiple probe batches is positive per-node reuse evidence"
+    );
+
+    state.record_hash_join_build_metadata(12, 9, 32);
+    assert!(
+        !state.hash_join_reuses_build_across_probe_batches(),
+        "redundant inner rebuilds must not be reported as retained/reused build state"
+    );
+}
+
+#[test]
 fn hash_join_probe_metadata_tracks_capacity_and_result() {
     let mut state = make_state(AccelStrategy::GpuHashJoin, 256);
 

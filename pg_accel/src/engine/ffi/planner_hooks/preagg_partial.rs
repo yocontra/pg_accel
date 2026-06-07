@@ -38,10 +38,9 @@
 
 use pgrx::pg_sys::{self, CustomPath, List, NodeTag, Path, lappend};
 
-use crate::engine::cost;
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
-use crate::engine::gucs;
+use crate::engine::{cost, gucs, stats};
 
 use super::agg_common::{self, AggClass};
 use super::custom_scan;
@@ -314,14 +313,26 @@ pub(super) unsafe fn try_inject(
         let aggref_ref = unsafe { &*aggref };
 
         if !aggref_ref.aggdistinct.is_null() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!("pg_accel preagg_partial: aggregate has DISTINCT clause");
             return;
         }
         if !aggref_ref.aggorder.is_null() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!("pg_accel preagg_partial: aggregate has ORDER BY clause");
             return;
         }
         if !aggref_ref.aggfilter.is_null() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!("pg_accel preagg_partial: aggregate has FILTER clause");
             return;
         }
@@ -408,6 +419,10 @@ pub(super) unsafe fn try_inject(
     let has_group_by =
         group_key_info.is_some() || (has_group_keys && !root_ref.processed_groupClause.is_null());
     if has_group_by && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
+        stats::increment_planner_rejected(
+            super::RejectionReason::GroupedAvgNoGpuFinalize.stats_key(),
+            rows as u64,
+        );
         pgrx::debug1!(
             "pg_accel preagg_partial: grouped AVG rejected until grouped AVG executor mapping is fixed",
         );

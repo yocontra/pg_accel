@@ -71,6 +71,13 @@ pub struct DeviceLimits {
     /// Below this threshold, the GPU kernel overhead exceeds PG parallel's
     /// per-row cost, so we defer to standard PostGIS evaluation.
     pub gpu_spatial_min_vertices: usize,
+    /// Maximum estimated output fraction for heap-backed GPU spatial scans.
+    ///
+    /// Until spatial predicates can feed a GPU-resident aggregate/filter
+    /// pipeline, high-output predicates still yield most matching heap tuples
+    /// back through PostgreSQL. Those rows are left native even when the
+    /// point-in-ring kernel itself is compute-heavy.
+    pub gpu_spatial_max_output_fraction: f64,
     /// Minimum rows for GPU expression scan dispatch.
     /// Below this, PG's native executor with JIT is faster.
     pub gpu_expr_min_rows: usize,
@@ -396,6 +403,7 @@ impl DeviceLimits {
             // break-even. The work-product gate is the correct discriminator;
             // keep this only as a hard floor for truly degenerate polygons.
             gpu_spatial_min_vertices: cu_scale(100).clamp(32, 1_000),
+            gpu_spatial_max_output_fraction: 0.80,
             // GpuExpr scan: inline template filter avoids ExecQual overhead
             // but Custom Scan framing still adds per-row cost. Needs enough
             // rows to amortize compilation + scan overhead.
@@ -579,6 +587,7 @@ impl DeviceLimits {
             gpu_spatial_unsafe_band_max_rows: 150_000,
             gpu_spatial_unsafe_band_min_vertices: 100,
             gpu_spatial_min_vertices: 50_000,
+            gpu_spatial_max_output_fraction: 0.80,
             gpu_expr_min_rows: 250_000,
             gpu_hash_join_build_max_rows: 99_999,
             gpu_pipeline_fusion_min_rows: 10_000,

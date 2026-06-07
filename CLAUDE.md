@@ -12,6 +12,7 @@ just lint             # cargo clippy -- -D warnings
 just check            # cargo check --all-features
 just deny             # cargo deny check (licenses + advisories)
 just test             # cargo pgrx test matrix (PG17/18, PG19 when pgrx supports it)
+just coverage         # cargo-llvm-cov gate; writes LCOV/JSON/summary artifacts and fails below 90% lines
 just bench            # run benchmark suite against local pgrx PG
 
 just ci               # Full local CI: lint + test
@@ -19,7 +20,12 @@ just package          # cargo pgrx package (installable .so)
 just gpu-build        # cmake build for GPU kernels (AdaptiveCpp/SYCL)
 just gpu-test         # Run standalone GPU kernel tests (warm cache, quiet console)
 just gpu-test-cold-all # Cold-cache GPU run for JIT/archive/fork-safety
+just metal-stress     # M-series Metal stress gate with benchmark/cancellation artifacts
+just cuda-stress      # NVIDIA CUDA stress gate with benchmark/cancellation artifacts
+just release-verify   # Release verification matrix with provenance/audit/benchmark/stress artifacts
+just release-checklist-audit # Fails while release checklist evidence is placeholder/unchecked
 make clear-jit        # Clear AdaptiveCpp Metal SSCP JIT cache (~/.acpp/apps/global/jit-cache)
+cargo run -p pg_accel_bench -- fp64-calibrate --connection "host=localhost port=28817 dbname=postgres" # soft-fp64 multiplier sweep; omit --max-size for release evidence
 ```
 
 Treat noisy output as a bug. If a command emits repeated warning spam, fix the
@@ -224,6 +230,17 @@ every threshold is recomputed from the detected profile. Benchmarks that
 quote these values without calling `pg_accel_device_limits()` are reporting
 the no-GPU fallback, not what the current session is actually using.
 
+Benchmark threshold-matrix rows must carry dispatch/output evidence,
+correctness-diff evidence, and cache-mode evidence. H3 and raster expected
+winner rows require `--cache-mode both` release artifacts so warm speedup and
+bounded cold-start cost are checked together. H3 and raster rows use
+operation-specific lanes (lat/lng-to-cell, SRF expansion, map algebra, slope,
+reclass, deep algebra) rather than generic extension-function dispatch claims;
+small H3 grouped rows below the grouped-aggregate admission floor must remain
+native-decline cells with captured benchmark-threshold decline reason evidence.
+Every native-decline threshold-matrix row must carry an exact visible decline
+reason in the captured plan snippet and no pg_accel plan label.
+
 ### How `from_profile()` derives each limit
 
 The scale factor is `cu_scale` (in
@@ -243,6 +260,9 @@ Representative formulas (cite `pg_accel/src/engine/cost/device_limits.rs:<line>`
 - `gpu_sort_max_elements = (mem / 32 / 12).clamp(64_000, 4_000_000)` — `:241-245`
 - `gpu_join_max_output_rows = (100_000 × cus / 32).clamp(50_000, 500_000)` — `:252-256`
 - `gpu_spatial_min_vertices = cu_scale(100).clamp(32, 1_000)` — `:291`
+- `gpu_spatial_max_output_fraction = 0.80` — high-output heap-backed spatial
+  scans stay PostgreSQL-native until spatial predicates can feed a
+  GPU-resident aggregate/filter pipeline.
 - `gpu_expr_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000)` — `:295`
 - `gpu_hash_join_build_max_rows = (mem / 64 / 64).clamp(10_000, 1_000_000)` — `:298-302`
 - `reduce_f32_break_even_rows = cu_scale(25_000).clamp(4_000, 250_000)` — `:364`

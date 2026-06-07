@@ -32,6 +32,7 @@ set(KERNEL_SOURCES
     src/window.cpp
     src/fused_ops.cpp
     src/nested_loop_ineq.cpp
+    src/ooo_overlap.cpp
 )
 
 # Static library for embedding into the Rust extension.
@@ -50,6 +51,10 @@ target_include_directories(pgaccel_kernels_shared PUBLIC
 
 add_sycl_to_target(TARGET pgaccel_kernels)
 add_sycl_to_target(TARGET pgaccel_kernels_shared)
+# AdaptiveCpp's CMake helper applies RULE_LAUNCH_LINK to every SYCL target.
+# For a static library that "link" step is just ar/ranlib; routing it through
+# syclcc-launcher can make the launcher hand archive flags to clang++.
+set_target_properties(pgaccel_kernels PROPERTIES RULE_LAUNCH_LINK "")
 message(STATUS "pgaccel_kernels: SYCL (AdaptiveCpp) is the only supported backend; build fails without AdaptiveCpp")
 
 # -ffast-math enables vectorizer-friendly float math (reciprocal throughput,
@@ -145,6 +150,9 @@ target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
 add_executable(test_sort_bench test/test_sort_bench.cpp)
 target_link_libraries(test_sort_bench PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_ooo_overlap test/test_ooo_overlap.cpp)
+target_link_libraries(test_ooo_overlap PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_spatial_bench test/test_spatial_bench.cpp)
 target_link_libraries(test_spatial_bench PRIVATE pgaccel_kernels_shared)
 
@@ -194,6 +202,7 @@ add_test(NAME test_expr_templates COMMAND test_expr_templates)
 add_test(NAME test_oom_invariant COMMAND test_oom_invariant)
 add_test(NAME test_fp64_mul_probe COMMAND test_fp64_mul_probe)
 add_test(NAME test_nested_loop_ineq COMMAND test_nested_loop_ineq)
+add_test(NAME test_ooo_overlap COMMAND test_ooo_overlap)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h

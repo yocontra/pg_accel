@@ -126,6 +126,8 @@ struct BoundedLogPolicy {
 struct ResumeArtifactInventory {
     #[serde(rename = "completed_artifacts")]
     completed: Vec<String>,
+    #[serde(rename = "correctness_artifacts")]
+    correctness: Vec<String>,
     #[serde(rename = "pre_risk_artifacts")]
     pre_risk: Vec<String>,
     #[serde(rename = "plan_artifacts")]
@@ -231,6 +233,16 @@ impl ArtifactWriter {
         path.is_file().then(|| self.relative_display_path(&path))
     }
 
+    #[must_use]
+    pub fn existing_correctness_diff_artifact(
+        &self,
+        workload: &str,
+        rows: usize,
+    ) -> Option<String> {
+        let path = self.correctness_diff_path(workload, rows);
+        path.is_file().then(|| self.relative_display_path(&path))
+    }
+
     pub fn capture_log_tails(&self, label: &str) -> io::Result<Vec<String>> {
         let dir = self.root.join("log_tails").join(sanitize_label(label));
         fs::create_dir_all(&dir)?;
@@ -319,10 +331,13 @@ impl ArtifactWriter {
         if crashes.is_empty() {
             md.push_str("No benchmark crashes recorded.\n");
         } else {
-            md.push_str("| Workload | Rows | Error | Plan Snippet | Log Tails | Repro |\n");
-            md.push_str("|---|---:|---|---|---|---|\n");
+            md.push_str(
+                "| Workload | Rows | Error | Plan Snippet | Correctness Diff | Log Tails | Repro |\n",
+            );
+            md.push_str("|---|---:|---|---|---|---|---|\n");
             for crash in crashes {
                 let plan = crash.plan_snippet_artifact.as_deref().unwrap_or("-");
+                let correctness = crash.correctness_diff_artifact.as_deref().unwrap_or("-");
                 let logs = if crash.log_tail_artifacts.is_empty() {
                     "-".to_owned()
                 } else {
@@ -331,11 +346,12 @@ impl ArtifactWriter {
                 let repro = crash.repro_command.as_deref().unwrap_or("-");
                 let _ = writeln!(
                     md,
-                    "| {} | {} | {} | {} | {} | `{}` |",
+                    "| {} | {} | {} | {} | {} | {} | `{}` |",
                     markdown_cell(&crash.workload),
                     crash.rows,
                     markdown_cell(&crash.error),
                     markdown_cell(plan),
+                    markdown_cell(correctness),
                     markdown_cell(&logs),
                     markdown_cell(repro),
                 );
@@ -396,6 +412,21 @@ impl ArtifactWriter {
         Ok(())
     }
 
+    pub fn write_correctness_diff<T: Serialize + ?Sized>(
+        &self,
+        workload: &str,
+        rows: usize,
+        diff: &T,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = self.correctness_diff_path(workload, rows);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_json(&path, diff)?;
+        self.write_artifact_index()?;
+        Ok(path)
+    }
+
     fn write_manifest(&self) -> io::Result<()> {
         let manifest = Manifest {
             schema_version: ARTIFACT_SCHEMA_VERSION,
@@ -447,6 +478,10 @@ impl ArtifactWriter {
         );
         readme.push_str("- `report.json`, `report.md`, `report.csv`: rendered benchmark report.\n");
         readme.push_str("- `crashes.json`, `crashes.md`: crash inventory and repro commands.\n");
+        readme.push_str(
+            "- `correctness_diffs/`: bounded accel-vs-baseline result diff summaries \
+             captured before timing.\n",
+        );
         readme.push_str("- `guc_snapshot.json`: PostgreSQL settings observed by the harness.\n");
         readme.push_str(
             "- `provenance.json`: pg_config, SQL metadata, and extension binary hashes.\n",
@@ -540,6 +575,12 @@ impl ArtifactWriter {
     fn pre_risk_context_path(&self, workload: &str, rows: usize) -> PathBuf {
         self.root
             .join("pre_risk_contexts")
+            .join(format!("{}-{rows}.json", sanitize_label(workload)))
+    }
+
+    fn correctness_diff_path(&self, workload: &str, rows: usize) -> PathBuf {
+        self.root
+            .join("correctness_diffs")
             .join(format!("{}-{rows}.json", sanitize_label(workload)))
     }
 
@@ -684,6 +725,7 @@ fn resume_artifact_inventory(entries: &[ArtifactIndexEntry]) -> ResumeArtifactIn
                 "report.json" | "report.md" | "report.csv" | "guc_snapshot.json"
             )
         }),
+        correctness: inventory_paths(entries, |path| path.starts_with("correctness_diffs/")),
         pre_risk: inventory_paths(entries, |path| path.starts_with("pre_risk_contexts/")),
         plan: inventory_paths(entries, |path| path.starts_with("plan_snippets/")),
         crash: inventory_paths(entries, |path| {
@@ -939,6 +981,7 @@ mod tests {
         assert!(readme.contains(ARTIFACT_INDEX_JSON));
         assert!(readme.contains(ARTIFACT_CHECKLIST_MD));
         assert!(readme.contains(RESUME_AUDIT_MANIFEST_JSON));
+        assert!(readme.contains("correctness_diffs/"));
         assert!(readme.contains("pre_risk_contexts/"));
 
         let resume_text = fs::read_to_string(artifacts.path().join(RESUME_AUDIT_MANIFEST_JSON))
@@ -985,6 +1028,10 @@ mod tests {
             resume["inventory"]["crash_artifacts"],
             serde_json::json!(["crashes.json", "crashes.md"])
         );
+        assert_eq!(
+            resume["inventory"]["correctness_artifacts"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -1025,6 +1072,17 @@ mod tests {
             .write_pre_risk_context("hash/join", 100, &context)
             .expect("pre-risk context should be written");
         writer
+            .write_correctness_diff(
+                "hash/join",
+                100,
+                &serde_json::json!({
+                    "status": "pass",
+                    "accel_minus_baseline_count": 0,
+                    "baseline_minus_accel_count": 0
+                }),
+            )
+            .expect("correctness diff should be written");
+        writer
             .capture_log_tails("run-complete")
             .expect("log tail should be captured");
 
@@ -1052,6 +1110,7 @@ mod tests {
         assert!(paths.contains(&"crashes.md"));
         assert!(paths.contains(&"plan_snippets/hash-join-100.txt"));
         assert!(paths.contains(&"pre_risk_contexts/hash-join-100.json"));
+        assert!(paths.contains(&"correctness_diffs/hash-join-100.json"));
         assert!(paths.contains(&"log_tails/run-complete/00-pg_accel_otel.jsonl.tail"));
         assert!(paths.contains(&"log_tails/run-complete/00-pg_accel_otel.jsonl.delta"));
         assert!(!paths.contains(&ARTIFACT_INDEX_JSON));
@@ -1077,12 +1136,43 @@ mod tests {
         assert!(checklist.contains("| [x] | `resume_audit_manifest.json` |"));
         assert!(checklist.contains("| [x] | `plan_snippets/hash-join-100.txt` |"));
         assert!(checklist.contains("| [x] | `pre_risk_contexts/hash-join-100.json` |"));
+        assert!(checklist.contains("| [x] | `correctness_diffs/hash-join-100.json` |"));
         assert!(checklist.contains("not listed in their own file table"));
 
         assert_eq!(
             writer.existing_pre_risk_context_artifact("hash/join", 100),
             Some("pre_risk_contexts/hash-join-100.json".to_owned())
         );
+        assert_eq!(
+            writer.existing_correctness_diff_artifact("hash/join", 100),
+            Some("correctness_diffs/hash-join-100.json".to_owned())
+        );
+    }
+
+    #[test]
+    fn crashes_markdown_links_correctness_diff_artifact() {
+        let artifacts = TestDir::new("crash_correctness");
+        let writer = ArtifactWriter::new(artifacts.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+
+        writer
+            .write_crashes(&[CrashedScale {
+                workload: "bad_correctness".to_owned(),
+                rows: 100,
+                error: "correctness diff failed".to_owned(),
+                repro_command: None,
+                plan_snippet_artifact: None,
+                correctness_diff_artifact: Some(
+                    "correctness_diffs/bad-correctness-100.json".to_owned(),
+                ),
+                log_tail_artifacts: Vec::new(),
+            }])
+            .expect("crashes should be written");
+
+        let markdown =
+            fs::read_to_string(artifacts.path().join("crashes.md")).expect("crashes markdown");
+        assert!(markdown.contains("Correctness Diff"));
+        assert!(markdown.contains("correctness_diffs/bad-correctness-100.json"));
     }
 
     #[test]
@@ -1166,6 +1256,11 @@ mod tests {
                 modified_unix_seconds: 1,
             },
             ArtifactIndexEntry {
+                path: "correctness_diffs/hash-join-100.json".to_owned(),
+                size_bytes: 1,
+                modified_unix_seconds: 1,
+            },
+            ArtifactIndexEntry {
                 path: "log_tails/crash-002/00-postgres.log.delta".to_owned(),
                 size_bytes: 1,
                 modified_unix_seconds: 1,
@@ -1199,6 +1294,10 @@ mod tests {
 
         let inventory = resume_artifact_inventory(&entries);
         assert_eq!(inventory.completed, vec!["report.json"]);
+        assert_eq!(
+            inventory.correctness,
+            vec!["correctness_diffs/hash-join-100.json"]
+        );
         assert_eq!(
             inventory.pre_risk,
             vec!["pre_risk_contexts/hash-join-100.json"]

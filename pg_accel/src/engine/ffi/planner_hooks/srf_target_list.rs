@@ -78,10 +78,10 @@
 //! output tuple per expanded row preserving non-SRF passthrough cols.
 //!
 //! **Limitation (escalated per ban #9)**: multi-SRF target lists like
-//! `SELECT srf1(c), srf2(c) FROM t` use cartesian product semantics
-//! per `nodeProjectSet.c` — a separate executor design. The single-SRF
-//! case is the primary target and what the executor + hook currently
-//! support; multi-SRF queries fall through to native PG ProjectSet.
+//! `SELECT srf1(c), srf2(c) FROM t` use ProjectSet lockstep semantics
+//! with NULL padding per `nodeProjectSet.c` — a separate executor design.
+//! The single-SRF case is the primary target and what the executor + hook
+//! currently support; multi-SRF queries fall through to native PG ProjectSet.
 
 use std::ffi::c_int;
 
@@ -345,12 +345,16 @@ unsafe fn wrap_projectset_path(
                 }
                 srf_count += 1;
                 if srf_count > 1 {
-                    // Multi-SRF target list — cartesian product semantics
-                    // (see nodeProjectSet.c). Per ban #9, escalate cleanly.
+                    // Multi-SRF target list — ProjectSet lockstep/NULL-padding
+                    // semantics (see nodeProjectSet.c). Per ban #9, decline.
+                    stats::increment_planner_rejected(
+                        super::RejectionReason::SrfTlistMultiSrfSemantics.stats_key(),
+                        unsafe { (*projectset).path.rows.max(0.0) as u64 },
+                    );
                     pgrx::debug1!(
                         "pg_accel: srf_target_list: multi-SRF target list (>1 SRF) \
-                         not supported — cartesian product semantics need a separate \
-                         executor design; declining this ProjectSetPath"
+                         not supported — ProjectSet lockstep/NULL-padding semantics \
+                         need a separate executor design; declining this ProjectSetPath"
                     );
                     return false;
                 }
@@ -524,7 +528,10 @@ unsafe fn wrap_projectset_path(
             projset_rows,
             SRF_TLIST_MAX_CPU_OUTPUT_ROWS,
         );
-        stats::increment_planner_rejected("srf_tlist_cpu_output_too_large", projset_rows as u64);
+        stats::increment_planner_rejected(
+            super::RejectionReason::SrfTlistCpuOutputTooLarge.stats_key(),
+            projset_rows as u64,
+        );
         return false;
     }
 
@@ -982,6 +989,7 @@ mod tests {
              ANALYZE _srf_tlist_large",
         )
         .expect("setup ok");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
 
         let plan = explain_text(
             "EXPLAIN (FORMAT TEXT) SELECT id, h3_grid_disk(cell, 1) \
@@ -998,6 +1006,57 @@ mod tests {
         assert!(
             plan.contains("ProjectSet"),
             "Expected native ProjectSet for large variable-length SRF target-list scan; got:\n{plan}",
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("large target-list SRF decline should record a reason");
+        assert_eq!(
+            rejection, "srf_tlist_cpu_output_too_large",
+            "large target-list SRF should expose the CPU-output cap; plan:\n{plan}"
+        );
+    }
+
+    /// Multiple SRFs in the target list need PostgreSQL ProjectSet's
+    /// lockstep/NULL-padding semantics. Keep the shape native until the
+    /// executor implements that contract.
+    #[pg_test]
+    fn pg_test_srf_tlist_multi_srf_records_semantics_decline() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+        Spi::run(
+            "CREATE TEMP TABLE _srf_tlist_multi(id int, cell h3index); \
+             INSERT INTO _srf_tlist_multi VALUES (1, '8928308280fffff'::h3index); \
+             ANALYZE _srf_tlist_multi",
+        )
+        .expect("setup ok");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "EXPLAIN (FORMAT TEXT) \
+             SELECT h3_grid_disk(cell, 1), h3_grid_disk(cell, 2) \
+             FROM _srf_tlist_multi",
+        );
+
+        assert!(
+            !plan.is_empty(),
+            "EXPLAIN returned no rows for multi-SRF test"
+        );
+        assert!(
+            !plan.contains("GpuAccelSrfTargetList"),
+            "Expected multi-SRF target list to stay native; got:\n{plan}",
+        );
+        assert!(
+            plan.contains("ProjectSet"),
+            "Expected native ProjectSet for multi-SRF target list; got:\n{plan}",
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("multi-SRF target-list decline should record a reason");
+        assert_eq!(
+            rejection, "srf_tlist_multi_srf_semantics",
+            "multi-SRF target list should expose the ProjectSet semantics gap; plan:\n{plan}"
         );
     }
 

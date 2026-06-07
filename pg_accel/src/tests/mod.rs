@@ -9,6 +9,30 @@
 mod tests {
     use pgrx::prelude::*;
 
+    fn explain_text(query: &str) -> String {
+        Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(&format!("EXPLAIN (FORMAT TEXT) {query}"), None, &[])
+                .expect("EXPLAIN should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        })
+    }
+
+    fn ensure_extension(name: &str) -> bool {
+        let create_sql = format!("CREATE EXTENSION IF NOT EXISTS {name} CASCADE");
+        if Spi::run(&create_sql).is_err() {
+            return false;
+        }
+        let q = format!("SELECT count(*) FROM pg_extension WHERE extname = '{name}'");
+        Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
+    }
+
     // =========================================================================
     // 1. Extension loads without crash
     // =========================================================================
@@ -445,6 +469,229 @@ mod tests {
             (avg - 50.5).abs() < 0.01,
             "avg(1..100) should be 50.5, got {avg}"
         );
+    }
+
+    #[pg_test]
+    fn test_grouped_avg_records_finalize_decline() {
+        Spi::run(
+            "CREATE TEMP TABLE t_grouped_avg_decline (\
+                g int4 NOT NULL, \
+                v float8 NOT NULL\
+             )",
+        )
+        .expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_grouped_avg_decline \
+             SELECT g % 64, g::float8 \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("INSERT");
+        Spi::run("ANALYZE t_grouped_avg_decline").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan_text = explain_text("SELECT g, avg(v) FROM t_grouped_avg_decline GROUP BY g");
+
+        assert!(
+            !plan_text.contains("Strategy: GpuAgg")
+                && !plan_text.contains("Custom Scan (GpuAccelAgg)"),
+            "grouped AVG must stay native until finalize-mode GPU hashagg emits averages; got:\n{plan_text}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("grouped AVG finalize decline should record a reason");
+        assert_eq!(
+            rejection, "grouped_avg_no_gpu_finalize",
+            "grouped AVG should expose the finalize gap; plan:\n{plan_text}"
+        );
+    }
+
+    #[pg_test]
+    fn test_non_float_avg_variants_decline_gpu_agg_plan() {
+        Spi::run(
+            "CREATE TEMP TABLE t_avg_variants (\
+                i4 int4 NOT NULL, \
+                n numeric NOT NULL, \
+                d interval NOT NULL\
+             )",
+        )
+        .expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_avg_variants \
+             SELECT g::int4, g::numeric, make_interval(secs => g::double precision) \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("INSERT");
+        Spi::run("ANALYZE t_avg_variants").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        for (query, expected_reason) in [
+            (
+                "SELECT avg(i4) FROM t_avg_variants",
+                "avg_unsupported_input_type",
+            ),
+            (
+                "SELECT avg(n) FROM t_avg_variants",
+                "numeric_agg_no_gpu_kernel",
+            ),
+            (
+                "SELECT avg(d) FROM t_avg_variants",
+                "unsupported_interval_type",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan_text = explain_text(query);
+
+            assert!(
+                !plan_text.contains("Strategy: GpuAgg")
+                    && !plan_text.contains("Custom Scan (GpuAccelAgg)"),
+                "non-float AVG must stay on PostgreSQL native accumulator semantics; got:\n{plan_text}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("non-float AVG should record a decline for {query}"));
+            assert_eq!(
+                rejection, expected_reason,
+                "non-float AVG should expose the exact unsupported accumulator semantics; plan:\n{plan_text}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_numeric_aggregate_variants_decline_gpu_accumulator_plan() {
+        Spi::run("CREATE TEMP TABLE t_numeric_agg (n numeric NOT NULL)").expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_numeric_agg \
+             SELECT (9007199254740993::numeric + g::numeric / 1000) \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("INSERT");
+        Spi::run("ANALYZE t_numeric_agg").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        for query in [
+            "SELECT sum(n) FROM t_numeric_agg",
+            "SELECT avg(n) FROM t_numeric_agg",
+            "SELECT min(n) FROM t_numeric_agg",
+            "SELECT max(n) FROM t_numeric_agg",
+            "SELECT stddev(n) FROM t_numeric_agg",
+            "SELECT var_samp(n) FROM t_numeric_agg",
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan_text = explain_text(query);
+
+            assert!(
+                !plan_text.contains("Strategy: GpuAgg")
+                    && !plan_text.contains("Custom Scan (GpuAccelAgg)"),
+                "NUMERIC aggregate must stay on PostgreSQL native accumulator semantics; got:\n{plan_text}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| {
+                        panic!("NUMERIC aggregate should record a decline for {query}")
+                    });
+            assert_eq!(
+                rejection, "numeric_agg_no_gpu_kernel",
+                "NUMERIC aggregate should expose the multi-limb accumulator gap; plan:\n{plan_text}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_aggregate_semantic_modifiers_record_decline() {
+        Spi::run(
+            "CREATE TEMP TABLE t_agg_semantic_decline (\
+                id int4 NOT NULL, \
+                v float8 NOT NULL\
+             )",
+        )
+        .expect("CREATE TABLE");
+        Spi::run(
+            "INSERT INTO t_agg_semantic_decline \
+             SELECT g::int4, g::float8 \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("INSERT");
+        Spi::run("ANALYZE t_agg_semantic_decline").expect("ANALYZE");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        for query in [
+            "SELECT sum(v) FILTER (WHERE id > 0) FROM t_agg_semantic_decline",
+            "SELECT count(DISTINCT id) FROM t_agg_semantic_decline",
+            "SELECT sum(v ORDER BY id) FROM t_agg_semantic_decline",
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan_text = explain_text(query);
+
+            assert!(
+                !plan_text.contains("Strategy: GpuAgg")
+                    && !plan_text.contains("Custom Scan (GpuAccelAgg)"),
+                "aggregate semantic modifier must stay native until its full semantics are implemented; got:\n{plan_text}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .expect("semantic aggregate modifier should record a reason");
+            assert_eq!(
+                rejection, "agg_semantic_modifier_no_gpu_kernel",
+                "aggregate semantic modifier should expose the missing semantic lane; plan:\n{plan_text}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_setop_and_recursiveunion_decline_gpu_paths() {
+        Spi::run("CREATE TEMP TABLE t_setop_l (x int4 NOT NULL)").expect("CREATE left");
+        Spi::run("CREATE TEMP TABLE t_setop_r (x int4 NOT NULL)").expect("CREATE right");
+        Spi::run("INSERT INTO t_setop_l SELECT g FROM generate_series(1, 2000) g")
+            .expect("INSERT left");
+        Spi::run("INSERT INTO t_setop_r SELECT g FROM generate_series(1000, 3000) g")
+            .expect("INSERT right");
+        Spi::run("ANALYZE t_setop_l").expect("ANALYZE left");
+        Spi::run("ANALYZE t_setop_r").expect("ANALYZE right");
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        let queries = [
+            (
+                "intersect",
+                "SELECT x FROM t_setop_l INTERSECT SELECT x FROM t_setop_r",
+                "setop_no_gpu_kernel",
+            ),
+            (
+                "recursive",
+                "WITH RECURSIVE r(n) AS ( \
+                    VALUES (1) \
+                    UNION ALL \
+                    SELECT n + 1 FROM r WHERE n < 32 \
+                 ) SELECT n FROM r",
+                "recursiveunion_no_gpu_kernel",
+            ),
+        ];
+
+        for (label, query, expected_reason) in queries {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan_text = explain_text(query);
+
+            assert!(
+                !plan_text.contains("Custom Scan"),
+                "{label} should remain a PostgreSQL-native SetOp/RecursiveUnion plan; got:\n{plan_text}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} should record an exact planner decline"));
+            assert_eq!(
+                rejection, expected_reason,
+                "{label} should expose the missing SetOp/RecursiveUnion GPU lane; plan:\n{plan_text}"
+            );
+        }
     }
 
     // =========================================================================
@@ -1001,11 +1248,11 @@ mod tests {
         // needing PostGIS installed.
         let a = crate::adapters::postgis::adapter();
         assert_eq!(a.name, "postgis");
-        let expected_allowlist: [&str; 0] = [];
+        let expected_allowlist = ["st_intersects"];
         let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
         assert_eq!(
             names, expected_allowlist,
-            "PostGIS adapter must expose only GPU-only/no-recheck functions",
+            "PostGIS adapter must expose only functions with planner-time GPU-only shape gates",
         );
 
         let expected = expected_allowlist.len();
@@ -1023,7 +1270,6 @@ mod tests {
         assert_eq!(gpu_count, expected, "all entries are GPU spatial");
 
         for blocked in [
-            "st_intersects",
             "st_contains",
             "st_within",
             "st_dwithin",
@@ -1037,10 +1283,13 @@ mod tests {
             "st_touches",
             "st_crosses",
             "st_overlaps",
+            "st_buffer",
+            "st_union",
+            "st_intersection",
         ] {
             assert!(
                 !a.functions.iter().any(|f| f.name == blocked),
-                "{blocked} must not be registered without planner-time shape gates",
+                "{blocked} must not be registered without a production GPU-only shape gate",
             );
         }
     }
@@ -1103,14 +1352,7 @@ mod tests {
 
     #[pg_test]
     fn test_postgis_oid_resolution_when_installed() {
-        // Check if PostGIS is installed; if so, verify OID resolution.
-        let has_postgis =
-            Spi::get_one::<i64>("SELECT count(*) FROM pg_extension WHERE extname = 'postgis'")
-                .expect("query ok")
-                .expect("not null");
-
-        if has_postgis == 0 {
-            // PostGIS not installed — skip gracefully.
+        if !ensure_extension("postgis") {
             return;
         }
 
@@ -1119,11 +1361,14 @@ mod tests {
 
         let reg = crate::engine::registry::global_registry();
 
-        // PostGIS vector predicates are intentionally unregistered until
-        // planner-time geometry subtype gates exist.
+        // ST_Intersects is registered, but rel_pathlist keeps scan admission
+        // closed until exact fp64/PostGIS semantics are proved.
         let oid = Spi::get_one::<i64>(
             "SELECT oid::bigint FROM pg_proc WHERE proname = 'st_intersects' \
-             AND pronamespace = 'public'::regnamespace LIMIT 1",
+             AND pronamespace = 'public'::regnamespace \
+             AND proargtypes::text = (to_regtype('public.geometry')::oid::text || ' ' || \
+                                      to_regtype('public.geometry')::oid::text) \
+             LIMIT 1",
         )
         .expect("query ok");
 
@@ -1131,10 +1376,676 @@ mod tests {
             let pg_oid = pgrx::pg_sys::Oid::from(oid_val as u32);
             let entry = reg.lookup(pg_oid);
             assert!(
-                entry.is_none(),
-                "st_intersects (OID {oid_val}) must stay unregistered until GPU-only shape gates exist"
+                entry.is_some(),
+                "st_intersects geometry/geometry (OID {oid_val}) should be registered behind the point/polygon shape gate"
+            );
+            assert_eq!(
+                entry.expect("entry present").strategy,
+                crate::engine::registry::AccelStrategy::GpuSpatial,
+                "st_intersects geometry/geometry should use GpuSpatial"
             );
         }
+    }
+
+    #[pg_test]
+    fn test_postgis_simple_spatial_filter_records_native_decline() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "CREATE TEMP TABLE _postgis_spatial_decline AS \
+             SELECT i, ST_SetSRID(ST_MakePoint(i::float8 / 10.0, i::float8 / 10.0), 4326) AS geom \
+             FROM generate_series(1, 100) AS g(i); \
+             ANALYZE _postgis_spatial_decline",
+        )
+        .expect("spatial fixture should be created");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT count(*) FROM _postgis_spatial_decline \
+             WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry)",
+        );
+
+        assert!(
+            !plan.contains("GpuAccelScan") && !plan.contains("Strategy: GpuSpatial"),
+            "simple PostGIS predicate should stay native until shape gates land:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("simple PostGIS predicate should record a planner decline");
+        assert_eq!(
+            rejection, "postgis_intersects_unsupported_shape",
+            "ST_Intersects should expose the closed exact-semantics gate before spatial cost gates; plan:\n{plan}"
+        );
+    }
+
+    #[pg_test]
+    fn test_postgis_intersects_shape_gate_records_unsupported_shapes() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             CREATE TEMP TABLE _postgis_intersects_generic AS \
+               SELECT i, ST_SetSRID(ST_MakePoint(i::float8, i::float8), 4326)::geometry AS geom \
+               FROM generate_series(1, 10) AS g(i); \
+             CREATE TEMP TABLE _postgis_intersects_line(\
+               id int4, geom geometry(LineString, 4326) NOT NULL); \
+             INSERT INTO _postgis_intersects_line \
+               SELECT i, ST_SetSRID(ST_MakeLine(\
+                 ST_MakePoint(i::float8, i::float8), \
+                 ST_MakePoint(i::float8 + 1.0, i::float8 + 1.0)), 4326)::geometry(LineString, 4326) \
+               FROM generate_series(1, 10) AS g(i); \
+             CREATE TEMP TABLE _postgis_intersects_dynamic(\
+               id int4, geom geometry(Point, 4326) NOT NULL, poly geometry(Polygon, 4326) NOT NULL); \
+             INSERT INTO _postgis_intersects_dynamic \
+               SELECT i, \
+                      ST_SetSRID(ST_MakePoint(i::float8, i::float8), 4326)::geometry(Point, 4326), \
+                      'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry(Polygon, 4326) \
+               FROM generate_series(1, 10) AS g(i); \
+             CREATE TEMP TABLE _postgis_intersects_unknown_srid(\
+               id int4, geom geometry(Point) NOT NULL); \
+             INSERT INTO _postgis_intersects_unknown_srid \
+               SELECT i, ST_SetSRID(ST_MakePoint(i::float8, i::float8), 4326)::geometry(Point) \
+               FROM generate_series(1, 10) AS g(i); \
+             ANALYZE _postgis_intersects_generic; \
+             ANALYZE _postgis_intersects_line; \
+             ANALYZE _postgis_intersects_dynamic; \
+             ANALYZE _postgis_intersects_unknown_srid",
+        )
+        .expect("PostGIS ST_Intersects shape-gate fixtures should be created");
+
+        for (label, sql) in [
+            (
+                "generic geometry point column",
+                "SELECT count(*) FROM _postgis_intersects_generic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "LineString column",
+                "SELECT count(*) FROM _postgis_intersects_line \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "unknown-SRID Point typmod",
+                "SELECT count(*) FROM _postgis_intersects_unknown_srid \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "missing-SRID polygon constant",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "wrong-SRID polygon constant",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=3857;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "dynamic polygon argument",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, poly)",
+            ),
+            (
+                "polygon with hole",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0),(2 2,18 2,18 18,2 18,2 2))'::geometry)",
+            ),
+            (
+                "self-intersecting polygon",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,20 20,0 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "extra top-level AND qual",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
+                   AND id < 0",
+            ),
+            (
+                "OR wrapper",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
+                   OR id < 0",
+            ),
+            (
+                "negated predicate",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE NOT ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+            ),
+            (
+                "boolean-test wrapper",
+                "SELECT count(*) FROM _postgis_intersects_dynamic \
+                 WHERE ST_Intersects(geom, \
+                   'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
+                   IS TRUE",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(sql);
+
+            assert!(
+                !plan.contains("GpuAccelScan")
+                    && !plan.contains("Strategy: GpuSpatial")
+                    && !plan.contains("Accel Strategy: GpuSpatial"),
+                "{label} ST_Intersects shape should stay native:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} should record a planner decline"));
+            assert_eq!(
+                rejection, "postgis_intersects_unsupported_shape",
+                "{label} should expose the ST_Intersects shape gate; plan:\n{plan}"
+            );
+        }
+
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+        let supported_shape_sql = "SELECT count(*) FROM _postgis_intersects_dynamic \
+             WHERE ST_Intersects(geom, \
+               'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)";
+        let plan = explain_text(supported_shape_sql);
+        assert!(
+            !plan.contains("GpuAccelScan")
+                && !plan.contains("Strategy: GpuSpatial")
+                && !plan.contains("Accel Strategy: GpuSpatial"),
+            "structurally covered ST_Intersects must stay native until exact fp64 semantics land:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("structurally covered ST_Intersects should record a planner decline");
+        assert_eq!(
+            rejection, "postgis_intersects_unsupported_shape",
+            "structurally covered ST_Intersects should expose the native-decline gate; plan:\n{plan}"
+        );
+    }
+
+    #[pg_test]
+    fn test_postgis_contains_within_filters_record_native_decline() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "CREATE TEMP TABLE _postgis_contains_within_decline AS \
+             SELECT i, ST_SetSRID(ST_MakePoint(i::float8 / 10.0, i::float8 / 10.0), 4326) AS geom \
+             FROM generate_series(1, 100) AS g(i); \
+             CREATE DOMAIN _pgaccel_postgis_bool_domain AS boolean; \
+             ANALYZE _postgis_contains_within_decline",
+        )
+        .expect("contains/within fixture should be created");
+
+        for (label, sql) in [
+            (
+                "ST_Contains",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE ST_Contains(\
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry, \
+                   geom)",
+            ),
+            (
+                "ST_Within",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE ST_Within(\
+                   geom, \
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry)",
+            ),
+            (
+                "ST_Contains boolean test",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE ST_Contains(\
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry, \
+                   geom) IS TRUE",
+            ),
+            (
+                "ST_Within CASE wrapper with scalar constants",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE CASE WHEN i > 0 THEN ST_Within(\
+                   geom, \
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry) \
+                   ELSE false END",
+            ),
+            (
+                "ST_Contains domain boolean wrapper",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE (ST_Contains(\
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry, \
+                   geom))::_pgaccel_postgis_bool_domain",
+            ),
+            (
+                "ST_Contains constant typmod wrapper",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE ST_Contains(\
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry(Polygon,4326), \
+                   geom)",
+            ),
+            (
+                "ST_Contains argument relabel wrapper",
+                "SELECT count(*) FROM _postgis_contains_within_decline \
+                 WHERE ST_Contains(\
+                   'SRID=4326;POLYGON((0 0,0 1,1 1,1 0,0 0))'::geometry, \
+                   geom::geometry)",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(sql);
+
+            assert!(
+                !plan.contains("GpuAccelScan")
+                    && !plan.contains("Strategy: GpuSpatial")
+                    && !plan.contains("Accel Strategy: GpuSpatial"),
+                "{label} should stay native until exact predicate semantics are GPU-covered:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} should record a planner decline"));
+            assert_eq!(
+                rejection, "spatial_vertices_below_break_even",
+                "{label} should expose the spatial predicate decline path; plan:\n{plan}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_postgis_distance_filter_records_no_gpu_kernel_decline() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "CREATE TEMP TABLE _postgis_distance_decline AS \
+             SELECT i, ST_SetSRID(ST_MakePoint(i::float8 / 10.0, i::float8 / 10.0), 4326) AS geom \
+             FROM generate_series(1, 100) AS g(i); \
+             ANALYZE _postgis_distance_decline",
+        )
+        .expect("distance fixture should be created");
+
+        for (label, sql) in [
+            (
+                "direct ST_Distance predicate",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry) < 1.0",
+            ),
+            (
+                "ST_Distance boolean test",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE (ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry) < 1.0) \
+                 IS TRUE",
+            ),
+            (
+                "ST_Distance CASE wrapper",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE CASE WHEN i > 0 THEN \
+                   ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry) < 1.0 \
+                   ELSE false END",
+            ),
+            (
+                "ST_Distance COALESCE wrapper",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE COALESCE(\
+                   ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry) < 1.0, \
+                   false)",
+            ),
+            (
+                "ST_Distance MinMax wrapper",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE GREATEST(\
+                   ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry), \
+                   0.0) < 1.0",
+            ),
+            (
+                "ST_Distance scalar-array wrapper",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry) \
+                   = ANY(ARRAY[0.0, 1.0])",
+            ),
+            (
+                "ST_Distance CoerceViaIO wrapper",
+                "SELECT count(*) FROM _postgis_distance_decline \
+                 WHERE ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry)::text \
+                   <> 'NaN'",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(sql);
+
+            assert!(
+                !plan.contains("GpuAccelScan") && !plan.contains("Strategy: GpuSpatial"),
+                "{label} should stay native until a distance kernel lands:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} should record a planner decline"));
+            assert_eq!(
+                rejection, "postgis_distance_no_gpu_kernel",
+                "{label} should expose the distance-kernel gap; plan:\n{plan}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_postgis_constructor_filter_records_output_protocol_decline() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "CREATE TEMP TABLE _postgis_constructor_decline AS \
+             SELECT i, ST_SetSRID(ST_MakePoint(i::float8 / 10.0, i::float8 / 10.0), 4326) AS geom \
+             FROM generate_series(1, 100) AS g(i); \
+             ANALYZE _postgis_constructor_decline",
+        )
+        .expect("constructor fixture should be created");
+
+        for (label, sql) in [
+            (
+                "constructor inside measurement predicate",
+                "SELECT count(*) FROM _postgis_constructor_decline \
+                 WHERE ST_Area(ST_Buffer(geom, 0.25)) > 0.0",
+            ),
+            (
+                "constructor NULL-test predicate",
+                "SELECT count(*) FROM _postgis_constructor_decline \
+                 WHERE ST_Buffer(geom, 0.25) IS NOT NULL",
+            ),
+            (
+                "constructor CASE wrapper",
+                "SELECT count(*) FROM _postgis_constructor_decline \
+                 WHERE CASE WHEN i > 0 THEN ST_Buffer(geom, 0.25) IS NOT NULL \
+                   ELSE false END",
+            ),
+            (
+                "constructor array wrapper",
+                "SELECT count(*) FROM _postgis_constructor_decline \
+                 WHERE ARRAY[ST_Buffer(geom, 0.25)] IS NOT NULL",
+            ),
+            (
+                "constructor geometry-array argument",
+                "SELECT count(*) FROM _postgis_constructor_decline \
+                 WHERE ST_Union(ARRAY[geom]) IS NOT NULL",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(sql);
+
+            assert!(
+                !plan.contains("GpuAccelScan") && !plan.contains("Strategy: GpuSpatial"),
+                "{label} should stay native until variable-size GPU output lands:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} should record a planner decline"));
+            assert_eq!(
+                rejection, "postgis_geometry_constructor_no_gpu_output_protocol",
+                "{label} should expose the output protocol gap; plan:\n{plan}"
+            );
+        }
+    }
+
+    #[pg_test]
+    fn test_shadowed_postgis_names_do_not_record_declines() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "CREATE TEMP TABLE _postgis_shadow_decline AS \
+             SELECT i, ST_SetSRID(ST_MakePoint(i::float8 / 10.0, i::float8 / 10.0), 4326) AS geom \
+             FROM generate_series(1, 100) AS g(i); \
+             CREATE SCHEMA _pgaccel_shadow_postgis; \
+             CREATE FUNCTION _pgaccel_shadow_postgis.st_distance(public.geometry, public.geometry) \
+             RETURNS double precision \
+             LANGUAGE sql IMMUTABLE \
+             AS $$ SELECT 0.0::double precision $$; \
+             ANALYZE _postgis_shadow_decline",
+        )
+        .expect("shadow PostGIS-name fixture should be created");
+        Spi::run(
+            "SET search_path = _pgaccel_shadow_postgis, public; SELECT pg_accel_reset_stats()",
+        )
+        .expect("search_path and stats reset should succeed");
+
+        let plan = explain_text(
+            "SELECT count(*) FROM _postgis_shadow_decline \
+             WHERE ST_Distance(geom, 'SRID=4326;POINT(0 0)'::geometry) < 1.0",
+        );
+
+        assert!(
+            !plan.contains("GpuAccelScan") && !plan.contains("Strategy: GpuSpatial"),
+            "shadowed ST_Distance function should not select a PostGIS GPU path:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed");
+        assert_ne!(
+            rejection.as_deref(),
+            Some("postgis_distance_no_gpu_kernel"),
+            "shadowed non-public ST_Distance must not be classified as a PostGIS distance gap; plan:\n{plan}"
+        );
+        Spi::run("SET search_path = public").expect("restore search_path");
+    }
+
+    #[pg_test]
+    fn test_public_postgis_name_overloads_stay_generic() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        Spi::run(
+            "CREATE TEMP TABLE _postgis_public_overload_decline AS \
+             SELECT i FROM generate_series(1, 100) AS g(i); \
+             CREATE OR REPLACE FUNCTION public.st_distance(integer, integer) \
+             RETURNS double precision \
+             LANGUAGE sql IMMUTABLE \
+             AS $$ SELECT ($1 - $2)::double precision $$; \
+             CREATE OR REPLACE FUNCTION public.st_buffer(integer, double precision) \
+             RETURNS integer \
+             LANGUAGE sql IMMUTABLE \
+             AS $$ SELECT $1 $$; \
+             ANALYZE _postgis_public_overload_decline",
+        )
+        .expect("public PostGIS-name overload fixture should be created");
+
+        for (label, sql, forbidden_reason) in [
+            (
+                "public st_distance integer overload",
+                "SELECT count(*) FROM _postgis_public_overload_decline \
+                 WHERE ST_Distance(i, i) < 1.0",
+                "postgis_distance_no_gpu_kernel",
+            ),
+            (
+                "public st_buffer integer overload",
+                "SELECT count(*) FROM _postgis_public_overload_decline \
+                 WHERE ST_Buffer(i, 0.25) > 0",
+                "postgis_geometry_constructor_no_gpu_output_protocol",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(sql);
+
+            assert!(
+                !plan.contains("GpuAccelScan") && !plan.contains("Strategy: GpuSpatial"),
+                "{label} should not select a PostGIS GPU path:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed");
+            assert_ne!(
+                rejection.as_deref(),
+                Some(forbidden_reason),
+                "{label} must not be classified as a PostGIS gap; plan:\n{plan}"
+            );
+        }
+
+        Spi::run(
+            "DROP FUNCTION public.st_distance(integer, integer); \
+             DROP FUNCTION public.st_buffer(integer, double precision)",
+        )
+        .expect("public overload cleanup should succeed");
+    }
+
+    #[pg_test]
+    fn test_h3_lateral_srf_records_batched_expansion_decline() {
+        if !ensure_extension("h3") {
+            return;
+        }
+
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+        Spi::run(
+            "CREATE TEMP TABLE _h3_lateral_srf(cell h3index); \
+             INSERT INTO _h3_lateral_srf VALUES ('8928308280fffff'::h3index); \
+             ANALYZE _h3_lateral_srf",
+        )
+        .expect("h3 lateral fixture should be created");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT count(*) FROM _h3_lateral_srf s \
+             CROSS JOIN LATERAL h3_grid_disk(s.cell, 1) AS d(cell)",
+        );
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("GpuAccelFunctionScan"),
+            "correlated H3 SRF should stay native until batched LATERAL expansion lands:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("correlated H3 SRF should record a planner decline");
+        assert_eq!(
+            rejection, "h3_lateral_srf_no_batched_expansion",
+            "correlated H3 SRF should expose the missing batched LATERAL expansion lane; plan:\n{plan}"
+        );
+    }
+
+    #[pg_test]
+    fn test_h3_latlng_scan_predicates_record_native_declines() {
+        if !ensure_extension("h3") {
+            return;
+        }
+
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             SET pg_accel.min_batch_size = 1; \
+             CREATE TEMP TABLE _h3_latlng_scan_decline(\
+               id int4, geom point NOT NULL, res int4 NOT NULL, lng float8, lat float8); \
+             INSERT INTO _h3_latlng_scan_decline VALUES \
+               (1, point(-122.4194, 37.7749), 7, -122.4194, 37.7749), \
+               (2, point(-73.9857, 40.7484), 7, -73.9857, 40.7484); \
+             ANALYZE _h3_latlng_scan_decline",
+        )
+        .expect("h3 scan decline fixture should be created");
+
+        for (label, sql, expected_reason) in [
+            (
+                "invalid resolution",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE h3_latlng_to_cell(geom, 16) IS NOT NULL",
+                "h3_latlng_unsupported_shape",
+            ),
+            (
+                "non-constant resolution",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE h3_latlng_to_cell(geom, res) IS NOT NULL",
+                "h3_latlng_unsupported_shape",
+            ),
+            (
+                "non-point-column argument",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE h3_latlng_to_cell(point(lng, lat), 7) IS NOT NULL",
+                "h3_latlng_unsupported_shape",
+            ),
+            (
+                "valid scalar predicate",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE h3_latlng_to_cell(geom, 7) IS NOT NULL",
+                "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            ),
+            (
+                "equality scalar predicate",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE h3_latlng_to_cell(geom, 7) = '8928308280fffff'::h3index",
+                "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            ),
+            (
+                "boolean-wrapper scalar predicate",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE (h3_latlng_to_cell(geom, 7) IS NOT NULL) AND id > 0",
+                "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            ),
+            (
+                "boolean-test scalar predicate",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE (h3_latlng_to_cell(geom, 7) IS NOT NULL) IS TRUE",
+                "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            ),
+            (
+                "case scalar predicate",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE CASE WHEN id > 0 THEN h3_latlng_to_cell(geom, 7) IS NOT NULL ELSE false END",
+                "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            ),
+            (
+                "coalesce scalar predicate",
+                "SELECT count(*) FROM _h3_latlng_scan_decline \
+                 WHERE COALESCE(h3_latlng_to_cell(geom, 7) IS NOT NULL, false)",
+                "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            ),
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(sql);
+
+            assert!(
+                !plan.contains("GpuAccelScan")
+                    && !plan.contains("Strategy: GpuH3")
+                    && !plan.contains("Accel Strategy: GpuH3"),
+                "{label} H3 scan predicate should stay native:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} H3 predicate should record a decline"));
+            assert_eq!(
+                rejection, expected_reason,
+                "{label} H3 predicate should expose the correct native-decline reason; plan:\n{plan}"
+            );
+        }
+
+        Spi::run("SET pg_accel.min_batch_size = 65536; SELECT pg_accel_reset_stats()")
+            .expect("reset stats and force small-relation row gate");
+        let plan = explain_text(
+            "SELECT count(*) FROM _h3_latlng_scan_decline \
+             WHERE h3_latlng_to_cell(geom, 7) IS NOT NULL",
+        );
+        assert!(
+            !plan.contains("GpuAccelScan")
+                && !plan.contains("Strategy: GpuH3")
+                && !plan.contains("Accel Strategy: GpuH3"),
+            "small-relation H3 predicate should stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("small-relation H3 predicate should record a decline");
+        assert_eq!(
+            rejection, "h3_latlng_scalar_predicate_no_gpu_pipeline",
+            "H3-specific decline should run before the generic row gate; plan:\n{plan}"
+        );
     }
 
     #[pg_test]
@@ -2063,6 +2974,73 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_window_row_number_records_segmented_kernel_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        Spi::run(
+            "CREATE TEMP TABLE _wt_row_number_decline AS \
+             SELECT i AS id, (i % 128) AS dept \
+             FROM generate_series(1, 200000) i",
+        )
+        .expect("CREATE");
+        Spi::run("ANALYZE _wt_row_number_decline").expect("ANALYZE");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT row_number() OVER (PARTITION BY dept ORDER BY id) \
+             FROM _wt_row_number_decline",
+        );
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Strategy: GpuWindow"),
+            "ROW_NUMBER should stay native until segmented window kernels win:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("ROW_NUMBER window decline should record a reason");
+        assert_eq!(
+            rejection, "window_function_no_segmented_kernel",
+            "ROW_NUMBER should expose the missing segmented-kernel lane; plan:\n{plan}"
+        );
+    }
+
+    #[pg_test]
+    fn test_window_partial_path_records_parallel_hook_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET max_parallel_workers_per_gather = 4").expect("parallel workers");
+        Spi::run("SET min_parallel_table_scan_size = 0").expect("parallel scan size");
+        Spi::run("SET parallel_setup_cost = 0").expect("parallel setup");
+        Spi::run("SET parallel_tuple_cost = 0").expect("parallel tuple");
+
+        Spi::run(
+            "DROP TABLE IF EXISTS _wt_partial_window_decline; \
+             CREATE TABLE _wt_partial_window_decline AS \
+             SELECT i AS id, (i % 128) AS dept, (i % 1000)::float8 AS salary \
+             FROM generate_series(1, 200000) i",
+        )
+        .expect("CREATE");
+        Spi::run("ANALYZE _wt_partial_window_decline").expect("ANALYZE");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT sum(salary) OVER (PARTITION BY dept ORDER BY id) \
+             FROM _wt_partial_window_decline",
+        );
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("parallel window input should record a planner decline");
+        assert_eq!(
+            rejection, "window_partial_path_no_parallel_hook",
+            "parallel window input should expose the missing worker-local window hook; plan:\n{plan}"
+        );
+    }
+
+    #[pg_test]
     fn test_window_rank_with_ties() {
         Spi::run("CREATE TEMP TABLE _wt2 (id int, dept int, salary float8)").expect("CREATE");
         Spi::run(
@@ -2584,6 +3562,39 @@ mod tests {
         crate::gpu::assert_gpu_executed(1);
     }
 
+    /// Full-output standalone ORDER BY remains a known loser lane. The
+    /// planner should expose the decline explicitly instead of routing it
+    /// through `GpuSort` just because the key type is supported.
+    #[pg_test]
+    fn test_full_output_sort_records_heap_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+
+        Spi::run(
+            "CREATE TEMP TABLE _sort_full_decline AS \
+             SELECT (random() * 1e6)::float8 AS v \
+             FROM generate_series(1, 200000)",
+        )
+        .expect("create temp table");
+        Spi::run("ANALYZE _sort_full_decline").expect("ANALYZE");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text("SELECT v FROM _sort_full_decline ORDER BY v");
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Strategy: GpuSort") && !plan.contains("Custom Scan (GpuAccelScan)"),
+            "full-output standalone ORDER BY should stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("full-output sort should record a reason");
+        assert_eq!(
+            rejection, "sort_heap_full_output",
+            "full-output sort should expose the heap-output decline; plan:\n{plan}"
+        );
+    }
+
     /// Regression: GpuSort wrapped in a subquery scan must emit every input
     /// row. The outer plan rebuilds the range table during setrefs, so the
     /// RTE that `self_scan_relid` pointed to at plan time is no longer at
@@ -2736,6 +3747,7 @@ mod tests {
         )
         .expect("create table");
         Spi::run("ANALYZE _agg_par_t").expect("ANALYZE");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
 
         let plan = Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -2759,8 +3771,86 @@ mod tests {
             !(plan.contains("Custom Scan (GpuAccelAgg)") && plan.contains("Parallel Seq Scan")),
             "GpuAccelAgg must not wrap a CPU Parallel Seq Scan:\n{plan}"
         );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("partial agg CPU-child decline should record a reason");
+        assert_eq!(
+            rejection, "partial_agg_no_gpu_producing_child",
+            "partial aggregate CPU-child decline should be visible in stats; plan:\n{plan}"
+        );
 
         Spi::run("DROP TABLE _agg_par_t").expect("drop table");
+    }
+
+    /// Grouped join aggregates are the candidate shape for PG-Strom-style
+    /// GpuPreAgg, but normal planning does not inject that path until the
+    /// join->preagg pipeline is GPU-resident. Surface that decline explicitly
+    /// so benchmark traces do not just show a native PostgreSQL aggregate.
+    #[pg_test]
+    fn test_grouped_join_aggregate_records_preagg_pipeline_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET max_parallel_workers_per_gather = 0").expect("disable parallel gather");
+        Spi::run("SET enable_hashjoin = on").expect("enable hashjoin");
+        Spi::run("SET enable_mergejoin = off").expect("disable mergejoin");
+        Spi::run("SET enable_nestloop = off").expect("disable nestloop");
+
+        Spi::run("DROP TABLE IF EXISTS _preagg_fact").expect("drop fact");
+        Spi::run("DROP TABLE IF EXISTS _preagg_dim").expect("drop dim");
+        Spi::run(
+            "CREATE TEMP TABLE _preagg_fact (\
+                k int4 NOT NULL, \
+                g int4 NOT NULL, \
+                v float8 NOT NULL\
+             )",
+        )
+        .expect("create fact");
+        Spi::run(
+            "CREATE TEMP TABLE _preagg_dim (\
+                k int4 NOT NULL, \
+                active int4 NOT NULL\
+             )",
+        )
+        .expect("create dim");
+        Spi::run(
+            "INSERT INTO _preagg_fact \
+             SELECT (g % 2048) + 1, g % 64, (g * 0.5)::float8 \
+             FROM generate_series(1, 200000) g",
+        )
+        .expect("seed fact");
+        Spi::run(
+            "INSERT INTO _preagg_dim \
+             SELECT g, CASE WHEN g % 2 = 0 THEN 1 ELSE 0 END \
+             FROM generate_series(1, 2048) g",
+        )
+        .expect("seed dim");
+        Spi::run("ANALYZE _preagg_fact").expect("analyze fact");
+        Spi::run("ANALYZE _preagg_dim").expect("analyze dim");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT f.g, sum(f.v) \
+             FROM _preagg_fact f \
+             JOIN _preagg_dim d ON f.k = d.k \
+             WHERE d.active = 1 \
+             GROUP BY f.g",
+        );
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("GpuAccelPreAgg"),
+            "normal planning must not inject the disabled PreAgg scaffold:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("grouped join aggregate PreAgg decline should record a reason");
+        assert_eq!(
+            rejection, "preagg_no_gpu_resident_pipeline",
+            "grouped join aggregate should expose the disabled PreAgg pipeline reason; plan:\n{plan}"
+        );
+
+        Spi::run("DROP TABLE _preagg_fact").expect("drop fact");
+        Spi::run("DROP TABLE _preagg_dim").expect("drop dim");
     }
 
     /// GpuHashJoin partial path: EXPLAIN a 2-table int equi-join with
@@ -2820,6 +3910,216 @@ mod tests {
         // The new code must not introduce a crash when PG evaluates the
         // Gather ∘ Parallel HashJoin candidate against the GPU partial path.
         assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+    }
+
+    /// High-output row-returning hash joins must stay native until the join
+    /// output can feed GPU-resident preagg/projection instead of reconstructing
+    /// PostgreSQL heap tuples for every joined row.
+    #[pg_test]
+    fn test_gpu_hashjoin_row_output_cap_records_heap_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET max_parallel_workers_per_gather = 0").expect("disable parallel gather");
+        Spi::run("SET enable_hashjoin = on").expect("enable hashjoin");
+        Spi::run("SET enable_mergejoin = off").expect("disable mergejoin");
+        Spi::run("SET enable_nestloop = off").expect("disable nestloop");
+
+        Spi::run(
+            "CREATE TEMP TABLE _hj_heap_outer AS \
+             SELECT g AS id, (g % 1000) AS k \
+             FROM generate_series(1, 50000) g",
+        )
+        .expect("create outer table");
+        Spi::run(
+            "CREATE TEMP TABLE _hj_heap_inner AS \
+             SELECT g AS k, (g * 7) AS v \
+             FROM generate_series(0, 999) g",
+        )
+        .expect("create inner table");
+        Spi::run("ANALYZE _hj_heap_outer").expect("ANALYZE outer");
+        Spi::run("ANALYZE _hj_heap_inner").expect("ANALYZE inner");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT o.id, i.v \
+             FROM _hj_heap_outer o JOIN _hj_heap_inner i ON o.k = i.k",
+        );
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Custom Scan (GpuAccelJoin)"),
+            "high-output row-returning hash join should stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("high-output hash join should record a reason");
+        assert_eq!(
+            rejection, "hashjoin_heap_output_too_large",
+            "high-output hash join should expose the heap-output cap; plan:\n{plan}"
+        );
+    }
+
+    /// Semi/anti joins need membership-filter semantics, not the current
+    /// row-returning `GpuHashJoin` heap reconstruction path.
+    #[pg_test]
+    fn test_gpu_semi_anti_join_records_membership_filter_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET max_parallel_workers_per_gather = 0").expect("disable parallel gather");
+        Spi::run("SET enable_hashjoin = on").expect("enable hashjoin");
+        Spi::run("SET enable_mergejoin = off").expect("disable mergejoin");
+        Spi::run("SET enable_nestloop = off").expect("disable nestloop");
+
+        Spi::run(
+            "CREATE TEMP TABLE _semi_outer AS \
+             SELECT g AS id, (g % 1000) AS k \
+             FROM generate_series(1, 50000) g",
+        )
+        .expect("create outer table");
+        Spi::run(
+            "CREATE TEMP TABLE _semi_inner AS \
+             SELECT g AS k \
+             FROM generate_series(0, 499) g",
+        )
+        .expect("create inner table");
+        Spi::run("ANALYZE _semi_outer").expect("ANALYZE outer");
+        Spi::run("ANALYZE _semi_inner").expect("ANALYZE inner");
+
+        for query in [
+            "SELECT o.id FROM _semi_outer o \
+             WHERE EXISTS (SELECT 1 FROM _semi_inner i WHERE i.k = o.k)",
+            "SELECT o.id FROM _semi_outer o \
+             WHERE NOT EXISTS (SELECT 1 FROM _semi_inner i WHERE i.k = o.k)",
+        ] {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+            let plan = explain_text(query);
+
+            assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+            assert!(
+                !plan.contains("Custom Scan (GpuAccelJoin)"),
+                "semi/anti join should stay native until GPU membership filters exist:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query should succeed")
+                    .expect("semi/anti join should record a reason");
+            assert_eq!(
+                rejection, "semianti_no_gpu_membership_filter",
+                "semi/anti join should expose the membership-filter gap; plan:\n{plan}"
+            );
+        }
+    }
+
+    /// The selected BETWEEN NestedLoop inequality path must stay bounded while
+    /// it still materializes host tuple pairs instead of a GPU-resident pair
+    /// buffer or downstream count/preagg consumer.
+    #[pg_test]
+    fn test_gpu_nlj_between_output_cap_records_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET max_parallel_workers_per_gather = 0").expect("disable parallel gather");
+        Spi::run("SET enable_hashjoin = off").expect("disable hashjoin");
+        Spi::run("SET enable_mergejoin = off").expect("disable mergejoin");
+        Spi::run("SET enable_nestloop = on").expect("enable nestloop");
+
+        Spi::run(
+            "CREATE TEMP TABLE _nlj_cap_outer AS \
+             SELECT g::int4 AS x \
+             FROM generate_series(1, 500001) g",
+        )
+        .expect("create outer table");
+        Spi::run(
+            "CREATE TEMP TABLE _nlj_cap_inner AS \
+             SELECT 0::int4 AS lo, 1000000::int4 AS hi \
+             FROM generate_series(1, 500001) g",
+        )
+        .expect("create inner table");
+        Spi::run("ANALYZE _nlj_cap_outer").expect("ANALYZE outer");
+        Spi::run("ANALYZE _nlj_cap_inner").expect("ANALYZE inner");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+
+        let plan = explain_text(
+            "SELECT o.x \
+             FROM _nlj_cap_outer o \
+             JOIN _nlj_cap_inner i ON o.x BETWEEN i.lo AND i.hi",
+        );
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Custom Scan (GpuAccelJoin)"),
+            "oversized NLJ BETWEEN output should stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("oversized NLJ BETWEEN should record a reason");
+        assert_eq!(
+            rejection, "nlj_between_output_too_large",
+            "oversized NLJ BETWEEN should expose the output cap; plan:\n{plan}"
+        );
+    }
+
+    /// Large inner side + parallel hash join: pg_accel must not inject a
+    /// partial GpuHashJoin that rebuilds the full GPU hash table in each
+    /// worker. Until shared GPU-resident inner state exists, planning this
+    /// shape should record an explicit decline and leave PostgreSQL's native
+    /// parallel hash join lane available.
+    #[pg_test]
+    fn test_gpu_hashjoin_parallel_large_inner_records_rebuild_decline() {
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
+        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
+        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
+        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+        Spi::run("SET pg_accel.min_batch_size = 1").expect("SET min_batch_size");
+
+        Spi::run("DROP TABLE IF EXISTS _hj_par_big_outer").expect("drop outer");
+        Spi::run("DROP TABLE IF EXISTS _hj_par_big_inner").expect("drop inner");
+        Spi::run(
+            "CREATE UNLOGGED TABLE _hj_par_big_outer AS \
+             SELECT g AS id, g AS k \
+             FROM generate_series(1, 20000) g",
+        )
+        .expect("create outer table");
+        Spi::run(
+            "CREATE UNLOGGED TABLE _hj_par_big_inner AS \
+             SELECT \
+               CASE WHEN g <= 20000 THEN g ELSE 1000000 + g END AS k, \
+               (g * 7) AS v \
+             FROM generate_series(1, 60000) g",
+        )
+        .expect("create inner table");
+        Spi::run("ANALYZE _hj_par_big_outer").expect("ANALYZE outer");
+        Spi::run("ANALYZE _hj_par_big_inner").expect("ANALYZE inner");
+
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+        let before = crate::engine::stats::read_planner_rejected();
+        let plan = explain_text(
+            "SELECT count(*) \
+             FROM _hj_par_big_outer o JOIN _hj_par_big_inner i ON o.k = i.k",
+        );
+        let after = crate::engine::stats::read_planner_rejected();
+
+        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            after > before,
+            "large-inner parallel hash join should record a planner decline \
+             (before={before}, after={after})"
+        );
+        let rebuild_declines = Spi::get_one::<i64>(
+            "SELECT pg_accel_planner_rejection_count(\
+                'hashjoin_parallel_inner_rebuild_too_large'\
+             )",
+        )
+        .expect("rejection count query should succeed")
+        .expect("rejection count should not be NULL");
+        assert!(
+            rebuild_declines > 0,
+            "large-inner parallel hash join should expose the missing shared-state lane; plan:\n{plan}"
+        );
+
+        Spi::run("DROP TABLE _hj_par_big_outer").expect("drop outer");
+        Spi::run("DROP TABLE _hj_par_big_inner").expect("drop inner");
     }
 
     // =========================================================================

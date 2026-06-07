@@ -639,11 +639,30 @@ unsafe fn deserialize_path_sort_keys_at(
     sort_keys
 }
 
-/// Shared helper: build a `CustomScan` plan from a `CustomPath`.
-///
-/// Convert an agg `CustomPath` into a `CustomScan` plan node.
+/// Return the planned child `SeqScan` range-table index when an agg wraps a
+/// direct heap scan.
 ///
 /// # Safety
+///
+/// Called by the PostgreSQL planner on the main backend thread.
+unsafe fn planned_child_seqscan_relid(custom_plans: *mut pg_sys::List) -> Option<c_int> {
+    if custom_plans.is_null() || unsafe { pg_sys::list_length(custom_plans) } <= 0 {
+        return None;
+    }
+    let child_plan = unsafe { pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>() };
+    if child_plan.is_null() {
+        return None;
+    }
+    if unsafe { (*child_plan).type_ } != pg_sys::NodeTag::T_SeqScan {
+        return None;
+    }
+    let scanrelid = unsafe { (*child_plan.cast::<pg_sys::Scan>()).scanrelid };
+    c_int::try_from(scanrelid)
+        .ok()
+        .filter(|scanrelid| *scanrelid > 0)
+}
+
+/// Shared helper: build a `CustomScan` plan from a `CustomPath`.
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
 /// Build a `CustomScan` plan node for GPU aggregate.
@@ -726,6 +745,11 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         let is_partial_idx = self_scan_idx + 1;
         let self_scan_relid = if self_scan_idx < path_len {
             list_int_at(path_priv, self_scan_idx as c_int)
+        } else {
+            0
+        };
+        let self_scan_relid = if self_scan_relid > 0 {
+            planned_child_seqscan_relid(custom_plans).unwrap_or(self_scan_relid)
         } else {
             0
         };
@@ -2823,8 +2847,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // scan on the base table and create a VectorizedScan. This
             // bypasses ExecProcNode entirely — the agg walks the heap
             // directly.
+            let mut agg_self_scan_opened = false;
             if privdata.self_scan_relid > 0 {
                 let estate = (*node).ss.ps.state;
+                let mut rel: pg_sys::Relation = std::ptr::null_mut();
+                let mut rel_source = "range table";
                 // Guard: the RTE must be a real heap relation. Non-relation
                 // RTEs (function, VALUES, CTE, subquery) passed to
                 // ExecOpenScanRelation raise ERROR → panic → SIGABRT.
@@ -2835,19 +2862,51 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 {
                     // SAFETY: estate is valid; self_scan_relid references a
                     // valid RTE_RELATION range table entry set by the planner.
-                    let rel =
-                        pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
+                    rel = pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
+                } else {
+                    // Wrapper queries can shift range-table indexes by the
+                    // time execution starts. The child SeqScanState already
+                    // owns the same base relation, so borrow its Relation
+                    // descriptor for our independent TableScanDesc.
+                    let custom_ps = (*node).custom_ps;
+                    if !custom_ps.is_null() && pg_sys::list_length(custom_ps) > 0 {
+                        let child_ps = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
+                        if !child_ps.is_null()
+                            && (*child_ps.cast::<pg_sys::Node>()).type_
+                                == pg_sys::NodeTag::T_SeqScanState
+                        {
+                            rel = (*child_ps.cast::<pg_sys::SeqScanState>())
+                                .ss
+                                .ss_currentRelation;
+                            rel_source = "child SeqScan";
+                        }
+                    }
+                }
+                if !rel.is_null() {
                     let snap = (*estate).es_snapshot;
                     // SAFETY: rel and snap are valid; main backend thread.
                     let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
                     // SAFETY: sd is a valid, open TableScanDesc.
                     let vscan = VectorizedScan::new(sd);
                     exec.set_vscan(vscan);
+                    agg_self_scan_opened = true;
                     pgrx::debug1!(
-                        "pg_accel: begin_custom_scan: Agg self-scan on relid {}",
+                        "pg_accel: begin_custom_scan: Agg self-scan on relid {} via {}",
                         privdata.self_scan_relid,
+                        rel_source,
                     );
                 }
+            }
+            if !agg_self_scan_opened
+                && let Some(gk) = exec.group_key_info()
+                && gk.key_type == H3_LATLNG_GROUP_KEY_TYPE
+            {
+                let projected_attno = ((privdata.group_key_tlist_pos & 0xffff) + 1) as i32;
+                exec.set_group_key_source(projected_attno, 1);
+                pgrx::debug1!(
+                    "pg_accel: begin_custom_scan: H3 grouped agg using child-projected key attno {} as int64",
+                    projected_attno,
+                );
             }
 
             // Pipeline fusion: if the child is a GpuExpr scan with a direct

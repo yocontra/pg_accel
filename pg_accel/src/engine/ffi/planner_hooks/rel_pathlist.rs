@@ -14,6 +14,7 @@ use super::{
     PREV_SET_REL_PATHLIST_HOOK, create_custom_path, extract_const_geom_vertex_count,
     find_accelerable_match, find_cheapest_path, find_cheapest_seqscan_cost,
     find_cheapest_seqscan_path, has_cheap_spatial_index_path, has_cheaper_spatial_index_path,
+    unwrap_var,
 };
 use crate::engine::cost;
 use crate::engine::executor::sort::SortKeyDesc;
@@ -21,11 +22,34 @@ use crate::engine::gucs;
 use crate::engine::registry;
 use crate::engine::stats;
 
-/// Keep the generic GpuExpr matcher reachable for unit tests and future fused
-/// GpuScan work without calling it from the normal base-relation planner hook.
-#[allow(dead_code)]
-fn retained_gpu_expr_matcher() -> fn(*mut List, u64) -> Option<super::AccelMatch> {
-    super::try_gpu_expr_match
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DirectGpuExprTemplateMatch {
+    referenced_cols: usize,
+    predicate_complexity: u64,
+    uses_fp64: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GpuExprTemplateTerm {
+    col_idx: u32,
+    uses_fp64: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum H3LatLngQualDecline {
+    UnsupportedShape,
+    ScalarPredicateNoGpuPipeline,
+}
+
+impl H3LatLngQualDecline {
+    const fn stats_key(self) -> &'static str {
+        match self {
+            Self::UnsupportedShape => super::RejectionReason::H3LatLngUnsupportedShape.stats_key(),
+            Self::ScalarPredicateNoGpuPipeline => {
+                super::RejectionReason::H3LatLngScalarPredicateNoGpuPipeline.stats_key()
+            }
+        }
+    }
 }
 
 /// Minimum standalone scan rows for H3 scalar kernels.
@@ -45,8 +69,429 @@ pub(super) fn raster_standalone_scan_min_rows(limits: &cost::DeviceLimits) -> us
     limits.gpu_min_rows.saturating_mul(20).max(100_000)
 }
 
-fn h3_scan_function_is_compute_heavy(name: &str) -> bool {
-    matches!(name, "h3_latlng_to_cell" | "h3_grid_distance")
+fn gpuexpr_template_type_supported(oid: pg_sys::Oid) -> bool {
+    matches!(
+        u32::from(oid),
+        SORT_INT4OID | SORT_INT8OID | SORT_FLOAT4OID | SORT_FLOAT8OID
+    )
+}
+
+fn gpuexpr_template_type_uses_fp64(oid: pg_sys::Oid) -> bool {
+    u32::from(oid) == SORT_FLOAT8OID
+}
+
+/// Return the 0-based column index for a template-safe GpuExpr input Var.
+///
+/// The executor's template path extracts the column as f64 before dispatch.
+/// Keep planner admission to ordinary numeric table columns; broader bytecode
+/// and date/bool coverage remain declined until the live parity evidence is
+/// stronger.
+unsafe fn gpuexpr_template_var_col(node: *mut pg_sys::Node) -> Option<GpuExprTemplateTerm> {
+    if node.is_null() {
+        return None;
+    }
+    match unsafe { (*node).type_ } {
+        NodeTag::T_Var => {
+            let var = node.cast::<pg_sys::Var>();
+            let vartype = unsafe { (*var).vartype };
+            if !gpuexpr_template_type_supported(vartype) {
+                return None;
+            }
+            let attno = unsafe { (*var).varattno };
+            if attno <= 0 {
+                return None;
+            }
+            Some(GpuExprTemplateTerm {
+                col_idx: (attno - 1) as u32,
+                uses_fp64: gpuexpr_template_type_uses_fp64(vartype),
+            })
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            let result_type = unsafe { (*relabel).resulttype };
+            if !gpuexpr_template_type_supported(result_type) {
+                return None;
+            }
+            unsafe { gpuexpr_template_var_col((*relabel).arg.cast::<pg_sys::Node>()) }
+        }
+        _ => None,
+    }
+}
+
+unsafe fn gpuexpr_template_const_supported(node: *mut pg_sys::Node) -> Option<bool> {
+    if node.is_null() {
+        return None;
+    }
+    match unsafe { (*node).type_ } {
+        NodeTag::T_Const => {
+            let cst = node.cast::<pg_sys::Const>();
+            if unsafe { (*cst).constisnull } {
+                return None;
+            }
+            let const_type = unsafe { (*cst).consttype };
+            gpuexpr_template_type_supported(const_type)
+                .then_some(gpuexpr_template_type_uses_fp64(const_type))
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            let result_type = unsafe { (*relabel).resulttype };
+            if !gpuexpr_template_type_supported(result_type) {
+                return None;
+            }
+            unsafe { gpuexpr_template_const_supported((*relabel).arg.cast::<pg_sys::Node>()) }
+        }
+        _ => None,
+    }
+}
+
+/// Match exactly the template kernels that are production-admitted for direct
+/// `GpuExpr`: `Var <cmp> Const`. `Const <cmp> Var` intentionally stays native
+/// because the executor's old template extractor does not invert the operator.
+unsafe fn gpuexpr_template_cmp_const(node: *mut pg_sys::Node) -> Option<GpuExprTemplateTerm> {
+    if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_OpExpr {
+        return None;
+    }
+
+    let opexpr = node.cast::<pg_sys::OpExpr>();
+    if u32::from(unsafe { (*opexpr).opresulttype }) != u32::from(pg_sys::BOOLOID) {
+        return None;
+    }
+
+    let args = unsafe { (*opexpr).args };
+    if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+        return None;
+    }
+
+    let op_name_ptr = unsafe { pg_sys::get_opname((*opexpr).opno) };
+    if op_name_ptr.is_null() {
+        return None;
+    }
+    let op_name = unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }
+        .to_str()
+        .ok()?;
+    crate::engine::expr_compiler::pg_cmp_op_to_opcode(op_name)?;
+
+    let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+    let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+    let term = unsafe { gpuexpr_template_var_col(arg0) }?;
+    let const_uses_fp64 = unsafe { gpuexpr_template_const_supported(arg1) }?;
+
+    Some(GpuExprTemplateTerm {
+        col_idx: term.col_idx,
+        uses_fp64: term.uses_fp64 || const_uses_fp64,
+    })
+}
+
+unsafe fn gpuexpr_template_terms_from_clause(
+    node: *mut pg_sys::Node,
+) -> Option<Vec<GpuExprTemplateTerm>> {
+    if node.is_null() {
+        return None;
+    }
+
+    if let Some(term) = unsafe { gpuexpr_template_cmp_const(node) } {
+        return Some(vec![term]);
+    }
+
+    if unsafe { (*node).type_ } != NodeTag::T_BoolExpr {
+        return None;
+    }
+    let boolexpr = node.cast::<pg_sys::BoolExpr>();
+    if unsafe { (*boolexpr).boolop } != pg_sys::BoolExprType::AND_EXPR {
+        return None;
+    }
+    let args = unsafe { (*boolexpr).args };
+    if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+        return None;
+    }
+
+    let lhs = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+    let rhs = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+    Some(vec![unsafe { gpuexpr_template_cmp_const(lhs) }?, unsafe {
+        gpuexpr_template_cmp_const(rhs)
+    }?])
+}
+
+unsafe fn direct_gpuexpr_template_match(
+    restrictinfo_list: *mut List,
+    rows: usize,
+    limits: &cost::DeviceLimits,
+) -> Option<DirectGpuExprTemplateMatch> {
+    if restrictinfo_list.is_null() || rows < limits.gpu_expr_min_rows {
+        return None;
+    }
+
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    if len == 0 || len > 2 {
+        return None;
+    }
+
+    let mut terms = Vec::new();
+    for i in 0..len {
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
+        if ri.is_null() {
+            return None;
+        }
+        let clause = unsafe { (*ri).clause };
+        if clause.is_null() {
+            return None;
+        }
+        let clause_terms = unsafe { gpuexpr_template_terms_from_clause(clause.cast()) }?;
+        terms.extend(clause_terms);
+    }
+
+    if terms.is_empty() || terms.len() > 2 {
+        return None;
+    }
+
+    let mut cols = Vec::new();
+    let mut uses_fp64 = false;
+    for term in &terms {
+        if !cols.contains(&term.col_idx) {
+            cols.push(term.col_idx);
+        }
+        uses_fp64 |= term.uses_fp64;
+    }
+
+    let predicate_complexity = (terms.len() as u64)
+        .saturating_mul(3)
+        .saturating_add(u64::from(terms.len() > 1));
+    let work = predicate_complexity.saturating_mul(rows as u64);
+    if work < limits.expr_min_predicate_complexity_x_rows {
+        return None;
+    }
+
+    Some(DirectGpuExprTemplateMatch {
+        referenced_cols: cols.len(),
+        predicate_complexity,
+        uses_fp64,
+    })
+}
+
+unsafe fn try_inject_direct_gpuexpr_path(
+    rel: *mut RelOptInfo,
+    rel_ref: &RelOptInfo,
+    rows: usize,
+    shape: DirectGpuExprTemplateMatch,
+) -> bool {
+    let cheapest = unsafe { find_cheapest_seqscan_path(rel_ref.pathlist) };
+    if cheapest.is_null() {
+        pgrx::debug1!("pg_accel: direct GpuExpr skipped: no sequential heap path for direct scan");
+        return false;
+    }
+
+    let base = unsafe { &*cheapest };
+    let extract_cols = shape.referenced_cols.max(1);
+    let expr_cost = cost::self_scan_cost_fp64_aware(
+        base.rows.max(rows as f64),
+        extract_cols,
+        cost::device_limits().gpu_op_cost_filter,
+        shape.uses_fp64,
+    );
+    let startup_cost = base.startup_cost + cost::GPU_LAUNCH_OVERHEAD;
+    let total_cost = (base.total_cost + expr_cost) * gucs::cost_multiplier();
+
+    unsafe {
+        let cpath = create_custom_path(
+            rel,
+            cheapest,
+            startup_cost,
+            total_cost,
+            base.rows,
+            custom_scan::scan_path_methods(),
+        );
+
+        let mut priv_list: *mut List = std::ptr::null_mut();
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(u32::from(pg_sys::InvalidOid) as i32).cast(),
+        );
+        priv_list = lappend(priv_list, pg_sys::makeInteger(0).cast());
+        priv_list = lappend(
+            priv_list,
+            pg_sys::makeInteger(registry::AccelStrategy::GpuExpr as i32).cast(),
+        );
+        (*cpath).custom_private = priv_list;
+
+        add_path(rel, cpath.cast());
+    }
+
+    pgrx::debug1!(
+        "pg_accel: direct GpuExpr template path added rows={} cols={} complexity={} fp64={}",
+        rows,
+        shape.referenced_cols,
+        shape.predicate_complexity,
+        shape.uses_fp64
+    );
+    true
+}
+
+fn h3_scan_function_is_filter_safe(_name: &str) -> bool {
+    false
+}
+
+unsafe fn h3_point_var_node(node: *mut pg_sys::Node) -> bool {
+    let var = unsafe { unwrap_var(node) };
+    if var.is_null() {
+        return false;
+    }
+    let vartype = u32::from(unsafe { (*var).vartype });
+    let attno = unsafe { (*var).varattno };
+    vartype == pg_sys::POINTOID.to_u32() && attno > 0
+}
+
+unsafe fn h3_resolution_const_node(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_Const {
+        return false;
+    }
+    let cst = node.cast::<pg_sys::Const>();
+    if unsafe { (*cst).constisnull } {
+        return false;
+    }
+    let datum = unsafe { (*cst).constvalue };
+    let resolution = match u32::from(unsafe { (*cst).consttype }) {
+        21 => i32::from(datum.value() as i16),
+        23 => datum.value() as i32,
+        20 => (datum.value() as i64).try_into().unwrap_or(i32::MAX),
+        _ => return false,
+    };
+    (0..=15).contains(&resolution)
+}
+
+unsafe fn h3_latlng_args_supported(args: *mut List) -> bool {
+    if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
+        return false;
+    }
+    let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+    let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+    (unsafe { h3_point_var_node(arg0) }) && (unsafe { h3_resolution_const_node(arg1) })
+}
+
+fn merge_h3_latlng_decline(
+    current: Option<H3LatLngQualDecline>,
+    next: Option<H3LatLngQualDecline>,
+) -> Option<H3LatLngQualDecline> {
+    match (current, next) {
+        (Some(H3LatLngQualDecline::UnsupportedShape), _) => {
+            Some(H3LatLngQualDecline::UnsupportedShape)
+        }
+        (_, Some(H3LatLngQualDecline::UnsupportedShape)) => {
+            Some(H3LatLngQualDecline::UnsupportedShape)
+        }
+        (Some(H3LatLngQualDecline::ScalarPredicateNoGpuPipeline), _)
+        | (_, Some(H3LatLngQualDecline::ScalarPredicateNoGpuPipeline)) => {
+            Some(H3LatLngQualDecline::ScalarPredicateNoGpuPipeline)
+        }
+        (None, None) => None,
+    }
+}
+
+unsafe fn h3_latlng_qual_decline_list(args: *mut List) -> Option<H3LatLngQualDecline> {
+    if args.is_null() {
+        return None;
+    }
+    let len = unsafe { pg_sys::list_length(args) };
+    let mut out = None;
+    for i in 0..len {
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        out = merge_h3_latlng_decline(out, unsafe { h3_latlng_qual_decline_node(child) });
+        if out == Some(H3LatLngQualDecline::UnsupportedShape) {
+            return out;
+        }
+    }
+    out
+}
+
+unsafe fn h3_latlng_qual_decline_node(node: *mut pg_sys::Node) -> Option<H3LatLngQualDecline> {
+    if node.is_null() {
+        return None;
+    }
+    match unsafe { (*node).type_ } {
+        NodeTag::T_FuncExpr => {
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            let fn_name = unsafe { function_name_for_oid((*funcexpr).funcid) };
+            if fn_name.as_deref() == Some("h3_latlng_to_cell") {
+                return if unsafe { h3_latlng_args_supported((*funcexpr).args) } {
+                    Some(H3LatLngQualDecline::ScalarPredicateNoGpuPipeline)
+                } else {
+                    Some(H3LatLngQualDecline::UnsupportedShape)
+                };
+            }
+            unsafe { h3_latlng_qual_decline_list((*funcexpr).args) }
+        }
+        NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            unsafe { h3_latlng_qual_decline_list((*opexpr).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            unsafe { h3_latlng_qual_decline_list((*bool_expr).args) }
+        }
+        NodeTag::T_BooleanTest => {
+            let bool_test = node.cast::<pg_sys::BooleanTest>();
+            unsafe { h3_latlng_qual_decline_node((*bool_test).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_NullTest => {
+            let null_test = node.cast::<pg_sys::NullTest>();
+            unsafe { h3_latlng_qual_decline_node((*null_test).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            unsafe { h3_latlng_qual_decline_node((*relabel).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            unsafe { h3_latlng_qual_decline_node((*coercion).arg.cast::<pg_sys::Node>()) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { h3_latlng_qual_decline_list((*scalar_array).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.cast::<pg_sys::CaseExpr>();
+            let mut out =
+                unsafe { h3_latlng_qual_decline_node((*case_expr).arg.cast::<pg_sys::Node>()) };
+            out = merge_h3_latlng_decline(out, unsafe {
+                h3_latlng_qual_decline_list((*case_expr).args)
+            });
+            merge_h3_latlng_decline(out, unsafe {
+                h3_latlng_qual_decline_node((*case_expr).defresult.cast::<pg_sys::Node>())
+            })
+        }
+        NodeTag::T_CaseWhen => {
+            let case_when = node.cast::<pg_sys::CaseWhen>();
+            let out =
+                unsafe { h3_latlng_qual_decline_node((*case_when).expr.cast::<pg_sys::Node>()) };
+            merge_h3_latlng_decline(out, unsafe {
+                h3_latlng_qual_decline_node((*case_when).result.cast::<pg_sys::Node>())
+            })
+        }
+        NodeTag::T_CoalesceExpr => {
+            let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            unsafe { h3_latlng_qual_decline_list((*coalesce).args) }
+        }
+        _ => None,
+    }
+}
+
+unsafe fn h3_latlng_qual_decline(restrictinfo_list: *mut List) -> Option<H3LatLngQualDecline> {
+    if restrictinfo_list.is_null() {
+        return None;
+    }
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    let mut out = None;
+    for i in 0..len {
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        let clause = unsafe { (*ri).clause };
+        out = merge_h3_latlng_decline(out, unsafe { h3_latlng_qual_decline_node(clause.cast()) });
+        if out == Some(H3LatLngQualDecline::UnsupportedShape) {
+            return out;
+        }
+    }
+    out
 }
 
 fn raster_scan_function_is_compute_heavy(name: &str) -> bool {
@@ -83,7 +528,7 @@ pub(super) fn extension_scan_gate(
             let Some(name) = fn_name else {
                 return Err("h3_unknown_function");
             };
-            if h3_scan_function_is_compute_heavy(name) {
+            if h3_scan_function_is_filter_safe(name) {
                 Ok(())
             } else {
                 Err("h3_function_not_compute_heavy")
@@ -126,6 +571,786 @@ unsafe fn function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
     // memory context.
     let name_cstr = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
     name_cstr.to_str().ok().map(str::to_ascii_lowercase)
+}
+
+unsafe fn postgis_function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
+    if !unsafe { super::super::syscache::function_is_extension_member(fn_oid, "postgis") } {
+        return None;
+    }
+    let (_, name) = unsafe { super::super::syscache::function_schema_and_name(fn_oid) }?;
+    Some(name)
+}
+
+unsafe fn oid_is_postgis_spatial_scalar_type(type_oid: pg_sys::Oid) -> bool {
+    if type_oid == pg_sys::InvalidOid {
+        return false;
+    }
+
+    let base_type = unsafe { pg_sys::getBaseType(type_oid) };
+    if base_type == pg_sys::InvalidOid {
+        return false;
+    }
+    if !unsafe { super::super::syscache::type_is_extension_member(base_type, "postgis") } {
+        return false;
+    }
+    unsafe { super::super::syscache::type_name(base_type) }
+        .as_deref()
+        .is_some_and(|name| matches!(name, "geometry" | "geography"))
+}
+
+unsafe fn oid_is_postgis_spatial_or_array_type(type_oid: pg_sys::Oid) -> bool {
+    if unsafe { oid_is_postgis_spatial_scalar_type(type_oid) } {
+        return true;
+    }
+
+    let base_type = unsafe { pg_sys::getBaseType(type_oid) };
+    if base_type == pg_sys::InvalidOid {
+        return false;
+    }
+    let element_type = unsafe { pg_sys::get_element_type(base_type) };
+    element_type != pg_sys::InvalidOid
+        && unsafe { oid_is_postgis_spatial_scalar_type(element_type) }
+}
+
+unsafe fn expr_list_has_spatial_prefix(args: *mut List, required: usize) -> bool {
+    if args.is_null() || unsafe { pg_sys::list_length(args) } < required as i32 {
+        return false;
+    }
+
+    for i in 0..required {
+        let child = unsafe { pg_sys::list_nth(args, i as i32).cast::<pg_sys::Node>() };
+        if child.is_null() {
+            return false;
+        }
+        let arg_type = unsafe { pg_sys::exprType(child) };
+        if !unsafe { oid_is_postgis_spatial_scalar_type(arg_type) } {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn expr_list_contains_spatial_arg(args: *mut List) -> bool {
+    if args.is_null() {
+        return false;
+    }
+
+    let len = unsafe { pg_sys::list_length(args) };
+    for i in 0..len {
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        if child.is_null() {
+            continue;
+        }
+        let arg_type = unsafe { pg_sys::exprType(child) };
+        if unsafe { oid_is_postgis_spatial_or_array_type(arg_type) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn function_matches_postgis_spatial_prefix(
+    fn_oid: pg_sys::Oid,
+    args: *mut List,
+    name_predicate: impl FnOnce(&str) -> bool,
+) -> bool {
+    let Some(name) = (unsafe { postgis_function_name_for_oid(fn_oid) }) else {
+        return false;
+    };
+    name_predicate(&name) && unsafe { expr_list_has_spatial_prefix(args, 2) }
+}
+
+unsafe fn function_matches_postgis_spatial_arg(
+    fn_oid: pg_sys::Oid,
+    args: *mut List,
+    name_predicate: impl FnOnce(&str) -> bool,
+) -> bool {
+    let Some(name) = (unsafe { postgis_function_name_for_oid(fn_oid) }) else {
+        return false;
+    };
+    name_predicate(&name) && unsafe { expr_list_contains_spatial_arg(args) }
+}
+
+#[must_use]
+fn postgis_spatial_predicate_name(name: &str) -> bool {
+    matches!(
+        name,
+        "st_intersects"
+            | "st_contains"
+            | "st_within"
+            | "st_dwithin"
+            | "st_disjoint"
+            | "st_equals"
+            | "st_touches"
+            | "st_crosses"
+            | "st_overlaps"
+            | "st_covers"
+            | "st_coveredby"
+    )
+}
+
+#[must_use]
+fn postgis_distance_function_name(name: &str) -> bool {
+    matches!(name, "st_distance")
+}
+
+#[must_use]
+fn postgis_geometry_constructor_function_name(name: &str) -> bool {
+    matches!(name, "st_buffer" | "st_union" | "st_intersection")
+}
+
+unsafe fn funcexpr_is_postgis_intersects(funcexpr: *mut pg_sys::FuncExpr) -> bool {
+    let funcid = unsafe { (*funcexpr).funcid };
+    let args = unsafe { (*funcexpr).args };
+    unsafe { function_matches_postgis_spatial_prefix(funcid, args, |name| name == "st_intersects") }
+}
+
+unsafe fn opexpr_is_postgis_intersects(opexpr: *mut pg_sys::OpExpr) -> bool {
+    let mut opfuncid = unsafe { (*opexpr).opfuncid };
+    if opfuncid == pg_sys::InvalidOid {
+        unsafe { pg_sys::set_opfuncid(opexpr) };
+        opfuncid = unsafe { (*opexpr).opfuncid };
+    }
+    let args = unsafe { (*opexpr).args };
+    unsafe {
+        function_matches_postgis_spatial_prefix(opfuncid, args, |name| name == "st_intersects")
+    }
+}
+
+unsafe fn restrictinfo_contains_wrapped_postgis_intersects(restrictinfo_list: *mut List) -> bool {
+    if restrictinfo_list.is_null() {
+        return false;
+    }
+
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    for i in 0..len {
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        let clause = unsafe { (*ri).clause };
+        if unsafe { node_contains_wrapped_postgis_intersects(clause.cast()) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn node_contains_wrapped_postgis_intersects(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    let tag = unsafe { (*node).type_ };
+    #[allow(clippy::cast_ptr_alignment)]
+    match tag {
+        NodeTag::T_FuncExpr => {
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            if unsafe { funcexpr_is_postgis_intersects(funcexpr) } {
+                return true;
+            }
+            unsafe { args_contain_wrapped_postgis_intersects((*funcexpr).args) }
+        }
+        NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            if unsafe { opexpr_is_postgis_intersects(opexpr) } {
+                return true;
+            }
+            unsafe { args_contain_wrapped_postgis_intersects((*opexpr).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            unsafe { args_contain_wrapped_postgis_intersects((*bool_expr).args) }
+        }
+        NodeTag::T_NullTest => {
+            let null_test = node.cast::<pg_sys::NullTest>();
+            unsafe { node_contains_wrapped_postgis_intersects((*null_test).arg.cast()) }
+        }
+        NodeTag::T_BooleanTest => {
+            let bool_test = node.cast::<pg_sys::BooleanTest>();
+            unsafe { node_contains_wrapped_postgis_intersects((*bool_test).arg.cast()) }
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            unsafe { node_contains_wrapped_postgis_intersects((*relabel).arg.cast()) }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            unsafe { node_contains_wrapped_postgis_intersects((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoerceToDomain => {
+            let coercion = node.cast::<pg_sys::CoerceToDomain>();
+            unsafe { node_contains_wrapped_postgis_intersects((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoalesceExpr => {
+            let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            unsafe { args_contain_wrapped_postgis_intersects((*coalesce).args) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { args_contain_wrapped_postgis_intersects((*scalar_array).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.cast::<pg_sys::CaseExpr>();
+            unsafe {
+                node_contains_wrapped_postgis_intersects((*case_expr).arg.cast())
+                    || args_contain_wrapped_postgis_intersects((*case_expr).args)
+                    || node_contains_wrapped_postgis_intersects((*case_expr).defresult.cast())
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let case_when = node.cast::<pg_sys::CaseWhen>();
+            unsafe {
+                node_contains_wrapped_postgis_intersects((*case_when).expr.cast())
+                    || node_contains_wrapped_postgis_intersects((*case_when).result.cast())
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            let array = node.cast::<pg_sys::ArrayExpr>();
+            unsafe { args_contain_wrapped_postgis_intersects((*array).elements) }
+        }
+        NodeTag::T_MinMaxExpr => {
+            let minmax = node.cast::<pg_sys::MinMaxExpr>();
+            unsafe { args_contain_wrapped_postgis_intersects((*minmax).args) }
+        }
+        _ => false,
+    }
+}
+
+unsafe fn args_contain_wrapped_postgis_intersects(args: *mut List) -> bool {
+    if args.is_null() {
+        return false;
+    }
+
+    let len = unsafe { pg_sys::list_length(args) };
+    for i in 0..len {
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        if unsafe { node_contains_wrapped_postgis_intersects(child) } {
+            return true;
+        }
+    }
+    false
+}
+
+/// Detect a PostGIS spatial predicate that is intentionally not registered in
+/// the normal adapter because the current GPU coverage still needs CPU
+/// recheck/uncertain-row handling for some geometry pairs.
+unsafe fn restrictinfo_contains_unregistered_spatial_predicate(
+    restrictinfo_list: *mut List,
+) -> bool {
+    if restrictinfo_list.is_null() {
+        return false;
+    }
+
+    // SAFETY: restrictinfo_list is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a RestrictInfo pointer.
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is a planner-owned RestrictInfo.
+        let clause = unsafe { (*ri).clause };
+        if unsafe { node_contains_unregistered_spatial_predicate(clause.cast()) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn node_contains_unregistered_spatial_predicate(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: node is a valid planner expression node.
+    let tag = unsafe { (*node).type_ };
+    #[allow(clippy::cast_ptr_alignment)]
+    match tag {
+        NodeTag::T_FuncExpr => {
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: tag checked above.
+            let result_type = unsafe { (*funcexpr).funcresulttype };
+            // SAFETY: tag checked above.
+            let funcid = unsafe { (*funcexpr).funcid };
+            if result_type == pg_sys::BOOLOID
+                && unsafe {
+                    function_matches_postgis_spatial_prefix(
+                        funcid,
+                        (*funcexpr).args,
+                        postgis_spatial_predicate_name,
+                    )
+                }
+            {
+                return true;
+            }
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_spatial_predicate((*funcexpr).args) }
+        }
+        NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: tag checked above.
+            let mut funcid = unsafe { (*opexpr).opfuncid };
+            if funcid == pg_sys::InvalidOid {
+                // SAFETY: opexpr is a valid OpExpr pointer.
+                unsafe { pg_sys::set_opfuncid(opexpr) };
+                // SAFETY: tag checked above.
+                funcid = unsafe { (*opexpr).opfuncid };
+            }
+            // SAFETY: tag checked above.
+            let result_type = unsafe { (*opexpr).opresulttype };
+            if result_type == pg_sys::BOOLOID
+                && unsafe {
+                    function_matches_postgis_spatial_prefix(
+                        funcid,
+                        (*opexpr).args,
+                        postgis_spatial_predicate_name,
+                    )
+                }
+            {
+                return true;
+            }
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_spatial_predicate((*opexpr).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_spatial_predicate((*bool_expr).args) }
+        }
+        NodeTag::T_NullTest => {
+            let null_test = node.cast::<pg_sys::NullTest>();
+            unsafe { node_contains_unregistered_spatial_predicate((*null_test).arg.cast()) }
+        }
+        NodeTag::T_BooleanTest => {
+            let bool_test = node.cast::<pg_sys::BooleanTest>();
+            unsafe { node_contains_unregistered_spatial_predicate((*bool_test).arg.cast()) }
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            unsafe { node_contains_unregistered_spatial_predicate((*relabel).arg.cast()) }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            unsafe { node_contains_unregistered_spatial_predicate((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoerceToDomain => {
+            let coercion = node.cast::<pg_sys::CoerceToDomain>();
+            unsafe { node_contains_unregistered_spatial_predicate((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoalesceExpr => {
+            let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            unsafe { args_contain_unregistered_spatial_predicate((*coalesce).args) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { args_contain_unregistered_spatial_predicate((*scalar_array).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.cast::<pg_sys::CaseExpr>();
+            unsafe {
+                node_contains_unregistered_spatial_predicate((*case_expr).arg.cast())
+                    || args_contain_unregistered_spatial_predicate((*case_expr).args)
+                    || node_contains_unregistered_spatial_predicate((*case_expr).defresult.cast())
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let case_when = node.cast::<pg_sys::CaseWhen>();
+            unsafe {
+                node_contains_unregistered_spatial_predicate((*case_when).expr.cast())
+                    || node_contains_unregistered_spatial_predicate((*case_when).result.cast())
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            let array = node.cast::<pg_sys::ArrayExpr>();
+            unsafe { args_contain_unregistered_spatial_predicate((*array).elements) }
+        }
+        NodeTag::T_MinMaxExpr => {
+            let minmax = node.cast::<pg_sys::MinMaxExpr>();
+            unsafe { args_contain_unregistered_spatial_predicate((*minmax).args) }
+        }
+        _ => false,
+    }
+}
+
+unsafe fn args_contain_unregistered_spatial_predicate(args: *mut List) -> bool {
+    if args.is_null() {
+        return false;
+    }
+
+    // SAFETY: args is a valid planner expression List.
+    let len = unsafe { pg_sys::list_length(args) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len).
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        if unsafe { node_contains_unregistered_spatial_predicate(child) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn restrictinfo_contains_unregistered_postgis_geometry_constructor(
+    restrictinfo_list: *mut List,
+) -> bool {
+    if restrictinfo_list.is_null() {
+        return false;
+    }
+
+    // SAFETY: restrictinfo_list is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a RestrictInfo pointer.
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is a planner-owned RestrictInfo.
+        let clause = unsafe { (*ri).clause };
+        if unsafe { node_contains_unregistered_postgis_geometry_constructor(clause.cast()) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn node_contains_unregistered_postgis_geometry_constructor(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: node is a valid planner expression node.
+    let tag = unsafe { (*node).type_ };
+    #[allow(clippy::cast_ptr_alignment)]
+    match tag {
+        NodeTag::T_FuncExpr => {
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: tag checked above.
+            let funcid = unsafe { (*funcexpr).funcid };
+            if unsafe {
+                function_matches_postgis_spatial_arg(
+                    funcid,
+                    (*funcexpr).args,
+                    postgis_geometry_constructor_function_name,
+                )
+            } {
+                return true;
+            }
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*funcexpr).args) }
+        }
+        NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*opexpr).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*bool_expr).args) }
+        }
+        NodeTag::T_NullTest => {
+            let null_test = node.cast::<pg_sys::NullTest>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*null_test).arg.cast())
+            }
+        }
+        NodeTag::T_BooleanTest => {
+            let bool_test = node.cast::<pg_sys::BooleanTest>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*bool_test).arg.cast())
+            }
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*relabel).arg.cast())
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*coercion).arg.cast())
+            }
+        }
+        NodeTag::T_CoerceToDomain => {
+            let coercion = node.cast::<pg_sys::CoerceToDomain>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*coercion).arg.cast())
+            }
+        }
+        NodeTag::T_CoalesceExpr => {
+            let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*coalesce).args) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*scalar_array).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.cast::<pg_sys::CaseExpr>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*case_expr).arg.cast())
+                    || args_contain_unregistered_postgis_geometry_constructor((*case_expr).args)
+                    || node_contains_unregistered_postgis_geometry_constructor(
+                        (*case_expr).defresult.cast(),
+                    )
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let case_when = node.cast::<pg_sys::CaseWhen>();
+            unsafe {
+                node_contains_unregistered_postgis_geometry_constructor((*case_when).expr.cast())
+                    || node_contains_unregistered_postgis_geometry_constructor(
+                        (*case_when).result.cast(),
+                    )
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            let array = node.cast::<pg_sys::ArrayExpr>();
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*array).elements) }
+        }
+        NodeTag::T_MinMaxExpr => {
+            let minmax = node.cast::<pg_sys::MinMaxExpr>();
+            unsafe { args_contain_unregistered_postgis_geometry_constructor((*minmax).args) }
+        }
+        _ => false,
+    }
+}
+
+unsafe fn args_contain_unregistered_postgis_geometry_constructor(args: *mut List) -> bool {
+    if args.is_null() {
+        return false;
+    }
+
+    // SAFETY: args is a valid planner expression List.
+    let len = unsafe { pg_sys::list_length(args) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len).
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        if unsafe { node_contains_unregistered_postgis_geometry_constructor(child) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn restrictinfo_contains_unregistered_postgis_distance_function(
+    restrictinfo_list: *mut List,
+) -> bool {
+    if restrictinfo_list.is_null() {
+        return false;
+    }
+
+    // SAFETY: restrictinfo_list is a valid List from the planner.
+    let len = unsafe { pg_sys::list_length(restrictinfo_list) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len), list_nth returns a RestrictInfo pointer.
+        let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
+        if ri.is_null() {
+            continue;
+        }
+        // SAFETY: ri is a planner-owned RestrictInfo.
+        let clause = unsafe { (*ri).clause };
+        if unsafe { node_contains_unregistered_postgis_distance_function(clause.cast()) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn node_contains_unregistered_postgis_distance_function(node: *mut pg_sys::Node) -> bool {
+    if node.is_null() {
+        return false;
+    }
+
+    // SAFETY: node is a valid planner expression node.
+    let tag = unsafe { (*node).type_ };
+    #[allow(clippy::cast_ptr_alignment)]
+    match tag {
+        NodeTag::T_FuncExpr => {
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: tag checked above.
+            let funcid = unsafe { (*funcexpr).funcid };
+            if unsafe {
+                function_matches_postgis_spatial_prefix(
+                    funcid,
+                    (*funcexpr).args,
+                    postgis_distance_function_name,
+                )
+            } {
+                return true;
+            }
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_postgis_distance_function((*funcexpr).args) }
+        }
+        NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_postgis_distance_function((*opexpr).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            // SAFETY: tag checked above.
+            unsafe { args_contain_unregistered_postgis_distance_function((*bool_expr).args) }
+        }
+        NodeTag::T_NullTest => {
+            let null_test = node.cast::<pg_sys::NullTest>();
+            unsafe { node_contains_unregistered_postgis_distance_function((*null_test).arg.cast()) }
+        }
+        NodeTag::T_BooleanTest => {
+            let bool_test = node.cast::<pg_sys::BooleanTest>();
+            unsafe { node_contains_unregistered_postgis_distance_function((*bool_test).arg.cast()) }
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            unsafe { node_contains_unregistered_postgis_distance_function((*relabel).arg.cast()) }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            unsafe { node_contains_unregistered_postgis_distance_function((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoerceToDomain => {
+            let coercion = node.cast::<pg_sys::CoerceToDomain>();
+            unsafe { node_contains_unregistered_postgis_distance_function((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoalesceExpr => {
+            let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            unsafe { args_contain_unregistered_postgis_distance_function((*coalesce).args) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { args_contain_unregistered_postgis_distance_function((*scalar_array).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.cast::<pg_sys::CaseExpr>();
+            unsafe {
+                node_contains_unregistered_postgis_distance_function((*case_expr).arg.cast())
+                    || args_contain_unregistered_postgis_distance_function((*case_expr).args)
+                    || node_contains_unregistered_postgis_distance_function(
+                        (*case_expr).defresult.cast(),
+                    )
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let case_when = node.cast::<pg_sys::CaseWhen>();
+            unsafe {
+                node_contains_unregistered_postgis_distance_function((*case_when).expr.cast())
+                    || node_contains_unregistered_postgis_distance_function(
+                        (*case_when).result.cast(),
+                    )
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            let array = node.cast::<pg_sys::ArrayExpr>();
+            unsafe { args_contain_unregistered_postgis_distance_function((*array).elements) }
+        }
+        NodeTag::T_MinMaxExpr => {
+            let minmax = node.cast::<pg_sys::MinMaxExpr>();
+            unsafe { args_contain_unregistered_postgis_distance_function((*minmax).args) }
+        }
+        _ => false,
+    }
+}
+
+unsafe fn args_contain_unregistered_postgis_distance_function(args: *mut List) -> bool {
+    if args.is_null() {
+        return false;
+    }
+
+    // SAFETY: args is a valid planner expression List.
+    let len = unsafe { pg_sys::list_length(args) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len).
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        if unsafe { node_contains_unregistered_postgis_distance_function(child) } {
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn unregistered_spatial_decline_reason(
+    restrictinfo_list: *mut List,
+    rows: usize,
+    output_rows: f64,
+    limits: &cost::DeviceLimits,
+) -> Option<super::RejectionReason> {
+    if unsafe { restrictinfo_contains_unregistered_postgis_geometry_constructor(restrictinfo_list) }
+    {
+        return Some(super::RejectionReason::PostgisGeometryConstructorNoGpuOutputProtocol);
+    }
+    if unsafe { restrictinfo_contains_unregistered_postgis_distance_function(restrictinfo_list) } {
+        return Some(super::RejectionReason::PostgisDistanceNoGpuKernel);
+    }
+    if unsafe { restrictinfo_contains_wrapped_postgis_intersects(restrictinfo_list) } {
+        return Some(super::RejectionReason::PostgisIntersectsUnsupportedShape);
+    }
+    if !unsafe { restrictinfo_contains_unregistered_spatial_predicate(restrictinfo_list) } {
+        return None;
+    }
+
+    // SAFETY: restrictinfo_list is the planner-provided base restriction list.
+    let vcount = unsafe { extract_const_geom_vertex_count(restrictinfo_list) }.unwrap_or(0);
+    Some(unregistered_spatial_shape_decline_reason(
+        vcount,
+        rows,
+        output_rows,
+        limits,
+    ))
+}
+
+fn unregistered_spatial_shape_decline_reason(
+    vcount: usize,
+    rows: usize,
+    output_rows: f64,
+    limits: &cost::DeviceLimits,
+) -> super::RejectionReason {
+    if !cost::spatial_polygon_rows_safe(rows, vcount, limits) {
+        return super::RejectionReason::SpatialUnsafeRowBand;
+    }
+    if vcount > 0 && vcount < limits.gpu_spatial_min_vertices {
+        return super::RejectionReason::SpatialVerticesBelowBreakEven;
+    }
+    if vcount > 0 {
+        let work_product = (vcount as u64).saturating_mul(rows as u64);
+        if work_product < limits.spatial_point_in_ring_break_even_verts_x_rows {
+            return super::RejectionReason::SpatialWorkBelowBreakEven;
+        }
+        if work_product > limits.spatial_point_in_ring_max_verts_x_rows {
+            return super::RejectionReason::SpatialWorkAboveMax;
+        }
+    }
+    if !cost::spatial_output_fraction_allowed(output_rows, rows as f64, limits) {
+        return super::RejectionReason::SpatialHighOutputFraction;
+    }
+    if vcount >= limits.gpu_spatial_min_vertices {
+        return super::RejectionReason::SpatialPreparedGeometryNotAvailable;
+    }
+    super::RejectionReason::SpatialNoRegisteredGpuPredicate
+}
+
+unsafe fn record_unregistered_spatial_decline(
+    restrictinfo_list: *mut List,
+    rows: usize,
+    output_rows: f64,
+    limits: &cost::DeviceLimits,
+) -> bool {
+    if let Some(reason) =
+        unsafe { unregistered_spatial_decline_reason(restrictinfo_list, rows, output_rows, limits) }
+    {
+        let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
+        let reason = reason.stats_key();
+        stats::increment_planner_rejected(reason, rejected_rows);
+        pgrx::debug1!(
+            "pg_accel: set_rel_pathlist: PostGIS spatial predicate declined with reason={}",
+            reason
+        );
+        true
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,31 +1473,108 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
+    let direct_gpuexpr_template;
+
     // Gate 3: Early rows exit. No scan strategy can fire below min_batch_size
     // (should_batch will reject at Gate 4), so skip expensive clause matching
     // and registry initialisation. This eliminates 20-50µs of overhead on
     // small dimension tables in star-schema queries.
     {
         let rows_early = rel_ref.tuples.max(rel_ref.rows) as usize;
+        let rows_early_u64 = u64::try_from(rows_early).unwrap_or(u64::MAX);
         let min_batch = gucs::min_batch_size().max(1) as usize;
+        let limits = cost::device_limits();
+        if let Some(h3_decline) = unsafe { h3_latlng_qual_decline(rel_ref.baserestrictinfo) } {
+            stats::increment_planner_rejected(h3_decline.stats_key(), rows_early_u64);
+            pgrx::debug1!(
+                "pg_accel: set_rel_pathlist: h3_latlng_to_cell qual declined ({:?}); \
+                 scalar H3 predicates stay native until fused GPU expression filtering exists",
+                h3_decline
+            );
+            return;
+        }
+        if unsafe { restrictinfo_contains_wrapped_postgis_intersects(rel_ref.baserestrictinfo) } {
+            stats::increment_planner_rejected(
+                super::RejectionReason::PostgisIntersectsUnsupportedShape.stats_key(),
+                rows_early_u64,
+            );
+            pgrx::debug1!(
+                "pg_accel: set_rel_pathlist: ST_Intersects scan predicate declined before \
+                 row gating; exact fp64/PostGIS semantics are not ready"
+            );
+            return;
+        }
         if rows_early < min_batch {
+            unsafe {
+                record_unregistered_spatial_decline(
+                    rel_ref.baserestrictinfo,
+                    rows_early,
+                    rel_ref.rows,
+                    limits,
+                );
+            }
+            return;
+        }
+
+        // BitmapHeapScan + generic GpuExpr is a real planner opportunity, but
+        // the current standalone GpuExpr path is disabled until scan input and
+        // expression output can stay in one GPU-resident batch pipeline. Keep
+        // this visible as an explicit decline instead of silently falling
+        // through to PostgreSQL when a bitmap-prefiltered numeric predicate
+        // shape appears.
+        let bitmap_path = unsafe { super::find_cheapest_bitmap_heap_path(rel_ref.pathlist) };
+        let gpu_expr_candidate =
+            super::try_gpu_expr_match(rel_ref.baserestrictinfo, rows_early_u64).is_some();
+        direct_gpuexpr_template =
+            unsafe { direct_gpuexpr_template_match(rel_ref.baserestrictinfo, rows_early, limits) };
+        if !bitmap_path.is_null() && gpu_expr_candidate {
+            stats::increment_planner_rejected(
+                super::RejectionReason::BitmapHeapGpuExprNoGpuPipeline.stats_key(),
+                rows_early_u64,
+            );
+            pgrx::debug1!(
+                "pg_accel: set_rel_pathlist: BitmapHeapPath + GpuExpr candidate \
+                 declined until fused GPU scan pipeline exists"
+            );
+            return;
+        }
+
+        if gpu_expr_candidate && direct_gpuexpr_template.is_none() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::StandaloneGpuExprNoGpuPipeline.stats_key(),
+                rows_early_u64,
+            );
+            pgrx::debug1!(
+                "pg_accel: set_rel_pathlist: standalone GpuExpr candidate \
+                 declined until fused GPU scan pipeline exists"
+            );
             return;
         }
     }
 
-    // Gate 3b: GPU must be available and enabled for extension-function scan
-    // strategies. Keep this behind the cheap relation / row / clause checks so
-    // planner-declined native queries do not initialise the GPU runtime.
-    if !cost::gpu_is_usable() {
-        pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
+    if let Some(shape) = direct_gpuexpr_template {
+        if !cost::gpu_is_usable() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::GpuNotUsable.stats_key(),
+                u64::try_from(rel_ref.tuples.max(rel_ref.rows) as usize).unwrap_or(u64::MAX),
+            );
+            pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
+            return;
+        }
+        let rows = rel_ref.tuples.max(rel_ref.rows) as usize;
+        if unsafe { try_inject_direct_gpuexpr_path(rel, rel_ref, rows, shape) } {
+            return;
+        }
+        stats::increment_planner_rejected(
+            super::RejectionReason::NoCheapestPath.stats_key(),
+            u64::try_from(rows).unwrap_or(u64::MAX),
+        );
         return;
     }
-    pgrx::debug1!("pg_accel: set_rel_pathlist: GPU usable, checking restrictions");
 
     // Extension-function match: requires the adapter registry (PostGIS,
-    // H3, raster). Generic numeric GpuExpr is intentionally not exposed as
-    // a standalone Custom Scan path; expression evaluation belongs inside a
-    // future fused GpuScan pipeline or test-only primitive.
+    // H3, raster). Broad generic numeric GpuExpr is still not exposed as a
+    // standalone path; only the direct template scan branch above is admitted.
     registry::lazy_init();
     let reg_match = if registry::is_ready() {
         let reg = registry::global_registry();
@@ -287,17 +1589,65 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
     let accel = reg_match;
     let Some(accel) = accel else {
+        let rows = rel_ref.tuples.max(rel_ref.rows) as usize;
+        unsafe {
+            record_unregistered_spatial_decline(
+                rel_ref.baserestrictinfo,
+                rows,
+                rel_ref.rows,
+                cost::device_limits(),
+            );
+        }
         pgrx::debug1!("pg_accel: set_rel_pathlist: no accelerable match found");
         return;
     };
     let strategy = accel.strategy;
+    let fn_name = unsafe { function_name_for_oid(accel.fn_oid) };
     if strategy == registry::AccelStrategy::GpuExpr {
         pgrx::debug1!(
             "pg_accel: set_rel_pathlist: standalone GpuExpr Custom Scan exposure disabled"
         );
         return;
     }
+    if strategy == registry::AccelStrategy::GpuSpatial {
+        stats::increment_planner_rejected(
+            super::RejectionReason::PostgisIntersectsUnsupportedShape.stats_key(),
+            u64::try_from(rel_ref.tuples.max(rel_ref.rows) as usize).unwrap_or(u64::MAX),
+        );
+        pgrx::debug1!(
+            "pg_accel: set_rel_pathlist: PostGIS function={:?} declined before \
+             expensive shape validation because exact fp64/PostGIS semantics are not ready",
+            fn_name.as_deref()
+        );
+        return;
+    }
+    if strategy == registry::AccelStrategy::GpuH3 {
+        stats::increment_planner_rejected(
+            super::RejectionReason::H3LatLngScalarPredicateNoGpuPipeline.stats_key(),
+            u64::try_from(rel_ref.tuples.max(rel_ref.rows) as usize).unwrap_or(u64::MAX),
+        );
+        pgrx::debug1!(
+            "pg_accel: set_rel_pathlist: H3 function={:?} declined because \
+             standalone scalar H3 scan predicates need fused GPU expression filtering",
+            fn_name.as_deref()
+        );
+        return;
+    }
     pgrx::debug1!("pg_accel: set_rel_pathlist: found {:?} match", strategy);
+
+    // Gate 3b: GPU must be available and enabled before any pg_accel path is
+    // injected. This intentionally sits after registry/shape-only declines so
+    // unsupported PostGIS/H3/raster shapes expose precise native-decline
+    // reasons even on test hosts without a usable GPU.
+    if !cost::gpu_is_usable() {
+        stats::increment_planner_rejected(
+            super::RejectionReason::GpuNotUsable.stats_key(),
+            u64::try_from(rel_ref.tuples.max(rel_ref.rows) as usize).unwrap_or(u64::MAX),
+        );
+        pgrx::debug1!("pg_accel: set_rel_pathlist: GPU not usable");
+        return;
+    }
+    pgrx::debug1!("pg_accel: set_rel_pathlist: GPU usable, checking restrictions");
 
     // Gate 4: Cost model gating — skip if batching is not worthwhile.
     // Use strategy-aware per-row cost so GPU paths (with higher overhead)
@@ -319,7 +1669,6 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // the function name can't be resolved, default to `false`. The helper
     // centralises the per-function classification so it's consistent with
     // the adapters' own declarations in `pg_accel/src/adapters/*.rs`.
-    let fn_name = unsafe { function_name_for_oid(accel.fn_oid) };
     let fn_uses_fp64 = fn_name
         .as_deref()
         .is_some_and(|name| crate::adapters::uses_fp64(strategy, name));
@@ -370,6 +1719,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         let seq_scan_cost = unsafe { find_cheapest_seqscan_cost(rel_ref.pathlist) };
         // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
         if unsafe { has_cheap_spatial_index_path(rel_ref.pathlist, seq_scan_cost) } {
+            stats::increment_planner_rejected(
+                super::RejectionReason::SpatialIndexCheaper.stats_key(),
+                rows as u64,
+            );
             return;
         }
     }
@@ -395,6 +1748,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // from the hardware profile in `from_profile`.
     if strategy == registry::AccelStrategy::GpuSpatial {
         let dl = cost::device_limits();
+        let rows_u64 = rows as u64;
         let min_verts = dl.gpu_spatial_min_vertices;
         let min_product = dl.spatial_point_in_ring_break_even_verts_x_rows;
         let max_product = dl.spatial_point_in_ring_max_verts_x_rows;
@@ -406,6 +1760,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         let vcount =
             unsafe { extract_const_geom_vertex_count(rel_ref.baserestrictinfo) }.unwrap_or(0);
         if !cost::spatial_polygon_rows_safe(rows, vcount, dl) {
+            stats::increment_planner_rejected(
+                super::RejectionReason::SpatialUnsafeRowBand.stats_key(),
+                rows_u64,
+            );
             pgrx::debug1!(
                 "pg_accel: spatial 100K safety gate: rows={} vcount={} in unsafe band \
                  [{}..={}] with min_vertices={}, skipping",
@@ -418,6 +1776,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
             return;
         }
         if vcount < min_verts {
+            stats::increment_planner_rejected(
+                super::RejectionReason::SpatialVerticesBelowBreakEven.stats_key(),
+                rows_u64,
+            );
             pgrx::debug1!(
                 "pg_accel: spatial vertex gate: vcount={} < min={}, skipping",
                 vcount,
@@ -428,6 +1790,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         // Compute the work product as u64 to avoid overflow at 10^13.
         let work_product = (vcount as u64).saturating_mul(rows as u64);
         if work_product < min_product {
+            stats::increment_planner_rejected(
+                super::RejectionReason::SpatialWorkBelowBreakEven.stats_key(),
+                rows_u64,
+            );
             pgrx::debug1!(
                 "pg_accel: spatial work-product gate: vcount={} * rows={} = {} < min {}, \
                  skipping (below break-even)",
@@ -439,6 +1805,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
             return;
         }
         if work_product > max_product {
+            stats::increment_planner_rejected(
+                super::RejectionReason::SpatialWorkAboveMax.stats_key(),
+                rows_u64,
+            );
             pgrx::debug1!(
                 "pg_accel: spatial work-product gate: vcount={} * rows={} = {} > max {}, \
                  skipping (megapoly loser path)",
@@ -446,6 +1816,20 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
                 rows,
                 work_product,
                 max_product
+            );
+            return;
+        }
+        let output_fraction = cost::spatial_output_fraction(rel_ref.rows, rows as f64);
+        if !cost::spatial_output_fraction_allowed(rel_ref.rows, rows as f64, dl) {
+            stats::increment_planner_rejected(
+                super::RejectionReason::SpatialHighOutputFraction.stats_key(),
+                rows_u64,
+            );
+            pgrx::debug1!(
+                "pg_accel: spatial output gate: estimated output fraction {:.3} > max {:.3}, \
+                 skipping heap-backed Custom Scan",
+                output_fraction,
+                dl.gpu_spatial_max_output_fraction
             );
             return;
         }
@@ -555,6 +1939,10 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // heap walk unless a bitmap child is wrapped.
     // SAFETY: rel_ref.pathlist is a valid List pointer from the planner.
     if unsafe { has_cheaper_spatial_index_path(rel_ref.pathlist, total_cost) } {
+        stats::increment_planner_rejected(
+            super::RejectionReason::SpatialIndexCheaper.stats_key(),
+            rows as u64,
+        );
         return;
     }
 
@@ -980,6 +2368,12 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         pgrx::debug1!(
             "pg_accel sort: {num_pathkeys} keys outside supported range 1..={GPU_SORT_MAX_PATHKEYS}, skipping"
         );
+        #[allow(clippy::cast_sign_loss)]
+        let rejected_rows = rel_ref.rows.max(0.0) as u64;
+        stats::increment_planner_rejected(
+            super::RejectionReason::SortMultiKeyNoGpuKernel.stats_key(),
+            rejected_rows,
+        );
         return;
     }
 
@@ -1031,7 +2425,10 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
             rows
         );
         let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
-        stats::increment_planner_rejected("sort_heap_full_output", rejected_rows);
+        stats::increment_planner_rejected(
+            super::RejectionReason::SortHeapFullOutput.stats_key(),
+            rejected_rows,
+        );
         return;
     }
 
@@ -1176,7 +2573,7 @@ unsafe fn try_inject_gpu_sort_path(root: *mut PlannerInfo, rel: *mut RelOptInfo)
         let rejected_rows = u64::try_from(rows).unwrap_or(u64::MAX);
         let reason = match admission.reason {
             Some(cost::formulas::SortDeclineReason::RowTooWide) => "sort_heap_topk_wide_output",
-            _ => "sort_heap_full_output",
+            _ => super::RejectionReason::SortHeapFullOutput.stats_key(),
         };
         stats::increment_planner_rejected(reason, rejected_rows);
         return;
@@ -1461,7 +2858,9 @@ unsafe fn inject_gpu_sort_partial_paths(
 mod tests {
     use super::{
         GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape, heap_topk_sort_candidate,
-        min_max_rewrite_shape, sort_topk_backend_supported,
+        min_max_rewrite_shape, postgis_distance_function_name,
+        postgis_geometry_constructor_function_name, postgis_spatial_predicate_name,
+        sort_topk_backend_supported, unregistered_spatial_shape_decline_reason,
     };
     use crate::engine::cost::DeviceLimits;
 
@@ -1493,6 +2892,52 @@ mod tests {
         assert!(!sort_topk_backend_supported(b"metal"));
         assert!(sort_topk_backend_supported(b"cuda"));
         assert!(sort_topk_backend_supported(b"hip"));
+    }
+
+    #[test]
+    fn unregistered_spatial_predicate_reason_is_stable() {
+        assert_eq!(
+            super::super::RejectionReason::SpatialNoRegisteredGpuPredicate.stats_key(),
+            "spatial_no_registered_gpu_predicate"
+        );
+        assert!(postgis_spatial_predicate_name("st_intersects"));
+        assert!(postgis_spatial_predicate_name("st_dwithin"));
+        assert!(!postgis_spatial_predicate_name("st_buffer"));
+        assert!(postgis_distance_function_name("st_distance"));
+        assert!(!postgis_distance_function_name("st_dwithin"));
+        assert!(postgis_geometry_constructor_function_name("st_buffer"));
+        assert!(postgis_geometry_constructor_function_name("st_union"));
+        assert!(postgis_geometry_constructor_function_name(
+            "st_intersection"
+        ));
+        assert!(!postgis_geometry_constructor_function_name("st_area"));
+    }
+
+    #[test]
+    fn unregistered_spatial_shape_marks_prepared_geometry_gap_after_cost_gates() {
+        let limits = DeviceLimits::cpu_only();
+
+        let reason = unregistered_spatial_shape_decline_reason(
+            limits.gpu_spatial_min_vertices,
+            limits.gpu_min_rows,
+            1.0,
+            &limits,
+        );
+
+        assert_eq!(
+            reason.stats_key(),
+            "spatial_prepared_geometry_not_available"
+        );
+    }
+
+    #[test]
+    fn unregistered_spatial_shape_keeps_generic_reason_for_unknown_geometry() {
+        let limits = DeviceLimits::cpu_only();
+
+        let reason =
+            unregistered_spatial_shape_decline_reason(0, limits.gpu_min_rows, 1.0, &limits);
+
+        assert_eq!(reason.stats_key(), "spatial_no_registered_gpu_predicate");
     }
 
     // -- classify_sort_shape ------------------------------------------------

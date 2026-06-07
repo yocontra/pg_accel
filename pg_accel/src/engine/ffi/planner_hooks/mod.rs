@@ -127,6 +127,9 @@ pub unsafe fn install() {
 // Upper paths hook (aggregates)
 // ---------------------------------------------------------------------------
 
+const SETOP_NO_GPU_KERNEL_REASON: &str = "setop_no_gpu_kernel";
+const RECURSIVEUNION_NO_GPU_KERNEL_REASON: &str = "recursiveunion_no_gpu_kernel";
+
 /// `create_upper_paths_hook` implementation.
 ///
 /// Delegates to `pgaccel_inject_gpu_agg` for `UPPERREL_GROUP_AGG`.
@@ -163,6 +166,18 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
 
     // Dispatch by upper relation stage.
     match stage {
+        pg_sys::UpperRelationKind::UPPERREL_SETOP => {
+            let rows_est = rel_rows_estimate(output_rel).or_else(|| rel_rows_estimate(input_rel));
+            let reason = unsafe { setop_decline_reason(output_rel) };
+            stats::increment_planner_rejected(reason, rows_est.unwrap_or(0));
+            stats::record_planner_fast_decline("upper_paths_setop_no_gpu_kernel");
+            pgrx::debug1!(
+                "pg_accel: upper_paths decline: UPPERREL_SETOP has no GPU SetOp/RecursiveUnion \
+                 implementation; reason={}",
+                reason
+            );
+            return;
+        }
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => {
             // Phase 0 fast-decline: if the query's GROUP BY contains an
             // unsupported group-key type (text/varchar/timestamp/date/etc.),
@@ -206,9 +221,15 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // can re-enter only after the child is a real GPU-resident
             // GpuScan/GpuJoin/PreAgg producer.
             // SAFETY: All pointers are valid planner arguments.
+            unsafe { record_partial_agg_no_gpu_producing_child(input_rel) };
+            unsafe { record_preagg_no_gpu_resident_pipeline(root, input_rel) };
             unsafe { agg::inject(root, input_rel, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
+            // The active window path is leader-side only. If PostgreSQL has
+            // worker partial input paths, keep the missing partial-window hook
+            // visible until the planner can inject worker-local window work.
+            unsafe { record_window_partial_path_no_parallel_hook(input_rel) };
             if !hook_context.require_gpu_usable() {
                 pgrx::debug1!("pg_accel window: gpu not usable");
                 return;
@@ -240,6 +261,138 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         _ => {}
     }
     let _ = extra;
+}
+
+fn rel_rows_estimate(rel: *mut RelOptInfo) -> Option<u64> {
+    if rel.is_null() {
+        return None;
+    }
+    // SAFETY: caller passed a planner-owned RelOptInfo pointer.
+    Some(unsafe { (*rel).rows.max(0.0) as u64 })
+}
+
+unsafe fn record_partial_agg_no_gpu_producing_child(input_rel: *mut RelOptInfo) {
+    if input_rel.is_null() || !cost::gpu_is_usable() {
+        return;
+    }
+    // SAFETY: input_rel is a planner-owned RelOptInfo pointer.
+    let input_ref = unsafe { &*input_rel };
+    if input_ref.partial_pathlist.is_null()
+        || unsafe { pg_sys::list_length(input_ref.partial_pathlist) } == 0
+    {
+        return;
+    }
+    if !unsafe { find_cheapest_gpu_producing_path(input_ref.partial_pathlist) }.is_null() {
+        return;
+    }
+
+    stats::increment_planner_rejected(
+        RejectionReason::PartialAggNoGpuProducingChild.stats_key(),
+        input_ref.rows.max(0.0) as u64,
+    );
+    pgrx::debug1!("pg_accel: gpu_agg partial skipped: no GPU-producing partial child path");
+}
+
+unsafe fn record_preagg_no_gpu_resident_pipeline(
+    root: *mut PlannerInfo,
+    input_rel: *mut RelOptInfo,
+) {
+    if root.is_null() || input_rel.is_null() || !cost::gpu_is_usable() {
+        return;
+    }
+    // SAFETY: root is a planner-owned PlannerInfo pointer.
+    let parse = unsafe { (*root).parse };
+    if parse.is_null() {
+        return;
+    }
+    // SAFETY: parse is a planner-owned Query pointer.
+    let query = unsafe { &*parse };
+    if query.groupClause.is_null() || unsafe { pg_sys::list_length(query.groupClause) } == 0 {
+        return;
+    }
+    if !unsafe { rel_pathlist_contains_any_join_path(input_rel) } {
+        return;
+    }
+
+    let rows_est = rel_rows_estimate(input_rel).unwrap_or(0);
+    stats::increment_planner_rejected(
+        RejectionReason::PreAggNoGpuResidentPipeline.stats_key(),
+        rows_est,
+    );
+    pgrx::debug1!(
+        "pg_accel: preagg skipped: grouped join input has no GPU-resident PreAgg pipeline yet"
+    );
+}
+
+unsafe fn record_window_partial_path_no_parallel_hook(input_rel: *mut RelOptInfo) {
+    if input_rel.is_null() {
+        return;
+    }
+
+    // SAFETY: input_rel is a planner-owned RelOptInfo pointer.
+    let input_ref = unsafe { &*input_rel };
+    if input_ref.partial_pathlist.is_null()
+        || unsafe { pg_sys::list_length(input_ref.partial_pathlist) } == 0
+    {
+        return;
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    let rows = input_ref.rows.max(0.0) as u64;
+    stats::increment_planner_rejected(
+        RejectionReason::WindowPartialPathNoParallelHook.stats_key(),
+        rows,
+    );
+    pgrx::debug1!(
+        "pg_accel window: partial input paths exist, but no worker-local partial window hook is \
+         implemented yet"
+    );
+}
+
+#[must_use]
+const fn setop_reason_for_recursive_union(has_recursive_union: bool) -> &'static str {
+    if has_recursive_union {
+        RECURSIVEUNION_NO_GPU_KERNEL_REASON
+    } else {
+        SETOP_NO_GPU_KERNEL_REASON
+    }
+}
+
+unsafe fn setop_decline_reason(output_rel: *mut RelOptInfo) -> &'static str {
+    let has_recursive_union =
+        unsafe { rel_pathlist_contains_node_tag(output_rel, NodeTag::T_RecursiveUnionPath) };
+    setop_reason_for_recursive_union(has_recursive_union)
+}
+
+unsafe fn rel_pathlist_contains_any_join_path(rel: *mut RelOptInfo) -> bool {
+    (unsafe { rel_pathlist_contains_node_tag(rel, NodeTag::T_HashPath) })
+        || unsafe { rel_pathlist_contains_node_tag(rel, NodeTag::T_MergePath) }
+        || unsafe { rel_pathlist_contains_node_tag(rel, NodeTag::T_NestPath) }
+}
+
+unsafe fn rel_pathlist_contains_node_tag(rel: *mut RelOptInfo, tag: NodeTag) -> bool {
+    if rel.is_null() {
+        return false;
+    }
+    // SAFETY: rel is a planner-owned RelOptInfo pointer.
+    let pathlist = unsafe { (*rel).pathlist };
+    if pathlist.is_null() {
+        return false;
+    }
+    // SAFETY: pathlist is a planner-owned List.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    for i in 0..len {
+        // SAFETY: i is in [0, len).
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+        // SAFETY: path is a valid planner Path node.
+        if unsafe { (*path.cast::<pg_sys::Node>()).type_ } == tag {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -554,6 +707,10 @@ unsafe fn pgaccel_inject_gpu_window(
                 | WindowFunc::Lag
                 | WindowFunc::Lead
         ) {
+            stats::increment_planner_rejected(
+                RejectionReason::WindowFunctionNoSegmentedKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!(
                 "pg_accel window: rejecting {:?} — benchmark shows GPU loses at all scales",
                 wfunc_enum
@@ -1018,6 +1175,11 @@ fn reduce_break_even_rows_for_type(type_oid: u32) -> usize {
         AGG_INT8OID => limits.reduce_i64_break_even_rows,
         _ => limits.reduce_f64_break_even_rows,
     }
+}
+
+#[must_use]
+const fn gpu_avg_input_type_supported(type_oid: u32) -> bool {
+    matches!(type_oid, AGG_FLOAT4OID | AGG_FLOAT8OID)
 }
 
 // ---------------------------------------------------------------------------
@@ -2428,15 +2590,39 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
         // reproduces on a plain table without any SRF — the bug is in
         // the agg gate, not in the SRF executor.
         if !aggref_ref.aggdistinct.is_null() {
+            stats::increment_planner_rejected(
+                RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                agg_rows_estimate,
+            );
             pgrx::debug1!("pg_accel: gpu_agg rejected: aggregate has DISTINCT clause");
             return;
         }
         if !aggref_ref.aggorder.is_null() {
+            stats::increment_planner_rejected(
+                RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                agg_rows_estimate,
+            );
             pgrx::debug1!("pg_accel: gpu_agg rejected: aggregate has ORDER BY clause");
             return;
         }
         if !aggref_ref.aggfilter.is_null() {
+            stats::increment_planner_rejected(
+                RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                agg_rows_estimate,
+            );
             pgrx::debug1!("pg_accel: gpu_agg rejected: aggregate has FILTER clause");
+            return;
+        }
+
+        if unsafe { agg_common::aggref_uses_numeric_accumulator(aggref) } {
+            pgrx::debug1!(
+                "pg_accel: gpu_agg rejected: NUMERIC aggregate requires PostgreSQL-compatible \
+                 arbitrary-precision accumulator/comparator state"
+            );
+            stats::increment_planner_rejected(
+                agg_common::NUMERIC_AGG_NO_GPU_KERNEL_REASON,
+                agg_rows_estimate,
+            );
             return;
         }
 
@@ -2556,11 +2742,44 @@ pub(super) unsafe fn pgaccel_inject_gpu_agg(
                         policy,
                         agg_rows_estimate,
                     );
+                } else if matches!(op, AggOp::Avg) {
+                    pgrx::debug1!(
+                        "pg_accel: gpu_agg rejected: AVG expression result type oid={} needs \
+                         PostgreSQL native accumulator semantics; only float4/float8 AVG is \
+                         GPU-supported today",
+                        result_type,
+                    );
+                    stats::increment_planner_rejected(
+                        "avg_unsupported_input_type",
+                        agg_rows_estimate,
+                    );
                 }
                 return;
             }
             AGG_FLOAT8OID
         };
+
+        if matches!(op, AggOp::Avg) && !gpu_avg_input_type_supported(typid) {
+            pgrx::debug1!(
+                "pg_accel: gpu_agg rejected: AVG input type oid={} needs PostgreSQL native \
+                 accumulator semantics; only float4/float8 AVG is GPU-supported today",
+                typid,
+            );
+            // SAFETY: planner hook runs on the main backend thread.
+            if let Some(policy) =
+                unsafe { planner_type_policy(pg_sys::Oid::from(typid)).rejection() }
+            {
+                record_planner_type_rejection(
+                    "agg AVG input",
+                    pg_sys::Oid::from(typid),
+                    policy,
+                    agg_rows_estimate,
+                );
+            } else {
+                stats::increment_planner_rejected("avg_unsupported_input_type", agg_rows_estimate);
+            }
+            return;
+        }
 
         // Bitwise reductions accept INT2/INT4/INT8 input; boolean reductions
         // accept BOOLOID. Numeric aggregates (SUM/AVG/MIN/MAX/etc.) keep the
@@ -3831,8 +4050,6 @@ pub(super) struct AccelMatch {
 pub(super) unsafe fn extract_const_geom_vertex_count(
     restrictinfo_list: *mut List,
 ) -> Option<usize> {
-    use crate::adapters::extractors::geometry::extract_geometry;
-
     if restrictinfo_list.is_null() {
         return None;
     }
@@ -3847,39 +4064,131 @@ pub(super) unsafe fn extract_const_geom_vertex_count(
         if clause.is_null() {
             continue;
         }
-        // SAFETY: clause is a valid Node.
-        let tag = unsafe { (*clause.cast::<pg_sys::Node>()).type_ };
-        #[allow(clippy::cast_ptr_alignment)]
-        let args = match tag {
-            NodeTag::T_FuncExpr => unsafe { (*clause.cast::<pg_sys::FuncExpr>()).args },
-            NodeTag::T_OpExpr => unsafe { (*clause.cast::<pg_sys::OpExpr>()).args },
-            _ => continue,
-        };
-        if args.is_null() {
-            continue;
-        }
-        let alen = unsafe { pg_sys::list_length(args) };
-        for j in 0..alen {
-            let node = unsafe { pg_sys::list_nth(args, j).cast::<pg_sys::Node>() };
-            if node.is_null() {
-                continue;
-            }
-            // SAFETY: reading tag of arg node.
-            if unsafe { (*node).type_ } != NodeTag::T_Const {
-                continue;
-            }
-            let cst = node.cast::<pg_sys::Const>();
-            // SAFETY: tag-checked Const; skip NULL constants.
-            if unsafe { (*cst).constisnull } {
-                continue;
-            }
-            let datum = unsafe { (*cst).constvalue };
-            if let Some(geom) = extract_geometry(datum) {
-                return Some(geom.coord_count);
-            }
+        if let Some(count) = unsafe { extract_const_geom_vertex_count_node(clause.cast()) } {
+            return Some(count);
         }
     }
     None
+}
+
+unsafe fn extract_const_geom_vertex_count_list(args: *mut List) -> Option<usize> {
+    if args.is_null() {
+        return None;
+    }
+    let len = unsafe { pg_sys::list_length(args) };
+    for i in 0..len {
+        let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        if let Some(count) = unsafe { extract_const_geom_vertex_count_node(child) } {
+            return Some(count);
+        }
+    }
+    None
+}
+
+unsafe fn oid_is_postgis_spatial_scalar_type(type_oid: pg_sys::Oid) -> bool {
+    if type_oid == pg_sys::InvalidOid {
+        return false;
+    }
+
+    let base_type = unsafe { pg_sys::getBaseType(type_oid) };
+    if base_type == pg_sys::InvalidOid {
+        return false;
+    }
+    if !unsafe { super::syscache::type_is_extension_member(base_type, "postgis") } {
+        return false;
+    }
+
+    unsafe { super::syscache::type_name(base_type) }
+        .as_deref()
+        .is_some_and(|name| matches!(name, "geometry" | "geography"))
+}
+
+unsafe fn extract_const_geom_vertex_count_node(node: *mut pg_sys::Node) -> Option<usize> {
+    use crate::adapters::extractors::geometry::extract_geometry;
+
+    if node.is_null() {
+        return None;
+    }
+
+    let tag = unsafe { (*node).type_ };
+    #[allow(clippy::cast_ptr_alignment)]
+    match tag {
+        NodeTag::T_Const => {
+            let cst = node.cast::<pg_sys::Const>();
+            if unsafe { (*cst).constisnull } {
+                return None;
+            }
+            if !unsafe { oid_is_postgis_spatial_scalar_type((*cst).consttype) } {
+                return None;
+            }
+            let datum = unsafe { (*cst).constvalue };
+            extract_geometry(datum).map(|geom| geom.coord_count)
+        }
+        NodeTag::T_FuncExpr => {
+            let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*funcexpr).args) }
+        }
+        NodeTag::T_OpExpr => {
+            let opexpr = node.cast::<pg_sys::OpExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*opexpr).args) }
+        }
+        NodeTag::T_BoolExpr => {
+            let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*bool_expr).args) }
+        }
+        NodeTag::T_NullTest => {
+            let null_test = node.cast::<pg_sys::NullTest>();
+            unsafe { extract_const_geom_vertex_count_node((*null_test).arg.cast()) }
+        }
+        NodeTag::T_BooleanTest => {
+            let bool_test = node.cast::<pg_sys::BooleanTest>();
+            unsafe { extract_const_geom_vertex_count_node((*bool_test).arg.cast()) }
+        }
+        NodeTag::T_RelabelType => {
+            let relabel = node.cast::<pg_sys::RelabelType>();
+            unsafe { extract_const_geom_vertex_count_node((*relabel).arg.cast()) }
+        }
+        NodeTag::T_CoerceViaIO => {
+            let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            unsafe { extract_const_geom_vertex_count_node((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoerceToDomain => {
+            let coercion = node.cast::<pg_sys::CoerceToDomain>();
+            unsafe { extract_const_geom_vertex_count_node((*coercion).arg.cast()) }
+        }
+        NodeTag::T_CoalesceExpr => {
+            let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*coalesce).args) }
+        }
+        NodeTag::T_ScalarArrayOpExpr => {
+            let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*scalar_array).args) }
+        }
+        NodeTag::T_CaseExpr => {
+            let case_expr = node.cast::<pg_sys::CaseExpr>();
+            unsafe {
+                extract_const_geom_vertex_count_node((*case_expr).arg.cast())
+                    .or_else(|| extract_const_geom_vertex_count_list((*case_expr).args))
+                    .or_else(|| extract_const_geom_vertex_count_node((*case_expr).defresult.cast()))
+            }
+        }
+        NodeTag::T_CaseWhen => {
+            let case_when = node.cast::<pg_sys::CaseWhen>();
+            unsafe {
+                extract_const_geom_vertex_count_node((*case_when).expr.cast())
+                    .or_else(|| extract_const_geom_vertex_count_node((*case_when).result.cast()))
+            }
+        }
+        NodeTag::T_ArrayExpr => {
+            let array = node.cast::<pg_sys::ArrayExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*array).elements) }
+        }
+        NodeTag::T_MinMaxExpr => {
+            let minmax = node.cast::<pg_sys::MinMaxExpr>();
+            unsafe { extract_const_geom_vertex_count_list((*minmax).args) }
+        }
+        _ => None,
+    }
 }
 
 /// GPU-supported numeric type OIDs for expression evaluation.

@@ -21,16 +21,35 @@ pg_accel injects four Custom Scan node types via the planner hook:
 | Field | Description |
 |-------|-------------|
 | `Strategy` | Node type: `GpuScan`, `GpuJoin`, `GpuAgg`, or `GpuSort` |
+| `Plan Selected` | `true` when PostgreSQL selected a pg_accel Custom Scan node |
 | `Batch Size` | Tuples per batch sent to the GPU/batched evaluator |
 | `Expected Threads` | Worker thread count for GPU dispatch |
+| `GPU Resident Pipeline` | Whether this node keeps intermediate data GPU-resident |
+| `GPU Resident Boundary` | If not resident, the CPU/PostgreSQL materialization boundary |
 
 ### EXPLAIN ANALYZE Only
 
 | Field | Description |
 |-------|-------------|
+| `GPU Kernel Dispatched` | Runtime evidence that the selected node actually launched GPU work |
+| `Rows Returned To CPU` | Tuples emitted by the Custom Scan node to PostgreSQL |
 | `Rows Dispatched` | Cumulative tuples sent to GPU across all batches |
 | `Batches` | Total batch executions |
+| `Rows Per Batch` | Average rows processed per dispatch batch |
 | `Dispatch Time` | Total GPU dispatch time in milliseconds (3 decimal places) |
+| `Avg Dispatch Time Per Batch` | Average dispatch wall time per batch in milliseconds |
+| `Hash Join Build Count` | `GpuHashJoin` build-side hash table builds observed at runtime |
+| `Hash Join Redundant Builds` | Extra inner-side rebuilds beyond the first build |
+| `Hash Join Build Rows` | Inner rows consumed by the most recent hash build |
+| `Hash Join Build Non-Null Rows` | Non-NULL inner keys inserted into the GPU hash table |
+| `Hash Join Probe Batches` | Probe batches that used the built hash table |
+| `GPU Hash Table Reused Across Probe Batches` | Whether one build fed multiple probe batches in this node |
+| `Shared GPU Inner Reuse` | Whether the inner build is retained/shared across workers or executions |
+| `Top-K Limit` | Bounded LIMIT used by a selected `GpuSort` top-k path |
+| `Input Rows Materialized` | Heap/child tuples copied before top-k pruning |
+| `Output Tuples Retained` | Tuple copies retained for final emission |
+| `Rows Pruned After Top-K` | Materialized tuple copies discarded after selecting top-k output |
+| `Full Input Materialized` | Whether the selected sort copied the full input before output |
 
 ---
 
@@ -64,11 +83,17 @@ Aggregate  (cost=2520.00..2520.01 rows=1 width=8)
   ->  Custom Scan (GpuAccelScan)  (cost=0.00..2500.00 rows=8000 width=0)
                                   (actual time=0.830..12.210 rows=7823 loops=1)
         Strategy: GpuScan
+        Plan Selected: true
         Batch Size: 256
         Expected Threads: 4
+        GPU Resident Pipeline: false
+        GPU Kernel Dispatched: true
+        Rows Returned To CPU: 7823
         Rows Dispatched: 100000
         Batches: 391
+        Rows Per Batch: 255.754
         Dispatch Time: 11.240 ms
+        Avg Dispatch Time Per Batch: 0.029 ms
         ->  Seq Scan on bench_locations  (cost=0.00..1500.00 rows=100000 width=32)
                                          (actual time=0.012..3.456 rows=100000 loops=1)
 Planning Time: 0.210 ms
@@ -122,11 +147,17 @@ Aggregate  (cost=65000.00..65000.01 rows=1 width=8)
   ->  Custom Scan (GpuAccelJoin)  (cost=0.28..64000.00 rows=40000 width=0)
                                   (actual time=1.200..245.100 rows=38421 loops=1)
         Strategy: GpuJoin
+        Plan Selected: true
         Batch Size: 256
         Expected Threads: 4
+        GPU Resident Pipeline: false
+        GPU Kernel Dispatched: true
+        Rows Returned To CPU: 38421
         Rows Dispatched: 60000
         Batches: 235
+        Rows Per Batch: 255.319
         Dispatch Time: 198.500 ms
+        Avg Dispatch Time Per Batch: 0.845 ms
         ->  Nested Loop  (cost=0.28..50000.00 rows=60000 width=64)
                          (actual time=0.120..42.300 rows=60000 loops=1)
               ->  Seq Scan on bench_polygons g  (cost=0.00..180.00 rows=10000 width=32)
@@ -145,6 +176,11 @@ Execution Time: 245.890 ms
 - The GiST index still provides bbox candidates (`geom && g.geom`)
 - The expensive `ST_Contains` recheck moves to GPU-accelerated batch evaluation
 - `Strategy: GpuJoin` indicates spatial join acceleration
+
+For selected `GpuHashJoin` plans, `EXPLAIN ANALYZE` also reports build-side
+reuse evidence. Today `Shared GPU Inner Reuse` is `false`; a value of
+`GPU Hash Table Reused Across Probe Batches: true` only proves per-node reuse
+after one build, not retained/shared inner buffers across workers or executions.
 
 ---
 
@@ -177,11 +213,17 @@ Execution Time: 32.560 ms
 Custom Scan (GpuAccelScan)  (cost=0.00..1800.00 rows=50 width=28)
                             (actual time=1.200..8.910 rows=50 loops=1)
   Strategy: GpuAgg
+  Plan Selected: true
   Batch Size: 256
   Expected Threads: 4
+  GPU Resident Pipeline: false
+  GPU Kernel Dispatched: true
+  Rows Returned To CPU: 50
   Rows Dispatched: 10023
   Batches: 40
+  Rows Per Batch: 250.575
   Dispatch Time: 6.780 ms
+  Avg Dispatch Time Per Batch: 0.170 ms
   ->  Seq Scan on bench_employees  (cost=0.00..2300.00 rows=10000 width=12)
                                    (actual time=0.012..1.850 rows=10023 loops=1)
         Filter: active
@@ -227,11 +269,24 @@ Limit  (cost=2500.00..2502.50 rows=1000 width=8)
   ->  Custom Scan (GpuAccelScan)  (cost=0.00..2500.00 rows=100000 width=8)
                                   (actual time=1.100..15.200 rows=1000 loops=1)
         Strategy: GpuSort
+        Plan Selected: true
         Batch Size: 256
         Expected Threads: 4
+        GPU Resident Pipeline: false
+        GPU Kernel Dispatched: true
+        Rows Returned To CPU: 1000
         Rows Dispatched: 100000
         Batches: 391
+        Rows Per Batch: 255.754
         Dispatch Time: 13.800 ms
+        Avg Dispatch Time Per Batch: 0.035 ms
+        GPU Dispatched: true
+        GPU Rows Dispatched: 100000
+        Top-K Limit: 1000
+        Input Rows Materialized: 100000
+        Output Tuples Retained: 1000
+        Rows Pruned After Top-K: 99000
+        Full Input Materialized: true
         ->  Seq Scan on bench_sort_ints  (cost=0.00..1450.00 rows=100000 width=8)
                                          (actual time=0.008..5.900 rows=100000 loops=1)
 Planning Time: 0.090 ms
@@ -242,6 +297,8 @@ Execution Time: 15.520 ms
 - `Sort` node is replaced by `Custom Scan` with `Strategy: GpuSort`
 - GPU radix sort handles the ORDER BY with top-K extraction
 - The `Limit` node still caps output at 1000 rows
+- The materialization counters show that this standalone top-k path still
+  copied all input tuples before retaining only the bounded output
 
 ---
 
@@ -270,6 +327,10 @@ When using `EXPLAIN ANALYZE`, the dispatch statistics help diagnose performance:
 
 | Scenario | What to Look For |
 |----------|-----------------|
+| `Plan Selected: true` with `GPU Kernel Dispatched: false` | Planner selected pg_accel but no GPU work was credited |
+| `Rows Returned To CPU` close to input rows | The plan may be paying full materialization cost |
+| `GPU Resident Pipeline: false` | Intermediate rows crossed back through PostgreSQL/CPU slots |
+| Low `Rows Per Batch` or high `Avg Dispatch Time Per Batch` | Dispatch overhead may dominate cheap reduce/sort work |
 | High `Dispatch Time` relative to total | GPU kernel is the bottleneck — check data transfer |
 | `Batches` much higher than expected | `Batch Size` may be too small — tune `pg_accel.min_batch_size` |
 | `Rows Dispatched` << total rows | Good selectivity — filter pushed before GPU dispatch |

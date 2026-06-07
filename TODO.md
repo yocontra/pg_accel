@@ -176,8 +176,8 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `:475-519`). Large outputs are capped because CPU materialization dominates
   (`pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs:520-528`).
   Work: batched variable-output SRF kernels with row-id/offset tables on GPU,
-  GPU-resident downstream aggregate/sort consumers, and multi-SRF/cartesian
-  semantics before broad admission.
+  GPU-resident downstream aggregate/sort consumers, and multi-SRF ProjectSet
+  lockstep/NULL-padding semantics before broad admission.
 - Partial/Gather and partition/Append surfaces: not pure GPU. Partial
   `GpuSort`, partial `GpuHashJoin`, and partial aggregate scaffolds currently
   wrap PostgreSQL partial children or duplicate per-worker host work unless the
@@ -260,6 +260,18 @@ kernels dispatched, and which rows returned to PostgreSQL.
   or audited from saved artifacts, reports every crash/skip without relying
   on terminal scrollback, and keeps the default suite bounded while preserving
   rigorous coverage for long winning/proof lanes.
+- Progress (2026-06-05): correctness diff artifacts are captured before
+  timing and now propagate into each `WorkloadResult` as
+  `correctness_diff_artifact`, with JSON, CSV, and markdown report coverage
+  linking the per-cell `correctness_diffs/<workload>-<rows>.json` file. The
+  crash inventory and crash-context artifacts also link correctness diff files
+  when pre-timing diff capture fails, and correctness scratch tables are
+  confined to `pg_temp` so artifact capture cannot drop permanent tables with
+  matching names. The resume entrypoint reads `resume_audit_manifest.json`
+  plus pre-risk contexts and writes a retry source artifact before rerunning
+  crashed cells. This item remains open until a full saved benchmark run
+  proves end-to-end resume/audit behavior across crashes, skips, correctness
+  failures, and bounded logs.
 
 ## Phase 1 - Stop All Backend Crashes Before Re-Entry
 
@@ -430,6 +442,18 @@ retained buffers, and truthful EXPLAIN/runtime counters.
 - Acceptance: scan predicates and projections dispatch GPU expression
   kernels, match PostgreSQL semantics for NULLs and supported operator
   classes, and decline unsupported shapes visibly.
+- Progress (2026-06-05): scalar `h3_latlng_to_cell` base-relation predicates
+  now stay native with explicit planner-decline evidence instead of reaching
+  standalone scan-filter exposure. Bad argument shapes, including invalid
+  resolutions, non-constant resolutions, and non-point-column arguments,
+  record `h3_latlng_unsupported_shape`; valid scalar predicate wrappers,
+  including equality, `AND`, `IS TRUE`, `CASE`, and `COALESCE`, record
+  `h3_latlng_scalar_predicate_no_gpu_pipeline`. The detector now runs before
+  the generic min-batch row gate, the stale standalone H3 scan admission helper
+  was removed, a PG17 pgrx regression covers the visible declines, and the H3
+  protection integration guard compiles behind `integration_tests`. This item
+  remains open until fused GPU expression filtering owns H3 scalar outputs and
+  the surrounding comparison/null-test semantics.
 
 ### Fused scan plus partial aggregate
 
@@ -440,6 +464,11 @@ retained buffers, and truthful EXPLAIN/runtime counters.
 - Acceptance: aggregate audit rows report GPU Custom Scan plans selected by
   PostgreSQL, EXPLAIN ANALYZE shows actual GPU dispatch, and corresponding
   benchmark cells are at or above PostgreSQL parallel parity.
+- Progress (2026-06-05): parallel aggregate shapes over PostgreSQL CPU
+  partial scans now stay native with exact
+  `partial_agg_no_gpu_producing_child` planner-decline evidence. This item
+  remains open until partial aggregate CustomPaths consume GPU-producing
+  children or direct GPU-owned scans without wrapping CPU parallel scans.
 
 ### GPU-resident join build/probe and retained inner reuse
 
@@ -499,6 +528,12 @@ window work.
   path rather than treating no-dispatch rows as GPU losses.
 - Acceptance: star-schema benchmark queries select `GpuPreAgg`, dispatch GPU
   kernels, match PostgreSQL output, and beat PostgreSQL parallel plans.
+- Progress (2026-06-05): grouped join aggregate shapes now have PG17
+  regression coverage that keeps the disabled serial PreAgg scaffold out of
+  normal planning and exposes the exact `preagg_no_gpu_resident_pipeline`
+  native-decline reason. This item remains open until a real GPU-resident
+  star-schema PreAgg path dispatches kernels, passes correctness diffs, and
+  wins benchmark cells.
 
 ### Grouped hash aggregation
 
@@ -577,6 +612,12 @@ window work.
   diffs and speedup at or above 1.0; `HashJoinTelemetry.redundant_inner_builds`
   proves the intended reuse model; high-output joins either feed GPU-resident
   preagg/semi/anti paths or decline with `hashjoin_heap_output_too_large`.
+- Progress (2026-06-05): high-output row-returning hash joins now stay
+  PostgreSQL-native with exact `hashjoin_heap_output_too_large`
+  planner-decline evidence, protecting release runs from selecting a
+  row-reconstructing heap `GpuHashJoin` where output materialization dominates.
+  This item remains open until joined rows feed GPU-resident preagg/projection
+  or benchmark artifacts prove selected row-returning joins win.
 
 ### GPU semi/anti join and Bloom prefilters
 
@@ -589,6 +630,11 @@ window work.
 - Acceptance: representative semi/anti join queries dispatch GPU membership
   work, avoid full join-output reconstruction, match PostgreSQL semantics for
   NULLs and anti joins, and beat PostgreSQL parallel plans where selected.
+- Progress (2026-06-05): representative `EXISTS` and `NOT EXISTS` shapes now
+  stay PostgreSQL-native with exact `semianti_no_gpu_membership_filter`
+  planner-decline evidence instead of routing through row-returning
+  `GpuHashJoin` heap reconstruction. This item remains open until GPU
+  membership/Bloom-filter semantics are implemented and benchmark-proven.
 
 ### NestedLoop inequality pure-GPU follow-up
 
@@ -608,6 +654,11 @@ window work.
 - Acceptance: selected NLJ either stays row-count bounded with no crash and
   speedup at or above 1.0, or feeds a GPU-resident downstream consumer without
   host pair materialization.
+- Progress (2026-06-05): oversized `BETWEEN` NLJ shapes now stay
+  PostgreSQL-native with exact `nlj_between_output_too_large`
+  planner-decline evidence. This item remains open until selected
+  `GpuNestedLoopIneq` output is bounded by benchmarked admission or feeds a
+  GPU-resident downstream consumer without host pair materialization.
 
 ### Aggregate FILTER / DISTINCT / ordered semantics
 
@@ -625,6 +676,12 @@ window work.
   match PostgreSQL for NULLs, duplicates, collations/order-sensitive cases
   where applicable, and benchmark-selected cells are at or above PostgreSQL
   parallel parity.
+- Progress (2026-06-05): aggregate `FILTER`, `DISTINCT`, and aggregate-local
+  `ORDER BY` shapes stay PostgreSQL-native and expose
+  `agg_semantic_modifier_no_gpu_kernel` instead of selecting a partial
+  `GpuAgg` path that would ignore the modifier semantics. This item remains
+  open until those modifiers have implemented GPU semantic paths and
+  correctness/performance evidence.
 
 ### Full sort algorithm and cost gating
 
@@ -643,6 +700,11 @@ window work.
 - Acceptance: full sorts either produce PostgreSQL-native plans or beat
   PostgreSQL in the benchmark matrix with real GPU dispatch; top-k remains
   independently measured.
+- Progress (2026-06-05): full-output standalone `ORDER BY` shapes now stay
+  PostgreSQL-native with exact `sort_heap_full_output` planner-decline
+  evidence instead of exposing heap-backed `GpuSort` for known loser lanes.
+  This item remains open until full-output sorts either benchmark as native
+  declines or dispatch a GPU-resident sort/gather path that beats PostgreSQL.
 
 ### Window executor partial path
 
@@ -652,6 +714,11 @@ window work.
   CustomPath when `PARTITION BY` aligns with worker distribution.
 - Acceptance: EXPLAIN shows eligible partitioned window work running inside
   workers rather than only on the leader.
+- Progress (2026-06-05): parallel window input shapes now stay native with
+  the exact `window_partial_path_no_parallel_hook` planner-decline reason.
+  This item remains open until a worker-local/partition-aware window hook is
+  implemented and EXPLAIN/runtime artifacts show eligible window work running
+  inside workers.
 
 ### Segmented window kernels
 
@@ -668,6 +735,10 @@ window work.
   dispatch segmented kernels, match PostgreSQL output for NULLs, peer groups,
   frame bounds, and ordering ties, and show measured speedups at selected
   thresholds.
+- Progress (2026-06-05): representative `ROW_NUMBER` window shapes now stay
+  PostgreSQL-native with exact `window_function_no_segmented_kernel`
+  planner-decline evidence. This item remains open until segmented window
+  kernels are implemented, selected, correctness-proven, and benchmarked.
 
 ## Phase 5 - Geo, H3, Raster, And PostGIS Coverage
 
@@ -727,6 +798,11 @@ raster map algebra, and prepared geometry structures.
   kernels, match h3-pg output including ordering/NULL semantics where
   PostgreSQL requires them, and beat PostgreSQL native execution at measured
   thresholds.
+- Progress (2026-06-05): correlated `h3_grid_disk` LATERAL shapes now stay
+  PostgreSQL-native with exact `h3_lateral_srf_no_batched_expansion`
+  planner-decline evidence. This item remains open until table-correlated
+  variable-output H3 expansion is batched, correctness-diffed against h3-pg,
+  and benchmark-proven.
 
 ### H3 target-list and multi-SRF semantics
 
@@ -746,6 +822,13 @@ raster map algebra, and prepared geometry structures.
 - Acceptance: multi-SRF H3 target-list queries either dispatch with
   correctness diffs against PostgreSQL/h3-pg or decline without selected
   pg_accel plan labels.
+- Progress (2026-06-05): large variable-output target-list SRF scans now stay
+  native with exact `srf_tlist_cpu_output_too_large` evidence, and multi-SRF
+  target lists expose `srf_tlist_multi_srf_semantics` instead of selecting a
+  Custom Scan that cannot implement ProjectSet lockstep/NULL-padding
+  semantics. This item remains open until target-list SRF expansion has
+  bounded CPU output or GPU-resident downstream consumers, plus multi-SRF
+  correctness coverage.
 
 ### Spatial cost model and geometry staging
 
@@ -766,6 +849,25 @@ raster map algebra, and prepared geometry structures.
   eligible; improve geometry staging after the 100K crash repro is fixed.
 - Acceptance: simple spatial filters route to PostgreSQL-native plans when
   faster, while high-compute spatial cases produce stable GPU wins.
+- Progress (2026-06-05): `st_intersects(geometry, geometry)` is registered,
+  but selected scan admission is closed until exact fp64/PostGIS semantics are
+  implemented and proved. Direct and wrapped `ST_Intersects` scan predicates
+  now stay native with `postgis_intersects_unsupported_shape`, and that reason
+  is recorded before the generic min-batch row gate. The closed planner branch
+  skips full polygon validation to avoid quadratic planning cost while no
+  PostGIS `ST_Intersects` scan can be selected. Generic geometry columns,
+  LineString columns, unknown-SRID typmods, dynamic polygon Vars,
+  missing/wrong-SRID constants, polygons with holes, self-intersecting
+  polygons, extra top-level quals, boolean wrappers, and the future
+  point-column/simple-polygon candidate all stay native with
+  `postgis_intersects_unsupported_shape`. The point-in-polygon kernels now
+  classify polygon edge/vertex and interior-hole boundary points as
+  `ST_Intersects = true`; the integration plan-shape fixture includes explicit
+  boundary rows and compiles coverage for both argument orders as native
+  declines. The focused `test_spatial` binary rebuilt, but its cold Metal
+  runtime stalled after JIT and was interrupted, so this item remains open
+  until selected point/polygon cells have durable runtime artifacts and the
+  remaining spatial cost terms are calibrated.
 
 ### Prepared spatial geometry acceleration
 
@@ -791,6 +893,21 @@ raster map algebra, and prepared geometry structures.
 - Acceptance: mixed supported distance shapes route through GPU with
   PostgreSQL-native correctness diffs, and unsupported shapes have visible
   planner decline counters.
+- Progress (2026-06-05): unsupported PostGIS predicates, distance calls, and
+  geometry constructors now recurse through boolean/null/case/coalesce-style
+  wrappers, `GREATEST`/`LEAST` nodes, and array/scalar-array forms before row
+  gating, so wrapped `ST_Contains`/`ST_Within`, `ST_Distance`, and
+  `ST_Buffer` filter shapes stay PostgreSQL-native with stable
+  planner-decline reasons instead of disappearing behind generic row gates.
+  PostGIS-name decline detection also requires `postgis` extension membership
+  plus extension-owned `geometry`/`geography` scalar or array argument types,
+  so user-defined overloads with the same SQL names stay on the generic
+  native path while PostGIS installs outside `public` keep specific decline
+  visibility.
+  The shared constant-geometry vertex extractor now walks the same wrappers,
+  preserving spatial cost reasons such as `spatial_vertices_below_break_even`
+  for wrapped predicate forms. This item remains open until mixed distance
+  predicates have exact GPU kernels and correctness-diff artifacts.
 
 ### PostGIS geometry constructors
 
@@ -832,6 +949,11 @@ only when benchmarks prove no release-relevant GPU opportunity.
 - Acceptance: NUMERIC aggregate lanes either dispatch a correct multi-limb
   GPU accumulator with PostgreSQL-compatible overflow/scale behavior or have
   measured evidence that release workloads should decline them.
+- Progress (2026-06-05): built-in NUMERIC `SUM`, `AVG`, `MIN`, `MAX`,
+  `STDDEV`, and `VAR_SAMP` aggregate shapes now remain PostgreSQL-native with
+  exact `numeric_agg_no_gpu_kernel` planner-decline evidence. This item
+  remains open until the release matrix has either measured native-decline
+  artifacts or a correct multi-limb GPU accumulator/comparator implementation.
 
 ### Integer / NUMERIC AVG variants
 
@@ -840,6 +962,12 @@ only when benchmarks prove no release-relevant GPU opportunity.
 - Acceptance: supported AVG variants dispatch GPU kernels and match
   PostgreSQL, or planner decline reasons explain why the variant is outside
   the release matrix.
+- Progress (2026-06-05): unsupported AVG variants now expose precise native
+  decline reasons: integer AVG uses `avg_unsupported_input_type`, NUMERIC AVG
+  uses `numeric_agg_no_gpu_kernel`, and interval AVG uses
+  `unsupported_interval_type`. This item remains open until AVG variants
+  either gain PostgreSQL-compatible GPU accumulator/finalization support or
+  have release benchmark artifacts documenting native decline.
 
 ### Cascaded multi-key GPU sort
 
@@ -848,6 +976,12 @@ only when benchmarks prove no release-relevant GPU opportunity.
   PostgreSQL.
 - Acceptance: production-style multikey/top-k traces either dispatch a
   stable GPU implementation with speedup or decline with benchmark evidence.
+- Progress (2026-06-05): multi-key `ORDER BY` regression coverage now resets
+  planner stats and asserts the exact `sort_multikey_no_gpu_kernel` rejection
+  count, proving the current single-key GPU sort executor does not claim
+  cascaded multi-key support. This item remains open until production-style
+  multi-key and IncrementalSort traces are backed by benchmark artifacts or a
+  correct cascaded GPU sort implementation.
 
 ### GPU merge-join kernel
 
@@ -856,6 +990,12 @@ only when benchmarks prove no release-relevant GPU opportunity.
 - Acceptance: representative merge-join workloads either dispatch a GPU
   merge join and beat PostgreSQL, or the planner records why hash/semi/scan
   alternatives are preferred.
+- Progress (2026-06-05): merge-join-shaped equijoin regressions now reset
+  planner stats and assert the exact `mergejoin_no_gpu_kernel` rejection
+  count, rather than only proving that some planner rejection occurred. This
+  item remains open until representative merge-join workloads have benchmark
+  artifacts documenting native decline or a correct GPU merge-join kernel is
+  implemented and proven.
 
 ### GpuExpr+Scan for BitmapHeapScan
 
@@ -863,12 +1003,25 @@ only when benchmarks prove no release-relevant GPU opportunity.
   pushing expression work into GPU scan batches.
 - Acceptance: BitmapHeapScan-adjacent GPU plans either beat the current
   BitmapHeapPath wrapping approach or decline explicitly.
+- Progress (2026-06-05): bitmap-prefiltered generic `GpuExpr` candidates now
+  reset planner stats and assert the exact
+  `bitmap_heap_gpuexpr_no_gpu_pipeline` rejection count. This protects the
+  current release behavior: BitmapHeapPath-adjacent scalar-expression scans
+  stay PostgreSQL-native until GPU scan input, expression evaluation, and
+  output handoff are GPU-resident instead of wrapping a CPU child plan.
 
 ### Shared hashtable for parallel GpuHashJoin
 
 - Scope: large-inner benchmarks may show per-worker inner builds dominating.
 - Acceptance: parallel GpuHashJoin either shares/reuses a GPU-resident inner
   structure or declines large-inner plans where duplicated work loses.
+- Progress (2026-06-05): large-inner parallel hash join shapes now have PG17
+  regression evidence that the planner records the exact
+  `hashjoin_parallel_inner_rebuild_too_large` native-decline reason before
+  exposing per-worker private GPU hash-table rebuilds. This item remains open
+  until the release matrix has benchmark artifacts proving native decline is
+  intentional, or shared GPU-resident build-side state is implemented and
+  correctness/performance proven.
 
 ### SetOp / RecursiveUnion GPU handling
 
@@ -876,6 +1029,14 @@ only when benchmarks prove no release-relevant GPU opportunity.
   workloads show them as bottlenecks with GPU-friendly shapes.
 - Acceptance: benchmarked shapes either dispatch GPU work with correctness
   proof or are documented as planner-declined.
+- Progress (2026-06-05): upper-planner SetOp and RecursiveUnion stages now
+  remain PostgreSQL-native with explicit `setop_no_gpu_kernel` and
+  `recursiveunion_no_gpu_kernel` planner-decline reasons. PG17 regression
+  coverage verifies representative `INTERSECT` and recursive CTE shapes do
+  not get pg_accel plan labels and expose the exact missing-lane reason. This
+  item remains open until benchmarked SetOp/RecursiveUnion shapes are either
+  release-documented as native declines with artifacts or implemented with
+  correctness-proof GPU kernels.
 
 ### AdaptiveCpp rebase and upstream PRs
 

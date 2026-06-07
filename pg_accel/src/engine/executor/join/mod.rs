@@ -95,6 +95,33 @@ impl Default for HashJoinTelemetry {
     }
 }
 
+impl HashJoinTelemetry {
+    #[must_use]
+    pub(crate) const fn build_count(self) -> u64 {
+        self.build_count
+    }
+
+    #[must_use]
+    pub(crate) const fn redundant_inner_builds(self) -> u64 {
+        self.redundant_inner_builds
+    }
+
+    #[must_use]
+    pub(crate) const fn build_rows(self) -> usize {
+        self.build_rows
+    }
+
+    #[must_use]
+    pub(crate) const fn build_non_null_rows(self) -> usize {
+        self.build_non_null_rows
+    }
+
+    #[must_use]
+    pub(crate) const fn probe_batches(self) -> u64 {
+        self.probe_batches
+    }
+}
+
 #[must_use]
 pub(super) fn hash_join_non_null_rows(null_mask: &[u8]) -> usize {
     null_mask
@@ -335,6 +362,19 @@ impl JoinExecState {
     #[must_use]
     pub(crate) fn hash_join_count_only(&self) -> bool {
         self.hash_count_only
+    }
+
+    #[must_use]
+    pub(crate) fn hash_join_reuses_build_across_probe_batches(&self) -> bool {
+        self.strategy == AccelStrategy::GpuHashJoin
+            && self.hash_join_telemetry.build_count == 1
+            && self.hash_join_telemetry.redundant_inner_builds == 0
+            && self.hash_join_telemetry.probe_batches > 1
+    }
+
+    #[must_use]
+    pub(crate) const fn hash_join_shared_inner_reuse(&self) -> bool {
+        false
     }
 
     pub(super) fn record_hash_join_worker_metadata(&mut self, worker_number: i32) {

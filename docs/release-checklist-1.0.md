@@ -31,7 +31,7 @@ unchecked.
 ## Phase 2 - AdaptiveCpp Runtime, Metal, CUDA, And Fork Stability
 
 - [ ] fp64 soft path uses the pinned AdaptiveCpp fork or newer accepted upstream commits, with fork-local commits listed in release notes. Evidence SHA/artifact: `<sha-or-url>`.
-- [ ] fp64 ULP budget, special-value behavior, fenv/ABI requirements, and `pg_accel.soft_fp64_cost_multiplier` calibration are verified for every shipped fp64 kernel family. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] fp64 ULP budget, special-value behavior, documented no-fenv-read-back release semantics, ABI value-buffer contract, and `pg_accel.soft_fp64_cost_multiplier` calibration are verified for every shipped fp64 kernel family. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Cold-start, fork, archive-size, SSCP debug, and warning-noise behavior are captured as pass/fail artifacts, including first-dispatch latency per kernel. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Metal and CUDA runtime setup paths are documented with backend metadata and any ROCm/L0 deferrals. Evidence SHA/artifact: `<sha-or-url>`.
 

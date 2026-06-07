@@ -9,7 +9,8 @@ impl Workload for GpuSortMultikey {
     }
 
     fn description(&self) -> &'static str {
-        "ORDER BY key1, key2 on ~120-byte rows — tests GPU sort with composite sort keys"
+        "ORDER BY key1, key2 on ~120-byte rows — native planner decline \
+         (`sort_multikey_no_gpu_kernel`) until cascaded multi-key GPU sort lands"
     }
 
     fn category(&self) -> &'static str {

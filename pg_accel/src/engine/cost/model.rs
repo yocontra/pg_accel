@@ -158,6 +158,8 @@ pub struct PlannerPolicy {
     pub gpu_hash_agg_min_rows: Rows,
     /// Minimum constant polygon vertex count for GPU spatial dispatch.
     pub gpu_spatial_min_vertices: usize,
+    /// Maximum estimated output fraction for heap-backed GPU spatial scans.
+    pub gpu_spatial_max_output_fraction: f64,
     /// Minimum rows for GPU expression scan dispatch.
     pub gpu_expr_min_rows: Rows,
     /// Minimum rows for pipeline fusion.
@@ -202,6 +204,7 @@ impl From<&DeviceLimits> for PlannerPolicy {
             gpu_reduce_min_rows: Rows::new(limits.gpu_reduce_min_rows),
             gpu_hash_agg_min_rows: Rows::new(limits.gpu_hash_agg_min_rows),
             gpu_spatial_min_vertices: limits.gpu_spatial_min_vertices,
+            gpu_spatial_max_output_fraction: limits.gpu_spatial_max_output_fraction,
             gpu_expr_min_rows: Rows::new(limits.gpu_expr_min_rows),
             gpu_pipeline_fusion_min_rows: Rows::new(limits.gpu_pipeline_fusion_min_rows),
             gpu_preagg_min_fact_rows: Rows::new(limits.gpu_preagg_min_fact_rows),
@@ -397,6 +400,10 @@ mod tests {
         assert_eq!(
             model.planner.gpu_spatial_min_vertices,
             limits.gpu_spatial_min_vertices,
+        );
+        assert_eq!(
+            model.planner.gpu_spatial_max_output_fraction,
+            limits.gpu_spatial_max_output_fraction,
         );
         assert_eq!(
             model.planner.gpu_expr_min_rows.get(),

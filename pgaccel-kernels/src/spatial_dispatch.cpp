@@ -31,11 +31,26 @@ extern sycl::queue* g_queue;
 
 static constexpr float EPSILON = 1.0e-7f;
 
+static bool point_on_segment(float px, float py, float ax, float ay, float bx, float by) {
+  const float cross = (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+  if (cross > EPSILON || cross < -EPSILON) {
+    return false;
+  }
+  const float min_x = ax < bx ? ax : bx;
+  const float max_x = ax > bx ? ax : bx;
+  const float min_y = ay < by ? ay : by;
+  const float max_y = ay > by ? ay : by;
+  return px >= min_x - EPSILON && px <= max_x + EPSILON && py >= min_y - EPSILON &&
+         py <= max_y + EPSILON;
+}
+
 /* Point-in-ring via ray casting.
  * ring_coords: flat x,y pairs for a single ring.
- * ring_len:    number of coordinate pairs in the ring.
- * Returns true if point (px,py) is inside the ring. */
-static bool point_in_ring(float px, float py, const float* ring_coords, size_t ring_len) {
+ * ring_len:    number of coordinate pairs in the ring, including the repeated
+ *              closing point for PostGIS polygon rings.
+ * Returns 1 for inside, 0 for boundary, -1 for outside. */
+static int8_t point_in_ring_relation(float px, float py, const float* ring_coords,
+                                     size_t ring_len) {
   bool inside = false;
   for (size_t i = 0, j = ring_len - 1; i < ring_len; j = i++) {
     float xi = ring_coords[i * 2];
@@ -45,7 +60,10 @@ static bool point_in_ring(float px, float py, const float* ring_coords, size_t r
 
     /* Check if the point lies exactly on a vertex. */
     if (std::fabs(px - xi) < EPSILON && std::fabs(py - yi) < EPSILON) {
-      return true; /* on vertex — treat as inside */
+      return 0; /* boundary */
+    }
+    if (point_on_segment(px, py, xi, yi, xj, yj)) {
+      return 0; /* boundary */
     }
 
     bool crosses = ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
@@ -53,7 +71,7 @@ static bool point_in_ring(float px, float py, const float* ring_coords, size_t r
       inside = !inside;
     }
   }
-  return inside;
+  return inside ? 1 : -1;
 }
 
 /* Point-in-polygon with holes.
@@ -66,8 +84,8 @@ static int8_t point_in_polygon_check(const float* pt_coords, const float* poly_c
 
   if (ring_count == 0 || ring_offsets == nullptr) {
     /* Treat the whole coord array as one ring. */
-    bool inside = point_in_ring(px, py, poly_coords, poly_coord_count);
-    return inside ? 1 : -1;
+    int8_t rel = point_in_ring_relation(px, py, poly_coords, poly_coord_count);
+    return rel >= 0 ? 1 : -1;
   }
 
   /* Outer ring is ring 0.  Compute its length. */
@@ -75,8 +93,12 @@ static int8_t point_in_polygon_check(const float* pt_coords, const float* poly_c
   size_t outer_end = (ring_count > 1) ? ring_offsets[1] : poly_coord_count;
   size_t outer_len = outer_end - outer_start;
 
-  if (!point_in_ring(px, py, poly_coords + outer_start * 2, outer_len)) {
+  int8_t outer_rel = point_in_ring_relation(px, py, poly_coords + outer_start * 2, outer_len);
+  if (outer_rel < 0) {
     return -1; /* outside outer ring */
+  }
+  if (outer_rel == 0) {
+    return 1; /* on outer boundary intersects the polygon */
   }
 
   /* Check hole rings. */
@@ -84,7 +106,11 @@ static int8_t point_in_polygon_check(const float* pt_coords, const float* poly_c
     size_t start = ring_offsets[r];
     size_t end = (r + 1 < ring_count) ? ring_offsets[r + 1] : poly_coord_count;
     size_t len = end - start;
-    if (point_in_ring(px, py, poly_coords + start * 2, len)) {
+    int8_t hole_rel = point_in_ring_relation(px, py, poly_coords + start * 2, len);
+    if (hole_rel == 0) {
+      return 1; /* on an interior-ring boundary still intersects */
+    }
+    if (hole_rel > 0) {
       return -1; /* inside a hole */
     }
   }
@@ -233,7 +259,8 @@ static int8_t evaluate_predicate(const pgaccel_geometry& a, const pgaccel_geomet
 
 /* Device-side point-in-ring: same ray-casting algorithm as the scalar path.
  * Returns true if point is inside the ring. */
-static bool device_point_in_ring(float px, float py, const float* ring_coords, size_t ring_len) {
+static int8_t device_point_in_ring_relation(float px, float py, const float* ring_coords,
+                                            size_t ring_len) {
   bool inside = false;
   for (size_t i = 0, j = ring_len - 1; i < ring_len; j = i++) {
     float xi = ring_coords[i * 2];
@@ -245,7 +272,10 @@ static bool device_point_in_ring(float px, float py, const float* ring_coords, s
     float dx = px - xi;
     float dy = py - yi;
     if (dx * dx + dy * dy < EPSILON * EPSILON) {
-      return true;
+      return 0;
+    }
+    if (point_on_segment(px, py, xi, yi, xj, yj)) {
+      return 0;
     }
 
     bool crosses = ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
@@ -253,7 +283,7 @@ static bool device_point_in_ring(float px, float py, const float* ring_coords, s
       inside = !inside;
     }
   }
-  return inside;
+  return inside ? 1 : -1;
 }
 
 /* Device-side full polygon check: outer ring + hole rings. */
@@ -261,22 +291,32 @@ static int8_t device_point_in_polygon(float px, float py, const float* poly_coor
                                       size_t poly_coord_count, const uint32_t* ring_offsets,
                                       size_t ring_count) {
   if (ring_count == 0 || ring_offsets == nullptr) {
-    return device_point_in_ring(px, py, poly_coords, poly_coord_count) ? 1 : -1;
+    int8_t rel = device_point_in_ring_relation(px, py, poly_coords, poly_coord_count);
+    return rel >= 0 ? 1 : -1;
   }
 
   size_t outer_start = ring_offsets[0];
   size_t outer_end = (ring_count > 1) ? ring_offsets[1] : poly_coord_count;
   size_t outer_len = outer_end - outer_start;
 
-  if (!device_point_in_ring(px, py, poly_coords + outer_start * 2, outer_len)) {
+  int8_t outer_rel =
+      device_point_in_ring_relation(px, py, poly_coords + outer_start * 2, outer_len);
+  if (outer_rel < 0) {
     return -1;
+  }
+  if (outer_rel == 0) {
+    return 1;
   }
 
   for (size_t r = 1; r < ring_count; ++r) {
     size_t start = ring_offsets[r];
     size_t end = (r + 1 < ring_count) ? ring_offsets[r + 1] : poly_coord_count;
     size_t len = end - start;
-    if (device_point_in_ring(px, py, poly_coords + start * 2, len)) {
+    int8_t hole_rel = device_point_in_ring_relation(px, py, poly_coords + start * 2, len);
+    if (hole_rel == 0) {
+      return 1;
+    }
+    if (hole_rel > 0) {
       return -1;
     }
   }
@@ -535,6 +575,10 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
                my_on_edge = 1u;
                continue;
              }
+             if (point_on_segment(px, py, xi, yi, xj, yj)) {
+               my_on_edge = 1u;
+               continue;
+             }
 
              // Ray-cast test.
              if ((yi > py) != (yj > py)) {
@@ -563,17 +607,21 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
            const uint32_t parity = lparity[0];
            const uint32_t onedge = lon_edge[0];
 
-           const bool inside_ring = (onedge != 0u) || (parity != 0u);
-
            if (r == 0) {
              // Outer ring.
-             if (!inside_ring) {
+             if (onedge != 0u) {
+               result = 1;
+               definitive = true;
+             } else if (parity == 0u) {
                result = -1;
                definitive = true;
              }
            } else {
              // Hole ring.
-             if (inside_ring) {
+             if (onedge != 0u) {
+               result = 1;
+               definitive = true;
+             } else if (parity != 0u) {
                result = -1;
                definitive = true;
              }

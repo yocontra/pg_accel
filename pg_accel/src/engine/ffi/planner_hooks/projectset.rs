@@ -66,10 +66,6 @@ pub(super) unsafe fn try_inject_function_scan(
         pgrx::debug1!("pg_accel: projectset: extension disabled, skipping");
         return;
     }
-    if !cost::gpu_is_usable() {
-        pgrx::debug1!("pg_accel: projectset: gpu_is_usable=false, skipping");
-        return;
-    }
     if rel.is_null() || rte.is_null() {
         return;
     }
@@ -189,6 +185,12 @@ pub(super) unsafe fn try_inject_function_scan(
         }
         // SAFETY: arg_node is a valid Node; reading the tag.
         if unsafe { (*arg_node).type_ } != pg_sys::NodeTag::T_Const {
+            // SAFETY: rel is a planner-owned RelOptInfo pointer.
+            let rows = unsafe { (*rel).rows.max(0.0) as u64 };
+            stats::increment_planner_rejected(
+                super::RejectionReason::H3LateralSrfNoBatchedExpansion.stats_key(),
+                rows,
+            );
             pgrx::debug1!(
                 "pg_accel: projectset hook: non-Const arg {} for fn_oid={}; \
                  declining (lateral SRF args not supported)",
@@ -223,6 +225,11 @@ pub(super) unsafe fn try_inject_function_scan(
         output_shape_field_count: shape_field_count,
         args: serialized_args,
     };
+
+    if !cost::gpu_is_usable() {
+        pgrx::debug1!("pg_accel: projectset: gpu_is_usable=false, skipping");
+        return;
+    }
 
     // Build a CustomPath. Function rels typically have a small `tuples`
     // estimate (PG defaults to 1000 for unknown SRFs); use that as the row

@@ -135,6 +135,38 @@ pub(super) const fn partial_is_eligible(
     outer_parallel_safe && inner_parallel_safe
 }
 
+/// Inner-row threshold above which private per-worker hash-table rebuilds are
+/// treated as a known parallel `GpuHashJoin` loser lane.
+///
+/// The current partial path does not share a GPU-resident build table across
+/// workers. It is acceptable for small dimension tables, but once the build
+/// side reaches roughly 10x the minimum viable hashjoin build size, the GPU
+/// does duplicate build work in every worker while PostgreSQL's native
+/// parallel hash join can share build-side state. Keep the threshold tied to
+/// device limits instead of a standalone constant, and never set it above the
+/// build-side safety cap.
+#[must_use]
+#[inline]
+pub(super) fn partial_private_inner_rebuild_row_limit(limits: &DeviceLimits) -> usize {
+    limits
+        .hashjoin_min_build_rows
+        .saturating_mul(10)
+        .max(25_000)
+        .min(limits.gpu_hash_join_build_max_rows.max(1))
+}
+
+/// Return true when partial `GpuHashJoin` should decline because each worker
+/// would rebuild a large private inner hash table.
+#[must_use]
+#[inline]
+pub(super) fn partial_private_inner_rebuild_declines(
+    inner_rows: usize,
+    worker_count: usize,
+    limits: &DeviceLimits,
+) -> bool {
+    worker_count > 1 && inner_rows >= partial_private_inner_rebuild_row_limit(limits)
+}
+
 /// Per-worker GPU hash-join total-cost estimate.
 ///
 /// Matches the non-parallel formula in [`super::join_pathlist`] but takes
@@ -293,6 +325,25 @@ mod tests {
         assert!(!partial_is_eligible(false, true));
         assert!(!partial_is_eligible(true, false));
         assert!(!partial_is_eligible(false, false));
+    }
+
+    #[test]
+    fn partial_private_inner_rebuild_limit_tracks_device_limits() {
+        let l = limits_native();
+        assert_eq!(
+            partial_private_inner_rebuild_row_limit(&l),
+            l.hashjoin_min_build_rows * 10
+        );
+    }
+
+    #[test]
+    fn partial_private_inner_rebuild_declines_large_inner_only_with_multiple_workers() {
+        let l = limits_native();
+        let limit = partial_private_inner_rebuild_row_limit(&l);
+
+        assert!(!partial_private_inner_rebuild_declines(limit - 1, 4, &l));
+        assert!(partial_private_inner_rebuild_declines(limit, 4, &l));
+        assert!(!partial_private_inner_rebuild_declines(limit, 1, &l));
     }
 
     /// The parallel total-cost estimate must apply the soft-fp64 multiplier

@@ -1,0 +1,24 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b5eb8e82..2f9cf2f2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -658,6 +658,10 @@ endif()
+
+ message(STATUS "Default compilation target(s): ${DEFAULT_TARGETS}")
+
++set(ACPP_DEFAULT_TARGETS_JSON "${DEFAULT_TARGETS}")
++string(REPLACE "\\" "\\\\" ACPP_DEFAULT_TARGETS_JSON "${ACPP_DEFAULT_TARGETS_JSON}")
++string(REPLACE "\"" "\\\"" ACPP_DEFAULT_TARGETS_JSON "${ACPP_DEFAULT_TARGETS_JSON}")
++string(REPLACE ";" "\\;" ACPP_DEFAULT_TARGETS_JSON "${ACPP_DEFAULT_TARGETS_JSON}")
+
+ set(ACPP_CORE_CONFIG_FILE "{
+   \"version-major\" : \"${ACPP_VERSION_MAJOR}\",
+@@ -669,7 +673,7 @@ set(ACPP_CORE_CONFIG_FILE "{
+   \"plugin-with-cpu-acceleration\" : \"${WITH_ACCELERATED_CPU}\",
+   \"plugin-with-sscp-compiler\" : \"${WITH_SSCP_COMPILER}\",
+   \"default-clang\"     : \"${CLANG_INSTALLED_PATH}\",
+-  \"default-targets\"  : \"${DEFAULT_TARGETS}\",
++  \"default-targets\"  : \"${ACPP_DEFAULT_TARGETS_JSON}\",
+   \"default-cpu-cxx\"   : \"${CMAKE_CXX_COMPILER}\",
+   \"default-rocm-path\" : \"${ROCM_PATH}\",
+   \"default-use-bootstrap-mode\" : \"false\",

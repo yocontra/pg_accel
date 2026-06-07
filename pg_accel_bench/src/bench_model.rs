@@ -61,6 +61,12 @@ pub enum CachePurgeState {
     Failed,
 }
 
+impl Default for CachePurgeState {
+    fn default() -> Self {
+        Self::NotRequested
+    }
+}
+
 impl CachePurgeState {
     #[must_use]
     pub const fn from_attempt(requested: bool, result: Result<bool, ()>) -> Self {

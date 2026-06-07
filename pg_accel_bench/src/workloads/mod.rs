@@ -57,7 +57,7 @@ mod ssbm;
 mod filtered_grouped_agg;
 mod mixed_variants;
 // --- fp64 matrix (Phase 1 calibration grid: 8 workloads x 5 sizes) ---
-mod fp64_matrix;
+pub mod fp64_matrix;
 // --- Parallel stress (8-worker Gather assurance) ---
 pub mod parallel_stress;
 // scale_sweep retired per action_items W9 (Reviewer 1 Sin #7) — the 5
@@ -66,10 +66,15 @@ pub mod parallel_stress;
 mod spatial_agg;
 mod spatial_sort;
 // --- Regression ---
+mod bitmap_heap_gpuexpr_decline;
+mod mergejoin_decline;
+mod numeric_agg_decline;
 mod oltp_point;
+mod parallel_hashjoin_rebuild_decline;
 mod small_table;
 mod topk_wide;
 
+pub use bitmap_heap_gpuexpr_decline::BitmapHeapGpuExprDecline;
 pub use filtered_grouped_agg::FilteredGroupedAgg;
 pub use gpu_expr_complex::GpuExprComplex;
 pub use gpu_expr_filter::GpuExprFilter;
@@ -92,7 +97,10 @@ pub use h3_srf_grid_disk::H3SrfGridDisk;
 pub use hash_join::HashJoin;
 pub use index_recheck::IndexRecheck;
 pub use large_sort::LargeSort;
+pub use mergejoin_decline::MergeJoinDecline;
+pub use numeric_agg_decline::NumericAggDecline;
 pub use oltp_point::OltpPoint;
+pub use parallel_hashjoin_rebuild_decline::ParallelHashJoinRebuildDecline;
 pub use parallel_stress::{
     ParallelStress, ParallelStressGrouped, ParallelStressSort, ParallelStressWindow,
 };
@@ -167,9 +175,9 @@ pub trait Workload: Send + Sync {
     /// Row scales to run for this workload in the default benchmark suite.
     ///
     /// Most workloads use the global four-scale matrix. A workload may cap
-    /// scales when the benchmark itself has unbounded native runtime, but
-    /// every returned scale must come from [`ROW_SCALES`] so reports stay
-    /// comparable.
+    /// scales when the benchmark itself has unbounded native runtime. Any
+    /// scale outside [`ROW_SCALES`] must be an explicit, tested smoke/probe
+    /// exception so the default suite remains bounded.
     fn row_scales(&self) -> &'static [usize] {
         ROW_SCALES
     }
@@ -515,6 +523,10 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SpatialContains),
         Box::new(SpatialMultiPred),
         Box::new(OltpPoint),
+        Box::new(BitmapHeapGpuExprDecline),
+        Box::new(MergeJoinDecline),
+        Box::new(NumericAggDecline),
+        Box::new(ParallelHashJoinRebuildDecline),
         Box::new(SmallTable),
         Box::new(TopkWide),
         // --- fp64 matrix (Phase 1 calibration grid) ---
@@ -551,6 +563,7 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("spatial_multi_pred", "postgis"),
         ("spatial_complex_poly", "postgis"),
         ("spatial_selectivity", "postgis"),
+        ("spatial_fp64_recheck", "postgis"),
         // GPU Spatial (megapoly — collapsed to one representative, W7)
         ("spatial_mega_1kv", "postgis"),
         // Vertex sweep (collapsed from 17 to 4 reps, W6/W10)
@@ -597,6 +610,7 @@ pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
         ("h3_dist_near", "h3"),
         ("h3_dist_far", "h3"),
         ("h3_parent_deep", "h3"),
+        ("h3_fp64_ops", "h3"),
         // GPU Raster
         ("raster_ndvi", "postgis_raster"),
         ("raster_slope", "postgis_raster"),
@@ -904,9 +918,1140 @@ pub fn h3_parity_lane_names() -> Vec<&'static str> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Benchmark win-plan threshold matrix (TODO Phase 7)
+// ---------------------------------------------------------------------------
+
+/// Expected release behavior for one benchmark threshold-matrix cell.
+///
+/// `GpuWinner` means the row is above the measured break-even for its lane and
+/// must prove GPU dispatch. `NativeDecline` means the planner must stay on the
+/// PostgreSQL-native plan and expose the decline reason in pg_accel stats/plan
+/// evidence.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BenchmarkLaneExpectation {
+    GpuWinner { min_warm_speedup: f64 },
+    NativeDecline { reason: &'static str },
+}
+
+impl BenchmarkLaneExpectation {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GpuWinner { .. } => "gpu_winner",
+            Self::NativeDecline { .. } => "native_decline",
+        }
+    }
+
+    #[must_use]
+    pub const fn decline_reason(self) -> Option<&'static str> {
+        match self {
+            Self::NativeDecline { reason } => Some(reason),
+            Self::GpuWinner { .. } => None,
+        }
+    }
+}
+
+/// One reportable planner threshold-matrix cell.
+///
+/// The dimensions match the Phase 7 benchmark-win plan: row count, type,
+/// cardinality, selectivity, row width, and output size. The matrix is used by
+/// the report renderer and the generic ship gate, so planner admission is tied
+/// to explicit measured break-even rows instead of a broad "large input" label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchmarkThresholdMatrixEntry {
+    pub lane: &'static str,
+    pub workload: &'static str,
+    pub rows: usize,
+    pub data_type: &'static str,
+    pub cardinality: &'static str,
+    pub selectivity: &'static str,
+    pub result_count: String,
+    pub index_pruning_shape: &'static str,
+    pub prepared_geometry: &'static str,
+    pub batch_count: String,
+    pub row_width: &'static str,
+    pub output_size: &'static str,
+    pub dispatch_evidence: &'static str,
+    pub correctness_evidence: &'static str,
+    pub cache_gate: &'static str,
+    pub threshold_basis: &'static str,
+    pub expectation: BenchmarkLaneExpectation,
+}
+
+#[must_use]
+pub fn benchmark_threshold_matrix_entry(
+    name: &str,
+    rows: usize,
+) -> Option<BenchmarkThresholdMatrixEntry> {
+    h3_threshold_matrix_entry(name, rows)
+        .or_else(|| raster_threshold_matrix_entry(name, rows))
+        .or_else(|| reduce_threshold_matrix_entry(name, rows))
+        .or_else(|| hashjoin_threshold_matrix_entry(name, rows))
+        .or_else(|| sort_threshold_matrix_entry(name, rows))
+        .or_else(|| spatial_threshold_matrix_entry(name, rows))
+        .or_else(|| regression_decline_matrix_entry(name, rows))
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn benchmark_expected_winner_names() -> Vec<&'static str> {
+    vec![
+        "h3_bulk",
+        "h3_resolution_sweep",
+        "h3_latlng_res15",
+        "h3_fp64_ops",
+        "raster_ndvi",
+        "raster_slope",
+        "raster_reclass",
+        "raster_algebra_deep",
+        "gpu_reduce_sum",
+        "reduce_sum_f32",
+        "reduce_sum_f64",
+        "reduce_sum_i64",
+        "reduce_min_f64",
+        "reduce_max_f64",
+        "reduce_multi",
+        "hash_join",
+        "hashjoin_10k_1m",
+    ]
+}
+
+#[cfg(test)]
+#[must_use]
+pub fn benchmark_native_decline_names() -> Vec<&'static str> {
+    vec![
+        "h3_cell_to_parent",
+        "h3_grid_distance",
+        "h3_dist_near",
+        "h3_dist_far",
+        "h3_parent_deep",
+        "h3_srf_grid_disk",
+        "gpu_sort_multikey",
+        "large_sort",
+        "gpu_sort_topk_wide",
+        "sort_int4",
+        "sort_int8",
+        "sort_float4",
+        "sort_float8",
+        "topk_wide",
+        "mergejoin_decline",
+        "numeric_agg_decline",
+        "bitmap_heap_gpuexpr_decline",
+        "parallel_hashjoin_rebuild_decline",
+        "spatial_filter",
+        "spatial_selectivity",
+        "spatial_mega_1kv",
+        "vsweep_low",
+        "vsweep_mid",
+        "vsweep_high",
+        "vsweep_pathological",
+        "spatial_sel_1pct",
+        "spatial_sel_10pct",
+        "spatial_sel_50pct",
+        "spatial_sel_90pct",
+        "spatial_sel_repro_simple_s10_b64k_w0_jitoff",
+        "spatial_sel_repro_simple_s90_b64k_w0_jitoff",
+        "spatial_sel_repro_simple_s90_b8k_w0_jitoff",
+        "spatial_sel_repro_simple_s90_b64k_w4_jitoff",
+        "spatial_sel_repro_simple_s90_b64k_w4_jiton",
+        "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff",
+        "spatial_sel_repro_coop1024_s90_b64k_w0_jitoff",
+        "spatial_sel_repro_coop1024_s90_b8k_w0_jitoff",
+        "spatial_sel_repro_coop1024_s90_b64k_w4_jitoff",
+        "spatial_sel_repro_coop1024_s90_b64k_w4_jiton",
+    ]
+}
+
+const REDUCE_F32_BREAK_EVEN_ROWS: usize = 25_000;
+const REDUCE_F64_BREAK_EVEN_ROWS: usize = 50_000;
+const REDUCE_I64_BREAK_EVEN_ROWS: usize = 75_000;
+const HASHJOIN_MIN_BUILD_ROWS: usize = 5_000;
+const HASHJOIN_MAX_BUILD_ROWS: usize = 99_999;
+const SPATIAL_UNSAFE_MIN_ROWS: usize = 80_000;
+const SPATIAL_UNSAFE_MAX_ROWS: usize = 150_000;
+const SPATIAL_MIN_VERTICES: usize = 100;
+const SPATIAL_BREAK_EVEN_VERTS_X_ROWS: u64 = 500_000_000;
+const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
+const SPATIAL_MAX_OUTPUT_FRACTION_PCT: usize = 80;
+const SPATIAL_DEFAULT_MIN_BATCH_SIZE: usize = 65_536;
+const H3_GROUPED_WINNER_MIN_ROWS: usize = 25_000;
+const RASTER_STANDALONE_MIN_ROWS: usize = 200_000;
+const CORRECTNESS_DIFF_EVIDENCE: &str =
+    "correctness_diffs artifact must pass before timing when artifacts are enabled";
+const GENERIC_GPU_DISPATCH_EVIDENCE: &str =
+    "dispatch counter delta > 0 and accel output rows consumed";
+const GENERIC_NATIVE_DISPATCH_EVIDENCE: &str =
+    "dispatch counter delta = 0 and no pg_accel plan selected";
+const GENERIC_CACHE_GATE: &str =
+    "warm median threshold; use cache-mode both artifacts for cold-start audit";
+
+fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
+    let profile = h3_matrix_profile(name)?;
+    let class = h3_lane_class(name)?;
+    let expectation = match class {
+        H3LaneClass::Winning { min_warm_speedup } if rows >= H3_GROUPED_WINNER_MIN_ROWS => {
+            BenchmarkLaneExpectation::GpuWinner { min_warm_speedup }
+        }
+        H3LaneClass::Winning { .. } => BenchmarkLaneExpectation::NativeDecline {
+            reason: "h3_rows_below_grouped_agg_min",
+        },
+        H3LaneClass::Parity => BenchmarkLaneExpectation::NativeDecline {
+            reason: profile.decline_reason,
+        },
+    };
+    Some(BenchmarkThresholdMatrixEntry {
+        lane: profile.lane,
+        workload: static_workload_name(name),
+        rows,
+        data_type: profile.data_type,
+        cardinality: profile.cardinality,
+        selectivity: profile.selectivity,
+        result_count: (profile.result_count)(rows),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: profile.batch_count.to_owned(),
+        row_width: profile.row_width,
+        output_size: profile.output_size,
+        dispatch_evidence: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => {
+                "H3 Custom Scan or function/SRF kernel counter delta > 0 and accel output rows consumed"
+            }
+            BenchmarkLaneExpectation::NativeDecline { .. } => {
+                "kernel counter delta must remain zero under normal planning"
+            }
+        },
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => {
+                "warm median must meet per-op H3 threshold; release artifact must use cache-mode both to bound cold-start cost"
+            }
+            BenchmarkLaneExpectation::NativeDecline { .. } => {
+                "native or below-floor lane; no GPU cold-start cost admitted"
+            }
+        },
+        threshold_basis: profile.threshold_basis,
+        expectation,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct H3MatrixProfile {
+    lane: &'static str,
+    data_type: &'static str,
+    cardinality: &'static str,
+    selectivity: &'static str,
+    result_count: fn(usize) -> String,
+    batch_count: &'static str,
+    row_width: &'static str,
+    output_size: &'static str,
+    threshold_basis: &'static str,
+    decline_reason: &'static str,
+}
+
+fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
+    let latlng_result = |rows: usize| {
+        format!(
+            "{} h3index function outputs consumed",
+            format_matrix_rows(rows)
+        )
+    };
+    let grouped_result =
+        |_rows: usize| "grouped h3index buckets plus one count per populated bucket".to_owned();
+    let aggregate_result =
+        |_rows: usize| "one aggregate row after consuming all function outputs".to_owned();
+    let srf_result = |rows: usize| {
+        format!(
+            "~{} expanded h3index SRF rows at k=2 before aggregate consumption",
+            format_matrix_rows(rows.saturating_mul(19))
+        )
+    };
+    let scalar_native_result = |rows: usize| {
+        format!(
+            "{} native h3-pg scalar outputs before aggregate/group consumption",
+            format_matrix_rows(rows)
+        )
+    };
+    Some(match name {
+        "h3_bulk" => H3MatrixProfile {
+            lane: "h3_latlng_to_cell_grouped_res7",
+            data_type: "point -> h3index",
+            cardinality: "resolution 7 grouped cell ids",
+            selectivity: "100% input points converted and grouped",
+            result_count: grouped_result,
+            batch_count: "function kernel batches by executor; group aggregate consumes outputs",
+            row_width: "16-byte point input + 8-byte h3index output",
+            output_size: "h3index group key plus count rows",
+            threshold_basis: "H3 bulk lat/lng-to-cell warm winner matrix",
+            decline_reason: "h3_unexpected_native_decline",
+        },
+        "h3_resolution_sweep" => H3MatrixProfile {
+            lane: "h3_latlng_to_cell_grouped_res9",
+            data_type: "point -> h3index",
+            cardinality: "resolution 9 grouped cell ids",
+            selectivity: "100% input points converted and grouped",
+            result_count: grouped_result,
+            batch_count: "function kernel batches by executor; group aggregate consumes outputs",
+            row_width: "16-byte point input + 8-byte h3index output",
+            output_size: "h3index group key plus count rows",
+            threshold_basis: "H3 resolution-specific lat/lng-to-cell warm winner matrix",
+            decline_reason: "h3_unexpected_native_decline",
+        },
+        "h3_latlng_res15" => H3MatrixProfile {
+            lane: "h3_latlng_to_cell_grouped_res15",
+            data_type: "float8 lat/lng -> h3index",
+            cardinality: "resolution 15 grouped cell ids",
+            selectivity: "100% input coordinates converted and grouped",
+            result_count: latlng_result,
+            batch_count: "function kernel batches by executor; group aggregate consumes outputs",
+            row_width: "16-byte coordinate pair + 8-byte h3index output",
+            output_size: "h3index group key plus count rows",
+            threshold_basis: "H3 high-resolution lat/lng-to-cell warm winner matrix",
+            decline_reason: "h3_unexpected_native_decline",
+        },
+        "h3_fp64_ops" => H3MatrixProfile {
+            lane: "h3_latlng_to_cell_fp64_count_res15",
+            data_type: "float8 lat/lng -> h3index",
+            cardinality: "resolution 15 count aggregate",
+            selectivity: "100% input coordinates converted and counted",
+            result_count: aggregate_result,
+            batch_count: "function kernel batches by executor; count consumes outputs",
+            row_width: "16-byte coordinate pair + 8-byte h3index output",
+            output_size: "one count row",
+            threshold_basis: "H3 fp64 lat/lng-to-cell warm winner matrix",
+            decline_reason: "h3_unexpected_native_decline",
+        },
+        "h3_cell_to_parent" => H3MatrixProfile {
+            lane: "h3_cell_to_parent_native_parity",
+            data_type: "h3index -> h3index",
+            cardinality: "resolution 7 to parent resolution 4",
+            selectivity: "100% native h3-pg scalar outputs grouped",
+            result_count: scalar_native_result,
+            batch_count: "n/a, native h3-pg scalar execution",
+            row_width: "8-byte h3index input and output",
+            output_size: "parent h3index group key plus count rows",
+            threshold_basis: "H3 scalar parity lane; standalone GPU path not a stable win",
+            decline_reason: "h3_cell_to_parent_parity_lane",
+        },
+        "h3_grid_distance" | "h3_dist_near" | "h3_dist_far" => H3MatrixProfile {
+            lane: "h3_grid_distance_native_parity",
+            data_type: "h3index pair -> integer distance",
+            cardinality: "near/far cell-pair scalar distance",
+            selectivity: "100% native h3-pg scalar outputs aggregated",
+            result_count: scalar_native_result,
+            batch_count: "n/a, native h3-pg scalar execution",
+            row_width: "16-byte h3index pair + 4-byte distance",
+            output_size: "one sum/avg aggregate row",
+            threshold_basis: "H3 grid-distance parity lane; standalone GPU path not a stable win",
+            decline_reason: "h3_grid_distance_parity_lane",
+        },
+        "h3_parent_deep" => H3MatrixProfile {
+            lane: "h3_cell_to_parent_deep_native_parity",
+            data_type: "h3index -> h3index",
+            cardinality: "resolution 15 to parent resolution 3",
+            selectivity: "100% native h3-pg scalar outputs grouped",
+            result_count: scalar_native_result,
+            batch_count: "n/a, native h3-pg scalar execution",
+            row_width: "8-byte h3index input and output",
+            output_size: "parent h3index group key plus count rows",
+            threshold_basis: "H3 deep-parent parity lane; standalone GPU path not a stable win",
+            decline_reason: "h3_cell_to_parent_parity_lane",
+        },
+        "h3_srf_grid_disk" => H3MatrixProfile {
+            lane: "h3_grid_disk_srf_k2_native_output_gate",
+            data_type: "h3index -> setof h3index",
+            cardinality: "k=2 disk expansion, up to 19 cells per input row",
+            selectivity: "expanded SRF rows must be consumed by aggregate",
+            result_count: srf_result,
+            batch_count: "benchmark SRF expansion stays native until GPU-resident aggregate fusion",
+            row_width: "8-byte h3index input; variable expanded h3index output",
+            output_size: "aggregate over expanded SRF rows",
+            threshold_basis: "H3 SRF output-return gate; small selected SRF covered by integration test",
+            decline_reason: "h3_srf_output_returns_to_cpu",
+        },
+        _ => return None,
+    })
+}
+
+fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
+    let profile = raster_matrix_profile(name)?;
+    let pixels = raster_total_pixels(rows);
+    let expectation = if rows >= RASTER_STANDALONE_MIN_ROWS {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: profile.min_warm_speedup,
+        }
+    } else {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "raster_rows_below_standalone_min",
+        }
+    };
+    Some(BenchmarkThresholdMatrixEntry {
+        lane: profile.lane,
+        workload: static_workload_name(name),
+        rows,
+        data_type: "PostGIS raster 32BF tiles",
+        cardinality: profile.cardinality,
+        selectivity: "100% raster tiles consumed by summary aggregate",
+        result_count: "one aggregate digest row after raster outputs are consumed".to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: format!(
+            "{} raster rows, {} total pixels at {}x{} tile size",
+            format_matrix_rows(rows),
+            format_matrix_rows_u64(pixels),
+            raster_tile_size(rows),
+            raster_tile_size(rows)
+        ),
+        row_width: profile.row_width,
+        output_size: "summary digest aggregate row",
+        dispatch_evidence: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => {
+                "Custom Scan/FunctionScan raster counter delta > 0 and digest output consumed"
+            }
+            BenchmarkLaneExpectation::NativeDecline { .. } => GENERIC_NATIVE_DISPATCH_EVIDENCE,
+        },
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: "warm median threshold plus cache-mode both raster artifact before release promotion",
+        threshold_basis: profile.threshold_basis,
+        expectation,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct RasterMatrixProfile {
+    lane: &'static str,
+    cardinality: &'static str,
+    row_width: &'static str,
+    threshold_basis: &'static str,
+    min_warm_speedup: f64,
+}
+
+fn raster_matrix_profile(name: &str) -> Option<RasterMatrixProfile> {
+    Some(match name {
+        "raster_ndvi" => RasterMatrixProfile {
+            lane: "raster_mapalgebra_ndvi",
+            cardinality: "two-band map algebra, ~3 FLOPs/pixel",
+            row_width: "two 32BF bands per tile",
+            threshold_basis: "raster per-pixel map algebra threshold matrix",
+            min_warm_speedup: 1.0,
+        },
+        "raster_slope" => RasterMatrixProfile {
+            lane: "raster_slope_terrain",
+            cardinality: "single-band terrain slope, ~35 FLOPs/pixel",
+            row_width: "one 32BF elevation band per tile",
+            threshold_basis: "raster terrain-analysis threshold matrix",
+            min_warm_speedup: 1.0,
+        },
+        "raster_reclass" => RasterMatrixProfile {
+            lane: "raster_reclass_rules",
+            cardinality: "single-band 5-class reclassification",
+            row_width: "one 32BF source band plus rule text",
+            threshold_basis: "raster reclass threshold matrix",
+            min_warm_speedup: 1.0,
+        },
+        "raster_algebra_deep" => RasterMatrixProfile {
+            lane: "raster_mapalgebra_deep",
+            cardinality: "three-band deep algebra, ~50 FLOPs/pixel",
+            row_width: "three 32BF bands per tile",
+            threshold_basis: "raster deep map algebra threshold matrix",
+            min_warm_speedup: 1.0,
+        },
+        _ => return None,
+    })
+}
+
+fn raster_tile_size(rows: usize) -> usize {
+    match rows {
+        r if r <= 1_000 => 256,
+        r if r <= 10_000 => 64,
+        r if r <= 100_000 => 24,
+        _ => 8,
+    }
+}
+
+fn raster_total_pixels(rows: usize) -> u64 {
+    let tile = raster_tile_size(rows) as u64;
+    (rows as u64).saturating_mul(tile).saturating_mul(tile)
+}
+
+fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
+    let (data_type, row_width, floor) = match name {
+        "gpu_reduce_sum" => (
+            "float8/float4/int4 mixed",
+            "16 bytes of aggregate inputs",
+            REDUCE_F64_BREAK_EVEN_ROWS,
+        ),
+        "reduce_sum_f32" => ("float4", "4 bytes", REDUCE_F32_BREAK_EVEN_ROWS),
+        "reduce_sum_f64" | "reduce_min_f64" | "reduce_max_f64" => {
+            ("float8", "8 bytes", REDUCE_F64_BREAK_EVEN_ROWS)
+        }
+        "reduce_sum_i64" => ("int8", "8 bytes", REDUCE_I64_BREAK_EVEN_ROWS),
+        "reduce_multi" => (
+            "float8 + count",
+            "8 bytes plus counter",
+            REDUCE_F64_BREAK_EVEN_ROWS,
+        ),
+        _ => return None,
+    };
+    let expectation = if rows >= floor {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: 1.0,
+        }
+    } else {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "rows_below_typed_reduce_break_even",
+        }
+    };
+    Some(BenchmarkThresholdMatrixEntry {
+        lane: "typed_reduce",
+        workload: static_workload_name(name),
+        rows,
+        data_type,
+        cardinality: "global aggregate, one group",
+        selectivity: "100% input rows accumulated",
+        result_count: "one aggregate result row".to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "reduce chunking by DeviceLimits gpu_reduce_max_chunk".to_owned(),
+        row_width,
+        output_size: "one aggregate row",
+        dispatch_evidence: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => GENERIC_GPU_DISPATCH_EVIDENCE,
+            BenchmarkLaneExpectation::NativeDecline { .. } => GENERIC_NATIVE_DISPATCH_EVIDENCE,
+        },
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "DeviceLimits reduce_*_break_even_rows matrix",
+        expectation,
+    })
+}
+
+fn hashjoin_threshold_matrix_entry(
+    name: &str,
+    rows: usize,
+) -> Option<BenchmarkThresholdMatrixEntry> {
+    let (lane, inner_rows, data_type, cardinality, selectivity, row_width, output_size) = match name
+    {
+        "hash_join" => {
+            let inner = (rows / 100).clamp(100, 100_000);
+            (
+                "hashjoin_count",
+                inner,
+                "int4 equality key",
+                "inner = outer/100, count-only output",
+                "key domain sized to inner table",
+                "12-byte probe row + build payload",
+                "one count row",
+            )
+        }
+        "hashjoin_100_1m" => (
+            "hashjoin_build_sweep",
+            100,
+            "int4 equality key",
+            "fixed 100-row build side",
+            "high fanout probe over 1M-style outer",
+            "16-byte probe row + 8-byte build row",
+            "one count row",
+        ),
+        "hashjoin_1k_1m" => (
+            "hashjoin_build_sweep",
+            1_000,
+            "int4 equality key",
+            "fixed 1K-row build side",
+            "high fanout probe over 1M-style outer",
+            "16-byte probe row + 8-byte build row",
+            "one count row",
+        ),
+        "hashjoin_10k_1m" => (
+            "hashjoin_build_sweep",
+            10_000,
+            "int4 equality key",
+            "fixed 10K-row build side",
+            "probe side dominates build cost",
+            "16-byte probe row + 8-byte build row",
+            "one count row",
+        ),
+        "hashjoin_100k_1m" => (
+            "hashjoin_build_sweep",
+            100_000,
+            "int4 equality key",
+            "fixed 100K-row build side",
+            "build side reaches unsafe GPU hash table branch",
+            "16-byte probe row + 8-byte build row",
+            "one count row",
+        ),
+        "parallel_hashjoin_rebuild_decline" => {
+            return Some(BenchmarkThresholdMatrixEntry {
+                lane: "parallel_hashjoin_inner_reuse",
+                workload: "parallel_hashjoin_rebuild_decline",
+                rows,
+                data_type: "int4 equality key",
+                cardinality: "60K-row inner side across parallel workers",
+                selectivity: "20K matching rows",
+                result_count: "20K joined rows accumulated to one count".to_owned(),
+                index_pruning_shape: "n/a",
+                prepared_geometry: "n/a",
+                batch_count: "parallel worker rebuild shape".to_owned(),
+                row_width: "8-byte outer/build tuples",
+                output_size: "one count row",
+                dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
+                correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+                cache_gate: GENERIC_CACHE_GATE,
+                threshold_basis: "partial private rebuild row cap until shared GPU inner state",
+                expectation: BenchmarkLaneExpectation::NativeDecline {
+                    reason: "hashjoin_parallel_inner_rebuild_too_large",
+                },
+            });
+        }
+        _ => return None,
+    };
+    let expectation = if (HASHJOIN_MIN_BUILD_ROWS..=HASHJOIN_MAX_BUILD_ROWS).contains(&inner_rows) {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: 1.0,
+        }
+    } else if inner_rows < HASHJOIN_MIN_BUILD_ROWS {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "hashjoin_build_below_break_even",
+        }
+    } else {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "hashjoin_build_side_too_large",
+        }
+    };
+    Some(BenchmarkThresholdMatrixEntry {
+        lane,
+        workload: static_workload_name(name),
+        rows,
+        data_type,
+        cardinality,
+        selectivity,
+        result_count: output_size.to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "hash build/probe batches by executor".to_owned(),
+        row_width,
+        output_size,
+        dispatch_evidence: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => GENERIC_GPU_DISPATCH_EVIDENCE,
+            BenchmarkLaneExpectation::NativeDecline { .. } => GENERIC_NATIVE_DISPATCH_EVIDENCE,
+        },
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "DeviceLimits hashjoin_min_build_rows/gpu_hash_join_build_max_rows",
+        expectation,
+    })
+}
+
+fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
+    let (data_type, cardinality, row_width, output_size, reason) = match name {
+        "gpu_sort_multikey" => (
+            "float4 + int4 composite key",
+            "full ORDER BY key1, key2",
+            "~120-byte heap row",
+            "full sorted relation",
+            "sort_multikey_no_gpu_kernel",
+        ),
+        "large_sort" => (
+            "float4 single key",
+            "full ORDER BY without LIMIT",
+            "~120-byte heap row",
+            "full sorted relation",
+            "sort_heap_full_output",
+        ),
+        "gpu_sort_topk_wide" => (
+            "float4 single key",
+            "LIMIT 1000 exceeds standalone top-k bound",
+            "~120-byte heap row",
+            "1000 heap rows",
+            "sort_heap_topk_wide_output",
+        ),
+        "topk_wide" => (
+            "float4 single key",
+            "LIMIT 100 on wide heap rows",
+            "~120-byte heap row",
+            "100 heap rows",
+            "sort_heap_topk_wide_output",
+        ),
+        "sort_int4" => (
+            "int4 single key",
+            "full ORDER BY without LIMIT",
+            "4-byte projected row",
+            "full sorted relation",
+            "sort_heap_full_output",
+        ),
+        "sort_int8" => (
+            "int8 single key",
+            "full ORDER BY without LIMIT",
+            "8-byte projected row",
+            "full sorted relation",
+            "sort_heap_full_output",
+        ),
+        "sort_float4" => (
+            "float4 single key",
+            "full ORDER BY without LIMIT",
+            "4-byte projected row",
+            "full sorted relation",
+            "sort_heap_full_output",
+        ),
+        "sort_float8" => (
+            "float8 single key",
+            "full ORDER BY without LIMIT",
+            "8-byte projected row",
+            "full sorted relation",
+            "sort_heap_full_output",
+        ),
+        _ => return None,
+    };
+    Some(BenchmarkThresholdMatrixEntry {
+        lane: "standalone_heap_sort",
+        workload: static_workload_name(name),
+        rows,
+        data_type,
+        cardinality,
+        selectivity: "ORDER BY consumes selected relation",
+        result_count: output_size.to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "sort chunks by DeviceLimits gpu_sort_max_elements".to_owned(),
+        row_width,
+        output_size,
+        dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "single-key bounded top-k only; no full-output or wide standalone heap sort",
+        expectation: BenchmarkLaneExpectation::NativeDecline { reason },
+    })
+}
+
+fn spatial_threshold_matrix_entry(
+    name: &str,
+    rows: usize,
+) -> Option<BenchmarkThresholdMatrixEntry> {
+    let profile = spatial_matrix_profile(name)?;
+    let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
+    let expectation = spatial_matrix_expectation(
+        rows,
+        profile.vertices,
+        profile.selectivity_pct,
+        profile.registered_gpu_predicate,
+    );
+    Some(BenchmarkThresholdMatrixEntry {
+        lane: profile.lane,
+        workload: static_workload_name(name),
+        rows,
+        data_type: "PostGIS point-in-polygon",
+        cardinality: spatial_vertex_bucket(profile.vertices),
+        selectivity: profile.selectivity_label,
+        result_count: spatial_result_count(rows, profile.selectivity_pct),
+        index_pruning_shape: profile.index_pruning_shape,
+        prepared_geometry: profile.prepared_geometry,
+        batch_count: spatial_batch_count(rows, profile.min_batch_size),
+        row_width: "point geometry + tuple id",
+        output_size: "count aggregate emits one row; Custom Scan yields matching heap rows",
+        dispatch_evidence: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => GENERIC_GPU_DISPATCH_EVIDENCE,
+            BenchmarkLaneExpectation::NativeDecline { .. } => {
+                "planner rejection reason plus zero dispatch counter"
+            }
+        },
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: spatial_threshold_basis(&profile, work_product),
+        expectation,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct SpatialMatrixProfile {
+    vertices: usize,
+    selectivity_pct: Option<usize>,
+    selectivity_label: &'static str,
+    lane: &'static str,
+    index_pruning_shape: &'static str,
+    prepared_geometry: &'static str,
+    min_batch_size: usize,
+    registered_gpu_predicate: bool,
+}
+
+fn spatial_matrix_profile(name: &str) -> Option<SpatialMatrixProfile> {
+    let base = |vertices, selectivity_pct, selectivity_label, lane| SpatialMatrixProfile {
+        vertices,
+        selectivity_pct,
+        selectivity_label,
+        lane,
+        index_pruning_shape: "no spatial index; full heap scan predicate evaluation",
+        prepared_geometry: "constant geometry argument required for vertex-count gate",
+        min_batch_size: SPATIAL_DEFAULT_MIN_BATCH_SIZE,
+        registered_gpu_predicate: false,
+    };
+
+    let repro =
+        |vertices, selectivity_pct, selectivity_label, min_batch_size| SpatialMatrixProfile {
+            vertices,
+            selectivity_pct: Some(selectivity_pct),
+            selectivity_label,
+            lane: "point_in_ring_selectivity_repro",
+            index_pruning_shape: "no spatial index; reloption controls native parallel scan",
+            prepared_geometry: "generated ST_Buffer constant retained only after Const extraction",
+            min_batch_size,
+            registered_gpu_predicate: false,
+        };
+
+    Some(match name {
+        "spatial_filter" => base(
+            15,
+            None,
+            "simple polygon selectivity, count aggregate",
+            "point_in_ring_simple_polygon",
+        ),
+        "spatial_selectivity" => base(
+            20,
+            Some(25),
+            "~25% predicate selectivity",
+            "point_in_ring_simple_polygon",
+        ),
+        "spatial_mega_1kv" => base(
+            1_000,
+            None,
+            "full scan, count aggregate",
+            "point_in_ring_megapoly",
+        ),
+        "vsweep_low" => base(
+            32,
+            None,
+            "full scan, count aggregate",
+            "point_in_ring_vertex_sweep",
+        ),
+        "vsweep_mid" => base(
+            1_000,
+            None,
+            "full scan, count aggregate",
+            "point_in_ring_vertex_sweep",
+        ),
+        "vsweep_high" => base(
+            10_000,
+            None,
+            "full scan, count aggregate",
+            "point_in_ring_vertex_sweep",
+        ),
+        "vsweep_pathological" => base(
+            100_000,
+            None,
+            "full scan, count aggregate",
+            "point_in_ring_vertex_sweep",
+        ),
+        "spatial_sel_1pct" => base(
+            500,
+            Some(1),
+            "~1% predicate selectivity",
+            "point_in_ring_selectivity",
+        ),
+        "spatial_sel_10pct" => base(
+            500,
+            Some(10),
+            "~10% predicate selectivity",
+            "point_in_ring_selectivity",
+        ),
+        "spatial_sel_50pct" => base(
+            500,
+            Some(50),
+            "~50% predicate selectivity",
+            "point_in_ring_selectivity",
+        ),
+        "spatial_sel_90pct" => base(
+            500,
+            Some(90),
+            "~90% predicate selectivity",
+            "point_in_ring_selectivity",
+        ),
+        "spatial_sel_repro_simple_s10_b64k_w0_jitoff" => {
+            repro(500, 10, "deterministic 10% predicate selectivity", 65_536)
+        }
+        "spatial_sel_repro_simple_s90_b64k_w0_jitoff"
+        | "spatial_sel_repro_simple_s90_b64k_w4_jitoff"
+        | "spatial_sel_repro_simple_s90_b64k_w4_jiton" => {
+            repro(500, 90, "deterministic 90% predicate selectivity", 65_536)
+        }
+        "spatial_sel_repro_simple_s90_b8k_w0_jitoff" => {
+            repro(500, 90, "deterministic 90% predicate selectivity", 8_192)
+        }
+        "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff" => {
+            repro(1_024, 10, "deterministic 10% predicate selectivity", 65_536)
+        }
+        "spatial_sel_repro_coop1024_s90_b64k_w0_jitoff"
+        | "spatial_sel_repro_coop1024_s90_b64k_w4_jitoff"
+        | "spatial_sel_repro_coop1024_s90_b64k_w4_jiton" => {
+            repro(1_024, 90, "deterministic 90% predicate selectivity", 65_536)
+        }
+        "spatial_sel_repro_coop1024_s90_b8k_w0_jitoff" => {
+            repro(1_024, 90, "deterministic 90% predicate selectivity", 8_192)
+        }
+        _ => return None,
+    })
+}
+
+fn spatial_matrix_expectation(
+    rows: usize,
+    vertices: usize,
+    selectivity_pct: Option<usize>,
+    registered_gpu_predicate: bool,
+) -> BenchmarkLaneExpectation {
+    let work_product = (vertices as u64).saturating_mul(rows as u64);
+    if vertices < SPATIAL_MIN_VERTICES {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "spatial_vertices_below_break_even",
+        }
+    } else if (SPATIAL_UNSAFE_MIN_ROWS..=SPATIAL_UNSAFE_MAX_ROWS).contains(&rows)
+        && vertices >= SPATIAL_MIN_VERTICES
+    {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "spatial_unsafe_row_band",
+        }
+    } else if work_product < SPATIAL_BREAK_EVEN_VERTS_X_ROWS {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "spatial_work_below_break_even",
+        }
+    } else if work_product > SPATIAL_MAX_VERTS_X_ROWS {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "spatial_work_above_max",
+        }
+    } else if selectivity_pct.is_some_and(|pct| pct > SPATIAL_MAX_OUTPUT_FRACTION_PCT) {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "spatial_high_output_fraction",
+        }
+    } else if !registered_gpu_predicate {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "spatial_no_registered_gpu_predicate",
+        }
+    } else {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: 1.0,
+        }
+    }
+}
+
+fn spatial_threshold_basis(profile: &SpatialMatrixProfile, work_product: u64) -> &'static str {
+    if profile.selectivity_pct.is_some_and(|pct| {
+        pct > SPATIAL_MAX_OUTPUT_FRACTION_PCT && work_product >= SPATIAL_BREAK_EVEN_VERTS_X_ROWS
+    }) {
+        "vertex_count * rows plus gpu_spatial_max_output_fraction high-output gate"
+    } else if !profile.registered_gpu_predicate {
+        "PostGIS GPU predicate registration gate plus vertex/output thresholds"
+    } else {
+        "vertex_count * row_count work-product matrix"
+    }
+}
+
+fn spatial_result_count(rows: usize, selectivity_pct: Option<usize>) -> String {
+    selectivity_pct.map_or_else(
+        || "predicate-dependent matching heap rows".to_owned(),
+        |pct| {
+            let matches = rows.saturating_mul(pct) / 100;
+            format!(
+                "~{} matching heap rows ({}%)",
+                format_matrix_rows(matches),
+                pct
+            )
+        },
+    )
+}
+
+fn spatial_batch_count(rows: usize, min_batch_size: usize) -> String {
+    let batches = rows.div_ceil(min_batch_size.max(1));
+    format!(
+        "{} batches at {} min_batch_size",
+        batches,
+        format_matrix_rows(min_batch_size)
+    )
+}
+
+fn format_matrix_rows(rows: usize) -> String {
+    if rows >= 1_000_000 && rows.is_multiple_of(1_000_000) {
+        format!("{}M", rows / 1_000_000)
+    } else if rows >= 1_000 && rows.is_multiple_of(1_000) {
+        format!("{}K", rows / 1_000)
+    } else {
+        rows.to_string()
+    }
+}
+
+fn format_matrix_rows_u64(rows: u64) -> String {
+    if rows >= 1_000_000 && rows.is_multiple_of(1_000_000) {
+        format!("{}M", rows / 1_000_000)
+    } else if rows >= 1_000 && rows.is_multiple_of(1_000) {
+        format!("{}K", rows / 1_000)
+    } else {
+        rows.to_string()
+    }
+}
+
+fn regression_decline_matrix_entry(
+    name: &str,
+    rows: usize,
+) -> Option<BenchmarkThresholdMatrixEntry> {
+    let (lane, data_type, cardinality, selectivity, row_width, output_size, reason) = match name {
+        "mergejoin_decline" => (
+            "mergejoin_ordered_equi",
+            "int4 ordered equality key",
+            "ordered join input",
+            "merge-join shape until GPU merge join exists",
+            "narrow join rows",
+            "one aggregate row",
+            "mergejoin_no_gpu_kernel",
+        ),
+        "numeric_agg_decline" => (
+            "numeric_aggregate",
+            "NUMERIC varlena",
+            "global aggregate",
+            "100% input rows accumulated",
+            "variable-width numeric datum",
+            "one aggregate row",
+            "numeric_agg_no_gpu_kernel",
+        ),
+        "bitmap_heap_gpuexpr_decline" => (
+            "bitmap_heap_gpuexpr",
+            "int4/float8 scalar predicates",
+            "BitmapHeapScan prefilter",
+            "bitmap predicate plus scalar expression",
+            "heap row after bitmap prefilter",
+            "filtered aggregate row",
+            "bitmap_heap_gpuexpr_no_gpu_pipeline",
+        ),
+        _ => return None,
+    };
+    Some(BenchmarkThresholdMatrixEntry {
+        lane,
+        workload: static_workload_name(name),
+        rows,
+        data_type,
+        cardinality,
+        selectivity,
+        result_count: output_size.to_owned(),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "n/a".to_owned(),
+        row_width,
+        output_size,
+        dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "release-decline benchmark cell until GPU kernel/pipeline exists",
+        expectation: BenchmarkLaneExpectation::NativeDecline { reason },
+    })
+}
+
+fn spatial_vertex_bucket(vertices: usize) -> &'static str {
+    match vertices {
+        15 => "15 polygon vertices",
+        20 => "20 polygon vertices",
+        32 => "32 polygon vertices",
+        500 => "500 polygon vertices",
+        1_000 => "~1000 polygon vertices",
+        1_024 => "1024+ polygon vertices",
+        10_000 => "~10000 polygon vertices",
+        100_000 => "~100000 polygon vertices",
+        _ => "polygon vertex-count matrix",
+    }
+}
+
+fn static_workload_name(name: &str) -> &'static str {
+    match name {
+        "h3_bulk" => "h3_bulk",
+        "h3_resolution_sweep" => "h3_resolution_sweep",
+        "h3_latlng_res15" => "h3_latlng_res15",
+        "h3_fp64_ops" => "h3_fp64_ops",
+        "h3_cell_to_parent" => "h3_cell_to_parent",
+        "h3_grid_distance" => "h3_grid_distance",
+        "h3_dist_near" => "h3_dist_near",
+        "h3_dist_far" => "h3_dist_far",
+        "h3_parent_deep" => "h3_parent_deep",
+        "h3_srf_grid_disk" => "h3_srf_grid_disk",
+        "gpu_reduce_sum" => "gpu_reduce_sum",
+        "reduce_sum_f32" => "reduce_sum_f32",
+        "reduce_sum_f64" => "reduce_sum_f64",
+        "reduce_sum_i64" => "reduce_sum_i64",
+        "reduce_min_f64" => "reduce_min_f64",
+        "reduce_max_f64" => "reduce_max_f64",
+        "reduce_multi" => "reduce_multi",
+        "hash_join" => "hash_join",
+        "hashjoin_100_1m" => "hashjoin_100_1m",
+        "hashjoin_1k_1m" => "hashjoin_1k_1m",
+        "hashjoin_10k_1m" => "hashjoin_10k_1m",
+        "hashjoin_100k_1m" => "hashjoin_100k_1m",
+        "parallel_hashjoin_rebuild_decline" => "parallel_hashjoin_rebuild_decline",
+        "gpu_sort_multikey" => "gpu_sort_multikey",
+        "large_sort" => "large_sort",
+        "gpu_sort_topk_wide" => "gpu_sort_topk_wide",
+        "topk_wide" => "topk_wide",
+        "sort_int4" => "sort_int4",
+        "sort_int8" => "sort_int8",
+        "sort_float4" => "sort_float4",
+        "sort_float8" => "sort_float8",
+        "spatial_filter" => "spatial_filter",
+        "spatial_selectivity" => "spatial_selectivity",
+        "spatial_mega_1kv" => "spatial_mega_1kv",
+        "vsweep_low" => "vsweep_low",
+        "vsweep_mid" => "vsweep_mid",
+        "vsweep_high" => "vsweep_high",
+        "vsweep_pathological" => "vsweep_pathological",
+        "spatial_sel_1pct" => "spatial_sel_1pct",
+        "spatial_sel_10pct" => "spatial_sel_10pct",
+        "spatial_sel_50pct" => "spatial_sel_50pct",
+        "spatial_sel_90pct" => "spatial_sel_90pct",
+        "spatial_sel_repro_simple_s10_b64k_w0_jitoff" => {
+            "spatial_sel_repro_simple_s10_b64k_w0_jitoff"
+        }
+        "spatial_sel_repro_simple_s90_b64k_w0_jitoff" => {
+            "spatial_sel_repro_simple_s90_b64k_w0_jitoff"
+        }
+        "spatial_sel_repro_simple_s90_b8k_w0_jitoff" => {
+            "spatial_sel_repro_simple_s90_b8k_w0_jitoff"
+        }
+        "spatial_sel_repro_simple_s90_b64k_w4_jitoff" => {
+            "spatial_sel_repro_simple_s90_b64k_w4_jitoff"
+        }
+        "spatial_sel_repro_simple_s90_b64k_w4_jiton" => {
+            "spatial_sel_repro_simple_s90_b64k_w4_jiton"
+        }
+        "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff" => {
+            "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff"
+        }
+        "spatial_sel_repro_coop1024_s90_b64k_w0_jitoff" => {
+            "spatial_sel_repro_coop1024_s90_b64k_w0_jitoff"
+        }
+        "spatial_sel_repro_coop1024_s90_b8k_w0_jitoff" => {
+            "spatial_sel_repro_coop1024_s90_b8k_w0_jitoff"
+        }
+        "spatial_sel_repro_coop1024_s90_b64k_w4_jitoff" => {
+            "spatial_sel_repro_coop1024_s90_b64k_w4_jitoff"
+        }
+        "spatial_sel_repro_coop1024_s90_b64k_w4_jiton" => {
+            "spatial_sel_repro_coop1024_s90_b64k_w4_jiton"
+        }
+        "raster_ndvi" => "raster_ndvi",
+        "raster_slope" => "raster_slope",
+        "raster_reclass" => "raster_reclass",
+        "raster_algebra_deep" => "raster_algebra_deep",
+        "mergejoin_decline" => "mergejoin_decline",
+        "numeric_agg_decline" => "numeric_agg_decline",
+        "bitmap_heap_gpuexpr_decline" => "bitmap_heap_gpuexpr_decline",
+        _ => "unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
+        matches!(
+            (name, rows),
+            (
+                "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
+                100
+            )
+        )
+    }
 
     // -----------------------------------------------------------------------
     // Workload registry
@@ -957,7 +2102,7 @@ mod tests {
             );
             for &rows in scales {
                 assert!(
-                    ROW_SCALES.contains(&rows),
+                    ROW_SCALES.contains(&rows) || supported_default_suite_probe(w.name(), rows),
                     "workload '{}' uses unsupported row scale {rows}",
                     w.name(),
                 );
@@ -976,6 +2121,237 @@ mod tests {
     fn test_h3_srf_grid_disk_caps_default_scales() {
         let wl = find_workload("h3_srf_grid_disk").expect("registered h3_srf_grid_disk");
         assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+    }
+
+    #[test]
+    fn test_numeric_agg_decline_caps_default_scales() {
+        let wl = find_workload("numeric_agg_decline").expect("registered numeric_agg_decline");
+        assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+    }
+
+    #[test]
+    fn test_mergejoin_decline_caps_default_scales() {
+        let wl = find_workload("mergejoin_decline").expect("registered mergejoin_decline");
+        assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+    }
+
+    #[test]
+    fn test_bitmap_heap_gpuexpr_decline_caps_default_scales() {
+        let wl = find_workload("bitmap_heap_gpuexpr_decline")
+            .expect("registered bitmap_heap_gpuexpr_decline");
+        assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+    }
+
+    #[test]
+    fn test_parallel_hashjoin_rebuild_decline_caps_default_scales() {
+        let wl = find_workload("parallel_hashjoin_rebuild_decline")
+            .expect("registered parallel_hashjoin_rebuild_decline");
+        assert_eq!(wl.row_scales(), &[100_000]);
+    }
+
+    #[test]
+    fn test_raster_variants_use_bounded_smoke_default_scale() {
+        let raster_workloads: Vec<_> = all_workloads()
+            .into_iter()
+            .filter(|w| w.category() == "gpu_raster")
+            .collect();
+        assert_eq!(raster_workloads.len(), 4);
+        for workload in raster_workloads {
+            assert_eq!(workload.row_scales(), &[100], "{}", workload.name());
+            let entry = benchmark_threshold_matrix_entry(workload.name(), 100)
+                .expect("raster threshold matrix entry");
+            assert_eq!(
+                entry.expectation.decline_reason(),
+                Some("raster_rows_below_standalone_min")
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 7 benchmark threshold matrix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_threshold_matrix_marks_reduce_above_break_even_as_winner() {
+        let entry = benchmark_threshold_matrix_entry("reduce_sum_i64", 100_000)
+            .expect("reduce_sum_i64 threshold entry");
+        assert_eq!(entry.lane, "typed_reduce");
+        assert_eq!(
+            entry.expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: 1.0,
+            }
+        );
+        assert!(entry.threshold_basis.contains("reduce_*_break_even_rows"));
+    }
+
+    #[test]
+    fn test_threshold_matrix_marks_reduce_below_break_even_as_decline() {
+        let entry = benchmark_threshold_matrix_entry("reduce_sum_i64", 10_000)
+            .expect("reduce_sum_i64 threshold entry");
+        assert_eq!(
+            entry.expectation.decline_reason(),
+            Some("rows_below_typed_reduce_break_even")
+        );
+    }
+
+    #[test]
+    fn test_threshold_matrix_marks_sort_multikey_as_decline() {
+        let entry = benchmark_threshold_matrix_entry("gpu_sort_multikey", 1_000_000)
+            .expect("gpu_sort_multikey threshold entry");
+        assert_eq!(entry.lane, "standalone_heap_sort");
+        assert_eq!(
+            entry.expectation.decline_reason(),
+            Some("sort_multikey_no_gpu_kernel")
+        );
+    }
+
+    #[test]
+    fn test_threshold_matrix_marks_hashjoin_build_band() {
+        let winner = benchmark_threshold_matrix_entry("hashjoin_10k_1m", 1_000_000)
+            .expect("hashjoin_10k_1m threshold entry");
+        assert_eq!(winner.expectation.label(), "gpu_winner");
+
+        let too_small = benchmark_threshold_matrix_entry("hashjoin_1k_1m", 1_000_000)
+            .expect("hashjoin_1k_1m threshold entry");
+        assert_eq!(
+            too_small.expectation.decline_reason(),
+            Some("hashjoin_build_below_break_even")
+        );
+
+        let too_large = benchmark_threshold_matrix_entry("hashjoin_100k_1m", 1_000_000)
+            .expect("hashjoin_100k_1m threshold entry");
+        assert_eq!(
+            too_large.expectation.decline_reason(),
+            Some("hashjoin_build_side_too_large")
+        );
+    }
+
+    #[test]
+    fn test_threshold_matrix_marks_spatial_work_product() {
+        let simple = benchmark_threshold_matrix_entry("spatial_filter", 1_000_000)
+            .expect("spatial_filter threshold entry");
+        assert_eq!(
+            simple.expectation.decline_reason(),
+            Some("spatial_vertices_below_break_even")
+        );
+
+        let small = benchmark_threshold_matrix_entry("vsweep_mid", 10_000)
+            .expect("vsweep_mid threshold entry");
+        assert_eq!(
+            small.expectation.decline_reason(),
+            Some("spatial_work_below_break_even")
+        );
+
+        let unsafe_band = benchmark_threshold_matrix_entry("vsweep_mid", 100_000)
+            .expect("vsweep_mid threshold entry");
+        assert_eq!(
+            unsafe_band.expectation.decline_reason(),
+            Some("spatial_unsafe_row_band")
+        );
+
+        let unregistered = benchmark_threshold_matrix_entry("vsweep_mid", 1_000_000)
+            .expect("vsweep_mid threshold entry");
+        assert_eq!(
+            unregistered.expectation.decline_reason(),
+            Some("spatial_no_registered_gpu_predicate")
+        );
+
+        let high_output = benchmark_threshold_matrix_entry("spatial_sel_90pct", 1_000_000)
+            .expect("spatial_sel_90pct threshold entry");
+        assert_eq!(
+            high_output.expectation.decline_reason(),
+            Some("spatial_high_output_fraction")
+        );
+        assert!(high_output.result_count.contains("900K matching heap rows"));
+
+        let repro = benchmark_threshold_matrix_entry(
+            "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff",
+            1_000_000,
+        )
+        .expect("spatial selectivity repro threshold entry");
+        assert_eq!(
+            repro.expectation.decline_reason(),
+            Some("spatial_no_registered_gpu_predicate")
+        );
+        assert_eq!(repro.cardinality, "1024+ polygon vertices");
+        assert!(repro.batch_count.contains("16 batches"));
+        assert!(repro.index_pruning_shape.contains("reloption controls"));
+    }
+
+    #[test]
+    fn test_threshold_matrix_marks_h3_operation_specific_lanes() {
+        let bulk = benchmark_threshold_matrix_entry("h3_bulk", 1_000_000)
+            .expect("h3_bulk threshold entry");
+        assert_eq!(bulk.lane, "h3_latlng_to_cell_grouped_res7");
+        assert_eq!(
+            bulk.expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: 1.5,
+            }
+        );
+        assert!(bulk.dispatch_evidence.contains("counter delta > 0"));
+        assert!(bulk.dispatch_evidence.contains("output rows consumed"));
+        assert!(bulk.correctness_evidence.contains("correctness_diffs"));
+        assert!(bulk.cache_gate.contains("warm median"));
+
+        let small = benchmark_threshold_matrix_entry("h3_bulk", 10_000)
+            .expect("small h3_bulk threshold entry");
+        assert_eq!(
+            small.expectation.decline_reason(),
+            Some("h3_rows_below_grouped_agg_min")
+        );
+        assert!(small.cache_gate.contains("below-floor"));
+
+        let srf = benchmark_threshold_matrix_entry("h3_srf_grid_disk", 10_000)
+            .expect("h3_srf_grid_disk threshold entry");
+        assert_eq!(srf.lane, "h3_grid_disk_srf_k2_native_output_gate");
+        assert_eq!(
+            srf.expectation.decline_reason(),
+            Some("h3_srf_output_returns_to_cpu")
+        );
+        assert!(srf.result_count.contains("190K expanded h3index SRF rows"));
+    }
+
+    #[test]
+    fn test_threshold_matrix_marks_raster_operation_specific_lanes() {
+        let small = benchmark_threshold_matrix_entry("raster_slope", 10_000)
+            .expect("raster_slope threshold entry");
+        assert_eq!(small.lane, "raster_slope_terrain");
+        assert_eq!(
+            small.expectation.decline_reason(),
+            Some("raster_rows_below_standalone_min")
+        );
+        assert!(small.cardinality.contains("35 FLOPs/pixel"));
+        assert!(small.batch_count.contains("10K raster rows"));
+        assert!(small.batch_count.contains("40960K total pixels"));
+
+        let large = benchmark_threshold_matrix_entry("raster_slope", 1_000_000)
+            .expect("raster_slope threshold entry");
+        assert_eq!(
+            large.expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: 1.0,
+            }
+        );
+        assert!(large.dispatch_evidence.contains("raster counter delta > 0"));
+        assert!(large.dispatch_evidence.contains("digest output consumed"));
+        assert!(large.correctness_evidence.contains("correctness_diffs"));
+        assert!(large.cache_gate.contains("cache-mode both"));
+        assert!(large.batch_count.contains("64M total pixels"));
+    }
+
+    #[test]
+    fn test_threshold_matrix_expected_names_are_registered() {
+        for name in benchmark_expected_winner_names()
+            .into_iter()
+            .chain(benchmark_native_decline_names())
+        {
+            assert!(
+                find_workload(name).is_some(),
+                "threshold matrix references unregistered workload `{name}`"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1132,6 +2508,24 @@ mod tests {
             None,
             "unknown workload name must return None"
         );
+    }
+
+    #[test]
+    fn test_h3_latlng_baselines_alias_accelerated_output_name() {
+        for name in ["h3_bulk", "h3_resolution_sweep", "h3_latlng_res15"] {
+            let baseline = find_workload(name)
+                .expect("registered H3 workload")
+                .baseline_query_sql()
+                .expect("H3 lat/lng winner baseline query");
+            assert!(
+                baseline
+                    .to_ascii_lowercase()
+                    .contains(" as h3_latlng_to_cell"),
+                "baseline for `{name}` must alias h3-pg's underscored function \
+                 to the accel output name so correctness diffs compare values, \
+                 not JSON field-name spelling: {baseline}"
+            );
+        }
     }
 
     /// All H3 lane workloads must report category `gpu_h3` so per-category

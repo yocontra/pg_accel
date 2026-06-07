@@ -29,9 +29,38 @@ pub(super) enum RejectionReason {
     CheaperNativePath,
     CostModelDeclined,
     HashJoinNoSelectedGpuKernel,
+    HashJoinParallelInnerRebuildTooLarge,
+    HashJoinHeapOutputTooLarge,
+    SemiAntiNoGpuMembershipFilter,
     MergeJoinNoGpuKernel,
     NestedLoopScalarNoGpuKernel,
+    NljBetweenOutputTooLarge,
+    PartialAggNoGpuProducingChild,
+    PreAggNoGpuResidentPipeline,
+    GroupedAvgNoGpuFinalize,
+    AggSemanticModifierNoGpuKernel,
+    WindowFunctionNoSegmentedKernel,
+    WindowPartialPathNoParallelHook,
+    H3LateralSrfNoBatchedExpansion,
+    H3LatLngUnsupportedShape,
+    H3LatLngScalarPredicateNoGpuPipeline,
+    SrfTlistMultiSrfSemantics,
+    SrfTlistCpuOutputTooLarge,
+    StandaloneGpuExprNoGpuPipeline,
+    BitmapHeapGpuExprNoGpuPipeline,
+    SpatialNoRegisteredGpuPredicate,
+    SpatialIndexCheaper,
+    SpatialUnsafeRowBand,
+    SpatialVerticesBelowBreakEven,
+    SpatialWorkBelowBreakEven,
+    SpatialWorkAboveMax,
+    SpatialHighOutputFraction,
+    SpatialPreparedGeometryNotAvailable,
+    PostgisIntersectsUnsupportedShape,
+    PostgisDistanceNoGpuKernel,
+    PostgisGeometryConstructorNoGpuOutputProtocol,
     SortIncrementalOpportunity,
+    SortMultiKeyNoGpuKernel,
     SortHeapFullOutput,
     /// Single-column ORDER BY with LIMIT 1: looks like PG's MIN/MAX →
     /// IndexScan+Limit rewrite (or a legitimate user LIMIT 1 by a single
@@ -59,9 +88,44 @@ impl RejectionReason {
             Self::CheaperNativePath => "cheaper_native_path",
             Self::CostModelDeclined => "cost_model_declined",
             Self::HashJoinNoSelectedGpuKernel => "hashjoin_no_selected_gpu_kernel",
+            Self::HashJoinParallelInnerRebuildTooLarge => {
+                "hashjoin_parallel_inner_rebuild_too_large"
+            }
+            Self::HashJoinHeapOutputTooLarge => "hashjoin_heap_output_too_large",
+            Self::SemiAntiNoGpuMembershipFilter => "semianti_no_gpu_membership_filter",
             Self::MergeJoinNoGpuKernel => "mergejoin_no_gpu_kernel",
             Self::NestedLoopScalarNoGpuKernel => "nestloop_scalar_no_gpu_kernel",
+            Self::NljBetweenOutputTooLarge => "nlj_between_output_too_large",
+            Self::PartialAggNoGpuProducingChild => "partial_agg_no_gpu_producing_child",
+            Self::PreAggNoGpuResidentPipeline => "preagg_no_gpu_resident_pipeline",
+            Self::GroupedAvgNoGpuFinalize => "grouped_avg_no_gpu_finalize",
+            Self::AggSemanticModifierNoGpuKernel => "agg_semantic_modifier_no_gpu_kernel",
+            Self::WindowFunctionNoSegmentedKernel => "window_function_no_segmented_kernel",
+            Self::WindowPartialPathNoParallelHook => "window_partial_path_no_parallel_hook",
+            Self::H3LateralSrfNoBatchedExpansion => "h3_lateral_srf_no_batched_expansion",
+            Self::H3LatLngUnsupportedShape => "h3_latlng_unsupported_shape",
+            Self::H3LatLngScalarPredicateNoGpuPipeline => {
+                "h3_latlng_scalar_predicate_no_gpu_pipeline"
+            }
+            Self::SrfTlistMultiSrfSemantics => "srf_tlist_multi_srf_semantics",
+            Self::SrfTlistCpuOutputTooLarge => "srf_tlist_cpu_output_too_large",
+            Self::StandaloneGpuExprNoGpuPipeline => "standalone_gpuexpr_no_gpu_pipeline",
+            Self::BitmapHeapGpuExprNoGpuPipeline => "bitmap_heap_gpuexpr_no_gpu_pipeline",
+            Self::SpatialNoRegisteredGpuPredicate => "spatial_no_registered_gpu_predicate",
+            Self::SpatialIndexCheaper => "spatial_index_cheaper",
+            Self::SpatialUnsafeRowBand => "spatial_unsafe_row_band",
+            Self::SpatialVerticesBelowBreakEven => "spatial_vertices_below_break_even",
+            Self::SpatialWorkBelowBreakEven => "spatial_work_below_break_even",
+            Self::SpatialWorkAboveMax => "spatial_work_above_max",
+            Self::SpatialHighOutputFraction => "spatial_high_output_fraction",
+            Self::SpatialPreparedGeometryNotAvailable => "spatial_prepared_geometry_not_available",
+            Self::PostgisIntersectsUnsupportedShape => "postgis_intersects_unsupported_shape",
+            Self::PostgisDistanceNoGpuKernel => "postgis_distance_no_gpu_kernel",
+            Self::PostgisGeometryConstructorNoGpuOutputProtocol => {
+                "postgis_geometry_constructor_no_gpu_output_protocol"
+            }
             Self::SortIncrementalOpportunity => "sort_incremental_opportunity",
+            Self::SortMultiKeyNoGpuKernel => "sort_multikey_no_gpu_kernel",
             Self::SortHeapFullOutput => "sort_heap_full_output",
             Self::MinMaxRewriteNotASort => "min_max_rewrite_not_a_sort",
             Self::UnsupportedType(reason) | Self::Other(reason) => reason,
@@ -377,6 +441,18 @@ mod tests {
             "hashjoin_no_selected_gpu_kernel"
         );
         assert_eq!(
+            RejectionReason::HashJoinParallelInnerRebuildTooLarge.stats_key(),
+            "hashjoin_parallel_inner_rebuild_too_large"
+        );
+        assert_eq!(
+            RejectionReason::HashJoinHeapOutputTooLarge.stats_key(),
+            "hashjoin_heap_output_too_large"
+        );
+        assert_eq!(
+            RejectionReason::SemiAntiNoGpuMembershipFilter.stats_key(),
+            "semianti_no_gpu_membership_filter"
+        );
+        assert_eq!(
             RejectionReason::MergeJoinNoGpuKernel.stats_key(),
             "mergejoin_no_gpu_kernel"
         );
@@ -385,8 +461,112 @@ mod tests {
             "nestloop_scalar_no_gpu_kernel"
         );
         assert_eq!(
+            RejectionReason::NljBetweenOutputTooLarge.stats_key(),
+            "nlj_between_output_too_large"
+        );
+        assert_eq!(
+            RejectionReason::PartialAggNoGpuProducingChild.stats_key(),
+            "partial_agg_no_gpu_producing_child"
+        );
+        assert_eq!(
+            RejectionReason::PreAggNoGpuResidentPipeline.stats_key(),
+            "preagg_no_gpu_resident_pipeline"
+        );
+        assert_eq!(
+            RejectionReason::GroupedAvgNoGpuFinalize.stats_key(),
+            "grouped_avg_no_gpu_finalize"
+        );
+        assert_eq!(
+            RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+            "agg_semantic_modifier_no_gpu_kernel"
+        );
+        assert_eq!(
+            RejectionReason::WindowFunctionNoSegmentedKernel.stats_key(),
+            "window_function_no_segmented_kernel"
+        );
+        assert_eq!(
+            RejectionReason::WindowPartialPathNoParallelHook.stats_key(),
+            "window_partial_path_no_parallel_hook"
+        );
+        assert_eq!(
+            RejectionReason::H3LateralSrfNoBatchedExpansion.stats_key(),
+            "h3_lateral_srf_no_batched_expansion"
+        );
+        assert_eq!(
+            RejectionReason::H3LatLngUnsupportedShape.stats_key(),
+            "h3_latlng_unsupported_shape"
+        );
+        assert_eq!(
+            RejectionReason::H3LatLngScalarPredicateNoGpuPipeline.stats_key(),
+            "h3_latlng_scalar_predicate_no_gpu_pipeline"
+        );
+        assert_eq!(
+            RejectionReason::SrfTlistMultiSrfSemantics.stats_key(),
+            "srf_tlist_multi_srf_semantics"
+        );
+        assert_eq!(
+            RejectionReason::SrfTlistCpuOutputTooLarge.stats_key(),
+            "srf_tlist_cpu_output_too_large"
+        );
+        assert_eq!(
+            RejectionReason::StandaloneGpuExprNoGpuPipeline.stats_key(),
+            "standalone_gpuexpr_no_gpu_pipeline"
+        );
+        assert_eq!(
+            RejectionReason::BitmapHeapGpuExprNoGpuPipeline.stats_key(),
+            "bitmap_heap_gpuexpr_no_gpu_pipeline"
+        );
+        assert_eq!(
+            RejectionReason::SpatialNoRegisteredGpuPredicate.stats_key(),
+            "spatial_no_registered_gpu_predicate"
+        );
+        assert_eq!(
+            RejectionReason::SpatialIndexCheaper.stats_key(),
+            "spatial_index_cheaper"
+        );
+        assert_eq!(
+            RejectionReason::SpatialUnsafeRowBand.stats_key(),
+            "spatial_unsafe_row_band"
+        );
+        assert_eq!(
+            RejectionReason::SpatialVerticesBelowBreakEven.stats_key(),
+            "spatial_vertices_below_break_even"
+        );
+        assert_eq!(
+            RejectionReason::SpatialWorkBelowBreakEven.stats_key(),
+            "spatial_work_below_break_even"
+        );
+        assert_eq!(
+            RejectionReason::SpatialWorkAboveMax.stats_key(),
+            "spatial_work_above_max"
+        );
+        assert_eq!(
+            RejectionReason::SpatialHighOutputFraction.stats_key(),
+            "spatial_high_output_fraction"
+        );
+        assert_eq!(
+            RejectionReason::SpatialPreparedGeometryNotAvailable.stats_key(),
+            "spatial_prepared_geometry_not_available"
+        );
+        assert_eq!(
+            RejectionReason::PostgisIntersectsUnsupportedShape.stats_key(),
+            "postgis_intersects_unsupported_shape"
+        );
+        assert_eq!(
+            RejectionReason::PostgisDistanceNoGpuKernel.stats_key(),
+            "postgis_distance_no_gpu_kernel"
+        );
+        assert_eq!(
+            RejectionReason::PostgisGeometryConstructorNoGpuOutputProtocol.stats_key(),
+            "postgis_geometry_constructor_no_gpu_output_protocol"
+        );
+        assert_eq!(
             RejectionReason::SortIncrementalOpportunity.stats_key(),
             "sort_incremental_opportunity"
+        );
+        assert_eq!(
+            RejectionReason::SortMultiKeyNoGpuKernel.stats_key(),
+            "sort_multikey_no_gpu_kernel"
         );
         assert_eq!(
             RejectionReason::SortHeapFullOutput.stats_key(),

@@ -675,15 +675,43 @@ static void test_point_in_polygon_bulk_simple_path() {
       5.0f,  5.0f,   // inside, survives bbox and simple PIP
       20.0f, 20.0f,  // bbox reject
       2.0f,  8.0f,   // inside, survives bbox and simple PIP
+      5.0f,  10.0f,  // boundary edge: ST_Intersects = true
+      0.0f,  0.0f,   // boundary vertex: ST_Intersects = true
   };
-  int8_t results[] = {99, 99, 99};
+  int8_t results[] = {99, 99, 99, 99, 99};
 
-  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 3, bbox, poly, 5, rings, 1, results);
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 5, bbox, poly, 5, rings, 1, results);
 
   ASSERT_EQ("simple PIP status OK", s, PGACCEL_OK);
   ASSERT_EQ("simple PIP inside[0]", results[0], 1);
   ASSERT_EQ("simple PIP bbox outside", results[1], -1);
   ASSERT_EQ("simple PIP inside[2]", results[2], 1);
+  ASSERT_EQ("simple PIP boundary edge", results[3], 1);
+  ASSERT_EQ("simple PIP boundary vertex", results[4], 1);
+}
+
+static void test_point_in_polygon_bulk_simple_hole_boundary() {
+  printf("--- point_in_polygon_bulk: simple kernel hole boundary ---\n");
+
+  float bbox[] = {0.0f, 0.0f, 10.0f, 10.0f};
+  float polygon[] = {
+      0.0f, 0.0f, 10.0f, 0.0f, 10.0f, 10.0f, 0.0f, 10.0f, 0.0f, 0.0f,
+      4.0f, 4.0f, 6.0f, 4.0f,  6.0f,  6.0f,  4.0f, 6.0f,  4.0f, 4.0f,
+  };
+  uint32_t rings[] = {0, 5};
+  float pts[] = {
+      5.0f, 4.0f,  // interior-ring boundary: ST_Intersects = true
+      5.0f, 5.0f,  // inside the hole: no intersection
+      2.0f, 2.0f,  // inside polygon shell
+  };
+  int8_t results[] = {99, 99, 99};
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 3, bbox, polygon, 10, rings, 2, results);
+
+  ASSERT_EQ("simple hole-boundary PIP status OK", s, PGACCEL_OK);
+  ASSERT_EQ("simple PIP hole boundary", results[0], 1);
+  ASSERT_EQ("simple PIP inside hole", results[1], -1);
+  ASSERT_EQ("simple PIP shell interior", results[2], 1);
 }
 
 static void test_point_in_polygon_bulk_simple_slab_large_batch() {
@@ -748,15 +776,21 @@ static void test_point_in_polygon_bulk_coop_path() {
 
   float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
   uint32_t rings[] = {0};
+  const float edge_mid_x = (ring[0] + ring[2]) * 0.5f;
+  const float edge_mid_y = (ring[1] + ring[3]) * 0.5f;
   float pts[] = {
       0.0f,   0.0f,  // inside
       0.9f,   0.9f,  // inside bbox, outside polygon
       2.0f,   0.0f,  // bbox reject
       -0.25f, 0.5f,  // inside
+      edge_mid_x,
+      edge_mid_y,  // boundary edge: ST_Intersects = true
+      ring[0],
+      ring[1],  // boundary vertex: ST_Intersects = true
   };
-  int8_t results[] = {99, 99, 99, 99};
+  int8_t results[] = {99, 99, 99, 99, 99, 99};
 
-  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 4, bbox, ring.data(), unique_vertices + 1,
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 6, bbox, ring.data(), unique_vertices + 1,
                                                    rings, 1, results);
 
   ASSERT_EQ("coop PIP status OK", s, PGACCEL_OK);
@@ -764,6 +798,37 @@ static void test_point_in_polygon_bulk_coop_path() {
   ASSERT_EQ("coop PIP in-bbox outside", results[1], -1);
   ASSERT_EQ("coop PIP bbox outside", results[2], -1);
   ASSERT_EQ("coop PIP inside[3]", results[3], 1);
+  ASSERT_EQ("coop PIP boundary edge", results[4], 1);
+  ASSERT_EQ("coop PIP boundary vertex", results[5], 1);
+}
+
+static void test_point_in_polygon_bulk_coop_hole_boundary() {
+  printf("--- point_in_polygon_bulk: cooperative kernel hole boundary ---\n");
+
+  constexpr size_t unique_vertices = 1024;
+  std::vector<float> polygon = make_regular_ring(unique_vertices, 1.0f);
+  const size_t hole_offset = polygon.size() / 2;
+  const float hole[] = {
+      -0.15f, -0.15f, 0.15f, -0.15f, 0.15f, 0.15f, -0.15f, 0.15f, -0.15f, -0.15f,
+  };
+  polygon.insert(polygon.end(), hole, hole + sizeof(hole) / sizeof(hole[0]));
+
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  uint32_t rings[] = {0, static_cast<uint32_t>(hole_offset)};
+  float pts[] = {
+      0.0f,  -0.15f,  // interior-ring boundary: ST_Intersects = true
+      0.0f,  0.0f,    // inside the hole: no intersection
+      0.50f, 0.00f,   // inside polygon shell
+  };
+  int8_t results[] = {99, 99, 99};
+
+  pgaccel_status s = pgaccel_point_in_polygon_bulk(pts, 3, bbox, polygon.data(),
+                                                   polygon.size() / 2, rings, 2, results);
+
+  ASSERT_EQ("coop hole-boundary PIP status OK", s, PGACCEL_OK);
+  ASSERT_EQ("coop PIP hole boundary", results[0], 1);
+  ASSERT_EQ("coop PIP inside hole", results[1], -1);
+  ASSERT_EQ("coop PIP shell interior", results[2], 1);
 }
 
 static void test_point_in_polygon_bulk_coop_slab_large_batch_with_hole() {
@@ -1332,8 +1397,10 @@ int main() {
   test_point_in_ring_fp64_bulk();
   test_point_in_ring_fp64_gpu_dispatch();
   test_point_in_polygon_bulk_simple_path();
+  test_point_in_polygon_bulk_simple_hole_boundary();
   test_point_in_polygon_bulk_simple_slab_large_batch();
   test_point_in_polygon_bulk_coop_path();
+  test_point_in_polygon_bulk_coop_hole_boundary();
   test_point_in_polygon_bulk_coop_slab_large_batch_with_hole();
 
   test_sphere_distance_basic();

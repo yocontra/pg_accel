@@ -11,6 +11,8 @@
 
 #![allow(dead_code)]
 
+use std::fmt::Write as _;
+
 use postgres::{Client, NoTls};
 
 use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
@@ -56,6 +58,24 @@ fn explain(c: &mut Client, sql: &str) -> String {
         }
     }
     out.to_lowercase()
+}
+
+fn kernel_executions(c: &mut Client) -> i64 {
+    c.query_one("SELECT pg_accel_kernel_executions()", &[])
+        .expect("pg_accel_kernel_executions()")
+        .get::<_, i64>(0)
+}
+
+fn last_planner_rejection_reason(c: &mut Client) -> Option<String> {
+    c.query_one("SELECT pg_accel_last_planner_rejection_reason()", &[])
+        .ok()
+        .and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+fn scalar_i64(c: &mut Client, sql: &str) -> i64 {
+    c.query_one(sql, &[])
+        .unwrap_or_else(|e| panic!("query `{sql}` failed: {e}"))
+        .get::<_, i64>(0)
 }
 
 /// Assert that `EXPLAIN sql` contains every substring in `needles`.
@@ -115,6 +135,65 @@ fn ensure_hashagg_gate_fixture(c: &mut Client) {
          SELECT g, (g % 10000)::int4, random() \
          FROM generate_series(1, 100000) g",
         "ANALYZE bench_hashagg_gate",
+    ] {
+        c.simple_query(stmt).expect(stmt);
+    }
+}
+
+fn polygon_wkt(vertices: usize, cx: f64, cy: f64, radius: f64) -> String {
+    let mut out = String::from("POLYGON((");
+    for i in 0..=vertices {
+        if i > 0 {
+            out.push(',');
+        }
+        let j = i % vertices;
+        let angle = std::f64::consts::TAU * (j as f64) / (vertices as f64);
+        let x = cx + radius * angle.cos();
+        let y = cy + radius * angle.sin();
+        write!(&mut out, "{x:.8} {y:.8}").expect("write polygon coordinate");
+    }
+    out.push_str("))");
+    out
+}
+
+fn ensure_postgis_point_polygon_fixture(c: &mut Client) {
+    for stmt in [
+        "CREATE EXTENSION IF NOT EXISTS postgis CASCADE",
+        "CREATE UNLOGGED TABLE IF NOT EXISTS bench_postgis_pip_gate \
+         (id int4, geom geometry(Point, 4326) NOT NULL)",
+        "TRUNCATE bench_postgis_pip_gate",
+        "INSERT INTO bench_postgis_pip_gate (id, geom) \
+         SELECT g, ST_SetSRID(\
+                    ST_MakePoint((g % 1000)::float8 / 10.0, \
+                                 ((g / 1000) % 250)::float8 / 10.0), \
+                    4326)::geometry(Point, 4326) \
+         FROM generate_series(1, 250000) AS g",
+        "INSERT INTO bench_postgis_pip_gate (id, geom) VALUES \
+           (250001, ST_SetSRID(ST_MakePoint(58.0, 12.5), 4326)::geometry(Point, 4326)), \
+           (250002, ST_SetSRID(ST_MakePoint(50.0, 20.5), 4326)::geometry(Point, 4326)), \
+           (250003, ST_SetSRID(ST_MakePoint(42.0, 12.5), 4326)::geometry(Point, 4326)), \
+           (250004, ST_SetSRID(ST_MakePoint(50.0, 4.5), 4326)::geometry(Point, 4326))",
+        "ANALYZE bench_postgis_pip_gate",
+    ] {
+        c.simple_query(stmt).expect(stmt);
+    }
+}
+
+fn ensure_gpuexpr_direct_fixture(c: &mut Client) {
+    for stmt in [
+        "CREATE UNLOGGED TABLE IF NOT EXISTS bench_gpuexpr_direct_gate ( \
+            id int4 NOT NULL, \
+            val float4 NOT NULL, \
+            category int4 NOT NULL \
+         )",
+        "TRUNCATE bench_gpuexpr_direct_gate",
+        "INSERT INTO bench_gpuexpr_direct_gate \
+         SELECT \
+           g::int4, \
+           (g % 1000)::float4, \
+           (g % 100)::int4 \
+         FROM generate_series(1, 1000000) AS g",
+        "ANALYZE bench_gpuexpr_direct_gate",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -187,5 +266,132 @@ fn plan_shape_grouped_hashagg_100k_declines_gpu() {
         &mut c,
         sql,
         &["CustomScan(pg_accel)", "GpuAgg", "GpuAccelAgg"],
+    );
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn plan_shape_postgis_point_polygon_intersects_declines_until_exact_semantics() {
+    let mut c = connect();
+    ensure_postgis_point_polygon_fixture(&mut c);
+    let polygon = polygon_wkt(2200, 50.0, 12.5, 8.0);
+    let polygon_4326 = format!("SRID=4326;{polygon}");
+
+    for (label, sql) in [
+        (
+            "Point column × constant Polygon",
+            format!(
+                "SELECT count(*) FROM bench_postgis_pip_gate \
+                 WHERE ST_Intersects(geom, '{polygon_4326}'::geometry)"
+            ),
+        ),
+        (
+            "constant Polygon × Point column",
+            format!(
+                "SELECT count(*) FROM bench_postgis_pip_gate \
+                 WHERE ST_Intersects('{polygon_4326}'::geometry, geom)"
+            ),
+        ),
+    ] {
+        for stmt in [
+            "SET pg_accel.enabled = on",
+            "SET pg_accel.cost_multiplier = 0.1",
+            "SELECT pg_accel_reset_stats()",
+        ] {
+            c.simple_query(stmt).expect(stmt);
+        }
+
+        let plan = explain(&mut c, &sql);
+        assert!(
+            !plan.contains("custom scan") && !plan.contains("gpuspatial"),
+            "{label} ST_Intersects must stay native until exact fp64 PostGIS semantics land:\n{plan}"
+        );
+        assert_eq!(
+            last_planner_rejection_reason(&mut c).as_deref(),
+            Some("postgis_intersects_unsupported_shape"),
+            "{label} ST_Intersects should expose the native-decline gate; plan:\n{plan}"
+        );
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn plan_shape_postgis_intersects_unsupported_shape_stays_native() {
+    let mut c = connect();
+    for stmt in [
+        "CREATE EXTENSION IF NOT EXISTS postgis CASCADE",
+        "CREATE UNLOGGED TABLE IF NOT EXISTS bench_postgis_intersects_unsupported_gate \
+         (id int4, geom geometry NOT NULL)",
+        "TRUNCATE bench_postgis_intersects_unsupported_gate",
+        "INSERT INTO bench_postgis_intersects_unsupported_gate (id, geom) \
+         SELECT g, ST_SetSRID(\
+                    ST_MakePoint((g % 1000)::float8 / 10.0, \
+                                 ((g / 1000) % 250)::float8 / 10.0), \
+                    4326)::geometry \
+         FROM generate_series(1, 250000) AS g",
+        "ANALYZE bench_postgis_intersects_unsupported_gate",
+        "SET pg_accel.enabled = on",
+        "SET pg_accel.cost_multiplier = 0.1",
+        "SELECT pg_accel_reset_stats()",
+    ] {
+        c.simple_query(stmt).expect(stmt);
+    }
+
+    let polygon = polygon_wkt(2200, 50.0, 12.5, 8.0);
+    let polygon_4326 = format!("SRID=4326;{polygon}");
+    let sql = format!(
+        "SELECT count(*) FROM bench_postgis_intersects_unsupported_gate \
+         WHERE ST_Intersects(geom, '{polygon_4326}'::geometry)"
+    );
+    let plan = explain(&mut c, &sql);
+    assert!(
+        !plan.contains("custom scan") && !plan.contains("gpuspatial"),
+        "generic geometry ST_Intersects must stay native behind the shape gate:\n{plan}"
+    );
+    assert_eq!(
+        last_planner_rejection_reason(&mut c).as_deref(),
+        Some("postgis_intersects_unsupported_shape"),
+        "generic geometry ST_Intersects should expose the unsupported-shape decline; plan:\n{plan}"
+    );
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn plan_shape_direct_gpuexpr_template_scan_dispatches_gpu() {
+    let mut c = connect();
+    ensure_gpuexpr_direct_fixture(&mut c);
+    let sql = "SELECT count(*) FROM bench_gpuexpr_direct_gate \
+               WHERE val > 500.0::float4 AND category < 50";
+
+    c.simple_query("SET pg_accel.enabled = off")
+        .expect("disable pg_accel");
+    let native_count = scalar_i64(&mut c, sql);
+
+    for stmt in [
+        "SET pg_accel.enabled = on",
+        "SET pg_accel.cost_multiplier = 0.01",
+        "SET pg_accel.min_batch_size = 1",
+    ] {
+        c.simple_query(stmt).expect(stmt);
+    }
+
+    let plan = explain(&mut c, sql);
+    assert!(
+        plan.contains("custom scan") && plan.contains("gpuexpr"),
+        "template-safe numeric WHERE must select direct GpuExpr Custom Scan:\n{plan}"
+    );
+
+    let before = kernel_executions(&mut c);
+    let accel_count = scalar_i64(&mut c, sql);
+    let after = kernel_executions(&mut c);
+
+    assert_eq!(
+        accel_count, native_count,
+        "direct GpuExpr template count differs from native PostgreSQL"
+    );
+    assert!(
+        after > before,
+        "direct GpuExpr template plan did not dispatch a GPU kernel \
+         (before={before}, after={after})"
     );
 }

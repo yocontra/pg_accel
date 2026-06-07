@@ -139,7 +139,7 @@ pub const H3_LATLNG_RES15: H3Variant = H3Variant {
     setup_extra: "",
     query: "SELECT h3_latlng_to_cell(point(lng, lat), 15), count(*) \
             FROM bench_h3_var GROUP BY 1",
-    baseline_query: "SELECT public.h3_lat_lng_to_cell(point(lng, lat), 15), count(*) \
+    baseline_query: "SELECT public.h3_lat_lng_to_cell(point(lng, lat), 15) AS h3_latlng_to_cell, count(*) \
                      FROM bench_h3_var GROUP BY 1",
     cleanup_extra: "",
 };

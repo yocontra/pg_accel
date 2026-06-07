@@ -31,10 +31,10 @@
 
 use pgrx::pg_sys::{self, CustomPath, List, NodeTag, Path, lappend};
 
-use crate::engine::cost;
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
 use crate::engine::gucs;
+use crate::engine::{cost, stats};
 
 use super::agg_common::{self, AggClass};
 use super::custom_scan;
@@ -278,14 +278,26 @@ pub(super) unsafe fn try_inject(
         let aggref_ref = unsafe { &*aggref };
 
         if !aggref_ref.aggdistinct.is_null() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!("pg_accel partial_agg: aggregate has DISTINCT clause");
             return;
         }
         if !aggref_ref.aggorder.is_null() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!("pg_accel partial_agg: aggregate has ORDER BY clause");
             return;
         }
         if !aggref_ref.aggfilter.is_null() {
+            stats::increment_planner_rejected(
+                super::RejectionReason::AggSemanticModifierNoGpuKernel.stats_key(),
+                rows as u64,
+            );
             pgrx::debug1!("pg_accel partial_agg: aggregate has FILTER clause");
             return;
         }
@@ -374,6 +386,10 @@ pub(super) unsafe fn try_inject(
         return;
     }
     if group_key_info.is_some() && agg_descs.iter().any(|(op, _, _)| matches!(op, AggOp::Avg)) {
+        stats::increment_planner_rejected(
+            super::RejectionReason::GroupedAvgNoGpuFinalize.stats_key(),
+            rows as u64,
+        );
         pgrx::debug1!(
             "pg_accel partial_agg: grouped AVG rejected until grouped AVG executor mapping is fixed",
         );
@@ -409,6 +425,10 @@ pub(super) unsafe fn try_inject(
     let cheapest_partial =
         unsafe { super::find_cheapest_gpu_producing_path(input_ref.partial_pathlist) };
     if cheapest_partial.is_null() {
+        stats::increment_planner_rejected(
+            super::RejectionReason::PartialAggNoGpuProducingChild.stats_key(),
+            rows as u64,
+        );
         pgrx::debug1!(
             "pg_accel partial_agg: rejected because no GPU-producing partial child exists"
         );

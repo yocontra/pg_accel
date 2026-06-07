@@ -4,13 +4,14 @@
 //! classified by [`AccelStrategy`].
 //!
 //! The generic PostGIS `geometry` signatures do not carry enough subtype
-//! information for the planner to prove a fully GPU-covered batch. Functions
-//! that can still emit `UNCERTAIN`, defer by shape, or require PostGIS CPU
-//! recheck stay unregistered until planner-time shape gates exist.
+//! information by themselves for the planner to prove a fully GPU-covered
+//! batch. Registered functions still require planner-time shape gates before
+//! path injection. Functions that can still emit `UNCERTAIN`, defer by shape,
+//! or require PostGIS CPU recheck stay unregistered.
 
 use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
 
-const GPU_ONLY_ALLOWLIST: &[&str] = &[];
+const GPU_ONLY_ALLOWLIST: &[&str] = &["st_intersects"];
 
 /// Build the `PostGIS` vector adapter with all supported function entries.
 #[must_use]
@@ -50,7 +51,7 @@ pub fn adapter() -> ExtensionAdapter {
 ///
 /// | Predicate        | Registered? | Reason |
 /// |------------------|-------------|--------|
-/// | `st_intersects`  | NO          | Geometry-pair coverage is partial; unsupported pairs route to UNCERTAIN. |
+/// | `st_intersects`  | YES         | Planner-admitted only for `geometry(Point)` column × constant simple Polygon. |
 /// | `st_contains`    | NO          | Polygon-Point fp32 path only; non-Polygon/Point pairs route to UNCERTAIN. |
 /// | `st_within`      | NO          | Same partial shape coverage as `st_contains`. |
 /// | `st_dwithin`     | NO          | Point-Point fp32 path only; non-Point pairs route to UNCERTAIN. |
@@ -108,7 +109,6 @@ mod tests {
     #[test]
     fn partial_or_recheck_dependent_functions_are_not_registered() {
         for name in [
-            "st_intersects",
             "st_contains",
             "st_within",
             "st_dwithin",
@@ -122,6 +122,9 @@ mod tests {
             "st_touches",
             "st_crosses",
             "st_overlaps",
+            "st_buffer",
+            "st_union",
+            "st_intersection",
         ] {
             assert!(
                 !adapter().functions.iter().any(|f| f.name == name),
@@ -131,10 +134,13 @@ mod tests {
     }
 
     #[test]
-    fn adapter_is_empty_until_shape_gates_exist() {
+    fn adapter_registers_st_intersects_behind_shape_gate() {
         assert!(
-            adapter().functions.is_empty(),
-            "PostGIS geometry predicates need planner-time shape gates before registration",
+            adapter()
+                .functions
+                .iter()
+                .any(|f| f.name == "st_intersects"),
+            "ST_Intersects should be registered behind the planner-time point/polygon shape gate",
         );
     }
 
@@ -235,9 +241,9 @@ mod tests {
     // -- Specific function presence -------------------------------------------
 
     #[test]
-    fn does_not_contain_st_intersects() {
+    fn contains_st_intersects() {
         assert!(
-            !adapter()
+            adapter()
                 .functions
                 .iter()
                 .any(|f| f.name == "st_intersects")

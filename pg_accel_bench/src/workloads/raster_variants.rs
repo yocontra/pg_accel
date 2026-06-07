@@ -1,5 +1,7 @@
 use super::Workload;
 
+const RASTER_DEFAULT_ROW_SCALES: &[usize] = &[100];
+
 /// Parametric raster map-algebra benchmark.
 ///
 /// Queries consume the derived raster through ST_SummaryStats and aggregate a
@@ -36,6 +38,10 @@ impl Workload for RasterVariant {
 
     fn category(&self) -> &'static str {
         "gpu_raster"
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        RASTER_DEFAULT_ROW_SCALES
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

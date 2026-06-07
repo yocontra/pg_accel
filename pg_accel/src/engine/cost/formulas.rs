@@ -525,6 +525,30 @@ pub fn spatial_polygon_rows_safe(
         && polygon_vertices >= limits.gpu_spatial_unsafe_band_min_vertices)
 }
 
+/// Estimated fraction of a spatial scan's input rows that would be yielded
+/// from the heap-backed Custom Scan path.
+#[must_use]
+#[inline]
+pub fn spatial_output_fraction(output_rows: f64, input_rows: f64) -> f64 {
+    if !output_rows.is_finite() || !input_rows.is_finite() || input_rows <= 0.0 {
+        return 1.0;
+    }
+    (output_rows.max(0.0) / input_rows).clamp(0.0, 1.0)
+}
+
+/// Whether a heap-backed spatial scan keeps enough rows filtered out for GPU
+/// predicate evaluation to amortize tuple yield and downstream CPU aggregate
+/// work.
+#[must_use]
+#[inline]
+pub fn spatial_output_fraction_allowed(
+    output_rows: f64,
+    input_rows: f64,
+    limits: &DeviceLimits,
+) -> bool {
+    spatial_output_fraction(output_rows, input_rows) <= limits.gpu_spatial_max_output_fraction
+}
+
 /// Universal cost model for self-scanning Custom Scan paths (agg, sort, window).
 ///
 /// These paths scan a base relation directly (heap_getnext + arena copy),
@@ -596,6 +620,31 @@ pub fn optimal_batch_size(estimated_rows: usize) -> usize {
 pub fn estimate_threads(profile: &PlatformProfile, available_budget: usize) -> usize {
     let max = profile.cpu_cores.saturating_sub(1).max(1);
     available_budget.min(max).max(1)
+}
+
+#[cfg(test)]
+mod spatial_output_tests {
+    use super::*;
+
+    #[test]
+    fn output_fraction_clamps_invalid_or_oversized_estimates() {
+        assert_eq!(spatial_output_fraction(90_000.0, 100_000.0), 0.9);
+        assert_eq!(spatial_output_fraction(200_000.0, 100_000.0), 1.0);
+        assert_eq!(spatial_output_fraction(-1.0, 100_000.0), 0.0);
+        assert_eq!(spatial_output_fraction(1.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn output_fraction_gate_rejects_above_device_limit() {
+        let limits = DeviceLimits::cpu_only();
+
+        assert!(spatial_output_fraction_allowed(
+            80_000.0, 100_000.0, &limits
+        ));
+        assert!(!spatial_output_fraction_allowed(
+            80_001.0, 100_000.0, &limits
+        ));
+    }
 }
 
 #[cfg(test)]

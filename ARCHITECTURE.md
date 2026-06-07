@@ -9,11 +9,12 @@ CUDA / ROCm / Level Zero / Metal).
 ## Bundled dependencies
 
 The build links against a forked AdaptiveCpp: `yocontra/AdaptiveCpp` branch
-`fork-safe-metal` at commit `ceb641a535b4706f71ded2690baedaf8cf711b30` (plus
-earlier fork/runtime fixes: `667338f74`, `0992997c`,
-`579ee8256`, `ea355d63`, `792d045e8b218241ef54af74244bf5fa92b2f80f`). See `NOTICE` for the full third-party
-attribution list (AdaptiveCpp BSD-2-Clause, soft-fp64 MIT, SLEEF BSL-1.0,
-PostgreSQL headers, pgrx MIT/Apache-2.0).
+`fork-safe-metal` at commit `0ebc10e5a596c4760b29bab1bdae45a4809f2ace`. The
+1.0 release is intentionally fork-pinned until the Metal/fork/soft-fp64 fixes
+land upstream; `scripts/setup_acpp.sh`, CI, and release packaging all use that
+same `ACPP_REQUIRED_SHA`. See `NOTICE` for the full third-party attribution
+list (AdaptiveCpp BSD-2-Clause, soft-fp64 MIT, SLEEF BSL-1.0, PostgreSQL
+headers, pgrx MIT/Apache-2.0).
 
 ## Four-Layer Architecture
 
@@ -230,6 +231,18 @@ via AdaptiveCpp's SSCP lowering (`pgaccel-kernels/src/reduce.cpp:3-9`). The
 soft-fp64 path currently has a known runtime blocker on Metal in the
 AdaptiveCpp HL-extraction phi-default path, but the
 compile/link path is green on every fp64 kernel.
+
+**soft-fp64 fenv and ABI scope.** The 1.0 release contract for soft-fp64 is
+SQL value equivalence for shipped fp64 kernels, not GPU-side IEEE status flag
+observability. pg_accel does not expose floating-point exception flags,
+rounding-mode changes, or per-expression fenv state through SQL functions,
+EXPLAIN, telemetry, or benchmark artifacts. Kernels communicate ordinary value
+buffers plus the existing null, valid, and `uncertain` result flags; ambiguous
+spatial predicates are rechecked through PostGIS value semantics on the main
+thread. Extra Metal ABI attributes and fenv read-back buffers are therefore
+unnecessary for the release semantics. A future consumer that needs IEEE
+status flags must add an explicit output-buffer contract and regression tests
+before planner dispatch can depend on those flags.
 
 **Cost model integration.** `DeviceLimits::soft_fp64_cost_multiplier`
 (`pg_accel/src/engine/cost/device_limits.rs:167-175`, default `32.0` on Metal

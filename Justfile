@@ -40,6 +40,7 @@ setup-tools:
     cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
     cargo install cargo-deny --locked
     cargo install cargo-audit --locked
+    cargo install cargo-llvm-cov --locked
 
 # Print system dependency hints for source PostgreSQL + AdaptiveCpp builds.
 setup-system-deps:
@@ -355,6 +356,19 @@ test-matrix:
 test: test-matrix
     @echo "All tests passed."
 
+# Run the Rust coverage gate for one PG major. Defaults to the supported PG target.
+coverage pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    bash scripts/coverage_gate.sh "$pg"
+
 # Run benchmark suite against local pgrx PG. The runner seeds and cleans up
 # each workload/scale itself. Long benches can fill the PG log; `log-rails`
 # truncates oversized logs first.
@@ -535,6 +549,7 @@ gpu-test: gpu-build
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p .pgaccel/logs
+    timeout_s="${GPU_TEST_TIMEOUT_S:-300}"
     tests=(
         device
         bbox
@@ -550,7 +565,10 @@ gpu-test: gpu-build
         fork_cold
         sycl_basic
         reduce_stats
+        reduce_bool_bit
         hash_agg_partial
+        hash_join
+        nested_loop_ineq
         window
         expr_templates
     )
@@ -559,7 +577,7 @@ gpu-test: gpu-build
         python3 scripts/filter_gpu_output.py \
             --label "test_${test_name}" \
             --log "$log" \
-            -- "./pgaccel-kernels/build/test_${test_name}"
+            -- timeout "$timeout_s" "./pgaccel-kernels/build/test_${test_name}"
     done
 
 # Wipe the AdaptiveCpp Metal SSCP JIT cache, then run a single named
@@ -612,6 +630,49 @@ gpu-stress-archive workers="8" iters="20":
         --log "$log" \
         -- env PGACCEL_FORK_STRESS_WORKERS={{workers}} PGACCEL_FORK_STRESS_ITERS={{iters}} \
             timeout 600 ./pgaccel-kernels/build/test_fork_archive_stress
+
+# Run the M-series Metal release stress gate with durable artifacts.
+metal-stress pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    bash scripts/metal_stress_gate.sh "$pg"
+
+# Run the NVIDIA CUDA release stress gate with durable artifacts.
+cuda-stress pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    bash scripts/cuda_stress_gate.sh "$pg"
+
+# Run the release verification matrix with durable artifacts.
+release-verify pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    bash scripts/release_verification_matrix.sh "$pg"
+
+# Fail while the v1.0 release checklist still has placeholder evidence.
+release-checklist-audit:
+    bash scripts/release_checklist_audit.sh
 
 # Audit pgaccel-kernels/src/*.cpp for `extern "C" pgaccel_*` symbols
 # that are labelled GPU-accelerated but whose body is a host-side

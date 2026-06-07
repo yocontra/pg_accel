@@ -53,7 +53,7 @@ impl Workload for H3Bulk {
         // bypasses the pg_accel planner hook entirely and measures the
         // stock h3-pg C function.
         Some(
-            "SELECT public.h3_lat_lng_to_cell(geom, 7), count(*) \
+            "SELECT public.h3_lat_lng_to_cell(geom, 7) AS h3_latlng_to_cell, count(*) \
              FROM bench_h3_points GROUP BY 1"
                 .to_owned(),
         )

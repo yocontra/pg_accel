@@ -12,8 +12,11 @@
 // **zero** XPC errors. The harness exits non-zero if any child surfaced
 // an `MTLCompilerService` / pipeline-state failure / archive load
 // failure log line, or if the per-child dispatch matrix produced wrong
-// results. The per-child report on stdout is the source of truth for
-// reviewers — paste it verbatim in the task report.
+// results. It also prints per-fork first-dispatch timing and cache-id
+// evidence so reviewers can distinguish unstable kernel hashes from the
+// unavoidable per-process Metal library/archive/pipeline construction cost.
+// The per-child report on stdout is the source of truth for reviewers —
+// paste it verbatim in the task report.
 
 #include <fcntl.h>
 #include <poll.h>
@@ -24,11 +27,15 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -39,19 +46,21 @@
 // matrix. Override via env for diagnostics / extended soak.
 // ──────────────────────────────────────────────────────────────────────
 
-static int parse_env_int(const char* name, int fallback) {
+static int parse_env_int(const char* name, int fallback, int max_value = 1024) {
   const char* v = std::getenv(name);
   if (!v || v[0] == '\0')
     return fallback;
   char* end = nullptr;
   long parsed = std::strtol(v, &end, 10);
-  if (end == v || parsed < 1 || parsed > 1024)
+  if (end == v || parsed < 1 || parsed > max_value)
     return fallback;
   return static_cast<int>(parsed);
 }
 
 static const int N_WORKERS = parse_env_int("PGACCEL_FORK_STRESS_WORKERS", 8);
 static const int N_ITERATIONS = parse_env_int("PGACCEL_FORK_STRESS_ITERS", 20);
+static const int FIRST_DISPATCH_BUDGET_US =
+    parse_env_int("PGACCEL_FORK_FIRST_DISPATCH_BUDGET_US", 50'000, 60'000'000);
 
 // Kernel input sizes — small enough that the iteration loop dominates,
 // large enough that GPU dispatch is actually exercised (above
@@ -104,6 +113,47 @@ static size_t total_failures(const MarkerSet& m) {
          m.archive_build_fail.size() + m.posix_spawn_fail.size();
 }
 
+static uint64_t elapsed_us(std::chrono::steady_clock::time_point start,
+                           std::chrono::steady_clock::time_point end) {
+  return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+}
+
+static double us_to_ms(uint64_t us) {
+  return static_cast<double>(us) / 1000.0;
+}
+
+static std::vector<std::string> list_cache_ids(const char* cache_dir, const char* extension) {
+  std::vector<std::string> ids;
+  if (!cache_dir || cache_dir[0] == '\0')
+    return ids;
+
+  std::error_code ec;
+  if (!std::filesystem::is_directory(cache_dir, ec) || ec)
+    return ids;
+
+  std::set<std::string> unique;
+  for (const auto& entry : std::filesystem::directory_iterator(cache_dir, ec)) {
+    if (ec)
+      break;
+    if (entry.path().extension() == extension)
+      unique.insert(entry.path().stem().string());
+  }
+  ids.assign(unique.begin(), unique.end());
+  return ids;
+}
+
+static std::string join_ids(const std::vector<std::string>& ids) {
+  if (ids.empty())
+    return "<none>";
+  std::ostringstream out;
+  for (size_t i = 0; i < ids.size(); ++i) {
+    if (i != 0)
+      out << ",";
+    out << ids[i];
+  }
+  return out.str();
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Per-child report passed parent ← child through a binary pipe. Kept
 // trivially-copyable so a single write/read pair is sufficient.
@@ -128,6 +178,11 @@ struct ChildReport {
   uint64_t archive_orphan_after;
   uint32_t compute_units;
   uint32_t backend_is_metal;  // 1 if backend == "metal"
+  uint64_t init_us;
+  uint64_t first_iteration_us;
+  uint64_t first_reduce_us;
+  uint64_t first_h3_us;
+  uint64_t first_pip_us;
   uint64_t wall_us;
 };
 
@@ -138,14 +193,27 @@ struct ChildReport {
 // Return value: 0 = OK, otherwise (kernel_id << 16) | (pgaccel_status & 0xff).
 // ──────────────────────────────────────────────────────────────────────
 
+struct IterationTiming {
+  uint64_t reduce_us = 0;
+  uint64_t h3_us = 0;
+  uint64_t pip_us = 0;
+  uint64_t total_us = 0;
+};
+
 static int run_one_iteration(std::vector<float>& reduce_buf, std::vector<double>& h3_lat,
                              std::vector<double>& h3_lng, std::vector<uint64_t>& h3_cells,
                              std::vector<uint8_t>& h3_valid, std::vector<float>& pip_points,
                              std::vector<int8_t>& pip_results, const float* pip_bbox,
-                             const float* pip_ring) {
+                             const float* pip_ring, IterationTiming* timing = nullptr) {
+  const auto iter_t0 = std::chrono::steady_clock::now();
+
   // ── reduce_sum_f32 ──
   float sum = 0.0f;
+  const auto reduce_t0 = std::chrono::steady_clock::now();
   pgaccel_status st = pgaccel_reduce_sum_f32(reduce_buf.data(), REDUCE_N, &sum);
+  const auto reduce_t1 = std::chrono::steady_clock::now();
+  if (timing)
+    timing->reduce_us = elapsed_us(reduce_t0, reduce_t1);
   if (st != PGACCEL_OK) {
     return (0 << 16) | (st & 0xff);
   }
@@ -155,9 +223,13 @@ static int run_one_iteration(std::vector<float>& reduce_buf, std::vector<double>
   }
 
   // ── h3_lat_lng_to_cell_bulk ──
+  const auto h3_t0 = std::chrono::steady_clock::now();
   st = pgaccel_h3_lat_lng_to_cell_bulk(h3_lat.data(), h3_lng.data(), H3_N,
                                        /*resolution=*/7, /*use_fp64=*/1, h3_cells.data(),
                                        h3_valid.data());
+  const auto h3_t1 = std::chrono::steady_clock::now();
+  if (timing)
+    timing->h3_us = elapsed_us(h3_t0, h3_t1);
   if (st != PGACCEL_OK) {
     return (1 << 16) | (st & 0xff);
   }
@@ -166,8 +238,14 @@ static int run_one_iteration(std::vector<float>& reduce_buf, std::vector<double>
   }
 
   // ── point_in_polygon_bulk (simple, no rings index) ──
+  const auto pip_t0 = std::chrono::steady_clock::now();
   st = pgaccel_point_in_polygon_bulk(pip_points.data(), PIP_N, pip_bbox, pip_ring, 5, nullptr, 0,
                                      pip_results.data());
+  const auto pip_t1 = std::chrono::steady_clock::now();
+  if (timing) {
+    timing->pip_us = elapsed_us(pip_t0, pip_t1);
+    timing->total_us = elapsed_us(iter_t0, pip_t1);
+  }
   if (st != PGACCEL_OK) {
     return (2 << 16) | (st & 0xff);
   }
@@ -209,7 +287,10 @@ static int run_one_iteration(std::vector<float>& reduce_buf, std::vector<double>
   report.archive_metalar_before = snap_before.metalar_files;
   report.archive_orphan_before = snap_before.orphan_metallib;
 
+  const auto init_t0 = std::chrono::steady_clock::now();
   pgaccel_status init_st = pgaccel_init();
+  const auto init_t1 = std::chrono::steady_clock::now();
+  report.init_us = elapsed_us(init_t0, init_t1);
   report.pgaccel_init_status = static_cast<int>(init_st);
   if (init_st != PGACCEL_OK) {
     write(fd_out, &report, sizeof(report));
@@ -257,8 +338,15 @@ static int run_one_iteration(std::vector<float>& reduce_buf, std::vector<double>
 
   for (int iter = 0; iter < N_ITERATIONS; ++iter) {
     report.iterations_attempted = iter + 1;
+    IterationTiming first_timing{};
     int rc = run_one_iteration(reduce_buf, h3_lat, h3_lng, h3_cells, h3_valid, pip_points,
-                               pip_results, pip_bbox, pip_ring);
+                               pip_results, pip_bbox, pip_ring, iter == 0 ? &first_timing : nullptr);
+    if (iter == 0) {
+      report.first_iteration_us = first_timing.total_us;
+      report.first_reduce_us = first_timing.reduce_us;
+      report.first_h3_us = first_timing.h3_us;
+      report.first_pip_us = first_timing.pip_us;
+    }
     if (rc != 0) {
       report.first_failure_iter = iter;
       report.first_failure_kernel = (rc >> 16) & 0xff;
@@ -369,10 +457,17 @@ int main() {
 
   pgaccel_archive_snapshot snap_start{};
   pgaccel_archive_stats_snapshot(&snap_start);
+  std::vector<std::string> pre_metalar_ids = list_cache_ids(cache_buf, ".metalar");
+  std::vector<std::string> pre_metallib_ids = list_cache_ids(cache_buf, ".metallib");
+  std::vector<std::string> pre_jit_ids = list_cache_ids(cache_buf, ".jit");
   std::printf(
       "pre-fork archive cache: metallib=%llu metalar=%llu jit=%llu orphan=%llu\n",
       (unsigned long long)snap_start.metallib_files, (unsigned long long)snap_start.metalar_files,
       (unsigned long long)snap_start.jit_files, (unsigned long long)snap_start.orphan_metallib);
+  std::printf("pre-fork cache ids: metallib=%s\n", join_ids(pre_metallib_ids).c_str());
+  std::printf("pre-fork cache ids: metalar=%s\n", join_ids(pre_metalar_ids).c_str());
+  std::printf("pre-fork cache ids: jit=%s\n", join_ids(pre_jit_ids).c_str());
+  std::fflush(stdout);
 
   // Important: do NOT call pgaccel_init() in the parent. We are
   // simulating the postmaster pattern (no Metal init pre-fork) so that
@@ -490,6 +585,11 @@ int main() {
 
   pgaccel_archive_snapshot snap_end{};
   pgaccel_archive_stats_snapshot(&snap_end);
+  std::vector<std::string> post_metalar_ids = list_cache_ids(cache_buf, ".metalar");
+  std::vector<std::string> post_metallib_ids = list_cache_ids(cache_buf, ".metallib");
+  std::vector<std::string> post_jit_ids = list_cache_ids(cache_buf, ".jit");
+  const bool started_empty = snap_start.metallib_files == 0 && snap_start.metalar_files == 0 &&
+                             snap_start.jit_files == 0;
   std::printf("\npost-fork archive cache: metallib=%llu metalar=%llu jit=%llu "
               "orphan=%llu (delta_metallib=%lld delta_metalar=%lld)\n",
               (unsigned long long)snap_end.metallib_files,
@@ -497,6 +597,9 @@ int main() {
               (unsigned long long)snap_end.orphan_metallib,
               (long long)snap_end.metallib_files - (long long)snap_start.metallib_files,
               (long long)snap_end.metalar_files - (long long)snap_start.metalar_files);
+  std::printf("post-fork cache ids: metallib=%s\n", join_ids(post_metallib_ids).c_str());
+  std::printf("post-fork cache ids: metalar=%s\n", join_ids(post_metalar_ids).c_str());
+  std::printf("post-fork cache ids: jit=%s\n", join_ids(post_jit_ids).c_str());
 
   // ── Per-child report ──
   std::printf("\n%-3s %-7s %-4s %-4s %-4s %-12s %-12s %-12s %-12s\n", "idx", "pid", "init", "ok",
@@ -536,6 +639,42 @@ int main() {
   for (int i = 0; i < N_WORKERS; ++i)
     std::printf(" %d", term_signal[i]);
   std::printf("\n");
+
+  uint64_t max_first_reduce_us = 0;
+  uint64_t max_first_iteration_us = 0;
+  uint64_t max_steady_after_first_us = 0;
+  uint64_t max_init_us = 0;
+  std::printf("\n=== Per-child first-iteration timings (ms) ===\n");
+  std::printf("%-3s %-8s %-10s %-10s %-10s %-10s %-10s %-10s\n", "idx", "init",
+              "first_all", "first_sum", "first_h3", "first_pip", "steady_avg", "loop_wall");
+  for (int i = 0; i < N_WORKERS; ++i) {
+    const ChildReport& r = kids[i].report;
+    max_init_us = std::max(max_init_us, r.init_us);
+    max_first_reduce_us = std::max(max_first_reduce_us, r.first_reduce_us);
+    max_first_iteration_us = std::max(max_first_iteration_us, r.first_iteration_us);
+    uint64_t steady_after_first_us = 0;
+    if (r.iterations_passed > 1 && r.wall_us > r.first_iteration_us) {
+      steady_after_first_us =
+          (r.wall_us - r.first_iteration_us) / static_cast<uint64_t>(r.iterations_passed - 1);
+      max_steady_after_first_us = std::max(max_steady_after_first_us, steady_after_first_us);
+    }
+    std::printf("%-3d %-8.2f %-10.2f %-10.2f %-10.2f %-10.2f %-10.2f %-10.2f\n", i,
+                us_to_ms(r.init_us), us_to_ms(r.first_iteration_us),
+                us_to_ms(r.first_reduce_us), us_to_ms(r.first_h3_us),
+                us_to_ms(r.first_pip_us), us_to_ms(steady_after_first_us),
+                us_to_ms(r.wall_us));
+  }
+  const char* first_dispatch_status =
+      max_first_reduce_us <= static_cast<uint64_t>(FIRST_DISPATCH_BUDGET_US)
+          ? "within_budget"
+          : (started_empty ? "above_budget_cold_cache_compile"
+                           : "above_budget_cached_code_object_pipeline");
+  std::printf("first_dispatch_budget_us=%d max_first_sum_us=%llu status=%s\n",
+              FIRST_DISPATCH_BUDGET_US, (unsigned long long)max_first_reduce_us,
+              first_dispatch_status);
+  std::printf("max_first_iteration_us=%llu max_steady_after_first_us=%llu max_init_us=%llu\n",
+              (unsigned long long)max_first_iteration_us,
+              (unsigned long long)max_steady_after_first_us, (unsigned long long)max_init_us);
 
   // ── Stderr marker scan ──
   std::printf("\n=== stderr marker scan (per-worker) ===\n");
@@ -593,10 +732,24 @@ int main() {
   std::printf("archive_skipped_intentional=%d (not a failure — large metallibs)\n", total_skipped);
   std::printf("posix_spawn_failures=%d\n", total_spawn_fail);
 
+  int hash_instability_failures = 0;
+  if (started_empty && (post_metallib_ids.size() > 3 || post_metalar_ids.size() > 3 ||
+                        post_jit_ids.size() > 3)) {
+    hash_instability_failures = 1;
+  }
+  std::printf("cache_hash_unique_ids: metallib=%zu metalar=%zu jit=%zu expected<=3 started_empty=%d\n",
+              post_metallib_ids.size(), post_metalar_ids.size(), post_jit_ids.size(),
+              started_empty ? 1 : 0);
+  std::printf("cache_hash_ids_changed: metallib=%d metalar=%d jit=%d\n",
+              pre_metallib_ids == post_metallib_ids ? 0 : 1,
+              pre_metalar_ids == post_metalar_ids ? 0 : 1, pre_jit_ids == post_jit_ids ? 0 : 1);
+  std::printf("cache_hash_instability_failures=%d\n", hash_instability_failures);
+
   // Acceptance gate: zero XPC errors AND every worker completed every
   // iteration AND no abnormal terminations.
   const int hard_failures =
-      total_xpc + total_pipeline_fail + total_load_fail + total_build_fail + total_spawn_fail;
+      total_xpc + total_pipeline_fail + total_load_fail + total_build_fail + total_spawn_fail +
+      hash_instability_failures;
   if (hard_failures == 0 && crashed == 0 && reports_missing == 0 && total_ok == N_WORKERS) {
     std::printf("\nRESULT: PASS — %d × %d fork stress with zero MTLCompilerService "
                 "XPC errors.\n",
