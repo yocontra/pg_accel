@@ -1,0 +1,377 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      cuda_smoke:
+        description: Run the optional self-hosted CUDA smoke job.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  ACPP_REQUIRED_SHA: 7e79a6ca45f5a067f02a30207cb8da1b81eb5f29
+  SOFT_FP64_REQUIRED_TAG: v1.3.0
+
+jobs:
+  mac-arm64:
+    name: macOS arm64 PG ${{ matrix.pg }}
+    runs-on: macos-14
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18, 19]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup default "$rust_version"
+
+      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+        id: pg-support
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Cargo artifacts
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-macos-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            cargo-macos-${{ runner.arch }}-pg${{ matrix.pg }}-
+            cargo-macos-${{ runner.arch }}-
+
+      - name: Cache pgrx cluster
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx
+            .pgaccel/postgres
+          key: pgrx-macos-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', 'pg_accel/pg_accel.control') }}
+          restore-keys: |
+            pgrx-macos-${{ runner.arch }}-pg${{ matrix.pg }}-
+            pgrx-macos-${{ runner.arch }}-
+
+      - name: Cache AdaptiveCpp install
+        if: steps.pg-support.outputs.skip != 'true'
+        id: cache-acpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: acpp-macos-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+
+      - name: Install macOS build dependencies
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install just llvm@20 lld@20 boost libomp postgis
+
+      - name: Install cargo tools
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          cargo install cargo-deny --locked
+          cargo install cargo-audit --locked
+
+      - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-gpu-metal-headers
+          ACPP_BACKEND=metal \
+            LLVM_PREFIX="$(brew --prefix llvm@20)" \
+            ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
+            just setup-gpu-acpp
+
+      - name: Initialize pgrx PostgreSQL ${{ matrix.pg }}
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-pg-source ${{ matrix.pg }}
+          just setup-pg-extensions ${{ matrix.pg }}
+          just setup-pgrx ${{ matrix.pg }}
+
+      - name: Run PostgreSQL ${{ matrix.pg }} Rust gate
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just fmt-check
+          just lint ${{ matrix.pg }}
+          just check ${{ matrix.pg }}
+          just test-unit ${{ matrix.pg }}
+
+      - name: Run benchmark harness release-gate tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p pg_accel_bench --locked
+
+      - name: Run standalone GPU kernel gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just gpu-test
+
+      - name: Run live extension smoke
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just extension-smoke ${{ matrix.pg }}
+
+      - name: Run SQL integration tests
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        env:
+          PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION: "1"
+        run: |
+          set -euo pipefail
+          just sql-test ${{ matrix.pg }}
+
+      - name: Generate package schema artifact
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cargo pgrx schema -p pg_accel pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }} -o artifacts/pg_accel--1.0.0-pg${{ matrix.pg }}.sql
+
+      - name: Upload schema artifact
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-schema-pg${{ matrix.pg }}-macos-arm64
+          path: artifacts/pg_accel--1.0.0-pg${{ matrix.pg }}.sql
+          if-no-files-found: error
+
+  linux-x86:
+    name: Linux x86_64 PG ${{ matrix.pg }} check/test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18, 19]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup default "$rust_version"
+
+      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+        id: pg-support
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache Cargo artifacts
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-
+            cargo-linux-${{ runner.arch }}-
+
+      - name: Cache AdaptiveCpp generic install
+        if: steps.pg-support.outputs.skip != 'true'
+        id: cache-acpp-linux
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+
+      - name: Cache source PostgreSQL
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx
+            .pgaccel/postgres
+          key: source-pg-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('scripts/pg_source.sh') }}
+
+      - name: Install system dependencies
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            bison \
+            clang \
+            cmake \
+            curl \
+            flex \
+            git \
+            libreadline-dev \
+            libssl-dev \
+            lld \
+            llvm-dev \
+            ninja-build \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Install cargo-pgrx and initialize PostgreSQL ${{ matrix.pg }}
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          cargo install just --locked
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          scripts/pg_source.sh build ${{ matrix.pg }}
+          cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
+
+      - name: Install Rust coverage tooling
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-llvm-cov --locked
+
+      - name: Build pinned AdaptiveCpp generic toolchain
+        if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp-linux.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACPP_BACKEND=generic ./scripts/setup_acpp.sh
+
+      - name: Check without GPU devices
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --workspace --no-default-features --features pg${{ matrix.pg }} --all-targets
+
+      - name: Run Rust tests without GPU device tests
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace --no-default-features --features pg${{ matrix.pg }} --no-run
+
+      - name: Run benchmark harness release-gate tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p pg_accel_bench --locked
+
+      - name: Run Rust coverage gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18
+          COVERAGE_MIN_LINES: 90
+        run: |
+          set -euo pipefail
+          just coverage ${{ matrix.pg }}
+
+      - name: Upload Rust coverage artifacts
+        if: always() && steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-rust-coverage-pg18-linux-x86_64
+          path: artifacts/coverage-pg18
+          if-no-files-found: warn
+
+  cuda-smoke:
+    name: CUDA smoke
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.cuda_smoke) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'cuda-smoke')) }}
+    runs-on:
+      - self-hosted
+      - cuda
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify CUDA AdaptiveCpp runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v nvidia-smi
+          command -v acpp
+          nvidia-smi
+          acpp --acpp-version
+
+      - name: Build kernels and run minimal smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B pgaccel-kernels/build -S pgaccel-kernels \
+            -DCMAKE_PREFIX_PATH="$HOME/local" \
+            -DACPP_TARGETS=cuda
+          cmake --build pgaccel-kernels/build --parallel
+          ./pgaccel-kernels/build/test_device
+          ./pgaccel-kernels/build/test_sycl_basic

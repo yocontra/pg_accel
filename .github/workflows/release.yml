@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }}, PG ${{ matrix.pg }})
+    env:
+      ACPP_REQUIRED_SHA: 7e79a6ca45f5a067f02a30207cb8da1b81eb5f29
+      SOFT_FP64_REQUIRED_TAG: v1.3.0
+    strategy:
+      fail-fast: false
+      matrix:
+        # Release packaging currently runs on macOS; Linux/CUDA runtime
+        # validation is covered by the optional self-hosted CUDA smoke job.
+        os: [macos-26]
+        pg: [18, 19]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+        id: pg-support
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pg-support.outputs.skip != 'true'
+      - name: Install macOS build dependencies
+        if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          brew update
+          brew install just cmake llvm@20 lld@20 boost libomp
+      - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          just setup-gpu-metal-headers
+          ACPP_BACKEND=metal \
+            LLVM_PREFIX="$(brew --prefix llvm@20)" \
+            ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
+            just setup-gpu-acpp
+      - if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          source scripts/pg_versions.sh
+          cargo install cargo-pgrx --locked --version "$PG_ACCEL_PGRX_VERSION"
+      - if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          scripts/pg_source.sh build ${{ matrix.pg }}
+          cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
+      - if: steps.pg-support.outputs.skip != 'true'
+        run: |
+          cargo pgrx package --package pg_accel --pg-config "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})" --no-default-features --features pg${{ matrix.pg }}
+          cp NOTICE target/release/pg_accel-pg${{ matrix.pg }}/NOTICE
+      - name: Upload artifacts
+        if: steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_accel-pg${{ matrix.pg }}-${{ matrix.os }}
+          path: target/release/pg_accel-pg${{ matrix.pg }}/
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-artifacts/pg_accel-pg*/**

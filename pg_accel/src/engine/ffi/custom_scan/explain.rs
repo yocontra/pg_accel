@@ -1,0 +1,1043 @@
+//! EXPLAIN output for Custom Scan nodes.
+//!
+//! Reports strategy + batch config always; execution counters only under
+//! EXPLAIN ANALYZE.
+
+use std::ffi::{CStr, CString, c_int};
+
+use pgrx::pg_sys;
+
+use super::{GpuAccelScanState, GpuStrategy, dsm, function_scan, srf_target_list};
+use crate::engine::executor::agg::AggExecState;
+use crate::engine::executor::join::JoinExecState;
+use crate::engine::executor::olap::{
+    OlapAggSpec, ResidentDenseGroupedF64MeasurePredicate,
+    ResidentDenseGroupedF64MeasurePredicateOp, ResidentDenseGroupedF64MeasurePredicateSource,
+    ResidentGroupAggFilterExpr, ResidentGroupAggGroupKeyExpr, ResidentGroupAggMeasureExpr,
+    ResidentGroupAggPredicateGuard, ResidentGroupAggValuePredicate,
+};
+use crate::engine::executor::preagg::PreAggExecState;
+use crate::engine::executor::scan::ScanExecState;
+use crate::engine::executor::sort::SortExecState;
+use crate::engine::registry::AccelStrategy;
+use crate::engine::residency::ResidentProofSnapshot;
+
+use super::private_data::{RESIDENT_PROOF_VERSION, resident_proof_default_for_strategy};
+
+/// `ExplainCustomScan`: emit EXPLAIN output.
+///
+/// Always shows Strategy, Batch Size, Expected Threads. When `EXPLAIN ANALYZE`,
+/// also shows Rows Dispatched, Batches, and Dispatch Time.
+///
+/// # Safety
+///
+/// Called by the executor on the main backend thread.
+pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
+    node: *mut pg_sys::CustomScanState,
+    _ancestors: *mut pg_sys::List,
+    es: *mut pg_sys::ExplainState,
+) {
+    let _span = tracing::debug_span!("ffi.explain_custom_scan").entered();
+    let state = node.cast::<GpuAccelScanState>();
+
+    // SAFETY: state is our extended struct, es is a valid ExplainState.
+    unsafe {
+        let strategy = GpuStrategy::decode((*state).accel.strategy);
+
+        pg_sys::ExplainPropertyText(c"Strategy".as_ptr(), strategy.label().as_ptr(), es);
+        if strategy == GpuStrategy::Scan && !(*state).accel.executor.is_null() {
+            let scan_state = &*(*state).accel.executor.cast::<ScanExecState>();
+            pg_sys::ExplainPropertyText(
+                c"Accel Strategy".as_ptr(),
+                accel_strategy_label(scan_state.strategy()).as_ptr(),
+                es,
+            );
+        }
+        pg_sys::ExplainPropertyBool(c"Plan Selected".as_ptr(), true, es);
+        pg_sys::ExplainPropertyInteger(
+            c"Batch Size".as_ptr(),
+            std::ptr::null(),
+            i64::from((*state).accel.batch_size),
+            es,
+        );
+        pg_sys::ExplainPropertyInteger(
+            c"Expected Threads".as_ptr(),
+            std::ptr::null(),
+            i64::from((*state).accel.expected_threads),
+            es,
+        );
+        let resident_proof = (*state).accel.resident_proof;
+        pg_sys::ExplainPropertyBool(
+            c"GPU Resident Pipeline".as_ptr(),
+            resident_proof.gpu_resident_pipeline(),
+            es,
+        );
+        pg_sys::ExplainPropertyInteger(
+            c"GPU Resident Proof Version".as_ptr(),
+            std::ptr::null(),
+            i64::from(RESIDENT_PROOF_VERSION),
+            es,
+        );
+        explain_resident_operator_class(resident_proof, es);
+        if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {
+            let agg_state = &*(*state).accel.executor.cast::<AggExecState>();
+            explain_resident_groupagg_logical_spec(agg_state, es);
+        }
+        pg_sys::ExplainPropertyInteger(
+            c"GPU Resident Stage Mask".as_ptr(),
+            std::ptr::null(),
+            i64::from(resident_proof.stage_mask),
+            es,
+        );
+        pg_sys::ExplainPropertyInteger(
+            c"GPU Resident Device Columns".as_ptr(),
+            std::ptr::null(),
+            i64::from(resident_proof.device_columns),
+            es,
+        );
+        explain_resident_boundary(strategy, resident_proof, es);
+
+        // Execution stats only with EXPLAIN ANALYZE.
+        if (*es).analyze {
+            pg_sys::ExplainPropertyBool(
+                c"GPU Kernel Dispatched".as_ptr(),
+                gpu_kernel_dispatched_for_explain(strategy, state),
+                es,
+            );
+            pg_sys::ExplainPropertyInteger(
+                c"Rows Returned To CPU".as_ptr(),
+                std::ptr::null(),
+                rows_returned_to_cpu(node),
+                es,
+            );
+            pg_sys::ExplainPropertyInteger(
+                c"Rows Dispatched".as_ptr(),
+                std::ptr::null(),
+                (*state).accel.rows_dispatched as i64,
+                es,
+            );
+            pg_sys::ExplainPropertyInteger(
+                c"Batches".as_ptr(),
+                std::ptr::null(),
+                (*state).accel.batches_executed as i64,
+                es,
+            );
+            pg_sys::ExplainPropertyFloat(
+                c"Rows Per Batch".as_ptr(),
+                std::ptr::null(),
+                rows_per_batch_for_explain(
+                    (*state).accel.rows_dispatched,
+                    (*state).accel.batches_executed,
+                ),
+                3,
+                es,
+            );
+
+            #[allow(clippy::cast_precision_loss)]
+            let time_ms = (*state).accel.dispatch_time_us as f64 / 1000.0;
+            pg_sys::ExplainPropertyFloat(c"Dispatch Time".as_ptr(), c"ms".as_ptr(), time_ms, 3, es);
+            pg_sys::ExplainPropertyFloat(
+                c"Avg Dispatch Time Per Batch".as_ptr(),
+                c"ms".as_ptr(),
+                avg_dispatch_time_per_batch_ms_for_explain(
+                    (*state).accel.dispatch_time_us,
+                    (*state).accel.batches_executed,
+                ),
+                3,
+                es,
+            );
+
+            let parallel_agg_counters = if strategy == GpuStrategy::Agg {
+                dsm::parallel_agg_counter_snapshot(state)
+            } else {
+                None
+            };
+            pg_sys::ExplainPropertyText(
+                c"Counter Scope".as_ptr(),
+                if parallel_agg_counters.is_some() {
+                    c"Local Backend; Parallel Totals Below".as_ptr()
+                } else {
+                    c"Local Backend".as_ptr()
+                },
+                es,
+            );
+            if let Some(counters) = parallel_agg_counters
+                && counters.participants > 0
+            {
+                pg_sys::ExplainPropertyInteger(
+                    c"Parallel Participants Reported".as_ptr(),
+                    std::ptr::null(),
+                    i64::from(counters.participants),
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Parallel Active Participants".as_ptr(),
+                    std::ptr::null(),
+                    i64::from(counters.active_participants),
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Parallel Rows Dispatched Total".as_ptr(),
+                    std::ptr::null(),
+                    counters.rows_dispatched as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Parallel Batches Total".as_ptr(),
+                    std::ptr::null(),
+                    counters.batches_executed as i64,
+                    es,
+                );
+                #[allow(clippy::cast_precision_loss)]
+                let parallel_time_ms = counters.dispatch_time_us as f64 / 1000.0;
+                pg_sys::ExplainPropertyFloat(
+                    c"Parallel Dispatch Time Sum".as_ptr(),
+                    c"ms".as_ptr(),
+                    parallel_time_ms,
+                    3,
+                    es,
+                );
+                pg_sys::ExplainPropertyFloat(
+                    c"Parallel Avg Dispatch Time Per Batch".as_ptr(),
+                    c"ms".as_ptr(),
+                    avg_dispatch_time_per_batch_ms_for_explain(
+                        counters.dispatch_time_us,
+                        counters.batches_executed,
+                    ),
+                    3,
+                    es,
+                );
+            }
+
+            if strategy == GpuStrategy::Scan {
+                pg_sys::ExplainPropertyInteger(
+                    c"Parallel Worker".as_ptr(),
+                    std::ptr::null(),
+                    i64::from((*state).accel.parallel_worker_number),
+                    es,
+                );
+            }
+
+            // For Agg strategy, report whether GPU reduce was used and
+            // whether this is a partial (worker-side) aggregate path.
+            if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as AggExecState.
+                let agg_state = &*(*state).accel.executor.cast::<AggExecState>();
+                pg_sys::ExplainPropertyBool(
+                    c"GPU Dispatched".as_ptr(),
+                    agg_state.gpu_dispatched,
+                    es,
+                );
+                if agg_state.partial_emitters.is_some() {
+                    pg_sys::ExplainPropertyBool(c"Partial".as_ptr(), true, es);
+                }
+            }
+
+            if strategy == GpuStrategy::Join && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as JoinExecState.
+                let join_state = &*(*state).accel.executor.cast::<JoinExecState>();
+                pg_sys::ExplainPropertyBool(
+                    c"Hash Join Count Only".as_ptr(),
+                    join_state.hash_join_count_only(),
+                    es,
+                );
+                if join_state.strategy() == crate::engine::registry::AccelStrategy::GpuHashJoin {
+                    let telemetry = join_state.hash_join_telemetry();
+                    pg_sys::ExplainPropertyInteger(
+                        c"Hash Join Build Count".as_ptr(),
+                        std::ptr::null(),
+                        telemetry.build_count() as i64,
+                        es,
+                    );
+                    pg_sys::ExplainPropertyInteger(
+                        c"Hash Join Redundant Builds".as_ptr(),
+                        std::ptr::null(),
+                        telemetry.redundant_inner_builds() as i64,
+                        es,
+                    );
+                    pg_sys::ExplainPropertyInteger(
+                        c"Hash Join Build Rows".as_ptr(),
+                        std::ptr::null(),
+                        telemetry.build_rows() as i64,
+                        es,
+                    );
+                    pg_sys::ExplainPropertyInteger(
+                        c"Hash Join Build Non-Null Rows".as_ptr(),
+                        std::ptr::null(),
+                        telemetry.build_non_null_rows() as i64,
+                        es,
+                    );
+                    pg_sys::ExplainPropertyInteger(
+                        c"Hash Join Probe Batches".as_ptr(),
+                        std::ptr::null(),
+                        telemetry.probe_batches() as i64,
+                        es,
+                    );
+                    pg_sys::ExplainPropertyBool(
+                        c"GPU Hash Table Reused Across Probe Batches".as_ptr(),
+                        join_state.hash_join_reuses_build_across_probe_batches(),
+                        es,
+                    );
+                    pg_sys::ExplainPropertyBool(
+                        c"Shared GPU Inner Reuse".as_ptr(),
+                        join_state.hash_join_shared_inner_reuse(),
+                        es,
+                    );
+                }
+            }
+
+            // For Sort strategy, distinguish rows consumed from rows actually
+            // submitted to the bounded top-k GPU kernel.
+            if strategy == GpuStrategy::Sort && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as SortExecState.
+                let sort_state = &*(*state).accel.executor.cast::<SortExecState>();
+                pg_sys::ExplainPropertyBool(
+                    c"GPU Dispatched".as_ptr(),
+                    sort_state.gpu_dispatched,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"GPU Rows Dispatched".as_ptr(),
+                    std::ptr::null(),
+                    sort_state.gpu_rows_dispatched as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Top-K Limit".as_ptr(),
+                    std::ptr::null(),
+                    sort_state.limit().unwrap_or(0) as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Input Rows Materialized".as_ptr(),
+                    std::ptr::null(),
+                    sort_state.input_rows_materialized() as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Output Tuples Retained".as_ptr(),
+                    std::ptr::null(),
+                    sort_state.retained_output_tuples() as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Rows Pruned After Top-K".as_ptr(),
+                    std::ptr::null(),
+                    sort_state.rows_pruned_after_topk() as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyBool(
+                    c"Full Input Materialized".as_ptr(),
+                    sort_state.full_input_materialized(),
+                    es,
+                );
+            }
+
+            // For PreAgg strategy, report fused pipeline metrics.
+            if strategy == GpuStrategy::PreAgg && !(*state).accel.executor.is_null() {
+                // SAFETY: executor was Box::into_raw'd as PreAggExecState.
+                let preagg_state = &*(*state).accel.executor.cast::<PreAggExecState>();
+                pg_sys::ExplainPropertyInteger(
+                    c"Depths".as_ptr(),
+                    std::ptr::null(),
+                    preagg_state.depths.len() as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyInteger(
+                    c"Fact Rows Scanned".as_ptr(),
+                    std::ptr::null(),
+                    preagg_state.rows_dispatched as i64,
+                    es,
+                );
+                pg_sys::ExplainPropertyBool(
+                    c"Has Scan Expr".as_ptr(),
+                    preagg_state.scan_expr.is_some(),
+                    es,
+                );
+            }
+        }
+    }
+}
+
+/// Determine expected thread count (GPU-only: always 1, no CPU worker pool).
+pub(super) fn resolve_thread_count() -> c_int {
+    1
+}
+
+const fn accel_strategy_label(strategy: AccelStrategy) -> &'static CStr {
+    match strategy {
+        AccelStrategy::GpuSpatial => c"GpuSpatial",
+        AccelStrategy::GpuRaster => c"GpuRaster",
+        AccelStrategy::GpuH3 => c"GpuH3",
+        AccelStrategy::GpuSort => c"GpuSort",
+        AccelStrategy::GpuReduce => c"GpuReduce",
+        AccelStrategy::GpuExpr => c"GpuExpr",
+        AccelStrategy::GpuHashJoin => c"GpuHashJoin",
+        AccelStrategy::GpuWindow => c"GpuWindow",
+        AccelStrategy::GpuNestedLoopIneq => c"GpuNestedLoopIneq",
+    }
+}
+
+unsafe fn gpu_kernel_dispatched_for_explain(
+    strategy: GpuStrategy,
+    state: *const GpuAccelScanState,
+) -> bool {
+    let executor = unsafe { (*state).accel.executor };
+    if executor.is_null() {
+        return false;
+    }
+
+    match strategy {
+        GpuStrategy::Agg => unsafe { (*executor.cast::<AggExecState>()).gpu_dispatched },
+        GpuStrategy::Sort => unsafe { (*executor.cast::<SortExecState>()).gpu_dispatched },
+        GpuStrategy::FunctionScan => unsafe { function_scan::dispatched_ok(executor) },
+        GpuStrategy::SrfTargetList => unsafe { srf_target_list::batches_executed(executor) > 0 },
+        GpuStrategy::Scan | GpuStrategy::Join | GpuStrategy::Window | GpuStrategy::PreAgg => unsafe {
+            (*state).accel.batches_executed > 0
+        },
+    }
+}
+
+unsafe fn rows_returned_to_cpu(node: *mut pg_sys::CustomScanState) -> i64 {
+    let instrument = unsafe { (*node).ss.ps.instrument };
+    if instrument.is_null() {
+        return 0;
+    }
+    let tuple_count = unsafe { (*instrument).tuplecount };
+    if tuple_count.is_finite() && tuple_count > 0.0 {
+        tuple_count.round() as i64
+    } else {
+        0
+    }
+}
+
+fn rows_per_batch_for_explain(rows_dispatched: u64, batches_executed: u64) -> f64 {
+    if batches_executed == 0 {
+        0.0
+    } else {
+        rows_dispatched as f64 / batches_executed as f64
+    }
+}
+
+fn avg_dispatch_time_per_batch_ms_for_explain(dispatch_time_us: u64, batches_executed: u64) -> f64 {
+    if batches_executed == 0 {
+        0.0
+    } else {
+        (dispatch_time_us as f64 / 1000.0) / batches_executed as f64
+    }
+}
+
+fn gpu_resident_boundary_reason(strategy: GpuStrategy) -> &'static CStr {
+    match strategy {
+        GpuStrategy::Scan => c"GpuScan consumes heap or child tuples on CPU via table_scan_getnextslot/ExecProcNode/MinimalTuple staging and emits PostgreSQL slots",
+        GpuStrategy::Join => c"GpuJoin collects child rows through ExecProcNode into host MinimalTuple/key buffers and reconstructs joined PostgreSQL slots",
+        GpuStrategy::Agg => c"GpuAgg drains heap or child tuples on CPU and stages host input/key/value buffers before GPU reduce or grouped aggregation",
+        GpuStrategy::Sort => c"GpuSort materializes input tuples on CPU, sends key vectors only, reorders host MinimalTuples, and emits PostgreSQL slots",
+        GpuStrategy::Window => c"GpuWindow buffers input MinimalTuples, extracts host columns, stores host result vectors, and emits PostgreSQL slots",
+        GpuStrategy::PreAgg => c"GpuPreAgg materializes dimensions in host HashMap state and scans/probes fact rows through ExecProcNode/materialized slots",
+        GpuStrategy::FunctionScan => c"GpuFunctionScan dispatches constant arguments once, buffers host Datums, and drains output through PostgreSQL slots",
+        GpuStrategy::SrfTargetList => c"GpuAccelSrfTargetList drives ProjectSet input through ExecProcNode, buffers per-row SRF output, and emits expanded PostgreSQL tuples",
+    }
+}
+
+unsafe fn explain_resident_boundary(
+    strategy: GpuStrategy,
+    proof: ResidentProofSnapshot,
+    es: *mut pg_sys::ExplainState,
+) {
+    if !proof.gpu_resident_pipeline() && proof == resident_proof_default_for_strategy(strategy) {
+        unsafe {
+            pg_sys::ExplainPropertyText(
+                c"GPU Resident Boundary".as_ptr(),
+                gpu_resident_boundary_reason(strategy).as_ptr(),
+                es,
+            );
+        }
+        return;
+    }
+
+    let boundary = if let Ok(boundary) = CString::new(proof.boundary_label()) {
+        boundary
+    } else {
+        unsafe {
+            pg_sys::ExplainPropertyText(
+                c"GPU Resident Boundary".as_ptr(),
+                c"invalid_boundary_label".as_ptr(),
+                es,
+            );
+        }
+        return;
+    };
+    unsafe {
+        pg_sys::ExplainPropertyText(c"GPU Resident Boundary".as_ptr(), boundary.as_ptr(), es);
+    }
+}
+
+unsafe fn explain_resident_operator_class(
+    proof: ResidentProofSnapshot,
+    es: *mut pg_sys::ExplainState,
+) {
+    let label = if let Ok(label) = CString::new(proof.operator_class_label()) {
+        label
+    } else {
+        unsafe {
+            pg_sys::ExplainPropertyText(
+                c"GPU Resident Operator Class".as_ptr(),
+                c"invalid_operator_class".as_ptr(),
+                es,
+            );
+        }
+        return;
+    };
+    unsafe {
+        pg_sys::ExplainPropertyText(c"GPU Resident Operator Class".as_ptr(), label.as_ptr(), es);
+    }
+}
+
+unsafe fn explain_resident_groupagg_logical_spec(
+    agg_state: &AggExecState,
+    es: *mut pg_sys::ExplainState,
+) {
+    let Some((logical, dense_measure_predicate)) = (match agg_state.olap_spec() {
+        Some(OlapAggSpec::SsbmQ1Revenue(_)) => Some((
+            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q1_revenue(),
+            None,
+        )),
+        Some(OlapAggSpec::SsbmQ2GroupedRevenue(_)) => Some((
+            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q2_grouped_revenue(
+            ),
+            None,
+        )),
+        Some(OlapAggSpec::SsbmQ3GroupedRevenue(_)) => Some((
+            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q3_grouped_revenue(
+            ),
+            None,
+        )),
+        Some(OlapAggSpec::SsbmQ4GroupedProfit(_)) => Some((
+            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q4_grouped_profit(
+            ),
+            None,
+        )),
+        Some(OlapAggSpec::ResidentDenseGroupedF64(spec)) => {
+            Some((spec.logical, Some(spec.measure_predicate)))
+        }
+        Some(OlapAggSpec::ResidentStarDimGroupedF64(spec)) => Some((spec.logical, None)),
+        Some(OlapAggSpec::ResidentH3GroupedCount(_)) => Some((
+            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_h3_grouped_count(),
+            None,
+        )),
+        _ => None,
+    }) else {
+        return;
+    };
+    unsafe {
+        pg_sys::ExplainPropertyText(
+            c"GPU Resident GroupAgg Key".as_ptr(),
+            resident_groupagg_key_expr_label(logical.group_key_expr).as_ptr(),
+            es,
+        );
+        pg_sys::ExplainPropertyText(
+            c"GPU Resident GroupAgg Measure".as_ptr(),
+            resident_groupagg_measure_expr_label(logical.measure_expr).as_ptr(),
+            es,
+        );
+        pg_sys::ExplainPropertyText(
+            c"GPU Resident GroupAgg Filter".as_ptr(),
+            resident_groupagg_filter_expr_label(logical.filter_expr).as_ptr(),
+            es,
+        );
+        let predicate = logical.predicate_spec();
+        pg_sys::ExplainPropertyText(
+            c"GPU Resident GroupAgg Predicate Guard".as_ptr(),
+            resident_groupagg_predicate_guard_label(predicate.guard).as_ptr(),
+            es,
+        );
+        pg_sys::ExplainPropertyText(
+            c"GPU Resident GroupAgg Value Predicate".as_ptr(),
+            resident_groupagg_value_predicate_label(predicate.value_predicate).as_ptr(),
+            es,
+        );
+        let predicate_ir =
+            resident_groupagg_predicate_ir_label(logical.filter_expr, dense_measure_predicate);
+        pg_sys::ExplainPropertyText(
+            c"GPU Resident GroupAgg Predicate IR".as_ptr(),
+            predicate_ir.as_ptr(),
+            es,
+        );
+        pg_sys::ExplainPropertyInteger(
+            c"GPU Resident GroupAgg Aggregate Mask".as_ptr(),
+            std::ptr::null(),
+            i64::from(logical.aggregate_lane_mask),
+            es,
+        );
+    }
+}
+
+const fn resident_groupagg_key_expr_label(expr: ResidentGroupAggGroupKeyExpr) -> &'static CStr {
+    match expr {
+        ResidentGroupAggGroupKeyExpr::ResidentI32 => c"resident_i32",
+        ResidentGroupAggGroupKeyExpr::H3Index => c"h3index",
+        ResidentGroupAggGroupKeyExpr::SingleGroup => c"single_group",
+        ResidentGroupAggGroupKeyExpr::SsbmYearBrand => c"ssbm_year_brand",
+        ResidentGroupAggGroupKeyExpr::SsbmCustomerSupplierYear => c"ssbm_customer_supplier_year",
+        ResidentGroupAggGroupKeyExpr::SsbmYearGeoPart => c"ssbm_year_geo_part",
+        ResidentGroupAggGroupKeyExpr::StarDimension => c"star_dimension",
+    }
+}
+
+const fn resident_groupagg_measure_expr_label(expr: ResidentGroupAggMeasureExpr) -> &'static CStr {
+    match expr {
+        ResidentGroupAggMeasureExpr::DirectColumn => c"direct_column",
+        ResidentGroupAggMeasureExpr::BinaryMul => c"binary_mul",
+        ResidentGroupAggMeasureExpr::BinarySub => c"binary_sub",
+        ResidentGroupAggMeasureExpr::CountStar => c"count_star",
+        ResidentGroupAggMeasureExpr::SsbmDiscountedRevenue => c"ssbm_discounted_revenue",
+        ResidentGroupAggMeasureExpr::SsbmRevenueColumn => c"ssbm_revenue_column",
+        ResidentGroupAggMeasureExpr::SsbmProfitRevenueMinusSupplycost => {
+            c"ssbm_profit_revenue_minus_supplycost"
+        }
+        ResidentGroupAggMeasureExpr::TwoMeasureStats => c"two_measure_stats",
+    }
+}
+
+const fn resident_groupagg_filter_expr_label(expr: ResidentGroupAggFilterExpr) -> &'static CStr {
+    match expr {
+        ResidentGroupAggFilterExpr::None => c"none",
+        ResidentGroupAggFilterExpr::WhereBool => c"where_bool",
+        ResidentGroupAggFilterExpr::AggregateFilterBool => c"aggregate_filter_bool",
+        ResidentGroupAggFilterExpr::CaseBool => c"case_bool",
+        ResidentGroupAggFilterExpr::CaseBoolAndValueRanges => c"case_bool_and_value_ranges",
+        ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges => c"case_bool_and_rhs_ranges",
+        ResidentGroupAggFilterExpr::SsbmDateFactPredicate => c"ssbm_date_fact_predicate",
+        ResidentGroupAggFilterExpr::SsbmStarJoinMembership => c"ssbm_star_join_membership",
+        ResidentGroupAggFilterExpr::WhereBoolAndValueRanges => c"where_bool_and_value_ranges",
+        ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges => c"where_bool_and_rhs_ranges",
+        ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges => {
+            c"aggregate_filter_bool_and_value_ranges"
+        }
+        ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges => {
+            c"aggregate_filter_bool_and_rhs_ranges"
+        }
+        ResidentGroupAggFilterExpr::StarJoinMembership => c"star_join_membership",
+    }
+}
+
+const fn resident_groupagg_predicate_guard_label(
+    guard: ResidentGroupAggPredicateGuard,
+) -> &'static CStr {
+    match guard {
+        ResidentGroupAggPredicateGuard::None => c"none",
+        ResidentGroupAggPredicateGuard::ResidentBoolColumn => c"resident_bool_column",
+        ResidentGroupAggPredicateGuard::SsbmDateFactPredicate => c"ssbm_date_fact_predicate",
+        ResidentGroupAggPredicateGuard::SsbmStarJoinMembership => c"ssbm_star_join_membership",
+        ResidentGroupAggPredicateGuard::StarJoinMembership => c"star_join_membership",
+    }
+}
+
+const fn resident_groupagg_value_predicate_label(
+    predicate: ResidentGroupAggValuePredicate,
+) -> &'static CStr {
+    match predicate {
+        ResidentGroupAggValuePredicate::None => c"none",
+        ResidentGroupAggValuePredicate::ValueRanges => c"value_ranges",
+        ResidentGroupAggValuePredicate::RhsRanges => c"rhs_ranges",
+    }
+}
+
+fn resident_groupagg_predicate_ir_label(
+    filter_expr: ResidentGroupAggFilterExpr,
+    dense_measure_predicate: Option<ResidentDenseGroupedF64MeasurePredicate>,
+) -> CString {
+    let label = match filter_expr {
+        ResidentGroupAggFilterExpr::None => "guard=none;value=none".to_owned(),
+        ResidentGroupAggFilterExpr::WhereBool => {
+            "guard=resident_bool_column;scope=row;value=none".to_owned()
+        }
+        ResidentGroupAggFilterExpr::AggregateFilterBool => {
+            "guard=resident_bool_column;scope=aggregate_filter;value=none".to_owned()
+        }
+        ResidentGroupAggFilterExpr::CaseBool => {
+            "guard=resident_bool_column;scope=measure;value=none".to_owned()
+        }
+        ResidentGroupAggFilterExpr::WhereBoolAndValueRanges
+        | ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges => {
+            resident_groupagg_range_predicate_ir_label("row", filter_expr, dense_measure_predicate)
+        }
+        ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges
+        | ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges => {
+            resident_groupagg_range_predicate_ir_label(
+                "aggregate_filter",
+                filter_expr,
+                dense_measure_predicate,
+            )
+        }
+        ResidentGroupAggFilterExpr::CaseBoolAndValueRanges
+        | ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges => {
+            resident_groupagg_range_predicate_ir_label(
+                "measure",
+                filter_expr,
+                dense_measure_predicate,
+            )
+        }
+        ResidentGroupAggFilterExpr::SsbmDateFactPredicate => {
+            "guard=ssbm_date_fact_predicate;value=none".to_owned()
+        }
+        ResidentGroupAggFilterExpr::SsbmStarJoinMembership => {
+            "guard=ssbm_star_join_membership;value=none".to_owned()
+        }
+        ResidentGroupAggFilterExpr::StarJoinMembership => {
+            "guard=star_join_membership;value=none".to_owned()
+        }
+    };
+    CString::new(label).expect("resident groupagg predicate IR labels never contain NUL")
+}
+
+fn resident_groupagg_range_predicate_ir_label(
+    scope: &str,
+    filter_expr: ResidentGroupAggFilterExpr,
+    dense_measure_predicate: Option<ResidentDenseGroupedF64MeasurePredicate>,
+) -> String {
+    let source = match filter_expr {
+        ResidentGroupAggFilterExpr::CaseBoolAndValueRanges
+        | ResidentGroupAggFilterExpr::WhereBoolAndValueRanges
+        | ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges => {
+            ResidentDenseGroupedF64MeasurePredicateSource::Value
+        }
+        ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges
+        | ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges
+        | ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges => {
+            ResidentDenseGroupedF64MeasurePredicateSource::Rhs
+        }
+        _ => unreachable!("range predicate IR label called for non-range filter"),
+    };
+    let range_count = dense_measure_predicate
+        .filter(|predicate| {
+            matches!(
+                predicate.op,
+                ResidentDenseGroupedF64MeasurePredicateOp::BoolAndRhsBetween
+                    | ResidentDenseGroupedF64MeasurePredicateOp::BoolAndRhsRanges
+            ) && predicate.source == source
+        })
+        .map_or(0, |predicate| predicate.range_count);
+    format!(
+        "guard=resident_bool_column;scope={scope};value={};ranges={range_count}",
+        resident_groupagg_predicate_source_label(source),
+    )
+}
+
+const fn resident_groupagg_predicate_source_label(
+    source: ResidentDenseGroupedF64MeasurePredicateSource,
+) -> &'static str {
+    match source {
+        ResidentDenseGroupedF64MeasurePredicateSource::Value => "value_ranges",
+        ResidentDenseGroupedF64MeasurePredicateSource::Rhs => "rhs_ranges",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::executor::agg::AggOp;
+    use crate::engine::registry::AccelStrategy;
+
+    #[test]
+    fn every_gpu_strategy_has_non_resident_boundary_reason() {
+        for strategy in [
+            GpuStrategy::Scan,
+            GpuStrategy::Join,
+            GpuStrategy::Agg,
+            GpuStrategy::Sort,
+            GpuStrategy::Window,
+            GpuStrategy::PreAgg,
+            GpuStrategy::FunctionScan,
+            GpuStrategy::SrfTargetList,
+        ] {
+            let reason = gpu_resident_boundary_reason(strategy)
+                .to_str()
+                .expect("reason is utf8");
+            assert!(
+                reason.contains("CPU")
+                    || reason.contains("ExecProcNode")
+                    || reason.contains("host")
+                    || reason.contains("PostgreSQL slots"),
+                "{strategy:?} reason must name the CPU/PostgreSQL boundary: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn accel_strategy_labels_are_explain_stable() {
+        assert_eq!(accel_strategy_label(AccelStrategy::GpuExpr), c"GpuExpr");
+        assert_eq!(
+            accel_strategy_label(AccelStrategy::GpuSpatial),
+            c"GpuSpatial"
+        );
+    }
+
+    #[test]
+    fn resident_groupagg_logical_labels_are_explain_stable() {
+        for (expr, label) in [
+            (ResidentGroupAggGroupKeyExpr::ResidentI32, c"resident_i32"),
+            (ResidentGroupAggGroupKeyExpr::H3Index, c"h3index"),
+            (ResidentGroupAggGroupKeyExpr::SingleGroup, c"single_group"),
+            (
+                ResidentGroupAggGroupKeyExpr::SsbmYearBrand,
+                c"ssbm_year_brand",
+            ),
+            (
+                ResidentGroupAggGroupKeyExpr::SsbmCustomerSupplierYear,
+                c"ssbm_customer_supplier_year",
+            ),
+            (
+                ResidentGroupAggGroupKeyExpr::SsbmYearGeoPart,
+                c"ssbm_year_geo_part",
+            ),
+            (
+                ResidentGroupAggGroupKeyExpr::StarDimension,
+                c"star_dimension",
+            ),
+        ] {
+            assert_eq!(resident_groupagg_key_expr_label(expr), label);
+        }
+
+        for (expr, label) in [
+            (ResidentGroupAggMeasureExpr::DirectColumn, c"direct_column"),
+            (ResidentGroupAggMeasureExpr::BinaryMul, c"binary_mul"),
+            (ResidentGroupAggMeasureExpr::BinarySub, c"binary_sub"),
+            (ResidentGroupAggMeasureExpr::CountStar, c"count_star"),
+            (
+                ResidentGroupAggMeasureExpr::SsbmDiscountedRevenue,
+                c"ssbm_discounted_revenue",
+            ),
+            (
+                ResidentGroupAggMeasureExpr::SsbmRevenueColumn,
+                c"ssbm_revenue_column",
+            ),
+            (
+                ResidentGroupAggMeasureExpr::SsbmProfitRevenueMinusSupplycost,
+                c"ssbm_profit_revenue_minus_supplycost",
+            ),
+            (
+                ResidentGroupAggMeasureExpr::TwoMeasureStats,
+                c"two_measure_stats",
+            ),
+        ] {
+            assert_eq!(resident_groupagg_measure_expr_label(expr), label);
+        }
+
+        for (expr, label) in [
+            (ResidentGroupAggFilterExpr::None, c"none"),
+            (ResidentGroupAggFilterExpr::WhereBool, c"where_bool"),
+            (
+                ResidentGroupAggFilterExpr::AggregateFilterBool,
+                c"aggregate_filter_bool",
+            ),
+            (ResidentGroupAggFilterExpr::CaseBool, c"case_bool"),
+            (
+                ResidentGroupAggFilterExpr::CaseBoolAndValueRanges,
+                c"case_bool_and_value_ranges",
+            ),
+            (
+                ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges,
+                c"case_bool_and_rhs_ranges",
+            ),
+            (
+                ResidentGroupAggFilterExpr::SsbmDateFactPredicate,
+                c"ssbm_date_fact_predicate",
+            ),
+            (
+                ResidentGroupAggFilterExpr::SsbmStarJoinMembership,
+                c"ssbm_star_join_membership",
+            ),
+            (
+                ResidentGroupAggFilterExpr::WhereBoolAndValueRanges,
+                c"where_bool_and_value_ranges",
+            ),
+            (
+                ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges,
+                c"where_bool_and_rhs_ranges",
+            ),
+            (
+                ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges,
+                c"aggregate_filter_bool_and_value_ranges",
+            ),
+            (
+                ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges,
+                c"aggregate_filter_bool_and_rhs_ranges",
+            ),
+            (
+                ResidentGroupAggFilterExpr::StarJoinMembership,
+                c"star_join_membership",
+            ),
+        ] {
+            assert_eq!(resident_groupagg_filter_expr_label(expr), label);
+        }
+
+        for (guard, label) in [
+            (ResidentGroupAggPredicateGuard::None, c"none"),
+            (
+                ResidentGroupAggPredicateGuard::ResidentBoolColumn,
+                c"resident_bool_column",
+            ),
+            (
+                ResidentGroupAggPredicateGuard::SsbmDateFactPredicate,
+                c"ssbm_date_fact_predicate",
+            ),
+            (
+                ResidentGroupAggPredicateGuard::SsbmStarJoinMembership,
+                c"ssbm_star_join_membership",
+            ),
+            (
+                ResidentGroupAggPredicateGuard::StarJoinMembership,
+                c"star_join_membership",
+            ),
+        ] {
+            assert_eq!(resident_groupagg_predicate_guard_label(guard), label);
+        }
+
+        for (predicate, label) in [
+            (ResidentGroupAggValuePredicate::None, c"none"),
+            (ResidentGroupAggValuePredicate::ValueRanges, c"value_ranges"),
+            (ResidentGroupAggValuePredicate::RhsRanges, c"rhs_ranges"),
+        ] {
+            assert_eq!(resident_groupagg_value_predicate_label(predicate), label);
+        }
+
+        assert_eq!(
+            resident_groupagg_predicate_ir_label(ResidentGroupAggFilterExpr::None, None)
+                .to_str()
+                .expect("predicate IR label is utf8"),
+            "guard=none;value=none"
+        );
+        assert_eq!(
+            resident_groupagg_predicate_ir_label(
+                ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges,
+                Some(
+                    crate::engine::executor::olap::ResidentDenseGroupedF64MeasurePredicate::bool_and_rhs_ranges(
+                        &[(1.0, 2.0), (4.0, 8.0)],
+                    )
+                    .expect("valid rhs ranges"),
+                ),
+            )
+            .to_str()
+            .expect("predicate IR label is utf8"),
+            "guard=resident_bool_column;scope=measure;value=rhs_ranges;ranges=2"
+        );
+        assert_eq!(
+            resident_groupagg_predicate_ir_label(
+                ResidentGroupAggFilterExpr::WhereBoolAndValueRanges,
+                Some(
+                    crate::engine::executor::olap::ResidentDenseGroupedF64MeasurePredicate::bool_and_value_ranges(
+                        &[(10.0, 20.0)],
+                    )
+                    .expect("valid value ranges"),
+                ),
+            )
+            .to_str()
+            .expect("predicate IR label is utf8"),
+            "guard=resident_bool_column;scope=row;value=value_ranges;ranges=1"
+        );
+        assert_eq!(
+            resident_groupagg_predicate_ir_label(
+                ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges,
+                Some(
+                    crate::engine::executor::olap::ResidentDenseGroupedF64MeasurePredicate::bool_and_rhs_ranges(
+                        &[(0.1, 0.2), (0.4, 0.5)],
+                    )
+                    .expect("valid rhs ranges"),
+                ),
+            )
+            .to_str()
+            .expect("predicate IR label is utf8"),
+            "guard=resident_bool_column;scope=aggregate_filter;value=rhs_ranges;ranges=2"
+        );
+        assert_eq!(
+            resident_groupagg_predicate_ir_label(
+                ResidentGroupAggFilterExpr::SsbmStarJoinMembership,
+                None,
+            )
+            .to_str()
+            .expect("predicate IR label is utf8"),
+            "guard=ssbm_star_join_membership;value=none"
+        );
+        assert_eq!(
+            resident_groupagg_predicate_ir_label(
+                ResidentGroupAggFilterExpr::StarJoinMembership,
+                None,
+            )
+            .to_str()
+            .expect("predicate IR label is utf8"),
+            "guard=star_join_membership;value=none"
+        );
+    }
+
+    #[test]
+    fn explain_dispatch_flag_uses_strategy_specific_state() {
+        let mut agg = AggExecState::new(AccelStrategy::GpuReduce, 1024, &[(AggOp::Count, 0)]);
+        agg.gpu_dispatched = true;
+        let state = GpuAccelScanState {
+            css: unsafe { std::mem::zeroed() },
+            accel: super::super::GpuAccelState {
+                strategy: GpuStrategy::Agg as i32,
+                batch_size: 1024,
+                expected_threads: 1,
+                rows_dispatched: 0,
+                batches_executed: 0,
+                dispatch_time_us: 0,
+                parallel_worker_number: -1,
+                dsm_flags: 0,
+                dsm_state: std::ptr::null_mut(),
+                dsm_counters_recorded: false,
+                parallel_agg_participants: 0,
+                parallel_agg_active_participants: 0,
+                parallel_agg_rows_dispatched: 0,
+                parallel_agg_batches_executed: 0,
+                parallel_agg_dispatch_time_us: 0,
+                resident_proof: ResidentProofSnapshot::not_proven(),
+                executor: (&raw mut agg).cast(),
+            },
+        };
+
+        assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
+        agg.gpu_dispatched = false;
+        assert!(!unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
+    }
+
+    #[test]
+    fn explain_dispatch_flag_uses_batch_counters_for_scan_like_strategies() {
+        let mut state = GpuAccelScanState {
+            css: unsafe { std::mem::zeroed() },
+            accel: super::super::GpuAccelState {
+                strategy: GpuStrategy::Scan as i32,
+                batch_size: 1024,
+                expected_threads: 1,
+                rows_dispatched: 0,
+                batches_executed: 0,
+                dispatch_time_us: 0,
+                parallel_worker_number: -1,
+                dsm_flags: 0,
+                dsm_state: std::ptr::null_mut(),
+                dsm_counters_recorded: false,
+                parallel_agg_participants: 0,
+                parallel_agg_active_participants: 0,
+                parallel_agg_rows_dispatched: 0,
+                parallel_agg_batches_executed: 0,
+                parallel_agg_dispatch_time_us: 0,
+                resident_proof: ResidentProofSnapshot::not_proven(),
+                executor: std::ptr::dangling_mut::<u8>().cast(),
+            },
+        };
+
+        assert!(!unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Scan, &raw const state) });
+        state.accel.batches_executed = 1;
+        assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Scan, &raw const state) });
+    }
+
+    #[test]
+    fn explain_batch_amortization_helpers_handle_zero_and_nonzero_batches() {
+        assert_eq!(rows_per_batch_for_explain(0, 0), 0.0);
+        assert_eq!(avg_dispatch_time_per_batch_ms_for_explain(0, 0), 0.0);
+        assert_eq!(rows_per_batch_for_explain(1_000, 4), 250.0);
+        assert_eq!(avg_dispatch_time_per_batch_ms_for_explain(2_000, 4), 0.5);
+    }
+}

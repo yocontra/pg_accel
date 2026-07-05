@@ -1,0 +1,27 @@
+[package]
+name = "pg_accel_bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+postgres = "0.19"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Live-PG stress + plan-shape tests — opt in explicitly so `cargo test
+# -p pg_accel_bench` stays hermetic on a clean checkout.
+integration_tests = []
+
+[lints]
+workspace = true

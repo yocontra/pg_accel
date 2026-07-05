@@ -1,0 +1,220 @@
+pg_accel NOTICE
+===============
+
+This file attributes every third-party component bundled into the pg_accel
+build artifacts (the Rust crate, the GPU kernel shared library, and the
+Metal/CUDA/ROCm/L0 binary archives produced at install time). SPDX
+identifiers follow https://spdx.org/licenses/.
+
+The AdaptiveCpp fork pin referenced below is:
+  repository: https://github.com/yocontra/AdaptiveCpp
+  branch:     fork-safe-metal
+  commit:     7e79a6ca45f5a067f02a30207cb8da1b81eb5f29
+Source bundles for any license linked below can be obtained from that pin
+(the `external/`, `src/`, and `LICENSE`/`COPYING` files under that tree).
+
+----------------------------------------------------------------------
+
+1. soft-fp64
+----------------------------------------------------------------------
+SPDX:    MIT
+Role:    Software fp64 emulation. Function bodies are linked into the
+         Metal .metallib cache on Apple Silicon (which lacks hardware
+         fp64) via the AdaptiveCpp fork's compiler backend.
+Source:  https://github.com/yocontra/AdaptiveCpp/tree/fork-safe-metal
+         (AdaptiveCpp Metal consumes soft-fp64 via
+         `ACPP_SOFT_FP64_SRC_DIR`.)
+         https://github.com/yocontra/soft-fp.git (tag v1.3.0)
+
+License text (MIT):
+
+    Permission is hereby granted, free of charge, to any person obtaining
+    a copy of this software and associated documentation files (the
+    "Software"), to deal in the Software without restriction, including
+    without limitation the rights to use, copy, modify, merge, publish,
+    distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so, subject to
+    the following conditions:
+
+    The above copyright notice and this permission notice shall be
+    included in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+    CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+----------------------------------------------------------------------
+
+2. AdaptiveCpp
+----------------------------------------------------------------------
+SPDX:    BSD-2-Clause
+Role:    SYCL runtime + compiler toolchain. The `libacpp-rt.dylib`
+         runtime ships next to the extension, and the `acpp` / clang
+         compiler frontend produces the device code cached in
+         `~/.acpp/apps/global/jit-cache/`.
+Source:  https://github.com/yocontra/AdaptiveCpp (branch fork-safe-metal,
+         commit 7e79a6ca45f5a067f02a30207cb8da1b81eb5f29). Verbatim
+         license text is in the `LICENSE` file at the root of that tree.
+
+License text (BSD-2-Clause):
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+
+    2. Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in
+       the documentation and/or other materials provided with the
+       distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+    A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+    HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+    DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+    THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+    (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+----------------------------------------------------------------------
+
+3. SLEEF
+----------------------------------------------------------------------
+SPDX:    BSL-1.0  (Boost Software License 1.0)
+Role:    Transcendental math function bodies (sin, cos, exp, log, etc.)
+         used inside the soft-fp64 emulation path. Linked into the
+         Metal .metallib cache at install time.
+Source:  https://github.com/shibatch/sleef — mirrored inside the
+         soft-fp64 source tree used for the build; see the `LICENSE.txt`
+         shipped alongside the vendored SLEEF sources in soft-fp64 tag
+         v1.3.0.
+
+License text (Boost Software License 1.0):
+
+    Boost Software License - Version 1.0 - August 17th, 2003
+
+    Permission is hereby granted, free of charge, to any person or
+    organization obtaining a copy of the software and accompanying
+    documentation covered by this license (the "Software") to use,
+    reproduce, display, distribute, execute, and transmit the Software,
+    and to prepare derivative works of the Software, and to permit
+    third-parties to whom the Software is furnished to do so, all
+    subject to the following:
+
+    The copyright notices in the Software and this entire statement,
+    including the above license grant, this restriction and the
+    following disclaimer, must be included in all copies of the
+    Software, in whole or in part, and all derivative works of the
+    Software, unless such copies or derivative works are solely in the
+    form of machine-executable object code generated by a source
+    language processor.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE AND
+    NON-INFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR ANYONE
+    DISTRIBUTING THE SOFTWARE BE LIABLE FOR ANY DAMAGES OR OTHER
+    LIABILITY, WHETHER IN CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+----------------------------------------------------------------------
+
+4. PostgreSQL
+----------------------------------------------------------------------
+SPDX:    PostgreSQL
+Role:    FFI headers and server API surface consumed by the pgrx
+         bindings (`pg_config --includedir-server`). No PostgreSQL
+         source is redistributed in the compiled artifact; the headers
+         are used at build time only.
+Source:  https://www.postgresql.org/ — see `COPYRIGHT` file in the
+         supported PostgreSQL source tree used at build time.
+
+License text (PostgreSQL License):
+
+    PostgreSQL Database Management System
+    (formerly known as Postgres, then as Postgres95)
+
+    Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
+    Portions Copyright (c) 1994, The Regents of the University of
+    California
+
+    Permission to use, copy, modify, and distribute this software and
+    its documentation for any purpose, without fee, and without a
+    written agreement is hereby granted, provided that the above
+    copyright notice and this paragraph and the following two paragraphs
+    appear in all copies.
+
+    IN NO EVENT SHALL THE UNIVERSITY OF CALIFORNIA BE LIABLE TO ANY
+    PARTY FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL
+    DAMAGES, INCLUDING LOST PROFITS, ARISING OUT OF THE USE OF THIS
+    SOFTWARE AND ITS DOCUMENTATION, EVEN IF THE UNIVERSITY OF CALIFORNIA
+    HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+    THE UNIVERSITY OF CALIFORNIA SPECIFICALLY DISCLAIMS ANY WARRANTIES,
+    INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+    MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE. THE SOFTWARE
+    PROVIDED HEREUNDER IS ON AN "AS IS" BASIS, AND THE UNIVERSITY OF
+    CALIFORNIA HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT,
+    UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+
+----------------------------------------------------------------------
+
+5. H3 Core Library
+----------------------------------------------------------------------
+SPDX:    Apache-2.0
+Role:    H3 lat/lng-to-cell indexing logic and lookup tables are used by
+         the GPU H3 bulk kernel. The device headers are derived from the
+         H3 C core call chain that h3-pg exposes through PostgreSQL.
+Source:  https://github.com/uber/h3
+         Local build provenance: h3-pg 4.2.3 fetches H3 Core into
+         `.pgaccel/build/h3-pg-probe/build/_deps/h3-src`.
+
+License text (Apache-2.0) — identical to the Apache-2.0 text under entry 6.
+
+----------------------------------------------------------------------
+
+6. pgrx
+----------------------------------------------------------------------
+SPDX:    MIT OR Apache-2.0
+Role:    Rust extension framework. Links into the compiled `.so` /
+         `.dylib` as a regular cargo dependency (pgrx 0.18).
+Source:  https://github.com/pgcentralfoundation/pgrx — verbatim license
+         text in `LICENSE-MIT` and `LICENSE-APACHE` at the repository
+         root.
+
+License text (MIT) — identical to the MIT text under entry 1 above.
+
+License text (Apache-2.0):
+
+    Licensed under the Apache License, Version 2.0 (the "License"); you
+    may not use this file except in compliance with the License. You
+    may obtain a copy of the License at:
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+    implied. See the License for the specific language governing
+    permissions and limitations under the License.
+
+----------------------------------------------------------------------
+
+Other dependencies
+----------------------------------------------------------------------
+The full transitive crate graph (283 crates as of the current Cargo.lock)
+is license-audited by `cargo deny check` against the allow list in
+`deny.toml`; `cargo audit` scans the same graph for RustSec advisories.
+Both commands run as part of `just ci`. The license summary for every
+crate in the graph can be reproduced with `cargo deny list`.

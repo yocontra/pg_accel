@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/contra/Projects/AdaptiveCpp/build/**)",
+      "Bash(cmake --build . --target llvm-to-metal -j4)",
+      "Bash(cp src/compiler/llvm-to-backend/libllvm-to-metal.dylib /Users/contra/local/lib/hipSYCL/llvm-to-backend/libllvm-to-metal.dylib)",
+      "Bash(rm -f ~/.acpp/apps/global/jit-cache/*)",
+      "Bash(timeout 120 ./test_reduce_stats)",
+      "Bash(timeout 60 ./test_reduce_stats)",
+      "Bash(cmake --install .)",
+      "Read(//Users/contra/local/lib/hipSYCL/bitcode/**)",
+      "Bash(rm -rf /Users/contra/.acpp/apps/global/jit-cache/*)",
+      "Bash(timeout 30 ./test_reduce_stats)",
+      "Bash(cp src/compiler/llvm-to-backend/libllvm-to-metal.dylib /Users/contra/local/lib/hipSYCL/llvm-to-backend/)",
+      "Bash(rm -f /Users/contra/.acpp/apps/global/jit-cache/*)",
+      "Bash(cmake --build /Users/contra/Projects/AdaptiveCpp/build --parallel 8)",
+      "Bash(cmake --install /Users/contra/Projects/AdaptiveCpp/build)",
+      "Bash(/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_reduce_stats)",
+      "Bash(rm -f /tmp/rs2.out)",
+      "Read(//tmp/**)",
+      "Read(//Users/contra/.acpp/apps/global/jit-cache/**)",
+      "Bash(tee /tmp/rs3.out)",
+      "Bash(tee /tmp/rs4.out)",
+      "Bash(rm -rf ~/.acpp/apps/global/jit-cache/*)",
+      "Bash(/Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fp64_mul_probe)",
+      "Bash(ACPP_METAL_KEEP_SOURCE=1 ACPP_METAL_DUMP_IR=1 rm -rf ~/.acpp/apps/global/jit-cache/*)",
+      "Bash(ACPP_METAL_KEEP_SOURCE=1 /Users/contra/Projects/pg_accel/pgaccel-kernels/build/test_fp64_mul_probe)",
+      "Bash(cmake --build . --target test_correctness -j4)",
+      "Bash(./test_correctness)",
+      "Bash(./test_fork)",
+      "Bash(cmake --build . -j4)",
+      "Bash(timeout 180 ./test_spatial)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(cmake --build . --target test_spatial -j4)",
+      "Bash(timeout 90 ./test_spatial)",
+      "Bash(timeout 120 ./test_spatial)",
+      "Read(//private/tmp/**)",
+      "Bash(timeout 60 ./test_spatial)"
+    ]
+  }
+}

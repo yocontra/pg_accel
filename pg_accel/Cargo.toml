@@ -1,0 +1,50 @@
+[package]
+name = "pg_accel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+# pg_accel is a pgrx extension that builds the sibling pgaccel-kernels CMake
+# project. Publish release artifacts through the pgrx package/release workflow;
+# a standalone crates.io package would be missing that repo-level source tree.
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# PostgreSQL 18 is the active pgrx extension target. PostgreSQL 19 beta source
+# builds are wired through scripts/pg_source.sh, but pgrx 0.18.x does not expose
+# a pg19 feature yet, so do not declare a fake pg19 ABI here.
+default = ["pg18"]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg_test = []
+
+[dependencies]
+libc = "0.2"
+pgrx = "0.18.1"
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-opentelemetry = "0.32"
+tracing-subscriber = { version = "0.3", features = [
+  "fmt",
+  "env-filter",
+  "json",
+] }
+
+[dev-dependencies]
+pgrx-tests = "0.18.1"
+
+[build-dependencies]
+
+[lints]
+workspace = true

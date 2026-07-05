@@ -1,0 +1,30 @@
+name: Bug Report
+description: Report a bug in pg_accel
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: SQL queries or commands that trigger the bug
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Paste output of:
+        - SELECT pg_accel_device_info();
+        - SELECT version();
+        - SELECT postgis_version(); (if applicable)
+        - SHOW pg_accel.workers;
+    validations:
+      required: true

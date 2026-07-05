@@ -1,0 +1,62 @@
+# typos config — https://github.com/crate-ci/typos
+# Keep identifier tweaks surgical. Do not disable rules wholesale.
+
+[default]
+extend-ignore-re = [
+  # Hex SHAs in commit messages / lockfiles
+  "\\b[0-9a-f]{7,40}\\b",
+  # Allow anti-cheat-allow: escape on anti-cheat lines
+  "anti-cheat-allow:.*$",
+]
+
+[default.extend-words]
+# Statistics / PG aggregate names
+STDDEV = "STDDEV"
+stddev = "stddev"
+# H3 cell ops — "H3" occasionally flagged near "HE"
+h3 = "h3"
+# PostGIS / spatial terms that trip dictionaries
+gserialized = "gserialized"
+# PostGIS raster pixel type codes: 8BUI, 16BUI, 32BUI (Byte Unsigned Int)
+BUI = "BUI"
+bui = "bui"
+# SYCL identifier prefixes — typos flags "nd" as a typo for "and"
+nd = "nd"
+ND = "ND"
+# Rust/Cargo crate names that look like typos
+pgrx = "pgrx"
+# SYCL kernel / hardware terms
+sycl = "sycl"
+adaptivecpp = "adaptivecpp"
+# macOS frameworks
+metallib = "metallib"
+metalar = "metalar"
+# PostgreSQL JoinExpr AST field names (upstream C API)
+larg = "larg" # JoinExpr.larg (left arg)
+rarg = "rarg" # JoinExpr.rarg (right arg)
+# Local identifiers frequently abbreviated in this codebase
+clen = "clen"                   # "column length" / list length shorthand in planner code
+strat = "strat"                 # PG strategy-number shorthand; also table name `cscan_strat`
+ba = "ba"                       # BandArr alias in raster_ops.cpp
+ser = "ser"                     # SERIALIZABLE short-hand in `_tx08_ser` test table
+numer = "numer"                 # numerator abbreviation in continued-fraction math (stats.rs)
+datas = "datas"                 # deliberate plural-of-plural in build.rs (parallels `funcs`)
+compilability = "compilability" # real word ("property of being compilable") — not compatibility
+POIN = "POIN"                   # typos mis-splits "POINTs" → "POIN"+"Ts"
+ERRO = "ERRO"                   # typos mis-splits "ERRORs" → "ERRO"+"Rs"
+mis = "mis"                     # common English prefix (mis-escaped, mis-aligned, …) — typos flags it as miss/mist
+
+[files]
+extend-exclude = [
+  "Cargo.lock",
+  "*.lock",
+  "target/",
+  "pgaccel-kernels/build/",
+  "pgaccel-kernels/external/",
+  "*.jsonl",
+  ".pgrx/",
+  "*.patch",
+  "*.snap",
+]
+ignore-hidden = false
+ignore-vcs = true
