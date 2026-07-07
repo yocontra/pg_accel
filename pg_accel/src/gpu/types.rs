@@ -206,6 +206,7 @@ pub struct PgaccelExprUsmCol {
 /// ABI version for [`PgaccelResidentBatch`] and [`PgaccelDeviceVarOutput`].
 ///
 /// Version 1 is additive and does not change the legacy [`PgaccelBatch`] shape.
+#[allow(dead_code)] // reason: additive resident ABI mirror; versions the resident-batch structs kept for FFI parity
 pub const PGACCEL_RESIDENT_BATCH_ABI_VERSION: u32 = 1;
 
 /// Memory space for a resident batch pointer.

@@ -234,14 +234,6 @@ unsafe extern "C" {
         hit_count: *mut usize,
     ) -> PgaccelStatus;
 
-    // -- Memory pool (USM arena allocator) --
-
-    pub fn pgaccel_alloc(bytes: usize) -> *mut std::ffi::c_void;
-    pub fn pgaccel_free(ptr: *mut std::ffi::c_void);
-    pub fn pgaccel_pool_reset();
-    pub fn pgaccel_pool_bytes_used() -> usize;
-    pub fn pgaccel_prefetch(ptr: *mut std::ffi::c_void, bytes: usize);
-
     // -- Sort kernels --
 
     pub fn pgaccel_sort_f32(data: *mut f32, count: usize) -> PgaccelStatus;
