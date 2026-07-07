@@ -352,8 +352,7 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
     // correct, but per-backend tracking is degraded (cleanup_backend won't
     // reclaim these). Rare: only when more than MAX_BACKENDS backends hold a
     // pg_accel allocation simultaneously.
-    data.total_allocated =
-        saturating_add_checked(data.total_allocated, granted, "total_allocated");
+    data.total_allocated = saturating_add_checked(data.total_allocated, granted, "total_allocated");
     warn_msg(&format!(
         "pg_accel: no free backend slot for PID {pid} (>{MAX_BACKENDS} tracked), \
          thread tracking degraded — cluster total stays correct but this \

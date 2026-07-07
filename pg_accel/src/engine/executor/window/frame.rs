@@ -247,10 +247,7 @@ mod tests {
 
     #[test]
     fn part_key_eq_float_uses_group_semantics() {
-        assert!(part_key_eq(
-            &PartKey::Float(0.0),
-            &PartKey::Float(-0.0)
-        ));
+        assert!(part_key_eq(&PartKey::Float(0.0), &PartKey::Float(-0.0)));
         assert!(part_key_eq(
             &PartKey::Float(f64::NAN),
             &PartKey::Float(f64::NAN)

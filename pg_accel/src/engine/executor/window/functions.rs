@@ -261,7 +261,10 @@ mod tests {
         // A raw Datum word for int4 = 5 is the integer 5, NOT f64::from_bits(5).
         let raw = 5usize;
         assert_eq!(datum_value_to_f64(raw, pg_sys::INT4OID), Some(5.0));
-        assert_ne!(datum_value_to_f64(raw, pg_sys::INT4OID), Some(f64::from_bits(5)));
+        assert_ne!(
+            datum_value_to_f64(raw, pg_sys::INT4OID),
+            Some(f64::from_bits(5))
+        );
     }
 
     #[test]
@@ -281,7 +284,10 @@ mod tests {
     #[test]
     fn extract_int8() {
         let raw = (-123_456_789i64) as u64 as usize;
-        assert_eq!(datum_value_to_f64(raw, pg_sys::INT8OID), Some(-123_456_789.0));
+        assert_eq!(
+            datum_value_to_f64(raw, pg_sys::INT8OID),
+            Some(-123_456_789.0)
+        );
     }
 
     #[test]
