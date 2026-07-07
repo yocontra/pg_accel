@@ -21,8 +21,11 @@
 // location does not affect test collection.
 #[cfg(any(test, feature = "pg_test"))]
 #[allow(clippy::unwrap_used)]
+// NOTE: module MUST be named `tests` — the pgrx test runner hardcodes SQL
+// schema `tests` when invoking #[pg_test] wrappers; pgrx emits CREATE SCHEMA
+// IF NOT EXISTS so this coexists with the other `mod tests` files.
 #[pgrx::pg_schema]
-mod phase2_dispatch {
+mod tests {
     use crate::adapters::extractors::raster::{PixelType, extract_pixels_f64, parse_band_info};
     use pgrx::prelude::*;
 

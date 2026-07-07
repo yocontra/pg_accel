@@ -29,8 +29,8 @@ fn pixel_type_to_code(pt: PixelType) -> u8 {
         PixelType::UInt16 => 6,
         PixelType::Int32 => 7,
         PixelType::UInt32 => 8,
-        PixelType::Float32 => 9,
-        PixelType::Float64 => 10,
+        PixelType::Float32 => 10,
+        PixelType::Float64 => 11,
     }
 }
 
@@ -115,7 +115,7 @@ fn build_raster_le_nbands(
 
     for &(pt, nodata, fill) in bands {
         let pix_code = pixel_type_to_code(pt);
-        let flags: u8 = (pix_code << 4) | 0x01; // hasNodata = true
+        let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
         buf.push(flags);
         write_pixel_value(&mut buf, pt, nodata);
         for _ in 0..pixel_count {
@@ -152,7 +152,7 @@ fn build_raster_be(
     buf.extend_from_slice(&height.to_be_bytes());
 
     let pix_code = pixel_type_to_code(pixel_type);
-    let flags: u8 = (pix_code << 4) | 0x01;
+    let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
     buf.push(flags);
     write_pixel_value_be(&mut buf, pixel_type, nodata);
 
@@ -183,7 +183,7 @@ fn build_raster_offline_band(width: u16, height: u16) -> Vec<u8> {
 
     // Band flags: UInt8 (PostGIS rt_pixtype code 4), offline bit (0x08),
     // hasNodata (0x01).
-    let flags: u8 = (4 << 4) | 0x08 | 0x01;
+    let flags: u8 = 4 | 0x80 | 0x40; // 8BUI, OFFDB, HASNODATA
     buf.push(flags);
     buf.push(0); // nodata = 0
     // Offline band: 1-byte band number + null-terminated path

@@ -79,7 +79,8 @@ impl PixelType {
     ///
     /// The code numbers are the PostGIS `rt_pixtype` enum (`librtcore.h`):
     /// `0=1BB, 1=2BUI, 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI,
-    /// 8=32BUI, 9=32BF, 10=64BF`. Getting this table wrong silently shifts
+    /// 8=32BUI, 10=32BF, 11=64BF` — value 9 is skipped in the enum across
+    /// PostGIS 3.x. Getting this table wrong silently shifts
     /// every wider type (real 8BUI reads as UInt16, 32BF is rejected, etc.),
     /// so it is pinned by `pixel_type_code_tests`.
     fn from_code(code: u8) -> Option<Self> {
@@ -93,8 +94,13 @@ impl PixelType {
             6 => Some(Self::UInt16),
             7 => Some(Self::Int32),
             8 => Some(Self::UInt32),
-            9 => Some(Self::Float32),
-            10 => Some(Self::Float64),
+            // PostGIS rt_pixtype (librtcore.h, stable-3.4 and stable-3.6 both):
+            // PT_32BF=10, PT_64BF=11 — value 9 is skipped in the enum and has
+            // been across PostGIS 3.x. Confirmed empirically against a live
+            // PostGIS 3.6.3 via ST_AsBinary band bytes for every type.
+            9 => None,
+            10 => Some(Self::Float32),
+            11 => Some(Self::Float64),
             _ => None,
         }
     }
@@ -279,8 +285,10 @@ fn band_offset(data: &[u8], band_index: usize) -> Option<usize> {
     // Skip preceding bands.
     for _ in 0..band_index {
         let flags_byte = r.read_u8()?;
-        let pix_code = flags_byte >> 4;
-        let is_offline = (flags_byte & 0x08) != 0;
+        // PostGIS librtcore.h: pixel type = low nibble (BANDTYPE_PIXTYPE_MASK 0x0F);
+        // flags live in the high bits (OFFDB 1<<7, HASNODATA 1<<6, ISNODATA 1<<5).
+        let pix_code = flags_byte & 0x0F;
+        let is_offline = (flags_byte & 0x80) != 0;
         let pt = PixelType::from_code(pix_code)?;
         let nodata_size = pt.byte_size();
 
@@ -317,9 +325,11 @@ pub fn parse_band_info(data: &[u8], band_index: usize) -> Option<BandInfo> {
     r.set_position(offset);
 
     let flags_byte = r.read_u8()?;
-    let pix_code = flags_byte >> 4;
-    let has_nodata = (flags_byte & 0x01) != 0;
-    let is_offline = (flags_byte & 0x08) != 0;
+    // PostGIS librtcore.h: pixel type = low nibble (BANDTYPE_PIXTYPE_MASK 0x0F);
+    // flags live in the high bits (OFFDB 1<<7, HASNODATA 1<<6, ISNODATA 1<<5).
+    let pix_code = flags_byte & 0x0F;
+    let has_nodata = (flags_byte & 0x40) != 0;
+    let is_offline = (flags_byte & 0x80) != 0;
     let pixel_type = PixelType::from_code(pix_code)?;
 
     let nodata = read_nodata(&mut r, pixel_type)?;
@@ -367,8 +377,10 @@ pub fn extract_pixels_f64(data: &[u8], band_index: usize) -> Option<Vec<f64>> {
     r.set_position(offset);
 
     let flags_byte = r.read_u8()?;
-    let pix_code = flags_byte >> 4;
-    let is_offline = (flags_byte & 0x08) != 0;
+    // PostGIS librtcore.h: pixel type = low nibble (BANDTYPE_PIXTYPE_MASK 0x0F);
+    // flags live in the high bits (OFFDB 1<<7, HASNODATA 1<<6, ISNODATA 1<<5).
+    let pix_code = flags_byte & 0x0F;
+    let is_offline = (flags_byte & 0x80) != 0;
     let pixel_type = PixelType::from_code(pix_code)?;
 
     // Skip nodata value.
@@ -406,8 +418,10 @@ pub fn patch_band0_pixels(original_wkb: &[u8], output_f32: &[f32]) -> Option<Vec
     r.set_position(offset);
 
     let flags_byte = r.read_u8()?;
-    let pix_code = flags_byte >> 4;
-    let is_offline = (flags_byte & 0x08) != 0;
+    // PostGIS librtcore.h: pixel type = low nibble (BANDTYPE_PIXTYPE_MASK 0x0F);
+    // flags live in the high bits (OFFDB 1<<7, HASNODATA 1<<6, ISNODATA 1<<5).
+    let pix_code = flags_byte & 0x0F;
+    let is_offline = (flags_byte & 0x80) != 0;
     let pixel_type = PixelType::from_code(pix_code)?;
 
     if is_offline {
@@ -708,15 +722,16 @@ mod pixel_type_code_tests {
             Some(PixelType::UInt32),
             "8 = 32BUI"
         );
-        assert_eq!(
-            PixelType::from_code(9),
-            Some(PixelType::Float32),
-            "9 = 32BF"
-        );
+        assert_eq!(PixelType::from_code(9), None, "9 is skipped in rt_pixtype");
         assert_eq!(
             PixelType::from_code(10),
+            Some(PixelType::Float32),
+            "10 = 32BF"
+        );
+        assert_eq!(
+            PixelType::from_code(11),
             Some(PixelType::Float64),
-            "10 = 64BF"
+            "11 = 64BF"
         );
     }
 
@@ -737,19 +752,22 @@ mod pixel_type_code_tests {
                 "code {code} must be a 2-byte pixel"
             );
         }
-        for code in [7u8, 8, 9] {
+        for code in [7u8, 8, 10] {
             assert_eq!(
                 PixelType::from_code(code).unwrap().byte_size(),
                 4,
                 "code {code} must be a 4-byte pixel"
             );
         }
-        assert_eq!(PixelType::from_code(10).unwrap().byte_size(), 8, "64BF");
+        assert_eq!(PixelType::from_code(11).unwrap().byte_size(), 8, "64BF");
     }
 
     #[test]
     fn from_code_rejects_out_of_range() {
-        assert!(PixelType::from_code(11).is_none());
+        assert!(
+            PixelType::from_code(9).is_none(),
+            "9 is a skipped enum value"
+        );
         assert!(PixelType::from_code(12).is_none());
         assert!(PixelType::from_code(255).is_none());
     }
@@ -772,7 +790,7 @@ mod pixel_type_code_tests {
         buf.extend_from_slice(&0i32.to_le_bytes()); // srid
         buf.extend_from_slice(&1u16.to_le_bytes()); // width = 1
         buf.extend_from_slice(&1u16.to_le_bytes()); // height = 1
-        let flags: u8 = (pix_code << 4) | 0x01; // hasNodata
+        let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
         buf.push(flags);
         buf.extend_from_slice(nodata_bytes);
         buf.extend_from_slice(pixel_bytes);
@@ -801,8 +819,8 @@ mod pixel_type_code_tests {
 
     #[test]
     fn hand_built_32bf_decodes() {
-        // code 9 = 32BF, four LE bytes, value 3.5.
-        let wkb = hand_build_wkb(9, &3.5f32.to_le_bytes(), &0.0f32.to_le_bytes());
+        // code 10 = 32BF, four LE bytes, value 3.5.
+        let wkb = hand_build_wkb(10, &3.5f32.to_le_bytes(), &0.0f32.to_le_bytes());
         let band = super::parse_band_info(&wkb, 0).unwrap();
         assert_eq!(band.pixel_type, PixelType::Float32);
         let px = super::extract_pixels_f64(&wkb, 0).unwrap();
@@ -811,8 +829,8 @@ mod pixel_type_code_tests {
 
     #[test]
     fn hand_built_64bf_decodes() {
-        // code 10 = 64BF, eight LE bytes.
-        let wkb = hand_build_wkb(10, &2.5f64.to_le_bytes(), &0.0f64.to_le_bytes());
+        // code 11 = 64BF, eight LE bytes.
+        let wkb = hand_build_wkb(11, &2.5f64.to_le_bytes(), &0.0f64.to_le_bytes());
         let band = super::parse_band_info(&wkb, 0).unwrap();
         assert_eq!(band.pixel_type, PixelType::Float64);
         let px = super::extract_pixels_f64(&wkb, 0).unwrap();
@@ -865,7 +883,7 @@ mod test_helpers {
 
         // Band header.
         let pix_code = pixel_type_to_code(pixel_type);
-        let flags: u8 = (pix_code << 4) | 0x01; // hasNodata = true
+        let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
         buf.push(flags);
 
         // Nodata value.
@@ -892,8 +910,8 @@ mod test_helpers {
             PixelType::UInt16 => 6,
             PixelType::Int32 => 7,
             PixelType::UInt32 => 8,
-            PixelType::Float32 => 9,
-            PixelType::Float64 => 10,
+            PixelType::Float32 => 10,
+            PixelType::Float64 => 11,
         }
     }
 
@@ -1089,8 +1107,8 @@ mod tests {
 
     #[test]
     fn pixel_type_from_code_invalid_returns_none() {
-        // Codes 11+ are out of range for PostGIS rt_pixtype (0..=10).
-        assert!(PixelType::from_code(11).is_none());
+        // Code 9 is skipped and 12+ are out of range for PostGIS rt_pixtype.
+        assert!(PixelType::from_code(9).is_none());
         assert!(PixelType::from_code(12).is_none());
         assert!(PixelType::from_code(255).is_none());
     }
@@ -1098,7 +1116,7 @@ mod tests {
     #[test]
     fn pixel_type_from_code_all_valid() {
         // PostGIS rt_pixtype (librtcore.h): 0=1BB, 1=2BUI, 2=4BUI, 3=8BSI,
-        // 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI, 8=32BUI, 9=32BF, 10=64BF.
+        // 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI, 8=32BUI, 10=32BF, 11=64BF (9 skipped).
         assert_eq!(PixelType::from_code(0), Some(PixelType::Bool));
         assert_eq!(PixelType::from_code(1), Some(PixelType::UInt2));
         assert_eq!(PixelType::from_code(2), Some(PixelType::UInt4));
@@ -1108,8 +1126,8 @@ mod tests {
         assert_eq!(PixelType::from_code(6), Some(PixelType::UInt16));
         assert_eq!(PixelType::from_code(7), Some(PixelType::Int32));
         assert_eq!(PixelType::from_code(8), Some(PixelType::UInt32));
-        assert_eq!(PixelType::from_code(9), Some(PixelType::Float32));
-        assert_eq!(PixelType::from_code(10), Some(PixelType::Float64));
+        assert_eq!(PixelType::from_code(10), Some(PixelType::Float32));
+        assert_eq!(PixelType::from_code(11), Some(PixelType::Float64));
     }
 
     // -- Multi-band tests -----------------------------------------------------
@@ -1155,13 +1173,13 @@ mod tests {
             PixelType::UInt16 => 6,
             PixelType::Int32 => 7,
             PixelType::UInt32 => 8,
-            PixelType::Float32 => 9,
-            PixelType::Float64 => 10,
+            PixelType::Float32 => 10,
+            PixelType::Float64 => 11,
         };
 
         let pixel_count = width as usize * height as usize;
         for _ in 0..num_bands {
-            let flags: u8 = (pix_code << 4) | 0x01; // hasNodata = true
+            let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
             buf.push(flags);
             // Write nodata
             write_pixel(&mut buf, pixel_type, nodata);
@@ -1227,8 +1245,8 @@ mod tests {
         buf.extend_from_slice(&1u16.to_le_bytes()); // width
         buf.extend_from_slice(&1u16.to_le_bytes()); // height
 
-        // Band: pixel type UInt8 (code 2), no flags -> hasNodata=false
-        let flags: u8 = 2 << 4; // pix_code=2, no nodata bit
+        // Band: pixel type UInt8 (code 4), no flags -> hasNodata=false
+        let flags: u8 = 4; // low nibble: pix_code=4 (8BUI), no HASNODATA bit
         buf.push(flags);
         buf.push(0u8); // nodata value (still written, just flag is off)
         buf.push(42u8); // 1 pixel
@@ -1256,8 +1274,8 @@ mod tests {
         buf.extend_from_slice(&1u16.to_le_bytes()); // width
         buf.extend_from_slice(&1u16.to_le_bytes()); // height
 
-        // Band: pixel type UInt8 (code 2), offline bit (0x08) set
-        let flags: u8 = (2 << 4) | 0x08;
+        // Band: pixel type UInt8 (code 4), OFFDB bit (0x80) set
+        let flags: u8 = 4 | 0x80;
         buf.push(flags);
         buf.push(0u8); // nodata
         buf.push(0u8); // band number
@@ -1290,7 +1308,7 @@ mod tests {
         buf.extend_from_slice(&2u16.to_be_bytes()); // height
 
         // Band: UInt8 (code 2), hasNodata
-        let flags: u8 = (2 << 4) | 0x01;
+        let flags: u8 = 4 | 0x40; // 8BUI + HASNODATA
         buf.push(flags);
         buf.push(0u8); // nodata
 
