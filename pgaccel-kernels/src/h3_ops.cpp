@@ -1053,7 +1053,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* c
     return PGACCEL_ERROR;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: h3_cell_to_parent_count_bulk failed (unknown)\n");
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
@@ -1619,7 +1619,7 @@ h3_lat_lng_count_bulk_device_direct(const double* lat_array, const double* lng_a
     return PGACCEL_ERROR;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk direct GPU path failed (unknown)\n");
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
 }
 
@@ -1743,7 +1743,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
     return PGACCEL_ERROR;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: h3_lat_lng_count_resident_bulk failed (unknown)\n");
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;

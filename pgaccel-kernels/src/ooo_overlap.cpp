@@ -325,7 +325,7 @@ extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
     }
   } catch (const sycl::exception& e) {
     fprintf(stderr, "pgaccel: OOO overlap probe failed: %s\n", e.what());
-    status = PGACCEL_ERROR_NO_DEVICE;
+    status = PGACCEL_ERROR;
   } catch (const std::bad_alloc&) {
     status = PGACCEL_OOM;
   } catch (const std::exception& e) {

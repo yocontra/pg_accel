@@ -268,6 +268,10 @@ extern "C" pgaccel_status pgaccel_init(void) {
     fprintf(stderr, "pgaccel: FATAL: SYCL init failed: %s\n", e.what());
   } catch (const std::exception& e) {
     fprintf(stderr, "pgaccel: FATAL: init failed: %s\n", e.what());
+  } catch (...) {
+    // Without this arm a non-std exception would escape the extern "C"
+    // boundary (std::terminate) AND skip the handler/mask restore below.
+    fprintf(stderr, "pgaccel: FATAL: init failed: unknown C++ exception\n");
   }
 
   // Restore PG's fault-signal handlers, then the signal mask. Any async

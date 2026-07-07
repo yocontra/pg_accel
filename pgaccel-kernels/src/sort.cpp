@@ -1230,21 +1230,23 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
       } else if constexpr (std::is_same_v<T, uint64_t>) {
         st = sycl_radix_sort_u64(reinterpret_cast<uint64_t*>(data), count);
       }
-      if (st == PGACCEL_OK)
+      if (st == PGACCEL_OK) {
         pgaccel_record_gpu_exec();
-      return st;
-      // Fall through to bitonic on radix failure.
+        return st;
+      }
+      // Fall through to bitonic on radix failure (intra-GPU retry).
     }
   }
 
-  // Bitonic sort uses compare-and-swap only — reliable on Metal.
+  // Bitonic sort uses compare-and-swap only — reliable on Metal. As the
+  // last kernel in the chain its status is returned as-is (honest error,
+  // not collapsed to NO_DEVICE).
   {
     pgaccel_status st = sycl_bitonic_sort(data, count);
     if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
     return st;
   }
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 template <typename T>
@@ -1283,20 +1285,22 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices, size_t count)
       } else if constexpr (std::is_same_v<K, uint64_t>) {
         st = sycl_radix_sort_kv_u64(reinterpret_cast<uint64_t*>(keys), indices, count);
       }
-      if (st == PGACCEL_OK)
+      if (st == PGACCEL_OK) {
         pgaccel_record_gpu_exec();
-      return st;
+        return st;
+      }
+      // Fall through to bitonic on radix failure (intra-GPU retry).
     }
   }
 
-  // Bitonic sort uses compare-and-swap only — reliable on Metal.
+  // Bitonic sort uses compare-and-swap only — reliable on Metal. Last
+  // kernel in the chain: status returned as-is.
   {
     pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
     if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
     return st;
   }
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 static pgaccel_status dispatch_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) {
@@ -1307,16 +1311,17 @@ static pgaccel_status dispatch_sort_kv_i32_device(int32_t* keys, uint32_t* indic
 
   if (count >= RADIX_SORT_THRESHOLD) {
     const pgaccel_status st = sycl_radix_sort_kv_i32_device(keys, indices, count);
-    if (st == PGACCEL_OK)
+    if (st == PGACCEL_OK) {
       pgaccel_record_gpu_exec();
-    return st;
+      return st;
+    }
+    // Fall through to bitonic on radix failure (intra-GPU retry).
   }
 
   const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
@@ -1330,16 +1335,17 @@ static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uin
   if (count >= RADIX_SORT_THRESHOLD) {
     const pgaccel_status st =
         sycl_radix_sort_kv_i32_nonnegative_device(keys, indices, count, radix_bits);
-    if (st == PGACCEL_OK)
+    if (st == PGACCEL_OK) {
       pgaccel_record_gpu_exec();
-    return st;
+      return st;
+    }
+    // Fall through to bitonic on radix failure (intra-GPU retry).
   }
 
   const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 template <typename K>
