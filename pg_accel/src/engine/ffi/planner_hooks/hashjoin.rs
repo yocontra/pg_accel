@@ -24,20 +24,6 @@
 
 use crate::engine::cost::{self, DeviceLimits};
 
-/// Encoded key-type tag for Float64 hash-join keys.
-///
-/// Mirrors the encoding in [`super::mod::find_equi_join_key`](super) where
-/// PG type OID `701` (float8) / `700` (float4 → promoted) both map to `2`.
-pub(super) const KEY_TYPE_FLOAT64: i32 = 2;
-
-/// True when the encoded join key type is Float64 and therefore subject to
-/// soft-fp64 penalisation on devices without native fp64.
-#[must_use]
-#[inline]
-pub(super) const fn key_type_is_fp64(key_type: i32) -> bool {
-    key_type == KEY_TYPE_FLOAT64
-}
-
 /// True for key types implemented by the selected GPU hash-join build/probe
 /// path.
 ///
@@ -49,43 +35,6 @@ pub(super) const fn key_type_is_fp64(key_type: i32) -> bool {
 #[inline]
 pub(super) const fn selected_key_type_supported(key_type: i32) -> bool {
     matches!(key_type, 0 | 1)
-}
-
-/// Backend gate for count-only hash-join aggregate replacement.
-///
-/// The Metal implementation is correct and covered by the C++ tests, but the
-/// selected SQL path remains slower than PostgreSQL parallel HashJoin on the
-/// canonical 100K benchmark even after removing per-match global atomics.
-/// Keep the kernel available for direct testing while preventing a known
-/// planner-selected regression on M-series.
-#[must_use]
-#[inline]
-pub(super) fn count_only_backend_supported(backend_name: &[u8]) -> bool {
-    backend_name != b"metal"
-}
-
-#[must_use]
-#[inline]
-pub(super) fn selected_count_only_backend_supported() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        count_only_backend_supported(b"metal")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        count_only_backend_supported(b"")
-    }
-}
-
-/// Per-row GPU op cost for the `should_batch` gate.
-///
-/// Wraps the hashjoin constant with `apply_fp64_penalty` so a Float64 key on
-/// a soft-fp64 device is filtered out at the batching gate if the penalty
-/// pushes per-row cost past the `should_batch` threshold.
-#[must_use]
-#[inline]
-pub(super) fn per_row_cost_for_batch_gate(uses_fp64: bool, limits: &DeviceLimits) -> f64 {
-    cost::apply_fp64_penalty(cost::GPU_HASH_JOIN_PER_ROW_COST, uses_fp64, limits)
 }
 
 /// Per-row hash-build cost contribution (per inner row).
@@ -112,88 +61,6 @@ pub(super) fn build_cost_per_inner_row(uses_fp64: bool, limits: &DeviceLimits) -
 #[inline]
 pub(super) fn probe_cost_per_outer_row(uses_fp64: bool, limits: &DeviceLimits) -> f64 {
     cost::apply_fp64_penalty(limits.gpu_hashjoin_probe_per_row, uses_fp64, limits)
-}
-
-/// Eligibility gate for injecting a parallel (partial) GPU hashjoin variant.
-///
-/// A parallel hashjoin is only legal when BOTH sides can execute inside a
-/// worker. The outer side is drawn from `outer_rel->partial_pathlist` so its
-/// `parallel_safe` flag is implicitly true; callers must still pass
-/// `outer_parallel_safe` to support unit-testing the policy. The inner side
-/// is read from `inner_rel`'s regular pathlist (each worker rebuilds its own
-/// hashtable because pgrx does not expose the PG shared-hashtable APIs), so
-/// we require `inner_parallel_safe` explicitly.
-///
-/// This helper is *the* single source of truth for the parallel-HashJoin
-/// gate — `join_pathlist.rs` must call this rather than inlining the check.
-#[must_use]
-#[inline]
-pub(super) const fn partial_is_eligible(
-    outer_parallel_safe: bool,
-    inner_parallel_safe: bool,
-) -> bool {
-    outer_parallel_safe && inner_parallel_safe
-}
-
-/// Inner-row threshold above which private per-worker hash-table rebuilds are
-/// treated as a known parallel `GpuHashJoin` loser lane.
-///
-/// The current partial path does not share a GPU-resident build table across
-/// workers. It is acceptable for small dimension tables, but once the build
-/// side reaches roughly 10x the minimum viable hashjoin build size, the GPU
-/// does duplicate build work in every worker while PostgreSQL's native
-/// parallel hash join can share build-side state. Keep the threshold tied to
-/// device limits instead of a standalone constant, and never set it above the
-/// build-side safety cap.
-#[must_use]
-#[inline]
-pub(super) fn partial_private_inner_rebuild_row_limit(limits: &DeviceLimits) -> usize {
-    limits
-        .hashjoin_min_build_rows
-        .saturating_mul(10)
-        .max(25_000)
-        .min(limits.gpu_hash_join_build_max_rows.max(1))
-}
-
-/// Return true when partial `GpuHashJoin` should decline because each worker
-/// would rebuild a large private inner hash table.
-#[must_use]
-#[inline]
-pub(super) fn partial_private_inner_rebuild_declines(
-    inner_rows: usize,
-    worker_count: usize,
-    limits: &DeviceLimits,
-) -> bool {
-    worker_count > 1 && inner_rows >= partial_private_inner_rebuild_row_limit(limits)
-}
-
-/// Per-worker GPU hash-join total-cost estimate.
-///
-/// Matches the non-parallel formula in [`super::join_pathlist`] but takes
-/// the outer row count as the *partial* rows (already divided among workers)
-/// and the inner row count as the *full* inner rows (each worker rebuilds
-/// its own hashtable). `output_rows` is the partial output row estimate for
-/// this worker. The soft-fp64 multiplier is threaded via
-/// [`build_cost_per_inner_row`] / [`probe_cost_per_outer_row`] /
-/// [`per_row_cost_for_batch_gate`] exactly as in the non-parallel path.
-#[must_use]
-#[inline]
-pub(super) fn partial_total_cost(
-    outer_partial_rows: f64,
-    outer_partial_total_cost: f64,
-    inner_rows: f64,
-    inner_total_cost: f64,
-    output_partial_rows: f64,
-    uses_fp64: bool,
-    limits: &DeviceLimits,
-) -> f64 {
-    let base_cost = outer_partial_total_cost + inner_total_cost;
-    let gpu_launch = cost::GPU_LAUNCH_OVERHEAD;
-    let build_cost = inner_rows * build_cost_per_inner_row(uses_fp64, limits);
-    let probe_cost = outer_partial_rows * probe_cost_per_outer_row(uses_fp64, limits);
-    // Hardware-derived yield cost; see `DeviceLimits::custom_scan_yield_per_row`.
-    let yield_cost = output_partial_rows * limits.custom_scan_yield_per_row;
-    base_cost + gpu_launch + build_cost + probe_cost + yield_cost
 }
 
 // ---------------------------------------------------------------------------
@@ -224,19 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn key_type_classification_float64() {
-        assert!(key_type_is_fp64(KEY_TYPE_FLOAT64));
-        assert!(key_type_is_fp64(2));
-    }
-
-    #[test]
-    fn key_type_classification_non_fp64() {
-        assert!(!key_type_is_fp64(0)); // Int32
-        assert!(!key_type_is_fp64(1)); // Int64
-        assert!(!key_type_is_fp64(3)); // CompositeInt4x2 (agg group-key; not a hash-join key type today)
-    }
-
-    #[test]
     fn selected_key_type_support_is_integer_only() {
         assert!(selected_key_type_supported(0)); // Int32
         assert!(selected_key_type_supported(1)); // Int64
@@ -244,53 +98,6 @@ mod tests {
         assert!(!selected_key_type_supported(3)); // CompositeInt4x2
         assert!(!selected_key_type_supported(4)); // UUID
         assert!(!selected_key_type_supported(5)); // INET/CIDR
-    }
-
-    #[test]
-    fn count_only_backend_gate_rejects_metal() {
-        assert!(!count_only_backend_supported(b"metal"));
-        assert!(count_only_backend_supported(b"cuda"));
-        assert!(count_only_backend_supported(b"hip"));
-        assert!(count_only_backend_supported(b""));
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn selected_count_only_backend_rejects_macos_metal() {
-        assert!(!selected_count_only_backend_supported());
-    }
-
-    #[test]
-    fn batch_gate_penalty_applied_for_fp64_on_soft_device() {
-        let l = limits_soft();
-        let base = cost::GPU_HASH_JOIN_PER_ROW_COST;
-        let c = per_row_cost_for_batch_gate(true, &l);
-        assert!(
-            base.mul_add(-32.0, c).abs() < 1e-12,
-            "soft-fp64 Float64 key should pay 32x at batch gate; got {c}",
-        );
-    }
-
-    #[test]
-    fn batch_gate_no_penalty_for_int64_on_soft_device() {
-        let l = limits_soft();
-        let base = cost::GPU_HASH_JOIN_PER_ROW_COST;
-        let c = per_row_cost_for_batch_gate(false, &l);
-        assert!(
-            (c - base).abs() < 1e-12,
-            "Int64 key must not pay the soft-fp64 penalty; got {c}",
-        );
-    }
-
-    #[test]
-    fn batch_gate_no_penalty_for_fp64_on_native_device() {
-        let l = limits_native();
-        let base = cost::GPU_HASH_JOIN_PER_ROW_COST;
-        let c = per_row_cost_for_batch_gate(true, &l);
-        assert!(
-            (c - base).abs() < 1e-12,
-            "Native-fp64 device must not pay the soft-fp64 penalty for Float64 keys; got {c}",
-        );
     }
 
     #[test]
@@ -317,83 +124,6 @@ mod tests {
         let probe = probe_cost_per_outer_row(false, &l);
         assert!((build - l.gpu_hashjoin_build_per_row).abs() < 1e-12);
         assert!((probe - l.gpu_hashjoin_probe_per_row).abs() < 1e-12);
-    }
-
-    #[test]
-    fn partial_is_eligible_requires_both_sides_parallel_safe() {
-        assert!(partial_is_eligible(true, true));
-        assert!(!partial_is_eligible(false, true));
-        assert!(!partial_is_eligible(true, false));
-        assert!(!partial_is_eligible(false, false));
-    }
-
-    #[test]
-    fn partial_private_inner_rebuild_limit_tracks_device_limits() {
-        let l = limits_native();
-        assert_eq!(
-            partial_private_inner_rebuild_row_limit(&l),
-            l.hashjoin_min_build_rows * 10
-        );
-    }
-
-    #[test]
-    fn partial_private_inner_rebuild_declines_large_inner_only_with_multiple_workers() {
-        let l = limits_native();
-        let limit = partial_private_inner_rebuild_row_limit(&l);
-
-        assert!(!partial_private_inner_rebuild_declines(limit - 1, 4, &l));
-        assert!(partial_private_inner_rebuild_declines(limit, 4, &l));
-        assert!(!partial_private_inner_rebuild_declines(limit, 1, &l));
-    }
-
-    /// The parallel total-cost estimate must apply the soft-fp64 multiplier
-    /// to build + probe contributions. Dropping the outer *partial* rows
-    /// count by half should drop the probe component proportionally.
-    #[test]
-    fn partial_total_cost_probe_scales_linearly_with_outer_partial_rows() {
-        let l = limits_native();
-        let inner = 100_000.0_f64;
-        let output_partial = 50_000.0_f64;
-
-        let c1 = partial_total_cost(1_000_000.0, 0.0, inner, 0.0, output_partial, false, &l);
-        let c2 = partial_total_cost(500_000.0, 0.0, inner, 0.0, output_partial, false, &l);
-
-        let expected_delta = 500_000.0_f64 * probe_cost_per_outer_row(false, &l);
-        assert!(
-            ((c1 - c2) - expected_delta).abs() < 1e-6,
-            "probe cost should shrink by {expected_delta}; got delta {}",
-            c1 - c2
-        );
-    }
-
-    /// Partial cost with fp64 keys on a soft-fp64 device differs from the
-    /// integer baseline by exactly
-    /// `(mult-1) * (inner * build_per_row + outer_partial * probe_per_row)`
-    /// (yield cost is fp64-agnostic, base costs are pre-passed as zero here).
-    /// After the Phase 6 calibration the per-row constants are read from
-    /// `DeviceLimits`, so we compute the expected delta from the limits
-    /// rather than the old `0.01` literal.
-    #[test]
-    fn partial_total_cost_fp64_penalty_is_applied() {
-        let l = limits_soft();
-        let outer_partial = 1_000_000.0_f64;
-        let inner = 100_000.0_f64;
-        let output_partial = 500_000.0_f64;
-
-        let cost_int =
-            partial_total_cost(outer_partial, 0.0, inner, 0.0, output_partial, false, &l);
-        let cost_fp = partial_total_cost(outer_partial, 0.0, inner, 0.0, output_partial, true, &l);
-
-        let delta = cost_fp - cost_int;
-        let expected = (32.0_f64 - 1.0)
-            * inner.mul_add(
-                l.gpu_hashjoin_build_per_row,
-                outer_partial * l.gpu_hashjoin_probe_per_row,
-            );
-        assert!(
-            (delta - expected).abs() < 1e-6,
-            "fp64 - int delta {delta} should be (mult-1)*(inner*build+outer*probe) = {expected}",
-        );
     }
 
     /// Plan assertion: an fp64-keyed hash join on a soft-fp64 device must

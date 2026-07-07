@@ -1993,61 +1993,6 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
     deserialize_partial_spec_from_reader(&fields, start_idx)
 }
 
-/// Append an aggregate self-scan template expression onto `list`.
-///
-/// Layout: `[AGG_SCAN_EXPR_SENTINEL, template_type, ...template_data]`.
-/// Template type values mirror the PreAgg scan expression codec:
-/// 1 = `CmpConst`, 2 = `Between`, 3 = `TwoPredAnd`.
-///
-/// # Safety
-/// Must be called in a valid PG memory context on the main backend thread.
-#[allow(clippy::cast_possible_wrap)]
-pub(in crate::engine::ffi) unsafe fn append_agg_scan_expr(
-    list: *mut pg_sys::List,
-    expr: &CompiledExpr,
-) -> *mut pg_sys::List {
-    let mut writer = PgListWriter::from_existing(list);
-    writer.push_int(AGG_SCAN_EXPR_SENTINEL);
-    match expr {
-        CompiledExpr::Template(TemplateKernel::CmpConst {
-            col_idx,
-            cmp_opcode,
-            const_val,
-        }) => {
-            writer.push_int(1);
-            writer.push_u32(*col_idx);
-            writer.push_int(*cmp_opcode as c_int);
-            writer.push_f64_halves(*const_val);
-        }
-        CompiledExpr::Template(TemplateKernel::Between { col_idx, lo, hi }) => {
-            writer.push_int(2);
-            writer.push_u32(*col_idx);
-            writer.push_f64_halves(*lo);
-            writer.push_f64_halves(*hi);
-        }
-        CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-            col1_idx,
-            cmp1_opcode,
-            const1_val,
-            col2_idx,
-            cmp2_opcode,
-            const2_val,
-        }) => {
-            writer.push_int(3);
-            writer.push_u32(*col1_idx);
-            writer.push_int(*cmp1_opcode as c_int);
-            writer.push_f64_halves(*const1_val);
-            writer.push_u32(*col2_idx);
-            writer.push_int(*cmp2_opcode as c_int);
-            writer.push_f64_halves(*const2_val);
-        }
-        _ => {
-            pgrx::error!("pg_accel: aggregate self-scan expression must be a template predicate");
-        }
-    }
-    writer.into_list()
-}
-
 #[must_use]
 fn deserialize_agg_scan_expr_from_reader(
     fields: &IntListReader<'_>,

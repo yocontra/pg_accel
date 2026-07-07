@@ -44,8 +44,8 @@ use private_data::CustomPrivateData;
 pub(in crate::engine::ffi) use private_data::HASH_JOIN_RESIDENT_COUNT_SENTINEL;
 pub use private_data::serialize_preagg_private;
 pub(super) use private_data::{
-    AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_scan_expr,
-    append_olap_agg_spec, append_partial_spec, deserialize_partial_spec,
+    AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_olap_agg_spec,
+    append_partial_spec, deserialize_partial_spec,
 };
 pub use private_data::{
     FUNCTIONSCAN_SENTINEL, FunctionScanPrivData, append_functionscan_priv,
