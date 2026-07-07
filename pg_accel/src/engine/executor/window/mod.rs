@@ -215,13 +215,22 @@ impl WindowExecState {
                         (pg_sys::Datum::from(val), false)
                     }
                     WindowFunc::Sum => {
+                        // SUM yields SQL NULL over an all-NULL partition prefix;
+                        // the null mask is populated in consume_and_compute*.
+                        let is_null = self
+                            .null_results
+                            .get(spec_idx)
+                            .and_then(|v| v.get(pos))
+                            .copied()
+                            .unwrap_or(0)
+                            != 0;
                         let val = self
                             .f64_results
                             .get(spec_idx)
                             .and_then(|v| v.get(pos))
                             .copied()
                             .unwrap_or(0.0);
-                        (pg_sys::Datum::from(val.to_bits()), false)
+                        (pg_sys::Datum::from(val.to_bits()), is_null)
                     }
                     WindowFunc::Lag | WindowFunc::Lead => {
                         let is_null = self
@@ -370,13 +379,22 @@ impl WindowExecState {
                         (pg_sys::Datum::from(val), false)
                     }
                     WindowFunc::Sum => {
+                        // SUM yields SQL NULL over an all-NULL partition prefix;
+                        // the null mask is populated in consume_and_compute*.
+                        let is_null = self
+                            .null_results
+                            .get(spec_idx)
+                            .and_then(|v| v.get(pos))
+                            .copied()
+                            .unwrap_or(0)
+                            != 0;
                         let val = self
                             .f64_results
                             .get(spec_idx)
                             .and_then(|v| v.get(pos))
                             .copied()
                             .unwrap_or(0.0);
-                        (pg_sys::Datum::from(val.to_bits()), false)
+                        (pg_sys::Datum::from(val.to_bits()), is_null)
                     }
                     WindowFunc::Lag | WindowFunc::Lead => {
                         let is_null = self
@@ -496,6 +514,11 @@ impl WindowExecState {
                     let ok = gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
                         .is_some();
                     self.f64_results[spec_idx] = results;
+                    // SUM over a partition prefix with zero non-NULL inputs is
+                    // SQL NULL, not 0.0. The kernel writes 0.0 in that case, so
+                    // track a null mask (like Lag/Lead) for the emit path.
+                    self.null_results[spec_idx] =
+                        functions::compute_sum_null_mask(&partition_starts, &null_mask);
                     ok
                 }
                 WindowFunc::Count => {
@@ -679,6 +702,11 @@ impl WindowExecState {
                     let ok = gpu::window_sum(&partition_starts, &values, &null_mask, &mut results)
                         .is_some();
                     self.f64_results[spec_idx] = results;
+                    // SUM over a partition prefix with zero non-NULL inputs is
+                    // SQL NULL, not 0.0. The kernel writes 0.0 in that case, so
+                    // track a null mask (like Lag/Lead) for the emit path.
+                    self.null_results[spec_idx] =
+                        functions::compute_sum_null_mask(&partition_starts, &null_mask);
                     ok
                 }
                 WindowFunc::Count => {
