@@ -662,7 +662,7 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
 extern "C" {
 
 pgaccel_status pgaccel_window_row_number(const uint8_t* partition_starts, size_t count,
-                                         int64_t* results) {
+                                         int64_t* results) try {
   if (partition_starts == nullptr || results == nullptr)
     return PGACCEL_ERROR;
   if (count == 0)
@@ -674,10 +674,16 @@ pgaccel_status pgaccel_window_row_number(const uint8_t* partition_starts, size_t
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_row_number", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_row_number", nullptr);
 }
 
 pgaccel_status pgaccel_window_rank(const uint8_t* partition_starts, const double* sort_keys,
-                                   size_t count, int64_t* results) {
+                                   size_t count, int64_t* results) try {
   if (partition_starts == nullptr || sort_keys == nullptr || results == nullptr) {
     return PGACCEL_ERROR;
   }
@@ -692,10 +698,16 @@ pgaccel_status pgaccel_window_rank(const uint8_t* partition_starts, const double
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_rank", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_rank", nullptr);
 }
 
 pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const double* sort_keys,
-                                         size_t count, int64_t* results) {
+                                         size_t count, int64_t* results) try {
   if (partition_starts == nullptr || sort_keys == nullptr || results == nullptr) {
     return PGACCEL_ERROR;
   }
@@ -710,10 +722,16 @@ pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const 
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_dense_rank", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_dense_rank", nullptr);
 }
 
 pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double* values,
-                                  const uint8_t* null_mask, size_t count, double* results) {
+                                  const uint8_t* null_mask, size_t count, double* results) try {
   if (partition_starts == nullptr || values == nullptr || results == nullptr) {
     return PGACCEL_ERROR;
   }
@@ -728,10 +746,16 @@ pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double*
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_sum", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_sum", nullptr);
 }
 
 pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8_t* null_mask,
-                                    size_t count, int64_t* results) {
+                                    size_t count, int64_t* results) try {
   if (partition_starts == nullptr || results == nullptr)
     return PGACCEL_ERROR;
   if (count == 0)
@@ -745,11 +769,17 @@ pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_count", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_count", nullptr);
 }
 
 pgaccel_status pgaccel_window_lag(const uint8_t* partition_starts, const double* values,
                                   const uint8_t* null_mask, size_t count, int offset,
-                                  double default_val, double* results, uint8_t* result_nulls) {
+                                  double default_val, double* results, uint8_t* result_nulls) try {
   if (partition_starts == nullptr || values == nullptr || results == nullptr) {
     return PGACCEL_ERROR;
   }
@@ -765,11 +795,17 @@ pgaccel_status pgaccel_window_lag(const uint8_t* partition_starts, const double*
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_lag", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_lag", nullptr);
 }
 
 pgaccel_status pgaccel_window_lead(const uint8_t* partition_starts, const double* values,
                                    const uint8_t* null_mask, size_t count, int offset,
-                                   double default_val, double* results, uint8_t* result_nulls) {
+                                   double default_val, double* results, uint8_t* result_nulls) try {
   if (partition_starts == nullptr || values == nullptr || results == nullptr) {
     return PGACCEL_ERROR;
   }
@@ -785,6 +821,12 @@ pgaccel_status pgaccel_window_lead(const uint8_t* partition_starts, const double
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_window_lead", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_window_lead", nullptr);
 }
 
 }  // extern "C"
