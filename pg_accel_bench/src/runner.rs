@@ -4824,6 +4824,114 @@ mod tests {
         assert!(classification.function_srf_kernel_dispatched);
     }
 
+    fn iter_at(accel_ms: f64, parallel_ms: f64, cache_state: CacheState) -> IterationResult {
+        IterationResult {
+            accel_ms,
+            parallel_ms,
+            cache_purge: if cache_state == CacheState::Cold {
+                CachePurgeState::Completed
+            } else {
+                CachePurgeState::NotRequested
+            },
+            cache_state,
+        }
+    }
+
+    #[test]
+    fn test_from_iterations_separates_warm_and_cold_summaries() {
+        // Mixed warm+cold (CacheMode::Both) input: warm is fast, cold is slow.
+        let mut iters = Vec::new();
+        for _ in 0..4 {
+            iters.push(iter_at(100.0, 200.0, CacheState::Cold));
+        }
+        for _ in 0..6 {
+            iters.push(iter_at(10.0, 20.0, CacheState::Warm));
+        }
+        let result = WorkloadResult::from_iterations(
+            "mixed".to_owned(),
+            "d".to_owned(),
+            "gpu".to_owned(),
+            "unclassified".to_owned(),
+            10_000,
+            iters,
+            true,
+        );
+
+        let warm = result.warm_summary.expect("warm summary present");
+        let cold = result.cold_summary.expect("cold summary present");
+        assert_eq!(warm.n, 6);
+        assert_eq!(cold.n, 4);
+        // Summaries are computed over homogeneous subsamples, not the mixture.
+        assert!((warm.accel_median_ms - 10.0).abs() < f64::EPSILON);
+        assert!((cold.accel_median_ms - 100.0).abs() < f64::EPSILON);
+        // The flat top-level headline uses the WARM subsample when mixed, so no
+        // bimodal-mixture median can leak into the headline.
+        assert!((result.accel_median_ms - 10.0).abs() < f64::EPSILON);
+        assert!((result.speedup_median_vs_parallel - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_from_iterations_warm_only_has_no_cold_summary() {
+        let iters: Vec<IterationResult> = (0..10)
+            .map(|_| iter_at(10.0, 20.0, CacheState::Warm))
+            .collect();
+        let result = WorkloadResult::from_iterations(
+            "warm".to_owned(),
+            "d".to_owned(),
+            "gpu".to_owned(),
+            "unclassified".to_owned(),
+            10_000,
+            iters,
+            true,
+        );
+        assert!(result.warm_summary.is_some());
+        assert!(result.cold_summary.is_none());
+    }
+
+    #[test]
+    fn test_native_decline_evidence_prefers_planner_reported() {
+        let plan = "Aggregate\n  Seq Scan on t\n\
+                    pg_accel planner rejection reason: sort_multikey_no_gpu_kernel\n";
+        let evidence = native_decline_evidence("gpu_sort_multikey", 100_000, false, Some(plan))
+            .expect("planner-reported evidence present");
+        assert_eq!(evidence.reason, "sort_multikey_no_gpu_kernel");
+        assert_eq!(
+            evidence.source,
+            report::DeclineReasonSource::PlannerReported
+        );
+    }
+
+    #[test]
+    fn test_native_decline_evidence_none_when_custom_scan_selected() {
+        let plan = "Custom Scan (GpuReduce)\n  GPU Dispatched: true\n";
+        assert!(native_decline_evidence("reduce_f64_sum", 1_000_000, true, Some(plan)).is_none());
+    }
+
+    #[test]
+    fn test_native_decline_evidence_absent_without_reason_or_expectation() {
+        // A workload name with no threshold-matrix decline entry and no planner
+        // rejection line yields no fabricated evidence.
+        assert!(
+            native_decline_evidence(
+                "no_such_workload_xyz",
+                12_345,
+                false,
+                Some("Seq Scan on t\n")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_combine_purge_states_reports_worst_case() {
+        use CachePurgeState::{Completed, Failed, NotRequested, Unavailable};
+        assert_eq!(combine_purge_states(Completed, Completed), Completed);
+        assert_eq!(combine_purge_states(Completed, Unavailable), Unavailable);
+        assert_eq!(combine_purge_states(Unavailable, Failed), Failed);
+        assert_eq!(combine_purge_states(NotRequested, Completed), Completed);
+        assert_eq!(combine_purge_states(Failed, Completed), Failed);
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn test_parse_execution_time_zero() {
