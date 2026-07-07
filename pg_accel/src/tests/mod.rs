@@ -7,6 +7,7 @@
 mod phase2_bridge;
 mod phase2_cache;
 mod phase2_dispatch;
+#[cfg(any(test, feature = "pg_test"))]
 mod phase2_engine;
 mod phase2_kernels;
 mod phase2_window;

@@ -260,11 +260,25 @@ impl AdapterRegistry {
             return None;
         }
         RETRYING_LOOKUP.with(|f| f.set(true));
-        // SPI errors during re-resolve must not poison the planner pass.
-        // Catch + ignore; if re-resolve fails the lookup just stays a miss.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // SPI errors during re-resolve must not poison the planner pass. A
+        // pgrx panic here wraps a PostgreSQL ERROR whose backend error state
+        // must be cleared with `FlushErrorState` before the planner continues
+        // — otherwise the dirty error stack corrupts the rest of the pass.
+        // `PgTryBuilder::execute` runs `FlushErrorState` after the catch
+        // handler, which a bare `std::panic::catch_unwind` does not. If
+        // re-resolve fails the lookup just stays a miss.
+        pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
             self.resolve_oids_again();
-        }));
+        }))
+        .catch_others(|caught| {
+            let msg = caught_error_message(&caught);
+            tracing::warn!(
+                error = msg.as_str(),
+                "pg_accel: registry re-resolve failed during lookup retry; \
+                 treating as a miss"
+            );
+        })
+        .execute();
         RETRYING_LOOKUP.with(|f| f.set(false));
 
         self.lookup_no_retry(oid)
@@ -306,6 +320,19 @@ impl AdapterRegistry {
             .read()
             .map(|s| s.adapters.clone())
             .unwrap_or_default()
+    }
+}
+
+/// Extract a human-readable message from a [`CaughtError`] for logging.
+///
+/// Used by the `PgTryBuilder` catch handlers below. Every `CaughtError`
+/// variant carries an `ErrorReportWithLevel`; this pulls its `message()`
+/// out so the failure is visible in the trace file without rethrowing.
+fn caught_error_message(caught: &pgrx::pg_sys::panic::CaughtError) -> String {
+    use pgrx::pg_sys::panic::CaughtError;
+    match caught {
+        CaughtError::PostgresError(e) | CaughtError::ErrorReport(e) => e.message().to_string(),
+        CaughtError::RustPanic { ereport, .. } => ereport.message().to_string(),
     }
 }
 
@@ -369,24 +396,40 @@ pub fn lazy_init() {
     }
     INITIALIZING.with(|f| f.set(true));
 
-    // Wrap in catch_unwind because init_adapters() uses SPI queries
+    // Guard with PgTryBuilder because init_adapters() uses SPI queries
     // (e.g. `SELECT postgis_version()`) that can trigger PostgreSQL
-    // ERRORs. pgrx converts those to panics, and if the panic
-    // propagates through the C planner hook frame, PG aborts with
-    // "failed to initiate panic". Catching here keeps PG alive —
-    // the registry will be empty (no acceleration) but queries work.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    // ERRORs. pgrx converts those to panics, and if the panic propagates
+    // through the C planner hook frame, PG aborts with "failed to initiate
+    // panic". A pgrx panic wraps a PG ERROR whose backend error/memory
+    // state must be flushed via `FlushErrorState` — which
+    // `PgTryBuilder::execute` does after the catch handler runs, but a bare
+    // `std::panic::catch_unwind` does not. Catching here keeps PG alive with
+    // clean error state; on failure the registry is empty (no acceleration)
+    // but queries work.
+    let init_ok = pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
         GLOBAL_REGISTRY.get_or_init(|| {
             let registry = AdapterRegistry::new();
             registry.init_adapters();
             registry
         });
-    }));
+        true
+    }))
+    .catch_others(|caught| {
+        let msg = caught_error_message(&caught);
+        tracing::warn!(
+            error = msg.as_str(),
+            "pg_accel: adapter initialisation raised an error; \
+             running with no acceleration"
+        );
+        false
+    })
+    .execute();
 
-    if result.is_err() {
-        // Initialization panicked (SPI error, missing extension, etc.).
-        // Install an empty registry so is_ready() returns true and we
-        // don't retry on every query.
+    if !init_ok {
+        // Initialization failed (SPI error, missing extension, etc.). The
+        // catch handler already ran and `PgTryBuilder::execute` flushed the
+        // error state, so this ereport is safe. Install an empty registry so
+        // is_ready() returns true and we don't retry on every query.
         GLOBAL_REGISTRY.get_or_init(|| {
             pgrx::warning!("pg_accel: adapter initialisation failed, running with no acceleration");
             AdapterRegistry::new()

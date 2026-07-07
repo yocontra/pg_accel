@@ -28,7 +28,14 @@ static MAX_WORKERS_TOTAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 /// Global multiplier for pg_accel cost estimates (1.0 = default).
 /// Values >1.0 make pg_accel more conservative (less likely to be chosen),
 /// values <1.0 make it more aggressive (more likely to be chosen).
-static COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(1.0);
+static COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(COST_MULTIPLIER_DEFAULT);
+
+/// Registration default and non-finite fallback for `pg_accel.cost_multiplier`.
+const COST_MULTIPLIER_DEFAULT: f64 = 1.0;
+/// Lower bound registered with PG for `pg_accel.cost_multiplier`.
+const COST_MULTIPLIER_MIN: f64 = 0.1;
+/// Upper bound registered with PG for `pg_accel.cost_multiplier`.
+const COST_MULTIPLIER_MAX: f64 = 10.0;
 
 /// Log verbosity level for pg_accel messages.
 static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
@@ -108,7 +115,14 @@ pub fn init_gucs() {
         c"Below this threshold, the standard row-at-a-time executor is used.",
         &MIN_BATCH_SIZE,
         1,
-        65536,
+        // Upper bound must sit well above the 65536 default so operators can
+        // *raise* the GPU-dispatch floor (e.g. to force small/medium queries
+        // native on a shared box), not only lower it. A max_val equal to the
+        // default silently restricted this knob to "lower only", which is the
+        // direction anti-cheat rule #3 flags (lowering min_batch_size to
+        // sneak the GPU path onto tiny inputs). 16 MiB rows is a generous
+        // ceiling that still fits comfortably in i32.
+        16_777_216,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -153,8 +167,8 @@ pub fn init_gucs() {
         c"Global multiplier for pg_accel cost estimates.",
         c"Values >1.0 make pg_accel more conservative, <1.0 more aggressive. Default 1.0.",
         &COST_MULTIPLIER,
-        0.1,
-        10.0,
+        COST_MULTIPLIER_MIN,
+        COST_MULTIPLIER_MAX,
         GucContext::Userset,
         GucFlags::default(),
     );
@@ -258,11 +272,37 @@ pub fn max_workers_total() -> i32 {
     MAX_WORKERS_TOTAL.get()
 }
 
+/// Pure clamp for a raw `cost_multiplier` value, split out so the
+/// non-finite / out-of-range rule is unit-testable without a live backend.
+///
+/// PG's `DefineCustomRealVariable` already rejects out-of-range `SET`s at
+/// registration, but a NaN would slip through every `<` / `>` comparison
+/// (all false against NaN) and then propagate through every planner cost
+/// estimate it multiplies. Reject non-finite up front and fall back to the
+/// finite default; clamp finite-but-out-of-range values into the registered
+/// bounds as defence in depth.
+#[inline]
+#[must_use]
+fn clamp_cost_multiplier(raw: f64) -> f64 {
+    if !raw.is_finite() {
+        tracing::warn!(
+            raw = raw,
+            default = COST_MULTIPLIER_DEFAULT,
+            "pg_accel.cost_multiplier is non-finite (NaN/inf); using default \
+             to keep planner cost math finite"
+        );
+        return COST_MULTIPLIER_DEFAULT;
+    }
+    raw.clamp(COST_MULTIPLIER_MIN, COST_MULTIPLIER_MAX)
+}
+
 /// Global cost estimate multiplier.
+///
+/// Guaranteed finite and within `[0.1, 10.0]` — see [`clamp_cost_multiplier`].
 #[inline]
 #[must_use]
 pub fn cost_multiplier() -> f64 {
-    COST_MULTIPLIER.get()
+    clamp_cost_multiplier(COST_MULTIPLIER.get())
 }
 
 /// Current log level.
@@ -308,6 +348,32 @@ pub fn otel_log_max_rotations() -> i32 {
 #[cfg(feature = "pg_test")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cost_multiplier_passes_through_in_range() {
+        assert!((clamp_cost_multiplier(1.0) - 1.0).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(0.1) - 0.1).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(10.0) - 10.0).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(2.5) - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cost_multiplier_clamps_out_of_range() {
+        // Finite but out of the registered [0.1, 10.0] bounds clamps.
+        assert!((clamp_cost_multiplier(0.0) - COST_MULTIPLIER_MIN).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(-5.0) - COST_MULTIPLIER_MIN).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(1000.0) - COST_MULTIPLIER_MAX).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cost_multiplier_rejects_non_finite_to_default() {
+        // NaN/inf must not reach the planner: return the finite default.
+        let d = COST_MULTIPLIER_DEFAULT;
+        assert!((clamp_cost_multiplier(f64::NAN) - d).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(f64::INFINITY) - d).abs() < f64::EPSILON);
+        assert!((clamp_cost_multiplier(f64::NEG_INFINITY) - d).abs() < f64::EPSILON);
+        assert!(clamp_cost_multiplier(f64::NAN).is_finite());
+    }
 
     #[test]
     fn log_level_debug_eq() {
