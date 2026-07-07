@@ -702,7 +702,7 @@ mod pixel_type_code_tests {
 
     /// PostGIS `rt_pixtype` codes (librtcore.h):
     /// 0=1BB, 1=2BUI, 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI,
-    /// 7=32BSI, 8=32BUI, 9=32BF, 10=64BF.
+    /// 7=32BSI, 8=32BUI, 10=32BF, 11=64BF (9 skipped).
     #[test]
     fn from_code_matches_postgis_rt_pixtype_literally() {
         assert_eq!(PixelType::from_code(0), Some(PixelType::Bool), "0 = 1BB");

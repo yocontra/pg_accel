@@ -17,7 +17,7 @@ use std::collections::HashSet;
 /// Pixel type to WKB code.
 ///
 /// Must match the PostGIS `rt_pixtype` enum (librtcore.h): 0=1BB, 1=2BUI,
-/// 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI, 8=32BUI, 9=32BF, 10=64BF.
+/// 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI, 8=32BUI, 10=32BF, 11=64BF (9 skipped).
 fn pixel_type_to_code(pt: PixelType) -> u8 {
     match pt {
         PixelType::Bool => 0,
