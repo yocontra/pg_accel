@@ -31,6 +31,7 @@ wildcards = "deny"
 [advisories]
 ignore = [
   { id = "RUSTSEC-2021-0127", reason = "Unmaintained crate pulled in transitively by pgrx; reassess when pgrx updates its dependency tree." },
+  { id = "RUSTSEC-2026-0097", reason = "rand 0.9.2 'unsound with a custom logger using rand::rng()' — pulled in transitively via opentelemetry_sdk (OTel tracing), not called by pg_accel; we never invoke rand::rng() under a custom logger. Reassess when opentelemetry_sdk bumps rand." },
 ]
 
 [sources]

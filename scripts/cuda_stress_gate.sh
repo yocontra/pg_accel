@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pg="${1:-17}"
-pg="${pg#pg}"
-
 source scripts/pg_versions.sh
+pg="${1:-$(pg_accel_default_pg_major)}"
+pg="${pg#pg}"
 pg_accel_require_supported_pg "$pg"
 if pg_accel_skip_if_preview_without_pgrx "$pg"; then
     echo "cuda-stress: skipping PostgreSQL $pg because pgrx support is unavailable"

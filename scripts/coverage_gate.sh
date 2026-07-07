@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pg="${1:-17}"
+source scripts/pg_versions.sh
+pg="${1:-$(pg_accel_default_pg_major)}"
 min_lines="${COVERAGE_MIN_LINES:-90}"
 artifact_dir="${COVERAGE_ARTIFACT_DIR:-artifacts/coverage}"
-
-source scripts/pg_versions.sh
 pg="${pg#pg}"
 pg_accel_require_supported_pg "$pg"
 if pg_accel_skip_if_preview_without_pgrx "$pg"; then

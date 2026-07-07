@@ -12,7 +12,9 @@ jobs:
   build:
     name: Build (${{ matrix.os }}, PG ${{ matrix.pg }})
     env:
-      ACPP_REQUIRED_SHA: 7e79a6ca45f5a067f02a30207cb8da1b81eb5f29
+      # ACPP_REQUIRED_SHA is loaded from the repo-root .acpp-version file (single
+      # source of truth shared with scripts/setup_acpp.sh and ci.yml) by the
+      # "Load pinned AdaptiveCpp SHA" step below; do not hardcode it here.
       SOFT_FP64_REQUIRED_TAG: v1.3.0
     strategy:
       fail-fast: false
@@ -24,6 +26,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
         id: pg-support
