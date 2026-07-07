@@ -4,6 +4,13 @@
 //! pgrx's test framework.  They exercise the public SQL interface rather than
 //! internal Rust APIs.
 
+mod phase2_bridge;
+mod phase2_cache;
+mod phase2_dispatch;
+mod phase2_engine;
+mod phase2_kernels;
+mod phase2_window;
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
