@@ -1146,6 +1146,38 @@ unsafe fn libc_geteuid() -> u32 {
     unsafe { geteuid() }
 }
 
+/// Purge the OS page cache for one measurement and classify the outcome.
+/// Called immediately before each cold-mode timed run (per measurement, after
+/// any resident-cache prime) so the timed query reads a genuinely evicted heap.
+fn purge_for_measurement() -> CachePurgeState {
+    match purge_os_page_cache() {
+        Ok(true) => CachePurgeState::Completed,
+        Ok(false) => {
+            eprintln!("[cache] purge unavailable; cold measurement recorded as unpurged");
+            CachePurgeState::Unavailable
+        }
+        Err(e) => {
+            eprintln!("[cache] purge failed: {e}");
+            CachePurgeState::Failed
+        }
+    }
+}
+
+/// Combine the two per-mode purge outcomes of one accel/parallel iteration
+/// into a single worst-case state (Failed > Unavailable > Completed >
+/// NotRequested), so a partially-failed purge is never recorded as clean.
+const fn combine_purge_states(a: CachePurgeState, b: CachePurgeState) -> CachePurgeState {
+    const fn rank(s: CachePurgeState) -> u8 {
+        match s {
+            CachePurgeState::NotRequested => 0,
+            CachePurgeState::Completed => 1,
+            CachePurgeState::Unavailable => 2,
+            CachePurgeState::Failed => 3,
+        }
+    }
+    if rank(a) >= rank(b) { a } else { b }
+}
+
 /// Capture thermal state before a workload runs. Used by the report to
 /// flag workloads that ran under thermal pressure (action_items M13 /
 /// Reviewer 1 Sin #18).
@@ -1414,6 +1446,10 @@ pub fn run_with_timing_and_cache(
         let mut warmup_iterations = cold.warmup_iterations.clone();
         warmup_iterations.extend(warm.warmup_iterations.clone());
         result.set_warmup_iterations(warmup_iterations);
+        // Carry resident-lane evidence from the sub-runs (both measure the
+        // same workload; prefer the cold sub-run's off-clock load time).
+        result.resident_lane = cold.resident_lane || warm.resident_lane;
+        result.resident_load_ms = cold.resident_load_ms.or(warm.resident_load_ms);
         merge_dispatch_counter_fields(&mut result, &cold);
         merge_dispatch_counter_fields(&mut result, &warm);
         return Ok(result);
@@ -1452,31 +1488,42 @@ pub fn run_with_timing_and_cache(
     for client in &mut mode_clients {
         apply_benchmark_safety_settings(client)?;
     }
-    prime_workload_accel_backend(&mut mode_clients[0], workload)?;
+    // Resident-cache preload happens OFF the timed region. Record the load
+    // time so the report can surface the off-clock cost the accel side pays.
+    let resident_load_ms = prime_workload_accel_backend(&mut mode_clients[0], workload)?;
+
+    // Cold mode runs with warmup = 0, so backend init (tracing, GPU probe) and
+    // first-touch Metal JIT would otherwise land inside the cold timings. Pay
+    // them once here in a single UNTIMED init round (result discarded). The
+    // per-measurement purge below still evicts the OS page cache before every
+    // timed run, so this round does not warm the measured samples.
+    if cache_mode == CacheMode::Cold {
+        for &idx in &[0_usize, 1_usize] {
+            mode_clients[idx].batch_execute("DISCARD ALL")?;
+            apply_benchmark_safety_settings(&mut mode_clients[idx])?;
+            if matches!(modes[idx], BenchMode::Accel) {
+                prime_workload_accel_backend(&mut mode_clients[idx], workload)?;
+            }
+            let sql_for_mode = match modes[idx] {
+                BenchMode::Accel => query.as_str(),
+                BenchMode::PgParallel => baseline_query.as_str(),
+            };
+            let _ = run_with_mode(
+                &mut mode_clients[idx],
+                sql_for_mode,
+                modes[idx],
+                &pre_query,
+                timing_mode,
+            )?;
+        }
+    }
+
     let mut counter_before: Option<DispatchStatsSnapshot> = None;
     let mut counter_capture_error: Option<String> = None;
     let mut accel_output_rows_consumed = 0_u64;
 
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
-
-        let cache_purge = if cache_mode == CacheMode::Cold {
-            // Drop the OS page cache before every iteration. DISCARD ALL
-            // alone is insufficient (Reviewer 2 §3(ii)).
-            match purge_os_page_cache() {
-                Ok(true) => CachePurgeState::Completed,
-                Ok(false) => {
-                    eprintln!("[cache] purge unavailable; cold iteration recorded as unpurged");
-                    CachePurgeState::Unavailable
-                }
-                Err(e) => {
-                    eprintln!("[cache] purge failed: {e}");
-                    CachePurgeState::Failed
-                }
-            }
-        } else {
-            CachePurgeState::NotRequested
-        };
 
         // Randomize order to eliminate cache-warming bias.
         let mut order: [usize; 2] = [0, 1];
@@ -1500,12 +1547,20 @@ pub fn run_with_timing_and_cache(
             elapsed_ms: 0.0,
             output_rows: 0,
         }; 2];
+        // Cold mode purges the OS page cache before EACH mode's timed run
+        // (not once per accel/parallel pair) and AFTER the resident-cache
+        // prime, so the resident preload cannot re-warm the heap the timed
+        // query reads. Recorded per measurement.
+        let mut purge_outcomes = [CachePurgeState::NotRequested; 2];
         for &idx in &order {
             // DISCARD ALL resets session state before each measurement.
             mode_clients[idx].batch_execute("DISCARD ALL")?;
             apply_benchmark_safety_settings(&mut mode_clients[idx])?;
             if matches!(modes[idx], BenchMode::Accel) {
                 prime_workload_accel_backend(&mut mode_clients[idx], workload)?;
+            }
+            if cache_mode == CacheMode::Cold {
+                purge_outcomes[idx] = purge_for_measurement();
             }
             let sql_for_mode = match modes[idx] {
                 BenchMode::Accel => query.as_str(),
@@ -1519,6 +1574,7 @@ pub fn run_with_timing_and_cache(
                 timing_mode,
             )?;
         }
+        let cache_purge = combine_purge_states(purge_outcomes[0], purge_outcomes[1]);
 
         let accel_ms = timings[0].elapsed_ms;
         let parallel_ms = timings[1].elapsed_ms;
@@ -1593,6 +1649,8 @@ pub fn run_with_timing_and_cache(
     );
     result.set_warmup_iterations(warmup_results);
     result.accel_output_rows_consumed = accel_output_rows_consumed;
+    result.resident_load_ms = resident_load_ms;
+    result.resident_lane = workload_is_resident_lane(workload.name());
     merge_dispatch_counter_capture(&mut result, counter_capture);
     Ok(result)
 }
@@ -1623,11 +1681,19 @@ fn prime_pg_accel_backend(client: &mut Client) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// Prime the accel backend and load any GPU-resident cache the workload
+/// requires. Returns `Some(load_ms)` — the wall-clock time spent loading the
+/// resident cache **off** the timed region — for resident-lane workloads, or
+/// `None` for workloads with no resident-cache prerequisite. The caller
+/// records this so the report can surface the off-clock cost the accel side
+/// pays while the PG baseline pays scan I/O on the clock.
 fn prime_workload_accel_backend(
     client: &mut Client,
     workload: &dyn Workload,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Option<f64>, Box<dyn std::error::Error>> {
     prime_pg_accel_backend(client)?;
+    let resident_lane = workload_is_resident_lane(workload.name());
+    let resident_load_start = std::time::Instant::now();
     if ssbm_requires_resident_cache(workload.name()) {
         let row = client.query_one("SELECT pg_accel_load_ssbm_q1_cache()::bigint", &[])?;
         let loaded_rows: i64 = row.get(0);
@@ -1747,7 +1813,19 @@ fn prime_workload_accel_backend(
             .into());
         }
     }
-    Ok(())
+    Ok(resident_lane.then(|| resident_load_start.elapsed().as_secs_f64() * 1000.0))
+}
+
+/// Whether a workload requires a GPU-resident cache preload (any of the
+/// `ssbm_*` / `resident_*` lanes). Used to tag resident-lane rows and to
+/// decide whether resident-load time should be recorded.
+fn workload_is_resident_lane(name: &str) -> bool {
+    ssbm_requires_resident_cache(name)
+        || resident_groupagg_cache_loader(name).is_some()
+        || resident_f64_reduce_cache_loader(name).is_some()
+        || resident_h3_groupagg_cache_loader(name).is_some()
+        || resident_star_dim_groupagg_cache_loader(name).is_some()
+        || resident_hashjoin_count_cache_loader(name).is_some()
 }
 
 fn ssbm_requires_resident_cache(name: &str) -> bool {
@@ -3339,9 +3417,9 @@ fn run_workload_with_config(
     // feeds the dispatch classification (action_items C8 / Reviewer 1
     // Sin #5). The full-plans file (plans.txt) is still written if
     // plans_capture_path is set.
-    let plan_snippet = capture_plan_snippet(connection, workload, rows, BenchMode::Accel).ok();
+    let plan_snippet = capture_plan_snippet(connection, workload, BenchMode::Accel).ok();
     let baseline_plan_snippet =
-        capture_plan_snippet(connection, workload, rows, BenchMode::PgParallel).ok();
+        capture_plan_snippet(connection, workload, BenchMode::PgParallel).ok();
     if let (Some(artifact_writer), Some(snippet)) = (artifacts, plan_snippet.as_deref())
         && let Err(e) = artifact_writer.write_plan_snippet(workload.name(), rows, snippet)
     {
@@ -3405,10 +3483,27 @@ fn run_workload_with_config(
         },
         &result,
     );
+    // Tagged native-decline evidence — sourced only from a real planner
+    // rejection (PlannerReported) or an unconfirmed static expectation
+    // (ExpectedUnconfirmed). Never synthesized into plan text.
+    result.native_decline_evidence = native_decline_evidence(
+        workload.name(),
+        rows,
+        plan_selected,
+        plan_snippet.as_deref(),
+    );
     result.plan_snippet = plan_snippet;
     result.baseline_plan_snippet = baseline_plan_snippet;
     result.correctness_diff_artifact = correctness_diff_artifact;
     result.thermal = thermal;
+    // Cold-honesty tag: if the workload fixture fits within shared_buffers,
+    // the data stays resident even after the OS page-cache purge, so a "cold"
+    // label overstates the eviction. Record it so reports cannot call a run
+    // cold when shared_buffers stayed resident.
+    if matches!(config.cache_mode, CacheMode::Cold | CacheMode::Both) {
+        result.cold_shared_buffers_resident =
+            cold_shared_buffers_resident(connection, &vacuum_stats);
+    }
     result.table_stats = vacuum_stats;
     result.sanity_checks = sanity_checks;
     cleanup(connection, workload)?;
@@ -3979,7 +4074,7 @@ fn capture_and_write_pre_risk_context(
             if let Err(e) = apply_benchmark_safety_settings(&mut client) {
                 explain_error = Some(format!("pre-EXPLAIN safety setup failed: {e}"));
             }
-            if let Err(e) = prime_workload_accel_backend(&mut client, workload).and_then(|()| {
+            if let Err(e) = prime_workload_accel_backend(&mut client, workload).and_then(|_| {
                 client.batch_execute("SET pg_accel.enabled = on")?;
                 client.batch_execute("SET max_parallel_workers_per_gather = DEFAULT")?;
                 for sql in &pre_query_sql {
@@ -4043,14 +4138,24 @@ fn capture_and_write_pre_risk_context(
     Ok(())
 }
 
-/// Capture a short plan snippet (first 30 lines of
-/// `EXPLAIN (VERBOSE, COSTS OFF) <query>`) for one benchmark side. Used
-/// for dispatch classification and no-dispatch native-plan comparability
-/// checks.
+/// Capture the FULL `EXPLAIN (VERBOSE, COSTS OFF) <query>` plan text for one
+/// benchmark side. Used for dispatch classification and no-dispatch
+/// native-plan comparability checks.
+///
+/// The full plan is captured — classification (Custom Scan / GPU-dispatch
+/// detection) runs over ALL rows, not a truncated prefix, so a Custom Scan
+/// node deeper than 30 lines is never misclassified as declined. Display
+/// truncation is the renderer's job, not the capture's.
+///
+/// On the accel side, a real `pg_accel planner rejection reason: <reason>`
+/// line sourced from `pg_accel_last_planner_rejection_reason()` is appended
+/// as legitimate decline evidence. The runner does NOT synthesize any
+/// "benchmark threshold decline reason" line — an expected-but-unconfirmed
+/// decline is carried separately in `WorkloadResult::native_decline_evidence`
+/// tagged `ExpectedUnconfirmed`, never laundered into the plan text.
 fn capture_plan_snippet(
     connection: &str,
     workload: &dyn Workload,
-    rows: usize,
     mode: BenchMode,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
@@ -4078,41 +4183,99 @@ fn capture_plan_snippet(
     let explain = format!("EXPLAIN (VERBOSE, COSTS OFF) {query}");
     let rows_out = client.query(&explain, &[])?;
     let mut buf = String::new();
-    for (i, row) in rows_out.iter().enumerate() {
-        if i >= 30 {
-            break;
-        }
+    for row in &rows_out {
         let line: &str = row.get(0);
         buf.push_str(line);
         buf.push('\n');
     }
-    if matches!(mode, BenchMode::Accel) {
-        let planner_reason = capture_last_planner_rejection_reason(&mut client);
-        if let Some(reason) = planner_reason.as_deref() {
-            buf.push_str("pg_accel planner rejection reason: ");
-            buf.push_str(reason);
-            buf.push('\n');
-        }
-        if let Some(reason) = benchmark_threshold_decline_reason(workload.name(), rows)
-            && !plan_contains_custom_scan(&buf)
-            && planner_reason.as_deref() != Some(reason)
-        {
-            buf.push_str("pg_accel benchmark threshold decline reason: ");
-            buf.push_str(reason);
-            buf.push('\n');
-            let _ = writeln!(
-                buf,
-                "pg_accel benchmark threshold decline evidence: workload={} rows={rows}",
-                workload.name()
-            );
-        }
+    if matches!(mode, BenchMode::Accel)
+        && let Some(reason) = capture_last_planner_rejection_reason(&mut client)
+    {
+        buf.push_str("pg_accel planner rejection reason: ");
+        buf.push_str(&reason);
+        buf.push('\n');
     }
     Ok(buf)
+}
+
+/// Extract the real planner rejection reason from an accel-side plan snippet
+/// captured by [`capture_plan_snippet`], if present. Only matches the
+/// `pg_accel planner rejection reason: ` prefix, i.e. a reason the planner
+/// itself reported — never a synthesized line.
+fn plan_snippet_planner_rejection_reason(plan: &str) -> Option<String> {
+    plan.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("pg_accel planner rejection reason: ")
+            .map(str::to_owned)
+    })
+}
+
+/// Compute the tagged native-decline evidence for a benchmark row.
+///
+/// A real planner rejection (from `pg_accel_last_planner_rejection_reason()`,
+/// surfaced in the accel plan snippet) is `PlannerReported`. Otherwise, if the
+/// static benchmark-threshold matrix expected a decline and no Custom Scan was
+/// selected, the expectation is carried as `ExpectedUnconfirmed`. When a
+/// Custom Scan WAS selected there is no decline to report.
+fn native_decline_evidence(
+    workload_name: &str,
+    rows: usize,
+    plan_selected: bool,
+    plan_snippet: Option<&str>,
+) -> Option<report::NativeDeclineEvidence> {
+    if plan_selected {
+        return None;
+    }
+    if let Some(reason) = plan_snippet.and_then(plan_snippet_planner_rejection_reason) {
+        return Some(report::NativeDeclineEvidence {
+            reason,
+            source: report::DeclineReasonSource::PlannerReported,
+        });
+    }
+    benchmark_threshold_decline_reason(workload_name, rows).map(|reason| {
+        report::NativeDeclineEvidence {
+            reason: reason.to_owned(),
+            source: report::DeclineReasonSource::ExpectedUnconfirmed,
+        }
+    })
 }
 
 fn benchmark_threshold_decline_reason(name: &str, rows: usize) -> Option<&'static str> {
     crate::workloads::benchmark_threshold_matrix_entry(name, rows)
         .and_then(|entry| entry.expectation.decline_reason())
+}
+
+/// Determine whether a cold run's fixture fits inside `shared_buffers`.
+///
+/// If the fixture (sum of `relpages` × `block_size`) is <= `shared_buffers`,
+/// the data can stay resident in PostgreSQL's buffer cache even after the OS
+/// page-cache purge, so the "cold" label overstates the eviction. Returns
+/// `Some(true)` when the data stays resident (NOT truly cold), `Some(false)`
+/// when the fixture exceeds `shared_buffers` (genuinely cold-capable), and
+/// `None` when no table stats were captured or the settings query failed.
+fn cold_shared_buffers_resident(
+    connection: &str,
+    table_stats: &[crate::report::TableStats],
+) -> Option<bool> {
+    if table_stats.is_empty() {
+        return None;
+    }
+    let fixture_pages: i64 = table_stats.iter().map(|t| t.relpages.max(0)).sum();
+    let mut client = Client::connect(connection, NoTls).ok()?;
+    let row = client
+        .query_one(
+            "SELECT pg_size_bytes(current_setting('shared_buffers'))::bigint, \
+                    current_setting('block_size')::bigint",
+            &[],
+        )
+        .ok()?;
+    let shared_buffers_bytes: i64 = row.get(0);
+    let block_size: i64 = row.get(1);
+    if block_size <= 0 {
+        return None;
+    }
+    let fixture_bytes = fixture_pages.saturating_mul(block_size);
+    Some(fixture_bytes <= shared_buffers_bytes)
 }
 
 fn capture_last_planner_rejection_reason(client: &mut Client) -> Option<String> {
