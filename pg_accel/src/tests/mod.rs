@@ -5,6 +5,9 @@
 //! internal Rust APIs.
 
 #[cfg(any(test, feature = "pg_test"))]
+mod phase2_cache;
+
+#[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
     use pgrx::prelude::*;
