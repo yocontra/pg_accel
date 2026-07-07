@@ -4,6 +4,19 @@
 //! pgrx's test framework.  They exercise the public SQL interface rather than
 //! internal Rust APIs.
 
+/// Phase 2 GPU bridge FFI safety unit tests (no PostgreSQL / no GPU needed;
+/// runs under plain `cargo test -p pg_accel --lib`).
+#[cfg(test)]
+mod phase2_bridge;
+#[cfg(any(test, feature = "pg_test"))]
+mod phase2_cache;
+// NOTE: phase2_dispatch.rs is mounted from adapters/mod.rs via #[path] —
+// do not also declare it here (duplicate pg_finfo symbols).
+#[cfg(any(test, feature = "pg_test"))]
+mod phase2_engine;
+mod phase2_kernels;
+mod phase2_window;
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {

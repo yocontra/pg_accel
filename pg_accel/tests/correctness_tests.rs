@@ -15,24 +15,31 @@ use std::collections::HashSet;
 // ---------------------------------------------------------------------------
 
 /// Pixel type to WKB code.
+///
+/// Must match the PostGIS `rt_pixtype` enum (librtcore.h): 0=1BB, 1=2BUI,
+/// 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI, 8=32BUI, 10=32BF, 11=64BF (9 skipped).
 fn pixel_type_to_code(pt: PixelType) -> u8 {
     match pt {
         PixelType::Bool => 0,
-        PixelType::Int8 => 1,
-        PixelType::UInt8 => 2,
-        PixelType::Int16 => 3,
-        PixelType::UInt16 => 4,
-        PixelType::Int32 => 5,
-        PixelType::UInt32 => 6,
-        PixelType::Float32 => 7,
-        PixelType::Float64 => 10,
+        PixelType::UInt2 => 1,
+        PixelType::UInt4 => 2,
+        PixelType::Int8 => 3,
+        PixelType::UInt8 => 4,
+        PixelType::Int16 => 5,
+        PixelType::UInt16 => 6,
+        PixelType::Int32 => 7,
+        PixelType::UInt32 => 8,
+        PixelType::Float32 => 10,
+        PixelType::Float64 => 11,
     }
 }
 
 /// Write a single pixel value for the given pixel type as little-endian bytes.
 fn write_pixel_value(buf: &mut Vec<u8>, pt: PixelType, val: f64) {
     match pt {
-        PixelType::Bool | PixelType::UInt8 => buf.push(val as u8),
+        PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
+            buf.push(val as u8);
+        }
         PixelType::Int8 => buf.push(val as i8 as u8),
         PixelType::Int16 => buf.extend_from_slice(&(val as i16).to_le_bytes()),
         PixelType::UInt16 => buf.extend_from_slice(&(val as u16).to_le_bytes()),
@@ -46,7 +53,9 @@ fn write_pixel_value(buf: &mut Vec<u8>, pt: PixelType, val: f64) {
 /// Write a single pixel value as big-endian bytes.
 fn write_pixel_value_be(buf: &mut Vec<u8>, pt: PixelType, val: f64) {
     match pt {
-        PixelType::Bool | PixelType::UInt8 => buf.push(val as u8),
+        PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
+            buf.push(val as u8);
+        }
         PixelType::Int8 => buf.push(val as i8 as u8),
         PixelType::Int16 => buf.extend_from_slice(&(val as i16).to_be_bytes()),
         PixelType::UInt16 => buf.extend_from_slice(&(val as u16).to_be_bytes()),
@@ -106,7 +115,7 @@ fn build_raster_le_nbands(
 
     for &(pt, nodata, fill) in bands {
         let pix_code = pixel_type_to_code(pt);
-        let flags: u8 = (pix_code << 4) | 0x01; // hasNodata = true
+        let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
         buf.push(flags);
         write_pixel_value(&mut buf, pt, nodata);
         for _ in 0..pixel_count {
@@ -143,7 +152,7 @@ fn build_raster_be(
     buf.extend_from_slice(&height.to_be_bytes());
 
     let pix_code = pixel_type_to_code(pixel_type);
-    let flags: u8 = (pix_code << 4) | 0x01;
+    let flags: u8 = pix_code | 0x40; // low nibble = pixtype, 0x40 = HASNODATA
     buf.push(flags);
     write_pixel_value_be(&mut buf, pixel_type, nodata);
 
@@ -172,8 +181,9 @@ fn build_raster_offline_band(width: u16, height: u16) -> Vec<u8> {
     buf.extend_from_slice(&width.to_le_bytes());
     buf.extend_from_slice(&height.to_le_bytes());
 
-    // Band flags: UInt8 (code 2), offline bit (0x08), hasNodata (0x01)
-    let flags: u8 = (2 << 4) | 0x08 | 0x01;
+    // Band flags: UInt8 (PostGIS rt_pixtype code 4), offline bit (0x08),
+    // hasNodata (0x01).
+    let flags: u8 = 4 | 0x80 | 0x40; // 8BUI, OFFDB, HASNODATA
     buf.push(flags);
     buf.push(0); // nodata = 0
     // Offline band: 1-byte band number + null-terminated path

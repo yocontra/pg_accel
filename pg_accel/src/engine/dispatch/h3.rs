@@ -6,8 +6,18 @@ use crate::engine::gucs;
 use crate::gpu;
 use crate::gpu::three_layer::GeomType;
 
+use super::spatial::const_datum_as_i64;
 #[allow(unused_imports)]
 use super::{DispatchResult, H3DispatchOp};
+
+/// Decode an integer resolution / k / step constant into an `i32`, honouring
+/// the constant's declared type OID (int2/int4/int8/float). Returns `None`
+/// (caller Defers) for NULL, unsupported types, or values outside `i32`.
+fn const_i32_arg(qual: Option<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)>) -> Option<i32> {
+    let (datum, is_null, typid) = qual?;
+    let v = const_datum_as_i64(datum, is_null, typid)?;
+    i32::try_from(v).ok()
+}
 
 // ---------------------------------------------------------------------------
 // Strategy: GpuH3
@@ -36,8 +46,10 @@ pub unsafe fn dispatch_gpu_h3(
 ) -> DispatchResult {
     // First constant arg, if present (most H3 ops take a single scalar
     // const after the cell column: k for grid_disk, res for parent, etc.).
-    let qual_datum: Option<(pgrx::pg_sys::Datum, bool)> =
-        qual_datums.first().map(|&(d, n, _)| (d, n));
+    // The type OID is retained so integer args are decoded by their declared
+    // type rather than blindly truncated from the raw Datum bits.
+    let qual_datum: Option<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> =
+        qual_datums.first().copied();
 
     // ── Variable-output H3 ops ─────────────────────────────────────
     // Each input row expands to a CSR-laid-out list of output cells (or
@@ -90,10 +102,7 @@ pub unsafe fn dispatch_gpu_h3(
     // h3_latlng_to_cell takes point geometries, not cell indices —
     // handle it separately with geometry extraction.
     if op == H3DispatchOp::LatLngToCell {
-        let resolution = qual_datum
-            .filter(|(_, is_null)| !is_null)
-            .map(|(d, _)| d.value() as i32);
-        let Some(res) = resolution else {
+        let Some(res) = const_i32_arg(qual_datum) else {
             return DispatchResult::Deferred;
         };
 
@@ -153,15 +162,25 @@ pub unsafe fn dispatch_gpu_h3(
         }
         // H3 cell indices are bigint (i64) values stored as Datum.
         let cell = datum.value() as u64;
-        // Basic validity check: H3 cells have a non-zero high nibble.
+        // Skip the 0 sentinel (NULL/invalid placeholder). This is NOT a full
+        // H3 validity check — real cell validity (mode bits, reserved high
+        // bit, digit range) is enforced inside the GPU kernel; here we only
+        // drop obvious non-cells so they surface as per-row NULL outputs.
         if cell != 0 {
             cells.push(cell);
             valid_indices.push(i);
         }
     }
 
-    // If we couldn't extract enough cells, fall back to the standard executor.
-    if cells.is_empty() || valid_indices.len() < batch.len() / 2 {
+    // Only a whole batch with nothing to accelerate is an input gate. A batch
+    // that is merely sparse (many NULL/zero cells) is still valid input: per
+    // the dispatch contract (dispatch/mod.rs:265-270) an executor-time
+    // Deferred is a contract error, so we must produce per-row NULL outputs
+    // for the invalid rows rather than declining the whole batch. The result
+    // vector below is pre-filled with NULLs and only valid rows are written,
+    // so sparse batches are handled correctly without a hardcoded ratio gate
+    // (which also violated rule #10).
+    if cells.is_empty() {
         return DispatchResult::Deferred;
     }
 
@@ -192,28 +211,21 @@ pub unsafe fn dispatch_gpu_h3(
             crate::gpu::h3_is_res_class_iii_bulk(&cells).map(GpuH3Result::Bool)
         }
         // 2-arg: cell + resolution constant → parent cell (u64)
-        H3DispatchOp::CellToParent => {
-            let res = qual_datum
-                .filter(|(_, is_null)| !is_null)
-                .map(|(d, _)| d.value() as i32);
-            res.and_then(|parent_res| {
-                crate::gpu::h3_cell_to_parent_bulk(&cells, parent_res).map(GpuH3Result::U64)
-            })
-        }
+        H3DispatchOp::CellToParent => const_i32_arg(qual_datum).and_then(|parent_res| {
+            crate::gpu::h3_cell_to_parent_bulk(&cells, parent_res).map(GpuH3Result::U64)
+        }),
         // 2-arg: cell + resolution constant → center child cell (u64)
-        H3DispatchOp::CellToCenterChild => {
-            let res = qual_datum
-                .filter(|(_, is_null)| !is_null)
-                .map(|(d, _)| d.value() as i32);
-            res.and_then(|child_res| {
-                crate::gpu::h3_cell_to_center_child_bulk(&cells, child_res).map(GpuH3Result::U64)
-            })
-        }
-        // 2-arg: cell_a + cell_b constant → distance (i32)
+        H3DispatchOp::CellToCenterChild => const_i32_arg(qual_datum).and_then(|child_res| {
+            crate::gpu::h3_cell_to_center_child_bulk(&cells, child_res).map(GpuH3Result::U64)
+        }),
+        // 2-arg: cell_a + cell_b constant → distance (i32). The second cell is
+        // an h3index (8-byte pass-by-value); its raw Datum bits ARE the cell,
+        // so read them directly rather than through the integer decoder (which
+        // only knows the builtin int/float OIDs, not the h3index type OID).
         H3DispatchOp::GridDistance => {
             let other_cell = qual_datum
-                .filter(|(_, is_null)| !is_null)
-                .map(|(d, _)| d.value() as u64);
+                .filter(|(_, is_null, _)| !is_null)
+                .map(|(d, _, _)| d.value() as u64);
             other_cell.and_then(|oc| {
                 let cells_b = vec![oc; cells.len()];
                 crate::gpu::h3_grid_distance_bulk(&cells, &cells_b).map(GpuH3Result::I32)
@@ -255,7 +267,7 @@ pub unsafe fn dispatch_gpu_h3(
                 );
             }
             H3DispatchOp::CellToParent => {
-                if qual_datum.is_some_and(|(_, n)| !n) {
+                if qual_datum.is_some_and(|(_, n, _)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_cell_to_parent GPU kernel failed; refusing CPU fallback (rule 11)"
                     );
@@ -263,7 +275,7 @@ pub unsafe fn dispatch_gpu_h3(
                 return DispatchResult::Deferred;
             }
             H3DispatchOp::CellToCenterChild => {
-                if qual_datum.is_some_and(|(_, n)| !n) {
+                if qual_datum.is_some_and(|(_, n, _)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_cell_to_center_child GPU kernel failed; refusing CPU fallback (rule 11)"
                     );
@@ -271,7 +283,7 @@ pub unsafe fn dispatch_gpu_h3(
                 return DispatchResult::Deferred;
             }
             H3DispatchOp::GridDistance => {
-                if qual_datum.is_some_and(|(_, n)| !n) {
+                if qual_datum.is_some_and(|(_, n, _)| !n) {
                     pgrx::error!(
                         "pg_accel: h3_grid_distance GPU kernel failed; refusing CPU fallback (rule 11)"
                     );
@@ -389,15 +401,11 @@ fn extract_h3_cells_from_batch(batch: &[(pgrx::pg_sys::Datum, bool)]) -> (Vec<u6
 /// 2-arg dispatch interface and is the constant `k`.
 unsafe fn dispatch_gpu_h3_var_grid_disk(
     batch: &[(pgrx::pg_sys::Datum, bool)],
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)>,
 ) -> DispatchResult {
-    let Some((k_datum, k_null)) = qual_datum else {
+    let Some(k) = const_i32_arg(qual_datum) else {
         return DispatchResult::Deferred;
     };
-    if k_null {
-        return DispatchResult::Deferred;
-    }
-    let k = k_datum.value() as i32;
 
     let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
     if cells.is_empty() {
@@ -418,15 +426,11 @@ unsafe fn dispatch_gpu_h3_var_grid_disk(
 /// Same as `dispatch_gpu_h3_var_grid_disk`.
 unsafe fn dispatch_gpu_h3_var_grid_ring_unsafe(
     batch: &[(pgrx::pg_sys::Datum, bool)],
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)>,
 ) -> DispatchResult {
-    let Some((k_datum, k_null)) = qual_datum else {
+    let Some(k) = const_i32_arg(qual_datum) else {
         return DispatchResult::Deferred;
     };
-    if k_null {
-        return DispatchResult::Deferred;
-    }
-    let k = k_datum.value() as i32;
 
     let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
     if cells.is_empty() {
@@ -450,15 +454,11 @@ unsafe fn dispatch_gpu_h3_var_grid_ring_unsafe(
 /// Same as `dispatch_gpu_h3_var_grid_disk`.
 unsafe fn dispatch_gpu_h3_var_cell_to_children(
     batch: &[(pgrx::pg_sys::Datum, bool)],
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)>,
 ) -> DispatchResult {
-    let Some((res_datum, res_null)) = qual_datum else {
+    let Some(child_res) = const_i32_arg(qual_datum) else {
         return DispatchResult::Deferred;
     };
-    if res_null {
-        return DispatchResult::Deferred;
-    }
-    let child_res = res_datum.value() as i32;
 
     let (cells, valid_indices) = extract_h3_cells_from_batch(batch);
     if cells.is_empty() {
@@ -696,15 +696,11 @@ unsafe fn dispatch_gpu_h3_cell_to_boundary(
 /// Must be called on the main backend thread.
 unsafe fn dispatch_gpu_h3_polyfill(
     batch: &[(pgrx::pg_sys::Datum, bool)],
-    qual_datum: Option<(pgrx::pg_sys::Datum, bool)>,
+    qual_datum: Option<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)>,
 ) -> DispatchResult {
-    let Some((res_datum, res_null)) = qual_datum else {
+    let Some(resolution) = const_i32_arg(qual_datum) else {
         return DispatchResult::Deferred;
     };
-    if res_null {
-        return DispatchResult::Deferred;
-    }
-    let resolution = res_datum.value() as i32;
 
     // Collect per-row polygon rings from each batch entry. We assemble all
     // rings into one flat coords + offsets buffer and call the kernel
@@ -828,7 +824,10 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
         };
 
         // Collect non-null bigint elements as u64 cells. PG bigint is i64
-        // stored in a Datum; we read each element as 8 packed LE bytes.
+        // stored in the array payload as the in-memory Datum bytes, i.e. in
+        // NATIVE machine byte order — not a fixed little-endian wire format.
+        // Read them with `from_ne_bytes` so this is correct on big-endian
+        // hosts too (the array walker yields raw payload bytes).
         let mut cells: Vec<u64> = Vec::with_capacity(arr.nelems);
         for opt_elem in &arr {
             let Some(bytes) = opt_elem else {
@@ -837,9 +836,7 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
             if bytes.len() < 8 {
                 continue;
             }
-            // SAFETY: bigint elements are 8 bytes LE, packed in the array
-            // payload by PG's array_send/array_out.
-            let cell = u64::from_le_bytes([
+            let cell = u64::from_ne_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
             if cell != 0 {

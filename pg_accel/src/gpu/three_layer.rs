@@ -429,13 +429,14 @@ pub fn spatial_contains(
         // SAFETY: ring lives in geoms_a[0].coords (Rust-owned for the
         // duration of this call); points_xy is owned here; results is
         // owned. vertex_count is `coord_count` which the kernel expects.
+        // The `_f32` wrapper pairs the fp32 buffers with `use_fp64 = false`
+        // at the type level (fp64 pairs use the `_f64` wrapper).
         let status = unsafe {
-            bridge::pgaccel_point_in_ring_bulk(
+            bridge::pgaccel_point_in_ring_bulk_f32(
                 points_xy.as_ptr(),
                 n,
                 geoms_a[0].coords.as_ptr(),
                 geoms_a[0].coord_count,
-                false, // fp32 path; fp64 is fp64 SYCL kernel via the same entry
                 results.as_mut_ptr(),
             )
         };
@@ -464,14 +465,14 @@ pub fn spatial_contains(
         let pt = [geoms_b[i].coords[0], geoms_b[i].coords[1]];
         let mut result = [0i8; 1];
         // SAFETY: pt is a stack-local 2-float array; ring is owned by
-        // geoms_a[i].coords for the call's duration; result is local.
+        // geoms_a[i].coords for the call's duration; result is local. The
+        // `_f32` wrapper pairs fp32 buffers with `use_fp64 = false`.
         let status = unsafe {
-            bridge::pgaccel_point_in_ring_bulk(
+            bridge::pgaccel_point_in_ring_bulk_f32(
                 pt.as_ptr(),
                 1,
                 geoms_a[i].coords.as_ptr(),
                 geoms_a[i].coord_count,
-                false,
                 result.as_mut_ptr(),
             )
         };
@@ -563,13 +564,14 @@ fn spatial_dwithin(
     // SAFETY: All pointers reference live Rust-owned slices of the
     // declared lengths; the kernel is point-only and reads exactly
     // `count * 2` floats from each input. This helper intentionally uses
-    // fp32 because ExtractedGeometry currently stores f32 coordinates.
+    // fp32 because ExtractedGeometry currently stores f32 coordinates; the
+    // `_f32` wrapper pairs the buffers with `use_fp64 = false` at the type
+    // level.
     let status = unsafe {
-        bridge::pgaccel_sphere_distance_bulk(
+        bridge::pgaccel_sphere_distance_bulk_f32(
             a_xy.as_ptr(),
             b_xy.as_ptr(),
             n,
-            false,
             distances.as_mut_ptr(),
             uncertain_flags.as_mut_ptr(),
         )
@@ -634,6 +636,25 @@ fn try_gpu_dispatch(
     let count_a = n;
     let count_b = n;
 
+    // n² blowup guard: the current kernel evaluates the full n×n
+    // cross-product and this function allocates three n²×2 u32 host pair
+    // buffers (24·n² bytes) even though only the n diagonal pairs are
+    // consumed. Decline above the hardware-derived cap instead of
+    // allocating gigabytes (e.g. ~2.4 GB at n = 10K). The caller surfaces
+    // the batch as Uncertain and pg_accel declines the accelerated path.
+    // Diagonal/pairwise kernel is Phase 4 work.
+    let pairwise_cap = crate::engine::cost::device_limits().gpu_spatial_pairwise_max_rows;
+    if n > pairwise_cap {
+        tracing::debug!(
+            target: "pg_accel::gpu",
+            n,
+            pairwise_cap,
+            "spatial_intersects declined: row count exceeds gpu_spatial_pairwise_max_rows \
+             (n×n cross-product kernel; diagonal kernel is Phase 4)"
+        );
+        return None;
+    }
+
     // The C spatial kernel assumes well-formed inputs. Degenerate inputs
     // (Point with no coords, Polygon ring with < 3 vertices, Unknown type)
     // cause out-of-bounds reads inside the kernel, so short-circuit the
@@ -696,10 +717,14 @@ fn try_gpu_dispatch(
         })
         .collect();
 
-    let total_pairs = count_a * count_b;
-    let mut true_pairs = vec![0u32; total_pairs * 2];
-    let mut false_pairs = vec![0u32; total_pairs * 2];
-    let mut uncertain_pairs = vec![0u32; total_pairs * 2];
+    // Checked pair-buffer sizing: `n` is already bounded by `pairwise_cap`
+    // above, so these cannot overflow in practice; the checked ops make the
+    // bound load-bearing rather than assumed.
+    let total_pairs = count_a.checked_mul(count_b)?;
+    let buf_len = total_pairs.checked_mul(2)?;
+    let mut true_pairs = vec![0u32; buf_len];
+    let mut false_pairs = vec![0u32; buf_len];
+    let mut uncertain_pairs = vec![0u32; buf_len];
     let mut true_count: usize = 0;
     let mut false_count: usize = 0;
     let mut uncertain_count: usize = 0;

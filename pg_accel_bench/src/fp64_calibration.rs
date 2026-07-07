@@ -766,6 +766,7 @@ mod tests {
                 accel_ms,
                 parallel_ms,
                 cache_purge: crate::bench_model::CachePurgeState::default(),
+                cache_state: crate::bench_model::CacheState::default(),
             })
             .collect::<Vec<_>>();
         let mut result = WorkloadResult::from_iterations(

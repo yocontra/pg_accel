@@ -30,8 +30,13 @@ pub struct AccelStats {
     pub planner_hook_calls: u64,
     pub command_type_skips: u64,
     pub window_gpu_failures: u64,
-    /// GPU kernel executions (from C++ thread-local counter).
-    pub gpu_kernel_executions: u64,
+    // NOTE: there is deliberately no `gpu_kernel_executions` field here. The
+    // `gpu_kernel_executions` SRF column is sourced live from the C++
+    // thread-local counter via `crate::gpu::gpu_exec_count()` (see
+    // `pg_accel_stats`), never from this struct. A struct field was dead —
+    // written nowhere in production and only ever read back as its own
+    // default zero — so it was removed rather than left as a misleading
+    // always-zero counter.
 }
 
 thread_local! {
@@ -357,6 +362,45 @@ pub fn kernel_executions_snapshot() -> u64 {
 // SQL-callable functions
 // ---------------------------------------------------------------------------
 
+/// Returns per-domain GPU kernel-failure counters (backend-local), one row per
+/// [`crate::gpu::counters::GpuFailureDomain`], plus an `unknown_status` row for
+/// out-of-range raw status values from the C side. Failures are recorded at the
+/// single status-conversion point in `gpu::bridge`, so every non-OK kernel
+/// status is visible here regardless of how the caller degraded it.
+#[pg_extern]
+fn pg_accel_gpu_failures()
+-> TableIterator<'static, (name!(domain, String), name!(failure_count, i64))> {
+    use crate::gpu::{GpuFailureDomain as D, kernel_failure_count, unknown_status_count};
+    const DOMAINS: [(D, &str); 12] = [
+        (D::Runtime, "runtime"),
+        (D::Spatial, "spatial"),
+        (D::H3, "h3"),
+        (D::Raster, "raster"),
+        (D::Sort, "sort"),
+        (D::Reduce, "reduce"),
+        (D::Expr, "expr"),
+        (D::HashAgg, "hash_agg"),
+        (D::HashJoin, "hash_join"),
+        (D::Window, "window"),
+        (D::NestedLoop, "nested_loop"),
+        (D::Memory, "memory"),
+    ];
+    let mut rows: Vec<(String, i64)> = DOMAINS
+        .iter()
+        .map(|(d, label)| {
+            (
+                (*label).to_string(),
+                i64::try_from(kernel_failure_count(*d)).unwrap_or(i64::MAX),
+            )
+        })
+        .collect();
+    rows.push((
+        "unknown_status".to_string(),
+        i64::try_from(unknown_status_count()).unwrap_or(i64::MAX),
+    ));
+    TableIterator::new(rows)
+}
+
 /// Returns per-backend acceleration counters as a single row.
 #[pg_extern]
 #[allow(clippy::type_complexity)]
@@ -461,6 +505,23 @@ fn pg_accel_reset_stats() {
     PLANNER_REJECTION_REASON_COUNTS.with(|counts| {
         counts.borrow_mut().clear();
     });
+    // Reset the process-wide atomic counters too. Each PG backend is a
+    // separate process, so these atomics are effectively per-backend and the
+    // benchmark harness (which calls this immediately before a timed EXPLAIN
+    // / query) expects a clean slate. Leaving them cumulative made the
+    // planner-considered/rejected, GPU-cache, planner-overhead, degenerate-
+    // guard, and fast-decline SRF columns read stale totals after a reset.
+    PLANNER_CONSIDERED.store(0, Ordering::Relaxed);
+    PLANNER_REJECTED.store(0, Ordering::Relaxed);
+    DEGENERATE_GUARD_TRIGGERS.store(0, Ordering::Relaxed);
+    GPU_CACHE_HITS.store(0, Ordering::Relaxed);
+    GPU_CACHE_MISSES.store(0, Ordering::Relaxed);
+    PLANNER_HOOK_TOTAL_US.store(0, Ordering::Relaxed);
+    PLANNER_FAST_DECLINE.store(0, Ordering::Relaxed);
+    // `gpu_kernel_executions` is intentionally NOT reset here: it is a
+    // monotonic counter owned by the C++ runtime (`crate::gpu::gpu_exec_count`)
+    // that the harness reads by *delta* (before/after subtraction), not by
+    // absolute value, so a reset would be meaningless and cross-module.
 }
 
 /// Returns the last planner rejection reason observed by this backend.
@@ -725,6 +786,10 @@ fn pg_accel_device_limits() -> TableIterator<
             "gpu_nlj_per_pair_cost".into(),
             limits.gpu_nlj_per_pair_cost.to_string(),
         ),
+        (
+            "gpu_spatial_pairwise_max_rows".into(),
+            limits.gpu_spatial_pairwise_max_rows.to_string(),
+        ),
         ("has_native_fp64".into(), limits.has_native_fp64.to_string()),
         (
             "soft_fp64_cost_multiplier".into(),
@@ -949,7 +1014,6 @@ mod tests {
             planner_hook_calls: 0,
             command_type_skips: 0,
             window_gpu_failures: 0,
-            gpu_kernel_executions: 0,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("queries_accelerated: 5"));
@@ -973,7 +1037,6 @@ mod tests {
         assert_eq!(s.planner_hook_calls, 0);
         assert_eq!(s.command_type_skips, 0);
         assert_eq!(s.window_gpu_failures, 0);
-        assert_eq!(s.gpu_kernel_executions, 0);
     }
 
     // -- atomic bench-mode counters ------------------------------------------

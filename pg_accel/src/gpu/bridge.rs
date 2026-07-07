@@ -16,22 +16,133 @@ pub use super::types::{
 // Extern declarations — linked at load time against libpgaccel_kernels.
 // ---------------------------------------------------------------------------
 //
-// The declarations below mirror `pgaccel-kernels/include/pgaccel_ffi.h`
-// exactly. The full surface is declared even when individual symbols
-// have no current Rust caller — this is the ABI contract, not a list
-// of "currently used" symbols. Future Rust executors / dispatch
-// strategies pick from the same surface; truncating it would mean
-// reconstructing the FFI declarations every time a new caller lands.
+// Scope (honest, verified against `pgaccel-kernels/include/*.h` 2026-07-07):
+// the declarations below cover every header symbol that has a current or
+// staged Rust caller. Declarations match the C signatures exactly, but this
+// is NOT the complete header surface. Six symbols from `pgaccel_ffi.h` are
+// intentionally NOT declared because nothing on the Rust side calls them and
+// an extern declaration carries no cross-checking value on its own (the
+// linker does not type-check, so an unused declaration is dead surface that
+// can silently drift):
 //
-// `#[allow(dead_code)]` on the extern block is intentional and narrow
+//   - pgaccel_sort_u64                        (pgaccel_ffi.h:174)
+//   - pgaccel_sort_kv_i32_device              (pgaccel_ffi.h:190)
+//   - pgaccel_sort_kv_i32_nonnegative_device  (pgaccel_ffi.h:191)
+//   - pgaccel_sort_window_overlap_probe       (pgaccel_ffi.h:80)
+//   - pgaccel_archive_stats_snapshot          (pgaccel_ffi.h:126)
+//   - pgaccel_archive_jit_cache_dir           (pgaccel_ffi.h:131)
+//
+// When a caller for one of these lands, declare it here (through
+// `bridge_status_fns!` if it returns `pgaccel_status`) in the same change.
+//
+// Status returns: every kernel entry point that returns `pgaccel_status` in
+// C is declared `-> i32` (inside `bridge_status_fns!` below) and converted
+// through `PgaccelStatus::from_raw` at the wrapper layer. Declaring the
+// return as the fieldless `#[repr(i32)]` enum would be undefined behaviour
+// for any out-of-range value coming back from C.
+//
+// `#[allow(dead_code)]` on the extern items is intentional and narrow
 // (per anti-cheat ban #8 — not a module-scope blanket): it covers
 // only the FFI mirror, with the reason documented above.
-//
-// SAFETY: These are the C FFI bindings to libpgaccel_kernels. The functions
-// are implemented in C++ and linked at load time. Caller must ensure
-// pgaccel_init() is called before other functions.
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_ffi.h, layout + symbol set are load-bearing
-unsafe extern "C" {
+
+/// Declares raw `-> i32` externs plus converting public wrappers for every
+/// kernel entry point whose C return type is `pgaccel_status`.
+///
+/// The raw extern lives in the private `raw` module and returns `i32`
+/// exactly as the C ABI does. The generated public wrapper keeps the
+/// original symbol name and argument list, forwards to the raw extern, and
+/// converts through [`convert_status`] — the single point where unknown
+/// status values are rejected (logged + counted, never assumed OK) and
+/// every non-OK status is logged at error level with a per-domain failure
+/// counter bump.
+macro_rules! bridge_status_fns {
+    ($(
+        $(#[$meta:meta])*
+        pub fn $name:ident( $($arg:ident : $ty:ty),* $(,)? ) -> PgaccelStatus;
+    )*) => {
+        /// Raw `-> i32` extern declarations for status-returning kernel
+        /// entry points. Never call these directly — go through the
+        /// like-named converting wrappers in `bridge`.
+        mod raw {
+            #[allow(unused_imports)] // reason: which mirror types appear in signatures varies
+            use super::*;
+
+            #[allow(dead_code)] // reason: ABI mirror of pgaccel headers; symbol set is load-bearing
+            #[allow(clippy::too_many_arguments)] // reason: C kernel ABI dictates the arity
+            unsafe extern "C" {
+                $( pub fn $name( $($arg : $ty),* ) -> i32; )*
+            }
+        }
+        $(
+            $(#[$meta])*
+            ///
+            /// # Safety
+            ///
+            /// Direct C kernel entry point: the caller must uphold the
+            /// pointer/count contract documented for this symbol in the
+            /// pgaccel headers (buffers valid for the stated counts,
+            /// `pgaccel_init()` called first).
+            #[allow(dead_code)] // reason: ABI mirror of pgaccel headers; symbol set is load-bearing
+            #[allow(clippy::too_many_arguments)] // reason: C kernel ABI dictates the arity
+            #[must_use]
+            #[inline]
+            pub unsafe fn $name( $($arg : $ty),* ) -> PgaccelStatus {
+                // SAFETY: forwards verbatim to the like-named C symbol; the
+                // caller upholds that symbol's documented contract.
+                let raw_status = unsafe { raw::$name( $($arg),* ) };
+                convert_status(stringify!($name), raw_status)
+            }
+        )*
+    };
+}
+
+/// Convert a raw C status `i32` into [`PgaccelStatus`] at the single
+/// bridge conversion point.
+///
+/// - Unknown raw values (ABI drift / corruption) are logged at error level
+///   with the raw value, counted via `counters::record_unknown_status`, and
+///   mapped to [`PgaccelStatus::ErrorUnsupported`] so no caller can treat
+///   them as success.
+/// - Every non-OK status is logged at error level with the failing symbol
+///   name and counted per kernel domain via
+///   `counters::record_kernel_failure` — kernel dispatch failures are no
+///   longer silent even when the caller collapses them to a degraded value
+///   (`None` / `all_uncertain`). The degraded-return semantics themselves
+///   are unchanged (Phase 6 owns that policy).
+pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
+    match PgaccelStatus::from_raw(raw) {
+        Ok(PgaccelStatus::Ok) => PgaccelStatus::Ok,
+        Ok(status) => {
+            let domain = super::counters::GpuFailureDomain::classify(func);
+            super::counters::record_kernel_failure(domain);
+            tracing::error!(
+                target: "pg_accel::gpu",
+                func,
+                status = ?status,
+                raw,
+                domain = domain.as_str(),
+                "GPU kernel dispatch failed"
+            );
+            status
+        }
+        Err(unknown) => {
+            let domain = super::counters::GpuFailureDomain::classify(func);
+            super::counters::record_kernel_failure(domain);
+            super::counters::record_unknown_status();
+            tracing::error!(
+                target: "pg_accel::gpu",
+                func,
+                raw = unknown,
+                domain = domain.as_str(),
+                "GPU kernel returned an UNKNOWN status value (ABI drift or \
+                 memory corruption on the C side); treating as ErrorUnsupported"
+            );
+            PgaccelStatus::ErrorUnsupported
+        }
+    }
+}
+
+bridge_status_fns! {
     /// Initialise the GPU runtime.  Must be called once before any other
     /// `pgaccel_*` function.
     pub fn pgaccel_init() -> PgaccelStatus;
@@ -39,44 +150,22 @@ unsafe extern "C" {
     /// Tear down the GPU runtime and release all resources.
     pub fn pgaccel_shutdown() -> PgaccelStatus;
 
-    /// Return information about the selected compute device.
-    ///
-    /// Exposed as `pgaccel_get_device_info_raw` so the public wrapper
-    /// below can apply process-wide overrides (e.g.
-    /// `PGACCEL_FORCE_SOFT_FP64_COST`) before the struct reaches the rest
-    /// of the crate.
-    #[link_name = "pgaccel_get_device_info"]
-    fn pgaccel_get_device_info_raw() -> PgaccelDeviceInfo;
-
-    /// Return platform-level capability flags.
-    ///
-    /// Exposed as `pgaccel_get_caps_raw` so the public wrapper below can
-    /// apply process-wide overrides (e.g. `PGACCEL_FORCE_SOFT_FP64_COST`)
-    /// before the caps struct reaches the rest of the crate.
-    #[link_name = "pgaccel_get_caps"]
-    fn pgaccel_get_caps_raw() -> PgaccelPlatformCaps;
-
-    /// Pre-fork warmup: initialize Metal/SkyLight in the postmaster before
-    /// fork. Safe to call from `_PG_init()` — does not spawn threads.
-    pub fn pgaccel_prefork_warmup();
-
-    // -- GPU execution observability --
-
-    /// Number of kernel invocations that ran on GPU since last reset.
-    pub fn pgaccel_gpu_exec_count() -> u64;
-
-    /// Reset the GPU execution counter to zero.
-    pub fn pgaccel_reset_gpu_exec_count();
-
     // -- Spatial predicate kernels --
 
     /// Bulk point-in-ring test.
     ///
     /// Results: 1 = inside, -1 = outside, 0 = uncertain.
+    ///
+    /// `points_xy` / `ring_xy` mirror the C ABI (`pgaccel_ffi.h:338-343`):
+    /// untyped `const void*` buffers whose element type is selected by
+    /// `use_fp64` (`false` = f32, `true` = f64). Prefer the typed
+    /// [`pgaccel_point_in_ring_bulk_f32`] / [`pgaccel_point_in_ring_bulk_f64`]
+    /// wrappers, which make the buffer-type/flag pairing impossible to get
+    /// wrong.
     pub fn pgaccel_point_in_ring_bulk(
-        points_xy: *const f32,
+        points_xy: *const std::ffi::c_void,
         point_count: usize,
-        ring_xy: *const f32,
+        ring_xy: *const std::ffi::c_void,
         vertex_count: usize,
         use_fp64: bool,
         results: *mut i8,
@@ -86,21 +175,33 @@ unsafe extern "C" {
     ///
     /// Outputs distances in metres. `uncertain[i] = 1` means the GPU result
     /// was not classified as exact; pg_accel callers must reject it.
+    ///
+    /// `points_a` / `points_b` / `distances` mirror the C ABI
+    /// (`pgaccel_ffi.h:345-350`): untyped `void*` buffers whose element type
+    /// is selected by `use_fp64`. Prefer the typed
+    /// [`pgaccel_sphere_distance_bulk_f32`] / [`pgaccel_sphere_distance_bulk_f64`]
+    /// wrappers.
     pub fn pgaccel_sphere_distance_bulk(
-        points_a: *const f32,
-        points_b: *const f32,
+        points_a: *const std::ffi::c_void,
+        points_b: *const std::ffi::c_void,
         count: usize,
         use_fp64: bool,
-        distances: *mut f32,
+        distances: *mut std::ffi::c_void,
         uncertain: *mut u8,
     ) -> PgaccelStatus;
 
     /// Bulk segment intersection test.
     ///
     /// Results: 1 = intersects, -1 = no, 0 = uncertain.
+    ///
+    /// `segs_a` / `segs_b` mirror the C ABI (`pgaccel_ffi.h:352-357`):
+    /// untyped `const void*` buffers whose element type is selected by
+    /// `use_fp64`. Prefer the typed
+    /// [`pgaccel_segment_intersects_bulk_f32`] /
+    /// [`pgaccel_segment_intersects_bulk_f64`] wrappers.
     pub fn pgaccel_segment_intersects_bulk(
-        segs_a: *const f32,
-        segs_b: *const f32,
+        segs_a: *const std::ffi::c_void,
+        segs_b: *const std::ffi::c_void,
         count: usize,
         use_fp64: bool,
         results: *mut i8,
@@ -849,9 +950,6 @@ unsafe extern "C" {
         out: *mut *mut std::ffi::c_void,
     ) -> PgaccelStatus;
 
-    /// Free a pointer returned by `pgaccel_expr_shared_alloc`.
-    pub fn pgaccel_expr_shared_free(ptr: *mut std::ffi::c_void);
-
     /// Allocate device memory for resident cached columns and scratch.
     pub fn pgaccel_expr_device_alloc(
         bytes: usize,
@@ -864,9 +962,6 @@ unsafe extern "C" {
         bytes: usize,
         out: *mut *mut std::ffi::c_void,
     ) -> PgaccelStatus;
-
-    /// Free a pointer returned by `pgaccel_expr_device_alloc_copy`.
-    pub fn pgaccel_expr_device_free(ptr: *mut std::ffi::c_void);
 
     /// Template: col <cmp> const.
     pub fn pgaccel_expr_template_cmp_const(
@@ -1039,8 +1134,6 @@ unsafe extern "C" {
         selected_count: *mut usize,
         uncertain_count: *mut usize,
     ) -> PgaccelStatus;
-
-    pub fn pgaccel_expr_template_ssbm_q1_scratch_items(row_count: usize) -> usize;
 
     pub fn pgaccel_expr_template_ssbm_q1_revenue_i64_usm_scratch(
         orderdate_col: PgaccelExprUsmCol,
@@ -1590,28 +1683,6 @@ unsafe extern "C" {
         uncertain_count: *mut usize,
     ) -> PgaccelStatus;
 
-    // -- Hash join kernels --
-
-    /// Build a hash table from inner relation keys.
-    pub fn pgaccel_hash_join_build(
-        keys: *const std::ffi::c_void,
-        null_mask: *const u8,
-        indices: *const u32,
-        count: usize,
-        key_type: PgaccelKeyType,
-    ) -> *mut PgaccelHashTable;
-
-    /// Build a count-only hash table from already device-resident inner keys.
-    pub fn pgaccel_hash_join_build_device_count(
-        device_keys: *const std::ffi::c_void,
-        device_null_mask: *const u8,
-        count: usize,
-        key_type: PgaccelKeyType,
-    ) -> *mut PgaccelHashTable;
-
-    /// Free a hash table.
-    pub fn pgaccel_hash_join_free(ht: *mut PgaccelHashTable);
-
     /// Probe the hash table with outer keys.
     #[allow(clippy::too_many_arguments)]
     pub fn pgaccel_hash_join_probe(
@@ -1641,94 +1712,6 @@ unsafe extern "C" {
         outer_count: usize,
         match_count: *mut usize,
     ) -> PgaccelStatus;
-
-    // -- Hash aggregation kernels --
-
-    /// Perform grouped aggregation on columnar data.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_hash_agg_execute(
-        group_keys: *const std::ffi::c_void,
-        group_null_mask: *const u8,
-        row_count: usize,
-        key_type: i32,
-        value_cols: *const *const std::ffi::c_void,
-        value_nulls: *const *const u8,
-        value_types: *const i32,
-        agg_cols: *const PgaccelAggCol,
-        num_aggs: usize,
-    ) -> *mut PgaccelAggState;
-
-    /// Perform grouped COUNT(*) over int64 group keys. This symbol is
-    /// fail-closed and has no host hash-table grouping fallback in the C++
-    /// implementation.
-    pub fn pgaccel_hash_count_i64_execute(
-        group_keys: *const i64,
-        group_null_mask: *const u8,
-        row_count: usize,
-    ) -> *mut PgaccelAggState;
-
-    /// Perform grouped COUNT(*) over a resident int64 key buffer using the
-    /// bounded device hash-count path.
-    pub fn pgaccel_hash_count_i64_device_hash_execute_bounded(
-        group_keys: *mut i64,
-        row_count: usize,
-        max_distinct_hint: usize,
-    ) -> *mut PgaccelAggState;
-
-    /// Perform grouped COUNT(*) over an already-sorted resident int64 key
-    /// buffer using the compact-count device path.
-    pub fn pgaccel_hash_count_i64_sorted_device_execute(
-        sorted_group_keys: *mut i64,
-        row_count: usize,
-    ) -> *mut PgaccelAggState;
-
-    /// Get the number of groups in the aggregation result.
-    pub fn pgaccel_agg_group_count(state: *const PgaccelAggState) -> usize;
-
-    /// Get the group keys as a contiguous buffer.
-    pub fn pgaccel_agg_get_group_keys(state: *const PgaccelAggState) -> *const std::ffi::c_void;
-
-    /// Get aggregate results for one aggregate column.
-    pub fn pgaccel_agg_get_results(state: *const PgaccelAggState, agg_idx: usize) -> *const f64;
-
-    /// Perform grouped aggregation in **partial** mode (Phase 3B).
-    ///
-    /// Same input shape as `pgaccel_hash_agg_execute`. Output emits per-group
-    /// transition states matching PG's combine functions: 1 lane for
-    /// SUM/MIN/MAX/COUNT (identical to finalize mode), 2 lanes
-    /// `[N, sum]` for `AVG`, 3 lanes `[N, sum, sum_sq]` for STDDEV/VAR.
-    /// Read per-agg results via `pgaccel_agg_get_partial_results` and
-    /// per-agg lane width via `pgaccel_agg_get_partial_width`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_hash_agg_execute_partial(
-        group_keys: *const std::ffi::c_void,
-        group_null_mask: *const u8,
-        row_count: usize,
-        key_type: i32,
-        value_cols: *const *const std::ffi::c_void,
-        value_nulls: *const *const u8,
-        value_types: *const i32,
-        agg_cols: *const PgaccelAggCol,
-        num_aggs: usize,
-    ) -> *mut PgaccelAggState;
-
-    /// Get partial-mode aggregate results for one aggregate column.
-    ///
-    /// Returns a pointer to `group_count * partial_width(func)` f64 values
-    /// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
-    pub fn pgaccel_agg_get_partial_results(
-        state: *const PgaccelAggState,
-        agg_idx: usize,
-    ) -> *const f64;
-
-    /// Get partial-mode lane width for one aggregate column. 0 on error.
-    pub fn pgaccel_agg_get_partial_width(state: *const PgaccelAggState, agg_idx: usize) -> usize;
-
-    /// Get per-group row counts.
-    pub fn pgaccel_agg_get_counts(state: *const PgaccelAggState) -> *const i64;
-
-    /// Free aggregation state.
-    pub fn pgaccel_agg_free(state: *mut PgaccelAggState);
 
     // -- Window function kernels --
 
@@ -1876,6 +1859,326 @@ unsafe extern "C" {
     ) -> PgaccelStatus;
 }
 
+// Non-status externs: entry points returning pointers, scalars, structs, or
+// nothing. These carry no `pgaccel_status` and need no conversion layer.
+//
+// SAFETY: These are the C FFI bindings to libpgaccel_kernels. The functions
+// are implemented in C++ and linked at load time. Caller must ensure
+// pgaccel_init() is called before other functions.
+#[allow(dead_code)] // reason: ABI mirror of pgaccel headers; symbol set is load-bearing
+unsafe extern "C" {
+
+    /// Return information about the selected compute device.
+    ///
+    /// Exposed as `pgaccel_get_device_info_raw` so the public wrapper
+    /// below can apply process-wide overrides (e.g.
+    /// `PGACCEL_FORCE_SOFT_FP64_COST`) before the struct reaches the rest
+    /// of the crate.
+    #[link_name = "pgaccel_get_device_info"]
+    fn pgaccel_get_device_info_raw() -> PgaccelDeviceInfo;
+
+    /// Return platform-level capability flags.
+    ///
+    /// Exposed as `pgaccel_get_caps_raw` so the public wrapper below can
+    /// apply process-wide overrides (e.g. `PGACCEL_FORCE_SOFT_FP64_COST`)
+    /// before the caps struct reaches the rest of the crate.
+    #[link_name = "pgaccel_get_caps"]
+    fn pgaccel_get_caps_raw() -> PgaccelPlatformCaps;
+
+    /// Pre-fork warmup: initialize Metal/SkyLight in the postmaster before
+    /// fork. Safe to call from `_PG_init()` — does not spawn threads.
+    pub fn pgaccel_prefork_warmup();
+
+    // -- GPU execution observability --
+
+    /// Number of kernel invocations that ran on GPU since last reset.
+    pub fn pgaccel_gpu_exec_count() -> u64;
+
+    /// Reset the GPU execution counter to zero.
+    pub fn pgaccel_reset_gpu_exec_count();
+
+    // NOTE: the USM arena externs (pgaccel_alloc/free/pool_reset/
+    // pool_bytes_used/prefetch) were removed in Phase 3 — the arena had zero
+    // callers on either side of the FFI. The C symbol pgaccel_pool_reset
+    // still exists (device_manager.cpp calls it at shutdown) but no Rust
+    // code invokes it.
+
+    /// Free a pointer returned by `pgaccel_expr_shared_alloc`.
+    pub fn pgaccel_expr_shared_free(ptr: *mut std::ffi::c_void);
+
+    /// Free a pointer returned by `pgaccel_expr_device_alloc_copy`.
+    pub fn pgaccel_expr_device_free(ptr: *mut std::ffi::c_void);
+
+    pub fn pgaccel_expr_template_ssbm_q1_scratch_items(row_count: usize) -> usize;
+
+    // -- Hash join kernels --
+
+    /// Build a hash table from inner relation keys.
+    pub fn pgaccel_hash_join_build(
+        keys: *const std::ffi::c_void,
+        null_mask: *const u8,
+        indices: *const u32,
+        count: usize,
+        key_type: PgaccelKeyType,
+    ) -> *mut PgaccelHashTable;
+
+    /// Build a count-only hash table from already device-resident inner keys.
+    pub fn pgaccel_hash_join_build_device_count(
+        device_keys: *const std::ffi::c_void,
+        device_null_mask: *const u8,
+        count: usize,
+        key_type: PgaccelKeyType,
+    ) -> *mut PgaccelHashTable;
+
+    /// Free a hash table.
+    pub fn pgaccel_hash_join_free(ht: *mut PgaccelHashTable);
+
+    // -- Hash aggregation kernels --
+
+    /// Perform grouped aggregation on columnar data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_hash_agg_execute(
+        group_keys: *const std::ffi::c_void,
+        group_null_mask: *const u8,
+        row_count: usize,
+        key_type: i32,
+        value_cols: *const *const std::ffi::c_void,
+        value_nulls: *const *const u8,
+        value_types: *const i32,
+        agg_cols: *const PgaccelAggCol,
+        num_aggs: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Perform grouped COUNT(*) over int64 group keys. This symbol is
+    /// fail-closed and has no host hash-table grouping fallback in the C++
+    /// implementation.
+    pub fn pgaccel_hash_count_i64_execute(
+        group_keys: *const i64,
+        group_null_mask: *const u8,
+        row_count: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Perform grouped COUNT(*) over a resident int64 key buffer using the
+    /// bounded device hash-count path.
+    pub fn pgaccel_hash_count_i64_device_hash_execute_bounded(
+        group_keys: *mut i64,
+        row_count: usize,
+        max_distinct_hint: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Perform grouped COUNT(*) over an already-sorted resident int64 key
+    /// buffer using the compact-count device path.
+    pub fn pgaccel_hash_count_i64_sorted_device_execute(
+        sorted_group_keys: *mut i64,
+        row_count: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Get the number of groups in the aggregation result.
+    pub fn pgaccel_agg_group_count(state: *const PgaccelAggState) -> usize;
+
+    /// Get the group keys as a contiguous buffer.
+    pub fn pgaccel_agg_get_group_keys(state: *const PgaccelAggState) -> *const std::ffi::c_void;
+
+    /// Get aggregate results for one aggregate column.
+    pub fn pgaccel_agg_get_results(state: *const PgaccelAggState, agg_idx: usize) -> *const f64;
+
+    /// Perform grouped aggregation in **partial** mode (Phase 3B).
+    ///
+    /// Same input shape as `pgaccel_hash_agg_execute`. Output emits per-group
+    /// transition states matching PG's combine functions: 1 lane for
+    /// SUM/MIN/MAX/COUNT (identical to finalize mode), 2 lanes
+    /// `[N, sum]` for `AVG`, 3 lanes `[N, sum, sum_sq]` for STDDEV/VAR.
+    /// Read per-agg results via `pgaccel_agg_get_partial_results` and
+    /// per-agg lane width via `pgaccel_agg_get_partial_width`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pgaccel_hash_agg_execute_partial(
+        group_keys: *const std::ffi::c_void,
+        group_null_mask: *const u8,
+        row_count: usize,
+        key_type: i32,
+        value_cols: *const *const std::ffi::c_void,
+        value_nulls: *const *const u8,
+        value_types: *const i32,
+        agg_cols: *const PgaccelAggCol,
+        num_aggs: usize,
+    ) -> *mut PgaccelAggState;
+
+    /// Get partial-mode aggregate results for one aggregate column.
+    ///
+    /// Returns a pointer to `group_count * partial_width(func)` f64 values
+    /// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
+    pub fn pgaccel_agg_get_partial_results(
+        state: *const PgaccelAggState,
+        agg_idx: usize,
+    ) -> *const f64;
+
+    /// Get partial-mode lane width for one aggregate column. 0 on error.
+    pub fn pgaccel_agg_get_partial_width(state: *const PgaccelAggState, agg_idx: usize) -> usize;
+
+    /// Get per-group row counts.
+    pub fn pgaccel_agg_get_counts(state: *const PgaccelAggState) -> *const i64;
+
+    /// Free aggregation state.
+    pub fn pgaccel_agg_free(state: *mut PgaccelAggState);
+}
+
+// ---------------------------------------------------------------------------
+// Typed spatial wrappers over the `void* + use_fp64` C ABI
+// ---------------------------------------------------------------------------
+//
+// The three spatial predicate kernels take untyped `void*` buffers whose
+// element type is selected by a `use_fp64` flag (`pgaccel_ffi.h:338-357`).
+// The raw wrappers above mirror that ABI exactly; the typed pairs below fix
+// the buffer type and the flag together so the type system prevents the
+// f64-through-f32-buffer mismatch. New call sites should use these.
+
+/// `pgaccel_point_in_ring_bulk` with fp32 buffers (`use_fp64 = false`).
+///
+/// # Safety
+/// `points_xy` must hold `point_count * 2` f32 values, `ring_xy` must hold
+/// `vertex_count * 2` f32 values, and `results` must have room for
+/// `point_count` bytes. `pgaccel_init()` must have been called.
+#[must_use]
+pub unsafe fn pgaccel_point_in_ring_bulk_f32(
+    points_xy: *const f32,
+    point_count: usize,
+    ring_xy: *const f32,
+    vertex_count: usize,
+    results: *mut i8,
+) -> PgaccelStatus {
+    // SAFETY: forwards to the void* ABI with the flag matching the buffer
+    // element type (f32 / false); caller upholds the pointer contract.
+    unsafe {
+        pgaccel_point_in_ring_bulk(
+            points_xy.cast(),
+            point_count,
+            ring_xy.cast(),
+            vertex_count,
+            false,
+            results,
+        )
+    }
+}
+
+/// `pgaccel_point_in_ring_bulk` with fp64 buffers (`use_fp64 = true`).
+///
+/// # Safety
+/// Same contract as [`pgaccel_point_in_ring_bulk_f32`] with f64 elements.
+#[allow(dead_code)]
+// reason: typed pair of the f32 wrapper; the f64 three-layer contract lands with the shared typed-geometry work
+#[must_use]
+pub unsafe fn pgaccel_point_in_ring_bulk_f64(
+    points_xy: *const f64,
+    point_count: usize,
+    ring_xy: *const f64,
+    vertex_count: usize,
+    results: *mut i8,
+) -> PgaccelStatus {
+    // SAFETY: forwards to the void* ABI with the flag matching the buffer
+    // element type (f64 / true); caller upholds the pointer contract.
+    unsafe {
+        pgaccel_point_in_ring_bulk(
+            points_xy.cast(),
+            point_count,
+            ring_xy.cast(),
+            vertex_count,
+            true,
+            results,
+        )
+    }
+}
+
+/// `pgaccel_sphere_distance_bulk` with fp32 buffers (`use_fp64 = false`).
+///
+/// # Safety
+/// `points_a` / `points_b` must each hold `count * 2` f32 lon/lat values;
+/// `distances` must have room for `count` f32 values; `uncertain` must have
+/// room for `count` bytes. `pgaccel_init()` must have been called.
+#[must_use]
+pub unsafe fn pgaccel_sphere_distance_bulk_f32(
+    points_a: *const f32,
+    points_b: *const f32,
+    count: usize,
+    distances: *mut f32,
+    uncertain: *mut u8,
+) -> PgaccelStatus {
+    // SAFETY: forwards to the void* ABI with the flag matching the buffer
+    // element type (f32 / false); caller upholds the pointer contract.
+    unsafe {
+        pgaccel_sphere_distance_bulk(
+            points_a.cast(),
+            points_b.cast(),
+            count,
+            false,
+            distances.cast(),
+            uncertain,
+        )
+    }
+}
+
+/// `pgaccel_sphere_distance_bulk` with fp64 buffers (`use_fp64 = true`).
+///
+/// # Safety
+/// Same contract as [`pgaccel_sphere_distance_bulk_f32`] with f64 elements.
+#[allow(dead_code)]
+// reason: typed pair of the f32 wrapper; engine/dispatch/spatial.rs (agent 2B's file) migrates to it next phase
+#[must_use]
+pub unsafe fn pgaccel_sphere_distance_bulk_f64(
+    points_a: *const f64,
+    points_b: *const f64,
+    count: usize,
+    distances: *mut f64,
+    uncertain: *mut u8,
+) -> PgaccelStatus {
+    // SAFETY: forwards to the void* ABI with the flag matching the buffer
+    // element type (f64 / true); caller upholds the pointer contract.
+    unsafe {
+        pgaccel_sphere_distance_bulk(
+            points_a.cast(),
+            points_b.cast(),
+            count,
+            true,
+            distances.cast(),
+            uncertain,
+        )
+    }
+}
+
+/// `pgaccel_segment_intersects_bulk` with fp32 buffers (`use_fp64 = false`).
+///
+/// # Safety
+/// `segs_a` / `segs_b` must each hold `count * 4` f32 values; `results`
+/// must have room for `count` bytes. `pgaccel_init()` must have been called.
+#[allow(dead_code)] // reason: typed pair mirror; segment predicate dispatch is staged, no Rust caller yet
+#[must_use]
+pub unsafe fn pgaccel_segment_intersects_bulk_f32(
+    segs_a: *const f32,
+    segs_b: *const f32,
+    count: usize,
+    results: *mut i8,
+) -> PgaccelStatus {
+    // SAFETY: forwards to the void* ABI with the flag matching the buffer
+    // element type (f32 / false); caller upholds the pointer contract.
+    unsafe { pgaccel_segment_intersects_bulk(segs_a.cast(), segs_b.cast(), count, false, results) }
+}
+
+/// `pgaccel_segment_intersects_bulk` with fp64 buffers (`use_fp64 = true`).
+///
+/// # Safety
+/// Same contract as [`pgaccel_segment_intersects_bulk_f32`] with f64 elements.
+#[allow(dead_code)] // reason: typed pair mirror; segment predicate dispatch is staged, no Rust caller yet
+#[must_use]
+pub unsafe fn pgaccel_segment_intersects_bulk_f64(
+    segs_a: *const f64,
+    segs_b: *const f64,
+    count: usize,
+    results: *mut i8,
+) -> PgaccelStatus {
+    // SAFETY: forwards to the void* ABI with the flag matching the buffer
+    // element type (f64 / true); caller upholds the pointer contract.
+    unsafe { pgaccel_segment_intersects_bulk(segs_a.cast(), segs_b.cast(), count, true, results) }
+}
+
 // ---------------------------------------------------------------------------
 // Capability-probe wrappers (env-var overrides)
 // ---------------------------------------------------------------------------
@@ -1947,7 +2250,12 @@ pub unsafe fn pgaccel_get_caps() -> PgaccelPlatformCaps {
     caps
 }
 
-#[cfg(feature = "pg_test")]
+// Pure layout / discriminant / conversion tests: no PostgreSQL dependency,
+// so they run under plain `cargo test -p pg_accel --lib` (previously gated
+// behind `pg_test`, which silently skipped them in the default test run).
+// The load-bearing size pins are additionally enforced at compile time by
+// the const assertions in `types.rs`.
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::mem;

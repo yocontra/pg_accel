@@ -54,7 +54,7 @@ Specifically look for:
 
 ### Verifier C — Trace/log check (when relevant)
 Subagent type: `general-purpose`. Give it:
-- The trace file path (`~/.pgrx/data-17/pg_accel_traces.jsonl`)
+- The trace file path (`~/.pgrx/data-18/pg_accel_traces.jsonl`)
 - The list of spans that should exist if the claim is true
 - Required: `Read` the trace file directly, confirm expected spans with attributes
 
@@ -106,7 +106,7 @@ Agent(description: "Audit diff for cheats", subagent_type: "staff-code-reviewer"
                Report hits with file:line. PASS or FAIL.")
 
 Agent(description: "Verify trace spans", subagent_type: "general-purpose",
-      prompt: "Read ~/.pgrx/data-17/pg_accel_traces.jsonl and confirm spans
+      prompt: "Read ~/.pgrx/data-18/pg_accel_traces.jsonl and confirm spans
                gpu.reduce_i64 and exec.agg_grouped exist with n=10000000.
                PASS or FAIL + pasted span records.")
 ```

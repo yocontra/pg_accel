@@ -53,7 +53,9 @@ fn build_partition_starts_pure(keys: &[f64], nulls: &[bool]) -> Vec<u8> {
             // Both NULL — same partition (PG treats NULLs as equal in PARTITION BY).
             false
         } else {
-            keys[i].to_bits() != keys[i - 1].to_bits()
+            // PG float grouping: -0.0 == 0.0 and NaN == NaN (see
+            // frame::f64_group_eq). A raw-bit compare would disagree.
+            !super::frame::f64_group_eq(keys[i], keys[i - 1])
         };
         if new_partition {
             starts[i] = 1;
@@ -419,10 +421,11 @@ fn partition_starts_negative_keys() {
 
 #[test]
 fn partition_starts_zero_and_negative_zero() {
-    // 0.0 and -0.0 have different bit representations.
+    // 0.0 and -0.0 have different bit representations, but PG grouping treats
+    // them as EQUAL — so they belong to the same partition (the bug this fix
+    // addresses: a raw-bit compare would split them).
     let result = build_partition_starts_pure(&[0.0, -0.0], &[false, false]);
-    // to_bits() differs for 0.0 vs -0.0, so they are different partitions.
-    assert_eq!(result, vec![1, 1]);
+    assert_eq!(result, vec![1, 0]);
 }
 
 // =======================================================================

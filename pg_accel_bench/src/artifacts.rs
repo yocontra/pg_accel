@@ -1047,7 +1047,7 @@ fn markdown_cell(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bench_model::CachePurgeState;
+    use crate::bench_model::{CachePurgeState, CacheState};
     use crate::report::{
         IterationResult, Methodology, NO_DISPATCH_AUDIT_SCHEMA_VERSION,
         RESIDENT_BOUNDARY_AUDIT_SCHEMA_VERSION, WorkloadResult,
@@ -1090,6 +1090,7 @@ mod tests {
                 accel_ms: 10.0,
                 parallel_ms: 50.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             })
             .collect();
         let mut workload = WorkloadResult::from_iterations(

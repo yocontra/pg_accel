@@ -815,11 +815,31 @@ static_assert(sizeof(pgaccel_platform_caps) == 88,
               "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
 static_assert(sizeof(pgaccel_device_info) == 216,
               "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
+static_assert(sizeof(pgaccel_geometry) == 48,
+              "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
+static_assert(offsetof(pgaccel_geometry, bbox) == 8, "pgaccel_geometry.bbox at offset 8");
+static_assert(offsetof(pgaccel_geometry, coords) == 16, "pgaccel_geometry.coords at offset 16");
+static_assert(offsetof(pgaccel_geometry, coord_count) == 24,
+              "pgaccel_geometry.coord_count at offset 24");
+static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
+              "pgaccel_geometry.ring_offsets at offset 32");
+static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
+              "pgaccel_geometry.ring_count at offset 40");
 #else
 _Static_assert(sizeof(pgaccel_platform_caps) == 88,
                "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
 _Static_assert(sizeof(pgaccel_device_info) == 216,
                "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
+_Static_assert(sizeof(pgaccel_geometry) == 48,
+               "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
+_Static_assert(offsetof(pgaccel_geometry, bbox) == 8, "pgaccel_geometry.bbox at offset 8");
+_Static_assert(offsetof(pgaccel_geometry, coords) == 16, "pgaccel_geometry.coords at offset 16");
+_Static_assert(offsetof(pgaccel_geometry, coord_count) == 24,
+               "pgaccel_geometry.coord_count at offset 24");
+_Static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
+               "pgaccel_geometry.ring_offsets at offset 32");
+_Static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
+               "pgaccel_geometry.ring_count at offset 40");
 #endif
 
 #ifdef __cplusplus

@@ -16,6 +16,7 @@
 #include <unordered_set>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 namespace {
 
@@ -53,7 +54,7 @@ std::string resolve_jit_cache_dir() {
 
 }  // namespace
 
-extern "C" pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapshot* out) {
+extern "C" pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapshot* out) try {
   if (!out) {
     return PGACCEL_ERROR;
   }
@@ -110,9 +111,15 @@ extern "C" pgaccel_status pgaccel_archive_stats_snapshot(pgaccel_archive_snapsho
   }
 
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_archive_stats_snapshot", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_archive_stats_snapshot", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_archive_jit_cache_dir(char* buf, size_t buf_len) {
+extern "C" pgaccel_status pgaccel_archive_jit_cache_dir(char* buf, size_t buf_len) try {
   if (!buf || buf_len == 0) {
     return PGACCEL_ERROR;
   }
@@ -129,4 +136,10 @@ extern "C" pgaccel_status pgaccel_archive_jit_cache_dir(char* buf, size_t buf_le
   }
   std::memcpy(buf, cache_dir.c_str(), cache_dir.size() + 1);
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_archive_jit_cache_dir", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_archive_jit_cache_dir", nullptr);
 }

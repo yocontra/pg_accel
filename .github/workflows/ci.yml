@@ -23,7 +23,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  ACPP_REQUIRED_SHA: 7e79a6ca45f5a067f02a30207cb8da1b81eb5f29
+  # ACPP_REQUIRED_SHA is loaded per-job from the repo-root .acpp-version file
+  # (single source of truth shared with scripts/setup_acpp.sh) via a
+  # "Load pinned AdaptiveCpp SHA" step; do not hardcode it here.
   SOFT_FP64_REQUIRED_TAG: v1.3.0
 
 jobs:
@@ -39,6 +41,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         shell: bash
@@ -175,6 +183,13 @@ jobs:
           set -euo pipefail
           just sql-test ${{ matrix.pg }}
 
+      - name: Run plan-shape + parallel-stress integration tests
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just plan-shape-tests ${{ matrix.pg }}
+
       - name: Generate package schema artifact
         if: always() && steps.pg-support.outputs.skip != 'true'
         shell: bash
@@ -203,6 +218,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         shell: bash

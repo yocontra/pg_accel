@@ -82,6 +82,18 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #   fused_ops          — MIN/MAX fused reductions initialise to ±infinity.
 #   bbox_ops_f64       — host fallback preserves conservative NaN/Inf
 #                         behavior for PG native double boxes.
+#   window             — sycl_window_sum uses Kahan compensated summation
+#                         (window.cpp `comp` term); -ffast-math licenses
+#                         reassociation that algebraically deletes the
+#                         compensation term, silently degrading SUM
+#                         accuracy over large partitions.
+#   reduce             — the fused multi-reduce NaN-propagation contract
+#                         (pgaccel_ffi.h "NaN handling matches PG's
+#                         SUM/MIN/MAX semantics") is void under
+#                         -ffinite-math-only; MIN/MAX identities are ±inf.
+#   olap_ssbm          — grouped MIN/MAX lanes rely on sycl::fmin/fmax NaN
+#                         propagation and ±inf accumulator identities in
+#                         the dense-group tree reduction.
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
@@ -89,6 +101,9 @@ set_source_files_properties(
     src/hash_agg.cpp
     src/fused_ops.cpp
     src/bbox_ops_f64.cpp
+    src/window.cpp
+    src/reduce.cpp
+    src/olap_ssbm.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
 # Standalone test binary
@@ -206,6 +221,13 @@ target_link_libraries(test_oom_invariant PRIVATE pgaccel_kernels_shared)
 add_executable(test_nested_loop_ineq test/test_nested_loop_ineq.cpp)
 target_link_libraries(test_nested_loop_ineq PRIVATE pgaccel_kernels_shared)
 
+# Induced-failure honesty gate: a dispatch whose staging cannot succeed
+# must return PGACCEL_OOM / PGACCEL_ERROR — never PGACCEL_OK over unwritten
+# output, never SIGABRT through the C ABI, never a fake NO_DEVICE. Pins the
+# wait_and_throw + extern-C try/catch fixes (TODO-REVIEW 2026-07).
+add_executable(test_kernel_failure_status test/test_kernel_failure_status.cpp)
+target_link_libraries(test_kernel_failure_status PRIVATE pgaccel_kernels_shared)
+
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 set(PGACCEL_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -213,7 +235,10 @@ set(PGACCEL_GPU_TEST_FILTER "${PGACCEL_REPO_ROOT}/scripts/filter_gpu_output.py")
 set(PGACCEL_GPU_TEST_LOG_DIR "${PGACCEL_REPO_ROOT}/.pgaccel/logs"
     CACHE PATH "Directory for raw GPU CTest logs")
 
+# Optional TIMEOUT <seconds> sets an explicit CTest TIMEOUT property, which
+# overrides the suite-wide `ctest --timeout` budget for that one test.
 function(add_pgaccel_gpu_test test_target)
+    cmake_parse_arguments(PGACCEL_TEST "" "TIMEOUT" "" ${ARGN})
     if(Python3_Interpreter_FOUND AND EXISTS "${PGACCEL_GPU_TEST_FILTER}")
         add_test(
             NAME ${test_target}
@@ -223,6 +248,9 @@ function(add_pgaccel_gpu_test test_target)
                 -- "$<TARGET_FILE:${test_target}>")
     else()
         add_test(NAME ${test_target} COMMAND ${test_target})
+    endif()
+    if(PGACCEL_TEST_TIMEOUT)
+        set_tests_properties(${test_target} PROPERTIES TIMEOUT ${PGACCEL_TEST_TIMEOUT})
     endif()
 endfunction()
 
@@ -246,10 +274,22 @@ add_pgaccel_gpu_test(test_hash_agg_keys)
 add_pgaccel_gpu_test(test_hash_join)
 add_pgaccel_gpu_test(test_window)
 add_pgaccel_gpu_test(test_expr_templates)
-add_pgaccel_gpu_test(test_oom_invariant)
+# test_oom_invariant sweeps 2GB fp64 inputs per family on soft-fp64 devices;
+# measured 441.5s warm-JIT on M2 Max (2026-07-07, /usr/bin/time -l, exit 0,
+# peak RSS 14.08GB). Budget = measured * ~2 to cover cold-JIT runs
+# (gpu-test-cold-all). This is a runtime budget, not a hidden skip.
+add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)
 add_pgaccel_gpu_test(test_fp64_mul_probe)
 add_pgaccel_gpu_test(test_nested_loop_ineq)
-add_pgaccel_gpu_test(test_ooo_overlap)
+add_pgaccel_gpu_test(test_kernel_failure_status)
+# test_ooo_overlap is intentionally NOT registered with CTest: it asserts the
+# acceptance criterion of the never-built out-of-order kernel-overlap feature
+# (dropped by the 2026-07 architecture decision). It cannot pass on the pinned
+# AdaptiveCpp Metal backend: every dispatch marks all USM buffers Read|Write
+# (metal_queue.cpp:225-227) on hazard-tracked storage (metal_allocator.cpp:395),
+# so Metal serializes all compute device-wide (observed sub-microsecond gaps
+# between "overlapping" kernels across 6/6 runs). The binary still builds as a
+# manual diagnostic probe for any future fork work on untracked-hazard buffers.
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h

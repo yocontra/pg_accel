@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+> History before the initial public squash (`bef50f6`) is not preserved;
+> pre-squash commit references have been removed from this changelog. Where a
+> commit hash below refers to an external repository (e.g. the
+> `yocontra/AdaptiveCpp` fork), it remains because that history lives outside
+> this repo and is independently checkable there.
+
 ### Changed
 - Public setup, release packaging, and attribution docs now pin AdaptiveCpp to
   `yocontra/AdaptiveCpp` `fork-safe-metal`
@@ -76,57 +82,54 @@
   M2 Max 100K probe disqualifies all `{16,24,32,40,48,56,64}` candidates
   because the required 100K fp64 cells still stay native or fall below parity.
 
-### Phase II infrastructure round (2026-05-03, 8 agents → 5 merge commits)
+### Phase II infrastructure round (2026-05-03)
 
-This round developed the dispatch / planner / executor infrastructure each
-of the previous round's 5 architectural blockers required, so every kernel
-already in `pgaccel-kernels/src/*.cpp` now has an end-to-end injection +
-dispatch path. Source-of-truth merge commits: `00e5ac3` (F2 GSERIALIZED
-encoder), `90eae48` (P1 PreAgg planner chain), `f8a3381` (F1 multi-arg
-dispatch carrier + 4 raster + st_dwithin), `6dcd882` (F3-functionscan
-registry meta + 2 H3 var-output dispatch arms), `fc9fc6d` (F3-finish-v2
-FunctionScan vtables + planner hook + 3 pg_test integrations).
+This round developed the dispatch / planner / executor infrastructure the
+previous round's architectural blockers required, so every kernel already in
+`pgaccel-kernels/src/*.cpp` now has an end-to-end injection + dispatch path:
+a GSERIALIZED encoder (F2), the PreAgg planner chain (P1), a multi-arg
+dispatch carrier plus 4 raster ops and `st_dwithin` (F1), FunctionScan
+registry metadata and 2 H3 var-output dispatch arms (F3-functionscan), and
+FunctionScan vtables + planner hook + 3 pg_test integrations (F3-finish-v2).
 
 #### Added
 - Multi-arg dispatch carrier: `dispatch::dispatch()` now takes
   `&[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)]`;
   `extract_const_datum` collects ALL `Const` nodes from FuncExpr.args
   preserving positional order; `FunctionScanPrivData` round-trip
-  layout serializes/deserializes the args list (1795e55, 5004839).
+  layout serializes/deserializes the args list.
 - 4 raster ops dispatched per-row via the new carrier:
   `st_resample(rast, w, h)` (2× i32), `st_slope(rast, cx, cy)` and
   `st_aspect(rast, cx, cy)` (2× f64 each), `st_hillshade(rast, cx, cy,
-  sun_az, sun_alt)` (4× f64) (1795e55).
+  sun_az, sun_alt)` (4× f64).
 - `st_dwithin` per-row dispatch: 3rd-arg threshold flows through the
   multi-arg carrier as `qual_datums[1]` and routes through
-  `three_layer::spatial_dwithin` with `SpatialPredicate::DWithin(t)`
-  (1795e55).
+  `three_layer::spatial_dwithin` with `SpatialPredicate::DWithin(t)`.
 - Pure-Rust GSERIALIZED v2 encoder for POLYGON and MULTIPOLYGON in
   `pg_accel/src/adapters/extractors/geometry/polygon_encoder.rs`:
   `encode_polygon(srid, &[&[(f64, f64)]])` and
   `encode_multipolygon(srid, &[&[&[(f64, f64)]]])` produce bare
   GSERIALIZED bytes (caller wraps with `palloc(VARHDRSZ + len)`);
   roundtrip-tested against the existing parser at
-  `polygon.rs:1-88` (3abaf50).
+  `polygon.rs:1-88`.
 - PreAgg planner chain construction: `preagg_partial::try_inject` now
   builds the Finalize Agg → Gather → CustomPath triple inside the
   `UPPERREL_GROUP_AGG` callback (PG17 doesn't fire
   `UPPERREL_PARTIAL_GROUP_AGG`), mirroring `partial_agg::try_inject`
-  structurally (e386720); GROUP BY propagation via
+  structurally; GROUP BY propagation via
   `root.processed_groupClause` + `parse.havingQual` into
   `pg_sys::create_agg_path` matches PG's own
   `add_paths_to_grouping_rel` (`planner.c:7253-7263`); `AGG_HASHED`
   when GROUP BY present, `AGG_PLAIN` otherwise; 16/16 unit tests pass
-  including SPI smoke (5599067).
+  including SPI smoke.
 - 2 H3 var-output dispatch arms: `h3_cell_to_boundary(cell)` produces
   `AcceleratedVarLen` of GSERIALIZED varlena Datums via the F2
   encoder; `h3_polyfill(geometry, resolution)` extracts per-row
   polygons via existing `extract_geometry` and runs the two-pass
-  kernel (b5702e6).
+  kernel.
 - `FunctionAccelEntry::output_field_types / output_field_names` +
   TupleDesc resolution metadata so FunctionScan can build the right
-  TupleDesc; `FunctionScanPrivData` round-trip serialization
-  (af7594a, 5004839).
+  TupleDesc; `FunctionScanPrivData` round-trip serialization.
 - FunctionScan injection plumbing: new `FUNCTION_PATH_METHODS` /
   `FUNCTION_SCAN_METHODS` Custom Scan vtables; `projectset.rs`
   planner hook walks `RTE_FUNCTION` rels and builds a `CustomPath`
@@ -136,8 +139,7 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
   `get_func_rettype`), dispatches the SRF once via
   `dispatch::dispatch`, and emits one row per dispatch output via
   `ExecStoreVirtualTuple` (Scalar / VarLen) or `heap_form_tuple` +
-  `ExecStoreHeapTuple` (Record); 3 pg_test integration tests
-  (30a9b6e, da6b054, afaff4b).
+  `ExecStoreHeapTuple` (Record); 3 pg_test integration tests.
 - AdaptiveCpp `fork-safe-metal` helper-side fix for
   `acpp-metal-archive-build` OOM on soft-fp64 metallibs: configurable
   size threshold (default 900 KiB; override
@@ -154,17 +156,17 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
 - `dispatch::dispatch()` signature changed from
   `qual_datum: Option<(Datum, bool)>` to
   `qual_datums: &[(Datum, bool, Oid)]`; every existing dispatch arm
-  rewritten in the same atomic commit and all callsites updated (1795e55).
+  rewritten in the same atomic commit and all callsites updated.
 - `pg_test_explain` schema renamed → `preagg_explain` because PG
-  forbids the `pg_` prefix on user-created schemas (fb64b1a).
+  forbids the `pg_` prefix on user-created schemas.
 - `GpuStrategy::from_i32` boundary tests updated to recognise
-  `FunctionScan = 6` (afaff4b).
+  `FunctionScan = 6`.
 - `reduce_multi_f32 / reduce_multi_i64` wrapper `#[allow(dead_code)]`
   comments updated to canonical wording: "retained for future fp32/i64
   fast-path executors; current agg path uses uniform Vec<f64> per
   agg/execute.rs:1804". Doc-only; no functional change. The bridge
   wrappers stay as the entry points for a future executor variant
-  that retains typed buffers (avoiding the f64 widening) (dfc4444).
+  that retains typed buffers (avoiding the f64 widening).
 
 #### Open follow-ups (documented in TODO.md, NOT shipped this round)
 - Registry-init ordering for pgrx_tests harness: integration tests
@@ -190,109 +192,109 @@ FunctionScan vtables + planner hook + 3 pg_test integrations).
   (sphere_distance) and `:1027` (st_length) cannot be dropped.
 
 ### Added
-- PostGIS predicates: 4 algorithmic predicates `st_equals`, `st_touches`, `st_crosses`, `st_overlaps` end-to-end (kernel: b5e546a; SpatialPredicate enum + three-layer dispatch: 2c08296; adapter registration: 433bc21)
-- PostGIS distance: `pgaccel_st_distance_polygon_polygon_bulk` SYCL kernel — fp32 vertex-pair minimum for Polygon × Polygon (676a95d)
-- PostGIS raster: 6 new SYCL kernels — `pgaccel_raster_resample`, `pgaccel_slope`, `pgaccel_aspect`, `pgaccel_hillshade`, `pgaccel_raster_value`, `pgaccel_raster_summarystats` (13ec5fa); Rust bridge wrappers (cb2ec8d); adapter registration with `OutputShape::Record` for `st_summarystats` (a6bdf19)
-- PostGIS raster dispatch: `st_clip` polygon-ring extractor + `st_reclass` rule-text parser + `st_summarystats` Record output wired end-to-end via `pg_accel/src/engine/dispatch/raster.rs` (c487abd, c44ad34)
-- H3: 6 new var-output SYCL kernels — `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`, `h3_cell_to_children`, `h3_cell_to_boundary`, `h3_cells_to_multi_polygon` (b8873f2); Rust bridge wrappers (62fbd26); adapter registration with `OutputShape::VarLen` (47f2d68); 3 dispatched end-to-end via two-pass kernels — `grid_disk`, `grid_ring_unsafe`, `cell_to_children` (4f373a5)
-- Aggregation: int128 `NumericSumEmitter` for NUMERIC SUM with 38-digit precision + PG NUMERIC encoder helpers (dcd0cce, test coverage 9423d11)
-- Adapter framework: `OutputShape` enum + extended `FunctionAccelEntry` for Record / VarLen function shapes (2d7be99); H3 var-output kernel FFI prototypes (0ec4dce); `DispatchResult::AcceleratedRecord` + `DispatchResult::AcceleratedVarLen` variants (e810597)
-- Pre-aggregation: `PartialAggSpec` round-trip executor wiring — `PreAggPrivData` carries `partial: Option<PartialAggSpec>`, serialize/deserialize via `PARTIAL_SENTINEL`, `begin_custom_scan` calls `exec.enable_partial(spec)` so workers emit transition-state tuples for Finalize Aggregate (be493db); `preagg_partial::try_inject` validates pre-conditions + builds the spec (planner-side Finalize → Gather → CustomPath chain construction tracked under TODO Phase 3) (1b990c9)
-- Test coverage: kernel-level test for new predicates + raster + H3 ops — `test_spatial` includes st_equals/touches/crosses/overlaps and polygon×polygon distance (b5e546a, 4dce963); `test_raster` covers 6 new raster kernels + Metal soft-fp64 workarounds (e87b56a); `test_h3` covers 6 var-output ops (4d37031, ea230cf); `test_hash_agg_keys` reproducer for UUID/INET key types (6de58d6); `test_expr_templates` adds 6 assertions for `pgaccel_expr_template_two_pred_and` after the struct-pack fix (8808636)
-- Polygon-ring + reclass-rule parsers under `pg_accel/src/adapters/extractors/raster.rs` for raster dispatch (c487abd)
-- PostGIS predicates: `st_dwithin` Point×Point fp32 via `pgaccel_sphere_distance_bulk` SYCL kernel (a2793c4)
-- PostGIS predicates: `st_contains` / `st_within` Polygon⊇Point fp32 via `pgaccel_point_in_ring_bulk` (e804376)
-- PostGIS predicates: `st_disjoint` as inversion of `st_intersects` — no extra kernel (a52e565)
-- PostGIS predicates: `st_covers` / `st_coveredby` aliasing contains/within (PG Layer-3 recheck handles boundary semantics) (43dd575)
-- UUID group-key support for hash_agg via `PGACCEL_KEY_UUID = 4` end-to-end (kernel ABI + Rust bridge + extractor + planner classifier + executor dispatch + datum reconstruction) (243fa1f)
-- H3 `pgaccel_h3_cell_to_center_child_bulk` SYCL kernel + bridge + dispatch + adapter registration (fb0a6d9)
-- `just gpu-test-cold <name> [timeout_s]` recipe: wipe JIT cache then run a single named test binary in one allowlistable invocation, eliminating the prompt-on-every-rm pattern that broke autonomous loops (91b9c35)
-- Zero-IPC GPU architecture: direct in-process Metal dispatch from PG backends, replacing the background-worker IPC path (4a3ed86)
-- Native Metal backend with zero-IPC reduce kernels, fork-safe via pre-built `.metalar` binary archives (ec065f7, 88e5d81)
-- Native Metal sort and window kernels (16 compiled pipelines) (71c44de)
-- Universal fp64 support via AdaptiveCpp soft-fp64 on devices without native fp64 (Apple GPUs); fp64 path now MSL-compiles end-to-end (20b4f1b, 8eaba31)
-- Atomic64 support on Apple8+ GPUs; h3 resolution >=12 now executes on GPU via fp64 (8eaba31)
-- Parallel partial-aggregate execution: typed `PartialAggSpec`, DSM callbacks, and `plan_partial_custom_path` wiring (b59a57e, 5a8329f)
-- Parallel AVG / STDDEV / VAR via PartialAggSpec round-trip (dd1cce0)
-- `ColumnAccumulator` + `PartialEmitter` dispatch with extended `AggOp` variants (BitReduction, BoolReduction) (2aed482, 9680886)
-- Preagg fused pipeline for partial-state aggregation (b5d5aa7, ce4035a)
-- `reduce_sum_sq` and fused `reduce_stats` kernels for partial-agg statistics (255dc5f)
-- Universal vectorized pipeline: fused reduce, `VectorizedScan` for sort, window support (150af34, 83d55e7, 5baa9df)
-- OpenTelemetry-compatible tracing with triple-output subscriber (OTel JSONL, tracing JSONL, PG stderr) (71e57ac)
-- Per-backend stats counters wired through executor and planner hooks; exposed via `pg_accel_stats()` (2ce1cb5, 71e57ac)
-- GPU executor nodes for grouped aggregate, hash join, window functions, and scan pipeline fusion (dafd5bd)
-- Planner hooks covering all GPU strategies with Custom Scan vtables and an expression compiler (3f65e6c)
-- SYCL kernels for hash aggregate, hash join, and expression evaluation (9be24a2, 15eaa3a)
-- Expression compiler, window executor, and columnar storage (1cf8544)
-- Three-layer spatial dispatch: bbox filter -> GPU predicate -> uncertain-row rejection, with expanded geometry/raster extractors (40df3fd, 521ad9f)
-- Cost model overhaul with columnar storage and dispatch consolidation (6e116e6)
-- Early-rows dispatch gate and `GpuExpr` margin tuning (8bb4f69)
-- Benchmark suite: honest v2 harness, Bonferroni correction + geomean, realistic GUCs, plan capture, raw timing, warmup/seed/CSV (5dcb19a, 1442f00, a129c4f)
-- New benchmark workloads (SSBM, spatial_mega, window, expr, 10M-row variants) and 8-worker partial-agg stress bench (ce4035a, b5d5aa7, e29d4e1, 4b30348, 9616969)
-- Hardening: dead-PID reclamation, GPU timeout wiring, GUC gating (2eed2f2)
-- OID resolution for adapter functions via `pg_proc` registry (1a3e2d9)
-- macOS release matrix and CI pinning (dfeb1d1)
-- `just setup-hooks` target and prek-based project anti-cheat hook mirror (7f0fe21, 5e1818c, 432da7d)
-- Auto-clone of the AdaptiveCpp `fork-safe-metal` fork via Justfile (c867661)
-- Integration and SQL correctness test suites, including Phase 8 geometry-extraction edge cases (d0c1cd3, 66a4e73, 41146a9)
+- PostGIS predicates: 4 algorithmic predicates `st_equals`, `st_touches`, `st_crosses`, `st_overlaps` end-to-end (kernel, `SpatialPredicate` enum + three-layer dispatch, adapter registration)
+- PostGIS distance: `pgaccel_st_distance_polygon_polygon_bulk` SYCL kernel — fp32 vertex-pair minimum for Polygon × Polygon
+- PostGIS raster: 6 new SYCL kernels — `pgaccel_raster_resample`, `pgaccel_slope`, `pgaccel_aspect`, `pgaccel_hillshade`, `pgaccel_raster_value`, `pgaccel_raster_summarystats` — with Rust bridge wrappers and adapter registration using `OutputShape::Record` for `st_summarystats`
+- PostGIS raster dispatch: `st_clip` polygon-ring extractor + `st_reclass` rule-text parser + `st_summarystats` Record output wired end-to-end via `pg_accel/src/engine/dispatch/raster.rs`
+- H3: 6 new var-output SYCL kernels — `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_polyfill`, `h3_cell_to_children`, `h3_cell_to_boundary`, `h3_cells_to_multi_polygon` — with Rust bridge wrappers and adapter registration using `OutputShape::VarLen`; 3 of these are dispatched end-to-end via two-pass kernels: `grid_disk`, `grid_ring_unsafe`, `cell_to_children`
+- Aggregation: int128 `NumericSumEmitter` for NUMERIC SUM with 38-digit precision + PG NUMERIC encoder helpers, with test coverage
+- Adapter framework: `OutputShape` enum + extended `FunctionAccelEntry` for Record / VarLen function shapes, H3 var-output kernel FFI prototypes, and `DispatchResult::AcceleratedRecord` + `DispatchResult::AcceleratedVarLen` variants
+- Pre-aggregation: `PartialAggSpec` round-trip executor wiring — `PreAggPrivData` carries `partial: Option<PartialAggSpec>`, serialize/deserialize via `PARTIAL_SENTINEL`, `begin_custom_scan` calls `exec.enable_partial(spec)` so workers emit transition-state tuples for Finalize Aggregate; `preagg_partial::try_inject` validates pre-conditions + builds the spec (planner-side Finalize → Gather → CustomPath chain construction tracked under TODO Phase 3)
+- Test coverage: kernel-level test for new predicates + raster + H3 ops — `test_spatial` includes st_equals/touches/crosses/overlaps and polygon×polygon distance; `test_raster` covers 6 new raster kernels + Metal soft-fp64 workarounds; `test_h3` covers 6 var-output ops; `test_hash_agg_keys` reproducer for UUID/INET key types; `test_expr_templates` adds 6 assertions for `pgaccel_expr_template_two_pred_and` after the struct-pack fix
+- Polygon-ring + reclass-rule parsers under `pg_accel/src/adapters/extractors/raster.rs` for raster dispatch
+- PostGIS predicates: `st_dwithin` Point×Point fp32 via `pgaccel_sphere_distance_bulk` SYCL kernel
+- PostGIS predicates: `st_contains` / `st_within` Polygon⊇Point fp32 via `pgaccel_point_in_ring_bulk`
+- PostGIS predicates: `st_disjoint` as inversion of `st_intersects` — no extra kernel
+- PostGIS predicates: `st_covers` / `st_coveredby` aliasing contains/within (PG Layer-3 recheck handles boundary semantics)
+- UUID group-key support for hash_agg via `PGACCEL_KEY_UUID = 4` end-to-end (kernel ABI + Rust bridge + extractor + planner classifier + executor dispatch + datum reconstruction)
+- H3 `pgaccel_h3_cell_to_center_child_bulk` SYCL kernel + bridge + dispatch + adapter registration
+- `just gpu-test-cold <name> [timeout_s]` recipe: wipe JIT cache then run a single named test binary in one allowlistable invocation, eliminating the prompt-on-every-rm pattern that broke autonomous loops
+- Zero-IPC GPU architecture: direct in-process Metal dispatch from PG backends, replacing the background-worker IPC path
+- Native Metal backend with zero-IPC reduce kernels, fork-safe via pre-built `.metalar` binary archives
+- Native Metal sort and window kernels (16 compiled pipelines)
+- Universal fp64 support via AdaptiveCpp soft-fp64 on devices without native fp64 (Apple GPUs); fp64 path now MSL-compiles end-to-end
+- Atomic64 support on Apple8+ GPUs; h3 resolution >=12 now executes on GPU via fp64
+- Parallel partial-aggregate execution: typed `PartialAggSpec`, DSM callbacks, and `plan_partial_custom_path` wiring
+- Parallel AVG / STDDEV / VAR via PartialAggSpec round-trip
+- `ColumnAccumulator` + `PartialEmitter` dispatch with extended `AggOp` variants (BitReduction, BoolReduction)
+- Preagg fused pipeline for partial-state aggregation
+- `reduce_sum_sq` and fused `reduce_stats` kernels for partial-agg statistics
+- Universal vectorized pipeline: fused reduce, `VectorizedScan` for sort, window support
+- OpenTelemetry-compatible tracing with triple-output subscriber (OTel JSONL, tracing JSONL, PG stderr)
+- Per-backend stats counters wired through executor and planner hooks; exposed via `pg_accel_stats()`
+- GPU executor nodes for grouped aggregate, hash join, window functions, and scan pipeline fusion
+- Planner hooks covering all GPU strategies with Custom Scan vtables and an expression compiler
+- SYCL kernels for hash aggregate, hash join, and expression evaluation
+- Expression compiler, window executor, and columnar storage
+- Three-layer spatial dispatch: bbox filter -> GPU predicate -> uncertain-row rejection, with expanded geometry/raster extractors
+- Cost model overhaul with columnar storage and dispatch consolidation
+- Early-rows dispatch gate and `GpuExpr` margin tuning
+- Benchmark suite: honest v2 harness, Bonferroni correction + geomean, realistic GUCs, plan capture, raw timing, warmup/seed/CSV
+- New benchmark workloads (SSBM, spatial_mega, window, expr, 10M-row variants) and 8-worker partial-agg stress bench
+- Hardening: dead-PID reclamation, GPU timeout wiring, GUC gating
+- OID resolution for adapter functions via `pg_proc` registry
+- macOS release matrix and CI pinning
+- `just setup-hooks` target and prek-based project anti-cheat hook mirror
+- Auto-clone of the AdaptiveCpp `fork-safe-metal` fork via Justfile
+- Integration and SQL correctness test suites, including Phase 8 geometry-extraction edge cases
 
 ### Changed
-- Scan executor: `TwoPredAnd` template variant consolidated into a single struct-packed kernel call from `pg_accel/src/engine/executor/scan/exec.rs`; previously the scan executor + agg + preagg paths each evaluated `TwoPredAnd` by calling `pgaccel_expr_template_cmp_const` twice and AND-ing the results in Rust (9009ef1)
-- Spatial kernels: `sphere_distance_bulk_sycl` + `st_length_bulk_sycl` split into non-templated `_f32` / `_f64` variants to sidestep the templated emitter recursion that was hanging Metal SSCP JIT (0b176c6, f885523)
-- Algorithmic spatial dispatch helper renamed to `sycl_*` prefix for the four new predicates (1b27908)
-- SYCL-only compile-time enforcement: the `gpu` Cargo feature, `PGACCEL_HAS_SYCL` preprocessor gate, `stubs.rs`, and `cpu_fallback_count` FFI were deleted; the GPU bridge now builds unconditionally (6242acb, 50e2b83, 30320ae, 16734df, 67169cb, 02db2d1)
-- Crate reorganised: god files split, `ExecutorState` trait introduced (be65257)
-- Planner agg injection split into `parallel_safe`-aware modules (509c531)
-- Statistical aggregates classified into proper `AggOp` variants (2dacdfc)
-- Window executor now uses `table_endscan` + projection; broken bytecode eval disabled (2db6ac9)
-- `pgaccel-kernels` reformatted with project-wide `.clang-format` (1c8bbd3)
+- Scan executor: `TwoPredAnd` template variant consolidated into a single struct-packed kernel call from `pg_accel/src/engine/executor/scan/exec.rs`; previously the scan executor + agg + preagg paths each evaluated `TwoPredAnd` by calling `pgaccel_expr_template_cmp_const` twice and AND-ing the results in Rust
+- Spatial kernels: `sphere_distance_bulk_sycl` + `st_length_bulk_sycl` split into non-templated `_f32` / `_f64` variants to sidestep the templated emitter recursion that was hanging Metal SSCP JIT
+- Algorithmic spatial dispatch helper renamed to `sycl_*` prefix for the four new predicates
+- SYCL-only compile-time enforcement: the `gpu` Cargo feature, `PGACCEL_HAS_SYCL` preprocessor gate, `stubs.rs`, and `cpu_fallback_count` FFI were deleted; the GPU bridge now builds unconditionally
+- Crate reorganised: god files split, `ExecutorState` trait introduced
+- Planner agg injection split into `parallel_safe`-aware modules
+- Statistical aggregates classified into proper `AggOp` variants
+- Window executor now uses `table_endscan` + projection; broken bytecode eval disabled
+- `pgaccel-kernels` reformatted with project-wide `.clang-format`
 
 ### Removed
-- `gpu` Cargo feature (previously gated GPU code; now unconditional) (16734df)
-- `PGACCEL_HAS_SYCL` preprocessor flag and all `#if PGACCEL_HAS_SYCL` branches in kernel `.cpp` files (67169cb, 02db2d1)
-- `pg_accel/src/gpu/stubs.rs` CPU stub module (30320ae)
-- `pgaccel_cpu_fallback_count` / `pgaccel_reset_cpu_fallback_count` / `pgaccel_warn_cpu_fallback` FFI symbols and the `cpu_fallback_count` field in `pg_accel_stats()` (30320ae, 16734df, 6a16b64)
-- host-side sort-merge and point-in-polygon fallback kernels (913c02b)
-- `cpu_sort_kv` CPU sort helper (67169cb)
-- BGW-based GPU dispatch path (replaced by zero-IPC Metal) (4a3ed86)
-- `real_boundary` benchmark workload (bc9e63f)
+- `gpu` Cargo feature (previously gated GPU code; now unconditional)
+- `PGACCEL_HAS_SYCL` preprocessor flag and all `#if PGACCEL_HAS_SYCL` branches in kernel `.cpp` files
+- `pg_accel/src/gpu/stubs.rs` CPU stub module
+- `pgaccel_cpu_fallback_count` / `pgaccel_reset_cpu_fallback_count` / `pgaccel_warn_cpu_fallback` FFI symbols and the `cpu_fallback_count` field in `pg_accel_stats()`
+- host-side sort-merge and point-in-polygon fallback kernels
+- `cpu_sort_kv` CPU sort helper
+- BGW-based GPU dispatch path (replaced by zero-IPC Metal)
+- `real_boundary` benchmark workload
 
 ### Fixed
-- `hash_agg` value-aggregation pass returning 0 for UUID and INET / CIDR key types (Metal MSL emitter bug class). Agent 4A's flat-buffer kernel-staging refactor in `pgaccel-kernels/src/hash_agg.cpp` flattens the per-column pointer-of-pointer capture into single-level `device void*` argbuffer slots that AdaptiveCpp's Metal Emitter handles correctly. Cold-cache `pgaccel-kernels/build/test_hash_agg_keys` reports 10/10 PASS (was 8/10 with `xcrun metal failed` and silent zero sums on the 2 UUID + INET tests). Classifier re-enabled in `pg_accel/src/engine/executor/agg/keys.rs`. (309f8c7, 639f6f1)
-- `pgaccel_expr_template_two_pred_and` Metal SSCP JIT failure (`attribute 'id' set location to 4, but minimum is 5`). Agent 4A's f64-as-u64-bits capture refactor in `pgaccel-kernels/src/expr_templates.cpp` makes the kernel cold-cache MSL-compile; the previously-skipped `test_expr_templates` two_pred_and section is now exercised (0c3d5d7)
-- H3 cell layout `+1` digit-shift offset bug — `pgaccel-kernels/src/h3_ops.cpp` digit slots used `shift = (X - r) * 3 + 1` on the assumption bit 0 was reserved; H3 v4 uses no offset (bits 44-0 = 15 digits × 3 bits flush to bit 0). The offset overlapped digit-1 with the LSB of the base-cell field, silently corrupting `h3_get_base_cell` / `h3_is_pentagon` / `h3_cell_to_center_child` on real H3 input. Standalone `test_h3` cold-cache reports 220 PASS / 0 FAIL across 11 sections including new sweeps for canonical 12 pentagons, 0..121 base cells, odd-base descent preservation. (56b770d)
-- fp64 `sphere_distance` + `st_length` re-gated to `PGACCEL_ERROR_NO_DEVICE` (commit 573a60b) pending the `acpp-metal-archive-build` OOM fix tracked under TODO Phase 7 "Metal SSCP soft-fp64 trig". Kernels stay in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:502,937`; gate is a one-line drop the moment archive serialization is fixed
+- `hash_agg` value-aggregation pass returning 0 for UUID and INET / CIDR key types (Metal MSL emitter bug class). Agent 4A's flat-buffer kernel-staging refactor in `pgaccel-kernels/src/hash_agg.cpp` flattens the per-column pointer-of-pointer capture into single-level `device void*` argbuffer slots that AdaptiveCpp's Metal Emitter handles correctly. Cold-cache `pgaccel-kernels/build/test_hash_agg_keys` reports 10/10 PASS (was 8/10 with `xcrun metal failed` and silent zero sums on the 2 UUID + INET tests). Classifier re-enabled in `pg_accel/src/engine/executor/agg/keys.rs`.
+- `pgaccel_expr_template_two_pred_and` Metal SSCP JIT failure (`attribute 'id' set location to 4, but minimum is 5`). Agent 4A's f64-as-u64-bits capture refactor in `pgaccel-kernels/src/expr_templates.cpp` makes the kernel cold-cache MSL-compile; the previously-skipped `test_expr_templates` two_pred_and section is now exercised
+- H3 cell layout `+1` digit-shift offset bug — `pgaccel-kernels/src/h3_ops.cpp` digit slots used `shift = (X - r) * 3 + 1` on the assumption bit 0 was reserved; H3 v4 uses no offset (bits 44-0 = 15 digits × 3 bits flush to bit 0). The offset overlapped digit-1 with the LSB of the base-cell field, silently corrupting `h3_get_base_cell` / `h3_is_pentagon` / `h3_cell_to_center_child` on real H3 input. Standalone `test_h3` cold-cache reports 220 PASS / 0 FAIL across 11 sections including new sweeps for canonical 12 pentagons, 0..121 base cells, odd-base descent preservation.
+- fp64 `sphere_distance` + `st_length` re-gated to `PGACCEL_ERROR_NO_DEVICE` pending the `acpp-metal-archive-build` OOM fix tracked under TODO Phase 7 "Metal SSCP soft-fp64 trig". Kernels stay in-tree at `pgaccel-kernels/src/spatial_predicates.cpp:502,937`; gate is a one-line drop the moment archive serialization is fixed
 - 7-cheat audit (2026-05-02): every `extern "C" pgaccel_*` symbol previously hosting a host-side `for` loop was either converted to a real SYCL kernel or surfaced as `PGACCEL_ERROR_NO_DEVICE` so the planner declines.
-  - `pgaccel_sphere_distance_bulk` host loop → fp32 SYCL kernel; fp64 returns NO_DEVICE pending soft-fp64 trig fix (6ea0a51).
-  - `pgaccel_point_in_ring_bulk` fp32 path host loop → templated `point_in_ring_bulk_sycl<T>` (91b9c35).
-  - `pgaccel_segment_intersects_bulk` fp32+fp64 host loops → templated `segment_intersects_bulk_sycl<T>` (9aa65bb).
-  - `pgaccel_map_algebra` and `pgaccel_raster_clip` small-N CPU branches deleted; non-FP32 inputs return UNSUPPORTED (no fraudulent `pgaccel_record_gpu_exec()` for CPU work) (a44ea0b).
-  - `pgaccel_window_rank` / `dense_rank` / `sum` / `count` host loops → SYCL per-row independent scan kernels (22210b0).
-- AdaptiveCpp emitter tracking for fp64 MSL compilation on Apple GPUs: tracks upstream commits `667338f7`, `0992997c`, and `579ee825`, unblocking the intra-module fp64 path and all fp64 kernels (a5a6c44, e6e5a98, 455c7ea)
-- H3 resolution >=5 fp64 run now ungated after JIT retry-loop fix (2ff7103)
-- Post-fork Metal crash routed through BGW as interim fix before zero-IPC rewrite (c26bfb4)
-- `NUMERICOID` crash; cost-model tuning for window/raster gates (52e981f)
-- `GpuSort` target-list projection regression (5baa9df)
-- Window target-list handling; `SELECT`-only executor gate (71e57ac)
-- Grouped-agg cost model; `AVG` fp64 gate removed (2129497)
-- Window, expr, hash-agg, SSBM, and `spatial_mega` paths now correctly dispatch through the GPU (d6f7b1d)
-- Vectorised agg path dispatches through GPU reduce and wires stats (d7c69e6)
-- Chunked-reduce f32 path on Metal (no native fp64) (522162c)
-- Real varlena detoasting, function matching, and registry integration (c9ba514)
-- `AggColumn::with_result_type` now carries `bit_acc` / `bool_acc` fields (7d6a792)
-- PG-dependent tests gated behind `pg_test` feature (f9f70db)
-- Fork-safety correctness fixes (0f47b8a, 3f45f37)
-- Spatial index regression surfaced by the 10M benchmark (b5d5aa7)
-- Lint cleanups across bench, docker, and preagg surfaced by prek (75a8fff)
+  - `pgaccel_sphere_distance_bulk` host loop → fp32 SYCL kernel; fp64 returns NO_DEVICE pending soft-fp64 trig fix.
+  - `pgaccel_point_in_ring_bulk` fp32 path host loop → templated `point_in_ring_bulk_sycl<T>`.
+  - `pgaccel_segment_intersects_bulk` fp32+fp64 host loops → templated `segment_intersects_bulk_sycl<T>`.
+  - `pgaccel_map_algebra` and `pgaccel_raster_clip` small-N CPU branches deleted; non-FP32 inputs return UNSUPPORTED (no fraudulent `pgaccel_record_gpu_exec()` for CPU work).
+  - `pgaccel_window_rank` / `dense_rank` / `sum` / `count` host loops → SYCL per-row independent scan kernels.
+- AdaptiveCpp emitter tracking for fp64 MSL compilation on Apple GPUs: tracks upstream commits `667338f7`, `0992997c`, and `579ee825`, unblocking the intra-module fp64 path and all fp64 kernels
+- H3 resolution >=5 fp64 run now ungated after JIT retry-loop fix
+- Post-fork Metal crash routed through BGW as interim fix before zero-IPC rewrite
+- `NUMERICOID` crash; cost-model tuning for window/raster gates
+- `GpuSort` target-list projection regression
+- Window target-list handling; `SELECT`-only executor gate
+- Grouped-agg cost model; `AVG` fp64 gate removed
+- Window, expr, hash-agg, SSBM, and `spatial_mega` paths now correctly dispatch through the GPU
+- Vectorised agg path dispatches through GPU reduce and wires stats
+- Chunked-reduce f32 path on Metal (no native fp64)
+- Real varlena detoasting, function matching, and registry integration
+- `AggColumn::with_result_type` now carries `bit_acc` / `bool_acc` fields
+- PG-dependent tests gated behind `pg_test` feature
+- Fork-safety correctness fixes
+- Spatial index regression surfaced by the 10M benchmark
+- Lint cleanups across bench, docker, and preagg surfaced by prek
 
 ### Performance
-- Native i32 / i64 key sort + `-ffast-math` + fp64 external hook (591ff72)
-- Radix sort for integer keys, cooperative vectorised sweep, batched raster (98f6fb1)
-- Spin-poll BGW + client for sub-millisecond round-trip latency (later superseded by zero-IPC) (fb14436)
-- Early-rows dispatch gate reduces unnecessary GPU hand-offs on small scans (8bb4f69)
+- Native i32 / i64 key sort + `-ffast-math` + fp64 external hook
+- Radix sort for integer keys, cooperative vectorised sweep, batched raster
+- Spin-poll BGW + client for sub-millisecond round-trip latency (later superseded by zero-IPC)
+- Early-rows dispatch gate reduces unnecessary GPU hand-offs on small scans
 
 ### Upgrade notes
 - **CPU fallback removal is a breaking build-configuration change.** Existing build scripts that pass `--features gpu`, set `PGACCEL_HAS_SYCL`, or depend on the `pgaccel_cpu_fallback_count` FFI symbol will fail. Drop the feature flag; the GPU bridge now builds unconditionally, and on hardware without a capable GPU the planner is a runtime no-op (queries fall back to native PG plans untouched).
 - **GPU dispatch is no longer routed through a background worker.** Deployments relying on an external BGW health signal should migrate to per-backend stats via `pg_accel_stats()`.
 
-<!-- Last indexed commit: d3d5a1b1f5abbd23fa26e1c3470c9406c54ec9aa -->
+<!-- Last indexed commit: 1e80700bdbd7d5b42351e3928c4ea681dc733fa2 -->

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 #include "pgaccel_hash_agg.h"
 
 #include "h3_exact_device.hpp"
@@ -15,16 +16,9 @@
 
 // SAFETY: g_queue is owned by device_manager.cpp. All H3 kernels share it so
 // pgaccel_shutdown() tears down one Metal context for the process.
-extern sycl::queue* g_queue;
 
 static sycl::queue& get_queue() {
-  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
-    throw std::runtime_error("pgaccel_init failed");
-  }
-  if (g_queue == nullptr) {
-    throw std::runtime_error("pgaccel queue unavailable");
-  }
-  return *g_queue;
+  return pgaccel_require_queue();
 }
 
 // ---------------------------------------------------------------------------
@@ -523,7 +517,7 @@ static inline void cell_to_ijk(uint64_t cell, int res, int& oi, int& oj, int& ok
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(const uint64_t* cells, size_t count,
-                                                         int32_t* resolutions) {
+                                                         int32_t* resolutions) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || resolutions == nullptr)
@@ -563,13 +557,24 @@ extern "C" pgaccel_status pgaccel_h3_get_resolution_bulk(const uint64_t* cells, 
     sycl::free(d_res, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_get_resolution_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_get_resolution_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_get_base_cell_bulk(const uint64_t* cells, size_t count,
-                                                        int32_t* base_cells) {
+                                                        int32_t* base_cells) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || base_cells == nullptr)
@@ -607,13 +612,24 @@ extern "C" pgaccel_status pgaccel_h3_get_base_cell_bulk(const uint64_t* cells, s
     sycl::free(d_base, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_get_base_cell_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_get_base_cell_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, size_t count,
-                                                        uint8_t* valid) {
+                                                        uint8_t* valid) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || valid == nullptr)
@@ -695,9 +711,20 @@ extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, s
     sycl::free(d_valid, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_is_valid_cell_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_is_valid_cell_bulk", nullptr);
 }
 
 // Pentagon base cells: 12 of the 122 base cells form pentagon hierarchies.
@@ -714,7 +741,7 @@ static constexpr uint64_t H3_PENTAGON_BASE_HIGH =
     (1ULL << 8) | (1ULL << 19) | (1ULL << 33) | (1ULL << 43) | (1ULL << 53);
 
 extern "C" pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, size_t count,
-                                                      uint8_t* is_pent) {
+                                                      uint8_t* is_pent) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || is_pent == nullptr)
@@ -779,13 +806,24 @@ extern "C" pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, siz
     sycl::free(d_pent, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_is_pentagon_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_is_pentagon_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells, size_t count,
-                                                           uint8_t* is_class_iii) {
+                                                           uint8_t* is_class_iii) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || is_class_iii == nullptr)
@@ -820,13 +858,24 @@ extern "C" pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells
     sycl::free(d_out, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_is_res_class_iii_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_is_res_class_iii_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count,
-                                                         int parent_res, uint64_t* parents) {
+                                                         int parent_res, uint64_t* parents) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || parents == nullptr)
@@ -891,14 +940,25 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, 
     sycl::free(d_parents, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* cells, size_t count,
                                                                int parent_res,
-                                                               pgaccel_agg_state** out_state) {
+                                                               pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR_INIT;
   *out_state = nullptr;
@@ -984,19 +1044,27 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* c
     *out_state = state;
     cleanup();
     return PGACCEL_OK;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::bad_alloc&) {
     return PGACCEL_ERROR_OOM;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "pgaccel: h3_cell_to_parent_count_bulk failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: h3_cell_to_parent_count_bulk failed (unknown)\n");
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_count_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_count_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* cells, size_t count,
-                                                               int child_res, uint64_t* children) {
+                                                               int child_res, uint64_t* children) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || children == nullptr)
@@ -1068,14 +1136,25 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* c
     sycl::free(d_children, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_center_child_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_center_child_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a,
                                                         const uint64_t* cells_b, size_t count,
-                                                        int32_t* distances) {
+                                                        int32_t* distances) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells_a == nullptr || cells_b == nullptr || distances == nullptr) {
@@ -1186,15 +1265,26 @@ extern "C" pgaccel_status pgaccel_h3_grid_distance_bulk(const uint64_t* cells_a,
     sycl::free(d_dist, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_distance_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_distance_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
                                                           const void* lng_array, size_t count,
                                                           int resolution, int use_fp64,
-                                                          uint64_t* cell_ids, uint8_t* valid) {
+                                                          uint64_t* cell_ids, uint8_t* valid) try {
   if (count == 0)
     return PGACCEL_OK;
   if (lat_array == nullptr || lng_array == nullptr || cell_ids == nullptr || valid == nullptr) {
@@ -1434,9 +1524,20 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
     sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_to_cell_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_to_cell_bulk", nullptr);
 }
 
 static pgaccel_status
@@ -1509,21 +1610,23 @@ h3_lat_lng_count_bulk_device_direct(const double* lat_array, const double* lng_a
     *out_state = state;
     cleanup();
     return PGACCEL_OK;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::bad_alloc&) {
     return PGACCEL_ERROR_OOM;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk direct GPU path failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: h3_lat_lng_count_bulk direct GPU path failed (unknown)\n");
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
 }
 
 extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk(const double* lat_array,
                                                         const double* lng_array, size_t count,
                                                         int resolution,
-                                                        pgaccel_agg_state** out_state) {
+                                                        pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR_INIT;
   *out_state = nullptr;
@@ -1536,11 +1639,17 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk(const double* lat_array,
 
   return h3_lat_lng_count_bulk_device_direct(lat_array, lng_array, nullptr, nullptr, count,
                                              resolution, out_state);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk_f32_exact(
     const float* lat_f32_array, const float* lng_f32_array, const double* lat_exact_array,
-    const double* lng_exact_array, size_t count, int resolution, pgaccel_agg_state** out_state) {
+    const double* lng_exact_array, size_t count, int resolution, pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR_INIT;
   *out_state = nullptr;
@@ -1558,11 +1667,17 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk_f32_exact(
 
   return h3_lat_lng_count_bulk_device_direct(lat_exact_array, lng_exact_array, lat_f32_array,
                                              lng_f32_array, count, resolution, out_state);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_bulk_f32_exact", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_bulk_f32_exact", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
     const double* lat_exact_array, const double* lng_exact_array, const float* lat_f32_array,
-    const float* lng_f32_array, size_t count, int resolution, pgaccel_agg_state** out_state) {
+    const float* lng_f32_array, size_t count, int resolution, pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR_INIT;
   *out_state = nullptr;
@@ -1619,15 +1734,23 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
     *out_state = state;
     cleanup();
     return PGACCEL_OK;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::bad_alloc&) {
     return PGACCEL_ERROR_OOM;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "pgaccel: h3_lat_lng_count_resident_bulk failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: h3_lat_lng_count_resident_bulk failed (unknown)\n");
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_resident_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_resident_bulk", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1705,7 +1828,7 @@ static inline uint32_t h3_grid_ring_count(uint64_t cell, int32_t k) {
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells, size_t count,
-                                                           int32_t k, uint32_t* out_offsets) {
+                                                           int32_t k, uint32_t* out_offsets) try {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -1734,10 +1857,16 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells
   }
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_output_size", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_output_size", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_t count, int32_t k,
-                                                    const uint32_t* offsets, uint64_t* out_cells) {
+                                                    const uint32_t* offsets, uint64_t* out_cells) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_cells == nullptr)
@@ -1817,18 +1946,27 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_
     sycl::free(d_out, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& ex) {
     fprintf(stderr,
             "pgaccel_h3_grid_disk_emit: SYCL exception: %s "
-            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR_NO_DEVICE\n",
+            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR\n",
             ex.what(), count, (int)k, total);
+    return PGACCEL_ERROR;
   } catch (...) {
     fprintf(stderr,
             "pgaccel_h3_grid_disk_emit: unknown exception "
-            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR_NO_DEVICE\n",
+            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR\n",
             count, (int)k, total);
+    return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_emit", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_emit", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1837,7 +1975,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_
 
 extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t* cells,
                                                                   size_t count, int32_t k,
-                                                                  uint32_t* out_offsets) {
+                                                                  uint32_t* out_offsets) try {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -1864,11 +2002,17 @@ extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t
   }
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_output_size", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_output_size", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells, size_t count,
                                                            int32_t k, const uint32_t* offsets,
-                                                           uint64_t* out_cells) {
+                                                           uint64_t* out_cells) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_cells == nullptr)
@@ -1948,9 +2092,20 @@ extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells
     sycl::free(d_out, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_emit", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_emit", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1977,7 +2132,7 @@ static inline uint32_t h3_pow7(int n) {
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t* cells,
                                                                   size_t count, int32_t child_res,
-                                                                  uint32_t* out_offsets) {
+                                                                  uint32_t* out_offsets) try {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2082,15 +2237,26 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t
     sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_children_output_size", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_children_output_size", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells, size_t count,
                                                            int32_t child_res,
                                                            const uint32_t* offsets,
-                                                           uint64_t* out_children) {
+                                                           uint64_t* out_children) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_children == nullptr)
@@ -2256,9 +2422,20 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
     sycl::free(d_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_children_emit", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_children_emit", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -2282,7 +2459,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t* cells,
                                                                   size_t count,
-                                                                  uint32_t* out_offsets) {
+                                                                  uint32_t* out_offsets) try {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2315,11 +2492,17 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t
   }
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_output_size", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_output_size", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells, size_t count,
                                                            const uint32_t* offsets,
-                                                           double* out_coords) {
+                                                           double* out_coords) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_coords == nullptr)
@@ -2417,6 +2600,12 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells
 
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_emit", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_emit", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -2452,7 +2641,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells
 extern "C" pgaccel_status pgaccel_h3_polyfill_output_size(const float* coords,
                                                           const uint32_t* ring_offsets,
                                                           size_t ring_count, int32_t resolution,
-                                                          uint32_t* out_offsets) {
+                                                          uint32_t* out_offsets) try {
   if (ring_count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2519,6 +2708,12 @@ extern "C" pgaccel_status pgaccel_h3_polyfill_output_size(const float* coords,
 
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_polyfill_output_size", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_polyfill_output_size", nullptr);
 }
 
 // Host-side ray-casting point_in_ring (matches spatial_predicates.cpp logic
@@ -2543,7 +2738,7 @@ static inline bool point_in_polygon_xy(double px, double py, const float* coords
 extern "C" pgaccel_status pgaccel_h3_polyfill_emit(const float* coords,
                                                    const uint32_t* ring_offsets, size_t ring_count,
                                                    int32_t resolution, const uint32_t* offsets,
-                                                   uint64_t* out_cells) {
+                                                   uint64_t* out_cells) try {
   if (ring_count == 0)
     return PGACCEL_OK;
   if (coords == nullptr || ring_offsets == nullptr || offsets == nullptr || out_cells == nullptr)
@@ -2644,6 +2839,12 @@ extern "C" pgaccel_status pgaccel_h3_polyfill_emit(const float* coords,
 
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_polyfill_emit", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_polyfill_emit", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -2669,7 +2870,7 @@ extern "C" pgaccel_status pgaccel_h3_polyfill_emit(const float* coords,
 extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_output_size(const uint64_t* cells,
                                                                         size_t count,
                                                                         uint32_t* out_ring_offsets,
-                                                                        uint32_t* out_ring_count) {
+                                                                        uint32_t* out_ring_count) try {
   if (count == 0) {
     if (out_ring_count != nullptr)
       *out_ring_count = 0;
@@ -2703,13 +2904,19 @@ extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_output_size(const ui
 
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_output_size", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_output_size", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_emit(const uint64_t* cells,
                                                                  size_t count,
                                                                  const uint32_t* ring_offsets,
                                                                  uint32_t ring_count,
-                                                                 double* out_coords) {
+                                                                 double* out_coords) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || ring_offsets == nullptr || out_coords == nullptr)
@@ -2721,4 +2928,10 @@ extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_emit(const uint64_t*
   // pairs in the same CSR layout. The polygon-edge-dedup approximation
   // documented above means each cell becomes its own ring.
   return pgaccel_h3_cell_to_boundary_emit(cells, count, ring_offsets, out_coords);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_emit", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_emit", nullptr);
 }

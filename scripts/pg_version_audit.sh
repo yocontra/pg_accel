@@ -17,6 +17,8 @@ targets=(
     pg_accel/Cargo.toml
     scripts/pg_source.sh
     scripts/pg_versions.sh
+    scripts/coverage_gate.sh
+    scripts/cuda_stress_gate.sh
     pg_accel_bench/src/h3_protection_test.rs
     pg_accel_bench/src/integration_connection.rs
     pg_accel_bench/src/main.rs

@@ -294,16 +294,28 @@ deny:
 # advisory check: audit uses the full RustSec DB directly). Fails with a clear
 # message on machines that don't have cargo-audit installed — `cargo install
 # cargo-audit --locked` fixes it.
-# Ignored advisories are transitive warnings from pgrx/pgrx-tests/bench-only
-# deps, not pg_accel runtime safety boundaries.
+#
+# The ignored-advisory set is single-sourced from deny.toml's
+# [advisories].ignore table (the authoritative list, with per-advisory reason
+# comments) so cargo-audit and cargo-deny can never drift. Ignored advisories
+# are transitive warnings from pgrx/opentelemetry/bench-only deps, not
+# pg_accel runtime safety boundaries.
 audit:
-    @cargo audit --version >/dev/null 2>&1 || { \
-      echo "error: cargo-audit is not installed or is not runnable for the active Rust toolchain. Run: cargo install cargo-audit --locked" >&2; \
-      exit 1; \
-    }
-    cargo audit \
-      --ignore RUSTSEC-2021-0127 \
-      --ignore RUSTSEC-2026-0097
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! cargo audit --version >/dev/null 2>&1; then
+        echo "error: cargo-audit is not installed or is not runnable for the active Rust toolchain. Run: cargo install cargo-audit --locked" >&2
+        exit 1
+    fi
+    ignore_args=()
+    while IFS= read -r advisory_id; do
+        ignore_args+=(--ignore "$advisory_id")
+    done < <(grep -oE 'RUSTSEC-[0-9]{4}-[0-9]{4}' deny.toml | sort -u)
+    if [ "${#ignore_args[@]}" -eq 0 ]; then
+        echo "error: no ignored advisories parsed from deny.toml [advisories].ignore" >&2
+        exit 1
+    fi
+    cargo audit "${ignore_args[@]}"
 
 # Validate file:line citations in CLAUDE.md / ARCHITECTURE.md / TODO.md.
 # Anti-cheat §10 requires citations to be verifiable; this catches drift
@@ -371,7 +383,40 @@ coverage pg="":
 # Run benchmark suite against local pgrx PG. The runner seeds and cleans up
 # each workload/scale itself. Long benches can fill the PG log; `log-rails`
 # truncates oversized logs first.
+#
+# This is the EVIDENCE recipe: it does NOT pass `--skip-guc-verify`, so the
+# harness hard-fails if any PGC_POSTMASTER GUC (e.g. shared_buffers) drifts
+# from the requested profile. Use `just bench-dev` for local iteration where
+# the postmaster GUC mismatch should be tolerated.
 bench iterations="10" warmup="5" pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    just install-pg-accel "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run -p pg_accel_bench --release -- run \
+        --iterations {{iterations}} --warmup {{warmup}} \
+        --connection "host=localhost port=$port dbname=postgres" \
+        --format markdown --timing raw
+
+# Developer-iteration benchmark: identical to `just bench` but passes
+# `--skip-guc-verify` to bypass the postmaster-GUC mismatch hard-fail. Never
+# use for published/evidence runs — a settings table that doesn't match the
+# running postmaster is worse than no table at all (see main.rs --skip-guc-verify).
+bench-dev iterations="10" warmup="5" pg="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/pg_versions.sh
@@ -544,40 +589,23 @@ gpu-build:
     cmake --build pgaccel-kernels/build --parallel
 
 # Run standalone GPU kernel tests (warm cache, quiet console).
+#
+# The test list is discovered from CMake's CTest registration
+# (`add_pgaccel_gpu_test` in pgaccel-kernels/CMakeLists.txt) rather than a
+# hand-maintained array, so new kernel test targets run automatically instead
+# of being silently dropped. Each registered test is already wrapped in
+# scripts/filter_gpu_output.py, which preserves the quiet console and writes a
+# raw log per test under .pgaccel/logs. gpu-build reconfigures CMake first, so
+# the CTest manifest is always current. Runs serially (default), warm cache
+# (no clear-jit), with a per-test timeout via GPU_TEST_TIMEOUT_S.
 gpu-test: gpu-build
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p .pgaccel/logs
     timeout_s="${GPU_TEST_TIMEOUT_S:-300}"
-    tests=(
-        device
-        bbox
-        spatial
-        spatial_dispatch
-        h3
-        raster
-        correctness
-        exec_gpu
-        hash_agg_keys
-        fork
-        fork_warmed
-        fork_cold
-        sycl_basic
-        reduce_stats
-        reduce_bool_bit
-        hash_agg_partial
-        hash_join
-        nested_loop_ineq
-        window
-        expr_templates
-    )
-    for test_name in "${tests[@]}"; do
-        log=".pgaccel/logs/gpu-test-${test_name}-$(date +%Y%m%d-%H%M%S).log"
-        python3 scripts/filter_gpu_output.py \
-            --label "test_${test_name}" \
-            --log "$log" \
-            -- timeout "$timeout_s" "./pgaccel-kernels/build/test_${test_name}"
-    done
+    ctest --test-dir pgaccel-kernels/build \
+        --output-on-failure \
+        --timeout "$timeout_s"
 
 # Wipe the AdaptiveCpp Metal SSCP JIT cache, then run a single named
 # kernel test binary with a 5-minute timeout. Use this from the
@@ -747,6 +775,40 @@ sql-test pg="":
     connection="host=localhost port=$port dbname=postgres"
     "$psql_bin" "$connection" -v ON_ERROR_STOP=1 -f sql/init/01-create-extensions.sql
     PG_ACCEL_PG_MAJOR="$pg" PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 sql/tests/run_all.sh "$connection"
+
+# Run the opt-in plan-shape + parallel-stress integration tests (gated behind
+# the `integration_tests` cargo feature, so excluded from the default hermetic
+# `cargo test -p pg_accel_bench`). Installs pg_accel into the pgrx-managed
+# cluster, ensures the extension exists, then runs the live suite against it.
+# `pg_accel_bench/src/integration_connection.rs` reads PG_ACCEL_TEST_CONNECTION,
+# so we point it at the resolved pgrx port explicitly.
+plan-shape-tests pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    scripts/setup_pg_extensions.sh "$pg"
+    just install-pg-accel "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    psql_bin="$("$pg_config" --bindir)/psql"
+    if [ ! -x "$psql_bin" ]; then
+        psql_bin="psql"
+    fi
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    connection="host=localhost port=$port dbname=postgres"
+    "$psql_bin" "$connection" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pg_accel;"
+    PG_ACCEL_TEST_CONNECTION="$connection" PG_ACCEL_TEST_PG_MAJOR="$pg" \
+        cargo test -p pg_accel_bench --features integration_tests -- --nocapture
 
 # Build installable pgrx package
 package pg="":

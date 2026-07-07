@@ -1,4 +1,4 @@
-// Crate-wide lint allows. Every entry below was measured (Phase 3) with
+// Crate-wide lint allows. Every entry below was measured (Phase 3, re-measured after the Phase-2 merge) with
 // `cargo clippy --all-targets --message-format=json` and still fires; allows
 // that no longer fired were removed, and those already covered by
 // `[workspace.lints.clippy]` (doc_markdown, cast_possible_truncation/wrap,
@@ -7,37 +7,37 @@
 // their firing sites are spread across files owned by other Phase-3 agents;
 // item-scoping them would require edits outside this crate-root file.
 
-// Test modules use `use super::*;` defensively; not every test uses every item. (84)
+// Test modules use `use super::*;` defensively; not every test uses every item. (83)
 #![allow(unused_imports)]
 // pgrx macros can emit cfgs for feature names this crate does not define.
-// (0 today, but retained as insurance against pgrx macro/feature builds.)
+// (0 on the merged tree, but retained as insurance against pgrx macro/feature builds.)
 #![allow(unexpected_cfgs)]
-// Similar names are common in FFI wrappers (arg0/arg1, geom_a/geom_b). (80)
+// Similar names are common in FFI wrappers (arg0/arg1, geom_a/geom_b). (88)
 #![allow(clippy::similar_names)]
 // Pointer alignment casts are unavoidable when walking PG node graphs where
 // nodes arrive as *Node and must be down-cast to *OpExpr/*Var/etc. (262)
 #![allow(clippy::cast_ptr_alignment)]
 // PG row counts are i64 but cost formulas use f64; precision loss is
-// acceptable because these are estimates, not exact values. (86)
+// acceptable because these are estimates, not exact values. (90)
 #![allow(clippy::cast_precision_loss)]
 // inline(always) is used on hot-path helpers in executor fast-path loops
 // where the measured perf gain matters more than the style preference. (18)
 #![allow(clippy::inline_always)]
 // Dispatch tables commonly have match arms that share a body; collapsing
-// them would hurt readability. (56)
+// them would hurt readability. (58)
 #![allow(clippy::match_same_arms)]
 // Items declared mid-function are used to scope helper types near their
-// single use-site. (68)
+// single use-site. (72)
 #![allow(clippy::items_after_statements)]
 // Cost/stats floats are compared for exact equality to detect "unset"
-// sentinel values. (60)
+// sentinel values. (62)
 #![allow(clippy::float_cmp)]
 // Large pedantic/nursery warnings we've decided to live with. Dominant
 // sources are the executor and ffi/planner layers (other agents' files).
 #![allow(
-    clippy::too_many_lines,             // 92
+    clippy::too_many_lines,             // 94
     clippy::needless_pass_by_value,     // 68
-    clippy::option_if_let_else,         // 32
+    clippy::option_if_let_else,         // 42
     clippy::missing_errors_doc,         // 24
     clippy::missing_panics_doc,         // 24
     clippy::manual_let_else,            // 24
@@ -55,7 +55,7 @@
     clippy::redundant_closure_for_method_calls, // 4
     clippy::doc_overindented_list_items, // 2
     clippy::or_fun_call,                // 2
-    clippy::struct_field_names          // 2
+    clippy::struct_field_names          // 4
 )]
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
@@ -83,7 +83,14 @@ static FP64_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// fp32 sibling in the planner's cost equation, so the planner naturally
 /// prefers PG native for small-to-medium fp64 aggregates where the GPU
 /// win wouldn't overcome the emulation penalty.
-static SOFT_FP64_COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(32.0);
+static SOFT_FP64_COST_MULTIPLIER: GucSetting<f64> =
+    GucSetting::<f64>::new(SOFT_FP64_COST_MULTIPLIER_DEFAULT);
+
+/// Registration default for `pg_accel.soft_fp64_cost_multiplier` and the
+/// value the clamp falls back to when it is handed a non-finite input
+/// (NaN / ±inf). Kept as a named constant so the GucSetting seed and the
+/// clamp's safe fallback can never drift apart.
+const SOFT_FP64_COST_MULTIPLIER_DEFAULT: f64 = 32.0;
 
 /// Hard cap on `pg_accel.soft_fp64_cost_multiplier`. Values past this are
 /// clamped with a `tracing::warn!`. Raising this constant requires
@@ -115,6 +122,21 @@ pub fn fp64_enabled() -> bool {
 #[inline]
 #[must_use]
 fn clamp_soft_fp64_cost_multiplier(raw: f64) -> f64 {
+    // NaN and ±inf must never reach the planner cost equation: every
+    // comparison against NaN is false, so a NaN would slip past the
+    // `> cap` / `< 1.0` guards below unchanged and then poison every
+    // cost estimate it multiplies into (NaN propagates through the whole
+    // add_path comparison). Reject non-finite inputs up front and fall
+    // back to the registration default.
+    if !raw.is_finite() {
+        tracing::warn!(
+            raw = raw,
+            default = SOFT_FP64_COST_MULTIPLIER_DEFAULT,
+            "pg_accel.soft_fp64_cost_multiplier is non-finite (NaN/inf); \
+             using default to keep planner cost math finite"
+        );
+        return SOFT_FP64_COST_MULTIPLIER_DEFAULT;
+    }
     if raw > SOFT_FP64_COST_MULTIPLIER_HARD_CAP {
         tracing::warn!(
             raw = raw,
@@ -260,6 +282,16 @@ mod gpu;
 #[cfg(feature = "pg_test")]
 mod tests;
 
+// Phase 2 bridge FFI safety unit tests are pure Rust (no PG instance / no
+// GPU dispatch required) and must run under plain `cargo test -p pg_accel
+// --lib`. When the `pg_test` feature is off, `mod tests` above is not
+// compiled, so mount just that one file here. Under `cargo pgrx test`
+// (feature on) the file is reached through `tests/mod.rs` instead — the
+// two gates are mutually exclusive, so it is never compiled twice.
+#[cfg(all(test, not(feature = "pg_test")))]
+#[path = "tests/phase2_bridge.rs"]
+mod phase2_bridge_tests;
+
 // macOS Sequoia+ (26.x) eagerly resolves undefined data symbols at dyld
 // load time, which aborts pgrx lib unit test binaries before any tests
 // run. build.rs generates a file of `#[no_mangle] pub static NAME: u8`
@@ -326,7 +358,6 @@ mod soft_fp64_cap_tests {
         assert!((clamp_soft_fp64_cost_multiplier(64.0001) - 64.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(100.0) - 64.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(1000.0) - 64.0).abs() < f64::EPSILON);
-        assert!((clamp_soft_fp64_cost_multiplier(f64::INFINITY) - 64.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -336,5 +367,21 @@ mod soft_fp64_cap_tests {
         assert!((clamp_soft_fp64_cost_multiplier(0.5) - 1.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(0.0) - 1.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(-10.0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn clamp_rejects_non_finite_to_default() {
+        use super::SOFT_FP64_COST_MULTIPLIER_DEFAULT;
+        // NaN can never be clamped: `NaN > cap` and `NaN < 1.0` are both
+        // false, so without an explicit `is_finite` guard NaN would flow
+        // straight into the planner cost equation and poison every estimate
+        // it multiplies. Both NaN and ±inf must resolve to the finite
+        // registration default instead.
+        let d = SOFT_FP64_COST_MULTIPLIER_DEFAULT;
+        assert!((clamp_soft_fp64_cost_multiplier(f64::NAN) - d).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(f64::INFINITY) - d).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(f64::NEG_INFINITY) - d).abs() < f64::EPSILON);
+        // Sanity: the result is always finite regardless of input.
+        assert!(clamp_soft_fp64_cost_multiplier(f64::NAN).is_finite());
     }
 }

@@ -4,7 +4,7 @@
 //! then canonical SQL may select a CustomScan only while the matching columns
 //! are present in backend-local GPU-readable memory.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use pgrx::{pg_sys, prelude::*};
@@ -823,7 +823,13 @@ impl SsbmQ1ResidentCache {
 
     #[must_use]
     pub fn brand_count(&self) -> i32 {
-        i32::try_from(self.brand_values.len()).unwrap_or(i32::MAX)
+        i32::try_from(self.brand_values.len()).unwrap_or_else(|_| {
+            pgrx::error!(
+                "pg_accel: SSBM brand dictionary has {} entries, exceeding the int32 kernel \
+                 ABI; refusing to dispatch with a clamped brand count",
+                self.brand_values.len()
+            )
+        })
     }
 
     #[must_use]
@@ -1459,8 +1465,12 @@ impl ResidentStarDimensionHostFilter {
         let label_index: BTreeMap<&str, i32> = labels
             .iter()
             .enumerate()
-            .map(|(idx, label)| (label.as_str(), i32::try_from(idx).unwrap_or(i32::MAX)))
-            .collect();
+            .map(|(idx, label)| {
+                i32::try_from(idx)
+                    .map(|code| (label.as_str(), code))
+                    .map_err(|_| "SSBM grouping label index exceeds int32 code space".to_owned())
+            })
+            .collect::<Result<_, String>>()?;
         let mut match_by_key = vec![0u8; key_count];
         let mut group_code_by_key = vec![-1i32; key_count];
         for row in rows {
@@ -1599,10 +1609,15 @@ impl ResidentStarDimensionFilter {
     }
 
     fn group_code_ptr(&self) -> *const i32 {
-        self.group_code_by_key
-            .as_ref()
-            .expect("resident star grouped dimension has group codes")
-            .as_ptr()
+        self.group_code_by_key.as_ref().map_or_else(
+            || {
+                pgrx::error!(
+                    "pg_accel: resident star grouped dimension filter is missing its \
+                     group-code buffer; the grouped SSBM kernel cannot dispatch"
+                )
+            },
+            ExprDeviceBuffer::as_ptr,
+        )
     }
 
     const fn key_count(&self) -> usize {
@@ -1990,8 +2005,350 @@ thread_local! {
     static RESIDENT_HASH_JOIN_COUNT_CACHE: RefCell<Option<ResidentHashJoinCountCache>> = const { RefCell::new(None) };
 }
 
+// ---------------------------------------------------------------------------
+// Relcache invalidation (stopgap until residency v2 generation counters)
+// ---------------------------------------------------------------------------
+//
+// The resident caches above are backend-local snapshots keyed by relation OID.
+// A `CacheRegisterRelcacheCallback` callback records every relcache
+// invalidation that could affect a cached relation (TRUNCATE, ALTER TABLE,
+// DROP TABLE, VACUUM FULL, CLUSTER, ...) into fixed-capacity `Cell` storage,
+// and `process_relcache_invalidations()` — called at the top of every cache
+// accessor — drops the matching slots before the planner or executor can see
+// stale device data.
+//
+// Known limitations (documented, not hidden):
+//
+// 1. Plain row-level DML (INSERT/UPDATE/DELETE) does NOT fire relcache
+//    invalidation, so it is NOT detected by this stopgap. There is no cheap
+//    reliable backend-local signal for it: `pg_class.relfilenode` only
+//    changes on rewrites, `RelationGetNumberOfBlocks` misses updates/deletes
+//    and free-space-map reuse, and pgstat counters are flushed
+//    asynchronously. Residency v2 will add trigger-backed generation
+//    counters; until then every successful load emits a
+//    once-per-session-per-relation WARNING pointing at the manual
+//    `pg_accel_clear_*` functions (see `warn_dml_staleness_once`).
+// 2. TRUNCATE of a table created in the *current* (sub)transaction takes
+//    PostgreSQL's non-transactional in-place shortcut
+//    (`ExecuteTruncateGuts`: `rd_createSubid == mySubid` →
+//    `heap_truncate_one_rel`), which fires no relcache invalidation. A cache
+//    loaded from that table earlier in the same transaction is not cleared.
+//    TRUNCATE of any table that predates the current transaction rewrites
+//    the relfilenode and IS invalidated (covered by
+//    `tests/phase2_cache.rs`).
+
+/// Capacity of the pending-invalidation scratch. Sized for the handful of
+/// relations the resident caches can reference (SSBM uses five); overflow
+/// degrades to a conservative clear-everything, never to a missed
+/// invalidation.
+const PENDING_RELCACHE_INVAL_CAP: usize = 16;
+
+#[derive(Clone, Copy)]
+struct PendingRelcacheInvals {
+    relids: [u32; PENDING_RELCACHE_INVAL_CAP],
+    len: usize,
+}
+
+impl PendingRelcacheInvals {
+    const fn empty() -> Self {
+        Self {
+            relids: [0; PENDING_RELCACHE_INVAL_CAP],
+            len: 0,
+        }
+    }
+
+    fn contains(&self, relid: u32) -> bool {
+        self.relids[..self.len].contains(&relid)
+    }
+}
+
+thread_local! {
+    static RELCACHE_CALLBACK_REGISTERED: Cell<bool> = const { Cell::new(false) };
+    static RESIDENT_CACHE_LOAD_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
+    static PENDING_RELCACHE_CLEAR_ALL: Cell<bool> = const { Cell::new(false) };
+    static PENDING_RELCACHE_INVALS: Cell<PendingRelcacheInvals> =
+        const { Cell::new(PendingRelcacheInvals::empty()) };
+    static DML_STALENESS_WARNED_RELIDS: RefCell<BTreeSet<u32>> =
+        const { RefCell::new(BTreeSet::new()) };
+}
+
+/// Relation OIDs referenced by whatever is in each cache slot right now.
+/// Returns `true` when the slot holds a cache referencing `relid`. A slot
+/// whose `RefCell` is currently borrowed reports `true` (conservative): the
+/// callback must never panic, so it cannot wait for the borrow.
+fn relid_matches_any_resident_cache(relid: pg_sys::Oid) -> bool {
+    let ssbm = SSBM_Q1_CACHE.try_with(|slot| match slot.try_borrow() {
+        Ok(borrow) => borrow.as_ref().is_some_and(|cache| {
+            [
+                cache.fact_rel_oid,
+                cache.date_rel_oid,
+                cache.part_rel_oid,
+                cache.customer_rel_oid,
+                cache.supplier_rel_oid,
+            ]
+            .contains(&relid)
+        }),
+        Err(_) => true,
+    });
+    let dense = RESIDENT_DENSE_GROUP_AGG_CACHE.try_with(|slot| match slot.try_borrow() {
+        Ok(borrow) => borrow.as_ref().is_some_and(|cache| cache.rel_oid == relid),
+        Err(_) => true,
+    });
+    let star = RESIDENT_STAR_DIM_GROUP_AGG_CACHE.try_with(|slot| match slot.try_borrow() {
+        Ok(borrow) => borrow
+            .as_ref()
+            .is_some_and(|cache| cache.fact_rel_oid == relid || cache.dim_rel_oid == relid),
+        Err(_) => true,
+    });
+    let h3 = RESIDENT_H3_GROUP_AGG_CACHE.try_with(|slot| match slot.try_borrow() {
+        Ok(borrow) => borrow.as_ref().is_some_and(|cache| cache.rel_oid == relid),
+        Err(_) => true,
+    });
+    let hashjoin = RESIDENT_HASH_JOIN_COUNT_CACHE.try_with(|slot| match slot.try_borrow() {
+        Ok(borrow) => borrow
+            .as_ref()
+            .is_some_and(|cache| cache.outer_rel_oid == relid || cache.inner_rel_oid == relid),
+        Err(_) => true,
+    });
+    // `try_with` fails only during thread-local teardown (backend exit); the
+    // caches die with the backend, so a miss there is harmless either way.
+    [ssbm, dense, star, h3, hashjoin]
+        .into_iter()
+        .any(|hit| hit.unwrap_or(false))
+}
+
+/// Relcache invalidation callback: records which relation OIDs were
+/// invalidated so the next resident-cache access can drop stale slots.
+///
+/// This runs inside PostgreSQL's cache-invalidation processing (command end,
+/// lock acquisition, transaction abort). It must be minimal and panic-free:
+/// no PostgreSQL calls (no elog/palloc — an ERROR raised here would corrupt
+/// invalidation processing), no allocation, and no freeing of GPU device
+/// memory — dropping an `ExprDeviceBuffer` calls into the SYCL runtime, which
+/// has no safety contract inside abort-time invalidation processing. The
+/// relid is recorded into fixed-capacity `Cell` storage instead, and the
+/// matching cache slots are dropped lazily by
+/// `process_relcache_invalidations()` on the next cache access, which runs in
+/// normal planner/executor context.
+unsafe extern "C-unwind" fn resident_cache_relcache_callback(
+    _arg: pg_sys::Datum,
+    relid: pg_sys::Oid,
+) {
+    // All thread-local access uses `try_with`/`try_borrow` so this function
+    // cannot panic (an unwind escaping a raw C callback into PostgreSQL's
+    // inval machinery would be undefined behavior).
+    if relid == pg_sys::InvalidOid {
+        // InvalidOid means "every relation" (sinval queue overflow).
+        let _ = PENDING_RELCACHE_CLEAR_ALL.try_with(|flag| flag.set(true));
+        return;
+    }
+    // Skip relids that cannot affect any resident cache so the fixed-size
+    // pending list is not churned by unrelated DDL. While a load is in
+    // progress the slot under (re)construction is not yet visible, so record
+    // unconditionally — the post-install drain re-checks against the freshly
+    // stored cache.
+    let load_in_progress = RESIDENT_CACHE_LOAD_IN_PROGRESS
+        .try_with(Cell::get)
+        .unwrap_or(false);
+    if !load_in_progress && !relid_matches_any_resident_cache(relid) {
+        return;
+    }
+    let _ = PENDING_RELCACHE_INVALS.try_with(|pending_cell| {
+        let mut pending = pending_cell.get();
+        let relid_raw = u32::from(relid);
+        if pending.contains(relid_raw) {
+            return;
+        }
+        if pending.len == PENDING_RELCACHE_INVAL_CAP {
+            // Overflow degrades to clear-everything, never to a missed
+            // invalidation.
+            let _ = PENDING_RELCACHE_CLEAR_ALL.try_with(|flag| flag.set(true));
+            return;
+        }
+        pending.relids[pending.len] = relid_raw;
+        pending.len += 1;
+        pending_cell.set(pending);
+    });
+}
+
+/// Idempotently register the relcache invalidation callback for this backend.
+///
+/// Called lazily from every `pg_accel_load_*` entry point (rather than from
+/// `_PG_init`) so this module stays self-contained. PostgreSQL keeps the
+/// registration for the life of the backend; there is no unregister API.
+fn ensure_relcache_invalidation_callback_registered() {
+    if RELCACHE_CALLBACK_REGISTERED.get() {
+        return;
+    }
+    // SAFETY: called on the main backend thread from a `#[pg_extern]`
+    // function. `CacheRegisterRelcacheCallback` appends to inval.c's
+    // backend-local callback array; the function pointer is a static item and
+    // the zero Datum arg needs no lifetime, so both remain valid for the
+    // backend lifetime. PostgreSQL raises FATAL if more than
+    // MAX_RELCACHE_CALLBACKS registrations occur; the registered flag keeps
+    // this to exactly one per backend.
+    unsafe {
+        pg_sys::CacheRegisterRelcacheCallback(
+            Some(resident_cache_relcache_callback),
+            pg_sys::Datum::from(0),
+        );
+    }
+    RELCACHE_CALLBACK_REGISTERED.set(true);
+}
+
+/// Drop any resident cache slots invalidated since the last access.
+///
+/// Called at the top of every resident-cache accessor (planner recognizers,
+/// executor lookups, row-count SRFs) and around cache loads. Runs in normal
+/// backend context, so dropping `ExprDeviceBuffer`s (freeing GPU USM memory)
+/// is safe here — unlike in the relcache callback itself. Device memory for
+/// an invalidated cache is therefore reclaimed on the next access, not at
+/// invalidation time; a cache that is never touched again is freed at backend
+/// exit.
+fn process_relcache_invalidations() {
+    let clear_all = PENDING_RELCACHE_CLEAR_ALL.replace(false);
+    let pending = PENDING_RELCACHE_INVALS.replace(PendingRelcacheInvals::empty());
+    if !clear_all && pending.len == 0 {
+        return;
+    }
+    let invalidated = |cache_relids: &[pg_sys::Oid]| -> bool {
+        clear_all
+            || cache_relids
+                .iter()
+                .any(|oid| pending.contains(u32::from(*oid)))
+    };
+
+    SSBM_Q1_CACHE.with(|slot| {
+        let stale = slot.borrow().as_ref().is_some_and(|cache| {
+            invalidated(&[
+                cache.fact_rel_oid,
+                cache.date_rel_oid,
+                cache.part_rel_oid,
+                cache.customer_rel_oid,
+                cache.supplier_rel_oid,
+            ])
+        });
+        if stale {
+            *slot.borrow_mut() = None;
+            pgrx::debug1!("pg_accel: SSBM resident cache dropped after relcache invalidation");
+        }
+    });
+    RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
+        let stale = slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| invalidated(&[cache.rel_oid]));
+        if stale {
+            *slot.borrow_mut() = None;
+            pgrx::debug1!(
+                "pg_accel: resident dense groupagg cache dropped after relcache invalidation"
+            );
+        }
+    });
+    RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
+        let stale = slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| invalidated(&[cache.fact_rel_oid, cache.dim_rel_oid]));
+        if stale {
+            *slot.borrow_mut() = None;
+            pgrx::debug1!(
+                "pg_accel: resident star groupagg cache dropped after relcache invalidation"
+            );
+        }
+    });
+    RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
+        let stale = slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| invalidated(&[cache.rel_oid]));
+        if stale {
+            *slot.borrow_mut() = None;
+            pgrx::debug1!(
+                "pg_accel: resident H3 groupagg cache dropped after relcache invalidation"
+            );
+        }
+    });
+    RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| {
+        let stale = slot
+            .borrow()
+            .as_ref()
+            .is_some_and(|cache| invalidated(&[cache.outer_rel_oid, cache.inner_rel_oid]));
+        if stale {
+            *slot.borrow_mut() = None;
+            pgrx::debug1!(
+                "pg_accel: resident hashjoin count cache dropped after relcache invalidation"
+            );
+        }
+    });
+}
+
+/// Marks a resident-cache load as in progress so the relcache callback
+/// records every invalidation unconditionally (the slot under construction is
+/// not yet visible for OID matching). The flag is reset on drop, including
+/// when a load error unwinds.
+struct ResidentCacheLoadGuard;
+
+impl ResidentCacheLoadGuard {
+    fn begin() -> Self {
+        RESIDENT_CACHE_LOAD_IN_PROGRESS.set(true);
+        Self
+    }
+}
+
+impl Drop for ResidentCacheLoadGuard {
+    fn drop(&mut self) {
+        RESIDENT_CACHE_LOAD_IN_PROGRESS.set(false);
+    }
+}
+
+/// Emit the DML staleness contract once per session per relation: relcache
+/// invalidation covers DDL/TRUNCATE/VACUUM FULL, but plain INSERT/UPDATE/
+/// DELETE is invisible to this stopgap (see the module comment above for why
+/// no cheap reliable detection exists) and requires a manual clear or reload
+/// until residency v2 lands generation counters.
+fn warn_dml_staleness_once(rel_oids: &[pg_sys::Oid]) {
+    DML_STALENESS_WARNED_RELIDS.with(|warned| {
+        let mut warned = warned.borrow_mut();
+        for oid in rel_oids {
+            let raw = u32::from(*oid);
+            if warned.insert(raw) {
+                pgrx::warning!(
+                    "pg_accel: resident cache loaded for relation OID {raw}: DDL, TRUNCATE, \
+                     and VACUUM FULL invalidate it automatically, but plain DML \
+                     (INSERT/UPDATE/DELETE) does not; after row-level changes, reload the \
+                     cache or call the matching pg_accel_clear_* function, or queries may \
+                     return stale results until residency v2 adds DML invalidation"
+                );
+            }
+        }
+    });
+}
+
+/// Number of rows an interruptible SPI load loop scans between
+/// `CHECK_FOR_INTERRUPTS()` calls (safety rule #7 cadence).
+const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
+
+/// The grouped-count output lanes of every resident kernel are `uint32_t`
+/// (`pgaccel_expr.h`: `uint32_t* out_count_by_group`). A per-group count can
+/// never exceed the cache's total row count, so bounding the row count at
+/// load time honestly prevents 2^32 count wraparound instead of clamping or
+/// silently truncating at emission.
+fn ensure_resident_row_count_fits_u32(row_count: usize, table: &str) -> Result<(), String> {
+    if u32::try_from(row_count).is_ok() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{table} has {row_count} rows; resident cache grouped-count lanes are 32-bit in \
+             the kernel ABI (uint32_t out_count_by_group), refusing to load a cache that \
+             could wrap per-group counts"
+        ))
+    }
+}
+
 #[must_use]
 pub fn ssbm_q1_cache_loaded_for(fact_rel_oid: pg_sys::Oid, date_rel_oid: pg_sys::Oid) -> bool {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.fact_rel_oid() == fact_rel_oid && cache.date_rel_oid() == date_rel_oid
@@ -2006,6 +2363,7 @@ pub fn ssbm_q2_cache_loaded_for(
     part_rel_oid: pg_sys::Oid,
     supplier_rel_oid: pg_sys::Oid,
 ) -> bool {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.fact_rel_oid() == fact_rel_oid
@@ -2023,6 +2381,7 @@ pub fn ssbm_q3_cache_loaded_for(
     customer_rel_oid: pg_sys::Oid,
     supplier_rel_oid: pg_sys::Oid,
 ) -> bool {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.fact_rel_oid() == fact_rel_oid
@@ -2041,6 +2400,7 @@ pub fn ssbm_q4_cache_loaded_for(
     customer_rel_oid: pg_sys::Oid,
     supplier_rel_oid: pg_sys::Oid,
 ) -> bool {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.fact_rel_oid() == fact_rel_oid
@@ -2054,6 +2414,7 @@ pub fn ssbm_q4_cache_loaded_for(
 
 #[must_use]
 pub fn ssbm_q1_cache_rows() -> usize {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2068,6 +2429,7 @@ pub fn resident_dense_groupagg_cache_loaded_for_shape(
     requires_rhs: bool,
     requires_filter: bool,
 ) -> bool {
+    process_relcache_invalidations();
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.rel_oid() == rel_oid
@@ -2082,6 +2444,7 @@ pub fn resident_dense_groupagg_cache_loaded_for_shape(
 pub fn resident_dense_groupagg_cache_shape(
     rel_oid: pg_sys::Oid,
 ) -> Option<ResidentDenseGroupAggCacheShape> {
+    process_relcache_invalidations();
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2092,6 +2455,7 @@ pub fn resident_dense_groupagg_cache_shape(
 
 #[must_use]
 pub fn resident_dense_groupagg_cache_rows() -> usize {
+    process_relcache_invalidations();
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2106,6 +2470,7 @@ pub fn with_resident_dense_groupagg_cache<R>(
     requires_filter: bool,
     f: impl FnOnce(&ResidentDenseGroupAggCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2119,6 +2484,7 @@ pub fn with_resident_dense_groupagg_cache<R>(
 
 #[must_use]
 pub fn resident_star_dim_groupagg_cache_shape() -> Option<ResidentStarDimGroupAggCacheShape> {
+    process_relcache_invalidations();
     RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2128,6 +2494,7 @@ pub fn resident_star_dim_groupagg_cache_shape() -> Option<ResidentStarDimGroupAg
 
 #[must_use]
 pub fn resident_star_dim_groupagg_cache_rows() -> usize {
+    process_relcache_invalidations();
     RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2137,6 +2504,7 @@ pub fn resident_star_dim_groupagg_cache_rows() -> usize {
 
 #[must_use]
 pub fn resident_star_dim_groupagg_cache_dim_key_count() -> usize {
+    process_relcache_invalidations();
     RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2148,6 +2516,7 @@ pub fn with_resident_star_dim_groupagg_cache<R>(
     shape: ResidentStarDimGroupAggCacheShape,
     f: impl FnOnce(&ResidentStarDimGroupAggCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2163,6 +2532,7 @@ pub fn resident_hashjoin_count_cache_loaded_for(
     inner_attno: i32,
     key_type: PgaccelKeyType,
 ) -> bool {
+    process_relcache_invalidations();
     RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.matches(
@@ -2178,11 +2548,13 @@ pub fn resident_hashjoin_count_cache_loaded_for(
 
 #[must_use]
 pub fn resident_hashjoin_count_cache_shape() -> Option<ResidentHashJoinCountCacheShape> {
+    process_relcache_invalidations();
     RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| slot.borrow().as_ref().map(|cache| cache.shape()))
 }
 
 #[must_use]
 pub fn resident_hashjoin_count_cache_rows() -> usize {
+    process_relcache_invalidations();
     RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2198,6 +2570,7 @@ pub fn with_resident_hashjoin_count_cache<R>(
     key_type: PgaccelKeyType,
     f: impl FnOnce(&ResidentHashJoinCountCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2219,6 +2592,7 @@ pub fn resident_h3_groupagg_cache_loaded_for(
     kind: ResidentH3GroupedCountKind,
     resolution: i32,
 ) -> bool {
+    process_relcache_invalidations();
     RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow().as_ref().is_some_and(|cache| {
             cache.rel_oid() == rel_oid
@@ -2235,6 +2609,7 @@ pub fn resident_h3_groupagg_cache_loaded_for(
 
 #[must_use]
 pub fn resident_h3_groupagg_cache_rows() -> usize {
+    process_relcache_invalidations();
     RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
         slot.borrow()
             .as_ref()
@@ -2247,6 +2622,7 @@ pub fn with_resident_h3_groupagg_cache<R>(
     kind: ResidentH3GroupedCountKind,
     f: impl FnOnce(&ResidentH3GroupAggCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2259,6 +2635,7 @@ pub fn with_ssbm_q1_cache<R>(
     date_rel_oid: pg_sys::Oid,
     f: impl FnOnce(&SsbmQ1ResidentCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2274,6 +2651,7 @@ pub fn with_ssbm_q2_cache<R>(
     supplier_rel_oid: pg_sys::Oid,
     f: impl FnOnce(&SsbmQ1ResidentCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2292,6 +2670,7 @@ pub fn with_ssbm_q3_cache<R>(
     supplier_rel_oid: pg_sys::Oid,
     f: impl FnOnce(&SsbmQ1ResidentCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2311,6 +2690,7 @@ pub fn with_ssbm_q4_cache<R>(
     supplier_rel_oid: pg_sys::Oid,
     f: impl FnOnce(&SsbmQ1ResidentCache) -> R,
 ) -> Option<R> {
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         let borrow = slot.borrow();
         let cache = borrow.as_ref()?;
@@ -2416,7 +2796,10 @@ fn alloc_device_u32(len: usize, label: &str) -> Result<ExprDeviceBuffer<u32>, St
 
 const RESIDENT_DENSE_GROUP_BLOCKED_MIN_ROWS: usize = 262_144;
 const RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS: usize = 8_192;
-const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MIN_ROWS: usize = usize::MAX;
+/// Twin of `executor::olap::RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_ENABLED`
+/// (must stay in lockstep): the predicate-wide lane is disabled pending the
+/// Phase 4 kernel rewrite. Previously hidden as `MIN_ROWS = usize::MAX`.
+const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_ENABLED: bool = false;
 const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MAX_GROUPS: usize = 256;
 const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MIN_ROWS: usize = 8_192;
 const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_ROWS: usize = 262_144;
@@ -2436,7 +2819,7 @@ fn resident_groupagg_partial_capacity(
 ) -> Result<usize, String> {
     let may_use_one_pass = row_count >= RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS
         && group_capacity <= RESIDENT_DENSE_GROUP_ONE_PASS_MAX_GROUPS;
-    let may_use_predicate_wide = row_count >= RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MIN_ROWS
+    let may_use_predicate_wide = RESIDENT_DENSE_GROUP_PREDICATE_WIDE_ENABLED
         && group_capacity <= RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MAX_GROUPS;
     let may_use_simple_wide = row_count >= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MIN_ROWS
         && group_capacity <= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_GROUPS
@@ -2612,7 +2995,12 @@ fn load_resident_groupagg_cache(
                 let mut value_rhs_nulls = value_rhs_col.map(|_| Vec::new());
                 let mut saw_rhs_null = false;
                 let mut filter = filter_col.map(|_| Vec::new());
+                let mut scanned_rows: usize = 0;
                 for row in table_rows {
+                    scanned_rows += 1;
+                    if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                        pgrx::check_for_interrupts!();
+                    }
                     let group_key = match group_key_source {
                         ResidentGroupKeySource::Int4 => ResidentGroupKeyValue::Int4(
                             row.get::<i32>(1)
@@ -2701,6 +3089,7 @@ fn load_resident_groupagg_cache(
         return Err(format!("{table}.{group_col} has empty group domain"));
     }
     let row_count = codes.len();
+    ensure_resident_row_count_fits_u32(row_count, table)?;
     let partial_capacity = resident_groupagg_partial_capacity(row_count, group_capacity)?;
     let (
         filtered_row_count,
@@ -2925,7 +3314,12 @@ fn load_resident_star_dim_groupagg_cache(
                 let mut values = Vec::new();
                 let mut value_nulls = Vec::new();
                 let mut saw_value_null = false;
+                let mut scanned_rows: usize = 0;
                 for row in rows {
+                    scanned_rows += 1;
+                    if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                        pgrx::check_for_interrupts!();
+                    }
                     if let Some(key) = row
                         .get::<i32>(1)
                         .map_err(|err| format!("{fact_key_col} read failed: {err:?}"))?
@@ -2976,7 +3370,12 @@ fn load_resident_star_dim_groupagg_cache(
                 let mut dim_keys = Vec::new();
                 let mut matched_dim_keys = Vec::new();
                 let mut matched_groups = Vec::new();
+                let mut scanned_rows: usize = 0;
                 for row in rows {
+                    scanned_rows += 1;
+                    if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                        pgrx::check_for_interrupts!();
+                    }
                     let dim_key = row
                         .get::<i32>(1)
                         .map_err(|err| format!("{dim_key_col} read failed: {err:?}"))?
@@ -3073,6 +3472,7 @@ fn load_resident_star_dim_groupagg_cache(
         ));
     }
     let row_count = fact_keys.len();
+    ensure_resident_row_count_fits_u32(row_count, fact_table)?;
     let partial_capacity = resident_groupagg_partial_capacity(row_count, group_capacity)?;
 
     Ok(ResidentStarDimGroupAggCache {
@@ -3160,7 +3560,12 @@ fn load_resident_f64_reduce_cache(
                 let mut values = Vec::new();
                 let mut value_nulls = Vec::new();
                 let mut saw_value_null = false;
+                let mut scanned_rows: usize = 0;
                 for row in table_rows {
+                    scanned_rows += 1;
+                    if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                        pgrx::check_for_interrupts!();
+                    }
                     let value = read_nullable_resident_f64(&row, 1, value_col)?;
                     if value.is_null && !allow_nullable_f64 {
                         return Err(format!("{value_col} is NULL"));
@@ -3180,6 +3585,7 @@ fn load_resident_f64_reduce_cache(
     }
 
     let row_count = values.len();
+    ensure_resident_row_count_fits_u32(row_count, table)?;
     let group_capacity = 1usize;
     let partial_capacity = resident_groupagg_partial_capacity(row_count, group_capacity)?;
     let group_keys = vec![0i32; row_count];
@@ -3289,7 +3695,12 @@ fn read_resident_hashjoin_keys(
                     let mut values = Vec::new();
                     let mut nulls = Vec::new();
                     let mut saw_null = false;
+                    let mut scanned_rows: usize = 0;
                     for row in table_rows {
+                        scanned_rows += 1;
+                        if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                            pgrx::check_for_interrupts!();
+                        }
                         let value = row
                             .get::<i32>(1)
                             .map_err(|err| format!("{table}.{key_col} read failed: {err:?}"))?;
@@ -3311,7 +3722,12 @@ fn read_resident_hashjoin_keys(
                     let mut values = Vec::new();
                     let mut nulls = Vec::new();
                     let mut saw_null = false;
+                    let mut scanned_rows: usize = 0;
                     for row in table_rows {
+                        scanned_rows += 1;
+                        if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                            pgrx::check_for_interrupts!();
+                        }
                         let value = row
                             .get::<i64>(1)
                             .map_err(|err| format!("{table}.{key_col} read failed: {err:?}"))?;
@@ -3607,7 +4023,12 @@ fn load_resident_h3_latlng_groupagg_cache(
                 .map_err(|err| format!("failed to scan {table}: {err:?}"))?;
 
             let mut cells = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table_rows {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 cells.push(
                     row.get::<i64>(1)
                         .map_err(|err| format!("{point_col} H3 cell read failed: {err:?}"))?
@@ -3650,7 +4071,12 @@ fn load_resident_h3_parent_groupagg_cache(
                 .map_err(|err| format!("failed to scan {table}: {err:?}"))?;
 
             let mut cells = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table_rows {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 let cell = row
                     .get::<i64>(1)
                     .map_err(|err| format!("{cell_col} read failed: {err:?}"))?
@@ -3718,7 +4144,12 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
             let mut suppkey = Vec::new();
             let mut revenue = Vec::new();
             let mut supplycost = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 orderdate.push(
                     row.get::<i32>(1)
                         .map_err(|err| format!("lo_orderdate read failed: {err:?}"))?
@@ -3797,7 +4228,12 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
                 .map_err(|err| format!("failed to scan ssbm_date: {err:?}"))?;
 
             let mut rows = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 rows.push(SsbmDateRow {
                     datekey: row
                         .get::<i32>(1)
@@ -3840,7 +4276,12 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
                 .map_err(|err| format!("failed to scan ssbm_part: {err:?}"))?;
 
             let mut rows = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 rows.push(SsbmPartRow {
                     partkey: row
                         .get::<i32>(1)
@@ -3879,7 +4320,12 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
                 .map_err(|err| format!("failed to scan ssbm_customer: {err:?}"))?;
 
             let mut rows = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 rows.push(SsbmCustomerRow {
                     custkey: row
                         .get::<i32>(1)
@@ -3918,7 +4364,12 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
                 .map_err(|err| format!("failed to scan ssbm_supplier: {err:?}"))?;
 
             let mut rows = Vec::new();
+            let mut scanned_rows: usize = 0;
             for row in table {
+                scanned_rows += 1;
+                if scanned_rows.is_multiple_of(LOAD_INTERRUPT_CHECK_ROWS) {
+                    pgrx::check_for_interrupts!();
+                }
                 rows.push(SsbmSupplierRow {
                     suppkey: row
                         .get::<i32>(1)
@@ -3964,14 +4415,18 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
         SsbmQ2Variant::Q2_2,
         SsbmQ2Variant::Q2_3,
     ] {
-        if let Ok(filter) = SsbmQ2CachedFilter::from_rows(
+        match SsbmQ2CachedFilter::from_rows(
             variant,
             &part_rows,
             part_brand_code_by_key.len(),
             &supplier_rows,
             supplier_key_count,
         ) {
-            q2_filter_cache.push(filter);
+            Ok(filter) => q2_filter_cache.push(filter),
+            Err(err) => pgrx::warning!(
+                "pg_accel: SSBM Q2 variant {variant:?} cached filter prebuild failed: {err}; \
+                 the filter will be rebuilt on demand at execution"
+            ),
         }
     }
 
@@ -3982,7 +4437,7 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
         SsbmQ3Variant::Q3_3,
         SsbmQ3Variant::Q3_4,
     ] {
-        if let Ok(filter) = SsbmQ3CachedFilter::from_rows(
+        match SsbmQ3CachedFilter::from_rows(
             variant,
             &date_rows,
             date_key_min,
@@ -3992,7 +4447,11 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
             &supplier_rows,
             supplier_key_count,
         ) {
-            q3_filter_cache.push(filter);
+            Ok(filter) => q3_filter_cache.push(filter),
+            Err(err) => pgrx::warning!(
+                "pg_accel: SSBM Q3 variant {variant:?} cached filter prebuild failed: {err}; \
+                 the filter will be rebuilt on demand at execution"
+            ),
         }
     }
 
@@ -4002,7 +4461,7 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
         SsbmQ4Variant::Q4_2,
         SsbmQ4Variant::Q4_3,
     ] {
-        if let Ok(filter) = SsbmQ4CachedFilter::from_rows(
+        match SsbmQ4CachedFilter::from_rows(
             variant,
             &date_rows,
             date_key_min,
@@ -4014,7 +4473,11 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
             &part_rows,
             part_brand_code_by_key.len(),
         ) {
-            q4_filter_cache.push(filter);
+            Ok(filter) => q4_filter_cache.push(filter),
+            Err(err) => pgrx::warning!(
+                "pg_accel: SSBM Q4 variant {variant:?} cached filter prebuild failed: {err}; \
+                 the filter will be rebuilt on demand at execution"
+            ),
         }
     }
     let year_count_usize = usize::try_from(year_count)
@@ -4031,6 +4494,7 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
         .max(1);
 
     let row_count = orderdate.len();
+    ensure_resident_row_count_fits_u32(row_count, "ssbm_lineorder")?;
     Ok(SsbmQ1ResidentCache {
         fact_rel_oid,
         date_rel_oid,
@@ -4079,15 +4543,32 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
 
 #[pg_extern]
 fn pg_accel_load_ssbm_q1_cache() -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     SSBM_Q1_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_ssbm_q1_cache() {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_ssbm_q1_cache()
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.row_count() as i64;
+            let rel_oids = [
+                cache.fact_rel_oid,
+                cache.date_rel_oid,
+                cache.part_rel_oid,
+                cache.customer_rel_oid,
+                cache.supplier_rel_oid,
+            ];
             SSBM_Q1_CACHE.with(|slot| {
                 *slot.borrow_mut() = Some(cache);
             });
+            // Apply invalidations that arrived while the load's SPI scans ran;
+            // they may target the relations just loaded.
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => pgrx::error!("pg_accel: failed to load SSBM Q1 resident cache: {err}"),
@@ -4117,22 +4598,31 @@ fn install_resident_groupagg_cache(
     filter_col: Option<&str>,
     allow_nullable_f64: bool,
 ) -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_resident_groupagg_cache(
-        table,
-        group_col,
-        group_key_source,
-        value_col,
-        value_rhs_col,
-        measure_op,
-        filter_col,
-        allow_nullable_f64,
-    ) {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_resident_groupagg_cache(
+            table,
+            group_col,
+            group_key_source,
+            value_col,
+            value_rhs_col,
+            measure_op,
+            filter_col,
+            allow_nullable_f64,
+        )
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.row_count() as i64;
+            let rel_oids = [cache.rel_oid];
             RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| *slot.borrow_mut() = Some(cache));
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => {
@@ -4146,13 +4636,22 @@ fn install_resident_f64_reduce_cache(
     value_col: &str,
     allow_nullable_f64: bool,
 ) -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_resident_f64_reduce_cache(table, value_col, allow_nullable_f64) {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_resident_f64_reduce_cache(table, value_col, allow_nullable_f64)
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.row_count() as i64;
+            let rel_oids = [cache.rel_oid];
             RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| *slot.borrow_mut() = Some(cache));
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => {
@@ -4177,27 +4676,36 @@ fn install_resident_star_dim_groupagg_cache(
     dim_group_key_source: ResidentGroupKeySource,
     allow_nullable_f64: bool,
 ) -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_resident_star_dim_groupagg_cache(
-        fact_table,
-        fact_key_col,
-        fact_value_col,
-        fact_value_cmp_opcode,
-        fact_value_cmp_const,
-        dim_table,
-        dim_key_col,
-        dim_filter_col,
-        dim_filter_cmp_opcode,
-        dim_filter_const,
-        dim_group_col,
-        dim_group_key_source,
-        allow_nullable_f64,
-    ) {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_resident_star_dim_groupagg_cache(
+            fact_table,
+            fact_key_col,
+            fact_value_col,
+            fact_value_cmp_opcode,
+            fact_value_cmp_const,
+            dim_table,
+            dim_key_col,
+            dim_filter_col,
+            dim_filter_cmp_opcode,
+            dim_filter_const,
+            dim_group_col,
+            dim_group_key_source,
+            allow_nullable_f64,
+        )
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.row_count() as i64;
+            let rel_oids = [cache.fact_rel_oid, cache.dim_rel_oid];
             RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| *slot.borrow_mut() = Some(cache));
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => {
@@ -4213,19 +4721,28 @@ fn install_resident_hashjoin_count_cache(
     inner_key_col: &str,
     key_type: PgaccelKeyType,
 ) -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_resident_hashjoin_count_cache(
-        outer_table,
-        outer_key_col,
-        inner_table,
-        inner_key_col,
-        key_type,
-    ) {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_resident_hashjoin_count_cache(
+            outer_table,
+            outer_key_col,
+            inner_table,
+            inner_key_col,
+            key_type,
+        )
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.shape().outer_rows as i64;
+            let rel_oids = [cache.outer_rel_oid, cache.inner_rel_oid];
             RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| *slot.borrow_mut() = Some(cache));
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => {
@@ -4266,15 +4783,24 @@ fn parse_resident_cmp_opcode(value: &str) -> Result<u16, String> {
 }
 
 fn install_resident_h3_latlng_groupagg_cache(table: &str, point_col: &str, resolution: i32) -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_resident_h3_latlng_groupagg_cache(table, point_col, resolution) {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_resident_h3_latlng_groupagg_cache(table, point_col, resolution)
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.row_count() as i64;
+            let rel_oids = [cache.rel_oid];
             RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
                 *slot.borrow_mut() = Some(cache);
             });
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => pgrx::error!("pg_accel: failed to load resident H3 lat/lng cache: {err}"),
@@ -4282,15 +4808,24 @@ fn install_resident_h3_latlng_groupagg_cache(table: &str, point_col: &str, resol
 }
 
 fn install_resident_h3_parent_groupagg_cache(table: &str, cell_col: &str) -> i64 {
+    ensure_relcache_invalidation_callback_registered();
+    process_relcache_invalidations();
     RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    match load_resident_h3_parent_groupagg_cache(table, cell_col) {
+    let loaded = {
+        let _guard = ResidentCacheLoadGuard::begin();
+        load_resident_h3_parent_groupagg_cache(table, cell_col)
+    };
+    match loaded {
         Ok(cache) => {
             let rows = cache.row_count() as i64;
+            let rel_oids = [cache.rel_oid];
             RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
                 *slot.borrow_mut() = Some(cache);
             });
+            process_relcache_invalidations();
+            warn_dml_staleness_once(&rel_oids);
             rows
         }
         Err(err) => pgrx::error!("pg_accel: failed to load resident H3 parent cache: {err}"),

@@ -9,11 +9,11 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 // SAFETY: g_queue is owned by device_manager.cpp. Raster kernels must share
 // the same process-global queue so pgaccel_shutdown() can release the Metal
 // context; a private static queue leaks an extra runtime context at exit.
-extern sycl::queue* g_queue;
 
 /* ── Pixel type helpers ───────────────────────────────────────── */
 
@@ -80,14 +80,19 @@ static void write_pixel(void* data, size_t idx, int pt, double val) {
 // kernel body.
 
 static sycl::queue& get_queue() {
-  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
-    throw std::runtime_error("pgaccel_init failed");
-  }
-  if (g_queue == nullptr) {
-    throw std::runtime_error("pgaccel queue unavailable");
-  }
-  return *g_queue;
+  return pgaccel_require_queue();
 }
+
+// The pgaccel_expr_inst.arg union is written by Rust through a single
+// f64-sized mirror field: LOAD_BAND stores the band index via
+// f64::from_bits(index as u64) (pg_accel/src/engine/dispatch/raster.rs
+// load_band_inst), and the device code below reads it back through the
+// union's `int band_index` member. That aliasing is only correct when the
+// i32 occupies the low-order bytes of the 8-byte slot — i.e. on
+// little-endian targets. Pin it so a big-endian port fails at compile time
+// instead of silently reading garbage band indices.
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+              "pgaccel raster band-index union punning requires a little-endian target");
 
 static constexpr size_t PGACCEL_MAP_ALGEBRA_MAX_BANDS = 8;
 static constexpr int PGACCEL_MAP_ALGEBRA_MAX_STACK = 16;
@@ -370,7 +375,7 @@ static pgaccel_status map_algebra_gpu(const void* const* band_pixels, size_t pix
 
 extern "C" pgaccel_status pgaccel_map_algebra(const void* const* band_pixels, size_t pixel_count,
                                               int pixel_type, const pgaccel_expr* expr,
-                                              void* output_pixels, uint8_t* nodata_mask) {
+                                              void* output_pixels, uint8_t* nodata_mask) try {
   if (band_pixels == nullptr || expr == nullptr || output_pixels == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -379,13 +384,19 @@ extern "C" pgaccel_status pgaccel_map_algebra(const void* const* band_pixels, si
   }
 
   return map_algebra_gpu(band_pixels, pixel_count, pixel_type, expr, output_pixels, nodata_mask);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_map_algebra", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_map_algebra", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t width, size_t height,
                                               double origin_x, double origin_y, double scale_x,
                                               double scale_y, int pixel_type,
                                               const float* clip_ring_xy, size_t vertex_count,
-                                              void* output_pixels, uint8_t* nodata_mask) {
+                                              void* output_pixels, uint8_t* nodata_mask) try {
   if (rast_pixels == nullptr || clip_ring_xy == nullptr || output_pixels == nullptr ||
       nodata_mask == nullptr) {
     return PGACCEL_ERROR_INIT;
@@ -482,9 +493,20 @@ extern "C" pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t wi
     sycl::free(d_ring, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_clip", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_clip", nullptr);
 }
 
 /* ── Raster Resample (bilinear interpolation) ─────────────────── */
@@ -497,7 +519,7 @@ extern "C" pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t wi
  */
 extern "C" pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_t src_w,
                                                   size_t src_h, size_t dst_w, size_t dst_h,
-                                                  float* dst_pixels) {
+                                                  float* dst_pixels) try {
   if (src_pixels == nullptr || dst_pixels == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -585,6 +607,12 @@ extern "C" pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_
     fprintf(stderr, "pgaccel: SYCL raster_resample failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_resample", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_resample", nullptr);
 }
 
 /* ── Raster Slope (Horn's method) ─────────────────────────────── */
@@ -596,7 +624,7 @@ extern "C" pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_
  */
 extern "C" pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t width, size_t height,
                                                double cell_size_x, double cell_size_y,
-                                               float* slope_out) {
+                                               float* slope_out) try {
   if (src_pixels == nullptr || slope_out == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -671,6 +699,12 @@ extern "C" pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t w
     fprintf(stderr, "pgaccel: SYCL raster_slope failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_slope", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_slope", nullptr);
 }
 
 /* ── Raster Aspect (3×3 gradient → compass direction) ─────────── */
@@ -681,7 +715,7 @@ extern "C" pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t w
  * are also -1.
  */
 extern "C" pgaccel_status pgaccel_raster_aspect(const float* src_pixels, size_t width,
-                                                size_t height, float* aspect_out) {
+                                                size_t height, float* aspect_out) try {
   if (src_pixels == nullptr || aspect_out == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -764,6 +798,12 @@ extern "C" pgaccel_status pgaccel_raster_aspect(const float* src_pixels, size_t 
     fprintf(stderr, "pgaccel: SYCL raster_aspect failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_aspect", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_aspect", nullptr);
 }
 
 /* ── Raster Hillshade (slope + aspect + sun) ──────────────────── */
@@ -777,7 +817,7 @@ extern "C" pgaccel_status pgaccel_raster_hillshade(const float* src_pixels, size
                                                    size_t height, double cell_size_x,
                                                    double cell_size_y, double sun_azimuth_deg,
                                                    double sun_altitude_deg, double z_factor,
-                                                   float* shade_out) {
+                                                   float* shade_out) try {
   if (src_pixels == nullptr || shade_out == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -868,6 +908,12 @@ extern "C" pgaccel_status pgaccel_raster_hillshade(const float* src_pixels, size
     fprintf(stderr, "pgaccel: SYCL raster_hillshade failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_hillshade", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_hillshade", nullptr);
 }
 
 /* ── Raster Value (single-pixel lookup at point coords) ───────── */
@@ -881,7 +927,7 @@ extern "C" pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t 
                                                size_t height, double origin_x, double origin_y,
                                                double scale_x, double scale_y,
                                                const double* point_xy, size_t point_count,
-                                               double* output) {
+                                               double* output) try {
   if (rast_pixels == nullptr || point_xy == nullptr || output == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -964,6 +1010,12 @@ extern "C" pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t 
     fprintf(stderr, "pgaccel: SYCL raster_value failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_value", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_value", nullptr);
 }
 
 /* ── Raster SummaryStats (count/sum/mean/stddev/min/max per row) ─ */
@@ -985,7 +1037,7 @@ extern "C" pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t 
  */
 extern "C" pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_count,
                                                       size_t pixels_per_row,
-                                                      const uint8_t* nodata_masks, double* output) {
+                                                      const uint8_t* nodata_masks, double* output) try {
   if (rast_pixels == nullptr || output == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -1089,12 +1141,18 @@ extern "C" pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, 
     fprintf(stderr, "pgaccel: SYCL raster_summarystats failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_summarystats", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_summarystats", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_count,
                                                  int input_type, const pgaccel_reclass_rule* rules,
                                                  size_t rule_count, int output_type,
-                                                 void* output_pixels) {
+                                                 void* output_pixels) try {
   if (input_pixels == nullptr || output_pixels == nullptr) {
     return PGACCEL_ERROR_INIT;
   }
@@ -1201,7 +1259,18 @@ extern "C" pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_
     sycl::free(d_rules, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_raster_reclass", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_raster_reclass", nullptr);
 }

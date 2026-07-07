@@ -15,7 +15,14 @@ pub const RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES: usize = 4;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS: usize = 8_192;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_ROWS: usize = 262_144;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MAX_ROWS: usize = 65_536;
-const RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MIN_ROWS: usize = usize::MAX;
+/// The predicate-wide dense-grouped kernel lane is disabled: it lost to the v9
+/// masked path in benchmarks and its rewrite is owned by the Phase 4 kernel
+/// generalization (see TODO-REVIEW.md "usize::MAX threshold kill-switch").
+/// This used to be hidden as `MIN_ROWS = usize::MAX`; the explicit bool keeps
+/// the disabled state visible and lint-clean without changing behavior.
+/// Twin flag in `engine/olap_cache.rs` (`RESIDENT_DENSE_GROUP_PREDICATE_WIDE_ENABLED`)
+/// must stay in lockstep so scratch sizing matches dispatch.
+const RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_ENABLED: bool = false;
 const RESIDENT_DENSE_GROUPED_F64_MUL_WIDE_MIN_ROWS: usize = 1_000_000;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS: i32 = 129;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MIN_GROUPS: i32 = 2_049;
@@ -28,8 +35,9 @@ const RESIDENT_STAR_DIM_GROUPED_F64_FUSED_MAX_GROUPS: i32 = 256;
 
 fn resident_dense_grouped_f64_simple_wide_allowed(row_count: usize, group_count: i32) -> bool {
     if row_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS
-        || group_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
-        || group_count > RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS
+        || !(RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
+            ..=RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS)
+            .contains(&group_count)
     {
         return false;
     }
@@ -1103,8 +1111,8 @@ impl OlapAggExecState {
                             let brand_count = usize::try_from(cache.brand_count()).ok()?;
                             let mut rows = Vec::new();
                             for year_idx in 0..year_count {
-                                let year = cache.year_min()
-                                    + i32::try_from(year_idx).unwrap_or(i32::MAX);
+                                let year =
+                                    resident_year_for_index(cache.year_min(), year_idx);
                                 for brand_idx in 0..brand_count {
                                     let group = year_idx * brand_count + brand_idx;
                                     if result.count_by_group.get(group).copied().unwrap_or(0) == 0 {
@@ -1240,8 +1248,8 @@ impl OlapAggExecState {
                                 usize::try_from(supplier_group_count).ok()?;
                             let mut rows = Vec::new();
                             for year_idx in 0..year_count {
-                                let year = cache.year_min()
-                                    + i32::try_from(year_idx).unwrap_or(i32::MAX);
+                                let year =
+                                    resident_year_for_index(cache.year_min(), year_idx);
                                 for customer_idx in 0..customer_group_count_usize {
                                     for supplier_idx in 0..supplier_group_count_usize {
                                         let group = (year_idx * customer_group_count_usize
@@ -1405,8 +1413,8 @@ impl OlapAggExecState {
                                 usize::try_from(part_group_count).ok()?;
                             let mut rows = Vec::new();
                             for year_idx in 0..year_count {
-                                let year = cache.year_min()
-                                    + i32::try_from(year_idx).unwrap_or(i32::MAX);
+                                let year =
+                                    resident_year_for_index(cache.year_min(), year_idx);
                                 for geo_idx in 0..geo_group_count_usize {
                                     for part_idx in 0..part_group_count_usize {
                                         let group = (year_idx * geo_group_count_usize + geo_idx)
@@ -1695,7 +1703,8 @@ impl OlapAggExecState {
                         || spec.measure_predicate.source
                             == ResidentDenseGroupedF64MeasurePredicateSource::Rhs;
                     let uses_predicate_sum_count_kernel =
-                        cache.measure_op() != ResidentMeasureOp::StatsPair
+                        RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_ENABLED
+                            && cache.measure_op() != ResidentMeasureOp::StatsPair
                             && spec.filter_mode == ResidentDenseGroupedF64FilterMode::MeasurePredicate
                             && spec.measure_predicate
                                 != ResidentDenseGroupedF64MeasurePredicate::BOOL_ONLY
@@ -1705,8 +1714,6 @@ impl OlapAggExecState {
                                     | ResidentDenseGroupedF64Layout::GroupCountSum
                                     | ResidentDenseGroupedF64Layout::GroupSumAvgCount
                             )
-                            && cache.row_count()
-                                >= RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MIN_ROWS
                             && cache.group_count()
                                 <= RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MAX_GROUPS
                             && (!predicate_wide_rhs_required || rhs_col_for_predicate.is_some());
@@ -1912,24 +1919,53 @@ impl OlapAggExecState {
                     );
                     let needs_stats_pair =
                         spec.layout == ResidentDenseGroupedF64Layout::GroupSumAvgStddev;
-                    debug_assert_eq!(result.sum_by_group.len(), group_count);
-                    if needs_minmax {
-                        debug_assert_eq!(result.min_by_group.len(), group_count);
-                        debug_assert_eq!(result.max_by_group.len(), group_count);
-                    } else {
-                        debug_assert!(result.min_by_group.is_empty());
-                        debug_assert!(result.max_by_group.is_empty());
-                    }
-                    if needs_stats_pair {
-                        debug_assert_eq!(result.sumsq_by_group.len(), group_count);
-                        debug_assert_eq!(result.rhs_sum_by_group.len(), group_count);
-                        debug_assert_eq!(result.rhs_count_by_group.len(), group_count);
-                    } else {
-                        debug_assert!(result.sumsq_by_group.is_empty());
-                        debug_assert!(result.rhs_sum_by_group.is_empty());
-                        debug_assert!(result.rhs_count_by_group.is_empty());
-                    }
-                    debug_assert_eq!(result.count_by_group.len(), group_count);
+                    const DENSE_CTX: &str = "resident dense grouped f64";
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "sum_by_group",
+                        result.sum_by_group.len(),
+                        group_count,
+                    );
+                    let (minmax_expected, stats_expected) = (
+                        if needs_minmax { group_count } else { 0 },
+                        if needs_stats_pair { group_count } else { 0 },
+                    );
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "min_by_group",
+                        result.min_by_group.len(),
+                        minmax_expected,
+                    );
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "max_by_group",
+                        result.max_by_group.len(),
+                        minmax_expected,
+                    );
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "sumsq_by_group",
+                        result.sumsq_by_group.len(),
+                        stats_expected,
+                    );
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "rhs_sum_by_group",
+                        result.rhs_sum_by_group.len(),
+                        stats_expected,
+                    );
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "rhs_count_by_group",
+                        result.rhs_count_by_group.len(),
+                        stats_expected,
+                    );
+                    ensure_gpu_result_lane_len(
+                        DENSE_CTX,
+                        "count_by_group",
+                        result.count_by_group.len(),
+                        group_count,
+                    );
                     Some((
                         dispatched_rows,
                         result.selected_count,
@@ -2403,8 +2439,19 @@ impl OlapAggExecState {
                     };
 
                     let group_count = usize::try_from(cache.group_count()).ok()?;
-                    debug_assert_eq!(result.sum_by_group.len(), group_count);
-                    debug_assert_eq!(result.count_by_group.len(), group_count);
+                    const STAR_CTX: &str = "resident star dim grouped f64";
+                    ensure_gpu_result_lane_len(
+                        STAR_CTX,
+                        "sum_by_group",
+                        result.sum_by_group.len(),
+                        group_count,
+                    );
+                    ensure_gpu_result_lane_len(
+                        STAR_CTX,
+                        "count_by_group",
+                        result.count_by_group.len(),
+                        group_count,
+                    );
                     Some((
                         cache.row_count(),
                         result.selected_count,
@@ -2601,6 +2648,36 @@ fn float8_datum(value: f64) -> pg_sys::Datum {
     pg_sys::Datum::from(value.to_bits())
 }
 
+/// Validate a GPU result lane length at runtime.
+///
+/// A short lane silently truncates the emission loop (dropping groups from
+/// the query result) and a long lane indicates the kernel wrote out of the
+/// agreed ABI shape — both are data-corruption bugs that must surface as
+/// errors in release builds, not as `debug_assert`s that vanish.
+fn ensure_gpu_result_lane_len(context: &str, lane: &str, actual: usize, expected: usize) {
+    if actual != expected {
+        pgrx::error!(
+            "pg_accel: {context} GPU result lane {lane} has {actual} entries, expected \
+             {expected}; a mismatched kernel lane would silently corrupt group output, \
+             refusing to emit"
+        );
+    }
+}
+
+/// Compute `year_min + year_idx` for SSBM group emission, erroring on int4
+/// overflow instead of clamping a wrong year into query output.
+fn resident_year_for_index(year_min: i32, year_idx: usize) -> i32 {
+    i32::try_from(year_idx)
+        .ok()
+        .and_then(|idx| year_min.checked_add(idx))
+        .unwrap_or_else(|| {
+            pgrx::error!(
+                "pg_accel: SSBM year index {year_idx} overflows int4 when added to year_min \
+                 {year_min}; refusing to emit a clamped year"
+            )
+        })
+}
+
 unsafe fn write_resident_group_key(
     result_slot: *mut pg_sys::TupleTableSlot,
     output: &ResidentGroupKeyOutput,
@@ -2608,7 +2685,15 @@ unsafe fn write_resident_group_key(
 ) {
     match output {
         ResidentGroupKeyOutput::Int4Dense { min } => {
-            let key = *min + i32::try_from(group_idx).unwrap_or(i32::MAX);
+            let key = i32::try_from(group_idx)
+                .ok()
+                .and_then(|idx| min.checked_add(idx))
+                .unwrap_or_else(|| {
+                    pgrx::error!(
+                        "pg_accel: resident dense group index {group_idx} overflows the int4 \
+                         group key domain starting at {min}; refusing to emit a clamped key"
+                    )
+                });
             unsafe {
                 *(*result_slot).tts_values.add(0) = pg_sys::Datum::from(key);
                 *(*result_slot).tts_isnull.add(0) = false;
