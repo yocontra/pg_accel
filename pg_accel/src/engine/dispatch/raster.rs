@@ -9,7 +9,12 @@ use crate::adapters::extractors::raster;
 use crate::engine::gucs;
 use crate::gpu;
 
+use super::spatial::{const_datum_as_f64, const_datum_as_i64};
 use super::{DispatchResult, RasterDispatchOp};
+
+/// Interrupt-check cadence for per-row raster kernel-launch loops. Matches the
+/// standard 8192-row cadence used elsewhere (executor scan/agg loops).
+const RASTER_INTERRUPT_CADENCE: usize = 8192;
 
 // ---------------------------------------------------------------------------
 // Strategy: GpuRaster
@@ -80,25 +85,29 @@ pub unsafe fn dispatch_gpu_raster(
 // Per-op helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the raw varlena payload (after header) from a raster Datum.
+/// Copy the raw varlena payload (after the varlena header) of a raster Datum
+/// into an owned `Vec<u8>`.
+///
+/// Returning an owned buffer keeps the signature honest: the detoasted
+/// pointer's validity is bounded by the memory context, not by any borrowed
+/// argument, so fabricating a `&'static [u8]` was unsound. The extra copy per
+/// row is negligible next to per-row pixel extraction + GPU dispatch.
 ///
 /// # Safety
 ///
 /// Must be called on the main backend thread; `datum` must be a valid
 /// varlena (raster) Datum.
-unsafe fn raster_datum_as_bytes(datum: pgrx::pg_sys::Datum) -> &'static [u8] {
+unsafe fn raster_datum_to_bytes(datum: pgrx::pg_sys::Datum) -> Vec<u8> {
     // SAFETY: caller guarantees datum is a valid varlena pointer.
     let varlena = unsafe { pgrx::pg_sys::pg_detoast_datum(datum.cast_mut_ptr()) };
     // SAFETY: detoast returned a valid varlena pointer.
     let len = unsafe { pgrx::varsize_any_exhdr(varlena) };
     // SAFETY: vardata returns a pointer into the detoasted varlena payload.
     let ptr = unsafe { pgrx::vardata_any(varlena) };
-    // SAFETY: ptr points to len bytes of valid varlena payload. The slice is
-    // bound to the call's lifetime; callers MUST not retain it past the
-    // function (we mark 'static here only because the borrow checker has no
-    // way to bound the lifetime to the dispatch frame; consumers consume
-    // the slice synchronously).
-    unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) }
+    // SAFETY: ptr points to `len` bytes of valid varlena payload; we copy them
+    // out immediately so no borrow escapes the detoasted allocation.
+    let slice = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
+    slice.to_vec()
 }
 
 const MAP_ALGEBRA_MAX_BANDS: usize = 8;
@@ -144,9 +153,10 @@ fn datum_as_i32(datum: pgrx::pg_sys::Datum) -> i32 {
     datum.value() as i32
 }
 
-unsafe fn datum_as_text(datum: pgrx::pg_sys::Datum) -> Option<&'static str> {
+unsafe fn datum_as_text(datum: pgrx::pg_sys::Datum) -> Option<String> {
     // SAFETY: caller guarantees datum is a valid varlena text Datum.
-    std::str::from_utf8(unsafe { raster_datum_as_bytes(datum) }).ok()
+    let bytes = unsafe { raster_datum_to_bytes(datum) };
+    String::from_utf8(bytes).ok()
 }
 
 unsafe fn build_map_algebra_program(
@@ -163,7 +173,7 @@ unsafe fn build_map_algebra_program(
             // SAFETY: typid says this is a text-like varlena Datum.
             let text = unsafe { datum_as_text(datum) }?;
             if text.to_ascii_lowercase().contains("[rast") {
-                expr_text = Some(text.to_owned());
+                expr_text = Some(text);
                 break;
             }
             continue;
@@ -553,15 +563,18 @@ unsafe fn dispatch_st_mapalgebra(
 
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
 
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
 
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
             pgrx::debug1!("pg_accel: st_mapalgebra raster header parse failed; deferring");
             return DispatchResult::Deferred;
         };
@@ -573,7 +586,7 @@ unsafe fn dispatch_st_mapalgebra(
 
         let mut band_buffers: Vec<Vec<f32>> = Vec::with_capacity(program.source_bands.len());
         for &band_index in &program.source_bands {
-            let Some(pixels_f64) = raster::extract_pixels_f64(bytes, band_index) else {
+            let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, band_index) else {
                 pgrx::debug1!(
                     "pg_accel: st_mapalgebra band {} unavailable/offline; deferring",
                     band_index + 1
@@ -616,7 +629,7 @@ unsafe fn dispatch_st_mapalgebra(
         let output_f32: &[f32] =
             unsafe { std::slice::from_raw_parts(output_buf.as_ptr().cast(), pixel_count) };
 
-        let Some(new_wkb) = raster::patch_band0_pixels(bytes, output_f32) else {
+        let Some(new_wkb) = raster::patch_band0_pixels(&bytes, output_f32) else {
             pgrx::error!(
                 "pg_accel: raster map_algebra could not patch output raster; refusing original-raster passthrough"
             );
@@ -659,8 +672,8 @@ unsafe fn dispatch_st_clip(
         return DispatchResult::Deferred;
     }
     // SAFETY: main backend thread.
-    let geom_bytes = unsafe { raster_datum_as_bytes(qual_d) };
-    let Some(ring_xy_f64) = raster::extract_polygon_ring(geom_bytes) else {
+    let geom_bytes = unsafe { raster_datum_to_bytes(qual_d) };
+    let Some(ring_xy_f64) = raster::extract_polygon_ring(&geom_bytes) else {
         return DispatchResult::Deferred;
     };
     if ring_xy_f64.len() < 6 {
@@ -676,20 +689,26 @@ unsafe fn dispatch_st_clip(
 
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
 
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
-            results.push((datum, false));
-            continue;
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
+            // Never return the input raster as the "clipped" result — that is
+            // silent corruption. Decline the whole batch (contract error at
+            // executor time), matching st_mapalgebra's behaviour.
+            pgrx::debug1!("pg_accel: st_clip raster header parse failed; deferring");
+            return DispatchResult::Deferred;
         };
-        let Some(pixels_f64) = raster::extract_pixels_f64(bytes, 0) else {
-            results.push((datum, false));
-            continue;
+        let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, 0) else {
+            pgrx::debug1!("pg_accel: st_clip band 0 unavailable/offline; deferring");
+            return DispatchResult::Deferred;
         };
         let pixel_count = header.width as usize * header.height as usize;
         if pixel_count == 0 {
@@ -725,25 +744,24 @@ unsafe fn dispatch_st_clip(
         let output_f32: &[f32] =
             unsafe { std::slice::from_raw_parts(output_buf.as_ptr().cast(), pixel_count) };
 
-        match raster::patch_band0_pixels(bytes, output_f32) {
-            Some(new_wkb) => {
-                let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
-                // SAFETY: palloc on main backend thread.
-                let new_varlena = unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
-                // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
-                unsafe {
-                    pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);
-                    let data_dest = pgrx::vardata_any(new_varlena.cast()).cast::<u8>();
-                    std::ptr::copy_nonoverlapping(
-                        new_wkb.as_ptr(),
-                        data_dest.cast_mut(),
-                        new_wkb.len(),
-                    );
-                }
-                results.push((pgrx::pg_sys::Datum::from(new_varlena), false));
-            }
-            None => results.push((datum, false)),
+        // Patch-back failure: the GPU produced output we cannot write back.
+        // Erroring is correct — returning the input raster would silently
+        // present an unclipped raster as the clip result.
+        let Some(new_wkb) = raster::patch_band0_pixels(&bytes, output_f32) else {
+            pgrx::error!(
+                "pg_accel: raster_clip could not patch output raster; refusing original-raster passthrough"
+            );
+        };
+        let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
+        // SAFETY: palloc on main backend thread.
+        let new_varlena = unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
+        // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
+        unsafe {
+            pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);
+            let data_dest = pgrx::vardata_any(new_varlena.cast()).cast::<u8>();
+            std::ptr::copy_nonoverlapping(new_wkb.as_ptr(), data_dest.cast_mut(), new_wkb.len());
         }
+        results.push((pgrx::pg_sys::Datum::from(new_varlena), false));
     }
 
     let elapsed_ms = start.elapsed().as_millis() as i32;
@@ -779,8 +797,8 @@ unsafe fn dispatch_st_reclass(
         return DispatchResult::Deferred;
     }
     // SAFETY: main backend thread; qual_d is a valid text varlena Datum.
-    let text_bytes = unsafe { raster_datum_as_bytes(qual_d) };
-    let Ok(rules_text) = std::str::from_utf8(text_bytes) else {
+    let text_bytes = unsafe { raster_datum_to_bytes(qual_d) };
+    let Ok(rules_text) = std::str::from_utf8(&text_bytes) else {
         return DispatchResult::Deferred;
     };
     let Some(rules_f64) = raster::parse_reclass_rules(rules_text) else {
@@ -805,20 +823,24 @@ unsafe fn dispatch_st_reclass(
 
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
 
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
-            results.push((datum, false));
-            continue;
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
+            // Never return the input raster as the reclassed result.
+            pgrx::debug1!("pg_accel: st_reclass raster header parse failed; deferring");
+            return DispatchResult::Deferred;
         };
-        let Some(pixels_f64) = raster::extract_pixels_f64(bytes, 0) else {
-            results.push((datum, false));
-            continue;
+        let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, 0) else {
+            pgrx::debug1!("pg_accel: st_reclass band 0 unavailable/offline; deferring");
+            return DispatchResult::Deferred;
         };
         let pixel_count = header.width as usize * header.height as usize;
         if pixel_count == 0 {
@@ -849,25 +871,21 @@ unsafe fn dispatch_st_reclass(
         let output_f32: &[f32] =
             unsafe { std::slice::from_raw_parts(output_buf.as_ptr().cast(), pixel_count) };
 
-        match raster::patch_band0_pixels(bytes, output_f32) {
-            Some(new_wkb) => {
-                let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
-                // SAFETY: palloc on main backend thread.
-                let new_varlena = unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
-                // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
-                unsafe {
-                    pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);
-                    let data_dest = pgrx::vardata_any(new_varlena.cast()).cast::<u8>();
-                    std::ptr::copy_nonoverlapping(
-                        new_wkb.as_ptr(),
-                        data_dest.cast_mut(),
-                        new_wkb.len(),
-                    );
-                }
-                results.push((pgrx::pg_sys::Datum::from(new_varlena), false));
-            }
-            None => results.push((datum, false)),
+        let Some(new_wkb) = raster::patch_band0_pixels(&bytes, output_f32) else {
+            pgrx::error!(
+                "pg_accel: raster_reclass could not patch output raster; refusing original-raster passthrough"
+            );
+        };
+        let total_size = new_wkb.len() + pgrx::pg_sys::VARHDRSZ;
+        // SAFETY: palloc on main backend thread.
+        let new_varlena = unsafe { pgrx::pg_sys::palloc(total_size).cast::<u8>() };
+        // SAFETY: new_varlena is freshly palloc'd with total_size bytes.
+        unsafe {
+            pgrx::set_varsize_4b(new_varlena.cast(), total_size as i32);
+            let data_dest = pgrx::vardata_any(new_varlena.cast()).cast::<u8>();
+            std::ptr::copy_nonoverlapping(new_wkb.as_ptr(), data_dest.cast_mut(), new_wkb.len());
         }
+        results.push((pgrx::pg_sys::Datum::from(new_varlena), false));
     }
 
     let elapsed_ms = start.elapsed().as_millis() as i32;
@@ -901,7 +919,10 @@ unsafe fn dispatch_st_summarystats(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dis
 
     let mut datums: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len() * 6);
 
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             for _ in 0..6 {
                 datums.push((pgrx::pg_sys::Datum::from(0_u64), true));
@@ -909,14 +930,14 @@ unsafe fn dispatch_st_summarystats(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dis
             continue;
         }
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
             for _ in 0..6 {
                 datums.push((pgrx::pg_sys::Datum::from(0_u64), true));
             }
             continue;
         };
-        let Some(pixels_f64) = raster::extract_pixels_f64(bytes, 0) else {
+        let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, 0) else {
             for _ in 0..6 {
                 datums.push((pgrx::pg_sys::Datum::from(0_u64), true));
             }
@@ -1074,16 +1095,18 @@ unsafe fn dispatch_st_resample(
         );
         return DispatchResult::Deferred;
     }
-    let (w_datum, w_null, _w_typid) = qual_datums[0];
-    let (h_datum, h_null, _h_typid) = qual_datums[1];
-    if w_null || h_null {
+    let (w_datum, w_null, w_typid) = qual_datums[0];
+    let (h_datum, h_null, h_typid) = qual_datums[1];
+    // Decode the target dims by their declared type OID instead of assuming
+    // an int4 sits in the low Datum bits (an int8/float literal would
+    // otherwise be misread). Out-of-i32-range or non-integer types Defer.
+    let (Some(target_w), Some(target_h)) = (
+        const_datum_as_i64(w_datum, w_null, w_typid).and_then(|v| i32::try_from(v).ok()),
+        const_datum_as_i64(h_datum, h_null, h_typid).and_then(|v| i32::try_from(v).ok()),
+    ) else {
+        pgrx::debug1!("pg_accel: st_resample target dims not decodable as i32 — deferring");
         return DispatchResult::Deferred;
-    }
-    // PG int4 sits in the low 32 bits of the Datum.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let target_w = w_datum.value() as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let target_h = h_datum.value() as i32;
+    };
     if target_w <= 0 || target_h <= 0 {
         pgrx::debug1!(
             "pg_accel: st_resample target dims must be positive (got {}x{}) — deferring",
@@ -1101,20 +1124,24 @@ unsafe fn dispatch_st_resample(
     let start = std::time::Instant::now();
 
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
-            results.push((datum, false));
-            continue;
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
+            // Never return the input raster as the resampled result.
+            pgrx::debug1!("pg_accel: st_resample raster header parse failed; deferring");
+            return DispatchResult::Deferred;
         };
-        let Some(pixels_f64) = raster::extract_pixels_f64(bytes, 0) else {
-            results.push((datum, false));
-            continue;
+        let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, 0) else {
+            pgrx::debug1!("pg_accel: st_resample band 0 unavailable/offline; deferring");
+            return DispatchResult::Deferred;
         };
         let src_w = header.width as usize;
         let src_h = header.height as usize;
@@ -1185,18 +1212,19 @@ unsafe fn dispatch_st_slope(
         );
         return DispatchResult::Deferred;
     }
-    let (cx_d, cx_n, _cx_t) = qual_datums[0];
-    let (cy_d, cy_n, _cy_t) = qual_datums[1];
-    if cx_n || cy_n {
+    let (cx_d, cx_n, cx_t) = qual_datums[0];
+    let (cy_d, cy_n, cy_t) = qual_datums[1];
+    // Decode the cell sizes by their declared type OID (float8 in PostGIS,
+    // but an int literal may reach us as int4/int8). Reinterpreting an int as
+    // f64 bits would yield garbage slope values.
+    let (Some(cell_size_x), Some(cell_size_y)) = (
+        const_datum_as_f64(cx_d, cx_n, cx_t),
+        const_datum_as_f64(cy_d, cy_n, cy_t),
+    ) else {
+        pgrx::debug1!("pg_accel: st_slope cell sizes not decodable as f64 — deferring");
         return DispatchResult::Deferred;
-    }
-    let cell_size_x = f64::from_bits(cx_d.value() as u64);
-    let cell_size_y = f64::from_bits(cy_d.value() as u64);
-    if !cell_size_x.is_finite()
-        || !cell_size_y.is_finite()
-        || cell_size_x == 0.0
-        || cell_size_y == 0.0
-    {
+    };
+    if cell_size_x == 0.0 || cell_size_y == 0.0 {
         return DispatchResult::Deferred;
     }
     // SAFETY: main backend thread.
@@ -1237,14 +1265,12 @@ unsafe fn dispatch_st_aspect(
     // consume them — this matches the doc-string and makes mis-typed calls
     // observable here rather than silently producing slope/aspect-pipeline
     // mismatches downstream.
-    let (cx_d, cx_n, _) = qual_datums[0];
-    let (cy_d, cy_n, _) = qual_datums[1];
-    if cx_n || cy_n {
-        return DispatchResult::Deferred;
-    }
-    let cell_size_x = f64::from_bits(cx_d.value() as u64);
-    let cell_size_y = f64::from_bits(cy_d.value() as u64);
-    if !cell_size_x.is_finite() || !cell_size_y.is_finite() {
+    let (cx_d, cx_n, cx_t) = qual_datums[0];
+    let (cy_d, cy_n, cy_t) = qual_datums[1];
+    if const_datum_as_f64(cx_d, cx_n, cx_t).is_none()
+        || const_datum_as_f64(cy_d, cy_n, cy_t).is_none()
+    {
+        pgrx::debug1!("pg_accel: st_aspect cell sizes not decodable as f64 — deferring");
         return DispatchResult::Deferred;
     }
     // SAFETY: main backend thread.
@@ -1281,24 +1307,21 @@ unsafe fn dispatch_st_hillshade(
         );
         return DispatchResult::Deferred;
     }
-    let (cx_d, cx_n, _) = qual_datums[0];
-    let (cy_d, cy_n, _) = qual_datums[1];
-    let (az_d, az_n, _) = qual_datums[2];
-    let (al_d, al_n, _) = qual_datums[3];
-    if cx_n || cy_n || az_n || al_n {
+    let (cx_d, cx_n, cx_t) = qual_datums[0];
+    let (cy_d, cy_n, cy_t) = qual_datums[1];
+    let (az_d, az_n, az_t) = qual_datums[2];
+    let (al_d, al_n, al_t) = qual_datums[3];
+    // Decode all four args by their declared type OID (float8 in PostGIS).
+    let (Some(cell_size_x), Some(cell_size_y), Some(sun_az), Some(sun_alt)) = (
+        const_datum_as_f64(cx_d, cx_n, cx_t),
+        const_datum_as_f64(cy_d, cy_n, cy_t),
+        const_datum_as_f64(az_d, az_n, az_t),
+        const_datum_as_f64(al_d, al_n, al_t),
+    ) else {
+        pgrx::debug1!("pg_accel: st_hillshade args not decodable as f64 — deferring");
         return DispatchResult::Deferred;
-    }
-    let cell_size_x = f64::from_bits(cx_d.value() as u64);
-    let cell_size_y = f64::from_bits(cy_d.value() as u64);
-    let sun_az = f64::from_bits(az_d.value() as u64);
-    let sun_alt = f64::from_bits(al_d.value() as u64);
-    if !cell_size_x.is_finite()
-        || !cell_size_y.is_finite()
-        || !sun_az.is_finite()
-        || !sun_alt.is_finite()
-        || cell_size_x == 0.0
-        || cell_size_y == 0.0
-    {
+    };
+    if cell_size_x == 0.0 || cell_size_y == 0.0 {
         return DispatchResult::Deferred;
     }
     let z_factor = 1.0f64;
@@ -1348,20 +1371,24 @@ where
 
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
 
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
-            results.push((datum, false));
-            continue;
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
+            // Never return the input raster as the transformed result.
+            pgrx::debug1!("pg_accel: {kernel_name} raster header parse failed; deferring");
+            return DispatchResult::Deferred;
         };
-        let Some(pixels_f64) = raster::extract_pixels_f64(bytes, 0) else {
-            results.push((datum, false));
-            continue;
+        let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, 0) else {
+            pgrx::debug1!("pg_accel: {kernel_name} band 0 unavailable/offline; deferring");
+            return DispatchResult::Deferred;
         };
         let pixel_count = header.width as usize * header.height as usize;
         if pixel_count == 0 {
@@ -1379,14 +1406,15 @@ where
             );
         }
 
-        match raster::patch_band0_pixels(bytes, &out_f32) {
-            Some(new_wkb) => {
-                // SAFETY: main backend thread.
-                let datum_out = unsafe { wkb_to_varlena_datum(&new_wkb) };
-                results.push((datum_out, false));
-            }
-            None => results.push((datum, false)),
-        }
+        let Some(new_wkb) = raster::patch_band0_pixels(&bytes, &out_f32) else {
+            pgrx::error!(
+                "pg_accel: {} could not patch output raster; refusing original-raster passthrough",
+                kernel_name,
+            );
+        };
+        // SAFETY: main backend thread.
+        let datum_out = unsafe { wkb_to_varlena_datum(&new_wkb) };
+        results.push((datum_out, false));
     }
 
     let elapsed_ms = start.elapsed().as_millis() as i32;
@@ -1479,18 +1507,21 @@ unsafe fn dispatch_st_value(
     let start = std::time::Instant::now();
 
     let mut results: Vec<(pgrx::pg_sys::Datum, bool)> = Vec::with_capacity(batch.len());
-    for &(datum, is_null) in batch {
+    for (row_idx, &(datum, is_null)) in batch.iter().enumerate() {
+        if row_idx.is_multiple_of(RASTER_INTERRUPT_CADENCE) {
+            pgrx::check_for_interrupts!();
+        }
         if is_null {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         }
         // SAFETY: main backend thread.
-        let bytes = unsafe { raster_datum_as_bytes(datum) };
-        let Some(header) = raster::parse_header(bytes) else {
+        let bytes = unsafe { raster_datum_to_bytes(datum) };
+        let Some(header) = raster::parse_header(&bytes) else {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         };
-        let Some(pixels_f64) = raster::extract_pixels_f64(bytes, 0) else {
+        let Some(pixels_f64) = raster::extract_pixels_f64(&bytes, 0) else {
             results.push((pgrx::pg_sys::Datum::from(0usize), true));
             continue;
         };
