@@ -4149,10 +4149,10 @@ fn capture_and_write_pre_risk_context(
 ///
 /// On the accel side, a real `pg_accel planner rejection reason: <reason>`
 /// line sourced from `pg_accel_last_planner_rejection_reason()` is appended
-/// as legitimate decline evidence. The runner does NOT synthesize any
-/// "benchmark threshold decline reason" line — an expected-but-unconfirmed
-/// decline is carried separately in `WorkloadResult::native_decline_evidence`
-/// tagged `ExpectedUnconfirmed`, never laundered into the plan text.
+/// as legitimate decline evidence. The runner never synthesizes decline-reason
+/// text of its own — an expected-but-unconfirmed decline is carried separately
+/// in `WorkloadResult::native_decline_evidence` tagged `ExpectedUnconfirmed`,
+/// never laundered into the plan text.
 fn capture_plan_snippet(
     connection: &str,
     workload: &dyn Workload,
