@@ -1,6 +1,5 @@
 //! Batch dispatch: routes accumulated batches to the appropriate execution
-//! strategy (spatial, H3, raster) and implements late-materialization via
-//! predicate chain evaluation.
+//! strategy (spatial, H3, raster).
 //!
 //! # Strategies
 //!
@@ -14,26 +13,16 @@
 //!   3. **Uncertain bucket** — unsupported or ambiguous rows are rejected by
 //!      selected pg_accel plans instead of rechecked on CPU.
 //!
-//! # Late Materialization
-//!
-//! [`PredicateChain`] orders predicates by `selectivity / cost` so the cheapest,
-//! most-selective predicate runs first. Rows rejected early skip expensive
-//! geometry deserialization entirely.
-
-//! This module is split into per-strategy files (spatial, h3, raster) plus a
-//! shared predicate_chain helper.
+//! This module is split into per-strategy files (spatial, h3, raster).
 
 use crate::engine::registry::{AccelStrategy, DispatchOp, FunctionAccelEntry};
 
 pub mod h3;
-pub mod predicate_chain;
 pub mod raster;
 pub mod spatial;
 
 #[cfg(feature = "pg_test")]
 mod tests;
-
-pub use predicate_chain::{Predicate, PredicateChain, evaluate_chain};
 
 /// Spatial operations understood by the per-batch dispatcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -19,8 +19,6 @@ pub mod types;
 
 pub mod error;
 
-pub mod descriptors;
-
 pub mod bridge;
 
 pub mod three_layer;
@@ -41,10 +39,6 @@ pub use types::{
     cmp_op, reduce_op,
 };
 
-pub use descriptors::{
-    Column, ColumnBatch, ColumnData, CsrOutput, DeviceInput, DeviceOutput, MAX_DEVICE_LEN,
-    validate_csr_offsets, validate_device_len, validate_null_mask,
-};
 pub use error::{
     GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, status_to_result,
 };

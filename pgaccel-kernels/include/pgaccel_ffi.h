@@ -140,11 +140,12 @@ extern "C" {
 
 /* ── Memory Pool (USM arena allocator) ────────────────────────────── */
 
-void* pgaccel_alloc(size_t bytes);
-void pgaccel_free(void* ptr);
+/*
+ * The USM bump arena (pgaccel_alloc/free/bytes_used/prefetch) was removed —
+ * it had zero kernel callers. pgaccel_pool_reset() is retained as a no-op
+ * because pgaccel_shutdown() still calls it during teardown.
+ */
 void pgaccel_pool_reset(void);
-size_t pgaccel_pool_bytes_used(void);
-void pgaccel_prefetch(void* ptr, size_t bytes);
 
 /* ── Bounding Box Overlap ──────────────────────────────────────────── */
 

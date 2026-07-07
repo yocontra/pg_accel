@@ -1897,13 +1897,11 @@ unsafe extern "C" {
     /// Reset the GPU execution counter to zero.
     pub fn pgaccel_reset_gpu_exec_count();
 
-    // -- Memory pool (USM arena allocator) --
-
-    pub fn pgaccel_alloc(bytes: usize) -> *mut std::ffi::c_void;
-    pub fn pgaccel_free(ptr: *mut std::ffi::c_void);
-    pub fn pgaccel_pool_reset();
-    pub fn pgaccel_pool_bytes_used() -> usize;
-    pub fn pgaccel_prefetch(ptr: *mut std::ffi::c_void, bytes: usize);
+    // NOTE: the USM arena externs (pgaccel_alloc/free/pool_reset/
+    // pool_bytes_used/prefetch) were removed in Phase 3 — the arena had zero
+    // callers on either side of the FFI. The C symbol pgaccel_pool_reset
+    // still exists (device_manager.cpp calls it at shutdown) but no Rust
+    // code invokes it.
 
     /// Free a pointer returned by `pgaccel_expr_shared_alloc`.
     pub fn pgaccel_expr_shared_free(ptr: *mut std::ffi::c_void);

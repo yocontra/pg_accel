@@ -1,64 +1,61 @@
-// Test modules use `use super::*;` defensively; not every test uses every item.
+// Crate-wide lint allows. Every entry below was measured (Phase 3, re-measured after the Phase-2 merge) with
+// `cargo clippy --all-targets --message-format=json` and still fires; allows
+// that no longer fired were removed, and those already covered by
+// `[workspace.lints.clippy]` (doc_markdown, cast_possible_truncation/wrap,
+// cast_sign_loss, cast_lossless) were dropped as redundant. Firing counts are
+// noted per lint. These stay at crate scope rather than item scope because
+// their firing sites are spread across files owned by other Phase-3 agents;
+// item-scoping them would require edits outside this crate-root file.
+
+// Test modules use `use super::*;` defensively; not every test uses every item. (83)
 #![allow(unused_imports)]
-// Similar names are common in FFI wrappers (arg0/arg1, geom_a/geom_b).
-#![allow(clippy::similar_names)]
-// pgrx macros emit cfgs for feature names this crate does not define.
+// pgrx macros can emit cfgs for feature names this crate does not define.
+// (0 on the merged tree, but retained as insurance against pgrx macro/feature builds.)
 #![allow(unexpected_cfgs)]
+// Similar names are common in FFI wrappers (arg0/arg1, geom_a/geom_b). (88)
+#![allow(clippy::similar_names)]
 // Pointer alignment casts are unavoidable when walking PG node graphs where
-// nodes arrive as *Node and must be down-cast to *OpExpr/*Var/etc.
+// nodes arrive as *Node and must be down-cast to *OpExpr/*Var/etc. (262)
 #![allow(clippy::cast_ptr_alignment)]
 // PG row counts are i64 but cost formulas use f64; precision loss is
-// acceptable because these are estimates, not exact values.
+// acceptable because these are estimates, not exact values. (90)
 #![allow(clippy::cast_precision_loss)]
 // inline(always) is used on hot-path helpers in executor fast-path loops
-// where the measured perf gain matters more than the style preference.
+// where the measured perf gain matters more than the style preference. (18)
 #![allow(clippy::inline_always)]
 // Dispatch tables commonly have match arms that share a body; collapsing
-// them would hurt readability.
+// them would hurt readability. (58)
 #![allow(clippy::match_same_arms)]
 // Items declared mid-function are used to scope helper types near their
-// single use-site.
+// single use-site. (72)
 #![allow(clippy::items_after_statements)]
 // Cost/stats floats are compared for exact equality to detect "unset"
-// sentinel values.
+// sentinel values. (62)
 #![allow(clippy::float_cmp)]
-// Large pedantic warnings we've decided to live with.
+// Large pedantic/nursery warnings we've decided to live with. Dominant
+// sources are the executor and ffi/planner layers (other agents' files).
 #![allow(
-    clippy::too_many_lines,
-    clippy::doc_markdown,
-    clippy::module_name_repetitions,
-    clippy::struct_field_names,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    clippy::missing_safety_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::semicolon_if_nothing_returned,
-    clippy::redundant_closure_for_method_calls,
-    clippy::uninlined_format_args,
-    clippy::needless_pass_by_value,
-    clippy::unnecessary_wraps,
-    clippy::ignored_unit_patterns,
-    clippy::unreadable_literal,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_lossless,
-    clippy::manual_let_else,
-    clippy::option_if_let_else,
-    clippy::unused_self,
-    clippy::needless_continue,
-    clippy::ptr_as_ptr,
-    clippy::ptr_cast_constness,
-    clippy::doc_overindented_list_items,
-    clippy::missing_fields_in_debug,
-    clippy::or_fun_call,
-    clippy::used_underscore_binding,
-    clippy::no_effect_underscore_binding,
-    clippy::as_ptr_cast_mut,
-    clippy::too_long_first_doc_paragraph,
-    clippy::wildcard_imports,
-    clippy::let_unit_value
+    clippy::too_many_lines,             // 94
+    clippy::needless_pass_by_value,     // 68
+    clippy::option_if_let_else,         // 42
+    clippy::missing_errors_doc,         // 24
+    clippy::missing_panics_doc,         // 24
+    clippy::manual_let_else,            // 24
+    clippy::must_use_candidate,         // 16
+    clippy::unreadable_literal,         // 15
+    clippy::missing_safety_doc,         // 12
+    clippy::ptr_as_ptr,                 // 10
+    clippy::unused_self,                // 10
+    clippy::too_long_first_doc_paragraph, // 6
+    clippy::unnecessary_wraps,          // 6
+    clippy::as_ptr_cast_mut,            // 6
+    clippy::used_underscore_binding,    // 4
+    clippy::needless_continue,          // 4
+    clippy::no_effect_underscore_binding, // 4
+    clippy::redundant_closure_for_method_calls, // 4
+    clippy::doc_overindented_list_items, // 2
+    clippy::or_fun_call,                // 2
+    clippy::struct_field_names          // 4
 )]
 
 use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};

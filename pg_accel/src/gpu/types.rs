@@ -125,6 +125,9 @@ const _: () = assert!(std::mem::size_of::<PgaccelDeviceInfo>() == 216);
 // ---------------------------------------------------------------------------
 #[cfg(target_pointer_width = "64")]
 mod abi_size_pins {
+    // reason: compile-time size/align pins reference most ABI structs in this
+    // file; an explicit import list would drift every time a struct is added.
+    #[allow(clippy::wildcard_imports)]
     use super::*;
 
     // pgaccel_expr.h — tag(i32) + pad(4) + union{..., double}(8) = 16.
@@ -285,6 +288,7 @@ pub struct PgaccelExprUsmCol {
 /// ABI version for [`PgaccelResidentBatch`] and [`PgaccelDeviceVarOutput`].
 ///
 /// Version 1 is additive and does not change the legacy [`PgaccelBatch`] shape.
+#[allow(dead_code)] // reason: additive resident ABI mirror; versions the resident-batch structs kept for FFI parity
 pub const PGACCEL_RESIDENT_BATCH_ABI_VERSION: u32 = 1;
 
 /// Memory space for a resident batch pointer.
