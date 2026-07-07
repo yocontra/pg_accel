@@ -1948,16 +1948,25 @@ unsafe fn make_custom_scan_plan(
 /// Remove PostgreSQL CPU qualifier state from a child plan whose predicate is
 /// owned by pg_accel's GPU scan executor.
 ///
+/// `BitmapHeapScan.bitmapqualorig` is deliberately left intact. PostgreSQL's
+/// bitmap heap scan re-evaluates `bitmapqualorig` for tuples coming from
+/// lossy TIDBitmap pages (`src/backend/executor/nodeBitmapHeapscan.c`,
+/// `BitmapHeapRecheck`; `bitmapqualorig` is documented in
+/// `src/include/nodes/plannodes.h` as "index quals, in standard expr form" —
+/// when `work_mem` forces the bitmap lossy, every tuple on a matched page is
+/// returned and only the `bitmapqualorig` recheck filters non-matching rows).
+/// Those original index quals were consumed by the bitmap index path and are
+/// NOT part of the clause list hoisted into the CustomScan's own
+/// `plan.qual`, so nulling `bitmapqualorig` here removed the only place they
+/// were evaluated and let non-matching tuples from lossy pages into the
+/// result set.
+///
 /// # Safety
 ///
 /// `child` must point to a valid PostgreSQL `Plan` node.
 unsafe fn strip_child_cpu_quals(child: *mut pg_sys::Plan) {
     unsafe {
         (*child).qual = std::ptr::null_mut();
-        if (*child.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_BitmapHeapScan {
-            let bitmap = child.cast::<pg_sys::BitmapHeapScan>();
-            (*bitmap).bitmapqualorig = std::ptr::null_mut();
-        }
     }
 }
 

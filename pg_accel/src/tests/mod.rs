@@ -16,6 +16,9 @@ mod phase2_kernels;
 mod phase2_window;
 
 #[cfg(any(test, feature = "pg_test"))]
+mod phase2_cache;
+
+#[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
     use pgrx::prelude::*;

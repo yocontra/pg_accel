@@ -1014,18 +1014,29 @@ fn strip_child_cpu_quals_clears_plain_plan_qual() {
 }
 
 #[test]
-fn strip_child_cpu_quals_clears_bitmap_recheck_qual() {
+fn strip_child_cpu_quals_preserves_bitmap_recheck_qual() {
+    // bitmapqualorig holds the ORIGINAL index quals in standard expression
+    // form; PostgreSQL re-evaluates it for tuples from lossy TIDBitmap pages
+    // (nodeBitmapHeapscan.c, BitmapHeapRecheck). Those quals were consumed by
+    // the bitmap index path and are not in the CustomScan's own plan.qual, so
+    // clearing bitmapqualorig would let non-matching tuples from lossy pages
+    // into the result set. Only plan.qual (owned by the GPU scan) is cleared.
     let mut bitmap = unsafe { std::mem::zeroed::<pg_sys::BitmapHeapScan>() };
     bitmap.scan.plan.type_ = pg_sys::NodeTag::T_BitmapHeapScan;
     bitmap.scan.plan.qual = 0xDEAD_BEEF_usize as *mut pg_sys::List;
-    bitmap.bitmapqualorig = 0xBAD_CAFE_usize as *mut pg_sys::List;
+    let recheck_qual = 0xBAD_CAFE_usize as *mut pg_sys::List;
+    bitmap.bitmapqualorig = recheck_qual;
 
     unsafe {
         strip_child_cpu_quals(&raw mut bitmap.scan.plan);
     }
 
     assert!(bitmap.scan.plan.qual.is_null());
-    assert!(bitmap.bitmapqualorig.is_null());
+    assert_eq!(
+        bitmap.bitmapqualorig, recheck_qual,
+        "bitmapqualorig must survive qual stripping: it is PostgreSQL's only lossy-page \
+         recheck of the original index quals"
+    );
 }
 
 #[test]
