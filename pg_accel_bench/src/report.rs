@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bench_model::CachePurgeState;
+use crate::bench_model::{CachePurgeState, CacheState};
 use crate::stats;
 
 const NO_DISPATCH_TIMING_SKEW_THRESHOLD: f64 = 0.10;
@@ -24,6 +24,117 @@ const FUNCTION_SRF_GPU_FUNCTIONS: &[&str] = &[
     "h3_cells_to_multi_polygon",
 ];
 
+/// Where a native-decline reason came from. Distinguishes a real planner
+/// decision from an unconfirmed static-matrix expectation so the report can
+/// never launder an *expected* decline into *verified* evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeclineReasonSource {
+    /// Sourced from `pg_accel_last_planner_rejection_reason()` — the planner
+    /// itself reported why it declined. This is confirmed evidence.
+    PlannerReported,
+    /// The static benchmark-threshold matrix expected a decline (no Custom
+    /// Scan appeared) but the planner surfaced no reason. Unconfirmed: the
+    /// report must render it as "expected, unconfirmed" and never treat it as
+    /// verified.
+    ExpectedUnconfirmed,
+}
+
+/// Native-decline evidence for a benchmark row, tagged with its source. The
+/// runner only populates the `reason` from a real planner rejection or an
+/// unconfirmed static expectation — it never synthesizes plan text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeDeclineEvidence {
+    /// The decline reason string.
+    pub reason: String,
+    /// Whether the reason was reported by the planner or is an unconfirmed
+    /// static-matrix expectation.
+    pub source: DeclineReasonSource,
+}
+
+/// Summary statistics for one cache state (warm or cold) of a workload.
+///
+/// Populated by [`WorkloadResult::from_iterations`] by partitioning the
+/// iteration vector on [`IterationResult::cache_state`]. In `CacheMode::Both`
+/// both `warm` and `cold` summaries are populated so the report renders
+/// medians / p-values / speedups computed over homogeneous subsamples rather
+/// than the pooled bimodal mixture.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CacheModeSummary {
+    /// Which cache state this summary describes.
+    pub cache_state: CacheState,
+    /// Number of measured iterations in this subsample.
+    pub n: usize,
+    pub accel_mean_ms: f64,
+    pub accel_median_ms: f64,
+    pub accel_stddev_ms: f64,
+    pub accel_p95_ms: f64,
+    pub accel_cv_pct: f64,
+    pub accel_ci_95: (f64, f64),
+    pub parallel_mean_ms: f64,
+    pub parallel_median_ms: f64,
+    pub parallel_stddev_ms: f64,
+    pub parallel_p95_ms: f64,
+    pub parallel_cv_pct: f64,
+    pub parallel_ci_95: (f64, f64),
+    /// `parallel_mean / accel_mean` over this subsample.
+    pub speedup_mean_vs_parallel: f64,
+    /// `parallel_median / accel_median` over this subsample.
+    pub speedup_median_vs_parallel: f64,
+    /// Paired t-test p-value over this subsample.
+    pub p_value_vs_parallel: f64,
+    /// Cohen's d over this subsample.
+    pub cohens_d_vs_parallel: f64,
+    /// `|d| >= 0.5` over this subsample.
+    pub effect_size_meaningful: bool,
+}
+
+impl CacheModeSummary {
+    /// Build a summary from a homogeneous slice of iterations (all one cache
+    /// state). Returns `None` for an empty slice.
+    fn from_iterations(cache_state: CacheState, iterations: &[IterationResult]) -> Option<Self> {
+        if iterations.is_empty() {
+            return None;
+        }
+        let accel: Vec<f64> = iterations.iter().map(|i| i.accel_ms).collect();
+        let parallel: Vec<f64> = iterations.iter().map(|i| i.parallel_ms).collect();
+        let accel_mean = stats::mean(&accel);
+        let parallel_mean = stats::mean(&parallel);
+        let accel_median = stats::median(&accel);
+        let parallel_median = stats::median(&parallel);
+        let cohens_d = stats::cohens_d(&parallel, &accel);
+        Some(Self {
+            cache_state,
+            n: iterations.len(),
+            accel_mean_ms: accel_mean,
+            accel_median_ms: accel_median,
+            accel_stddev_ms: stats::stddev(&accel),
+            accel_p95_ms: stats::percentile(&accel, 95.0),
+            accel_cv_pct: stats::cv_percent(&accel),
+            accel_ci_95: stats::confidence_interval_95(&accel),
+            parallel_mean_ms: parallel_mean,
+            parallel_median_ms: parallel_median,
+            parallel_stddev_ms: stats::stddev(&parallel),
+            parallel_p95_ms: stats::percentile(&parallel, 95.0),
+            parallel_cv_pct: stats::cv_percent(&parallel),
+            parallel_ci_95: stats::confidence_interval_95(&parallel),
+            speedup_mean_vs_parallel: if accel_mean > 0.0 {
+                parallel_mean / accel_mean
+            } else {
+                f64::NAN
+            },
+            speedup_median_vs_parallel: if accel_median > 0.0 {
+                parallel_median / accel_median
+            } else {
+                f64::NAN
+            },
+            p_value_vs_parallel: stats::paired_t_test_p(&accel, &parallel),
+            cohens_d_vs_parallel: cohens_d,
+            effect_size_meaningful: cohens_d.is_finite() && cohens_d.abs() >= 0.5,
+        })
+    }
+}
+
 /// Timing results for a single iteration (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_field_names)]
@@ -35,6 +146,12 @@ pub struct IterationResult {
     /// Outcome of the OS page-cache purge requested for this iteration.
     #[serde(default)]
     pub cache_purge: CachePurgeState,
+    /// Cache state this iteration measured under (warm vs cold). Set from the
+    /// run's [`CacheMode`](crate::runner::CacheMode). In `CacheMode::Both` this
+    /// is the key that separates the cold and warm subsamples so summary stats
+    /// are never computed over the bimodal mixture.
+    #[serde(default)]
+    pub cache_state: CacheState,
 }
 
 /// Aggregated results for one workload at one row scale (two-way: accel vs PG parallel).
@@ -220,6 +337,45 @@ pub struct WorkloadResult {
     /// no-dispatch rows are interpreted as missing GPU PreAgg work.
     #[serde(default)]
     pub sanity_checks: Vec<SanityCheck>,
+    /// Wall-clock time (ms) the accel side spent loading GPU-resident caches
+    /// **off** the timed region for this workload, when a resident-cache
+    /// loader ran. `None` for workloads with no resident-cache prerequisite.
+    /// First-class evidence: the resident lanes pre-load caches outside the
+    /// clock while the PG baseline pays scan I/O on the clock, so the report
+    /// must be able to surface what the accel side got for free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_load_ms: Option<f64>,
+    /// True when this workload requires a GPU-resident cache preload
+    /// (`ssbm_*` / `resident_*` lanes). Marks resident-lane rows distinctly so
+    /// the report never folds an off-clock-preloaded win into the headline
+    /// geomean without a marker.
+    #[serde(default)]
+    pub resident_lane: bool,
+    /// Native-decline evidence tagged with its source. Populated only from a
+    /// real planner rejection (`PlannerReported`) or an unconfirmed static
+    /// expectation (`ExpectedUnconfirmed`). Replaces the deleted fabricated
+    /// plan-text injection: the report reads this instead of grepping the plan
+    /// snippet for a synthetic reason line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_decline_evidence: Option<NativeDeclineEvidence>,
+    /// Warm-only summary statistics, populated when the run measured any warm
+    /// iterations. In `CacheMode::Both` this is computed over the warm
+    /// subsample only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_summary: Option<CacheModeSummary>,
+    /// Cold-only summary statistics, populated when the run measured any cold
+    /// iterations. In `CacheMode::Both` this is computed over the cold
+    /// subsample only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_summary: Option<CacheModeSummary>,
+    /// For cold / both runs: whether the workload fixture fits within
+    /// `shared_buffers` (`Some(true)` = data stays resident in shared_buffers
+    /// even after the OS page-cache purge, so the "cold" label overstates the
+    /// eviction) or exceeds it (`Some(false)` = genuinely cold). `None` when
+    /// not a cold run or the comparison could not be made. Recorded so reports
+    /// cannot call a run cold when shared_buffers stayed resident.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_shared_buffers_resident: Option<bool>,
 }
 
 /// Hardware and software profile for reproducibility.
@@ -750,8 +906,35 @@ impl WorkloadResult {
         iterations: Vec<IterationResult>,
         gpu_kernel_dispatched: bool,
     ) -> Self {
-        let accel_times: Vec<f64> = iterations.iter().map(|i| i.accel_ms).collect();
-        let parallel_times: Vec<f64> = iterations.iter().map(|i| i.parallel_ms).collect();
+        // Partition by cache state so summary stats are never computed over a
+        // bimodal warm+cold mixture (CacheMode::Both). Each subsample gets its
+        // own summary; when both are present the flat top-level fields below
+        // describe the WARM subsample (the steady-state headline) rather than
+        // the pooled mixture, so nothing downstream can cite a mixed median.
+        let warm_iters: Vec<IterationResult> = iterations
+            .iter()
+            .filter(|i| i.cache_state == CacheState::Warm)
+            .cloned()
+            .collect();
+        let cold_iters: Vec<IterationResult> = iterations
+            .iter()
+            .filter(|i| i.cache_state == CacheState::Cold)
+            .cloned()
+            .collect();
+        let warm_summary = CacheModeSummary::from_iterations(CacheState::Warm, &warm_iters);
+        let cold_summary = CacheModeSummary::from_iterations(CacheState::Cold, &cold_iters);
+
+        // Primary subsample for the flat top-level statistics: when the run
+        // mixed warm and cold (Both), use warm only; otherwise use everything
+        // (a homogeneous single-mode run).
+        let primary: &[IterationResult] = if !warm_iters.is_empty() && !cold_iters.is_empty() {
+            &warm_iters
+        } else {
+            &iterations
+        };
+
+        let accel_times: Vec<f64> = primary.iter().map(|i| i.accel_ms).collect();
+        let parallel_times: Vec<f64> = primary.iter().map(|i| i.parallel_ms).collect();
 
         let accel_mean = stats::mean(&accel_times);
         let parallel_mean = stats::mean(&parallel_times);
@@ -843,6 +1026,12 @@ impl WorkloadResult {
             thermal: None,
             table_stats: Vec::new(),
             sanity_checks: Vec::new(),
+            resident_load_ms: None,
+            resident_lane: false,
+            native_decline_evidence: None,
+            warm_summary,
+            cold_summary,
+            cold_shared_buffers_resident: None,
             iterations,
         }
     }
@@ -4820,6 +5009,7 @@ mod tests {
                     accel_ms: accel_ms + jitter,
                     parallel_ms: baseline_ms + jitter,
                     cache_purge: CachePurgeState::NotRequested,
+                    cache_state: CacheState::Warm,
                 }
             })
             .collect();
@@ -4947,6 +5137,7 @@ mod tests {
             accel_ms: 5.0,
             parallel_ms: 10.0,
             cache_purge: CachePurgeState::NotRequested,
+            cache_state: CacheState::Warm,
         }];
         let result = WorkloadResult::from_iterations(
             "one".to_owned(),
@@ -4982,16 +5173,19 @@ mod tests {
                 accel_ms: 250.0,
                 parallel_ms: 40.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             },
             IterationResult {
                 accel_ms: 30.0,
                 parallel_ms: 35.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             },
             IterationResult {
                 accel_ms: 80.0,
                 parallel_ms: 32.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             },
         ]);
 
@@ -5011,11 +5205,13 @@ mod tests {
                 accel_ms: 50.0,
                 parallel_ms: 40.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             },
             IterationResult {
                 accel_ms: 1_500.0,
                 parallel_ms: 42.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             },
         ]);
         let report = mock_report(vec![workload]);

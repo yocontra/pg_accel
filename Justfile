@@ -383,7 +383,40 @@ coverage pg="":
 # Run benchmark suite against local pgrx PG. The runner seeds and cleans up
 # each workload/scale itself. Long benches can fill the PG log; `log-rails`
 # truncates oversized logs first.
+#
+# This is the EVIDENCE recipe: it does NOT pass `--skip-guc-verify`, so the
+# harness hard-fails if any PGC_POSTMASTER GUC (e.g. shared_buffers) drifts
+# from the requested profile. Use `just bench-dev` for local iteration where
+# the postmaster GUC mismatch should be tolerated.
 bench iterations="10" warmup="5" pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_supported_pg "$pg"
+    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
+        exit 0
+    fi
+    pg_accel_require_pgrx_pg_config "$pg"
+    just install-pg-accel "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run -p pg_accel_bench --release -- run \
+        --iterations {{iterations}} --warmup {{warmup}} \
+        --connection "host=localhost port=$port dbname=postgres" \
+        --format markdown --timing raw
+
+# Developer-iteration benchmark: identical to `just bench` but passes
+# `--skip-guc-verify` to bypass the postmaster-GUC mismatch hard-fail. Never
+# use for published/evidence runs — a settings table that doesn't match the
+# running postmaster is worse than no table at all (see main.rs --skip-guc-verify).
+bench-dev iterations="10" warmup="5" pg="":
     #!/usr/bin/env bash
     set -euo pipefail
     source scripts/pg_versions.sh
