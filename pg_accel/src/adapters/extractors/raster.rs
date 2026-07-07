@@ -39,8 +39,12 @@ pub struct BandInfo {
 /// Pixel data type stored in a raster band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelType {
-    /// 1-bit boolean
+    /// 1-bit boolean (`1BB`)
     Bool,
+    /// Unsigned 2-bit integer (`2BUI`) — serialized as one byte per pixel.
+    UInt2,
+    /// Unsigned 4-bit integer (`4BUI`) — serialized as one byte per pixel.
+    UInt4,
     /// Signed 8-bit integer
     Int8,
     /// Unsigned 8-bit integer
@@ -64,25 +68,33 @@ impl PixelType {
     #[must_use]
     pub const fn byte_size(self) -> usize {
         match self {
-            Self::Bool | Self::Int8 | Self::UInt8 => 1,
+            Self::Bool | Self::UInt2 | Self::UInt4 | Self::Int8 | Self::UInt8 => 1,
             Self::Int16 | Self::UInt16 => 2,
             Self::Int32 | Self::UInt32 | Self::Float32 => 4,
             Self::Float64 => 8,
         }
     }
 
-    /// Convert from the 4-bit pixel type code in the WKB format.
+    /// Convert from the pixel-type code in the WKB band header.
+    ///
+    /// The code numbers are the PostGIS `rt_pixtype` enum (`librtcore.h`):
+    /// `0=1BB, 1=2BUI, 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI,
+    /// 8=32BUI, 9=32BF, 10=64BF`. Getting this table wrong silently shifts
+    /// every wider type (real 8BUI reads as UInt16, 32BF is rejected, etc.),
+    /// so it is pinned by `pixel_type_code_tests`.
     fn from_code(code: u8) -> Option<Self> {
         match code {
             0 => Some(Self::Bool),
-            1 => Some(Self::Int8),
-            2 => Some(Self::UInt8),
-            3 => Some(Self::Int16),
-            4 => Some(Self::UInt16),
-            5 => Some(Self::Int32),
-            6 => Some(Self::UInt32),
-            7 => Some(Self::Float32),
-            10 | 11 => Some(Self::Float64),
+            1 => Some(Self::UInt2),
+            2 => Some(Self::UInt4),
+            3 => Some(Self::Int8),
+            4 => Some(Self::UInt8),
+            5 => Some(Self::Int16),
+            6 => Some(Self::UInt16),
+            7 => Some(Self::Int32),
+            8 => Some(Self::UInt32),
+            9 => Some(Self::Float32),
+            10 => Some(Self::Float64),
             _ => None,
         }
     }
@@ -323,7 +335,9 @@ pub fn parse_band_info(data: &[u8], band_index: usize) -> Option<BandInfo> {
 /// Read the nodata value for the given pixel type, returning it as `f64`.
 fn read_nodata(r: &mut WkbReader<'_>, pt: PixelType) -> Option<f64> {
     Some(match pt {
-        PixelType::Bool | PixelType::UInt8 => f64::from(r.read_u8()?),
+        PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
+            f64::from(r.read_u8()?)
+        }
         PixelType::Int8 => f64::from(r.read_i8()?),
         PixelType::Int16 => f64::from(r.read_i16()?),
         PixelType::UInt16 => f64::from(r.read_u16()?),
@@ -431,7 +445,7 @@ pub fn patch_band0_pixels(original_wkb: &[u8], output_f32: &[f32]) -> Option<Vec
 /// Write a single pixel value at a given offset in a mutable byte buffer.
 fn write_pixel_at(buf: &mut [u8], offset: usize, pt: PixelType, val: f64, le: bool) {
     match pt {
-        PixelType::Bool | PixelType::UInt8 => {
+        PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
             buf[offset] = val as u8;
         }
         PixelType::Int8 => {
@@ -659,6 +673,154 @@ fn parse_one_rule(token: &str) -> Option<PgaccelReclassRule> {
 }
 
 // ---------------------------------------------------------------------------
+// Pure-Rust unit tests for the PostGIS `rt_pixtype` decode table.
+//
+// These run under `cargo test -p pg_accel --lib` (no PG backend). They pin
+// the WKB pixel-type code numbers literally against the PostGIS
+// `librtcore.h` `rt_pixtype` enum so a future edit cannot silently re-shift
+// the table (the exact P0 corruption this fixes). Do NOT reuse the test
+// builder as the oracle — assert the code integers directly.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod pixel_type_code_tests {
+    use super::PixelType;
+
+    /// PostGIS `rt_pixtype` codes (librtcore.h):
+    /// 0=1BB, 1=2BUI, 2=4BUI, 3=8BSI, 4=8BUI, 5=16BSI, 6=16BUI,
+    /// 7=32BSI, 8=32BUI, 9=32BF, 10=64BF.
+    #[test]
+    fn from_code_matches_postgis_rt_pixtype_literally() {
+        assert_eq!(PixelType::from_code(0), Some(PixelType::Bool), "0 = 1BB");
+        assert_eq!(PixelType::from_code(1), Some(PixelType::UInt2), "1 = 2BUI");
+        assert_eq!(PixelType::from_code(2), Some(PixelType::UInt4), "2 = 4BUI");
+        assert_eq!(PixelType::from_code(3), Some(PixelType::Int8), "3 = 8BSI");
+        assert_eq!(PixelType::from_code(4), Some(PixelType::UInt8), "4 = 8BUI");
+        assert_eq!(PixelType::from_code(5), Some(PixelType::Int16), "5 = 16BSI");
+        assert_eq!(
+            PixelType::from_code(6),
+            Some(PixelType::UInt16),
+            "6 = 16BUI"
+        );
+        assert_eq!(PixelType::from_code(7), Some(PixelType::Int32), "7 = 32BSI");
+        assert_eq!(
+            PixelType::from_code(8),
+            Some(PixelType::UInt32),
+            "8 = 32BUI"
+        );
+        assert_eq!(
+            PixelType::from_code(9),
+            Some(PixelType::Float32),
+            "9 = 32BF"
+        );
+        assert_eq!(
+            PixelType::from_code(10),
+            Some(PixelType::Float64),
+            "10 = 64BF"
+        );
+    }
+
+    #[test]
+    fn from_code_byte_sizes_by_literal_code() {
+        // 1BB / 2BUI / 4BUI / 8BSI / 8BUI all serialize as one byte per pixel.
+        for code in [0u8, 1, 2, 3, 4] {
+            assert_eq!(
+                PixelType::from_code(code).unwrap().byte_size(),
+                1,
+                "code {code} must be a 1-byte pixel"
+            );
+        }
+        for code in [5u8, 6] {
+            assert_eq!(
+                PixelType::from_code(code).unwrap().byte_size(),
+                2,
+                "code {code} must be a 2-byte pixel"
+            );
+        }
+        for code in [7u8, 8, 9] {
+            assert_eq!(
+                PixelType::from_code(code).unwrap().byte_size(),
+                4,
+                "code {code} must be a 4-byte pixel"
+            );
+        }
+        assert_eq!(PixelType::from_code(10).unwrap().byte_size(), 8, "64BF");
+    }
+
+    #[test]
+    fn from_code_rejects_out_of_range() {
+        assert!(PixelType::from_code(11).is_none());
+        assert!(PixelType::from_code(12).is_none());
+        assert!(PixelType::from_code(255).is_none());
+    }
+
+    /// Hand-build a single-band raster WKB with a literal pixel-type code and
+    /// confirm band metadata + pixel value decode correctly. The builder here
+    /// writes the code integer directly (it is NOT `pixel_type_to_code`), so
+    /// this is an independent oracle for `from_code` + band parsing.
+    fn hand_build_wkb(pix_code: u8, pixel_bytes: &[u8], nodata_bytes: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(1u8); // little-endian
+        buf.extend_from_slice(&0u16.to_le_bytes()); // version
+        buf.extend_from_slice(&1u16.to_le_bytes()); // nBands
+        buf.extend_from_slice(&1.0f64.to_le_bytes()); // scaleX
+        buf.extend_from_slice(&(-1.0f64).to_le_bytes()); // scaleY
+        buf.extend_from_slice(&0.0f64.to_le_bytes()); // ipX
+        buf.extend_from_slice(&0.0f64.to_le_bytes()); // ipY
+        buf.extend_from_slice(&0.0f64.to_le_bytes()); // skewX
+        buf.extend_from_slice(&0.0f64.to_le_bytes()); // skewY
+        buf.extend_from_slice(&0i32.to_le_bytes()); // srid
+        buf.extend_from_slice(&1u16.to_le_bytes()); // width = 1
+        buf.extend_from_slice(&1u16.to_le_bytes()); // height = 1
+        let flags: u8 = (pix_code << 4) | 0x01; // hasNodata
+        buf.push(flags);
+        buf.extend_from_slice(nodata_bytes);
+        buf.extend_from_slice(pixel_bytes);
+        buf
+    }
+
+    #[test]
+    fn hand_built_8bui_decodes() {
+        // code 4 = 8BUI, one byte per pixel, value 200.
+        let wkb = hand_build_wkb(4, &[200u8], &[0u8]);
+        let band = super::parse_band_info(&wkb, 0).unwrap();
+        assert_eq!(band.pixel_type, PixelType::UInt8);
+        let px = super::extract_pixels_f64(&wkb, 0).unwrap();
+        assert_eq!(px, vec![200.0]);
+    }
+
+    #[test]
+    fn hand_built_16bsi_decodes_negative() {
+        // code 5 = 16BSI, two LE bytes, value -1000.
+        let wkb = hand_build_wkb(5, &(-1000i16).to_le_bytes(), &0i16.to_le_bytes());
+        let band = super::parse_band_info(&wkb, 0).unwrap();
+        assert_eq!(band.pixel_type, PixelType::Int16);
+        let px = super::extract_pixels_f64(&wkb, 0).unwrap();
+        assert_eq!(px, vec![-1000.0]);
+    }
+
+    #[test]
+    fn hand_built_32bf_decodes() {
+        // code 9 = 32BF, four LE bytes, value 3.5.
+        let wkb = hand_build_wkb(9, &3.5f32.to_le_bytes(), &0.0f32.to_le_bytes());
+        let band = super::parse_band_info(&wkb, 0).unwrap();
+        assert_eq!(band.pixel_type, PixelType::Float32);
+        let px = super::extract_pixels_f64(&wkb, 0).unwrap();
+        assert_eq!(px, vec![3.5]);
+    }
+
+    #[test]
+    fn hand_built_64bf_decodes() {
+        // code 10 = 64BF, eight LE bytes.
+        let wkb = hand_build_wkb(10, &2.5f64.to_le_bytes(), &0.0f64.to_le_bytes());
+        let band = super::parse_band_info(&wkb, 0).unwrap();
+        assert_eq!(band.pixel_type, PixelType::Float64);
+        let px = super::extract_pixels_f64(&wkb, 0).unwrap();
+        assert_eq!(px, vec![2.5]);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
@@ -719,22 +881,27 @@ mod test_helpers {
     }
 
     fn pixel_type_to_code(pt: PixelType) -> u8 {
+        // Must match the PostGIS `rt_pixtype` enum (librtcore.h).
         match pt {
             PixelType::Bool => 0,
-            PixelType::Int8 => 1,
-            PixelType::UInt8 => 2,
-            PixelType::Int16 => 3,
-            PixelType::UInt16 => 4,
-            PixelType::Int32 => 5,
-            PixelType::UInt32 => 6,
-            PixelType::Float32 => 7,
+            PixelType::UInt2 => 1,
+            PixelType::UInt4 => 2,
+            PixelType::Int8 => 3,
+            PixelType::UInt8 => 4,
+            PixelType::Int16 => 5,
+            PixelType::UInt16 => 6,
+            PixelType::Int32 => 7,
+            PixelType::UInt32 => 8,
+            PixelType::Float32 => 9,
             PixelType::Float64 => 10,
         }
     }
 
     fn write_pixel_value(buf: &mut Vec<u8>, pt: PixelType, val: f64) {
         match pt {
-            PixelType::Bool | PixelType::UInt8 => buf.push(val as u8),
+            PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
+                buf.push(val as u8);
+            }
             PixelType::Int8 => buf.push(val as i8 as u8),
             PixelType::Int16 => {
                 buf.extend_from_slice(&(val as i16).to_le_bytes());
@@ -922,25 +1089,27 @@ mod tests {
 
     #[test]
     fn pixel_type_from_code_invalid_returns_none() {
-        // Codes 8, 9, 12+ are invalid
-        assert!(PixelType::from_code(8).is_none());
-        assert!(PixelType::from_code(9).is_none());
+        // Codes 11+ are out of range for PostGIS rt_pixtype (0..=10).
+        assert!(PixelType::from_code(11).is_none());
         assert!(PixelType::from_code(12).is_none());
         assert!(PixelType::from_code(255).is_none());
     }
 
     #[test]
     fn pixel_type_from_code_all_valid() {
+        // PostGIS rt_pixtype (librtcore.h): 0=1BB, 1=2BUI, 2=4BUI, 3=8BSI,
+        // 4=8BUI, 5=16BSI, 6=16BUI, 7=32BSI, 8=32BUI, 9=32BF, 10=64BF.
         assert_eq!(PixelType::from_code(0), Some(PixelType::Bool));
-        assert_eq!(PixelType::from_code(1), Some(PixelType::Int8));
-        assert_eq!(PixelType::from_code(2), Some(PixelType::UInt8));
-        assert_eq!(PixelType::from_code(3), Some(PixelType::Int16));
-        assert_eq!(PixelType::from_code(4), Some(PixelType::UInt16));
-        assert_eq!(PixelType::from_code(5), Some(PixelType::Int32));
-        assert_eq!(PixelType::from_code(6), Some(PixelType::UInt32));
-        assert_eq!(PixelType::from_code(7), Some(PixelType::Float32));
+        assert_eq!(PixelType::from_code(1), Some(PixelType::UInt2));
+        assert_eq!(PixelType::from_code(2), Some(PixelType::UInt4));
+        assert_eq!(PixelType::from_code(3), Some(PixelType::Int8));
+        assert_eq!(PixelType::from_code(4), Some(PixelType::UInt8));
+        assert_eq!(PixelType::from_code(5), Some(PixelType::Int16));
+        assert_eq!(PixelType::from_code(6), Some(PixelType::UInt16));
+        assert_eq!(PixelType::from_code(7), Some(PixelType::Int32));
+        assert_eq!(PixelType::from_code(8), Some(PixelType::UInt32));
+        assert_eq!(PixelType::from_code(9), Some(PixelType::Float32));
         assert_eq!(PixelType::from_code(10), Some(PixelType::Float64));
-        assert_eq!(PixelType::from_code(11), Some(PixelType::Float64));
     }
 
     // -- Multi-band tests -----------------------------------------------------
@@ -978,13 +1147,15 @@ mod tests {
 
         let pix_code = match pixel_type {
             PixelType::Bool => 0u8,
-            PixelType::Int8 => 1,
-            PixelType::UInt8 => 2,
-            PixelType::Int16 => 3,
-            PixelType::UInt16 => 4,
-            PixelType::Int32 => 5,
-            PixelType::UInt32 => 6,
-            PixelType::Float32 => 7,
+            PixelType::UInt2 => 1,
+            PixelType::UInt4 => 2,
+            PixelType::Int8 => 3,
+            PixelType::UInt8 => 4,
+            PixelType::Int16 => 5,
+            PixelType::UInt16 => 6,
+            PixelType::Int32 => 7,
+            PixelType::UInt32 => 8,
+            PixelType::Float32 => 9,
             PixelType::Float64 => 10,
         };
 
@@ -1004,7 +1175,9 @@ mod tests {
 
     fn write_pixel(buf: &mut Vec<u8>, pt: PixelType, val: f64) {
         match pt {
-            PixelType::Bool | PixelType::UInt8 => buf.push(val as u8),
+            PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
+                buf.push(val as u8);
+            }
             PixelType::Int8 => buf.push(val as i8 as u8),
             PixelType::Int16 => buf.extend_from_slice(&(val as i16).to_le_bytes()),
             PixelType::UInt16 => buf.extend_from_slice(&(val as u16).to_le_bytes()),

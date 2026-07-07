@@ -11,6 +11,81 @@ use crate::gpu::three_layer;
 use super::{DispatchResult, SpatialDispatchOp};
 
 // ---------------------------------------------------------------------------
+// Shared constant-datum decoders
+//
+// Constant qual args arrive as `(Datum, is_null, type_oid)`. The Datum stores
+// the value in the PG in-memory representation for its declared type, so the
+// type OID is load-bearing: an int4 constant is NOT an f64 bit pattern, and
+// reinterpreting one as the other yields wrong slope/hillshade/dwithin
+// results. These helpers honour the OID and return `None` (caller Defers) for
+// NULL, non-finite, or types we don't cheaply support. Shared by the spatial,
+// h3, and raster dispatch modules.
+// ---------------------------------------------------------------------------
+
+/// Decode a constant `Datum` into an `f64`, honouring its declared type OID.
+///
+/// Supports int2/int4/int8 (exact) and float4/float8 (bit-reinterpreted).
+/// Returns `None` for NULL, non-finite floats, or unsupported types (e.g.
+/// `numeric`, which would need a PG function call to convert).
+#[must_use]
+pub(super) fn const_datum_as_f64(
+    datum: pgrx::pg_sys::Datum,
+    is_null: bool,
+    typid: pgrx::pg_sys::Oid,
+) -> Option<f64> {
+    if is_null {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let value = if typid == pgrx::pg_sys::INT2OID {
+        f64::from(datum.value() as i16)
+    } else if typid == pgrx::pg_sys::INT4OID {
+        f64::from(datum.value() as i32)
+    } else if typid == pgrx::pg_sys::INT8OID {
+        datum.value() as i64 as f64
+    } else if typid == pgrx::pg_sys::FLOAT4OID {
+        f64::from(f32::from_bits(datum.value() as u32))
+    } else if typid == pgrx::pg_sys::FLOAT8OID {
+        f64::from_bits(datum.value() as u64)
+    } else {
+        return None;
+    };
+    value.is_finite().then_some(value)
+}
+
+/// Decode a constant `Datum` into an `i64`, honouring its declared type OID.
+///
+/// Supports int2/int4/int8 (exact) and float4/float8 (truncated toward zero
+/// after a finiteness check). Returns `None` for NULL, non-finite floats, or
+/// unsupported types.
+#[must_use]
+pub(super) fn const_datum_as_i64(
+    datum: pgrx::pg_sys::Datum,
+    is_null: bool,
+    typid: pgrx::pg_sys::Oid,
+) -> Option<i64> {
+    if is_null {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    if typid == pgrx::pg_sys::INT2OID {
+        Some(i64::from(datum.value() as i16))
+    } else if typid == pgrx::pg_sys::INT4OID {
+        Some(i64::from(datum.value() as i32))
+    } else if typid == pgrx::pg_sys::INT8OID {
+        Some(datum.value() as i64)
+    } else if typid == pgrx::pg_sys::FLOAT4OID {
+        let f = f32::from_bits(datum.value() as u32);
+        f.is_finite().then_some(f as i64)
+    } else if typid == pgrx::pg_sys::FLOAT8OID {
+        let f = f64::from_bits(datum.value() as u64);
+        f.is_finite().then_some(f as i64)
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Strategy: GpuSpatial
 //
 // GPU spatial dispatch via the three-layer pipeline. The pipeline evaluates
@@ -304,7 +379,7 @@ pub unsafe fn dispatch_gpu_spatial(
             // 3-arg `ST_DWithin(geom, geom, threshold)` — the threshold
             // is captured at position 1 in qual_datums (qual_datums[0]
             // is the constant geometry already extracted above).
-            let Some(&(threshold_datum, threshold_null, _threshold_typid)) = qual_datums.get(1)
+            let Some(&(threshold_datum, threshold_null, threshold_typid)) = qual_datums.get(1)
             else {
                 pgrx::debug1!("pg_accel: st_dwithin: missing threshold qual_datums[1], deferring");
                 return DispatchResult::Deferred;
@@ -316,12 +391,21 @@ pub unsafe fn dispatch_gpu_spatial(
                     batch.len()
                 ]);
             }
-            // PostGIS ST_DWithin's third arg is float8 (Datum carries the
-            // f64 bit pattern). Decode and feed the spatial_eval pipeline.
-            let threshold = f64::from_bits(threshold_datum.value() as u64);
-            if !threshold.is_finite() || threshold < 0.0 {
+            // PostGIS ST_DWithin's third arg is float8, but a literal like
+            // `ST_DWithin(g, g, 1000)` may reach us as int4/int8. Decode by
+            // the actual type OID rather than assuming an f64 bit pattern.
+            let Some(threshold) =
+                const_datum_as_f64(threshold_datum, threshold_null, threshold_typid)
+            else {
                 pgrx::debug1!(
-                    "pg_accel: st_dwithin: non-finite or negative threshold {}, deferring",
+                    "pg_accel: st_dwithin: threshold type {:?} not cheaply decodable, deferring",
+                    threshold_typid
+                );
+                return DispatchResult::Deferred;
+            };
+            if threshold < 0.0 {
+                pgrx::debug1!(
+                    "pg_accel: st_dwithin: negative threshold {}, deferring",
                     threshold
                 );
                 return DispatchResult::Deferred;
@@ -605,7 +689,12 @@ unsafe fn dispatch_gpu_st_area(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispatc
         )
     };
     if !matches!(status, PgaccelStatus::Ok) {
-        return DispatchResult::Deferred;
+        // Kernel dispatch ran and failed — this is not an input gate. Surface
+        // it loudly instead of masking it as a planner decline (rule #4).
+        pgrx::error!(
+            "pg_accel: st_area GPU kernel failed with status {:?}; refusing non-GPU completion",
+            status
+        );
     }
 
     // Build the output Datum vector. NULL slots stay NULL; valid rows
@@ -729,7 +818,10 @@ unsafe fn dispatch_gpu_st_length(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispa
             )
         };
         if !matches!(status, PgaccelStatus::Ok) {
-            return DispatchResult::Deferred;
+            pgrx::error!(
+                "pg_accel: st_length (closed-ring) GPU kernel failed with status {:?}; refusing non-GPU completion",
+                status
+            );
         }
         for (k, &batch_i) in closed_rows.iter().enumerate() {
             let len_f64 = f64::from(lengths[k]);
@@ -752,7 +844,10 @@ unsafe fn dispatch_gpu_st_length(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispa
             )
         };
         if !matches!(status, PgaccelStatus::Ok) {
-            return DispatchResult::Deferred;
+            pgrx::error!(
+                "pg_accel: st_length (open-path) GPU kernel failed with status {:?}; refusing non-GPU completion",
+                status
+            );
         }
         for (k, &batch_i) in open_rows.iter().enumerate() {
             let len_f64 = f64::from(lengths[k]);
@@ -856,7 +951,10 @@ unsafe fn dispatch_gpu_st_distance(
         )
     };
     if !matches!(status, PgaccelStatus::Ok) {
-        return DispatchResult::Deferred;
+        pgrx::error!(
+            "pg_accel: st_distance GPU kernel failed with status {:?}; refusing non-GPU completion",
+            status
+        );
     }
     if uncertain.iter().any(|&u| u != 0) {
         pgrx::error!(
@@ -972,7 +1070,10 @@ unsafe fn dispatch_gpu_st_distance_polygon_polygon(
         )
     };
     if !matches!(status, PgaccelStatus::Ok) {
-        return DispatchResult::Deferred;
+        pgrx::error!(
+            "pg_accel: polygon st_distance GPU kernel failed with status {:?}; refusing non-GPU completion",
+            status
+        );
     }
     if uncertain.iter().any(|&u| u != 0) {
         pgrx::error!(
