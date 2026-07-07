@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "pg_accel"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
  "opentelemetry",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "pg_accel_bench"
-version = "1.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "postgres",
