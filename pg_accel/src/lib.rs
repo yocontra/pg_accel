@@ -263,6 +263,16 @@ mod gpu;
 #[cfg(feature = "pg_test")]
 mod tests;
 
+// Phase 2 bridge FFI safety unit tests are pure Rust (no PG instance / no
+// GPU dispatch required) and must run under plain `cargo test -p pg_accel
+// --lib`. When the `pg_test` feature is off, `mod tests` above is not
+// compiled, so mount just that one file here. Under `cargo pgrx test`
+// (feature on) the file is reached through `tests/mod.rs` instead — the
+// two gates are mutually exclusive, so it is never compiled twice.
+#[cfg(all(test, not(feature = "pg_test")))]
+#[path = "tests/phase2_bridge.rs"]
+mod phase2_bridge_tests;
+
 // macOS Sequoia+ (26.x) eagerly resolves undefined data symbols at dyld
 // load time, which aborts pgrx lib unit test binaries before any tests
 // run. build.rs generates a file of `#[no_mangle] pub static NAME: u8`

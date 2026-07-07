@@ -15,7 +15,13 @@ pub fn h3_get_resolution_bulk(cells: &[u64]) -> Option<Vec<i32>> {
             resolutions.as_mut_ptr(),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -29,7 +35,13 @@ pub fn h3_get_base_cell_bulk(cells: &[u64]) -> Option<Vec<i32>> {
     let status = unsafe {
         bridge::pgaccel_h3_get_base_cell_bulk(cells.as_ptr(), cells.len(), base_cells.as_mut_ptr())
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -43,7 +55,13 @@ pub fn h3_is_valid_cell_bulk(cells: &[u64]) -> Option<Vec<u8>> {
     let status = unsafe {
         bridge::pgaccel_h3_is_valid_cell_bulk(cells.as_ptr(), cells.len(), valid.as_mut_ptr())
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -57,7 +75,13 @@ pub fn h3_is_pentagon_bulk(cells: &[u64]) -> Option<Vec<u8>> {
     let status = unsafe {
         bridge::pgaccel_h3_is_pentagon_bulk(cells.as_ptr(), cells.len(), is_pent.as_mut_ptr())
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -75,7 +99,13 @@ pub fn h3_is_res_class_iii_bulk(cells: &[u64]) -> Option<Vec<u8>> {
             is_class_iii.as_mut_ptr(),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -94,7 +124,13 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
             parents.as_mut_ptr(),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -120,7 +156,13 @@ pub fn h3_cell_to_parent_count_bulk(cells: &[u64], parent_res: i32) -> Option<Ha
             std::ptr::addr_of_mut!(state),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -158,7 +200,13 @@ pub fn h3_cell_to_parent_count_resident(
             std::ptr::addr_of_mut!(state),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -191,7 +239,13 @@ pub fn h3_cell_to_center_child_bulk(cells: &[u64], child_res: i32) -> Option<Vec
             children.as_mut_ptr(),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -211,7 +265,13 @@ pub fn h3_grid_distance_bulk(cells_a: &[u64], cells_b: &[u64]) -> Option<Vec<i32
             distances.as_mut_ptr(),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -240,13 +300,25 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
         )
     };
     if !status.is_ok() {
-        // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+        // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the
+        // arena block list in mem_pool.cpp) from this thread; no Rust
+        // invariants are involved. NOTE: it does NOT free this dispatch's
+        // device buffers — the H3 kernels allocate via sycl::malloc_shared/
+        // free directly (see h3_ops.cpp) and no kernel calls the extern "C"
+        // pgaccel_alloc arena, so this reset is currently a defensive no-op.
+        // Kept until Phase 3 deletes the arena.
         unsafe {
             bridge::pgaccel_pool_reset();
         }
         return None;
     }
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -280,7 +352,13 @@ pub fn h3_lat_lng_count_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> Opt
             std::ptr::addr_of_mut!(state),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -329,7 +407,13 @@ pub fn h3_lat_lng_count_bulk_f32_exact(
             std::ptr::addr_of_mut!(state),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }
@@ -379,7 +463,13 @@ pub fn h3_lat_lng_count_resident(
             std::ptr::addr_of_mut!(state),
         )
     };
-    // SAFETY: pool_reset frees C++ arena allocations from this dispatch.
+    // SAFETY: pgaccel_pool_reset only touches C++-owned globals (the arena
+    // block list in mem_pool.cpp) from this thread; no Rust invariants are
+    // involved. NOTE: it does NOT free this dispatch's device buffers — the
+    // H3 kernels allocate via sycl::malloc_shared/free directly (see
+    // h3_ops.cpp) and no kernel calls the extern "C" pgaccel_alloc arena, so
+    // this reset is currently a defensive no-op. Kept until Phase 3 deletes
+    // the arena.
     unsafe {
         bridge::pgaccel_pool_reset();
     }

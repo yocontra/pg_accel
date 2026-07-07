@@ -9,10 +9,6 @@ pub struct GpuHashTable {
     ht: *mut PgaccelHashTable,
 }
 
-// SAFETY: The hash table handle is only accessed from the main backend thread
-// via the safe wrapper methods. No concurrent access occurs.
-unsafe impl Send for GpuHashTable {}
-
 impl Drop for GpuHashTable {
     fn drop(&mut self) {
         if !self.ht.is_null() {

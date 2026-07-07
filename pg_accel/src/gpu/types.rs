@@ -18,6 +18,13 @@ use std::ffi::{c_char, c_void};
 ///
 /// Values **must** stay in sync with the `pgaccel_status` enum in
 /// `pgaccel_ffi.h`.
+///
+/// This enum is **never** used directly as an FFI return type: a fieldless
+/// `#[repr(i32)]` enum materialised from an out-of-range C value is
+/// instant undefined behaviour. The extern declarations in `bridge.rs`
+/// return raw `i32` and the bridge wrapper layer converts through
+/// [`PgaccelStatus::from_raw`], which rejects unknown values instead of
+/// transmuting them.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // reason: ABI mirror of pgaccel_status; all variants must exist for FFI parity
@@ -35,6 +42,25 @@ impl PgaccelStatus {
     #[must_use]
     pub const fn is_ok(self) -> bool {
         matches!(self, Self::Ok)
+    }
+
+    /// Fallible conversion from the raw `i32` a C kernel entry point
+    /// returned. `Err(raw)` carries the unrecognised value so the caller
+    /// can log it verbatim; it must never be treated as success.
+    ///
+    /// The mapping mirrors `pgaccel_status` in `pgaccel_ffi.h` exactly
+    /// (the `PGACCEL_ERROR_*` names in that enum are value aliases of the
+    /// short names, so each discriminant appears once here).
+    pub const fn from_raw(raw: i32) -> Result<Self, i32> {
+        match raw {
+            0 => Ok(Self::Ok),
+            -1 => Ok(Self::ErrorInit),
+            -2 => Ok(Self::ErrorUnsupported),
+            -3 => Ok(Self::ErrorOom),
+            -4 => Ok(Self::ErrorTimeout),
+            -5 => Ok(Self::ErrorNoDevice),
+            other => Err(other),
+        }
     }
 }
 
@@ -80,6 +106,59 @@ pub struct PgaccelPlatformCaps {
 // the C struct to match or escalate.
 const _: () = assert!(std::mem::size_of::<PgaccelPlatformCaps>() == 88);
 const _: () = assert!(std::mem::size_of::<PgaccelDeviceInfo>() == 216);
+
+// ---------------------------------------------------------------------------
+// Compile-time ABI pins for every shared FFI struct.
+//
+// These are `const` assertions (not `#[test]`s) so they are checked by every
+// `cargo check` / `cargo build`, not just test runs. Each expected size is
+// derived from the C header layout on LP64 targets:
+//   - `pgaccel_expr.h`     — pgaccel_val, pgaccel_expr_instruction,
+//                            pgaccel_expr_program, pgaccel_batch,
+//                            pgaccel_expr_usm_col, resident batch fabric
+//   - `pgaccel_ffi.h`      — pgaccel_geometry, pgaccel_expr_inst,
+//                            pgaccel_expr, pgaccel_reclass_rule
+//   - `pgaccel_hash_agg.h` — pgaccel_agg_col
+//   - `pgaccel_fused.h`    — pgaccel_reduce_col
+// If one fires, the two sides drifted — fix the drift, never the number.
+// Agent 2A mirrors the same numbers as C-side static_asserts.
+// ---------------------------------------------------------------------------
+#[cfg(target_pointer_width = "64")]
+mod abi_size_pins {
+    use super::*;
+
+    // pgaccel_expr.h — tag(i32) + pad(4) + union{..., double}(8) = 16.
+    const _: () = assert!(std::mem::size_of::<PgaccelVal>() == 16);
+    const _: () = assert!(std::mem::align_of::<PgaccelVal>() == 8);
+    // u16 + u16 + u32 = 8.
+    const _: () = assert!(std::mem::size_of::<PgaccelExprInstruction>() == 8);
+    // ptr + size_t + ptr + size_t + size_t + size_t = 48.
+    const _: () = assert!(std::mem::size_of::<PgaccelExprProgram>() == 48);
+    // size_t + size_t + ptr + ptr + ptr = 40.
+    const _: () = assert!(std::mem::size_of::<PgaccelBatch>() == 40);
+    // ptr + ptr + tag(i32) + pad(4) = 24.
+    const _: () = assert!(std::mem::size_of::<PgaccelExprUsmCol>() == 24);
+    // Resident batch fabric (pgaccel_expr.h additive ABI v1).
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentColumnView>() == 48);
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentBatch>() == 56);
+    const _: () = assert!(std::mem::size_of::<PgaccelDeviceVarOutput>() == 104);
+
+    // pgaccel_ffi.h — geom_type(4) + pad(4) + 2 ptr + size_t + ptr + size_t = 48.
+    const _: () = assert!(std::mem::size_of::<PgaccelGeometry>() == 48);
+    // op(4) + pad(4) + union{int, double}(8) = 16.
+    const _: () = assert!(std::mem::size_of::<PgaccelExprInst>() == 16);
+    // ptr + size_t + size_t = 24.
+    const _: () = assert!(std::mem::size_of::<PgaccelExpr>() == 24);
+    // 3 × f64 = 24.
+    const _: () = assert!(std::mem::size_of::<PgaccelReclassRule>() == 24);
+    const _: () = assert!(std::mem::align_of::<PgaccelReclassRule>() == 8);
+
+    // pgaccel_hash_agg.h — func(4) + pad(4) + size_t(8) = 16.
+    const _: () = assert!(std::mem::size_of::<PgaccelAggCol>() == 16);
+
+    // pgaccel_fused.h — op(int, 4) + pad(4) + ptr(8) = 16.
+    const _: () = assert!(std::mem::size_of::<PgaccelReduceCol>() == 16);
+}
 
 // ---------------------------------------------------------------------------
 // Expression evaluator types (mirrors pgaccel_expr.h).

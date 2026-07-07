@@ -12,6 +12,28 @@ fn checked_allocation_bytes<T>(len: usize) -> Option<usize> {
         .filter(|bytes| *bytes != 0)
 }
 
+/// Guard for batch-consuming wrappers whose output buffers are sized by a
+/// caller-supplied `num_rows`: the C kernel writes `batch.num_rows` results
+/// regardless, so any mismatch would let the kernel write past the end of
+/// the Rust-owned output `Vec` (heap overflow). Mismatches are rejected
+/// loudly instead of trusted.
+fn batch_rows_checked(func: &'static str, batch: &PgaccelBatch, num_rows: usize) -> Option<usize> {
+    if batch.num_rows == num_rows {
+        return Some(num_rows);
+    }
+    super::counters::record_kernel_failure(super::counters::GpuFailureDomain::Expr);
+    tracing::error!(
+        target: "pg_accel::gpu",
+        func,
+        batch_num_rows = batch.num_rows,
+        caller_num_rows = num_rows,
+        "expression batch dispatch rejected: caller-supplied num_rows does not match \
+         batch.num_rows (the kernel writes batch.num_rows results; a shorter output \
+         buffer would be a heap overflow)"
+    );
+    None
+}
+
 /// Shared-USM buffer for direct expression-template staging.
 ///
 /// The pointer is host-writable and kernel-readable. It is intentionally
@@ -228,9 +250,11 @@ pub fn expr_eval_predicate(
     batch: &PgaccelBatch,
     num_rows: usize,
 ) -> Option<Vec<i8>> {
+    let num_rows = batch_rows_checked("pgaccel_expr_eval_predicate", batch, num_rows)?;
     let mut results = vec![0i8; num_rows];
 
-    // SAFETY: program and batch are valid references. results is pre-allocated.
+    // SAFETY: program and batch are valid references. results is pre-allocated
+    // to batch.num_rows (validated above), which is exactly what the kernel writes.
     let status = unsafe {
         bridge::pgaccel_expr_eval_predicate(
             std::ptr::from_ref(program),
@@ -250,10 +274,12 @@ pub fn expr_eval_project(
     batch: &PgaccelBatch,
     num_rows: usize,
 ) -> Option<(Vec<PgaccelVal>, Vec<u8>)> {
+    let num_rows = batch_rows_checked("pgaccel_expr_eval_project", batch, num_rows)?;
     let mut output = vec![PgaccelVal::null(); num_rows];
     let mut uncertain = vec![0u8; num_rows];
 
-    // SAFETY: program and batch are valid references. output/uncertain pre-allocated.
+    // SAFETY: program and batch are valid references. output/uncertain are
+    // pre-allocated to batch.num_rows (validated above).
     let status = unsafe {
         bridge::pgaccel_expr_eval_project(
             std::ptr::from_ref(program),
@@ -275,9 +301,11 @@ pub fn expr_template_cmp_const(
     const_val: f64,
     num_rows: usize,
 ) -> Option<Vec<i8>> {
+    let num_rows = batch_rows_checked("pgaccel_expr_template_cmp_const", batch, num_rows)?;
     let mut results = vec![0i8; num_rows];
 
-    // SAFETY: batch is a valid reference. results is pre-allocated.
+    // SAFETY: batch is a valid reference. results is pre-allocated to
+    // batch.num_rows (validated above).
     let status = unsafe {
         bridge::pgaccel_expr_template_cmp_const(
             std::ptr::from_ref(batch),
@@ -1918,9 +1946,10 @@ pub fn expr_template_two_pred_and(
     const2_val: f64,
     num_rows: usize,
 ) -> Option<Vec<i8>> {
+    let num_rows = batch_rows_checked("pgaccel_expr_template_two_pred_and", batch, num_rows)?;
     let mut results = vec![0i8; num_rows];
-    // SAFETY: batch is a valid reference; results is caller-owned with
-    // num_rows capacity.
+    // SAFETY: batch is a valid reference; results is pre-allocated to
+    // batch.num_rows (validated above), which is exactly what the kernel writes.
     let status = unsafe {
         bridge::pgaccel_expr_template_two_pred_and(
             std::ptr::from_ref(batch),

@@ -78,6 +78,17 @@ pub struct DeviceLimits {
     /// back through PostgreSQL. Those rows are left native even when the
     /// point-in-ring kernel itself is compute-heavy.
     pub gpu_spatial_max_output_fraction: f64,
+    /// Maximum row-wise pair count for the cross-product spatial
+    /// intersects kernel (`pgaccel_spatial_intersects`).
+    ///
+    /// The current kernel evaluates all `n × n` pairs and the bridge
+    /// allocates three `n² × 2` u32 host pair buffers (24·n² bytes), even
+    /// though the row-wise three-layer contract only needs the n diagonal
+    /// pairs. Above this row count the dispatch is declined (the batch is
+    /// surfaced as Uncertain) instead of allocating gigabytes of host
+    /// memory. The dedicated diagonal/pairwise kernel is Phase 4 work;
+    /// this cap only makes the n² blowup impossible until it lands.
+    pub gpu_spatial_pairwise_max_rows: usize,
     /// Minimum rows for GPU expression scan dispatch.
     /// Below this, PG's native executor with JIT is faster.
     pub gpu_expr_min_rows: usize,
@@ -404,6 +415,20 @@ impl DeviceLimits {
             // keep this only as a hard floor for truly degenerate polygons.
             gpu_spatial_min_vertices: cu_scale(100).clamp(32, 1_000),
             gpu_spatial_max_output_fraction: 0.80,
+            // Cross-product pair-buffer budget: the bridge allocates three
+            // n²×2 u32 host buffers (24·n² bytes) for pgaccel_spatial_intersects.
+            // Budget 1/64th of the device max-alloc figure for the host pair
+            // buffers (unified-memory machines share that budget with the
+            // device): n_max = sqrt(mem / 64 / 24). Clamped so a mis-probed
+            // profile can neither starve the kernel nor re-open the blowup.
+            // M2 Max (64 GiB) → sqrt(64 GiB / 64 / 24) ≈ 6.7K rows → 6_685.
+            gpu_spatial_pairwise_max_rows: if mem > 0 {
+                #[allow(clippy::cast_sign_loss)] // reason: sqrt of a non-negative byte count
+                let n_max = ((mem / 64 / 24) as f64).sqrt() as usize;
+                n_max.clamp(1_000, 8_192)
+            } else {
+                2_000
+            },
             // GpuExpr scan: inline template filter avoids ExecQual overhead
             // but Custom Scan framing still adds per-row cost. Needs enough
             // rows to amortize compilation + scan overhead.
@@ -588,6 +613,10 @@ impl DeviceLimits {
             gpu_spatial_unsafe_band_min_vertices: 100,
             gpu_spatial_min_vertices: 50_000,
             gpu_spatial_max_output_fraction: 0.80,
+            // Conservative no-GPU fallback: 2K rows → 4M pairs → ~96 MB of
+            // host pair buffers. Matches the conservative posture of the
+            // other cpu_only() spatial limits.
+            gpu_spatial_pairwise_max_rows: 2_000,
             gpu_expr_min_rows: 250_000,
             gpu_hash_join_build_max_rows: 99_999,
             gpu_pipeline_fusion_min_rows: 10_000,
