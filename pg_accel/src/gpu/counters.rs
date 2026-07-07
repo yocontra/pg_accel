@@ -146,14 +146,13 @@ pub fn record_kernel_failure(domain: GpuFailureDomain) {
 
 /// Read the failure count for one domain.
 #[must_use]
-#[allow(dead_code)] // reason: diagnostics accessor; consumed by tests/phase2_bridge.rs, stats SRF wiring is follow-up outside gpu/
 pub fn kernel_failure_count(domain: GpuFailureDomain) -> u64 {
     KERNEL_FAILURES[domain as usize].load(Ordering::Relaxed)
 }
 
 /// Total failures across all domains.
 #[must_use]
-#[allow(dead_code)] // reason: diagnostics accessor; stats SRF wiring is follow-up work outside gpu/
+#[allow(dead_code)] // reason: total is derivable from pg_accel_gpu_failures(); kept for tests
 pub fn kernel_failure_total() -> u64 {
     KERNEL_FAILURES
         .iter()
@@ -168,7 +167,6 @@ pub fn record_unknown_status() {
 
 /// Read the unknown-status counter.
 #[must_use]
-#[allow(dead_code)] // reason: diagnostics accessor; consumed by tests/phase2_bridge.rs, stats SRF wiring is follow-up outside gpu/
 pub fn unknown_status_count() -> u64 {
     UNKNOWN_STATUS.load(Ordering::Relaxed)
 }

@@ -362,6 +362,45 @@ pub fn kernel_executions_snapshot() -> u64 {
 // SQL-callable functions
 // ---------------------------------------------------------------------------
 
+/// Returns per-domain GPU kernel-failure counters (backend-local), one row per
+/// [`crate::gpu::counters::GpuFailureDomain`], plus an `unknown_status` row for
+/// out-of-range raw status values from the C side. Failures are recorded at the
+/// single status-conversion point in `gpu::bridge`, so every non-OK kernel
+/// status is visible here regardless of how the caller degraded it.
+#[pg_extern]
+fn pg_accel_gpu_failures()
+-> TableIterator<'static, (name!(domain, String), name!(failure_count, i64))> {
+    use crate::gpu::{GpuFailureDomain as D, kernel_failure_count, unknown_status_count};
+    const DOMAINS: [(D, &str); 12] = [
+        (D::Runtime, "runtime"),
+        (D::Spatial, "spatial"),
+        (D::H3, "h3"),
+        (D::Raster, "raster"),
+        (D::Sort, "sort"),
+        (D::Reduce, "reduce"),
+        (D::Expr, "expr"),
+        (D::HashAgg, "hash_agg"),
+        (D::HashJoin, "hash_join"),
+        (D::Window, "window"),
+        (D::NestedLoop, "nested_loop"),
+        (D::Memory, "memory"),
+    ];
+    let mut rows: Vec<(String, i64)> = DOMAINS
+        .iter()
+        .map(|(d, label)| {
+            (
+                (*label).to_string(),
+                i64::try_from(kernel_failure_count(*d)).unwrap_or(i64::MAX),
+            )
+        })
+        .collect();
+    rows.push((
+        "unknown_status".to_string(),
+        i64::try_from(unknown_status_count()).unwrap_or(i64::MAX),
+    ));
+    TableIterator::new(rows)
+}
+
 /// Returns per-backend acceleration counters as a single row.
 #[pg_extern]
 #[allow(clippy::type_complexity)]
@@ -746,6 +785,10 @@ fn pg_accel_device_limits() -> TableIterator<
         (
             "gpu_nlj_per_pair_cost".into(),
             limits.gpu_nlj_per_pair_cost.to_string(),
+        ),
+        (
+            "gpu_spatial_pairwise_max_rows".into(),
+            limits.gpu_spatial_pairwise_max_rows.to_string(),
         ),
         ("has_native_fp64".into(), limits.has_native_fp64.to_string()),
         (
