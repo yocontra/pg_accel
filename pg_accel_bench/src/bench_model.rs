@@ -31,10 +31,13 @@ impl From<TimingMode> for TimingSource {
 }
 
 /// Cache state targeted by a measurement iteration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheState {
+    /// Warm cache: no OS page-cache purge was requested for this measurement.
+    #[default]
     Warm,
+    /// Cold cache: the OS page cache was purged before this measurement.
     Cold,
 }
 

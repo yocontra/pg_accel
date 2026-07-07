@@ -11,7 +11,7 @@ use rand::Rng;
 use serde::Serialize;
 
 use crate::artifacts::{ArtifactWriter, PreRiskContext};
-use crate::bench_model::CachePurgeState;
+use crate::bench_model::{CachePurgeState, CacheState};
 #[allow(unused_imports)]
 pub use crate::config::{
     BenchConfig, CacheMode, GucProfile, ObservedGucs, PostmasterMismatch, ROW_SCALES, TimingMode,
@@ -1549,6 +1549,7 @@ pub fn run_with_timing_and_cache(
             accel_ms,
             parallel_ms,
             cache_purge,
+            cache_state: CacheState::from(cache_mode),
         };
         if is_warmup {
             warmup_results.push(iteration_result);
@@ -4468,6 +4469,7 @@ mod tests {
                 accel_ms: 10.0,
                 parallel_ms: 20.0,
                 cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
             })
             .collect();
         let mut workload = WorkloadResult::from_iterations(
