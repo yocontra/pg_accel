@@ -1961,54 +1961,6 @@ pgaccel_status dispatch_two_pred_and_mask_usm(pgaccel_expr_usm_col col1, uint16_
   }
 }
 
-#if defined(__APPLE__)
-pgaccel_status copy_host_to_device_via_kernel(void* dst, const void* src, size_t bytes,
-                                              sycl::queue& q) {
-  uint8_t* stage = nullptr;
-  try {
-    stage = sycl::malloc_shared<uint8_t>(bytes, q);
-    if (stage == nullptr)
-      return PGACCEL_OOM;
-
-    std::memcpy(stage, src, bytes);
-
-    auto* dst_bytes = static_cast<uint8_t*>(dst);
-    const size_t word_count = bytes / sizeof(uint64_t);
-    const size_t tail_offset = word_count * sizeof(uint64_t);
-    const size_t tail_count = bytes - tail_offset;
-
-    if (word_count > 0) {
-      auto* dst_words = static_cast<uint64_t*>(dst);
-      auto* stage_words = reinterpret_cast<const uint64_t*>(stage);
-      q.parallel_for(sycl::range<1>(word_count), [=](sycl::id<1> idx) {
-         const size_t i = idx[0];
-         dst_words[i] = stage_words[i];
-       }).wait_and_throw();
-    }
-    if (tail_count > 0) {
-      q.parallel_for(sycl::range<1>(tail_count), [=](sycl::id<1> idx) {
-         const size_t i = idx[0];
-         dst_bytes[tail_offset + i] = stage[tail_offset + i];
-       }).wait_and_throw();
-    }
-
-    sycl::free(stage, q);
-    return PGACCEL_OK;
-  } catch (const sycl::exception& e) {
-    std::fprintf(stderr, "pgaccel: device copy kernel failed: %s\n", e.what());
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "pgaccel: device copy kernel failed: %s\n", e.what());
-  }
-
-  if (stage != nullptr) {
-    try {
-      sycl::free(stage, q);
-    } catch (...) {}
-  }
-  return PGACCEL_ERROR;
-}
-#endif
-
 }  // namespace
 
 extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
@@ -2094,31 +2046,48 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t
   if (src == nullptr)
     return PGACCEL_ERROR;
 
+#if defined(__APPLE__)
+  pgaccel_status init_status = pgaccel_init();
+  if (init_status != PGACCEL_OK)
+    return init_status;
+  sycl::queue* q = g_queue;
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  void* ptr = nullptr;
+  try {
+    // On Apple Silicon, shared USM is the stable resident representation for
+    // host-built columns: kernels read it directly from unified memory and the
+    // loader avoids Metal blit/copy-kernel paths that can crash forked
+    // PostgreSQL backends in Apple's telemetry/logging helper thread.
+    ptr = sycl::malloc_shared(bytes, *q);
+    if (ptr == nullptr)
+      return PGACCEL_OOM;
+    std::memcpy(ptr, src, bytes);
+    *out = ptr;
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    std::fprintf(stderr, "pgaccel: resident shared copy allocation failed: %s\n", e.what());
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: resident shared copy allocation failed: %s\n", e.what());
+  }
+  if (ptr != nullptr) {
+    try {
+      sycl::free(ptr, *q);
+    } catch (...) {}
+  }
+  return PGACCEL_ERROR;
+#else
   void* ptr = nullptr;
   pgaccel_status status = pgaccel_expr_device_alloc(bytes, &ptr);
   if (status != PGACCEL_OK)
     return status;
 
   sycl::queue* q = g_queue;
-  if (q == nullptr) {
+  if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
-  }
   try {
-    // AdaptiveCpp's Metal backend uses a blit-command path for queue::memcpy.
-    // In forked PostgreSQL backends on macOS, the cold blit/JIT path can enter
-    // Apple telemetry/logging code on a helper thread and crash with
-    // "child side of fork pre-exec". Resident cache buffers still need true
-    // device memory, so stage through shared USM and launch a normal GPU copy
-    // kernel into the device allocation on Apple/Metal builds.
-#if defined(__APPLE__)
-    status = copy_host_to_device_via_kernel(ptr, src, bytes, *q);
-    if (status != PGACCEL_OK) {
-      sycl::free(ptr, *q);
-      return status;
-    }
-#else
     q->memcpy(ptr, src, bytes).wait_and_throw();
-#endif
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: device copy failed: %s\n", e.what());
     sycl::free(ptr, *q);
@@ -2130,6 +2099,55 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t
   }
   *out = ptr;
   return PGACCEL_OK;
+#endif
+}
+
+extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const void* src,
+                                                             size_t bytes) {
+  if (bytes == 0)
+    return PGACCEL_OK;
+  if (dst == nullptr || src == nullptr)
+    return PGACCEL_ERROR;
+  pgaccel_status init_status = pgaccel_init();
+  if (init_status != PGACCEL_OK)
+    return init_status;
+  sycl::queue* q = g_queue;
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  try {
+    q->memcpy(dst, src, bytes).wait_and_throw();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    std::fprintf(stderr, "pgaccel: device copy from host failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: device copy from host failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
+}
+
+extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void* src,
+                                                           size_t bytes) {
+  if (bytes == 0)
+    return PGACCEL_OK;
+  if (dst == nullptr || src == nullptr)
+    return PGACCEL_ERROR;
+  pgaccel_status init_status = pgaccel_init();
+  if (init_status != PGACCEL_OK)
+    return init_status;
+  sycl::queue* q = g_queue;
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  try {
+    q->memcpy(dst, src, bytes).wait_and_throw();
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    std::fprintf(stderr, "pgaccel: device copy to host failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: device copy to host failed: %s\n", e.what());
+    return PGACCEL_ERROR;
+  }
 }
 
 extern "C" void pgaccel_expr_device_free(void* ptr) {

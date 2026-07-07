@@ -2009,6 +2009,15 @@ fn hashjoin_threshold_matrix_entry(
                 "grouped dimension-name rows",
             )
         }
+        "mixed_join_agg" => (
+            "hashjoin_filter_groupagg",
+            1_000,
+            "int4 equality key + float8 payload",
+            "fixed 1K-row dimension table",
+            "all joined fact rows; no fact or dimension filters",
+            "fact row + int4 dimension label",
+            "grouped dimension-label rows with sum and count",
+        ),
         "hashjoin_100_1m" => (
             "hashjoin_build_sweep",
             100,
@@ -2070,7 +2079,7 @@ fn hashjoin_threshold_matrix_entry(
         }
         _ => return None,
     };
-    let min_build_rows = if name == "gpu_hashjoin_filter" {
+    let min_build_rows = if matches!(name, "gpu_hashjoin_filter" | "mixed_join_agg") {
         100
     } else {
         HASHJOIN_MIN_BUILD_ROWS
@@ -2579,6 +2588,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "reduce_multi" => "reduce_multi",
         "gpu_hashjoin_large_build" => "gpu_hashjoin_large_build",
         "gpu_hashjoin_filter" => "gpu_hashjoin_filter",
+        "mixed_join_agg" => "mixed_join_agg",
         "grouped_agg" => "grouped_agg",
         "grouped_agg_high_card" => "grouped_agg_high_card",
         "gpu_hashagg_med_card" => "gpu_hashagg_med_card",
@@ -3148,6 +3158,11 @@ mod tests {
             assert_eq!(entry.lane, "hashjoin_filter_groupagg");
             assert_eq!(entry.expectation.label(), "gpu_winner");
         }
+
+        let mixed = benchmark_threshold_matrix_entry("mixed_join_agg", 1_000_000)
+            .expect("mixed_join_agg threshold entry");
+        assert_eq!(mixed.lane, "hashjoin_filter_groupagg");
+        assert_eq!(mixed.expectation.label(), "gpu_winner");
 
         let too_large = benchmark_threshold_matrix_entry("gpu_hashjoin_filter", 10_000_000)
             .expect("gpu_hashjoin_filter threshold entry");

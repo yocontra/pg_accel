@@ -94,6 +94,7 @@ typedef enum {
   PGACCEL_EXPR_OP_LE = 43,
   PGACCEL_EXPR_OP_GT = 44,
   PGACCEL_EXPR_OP_GE = 45,
+  PGACCEL_EXPR_OP_ALWAYS_TRUE = 46, /* Predicate-only helper opcode */
 
   /* Boolean logic (SQL three-valued) */
   PGACCEL_EXPR_OP_AND = 50, /* NULL AND FALSE = FALSE */
@@ -294,13 +295,16 @@ pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out);
 void pgaccel_expr_shared_free(void* ptr);
 
 /*
- * Allocate/free SYCL device memory for resident cached columns and scratch.
- * Returned memory is device-owned; the host must not dereference it directly.
- * The `_copy` variant copies an already-built host column into the allocation
- * once.
+ * Allocate/free SYCL memory for resident cached columns and scratch.
+ * `pgaccel_expr_device_alloc` returns device-owned memory for scratch/output.
+ * The `_copy` variant copies an already-built host column into resident
+ * GPU-readable memory once; on Apple/Metal it may use shared USM to avoid
+ * unstable blit/copy-kernel paths in forked PostgreSQL backends.
  */
 pgaccel_status pgaccel_expr_device_alloc(size_t bytes, void** out);
 pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t bytes, void** out);
+pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const void* src, size_t bytes);
+pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void* src, size_t bytes);
 void pgaccel_expr_device_free(void* ptr);
 
 /*
@@ -669,6 +673,24 @@ pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_sum_count_us
     size_t* uncertain_count);
 
 /*
+ * Predicate-aware expression SUM/COUNT ABI for resident dense groups. It
+ * consumes the same interval predicate descriptor as the generic v9 grouped
+ * aggregate, but uses a one-scan wide layout for <=256 dense groups.
+ */
+pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
+    pgaccel_expr_usm_col group_col, pgaccel_expr_usm_col value_col,
+    pgaccel_expr_usm_col value_rhs_col, pgaccel_expr_usm_col filter_col, int32_t measure_op,
+    int32_t filter_mode, int32_t measure_predicate_source, int32_t measure_predicate_op,
+    int32_t measure_predicate_range_count, double measure_predicate_lo0,
+    double measure_predicate_hi0, double measure_predicate_lo1, double measure_predicate_hi1,
+    double measure_predicate_lo2, double measure_predicate_hi2, double measure_predicate_lo3,
+    double measure_predicate_hi3, size_t row_count, int32_t group_min, int32_t group_count,
+    double* scratch_sum, uint32_t* scratch_count, double* scratch_partial_sum,
+    uint32_t* scratch_partial_count, size_t scratch_partial_capacity, double* out_sum_by_group,
+    uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
+    size_t* uncertain_count);
+
+/*
  * Generic one-dimension resident star projection.
  *
  * Projects fact rows into dense dimension group codes without materializing
@@ -688,6 +710,23 @@ pgaccel_status pgaccel_expr_template_resident_star_dim_group_compact_f64_usm(
     const uint8_t* dim_match_by_key, const int32_t* dim_group_code_by_key, size_t dim_key_count,
     uint16_t value_cmp_opcode, double value_const, int32_t* out_group_codes,
     double* out_values, size_t out_capacity, size_t* selected_count, size_t* uncertain_count);
+
+/*
+ * Fused one-dimension resident star join + grouped SUM/COUNT.
+ *
+ * This consumes resident fact key/value columns and resident dimension
+ * match/group-code maps directly, applying the fact value predicate and
+ * dimension membership before accumulating dense group sums/counts. It avoids
+ * materializing compacted `(group_code, value)` rows when the aggregate shape
+ * is the common SUM/COUNT lane.
+ */
+pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
+    pgaccel_expr_usm_col fact_key_col, pgaccel_expr_usm_col value_col, size_t row_count,
+    const uint8_t* dim_match_by_key, const int32_t* dim_group_code_by_key, size_t dim_key_count,
+    uint16_t value_cmp_opcode, double value_const, int32_t group_count, double* scratch_sum,
+    uint32_t* scratch_count, double* scratch_partial_sum, uint32_t* scratch_partial_count,
+    size_t scratch_partial_capacity, double* out_sum_by_group, uint32_t* out_count_by_group,
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count);
 
 #ifdef __cplusplus
 }

@@ -19,12 +19,13 @@ Current integration pins:
   pgrx exposes `pg19`; when pgrx adds `pg19`, add the real Cargo feature and
   CI extension build before claiming PG19 extension support.
 - AdaptiveCpp: `yocontra/AdaptiveCpp`, branch `fork-safe-metal`, minimum
-  SHA `876634a63d09af6f8d7bbffd6c42d29527981437`.
+  SHA `456ae6910720810f5fe59f160e6707d46bb8e5f0`.
   As of 2026-07-04 this fork is merged with upstream `develop` through
   `9a912721` and retains pg_accel's Metal fork-safety, soft-fp64 lowering,
-  and generated-MSL polish on top. Upstream `feature/metal-interop` was
-  inspected but not merged because it is not a clean superset of current
-  `develop` and would drop the latest CLSPV chained-GEP fix.
+  generated-MSL polish, and `DEFAULT_TARGETS` JSON escaping fix on top.
+  Upstream `feature/metal-interop` was inspected but not merged because it is
+  not a clean superset of current `develop` and would drop the latest CLSPV
+  chained-GEP fix.
 - soft-fp64: `yocontra/soft-fp`, tag `v1.3.0`, consumed by AdaptiveCpp via
   `ACPP_SOFT_FP64_SRC_DIR`.
 - macOS local PG bench note: resident Metal JIT paths require the Metal
@@ -291,10 +292,12 @@ Current ship-gate remediation (2026-07-04):
    star groupagg path with resident fact key/value columns, resident dimension
    match/group-code maps, GPU compaction of selected `(group_code, value)`
    pairs, and the shared dense resident f64 grouped aggregate over the compacted
-   rows. The remaining broad work is to fuse compaction and aggregation, move
-   the dense grouped scratch/sort state to persistent device-pointer-safe
-   storage, and lift the guarded large-build cells into GPU winners instead of
-   native declines.
+   rows. `mixed_join_agg` now reuses the same resident star groupagg operator
+   for canonical `JOIN -> GROUP BY -> SUM, COUNT(*)` SQL. The remaining broad
+   work is to finish and benchmark the fused resident star
+   join/filter/groupagg path for SUM/COUNT, move dense grouped scratch/sort
+   state to persistent device-pointer-safe storage, and lift guarded
+   large-build cells into GPU winners instead of native declines.
 2. Rerun the full PG18 benchmark suite after the planner admission fixes for
    small H3 grouped-count rows and small selective `WHERE` filtered groupagg
    rows. Those lanes should now be honest native declines at 10K with
@@ -339,6 +342,22 @@ and **1.52x** at 1M. The 10M cell is now an honest native decline with
 removing the prior crash without counting native PostgreSQL execution as a GPU
 win.
 
+Progress (2026-07-04 generic mixed join aggregate): `mixed_join_agg` now routes
+through the generic resident star groupagg planner/executor path instead of a
+native/planner-declined mixed-workload row. The recognizer admits canonical
+`dim_group, SUM(fact_value), COUNT(*)` targets without requiring artificial
+fact or dimension filters, the cache loader supports `always_true` dimension
+filters without reading a fake filter column, and the executor uses a
+row-aligned GPU projection fast path for unfiltered joins before the shared
+dense grouped f64 aggregate. Fresh PG18 release artifact
+`benchmarks/artifacts/validate-mixed-join-agg-resident-star-shared-copy` passed
+with `crashes: []`, zero ship-gate failures, clean correctness diffs, resident
+pipeline proof, stock fallback 0, kernel class `resident_star_groupagg`, and
+median speedups of **1.28x** at 10K, **1.89x** at 100K, **6.32x** at 1M, and
+**13.04x** at 10M versus forced PostgreSQL parallel. This supersedes the July
+2 full-suite `mixed_join_agg @ 10M` planner-decline gap; the next full-suite
+run should remove that row from the release ledger.
+
 Immediate broad priority: make `ResidentGroupAgg` predicate/expression IR and
 resident star groupagg the single planner, executor, EXPLAIN, and
 benchmark-report contract for grouped OLAP before adding more focused workload
@@ -350,6 +369,109 @@ demoted once the generic path wins. The next large implementation target is a
 fused resident star join/filter/groupagg primitive that keeps compacted keys,
 aggregate state, and sorted/segmented scratch GPU-resident across high-row and
 high-build-cardinality cells.
+
+Progress (2026-07-04 fused resident star groupagg): added a reusable fused
+one-dimension resident star join/filter/grouped SUM/COUNT ABI under the
+existing resident star groupagg operator. Unfiltered star joins use the fused
+path from the 8K one-pass band; selective filtered joins keep the compacted
+path until 1M rows because the direct reducer regressed the 10K/100K bands.
+The compact/project fallbacks stay in place until the fused path has a
+high-cardinality/sorted fallback and a stronger selective-row cost model.
+
+Fresh PG18 artifacts:
+`benchmarks/artifacts/validate-gpu-hashjoin-filter-fused-selector-20260704-200753`
+passed with `crashes: []`, zero ship-gate failures, resident-boundary
+`failed_rows=0`, stock fallback 0, kernel class `resident_star_groupagg`, and
+median speedups of **1.85x** at 10K, **1.00x** at 100K, and **2.23x** at 1M;
+10M remains an honest native decline with `hashjoin_build_side_too_large`.
+`benchmarks/artifacts/validate-mixed-join-agg-fused-star-20260704-200915`
+passed with `crashes: []`, zero ship-gate failures, resident-boundary
+`failed_rows=0`, stock fallback 0, one fused dispatch per timed query, and
+median speedups of **1.52x** at 10K, **2.52x** at 100K, **6.02x** at 1M, and
+**15.52x** at 10M.
+
+Progress (2026-07-05 resident dense groupagg 1K radix route): `hashagg_1kg`
+now has a GPU-resident route split across the 10K/100K transition band and the
+large-row sorted/segmented path. The sorted path no longer copies signed group
+keys through host vectors: the C ABI includes device-pointer i32 key/value sort
+entry points, i32 sign conversion runs on GPU, the radix histogram prefix step
+uses device chunk scans, and dense group keys are normalized to `0..N` plus a
+sentinel so 1K-group rows use low-bit radix passes instead of a full signed
+sort. The direct SUM/COUNT route remains the small-row specialization under the
+same `ResidentGroupAgg` operator class, with a narrow 100K transition shape
+selected only where it beats sort setup.
+
+Fresh PG18 release artifact
+`benchmarks/artifacts/run-1783266524-2773-847007000` passed the ship gate for
+`hashagg_1kg` with `crashes: []`, selected resident CustomScan on all four
+scales, `GPU Resident Pipeline: true`, stock fallback 0, clean correctness
+diffs, kernel dispatch on every timed row, and median speedups of **1.31x** at
+10K, **1.17x** at 100K, **1.44x** at 1M, and **2.47x** at 10M versus forced
+PostgreSQL parallel. This supersedes the July 4 hybrid-route artifacts and
+closes the known 1K dense groupagg crash/performance blocker.
+
+Next broad ResidentGroupAgg work: validate the same resident radix/sorted dense
+route across adjacent grouped OLAP families (`hashagg_10kg`,
+`gpu_hashagg_med_card`, `grouped_agg_high_card`, and `hashagg_f64_aggs`), then
+lift any wins into shared threshold logic instead of workload-name branches.
+The next implementation hunk should also add a predicate-aware compact/mask
+producer for OR/IN/NOT/BETWEEN/CASE families and a direct-column MIN/MAX/AVG
+specialization for time-series-style rollups. These are operator-class fixes,
+not workload-name paths.
+
+Progress (2026-07-06 ResidentGroupAgg high-cardinality route repair): the
+medium/high-cardinality dense COUNT/SUM lane is crash-free again and no longer
+routes the 100K-row/10K-group band through the tiled simple-wide full-rescan
+shape. The crash in `gpu_hashagg_med_card` was traced to resident groupagg
+scratch initialization through Metal `queue::memset`/`queue::fill`; those
+initializers now use explicit GPU init kernels for the resident dense, segment,
+star, and v9 scratch paths. The follow-up performance failure was route
+selection, not correctness: simple-wide remains a valid small-row
+specialization, but for >=2049 groups it now stops at 65,536 rows and hands the
+larger high-cardinality transition band to the sorted resident route. This is a
+shared `ResidentGroupAgg` threshold, mirrored in cache-owned partial scratch
+sizing, not a workload-name branch.
+
+Fresh PG18 evidence after rebuilding/reinstalling the extension: native
+`test_olap_ssbm` and `test_expr_templates` passed; serial SQL repros for
+`hashagg_1kg`, `hashagg_10kg`, `grouped_agg_high_card`, and
+`gpu_hashagg_med_card` were crash-free after discarding the intentionally
+invalid concurrent harness run that collided on shared setup tables. The
+failing `gpu_hashagg_med_card @ 100K` cell moved from **0.50x** (34.92 ms vs
+17.45 ms, simple-wide route, artifact
+`benchmarks/artifacts/resident-med-card-ladder-restored`) to **1.42x** in the
+full ladder (13.07 ms vs 18.54 ms, sorted route, artifact
+`benchmarks/artifacts/resident-med-card-ladder-sorted-threshold`). The same
+artifact shows `gpu_hashagg_med_card` passing all default scales with
+**1.20x**, **1.42x**, **2.10x**, and **3.46x**, resident proof on every row,
+kernel dispatch on every row, zero stock fallback, clean correctness diffs, and
+no ship-gate failures. Adjacent guard ladders also passed:
+`hashagg_10kg` at **1.74x**, **1.35x**, **3.16x**, and **3.28x**
+(`benchmarks/artifacts/resident-hashagg-10kg-ladder-sorted-threshold`) and
+`hashagg_1kg` at **2.11x**, **1.24x**, **2.22x**, and **1.87x**
+(`benchmarks/artifacts/resident-hashagg-1kg-threshold-guard`). Remaining work:
+run the broader grouped-OLAP/full-suite gate so any non-hashagg losses or
+crashes become the next ledger items, then continue the predicate-mask and
+MIN/MAX/AVG generic operator work above.
+
+Predicate-wide experiment note (2026-07-04): a first one-scan local-array
+SUM/COUNT ABI for interval CASE predicates was added and covered in native
+`test_olap_ssbm`, but executor selection is deliberately disabled because the
+design lost badly on canonical OR CASE SQL. Artifacts:
+`benchmarks/artifacts/validate-case-or-predicate-wide16-20260704-212140` and
+`benchmarks/artifacts/validate-case-or-predicate-wide16-block1k-20260704-212538`
+were interrupted after 1M rows showed ~40-44 ms pg_accel timings versus
+~27-28 ms PG parallel, and 10M warmups were also below parity. Do not mark
+OR/IN/NOT/BETWEEN/CASE complete from this ABI. The next design should avoid
+large per-workgroup local arrays: likely a reusable predicate mask/compact
+producer plus separate grouped COUNT, or a warp/subgroup segmented reducer with
+enough row-level parallelism and no repeated group-tile scans.
+
+Next broad join-aggregate work: replace the fixed one-dimension,
+predicate-specialized star cache with a v2 reusable resident fact/dimension
+source descriptor plus runtime predicate/join/group spec, then extend the
+fused ABI with a high-cardinality sorted/segmented fallback so focused
+project/compact buffers can be deleted rather than kept as permanent paths.
 
 Progress (2026-07-01 crash-free benchmark sweep): SSBM Q4 grouped-profit
 dispatch now uses a shared kernel-parameter slab instead of a large Metal
@@ -493,14 +615,15 @@ without benchmark-only query rewrites. EXPLAIN now proves
 `where_bool_and_rhs_ranges` and `aggregate_filter_bool_and_rhs_ranges` with
 `guard=resident_bool_column;scope=...;value=rhs_ranges;ranges=1`.
 
-The shared resident device-copy helper was also hardened for macOS/Metal:
-`pgaccel_expr_device_alloc_copy` stages host bytes through shared USM and uses
-a normal GPU copy kernel into device memory on Apple/Metal builds, avoiding
-AdaptiveCpp Metal's cold `queue::memcpy` blit/JIT path that crashed forked
-PostgreSQL backends with `child side of fork pre-exec`. The destination remains
-device memory, and this fix applies to every `ExprDeviceBuffer::copy_from_slice`
-resident cache family: dense groupagg, SSBM, H3/geo, and future time-series
-resident sources.
+The shared resident copy helper was also hardened for macOS/Metal:
+`pgaccel_expr_device_alloc_copy` now places host-built resident columns in
+shared USM on Apple/Metal and copies into them with host `memcpy`, while
+scratch/output allocations continue to use device USM. This avoids both
+AdaptiveCpp Metal's cold `queue::memcpy` blit/JIT path and the follow-up copy
+kernel path that crashed forked PostgreSQL backends in Apple's telemetry/logging
+helper thread. The fix applies to every `ExprDeviceBuffer::copy_from_slice`
+resident cache family: dense groupagg, SSBM, H3/geo, hash join, and future
+time-series resident sources.
 
 Fresh PG18 evidence after rebuilding kernels, reinstalling the extension, and
 refreshing the local catalog: same-backend SQL cache loads for both no-filter
@@ -3313,7 +3436,7 @@ release. It is not enough for single benchmark cells to pass once.
   specialized spatial PIP kernels, fail-closed Metal window planning, and the
   archive stress expected-code-object count update.
 - Evidence (2026-07-04 AdaptiveCpp upstream sync): local fork commit
-  `876634a63d09af6f8d7bbffd6c42d29527981437` rebuilds and installs with
+  `456ae6910720810f5fe59f160e6707d46bb8e5f0` rebuilds and installs with
   `ACPP_COMPILER_FEATURE_PROFILE=full`, reports `plugin-with-sscp-compiler:
   true`, and passes cold fp64 probes for
   add/mul/sqrt/sin/cos/asin/atan2/haversine with zero mismatches and no
@@ -3321,6 +3444,11 @@ release. It is not enough for single benchmark cells to pass once.
   pass `test_spatial` `162/162`, `test_h3` `856/0`, `test_correctness`
   `340/340`, fork/cold-fork/warmed-fork smoke tests, and the 8x20 Metal
   archive fork stress with zero archive build/load failures.
+- Evidence (2026-07-04 clean setup pin): `ACPP_BACKEND=metal
+  ./scripts/setup_acpp.sh` uses
+  `456ae6910720810f5fe59f160e6707d46bb8e5f0`, does not apply the old
+  `DEFAULT_TARGETS` patch, installs `.pgaccel/acpp/metal`, and leaves
+  `.pgaccel/src/AdaptiveCpp` clean.
 - Acceptance: zero backend crashes, zero kernel failures, zero panic-log
   entries, zero resource-leak messages, and stable repeat artifacts.
 

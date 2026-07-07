@@ -69,6 +69,65 @@ void free_device(void* ptr) {
   pgaccel_expr_device_free(ptr);
 }
 
+void test_resident_sort_kv_i32_device_radix() {
+  constexpr size_t N = 65536;
+  std::vector<int32_t> original_keys(N);
+  std::vector<uint32_t> original_indices(N);
+  for (size_t i = 0; i < N; ++i) {
+    original_keys[i] = static_cast<int32_t>((i * 37) % 2048) - 1024;
+    original_indices[i] = static_cast<uint32_t>(i);
+  }
+
+  int32_t* keys = alloc_device_array<int32_t>("resident i32 kv sort keys", N);
+  uint32_t* indices = alloc_device_array<uint32_t>("resident i32 kv sort indices", N);
+  ASSERT_TRUE("resident i32 kv sort buffers", keys != nullptr && indices != nullptr);
+  if (keys == nullptr || indices == nullptr) {
+    free_device(keys);
+    free_device(indices);
+    return;
+  }
+
+  ASSERT_STATUS_OK("resident i32 kv sort copy keys",
+                   pgaccel_expr_device_copy_from_host(keys, original_keys.data(),
+                                                      N * sizeof(int32_t)));
+  ASSERT_STATUS_OK("resident i32 kv sort copy indices",
+                   pgaccel_expr_device_copy_from_host(indices, original_indices.data(),
+                                                      N * sizeof(uint32_t)));
+
+  const pgaccel_status status = pgaccel_sort_kv_i32_device(keys, indices, N);
+  ASSERT_STATUS_OK("resident i32 kv sort status", status);
+
+  std::vector<int32_t> sorted_keys(N);
+  std::vector<uint32_t> sorted_indices(N);
+  ASSERT_STATUS_OK("resident i32 kv sort read keys",
+                   pgaccel_expr_device_copy_to_host(sorted_keys.data(), keys,
+                                                    N * sizeof(int32_t)));
+  ASSERT_STATUS_OK("resident i32 kv sort read indices",
+                   pgaccel_expr_device_copy_to_host(sorted_indices.data(), indices,
+                                                    N * sizeof(uint32_t)));
+
+  bool sorted = true;
+  bool indices_match = true;
+  bool stable = true;
+  for (size_t i = 0; i < N; ++i) {
+    const uint32_t idx = sorted_indices[i];
+    if (idx >= N || original_keys[idx] != sorted_keys[i])
+      indices_match = false;
+    if (i > 0) {
+      if (sorted_keys[i] < sorted_keys[i - 1])
+        sorted = false;
+      if (sorted_keys[i] == sorted_keys[i - 1] && sorted_indices[i] < sorted_indices[i - 1])
+        stable = false;
+    }
+  }
+  ASSERT_TRUE("resident i32 kv sort sorted", sorted);
+  ASSERT_TRUE("resident i32 kv sort indices", indices_match);
+  ASSERT_TRUE("resident i32 kv sort stable", stable);
+
+  free_device(keys);
+  free_device(indices);
+}
+
 pgaccel_expr_usm_col i32_col(const int32_t* values, const uint8_t* nulls = nullptr) {
   pgaccel_expr_usm_col col = {};
   col.values = values;
@@ -853,10 +912,7 @@ void test_resident_dense_grouped_f64_one_pass_expression_sum_count() {
   free_device(scratch_partial_count);
 }
 
-void test_resident_dense_grouped_f64_simple_sum_count_256() {
-  constexpr size_t N = 70000;
-  constexpr int32_t GROUP_COUNT = 256;
-
+void run_resident_dense_grouped_f64_simple_sum_count(size_t N, int32_t GROUP_COUNT) {
   std::vector<int32_t> group_host(N);
   std::vector<uint8_t> group_null_host(N);
   std::vector<double> value_host(N);
@@ -935,6 +991,19 @@ void test_resident_dense_grouped_f64_simple_sum_count_256() {
   free_device(scratch_count);
   free_device(scratch_partial_sum);
   free_device(scratch_partial_count);
+}
+
+void test_resident_dense_grouped_f64_simple_sum_count_256() {
+  run_resident_dense_grouped_f64_simple_sum_count(70000, 256);
+}
+
+void test_resident_dense_grouped_f64_simple_sum_count_1k() {
+  run_resident_dense_grouped_f64_simple_sum_count(100000, 1000);
+}
+
+void test_resident_dense_grouped_f64_simple_sum_count_med_card() {
+  run_resident_dense_grouped_f64_simple_sum_count(10000, 6313);
+  run_resident_dense_grouped_f64_simple_sum_count(100000, 10000);
 }
 
 void test_resident_dense_grouped_f64_mul_sum_count_256() {
@@ -1060,6 +1129,128 @@ void test_resident_dense_grouped_f64_mul_sum_count_256() {
            bool_col(filter, filter_nulls), expected_sum_aggregate, expected_count_aggregate);
   run_case("resident dense grouped f64 mul sum count measure filter", FILTER_MEASURE_ONLY,
            bool_col(filter, filter_nulls), expected_sum_measure_only, expected_count_measure_only);
+
+  free_device(groups);
+  free_device(group_nulls);
+  free_device(lhs);
+  free_device(lhs_nulls);
+  free_device(rhs);
+  free_device(rhs_nulls);
+  free_device(filter);
+  free_device(filter_nulls);
+  free_device(scratch_sum);
+  free_device(scratch_count);
+  free_device(scratch_partial_sum);
+  free_device(scratch_partial_count);
+}
+
+void test_resident_dense_grouped_f64_pred_sum_count_ranges_256() {
+  constexpr size_t N = 70000;
+  constexpr int32_t GROUP_COUNT = 256;
+  constexpr int32_t MEASURE_OP_MUL = 1;
+  constexpr int32_t FILTER_MEASURE_ONLY = 1;
+  constexpr int32_t PREDICATE_SOURCE_RHS = 1;
+  constexpr int32_t PREDICATE_RANGES = 2;
+
+  std::vector<int32_t> group_host(N);
+  std::vector<uint8_t> group_null_host(N);
+  std::vector<double> lhs_host(N);
+  std::vector<uint8_t> lhs_null_host(N);
+  std::vector<double> rhs_host(N);
+  std::vector<uint8_t> rhs_null_host(N);
+  std::vector<uint8_t> filter_host(N);
+  std::vector<uint8_t> filter_null_host(N);
+  std::vector<double> expected_sum(GROUP_COUNT, 0.0);
+  std::vector<uint32_t> expected_count(GROUP_COUNT, 0);
+
+  auto rhs_in_ranges = [](double rhs) {
+    return (rhs >= 0.0 && rhs <= 0.10) || (rhs >= 0.25 && rhs <= 0.30) ||
+           (rhs >= 0.45 && rhs <= 0.55);
+  };
+
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t group = static_cast<int32_t>((i * 19) % GROUP_COUNT);
+    const double lhs = static_cast<double>((i * 31) % 10000) / 11.0 + 0.25;
+    const double rhs = static_cast<double>((i * 43) % 1000) / 1000.0;
+    const bool group_is_null = (i % 263) == 0;
+    const bool lhs_is_null = (i % 29) == 0;
+    const bool rhs_is_null = (i % 31) == 0;
+    const bool filter_is_null = (i % 37) == 0;
+    const bool active = (i % 5) != 1;
+
+    group_host[i] = group;
+    group_null_host[i] = group_is_null ? 1 : 0;
+    lhs_host[i] = lhs;
+    lhs_null_host[i] = lhs_is_null ? 1 : 0;
+    rhs_host[i] = rhs;
+    rhs_null_host[i] = rhs_is_null ? 1 : 0;
+    filter_host[i] = active ? 1 : 0;
+    filter_null_host[i] = filter_is_null ? 1 : 0;
+
+    if (group_is_null) {
+      continue;
+    }
+    expected_count[group] += 1;
+    if (!lhs_is_null && !rhs_is_null && active && !filter_is_null && rhs_in_ranges(rhs)) {
+      expected_sum[group] += lhs * rhs;
+    }
+  }
+
+  const size_t partial_items = ((N + 8192 - 1) / 8192) * GROUP_COUNT;
+  int32_t* groups =
+      alloc_device_copy<int32_t>("dense f64 pred sum count groups", group_host.data(), N);
+  uint8_t* group_nulls = alloc_device_copy<uint8_t>("dense f64 pred sum count group nulls",
+                                                    group_null_host.data(), N);
+  double* lhs = alloc_device_copy<double>("dense f64 pred sum count lhs", lhs_host.data(), N);
+  uint8_t* lhs_nulls =
+      alloc_device_copy<uint8_t>("dense f64 pred sum count lhs nulls", lhs_null_host.data(), N);
+  double* rhs = alloc_device_copy<double>("dense f64 pred sum count rhs", rhs_host.data(), N);
+  uint8_t* rhs_nulls =
+      alloc_device_copy<uint8_t>("dense f64 pred sum count rhs nulls", rhs_null_host.data(), N);
+  uint8_t* filter =
+      alloc_device_copy<uint8_t>("dense f64 pred sum count filter", filter_host.data(), N);
+  uint8_t* filter_nulls = alloc_device_copy<uint8_t>("dense f64 pred sum count filter nulls",
+                                                     filter_null_host.data(), N);
+  double* scratch_sum =
+      alloc_device_array<double>("dense f64 pred sum count sum scratch", GROUP_COUNT);
+  uint32_t* scratch_count =
+      alloc_device_array<uint32_t>("dense f64 pred sum count count scratch", GROUP_COUNT);
+  double* scratch_partial_sum =
+      alloc_device_array<double>("dense f64 pred sum count partial sum scratch", partial_items);
+  uint32_t* scratch_partial_count =
+      alloc_device_array<uint32_t>("dense f64 pred sum count partial count scratch", partial_items);
+
+  std::vector<double> sum_by_group(GROUP_COUNT, 0.0);
+  std::vector<uint32_t> count_by_group(GROUP_COUNT, 0);
+  size_t selected = static_cast<size_t>(-1);
+  size_t uncertain = static_cast<size_t>(-1);
+  pgaccel_status status = pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
+      i32_col(groups, group_nulls), f64_col(lhs, lhs_nulls), f64_col(rhs, rhs_nulls),
+      bool_col(filter, filter_nulls), MEASURE_OP_MUL, FILTER_MEASURE_ONLY, PREDICATE_SOURCE_RHS,
+      PREDICATE_RANGES, 3, 0.0, 0.10, 0.25, 0.30, 0.45, 0.55, 0.0, 0.0, N, 0, GROUP_COUNT,
+      scratch_sum, scratch_count, scratch_partial_sum, scratch_partial_count, partial_items,
+      sum_by_group.data(), count_by_group.data(), GROUP_COUNT, &selected, &uncertain);
+
+  ASSERT_STATUS_OK("resident dense grouped f64 predicate sum count status", status);
+  size_t expected_selected = 0;
+  for (uint32_t count : expected_count) {
+    expected_selected += count;
+  }
+  ASSERT_TRUE("resident dense grouped f64 predicate sum count selected",
+              selected == expected_selected);
+  ASSERT_TRUE("resident dense grouped f64 predicate sum count uncertain", uncertain == 0);
+
+  bool sums_match = true;
+  bool counts_match = true;
+  for (int32_t group = 0; group < GROUP_COUNT; ++group) {
+    counts_match = counts_match && count_by_group[group] == expected_count[group];
+    const double scale =
+        std::fabs(expected_sum[group]) > 1.0 ? std::fabs(expected_sum[group]) : 1.0;
+    const double relative_error = std::fabs(sum_by_group[group] - expected_sum[group]) / scale;
+    sums_match = sums_match && relative_error < 1e-12;
+  }
+  ASSERT_TRUE("resident dense grouped f64 predicate sum count counts", counts_match);
+  ASSERT_TRUE("resident dense grouped f64 predicate sum count sums", sums_match);
 
   free_device(groups);
   free_device(group_nulls);
@@ -1245,6 +1436,117 @@ void test_resident_star_dim_group_project_nan_semantics() {
   free_shared(dim_match);
   free_shared(dim_groups);
   free_shared(out_groups);
+}
+
+void test_resident_star_dim_grouped_f64_sum_count_fused() {
+  constexpr size_t N = 9000;
+  constexpr size_t DIM_KEY_COUNT = 8;
+  constexpr int32_t GROUP_COUNT = 4;
+  constexpr size_t PARTIAL_ITEMS = ((N + 8191) / 8192) * GROUP_COUNT;
+  constexpr double VALUE_THRESHOLD = 5.0;
+
+  std::vector<int32_t> fact_key_host(N);
+  std::vector<uint8_t> fact_key_null_host(N, 0);
+  std::vector<double> value_host(N);
+  std::vector<uint8_t> value_null_host(N, 0);
+  std::vector<uint8_t> dim_match_host(DIM_KEY_COUNT, 0);
+  std::vector<int32_t> dim_group_host(DIM_KEY_COUNT, -1);
+  std::vector<double> expected_sum(GROUP_COUNT, 0.0);
+  std::vector<uint32_t> expected_count(GROUP_COUNT, 0);
+  size_t expected_selected = 0;
+
+  dim_match_host[1] = 1;
+  dim_group_host[1] = 0;
+  dim_match_host[2] = 1;
+  dim_group_host[2] = 1;
+  dim_match_host[4] = 1;
+  dim_group_host[4] = 2;
+  dim_match_host[5] = 1;
+  dim_group_host[5] = 3;
+  dim_match_host[7] = 1;
+  dim_group_host[7] = 1;
+
+  for (size_t row = 0; row < N; ++row) {
+    fact_key_host[row] = static_cast<int32_t>(row % 10) - 1;
+    value_host[row] = static_cast<double>(row % 13) + 0.5;
+    if (row % 257 == 0) {
+      fact_key_null_host[row] = 1;
+    }
+    if (row % 263 == 0) {
+      value_null_host[row] = 1;
+    }
+
+    if (fact_key_null_host[row] != 0 || value_null_host[row] != 0 ||
+        !(value_host[row] > VALUE_THRESHOLD) || fact_key_host[row] < 0 ||
+        static_cast<size_t>(fact_key_host[row]) >= DIM_KEY_COUNT) {
+      continue;
+    }
+    const size_t key_idx = static_cast<size_t>(fact_key_host[row]);
+    if (dim_match_host[key_idx] == 0 || dim_group_host[key_idx] < 0)
+      continue;
+    const int32_t group = dim_group_host[key_idx];
+    expected_sum[group] += value_host[row];
+    expected_count[group] += 1;
+    expected_selected += 1;
+  }
+
+  int32_t* fact_keys =
+      alloc_device_copy<int32_t>("fused star groupagg fact keys", fact_key_host.data(), N);
+  uint8_t* fact_key_nulls = alloc_device_copy<uint8_t>(
+      "fused star groupagg fact key nulls", fact_key_null_host.data(), N);
+  double* values =
+      alloc_device_copy<double>("fused star groupagg values", value_host.data(), N);
+  uint8_t* value_nulls =
+      alloc_device_copy<uint8_t>("fused star groupagg value nulls", value_null_host.data(), N);
+  uint8_t* dim_match = alloc_device_copy<uint8_t>("fused star groupagg dim match",
+                                                  dim_match_host.data(), DIM_KEY_COUNT);
+  int32_t* dim_groups = alloc_device_copy<int32_t>("fused star groupagg dim groups",
+                                                   dim_group_host.data(), DIM_KEY_COUNT);
+  double* scratch_sum =
+      alloc_device_array<double>("fused star groupagg sum scratch", GROUP_COUNT);
+  uint32_t* scratch_count =
+      alloc_device_array<uint32_t>("fused star groupagg count scratch", GROUP_COUNT);
+  double* scratch_partial_sum =
+      alloc_device_array<double>("fused star groupagg partial sum scratch", PARTIAL_ITEMS);
+  uint32_t* scratch_partial_count =
+      alloc_device_array<uint32_t>("fused star groupagg partial count scratch", PARTIAL_ITEMS);
+
+  std::vector<double> sum_by_group(GROUP_COUNT, 0.0);
+  std::vector<uint32_t> count_by_group(GROUP_COUNT, 0);
+  size_t selected = static_cast<size_t>(-1);
+  size_t uncertain = static_cast<size_t>(-1);
+  pgaccel_status status = pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
+      i32_col(fact_keys, fact_key_nulls), f64_col(values, value_nulls), N, dim_match, dim_groups,
+      DIM_KEY_COUNT, PGACCEL_EXPR_OP_GT, VALUE_THRESHOLD, GROUP_COUNT, scratch_sum, scratch_count,
+      scratch_partial_sum, scratch_partial_count, PARTIAL_ITEMS, sum_by_group.data(),
+      count_by_group.data(), GROUP_COUNT, &selected, &uncertain);
+
+  ASSERT_STATUS_OK("resident fused star grouped f64 sum count status", status);
+  ASSERT_TRUE("resident fused star grouped f64 sum count selected",
+              selected == expected_selected);
+  ASSERT_TRUE("resident fused star grouped f64 sum count uncertain", uncertain == 0);
+
+  bool counts_match = true;
+  bool sums_match = true;
+  for (int32_t group = 0; group < GROUP_COUNT; ++group) {
+    counts_match = counts_match && count_by_group[group] == expected_count[group];
+    const double scale =
+        std::fabs(expected_sum[group]) > 1.0 ? std::fabs(expected_sum[group]) : 1.0;
+    sums_match = sums_match && std::fabs(sum_by_group[group] - expected_sum[group]) / scale < 1e-12;
+  }
+  ASSERT_TRUE("resident fused star grouped f64 sum count counts", counts_match);
+  ASSERT_TRUE("resident fused star grouped f64 sum count sums", sums_match);
+
+  free_device(fact_keys);
+  free_device(fact_key_nulls);
+  free_device(values);
+  free_device(value_nulls);
+  free_device(dim_match);
+  free_device(dim_groups);
+  free_device(scratch_sum);
+  free_device(scratch_count);
+  free_device(scratch_partial_sum);
+  free_device(scratch_partial_count);
 }
 
 void test_resident_dense_grouped_f64_blocked_min_max_avg() {
@@ -1645,6 +1947,96 @@ void test_resident_dense_grouped_f64_true_sort_segment() {
   free_device(scratch_index);
 }
 
+void test_resident_dense_grouped_f64_sort_segment_sum_count_sparse() {
+  constexpr size_t N = 10000;
+  constexpr int32_t GROUP_COUNT = 6313;
+  constexpr uint32_t AGG_SUM_COUNT = (1u << 0) | (1u << 3);
+  constexpr int32_t FILTER_ROWS = 0;
+  constexpr int32_t PRED_BOOL_ONLY = 0;
+  constexpr int32_t PRED_SOURCE_VALUE = 0;
+
+  std::vector<int32_t> group_host(N);
+  std::vector<double> value_host(N);
+  std::vector<double> expected_sum(GROUP_COUNT, 0.0);
+  std::vector<uint32_t> expected_count(GROUP_COUNT, 0);
+  for (size_t i = 0; i < N; ++i) {
+    const int32_t group = static_cast<int32_t>((i * 37 + i / 7) % GROUP_COUNT);
+    const double value = static_cast<double>((i * 53) % 10000) / 7.0 + 0.5;
+    group_host[i] = group;
+    value_host[i] = value;
+    expected_sum[group] += value;
+    expected_count[group] += 1;
+  }
+
+  int32_t* groups =
+      alloc_device_copy<int32_t>("dense f64 sparse sort sum/count groups", group_host.data(), N);
+  double* values =
+      alloc_device_copy<double>("dense f64 sparse sort sum/count values", value_host.data(), N);
+  double* scratch_sum =
+      alloc_device_array<double>("dense f64 sparse sort sum/count sum scratch", GROUP_COUNT);
+  double* scratch_min =
+      alloc_device_array<double>("dense f64 sparse sort sum/count min scratch", GROUP_COUNT);
+  double* scratch_max =
+      alloc_device_array<double>("dense f64 sparse sort sum/count max scratch", GROUP_COUNT);
+  uint32_t* scratch_count =
+      alloc_device_array<uint32_t>("dense f64 sparse sort sum/count count scratch", GROUP_COUNT);
+  uint32_t* scratch_start =
+      alloc_device_array<uint32_t>("dense f64 sparse sort sum/count start scratch", GROUP_COUNT);
+  uint32_t* scratch_cursor =
+      alloc_device_array<uint32_t>("dense f64 sparse sort sum/count cursor scratch", GROUP_COUNT);
+  int32_t* scratch_sorted =
+      alloc_device_array<int32_t>("dense f64 sparse sort sum/count sorted scratch", N);
+  uint32_t* scratch_index =
+      alloc_device_array<uint32_t>("dense f64 sparse sort sum/count index scratch", N);
+
+  pgaccel_expr_usm_col no_rhs = {};
+  no_rhs.values = nullptr;
+  no_rhs.nulls = nullptr;
+  no_rhs.type = PGACCEL_VAL_NULL;
+  pgaccel_expr_usm_col no_filter = no_rhs;
+
+  std::vector<double> sum_by_group(GROUP_COUNT, 0.0);
+  std::vector<double> min_by_group(GROUP_COUNT, 0.0);
+  std::vector<double> max_by_group(GROUP_COUNT, 0.0);
+  std::vector<uint32_t> count_by_group(GROUP_COUNT, 0);
+  size_t selected = static_cast<size_t>(-1);
+  size_t uncertain = static_cast<size_t>(-1);
+  pgaccel_status status = pgaccel_expr_template_resident_dense_grouped_f64_usm_v9(
+      i32_col(groups), f64_col(values), no_rhs, 0, AGG_SUM_COUNT, FILTER_ROWS, PRED_BOOL_ONLY,
+      PRED_SOURCE_VALUE, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, no_filter, N, 0,
+      GROUP_COUNT, scratch_sum, scratch_min, scratch_max, scratch_count, scratch_start,
+      scratch_cursor, GROUP_COUNT, scratch_sorted, scratch_index, N, nullptr, nullptr, nullptr,
+      nullptr, 0, sum_by_group.data(), min_by_group.data(), max_by_group.data(),
+      count_by_group.data(), GROUP_COUNT, &selected, &uncertain);
+
+  ASSERT_STATUS_OK("resident dense grouped f64 sparse sort sum/count status", status);
+  ASSERT_TRUE("resident dense grouped f64 sparse sort sum/count selected", selected == N);
+  ASSERT_TRUE("resident dense grouped f64 sparse sort sum/count uncertain", uncertain == 0);
+
+  bool sums_match = true;
+  bool counts_match = true;
+  for (int32_t group = 0; group < GROUP_COUNT; ++group) {
+    counts_match = counts_match && count_by_group[group] == expected_count[group];
+    const double scale =
+        std::fabs(expected_sum[group]) > 1.0 ? std::fabs(expected_sum[group]) : 1.0;
+    const double relative_error = std::fabs(sum_by_group[group] - expected_sum[group]) / scale;
+    sums_match = sums_match && relative_error < 1e-12;
+  }
+  ASSERT_TRUE("resident dense grouped f64 sparse sort sum/count counts", counts_match);
+  ASSERT_TRUE("resident dense grouped f64 sparse sort sum/count sums", sums_match);
+
+  free_device(groups);
+  free_device(values);
+  free_device(scratch_sum);
+  free_device(scratch_min);
+  free_device(scratch_max);
+  free_device(scratch_count);
+  free_device(scratch_start);
+  free_device(scratch_cursor);
+  free_device(scratch_sorted);
+  free_device(scratch_index);
+}
+
 }  // namespace
 
 int main() {
@@ -1656,6 +2048,7 @@ int main() {
   test_range_filters();
   test_date_membership_and_nulls();
   test_device_resident_membership();
+  test_resident_sort_kv_i32_device_radix();
   test_q2_grouped_revenue();
   test_q3_grouped_revenue();
   test_q4_grouped_profit();
@@ -1663,14 +2056,19 @@ int main() {
   test_resident_dense_grouped_f64_v8_predicate_sources();
   test_resident_dense_grouped_f64_blocked_sum_count();
   test_resident_dense_grouped_f64_simple_sum_count_256();
+  test_resident_dense_grouped_f64_simple_sum_count_1k();
+  test_resident_dense_grouped_f64_simple_sum_count_med_card();
   test_resident_dense_grouped_f64_mul_sum_count_256();
+  test_resident_dense_grouped_f64_pred_sum_count_ranges_256();
   test_resident_dense_grouped_f64_stats_pair_1k();
   test_resident_star_dim_group_project_nan_semantics();
+  test_resident_star_dim_grouped_f64_sum_count_fused();
   test_resident_dense_grouped_f64_one_pass_expression_sum_count();
   test_resident_dense_grouped_f64_blocked_min_max_avg();
   test_resident_dense_grouped_f64_blocked_simple_min_max_avg();
   test_resident_dense_grouped_f64_sort_segment();
   test_resident_dense_grouped_f64_true_sort_segment();
+  test_resident_dense_grouped_f64_sort_segment_sum_count_sparse();
 
   std::printf("test_olap_ssbm: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;

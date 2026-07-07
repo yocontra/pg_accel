@@ -25,12 +25,20 @@ constexpr size_t ROWS_PER_ITEM = 64;
 constexpr size_t REDUCE_FANIN = 256;
 constexpr size_t DENSE_GROUP_LOW_LOCAL_SIZE = 256;
 constexpr size_t DENSE_GROUP_HIGH_LOCAL_SIZE = 64;
-constexpr size_t DENSE_GROUP_SORT_MIN_GROUPS = 4096;
-constexpr size_t DENSE_GROUP_SORT_MIN_ROWS = 65536;
+constexpr size_t DENSE_GROUP_SORT_MIN_GROUPS = 512;
+constexpr size_t DENSE_GROUP_SORT_MIN_ROWS = 8192;
+constexpr size_t DENSE_GROUP_SORT_SERIAL_SEGMENT_MAX_ROWS = 262144;
 constexpr size_t DENSE_GROUP_TILE_LOCAL_SIZE = 64;
 constexpr size_t DENSE_GROUP_TILE_GROUPS = 16;
 constexpr size_t DENSE_GROUP_ONE_PASS_LOCAL_SIZE = 32;
 constexpr size_t DENSE_GROUP_SIMPLE_WIDE_LOCAL_SIZE = 8;
+constexpr size_t DENSE_GROUP_SIMPLE_MEDIUM_LOCAL_SIZE = 8;
+constexpr size_t DENSE_GROUP_PRED_WIDE_LOCAL_SIZE = 16;
+constexpr size_t DENSE_GROUP_PRED_WIDE_BLOCK_ROWS = 1024;
+constexpr size_t DENSE_GROUP_SIMPLE_WIDE_MAX_GROUPS = 16384;
+constexpr size_t DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS = 16384;
+constexpr size_t DENSE_GROUP_SIMPLE_WIDE_TILE_GROUPS = 256;
+constexpr size_t DENSE_GROUP_SIMPLE_WIDE_TILE_MIN_ROWS = 65536;
 constexpr size_t DENSE_GROUP_ONE_PASS_TILE_GROUPS = 128;
 constexpr size_t DENSE_GROUP_ONE_PASS_MAX_GROUPS = 256;
 constexpr size_t DENSE_GROUP_ONE_PASS_BLOCK_ROWS = 8192;
@@ -39,6 +47,7 @@ constexpr size_t DENSE_GROUP_BLOCK_ROWS = 4096;
 constexpr size_t DENSE_GROUP_MINMAX_BLOCK_ROWS = 16384;
 constexpr size_t DENSE_GROUP_MINMAX_TILE_GROUPS = DENSE_GROUP_TILE_GROUPS;
 constexpr size_t DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE = 256;
+constexpr size_t DENSE_GROUP_SERIAL_PARTIAL_REDUCE_MAX_BLOCKS = 1;
 constexpr uint32_t DENSE_GROUP_AGG_SUM = 1u << 0;
 constexpr uint32_t DENSE_GROUP_AGG_MIN = 1u << 1;
 constexpr uint32_t DENSE_GROUP_AGG_MAX = 1u << 2;
@@ -54,6 +63,117 @@ constexpr int32_t DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_BETWEEN = 1;
 constexpr int32_t DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_RANGES = 2;
 constexpr int32_t DENSE_GROUP_MEASURE_PRED_SOURCE_VALUE = 0;
 constexpr int32_t DENSE_GROUP_MEASURE_PRED_SOURCE_RHS = 1;
+
+uint32_t dense_group_radix_bits(size_t group_count) {
+  size_t key_count = group_count + 1;  // include invalid/null sentinel.
+  uint32_t bits = 1;
+  size_t capacity = 2;
+  while (capacity < key_count && bits < 32) {
+    capacity <<= 1;
+    ++bits;
+  }
+  return bits;
+}
+
+void init_dense_group_sum_count_scratch(sycl::queue& q, size_t groups, double* scratch_sum,
+                                        uint32_t* scratch_count) {
+  q.parallel_for(sycl::range<1>(groups), [=](sycl::id<1> id) {
+     const size_t group_idx = id[0];
+     scratch_sum[group_idx] = 0.0;
+     scratch_count[group_idx] = 0;
+   }).wait_and_throw();
+}
+
+void init_dense_group_agg_scratch(sycl::queue& q, size_t groups, double* scratch_sum,
+                                  double* scratch_min, double* scratch_max,
+                                  uint32_t* scratch_count, bool need_min, bool need_max) {
+  q.parallel_for(sycl::range<1>(groups), [=](sycl::id<1> id) {
+     const size_t group_idx = id[0];
+     scratch_sum[group_idx] = 0.0;
+     scratch_count[group_idx] = 0;
+     if (need_min)
+       scratch_min[group_idx] = std::numeric_limits<double>::max();
+     if (need_max)
+       scratch_max[group_idx] = std::numeric_limits<double>::lowest();
+   }).wait_and_throw();
+}
+
+void init_dense_group_segment_scratch(sycl::queue& q, size_t groups, uint32_t no_group,
+                                      uint32_t* scratch_group_start,
+                                      uint32_t* scratch_group_len) {
+  q.parallel_for(sycl::range<1>(groups), [=](sycl::id<1> id) {
+     const size_t group_idx = id[0];
+     scratch_group_start[group_idx] = no_group;
+     scratch_group_len[group_idx] = 0;
+   }).wait_and_throw();
+}
+
+void reduce_dense_group_sum_count_partials(sycl::queue& q, size_t groups, size_t row_block_count,
+                                           const double* partial_sum,
+                                           const uint32_t* partial_count, double* scratch_sum,
+                                           uint32_t* scratch_count) {
+  if (row_block_count <= DENSE_GROUP_SERIAL_PARTIAL_REDUCE_MAX_BLOCKS) {
+    q.parallel_for(sycl::range<1>(groups), [=](sycl::id<1> id) {
+       const size_t group_idx = id[0];
+       double sum = 0.0;
+       uint32_t count = 0;
+       for (size_t block_idx = 0; block_idx < row_block_count; ++block_idx) {
+         const size_t partial_idx = block_idx * groups + group_idx;
+         sum += partial_sum[partial_idx];
+         count += partial_count[partial_idx];
+       }
+       scratch_sum[group_idx] = sum;
+       scratch_count[group_idx] = count;
+     }).wait_and_throw();
+    return;
+  }
+
+  q.submit([&](sycl::handler& h) {
+     sycl::local_accessor<double, 1> local_sum(
+         sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
+     sycl::local_accessor<uint32_t, 1> local_count(
+         sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
+     h.parallel_for(
+         sycl::nd_range<1>(sycl::range<1>(groups * DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE),
+                           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE)),
+         [=](sycl::nd_item<1> item) {
+           const size_t group_idx = item.get_group(0);
+           const size_t local_id = item.get_local_id(0);
+           double sum = 0.0;
+           uint32_t count = 0;
+           for (size_t block_idx = local_id; block_idx < row_block_count;
+                block_idx += DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE) {
+             const size_t partial_idx = block_idx * groups + group_idx;
+             sum += partial_sum[partial_idx];
+             count += partial_count[partial_idx];
+           }
+           local_sum[local_id] = sum;
+           local_count[local_id] = count;
+           item.barrier(sycl::access::fence_space::local_space);
+
+           for (size_t stride = DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE / 2; stride > 0; stride /= 2) {
+             if (local_id < stride) {
+               local_sum[local_id] += local_sum[local_id + stride];
+               local_count[local_id] += local_count[local_id + stride];
+             }
+             item.barrier(sycl::access::fence_space::local_space);
+           }
+
+           if (local_id == 0) {
+             scratch_sum[group_idx] = local_sum[0];
+             scratch_count[group_idx] = local_count[0];
+           }
+         });
+   }).wait_and_throw();
+}
+
+void copy_dense_group_sum_count_output(sycl::queue& q, double* out_sum_by_group,
+                                       uint32_t* out_count_by_group,
+                                       const double* scratch_sum,
+                                       const uint32_t* scratch_count, size_t groups) {
+  q.memcpy(out_sum_by_group, scratch_sum, sizeof(double) * groups).wait_and_throw();
+  q.memcpy(out_count_by_group, scratch_count, sizeof(uint32_t) * groups).wait_and_throw();
+}
 constexpr int32_t DENSE_GROUP_MUL_FILTER_NONE = 0;
 constexpr int32_t DENSE_GROUP_MUL_FILTER_AGGREGATE = 1;
 constexpr int32_t DENSE_GROUP_MUL_FILTER_MEASURE_ONLY = 2;
@@ -1096,7 +1216,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
   if (!valid_i32_col(group_col) || !valid_f64_col(value_col))
     return fail("invalid_input_column");
   const size_t groups = static_cast<size_t>(group_count);
-  if (groups > DENSE_GROUP_ONE_PASS_MAX_GROUPS)
+  if (groups > DENSE_GROUP_SIMPLE_WIDE_MAX_GROUPS)
     return fail("unsupported_group_count");
   if (!scratch_sum || !scratch_count || !out_sum_by_group || !out_count_by_group ||
       out_group_capacity < groups)
@@ -1110,16 +1230,22 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
   const size_t row_block_count =
-      (row_count + DENSE_GROUP_ONE_PASS_BLOCK_ROWS - 1) / DENSE_GROUP_ONE_PASS_BLOCK_ROWS;
+      (row_count + DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS - 1) / DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS;
   if (row_block_count != 0 && groups > std::numeric_limits<size_t>::max() / row_block_count)
     return fail("dense_grouped_simple_partial_size_overflow");
-  const size_t partial_items = row_block_count * groups;
+  const bool single_row_block = row_block_count == 1;
+  const size_t partial_items = single_row_block ? 0 : row_block_count * groups;
   const bool use_cached_partials =
-      scratch_partial_capacity >= partial_items && scratch_partial_sum && scratch_partial_count;
-  double* partial_sum =
-      use_cached_partials ? scratch_partial_sum : sycl::malloc_device<double>(partial_items, *q);
-  uint32_t* partial_count = use_cached_partials ? scratch_partial_count
-                                                : sycl::malloc_device<uint32_t>(partial_items, *q);
+      !single_row_block && scratch_partial_capacity >= partial_items && scratch_partial_sum &&
+      scratch_partial_count;
+  double* partial_sum = single_row_block
+                            ? scratch_sum
+                            : (use_cached_partials ? scratch_partial_sum
+                                                   : sycl::malloc_device<double>(partial_items, *q));
+  uint32_t* partial_count =
+      single_row_block ? scratch_count
+                       : (use_cached_partials ? scratch_partial_count
+                                              : sycl::malloc_device<uint32_t>(partial_items, *q));
   if (!partial_sum || !partial_count) {
     if (!use_cached_partials && partial_sum)
       sycl::free(partial_sum, *q);
@@ -1128,31 +1254,49 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
     return fail("dense_grouped_simple_partial_oom", PGACCEL_ERROR_OOM);
   }
   auto cleanup_partials = [&]() {
-    if (!use_cached_partials) {
+    if (!single_row_block && !use_cached_partials) {
       sycl::free(partial_sum, *q);
       sycl::free(partial_count, *q);
     }
   };
 
+  const bool single_tile = groups <= DENSE_GROUP_ONE_PASS_MAX_GROUPS;
+  const bool wide_group_tile =
+      !single_tile && row_count >= DENSE_GROUP_SIMPLE_WIDE_TILE_MIN_ROWS;
+  const size_t local_size =
+      single_tile ? DENSE_GROUP_SIMPLE_WIDE_LOCAL_SIZE
+                  : (wide_group_tile ? DENSE_GROUP_SIMPLE_MEDIUM_LOCAL_SIZE
+                                     : DENSE_GROUP_ONE_PASS_LOCAL_SIZE);
+  const size_t max_tile_groups =
+      wide_group_tile ? DENSE_GROUP_SIMPLE_WIDE_TILE_GROUPS : DENSE_GROUP_ONE_PASS_TILE_GROUPS;
+  const size_t tile_groups = single_tile ? groups : sycl::min(groups, max_tile_groups);
+  const size_t tile_count = (groups + tile_groups - 1) / tile_groups;
+  if (row_block_count != 0 && tile_count > std::numeric_limits<size_t>::max() / row_block_count)
+    return fail("dense_grouped_simple_workgroup_overflow");
+  const size_t workgroup_count = row_block_count * tile_count;
+
   const auto* group_values = static_cast<const int32_t*>(group_col.values);
   const auto* values = static_cast<const double*>(value_col.values);
   const uint8_t* group_nulls = group_col.nulls;
   const uint8_t* value_nulls = value_col.nulls;
-  constexpr size_t local_size = DENSE_GROUP_SIMPLE_WIDE_LOCAL_SIZE;
 
   try {
     q->submit([&](sycl::handler& h) {
-       sycl::local_accessor<double, 1> local_sum(sycl::range<1>(local_size * groups), h);
-       sycl::local_accessor<uint32_t, 1> local_count(sycl::range<1>(local_size * groups), h);
-       h.parallel_for(sycl::nd_range<1>(sycl::range<1>(row_block_count * local_size),
+      sycl::local_accessor<double, 1> local_sum(sycl::range<1>(local_size * tile_groups), h);
+      sycl::local_accessor<uint32_t, 1> local_count(sycl::range<1>(local_size * tile_groups), h);
+      h.parallel_for(sycl::nd_range<1>(sycl::range<1>(workgroup_count * local_size),
                                         sycl::range<1>(local_size)),
                       [=](sycl::nd_item<1> item) {
-                        const size_t row_block_idx = item.get_group(0);
+                        const size_t workgroup_idx = item.get_group(0);
+                        const size_t tile_idx = workgroup_idx % tile_count;
+                        const size_t row_block_idx = workgroup_idx / tile_count;
                         const size_t local_id = item.get_local_id(0);
-                        const size_t local_slots = local_size * groups;
-                        const size_t row_start = row_block_idx * DENSE_GROUP_ONE_PASS_BLOCK_ROWS;
+                        const size_t tile_start = tile_idx * tile_groups;
+                        const size_t groups_in_tile = sycl::min(tile_groups, groups - tile_start);
+                        const size_t local_slots = local_size * tile_groups;
+                        const size_t row_start = row_block_idx * DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS;
                         const size_t row_end =
-                            sycl::min(row_start + DENSE_GROUP_ONE_PASS_BLOCK_ROWS, row_count);
+                            sycl::min(row_start + DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS, row_count);
 
                         for (size_t slot = local_id; slot < local_slots; slot += local_size) {
                           local_sum[slot] = 0.0;
@@ -1167,72 +1311,41 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
                             continue;
                           const int64_t group_idx64 = static_cast<int64_t>(group_values[row]) -
                                                       static_cast<int64_t>(group_min);
-                          if (group_idx64 < 0 || group_idx64 >= static_cast<int64_t>(groups))
+                          if (group_idx64 < static_cast<int64_t>(tile_start) ||
+                              group_idx64 >= static_cast<int64_t>(tile_start + groups_in_tile))
                             continue;
-                          const size_t group_idx = static_cast<size_t>(group_idx64);
-                          const size_t slot = local_id * groups + group_idx;
+                          const size_t group_offset = static_cast<size_t>(group_idx64) - tile_start;
+                          const size_t slot = local_id * tile_groups + group_offset;
                           local_sum[slot] += values[row];
                           local_count[slot] += 1;
                         }
                         item.barrier(sycl::access::fence_space::local_space);
 
-                        for (size_t group_idx = local_id; group_idx < groups;
-                             group_idx += local_size) {
+                        for (size_t group_offset = local_id; group_offset < groups_in_tile;
+                             group_offset += local_size) {
                           double sum = 0.0;
                           uint32_t count = 0;
                           for (size_t lane = 0; lane < local_size; ++lane) {
-                            const size_t slot = lane * groups + group_idx;
+                            const size_t slot = lane * tile_groups + group_offset;
                             sum += local_sum[slot];
                             count += local_count[slot];
                           }
-                          const size_t partial_idx = row_block_idx * groups + group_idx;
+                          const size_t group_idx = tile_start + group_offset;
+                          const size_t partial_idx =
+                              single_row_block ? group_idx : row_block_idx * groups + group_idx;
                           partial_sum[partial_idx] = sum;
                           partial_count[partial_idx] = count;
                         }
                       });
      }).wait_and_throw();
 
-    q->submit([&](sycl::handler& h) {
-       sycl::local_accessor<double, 1> local_sum(
-           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
-       sycl::local_accessor<uint32_t, 1> local_count(
-           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
-       h.parallel_for(
-           sycl::nd_range<1>(sycl::range<1>(groups * DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE),
-                             sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE)),
-           [=](sycl::nd_item<1> item) {
-             const size_t group_idx = item.get_group(0);
-             const size_t local_id = item.get_local_id(0);
-             double sum = 0.0;
-             uint32_t count = 0;
-             for (size_t block_idx = local_id; block_idx < row_block_count;
-                  block_idx += DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE) {
-               const size_t partial_idx = block_idx * groups + group_idx;
-               sum += partial_sum[partial_idx];
-               count += partial_count[partial_idx];
-             }
-             local_sum[local_id] = sum;
-             local_count[local_id] = count;
-             item.barrier(sycl::access::fence_space::local_space);
+    if (!single_row_block) {
+      reduce_dense_group_sum_count_partials(*q, groups, row_block_count, partial_sum,
+                                            partial_count, scratch_sum, scratch_count);
+    }
 
-             for (size_t stride = DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE / 2; stride > 0;
-                  stride /= 2) {
-               if (local_id < stride) {
-                 local_sum[local_id] += local_sum[local_id + stride];
-                 local_count[local_id] += local_count[local_id + stride];
-               }
-               item.barrier(sycl::access::fence_space::local_space);
-             }
-
-             if (local_id == 0) {
-               scratch_sum[group_idx] = local_sum[0];
-               scratch_count[group_idx] = local_count[0];
-             }
-           });
-     }).wait_and_throw();
-
-    q->memcpy(out_sum_by_group, scratch_sum, sizeof(double) * groups).wait_and_throw();
-    q->memcpy(out_count_by_group, scratch_count, sizeof(uint32_t) * groups).wait_and_throw();
+    copy_dense_group_sum_count_output(*q, out_sum_by_group, out_count_by_group, scratch_sum,
+                                      scratch_count, groups);
     size_t selected_host = 0;
     for (size_t i = 0; i < groups; ++i)
       selected_host += static_cast<size_t>(out_count_by_group[i]);
@@ -1585,33 +1698,39 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_stats
 
     q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
        const uint32_t row = static_cast<uint32_t>(id[0]);
-       scratch_sorted_group[row] = group_values[row];
+       const int64_t group_idx64 = (group_nulls && group_nulls[row])
+                                       ? static_cast<int64_t>(group_count)
+                                       : static_cast<int64_t>(group_values[row]) -
+                                             static_cast<int64_t>(group_min);
+       scratch_sorted_group[row] =
+           (group_idx64 >= 0 && group_idx64 < static_cast<int64_t>(group_count))
+               ? static_cast<int32_t>(group_idx64)
+               : group_count;
        scratch_row_index[row] = row;
      }).wait_and_throw();
 
-    const pgaccel_status sort_status =
-        pgaccel_sort_kv_i32(scratch_sorted_group, scratch_row_index, row_count);
+    const pgaccel_status sort_status = pgaccel_sort_kv_i32_nonnegative_device(
+        scratch_sorted_group, scratch_row_index, row_count, dense_group_radix_bits(groups));
     if (sort_status != PGACCEL_OK)
       return fail("sort_kv_i32_failed");
 
     const uint32_t no_group = std::numeric_limits<uint32_t>::max();
-    q->fill(scratch_group_start, no_group, groups).wait_and_throw();
-    q->memset(scratch_group_len, 0, sizeof(uint32_t) * groups).wait_and_throw();
+    init_dense_group_segment_scratch(*q, groups, no_group, scratch_group_start,
+                                     scratch_group_len);
 
     q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
        const uint32_t pos = static_cast<uint32_t>(id[0]);
        const int32_t key = scratch_sorted_group[pos];
        if (pos > 0 && scratch_sorted_group[pos - 1] == key)
          return;
-       const int64_t group_idx64 = static_cast<int64_t>(key) - static_cast<int64_t>(group_min);
-       if (group_idx64 < 0 || group_idx64 >= static_cast<int64_t>(group_count))
+       if (key < 0 || key >= group_count)
          return;
 
        uint32_t end = pos + 1;
        while (end < row_count && scratch_sorted_group[end] == key)
          ++end;
 
-       const uint32_t group_idx = static_cast<uint32_t>(group_idx64);
+       const uint32_t group_idx = static_cast<uint32_t>(key);
        scratch_group_start[group_idx] = pos;
        scratch_group_len[group_idx] = end - pos;
      }).wait_and_throw();
@@ -1877,47 +1996,11 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_s
                       });
      }).wait_and_throw();
 
-    q->submit([&](sycl::handler& h) {
-       sycl::local_accessor<double, 1> local_sum(
-           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
-       sycl::local_accessor<uint32_t, 1> local_count(
-           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
-       h.parallel_for(
-           sycl::nd_range<1>(sycl::range<1>(groups * DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE),
-                             sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE)),
-           [=](sycl::nd_item<1> item) {
-             const size_t group_idx = item.get_group(0);
-             const size_t local_id = item.get_local_id(0);
-             double sum = 0.0;
-             uint32_t count = 0;
-             for (size_t block_idx = local_id; block_idx < row_block_count;
-                  block_idx += DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE) {
-               const size_t partial_idx = block_idx * groups + group_idx;
-               sum += partial_sum[partial_idx];
-               count += partial_count[partial_idx];
-             }
-             local_sum[local_id] = sum;
-             local_count[local_id] = count;
-             item.barrier(sycl::access::fence_space::local_space);
+    reduce_dense_group_sum_count_partials(*q, groups, row_block_count, partial_sum,
+                                          partial_count, scratch_sum, scratch_count);
 
-             for (size_t stride = DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE / 2; stride > 0;
-                  stride /= 2) {
-               if (local_id < stride) {
-                 local_sum[local_id] += local_sum[local_id + stride];
-                 local_count[local_id] += local_count[local_id + stride];
-               }
-               item.barrier(sycl::access::fence_space::local_space);
-             }
-
-             if (local_id == 0) {
-               scratch_sum[group_idx] = local_sum[0];
-               scratch_count[group_idx] = local_count[0];
-             }
-           });
-     }).wait_and_throw();
-
-    q->memcpy(out_sum_by_group, scratch_sum, sizeof(double) * groups).wait_and_throw();
-    q->memcpy(out_count_by_group, scratch_count, sizeof(uint32_t) * groups).wait_and_throw();
+    copy_dense_group_sum_count_output(*q, out_sum_by_group, out_count_by_group, scratch_sum,
+                                      scratch_count, groups);
     size_t selected_host = 0;
     for (size_t i = 0; i < groups; ++i)
       selected_host += static_cast<size_t>(out_count_by_group[i]);
@@ -1934,6 +2017,255 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_s
   } catch (...) {
     std::fprintf(stderr,
                  "pgaccel: resident dense grouped f64 mul sum/count kernel failed (unknown)\n");
+    cleanup_partials();
+    return PGACCEL_ERROR;
+  }
+}
+
+extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
+    pgaccel_expr_usm_col group_col, pgaccel_expr_usm_col value_col,
+    pgaccel_expr_usm_col value_rhs_col, pgaccel_expr_usm_col filter_col, int32_t measure_op,
+    int32_t filter_mode, int32_t measure_predicate_source, int32_t measure_predicate_op,
+    int32_t measure_predicate_range_count, double measure_predicate_lo0,
+    double measure_predicate_hi0, double measure_predicate_lo1, double measure_predicate_hi1,
+    double measure_predicate_lo2, double measure_predicate_hi2, double measure_predicate_lo3,
+    double measure_predicate_hi3, size_t row_count, int32_t group_min, int32_t group_count,
+    double* scratch_sum, uint32_t* scratch_count, double* scratch_partial_sum,
+    uint32_t* scratch_partial_count, size_t scratch_partial_capacity, double* out_sum_by_group,
+    uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
+    size_t* uncertain_count) {
+  if (selected_count)
+    *selected_count = 0;
+  if (uncertain_count)
+    *uncertain_count = 0;
+  const auto fail = [&](const char* reason,
+                        pgaccel_status status = PGACCEL_ERROR) -> pgaccel_status {
+    std::fprintf(stderr,
+                 "pgaccel: resident dense grouped f64 predicate sum/count preflight failed: "
+                 "reason=%s filter_mode=%d predicate_op=%d predicate_source=%d ranges=%d "
+                 "row_count=%zu group_min=%d group_count=%d group_values=%p group_nulls=%p "
+                 "group_type=%d value_values=%p value_nulls=%p value_type=%d rhs_values=%p "
+                 "rhs_nulls=%p rhs_type=%d filter_values=%p filter_nulls=%p filter_type=%d "
+                 "scratch_sum=%p scratch_count=%p partial_sum=%p partial_count=%p "
+                 "partial_capacity=%zu out_sum=%p out_count=%p out_group_capacity=%zu "
+                 "selected_count=%p uncertain_count=%p\n",
+                 reason, filter_mode, measure_predicate_op, measure_predicate_source,
+                 measure_predicate_range_count, row_count, group_min, group_count,
+                 group_col.values, group_col.nulls, static_cast<int>(group_col.type),
+                 value_col.values, value_col.nulls, static_cast<int>(value_col.type),
+                 value_rhs_col.values, value_rhs_col.nulls, static_cast<int>(value_rhs_col.type),
+                 filter_col.values, filter_col.nulls, static_cast<int>(filter_col.type),
+                 static_cast<void*>(scratch_sum), static_cast<void*>(scratch_count),
+                 static_cast<void*>(scratch_partial_sum),
+                 static_cast<void*>(scratch_partial_count), scratch_partial_capacity,
+                 static_cast<void*>(out_sum_by_group), static_cast<void*>(out_count_by_group),
+                 out_group_capacity, static_cast<void*>(selected_count),
+                 static_cast<void*>(uncertain_count));
+    std::fflush(stderr);
+    return status;
+  };
+
+  if (!selected_count || !uncertain_count)
+    return fail("missing_count_output");
+  if (row_count == 0)
+    return PGACCEL_OK;
+  if (group_count <= 0)
+    return fail("invalid_group_count");
+  if (filter_mode != DENSE_GROUP_FILTER_ROWS && filter_mode != DENSE_GROUP_FILTER_MEASURE_ONLY)
+    return fail("invalid_filter_mode");
+  if (measure_op < 0 || measure_op > 2)
+    return fail("invalid_measure_op");
+  if (measure_predicate_source != DENSE_GROUP_MEASURE_PRED_SOURCE_VALUE &&
+      measure_predicate_source != DENSE_GROUP_MEASURE_PRED_SOURCE_RHS)
+    return fail("invalid_measure_predicate_source");
+  if (measure_predicate_op != DENSE_GROUP_MEASURE_PRED_BOOL_ONLY &&
+      measure_predicate_op != DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_BETWEEN &&
+      measure_predicate_op != DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_RANGES)
+    return fail("invalid_measure_predicate_op");
+  if (measure_predicate_range_count < 0 || measure_predicate_range_count > 4)
+    return fail("invalid_measure_predicate_range_count");
+  if (measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_ONLY &&
+      measure_predicate_source != DENSE_GROUP_MEASURE_PRED_SOURCE_VALUE)
+    return fail("bool_only_predicate_requires_value_source");
+  if (measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_BETWEEN &&
+      measure_predicate_range_count != 1)
+    return fail("between_predicate_requires_one_range");
+  if (measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_RANGES &&
+      measure_predicate_range_count <= 0)
+    return fail("ranges_predicate_requires_ranges");
+  const bool range0_valid =
+      measure_predicate_range_count < 1 || (measure_predicate_lo0 <= measure_predicate_hi0 &&
+                                            measure_predicate_lo0 == measure_predicate_lo0 &&
+                                            measure_predicate_hi0 == measure_predicate_hi0);
+  const bool range1_valid =
+      measure_predicate_range_count < 2 || (measure_predicate_lo1 <= measure_predicate_hi1 &&
+                                            measure_predicate_lo1 == measure_predicate_lo1 &&
+                                            measure_predicate_hi1 == measure_predicate_hi1);
+  const bool range2_valid =
+      measure_predicate_range_count < 3 || (measure_predicate_lo2 <= measure_predicate_hi2 &&
+                                            measure_predicate_lo2 == measure_predicate_lo2 &&
+                                            measure_predicate_hi2 == measure_predicate_hi2);
+  const bool range3_valid =
+      measure_predicate_range_count < 4 || (measure_predicate_lo3 <= measure_predicate_hi3 &&
+                                            measure_predicate_lo3 == measure_predicate_lo3 &&
+                                            measure_predicate_hi3 == measure_predicate_hi3);
+  if (!range0_valid || !range1_valid || !range2_valid || !range3_valid)
+    return fail("invalid_measure_predicate_range");
+
+  const bool rhs_required_for_measure = measure_op != 0;
+  const bool rhs_required_for_predicate =
+      (measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_BETWEEN ||
+       measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_AND_RHS_RANGES) &&
+      measure_predicate_source == DENSE_GROUP_MEASURE_PRED_SOURCE_RHS;
+  if (!valid_i32_col(group_col) || !valid_f64_col(value_col) ||
+      !valid_measure_rhs_col(value_rhs_col, rhs_required_for_measure || rhs_required_for_predicate) ||
+      !valid_optional_bool_col(filter_col))
+    return fail("invalid_input_column");
+  const size_t groups = static_cast<size_t>(group_count);
+  if (groups > DENSE_GROUP_ONE_PASS_MAX_GROUPS)
+    return fail("unsupported_group_count");
+  if (!scratch_sum || !scratch_count || !out_sum_by_group || !out_count_by_group ||
+      out_group_capacity < groups)
+    return fail("invalid_output");
+  if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    return fail("row_count_exceeds_u32");
+
+  pgaccel_init();
+  sycl::queue* q = g_queue;
+  if (!q)
+    return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
+
+  const size_t row_block_count =
+      (row_count + DENSE_GROUP_PRED_WIDE_BLOCK_ROWS - 1) / DENSE_GROUP_PRED_WIDE_BLOCK_ROWS;
+  if (row_block_count != 0 && groups > std::numeric_limits<size_t>::max() / row_block_count)
+    return fail("dense_grouped_pred_partial_size_overflow");
+  const size_t partial_items = row_block_count * groups;
+  const bool use_cached_partials =
+      scratch_partial_capacity >= partial_items && scratch_partial_sum && scratch_partial_count;
+  double* partial_sum =
+      use_cached_partials ? scratch_partial_sum : sycl::malloc_device<double>(partial_items, *q);
+  uint32_t* partial_count = use_cached_partials ? scratch_partial_count
+                                                : sycl::malloc_device<uint32_t>(partial_items, *q);
+  if (!partial_sum || !partial_count) {
+    if (!use_cached_partials && partial_sum)
+      sycl::free(partial_sum, *q);
+    if (!use_cached_partials && partial_count)
+      sycl::free(partial_count, *q);
+    return fail("dense_grouped_pred_partial_oom", PGACCEL_ERROR_OOM);
+  }
+  auto cleanup_partials = [&]() {
+    if (!use_cached_partials) {
+      sycl::free(partial_sum, *q);
+      sycl::free(partial_count, *q);
+    }
+  };
+
+  const auto* group_values = static_cast<const int32_t*>(group_col.values);
+  const auto* values = static_cast<const double*>(value_col.values);
+  const auto* rhs_values = static_cast<const double*>(value_rhs_col.values);
+  const auto* filter = static_cast<const uint8_t*>(filter_col.values);
+  const uint8_t* group_nulls = group_col.nulls;
+  const uint8_t* value_nulls = value_col.nulls;
+  const uint8_t* rhs_nulls = value_rhs_col.nulls;
+  const uint8_t* filter_nulls = filter_col.nulls;
+  const bool measure_filter_only = filter_mode == DENSE_GROUP_FILTER_MEASURE_ONLY;
+  constexpr size_t local_size = DENSE_GROUP_PRED_WIDE_LOCAL_SIZE;
+
+  try {
+    q->submit([&](sycl::handler& h) {
+       sycl::local_accessor<double, 1> local_sum(sycl::range<1>(local_size * groups), h);
+       sycl::local_accessor<uint32_t, 1> local_count(sycl::range<1>(local_size * groups), h);
+       h.parallel_for(sycl::nd_range<1>(sycl::range<1>(row_block_count * local_size),
+                                        sycl::range<1>(local_size)),
+                      [=](sycl::nd_item<1> item) {
+                        const size_t row_block_idx = item.get_group(0);
+                        const size_t local_id = item.get_local_id(0);
+                        const size_t local_slots = local_size * groups;
+                        const size_t row_start = row_block_idx * DENSE_GROUP_PRED_WIDE_BLOCK_ROWS;
+                        const size_t row_end =
+                            sycl::min(row_start + DENSE_GROUP_PRED_WIDE_BLOCK_ROWS, row_count);
+
+                        for (size_t slot = local_id; slot < local_slots; slot += local_size) {
+                          local_sum[slot] = 0.0;
+                          local_count[slot] = 0;
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+
+                        for (size_t row = row_start + local_id; row < row_end; row += local_size) {
+                          if (group_nulls && group_nulls[row])
+                            continue;
+                          const int64_t group_idx64 = static_cast<int64_t>(group_values[row]) -
+                                                      static_cast<int64_t>(group_min);
+                          if (group_idx64 < 0 || group_idx64 >= static_cast<int64_t>(groups))
+                            continue;
+                          const size_t group_idx = static_cast<size_t>(group_idx64);
+                          const size_t slot = local_id * groups + group_idx;
+                          const bool measure_valid =
+                              !(value_nulls && value_nulls[row]) &&
+                              !(rhs_required_for_measure && rhs_nulls && rhs_nulls[row]);
+                          const bool filter_passes = resident_dense_filter_passes(
+                              row, filter, filter_nulls, values, value_nulls, rhs_values, rhs_nulls,
+                              measure_predicate_source, measure_predicate_op,
+                              measure_predicate_range_count, measure_predicate_lo0,
+                              measure_predicate_hi0, measure_predicate_lo1,
+                              measure_predicate_hi1, measure_predicate_lo2,
+                              measure_predicate_hi2, measure_predicate_lo3,
+                              measure_predicate_hi3);
+
+                          if (measure_filter_only) {
+                            if (measure_valid && filter_passes) {
+                              local_sum[slot] += resident_dense_measure_value(
+                                  values[row], rhs_required_for_measure ? rhs_values[row] : 0.0,
+                                  measure_op);
+                            }
+                            local_count[slot] += 1;
+                          } else if (measure_valid && filter_passes) {
+                            local_sum[slot] += resident_dense_measure_value(
+                                values[row], rhs_required_for_measure ? rhs_values[row] : 0.0,
+                                measure_op);
+                            local_count[slot] += 1;
+                          }
+                        }
+                        item.barrier(sycl::access::fence_space::local_space);
+
+                        for (size_t group_idx = local_id; group_idx < groups;
+                             group_idx += local_size) {
+                          double sum = 0.0;
+                          uint32_t count = 0;
+                          for (size_t lane = 0; lane < local_size; ++lane) {
+                            const size_t slot = lane * groups + group_idx;
+                            sum += local_sum[slot];
+                            count += local_count[slot];
+                          }
+                          const size_t partial_idx = row_block_idx * groups + group_idx;
+                          partial_sum[partial_idx] = sum;
+                          partial_count[partial_idx] = count;
+                        }
+                      });
+     }).wait_and_throw();
+
+    reduce_dense_group_sum_count_partials(*q, groups, row_block_count, partial_sum,
+                                          partial_count, scratch_sum, scratch_count);
+
+    copy_dense_group_sum_count_output(*q, out_sum_by_group, out_count_by_group, scratch_sum,
+                                      scratch_count, groups);
+    size_t selected_host = 0;
+    for (size_t i = 0; i < groups; ++i)
+      selected_host += static_cast<size_t>(out_count_by_group[i]);
+    *selected_count = selected_host;
+    *uncertain_count = 0;
+    cleanup_partials();
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr,
+                 "pgaccel: resident dense grouped f64 predicate sum/count kernel failed: %s\n",
+                 e.what());
+    cleanup_partials();
+    return PGACCEL_ERROR;
+  } catch (...) {
+    std::fprintf(stderr,
+                 "pgaccel: resident dense grouped f64 predicate sum/count kernel failed (unknown)\n");
     cleanup_partials();
     return PGACCEL_ERROR;
   }
@@ -2148,6 +2480,248 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_compact_
   }
 }
 
+extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
+    pgaccel_expr_usm_col fact_key_col, pgaccel_expr_usm_col value_col, size_t row_count,
+    const uint8_t* dim_match_by_key, const int32_t* dim_group_code_by_key, size_t dim_key_count,
+    uint16_t value_cmp_opcode, double value_const, int32_t group_count, double* scratch_sum,
+    uint32_t* scratch_count, double* scratch_partial_sum, uint32_t* scratch_partial_count,
+    size_t scratch_partial_capacity, double* out_sum_by_group, uint32_t* out_count_by_group,
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+  if (selected_count)
+    *selected_count = 0;
+  if (uncertain_count)
+    *uncertain_count = 0;
+  const auto fail = [&](const char* reason,
+                        pgaccel_status status = PGACCEL_ERROR) -> pgaccel_status {
+    std::fprintf(stderr,
+                 "pgaccel: resident star dim grouped f64 sum/count preflight failed: "
+                 "reason=%s row_count=%zu fact_key_values=%p fact_key_nulls=%p "
+                 "fact_key_type=%d value_values=%p value_nulls=%p value_type=%d dim_match=%p "
+                 "dim_group=%p dim_key_count=%zu cmp_opcode=%u group_count=%d scratch_sum=%p "
+                 "scratch_count=%p scratch_partial_sum=%p scratch_partial_count=%p "
+                 "scratch_partial_capacity=%zu out_sum=%p out_count=%p out_capacity=%zu "
+                 "selected_count=%p uncertain_count=%p\n",
+                 reason, row_count, fact_key_col.values, fact_key_col.nulls,
+                 static_cast<int>(fact_key_col.type), value_col.values, value_col.nulls,
+                 static_cast<int>(value_col.type), static_cast<const void*>(dim_match_by_key),
+                 static_cast<const void*>(dim_group_code_by_key), dim_key_count,
+                 static_cast<unsigned>(value_cmp_opcode), group_count, static_cast<void*>(scratch_sum),
+                 static_cast<void*>(scratch_count), static_cast<void*>(scratch_partial_sum),
+                 static_cast<void*>(scratch_partial_count), scratch_partial_capacity,
+                 static_cast<void*>(out_sum_by_group), static_cast<void*>(out_count_by_group),
+                 out_group_capacity, static_cast<void*>(selected_count),
+                 static_cast<void*>(uncertain_count));
+    std::fflush(stderr);
+    return status;
+  };
+
+  if (!selected_count || !uncertain_count)
+    return fail("missing_count_output");
+  if (row_count == 0)
+    return PGACCEL_OK;
+  if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    return fail("row_count_exceeds_u32", PGACCEL_UNSUPPORTED);
+  if (!valid_i32_col(fact_key_col) || !valid_f64_col(value_col))
+    return fail("invalid_input_column");
+  if (!dim_match_by_key || !dim_group_code_by_key || dim_key_count == 0)
+    return fail("invalid_dimension_map");
+  if (!valid_cmp_opcode(value_cmp_opcode))
+    return fail("invalid_cmp_opcode");
+  if (group_count <= 0)
+    return fail("invalid_group_count");
+  const size_t groups = static_cast<size_t>(group_count);
+  if (groups > DENSE_GROUP_ONE_PASS_MAX_GROUPS)
+    return fail("group_count_exceeds_fused_limit", PGACCEL_UNSUPPORTED);
+  if (row_count < DENSE_GROUP_SORT_MIN_ROWS)
+    return fail("row_count_below_fused_limit", PGACCEL_UNSUPPORTED);
+  if (!scratch_sum || !scratch_count || !out_sum_by_group || !out_count_by_group ||
+      out_group_capacity < groups)
+    return fail("invalid_scratch_or_output");
+
+  pgaccel_init();
+  sycl::queue* q = g_queue;
+  if (!q)
+    return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
+
+  const size_t one_pass_local_size = DENSE_GROUP_ONE_PASS_LOCAL_SIZE;
+  const size_t one_pass_tile_groups = sycl::min(groups, DENSE_GROUP_ONE_PASS_TILE_GROUPS);
+  const size_t one_pass_tile_count = (groups + one_pass_tile_groups - 1) / one_pass_tile_groups;
+  const size_t row_block_count =
+      (row_count + DENSE_GROUP_ONE_PASS_BLOCK_ROWS - 1) / DENSE_GROUP_ONE_PASS_BLOCK_ROWS;
+  if (row_block_count != 0 && groups > std::numeric_limits<size_t>::max() / row_block_count)
+    return fail("fused_star_grouped_partial_size_overflow", PGACCEL_UNSUPPORTED);
+  if (row_block_count != 0 &&
+      one_pass_tile_count > std::numeric_limits<size_t>::max() / row_block_count)
+    return fail("fused_star_grouped_workgroup_overflow", PGACCEL_UNSUPPORTED);
+  const size_t one_pass_workgroup_count = row_block_count * one_pass_tile_count;
+  if (one_pass_workgroup_count > std::numeric_limits<size_t>::max() / one_pass_local_size)
+    return fail("fused_star_grouped_global_size_overflow", PGACCEL_UNSUPPORTED);
+  const size_t partial_items = row_block_count * groups;
+  const bool use_cached_partials =
+      scratch_partial_capacity >= partial_items && scratch_partial_sum && scratch_partial_count;
+  double* partial_sum = use_cached_partials ? scratch_partial_sum : nullptr;
+  uint32_t* partial_count = use_cached_partials ? scratch_partial_count : nullptr;
+  auto cleanup_partials = [&]() {
+    if (!use_cached_partials) {
+      if (partial_sum)
+        sycl::free(partial_sum, *q);
+      if (partial_count)
+        sycl::free(partial_count, *q);
+    }
+  };
+
+  const auto* fact_keys = static_cast<const int32_t*>(fact_key_col.values);
+  const uint8_t* fact_key_nulls = fact_key_col.nulls;
+  const auto* values = static_cast<const double*>(value_col.values);
+  const uint8_t* value_nulls = value_col.nulls;
+
+  try {
+    init_dense_group_sum_count_scratch(*q, groups, scratch_sum, scratch_count);
+
+    if (!use_cached_partials) {
+      partial_sum = sycl::malloc_device<double>(partial_items, *q);
+      partial_count = sycl::malloc_device<uint32_t>(partial_items, *q);
+    }
+    if (!partial_sum || !partial_count) {
+      cleanup_partials();
+      return fail("fused_star_grouped_partial_oom", PGACCEL_ERROR_OOM);
+    }
+
+    q->submit([&](sycl::handler& h) {
+       sycl::local_accessor<double, 1> local_sum(
+           sycl::range<1>(one_pass_local_size * one_pass_tile_groups), h);
+       sycl::local_accessor<uint32_t, 1> local_count(
+           sycl::range<1>(one_pass_local_size * one_pass_tile_groups), h);
+       h.parallel_for(
+           sycl::nd_range<1>(sycl::range<1>(one_pass_workgroup_count * one_pass_local_size),
+                             sycl::range<1>(one_pass_local_size)),
+           [=](sycl::nd_item<1> item) {
+             const size_t workgroup_idx = item.get_group(0);
+             const size_t tile_idx = workgroup_idx % one_pass_tile_count;
+             const size_t row_block_idx = workgroup_idx / one_pass_tile_count;
+             const size_t local_id = item.get_local_id(0);
+             const size_t tile_start = tile_idx * one_pass_tile_groups;
+             const size_t groups_in_tile = sycl::min(one_pass_tile_groups, groups - tile_start);
+             const size_t local_slots = one_pass_local_size * one_pass_tile_groups;
+             const size_t row_start = row_block_idx * DENSE_GROUP_ONE_PASS_BLOCK_ROWS;
+             const size_t row_end =
+                 sycl::min(row_start + DENSE_GROUP_ONE_PASS_BLOCK_ROWS, row_count);
+
+             for (size_t slot = local_id; slot < local_slots; slot += one_pass_local_size) {
+               local_sum[slot] = 0.0;
+               local_count[slot] = 0;
+             }
+             item.barrier(sycl::access::fence_space::local_space);
+
+             for (size_t row = row_start + local_id; row < row_end;
+                  row += one_pass_local_size) {
+               if ((fact_key_nulls && fact_key_nulls[row]) || (value_nulls && value_nulls[row])) {
+                 continue;
+               }
+               const double value = values[row];
+               const int32_t dim_key = fact_keys[row];
+               if (!compare_f64(value, value_cmp_opcode, value_const) || dim_key < 0 ||
+                   static_cast<size_t>(dim_key) >= dim_key_count) {
+                 continue;
+               }
+               const size_t key_idx = static_cast<size_t>(dim_key);
+               if (dim_match_by_key[key_idx] == 0) {
+                 continue;
+               }
+               const int64_t mapped_group = static_cast<int64_t>(dim_group_code_by_key[key_idx]);
+               if (mapped_group < static_cast<int64_t>(tile_start) ||
+                   mapped_group >= static_cast<int64_t>(tile_start + groups_in_tile)) {
+                 continue;
+               }
+
+               const size_t group_offset = static_cast<size_t>(mapped_group) - tile_start;
+               const size_t slot = local_id * one_pass_tile_groups + group_offset;
+               local_sum[slot] += value;
+               local_count[slot] += 1;
+             }
+             item.barrier(sycl::access::fence_space::local_space);
+
+             for (size_t group_offset = local_id; group_offset < groups_in_tile;
+                  group_offset += one_pass_local_size) {
+               double sum = 0.0;
+               uint32_t count = 0;
+               for (size_t lane = 0; lane < one_pass_local_size; ++lane) {
+                 const size_t slot = lane * one_pass_tile_groups + group_offset;
+                 sum += local_sum[slot];
+                 count += local_count[slot];
+               }
+               const size_t group_idx = tile_start + group_offset;
+               const size_t partial_idx = row_block_idx * groups + group_idx;
+               partial_sum[partial_idx] = sum;
+               partial_count[partial_idx] = count;
+             }
+           });
+     }).wait_and_throw();
+
+    q->submit([&](sycl::handler& h) {
+       sycl::local_accessor<double, 1> local_sum(
+           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
+       sycl::local_accessor<uint32_t, 1> local_count(
+           sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE), h);
+       h.parallel_for(
+           sycl::nd_range<1>(sycl::range<1>(groups * DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE),
+                             sycl::range<1>(DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE)),
+           [=](sycl::nd_item<1> item) {
+             const size_t group_idx = item.get_group(0);
+             const size_t local_id = item.get_local_id(0);
+             double sum = 0.0;
+             uint32_t count = 0;
+             for (size_t block_idx = local_id; block_idx < row_block_count;
+                  block_idx += DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE) {
+               const size_t partial_idx = block_idx * groups + group_idx;
+               sum += partial_sum[partial_idx];
+               count += partial_count[partial_idx];
+             }
+
+             local_sum[local_id] = sum;
+             local_count[local_id] = count;
+             item.barrier(sycl::access::fence_space::local_space);
+
+             for (size_t stride = DENSE_GROUP_BLOCK_REDUCE_LOCAL_SIZE / 2; stride > 0;
+                  stride /= 2) {
+               if (local_id < stride) {
+                 local_sum[local_id] += local_sum[local_id + stride];
+                 local_count[local_id] += local_count[local_id + stride];
+               }
+               item.barrier(sycl::access::fence_space::local_space);
+             }
+
+             if (local_id == 0) {
+               scratch_sum[group_idx] = local_sum[0];
+               scratch_count[group_idx] = local_count[0];
+             }
+           });
+     }).wait_and_throw();
+
+    q->memcpy(out_sum_by_group, scratch_sum, sizeof(double) * groups).wait_and_throw();
+    q->memcpy(out_count_by_group, scratch_count, sizeof(uint32_t) * groups).wait_and_throw();
+    size_t selected_host = 0;
+    for (size_t group_idx = 0; group_idx < groups; ++group_idx)
+      selected_host += static_cast<size_t>(out_count_by_group[group_idx]);
+    *selected_count = selected_host;
+    *uncertain_count = 0;
+    cleanup_partials();
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: resident star dim grouped f64 sum/count failed: %s\n",
+                 e.what());
+    std::fflush(stderr);
+    cleanup_partials();
+    return PGACCEL_ERROR;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: resident star dim grouped f64 sum/count failed (unknown)\n");
+    std::fflush(stderr);
+    cleanup_partials();
+    return PGACCEL_ERROR;
+  }
+}
+
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v9(
     pgaccel_expr_usm_col group_col, pgaccel_expr_usm_col value_col,
     pgaccel_expr_usm_col value_rhs_col, int32_t measure_op, uint32_t aggregate_mask,
@@ -2280,12 +2854,8 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
                                       measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_ONLY;
 
   try {
-    q->memset(scratch_sum, 0, sizeof(double) * groups).wait_and_throw();
-    q->memset(scratch_count, 0, sizeof(uint32_t) * groups).wait_and_throw();
-    if (need_min)
-      q->fill(scratch_min, std::numeric_limits<double>::max(), groups).wait_and_throw();
-    if (need_max)
-      q->fill(scratch_max, std::numeric_limits<double>::lowest(), groups).wait_and_throw();
+    init_dense_group_agg_scratch(*q, groups, scratch_sum, scratch_min, scratch_max,
+                                 scratch_count, need_min, need_max);
 
     if (!need_min && !need_max && groups <= DENSE_GROUP_ONE_PASS_MAX_GROUPS &&
         row_count >= DENSE_GROUP_SORT_MIN_ROWS) {
@@ -3361,38 +3931,87 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     } else {
       q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
          const uint32_t row = static_cast<uint32_t>(id[0]);
-         scratch_sorted_group[row] = group_values[row];
+         const int64_t group_idx64 = (group_nulls && group_nulls[row])
+                                         ? static_cast<int64_t>(group_count)
+                                         : static_cast<int64_t>(group_values[row]) -
+                                               static_cast<int64_t>(group_min);
+         scratch_sorted_group[row] =
+             (group_idx64 >= 0 && group_idx64 < static_cast<int64_t>(group_count))
+                 ? static_cast<int32_t>(group_idx64)
+                 : group_count;
          scratch_row_index[row] = row;
        }).wait_and_throw();
 
-      const pgaccel_status sort_status =
-          pgaccel_sort_kv_i32(scratch_sorted_group, scratch_row_index, row_count);
+      const pgaccel_status sort_status = pgaccel_sort_kv_i32_nonnegative_device(
+          scratch_sorted_group, scratch_row_index, row_count, dense_group_radix_bits(groups));
       if (sort_status != PGACCEL_OK)
         return fail("sort_kv_i32_failed");
 
-      const uint32_t no_group = std::numeric_limits<uint32_t>::max();
-      q->fill(scratch_group_start, no_group, groups).wait_and_throw();
-      q->memset(scratch_count, 0, sizeof(uint32_t) * groups).wait_and_throw();
+      if (!need_min && !need_max && row_count <= DENSE_GROUP_SORT_SERIAL_SEGMENT_MAX_ROWS) {
+        q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+           const uint32_t pos = static_cast<uint32_t>(id[0]);
+           const int32_t key = scratch_sorted_group[pos];
+           if (pos > 0 && scratch_sorted_group[pos - 1] == key)
+             return;
+           if (key < 0 || key >= group_count)
+             return;
 
-      q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
-         const uint32_t pos = static_cast<uint32_t>(id[0]);
-         const int32_t key = scratch_sorted_group[pos];
-         if (pos > 0 && scratch_sorted_group[pos - 1] == key)
-           return;
-         const int64_t group_idx64 = static_cast<int64_t>(key) - static_cast<int64_t>(group_min);
-         if (group_idx64 < 0 || group_idx64 >= static_cast<int64_t>(group_count))
-           return;
+           double sum = 0.0;
+           uint32_t count = 0;
+           uint32_t end = pos;
+           while (end < row_count && scratch_sorted_group[end] == key) {
+             const uint32_t row = scratch_row_index[end];
+             if (!(group_nulls && group_nulls[row])) {
+               const bool measure_valid = !(value_nulls && value_nulls[row]) &&
+                                          !(rhs_required && rhs_nulls && rhs_nulls[row]);
+               const bool filter_passes = resident_dense_filter_passes(
+                   row, filter, filter_nulls, values, value_nulls, rhs_values, rhs_nulls,
+                   measure_predicate_source, measure_predicate_op, measure_predicate_range_count,
+                   measure_predicate_lo0, measure_predicate_hi0, measure_predicate_lo1,
+                   measure_predicate_hi1, measure_predicate_lo2, measure_predicate_hi2,
+                   measure_predicate_lo3, measure_predicate_hi3);
+               if (measure_filter_only) {
+                 if (measure_valid && filter_passes) {
+                   sum += resident_dense_measure_value(
+                       values[row], rhs_required ? rhs_values[row] : 0.0, measure_op);
+                 }
+                 count += 1;
+               } else if (measure_valid && filter_passes) {
+                 sum += resident_dense_measure_value(
+                     values[row], rhs_required ? rhs_values[row] : 0.0, measure_op);
+                 count += 1;
+               }
+             }
+             ++end;
+           }
 
-         uint32_t end = pos + 1;
-         while (end < row_count && scratch_sorted_group[end] == key)
-           ++end;
+           const uint32_t group_idx = static_cast<uint32_t>(key);
+           scratch_sum[group_idx] = sum;
+           scratch_count[group_idx] = count;
+         }).wait_and_throw();
+      } else {
+        const uint32_t no_group = std::numeric_limits<uint32_t>::max();
+        init_dense_group_segment_scratch(*q, groups, no_group, scratch_group_start,
+                                         scratch_count);
 
-         const uint32_t group_idx = static_cast<uint32_t>(group_idx64);
-         scratch_group_start[group_idx] = pos;
-         scratch_count[group_idx] = end - pos;
-       }).wait_and_throw();
+        q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+           const uint32_t pos = static_cast<uint32_t>(id[0]);
+           const int32_t key = scratch_sorted_group[pos];
+           if (pos > 0 && scratch_sorted_group[pos - 1] == key)
+             return;
+           if (key < 0 || key >= group_count)
+             return;
 
-      if (!need_min && !need_max) {
+           uint32_t end = pos + 1;
+           while (end < row_count && scratch_sorted_group[end] == key)
+             ++end;
+
+           const uint32_t group_idx = static_cast<uint32_t>(key);
+           scratch_group_start[group_idx] = pos;
+           scratch_count[group_idx] = end - pos;
+         }).wait_and_throw();
+
+        if (!need_min && !need_max) {
         q->submit([&](sycl::handler& h) {
            sycl::local_accessor<double, 1> local_sum(sycl::range<1>(DENSE_GROUP_HIGH_LOCAL_SIZE),
                                                      h);
@@ -3458,7 +4077,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
                  }
                });
          }).wait_and_throw();
-      } else {
+        } else {
         q->submit([&](sycl::handler& h) {
            sycl::local_accessor<double, 1> local_sum(sycl::range<1>(DENSE_GROUP_HIGH_LOCAL_SIZE),
                                                      h);
@@ -3544,6 +4163,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
                  }
                });
          }).wait_and_throw();
+        }
       }
     }
 

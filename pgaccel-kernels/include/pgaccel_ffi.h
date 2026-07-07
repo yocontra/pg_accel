@@ -183,6 +183,15 @@ pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t coun
 pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count);
 
 /*
+ * USM-resident key-value sort for int32 keys. `keys` and `indices` must be
+ * SYCL USM device/shared allocations; unlike the public host-slice i32 sort,
+ * this path never materializes the row-key payload in host vectors.
+ */
+pgaccel_status pgaccel_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count);
+pgaccel_status pgaccel_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
+                                                      size_t count, uint32_t radix_bits);
+
+/*
  * Bounded key-value top-k: returns row indices for the first k rows in ORDER
  * BY order without sorting the full input. `largest != 0` means descending.
  */

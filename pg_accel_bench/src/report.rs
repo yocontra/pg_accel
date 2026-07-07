@@ -959,6 +959,7 @@ pub fn classify_kernel(name: &str) -> String {
         ("spatial_sort", "sort"),
         ("topk_wide", "sort"),
         // hash join
+        ("gpu_hashjoin_filter", "resident_star_groupagg"),
         ("gpu_hashjoin", "hash_join"),
         ("gpu_nlj", "nested_loop_ineq"),
         ("hashjoin_", "hash_join"),
@@ -973,7 +974,7 @@ pub fn classify_kernel(name: &str) -> String {
         // mixed, small/oltp — split by common target
         ("mixed_megapoly", "point_in_ring"),
         ("mixed_expr", "expr"),
-        ("mixed_join", "hash_join"),
+        ("mixed_join", "resident_star_groupagg"),
         ("mixed_spatial_sort", "sort"),
         ("spatial_agg", "hash_agg"),
         ("oltp_point", "point_in_ring"),
@@ -1520,6 +1521,7 @@ fn threshold_lane_requires_resident_groupagg_logical_spec(lane: &str) -> bool {
         || lane.starts_with("ssbm_q")
         || lane.starts_with("h3_latlng_to_cell_grouped_")
         || lane.starts_with("h3_cell_to_parent_grouped_count_")
+        || lane == "hashjoin_filter_groupagg"
 }
 
 fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
@@ -4872,6 +4874,11 @@ mod tests {
             "hash_agg"
         );
         assert_eq!(classify_kernel("ssbm_q4_3"), "resident_star_groupagg");
+        assert_eq!(classify_kernel("mixed_join_agg"), "resident_star_groupagg");
+        assert_eq!(
+            classify_kernel("gpu_hashjoin_filter"),
+            "resident_star_groupagg"
+        );
     }
 
     fn mock_report(workloads: Vec<WorkloadResult>) -> BenchReport {
@@ -5626,6 +5633,33 @@ mod tests {
             BenchmarkShipGateFailureKind::ExpectedWinnerMissingGroupAggLogicalSpec
         );
         assert!(failures[0].detail.contains("ResidentGroupAgg logical spec"));
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_requires_hashjoin_filter_groupagg_logical_spec() {
+        let mut workload = mock_workload_result("gpu_hashjoin_filter", 1_000_000, 10.0, 20.0);
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true\n  \
+             GPU Resident Pipeline: true\n  \
+             GPU Resident Proof Version: 2\n  \
+             GPU Resident Operator Class: resident_groupagg\n  \
+             GPU Resident Stage Mask: 7\n  \
+             GPU Resident Device Columns: 4"
+                .to_owned(),
+        );
+        let report = mock_report(vec![workload]);
+
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerMissingGroupAggLogicalSpec
+        );
+        assert!(failures[0].detail.contains("hashjoin_filter_groupagg"));
     }
 
     #[test]

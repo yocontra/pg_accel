@@ -2,6 +2,7 @@
 
 use pgrx::pg_sys;
 
+use crate::engine::expr_compiler::opcode;
 use crate::engine::olap_cache::{
     self, ResidentGroupKeyOutput, ResidentH3GroupedCountKind, ResidentMeasureOp,
     ResidentStarDimGroupAggCacheShape, SsbmQ1DatePredicate, SsbmQ2Variant, SsbmQ3Variant,
@@ -11,10 +12,32 @@ use crate::engine::stats;
 use crate::gpu;
 
 pub const RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES: usize = 4;
-const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS: usize = 65_536;
+const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS: usize = 8_192;
+const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_ROWS: usize = 262_144;
+const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MAX_ROWS: usize = 65_536;
+const RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MIN_ROWS: usize = usize::MAX;
 const RESIDENT_DENSE_GROUPED_F64_MUL_WIDE_MIN_ROWS: usize = 1_000_000;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS: i32 = 129;
-const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS: i32 = 256;
+const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MIN_GROUPS: i32 = 2_049;
+const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS: i32 = 16_384;
+const RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MAX_GROUPS: i32 = 256;
+const RESIDENT_DENSE_GROUPED_F64_MUL_WIDE_MAX_GROUPS: i32 = 256;
+const RESIDENT_STAR_DIM_GROUPED_F64_FUSED_UNFILTERED_MIN_ROWS: usize = 8_192;
+const RESIDENT_STAR_DIM_GROUPED_F64_FUSED_FILTERED_MIN_ROWS: usize = 1_000_000;
+const RESIDENT_STAR_DIM_GROUPED_F64_FUSED_MAX_GROUPS: i32 = 256;
+
+fn resident_dense_grouped_f64_simple_wide_allowed(row_count: usize, group_count: i32) -> bool {
+    if row_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS
+        || group_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
+        || group_count > RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS
+    {
+        return false;
+    }
+    if group_count >= RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MIN_GROUPS {
+        return row_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MAX_ROWS;
+    }
+    row_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_ROWS
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OlapAggSpec {
@@ -1648,9 +1671,10 @@ impl OlapAggExecState {
                                 | ResidentDenseGroupedF64Layout::GroupCountSum
                                 | ResidentDenseGroupedF64Layout::GroupSumAvgCount
                         )
-                        && cache.row_count() >= RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS
-                        && cache.group_count() >= RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
-                        && cache.group_count() <= RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS;
+                        && resident_dense_grouped_f64_simple_wide_allowed(
+                            cache.row_count(),
+                            cache.group_count(),
+                        );
                     let mul_filter_mode = match spec.filter_mode {
                         ResidentDenseGroupedF64FilterMode::None => {
                             Some(gpu::RESIDENT_DENSE_GROUPED_F64_MUL_FILTER_NONE)
@@ -1665,6 +1689,27 @@ impl OlapAggExecState {
                     };
                     let rhs_col_for_mul = cache.value_rhs_col();
                     let filter_col_for_mul = cache.filter_col();
+                    let rhs_col_for_predicate = cache.value_rhs_col();
+                    let filter_col_for_predicate = cache.filter_col();
+                    let predicate_wide_rhs_required = cache.measure_op() != ResidentMeasureOp::Column
+                        || spec.measure_predicate.source
+                            == ResidentDenseGroupedF64MeasurePredicateSource::Rhs;
+                    let uses_predicate_sum_count_kernel =
+                        cache.measure_op() != ResidentMeasureOp::StatsPair
+                            && spec.filter_mode == ResidentDenseGroupedF64FilterMode::MeasurePredicate
+                            && spec.measure_predicate
+                                != ResidentDenseGroupedF64MeasurePredicate::BOOL_ONLY
+                            && matches!(
+                                spec.layout,
+                                ResidentDenseGroupedF64Layout::GroupSumCount
+                                    | ResidentDenseGroupedF64Layout::GroupCountSum
+                                    | ResidentDenseGroupedF64Layout::GroupSumAvgCount
+                            )
+                            && cache.row_count()
+                                >= RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MIN_ROWS
+                            && cache.group_count()
+                                <= RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MAX_GROUPS
+                            && (!predicate_wide_rhs_required || rhs_col_for_predicate.is_some());
                     let uses_mul_sum_count_kernel = cache.measure_op() == ResidentMeasureOp::Mul
                         && spec.requires_rhs
                         && spec.measure_predicate == ResidentDenseGroupedF64MeasurePredicate::BOOL_ONLY
@@ -1676,7 +1721,7 @@ impl OlapAggExecState {
                         )
                         && cache.row_count() >= RESIDENT_DENSE_GROUPED_F64_MUL_WIDE_MIN_ROWS
                         && cache.group_count() >= RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
-                        && cache.group_count() <= RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS
+                        && cache.group_count() <= RESIDENT_DENSE_GROUPED_F64_MUL_WIDE_MAX_GROUPS
                         && rhs_col_for_mul.is_some()
                         && mul_filter_mode.is_some()
                         && (spec.filter_mode == ResidentDenseGroupedF64FilterMode::None
@@ -1751,6 +1796,31 @@ impl OlapAggExecState {
                             gpu::try_expr_template_resident_dense_grouped_f64_simple_sum_count_usm(
                                 cache.group_col(),
                                 cache.value_col(),
+                                cache.row_count(),
+                                cache.group_min(),
+                                cache.group_count(),
+                                cache.scratch_sum_ptr(),
+                                cache.scratch_count_ptr(),
+                                cache.scratch_partial_sum_ptr(),
+                                cache.scratch_partial_count_ptr(),
+                                cache.scratch_partial_capacity(),
+                            ),
+                        )
+                    } else if uses_predicate_sum_count_kernel {
+                        (
+                            cache.row_count(),
+                            gpu::try_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
+                                cache.group_col(),
+                                cache.value_col(),
+                                rhs_col_for_predicate,
+                                filter_col_for_predicate,
+                                cache.measure_op().to_i32(),
+                                spec.filter_mode.kernel_filter_mode(),
+                                spec.measure_predicate.op.to_i32(),
+                                spec.measure_predicate.source.to_i32(),
+                                i32::from(spec.measure_predicate.range_count),
+                                spec.measure_predicate.range_los,
+                                spec.measure_predicate.range_his,
                                 cache.row_count(),
                                 cache.group_min(),
                                 cache.group_count(),
@@ -2164,8 +2234,25 @@ impl OlapAggExecState {
 
             let materialized =
                 olap_cache::with_resident_star_dim_groupagg_cache(spec.shape, |cache| {
-                    let compact =
-                        match gpu::try_expr_template_resident_star_dim_group_compact_f64_usm(
+                    let aggregate_mask = spec.logical.aggregate_lane_mask
+                        | gpu::RESIDENT_DENSE_GROUPED_F64_AGG_COUNT;
+                    let sum_count_mask = gpu::RESIDENT_DENSE_GROUPED_F64_AGG_SUM
+                        | gpu::RESIDENT_DENSE_GROUPED_F64_AGG_COUNT;
+                    let unfiltered_star_join =
+                        spec.shape.fact_value_cmp_opcode == opcode::ALWAYS_TRUE
+                            && spec.shape.dim_filter_cmp_opcode == opcode::ALWAYS_TRUE;
+                    let fused_min_rows = if unfiltered_star_join {
+                        RESIDENT_STAR_DIM_GROUPED_F64_FUSED_UNFILTERED_MIN_ROWS
+                    } else {
+                        RESIDENT_STAR_DIM_GROUPED_F64_FUSED_FILTERED_MIN_ROWS
+                    };
+                    let use_fused_star_groupagg = aggregate_mask == sum_count_mask
+                        && cache.row_count() >= fused_min_rows
+                        && cache.group_count() > 0
+                        && cache.group_count() <= RESIDENT_STAR_DIM_GROUPED_F64_FUSED_MAX_GROUPS;
+
+                    let (result, batches_executed) = if use_fused_star_groupagg {
+                        match gpu::try_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
                             cache.fact_key_col(),
                             cache.value_col(),
                             cache.row_count(),
@@ -2174,77 +2261,144 @@ impl OlapAggExecState {
                             cache.dim_key_count(),
                             spec.shape.fact_value_cmp_opcode,
                             spec.shape.fact_value_cmp_const,
-                            cache.projected_group_ptr(),
-                            cache.projected_value_ptr(),
-                            cache.projected_group_capacity(),
+                            cache.group_count(),
+                            cache.scratch_sum_ptr(),
+                            cache.scratch_count_ptr(),
+                            cache.scratch_partial_sum_ptr(),
+                            cache.scratch_partial_count_ptr(),
+                            cache.scratch_partial_capacity(),
                         ) {
-                            Ok(result) => result,
+                            Ok(result) => (result, 1),
                             Err(status) => {
                                 pgrx::warning!(
-                                    "pg_accel: resident star group compaction failed: status={:?} fact_rel_oid={} dim_rel_oid={} rows={}",
+                                    "pg_accel: resident fused star groupagg dispatch failed: status={:?} fact_rel_oid={} dim_rel_oid={} rows={} group_count={}",
                                     status,
                                     spec.shape.fact_rel_oid,
                                     spec.shape.dim_rel_oid,
                                     cache.row_count(),
+                                    cache.group_count(),
                                 );
                                 return None;
                             }
-                        };
-                    if compact.uncertain_count != 0 {
-                        pgrx::warning!(
-                            "pg_accel: resident star group compaction returned {} uncertain rows: fact_rel_oid={} dim_rel_oid={} rows={}",
-                            compact.uncertain_count,
-                            spec.shape.fact_rel_oid,
-                            spec.shape.dim_rel_oid,
-                            cache.row_count(),
-                        );
-                        return None;
-                    }
+                        }
+                    } else {
+                        let (group_col, value_col, aggregate_row_count) =
+                            if unfiltered_star_join {
+                                match gpu::try_expr_template_resident_star_dim_group_project_f64_usm(
+                                    cache.fact_key_col(),
+                                    cache.value_col(),
+                                    cache.row_count(),
+                                    cache.dim_match_ptr(),
+                                    cache.dim_group_code_ptr(),
+                                    cache.dim_key_count(),
+                                    spec.shape.fact_value_cmp_opcode,
+                                    spec.shape.fact_value_cmp_const,
+                                    cache.projected_group_ptr(),
+                                    cache.projected_group_capacity(),
+                                ) {
+                                    Ok(()) => (
+                                        cache.projected_group_col(),
+                                        cache.value_col(),
+                                        cache.row_count(),
+                                    ),
+                                    Err(status) => {
+                                        pgrx::warning!(
+                                            "pg_accel: resident star group projection failed: status={:?} fact_rel_oid={} dim_rel_oid={} rows={}",
+                                            status,
+                                            spec.shape.fact_rel_oid,
+                                            spec.shape.dim_rel_oid,
+                                            cache.row_count(),
+                                        );
+                                        return None;
+                                    }
+                                }
+                            } else {
+                                let compact = match gpu::try_expr_template_resident_star_dim_group_compact_f64_usm(
+                                cache.fact_key_col(),
+                                cache.value_col(),
+                                cache.row_count(),
+                                cache.dim_match_ptr(),
+                                cache.dim_group_code_ptr(),
+                                cache.dim_key_count(),
+                                spec.shape.fact_value_cmp_opcode,
+                                spec.shape.fact_value_cmp_const,
+                                cache.projected_group_ptr(),
+                                cache.projected_value_ptr(),
+                                cache.projected_group_capacity(),
+                            ) {
+                                    Ok(result) => result,
+                                    Err(status) => {
+                                        pgrx::warning!(
+                                            "pg_accel: resident star group compaction failed: status={:?} fact_rel_oid={} dim_rel_oid={} rows={}",
+                                            status,
+                                            spec.shape.fact_rel_oid,
+                                            spec.shape.dim_rel_oid,
+                                            cache.row_count(),
+                                        );
+                                        return None;
+                                    }
+                                };
+                                if compact.uncertain_count != 0 {
+                                    pgrx::warning!(
+                                        "pg_accel: resident star group compaction returned {} uncertain rows: fact_rel_oid={} dim_rel_oid={} rows={}",
+                                        compact.uncertain_count,
+                                        spec.shape.fact_rel_oid,
+                                        spec.shape.dim_rel_oid,
+                                        cache.row_count(),
+                                    );
+                                    return None;
+                                }
+                                (
+                                    cache.projected_group_col(),
+                                    cache.projected_value_col(),
+                                    compact.selected_count,
+                                )
+                            };
 
-                    let result = match gpu::try_expr_template_resident_dense_grouped_f64_usm_masked(
-                        cache.projected_group_col(),
-                        cache.projected_value_col(),
-                        None,
-                        ResidentMeasureOp::Column.to_i32(),
-                        spec.logical.aggregate_lane_mask
-                            | gpu::RESIDENT_DENSE_GROUPED_F64_AGG_COUNT,
-                        ResidentDenseGroupedF64FilterMode::None.kernel_filter_mode(),
-                        ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly.to_i32(),
-                        ResidentDenseGroupedF64MeasurePredicateSource::Value.to_i32(),
-                        0,
-                        [0.0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES],
-                        [0.0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES],
-                        None,
-                        compact.selected_count,
-                        cache.group_min(),
-                        cache.group_count(),
-                        cache.scratch_sum_ptr(),
-                        cache.scratch_min_ptr(),
-                        cache.scratch_max_ptr(),
-                        cache.scratch_count_ptr(),
-                        cache.scratch_group_start_ptr(),
-                        cache.scratch_group_cursor_ptr(),
-                        cache.scratch_group_capacity(),
-                        cache.scratch_sorted_group_ptr(),
-                        cache.scratch_row_index_ptr(),
-                        cache.scratch_row_capacity(),
-                        cache.scratch_partial_sum_ptr(),
-                        cache.scratch_partial_min_ptr(),
-                        cache.scratch_partial_max_ptr(),
-                        cache.scratch_partial_count_ptr(),
-                        cache.scratch_partial_capacity(),
-                    ) {
-                        Ok(result) => result,
-                        Err(status) => {
-                            pgrx::warning!(
-                                "pg_accel: resident star groupagg dispatch failed: status={:?} fact_rel_oid={} dim_rel_oid={} rows={} group_count={}",
-                                status,
-                                spec.shape.fact_rel_oid,
-                                spec.shape.dim_rel_oid,
-                                compact.selected_count,
-                                cache.group_count(),
-                            );
-                            return None;
+                        match gpu::try_expr_template_resident_dense_grouped_f64_usm_masked(
+                            group_col,
+                            value_col,
+                            None,
+                            ResidentMeasureOp::Column.to_i32(),
+                            aggregate_mask,
+                            ResidentDenseGroupedF64FilterMode::None.kernel_filter_mode(),
+                            ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly.to_i32(),
+                            ResidentDenseGroupedF64MeasurePredicateSource::Value.to_i32(),
+                            0,
+                            [0.0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES],
+                            [0.0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES],
+                            None,
+                            aggregate_row_count,
+                            cache.group_min(),
+                            cache.group_count(),
+                            cache.scratch_sum_ptr(),
+                            cache.scratch_min_ptr(),
+                            cache.scratch_max_ptr(),
+                            cache.scratch_count_ptr(),
+                            cache.scratch_group_start_ptr(),
+                            cache.scratch_group_cursor_ptr(),
+                            cache.scratch_group_capacity(),
+                            cache.scratch_sorted_group_ptr(),
+                            cache.scratch_row_index_ptr(),
+                            cache.scratch_row_capacity(),
+                            cache.scratch_partial_sum_ptr(),
+                            cache.scratch_partial_min_ptr(),
+                            cache.scratch_partial_max_ptr(),
+                            cache.scratch_partial_count_ptr(),
+                            cache.scratch_partial_capacity(),
+                        ) {
+                            Ok(result) => (result, 2),
+                            Err(status) => {
+                                pgrx::warning!(
+                                    "pg_accel: resident star groupagg dispatch failed: status={:?} fact_rel_oid={} dim_rel_oid={} rows={} group_count={}",
+                                    status,
+                                    spec.shape.fact_rel_oid,
+                                    spec.shape.dim_rel_oid,
+                                    aggregate_row_count,
+                                    cache.group_count(),
+                                );
+                                return None;
+                            }
                         }
                     };
 
@@ -2255,6 +2409,7 @@ impl OlapAggExecState {
                         cache.row_count(),
                         result.selected_count,
                         result.uncertain_count,
+                        batches_executed,
                         ResidentDenseGroupedF64Output {
                             group_output: cache.group_output().clone(),
                             sum_by_group: result.sum_by_group,
@@ -2283,7 +2438,8 @@ impl OlapAggExecState {
                     )
                 });
 
-            let (row_count, selected_count, uncertain_count, output) = materialized;
+            let (row_count, selected_count, uncertain_count, batches_executed, output) =
+                materialized;
             if uncertain_count != 0 {
                 pgrx::error!(
                     "pg_accel: resident star grouped f64 returned {} uncertain rows; refusing CPU fallback",
@@ -2292,7 +2448,7 @@ impl OlapAggExecState {
             }
 
             self.rows_dispatched = row_count as u64;
-            self.batches_executed = 2;
+            self.batches_executed = batches_executed;
             self.dispatch_time_us = start.elapsed().as_micros() as u64;
             self.gpu_dispatched = true;
             self.selected_rows = selected_count as u64;
@@ -2324,6 +2480,12 @@ impl OlapAggExecState {
             write_resident_group_key(result_slot, &output.group_output, group_idx);
             *(*result_slot).tts_values.add(1) = float8_datum(output.sum_by_group[group_idx]);
             *(*result_slot).tts_isnull.add(1) = false;
+            let tupdesc = (*result_slot).tts_tupleDescriptor;
+            if !tupdesc.is_null() && (*tupdesc).natts >= 3 {
+                *(*result_slot).tts_values.add(2) =
+                    pg_sys::Datum::from(i64::from(output.count_by_group[group_idx]));
+                *(*result_slot).tts_isnull.add(2) = false;
+            }
             pg_sys::ExecStoreVirtualTuple(result_slot);
         }
 

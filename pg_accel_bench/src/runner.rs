@@ -2142,6 +2142,21 @@ fn resident_star_dim_groupagg_cache_loader(name: &str) -> Option<ResidentStarDim
             dim_group_key_type: "text",
             allow_nullable_f64: false,
         }),
+        "mixed_join_agg" => Some(ResidentStarDimGroupAggCacheSpec {
+            fact_table: "bench_mixed_facts",
+            fact_key_col: "dim_id",
+            fact_value_col: "amount",
+            fact_value_cmp_op: "always_true",
+            fact_value_cmp_const: 0.0,
+            dim_table: "bench_mixed_dims",
+            dim_key_col: "id",
+            dim_filter_col: "label",
+            dim_filter_cmp_op: "always_true",
+            dim_filter_cmp_const: 0.0,
+            dim_group_col: "label",
+            dim_group_key_type: "int4",
+            allow_nullable_f64: false,
+        }),
         _ => None,
     }
 }
@@ -4994,7 +5009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_star_dim_groupagg_cache_loader_covers_hashjoin_filter_workload() {
+    fn test_resident_star_dim_groupagg_cache_loader_covers_join_groupagg_workloads() {
         assert_eq!(
             resident_star_dim_groupagg_cache_loader("gpu_hashjoin_filter"),
             Some(ResidentStarDimGroupAggCacheSpec {
@@ -5010,6 +5025,24 @@ mod tests {
                 dim_filter_cmp_const: 50.0,
                 dim_group_col: "name",
                 dim_group_key_type: "text",
+                allow_nullable_f64: false,
+            })
+        );
+        assert_eq!(
+            resident_star_dim_groupagg_cache_loader("mixed_join_agg"),
+            Some(ResidentStarDimGroupAggCacheSpec {
+                fact_table: "bench_mixed_facts",
+                fact_key_col: "dim_id",
+                fact_value_col: "amount",
+                fact_value_cmp_op: "always_true",
+                fact_value_cmp_const: 0.0,
+                dim_table: "bench_mixed_dims",
+                dim_key_col: "id",
+                dim_filter_col: "label",
+                dim_filter_cmp_op: "always_true",
+                dim_filter_cmp_const: 0.0,
+                dim_group_col: "label",
+                dim_group_key_type: "int4",
                 allow_nullable_f64: false,
             })
         );

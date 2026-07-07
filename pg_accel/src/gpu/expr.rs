@@ -80,11 +80,12 @@ impl<T> Drop for ExprSharedBuffer<T> {
     }
 }
 
-/// Device-owned buffer for resident cached columns.
+/// GPU-readable buffer for resident cached columns.
 ///
-/// The pointer is only valid for device kernels. It is intentionally not
-/// exposed as a Rust slice because host dereference of device memory is
-/// invalid on discrete devices and semantically wrong for resident caches.
+/// Host-built resident columns may be backed by shared USM on unified-memory
+/// backends, while scratch/output buffers remain device allocations. The
+/// pointer is intentionally not exposed as a Rust slice because callers should
+/// treat resident cache storage as GPU-owned after construction.
 pub struct ExprDeviceBuffer<T> {
     ptr: NonNull<T>,
     len: usize,
@@ -113,7 +114,7 @@ impl<T> ExprDeviceBuffer<T> {
         })
     }
 
-    /// Allocate device memory and copy `values` into it once.
+    /// Allocate resident GPU-readable memory and copy `values` into it once.
     ///
     /// Returns `None` for empty input, size overflow, unavailable GPU,
     /// allocation failure, or device-copy failure.
@@ -1434,7 +1435,7 @@ pub fn try_expr_template_resident_dense_grouped_f64_simple_sum_count_usm(
     let group_count_usize =
         usize::try_from(group_count).map_err(|_| PgaccelStatus::ErrorUnsupported)?;
     if group_count_usize == 0
-        || group_count_usize > 256
+        || group_count_usize > 16_384
         || scratch_sum.is_null()
         || scratch_count.is_null()
     {
@@ -1538,6 +1539,144 @@ pub fn try_expr_template_resident_dense_grouped_f64_mul_sum_count_usm(
             rhs_col,
             filter_col,
             filter_mode,
+            row_count,
+            group_min,
+            group_count,
+            scratch_sum,
+            scratch_count,
+            scratch_partial_sum,
+            scratch_partial_count,
+            scratch_partial_capacity,
+            sum_by_group.as_mut_ptr(),
+            count_by_group.as_mut_ptr(),
+            group_count_usize,
+            &raw mut selected_count,
+            &raw mut uncertain_count,
+        )
+    };
+    if !status.is_ok() {
+        return Err(status);
+    }
+    Ok(ExprTemplateResidentDenseGroupedF64 {
+        sum_by_group,
+        min_by_group: Vec::new(),
+        max_by_group: Vec::new(),
+        sumsq_by_group: Vec::new(),
+        rhs_sum_by_group: Vec::new(),
+        count_by_group,
+        rhs_count_by_group: Vec::new(),
+        selected_count,
+        uncertain_count,
+    })
+}
+
+/// Predicate-aware SUM/COUNT resident dense grouped aggregate for <=256 groups.
+#[allow(clippy::too_many_arguments)]
+pub fn try_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
+    group_col: PgaccelExprUsmCol,
+    value_col: PgaccelExprUsmCol,
+    value_rhs_col: Option<PgaccelExprUsmCol>,
+    filter_col: Option<PgaccelExprUsmCol>,
+    measure_op: i32,
+    filter_mode: i32,
+    measure_predicate_op: i32,
+    measure_predicate_source: i32,
+    measure_predicate_range_count: i32,
+    measure_predicate_range_los: [f64; RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_MAX_RANGES],
+    measure_predicate_range_his: [f64; RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_MAX_RANGES],
+    row_count: usize,
+    group_min: i32,
+    group_count: i32,
+    scratch_sum: *mut f64,
+    scratch_count: *mut u32,
+    scratch_partial_sum: *mut f64,
+    scratch_partial_count: *mut u32,
+    scratch_partial_capacity: usize,
+) -> Result<ExprTemplateResidentDenseGroupedF64, PgaccelStatus> {
+    if group_count <= 0 {
+        return Err(PgaccelStatus::ErrorUnsupported);
+    }
+    let group_count_usize =
+        usize::try_from(group_count).map_err(|_| PgaccelStatus::ErrorUnsupported)?;
+    let filter_mode_valid = matches!(
+        filter_mode,
+        RESIDENT_DENSE_GROUPED_F64_FILTER_ROWS | RESIDENT_DENSE_GROUPED_F64_FILTER_MEASURE_ONLY
+    );
+    let measure_op_valid = matches!(measure_op, 0..=2);
+    let measure_predicate_valid = matches!(
+        measure_predicate_op,
+        RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_ONLY
+            | RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_AND_RHS_BETWEEN
+            | RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_AND_RHS_RANGES
+    );
+    let measure_predicate_source_valid = matches!(
+        measure_predicate_source,
+        RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_SOURCE_VALUE
+            | RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_SOURCE_RHS
+    );
+    let measure_predicate_range_count_valid = measure_predicate_range_count >= 0
+        && usize::try_from(measure_predicate_range_count)
+            .is_ok_and(|count| count <= RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_MAX_RANGES);
+    let ranges_valid = measure_predicate_range_count_valid
+        && (0..usize::try_from(measure_predicate_range_count).unwrap_or(0)).all(|idx| {
+            !measure_predicate_range_los[idx].is_nan()
+                && !measure_predicate_range_his[idx].is_nan()
+                && measure_predicate_range_los[idx] <= measure_predicate_range_his[idx]
+        });
+    let predicate_uses_rhs = (measure_predicate_op
+        == RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_AND_RHS_BETWEEN
+        || measure_predicate_op == RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_AND_RHS_RANGES)
+        && measure_predicate_source == RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_SOURCE_RHS;
+    if group_count_usize == 0
+        || group_count_usize > 256
+        || !filter_mode_valid
+        || !measure_op_valid
+        || !measure_predicate_valid
+        || !measure_predicate_source_valid
+        || !measure_predicate_range_count_valid
+        || !ranges_valid
+        || (measure_predicate_op == RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_ONLY
+            && measure_predicate_source != RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_SOURCE_VALUE)
+        || (measure_predicate_op == RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_AND_RHS_BETWEEN
+            && measure_predicate_range_count != 1)
+        || (measure_predicate_op == RESIDENT_DENSE_GROUPED_F64_MEASURE_PRED_BOOL_AND_RHS_RANGES
+            && measure_predicate_range_count <= 0)
+        || ((measure_op != 0 || predicate_uses_rhs) && value_rhs_col.is_none())
+        || scratch_sum.is_null()
+        || scratch_count.is_null()
+    {
+        return Err(PgaccelStatus::ErrorUnsupported);
+    }
+
+    let mut sum_by_group = vec![0.0f64; group_count_usize];
+    let mut count_by_group = vec![0u32; group_count_usize];
+    let mut selected_count = 0usize;
+    let mut uncertain_count = 0usize;
+    let value_rhs_col = value_rhs_col.unwrap_or_else(null_usm_col);
+    let filter_col = filter_col.unwrap_or_else(null_usm_col);
+
+    // SAFETY: caller supplies resident columns and device scratch buffers with
+    // capacities implied by row_count/group_count. Output vectors are host-owned
+    // and sized to group_count.
+    let status = unsafe {
+        bridge::pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
+            group_col,
+            value_col,
+            value_rhs_col,
+            filter_col,
+            measure_op,
+            filter_mode,
+            measure_predicate_source,
+            measure_predicate_op,
+            measure_predicate_range_count,
+            measure_predicate_range_los[0],
+            measure_predicate_range_his[0],
+            measure_predicate_range_los[1],
+            measure_predicate_range_his[1],
+            measure_predicate_range_los[2],
+            measure_predicate_range_his[2],
+            measure_predicate_range_los[3],
+            measure_predicate_range_his[3],
             row_count,
             group_min,
             group_count,
@@ -1681,6 +1820,87 @@ pub fn try_expr_template_resident_star_dim_group_compact_f64_usm(
     } else {
         Err(status)
     }
+}
+
+/// Fused resident one-dimension star join plus dense-group SUM/COUNT.
+#[allow(clippy::too_many_arguments)]
+pub fn try_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
+    fact_key_col: PgaccelExprUsmCol,
+    value_col: PgaccelExprUsmCol,
+    row_count: usize,
+    dim_match_by_key: *const u8,
+    dim_group_code_by_key: *const i32,
+    dim_key_count: usize,
+    value_cmp_opcode: u16,
+    value_const: f64,
+    group_count: i32,
+    scratch_sum: *mut f64,
+    scratch_count: *mut u32,
+    scratch_partial_sum: *mut f64,
+    scratch_partial_count: *mut u32,
+    scratch_partial_capacity: usize,
+) -> Result<ExprTemplateResidentDenseGroupedF64, PgaccelStatus> {
+    if group_count <= 0 {
+        return Err(PgaccelStatus::ErrorUnsupported);
+    }
+    let group_count_usize =
+        usize::try_from(group_count).map_err(|_| PgaccelStatus::ErrorUnsupported)?;
+    if group_count_usize == 0
+        || group_count_usize > 256
+        || dim_match_by_key.is_null()
+        || dim_group_code_by_key.is_null()
+        || dim_key_count == 0
+        || scratch_sum.is_null()
+        || scratch_count.is_null()
+    {
+        return Err(PgaccelStatus::ErrorUnsupported);
+    }
+
+    let mut sum_by_group = vec![0.0f64; group_count_usize];
+    let mut count_by_group = vec![0u32; group_count_usize];
+    let mut selected_count = 0usize;
+    let mut uncertain_count = 0usize;
+
+    // SAFETY: caller supplies resident fact columns, resident dimension maps,
+    // and device scratch buffers. Output vectors are host-owned and sized to
+    // group_count.
+    let status = unsafe {
+        bridge::pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
+            fact_key_col,
+            value_col,
+            row_count,
+            dim_match_by_key,
+            dim_group_code_by_key,
+            dim_key_count,
+            value_cmp_opcode,
+            value_const,
+            group_count,
+            scratch_sum,
+            scratch_count,
+            scratch_partial_sum,
+            scratch_partial_count,
+            scratch_partial_capacity,
+            sum_by_group.as_mut_ptr(),
+            count_by_group.as_mut_ptr(),
+            group_count_usize,
+            &raw mut selected_count,
+            &raw mut uncertain_count,
+        )
+    };
+    if !status.is_ok() {
+        return Err(status);
+    }
+    Ok(ExprTemplateResidentDenseGroupedF64 {
+        sum_by_group,
+        min_by_group: Vec::new(),
+        max_by_group: Vec::new(),
+        sumsq_by_group: Vec::new(),
+        rhs_sum_by_group: Vec::new(),
+        count_by_group,
+        rhs_count_by_group: Vec::new(),
+        selected_count,
+        uncertain_count,
+    })
 }
 
 /// Template: evaluate `col1 <cmp1> const1 AND col2 <cmp2> const2` on a

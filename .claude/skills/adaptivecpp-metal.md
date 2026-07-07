@@ -295,7 +295,7 @@ q.parallel(num_work_groups, logical_group_size, [=](auto group){
 ### macOS (Metal + CPU) — pg_accel
 
 pg_accel does not use vanilla upstream AdaptiveCpp. It requires the
-`fork-safe-metal` branch at `876634a63d09af6f8d7bbffd6c42d29527981437`
+`fork-safe-metal` branch at `456ae6910720810f5fe59f160e6707d46bb8e5f0`
 (upstream `develop` through `9a912721` plus pg_accel's Metal fork-safety and
 soft-fp64 patches). The `just setup-gpu` recipe wraps the repo-local build:
 
@@ -311,8 +311,10 @@ ACPP_BACKEND=metal just setup-gpu
 The recipe installs to `.pgaccel/acpp/metal` (binary archive helper ends up at
 `.pgaccel/acpp/metal/bin/acpp-metal-archive-build`) and configures AdaptiveCpp
 with `ACPP_COMPILER_FEATURE_PROFILE=full` so the Metal translator targets are
-generated on current upstream CMake. Override the source path with `ACPP_SRC=...`
-if your checkout lives elsewhere. Verify with `./.pgaccel/acpp/current/bin/acpp-info`.
+generated on current upstream CMake. The pinned fork already includes pg_accel's
+`DEFAULT_TARGETS` JSON escaping fix, so setup should not leave the AdaptiveCpp
+source dirty. Override the source path with `ACPP_SRC=...` if your checkout
+lives elsewhere. Verify with `./.pgaccel/acpp/current/bin/acpp-info`.
 
 See the "MTLBinaryArchive cache" and "Crash diagnosis workflow" sections of
 the top-level `CLAUDE.md` for the fork-safety contract this branch provides.

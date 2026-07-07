@@ -309,6 +309,10 @@ static constexpr size_t RADIX_GROUP_SIZE = 256;
 /// comfortably in local memory.
 static constexpr size_t RADIX_TILE = RADIX_GROUP_SIZE;
 
+/// Work-group size for the device-side histogram prefix scan. One group scans
+/// up to 256 radix tiles for one bin; chunk totals are scanned separately.
+static constexpr size_t RADIX_SCAN_GROUP_SIZE = 256;
+
 /// GPU radix sort for uint32 keys + uint32 indices (key-value variant).
 ///
 /// Algorithm — 4 passes, each pass 8 bits:
@@ -319,9 +323,9 @@ static constexpr size_t RADIX_TILE = RADIX_GROUP_SIZE;
 ///      increment per thread, which is reliable on Metal (local atomics
 ///      don't suffer from the system-scope coherence bug).
 ///
-///   2. Exclusive scan the global histogram on the host (simple 256-bin
-///      prefix per group, computed over the group-major layout so we
-///      can hand each work-group its exact per-bin base offset).
+///   2. Exclusive scan the global histogram on the GPU (simple 256-bin
+///      prefix plus per-bin group-major scans) so resident callers never
+///      expose row keys or offsets to host code.
 ///
 ///   3. Scatter kernel: each work-group re-examines its tile, computes
 ///      a local exclusive scan per digit (to determine the offset
@@ -332,10 +336,13 @@ static constexpr size_t RADIX_TILE = RADIX_GROUP_SIZE;
 /// This pattern avoids AdaptiveCpp's broken global-scope atomic_ref on
 /// Metal.  It uses only (a) local-memory atomics, (b) non-atomic global
 /// writes to pre-computed distinct offsets.
-static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, size_t count) {
+static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, size_t count,
+                                             int pass_count = 4) {
   sycl::queue* q = get_queue();
   if (q == nullptr)
     return PGACCEL_UNSUPPORTED;
+  if (pass_count < 1 || pass_count > 4)
+    return PGACCEL_ERROR;
 
   const size_t ngroups = (count + RADIX_TILE - 1) / RADIX_TILE;
   const size_t padded = ngroups * RADIX_TILE;
@@ -348,11 +355,16 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     uint32_t* buf_idx_a = alloc_u32(padded);
     uint32_t* buf_idx_b = alloc_u32(padded);
 
-    // Per-group histogram: ngroups × 256 uints.
-    // Must be shared so host can do the inter-group prefix scan.
-    uint32_t* d_group_hist = sycl::malloc_shared<uint32_t>(ngroups * RADIX_BINS, *q);
+    // Per-group histogram / scatter base: ngroups × 256 uints.
+    uint32_t* d_group_hist = sycl::malloc_device<uint32_t>(ngroups * RADIX_BINS, *q);
+    uint32_t* d_bin_total = sycl::malloc_device<uint32_t>(RADIX_BINS, *q);
+    uint32_t* d_bin_base = sycl::malloc_device<uint32_t>(RADIX_BINS, *q);
+    const size_t scan_chunks = (ngroups + RADIX_SCAN_GROUP_SIZE - 1) / RADIX_SCAN_GROUP_SIZE;
+    uint32_t* d_chunk_sums = sycl::malloc_device<uint32_t>(scan_chunks * RADIX_BINS, *q);
+    uint32_t* d_chunk_offsets = sycl::malloc_device<uint32_t>(scan_chunks * RADIX_BINS, *q);
 
-    if (!buf_keys_a || !buf_keys_b || !buf_idx_a || !buf_idx_b || !d_group_hist) {
+    if (!buf_keys_a || !buf_keys_b || !buf_idx_a || !buf_idx_b || !d_group_hist ||
+        !d_bin_total || !d_bin_base || !d_chunk_sums || !d_chunk_offsets) {
       if (buf_keys_a)
         sycl::free(buf_keys_a, *q);
       if (buf_keys_b)
@@ -363,6 +375,14 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
         sycl::free(buf_idx_b, *q);
       if (d_group_hist)
         sycl::free(d_group_hist, *q);
+      if (d_bin_total)
+        sycl::free(d_bin_total, *q);
+      if (d_bin_base)
+        sycl::free(d_bin_base, *q);
+      if (d_chunk_sums)
+        sycl::free(d_chunk_sums, *q);
+      if (d_chunk_offsets)
+        sycl::free(d_chunk_offsets, *q);
       return PGACCEL_OOM;
     }
 
@@ -381,12 +401,9 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     uint32_t* src_idx = buf_idx_a;
     uint32_t* dst_idx = buf_idx_b;
 
-    // Scratch for host-side scan: per-group per-bin base offsets.
-    // Same layout as d_group_hist but holds the exclusive scan.
-    std::vector<uint32_t> scan_buf(ngroups * RADIX_BINS);
-
-    // 4 passes × 8 bits for 32-bit keys.
-    for (int pass = 0; pass < 4; ++pass) {
+    // Up to 4 passes × 8 bits for 32-bit keys. Dense callers can request
+    // fewer passes when all normalized keys fit in fewer low bytes.
+    for (int pass = 0; pass < pass_count; ++pass) {
       const int shift = pass * 8;
       const uint32_t shift_u = static_cast<uint32_t>(shift);
 
@@ -439,8 +456,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
          }).wait_and_throw();
       }
 
-      // ---- Host-side exclusive scan of group histograms -----
-      // We want scan_buf[g][b] = base write-offset for bin b
+      // ---- Device-side exclusive scan of group histograms ---
+      // We want d_group_hist[g][b] = base write-offset for bin b
       // within its own tile g.  Layout:
       //
       //   final position of (tile g, bin b, local_rank r) =
@@ -449,33 +466,76 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
       // where bin_base[b] = sum_{b' < b} total[b'],
       //       total[b']   = sum_g hist[g][b'].
       //
-      // Compute total[b] first, then prefix -> bin_base,
-      // then fill scan_buf via per-bin running accumulator.
-      uint32_t bin_total[RADIX_BINS];
-      for (size_t b = 0; b < RADIX_BINS; ++b)
-        bin_total[b] = 0;
-      for (size_t g = 0; g < ngroups; ++g) {
-        for (size_t b = 0; b < RADIX_BINS; ++b) {
-          bin_total[b] += d_group_hist[g * RADIX_BINS + b];
-        }
+      // Compute per-chunk exclusive prefixes first, then prefix chunk totals
+      // and bin totals. Scatter adds chunk/bin offsets on the fly.
+      {
+        uint32_t* group_hist_ptr = d_group_hist;
+        uint32_t* chunk_sums_ptr = d_chunk_sums;
+        const size_t group_count = ngroups;
+        const size_t chunk_count = scan_chunks;
+        auto nd = sycl::nd_range<1>(
+            sycl::range<1>(chunk_count * RADIX_BINS * RADIX_SCAN_GROUP_SIZE),
+            sycl::range<1>(RADIX_SCAN_GROUP_SIZE));
+        q->submit([&](sycl::handler& h) {
+           sycl::local_accessor<uint32_t, 1> prefix(sycl::range<1>(RADIX_SCAN_GROUP_SIZE), h);
+           h.parallel_for(nd, [=](sycl::nd_item<1> it) {
+             const size_t lid = it.get_local_id(0);
+             const size_t group_linear = it.get_group(0);
+             const size_t chunk = group_linear / RADIX_BINS;
+             const size_t bin = group_linear - chunk * RADIX_BINS;
+             const size_t group_idx = chunk * RADIX_SCAN_GROUP_SIZE + lid;
+             const uint32_t value =
+                 (group_idx < group_count) ? group_hist_ptr[group_idx * RADIX_BINS + bin] : 0u;
+
+             prefix[lid] = value;
+             sycl::group_barrier(it.get_group());
+             for (size_t offset = 1; offset < RADIX_SCAN_GROUP_SIZE; offset <<= 1) {
+               const uint32_t addend = (lid >= offset) ? prefix[lid - offset] : 0u;
+               sycl::group_barrier(it.get_group());
+               prefix[lid] += addend;
+               sycl::group_barrier(it.get_group());
+             }
+
+             if (group_idx < group_count)
+               group_hist_ptr[group_idx * RADIX_BINS + bin] = prefix[lid] - value;
+             if (lid == RADIX_SCAN_GROUP_SIZE - 1)
+               chunk_sums_ptr[chunk * RADIX_BINS + bin] = prefix[lid];
+           });
+         }).wait_and_throw();
       }
-      uint32_t bin_base[RADIX_BINS];
-      bin_base[0] = 0;
-      for (size_t b = 1; b < RADIX_BINS; ++b) {
-        bin_base[b] = bin_base[b - 1] + bin_total[b - 1];
+
+      {
+        uint32_t* chunk_sums_ptr = d_chunk_sums;
+        uint32_t* chunk_offsets_ptr = d_chunk_offsets;
+        uint32_t* bin_total_ptr = d_bin_total;
+        const size_t chunk_count = scan_chunks;
+        q->parallel_for(sycl::range<1>(RADIX_BINS), [=](sycl::id<1> id) {
+           const size_t bin = id[0];
+           uint32_t running = 0;
+           for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+             const size_t offset = chunk * RADIX_BINS + bin;
+             const uint32_t chunk_sum = chunk_sums_ptr[offset];
+             chunk_offsets_ptr[offset] = running;
+             running += chunk_sum;
+           }
+           bin_total_ptr[bin] = running;
+         }).wait_and_throw();
       }
-      // Per-group base = bin_base + running sum of hist[g'][b].
-      uint32_t running[RADIX_BINS];
-      for (size_t b = 0; b < RADIX_BINS; ++b)
-        running[b] = bin_base[b];
-      for (size_t g = 0; g < ngroups; ++g) {
-        for (size_t b = 0; b < RADIX_BINS; ++b) {
-          scan_buf[g * RADIX_BINS + b] = running[b];
-          running[b] += d_group_hist[g * RADIX_BINS + b];
-        }
+
+      {
+        uint32_t* bin_total_ptr = d_bin_total;
+        uint32_t* bin_base_ptr = d_bin_base;
+        q->submit([&](sycl::handler& h) {
+           h.single_task([=]() {
+             uint32_t running = 0;
+             for (size_t bin = 0; bin < RADIX_BINS; ++bin) {
+               const uint32_t total = bin_total_ptr[bin];
+               bin_base_ptr[bin] = running;
+               running += total;
+             }
+           });
+         }).wait_and_throw();
       }
-      q->memcpy(d_group_hist, scan_buf.data(), ngroups * RADIX_BINS * sizeof(uint32_t))
-          .wait_and_throw();
 
       // ---- Scatter pass --------------------------------------
       // Each work-group does a stable scatter of its tile.
@@ -496,6 +556,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
         auto nd = sycl::nd_range<1>(sycl::range<1>(ngroups * RADIX_GROUP_SIZE),
                                     sycl::range<1>(RADIX_GROUP_SIZE));
         uint32_t* group_base_ptr = d_group_hist;
+        uint32_t* chunk_offsets_ptr = d_chunk_offsets;
+        uint32_t* bin_base_ptr = d_bin_base;
         uint32_t* src_keys_ptr = src_keys;
         uint32_t* src_idx_ptr = src_idx;
         uint32_t* dst_keys_ptr = dst_keys;
@@ -534,7 +596,10 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
                  if (ldigits[i] == my_digit)
                    rank++;
                }
-               const uint32_t base = group_base_ptr[gid * RADIX_BINS + my_digit];
+               const size_t chunk = gid / RADIX_SCAN_GROUP_SIZE;
+               const uint32_t base = group_base_ptr[gid * RADIX_BINS + my_digit] +
+                                     chunk_offsets_ptr[chunk * RADIX_BINS + my_digit] +
+                                     bin_base_ptr[my_digit];
                const uint32_t pos = base + rank;
                dst_keys_ptr[pos] = my_key;
                dst_idx_ptr[pos] = my_idx;
@@ -556,6 +621,10 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     sycl::free(buf_keys_b, *q);
     sycl::free(buf_idx_a, *q);
     sycl::free(buf_idx_b, *q);
+    sycl::free(d_bin_total, *q);
+    sycl::free(d_bin_base, *q);
+    sycl::free(d_chunk_sums, *q);
+    sycl::free(d_chunk_offsets, *q);
 
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
@@ -565,6 +634,13 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     fprintf(stderr, "pgaccel: radix sort failed: %s — falling back\n", e.what());
     return PGACCEL_UNSUPPORTED;
   }
+}
+
+static int radix_pass_count_for_bits(uint32_t radix_bits) {
+  if (radix_bits == 0)
+    return 1;
+  const uint32_t clamped = radix_bits > 32 ? 32 : radix_bits;
+  return static_cast<int>((clamped + 7u) / 8u);
 }
 
 // ---------------------------------------------------------------------------
@@ -968,6 +1044,57 @@ static pgaccel_status sycl_radix_sort_kv_i32(int32_t* keys, uint32_t* indices, s
   return PGACCEL_OK;
 }
 
+/// GPU radix sort for USM-resident int32 keys + indices.
+static pgaccel_status sycl_radix_sort_kv_i32_device(int32_t* keys, uint32_t* indices,
+                                                    size_t count) {
+  sycl::queue* q = get_queue();
+  if (q == nullptr)
+    return PGACCEL_UNSUPPORTED;
+
+  uint32_t* ukeys = nullptr;
+  try {
+    ukeys = sycl::malloc_device<uint32_t>(count, *q);
+    if (ukeys == nullptr)
+      return PGACCEL_OOM;
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       ukeys[i] = i32_to_sortable(keys[i]);
+     }).wait_and_throw();
+
+    const pgaccel_status st = sycl_radix_sort_kv_u32(ukeys, indices, count);
+    if (st != PGACCEL_OK) {
+      sycl::free(ukeys, *q);
+      return st;
+    }
+
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       keys[i] = sortable_to_i32(ukeys[i]);
+     }).wait_and_throw();
+
+    sycl::free(ukeys, *q);
+    return PGACCEL_OK;
+  } catch (const sycl::exception& e) {
+    if (ukeys)
+      sycl::free(ukeys, *q);
+    fprintf(stderr, "pgaccel: SYCL resident radix sort i32 failed: %s — falling back\n", e.what());
+    return PGACCEL_UNSUPPORTED;
+  } catch (const std::exception& e) {
+    if (ukeys)
+      sycl::free(ukeys, *q);
+    fprintf(stderr, "pgaccel: resident radix sort i32 failed: %s — falling back\n", e.what());
+    return PGACCEL_UNSUPPORTED;
+  }
+}
+
+static pgaccel_status sycl_radix_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
+                                                                size_t count,
+                                                                uint32_t radix_bits) {
+  const int pass_count = radix_pass_count_for_bits(radix_bits);
+  return sycl_radix_sort_kv_u32(reinterpret_cast<uint32_t*>(keys), indices, count, pass_count);
+}
+
 /// GPU radix sort for float32 keys + indices (key-value).
 static pgaccel_status sycl_radix_sort_kv_f32(float* keys, uint32_t* indices, size_t count) {
   if (count > std::numeric_limits<uint32_t>::max())
@@ -1172,6 +1299,53 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices, size_t count)
       pgaccel_record_gpu_exec();
       return st;
     }
+  }
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+static pgaccel_status dispatch_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) {
+  if ((keys == nullptr || indices == nullptr) && count > 0)
+    return PGACCEL_ERROR;
+  if (count <= 1)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_kv_i32_device(keys, indices, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+  if (st == PGACCEL_OK) {
+    pgaccel_record_gpu_exec();
+    return st;
+  }
+  return PGACCEL_ERROR_NO_DEVICE;
+}
+
+static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
+                                                              size_t count,
+                                                              uint32_t radix_bits) {
+  if ((keys == nullptr || indices == nullptr) && count > 0)
+    return PGACCEL_ERROR;
+  if (count <= 1)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st =
+        sycl_radix_sort_kv_i32_nonnegative_device(keys, indices, count, radix_bits);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+  if (st == PGACCEL_OK) {
+    pgaccel_record_gpu_exec();
+    return st;
   }
   return PGACCEL_ERROR_NO_DEVICE;
 }
@@ -1431,6 +1605,15 @@ pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count
 
 pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count) {
   return dispatch_sort_kv(keys, indices, count);
+}
+
+pgaccel_status pgaccel_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) {
+  return dispatch_sort_kv_i32_device(keys, indices, count);
+}
+
+pgaccel_status pgaccel_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
+                                                      size_t count, uint32_t radix_bits) {
+  return dispatch_sort_kv_i32_nonnegative_device(keys, indices, count, radix_bits);
 }
 
 pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count) {

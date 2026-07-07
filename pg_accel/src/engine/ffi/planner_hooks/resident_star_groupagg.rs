@@ -12,6 +12,7 @@ use crate::engine::executor::agg::AggOp;
 use crate::engine::executor::olap::{
     OlapAggSpec, ResidentGroupAggLogicalSpec, ResidentStarDimGroupedF64Spec,
 };
+use crate::engine::expr_compiler::opcode;
 use crate::engine::olap_cache::{self, ResidentStarDimGroupAggCacheShape};
 use crate::engine::residency::ResidentOperatorStage;
 use crate::engine::stats;
@@ -42,6 +43,13 @@ struct StarJoinCandidate {
     dim_rel_oid: pg_sys::Oid,
     fact_key_attno: i32,
     dim_key_attno: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StarTarget {
+    group_var: VarRef,
+    value_var: VarRef,
+    has_count_star: bool,
 }
 
 /// Try to inject a childless resident star group aggregate path.
@@ -131,12 +139,14 @@ unsafe fn recognize(
         return None;
     }
 
-    let Some((group_var, value_var)) = (unsafe { recognize_target(query) }) else {
+    let Some(target) = (unsafe { recognize_target(query) }) else {
         pgrx::debug1!(
-            "pg_accel: resident star groupagg miss: target list is not group_var, sum(value_var)"
+            "pg_accel: resident star groupagg miss: target list is not group_var, sum(value_var)[, count(*)]"
         );
         return None;
     };
+    let group_var = target.group_var;
+    let value_var = target.value_var;
     if group_var.varno == value_var.varno || group_var.attno <= 0 || value_var.attno <= 0 {
         pgrx::debug1!(
             "pg_accel: resident star groupagg miss: group/value vars are not fact-dimension refs"
@@ -157,28 +167,31 @@ unsafe fn recognize(
             &mut predicates,
         );
     }
-    let Some(fact_predicate) = predicates
+    let fact_predicate = predicates
         .iter()
         .copied()
         .find(|predicate| predicate.var == value_var)
-    else {
-        pgrx::debug1!(
-            "pg_accel: resident star groupagg miss: no fact value Var OP Const predicate; \
-             predicates_seen={}",
-            predicates.len(),
-        );
-        return None;
-    };
-    let Some(dim_predicate) = predicates.iter().copied().find(|predicate| {
-        predicate.var.varno == group_var.varno
-            && predicate.var.attno != group_var.attno
-            && predicate.var.attno != candidate.dim_key_attno
-    }) else {
-        pgrx::debug1!(
-            "pg_accel: resident star groupagg miss: no dimension filter Var OP Const predicate"
-        );
-        return None;
-    };
+        .unwrap_or(VarConstPredicate {
+            var: value_var,
+            cmp_opcode: opcode::ALWAYS_TRUE,
+            const_value: 0.0,
+        });
+    let dim_predicate = predicates
+        .iter()
+        .copied()
+        .find(|predicate| {
+            predicate.var.varno == group_var.varno
+                && predicate.var.attno != group_var.attno
+                && predicate.var.attno != candidate.dim_key_attno
+        })
+        .unwrap_or(VarConstPredicate {
+            var: group_var,
+            cmp_opcode: opcode::ALWAYS_TRUE,
+            const_value: 0.0,
+        });
+    if target.has_count_star {
+        pgrx::debug1!("pg_accel: resident star groupagg recognized optional COUNT(*) lane");
+    }
 
     let logical = ResidentGroupAggLogicalSpec::for_star_dim_grouped_f64();
     Some(ResidentStarDimGroupedF64Spec {
@@ -199,7 +212,7 @@ unsafe fn recognize(
     })
 }
 
-unsafe fn recognize_target(query: &pg_sys::Query) -> Option<(VarRef, VarRef)> {
+unsafe fn recognize_target(query: &pg_sys::Query) -> Option<StarTarget> {
     let group_var = unsafe { single_group_var(query) }?;
     if query.targetList.is_null() {
         return None;
@@ -213,11 +226,20 @@ unsafe fn recognize_target(query: &pg_sys::Query) -> Option<(VarRef, VarRef)> {
         }
         nonjunk.push(unsafe { (*tle).expr.cast::<pg_sys::Node>() });
     }
-    if nonjunk.len() != 2 || unsafe { extract_var(nonjunk[0]) } != Some(group_var) {
+    if !(2..=3).contains(&nonjunk.len()) || unsafe { extract_var(nonjunk[0]) } != Some(group_var) {
         return None;
     }
     let value_var = unsafe { aggref_direct_var(nonjunk[1], b"sum") }?;
-    Some((group_var, value_var))
+    let has_count_star = if nonjunk.len() == 3 {
+        unsafe { aggref_count_star(nonjunk[2]) }?
+    } else {
+        false
+    };
+    Some(StarTarget {
+        group_var,
+        value_var,
+        has_count_star,
+    })
 }
 
 unsafe fn single_group_var(query: &pg_sys::Query) -> Option<VarRef> {
@@ -292,6 +314,23 @@ unsafe fn aggref_direct_var(node: *mut pg_sys::Node, name: &[u8]) -> Option<VarR
 unsafe fn agg_name_matches(aggfnoid: pg_sys::Oid, expected: &[u8]) -> bool {
     let name = unsafe { pg_sys::get_func_name(aggfnoid) };
     !name.is_null() && unsafe { CStr::from_ptr(name) }.to_bytes() == expected
+}
+
+unsafe fn aggref_count_star(node: *mut pg_sys::Node) -> Option<bool> {
+    if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_Aggref {
+        return None;
+    }
+    let agg = node.cast::<pg_sys::Aggref>();
+    let agg_ref = unsafe { &*agg };
+    if !agg_ref.aggstar
+        || !agg_ref.aggdistinct.is_null()
+        || !agg_ref.aggorder.is_null()
+        || !agg_ref.aggfilter.is_null()
+        || !unsafe { agg_name_matches(agg_ref.aggfnoid, b"count") }
+    {
+        return None;
+    }
+    Some(agg_ref.args.is_null() || unsafe { pg_sys::list_length(agg_ref.args) } == 0)
 }
 
 unsafe fn find_star_join_candidate(

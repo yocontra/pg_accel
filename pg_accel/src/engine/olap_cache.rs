@@ -2415,9 +2415,19 @@ fn alloc_device_u32(len: usize, label: &str) -> Result<ExprDeviceBuffer<u32>, St
 }
 
 const RESIDENT_DENSE_GROUP_BLOCKED_MIN_ROWS: usize = 262_144;
-const RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS: usize = 65_536;
-const RESIDENT_DENSE_GROUP_SORT_MIN_GROUPS: usize = 4096;
+const RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS: usize = 8_192;
+const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MIN_ROWS: usize = usize::MAX;
+const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MAX_GROUPS: usize = 256;
+const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MIN_ROWS: usize = 8_192;
+const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_ROWS: usize = 262_144;
+const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_HIGH_GROUP_MAX_ROWS: usize = 65_536;
+const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_HIGH_GROUP_MIN_GROUPS: usize = 2_049;
+const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_GROUPS: usize = 16_384;
+const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS: usize = 16_384;
+const RESIDENT_DENSE_GROUP_SORT_MIN_GROUPS: usize = 512;
 const RESIDENT_DENSE_GROUP_ONE_PASS_MAX_GROUPS: usize = 256;
+const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_BLOCK_ROWS: usize = 1024;
+const RESIDENT_DENSE_GROUP_ONE_PASS_BLOCK_ROWS: usize = 8192;
 const RESIDENT_DENSE_GROUP_BLOCK_ROWS: usize = 4096;
 
 fn resident_groupagg_partial_capacity(
@@ -2426,13 +2436,31 @@ fn resident_groupagg_partial_capacity(
 ) -> Result<usize, String> {
     let may_use_one_pass = row_count >= RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS
         && group_capacity <= RESIDENT_DENSE_GROUP_ONE_PASS_MAX_GROUPS;
+    let may_use_predicate_wide = row_count >= RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MIN_ROWS
+        && group_capacity <= RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MAX_GROUPS;
+    let may_use_simple_wide = row_count >= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MIN_ROWS
+        && group_capacity <= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_GROUPS
+        && if group_capacity >= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_HIGH_GROUP_MIN_GROUPS {
+            row_count < RESIDENT_DENSE_GROUP_SIMPLE_WIDE_HIGH_GROUP_MAX_ROWS
+        } else {
+            row_count < RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_ROWS
+        };
     let may_use_blocked = row_count >= RESIDENT_DENSE_GROUP_BLOCKED_MIN_ROWS
         && group_capacity < RESIDENT_DENSE_GROUP_SORT_MIN_GROUPS;
-    if !may_use_one_pass && !may_use_blocked {
+    if !may_use_one_pass && !may_use_predicate_wide && !may_use_simple_wide && !may_use_blocked {
         return Ok(0);
     }
-    let row_block_count = row_count / RESIDENT_DENSE_GROUP_BLOCK_ROWS
-        + usize::from(!row_count.is_multiple_of(RESIDENT_DENSE_GROUP_BLOCK_ROWS));
+    let block_rows = if may_use_predicate_wide {
+        RESIDENT_DENSE_GROUP_PREDICATE_WIDE_BLOCK_ROWS
+    } else if may_use_simple_wide {
+        RESIDENT_DENSE_GROUP_SIMPLE_WIDE_BLOCK_ROWS
+    } else if may_use_one_pass {
+        RESIDENT_DENSE_GROUP_ONE_PASS_BLOCK_ROWS
+    } else {
+        RESIDENT_DENSE_GROUP_BLOCK_ROWS
+    };
+    let row_block_count =
+        row_count / block_rows + usize::from(!row_count.is_multiple_of(block_rows));
     row_block_count
         .checked_mul(group_capacity)
         .ok_or_else(|| "resident groupagg partial scratch capacity overflow".to_string())
@@ -2853,6 +2881,8 @@ fn load_resident_star_dim_groupagg_cache(
     if fact_value_cmp_const.is_nan() || dim_filter_const.is_nan() {
         return Err("resident star groupagg predicates cannot compare against NaN".to_owned());
     }
+    let dim_filter_is_always_true =
+        dim_filter_cmp_opcode == crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
     let fact_rel_oid = relation_oid(fact_table)?;
     let dim_rel_oid = relation_oid(dim_table)?;
     let qualified_fact = relation_qualified_name(fact_rel_oid, fact_table)?;
@@ -2868,12 +2898,20 @@ fn load_resident_star_dim_groupagg_cache(
         quote_identifier(fact_key_col),
         quote_identifier(fact_value_col),
     );
-    let dim_query = format!(
-        "SELECT {}, {}, {} FROM {qualified_dim}",
-        quote_identifier(dim_key_col),
-        quote_identifier(dim_filter_col),
-        quote_identifier(dim_group_col),
-    );
+    let dim_query = if dim_filter_is_always_true {
+        format!(
+            "SELECT {}, {} FROM {qualified_dim}",
+            quote_identifier(dim_key_col),
+            quote_identifier(dim_group_col),
+        )
+    } else {
+        format!(
+            "SELECT {}, {}, {} FROM {qualified_dim}",
+            quote_identifier(dim_key_col),
+            quote_identifier(dim_filter_col),
+            quote_identifier(dim_group_col),
+        )
+    };
 
     let (fact_keys, fact_key_nulls, values, value_nulls) =
         crate::engine::ffi::planner_hooks::with_planner_hooks_suspended(|| {
@@ -2943,26 +2981,31 @@ fn load_resident_star_dim_groupagg_cache(
                         .get::<i32>(1)
                         .map_err(|err| format!("{dim_key_col} read failed: {err:?}"))?
                         .ok_or_else(|| format!("{dim_key_col} is NULL"))?;
-                    let filter_value = row
-                        .get::<i32>(2)
-                        .map_err(|err| format!("{dim_filter_col} read failed: {err:?}"))?
-                        .ok_or_else(|| format!("{dim_filter_col} is NULL"))?;
                     dim_keys.push(dim_key);
-                    if !cache_cmp_passes_f64(
-                        f64::from(filter_value),
-                        dim_filter_cmp_opcode,
-                        dim_filter_const,
-                    )? {
-                        continue;
-                    }
+                    let group_idx = if dim_filter_is_always_true {
+                        2
+                    } else {
+                        let filter_value = row
+                            .get::<i32>(2)
+                            .map_err(|err| format!("{dim_filter_col} read failed: {err:?}"))?
+                            .ok_or_else(|| format!("{dim_filter_col} is NULL"))?;
+                        if !cache_cmp_passes_f64(
+                            f64::from(filter_value),
+                            dim_filter_cmp_opcode,
+                            dim_filter_const,
+                        )? {
+                            continue;
+                        }
+                        3
+                    };
                     let group = match dim_group_key_source {
                         ResidentGroupKeySource::Int4 => ResidentGroupKeyValue::Int4(
-                            row.get::<i32>(3)
+                            row.get::<i32>(group_idx)
                                 .map_err(|err| format!("{dim_group_col} read failed: {err:?}"))?
                                 .ok_or_else(|| format!("{dim_group_col} is NULL"))?,
                         ),
                         ResidentGroupKeySource::Text => ResidentGroupKeyValue::Text(
-                            row.get::<String>(3)
+                            row.get::<String>(group_idx)
                                 .map_err(|err| format!("{dim_group_col} read failed: {err:?}"))?
                                 .ok_or_else(|| format!("{dim_group_col} is NULL"))?,
                         ),

@@ -89,7 +89,7 @@ GROUP BY b.name;
 | Rust | stable | For building from source |
 | cmake | 3.20+ | For GPU kernel build |
 | Apple Silicon or NVIDIA CUDA | M1+ for Metal, NVIDIA GPU for CUDA | Runtime GPU backend |
-| AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` @ `876634a63d09af6f8d7bbffd6c42d29527981437` | Required for source/package builds |
+| AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` @ `456ae6910720810f5fe59f160e6707d46bb8e5f0` | Required for source/package builds |
 
 Source and package builds compile the SYCL kernel library unconditionally.
 Runtime GPU acceleration requires an AdaptiveCpp backend visible to the native
@@ -127,9 +127,9 @@ release ship gate found 24 failures. In that July 2 artifact, the failures were
 not crashes: they were missed hashjoin GPU selection, missing H3 cache-mode
 evidence or threshold-policy mismatches, and one small-input filtered grouped
 aggregate threshold miss. Targeted July 3-4 artifacts have since remediated the
-count-only resident hashjoin and `gpu_hashjoin_filter` lanes, but the full
-suite still needs to be regenerated before those rows can be cleared from the
-release ledger.
+count-only resident hashjoin, `gpu_hashjoin_filter`, and `mixed_join_agg` lanes,
+but the full suite still needs to be regenerated before those rows can be
+cleared from the release ledger.
 
 ### Strongest current wins
 
@@ -141,6 +141,7 @@ release ledger.
 | `ssbm_q2_1` | 10M | 4.15 ms | 182.19 ms | 43.93x |
 | `ssbm_q1_2` | 10M | 5.55 ms | 188.33 ms | 33.95x |
 | `filtered_grouped_agg` | 10M | 5.12 ms | 78.31 ms | 15.30x |
+| `mixed_join_agg` | 10M | 18.34 ms | 239.22 ms | 13.04x |
 | `dictionary_grouped_agg` | 10M | 26.78 ms | 206.62 ms | 7.72x |
 | `predicate_filter_expression_grouped_agg` | 10M | 25.91 ms | 174.72 ms | 6.74x |
 | `grouped_agg` | 10M | 62.46 ms | 226.15 ms | 3.62x |
@@ -156,14 +157,14 @@ release ledger.
 | Windows | `window_analytics` @ 10M | planner declined | 0.98x | Needs a generic segmented window path. |
 | Sort/top-k | `large_sort` @ 10M | planner declined | 0.97x | Needs a resident generic sort/top-k path. |
 | Spatial | `spatial_contains` @ 10M | planner declined | 0.97x | Current spatial suite is mostly native parity. |
-| Mixed join/aggregate | `mixed_join_agg` @ 10M | planner declined | 0.97x | Fused join + aggregate is not broad enough yet. |
+| Mixed join/aggregate | `mixed_join_agg` @ 10M | fixed in targeted artifact | 13.04x | Generic resident star groupagg now wins; awaiting regenerated full-suite proof. |
 | Raster | `raster_ndvi` @ 100 | planner declined | 0.99x | Raster remains native/parity in this suite. |
 
 The current architecture story is clear: resident grouped aggregation and
 SSBM-style OLAP queries are strong, H3 has large wins but needs release-grade
 cache evidence, and the next broad work should focus on remaining
-join-filter/grouped-aggregate cases, segmented windows, sort/top-k, and
-spatial/raster pipelines.
+filtered/high-cardinality join-aggregate cases, segmented windows, sort/top-k,
+and spatial/raster pipelines.
 
 Run benchmarks with:
 
@@ -260,12 +261,13 @@ pg_accel does not run PostGIS predicate evaluation under an accelerator plan.
 GPU acceleration requires a native AdaptiveCpp backend visible to PostgreSQL:
 Metal on Apple Silicon or CUDA on Linux/NVIDIA. `just setup-gpu` builds the
 `yocontra/AdaptiveCpp` `fork-safe-metal` branch at
-`876634a63d09af6f8d7bbffd6c42d29527981437` into
+`456ae6910720810f5fe59f160e6707d46bb8e5f0` into
 `.pgaccel/acpp/<backend>` and pins the soft-fp64 source checkout to `v1.3.0`.
 This release intentionally uses the fork-pinned setup path until the required
 Metal, fork-safety, and soft-fp64 changes are available upstream. The current
 fork is merged with upstream `develop` through `9a912721` and keeps pg_accel's
-Metal soft-fp64/fork-safety patches on top.
+Metal soft-fp64/fork-safety patches plus the default-targets JSON escaping fix
+on top.
 
 ```bash
 # Linux/NVIDIA
