@@ -2416,7 +2416,10 @@ fn alloc_device_u32(len: usize, label: &str) -> Result<ExprDeviceBuffer<u32>, St
 
 const RESIDENT_DENSE_GROUP_BLOCKED_MIN_ROWS: usize = 262_144;
 const RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS: usize = 8_192;
-const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MIN_ROWS: usize = usize::MAX;
+/// Twin of `executor::olap::RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_ENABLED`
+/// (must stay in lockstep): the predicate-wide lane is disabled pending the
+/// Phase 4 kernel rewrite. Previously hidden as `MIN_ROWS = usize::MAX`.
+const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_ENABLED: bool = false;
 const RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MAX_GROUPS: usize = 256;
 const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MIN_ROWS: usize = 8_192;
 const RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_ROWS: usize = 262_144;
@@ -2436,7 +2439,7 @@ fn resident_groupagg_partial_capacity(
 ) -> Result<usize, String> {
     let may_use_one_pass = row_count >= RESIDENT_DENSE_GROUP_ONE_PASS_MIN_ROWS
         && group_capacity <= RESIDENT_DENSE_GROUP_ONE_PASS_MAX_GROUPS;
-    let may_use_predicate_wide = row_count >= RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MIN_ROWS
+    let may_use_predicate_wide = RESIDENT_DENSE_GROUP_PREDICATE_WIDE_ENABLED
         && group_capacity <= RESIDENT_DENSE_GROUP_PREDICATE_WIDE_MAX_GROUPS;
     let may_use_simple_wide = row_count >= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MIN_ROWS
         && group_capacity <= RESIDENT_DENSE_GROUP_SIMPLE_WIDE_MAX_GROUPS

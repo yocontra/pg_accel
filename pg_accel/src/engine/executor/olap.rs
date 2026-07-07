@@ -15,7 +15,12 @@ pub const RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES: usize = 4;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS: usize = 8_192;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_ROWS: usize = 262_144;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MAX_ROWS: usize = 65_536;
-const RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MIN_ROWS: usize = usize::MAX;
+/// The predicate-wide dense-grouped kernel lane is disabled: it lost to the v9
+/// masked path in benchmarks and its rewrite is owned by the Phase 4 kernel
+/// generalization (see TODO-REVIEW.md "usize::MAX threshold kill-switch").
+/// This used to be hidden as `MIN_ROWS = usize::MAX`; the explicit bool keeps
+/// the disabled state visible and lint-clean without changing behavior.
+const RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_ENABLED: bool = false;
 const RESIDENT_DENSE_GROUPED_F64_MUL_WIDE_MIN_ROWS: usize = 1_000_000;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS: i32 = 129;
 const RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_HIGH_GROUP_MIN_GROUPS: i32 = 2_049;
@@ -28,8 +33,9 @@ const RESIDENT_STAR_DIM_GROUPED_F64_FUSED_MAX_GROUPS: i32 = 256;
 
 fn resident_dense_grouped_f64_simple_wide_allowed(row_count: usize, group_count: i32) -> bool {
     if row_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_ROWS
-        || group_count < RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
-        || group_count > RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS
+        || !(RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MIN_GROUPS
+            ..=RESIDENT_DENSE_GROUPED_F64_SIMPLE_WIDE_MAX_GROUPS)
+            .contains(&group_count)
     {
         return false;
     }
@@ -1705,8 +1711,7 @@ impl OlapAggExecState {
                                     | ResidentDenseGroupedF64Layout::GroupCountSum
                                     | ResidentDenseGroupedF64Layout::GroupSumAvgCount
                             )
-                            && cache.row_count()
-                                >= RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MIN_ROWS
+                            && RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_ENABLED
                             && cache.group_count()
                                 <= RESIDENT_DENSE_GROUPED_F64_PREDICATE_WIDE_MAX_GROUPS
                             && (!predicate_wide_rhs_required || rhs_col_for_predicate.is_some());
