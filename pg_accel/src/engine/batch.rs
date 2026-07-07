@@ -1,4 +1,9 @@
+#![allow(dead_code)] // reason: loader-v2 candidate (Phase 5 residency decides SPI vs heap-scan); delete in Phase 5 if SPI wins
 //! Batch accumulator for collecting rows before dispatch.
+//!
+//! Quarantined 2026-07 executor rebuild (Phase 3B): `BatchAccumulator` has zero
+//! callers after the host-staged per-batch execution path was retired. Retained
+//! as a loader-v2 candidate; Phase 5 residency decides SPI vs heap-scan.
 //!
 //! The [`BatchAccumulator`] buffers `(Datum, is_null)` pairs until a
 //! configurable batch size is reached, at which point the caller can
