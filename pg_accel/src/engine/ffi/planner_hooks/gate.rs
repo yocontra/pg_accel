@@ -99,33 +99,6 @@ impl HookContext {
         false
     }
 
-    /// Require GPU execution to be available for a GPU-backed candidate.
-    #[must_use]
-    pub(super) fn require_gpu_usable(&mut self) -> bool {
-        if cost::gpu_is_usable() {
-            return true;
-        }
-
-        self.reject(RejectionReason::GpuNotUsable);
-        false
-    }
-
-    /// Require a transaction context before code that may use SPI.
-    #[must_use]
-    pub(super) fn require_transaction_for_spi(&mut self) -> bool {
-        // SAFETY: PostgreSQL exposes this as a read-only backend state check.
-        if unsafe { pg_sys::IsTransactionState() } {
-            return true;
-        }
-
-        self.reject(RejectionReason::Other("transaction_unavailable"));
-        false
-    }
-
-    pub(super) fn accept(&mut self) {
-        self.recorder.record_acceptance(self.facts);
-    }
-
     fn reject(&mut self, reason: RejectionReason) {
         self.recorder.record_rejection(reason, self.facts);
     }
@@ -146,34 +119,5 @@ mod tests {
         let context = HookContext::new("upper_paths", "GpuAgg");
 
         assert_eq!(context.last_decision(), None);
-    }
-
-    #[test]
-    fn accept_records_acceptance_for_context_facts() {
-        let mut context = HookContext::new("upper_paths", "GpuAgg");
-
-        context.accept();
-
-        let decision = context
-            .last_decision()
-            .expect("acceptance should record a decision");
-        assert!(decision.is_accepted());
-        assert_eq!(decision.facts().hook(), "upper_paths");
-        assert_eq!(decision.facts().candidate(), "GpuAgg");
-    }
-
-    #[test]
-    fn gpu_gate_records_rejection_when_unusable() {
-        let mut context = HookContext::new("upper_paths", "GpuAgg");
-
-        if !context.require_gpu_usable() {
-            let decision = context
-                .last_decision()
-                .expect("gpu gate should record rejection when it declines");
-            assert_eq!(
-                decision.rejection_reason(),
-                Some(RejectionReason::GpuNotUsable)
-            );
-        }
     }
 }
