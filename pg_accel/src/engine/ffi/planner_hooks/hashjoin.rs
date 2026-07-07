@@ -76,13 +76,6 @@ mod tests {
     //! helpers are exercised without a live PG backend or GPU.
     use super::*;
 
-    fn limits_native() -> DeviceLimits {
-        let mut l = DeviceLimits::cpu_only();
-        l.has_native_fp64 = true;
-        l.soft_fp64_cost_multiplier = 32.0;
-        l
-    }
-
     fn limits_soft() -> DeviceLimits {
         let mut l = DeviceLimits::cpu_only();
         l.has_native_fp64 = false;
