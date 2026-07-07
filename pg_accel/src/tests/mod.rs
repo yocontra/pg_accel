@@ -10,7 +10,8 @@
 mod phase2_bridge;
 #[cfg(any(test, feature = "pg_test"))]
 mod phase2_cache;
-mod phase2_dispatch;
+// NOTE: phase2_dispatch.rs is mounted from adapters/mod.rs via #[path] —
+// do not also declare it here (duplicate pg_finfo symbols).
 #[cfg(any(test, feature = "pg_test"))]
 mod phase2_engine;
 mod phase2_kernels;
