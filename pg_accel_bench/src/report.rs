@@ -2116,8 +2116,6 @@ fn normalize_plan_line(line: &str) -> Option<String> {
         || lower.starts_with("execution time:")
         || lower.starts_with("buffers:")
         || lower.starts_with("pg_accel planner rejection reason:")
-        || lower.starts_with("pg_accel benchmark threshold decline reason:")
-        || lower.starts_with("pg_accel benchmark threshold decline evidence:")
     {
         return None;
     }
@@ -2151,6 +2149,116 @@ fn max_iteration_value(
 
 fn format_optional_ms(value: Option<f64>) -> String {
     value.map_or_else(|| "-".to_owned(), |v| format!("{v:.2}ms"))
+}
+
+/// Maximum number of plan-snippet lines shown in a rendered report. This is
+/// a display-only cap: `WorkloadResult::plan_snippet` itself always holds
+/// the FULL captured `EXPLAIN (VERBOSE, COSTS OFF)` text, and every
+/// classification helper (dispatch detection, decline-reason extraction,
+/// plan-shape comparison, etc.) reads that full text directly. Only the
+/// markdown renderer truncates, so a deep plan tree cannot blow up the
+/// rendered report while a Custom Scan node past line 30 is still correctly
+/// classified.
+const PLAN_SNIPPET_DISPLAY_MAX_LINES: usize = 30;
+
+/// Truncate a full plan snippet for markdown display only. See
+/// `PLAN_SNIPPET_DISPLAY_MAX_LINES`. Never call this before classification —
+/// classification helpers must keep reading `WorkloadResult::plan_snippet`
+/// untouched.
+fn truncate_plan_for_display(plan: &str) -> String {
+    let total = plan.lines().count();
+    if total <= PLAN_SNIPPET_DISPLAY_MAX_LINES {
+        return plan.to_owned();
+    }
+    let mut truncated = plan
+        .lines()
+        .take(PLAN_SNIPPET_DISPLAY_MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = write!(
+        truncated,
+        "\n… ({} more lines)",
+        total - PLAN_SNIPPET_DISPLAY_MAX_LINES
+    );
+    truncated
+}
+
+/// Render the per-row evidence appendix for the Detailed Results section:
+/// warm/cold summaries (never a pooled median), the resident-cache preload
+/// note, the cold-cache `shared_buffers`-resident warning, native-decline
+/// evidence tagged with its source, and a truncated plan-snippet preview.
+/// Emits nothing when none of these apply to the row.
+fn render_workload_evidence_notes(w: &WorkloadResult, scale_label: &str, out: &mut String) {
+    let mut notes: Vec<String> = Vec::new();
+
+    if let (Some(warm), Some(cold)) = (&w.warm_summary, &w.cold_summary) {
+        notes.push(format!(
+            "Warm (n={}): accel median {:.2}ms, PG parallel median {:.2}ms, speedup {:.2}x.",
+            warm.n, warm.accel_median_ms, warm.parallel_median_ms, warm.speedup_median_vs_parallel
+        ));
+        notes.push(format!(
+            "Cold (n={}): accel median {:.2}ms, PG parallel median {:.2}ms, speedup {:.2}x.",
+            cold.n, cold.accel_median_ms, cold.parallel_median_ms, cold.speedup_median_vs_parallel
+        ));
+    }
+
+    if w.resident_lane {
+        notes.push(w.resident_load_ms.map_or_else(
+            || {
+                "Resident-cache preload: required for this lane but not captured for this row."
+                    .to_owned()
+            },
+            |ms| {
+                format!(
+                    "Resident-cache preload: {ms:.2}ms, paid once off the timed clock and \
+                     amortized across repeated queries against the resident cache."
+                )
+            },
+        ));
+    }
+
+    if w.cold_shared_buffers_resident == Some(true) {
+        notes.push(
+            "WARNING: this cold-cache fixture fit inside `shared_buffers`; PostgreSQL's buffer \
+             cache stayed resident after the OS page-cache purge, so these \"cold\" numbers \
+             reflect a shared_buffers-resident fixture, not genuine cold I/O."
+                .to_owned(),
+        );
+    }
+
+    if let Some(evidence) = &w.native_decline_evidence {
+        let confirmation = match evidence.source {
+            DeclineReasonSource::PlannerReported => "planner-reported, verified",
+            DeclineReasonSource::ExpectedUnconfirmed => "expected, unconfirmed",
+        };
+        notes.push(format!(
+            "Native-decline evidence: `{}` ({confirmation}).",
+            evidence.reason
+        ));
+    }
+
+    // Nothing noteworthy for this row (no cache split, no resident lane, no
+    // cold-buffer warning, no decline evidence) — skip. The full plan
+    // snippet is only worth dumping alongside evidence that needs it; the
+    // Dispatch Evidence By Row table already carries a one-line plan
+    // signature for every row.
+    if notes.is_empty() {
+        return;
+    }
+
+    if w.plan_snippet.is_some() {
+        notes.push(format!(
+            "Plan snippet (accel, display-truncated to {PLAN_SNIPPET_DISPLAY_MAX_LINES} lines):"
+        ));
+    }
+
+    let _ = writeln!(out, "- **{scale_label}:**");
+    for note in &notes {
+        let _ = writeln!(out, "  - {note}");
+    }
+    if let Some(plan) = &w.plan_snippet {
+        let _ = writeln!(out, "\n```\n{}\n```\n", truncate_plan_for_display(plan));
+    }
 }
 
 fn csv_optional_f64(value: Option<f64>) -> String {
@@ -2254,6 +2362,22 @@ fn warmup_jit_audit_reason(w: &WorkloadResult) -> Option<String> {
     (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
+/// Warm-subsample speedup used by the ship gates below. Reads
+/// `WorkloadResult::warm_summary` directly when the run measured a cache
+/// split (`CacheMode::Both`); falls back to the flat top-level
+/// `speedup_median_vs_parallel` for warm-only runs, where the flat field
+/// already describes the same (only) subsample. This is deliberately
+/// explicit rather than relying on the flat field's documented "describes
+/// the warm subsample" invariant — the gate should read the warm evidence
+/// directly, not through an implicit contract on an unrelated field.
+fn warm_speedup_for_gate(w: &WorkloadResult) -> f64 {
+    w.warm_summary
+        .as_ref()
+        .map_or(w.speedup_median_vs_parallel, |s| {
+            s.speedup_median_vs_parallel
+        })
+}
+
 fn gpu_winner_evidence_verified(
     w: &WorkloadResult,
     lane: &str,
@@ -2262,12 +2386,13 @@ fn gpu_winner_evidence_verified(
 ) -> bool {
     let classification = w.dispatch_classification();
     let threshold = min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
+    let warm_speedup = warm_speedup_for_gate(w);
     classification.gpu_kernel_dispatched
         && w.dispatch_counter_captured
         && w.gpu_kernel_execution_delta > 0
         && classification.rows_returned_to_cpu > 0
-        && w.speedup_median_vs_parallel.is_finite()
-        && w.speedup_median_vs_parallel >= threshold
+        && warm_speedup.is_finite()
+        && warm_speedup >= threshold
         && operation_cache_gate_verified(w, cache_mode)
         && (!threshold_lane_requires_resident_groupagg_logical_spec(lane)
             || w.plan_snippet
@@ -2275,28 +2400,61 @@ fn gpu_winner_evidence_verified(
                 .is_some_and(plan_contains_resident_groupagg_logical_evidence))
 }
 
+/// Whether native-decline evidence for this row is *verified* — i.e. safe to
+/// pass a ship gate. Reads `WorkloadResult::native_decline_evidence` only:
+/// only `DeclineReasonSource::PlannerReported` (a real
+/// `pg_accel_last_planner_rejection_reason()` decline captured by the
+/// runner) counts as verified. `DeclineReasonSource::ExpectedUnconfirmed`
+/// (the static benchmark-threshold matrix expected a decline but the
+/// planner surfaced no reason) must never pass — the report renders it as
+/// "expected, unconfirmed" instead (see `native_decline_evidence_label`).
+///
+/// This deliberately does not grep `plan_snippet` for any decline-reason
+/// text. The runner never synthesizes plan text for an unconfirmed
+/// expectation (see `runner::native_decline_evidence`), so grepping the
+/// plan snippet can no longer distinguish a real decline from an assumed
+/// one — the tagged evidence field is the only source of truth.
 fn native_decline_reason_verified(w: &WorkloadResult, reason: &str) -> bool {
-    plan_snippet_decline_reason_matches(w, "pg_accel planner rejection reason: ", reason)
-        || plan_snippet_decline_reason_matches(
-            w,
-            "pg_accel benchmark threshold decline reason: ",
-            reason,
-        )
+    matches!(
+        &w.native_decline_evidence,
+        Some(NativeDeclineEvidence {
+            reason: actual,
+            source: DeclineReasonSource::PlannerReported,
+        }) if actual == reason
+    )
 }
 
-fn plan_snippet_decline_reason_matches(w: &WorkloadResult, prefix: &str, reason: &str) -> bool {
-    w.plan_snippet.as_deref().is_some_and(|plan| {
-        plan.lines()
-            .any(|line| line.trim().strip_prefix(prefix) == Some(reason))
-    })
+/// Render the native-decline evidence for a row, tagged with its
+/// confirmation status, for markdown display. `ExpectedUnconfirmed` renders
+/// as "expected, unconfirmed" so a reader never mistakes a static-matrix
+/// assumption for a proven planner decision.
+fn native_decline_evidence_label(w: &WorkloadResult) -> String {
+    match &w.native_decline_evidence {
+        Some(NativeDeclineEvidence {
+            reason,
+            source: DeclineReasonSource::PlannerReported,
+        }) => format!("{reason} (planner-reported, verified)"),
+        Some(NativeDeclineEvidence {
+            reason,
+            source: DeclineReasonSource::ExpectedUnconfirmed,
+        }) => format!("{reason} (expected, unconfirmed)"),
+        None => "-".to_owned(),
+    }
 }
 
 fn operation_cache_gate_required(name: &str) -> bool {
     name.starts_with("h3_") || name.starts_with("raster_")
 }
 
+/// Verifies the h3_/raster_ cache-mode-both requirement. Requires both that
+/// the methodology reports `cache_mode == "both"` AND that this row actually
+/// carries a populated `warm_summary` — i.e. real warm-only medians were
+/// computed for this row, not merely that the run was globally configured
+/// for cache-mode both. A methodology string alone does not prove any given
+/// row was measured under both cache states.
 fn operation_cache_gate_verified(w: &WorkloadResult, cache_mode: &str) -> bool {
-    !operation_cache_gate_required(&w.name) || cache_mode.trim().eq_ignore_ascii_case("both")
+    !operation_cache_gate_required(&w.name)
+        || (cache_mode.trim().eq_ignore_ascii_case("both") && w.warm_summary.is_some())
 }
 
 fn no_dispatch_audit_action(w: &WorkloadResult) -> &'static str {
@@ -2951,9 +3109,10 @@ impl BenchReport {
             let _ = writeln!(
                 out,
                 "| Scale | Accel median (ms) | Accel p25–p75 | PG Parallel median (ms) | \
-                 PG p25–p75 | Speedup (median) | Cohen's d | p (Bonferroni) | Verdict |"
+                 PG p25–p75 | Speedup (median) | Cohen's d | p (Bonferroni) | Verdict | \
+                 Resident Load (ms) |"
             );
-            let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|");
+            let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|");
             for &s in scales {
                 if let Some(w) = lookup.get(&(name.as_str(), s)) {
                     let dispatch_view = normalized_lookup
@@ -2981,10 +3140,20 @@ impl BenchReport {
                     } else {
                         ""
                     };
+                    // Resident-cache preload cost, when this row required one
+                    // (`ssbm_*` / `resident_*` lanes). Paid once, off the
+                    // timed clock, and amortized across repeated queries
+                    // against the same resident cache — surfaced here so the
+                    // report never hides what the accel side got for free.
+                    let resident_load = if w.resident_lane {
+                        format_optional_ms(w.resident_load_ms)
+                    } else {
+                        "-".to_owned()
+                    };
                     let _ = writeln!(
                         out,
                         "| {} | {:.2}{} | {:.2}–{:.2} (p95 {:.2}) | {:.2}{} | \
-                         {:.2}–{:.2} (p95 {:.2}) | **{:.2}x** | {:.2} | {} | {} |",
+                         {:.2}–{:.2} (p95 {:.2}) | **{:.2}x** | {:.2} | {} | {} | {} |",
                         format_rows(s),
                         w.accel_median_ms,
                         asym,
@@ -3000,10 +3169,23 @@ impl BenchReport {
                         w.cohens_d_vs_parallel,
                         format_pvalue(adj_p),
                         verdict,
+                        resident_load,
                     );
                 }
             }
             out.push('\n');
+
+            // Evidence appendix: warm/cold split (never pooled), cold-cache
+            // shared_buffers warning, native-decline evidence source, and a
+            // truncated plan-snippet preview. Rendered as notes rather than
+            // extra columns on the primary table above so the headline shape
+            // stays stable while the honesty-critical evidence is still
+            // visible per row.
+            for &s in scales {
+                if let Some(w) = lookup.get(&(name.as_str(), s)) {
+                    render_workload_evidence_notes(w, &format_rows(s), &mut out);
+                }
+            }
         }
 
         // -------------------------------------------------------------------
@@ -3119,8 +3301,12 @@ impl BenchReport {
                 "|----------|-------|-------|--------------|------------------|-----------|-------|"
             );
             for c in &self.crashes {
-                let short_err = if c.error.len() > 80 {
-                    format!("{}...", &c.error[..77])
+                // Char-boundary-safe truncation: byte-slicing at a fixed
+                // offset panics if the cut falls inside a multibyte UTF-8
+                // sequence.
+                let short_err = if c.error.chars().count() > 80 {
+                    let truncated: String = c.error.chars().take(77).collect();
+                    format!("{truncated}...")
                 } else {
                     c.error.clone()
                 };
@@ -3474,6 +3660,75 @@ impl BenchReport {
         );
         out.push('\n');
 
+        // ----- Resident-cache lane split -----
+        //
+        // Resident lanes (`ssbm_*` / `resident_*`) pre-load GPU-resident
+        // caches OFF the timed clock, while the PG-parallel baseline pays
+        // scan I/O ON the clock for the same query. That is a real and
+        // legitimate difference, but it must never hide inside one combined
+        // geomean bar — a reviewer needs to be able to tell "this win
+        // includes off-clock preload" from "this win did not". See
+        // `resident_load_ms` in Detailed Results for the per-row preload
+        // cost.
+        let resident_dispatched: Vec<&WorkloadResult> = dispatched
+            .iter()
+            .copied()
+            .filter(|w| w.resident_lane)
+            .collect();
+        let non_resident_dispatched: Vec<&WorkloadResult> = dispatched
+            .iter()
+            .copied()
+            .filter(|w| !w.resident_lane)
+            .collect();
+
+        out.push_str("### Geomean by Resident-Cache Lane\n\n");
+        out.push_str(
+            "Splits the `overall (GPU-dispatched)` row into resident-cache lanes \
+             (pre-load caches off the timed clock; see `resident_load_ms` per row in \
+             Detailed Results) and non-resident lanes (no off-clock preload). Both \
+             buckets count as GPU-dispatched wins, but only the non-resident bucket is \
+             directly comparable to a PG-parallel baseline that pays scan I/O on the \
+             clock.\n\n",
+        );
+        let _ = writeln!(
+            out,
+            "| Lane | Workloads | Geomean ({speedup_label}) | Sig Wins | \
+             Sig Losses | Total Sig | Not Sig |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|");
+
+        let resident_speedups: Vec<f64> =
+            resident_dispatched.iter().map(|w| speedup_of(w)).collect();
+        let resident_gm = stats::geomean(&resident_speedups);
+        let resident_counts = classify_significance(&resident_dispatched, family_size, 0.05);
+        let _ = writeln!(
+            out,
+            "| Resident-cache lane | {} | {resident_gm:.2}x | {} | {} | {} | {} |",
+            resident_dispatched.len(),
+            resident_counts.sig_wins,
+            resident_counts.sig_losses,
+            resident_counts.total_sig,
+            resident_counts.not_significant,
+        );
+
+        let non_resident_speedups: Vec<f64> = non_resident_dispatched
+            .iter()
+            .map(|w| speedup_of(w))
+            .collect();
+        let non_resident_gm = stats::geomean(&non_resident_speedups);
+        let non_resident_counts =
+            classify_significance(&non_resident_dispatched, family_size, 0.05);
+        let _ = writeln!(
+            out,
+            "| Non-resident lane | {} | {non_resident_gm:.2}x | {} | {} | {} | {} |",
+            non_resident_dispatched.len(),
+            non_resident_counts.sig_wins,
+            non_resident_counts.sig_losses,
+            non_resident_counts.total_sig,
+            non_resident_counts.not_significant,
+        );
+        out.push('\n');
+
         // ----- CRASH summary rows (action_items L) -----
         if !report.crashes.is_empty() {
             out.push_str("### Crashed scales\n\n");
@@ -3483,8 +3738,13 @@ impl BenchReport {
             );
             let _ = writeln!(out, "|---|---|---|---|---|---|");
             for c in &report.crashes {
-                let short = if c.error.len() > 80 {
-                    format!("{}...", &c.error[..77])
+                // Char-boundary-safe truncation: byte-slicing at a fixed
+                // offset panics if the cut falls inside a multibyte UTF-8
+                // sequence (e.g. an error message containing non-ASCII
+                // identifiers or copy-pasted terminal output).
+                let short = if c.error.chars().count() > 80 {
+                    let truncated: String = c.error.chars().take(77).collect();
+                    format!("{truncated}...")
                 } else {
                     c.error.clone()
                 };
@@ -3548,11 +3808,11 @@ impl BenchReport {
             "| Lane | Workload | Scale | Type | Cardinality | Selectivity | Result Count | \
              Index/Pruning | Prepared Geometry | Batches | Row Width | Output | \
              Dispatch/Output Evidence | Correctness Evidence | Cache Gate | \
-             Threshold Basis | Expected | Observed | Speedup | Status |"
+             Threshold Basis | Expected | Observed | Decline Evidence | Speedup | Status |"
         );
         let _ = writeln!(
             out,
-            "|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---:|---|"
+            "|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---:|---|"
         );
         for (workload, entry) in rows {
             let status = threshold_matrix_status(
@@ -3563,9 +3823,10 @@ impl BenchReport {
             );
             let expected = threshold_matrix_expectation_label(entry.expectation);
             let observed = dispatch_evidence_label(workload);
+            let decline_evidence = native_decline_evidence_label(workload);
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.2}x | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {:.2}x | {} |",
                 markdown_cell(entry.lane),
                 markdown_cell(entry.workload),
                 format_rows(entry.rows),
@@ -3584,6 +3845,7 @@ impl BenchReport {
                 markdown_cell(entry.threshold_basis),
                 markdown_cell(&expected),
                 observed,
+                markdown_cell(&decline_evidence),
                 workload.speedup_median_vs_parallel,
                 status,
             );
@@ -5152,6 +5414,276 @@ mod tests {
         assert!((result.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
     }
 
+    /// Minimal `CacheModeSummary` builder for tests that need to plant a
+    /// specific warm/cold subsample summary directly, independent of
+    /// `WorkloadResult::from_iterations`.
+    fn mock_cache_mode_summary(cache_state: CacheState, speedup_median: f64) -> CacheModeSummary {
+        CacheModeSummary {
+            cache_state,
+            n: 5,
+            accel_mean_ms: 10.0,
+            accel_median_ms: 10.0,
+            accel_stddev_ms: 0.0,
+            accel_p95_ms: 10.0,
+            accel_cv_pct: 0.0,
+            accel_ci_95: (10.0, 10.0),
+            parallel_mean_ms: 10.0 * speedup_median,
+            parallel_median_ms: 10.0 * speedup_median,
+            parallel_stddev_ms: 0.0,
+            parallel_p95_ms: 10.0 * speedup_median,
+            parallel_cv_pct: 0.0,
+            parallel_ci_95: (10.0 * speedup_median, 10.0 * speedup_median),
+            speedup_mean_vs_parallel: speedup_median,
+            speedup_median_vs_parallel: speedup_median,
+            p_value_vs_parallel: 0.0,
+            cohens_d_vs_parallel: 5.0,
+            effect_size_meaningful: true,
+        }
+    }
+
+    /// `warm_speedup_for_gate` (and therefore `gpu_winner_evidence_verified`)
+    /// must read `WorkloadResult::warm_summary` directly rather than the flat
+    /// `speedup_median_vs_parallel`. Plant a flat speedup that would FAIL a
+    /// 1.5x gate and a `warm_summary` speedup that would PASS it — the gate
+    /// must follow the warm summary.
+    #[test]
+    fn test_warm_speedup_for_gate_reads_warm_summary_over_flat_field() {
+        let mut w = mock_workload_result("gpu_reduce_sum", 1_000_000, 10.0, 20.0);
+        w.speedup_median_vs_parallel = 0.5; // would fail a 1.5x gate if read directly
+        w.warm_summary = Some(mock_cache_mode_summary(CacheState::Warm, 2.0));
+        assert!((warm_speedup_for_gate(&w) - 2.0).abs() < f64::EPSILON);
+
+        // Warm-only runs (no `warm_summary` populated) fall back to the flat
+        // field, which already describes the only subsample measured.
+        let mut warm_only = mock_workload_result("gpu_reduce_sum", 1_000_000, 10.0, 20.0);
+        warm_only.warm_summary = None;
+        assert!(
+            (warm_speedup_for_gate(&warm_only) - warm_only.speedup_median_vs_parallel).abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn test_gpu_winner_evidence_verified_gates_on_warm_summary_not_flat_speedup() {
+        let mut w = mock_workload_result("gpu_reduce_sum", 1_000_000, 10.0, 20.0);
+        w.plan_selected = true;
+        w.gpu_kernel_dispatched = true;
+        w.dispatch_counter_captured = true;
+        w.gpu_kernel_execution_delta = 1;
+        w.rows_returned_to_cpu = 100;
+        w.accel_output_rows_consumed = 100;
+        // Flat field alone would fail a 1.5x gate...
+        w.speedup_median_vs_parallel = 0.5;
+        // ...but the warm-subsample evidence clears it, and the gate must
+        // follow the warm-subsample evidence.
+        w.warm_summary = Some(mock_cache_mode_summary(CacheState::Warm, 2.0));
+        assert!(gpu_winner_evidence_verified(
+            &w,
+            "unrelated_lane",
+            1.5,
+            "warm"
+        ));
+
+        // With no warm_summary at all, the flat field (0.5x) governs and the
+        // gate correctly fails.
+        w.warm_summary = None;
+        assert!(!gpu_winner_evidence_verified(
+            &w,
+            "unrelated_lane",
+            1.5,
+            "warm"
+        ));
+    }
+
+    /// The h3_/raster_ cache-mode-both gate must require a populated
+    /// `warm_summary` on the row itself, not merely a `cache_mode == "both"`
+    /// methodology string. A degenerate row (e.g. every iteration was
+    /// classified Cold, or the row was hand-built without a warm subsample)
+    /// must not launder a global "both" config into a false per-row pass.
+    #[test]
+    fn test_operation_cache_gate_verified_requires_row_level_warm_summary() {
+        let mut w = mock_workload_result("h3_bulk", 1_000_000, 10.0, 50.0);
+        w.category = "gpu_h3".to_owned();
+        assert!(
+            w.warm_summary.is_some(),
+            "sanity: mock_workload_result's all-Warm iterations must populate warm_summary"
+        );
+        assert!(operation_cache_gate_verified(&w, "both"));
+
+        w.warm_summary = None;
+        assert!(
+            !operation_cache_gate_verified(&w, "both"),
+            "cache_mode=both alone must not satisfy the gate without a row-level warm_summary"
+        );
+
+        // And the existing requirement still holds: cache_mode must actually
+        // be "both", regardless of warm_summary.
+        w.warm_summary = Some(mock_cache_mode_summary(CacheState::Warm, 2.0));
+        assert!(!operation_cache_gate_verified(&w, "warm"));
+    }
+
+    /// `native_decline_reason_verified` must read only
+    /// `WorkloadResult::native_decline_evidence`. Plan-snippet text — even if
+    /// it happens to mention a decline-sounding reason — is not evidence by
+    /// itself; only the tagged evidence field, sourced from a real planner
+    /// rejection, counts.
+    #[test]
+    fn test_native_decline_reason_verified_ignores_plan_snippet_text() {
+        let mut w = mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0);
+        w.plan_snippet = Some(
+            "Sort\n  -> Seq Scan on bench_sort_multi\n  Note: sort_multikey_no_gpu_kernel"
+                .to_owned(),
+        );
+        assert!(w.native_decline_evidence.is_none());
+        assert!(!native_decline_reason_verified(
+            &w,
+            "sort_multikey_no_gpu_kernel"
+        ));
+
+        w.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "sort_multikey_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
+        assert!(native_decline_reason_verified(
+            &w,
+            "sort_multikey_no_gpu_kernel"
+        ));
+    }
+
+    /// `ExpectedUnconfirmed` decline evidence must never verify, and must
+    /// render as "expected, unconfirmed" via `native_decline_evidence_label`.
+    #[test]
+    fn test_native_decline_reason_verified_rejects_unconfirmed_and_mismatched_reason() {
+        let mut w = mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0);
+        w.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "sort_multikey_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::ExpectedUnconfirmed,
+        });
+        assert!(!native_decline_reason_verified(
+            &w,
+            "sort_multikey_no_gpu_kernel"
+        ));
+        assert_eq!(
+            native_decline_evidence_label(&w),
+            "sort_multikey_no_gpu_kernel (expected, unconfirmed)"
+        );
+
+        // A mismatched reason string must not verify even when the source is
+        // PlannerReported.
+        w.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "some_other_reason".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
+        assert!(!native_decline_reason_verified(
+            &w,
+            "sort_multikey_no_gpu_kernel"
+        ));
+
+        w.native_decline_evidence = None;
+        assert_eq!(native_decline_evidence_label(&w), "-");
+    }
+
+    /// The crash-summary error-message truncation at
+    /// `render_geomean_headline` must be char-boundary safe: byte-slicing at
+    /// a fixed offset panics if the cut falls inside a multibyte UTF-8
+    /// sequence. Use a string whose 77th *byte* lands inside a multibyte
+    /// character to prove the fix.
+    #[test]
+    fn test_markdown_crash_summary_truncates_multibyte_error_without_panicking() {
+        // 76 ASCII chars, then a 3-byte UTF-8 character (e), so byte offset
+        // 77 falls inside the multibyte sequence — the old `&s[..77]`
+        // byte-slice would panic here.
+        let prefix: String = "a".repeat(76);
+        let error = format!("{prefix}\u{2705} trailing detail that pushes this past 80 chars");
+        assert!(
+            error.len() > 80,
+            "fixture must exceed the truncation threshold"
+        );
+
+        let mut workload = mock_workload_result("wl_crash", 1000, 5.0, 15.0);
+        workload.name = "wl_ok".to_owned();
+        let mut report = mock_report(vec![workload]);
+        report.crashes.push(CrashedScale {
+            workload: "wl_crash".to_owned(),
+            rows: 1000,
+            error,
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: Vec::new(),
+        });
+
+        // Must not panic.
+        let md = report.to_markdown();
+        assert!(md.contains("### Crashed scales"));
+        assert!(md.contains("CRASH:"));
+    }
+
+    /// Plan-snippet display truncation is renderer-only: a full plan beyond
+    /// `PLAN_SNIPPET_DISPLAY_MAX_LINES` is truncated with a trailing marker,
+    /// but classification helpers (exercised via `native_decline_reason_verified`
+    /// and `dispatch_classification`, tested elsewhere) always see the FULL
+    /// text — only `truncate_plan_for_display` itself shortens anything.
+    #[test]
+    fn test_truncate_plan_for_display_caps_long_plans_and_preserves_short_ones() {
+        let short_plan = "Seq Scan on bench\n  Filter: x > 1\n";
+        assert_eq!(truncate_plan_for_display(short_plan), short_plan);
+
+        let long_plan = (0..50)
+            .map(|i| format!("  -> Node {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncated = truncate_plan_for_display(&long_plan);
+        assert!(truncated.lines().count() > PLAN_SNIPPET_DISPLAY_MAX_LINES);
+        assert!(truncated.contains("(20 more lines)"));
+        assert!(truncated.contains("Node 0"));
+        assert!(!truncated.contains("Node 49"));
+    }
+
+    /// Detailed Results must render warm/cold summaries separately (never a
+    /// pooled median), the resident-cache preload note, the cold-cache
+    /// `shared_buffers`-resident warning, and native-decline evidence with
+    /// its source label.
+    #[test]
+    fn test_markdown_detailed_results_renders_cache_split_and_resident_evidence() {
+        let mut workload =
+            mock_workload_result("resident_star_groupagg_case", 1_000_000, 10.0, 20.0);
+        workload.warm_summary = Some(mock_cache_mode_summary(CacheState::Warm, 4.0));
+        workload.cold_summary = Some(mock_cache_mode_summary(CacheState::Cold, 1.2));
+        workload.resident_lane = true;
+        workload.resident_load_ms = Some(42.5);
+        workload.cold_shared_buffers_resident = Some(true);
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "some_reason".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
+        workload.plan_snippet = Some("Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n".to_owned());
+
+        let report = mock_report(vec![workload]);
+        let md = report.to_markdown();
+
+        assert!(
+            md.contains("Warm (n=5)"),
+            "must render warm summary; md:\n{md}"
+        );
+        assert!(
+            md.contains("Cold (n=5)"),
+            "must render cold summary; md:\n{md}"
+        );
+        assert!(
+            md.contains("42.50ms"),
+            "resident_load_ms must appear in Detailed Results; md:\n{md}"
+        );
+        assert!(
+            md.contains("shared_buffers"),
+            "cold_shared_buffers_resident must render a warning; md:\n{md}"
+        );
+        assert!(
+            md.contains("`some_reason` (planner-reported, verified)"),
+            "native-decline evidence must render with its source label; md:\n{md}"
+        );
+    }
+
     #[test]
     fn test_report_renders_cache_purge_audit_rows() {
         let mut workload = mock_workload_result("gpu_reduce_sum", 10_000, 10.0, 20.0);
@@ -5260,13 +5792,19 @@ mod tests {
 
     #[test]
     fn test_markdown_renders_planner_threshold_matrix() {
-        let workload = mark_no_dispatch(
+        // No real planner rejection reason was captured for this row — the
+        // static matrix merely *expects* a decline. That must render as
+        // "expected, unconfirmed" and FAIL the row's status, never be
+        // laundered into a passing "verified" decline.
+        let mut workload = mark_no_dispatch(
             mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0),
-            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi\n\
-             pg_accel benchmark threshold decline reason: sort_multikey_no_gpu_kernel\n\
-             pg_accel benchmark threshold decline evidence: workload=gpu_sort_multikey rows=100000",
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
             "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
         );
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "sort_multikey_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::ExpectedUnconfirmed,
+        });
         let report = mock_report(vec![workload]);
         let md = report.to_markdown();
 
@@ -5275,6 +5813,14 @@ mod tests {
         assert!(md.contains("Index/Pruning"));
         assert!(md.contains("sort_multikey_no_gpu_kernel"));
         assert!(md.contains("| standalone_heap_sort | gpu_sort_multikey | 100K |"));
+        assert!(
+            md.contains("expected, unconfirmed"),
+            "unconfirmed decline evidence must render honestly; md:\n{md}"
+        );
+        assert!(
+            md.contains("| FAIL |"),
+            "unconfirmed decline evidence must never pass the threshold-matrix status; md:\n{md}"
+        );
     }
 
     #[test]
@@ -5346,16 +5892,22 @@ mod tests {
 
     #[test]
     fn test_no_dispatch_plan_shape_ignores_pg_accel_decline_diagnostics() {
+        // A real `pg_accel planner rejection reason:` line (sourced from
+        // `pg_accel_last_planner_rejection_reason()`) is still stripped from
+        // the plan-shape signature so it does not itself cause a plan
+        // mismatch against the baseline plan, which never carries it.
         let baseline_plan = "Aggregate\n  Output: count(*)\n  -> Seq Scan on public.bench\n";
         let accel_plan = "Aggregate\n  Output: count(*)\n  -> Seq Scan on public.bench\n\
-             pg_accel planner rejection reason: nestloop_scalar_no_gpu_kernel\n\
-             pg_accel benchmark threshold decline reason: nlj_between_host_boundary_unsafe\n\
-             pg_accel benchmark threshold decline evidence: workload=gpu_nlj_between rows=50000";
-        let workload = mark_no_dispatch(
+             pg_accel planner rejection reason: nestloop_scalar_no_gpu_kernel";
+        let mut workload = mark_no_dispatch(
             mock_workload_result("native_decline_with_evidence", 50_000, 10.0, 10.0),
             accel_plan,
             baseline_plan,
         );
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "nestloop_scalar_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
         let audit = mock_report(vec![workload]).no_dispatch_audit();
 
         assert_eq!(audit.evaluated_no_dispatch_rows, 1);
@@ -6055,13 +6607,17 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_allows_planner_declined_native_rows() {
-        let workload = mark_no_dispatch(
+        // Honest evidence: the planner itself reported this decline reason
+        // (`DeclineReasonSource::PlannerReported`), so the ship gate passes.
+        let mut workload = mark_no_dispatch(
             mock_workload_result("mergejoin_decline", 100_000, 10.0, 10.0),
-            "Aggregate\n  ->  Merge Join\n\
-             pg_accel benchmark threshold decline reason: mergejoin_no_gpu_kernel\n\
-             pg_accel benchmark threshold decline evidence: workload=mergejoin_decline rows=100000",
+            "Aggregate\n  ->  Merge Join",
             "Aggregate\n  ->  Merge Join",
         );
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "mergejoin_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
         let report = mock_report(vec![workload]);
 
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
@@ -6087,12 +6643,20 @@ mod tests {
             BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
         );
 
-        let with_reason = mark_no_dispatch(
+        // The runner tags a real `pg_accel planner rejection reason:` line
+        // (captured from `pg_accel_last_planner_rejection_reason()`) into
+        // `native_decline_evidence` as `PlannerReported` — that tagged field,
+        // not the raw plan text, is what the ship gate reads.
+        let mut with_reason = mark_no_dispatch(
             mock_workload_result("spatial_sel_10pct", 1_000_000, 10.0, 10.0),
             "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan\n\
              pg_accel planner rejection reason: spatial_no_registered_gpu_predicate",
             "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan",
         );
+        with_reason.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "spatial_no_registered_gpu_predicate".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
         let report = mock_report(vec![with_reason]);
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
     }
@@ -6112,15 +6676,42 @@ mod tests {
             BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
         );
 
-        let with_generic_reason = mark_no_dispatch(
+        // Planner-reported evidence with the matching reason passes.
+        let mut with_generic_reason = mark_no_dispatch(
             mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0),
-            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi\n\
-             pg_accel benchmark threshold decline reason: sort_multikey_no_gpu_kernel\n\
-             pg_accel benchmark threshold decline evidence: workload=gpu_sort_multikey rows=100000",
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
             "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
         );
+        with_generic_reason.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "sort_multikey_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
         let report = mock_report(vec![with_generic_reason]);
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
+
+        // An *unconfirmed* expectation — the static matrix expected this
+        // decline but the planner never reported a reason — must still fail
+        // the gate. Only a confirmed planner-reported reason may pass.
+        let mut with_unconfirmed_reason = mark_no_dispatch(
+            mock_workload_result("gpu_sort_multikey", 100_000, 10.0, 10.0),
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
+            "Sort\n  Sort Key: key1, key2\n  -> Seq Scan on bench_sort_multi",
+        );
+        with_unconfirmed_reason.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "sort_multikey_no_gpu_kernel".to_owned(),
+            source: DeclineReasonSource::ExpectedUnconfirmed,
+        });
+        let report = mock_report(vec![with_unconfirmed_reason]);
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(
+            failures.len(),
+            1,
+            "unconfirmed expected-decline evidence must not satisfy the ship gate"
+        );
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
+        );
 
         let missing_reason = mark_no_dispatch(
             mock_workload_result("h3_bulk", 10_000, 10.0, 10.0),
@@ -6135,13 +6726,15 @@ mod tests {
             BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
         );
 
-        let with_reason = mark_no_dispatch(
+        let mut with_reason = mark_no_dispatch(
             mock_workload_result("h3_bulk", 10_000, 10.0, 10.0),
-            "HashAggregate\n  -> Seq Scan on bench_h3_points\n\
-             pg_accel benchmark threshold decline reason: h3_rows_below_grouped_agg_min\n\
-             pg_accel benchmark threshold decline evidence: workload=h3_bulk rows=10000",
+            "HashAggregate\n  -> Seq Scan on bench_h3_points",
             "HashAggregate\n  -> Seq Scan on bench_h3_points",
         );
+        with_reason.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "h3_rows_below_grouped_agg_min".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
         let report = mock_report(vec![with_reason]);
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
     }
@@ -6490,17 +7083,22 @@ mod tests {
         workload.gpu_kernel_execution_delta = 0;
         workload.accel_output_rows_consumed = 9_998;
         workload.pg_accel_stock_exec_delta = 0;
-        workload.plan_snippet = Some(
-            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n\
-             pg_accel benchmark threshold decline reason: h3_rows_below_grouped_agg_min\n\
-             pg_accel benchmark threshold decline evidence: workload=h3_bulk rows=10000"
-                .to_owned(),
-        );
+        workload.plan_snippet =
+            Some("HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n".to_owned());
+        // Honest evidence: the planner itself reported the expected decline
+        // reason. Without this field populated (or with it tagged
+        // `ExpectedUnconfirmed`) the generic ship gate must NOT pass — see
+        // `test_h3_below_grouped_floor_native_decline_requires_confirmed_evidence`.
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "h3_rows_below_grouped_agg_min".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
 
         let report = mock_report(vec![workload]);
         assert!(
             report.evaluate_benchmark_ship_gate().is_empty(),
-            "below-floor h3_bulk row must satisfy the generic native-decline ship gate"
+            "below-floor h3_bulk row must satisfy the generic native-decline ship gate \
+             when the planner reported the expected decline reason"
         );
         let failures = report.evaluate_h3_lane_gate();
         assert!(
@@ -6515,20 +7113,76 @@ mod tests {
         );
     }
 
+    /// Counterpart to the test above: without a planner-reported decline
+    /// reason, the same below-floor `h3_bulk` row must NOT pass the generic
+    /// ship gate — neither when no evidence at all was captured, nor when
+    /// the evidence is present but tagged `ExpectedUnconfirmed` (the static
+    /// matrix assumed the decline; the planner never confirmed it).
+    #[test]
+    fn test_h3_below_grouped_floor_native_decline_requires_confirmed_evidence() {
+        let base = || {
+            let mut workload = mock_workload_result("h3_bulk", 10_000, 10.0, 30.0);
+            workload.category = "gpu_h3".to_owned();
+            workload.kernel_class = "h3_latlng".to_owned();
+            workload.plan_selected = false;
+            workload.dispatch_counter_captured = true;
+            workload.gpu_kernel_execution_delta = 0;
+            workload.accel_output_rows_consumed = 9_998;
+            workload.pg_accel_stock_exec_delta = 0;
+            workload.plan_snippet = Some(
+                "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n".to_owned(),
+            );
+            workload
+        };
+
+        let no_evidence = base();
+        let report = mock_report(vec![no_evidence]);
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(
+            failures.len(),
+            1,
+            "missing decline evidence must fail the generic ship gate"
+        );
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
+        );
+
+        let mut unconfirmed = base();
+        unconfirmed.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "h3_rows_below_grouped_agg_min".to_owned(),
+            source: DeclineReasonSource::ExpectedUnconfirmed,
+        });
+        let report = mock_report(vec![unconfirmed]);
+        let failures = report.evaluate_benchmark_ship_gate();
+        assert_eq!(
+            failures.len(),
+            1,
+            "unconfirmed expected-decline evidence must fail the generic ship gate"
+        );
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::NativeDeclineReasonMissing
+        );
+    }
+
     #[test]
     fn test_benchmark_ship_gate_allows_small_raster_native_decline() {
-        let workload = mark_no_dispatch(
+        let mut workload = mark_no_dispatch(
             mock_workload_result("raster_reclass", 100, 10.0, 10.0),
-            "Aggregate\n  ->  Seq Scan on bench_raster_tiles\n\
-             pg_accel benchmark threshold decline reason: raster_rows_below_standalone_min\n\
-             pg_accel benchmark threshold decline evidence: workload=raster_reclass rows=100",
+            "Aggregate\n  ->  Seq Scan on bench_raster_tiles",
             "Aggregate\n  ->  Seq Scan on bench_raster_tiles",
         );
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: "raster_rows_below_standalone_min".to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
         let report = mock_report(vec![workload]);
 
         assert!(
             report.evaluate_benchmark_ship_gate().is_empty(),
-            "small raster native-decline row must satisfy the operation-specific threshold matrix"
+            "small raster native-decline row must satisfy the operation-specific threshold matrix \
+             when the planner reported the expected decline reason"
         );
     }
 

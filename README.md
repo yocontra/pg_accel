@@ -122,6 +122,17 @@ for every measured row. The generated full report is checked into
 | GPU hash/grouped aggregate geomean | 2.90x |
 | H3 geomean | 3.49x |
 
+**Evidence-integrity caveat:** the numbers above were produced by an earlier
+version of the benchmark harness with known evidence-integrity issues —
+warm and cold iterations were pooled into a single median/speedup instead of
+being reported separately, and GPU-resident cache preload time was not
+counted or surfaced as its own column. Those issues have since been fixed in
+the harness (warm/cold subsamples are now computed and reported
+independently, and resident-cache preload cost is captured per row). The
+full suite has not yet been re-run against the fixed harness, so treat every
+number on this page as provisional until a re-baselined artifact replaces
+it.
+
 The benchmark command completed the full suite but exited non-zero because the
 release ship gate found 24 failures. In that July 2 artifact, the failures were
 not crashes: they were missed hashjoin GPU selection, missing H3 cache-mode
