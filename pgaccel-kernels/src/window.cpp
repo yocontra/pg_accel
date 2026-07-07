@@ -19,13 +19,13 @@
 #include "pgaccel_window.h"
 
 #include "alloc_helper.h"
+#include "pgaccel_queue.h"
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  Written once during pgaccel_init(), read-only thereafter.
-extern sycl::queue* g_queue;
 
 static sycl::queue* get_queue() {
-  return g_queue;
+  return pgaccel_get_queue();
 }
 
 static bool is_metal_backend() {
@@ -104,7 +104,7 @@ static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, si
                                              int64_t* results) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   // Pass 1 (host): build partition start index for each row
   std::vector<size_t> h_part_start(count);
@@ -114,12 +114,12 @@ static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, si
     // Allocate device buffers
     size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
     if (!d_part_start)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
     if (!d_results) {
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     // Pass 2 (GPU): embarrassingly parallel row number
@@ -136,8 +136,10 @@ static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, si
     sycl::free(d_results, *q);
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -155,7 +157,7 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
                                       double default_val, double* results, uint8_t* result_nulls) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   // Pass 1 (host): build partition start index for each row
   std::vector<size_t> h_part_start(count);
@@ -165,12 +167,12 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
     // Allocate device buffers for inputs
     size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
     if (!d_part_start)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     double* d_values = pgaccel_alloc_input<double>(count, *q, values);
     if (!d_values) {
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     // null_mask may be nullptr (no nulls)
@@ -181,7 +183,7 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
       if (!d_null_mask) {
         pgaccel_free_input(d_values, *q, values);
         pgaccel_free_input(d_part_start, *q, h_part_start.data());
-        return PGACCEL_UNSUPPORTED;
+        return PGACCEL_OOM;
       }
     }
 
@@ -202,7 +204,7 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
         pgaccel_free_input(d_null_mask, *q, null_mask);
       pgaccel_free_input(d_values, *q, values);
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     int d_offset = offset;
@@ -246,8 +248,10 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
     pgaccel_free_input(d_part_start, *q, h_part_start.data());
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -265,7 +269,7 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
                                        double default_val, double* results, uint8_t* result_nulls) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   // Pass 1 (host): build partition end index for each row
   std::vector<size_t> h_part_end(count);
@@ -275,12 +279,12 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
     // Allocate device buffers for inputs
     size_t* d_part_end = pgaccel_alloc_input<size_t>(count, *q, h_part_end.data());
     if (!d_part_end)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     double* d_values = pgaccel_alloc_input<double>(count, *q, values);
     if (!d_values) {
       pgaccel_free_input(d_part_end, *q, h_part_end.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     // null_mask may be nullptr (no nulls)
@@ -291,7 +295,7 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
       if (!d_null_mask) {
         pgaccel_free_input(d_values, *q, values);
         pgaccel_free_input(d_part_end, *q, h_part_end.data());
-        return PGACCEL_UNSUPPORTED;
+        return PGACCEL_OOM;
       }
     }
 
@@ -312,7 +316,7 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
         pgaccel_free_input(d_null_mask, *q, null_mask);
       pgaccel_free_input(d_values, *q, values);
       pgaccel_free_input(d_part_end, *q, h_part_end.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     int d_offset = offset;
@@ -356,8 +360,10 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
     pgaccel_free_input(d_part_end, *q, h_part_end.data());
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -378,7 +384,7 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
                                         size_t count, int64_t* results) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   std::vector<size_t> h_part_start(count);
   build_part_start_idx(partition_starts, count, h_part_start.data());
@@ -386,7 +392,7 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
   try {
     size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
     if (!d_part_start)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     uint8_t* d_null_mask = nullptr;
     bool has_nulls = (null_mask != nullptr);
@@ -394,7 +400,7 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
       d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
       if (!d_null_mask) {
         pgaccel_free_input(d_part_start, *q, h_part_start.data());
-        return PGACCEL_UNSUPPORTED;
+        return PGACCEL_OOM;
       }
     }
 
@@ -403,7 +409,7 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
       if (has_nulls)
         pgaccel_free_input(d_null_mask, *q, null_mask);
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
@@ -426,8 +432,10 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
     pgaccel_free_input(d_part_start, *q, h_part_start.data());
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -444,7 +452,7 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
                                       const uint8_t* null_mask, size_t count, double* results) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   std::vector<size_t> h_part_start(count);
   build_part_start_idx(partition_starts, count, h_part_start.data());
@@ -452,12 +460,12 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
   try {
     size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
     if (!d_part_start)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     double* d_values = pgaccel_alloc_input<double>(count, *q, values);
     if (!d_values) {
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     uint8_t* d_null_mask = nullptr;
@@ -467,7 +475,7 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
       if (!d_null_mask) {
         pgaccel_free_input(d_values, *q, values);
         pgaccel_free_input(d_part_start, *q, h_part_start.data());
-        return PGACCEL_UNSUPPORTED;
+        return PGACCEL_OOM;
       }
     }
 
@@ -477,7 +485,7 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
         pgaccel_free_input(d_null_mask, *q, null_mask);
       pgaccel_free_input(d_values, *q, values);
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
@@ -506,8 +514,10 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
     pgaccel_free_input(d_part_start, *q, h_part_start.data());
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -526,7 +536,7 @@ static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const do
                                        size_t count, int64_t* results) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   std::vector<size_t> h_part_start(count);
   build_part_start_idx(partition_starts, count, h_part_start.data());
@@ -534,19 +544,19 @@ static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const do
   try {
     size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
     if (!d_part_start)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     double* d_keys = pgaccel_alloc_input<double>(count, *q, sort_keys);
     if (!d_keys) {
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
     if (!d_results) {
       pgaccel_free_input(d_keys, *q, sort_keys);
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
@@ -577,8 +587,10 @@ static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const do
     pgaccel_free_input(d_part_start, *q, h_part_start.data());
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -587,7 +599,7 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
                                              int64_t* results) {
   sycl::queue* q = get_queue();
   if (!q)
-    return PGACCEL_UNSUPPORTED;
+    return PGACCEL_ERROR_NO_DEVICE;
 
   std::vector<size_t> h_part_start(count);
   build_part_start_idx(partition_starts, count, h_part_start.data());
@@ -595,19 +607,19 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
   try {
     size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
     if (!d_part_start)
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
 
     double* d_keys = pgaccel_alloc_input<double>(count, *q, sort_keys);
     if (!d_keys) {
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
     if (!d_results) {
       pgaccel_free_input(d_keys, *q, sort_keys);
       pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_UNSUPPORTED;
+      return PGACCEL_OOM;
     }
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
@@ -636,8 +648,10 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
     pgaccel_free_input(d_part_start, *q, h_part_start.data());
 
     return PGACCEL_OK;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
   } catch (...) {
-    return PGACCEL_UNSUPPORTED;
+    return pgaccel_kernel_failure(__func__, nullptr);
   }
 }
 
@@ -654,15 +668,12 @@ pgaccel_status pgaccel_window_row_number(const uint8_t* partition_starts, size_t
   if (count == 0)
     return PGACCEL_OK;
 
-  if (count >= GPU_WINDOW_THRESHOLD) {
-    pgaccel_status st = sycl_window_row_number(partition_starts, count, results);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  pgaccel_status st = sycl_window_row_number(partition_starts, count, results);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 pgaccel_status pgaccel_window_rank(const uint8_t* partition_starts, const double* sort_keys,
@@ -673,15 +684,14 @@ pgaccel_status pgaccel_window_rank(const uint8_t* partition_starts, const double
   if (count == 0)
     return PGACCEL_OK;
 
-  if (count >= GPU_WINDOW_THRESHOLD && !is_metal_backend()) {
-    pgaccel_status st = sycl_window_rank(partition_starts, sort_keys, count, results);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  if (is_metal_backend())
+    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+  pgaccel_status st = sycl_window_rank(partition_starts, sort_keys, count, results);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const double* sort_keys,
@@ -692,15 +702,14 @@ pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const 
   if (count == 0)
     return PGACCEL_OK;
 
-  if (count >= GPU_WINDOW_THRESHOLD && !is_metal_backend()) {
-    pgaccel_status st = sycl_window_dense_rank(partition_starts, sort_keys, count, results);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  if (is_metal_backend())
+    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+  pgaccel_status st = sycl_window_dense_rank(partition_starts, sort_keys, count, results);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double* values,
@@ -711,15 +720,14 @@ pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double*
   if (count == 0)
     return PGACCEL_OK;
 
-  if (count >= GPU_WINDOW_THRESHOLD && !is_metal_backend()) {
-    pgaccel_status st = sycl_window_sum(partition_starts, values, null_mask, count, results);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  if (is_metal_backend())
+    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+  pgaccel_status st = sycl_window_sum(partition_starts, values, null_mask, count, results);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8_t* null_mask,
@@ -729,15 +737,14 @@ pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8
   if (count == 0)
     return PGACCEL_OK;
 
-  if (count >= GPU_WINDOW_THRESHOLD && !is_metal_backend()) {
-    pgaccel_status st = sycl_window_count(partition_starts, null_mask, count, results);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  if (is_metal_backend())
+    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+  pgaccel_status st = sycl_window_count(partition_starts, null_mask, count, results);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 pgaccel_status pgaccel_window_lag(const uint8_t* partition_starts, const double* values,
@@ -751,16 +758,13 @@ pgaccel_status pgaccel_window_lag(const uint8_t* partition_starts, const double*
   if (offset < 0)
     return PGACCEL_ERROR;
 
-  if (count >= GPU_WINDOW_THRESHOLD) {
-    pgaccel_status st = sycl_window_lag(partition_starts, values, null_mask, count, offset,
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  pgaccel_status st = sycl_window_lag(partition_starts, values, null_mask, count, offset,
                                         default_val, results, result_nulls);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 pgaccel_status pgaccel_window_lead(const uint8_t* partition_starts, const double* values,
@@ -774,16 +778,13 @@ pgaccel_status pgaccel_window_lead(const uint8_t* partition_starts, const double
   if (offset < 0)
     return PGACCEL_ERROR;
 
-  if (count >= GPU_WINDOW_THRESHOLD) {
-    pgaccel_status st = sycl_window_lead(partition_starts, values, null_mask, count, offset,
+  if (count < GPU_WINDOW_THRESHOLD)
+    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+  pgaccel_status st = sycl_window_lead(partition_starts, values, null_mask, count, offset,
                                          default_val, results, result_nulls);
-    if (st == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-      return st;
-    }
-  }
-
-  return PGACCEL_ERROR_NO_DEVICE;
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 }  // extern "C"

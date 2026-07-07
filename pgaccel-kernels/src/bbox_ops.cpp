@@ -11,22 +11,16 @@
 #include <stdexcept>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 // SAFETY: g_queue is owned by device_manager.cpp. Bbox kernels must not
 // create short-lived private queues because each Metal queue owns context
 // state that must be released by pgaccel_shutdown().
-extern sycl::queue* g_queue;
 
 namespace {
 
 static sycl::queue& get_queue() {
-  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
-    throw std::runtime_error("pgaccel_init failed");
-  }
-  if (g_queue == nullptr) {
-    throw std::runtime_error("pgaccel queue unavailable");
-  }
-  return *g_queue;
+  return pgaccel_require_queue();
 }
 
 // ---------------------------------------------------------------------------
@@ -137,12 +131,14 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f32(const float* boxes_a,
     sycl::queue& q = get_queue();
     pgaccel_status st =
         bbox_intersects_bulk_sycl_f32(q, boxes_a, count_a, boxes_b, count_b, result, hit_count);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
-  } catch (const std::exception&) {
-  } catch (...) {}
-
-  return PGACCEL_ERROR_NO_DEVICE;
+    return st;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 }

@@ -10,8 +10,7 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
-
-extern sycl::queue* g_ooo_queue;
+#include "pgaccel_queue.h"
 
 namespace {
 
@@ -220,11 +219,12 @@ static pgaccel_status run_probe_once(sycl::queue& q, bool overlap, size_t n,
 }  // namespace
 
 extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
-    size_t count, uint32_t spin_iters_per_sort_step, pgaccel_ooo_overlap_report* out) {
+    size_t count, uint32_t spin_iters_per_sort_step, pgaccel_ooo_overlap_report* out) try {
   if (out == nullptr)
     return PGACCEL_ERROR;
   std::memset(out, 0, sizeof(*out));
-  if (g_ooo_queue == nullptr || g_ooo_queue->is_in_order())
+  sycl::queue* ooo = pgaccel_get_ooo_queue();
+  if (ooo == nullptr || ooo->is_in_order())
     return PGACCEL_UNSUPPORTED;
 
   size_t n = next_power_of_two(count);
@@ -235,7 +235,7 @@ extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
   if (spin_iters_per_sort_step == 0)
     spin_iters_per_sort_step = 1;
 
-  sycl::queue& q = *g_ooo_queue;
+  sycl::queue& q = *ooo;
 
   std::vector<int32_t> input_keys(n);
   std::vector<uint32_t> input_indices(n);
@@ -349,4 +349,10 @@ extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
     sycl::free(d_keys, q);
 
   return status;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_window_overlap_probe", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_window_overlap_probe", nullptr);
 }

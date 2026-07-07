@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library. Written once during pgaccel_init(), read-only thereafter.
-extern sycl::queue* g_queue;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -246,7 +246,7 @@ namespace {
 template <typename T>
 pgaccel_status point_in_ring_bulk_sycl(const T* points_xy, size_t point_count, const T* ring_xy,
                                        size_t vertex_count, int8_t* results) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -395,7 +395,7 @@ pgaccel_status point_in_ring_bulk_sycl(const T* points_xy, size_t point_count, c
 static pgaccel_status sphere_distance_bulk_sycl_f32(const float* points_a, const float* points_b,
                                                     size_t count, float* distances,
                                                     uint8_t* uncertain) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -502,7 +502,7 @@ static pgaccel_status sphere_distance_bulk_sycl_f32(const float* points_a, const
 static pgaccel_status sphere_distance_bulk_sycl_f64(const double* points_a, const double* points_b,
                                                     size_t count, double* distances,
                                                     uint8_t* uncertain) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -622,7 +622,7 @@ static pgaccel_status sphere_distance_bulk_sycl_f64(const double* points_a, cons
 template <typename T>
 pgaccel_status segment_intersects_bulk_sycl(const T* segs_a, const T* segs_b, size_t count,
                                             int8_t* results) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -751,7 +751,7 @@ namespace {
 template <typename T>
 pgaccel_status st_area_bulk_sycl(const T* coords, const uint32_t* row_offsets, size_t row_count,
                                  T* areas) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -824,7 +824,7 @@ pgaccel_status st_area_bulk_sycl(const T* coords, const uint32_t* row_offsets, s
 }  // namespace
 
 extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_t* row_offsets,
-                                               size_t row_count, bool use_fp64, void* areas) {
+                                               size_t row_count, bool use_fp64, void* areas) try {
   if (row_count == 0)
     return PGACCEL_OK;
   if (!coords || !row_offsets || !areas)
@@ -836,6 +836,12 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
   }
   return st_area_bulk_sycl<float>(static_cast<const float*>(coords), row_offsets, row_count,
                                   static_cast<float*>(areas));
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_area_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_area_bulk", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -857,7 +863,7 @@ extern "C" pgaccel_status pgaccel_st_area_bulk(const void* coords, const uint32_
 namespace {
 pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_offsets,
                                        size_t row_count, bool closed_ring, float* lengths) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -936,7 +942,7 @@ pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_
 // is non-templated. Same fix shape as sphere_distance_bulk_sycl_f64.
 pgaccel_status st_length_bulk_sycl_f64(const double* coords, const uint32_t* row_offsets,
                                        size_t row_count, bool closed_ring, double* lengths) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1011,7 +1017,7 @@ pgaccel_status st_length_bulk_sycl_f64(const double* coords, const uint32_t* row
 
 extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint32_t* row_offsets,
                                                  size_t row_count, bool use_fp64, bool closed_ring,
-                                                 void* lengths) {
+                                                 void* lengths) try {
   if (row_count == 0)
     return PGACCEL_OK;
   if (!coords || !row_offsets || !lengths)
@@ -1034,6 +1040,12 @@ extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint3
   }
   return st_length_bulk_sycl_f32(static_cast<const float*>(coords), row_offsets, row_count,
                                  closed_ring, static_cast<float*>(lengths));
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_length_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_length_bulk", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +1054,7 @@ extern "C" pgaccel_status pgaccel_st_length_bulk(const void* coords, const uint3
 
 extern "C" pgaccel_status pgaccel_point_in_ring_bulk(const void* points_xy, size_t point_count,
                                                      const void* ring_xy, size_t vertex_count,
-                                                     bool use_fp64, int8_t* results) {
+                                                     bool use_fp64, int8_t* results) try {
   if (point_count == 0)
     return PGACCEL_OK;
   if (!points_xy || !ring_xy || !results)
@@ -1060,11 +1072,17 @@ extern "C" pgaccel_status pgaccel_point_in_ring_bulk(const void* points_xy, size
   }
   return point_in_ring_bulk_sycl<float>(static_cast<const float*>(points_xy), point_count,
                                         static_cast<const float*>(ring_xy), vertex_count, results);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_point_in_ring_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_point_in_ring_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, const void* points_b,
                                                        size_t count, bool use_fp64, void* distances,
-                                                       uint8_t* uncertain) {
+                                                       uint8_t* uncertain) try {
   if (count == 0)
     return PGACCEL_OK;
   if (!points_a || !points_b || !distances || !uncertain)
@@ -1101,11 +1119,17 @@ extern "C" pgaccel_status pgaccel_sphere_distance_bulk(const void* points_a, con
   return sphere_distance_bulk_sycl_f32(static_cast<const float*>(points_a),
                                        static_cast<const float*>(points_b), count,
                                        static_cast<float*>(distances), uncertain);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sphere_distance_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sphere_distance_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, const void* segs_b,
                                                           size_t count, bool use_fp64,
-                                                          int8_t* results) {
+                                                          int8_t* results) try {
   if (count == 0)
     return PGACCEL_OK;
   if (!segs_a || !segs_b || !results)
@@ -1122,6 +1146,12 @@ extern "C" pgaccel_status pgaccel_segment_intersects_bulk(const void* segs_a, co
   }
   return segment_intersects_bulk_sycl<float>(static_cast<const float*>(segs_a),
                                              static_cast<const float*>(segs_b), count, results);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_segment_intersects_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_segment_intersects_bulk", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1151,7 +1181,7 @@ pgaccel_status
 st_distance_polygon_polygon_bulk_sycl_f32(const float* coords_a, const uint32_t* row_offsets_a,
                                           const float* coords_b, const uint32_t* row_offsets_b,
                                           size_t row_count, float* distances, uint8_t* uncertain) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1309,13 +1339,19 @@ st_distance_polygon_polygon_bulk_sycl_f32(const float* coords_a, const uint32_t*
 extern "C" pgaccel_status
 pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* row_offsets_a,
                                          const float* coords_b, const uint32_t* row_offsets_b,
-                                         size_t row_count, float* distances, uint8_t* uncertain) {
+                                         size_t row_count, float* distances, uint8_t* uncertain) try {
   if (row_count == 0)
     return PGACCEL_OK;
   if (!coords_a || !row_offsets_a || !coords_b || !row_offsets_b || !distances || !uncertain)
     return PGACCEL_ERROR_INIT;
   return st_distance_polygon_polygon_bulk_sycl_f32(coords_a, row_offsets_a, coords_b, row_offsets_b,
                                                    row_count, distances, uncertain);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_distance_polygon_polygon_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_distance_polygon_polygon_bulk", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1385,7 +1421,7 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
   if (!geoms_a || !geoms_b || !results)
     return PGACCEL_ERROR_INIT;
 
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1617,28 +1653,52 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
 
 extern "C" pgaccel_status pgaccel_st_equals_bulk(const pgaccel_geometry* geoms_a,
                                                  const pgaccel_geometry* geoms_b, size_t count,
-                                                 int8_t* results) {
+                                                 int8_t* results) try {
   return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Equals,
                                              results);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_equals_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_equals_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_st_touches_bulk(const pgaccel_geometry* geoms_a,
                                                   const pgaccel_geometry* geoms_b, size_t count,
-                                                  int8_t* results) {
+                                                  int8_t* results) try {
   return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Touches,
                                              results);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_touches_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_touches_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_st_crosses_bulk(const pgaccel_geometry* geoms_a,
                                                   const pgaccel_geometry* geoms_b, size_t count,
-                                                  int8_t* results) {
+                                                  int8_t* results) try {
   return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count, AlgorithmicPredicate::Crosses,
                                              results);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_crosses_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_crosses_bulk", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_st_overlaps_bulk(const pgaccel_geometry* geoms_a,
                                                    const pgaccel_geometry* geoms_b, size_t count,
-                                                   int8_t* results) {
+                                                   int8_t* results) try {
   return sycl_algorithmic_predicate_dispatch(geoms_a, geoms_b, count,
                                              AlgorithmicPredicate::Overlaps, results);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_st_overlaps_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_st_overlaps_bulk", nullptr);
 }

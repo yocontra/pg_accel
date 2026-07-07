@@ -24,8 +24,8 @@
 #include <vector>
 
 #include "pgaccel_hash_join.h"
+#include "pgaccel_queue.h"
 
-extern sycl::queue* g_queue;
 
 struct pgaccel_hash_table {
   pgaccel_key_type key_type;
@@ -112,10 +112,7 @@ static size_t key_size(pgaccel_key_type key_type) {
 }
 
 static sycl::queue* get_queue() {
-  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
-    return nullptr;
-  }
-  return g_queue;
+  return pgaccel_get_queue();
 }
 
 static bool is_metal_backend() {
@@ -921,18 +918,22 @@ pgaccel_hash_table* pgaccel_hash_join_build_device_count(const void* device_keys
   }
 }
 
-void pgaccel_hash_join_free(pgaccel_hash_table* ht) {
+void pgaccel_hash_join_free(pgaccel_hash_table* ht) try {
   if (ht == nullptr) {
     return;
   }
   free_table_storage(ht);
   delete ht;
+} catch (const std::exception& e) {
+  std::fprintf(stderr, "pgaccel: pgaccel_hash_join_free failed: %s\n", e.what());
+} catch (...) {
+  std::fprintf(stderr, "pgaccel: pgaccel_hash_join_free failed: unknown C++ exception\n");
 }
 
 pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void* outer_keys,
                                        const uint8_t* outer_null_mask, size_t outer_count,
                                        uint32_t* match_pairs, size_t max_matches,
-                                       size_t* match_count) {
+                                       size_t* match_count) try {
   if (match_count != nullptr) {
     *match_count = 0;
   }
@@ -950,11 +951,17 @@ pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void*
     default:
       return PGACCEL_UNSUPPORTED;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_hash_join_probe", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_hash_join_probe", nullptr);
 }
 
 pgaccel_status pgaccel_hash_join_count(const pgaccel_hash_table* ht, const void* outer_keys,
                                        const uint8_t* outer_null_mask, size_t outer_count,
-                                       size_t* match_count) {
+                                       size_t* match_count) try {
   if (match_count != nullptr) {
     *match_count = 0;
   }
@@ -972,13 +979,19 @@ pgaccel_status pgaccel_hash_join_count(const pgaccel_hash_table* ht, const void*
     default:
       return PGACCEL_UNSUPPORTED;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_hash_join_count", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_hash_join_count", nullptr);
 }
 
 pgaccel_status pgaccel_hash_join_count_device(const pgaccel_hash_table* ht,
                                               const void* device_outer_keys,
                                               const uint8_t* device_outer_null_mask,
                                               size_t outer_count,
-                                              size_t* match_count) {
+                                              size_t* match_count) try {
   if (match_count != nullptr) {
     *match_count = 0;
   }
@@ -996,6 +1009,12 @@ pgaccel_status pgaccel_hash_join_count_device(const pgaccel_hash_table* ht,
     default:
       return PGACCEL_UNSUPPORTED;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_hash_join_count_device", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_hash_join_count_device", nullptr);
 }
 
 }  // extern "C"

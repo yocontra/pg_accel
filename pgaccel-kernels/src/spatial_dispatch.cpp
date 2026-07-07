@@ -7,12 +7,12 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 #include "alloc_helper.h"
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  Written once during pgaccel_init(), read-only thereafter.
-extern sycl::queue* g_queue;
 
 /* ----------------------------------------------------------------
  * Layer 2 — scalar predicate evaluator for heterogeneous geometry
@@ -449,7 +449,7 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* surv_pts, size_t
                                                    size_t poly_coord_count,
                                                    const uint32_t* ring_offsets, size_t ring_count,
                                                    int8_t* results) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR;
 
@@ -641,7 +641,7 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
                                                  const float* poly_coords, size_t poly_coord_count,
                                                  const uint32_t* ring_offsets, size_t ring_count,
                                                  int8_t* results) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR;
 
@@ -701,7 +701,7 @@ pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
                            const pgaccel_geometry* geoms_b, size_t count_b,
                            uint32_t* definite_true_pairs, size_t* definite_true_count,
                            uint32_t* definite_false_pairs, size_t* definite_false_count,
-                           uint32_t* uncertain_pairs, size_t* uncertain_count) {
+                           uint32_t* uncertain_pairs, size_t* uncertain_count) try {
   *definite_true_count = 0;
   *definite_false_count = 0;
   *uncertain_count = 0;
@@ -783,6 +783,12 @@ pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
   }
 
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_spatial_intersects", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_spatial_intersects", nullptr);
 }
 
 /* ================================================================
@@ -796,7 +802,7 @@ pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
 extern "C" pgaccel_status
 pgaccel_point_in_polygon_bulk(const float* points_xy, size_t point_count, const float* poly_bbox,
                               const float* poly_coords, size_t poly_coord_count,
-                              const uint32_t* ring_offsets, size_t ring_count, int8_t* results) {
+                              const uint32_t* ring_offsets, size_t ring_count, int8_t* results) try {
   if (point_count == 0)
     return PGACCEL_OK;
   if (!points_xy || !poly_coords || !poly_bbox || !results)
@@ -836,7 +842,7 @@ pgaccel_point_in_polygon_bulk(const float* points_xy, size_t point_count, const 
     surv_pts[k * 2 + 1] = points_xy[idx * 2 + 1];
   }
 
-  if (!g_queue)
+  if (pgaccel_get_queue() == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
   std::vector<int8_t> pir_results(surviving.size());
@@ -852,4 +858,10 @@ pgaccel_point_in_polygon_bulk(const float* points_xy, size_t point_count, const 
   }
 
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_point_in_polygon_bulk", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_point_in_polygon_bulk", nullptr);
 }

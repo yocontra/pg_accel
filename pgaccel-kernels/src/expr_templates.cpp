@@ -32,8 +32,8 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
-extern sycl::queue* g_queue;
 
 namespace {
 
@@ -581,8 +581,7 @@ pgaccel_status launch_cmp_const_count_f32_nan_const(const float* d_col, const ui
   if (d_col == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -658,8 +657,7 @@ pgaccel_status launch_cmp_const_count_usm_typed(const T* d_col, const uint8_t* d
     }
   }
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -730,8 +728,7 @@ pgaccel_status launch_two_pred_and_count_usm_typed(const T1* d_col1, const uint8
   if (d_col1 == nullptr || d_col2 == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -805,8 +802,7 @@ pgaccel_status launch_cmp_const_count_usm_as_double(const T* d_col, const uint8_
   if (d_col == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -877,8 +873,7 @@ launch_two_pred_and_count_usm_as_double(const T1* d_col1, const uint8_t* d_null1
   if (d_col1 == nullptr || d_col2 == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -952,8 +947,7 @@ pgaccel_status launch_cmp_const_mask_f32_nan_const(const float* d_col, const uin
   if (d_col == nullptr || selection == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1031,8 +1025,7 @@ pgaccel_status launch_cmp_const_mask_usm_typed(const T* d_col, const uint8_t* d_
     }
   }
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1106,8 +1099,7 @@ pgaccel_status launch_two_pred_and_mask_usm_typed(const T1* d_col1, const uint8_
   if (d_col1 == nullptr || d_col2 == nullptr || selection == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1184,8 +1176,7 @@ pgaccel_status launch_cmp_const_mask_usm_as_double(const T* d_col, const uint8_t
   if (d_col == nullptr || selection == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1260,8 +1251,7 @@ pgaccel_status launch_two_pred_and_mask_usm_as_double(const T1* d_col1, const ui
   if (d_col1 == nullptr || d_col2 == nullptr || selection == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1338,8 +1328,7 @@ pgaccel_status launch_cmp_const_count_typed(const pgaccel_batch* batch, uint32_t
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1367,8 +1356,7 @@ launch_two_pred_and_count_typed(const pgaccel_batch* batch, uint32_t col1_idx, u
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1504,8 +1492,7 @@ pgaccel_status launch_cmp_const_reduce_f32_usm_typed(
   if (d_pred == nullptr || d_value == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1590,8 +1577,7 @@ pgaccel_status launch_two_pred_and_reduce_f32_usm_typed(
   if (d_col1 == nullptr || d_col2 == nullptr || d_value == nullptr)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1963,7 +1949,7 @@ pgaccel_status dispatch_two_pred_and_mask_usm(pgaccel_expr_usm_col col1, uint16_
 
 }  // namespace
 
-extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) try {
   if (out == nullptr)
     return PGACCEL_ERROR;
   *out = nullptr;
@@ -1973,7 +1959,7 @@ extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
   pgaccel_status init_status = pgaccel_init();
   if (init_status != PGACCEL_OK)
     return init_status;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1991,6 +1977,12 @@ extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
     return PGACCEL_OOM;
   *out = ptr;
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_shared_alloc", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_shared_alloc", nullptr);
 }
 
 extern "C" void pgaccel_expr_shared_free(void* ptr) {
@@ -1998,15 +1990,19 @@ extern "C" void pgaccel_expr_shared_free(void* ptr) {
     return;
   if (pgaccel_init() != PGACCEL_OK)
     return;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return;
   try {
     sycl::free(ptr, *q);
-  } catch (...) {}
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: %s: sycl::free failed: %s\n", __func__, e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: %s: sycl::free failed: unknown C++ exception\n", __func__);
+  }
 }
 
-extern "C" pgaccel_status pgaccel_expr_device_alloc(size_t bytes, void** out) {
+extern "C" pgaccel_status pgaccel_expr_device_alloc(size_t bytes, void** out) try {
   if (out == nullptr)
     return PGACCEL_ERROR;
   *out = nullptr;
@@ -2016,7 +2012,7 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc(size_t bytes, void** out) {
   pgaccel_status init_status = pgaccel_init();
   if (init_status != PGACCEL_OK)
     return init_status;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2034,10 +2030,16 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc(size_t bytes, void** out) {
     return PGACCEL_OOM;
   *out = ptr;
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_alloc", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_alloc", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t bytes,
-                                                         void** out) {
+                                                         void** out) try {
   if (out == nullptr)
     return PGACCEL_ERROR;
   *out = nullptr;
@@ -2050,7 +2052,7 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t
   pgaccel_status init_status = pgaccel_init();
   if (init_status != PGACCEL_OK)
     return init_status;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2083,7 +2085,7 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t
   if (status != PGACCEL_OK)
     return status;
 
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   try {
@@ -2100,10 +2102,16 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t
   *out = ptr;
   return PGACCEL_OK;
 #endif
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_alloc_copy", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_alloc_copy", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const void* src,
-                                                             size_t bytes) {
+                                                             size_t bytes) try {
   if (bytes == 0)
     return PGACCEL_OK;
   if (dst == nullptr || src == nullptr)
@@ -2111,7 +2119,7 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const vo
   pgaccel_status init_status = pgaccel_init();
   if (init_status != PGACCEL_OK)
     return init_status;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   try {
@@ -2124,10 +2132,16 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const vo
     std::fprintf(stderr, "pgaccel: device copy from host failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_copy_from_host", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_copy_from_host", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void* src,
-                                                           size_t bytes) {
+                                                           size_t bytes) try {
   if (bytes == 0)
     return PGACCEL_OK;
   if (dst == nullptr || src == nullptr)
@@ -2135,7 +2149,7 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void
   pgaccel_status init_status = pgaccel_init();
   if (init_status != PGACCEL_OK)
     return init_status;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   try {
@@ -2148,6 +2162,12 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void
     std::fprintf(stderr, "pgaccel: device copy to host failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_copy_to_host", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_device_copy_to_host", nullptr);
 }
 
 extern "C" void pgaccel_expr_device_free(void* ptr) {
@@ -2155,18 +2175,22 @@ extern "C" void pgaccel_expr_device_free(void* ptr) {
     return;
   if (pgaccel_init() != PGACCEL_OK)
     return;
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return;
   try {
     sycl::free(ptr, *q);
-  } catch (...) {}
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: %s: sycl::free failed: %s\n", __func__, e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: %s: sycl::free failed: unknown C++ exception\n", __func__);
+  }
 }
 
 extern "C" pgaccel_status
 pgaccel_expr_template_cmp_const_count_usm(pgaccel_expr_usm_col col, size_t row_count,
                                           uint16_t cmp_opcode, double const_val, size_t* true_count,
-                                          size_t* uncertain_count) {
+                                          size_t* uncertain_count) try {
   if (true_count != nullptr)
     *true_count = 0;
   if (uncertain_count != nullptr)
@@ -2197,12 +2221,18 @@ pgaccel_expr_template_cmp_const_count_usm(pgaccel_expr_usm_col col, size_t row_c
     default:
       return PGACCEL_UNSUPPORTED;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_count_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_count_usm", nullptr);
 }
 
 extern "C" pgaccel_status
 pgaccel_expr_template_cmp_const_mask_usm(pgaccel_expr_usm_col col, size_t row_count,
                                          uint16_t cmp_opcode, double const_val, uint8_t* selection,
-                                         size_t* true_count, size_t* uncertain_count) {
+                                         size_t* true_count, size_t* uncertain_count) try {
   if (true_count != nullptr)
     *true_count = 0;
   if (uncertain_count != nullptr)
@@ -2234,12 +2264,18 @@ pgaccel_expr_template_cmp_const_mask_usm(pgaccel_expr_usm_col col, size_t row_co
     default:
       return PGACCEL_UNSUPPORTED;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_mask_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_mask_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_cmp_const_reduce_f32_usm(
     pgaccel_expr_usm_col pred_col, uint16_t cmp_opcode, double const_val,
     pgaccel_expr_usm_col value_col, size_t row_count, float* out_sum, float* out_min,
-    float* out_max, int64_t* out_value_count, size_t* true_count, size_t* uncertain_count) {
+    float* out_max, int64_t* out_value_count, size_t* true_count, size_t* uncertain_count) try {
   if (out_sum != nullptr)
     *out_sum = 0.0f;
   if (out_min != nullptr)
@@ -2286,12 +2322,18 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const_reduce_f32_usm(
     default:
       return PGACCEL_UNSUPPORTED;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_reduce_f32_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_reduce_f32_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_count_usm(
     pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
     uint16_t cmp2_opcode, double const2_val, size_t row_count, size_t* true_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   if (true_count != nullptr)
     *true_count = 0;
   if (uncertain_count != nullptr)
@@ -2307,12 +2349,18 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_count_usm(
 
   return dispatch_two_pred_and_count_usm(col1, cmp1_opcode, const1_val, col2, cmp2_opcode,
                                          const2_val, row_count, true_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_count_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_count_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_mask_usm(
     pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
     uint16_t cmp2_opcode, double const2_val, size_t row_count, uint8_t* selection,
-    size_t* true_count, size_t* uncertain_count) {
+    size_t* true_count, size_t* uncertain_count) try {
   if (true_count != nullptr)
     *true_count = 0;
   if (uncertain_count != nullptr)
@@ -2328,13 +2376,19 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_mask_usm(
 
   return dispatch_two_pred_and_mask_usm(col1, cmp1_opcode, const1_val, col2, cmp2_opcode,
                                         const2_val, row_count, selection, true_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_mask_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_mask_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
     pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
     uint16_t cmp2_opcode, double const2_val, pgaccel_expr_usm_col value_col, size_t row_count,
     float* out_sum, float* out_min, float* out_max, int64_t* out_value_count, size_t* true_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   if (out_sum != nullptr)
     *out_sum = 0.0f;
   if (out_min != nullptr)
@@ -2362,6 +2416,12 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
   return dispatch_two_pred_and_reduce_f32_usm(col1, cmp1_opcode, const1_val, col2, cmp2_opcode,
                                               const2_val, value_col, row_count, out_sum, out_min,
                                               out_max, out_value_count, true_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_reduce_f32_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_reduce_f32_usm", nullptr);
 }
 
 // ===========================================================================
@@ -2370,7 +2430,7 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
 
 extern "C" pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* batch,
                                                           uint32_t col_idx, uint16_t cmp_opcode,
-                                                          double const_val, int8_t* results) {
+                                                          double const_val, int8_t* results) try {
   if (batch == nullptr || results == nullptr)
     return PGACCEL_ERROR;
   if (!is_supported_cmp(cmp_opcode))
@@ -2380,8 +2440,7 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* b
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2409,17 +2468,23 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* b
      } else {
        d_res[i] = pg_cmp(op, d_col[i], cv) ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
      }
-   }).wait();
+   }).wait_and_throw();
 
   std::memcpy(results, s.d_res, n * sizeof(int8_t));
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const", nullptr);
 }
 
 extern "C" pgaccel_status
 pgaccel_expr_template_cmp_const_count(const pgaccel_batch* batch, uint32_t col_idx,
                                       uint16_t cmp_opcode, double const_val, size_t* true_count,
-                                      size_t* uncertain_count) {
+                                      size_t* uncertain_count) try {
   if (true_count != nullptr)
     *true_count = 0;
   if (uncertain_count != nullptr)
@@ -2452,8 +2517,7 @@ pgaccel_expr_template_cmp_const_count(const pgaccel_batch* batch, uint32_t col_i
                                                  true_count, "expr_template_cmp_const_count_i64");
   }
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2468,6 +2532,12 @@ pgaccel_expr_template_cmp_const_count(const pgaccel_batch* batch, uint32_t col_i
   stage_col_f64(batch, col_idx, s.d_col, s.d_null);
   return launch_cmp_const_count_usm_typed<double>(s.d_col, s.d_null, n, cmp_opcode, const_val,
                                                   true_count, "expr_template_cmp_const_count");
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_count", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_cmp_const_count", nullptr);
 }
 
 // ===========================================================================
@@ -2476,7 +2546,7 @@ pgaccel_expr_template_cmp_const_count(const pgaccel_batch* batch, uint32_t col_i
 
 extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* batch,
                                                         uint32_t col_idx, double lo, double hi,
-                                                        int8_t* results) {
+                                                        int8_t* results) try {
   if (batch == nullptr || results == nullptr)
     return PGACCEL_ERROR;
 
@@ -2484,8 +2554,7 @@ extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* bat
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2515,11 +2584,17 @@ extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* bat
        const bool ok = pg_cmp(OP_GE, v, clo) && pg_cmp(OP_LE, v, chi);
        d_res[i] = ok ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
      }
-   }).wait();
+   }).wait_and_throw();
 
   std::memcpy(results, s.d_res, n * sizeof(int8_t));
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_between", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_between", nullptr);
 }
 
 // ===========================================================================
@@ -2528,7 +2603,7 @@ extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* bat
 
 extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* batch,
                                                         uint32_t col_idx, const double* values,
-                                                        size_t value_count, int8_t* results) {
+                                                        size_t value_count, int8_t* results) try {
   if (batch == nullptr || results == nullptr || values == nullptr)
     return PGACCEL_ERROR;
   if (value_count > 16)
@@ -2538,8 +2613,7 @@ extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* bat
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2579,12 +2653,18 @@ extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* bat
        }
      }
      d_res[i] = found ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
-   }).wait();
+   }).wait_and_throw();
 
   std::memcpy(results, s.d_res, n * sizeof(int8_t));
   sycl::free(d_vals, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_in_list", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_in_list", nullptr);
 }
 
 // ===========================================================================
@@ -2593,7 +2673,7 @@ extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* bat
 
 extern "C" pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* batch,
                                                         uint32_t col_idx, bool check_not_null,
-                                                        int8_t* results) {
+                                                        int8_t* results) try {
   if (batch == nullptr || results == nullptr)
     return PGACCEL_ERROR;
 
@@ -2601,8 +2681,7 @@ extern "C" pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* bat
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2625,13 +2704,19 @@ extern "C" pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* bat
   q->parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
      const size_t i = id[0];
      dr[i] = dn[i] ? hit : miss;
-   }).wait();
+   }).wait_and_throw();
 
   std::memcpy(results, d_res, n * sizeof(int8_t));
   sycl::free(d_null, *q);
   sycl::free(d_res, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_is_null", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_is_null", nullptr);
 }
 
 // ===========================================================================
@@ -2671,7 +2756,7 @@ struct TwoPredAndParams {
 extern "C" pgaccel_status
 pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx,
                                    uint16_t cmp1_opcode, double const1_val, uint32_t col2_idx,
-                                   uint16_t cmp2_opcode, double const2_val, int8_t* results) {
+                                   uint16_t cmp2_opcode, double const2_val, int8_t* results) try {
   if (batch == nullptr || results == nullptr)
     return PGACCEL_ERROR;
   if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode))
@@ -2681,8 +2766,7 @@ pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx
   if (n == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2733,7 +2817,7 @@ pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx
        return;
      }
      p.res[i] = PGACCEL_EXPR_TRUE;
-   }).wait();
+   }).wait_and_throw();
 
   std::memcpy(results, d_res, n * sizeof(int8_t));
   sycl::free(d_col1, *q);
@@ -2743,13 +2827,19 @@ pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx
   sycl::free(d_res, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and", nullptr);
 }
 
 extern "C" pgaccel_status
 pgaccel_expr_template_two_pred_and_count(const pgaccel_batch* batch, uint32_t col1_idx,
                                          uint16_t cmp1_opcode, double const1_val, uint32_t col2_idx,
                                          uint16_t cmp2_opcode, double const2_val,
-                                         size_t* true_count, size_t* uncertain_count) {
+                                         size_t* true_count, size_t* uncertain_count) try {
   if (true_count != nullptr)
     *true_count = 0;
   if (uncertain_count != nullptr)
@@ -2794,8 +2884,7 @@ pgaccel_expr_template_two_pred_and_count(const pgaccel_batch* batch, uint32_t co
         PGACCEL_VAL_INT32, true_count, "expr_template_two_pred_and_count_i32_i32");
   }
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -2814,4 +2903,10 @@ pgaccel_expr_template_two_pred_and_count(const pgaccel_batch* batch, uint32_t co
   return launch_two_pred_and_count_usm_typed<double, double>(
       s.d_col1, s.d_null1, s.d_col2, s.d_null2, n, cmp1_opcode, const1_val, cmp2_opcode, const2_val,
       true_count, "expr_template_two_pred_and_count");
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_count", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_two_pred_and_count", nullptr);
 }

@@ -36,9 +36,9 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 #include "pgaccel_hash_agg.h"
 
-extern sycl::queue* g_queue;
 
 // ---------------------------------------------------------------------------
 // Hash functions (same as hash_join.cpp)
@@ -1804,7 +1804,7 @@ static pgaccel_agg_state* agg_hash_row_parallel_numeric(
     const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
     const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
     const pgaccel_agg_col* agg_cols, size_t num_aggs, bool enforce_min_rows = true) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return nullptr;
   if (hashagg_metal_backend())
@@ -2050,7 +2050,7 @@ static pgaccel_agg_state* agg_hash_row_parallel(const void* group_keys,
 
 static pgaccel_agg_state* agg_count_i64_hash(const int64_t* group_keys,
                                              const uint8_t* group_null_mask, size_t row_count) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr || group_keys == nullptr || row_count == 0 ||
       row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return nullptr;
@@ -2266,7 +2266,7 @@ static pgaccel_agg_state* build_count_i64_state_from_u32(const int64_t* out_keys
 
 static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t row_count,
                                                     size_t max_distinct_hint) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr || group_keys == nullptr || row_count == 0 ||
       row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return nullptr;
@@ -2446,7 +2446,7 @@ static pgaccel_agg_state* build_count_i64_state_from_u32(const int64_t* out_keys
 }
 
 static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_t row_count) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr || group_keys == nullptr || row_count == 0 ||
       row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
     return nullptr;
@@ -2621,7 +2621,7 @@ static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_
                                    size_t row_count, int key_type, const void* const* value_cols,
                                    const uint8_t* const* value_nulls, const int* value_types,
                                    const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return nullptr;
 
@@ -2762,7 +2762,7 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
                                          const void* const* value_cols,
                                          const uint8_t* const* value_nulls, const int* value_types,
                                          const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return nullptr;
 
@@ -3022,7 +3022,7 @@ static pgaccel_agg_state*
 agg_hash_partial(const void* group_keys, const uint8_t* group_null_mask, size_t row_count,
                  int key_type, const void* const* value_cols, const uint8_t* const* value_nulls,
                  const int* value_types, const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return nullptr;
 
@@ -3178,7 +3178,7 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
                                                  const uint8_t* const* value_nulls,
                                                  const int* value_types,
                                                  const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return nullptr;
 
@@ -3583,7 +3583,7 @@ pgaccel_agg_state* pgaccel_hash_count_i64_device_hash_execute_bounded(int64_t* g
 pgaccel_status pgaccel_hash_agg_execute_sort_based(
     const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
     const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
-    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state) {
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR;
   *out_state = nullptr;
@@ -3609,6 +3609,12 @@ pgaccel_status pgaccel_hash_agg_execute_sort_based(
     std::fprintf(stderr, "pgaccel: hash_agg_execute_sort_based failed (unknown)\n");
   }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_hash_agg_execute_sort_based", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_hash_agg_execute_sort_based", nullptr);
 }
 
 size_t pgaccel_agg_group_count(const pgaccel_agg_state* state) {
@@ -3681,8 +3687,12 @@ const int64_t* pgaccel_agg_get_counts(const pgaccel_agg_state* state) {
   return state->counts.data();
 }
 
-void pgaccel_agg_free(pgaccel_agg_state* state) {
+void pgaccel_agg_free(pgaccel_agg_state* state) try {
   delete state;
+} catch (const std::exception& e) {
+  std::fprintf(stderr, "pgaccel: pgaccel_agg_free failed: %s\n", e.what());
+} catch (...) {
+  std::fprintf(stderr, "pgaccel: pgaccel_agg_free failed: unknown C++ exception\n");
 }
 
 }  // extern "C"

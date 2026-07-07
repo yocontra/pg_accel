@@ -22,6 +22,7 @@
 #include <type_traits>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 // ---------------------------------------------------------------------------
 // SYCL kernel implementations
@@ -30,12 +31,11 @@
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  It is written once during pgaccel_init() (single writer,
 // guarded by g_initialized) and read-only thereafter.
-extern sycl::queue* g_queue;
 
 /// Get the global SYCL queue created by pgaccel_init().
 /// Returns nullptr when SYCL was not initialized or init failed.
 static sycl::queue* get_queue() {
-  return g_queue;
+  return pgaccel_get_queue();
 }
 
 static bool is_metal_backend() {
@@ -315,7 +315,7 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask, size_t cou
 // Public API — fp32 (all platforms)
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count, float* result) {
+extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count, float* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -333,19 +333,28 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_sum_sycl<float>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_sum_f32 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_f32", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count, float* result) {
+extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count, float* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -363,18 +372,28 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_min_sycl<float>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_min_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_min_f32", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count, float* result) {
+extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count, float* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -392,15 +411,25 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_max_sycl<float>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_max_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_max_f32", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +437,7 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count
 // via AdaptiveCpp SSCP). fp64 is always available.
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t count, double* result) {
+extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t count, double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -426,18 +455,28 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t coun
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_sum_sycl<double>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_f64", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t count, double* result) {
+extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t count, double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -457,18 +496,28 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t coun
       pgaccel_status st = is_metal_backend()
                                ? reduce_minmax_f64_sortable_sycl<false>(*q, data, count, result)
                                : reduce_min_sycl<double>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_min_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_min_f64", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t count, double* result) {
+extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t count, double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -488,15 +537,25 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t coun
       pgaccel_status st = is_metal_backend()
                                ? reduce_minmax_f64_sortable_sycl<true>(*q, data, count, result)
                                : reduce_max_sycl<double>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_max_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_max_f64", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -504,7 +563,7 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t coun
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data, size_t count,
-                                                 int64_t* result) {
+                                                 int64_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -522,19 +581,29 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data, size_t cou
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_sum_sycl<int64_t>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_min_i64(const int64_t* data, size_t count,
-                                                 int64_t* result) {
+                                                 int64_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -552,19 +621,29 @@ extern "C" pgaccel_status pgaccel_reduce_min_i64(const int64_t* data, size_t cou
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_min_sycl<int64_t>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_min_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_min_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_max_i64(const int64_t* data, size_t count,
-                                                 int64_t* result) {
+                                                 int64_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -582,22 +661,32 @@ extern "C" pgaccel_status pgaccel_reduce_max_i64(const int64_t* data, size_t cou
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_max_sycl<int64_t>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_max_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_max_i64", nullptr);
 }
 
 // ---------------------------------------------------------------------------
 // Public API — mask popcount (all platforms)
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count, size_t* result) {
+extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count, size_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -611,15 +700,25 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = reduce_count_sycl(*q, mask, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
-  } catch (const std::exception&) {
-  } catch (...) {}
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_count", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_count", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -951,7 +1050,7 @@ pgaccel_status tree_reduce_multi_masked_sycl(sycl::queue& q, const T* values,
 
 extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data, size_t count, float* out_sum,
                                                    float* out_min, float* out_max,
-                                                   int64_t* out_count) {
+                                                   int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -969,21 +1068,30 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f32(const float* data, size_t cou
     if (q) {
       pgaccel_status st =
           tree_reduce_multi_sycl<float>(*q, data, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_f32 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_f32", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data, size_t count,
                                                    double* out_sum, double* out_min,
-                                                   double* out_max, int64_t* out_count) {
+                                                   double* out_max, int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1018,21 +1126,30 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data, size_t co
     if (q) {
       pgaccel_status st =
           tree_reduce_multi_sycl<double>(*q, data, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_f64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_f64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data, size_t count,
                                                    int64_t* out_sum, int64_t* out_min,
-                                                   int64_t* out_max, int64_t* out_count) {
+                                                   int64_t* out_max, int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1050,23 +1167,32 @@ extern "C" pgaccel_status pgaccel_reduce_multi_i64(const int64_t* data, size_t c
     if (q) {
       pgaccel_status st =
           tree_reduce_multi_sycl<int64_t>(*q, data, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_i64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_masked_f32(const float* data,
                                                           const uint8_t* value_nulls,
                                                           const uint8_t* selection, size_t count,
                                                           float* out_sum, float* out_min,
-                                                          float* out_max, int64_t* out_count) {
+                                                          float* out_max, int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1084,24 +1210,33 @@ extern "C" pgaccel_status pgaccel_reduce_multi_masked_f32(const float* data,
     if (q) {
       pgaccel_status st = tree_reduce_multi_masked_sycl<float>(
           *q, data, value_nulls, selection, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
       return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_masked_f32 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_f32", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_masked_f64(const double* data,
                                                           const uint8_t* value_nulls,
                                                           const uint8_t* selection, size_t count,
                                                           double* out_sum, double* out_min,
-                                                          double* out_max, int64_t* out_count) {
+                                                          double* out_max, int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1124,24 +1259,33 @@ extern "C" pgaccel_status pgaccel_reduce_multi_masked_f64(const double* data,
     if (q) {
       pgaccel_status st = tree_reduce_multi_masked_sycl<double>(
           *q, data, value_nulls, selection, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
       return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_masked_f64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_f64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_multi_masked_i64(const int64_t* data,
                                                           const uint8_t* value_nulls,
                                                           const uint8_t* selection, size_t count,
                                                           int64_t* out_sum, int64_t* out_min,
-                                                          int64_t* out_max, int64_t* out_count) {
+                                                          int64_t* out_max, int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1159,17 +1303,26 @@ extern "C" pgaccel_status pgaccel_reduce_multi_masked_i64(const int64_t* data,
     if (q) {
       pgaccel_status st = tree_reduce_multi_masked_sycl<int64_t>(
           *q, data, value_nulls, selection, count, out_sum, out_min, out_max, out_count);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
       return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_multi_masked_i64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_i64", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1372,7 +1525,7 @@ pgaccel_status tree_reduce_stats_sycl(sycl::queue& q, const T* data, size_t coun
 // precision on the final sum of a few thousand partials without requiring
 // fp64 inside kernel code.
 extern "C" pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data, size_t count,
-                                                    double* result) {
+                                                    double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1391,22 +1544,31 @@ extern "C" pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data, size_t co
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = tree_reduce_sumsq_sycl<float, float>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_sum_sq_f32 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_sq_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_sq_f32", nullptr);
 }
 
 // fp64 input: fp64 always available (native on CUDA/ROCm/L0, soft-fp64 on
 // Metal via AdaptiveCpp SSCP). Kernel accumulator is double.
 extern "C" pgaccel_status pgaccel_reduce_sum_sq_f64(const double* data, size_t count,
-                                                    double* result) {
+                                                    double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1425,22 +1587,31 @@ extern "C" pgaccel_status pgaccel_reduce_sum_sq_f64(const double* data, size_t c
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = tree_reduce_sumsq_sycl<double, double>(*q, data, count, result);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_sum_sq_f64 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_sq_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_sum_sq_f64", nullptr);
 }
 
 // fp32 input stats: float accumulator, uint32_t per-group count.
 extern "C" pgaccel_status pgaccel_reduce_stats_f32(const float* data, size_t count,
                                                    uint64_t* out_count, double* out_sum,
-                                                   double* out_sum_sq) {
+                                                   double* out_sum_sq) try {
   if (!out_count || !out_sum || !out_sum_sq)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1457,22 +1628,31 @@ extern "C" pgaccel_status pgaccel_reduce_stats_f32(const float* data, size_t cou
     if (q) {
       pgaccel_status st = tree_reduce_stats_sycl<float, float, uint32_t>(*q, data, count, out_count,
                                                                          out_sum, out_sum_sq);
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_stats_f32 SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_stats_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_stats_f32", nullptr);
 }
 
 // fp64 input stats: double accumulator, uint64_t count. fp64 always available.
 extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t count,
                                                    uint64_t* out_count, double* out_sum,
-                                                   double* out_sum_sq) {
+                                                   double* out_sum_sq) try {
   if (!out_count || !out_sum || !out_sum_sq)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1492,6 +1672,12 @@ extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t co
     return st;
   *out_count = static_cast<uint64_t>(count);
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_stats_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_stats_f64", nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,7 +1702,7 @@ extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t co
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_reduce_bool_and(const uint8_t* data, size_t count,
-                                                  uint8_t* result) {
+                                                  uint8_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1537,20 +1723,29 @@ extern "C" pgaccel_status pgaccel_reduce_bool_and(const uint8_t* data, size_t co
       pgaccel_status st = tree_reduce_sycl<uint8_t>(
           *q, data, count, result, uint8_t{1},
           [](uint8_t a, uint8_t b) -> uint8_t { return (a && b) ? 1 : 0; });
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_bool_and SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bool_and", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bool_and", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bool_or(const uint8_t* data, size_t count,
-                                                 uint8_t* result) {
+                                                 uint8_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1570,16 +1765,25 @@ extern "C" pgaccel_status pgaccel_reduce_bool_or(const uint8_t* data, size_t cou
       pgaccel_status st = tree_reduce_sycl<uint8_t>(
           *q, data, count, result, uint8_t{0},
           [](uint8_t a, uint8_t b) -> uint8_t { return (a || b) ? 1 : 0; });
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_bool_or SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bool_or", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bool_or", nullptr);
 }
 
 // Bitwise reductions are templated on the integer width. We provide explicit
@@ -1609,14 +1813,17 @@ pgaccel_status reduce_bit_and_kernel(const T* data, size_t count, T* result) {
     if (q) {
       pgaccel_status st = tree_reduce_sycl<T>(*q, data, count, result, static_cast<T>(~T{0}),
                                               [](T a, T b) -> T { return static_cast<T>(a & b); });
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_bit_and SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
 }
@@ -1641,14 +1848,17 @@ pgaccel_status reduce_bit_or_kernel(const T* data, size_t count, T* result) {
     if (q) {
       pgaccel_status st = tree_reduce_sycl<T>(*q, data, count, result, T{0},
                                               [](T a, T b) -> T { return static_cast<T>(a | b); });
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_bit_or SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
 }
@@ -1673,60 +1883,117 @@ pgaccel_status reduce_bit_xor_kernel(const T* data, size_t count, T* result) {
     if (q) {
       pgaccel_status st = tree_reduce_sycl<T>(*q, data, count, result, T{0},
                                               [](T a, T b) -> T { return static_cast<T>(a ^ b); });
-      if (st == PGACCEL_OK) {
+      if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
-        return st;
-      }
+      return st;
     }
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: reduce_bit_xor SYCL failed: %s\n", e.what());
-  } catch (...) {}
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
 
   return PGACCEL_ERROR_NO_DEVICE;
 }
 }  // anonymous namespace
 
 extern "C" pgaccel_status pgaccel_reduce_bit_and_i16(const int16_t* data, size_t count,
-                                                     int16_t* result) {
+                                                     int16_t* result) try {
   return reduce_bit_and_kernel<int16_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_and_i16", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_and_i16", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_and_i32(const int32_t* data, size_t count,
-                                                     int32_t* result) {
+                                                     int32_t* result) try {
   return reduce_bit_and_kernel<int32_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_and_i32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_and_i32", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_and_i64(const int64_t* data, size_t count,
-                                                     int64_t* result) {
+                                                     int64_t* result) try {
   return reduce_bit_and_kernel<int64_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_and_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_and_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_or_i16(const int16_t* data, size_t count,
-                                                    int16_t* result) {
+                                                    int16_t* result) try {
   return reduce_bit_or_kernel<int16_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_or_i16", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_or_i16", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_or_i32(const int32_t* data, size_t count,
-                                                    int32_t* result) {
+                                                    int32_t* result) try {
   return reduce_bit_or_kernel<int32_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_or_i32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_or_i32", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_or_i64(const int64_t* data, size_t count,
-                                                    int64_t* result) {
+                                                    int64_t* result) try {
   return reduce_bit_or_kernel<int64_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_or_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_or_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_xor_i16(const int16_t* data, size_t count,
-                                                     int16_t* result) {
+                                                     int16_t* result) try {
   return reduce_bit_xor_kernel<int16_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_xor_i16", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_xor_i16", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_xor_i32(const int32_t* data, size_t count,
-                                                     int32_t* result) {
+                                                     int32_t* result) try {
   return reduce_bit_xor_kernel<int32_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_xor_i32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_xor_i32", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_reduce_bit_xor_i64(const int64_t* data, size_t count,
-                                                     int64_t* result) {
+                                                     int64_t* result) try {
   return reduce_bit_xor_kernel<int64_t>(data, count, result);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_xor_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_reduce_bit_xor_i64", nullptr);
 }
