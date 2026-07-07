@@ -19,7 +19,24 @@ use pgrx::shmem::PGRXSharedMemory;
 // ---------------------------------------------------------------------------
 
 /// Maximum number of concurrent backends we track individually.
-const MAX_BACKENDS: usize = 256;
+///
+/// The shared-memory struct is a fixed-size array (`pg_shmem_init!` allocates
+/// `sizeof(ThreadBudgetData)` once, and `PGRXSharedMemory` requires a
+/// `'static`, `Copy`, fixed-layout type — a runtime-sized `Vec` in shared
+/// memory is not supported by that trait), so this cannot be derived from
+/// `MaxBackends` at segment-registration time without a much larger rework of
+/// how the segment is requested.
+///
+/// It is therefore sized generously (1024 slots × 8 bytes ≈ 8 KiB of shared
+/// memory) so it comfortably covers a default cluster's `MaxBackends`
+/// (`max_connections` + autovacuum workers + background workers + WAL
+/// senders, typically a few hundred). When `MaxBackends` still exceeds this
+/// ceiling, [`warn_if_backends_exceed_capacity`] emits a loud one-time
+/// WARNING and backends past the ceiling fall through to the degraded
+/// global-only accounting path in [`record_allocation`] (the cluster-wide
+/// total stays correct; only per-backend reclaim-on-crash is lost for those
+/// overflow backends).
+const MAX_BACKENDS: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Shared-memory data
@@ -105,6 +122,8 @@ pub fn request_threads(n: i32) -> i32 {
         return 0;
     }
 
+    warn_if_backends_exceed_capacity();
+
     let max = gucs::max_workers_total();
 
     // Unlimited mode: grant the full request, while still tracking the backend
@@ -147,8 +166,12 @@ pub fn release_threads(n: i32) {
     for i in 0..MAX_BACKENDS {
         if exclusive.backends[i].pid == pid {
             let actual = n.min(exclusive.backends[i].allocated);
-            exclusive.backends[i].allocated -= actual;
-            exclusive.total_allocated -= actual;
+            // Saturating for defence in depth: `actual` is clamped to the
+            // slot's allocation so neither value can legitimately go negative,
+            // but never let a corrupted invariant wrap past zero.
+            exclusive.backends[i].allocated =
+                exclusive.backends[i].allocated.saturating_sub(actual);
+            exclusive.total_allocated = exclusive.total_allocated.saturating_sub(actual);
 
             if exclusive.backends[i].allocated == 0 {
                 exclusive.backends[i].pid = 0; // free the slot
@@ -167,22 +190,58 @@ pub fn cleanup_backend() {
     // This runs from a `before_shmem_exit` callback at backend termination.
     // If shared memory was never wired up (e.g. extension loaded without
     // `shared_preload_libraries`, or during early startup failure) the
-    // `PgLwLock::exclusive()` call will panic. We cannot propagate errors
-    // from a shmem_exit callback, so swallow any panic here — leaking a slot
-    // is strictly better than aborting the backend exit path.
-    let _ = std::panic::catch_unwind(|| {
+    // `PgLwLock::exclusive()` call can fail. We cannot propagate errors from a
+    // shmem_exit callback, so we contain the failure here — leaking a slot is
+    // strictly better than aborting the backend exit path.
+    //
+    // Honesty caveat: `catch_unwind` only catches a *Rust* panic. If the lock
+    // acquisition raises a PostgreSQL ERROR that longjmps at the C level
+    // (rather than being converted to a Rust panic by a `#[pg_guard]` frame),
+    // that longjmp bypasses `catch_unwind` entirely and PG's own shmem-exit
+    // machinery handles it. So this guard hardens the common Rust-panic case
+    // (poisoned lock, uninitialised shmem) but is not a universal shield.
+    let result = std::panic::catch_unwind(|| {
         let mut exclusive = BUDGET.exclusive();
         let pid = current_pid();
 
         for i in 0..MAX_BACKENDS {
             if exclusive.backends[i].pid == pid {
-                exclusive.total_allocated -= exclusive.backends[i].allocated;
+                let freed = exclusive.backends[i].allocated;
+                // Saturating: total should always be >= this slot's share, but
+                // never let a broken invariant drive the shared total negative.
+                exclusive.total_allocated = exclusive.total_allocated.saturating_sub(freed);
                 exclusive.backends[i].allocated = 0;
                 exclusive.backends[i].pid = 0;
                 return;
             }
         }
     });
+
+    if let Err(panic) = result {
+        // Do NOT swallow silently: a panic here means we may have leaked this
+        // backend's thread budget. Log it (stderr is the only safe channel in
+        // a shmem-exit callback — the tracing subscriber and PG's ereport
+        // machinery may already be torn down at this point in exit) so the
+        // leak is at least visible in the postmaster log.
+        let detail = panic_message(&*panic);
+        eprintln!(
+            "pg_accel: thread-budget cleanup_backend panicked ({detail}); \
+             this backend's thread-budget slot may be leaked until a later \
+             reclaim_dead_backends sweep frees it"
+        );
+    }
+}
+
+/// Best-effort extraction of a human-readable message from a caught panic
+/// payload, for logging only.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(s) = panic.downcast_ref::<&'static str>() {
+        s
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        s.as_str()
+    } else {
+        "non-string panic payload"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +302,7 @@ fn reclaim_dead_backends(data: &mut ThreadBudgetData) {
                 slot.allocated,
                 slot.pid,
             );
-            data.total_allocated -= slot.allocated;
+            data.total_allocated = data.total_allocated.saturating_sub(slot.allocated);
             slot.allocated = 0;
             slot.pid = 0;
         }
@@ -254,13 +313,26 @@ fn reclaim_dead_backends(data: &mut ThreadBudgetData) {
 ///
 /// Caller must hold the exclusive lock.
 fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
+    if granted <= 0 {
+        return;
+    }
     let pid = current_pid();
 
     // Try to find an existing slot for this backend.
+    //
+    // All arithmetic is saturating: a plain `+=` on i32 can wrap to a
+    // *negative* allocation under pathological accumulation (e.g. unlimited
+    // mode, where every grant is recorded and a long-lived backend keeps
+    // requesting without releasing). A negative total would then make
+    // `grant_from_budget`'s `max.saturating_sub(total)` hand out more than
+    // the cap. Saturating at i32::MAX is a correct, monotone ceiling; if we
+    // ever hit it something upstream is leaking, so surface it loudly rather
+    // than silently wrapping.
     for slot in &mut data.backends {
         if slot.pid == pid {
-            slot.allocated += granted;
-            data.total_allocated += granted;
+            slot.allocated = saturating_add_checked(slot.allocated, granted, "backend slot");
+            data.total_allocated =
+                saturating_add_checked(data.total_allocated, granted, "total_allocated");
             return;
         }
     }
@@ -270,17 +342,88 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
         if slot.pid == 0 {
             slot.pid = pid;
             slot.allocated = granted;
-            data.total_allocated += granted;
+            data.total_allocated =
+                saturating_add_checked(data.total_allocated, granted, "total_allocated");
             return;
         }
     }
 
     // No free slots — still update the global total so the budget stays
-    // correct, but per-backend tracking is degraded (cleanup_backend
-    // won't reclaim these). Exceedingly rare (>256 concurrent backends).
-    data.total_allocated += granted;
-    pgrx::warning!("pg_accel: no free backend slot for PID {pid}, thread tracking degraded");
+    // correct, but per-backend tracking is degraded (cleanup_backend won't
+    // reclaim these). Rare: only when more than MAX_BACKENDS backends hold a
+    // pg_accel allocation simultaneously.
+    data.total_allocated =
+        saturating_add_checked(data.total_allocated, granted, "total_allocated");
+    warn_msg(&format!(
+        "pg_accel: no free backend slot for PID {pid} (>{MAX_BACKENDS} tracked), \
+         thread tracking degraded — cluster total stays correct but this \
+         backend's threads will not be reclaimed on crash"
+    ));
 }
+
+/// Add two non-negative thread counts, saturating at `i32::MAX` instead of
+/// wrapping to a negative value. Logs loudly on saturation because reaching
+/// `i32::MAX` concurrent thread requests is an impossible-in-practice state
+/// that indicates an upstream leak.
+#[inline]
+fn saturating_add_checked(current: i32, delta: i32, what: &str) -> i32 {
+    current.checked_add(delta).unwrap_or_else(|| {
+        warn_msg(&format!(
+            "pg_accel: thread budget {what} would overflow i32 \
+             ({current} + {delta}); saturating at i32::MAX — this indicates \
+             a thread-accounting leak upstream"
+        ));
+        i32::MAX
+    })
+}
+
+/// Emit a warning through the right channel for the current build.
+///
+/// On a real backend this is `pgrx::warning!` (ereport WARNING). Under the
+/// standalone `#[cfg(test)]` binary PG server symbols are unavailable, so we
+/// fall back to stderr.
+#[inline]
+fn warn_msg(msg: &str) {
+    #[cfg(not(test))]
+    pgrx::warning!("{msg}");
+    #[cfg(test)]
+    eprintln!("{msg}");
+}
+
+/// Emit a loud one-time WARNING if PostgreSQL's `MaxBackends` exceeds the
+/// fixed number of per-backend slots we can track individually.
+///
+/// `MaxBackends` is not known at `_PG_init` time (it is computed later during
+/// shared-memory sizing), so this cannot run at segment registration; instead
+/// it runs at most once, lazily, on the first thread request in a backend.
+/// When it fires, backends beyond slot `MAX_BACKENDS` still get a correct
+/// cluster-wide budget but lose per-backend crash reclaim — see the
+/// [`MAX_BACKENDS`] doc comment.
+#[cfg(not(test))]
+fn warn_if_backends_exceed_capacity() {
+    use std::sync::Once;
+    static WARN_ONCE: Once = Once::new();
+    WARN_ONCE.call_once(|| {
+        // SAFETY: `MaxBackends` is a global i32 set once by PostgreSQL during
+        // shared-memory initialisation, before any backend serves queries.
+        // We only read it, from the main backend thread.
+        let max_backends = unsafe { pgrx::pg_sys::MaxBackends };
+        if max_backends > 0 && (max_backends as i64) > MAX_BACKENDS as i64 {
+            pgrx::warning!(
+                "pg_accel: MaxBackends ({max_backends}) exceeds the {MAX_BACKENDS} \
+                 per-backend thread-budget slots; backends past the ceiling keep a \
+                 correct cluster-wide budget but will not have their threads reclaimed \
+                 on crash. Increase MAX_BACKENDS in thread_budget.rs if this cluster \
+                 routinely runs that many pg_accel backends."
+            );
+        }
+    });
+}
+
+/// Test-build stub: `MaxBackends` and `pgrx::warning!` are unavailable in the
+/// standalone unit-test binary.
+#[cfg(test)]
+fn warn_if_backends_exceed_capacity() {}
 
 /// Compute how many requested threads can be granted under a cluster-wide cap.
 ///
@@ -592,5 +735,53 @@ mod tests {
         assert_eq!(slot.allocated, 0);
         assert_eq!(actual, 2);
         assert_eq!(total, 0);
+    }
+
+    // -- saturating math (overflow safety) -----------------------------------
+
+    #[test]
+    fn saturating_add_checked_normal_case() {
+        assert_eq!(saturating_add_checked(10, 5, "test"), 15);
+        assert_eq!(saturating_add_checked(0, 0, "test"), 0);
+    }
+
+    #[test]
+    fn saturating_add_checked_saturates_instead_of_wrapping() {
+        // A plain i32 `+=` here would wrap to a negative value; the checked
+        // helper must pin at i32::MAX instead so the budget never goes
+        // negative (which would make grant_from_budget over-allocate).
+        assert_eq!(saturating_add_checked(i32::MAX, 1, "test"), i32::MAX);
+        assert_eq!(saturating_add_checked(i32::MAX - 3, 10, "test"), i32::MAX);
+    }
+
+    #[test]
+    fn record_allocation_never_goes_negative_on_overflow() {
+        // Seed a slot near the ceiling, then request more. Without saturating
+        // math total_allocated would wrap negative.
+        let mut b = empty_budget();
+        let pid = current_pid();
+        b.backends[0] = BackendSlot {
+            pid,
+            allocated: i32::MAX - 2,
+        };
+        b.total_allocated = i32::MAX - 2;
+
+        record_allocation(&mut b, 100);
+
+        assert!(
+            b.total_allocated >= 0,
+            "total_allocated wrapped negative: {}",
+            b.total_allocated
+        );
+        assert_eq!(b.total_allocated, i32::MAX);
+        assert_eq!(b.backends[0].allocated, i32::MAX);
+    }
+
+    #[test]
+    fn record_allocation_ignores_non_positive() {
+        let mut b = empty_budget();
+        record_allocation(&mut b, 0);
+        record_allocation(&mut b, -5);
+        assert_eq!(b.total_allocated, 0);
     }
 }

@@ -86,7 +86,14 @@ static FP64_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 /// fp32 sibling in the planner's cost equation, so the planner naturally
 /// prefers PG native for small-to-medium fp64 aggregates where the GPU
 /// win wouldn't overcome the emulation penalty.
-static SOFT_FP64_COST_MULTIPLIER: GucSetting<f64> = GucSetting::<f64>::new(32.0);
+static SOFT_FP64_COST_MULTIPLIER: GucSetting<f64> =
+    GucSetting::<f64>::new(SOFT_FP64_COST_MULTIPLIER_DEFAULT);
+
+/// Registration default for `pg_accel.soft_fp64_cost_multiplier` and the
+/// value the clamp falls back to when it is handed a non-finite input
+/// (NaN / ±inf). Kept as a named constant so the GucSetting seed and the
+/// clamp's safe fallback can never drift apart.
+const SOFT_FP64_COST_MULTIPLIER_DEFAULT: f64 = 32.0;
 
 /// Hard cap on `pg_accel.soft_fp64_cost_multiplier`. Values past this are
 /// clamped with a `tracing::warn!`. Raising this constant requires
@@ -118,6 +125,21 @@ pub fn fp64_enabled() -> bool {
 #[inline]
 #[must_use]
 fn clamp_soft_fp64_cost_multiplier(raw: f64) -> f64 {
+    // NaN and ±inf must never reach the planner cost equation: every
+    // comparison against NaN is false, so a NaN would slip past the
+    // `> cap` / `< 1.0` guards below unchanged and then poison every
+    // cost estimate it multiplies into (NaN propagates through the whole
+    // add_path comparison). Reject non-finite inputs up front and fall
+    // back to the registration default.
+    if !raw.is_finite() {
+        tracing::warn!(
+            raw = raw,
+            default = SOFT_FP64_COST_MULTIPLIER_DEFAULT,
+            "pg_accel.soft_fp64_cost_multiplier is non-finite (NaN/inf); \
+             using default to keep planner cost math finite"
+        );
+        return SOFT_FP64_COST_MULTIPLIER_DEFAULT;
+    }
     if raw > SOFT_FP64_COST_MULTIPLIER_HARD_CAP {
         tracing::warn!(
             raw = raw,
@@ -329,7 +351,6 @@ mod soft_fp64_cap_tests {
         assert!((clamp_soft_fp64_cost_multiplier(64.0001) - 64.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(100.0) - 64.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(1000.0) - 64.0).abs() < f64::EPSILON);
-        assert!((clamp_soft_fp64_cost_multiplier(f64::INFINITY) - 64.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -339,5 +360,21 @@ mod soft_fp64_cap_tests {
         assert!((clamp_soft_fp64_cost_multiplier(0.5) - 1.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(0.0) - 1.0).abs() < f64::EPSILON);
         assert!((clamp_soft_fp64_cost_multiplier(-10.0) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn clamp_rejects_non_finite_to_default() {
+        use super::SOFT_FP64_COST_MULTIPLIER_DEFAULT;
+        // NaN can never be clamped: `NaN > cap` and `NaN < 1.0` are both
+        // false, so without an explicit `is_finite` guard NaN would flow
+        // straight into the planner cost equation and poison every estimate
+        // it multiplies. Both NaN and ±inf must resolve to the finite
+        // registration default instead.
+        let d = SOFT_FP64_COST_MULTIPLIER_DEFAULT;
+        assert!((clamp_soft_fp64_cost_multiplier(f64::NAN) - d).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(f64::INFINITY) - d).abs() < f64::EPSILON);
+        assert!((clamp_soft_fp64_cost_multiplier(f64::NEG_INFINITY) - d).abs() < f64::EPSILON);
+        // Sanity: the result is always finite regardless of input.
+        assert!(clamp_soft_fp64_cost_multiplier(f64::NAN).is_finite());
     }
 }

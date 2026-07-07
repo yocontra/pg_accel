@@ -30,8 +30,13 @@ pub struct AccelStats {
     pub planner_hook_calls: u64,
     pub command_type_skips: u64,
     pub window_gpu_failures: u64,
-    /// GPU kernel executions (from C++ thread-local counter).
-    pub gpu_kernel_executions: u64,
+    // NOTE: there is deliberately no `gpu_kernel_executions` field here. The
+    // `gpu_kernel_executions` SRF column is sourced live from the C++
+    // thread-local counter via `crate::gpu::gpu_exec_count()` (see
+    // `pg_accel_stats`), never from this struct. A struct field was dead —
+    // written nowhere in production and only ever read back as its own
+    // default zero — so it was removed rather than left as a misleading
+    // always-zero counter.
 }
 
 thread_local! {
@@ -461,6 +466,23 @@ fn pg_accel_reset_stats() {
     PLANNER_REJECTION_REASON_COUNTS.with(|counts| {
         counts.borrow_mut().clear();
     });
+    // Reset the process-wide atomic counters too. Each PG backend is a
+    // separate process, so these atomics are effectively per-backend and the
+    // benchmark harness (which calls this immediately before a timed EXPLAIN
+    // / query) expects a clean slate. Leaving them cumulative made the
+    // planner-considered/rejected, GPU-cache, planner-overhead, degenerate-
+    // guard, and fast-decline SRF columns read stale totals after a reset.
+    PLANNER_CONSIDERED.store(0, Ordering::Relaxed);
+    PLANNER_REJECTED.store(0, Ordering::Relaxed);
+    DEGENERATE_GUARD_TRIGGERS.store(0, Ordering::Relaxed);
+    GPU_CACHE_HITS.store(0, Ordering::Relaxed);
+    GPU_CACHE_MISSES.store(0, Ordering::Relaxed);
+    PLANNER_HOOK_TOTAL_US.store(0, Ordering::Relaxed);
+    PLANNER_FAST_DECLINE.store(0, Ordering::Relaxed);
+    // `gpu_kernel_executions` is intentionally NOT reset here: it is a
+    // monotonic counter owned by the C++ runtime (`crate::gpu::gpu_exec_count`)
+    // that the harness reads by *delta* (before/after subtraction), not by
+    // absolute value, so a reset would be meaningless and cross-module.
 }
 
 /// Returns the last planner rejection reason observed by this backend.
@@ -949,7 +971,6 @@ mod tests {
             planner_hook_calls: 0,
             command_type_skips: 0,
             window_gpu_failures: 0,
-            gpu_kernel_executions: 0,
         };
         let dbg = format!("{s:?}");
         assert!(dbg.contains("queries_accelerated: 5"));
@@ -973,7 +994,6 @@ mod tests {
         assert_eq!(s.planner_hook_calls, 0);
         assert_eq!(s.command_type_skips, 0);
         assert_eq!(s.window_gpu_failures, 0);
-        assert_eq!(s.gpu_kernel_executions, 0);
     }
 
     // -- atomic bench-mode counters ------------------------------------------

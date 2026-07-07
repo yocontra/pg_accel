@@ -4,6 +4,10 @@
 //! pgrx's test framework.  They exercise the public SQL interface rather than
 //! internal Rust APIs.
 
+// Phase 2 engine-hardening integration tests (Agent 2F).
+#[cfg(any(test, feature = "pg_test"))]
+mod phase2_engine;
+
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {

@@ -198,11 +198,14 @@ pub(super) fn append_key_bytes(
                 buf.extend_from_slice(&[0u8; 24]);
                 return;
             }
-            // SAFETY: payload_len ≥ 6 verified above. canonicalisation
-            // duplicates the inline math from
-            // tuple_extract::canonicalize_inet_payload — they must
-            // match (kernel reads the same 24-byte layout).
+            // SAFETY: `payload_len >= 6` was verified above and `vardata` is a
+            // non-null pointer into the detoasted flat varlena payload, so both
+            // `*vardata` (byte 0 = family) and `*vardata.add(1)` (byte 1 = bits)
+            // are in bounds. This canonicalisation duplicates the inline math
+            // from `tuple_extract::canonicalize_inet_payload` — the two must
+            // match because the kernel reads the same 24-byte layout.
             let family = unsafe { *vardata };
+            // SAFETY: see above — byte 1 is within the `payload_len >= 6` span.
             let bits = unsafe { *vardata.add(1) };
             let mut bytes = [0u8; 24];
             bytes[0] = family;
@@ -224,7 +227,20 @@ pub(super) fn append_key_bytes(
             }
             buf.extend_from_slice(&bytes);
         }
-        _ => {}
+        other => {
+            // Fail closed. A silent `_ => {}` here appended zero bytes for an
+            // unrecognised key type while `key_size()` still reports a fixed
+            // stride for it — desyncing the flat key buffer so the kernel
+            // reads every subsequent key shifted by the missing bytes and
+            // produces silently-wrong groupings. An unknown key type is a
+            // planner/executor bug, not a data condition, so hard-error on the
+            // main backend thread rather than corrupt the aggregate.
+            pgrx::error!(
+                "pg_accel: append_key_bytes called with unknown group-key type {other} \
+                 (type_oid {}); refusing to emit a stride-desynced key buffer",
+                u32::from(type_oid)
+            );
+        }
     }
 }
 
