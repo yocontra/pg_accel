@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "pgaccel_fused.h"
+#include "pgaccel_queue.h"
 
 static constexpr size_t GPU_FUSED_THRESHOLD = 8192;
 
@@ -23,12 +24,11 @@ static constexpr size_t GPU_FUSED_THRESHOLD = 8192;
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  It is written once during pgaccel_init() (single writer,
 // guarded by g_initialized) and read-only thereafter.
-extern sycl::queue* g_queue;
 
 /// Get the global SYCL queue created by pgaccel_init().
 /// Returns nullptr when SYCL was not initialized or init failed.
 static sycl::queue* get_queue() {
-  return g_queue;
+  return pgaccel_get_queue();
 }
 
 namespace {
@@ -346,7 +346,7 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, si
                                                      int cmp_op_raw, float filter_val,
                                                      const pgaccel_reduce_col* cols,
                                                      size_t num_cols, float* out_results,
-                                                     size_t* out_pass_count) {
+                                                     size_t* out_pass_count) try {
   if (!out_results || !out_pass_count)
     return PGACCEL_ERROR;
   pgaccel_cmp_op cmp_op = static_cast<pgaccel_cmp_op>(cmp_op_raw);
@@ -369,39 +369,42 @@ pgaccel_status pgaccel_fused_filter_multi_reduce_f32(const float* filter_col, si
     return PGACCEL_OK;
   }
 
-  if (count >= GPU_FUSED_THRESHOLD) {
-    try {
-      sycl::queue* q = get_queue();
-      if (q) {
-        std::vector<const float*> agg_cols(num_cols);
-        std::vector<pgaccel_fused_agg_op> agg_ops(num_cols);
-        for (size_t j = 0; j < num_cols; ++j) {
-          agg_ops[j] = static_cast<pgaccel_fused_agg_op>(cols[j].op);
-          if (cols[j].op < PGACCEL_FUSED_SUM || cols[j].op > PGACCEL_FUSED_COUNT)
-            return PGACCEL_ERROR;
-          if (agg_ops[j] != PGACCEL_FUSED_COUNT && cols[j].data == nullptr)
-            return PGACCEL_ERROR;
-          agg_cols[j] = cols[j].data;
-        }
+  if (count < GPU_FUSED_THRESHOLD)
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
 
-        std::vector<double> tmp_results(num_cols, 0.0);
-        uint32_t pass_count = 0;
-        pgaccel_status st = sycl_fused_filter_multi_reduce_f32(
-            *q, filter_col, cmp_op, filter_val, agg_cols.data(), agg_ops.data(), num_cols, count,
-            tmp_results.data(), &pass_count);
-        if (st == PGACCEL_OK) {
-          for (size_t j = 0; j < num_cols; ++j)
-            out_results[j] = static_cast<float>(tmp_results[j]);
-          *out_pass_count = static_cast<size_t>(pass_count);
-          pgaccel_record_gpu_exec();
-          return st;
-        }
-      }
-    } catch (const std::exception&) {
-    } catch (...) {}
+  sycl::queue* q = get_queue();
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  std::vector<const float*> agg_cols(num_cols);
+  std::vector<pgaccel_fused_agg_op> agg_ops(num_cols);
+  for (size_t j = 0; j < num_cols; ++j) {
+    agg_ops[j] = static_cast<pgaccel_fused_agg_op>(cols[j].op);
+    if (cols[j].op < PGACCEL_FUSED_SUM || cols[j].op > PGACCEL_FUSED_COUNT)
+      return PGACCEL_ERROR;
+    if (agg_ops[j] != PGACCEL_FUSED_COUNT && cols[j].data == nullptr)
+      return PGACCEL_ERROR;
+    agg_cols[j] = cols[j].data;
   }
 
+  std::vector<double> tmp_results(num_cols, 0.0);
+  uint32_t pass_count = 0;
+  pgaccel_status st = sycl_fused_filter_multi_reduce_f32(
+      *q, filter_col, cmp_op, filter_val, agg_cols.data(), agg_ops.data(), num_cols, count,
+      tmp_results.data(), &pass_count);
+  if (st == PGACCEL_OK) {
+    for (size_t j = 0; j < num_cols; ++j)
+      out_results[j] = static_cast<float>(tmp_results[j]);
+    *out_pass_count = static_cast<size_t>(pass_count);
+    pgaccel_record_gpu_exec();
+  }
+  return st;
+} catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_fused_filter_multi_reduce_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_fused_filter_multi_reduce_f32", nullptr);
 }
 
 }  // extern "C"

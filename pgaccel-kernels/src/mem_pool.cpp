@@ -1,14 +1,14 @@
 #include <sycl/sycl.hpp>
 
+#include <unistd.h>
+
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
 
 #include "pgaccel_ffi.h"
-
-// SAFETY: g_queue is owned by device_manager.cpp. The arena borrows the
-// process-global queue so runtime teardown stays centralized.
-extern sycl::queue* g_queue;
+#include "pgaccel_queue.h"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -39,6 +39,7 @@ struct Pool {
   size_t total_allocated = 0;
   bool initialized = false;
   sycl::queue* queue = nullptr;  // borrowed from device_manager.cpp
+  pid_t owner_pid = 0;           // PID that initialized this pool (fork guard)
 };
 
 static Pool g_pool;
@@ -77,17 +78,30 @@ static void raw_free(void* ptr) {
 }
 
 static void ensure_pool_initialized() {
-  if (g_pool.initialized)
+  const pid_t pid = getpid();
+  if (g_pool.initialized && g_pool.owner_pid == pid)
     return;
 
-  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
+  if (g_pool.initialized && g_pool.owner_pid != pid) {
+    // Forked child inherited the parent's pool bookkeeping. Those blocks
+    // belong to the parent's GPU context: freeing them via the child's
+    // fresh queue would be UB, and dispatching from them dispatches on a
+    // dead context. Drop the records (the parent still owns and frees the
+    // real allocations) and re-initialize against the child's queue.
+    g_pool.blocks.clear();
+    g_pool.oversized.clear();
+    g_pool.total_allocated = 0;
     g_pool.queue = nullptr;
-    return;
+    g_pool.initialized = false;
   }
-  g_pool.queue = g_queue;
+
+  // pgaccel_get_queue() routes through pgaccel_init(), which re-checks the
+  // PID itself and rebuilds the process queue after fork.
+  g_pool.queue = pgaccel_get_queue();
   if (g_pool.queue == nullptr) {
     return;
   }
+  g_pool.owner_pid = pid;
   g_pool.initialized = true;
 
   // The device manager owns the primary queue; the pool borrows it for USM
@@ -109,7 +123,7 @@ static Block allocate_block(size_t capacity) {
 // Public API
 // ---------------------------------------------------------------------------
 
-extern "C" void* pgaccel_alloc(size_t bytes) {
+extern "C" void* pgaccel_alloc(size_t bytes) try {
   if (bytes == 0)
     return nullptr;
 
@@ -149,6 +163,12 @@ extern "C" void* pgaccel_alloc(size_t bytes) {
   blk.used = aligned;
   g_pool.blocks.push_back(blk);
   return ptr;
+} catch (const std::exception& e) {
+  std::fprintf(stderr, "pgaccel: pgaccel_alloc failed: %s\n", e.what());
+  return nullptr;
+} catch (...) {
+  std::fprintf(stderr, "pgaccel: pgaccel_alloc failed: unknown C++ exception\n");
+  return nullptr;
 }
 
 extern "C" void pgaccel_free(void* ptr) {
@@ -157,7 +177,7 @@ extern "C" void pgaccel_free(void* ptr) {
   (void)ptr;
 }
 
-extern "C" void pgaccel_pool_reset() {
+extern "C" void pgaccel_pool_reset() try {
   for (auto& blk : g_pool.blocks) {
     raw_free(blk.data);
   }
@@ -171,6 +191,10 @@ extern "C" void pgaccel_pool_reset() {
   g_pool.total_allocated = 0;
   g_pool.queue = nullptr;
   g_pool.initialized = false;
+} catch (const std::exception& e) {
+  std::fprintf(stderr, "pgaccel: pgaccel_pool_reset failed: %s\n", e.what());
+} catch (...) {
+  std::fprintf(stderr, "pgaccel: pgaccel_pool_reset failed: unknown C++ exception\n");
 }
 
 extern "C" size_t pgaccel_pool_bytes_used() {
@@ -184,7 +208,7 @@ extern "C" size_t pgaccel_pool_bytes_used() {
   return used;
 }
 
-extern "C" void pgaccel_prefetch(void* ptr, size_t bytes) {
+extern "C" void pgaccel_prefetch(void* ptr, size_t bytes) try {
   if (!ptr || bytes == 0)
     return;
 
@@ -192,4 +216,8 @@ extern "C" void pgaccel_prefetch(void* ptr, size_t bytes) {
   if (g_pool.queue) {
     get_queue().prefetch(ptr, bytes);
   }
+} catch (const std::exception& e) {
+  std::fprintf(stderr, "pgaccel: pgaccel_prefetch failed: %s\n", e.what());
+} catch (...) {
+  std::fprintf(stderr, "pgaccel: pgaccel_prefetch failed: unknown C++ exception\n");
 }

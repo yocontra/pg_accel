@@ -360,6 +360,40 @@ pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
     size_t* uncertain_count);
 
 /*
+ * Simple predicate templates writing per-row three-result int8 outputs
+ * (PGACCEL_EXPR_TRUE / _FALSE / _UNCERTAIN). These symbols are exported by
+ * expr_templates.cpp and consumed by the Rust externs in
+ * pg_accel/src/gpu/bridge.rs; until 2026-07 they were declared in no C
+ * header at all, so nothing pinned the two sides together. Keep these
+ * declarations byte-for-byte in sync with both the definitions and the
+ * Rust externs.
+ */
+
+/* Template: col <cmp> const. */
+pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* batch, uint32_t col_idx,
+                                               uint16_t cmp_opcode, double const_val,
+                                               int8_t* results);
+
+/* Template: col BETWEEN lo AND hi (inclusive). */
+pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* batch, uint32_t col_idx,
+                                             double lo, double hi, int8_t* results);
+
+/* Template: col IN (v0..vN) — up to 16 values. */
+pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* batch, uint32_t col_idx,
+                                             const double* values, size_t value_count,
+                                             int8_t* results);
+
+/* Template: col IS NULL / IS NOT NULL. */
+pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* batch, uint32_t col_idx,
+                                             bool check_not_null, int8_t* results);
+
+/* Template: col1 <cmp1> const1 AND col2 <cmp2> const2. */
+pgaccel_status pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx,
+                                                  uint16_t cmp1_opcode, double const1_val,
+                                                  uint32_t col2_idx, uint16_t cmp2_opcode,
+                                                  double const2_val, int8_t* results);
+
+/*
  * SSBM Q1.x resident filtered revenue aggregate.
  *
  * Consumes shared-USM/resident int32 lineorder columns and returns only the
@@ -727,6 +761,49 @@ pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm
     uint32_t* scratch_count, double* scratch_partial_sum, uint32_t* scratch_partial_count,
     size_t scratch_partial_capacity, double* out_sum_by_group, uint32_t* out_count_by_group,
     size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count);
+
+/* ── ABI pins ─────────────────────────────────────────────────────── */
+/*
+ * Two-sided layout pins for structs crossing the C/Rust FFI boundary.
+ * Rust mirrors live in pg_accel/src/gpu/types.rs (PgaccelVal,
+ * PgaccelExprInstruction, PgaccelBatch, PgaccelExprUsmCol, resident batch
+ * fabric) with matching layout tests in pg_accel/src/gpu/bridge.rs and
+ * types.rs. All pins assume LP64 (the only supported target family);
+ * the pointer-size pin makes that explicit.
+ */
+#ifdef __cplusplus
+#define PGACCEL_ABI_PIN(cond, msg) static_assert(cond, msg)
+#else
+#define PGACCEL_ABI_PIN(cond, msg) _Static_assert(cond, msg)
+#endif
+
+PGACCEL_ABI_PIN(sizeof(void*) == 8, "pgaccel FFI layout pins assume LP64 targets");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_val) == 16, "pgaccel_val is 16 bytes (bridge.rs pin)");
+PGACCEL_ABI_PIN(offsetof(pgaccel_val, data) == 8, "pgaccel_val.data at offset 8");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_expr_instruction) == 8,
+                "pgaccel_expr_instruction is 8 bytes (bridge.rs pin)");
+PGACCEL_ABI_PIN(offsetof(pgaccel_expr_instruction, arg) == 4,
+                "pgaccel_expr_instruction.arg at offset 4");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_batch) == 40, "pgaccel_batch is 5 pointer-sized fields");
+PGACCEL_ABI_PIN(offsetof(pgaccel_batch, num_cols) == 8, "pgaccel_batch.num_cols at offset 8");
+PGACCEL_ABI_PIN(offsetof(pgaccel_batch, col_data) == 16, "pgaccel_batch.col_data at offset 16");
+PGACCEL_ABI_PIN(offsetof(pgaccel_batch, col_nulls) == 24, "pgaccel_batch.col_nulls at offset 24");
+PGACCEL_ABI_PIN(offsetof(pgaccel_batch, col_types) == 32, "pgaccel_batch.col_types at offset 32");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_expr_usm_col) == 24,
+                "pgaccel_expr_usm_col is 3 pointer-sized fields (bridge.rs pin)");
+
+/* Resident batch fabric — Rust pins at pg_accel/src/gpu/types.rs
+ * resident_batch_abi_layout_is_pinned(). */
+PGACCEL_ABI_PIN(sizeof(pgaccel_resident_column_view) == 48,
+                "pgaccel_resident_column_view ABI pinned at 48 bytes");
+PGACCEL_ABI_PIN(sizeof(pgaccel_resident_batch) == 56,
+                "pgaccel_resident_batch ABI pinned at 56 bytes");
+PGACCEL_ABI_PIN(sizeof(pgaccel_device_var_output) == 104,
+                "pgaccel_device_var_output ABI pinned at 104 bytes");
 
 #ifdef __cplusplus
 }

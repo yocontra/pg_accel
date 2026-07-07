@@ -5,11 +5,18 @@
 // — none of these had any standalone test coverage before this file.
 //
 // Each kernel gates on `count >= GPU_WINDOW_THRESHOLD == 65536` and
-// returns PGACCEL_ERROR_NO_DEVICE below that. On Metal, the legacy
-// non-segmented count/sum/rank kernels also return NO_DEVICE at the
-// threshold because one large partition can trip the command-buffer
+// returns PGACCEL_UNSUPPORTED below that. On Metal, the legacy
+// non-segmented count/sum/rank kernels also return PGACCEL_UNSUPPORTED at
+// the threshold because one large partition can trip the command-buffer
 // interactivity watchdog; production planning declines that path until
 // segmented prefix scans replace it.
+//
+// Status-honesty note (2026-07 kernel-safety pass): these decline gates
+// used to return PGACCEL_ERROR_NO_DEVICE, conflating "planner should not
+// use this path" with "the machine has no GPU". The gating behavior under
+// test is identical; only the status code was corrected. NO_DEVICE is now
+// reserved for an actually-missing device, PGACCEL_ERROR for a kernel that
+// failed, PGACCEL_UNSUPPORTED for policy declines like these.
 
 #include <cstdint>
 #include <cstdio>
@@ -124,8 +131,8 @@ static void test_window_count() {
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_count(starts.data(), nulls.data(), N, results.data());
   if (is_metal_backend()) {
-    ASSERT_TRUE("window_count Metal non-segmented path returns NO_DEVICE",
-                s == PGACCEL_ERROR_NO_DEVICE);
+    ASSERT_TRUE("window_count Metal non-segmented path declines with UNSUPPORTED",
+                s == PGACCEL_UNSUPPORTED);
     return;
   }
   ASSERT_STATUS_OK("window_count 65536 status", s);
@@ -176,8 +183,8 @@ static void test_window_sum() {
 
   pgaccel_status s = pgaccel_window_sum(starts.data(), values.data(), nullptr, N, results.data());
   if (is_metal_backend()) {
-    ASSERT_TRUE("window_sum Metal non-segmented path returns NO_DEVICE",
-                s == PGACCEL_ERROR_NO_DEVICE);
+    ASSERT_TRUE("window_sum Metal non-segmented path declines with UNSUPPORTED",
+                s == PGACCEL_UNSUPPORTED);
     return;
   }
   ASSERT_STATUS_OK("window_sum 65536 status", s);
@@ -208,8 +215,8 @@ static void test_window_rank() {
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_rank(starts.data(), sort_keys.data(), N, results.data());
   if (is_metal_backend()) {
-    ASSERT_TRUE("window_rank Metal non-segmented path returns NO_DEVICE",
-                s == PGACCEL_ERROR_NO_DEVICE);
+    ASSERT_TRUE("window_rank Metal non-segmented path declines with UNSUPPORTED",
+                s == PGACCEL_UNSUPPORTED);
     return;
   }
   ASSERT_STATUS_OK("window_rank 65536 status", s);
@@ -246,8 +253,8 @@ static void test_window_dense_rank() {
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_dense_rank(starts.data(), sort_keys.data(), N, results.data());
   if (is_metal_backend()) {
-    ASSERT_TRUE("window_dense_rank Metal non-segmented path returns NO_DEVICE",
-                s == PGACCEL_ERROR_NO_DEVICE);
+    ASSERT_TRUE("window_dense_rank Metal non-segmented path declines with UNSUPPORTED",
+                s == PGACCEL_UNSUPPORTED);
     return;
   }
   ASSERT_STATUS_OK("window_dense_rank 65536 status", s);
@@ -269,9 +276,9 @@ static void test_window_dense_rank() {
 // Test: below-threshold gating
 // ---------------------------------------------------------------------------
 //
-// All 5 kernels return PGACCEL_ERROR_NO_DEVICE for count < 65536; the
+// All 5 kernels return PGACCEL_UNSUPPORTED for count < 65536; the
 // dispatcher uses that to fall back to the host implementation. Confirm
-// the gate fires.
+// the gate fires (and reports itself as a decline, not a missing device).
 static void test_below_threshold_gates() {
   printf("--- test_below_threshold_gates ---\n");
 
@@ -284,19 +291,19 @@ static void test_below_threshold_gates() {
 
   pgaccel_status s;
   s = pgaccel_window_row_number(starts.data(), N, i64_results.data());
-  ASSERT_TRUE("row_number N=1024 returns NO_DEVICE", s == PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("row_number N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
 
   s = pgaccel_window_count(starts.data(), nullptr, N, i64_results.data());
-  ASSERT_TRUE("count N=1024 returns NO_DEVICE", s == PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("count N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
 
   s = pgaccel_window_sum(starts.data(), d_values.data(), nullptr, N, d_results.data());
-  ASSERT_TRUE("sum N=1024 returns NO_DEVICE", s == PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("sum N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
 
   s = pgaccel_window_rank(starts.data(), d_values.data(), N, i64_results.data());
-  ASSERT_TRUE("rank N=1024 returns NO_DEVICE", s == PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("rank N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
 
   s = pgaccel_window_dense_rank(starts.data(), d_values.data(), N, i64_results.data());
-  ASSERT_TRUE("dense_rank N=1024 returns NO_DEVICE", s == PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("dense_rank N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,12 +119,11 @@ static T pad_value() {
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  It is written once during pgaccel_init() (single writer,
 // guarded by g_initialized) and read-only thereafter.
-extern sycl::queue* g_queue;
 
 /// Get the global SYCL queue created by pgaccel_init().
 /// Returns nullptr when SYCL was not initialized or init failed.
 static sycl::queue* get_queue() {
-  return g_queue;
+  return pgaccel_get_queue();
 }
 
 // ---------------------------------------------------------------------------
@@ -182,10 +182,10 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
     fprintf(stderr, "pgaccel: SYCL sort failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   } catch (const std::exception& e) {
     fprintf(stderr, "pgaccel: sort failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
 }
 
@@ -272,10 +272,10 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
     fprintf(stderr, "pgaccel: SYCL kv-sort failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   } catch (const std::exception& e) {
     fprintf(stderr, "pgaccel: kv-sort failed: %s\n", e.what());
-    return PGACCEL_ERROR_NO_DEVICE;
+    return PGACCEL_ERROR;
   }
 }
 
@@ -1234,19 +1234,19 @@ static pgaccel_status dispatch_sort(T* data, size_t count) {
         pgaccel_record_gpu_exec();
         return st;
       }
-      // Fall through to bitonic on radix failure.
+      // Fall through to bitonic on radix failure (intra-GPU retry).
     }
   }
 
-  // Bitonic sort uses compare-and-swap only — reliable on Metal.
+  // Bitonic sort uses compare-and-swap only — reliable on Metal. As the
+  // last kernel in the chain its status is returned as-is (honest error,
+  // not collapsed to NO_DEVICE).
   {
     pgaccel_status st = sycl_bitonic_sort(data, count);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
+    return st;
   }
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 template <typename T>
@@ -1289,18 +1289,18 @@ static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices, size_t count)
         pgaccel_record_gpu_exec();
         return st;
       }
+      // Fall through to bitonic on radix failure (intra-GPU retry).
     }
   }
 
-  // Bitonic sort uses compare-and-swap only — reliable on Metal.
+  // Bitonic sort uses compare-and-swap only — reliable on Metal. Last
+  // kernel in the chain: status returned as-is.
   {
     pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
+    return st;
   }
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 static pgaccel_status dispatch_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) {
@@ -1315,14 +1315,13 @@ static pgaccel_status dispatch_sort_kv_i32_device(int32_t* keys, uint32_t* indic
       pgaccel_record_gpu_exec();
       return st;
     }
+    // Fall through to bitonic on radix failure (intra-GPU retry).
   }
 
   const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
-  if (st == PGACCEL_OK) {
+  if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
-    return st;
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  return st;
 }
 
 static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
@@ -1340,14 +1339,13 @@ static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uin
       pgaccel_record_gpu_exec();
       return st;
     }
+    // Fall through to bitonic on radix failure (intra-GPU retry).
   }
 
   const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
-  if (st == PGACCEL_OK) {
+  if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
-    return st;
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  return st;
 }
 
 template <typename K>
@@ -1575,69 +1573,159 @@ static pgaccel_status dispatch_topk_kv(const K* keys, size_t count, size_t k, bo
 
 extern "C" {
 
-pgaccel_status pgaccel_sort_f32(float* data, size_t count) {
+pgaccel_status pgaccel_sort_f32(float* data, size_t count) try {
   return dispatch_sort(data, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_f32", nullptr);
 }
 
-pgaccel_status pgaccel_sort_f64(double* data, size_t count) {
+pgaccel_status pgaccel_sort_f64(double* data, size_t count) try {
   return dispatch_sort_fp_checked(data, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_f64", nullptr);
 }
 
-pgaccel_status pgaccel_sort_i32(int32_t* data, size_t count) {
+pgaccel_status pgaccel_sort_i32(int32_t* data, size_t count) try {
   return dispatch_sort(data, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_i32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_i32", nullptr);
 }
 
-pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count) {
+pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count) try {
   return dispatch_sort(data, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_i64", nullptr);
 }
 
-pgaccel_status pgaccel_sort_u64(uint64_t* data, size_t count) {
+pgaccel_status pgaccel_sort_u64(uint64_t* data, size_t count) try {
   return dispatch_sort(data, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_u64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_u64", nullptr);
 }
 
-pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count) {
+pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count) try {
   return dispatch_sort_kv(keys, indices, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_f32", nullptr);
 }
 
-pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count) {
+pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count) try {
   return dispatch_sort_kv_fp_checked(keys, indices, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_f64", nullptr);
 }
 
-pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count) {
+pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count) try {
   return dispatch_sort_kv(keys, indices, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i32", nullptr);
 }
 
-pgaccel_status pgaccel_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) {
+pgaccel_status pgaccel_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) try {
   return dispatch_sort_kv_i32_device(keys, indices, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i32_device", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i32_device", nullptr);
 }
 
 pgaccel_status pgaccel_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
-                                                      size_t count, uint32_t radix_bits) {
+                                                      size_t count, uint32_t radix_bits) try {
   return dispatch_sort_kv_i32_nonnegative_device(keys, indices, count, radix_bits);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i32_nonnegative_device", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i32_nonnegative_device", nullptr);
 }
 
-pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count) {
+pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count) try {
   return dispatch_sort_kv(keys, indices, count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_sort_kv_i64", nullptr);
 }
 
 pgaccel_status pgaccel_topk_kv_f32(const float* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count) {
+                                   uint32_t* out_indices, size_t* out_count) try {
   return dispatch_topk_kv(keys, count, k, largest != 0, out_indices, out_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_f32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_f32", nullptr);
 }
 
 pgaccel_status pgaccel_topk_kv_f64(const double* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count) {
+                                   uint32_t* out_indices, size_t* out_count) try {
   return dispatch_topk_kv(keys, count, k, largest != 0, out_indices, out_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_f64", nullptr);
 }
 
 pgaccel_status pgaccel_topk_kv_i32(const int32_t* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count) {
+                                   uint32_t* out_indices, size_t* out_count) try {
   return dispatch_topk_kv(keys, count, k, largest != 0, out_indices, out_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_i32", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_i32", nullptr);
 }
 
 pgaccel_status pgaccel_topk_kv_i64(const int64_t* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count) {
+                                   uint32_t* out_indices, size_t* out_count) try {
   return dispatch_topk_kv(keys, count, k, largest != 0, out_indices, out_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_topk_kv_i64", nullptr);
 }
 
 }  // extern "C"

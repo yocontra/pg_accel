@@ -12,6 +12,7 @@
 #include <string>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
 // ---------------------------------------------------------------------------
 // GPU execution observability — thread-local counter
@@ -160,21 +161,42 @@ extern "C" pgaccel_status pgaccel_init(void) {
     // Fall through to normal init path below.
   }
 
-  // Temporarily reset signal handlers around SYCL init. PG installs
-  // custom SIGSEGV/SIGBUS handlers that interfere with Metal/IOKit
-  // driver initialization (the driver uses signals internally during
-  // device enumeration). shared_preload_libraries ensures libacpp-rt.dylib
-  // was loaded in the postmaster before fork, so the child inherits the
-  // loaded library and can create a fresh MTLDevice without triggering
-  // the compiler service.
-  struct sigaction old_handlers[32];
-  for (int sig = 1; sig < 32; sig++) {
-    if (sig == SIGKILL || sig == SIGSTOP)
-      continue;
+  // Narrow the signal surface around SYCL init instead of resetting all 31
+  // handlers to SIG_DFL. PG installs custom SIGSEGV/SIGBUS handlers that
+  // interfere with Metal/IOKit driver initialization (the driver relies on
+  // default fault-signal dispositions during device enumeration), so only
+  // the synchronous fault signals are reset to SIG_DFL for the window.
+  // Every asynchronous signal (SIGTERM, SIGQUIT, SIGINT, SIGUSR1, ...) is
+  // instead BLOCKED via sigprocmask: PG's die/quickdie handlers stay
+  // installed and a signal arriving mid-enumeration is deferred until the
+  // mask is restored, then delivered to PG's own handler. The previous
+  // blanket SIG_DFL reset meant a SIGTERM in this window killed the backend
+  // outright, bypassing PG's shmem cleanup (TODO-REVIEW P1).
+  //
+  // shared_preload_libraries ensures libacpp-rt.dylib was loaded in the
+  // postmaster before fork, so the child inherits the loaded library and
+  // can create a fresh MTLDevice without triggering the compiler service.
+  static const int k_fault_signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP};
+  constexpr size_t k_fault_count = sizeof(k_fault_signals) / sizeof(k_fault_signals[0]);
+
+  // Block all async signals for the window. Fault signals must never be
+  // blocked (delivery of a blocked synchronous fault is undefined), and
+  // SIGKILL/SIGSTOP are unblockable anyway (sigprocmask ignores them).
+  sigset_t block_mask;
+  sigset_t old_mask;
+  sigfillset(&block_mask);
+  for (size_t i = 0; i < k_fault_count; i++) {
+    sigdelset(&block_mask, k_fault_signals[i]);
+  }
+  sigprocmask(SIG_BLOCK, &block_mask, &old_mask);
+
+  // Reset only the fault-signal handlers PG hooks to SIG_DFL.
+  struct sigaction old_handlers[k_fault_count];
+  for (size_t i = 0; i < k_fault_count; i++) {
     struct sigaction sa = {};
     sa.sa_handler = SIG_DFL;
     sigemptyset(&sa.sa_mask);
-    sigaction(sig, &sa, &old_handlers[sig]);
+    sigaction(k_fault_signals[i], &sa, &old_handlers[i]);
   }
 
   bool init_ok = false;
@@ -246,14 +268,19 @@ extern "C" pgaccel_status pgaccel_init(void) {
     fprintf(stderr, "pgaccel: FATAL: SYCL init failed: %s\n", e.what());
   } catch (const std::exception& e) {
     fprintf(stderr, "pgaccel: FATAL: init failed: %s\n", e.what());
+  } catch (...) {
+    // Without this arm a non-std exception would escape the extern "C"
+    // boundary (std::terminate) AND skip the handler/mask restore below.
+    fprintf(stderr, "pgaccel: FATAL: init failed: unknown C++ exception\n");
   }
 
-  // Restore PG signal handlers.
-  for (int sig = 1; sig < 32; sig++) {
-    if (sig == SIGKILL || sig == SIGSTOP)
-      continue;
-    sigaction(sig, &old_handlers[sig], nullptr);
+  // Restore PG's fault-signal handlers, then the signal mask. Any async
+  // signal that arrived during the window is delivered now, to PG's own
+  // handlers.
+  for (size_t i = 0; i < k_fault_count; i++) {
+    sigaction(k_fault_signals[i], &old_handlers[i], nullptr);
   }
+  sigprocmask(SIG_SETMASK, &old_mask, nullptr);
 
   if (!init_ok) {
     return PGACCEL_ERROR;
@@ -262,6 +289,22 @@ extern "C" pgaccel_status pgaccel_init(void) {
   g_init_pid = current_pid;
   g_initialized.store(true, std::memory_order_release);
   return PGACCEL_OK;
+}
+
+// Fork-safe queue accessors (declared in pgaccel_queue.h). pgaccel_init()
+// is idempotent and re-checks getpid() on every call, so routing every
+// queue access through these guarantees a forked child never dispatches on
+// the parent's stale Metal/CUDA context.
+sycl::queue* pgaccel_get_queue() {
+  if (pgaccel_init() != PGACCEL_OK)
+    return nullptr;
+  return g_queue;
+}
+
+sycl::queue* pgaccel_get_ooo_queue() {
+  if (pgaccel_init() != PGACCEL_OK)
+    return nullptr;
+  return g_ooo_queue;
 }
 
 extern "C" pgaccel_status pgaccel_shutdown(void) {
@@ -274,16 +317,20 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
   if (g_queue != nullptr || g_ooo_queue != nullptr) {
     try {
       if (g_ooo_queue != nullptr)
-        g_ooo_queue->wait();
+        g_ooo_queue->wait_and_throw();
       if (g_queue != nullptr)
-        g_queue->wait();
+        g_queue->wait_and_throw();
       pgaccel_pool_reset();
       if (g_ooo_queue != nullptr)
-        g_ooo_queue->wait();
+        g_ooo_queue->wait_and_throw();
       if (g_queue != nullptr)
-        g_queue->wait();
+        g_queue->wait_and_throw();
+    } catch (const std::exception& e) {
+      // Best-effort flush during teardown; log so a failing in-flight
+      // kernel is visible, but continue releasing the queues.
+      fprintf(stderr, "pgaccel: shutdown queue flush failed: %s\n", e.what());
     } catch (...) {
-      // Best-effort flush; nothing useful to do on failure.
+      fprintf(stderr, "pgaccel: shutdown queue flush failed: unknown C++ exception\n");
     }
     if (g_ooo_queue != nullptr) {
       delete g_ooo_queue;

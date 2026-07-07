@@ -82,6 +82,18 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #   fused_ops          — MIN/MAX fused reductions initialise to ±infinity.
 #   bbox_ops_f64       — host fallback preserves conservative NaN/Inf
 #                         behavior for PG native double boxes.
+#   window             — sycl_window_sum uses Kahan compensated summation
+#                         (window.cpp `comp` term); -ffast-math licenses
+#                         reassociation that algebraically deletes the
+#                         compensation term, silently degrading SUM
+#                         accuracy over large partitions.
+#   reduce             — the fused multi-reduce NaN-propagation contract
+#                         (pgaccel_ffi.h "NaN handling matches PG's
+#                         SUM/MIN/MAX semantics") is void under
+#                         -ffinite-math-only; MIN/MAX identities are ±inf.
+#   olap_ssbm          — grouped MIN/MAX lanes rely on sycl::fmin/fmax NaN
+#                         propagation and ±inf accumulator identities in
+#                         the dense-group tree reduction.
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
@@ -89,6 +101,9 @@ set_source_files_properties(
     src/hash_agg.cpp
     src/fused_ops.cpp
     src/bbox_ops_f64.cpp
+    src/window.cpp
+    src/reduce.cpp
+    src/olap_ssbm.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
 # Standalone test binary
@@ -206,6 +221,13 @@ target_link_libraries(test_oom_invariant PRIVATE pgaccel_kernels_shared)
 add_executable(test_nested_loop_ineq test/test_nested_loop_ineq.cpp)
 target_link_libraries(test_nested_loop_ineq PRIVATE pgaccel_kernels_shared)
 
+# Induced-failure honesty gate: a dispatch whose staging cannot succeed
+# must return PGACCEL_OOM / PGACCEL_ERROR — never PGACCEL_OK over unwritten
+# output, never SIGABRT through the C ABI, never a fake NO_DEVICE. Pins the
+# wait_and_throw + extern-C try/catch fixes (TODO-REVIEW 2026-07).
+add_executable(test_kernel_failure_status test/test_kernel_failure_status.cpp)
+target_link_libraries(test_kernel_failure_status PRIVATE pgaccel_kernels_shared)
+
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 set(PGACCEL_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -259,6 +281,7 @@ add_pgaccel_gpu_test(test_expr_templates)
 add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)
 add_pgaccel_gpu_test(test_fp64_mul_probe)
 add_pgaccel_gpu_test(test_nested_loop_ineq)
+add_pgaccel_gpu_test(test_kernel_failure_status)
 # test_ooo_overlap is intentionally NOT registered with CTest: it asserts the
 # acceptance criterion of the never-built out-of-order kernel-overlap feature
 # (dropped by the 2026-07 architecture decision). It cannot pass on the pinned

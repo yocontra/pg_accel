@@ -65,6 +65,16 @@ typedef struct {
   size_t col_idx; /* Column index in batch, or SIZE_MAX for COUNT(*) */
 } pgaccel_agg_col;
 
+/* ABI pin — Rust mirror: PgaccelAggCol in pg_accel/src/gpu/types.rs
+ * (repr(C) enum + usize), layout test in pg_accel/src/gpu/bridge.rs. */
+#ifdef __cplusplus
+static_assert(sizeof(pgaccel_agg_col) == 16, "pgaccel_agg_col ABI pinned at 16 bytes");
+static_assert(offsetof(pgaccel_agg_col, col_idx) == 8, "pgaccel_agg_col.col_idx at offset 8");
+#else
+_Static_assert(sizeof(pgaccel_agg_col) == 16, "pgaccel_agg_col ABI pinned at 16 bytes");
+_Static_assert(offsetof(pgaccel_agg_col, col_idx) == 8, "pgaccel_agg_col.col_idx at offset 8");
+#endif
+
 /* ── Grouped aggregation result ─────────────────────────────────── */
 
 /// Opaque handle to grouped aggregation state.

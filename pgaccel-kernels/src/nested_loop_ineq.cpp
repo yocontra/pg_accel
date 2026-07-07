@@ -41,21 +41,15 @@
 #include <stdexcept>
 
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 #include "pgaccel_nested_loop_ineq.h"
 
 // SAFETY: g_queue is owned by device_manager.cpp.
-extern sycl::queue* g_queue;
 
 namespace {
 
 static sycl::queue& get_queue() {
-  if (g_queue == nullptr && pgaccel_init() != PGACCEL_OK) {
-    throw std::runtime_error("pgaccel_init failed");
-  }
-  if (g_queue == nullptr) {
-    throw std::runtime_error("pgaccel queue unavailable");
-  }
-  return *g_queue;
+  return pgaccel_require_queue();
 }
 
 // ---------------------------------------------------------------------------
@@ -319,71 +313,111 @@ pgaccel_status nlj_between_dispatch(sycl::queue& q, const T* outer_keys, size_t 
 extern "C" pgaccel_status pgaccel_nlj_ineq_i64(const int64_t* outer_keys, size_t n_outer,
                                                const int64_t* inner_keys, size_t n_inner,
                                                pgaccel_nlj_ineq_op op, uint32_t* pairs_out,
-                                               size_t max_pairs, size_t* pair_count_out) {
+                                               size_t max_pairs, size_t* pair_count_out) try {
   try {
     sycl::queue& q = get_queue();
     pgaccel_status st = nlj_ineq_dispatch<int64_t>(q, outer_keys, n_outer, inner_keys, n_inner, op,
                                                    pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
     return st;
-  } catch (const std::exception&) {
-  } catch (...) {}
+    return st;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_nlj_ineq_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_nlj_ineq_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_nlj_ineq_f64(const double* outer_keys, size_t n_outer,
                                                const double* inner_keys, size_t n_inner,
                                                pgaccel_nlj_ineq_op op, uint32_t* pairs_out,
-                                               size_t max_pairs, size_t* pair_count_out) {
+                                               size_t max_pairs, size_t* pair_count_out) try {
   try {
     sycl::queue& q = get_queue();
     pgaccel_status st = nlj_ineq_dispatch<double>(q, outer_keys, n_outer, inner_keys, n_inner, op,
                                                   pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
     return st;
-  } catch (const std::exception&) {
-  } catch (...) {}
+    return st;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_nlj_ineq_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_nlj_ineq_f64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_nlj_between_i64(const int64_t* outer_keys, size_t n_outer,
                                                   const int64_t* inner_lo, const int64_t* inner_hi,
                                                   size_t n_inner, uint32_t* pairs_out,
-                                                  size_t max_pairs, size_t* pair_count_out) {
+                                                  size_t max_pairs, size_t* pair_count_out) try {
   try {
     sycl::queue& q = get_queue();
     pgaccel_status st = nlj_between_dispatch<int64_t>(
         q, outer_keys, n_outer, inner_lo, inner_hi, n_inner, pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
     return st;
-  } catch (const std::exception&) {
-  } catch (...) {}
+    return st;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_nlj_between_i64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_nlj_between_i64", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_nlj_between_f64(const double* outer_keys, size_t n_outer,
                                                   const double* inner_lo, const double* inner_hi,
                                                   size_t n_inner, uint32_t* pairs_out,
-                                                  size_t max_pairs, size_t* pair_count_out) {
+                                                  size_t max_pairs, size_t* pair_count_out) try {
   try {
     sycl::queue& q = get_queue();
     pgaccel_status st = nlj_between_dispatch<double>(q, outer_keys, n_outer, inner_lo, inner_hi,
                                                      n_inner, pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK) {
+    if (st == PGACCEL_OK)
       pgaccel_record_gpu_exec();
-      return st;
-    }
     return st;
-  } catch (const std::exception&) {
-  } catch (...) {}
+    return st;
+  } catch (const pgaccel_no_device_error&) {
+    return PGACCEL_ERROR_NO_DEVICE;
+  } catch (const std::exception& e) {
+    return pgaccel_kernel_failure(__func__, &e);
+  } catch (...) {
+    return pgaccel_kernel_failure(__func__, nullptr);
+  }
   return PGACCEL_ERROR_NO_DEVICE;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_nlj_between_f64", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_nlj_between_f64", nullptr);
 }

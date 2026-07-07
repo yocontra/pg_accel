@@ -15,8 +15,8 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
+#include "pgaccel_queue.h"
 
-extern sycl::queue* g_queue;
 void pgaccel_record_gpu_exec();
 
 namespace {
@@ -456,8 +456,7 @@ pgaccel_status run_ssbm_q1_revenue_i64_scratch(
   if (orderdate_key_count > 0 && !orderdate_keys)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -573,7 +572,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q3_grouped_revenue_i64_usm(
     const int32_t* supplier_group_code_by_key, const uint8_t* supplier_match_by_key,
     size_t supplier_key_count, int32_t year_min, int32_t year_count, int32_t customer_group_count,
     int32_t supplier_group_count, int64_t* out_revenue_by_group, uint32_t* out_count_by_group,
-    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -601,8 +600,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q3_grouped_revenue_i64_usm(
       !supplier_group_code_by_key || !supplier_match_by_key || supplier_key_count == 0)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -730,6 +728,12 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q3_grouped_revenue_i64_usm(
   sycl::free(device_count, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q3_grouped_revenue_i64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q3_grouped_revenue_i64_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm(
@@ -745,7 +749,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm(
     int32_t year_min, int32_t year_count, int32_t geo_group_count, int32_t part_group_count,
     uint32_t* scratch_profit_lo, uint32_t* scratch_profit_hi, uint32_t* scratch_count,
     size_t scratch_group_capacity, int64_t* out_profit_by_group, uint32_t* out_count_by_group,
-    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -778,8 +782,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm(
       !part_group_code_by_key || !part_match_by_key || part_key_count == 0)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -949,6 +952,12 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm(
   sycl::free(params, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm", nullptr);
 }
 
 }  // namespace
@@ -964,12 +973,18 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q1_revenue_i64_usm_scratch(
     size_t orderdate_key_count, int32_t discount_lo, int32_t discount_hi, int32_t quantity_lo,
     int32_t quantity_hi, int64_t* scratch_revenue_a, int64_t* scratch_count_a,
     int64_t* scratch_revenue_b, int64_t* scratch_count_b, size_t scratch_item_capacity,
-    int64_t* out_sum, size_t* selected_count, size_t* uncertain_count) {
+    int64_t* out_sum, size_t* selected_count, size_t* uncertain_count) try {
   return run_ssbm_q1_revenue_i64_scratch(
       orderdate_col, discount_col, quantity_col, extendedprice_col, row_count, orderdate_lo,
       orderdate_hi, orderdate_keys, orderdate_key_count, discount_lo, discount_hi, quantity_lo,
       quantity_hi, scratch_revenue_a, scratch_count_a, scratch_revenue_b, scratch_count_b,
       scratch_item_capacity, out_sum, selected_count, uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q1_revenue_i64_usm_scratch", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q1_revenue_i64_usm_scratch", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_ssbm_q1_revenue_i64_usm(
@@ -977,7 +992,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q1_revenue_i64_usm(
     pgaccel_expr_usm_col quantity_col, pgaccel_expr_usm_col extendedprice_col, size_t row_count,
     int32_t orderdate_lo, int32_t orderdate_hi, const int32_t* orderdate_keys,
     size_t orderdate_key_count, int32_t discount_lo, int32_t discount_hi, int32_t quantity_lo,
-    int32_t quantity_hi, int64_t* out_sum, size_t* selected_count, size_t* uncertain_count) {
+    int32_t quantity_hi, int64_t* out_sum, size_t* selected_count, size_t* uncertain_count) try {
   if (out_sum)
     *out_sum = 0;
   if (selected_count)
@@ -990,8 +1005,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q1_revenue_i64_usm(
   if (row_count == 0)
     return PGACCEL_OK;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1019,6 +1033,12 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q1_revenue_i64_usm(
   sycl::free(revenue_b, *q);
   sycl::free(count_b, *q);
   return status;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q1_revenue_i64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q1_revenue_i64_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm(
@@ -1029,7 +1049,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm(
     const uint8_t* supplier_match_by_key, size_t supplier_key_count, int32_t year_min,
     int32_t year_count, int32_t brand_count, int64_t* out_revenue_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -1054,8 +1074,7 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm(
       supplier_key_count == 0)
     return PGACCEL_ERROR;
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -1174,6 +1193,12 @@ extern "C" pgaccel_status pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm(
   sycl::free(device_count, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simple_sum_count_usm(
@@ -1181,7 +1206,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
     int32_t group_min, int32_t group_count, double* scratch_sum, uint32_t* scratch_count,
     double* scratch_partial_sum, uint32_t* scratch_partial_count, size_t scratch_partial_capacity,
     double* out_sum_by_group, uint32_t* out_count_by_group, size_t out_group_capacity,
-    size_t* selected_count, size_t* uncertain_count) {
+    size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -1224,8 +1249,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
   if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return fail("row_count_exceeds_u32");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -1365,13 +1389,19 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_simpl
     cleanup_partials();
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_simple_sum_count_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_simple_sum_count_usm", nullptr);
 }
 
 extern "C" pgaccel_status
 pgaccel_expr_template_reduce_f64_usm(pgaccel_expr_usm_col value_col, uint32_t aggregate_mask,
                                      size_t row_count, double* out_sum, double* out_min,
                                      double* out_max, double* out_sumsq, uint64_t* out_count,
-                                     size_t* selected_count, size_t* uncertain_count) {
+                                     size_t* selected_count, size_t* uncertain_count) try {
   if (out_sum)
     *out_sum = 0.0;
   if (out_min)
@@ -1421,8 +1451,7 @@ pgaccel_expr_template_reduce_f64_usm(pgaccel_expr_usm_col value_col, uint32_t ag
   if (!valid_f64_col(value_col))
     return fail("invalid_input_column");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -1620,6 +1649,12 @@ pgaccel_expr_template_reduce_f64_usm(pgaccel_expr_usm_col value_col, uint32_t ag
     cleanup_partials();
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_reduce_f64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_reduce_f64_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_stats_pair_usm(
@@ -1630,7 +1665,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_stats
     int32_t* scratch_sorted_group, uint32_t* scratch_row_index, size_t scratch_row_capacity,
     double* out_sum_by_group, double* out_sumsq_by_group, uint32_t* out_count_by_group,
     double* out_rhs_sum_by_group, uint32_t* out_rhs_count_by_group, size_t out_group_capacity,
-    size_t* selected_count, size_t* uncertain_count) {
+    size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -1683,8 +1718,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_stats
   if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return fail("row_count_exceeds_u32");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -1829,6 +1863,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_stats
                  "pgaccel: resident dense grouped f64 stats-pair kernel failed (unknown)\n");
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_stats_pair_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_stats_pair_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_sum_count_usm(
@@ -1837,7 +1877,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_s
     int32_t group_count, double* scratch_sum, uint32_t* scratch_count, double* scratch_partial_sum,
     uint32_t* scratch_partial_count, size_t scratch_partial_capacity, double* out_sum_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -1891,8 +1931,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_s
   if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return fail("row_count_exceeds_u32");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -2020,6 +2059,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_mul_s
     cleanup_partials();
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_mul_sum_count_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_mul_sum_count_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm(
@@ -2033,7 +2078,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_pred_
     double* scratch_sum, uint32_t* scratch_count, double* scratch_partial_sum,
     uint32_t* scratch_partial_count, size_t scratch_partial_capacity, double* out_sum_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -2130,8 +2175,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_pred_
   if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return fail("row_count_exceeds_u32");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -2269,13 +2313,19 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_pred_
     cleanup_partials();
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_pred_sum_count_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_project_f64_usm(
     pgaccel_expr_usm_col fact_key_col, pgaccel_expr_usm_col value_col, size_t row_count,
     const uint8_t* dim_match_by_key, const int32_t* dim_group_code_by_key, size_t dim_key_count,
     uint16_t value_cmp_opcode, double value_const, int32_t* out_group_codes,
-    size_t out_group_capacity) {
+    size_t out_group_capacity) try {
   const auto fail = [&](const char* reason,
                         pgaccel_status status = PGACCEL_ERROR) -> pgaccel_status {
     std::fprintf(stderr,
@@ -2304,8 +2354,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_project_
   if (!valid_cmp_opcode(value_cmp_opcode))
     return fail("invalid_cmp_opcode");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -2355,13 +2404,19 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_project_
     std::fflush(stderr);
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_star_dim_group_project_f64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_star_dim_group_project_f64_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_compact_f64_usm(
     pgaccel_expr_usm_col fact_key_col, pgaccel_expr_usm_col value_col, size_t row_count,
     const uint8_t* dim_match_by_key, const int32_t* dim_group_code_by_key, size_t dim_key_count,
     uint16_t value_cmp_opcode, double value_const, int32_t* out_group_codes, double* out_values,
-    size_t out_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_capacity, size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -2400,8 +2455,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_compact_
   if (!valid_cmp_opcode(value_cmp_opcode))
     return fail("invalid_cmp_opcode");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -2478,6 +2532,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_group_compact_
     cleanup_compact_count();
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_star_dim_group_compact_f64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_star_dim_group_compact_f64_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm(
@@ -2486,7 +2546,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_su
     uint16_t value_cmp_opcode, double value_const, int32_t group_count, double* scratch_sum,
     uint32_t* scratch_count, double* scratch_partial_sum, uint32_t* scratch_partial_count,
     size_t scratch_partial_capacity, double* out_sum_by_group, uint32_t* out_count_by_group,
-    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -2538,8 +2598,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_su
       out_group_capacity < groups)
     return fail("invalid_scratch_or_output");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -2720,6 +2779,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_star_dim_grouped_f64_su
     cleanup_partials();
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_star_dim_grouped_f64_sum_count_usm", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v9(
@@ -2737,7 +2802,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     double* scratch_partial_min, double* scratch_partial_max, uint32_t* scratch_partial_count,
     size_t scratch_partial_capacity, double* out_sum_by_group, double* out_min_by_group,
     double* out_max_by_group, uint32_t* out_count_by_group, size_t out_group_capacity,
-    size_t* selected_count, size_t* uncertain_count) {
+    size_t* selected_count, size_t* uncertain_count) try {
   if (selected_count)
     *selected_count = 0;
   if (uncertain_count)
@@ -2834,8 +2899,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
   if (row_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
     return fail("row_count_exceeds_u32");
 
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return fail("no_device_queue", PGACCEL_ERROR_NO_DEVICE);
 
@@ -4167,12 +4231,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       }
     }
 
-    q->memcpy(out_sum_by_group, scratch_sum, sizeof(double) * groups).wait();
+    q->memcpy(out_sum_by_group, scratch_sum, sizeof(double) * groups).wait_and_throw();
     if (need_min)
-      q->memcpy(out_min_by_group, scratch_min, sizeof(double) * groups).wait();
+      q->memcpy(out_min_by_group, scratch_min, sizeof(double) * groups).wait_and_throw();
     if (need_max)
-      q->memcpy(out_max_by_group, scratch_max, sizeof(double) * groups).wait();
-    q->memcpy(out_count_by_group, scratch_count, sizeof(uint32_t) * groups).wait();
+      q->memcpy(out_max_by_group, scratch_max, sizeof(double) * groups).wait_and_throw();
+    q->memcpy(out_count_by_group, scratch_count, sizeof(uint32_t) * groups).wait_and_throw();
     size_t selected_host = 0;
     for (size_t i = 0; i < groups; ++i)
       selected_host += static_cast<size_t>(out_count_by_group[i]);
@@ -4188,6 +4252,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     std::fprintf(stderr, "pgaccel: resident dense grouped f64 kernel failed (unknown)\n");
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v9", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v9", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v8(
@@ -4203,7 +4273,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     uint32_t* scratch_group_cursor, size_t scratch_group_capacity, int32_t* scratch_sorted_group,
     uint32_t* scratch_row_index, size_t scratch_row_capacity, double* out_sum_by_group,
     double* out_min_by_group, double* out_max_by_group, uint32_t* out_count_by_group,
-    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) try {
   return pgaccel_expr_template_resident_dense_grouped_f64_usm_v9(
       group_col, value_col, value_rhs_col, measure_op, aggregate_mask, filter_mode,
       measure_predicate_op, measure_predicate_source, measure_predicate_range_count,
@@ -4214,6 +4284,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       scratch_sorted_group, scratch_row_index, scratch_row_capacity, nullptr, nullptr, nullptr,
       nullptr, 0, out_sum_by_group, out_min_by_group, out_max_by_group, out_count_by_group,
       out_group_capacity, selected_count, uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v8", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v8", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v7(
@@ -4229,7 +4305,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     int32_t* scratch_sorted_group, uint32_t* scratch_row_index, size_t scratch_row_capacity,
     double* out_sum_by_group, double* out_min_by_group, double* out_max_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   return pgaccel_expr_template_resident_dense_grouped_f64_usm_v8(
       group_col, value_col, value_rhs_col, measure_op, aggregate_mask, filter_mode,
       measure_predicate_op, DENSE_GROUP_MEASURE_PRED_SOURCE_RHS, measure_predicate_range_count,
@@ -4240,6 +4316,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       scratch_sorted_group, scratch_row_index, scratch_row_capacity, out_sum_by_group,
       out_min_by_group, out_max_by_group, out_count_by_group, out_group_capacity, selected_count,
       uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v7", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v7", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v5(
@@ -4251,7 +4333,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     size_t scratch_group_capacity, int32_t* scratch_sorted_group, uint32_t* scratch_row_index,
     size_t scratch_row_capacity, double* out_sum_by_group, double* out_min_by_group,
     double* out_max_by_group, uint32_t* out_count_by_group, size_t out_group_capacity,
-    size_t* selected_count, size_t* uncertain_count) {
+    size_t* selected_count, size_t* uncertain_count) try {
   return pgaccel_expr_template_resident_dense_grouped_f64_usm_v6(
       group_col, value_col, value_rhs_col, measure_op, aggregate_mask, filter_mode,
       DENSE_GROUP_MEASURE_PRED_BOOL_ONLY, 0.0, 0.0, filter_col, row_count, group_min, group_count,
@@ -4259,6 +4341,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       scratch_group_cursor, scratch_group_capacity, scratch_sorted_group, scratch_row_index,
       scratch_row_capacity, out_sum_by_group, out_min_by_group, out_max_by_group,
       out_count_by_group, out_group_capacity, selected_count, uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v5", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v5", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v6(
@@ -4271,7 +4359,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     uint32_t* scratch_group_cursor, size_t scratch_group_capacity, int32_t* scratch_sorted_group,
     uint32_t* scratch_row_index, size_t scratch_row_capacity, double* out_sum_by_group,
     double* out_min_by_group, double* out_max_by_group, uint32_t* out_count_by_group,
-    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) try {
   const int32_t range_count = measure_predicate_op == DENSE_GROUP_MEASURE_PRED_BOOL_ONLY ? 0 : 1;
   return pgaccel_expr_template_resident_dense_grouped_f64_usm_v7(
       group_col, value_col, value_rhs_col, measure_op, aggregate_mask, filter_mode,
@@ -4281,6 +4369,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       scratch_sorted_group, scratch_row_index, scratch_row_capacity, out_sum_by_group,
       out_min_by_group, out_max_by_group, out_count_by_group, out_group_capacity, selected_count,
       uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v6", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v6", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v4(
@@ -4292,7 +4386,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     int32_t* scratch_sorted_group, uint32_t* scratch_row_index, size_t scratch_row_capacity,
     double* out_sum_by_group, double* out_min_by_group, double* out_max_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   return pgaccel_expr_template_resident_dense_grouped_f64_usm_v5(
       group_col, value_col, value_rhs_col, measure_op, aggregate_mask, DENSE_GROUP_FILTER_ROWS,
       filter_col, row_count, group_min, group_count, scratch_sum, scratch_min, scratch_max,
@@ -4300,6 +4394,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       scratch_sorted_group, scratch_row_index, scratch_row_capacity, out_sum_by_group,
       out_min_by_group, out_max_by_group, out_count_by_group, out_group_capacity, selected_count,
       uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v4", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v4", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v3(
@@ -4311,13 +4411,19 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     int32_t* scratch_sorted_group, uint32_t* scratch_row_index, size_t scratch_row_capacity,
     double* out_sum_by_group, double* out_min_by_group, double* out_max_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   return pgaccel_expr_template_resident_dense_grouped_f64_usm_v4(
       group_col, value_col, value_rhs_col, measure_op, DENSE_GROUP_AGG_ALL, filter_col, row_count,
       group_min, group_count, scratch_sum, scratch_min, scratch_max, scratch_count,
       scratch_group_start, scratch_group_cursor, scratch_group_capacity, scratch_sorted_group,
       scratch_row_index, scratch_row_capacity, out_sum_by_group, out_min_by_group, out_max_by_group,
       out_count_by_group, out_group_capacity, selected_count, uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v3", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v3", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v2(
@@ -4328,7 +4434,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
     int32_t* scratch_sorted_group, uint32_t* scratch_row_index, size_t scratch_row_capacity,
     double* out_sum_by_group, double* out_min_by_group, double* out_max_by_group,
     uint32_t* out_count_by_group, size_t out_group_capacity, size_t* selected_count,
-    size_t* uncertain_count) {
+    size_t* uncertain_count) try {
   pgaccel_expr_usm_col value_rhs_col{};
   value_rhs_col.values = nullptr;
   value_rhs_col.nulls = nullptr;
@@ -4339,6 +4445,12 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm_v
       scratch_group_cursor, scratch_group_capacity, scratch_sorted_group, scratch_row_index,
       scratch_row_capacity, out_sum_by_group, out_min_by_group, out_max_by_group,
       out_count_by_group, out_group_capacity, selected_count, uncertain_count);
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v2", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm_v2", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm(
@@ -4347,7 +4459,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm(
     uint32_t* scratch_count, uint32_t* scratch_group_start, uint32_t* scratch_group_cursor,
     size_t scratch_group_capacity, int32_t* scratch_sorted_group, uint32_t* scratch_row_index,
     size_t scratch_row_capacity, double* out_sum_by_group, uint32_t* out_count_by_group,
-    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) {
+    size_t out_group_capacity, size_t* selected_count, size_t* uncertain_count) try {
   if (row_count == 0) {
     return pgaccel_expr_template_resident_dense_grouped_f64_usm_v2(
         group_col, value_col, filter_col, row_count, group_min, group_count, scratch_sum, nullptr,
@@ -4357,8 +4469,7 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm(
   }
   if (group_count <= 0)
     return PGACCEL_ERROR;
-  pgaccel_init();
-  sycl::queue* q = g_queue;
+  sycl::queue* q = pgaccel_get_queue();
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
@@ -4389,4 +4500,10 @@ extern "C" pgaccel_status pgaccel_expr_template_resident_dense_grouped_f64_usm(
       sycl::free(scratch_max, *q);
     return PGACCEL_ERROR;
   }
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_expr_template_resident_dense_grouped_f64_usm", nullptr);
 }
