@@ -29,11 +29,15 @@ use pgrx::pg_sys;
 
 impl crate::engine::executor::state::ExecutorState for AggExecState {
     unsafe fn exec(&mut self, css: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: trait contract — main backend thread, `css` is a valid
+        // CustomScanState whose scan slot was built by ExecInitCustomScan.
         let scan_slot = unsafe { (*css).ss.ss_ScanTupleSlot };
         // Only the resident OLAP aggregate survives; begin_custom_scan rejects
         // any Agg plan without an OLAP spec before an executor can exist.
+        // SAFETY: main backend thread; scan_slot is a valid TupleTableSlot.
         let result = unsafe { self.next_olap(scan_slot) };
         if result.is_null() {
+            // SAFETY: scan_slot is a valid TupleTableSlot on the main thread.
             unsafe { pg_sys::ExecClearTuple(scan_slot) };
             return scan_slot;
         }
