@@ -53,7 +53,6 @@ mod nested_loop_ineq;
 mod raster;
 mod reduce;
 mod runtime;
-mod sort;
 mod spatial;
 mod window;
 
@@ -70,6 +69,5 @@ pub use nested_loop_ineq::*;
 pub use raster::*;
 pub use reduce::*;
 pub use runtime::*;
-pub use sort::*;
 pub use spatial::*;
 pub use window::*;

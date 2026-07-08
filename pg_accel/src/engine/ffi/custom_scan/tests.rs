@@ -8,6 +8,7 @@ use crate::engine::cost;
 use crate::engine::executor::agg::H3_LATLNG_GROUP_KEY_TYPE;
 use crate::engine::executor::agg::ffi_bridge::agg_op_to_ffi;
 use crate::engine::executor::agg::values::oid_to_val_tag;
+use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::ResidentProofSnapshot;
 use crate::gpu::PgaccelAggFunc;
@@ -453,8 +454,6 @@ fn custom_private_data_default_fields() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuSpatial,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![],
         group_key: None,
         group_key_tlist_pos: 0,
@@ -482,111 +481,11 @@ fn custom_private_data_default_fields() {
     assert_eq!(data.fn_oid, pg_sys::Oid::INVALID);
     assert_eq!(data.target_attno, 0);
     assert_eq!(data.accel_strategy, AccelStrategy::GpuSpatial);
-    assert!(data.sort_keys.is_empty());
-    assert!(data.sort_limit.is_none());
     assert!(data.agg_columns.is_empty());
     assert!(data.group_key.is_none());
     assert_eq!(data.hash_inner_attno, 0);
     assert_eq!(data.hash_key_type, 0);
     assert!(data.window_specs.is_empty());
-}
-
-// -----------------------------------------------------------------------
-// CustomPrivateData — sort key storage
-// -----------------------------------------------------------------------
-
-#[test]
-fn custom_private_data_with_sort_keys() {
-    let keys = vec![
-        SortKeyDesc {
-            attno: 1,
-            sort_op: pg_sys::Oid::from(97u32), // int4lt
-            collation: pg_sys::Oid::from(0u32),
-            nulls_first: false,
-        },
-        SortKeyDesc {
-            attno: 3,
-            sort_op: pg_sys::Oid::from(622u32), // float8lt
-            collation: pg_sys::Oid::from(100u32),
-            nulls_first: true,
-        },
-    ];
-    let data = CustomPrivateData {
-        gpu_strategy: GpuStrategy::Sort,
-        batch_size: 512,
-        fn_oid: pg_sys::Oid::INVALID,
-        target_attno: 0,
-        accel_strategy: AccelStrategy::GpuSort,
-        sort_keys: keys.clone(),
-        sort_limit: Some(100),
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
-        hash_inner_attno: 0,
-        hash_key_type: 0,
-        hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
-        nlj_shape: 0,
-        nlj_key_type: 0,
-        nlj_op: 0,
-        nlj_inner_lo_attno: 0,
-        nlj_inner_hi_attno: 0,
-        window_specs: vec![],
-        window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
-        olap_agg: None,
-        resident_proof: ResidentProofSnapshot::not_proven(),
-    };
-    assert_eq!(data.sort_keys.len(), 2);
-    assert_eq!(data.sort_keys[0].attno, 1);
-    assert!(!data.sort_keys[0].nulls_first);
-    assert_eq!(data.sort_keys[1].attno, 3);
-    assert!(data.sort_keys[1].nulls_first);
-    assert_eq!(data.sort_limit, Some(100));
-}
-
-#[test]
-fn custom_private_data_sort_limit_none_when_no_limit() {
-    let data = CustomPrivateData {
-        gpu_strategy: GpuStrategy::Sort,
-        batch_size: 256,
-        fn_oid: pg_sys::Oid::INVALID,
-        target_attno: 0,
-        accel_strategy: AccelStrategy::GpuSort,
-        sort_keys: vec![SortKeyDesc {
-            attno: 1,
-            sort_op: pg_sys::Oid::from(97u32),
-            collation: pg_sys::Oid::from(0u32),
-            nulls_first: false,
-        }],
-        sort_limit: None,
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
-        hash_inner_attno: 0,
-        hash_key_type: 0,
-        hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
-        nlj_shape: 0,
-        nlj_key_type: 0,
-        nlj_op: 0,
-        nlj_inner_lo_attno: 0,
-        nlj_inner_hi_attno: 0,
-        window_specs: vec![],
-        window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
-        olap_agg: None,
-        resident_proof: ResidentProofSnapshot::not_proven(),
-    };
-    assert!(data.sort_limit.is_none());
 }
 
 // -----------------------------------------------------------------------
@@ -601,8 +500,6 @@ fn custom_private_data_with_agg_columns() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuReduce,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![
             (AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32()),
             (AggOp::Count, 0, pg_sys::INT8OID.to_u32()),
@@ -652,8 +549,6 @@ fn custom_private_data_with_group_key() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuReduce,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![(AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32())],
         group_key: Some(gk),
         group_key_tlist_pos: 0,
@@ -693,8 +588,6 @@ fn custom_private_data_hash_join_fields() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 1,
         accel_strategy: AccelStrategy::GpuHashJoin,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![],
         group_key: None,
         group_key_tlist_pos: 0,
@@ -732,8 +625,6 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 1,
         accel_strategy: AccelStrategy::GpuHashJoin,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![],
         group_key: None,
         group_key_tlist_pos: 0,
@@ -819,8 +710,6 @@ fn custom_private_data_with_window_specs() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuWindow,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![],
         group_key: None,
         group_key_tlist_pos: 0,
@@ -858,8 +747,6 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuSort,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![],
         group_key: None,
         group_key_tlist_pos: 0,
@@ -890,12 +777,6 @@ fn custom_private_data_empty_window_specs_for_non_window() {
 // -----------------------------------------------------------------------
 
 #[test]
-fn sort_path_methods_non_null() {
-    let methods = sort_path_methods();
-    assert!(!methods.is_null());
-}
-
-#[test]
 fn agg_path_methods_non_null() {
     let methods = agg_path_methods();
     assert!(!methods.is_null());
@@ -912,7 +793,6 @@ fn all_path_methods_are_distinct() {
     let ptrs = [
         scan_path_methods(),
         join_path_methods(),
-        sort_path_methods(),
         agg_path_methods(),
         window_path_methods(),
     ];
@@ -936,9 +816,6 @@ fn vtable_custom_names_are_valid_c_strings() {
     let join_name = unsafe { std::ffi::CStr::from_ptr(JOIN_PATH_METHODS.0.CustomName) };
     assert_eq!(join_name, c"GpuAccelJoin");
 
-    let sort_name = unsafe { std::ffi::CStr::from_ptr(SORT_PATH_METHODS.0.CustomName) };
-    assert_eq!(sort_name, c"GpuAccelSort");
-
     let agg_name = unsafe { std::ffi::CStr::from_ptr(AGG_PATH_METHODS.0.CustomName) };
     assert_eq!(agg_name, c"GpuAccelAgg");
 
@@ -957,10 +834,6 @@ fn scan_methods_custom_names_match_path_methods() {
     let join_path = unsafe { std::ffi::CStr::from_ptr(JOIN_PATH_METHODS.0.CustomName) };
     let join_scan = unsafe { std::ffi::CStr::from_ptr(JOIN_SCAN_METHODS.0.CustomName) };
     assert_eq!(join_path, join_scan);
-
-    let sort_path = unsafe { std::ffi::CStr::from_ptr(SORT_PATH_METHODS.0.CustomName) };
-    let sort_scan = unsafe { std::ffi::CStr::from_ptr(SORT_SCAN_METHODS.0.CustomName) };
-    assert_eq!(sort_path, sort_scan);
 
     let agg_path = unsafe { std::ffi::CStr::from_ptr(AGG_PATH_METHODS.0.CustomName) };
     let agg_scan = unsafe { std::ffi::CStr::from_ptr(AGG_SCAN_METHODS.0.CustomName) };
@@ -1066,7 +939,6 @@ fn dsm_estimate_allocates_worker_recheck_coordinate() {
 fn path_methods_plan_callback_is_some() {
     assert!(SCAN_PATH_METHODS.0.PlanCustomPath.is_some());
     assert!(JOIN_PATH_METHODS.0.PlanCustomPath.is_some());
-    assert!(SORT_PATH_METHODS.0.PlanCustomPath.is_some());
     assert!(AGG_PATH_METHODS.0.PlanCustomPath.is_some());
     assert!(WINDOW_PATH_METHODS.0.PlanCustomPath.is_some());
 }
@@ -1086,12 +958,6 @@ fn path_methods_reparameterize_is_none() {
             .ReparameterizeCustomPathByChild
             .is_none()
     );
-    assert!(
-        SORT_PATH_METHODS
-            .0
-            .ReparameterizeCustomPathByChild
-            .is_none()
-    );
     assert!(AGG_PATH_METHODS.0.ReparameterizeCustomPathByChild.is_none());
     assert!(
         WINDOW_PATH_METHODS
@@ -1106,7 +972,6 @@ fn scan_methods_create_state_callback_is_some() {
     // All scan methods should have CreateCustomScanState wired.
     assert!(SCAN_SCAN_METHODS.0.CreateCustomScanState.is_some());
     assert!(JOIN_SCAN_METHODS.0.CreateCustomScanState.is_some());
-    assert!(SORT_SCAN_METHODS.0.CreateCustomScanState.is_some());
     assert!(AGG_SCAN_METHODS.0.CreateCustomScanState.is_some());
     assert!(WINDOW_SCAN_METHODS.0.CreateCustomScanState.is_some());
 }
@@ -1435,8 +1300,6 @@ fn custom_private_data_partial_none_by_default() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuReduce,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![(AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32())],
         group_key: None,
         group_key_tlist_pos: 0,
@@ -1489,8 +1352,6 @@ fn custom_private_data_partial_some_carries_per_column_spec() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuReduce,
-        sort_keys: vec![],
-        sort_limit: None,
         agg_columns: vec![
             (AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32()),
             (AggOp::Count, 0, pg_sys::INT8OID.to_u32()),

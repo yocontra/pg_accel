@@ -19,11 +19,10 @@ pub use super::types::{
 // Scope (honest, verified against `pgaccel-kernels/include/*.h` 2026-07-07):
 // the declarations below cover every header symbol that has a current or
 // staged Rust caller. Declarations match the C signatures exactly, but this
-// is NOT the complete header surface. Six symbols from `pgaccel_ffi.h` are
-// intentionally NOT declared because nothing on the Rust side calls them and
-// an extern declaration carries no cross-checking value on its own (the
-// linker does not type-check, so an unused declaration is dead surface that
-// can silently drift):
+// is NOT the complete header surface. Header symbols with no Rust caller are
+// intentionally NOT declared because an extern declaration carries no
+// cross-checking value on its own (the linker does not type-check, so an
+// unused declaration is dead surface that can silently drift):
 //
 //   - pgaccel_sort_u64                        (pgaccel_ffi.h:174)
 //   - pgaccel_sort_kv_i32_device              (pgaccel_ffi.h:190)
@@ -31,6 +30,9 @@ pub use super::types::{
 //   - pgaccel_sort_window_overlap_probe       (pgaccel_ffi.h:80)
 //   - pgaccel_archive_stats_snapshot          (pgaccel_ffi.h:126)
 //   - pgaccel_archive_jit_cache_dir           (pgaccel_ffi.h:131)
+//   - pgaccel_sort_{f32,f64,i32,i64}          (host tuplesort executor retired)
+//   - pgaccel_sort_kv_{f32,f64,i32,i64}       (host tuplesort executor retired)
+//   - pgaccel_topk_kv_{f32,f64,i32,i64}       (host top-k sort executor retired)
 //
 // When a caller for one of these lands, declare it here (through
 // `bridge_status_fns!` if it returns `pgaccel_status`) in the same change.
@@ -333,65 +335,6 @@ bridge_status_fns! {
         count_b: usize,
         result: *mut u8,
         hit_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    // -- Sort kernels --
-
-    pub fn pgaccel_sort_f32(data: *mut f32, count: usize) -> PgaccelStatus;
-    pub fn pgaccel_sort_f64(data: *mut f64, count: usize) -> PgaccelStatus;
-    pub fn pgaccel_sort_i32(data: *mut i32, count: usize) -> PgaccelStatus;
-    pub fn pgaccel_sort_i64(data: *mut i64, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort: sorts keys and permutes indices to match.
-    pub fn pgaccel_sort_kv_f32(keys: *mut f32, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort (fp64 keys).
-    pub fn pgaccel_sort_kv_f64(keys: *mut f64, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort (i32 keys).
-    pub fn pgaccel_sort_kv_i32(keys: *mut i32, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort (i64 keys).
-    pub fn pgaccel_sort_kv_i64(keys: *mut i64, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (f32 keys).
-    pub fn pgaccel_topk_kv_f32(
-        keys: *const f32,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (f64 keys).
-    pub fn pgaccel_topk_kv_f64(
-        keys: *const f64,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (i32 keys).
-    pub fn pgaccel_topk_kv_i32(
-        keys: *const i32,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (i64 keys).
-    pub fn pgaccel_topk_kv_i64(
-        keys: *const i64,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
     ) -> PgaccelStatus;
 
     // -- Reduce kernels --

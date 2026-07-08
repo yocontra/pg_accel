@@ -22,7 +22,6 @@ use crate::engine::executor::olap::{
     SsbmQ3GroupedRevenueSpec, SsbmQ4GroupedProfitSpec,
 };
 use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
-use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
 use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 use crate::engine::gucs;
@@ -738,9 +737,6 @@ pub(super) struct CustomPrivateData {
     pub(super) fn_oid: pg_sys::Oid,
     pub(super) target_attno: i32,
     pub(super) accel_strategy: AccelStrategy,
-    pub(super) sort_keys: Vec<SortKeyDesc>,
-    /// Limit for top-k sort optimization. `None` means no limit.
-    pub(super) sort_limit: Option<usize>,
     /// Aggregate column descriptors `(AggOp, attno, result_type_oid)`.
     /// Only meaningful when `gpu_strategy == Agg`.
     pub(super) agg_columns: Vec<(AggOp, i32, u32)>,
@@ -851,8 +847,6 @@ struct PlanPayloadReader<'reader, 'source> {
 }
 
 impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
-    const SORT_KEY_COUNT: usize = PLAN_PAYLOAD_START;
-    const SORT_KEYS: usize = Self::SORT_KEY_COUNT + 1;
     const AGG_COUNT: usize = PLAN_PAYLOAD_START;
     const AGGS: usize = Self::AGG_COUNT + 1;
     const WINDOW_COUNT: usize = PLAN_PAYLOAD_START;
@@ -872,46 +866,6 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     #[must_use]
     const fn new(fields: &'reader IntListReader<'source>) -> Self {
         PlanPayloadReader { fields }
-    }
-
-    #[must_use]
-    fn sort_key_count(&self) -> usize {
-        self.fields.int_at(Self::SORT_KEY_COUNT) as usize
-    }
-
-    #[must_use]
-    fn sort_keys(&self, count: usize) -> Vec<SortKeyDesc> {
-        let mut keys = Vec::with_capacity(count);
-        for key_index in 0..count {
-            let offset = Self::SORT_KEYS + key_index * SORT_KEY_INTS;
-            if !self.fields.contains_range(offset, SORT_KEY_INTS) {
-                break;
-            }
-            let mut key = self.fields.cursor_at(offset);
-            keys.push(SortKeyDesc {
-                attno: key.read_int() as i16,
-                sort_op: key.read_oid(),
-                collation: key.read_oid(),
-                nulls_first: key.read_bool(),
-            });
-        }
-        keys
-    }
-
-    #[must_use]
-    fn sort_limit(&self, key_count: usize) -> Option<usize> {
-        let limit_idx = Self::SORT_KEYS + key_count * SORT_KEY_INTS;
-        self.fields
-            .get(limit_idx)
-            .and_then(|value| (value > 0).then_some(value as usize))
-    }
-
-    #[must_use]
-    fn sort_self_scan_relid(&self, key_count: usize) -> u32 {
-        let relid_idx = Self::SORT_KEYS + key_count * SORT_KEY_INTS + 1;
-        self.fields
-            .get(relid_idx)
-            .map_or(0, |value| if value > 0 { value as u32 } else { 0 })
     }
 
     #[must_use]
@@ -1107,12 +1061,11 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     }
 }
 
-/// Deserialize strategy, batch size, accel context, and sort keys from
+/// Deserialize strategy, batch size, and accel context from
 /// `custom_private`.
 ///
 /// Layout: `[strategy, batch_size, expected_threads, fn_oid, target_attno,
-///   accel_strategy, num_sort_keys?, attno1, sort_op1, collation1,
-///   nulls_first1, ...]`
+///   accel_strategy, ...strategy-specific payload...]`
 ///
 /// Invalid or missing private data raises a PostgreSQL ERROR.
 ///
@@ -1156,8 +1109,6 @@ pub(super) unsafe fn deserialize_custom_private(
             fn_oid: pg_sys::Oid::INVALID,
             target_attno: 0,
             accel_strategy: AccelStrategy::GpuReduce,
-            sort_keys: vec![],
-            sort_limit: None,
             agg_columns: vec![],
             group_key: None,
             group_key_tlist_pos: 0,
@@ -1191,32 +1142,11 @@ pub(super) unsafe fn deserialize_custom_private(
     let target_attno = plan_private.target_attno;
     let accel_strategy = plan_private.accel_strategy;
 
-    let sort_key_count = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_key_count()
-    } else {
-        0
-    };
-    let sort_keys = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_keys(sort_key_count)
-    } else {
-        vec![]
-    };
-
-    // For Sort strategy, read optional limit after sort keys.
-    // Layout: [...sort keys..., limit_tuples, self_scan_relid]
-    let sort_limit = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_limit(sort_key_count)
-    } else {
-        None
-    };
-
-    // For Sort strategy, read self_scan_relid for VectorizedScan.
-    // It's one position after limit_tuples in the plan's custom_private.
-    let sort_self_scan_relid = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_self_scan_relid(sort_key_count)
-    } else {
-        0
-    };
+    // GpuSort was retired: no plan-time serializer emits Sort payloads, so
+    // the reader no longer decodes sort keys / limit / self-scan relid.
+    if matches!(gpu_strategy, GpuStrategy::Sort) {
+        pgrx::error!("pg_accel: GpuSort strategy retired; refusing to decode a Sort plan payload");
+    }
 
     // For Agg strategy, read aggregate column descriptors starting at index 6.
     // Layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...]
@@ -1295,8 +1225,6 @@ pub(super) unsafe fn deserialize_custom_private(
     let (self_scan_relid, agg_scan_expr, partial, olap_agg) =
         if matches!(gpu_strategy, GpuStrategy::Agg) {
             payload.agg_self_scan_relid_and_trailers(agg_count)
-        } else if matches!(gpu_strategy, GpuStrategy::Sort) {
-            (sort_self_scan_relid, None, None, None)
         } else {
             (0, None, None, None)
         };
@@ -1307,8 +1235,6 @@ pub(super) unsafe fn deserialize_custom_private(
         fn_oid,
         target_attno,
         accel_strategy,
-        sort_keys,
-        sort_limit,
         agg_columns,
         group_key,
         group_key_tlist_pos,

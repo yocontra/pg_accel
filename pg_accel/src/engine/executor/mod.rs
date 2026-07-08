@@ -20,7 +20,6 @@ pub mod preagg;
 pub mod result_drain;
 pub mod scan;
 pub mod sort;
-pub mod sort_scan;
 pub(crate) mod state;
 pub mod tuple;
 pub mod vectorized_scan;

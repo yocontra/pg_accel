@@ -20,8 +20,6 @@ use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo, is_h3_synt
 use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
-use crate::engine::executor::sort::{SORT_KEY_INTS, SortExecState, SortKeyDesc};
-use crate::engine::executor::sort_scan::SortScan;
 use crate::engine::executor::vectorized_scan::VectorizedScan;
 use crate::engine::executor::window::{
     WINDOW_SPEC_INTS, WindowExecState, WindowFunc, WindowFuncSpec,
@@ -214,9 +212,9 @@ pub(super) struct GpuAccelState {
     pub(super) parallel_agg_batches_executed: u64,
     pub(super) parallel_agg_dispatch_time_us: u64,
     pub(super) resident_proof: ResidentProofSnapshot,
-    /// Opaque pointer to heap-allocated Rust executor state.
-    /// Points to either `ScanExecState` or `SortExecState` depending
-    /// on `strategy`. Set in `begin_custom_scan`, freed in `end_custom_scan`.
+    /// Opaque pointer to heap-allocated Rust executor state. The concrete
+    /// type depends on `strategy` (e.g. `ScanExecState`, `AggExecState`,
+    /// `JoinExecState`). Set in `begin_custom_scan`, freed in `end_custom_scan`.
     pub(super) executor: *mut std::ffi::c_void,
 }
 
@@ -255,12 +253,6 @@ static JOIN_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMe
     ReparameterizeCustomPathByChild: None,
 });
 
-static SORT_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
-    CustomName: c"GpuAccelSort".as_ptr(),
-    PlanCustomPath: Some(plan_custom_path_sort),
-    ReparameterizeCustomPathByChild: None,
-});
-
 static AGG_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
     CustomName: c"GpuAccelAgg".as_ptr(),
     PlanCustomPath: Some(plan_custom_path_agg),
@@ -274,11 +266,6 @@ static SCAN_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMe
 
 static JOIN_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelJoin".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
-});
-
-static SORT_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
-    CustomName: c"GpuAccelSort".as_ptr(),
     CreateCustomScanState: Some(create_custom_scan_state),
 });
 
@@ -367,13 +354,6 @@ pub fn join_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const JOIN_PATH_METHODS.0
 }
 
-/// Pointer to sort `CustomPathMethods` vtable.
-#[inline]
-#[must_use]
-pub fn sort_path_methods() -> *const pg_sys::CustomPathMethods {
-    &raw const SORT_PATH_METHODS.0
-}
-
 /// Pointer to agg `CustomPathMethods` vtable.
 #[inline]
 #[must_use]
@@ -417,7 +397,6 @@ pub fn register() {
     unsafe {
         pg_sys::RegisterCustomScanMethods(&raw const SCAN_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const JOIN_SCAN_METHODS.0);
-        pg_sys::RegisterCustomScanMethods(&raw const SORT_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const AGG_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const WINDOW_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const PREAGG_SCAN_METHODS.0);
@@ -489,195 +468,6 @@ unsafe fn append_path_resident_proof_or_default(
             .unwrap_or_else(|| resident_proof_default_for_strategy(strategy))
     };
     unsafe { append_resident_proof_snapshot(list, proof) }
-}
-
-/// Convert a sort `CustomPath` into a `CustomScan` plan node.
-///
-/// Reads sort key descriptors from the path's `custom_private` and
-/// serializes them into the plan's `custom_private` for the executor.
-///
-/// # Safety
-///
-/// Called by the PostgreSQL planner on the main backend thread.
-unsafe extern "C-unwind" fn plan_custom_path_sort(
-    _root: *mut pg_sys::PlannerInfo,
-    _rel: *mut pg_sys::RelOptInfo,
-    best_path: *mut pg_sys::CustomPath,
-    tlist: *mut pg_sys::List,
-    clauses: *mut pg_sys::List,
-    custom_plans: *mut pg_sys::List,
-) -> *mut pg_sys::Plan {
-    let _span = tracing::debug_span!("ffi.plan_custom_path_sort").entered();
-    tracing::info!("plan_custom_path_sort: start");
-    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
-    let cscan = unsafe {
-        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
-    };
-
-    // SAFETY: cscan is freshly palloc'd and zeroed; best_path is valid.
-    unsafe {
-        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
-        (*cscan).scan.plan.targetlist = tlist;
-        // Set custom_scan_tlist to the child plan's targetlist so PG
-        // creates a scan slot with the correct tuple descriptor.
-        // Without this, scanrelid=0 + NULL tlist creates a 0-column slot.
-        let child_tlist = if custom_plans.is_null() || pg_sys::list_length(custom_plans) == 0 {
-            std::ptr::null_mut()
-        } else {
-            let child = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
-            if child.is_null() {
-                std::ptr::null_mut()
-            } else {
-                (*child).targetlist
-            }
-        };
-        (*cscan).custom_scan_tlist = child_tlist;
-
-        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
-        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
-        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
-        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
-        (*cscan).custom_plans = custom_plans;
-        (*cscan).flags = (*best_path).flags;
-        (*cscan).scan.scanrelid = 0;
-        (*cscan).methods = &raw const SORT_SCAN_METHODS.0;
-
-        // Serialize: [strategy=Sort, batch_size, threads, fn_oid=0,
-        //             target_attno=0, accel_strategy=GpuSort, ...sort keys]
-        let batch_size = gucs::min_batch_size();
-        let expected_threads = resolve_thread_count();
-
-        let mut list: *mut pg_sys::List = std::ptr::null_mut();
-        list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Sort as c_int).cast());
-        list = pg_sys::lappend(list, pg_sys::makeInteger(batch_size).cast());
-        list = pg_sys::lappend(list, pg_sys::makeInteger(expected_threads).cast());
-        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // fn_oid
-        list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // target_attno
-        list = pg_sys::lappend(
-            list,
-            pg_sys::makeInteger(AccelStrategy::GpuSort as c_int).cast(),
-        );
-
-        // Read sort keys, limit, and self-scan relid from the path's custom_private and
-        // serialize them into the scan node's custom_private.
-        // Path layout: [fn_oid, target_attno, accel_strategy, num_keys,
-        //               ...sort_key_data..., limit_tuples, self_scan_relid]
-        // Sort key data starts at index 3 (after the 3-element header).
-        let path_priv = (*best_path).custom_private;
-        let sort_keys = deserialize_path_sort_keys_at(path_priv, 3);
-        list = serialize_sort_keys(list, &sort_keys);
-
-        // Serialize limit_tuples (appended after sort keys by planner).
-        // In the path layout, limit is at: 3 (header) + 1 (num_keys) + num_keys * SORT_KEY_INTS
-        let path_limit = deserialize_path_limit_at(path_priv, 3, &sort_keys);
-        list = pg_sys::lappend(list, pg_sys::makeInteger(path_limit).cast());
-        let path_self_scan_relid =
-            deserialize_path_sort_self_scan_relid_at(path_priv, 3, &sort_keys);
-        list = pg_sys::lappend(list, pg_sys::makeInteger(path_self_scan_relid).cast());
-
-        list = append_path_resident_proof_or_default(list, path_priv, GpuStrategy::Sort);
-        (*cscan).custom_private = list;
-    }
-
-    tracing::info!("plan_custom_path_sort: end");
-    cscan.cast()
-}
-
-/// Extract limit_tuples from the path's `custom_private` with a base offset.
-///
-/// The limit is serialized after sort key data:
-/// `[...header..., num_keys, ...sort_key_data..., limit_tuples]`
-///
-/// `header_offset` is the index where `num_keys` starts.
-///
-/// # Safety
-///
-/// `custom_private` must be null or a valid PG `List`.
-unsafe fn deserialize_path_limit_at(
-    custom_private: *mut pg_sys::List,
-    header_offset: usize,
-    sort_keys: &[SortKeyDesc],
-) -> c_int {
-    if custom_private.is_null() {
-        return 0;
-    }
-    // SAFETY: custom_private is a valid List.
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-    // limit is at index: header_offset + 1 (num_keys) + num_keys * SORT_KEY_INTS
-    let limit_idx = header_offset + 1 + sort_keys.len() * SORT_KEY_INTS;
-    if limit_idx >= list_len {
-        return 0;
-    }
-    // SAFETY: Index is within bounds (checked above).
-    unsafe { list_int_at(custom_private, limit_idx as c_int) }
-}
-
-/// Extract self_scan_relid from the path's `custom_private` with a base offset.
-///
-/// The relid is serialized immediately after limit_tuples:
-/// `[...header..., num_keys, ...sort_key_data..., limit_tuples, self_scan_relid]`
-///
-/// # Safety
-///
-/// `custom_private` must be null or a valid PG `List`.
-unsafe fn deserialize_path_sort_self_scan_relid_at(
-    custom_private: *mut pg_sys::List,
-    header_offset: usize,
-    sort_keys: &[SortKeyDesc],
-) -> c_int {
-    if custom_private.is_null() {
-        return 0;
-    }
-    // SAFETY: custom_private is a valid List.
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-    let relid_idx = header_offset + 1 + sort_keys.len() * SORT_KEY_INTS + 1;
-    if relid_idx >= list_len {
-        return 0;
-    }
-    // SAFETY: Index is within bounds (checked above).
-    unsafe { list_int_at(custom_private, relid_idx as c_int) }
-}
-
-/// Deserialize sort key descriptors starting at a given index in the list.
-///
-/// Layout at `start_idx`: `[num_sort_keys, attno1, sort_op1, collation1, nulls_first1, ...]`
-///
-/// # Safety
-///
-/// `custom_private` must be a valid PG `List` with at least `start_idx + 1` elements.
-unsafe fn deserialize_path_sort_keys_at(
-    custom_private: *mut pg_sys::List,
-    start_idx: usize,
-) -> Vec<SortKeyDesc> {
-    let mut sort_keys = vec![];
-    if custom_private.is_null() {
-        return sort_keys;
-    }
-    // SAFETY: custom_private is a valid List of Integer nodes.
-    let list_len = unsafe { pg_sys::list_length(custom_private) } as usize;
-    if start_idx >= list_len {
-        return sort_keys;
-    }
-    let num_keys = unsafe { list_int_at(custom_private, start_idx as c_int) } as usize;
-    let base = start_idx + 1;
-    for k in 0..num_keys {
-        let offset = base + k * SORT_KEY_INTS;
-        if offset + SORT_KEY_INTS > list_len {
-            break;
-        }
-        // SAFETY: Indices are within bounds (checked above).
-        let attno = unsafe { list_int_at(custom_private, offset as c_int) } as i16;
-        let sort_op_raw = unsafe { list_int_at(custom_private, (offset + 1) as c_int) } as u32;
-        let collation_raw = unsafe { list_int_at(custom_private, (offset + 2) as c_int) } as u32;
-        let nulls_first = unsafe { list_int_at(custom_private, (offset + 3) as c_int) } != 0;
-        sort_keys.push(SortKeyDesc {
-            attno,
-            sort_op: pg_sys::Oid::from(sort_op_raw),
-            collation: pg_sys::Oid::from(collation_raw),
-            nulls_first,
-        });
-    }
-    sort_keys
 }
 
 /// Return the planned child `SeqScan` range-table index when an agg wraps a
@@ -1686,12 +1476,14 @@ unsafe fn make_custom_scan_plan(
         let target_attno = list_int_at(path_priv, 1);
         let accel_strategy_raw = list_int_at(path_priv, 2);
 
-        // If accel_strategy is GpuSort, use GpuStrategy::Sort instead of
-        // Scan/Join so the executor picks the sort code path.
-        let is_sort = accel_strategy_raw == AccelStrategy::GpuSort as c_int;
-        let strategy = if is_sort {
-            GpuStrategy::Sort as c_int
-        } else if is_scan {
+        // GpuSort was retired: no planner path-creator serializes it anymore.
+        // Fail loudly if a stale path payload still carries it.
+        if accel_strategy_raw == AccelStrategy::GpuSort as c_int {
+            pgrx::error!(
+                "pg_accel: GpuSort strategy retired; planner must not create sort paths"
+            );
+        }
+        let strategy = if is_scan {
             GpuStrategy::Scan as c_int
         } else {
             GpuStrategy::Join as c_int
@@ -1705,33 +1497,6 @@ unsafe fn make_custom_scan_plan(
         list = pg_sys::lappend(list, pg_sys::makeInteger(fn_oid_raw).cast());
         list = pg_sys::lappend(list, pg_sys::makeInteger(target_attno).cast());
         list = pg_sys::lappend(list, pg_sys::makeInteger(accel_strategy_raw).cast());
-
-        // For GpuSort, read sort keys, limit, and self_scan_relid from
-        // the path's custom_private (after the 3-element header) and
-        // serialize them into the plan's custom_private.
-        if is_sort {
-            let path_priv_len = pg_sys::list_length(path_priv) as usize;
-            if path_priv_len > 3 {
-                // Sort key data starts at index 3: [num_keys, attno, op, coll, nf]
-                let sort_keys = deserialize_path_sort_keys_at(path_priv, 3);
-                list = serialize_sort_keys(list, &sort_keys);
-
-                // Serialize limit_tuples (after sort keys in path layout).
-                let path_limit = deserialize_path_limit_at(path_priv, 3, &sort_keys);
-                list = pg_sys::lappend(list, pg_sys::makeInteger(path_limit).cast());
-
-                // Serialize self_scan_relid for VectorizedScan.
-                // In the path layout: limit is at 3 + 1 + num_keys * SORT_KEY_INTS,
-                // self_scan_relid is one after that.
-                let relid_idx = 3 + 1 + sort_keys.len() * SORT_KEY_INTS + 1;
-                let self_scan_relid = if relid_idx < path_priv_len {
-                    list_int_at(path_priv, relid_idx as c_int)
-                } else {
-                    0
-                };
-                list = pg_sys::lappend(list, pg_sys::makeInteger(self_scan_relid).cast());
-            }
-        }
 
         // For GpuHashJoin, serialize inner_attno and key_type after the
         // base 6 fields. Path layout: [fn_oid, outer_attno, strategy,
@@ -3318,74 +3083,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 
             Box::into_raw(exec).cast()
         } else if privdata.gpu_strategy == GpuStrategy::Sort {
-            let mut exec = Box::new(SortExecState::new(
-                AccelStrategy::GpuSort,
-                batch_size,
-                privdata.sort_keys.clone(),
-                privdata.sort_limit,
-            ));
-
-            // Wire VectorizedScan when self_scan_relid > 0 (direct heap scan).
-            // SAFETY: All pointer dereferences below are valid because:
-            // - node is a valid CustomScanState set by ExecInitCustomScan
-            // - estate, exec_rt_fetch, ExecOpenScanRelation, table_beginscan
-            //   are PG APIs called on the main backend thread
-            // - rel->rd_att is a valid TupleDesc for the opened relation
-            // The enclosing block is already unsafe.
-            if privdata.self_scan_relid > 0 {
-                let estate = (*node).ss.ps.state;
-                // Guard: the RTE must be a real heap relation. Non-relation
-                // RTEs (function, VALUES, CTE, subquery, or entries
-                // invalidated by setrefs) passed to ExecOpenScanRelation
-                // raise ERROR → SIGABRT. Reproduces with `count(*) FROM
-                // (SELECT k FROM t ORDER BY k) sq` when the planner picks
-                // GpuSort under the count subquery — the outer plan's RTE
-                // doesn't survive into the inner scan's range table.
-                let rt_entry = pg_sys::exec_rt_fetch(privdata.self_scan_relid, estate);
-                if !rt_entry.is_null()
-                    && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
-                    && (*rt_entry).relid != pg_sys::InvalidOid
-                {
-                    let rel =
-                        pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
-                    let snap = (*estate).es_snapshot;
-                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-
-                    // Determine sort key type for inline extraction.
-                    let (key_attno, key_typid) = if privdata.sort_keys.is_empty() {
-                        (0, 0)
-                    } else {
-                        let sk = &privdata.sort_keys[0];
-                        let tupdesc = (*rel).rd_att;
-                        let attno_idx = (sk.attno as usize).wrapping_sub(1);
-                        if tupdesc.is_null() {
-                            (0, 0)
-                        } else {
-                            let natts = (*tupdesc).natts as usize;
-                            if attno_idx < natts {
-                                let attr =
-                                    &*crate::engine::pg_compat::tuple_desc_attr(tupdesc, attno_idx);
-                                (i32::from(sk.attno), u32::from(attr.atttypid))
-                            } else {
-                                (0, 0)
-                            }
-                        }
-                    };
-
-                    // SAFETY: rel is a valid, open Relation.
-                    let vscan = SortScan::new(sd, rel, key_attno, key_typid);
-                    exec.set_vscan(vscan);
-                    pgrx::debug1!(
-                        "pg_accel: begin_custom_scan: Sort VectorizedScan, \
-                         relid={}, key_attno={}, key_typid={}",
-                        privdata.self_scan_relid,
-                        key_attno,
-                        key_typid,
-                    );
-                }
-            }
-
-            Box::into_raw(exec).cast()
+            pgrx::error!(
+                "pg_accel: GpuSort strategy retired; no planner path-creator emits it"
+            );
         } else {
             // Use fn_oid + target_attno + accel_strategy from custom_private
             // (serialized by the planner hook). Fall back to qual discovery
@@ -3651,7 +3351,9 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             GpuStrategy::Scan => &mut *executor.cast::<ScanExecState>(),
             GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
             GpuStrategy::PreAgg => &mut *executor.cast::<PreAggExecState>(),
-            GpuStrategy::Sort => &mut *executor.cast::<SortExecState>(),
+            GpuStrategy::Sort => pgrx::error!(
+                "pg_accel: GpuSort strategy retired; begin_custom_scan rejects it before exec"
+            ),
             GpuStrategy::Window => &mut *executor.cast::<WindowExecState>(),
             GpuStrategy::Join => &mut *executor.cast::<JoinExecState>(),
             GpuStrategy::FunctionScan => unreachable!(
@@ -3684,7 +3386,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     if !result.is_null()
         && matches!(
             gpu_strategy,
-            GpuStrategy::Scan | GpuStrategy::Sort | GpuStrategy::Window
+            GpuStrategy::Scan | GpuStrategy::Window
         )
     {
         // SAFETY: node is a valid CustomScanState; proj_info may be null
@@ -3778,20 +3480,12 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     }
                     drop(win);
                 } else if gpu_strategy == GpuStrategy::Sort {
-                    // SAFETY: executor was Box::into_raw'd as SortExecState.
-                    let sort_exec = Box::from_raw((*state).accel.executor.cast::<SortExecState>());
-                    // End VectorizedScan's heap scan before dropping.
-                    // table_endscan must be called before the relation is
-                    // closed by PG's ExecCloseScanRelation.
-                    if let Some(vscan) = sort_exec.vscan_ref() {
-                        let sd = vscan.scan_desc();
-                        if !sd.is_null() {
-                            // SAFETY: sd was created by table_beginscan
-                            // in begin_custom_scan; main backend thread.
-                            pg_sys::table_endscan(sd);
-                        }
-                    }
-                    drop(sort_exec);
+                    // GpuSort retired: begin_custom_scan errors before an
+                    // executor can be allocated, so a non-null executor with
+                    // Sort strategy is a state-corruption bug.
+                    pgrx::error!(
+                        "pg_accel: GpuSort strategy retired; no Sort executor state can exist"
+                    );
                 } else {
                     // SAFETY: executor was Box::into_raw'd as ScanExecState.
                     let scan_exec = Box::from_raw((*state).accel.executor.cast::<ScanExecState>());
@@ -3907,20 +3601,9 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
             };
             (*state).accel.executor = Box::into_raw(exec).cast();
         } else if gpu_strategy == GpuStrategy::Sort {
-            let (sort_keys, limit) = if (*state).accel.executor.is_null() {
-                (vec![], None)
-            } else {
-                // SAFETY: executor was Box::into_raw'd as SortExecState.
-                let old = Box::from_raw((*state).accel.executor.cast::<SortExecState>());
-                (old.sort_keys().to_vec(), old.limit())
-            };
-            let exec = Box::new(SortExecState::new(
-                AccelStrategy::GpuSort,
-                batch_size,
-                sort_keys,
-                limit,
-            ));
-            (*state).accel.executor = Box::into_raw(exec).cast();
+            // GpuSort retired: begin_custom_scan errors before an executor
+            // can be allocated, so rescan can never see this strategy.
+            pgrx::error!("pg_accel: GpuSort strategy retired; rescan cannot rebuild it");
         } else if gpu_strategy == GpuStrategy::Window {
             let window_specs = if (*state).accel.executor.is_null() {
                 vec![]
@@ -4047,39 +3730,6 @@ pub(super) unsafe fn list_int_at(list: *mut pg_sys::List, idx: c_int) -> c_int {
     unsafe { (*node.cast::<pg_sys::Integer>()).ival }
 }
 
-/// Serialize sort key descriptors into a PG `List` of `Integer` nodes,
-/// appending to the base `[strategy, batch_size, expected_threads]`.
-///
-/// Appends: `[num_keys, attno1, sort_op1, collation1, nulls_first1, ...]`
-///
-/// # Safety
-///
-/// Must be called in a valid PG memory context.
-unsafe fn serialize_sort_keys(
-    mut list: *mut pg_sys::List,
-    sort_keys: &[SortKeyDesc],
-) -> *mut pg_sys::List {
-    // SAFETY: makeInteger + lappend allocate in CurrentMemoryContext.
-    unsafe {
-        list = pg_sys::lappend(list, pg_sys::makeInteger(sort_keys.len() as c_int).cast());
-        for key in sort_keys {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(c_int::from(key.attno)).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(key.sort_op) as c_int).cast(),
-            );
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(key.collation) as c_int).cast(),
-            );
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(c_int::from(key.nulls_first)).cast(),
-            );
-        }
-    }
-    list
-}
 
 #[cfg(feature = "pg_test")]
 mod tests;
