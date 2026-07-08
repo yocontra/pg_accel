@@ -1,4 +1,5 @@
-#![allow(dead_code)] // reason: loader-v2 candidate (Phase 5 residency decides SPI vs heap-scan); delete in Phase 5 if SPI wins
+#![allow(dead_code)]
+// reason: loader-v2 candidate (Phase 5 residency decides SPI vs heap-scan); delete in Phase 5 if SPI wins
 //! Column-at-a-time deserialization helpers for late materialization.
 //!
 //! Quarantined 2026-07 executor rebuild (Phase 3B): the cost-tier helpers
