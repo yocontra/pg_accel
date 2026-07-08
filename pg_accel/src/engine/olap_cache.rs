@@ -229,6 +229,7 @@ pub struct SsbmQ1ResidentCache {
     part_rel_oid: pg_sys::Oid,
     customer_rel_oid: pg_sys::Oid,
     supplier_rel_oid: pg_sys::Oid,
+    fingerprints: Vec<RelationFingerprint>,
     row_count: usize,
     orderdate: ExprDeviceBuffer<i32>,
     discount: ExprDeviceBuffer<i32>,
@@ -272,6 +273,7 @@ struct SsbmQ1ScratchBuffers {
 
 pub struct ResidentDenseGroupAggCache {
     rel_oid: pg_sys::Oid,
+    fingerprints: Vec<RelationFingerprint>,
     group_attno: i32,
     value_attno: i32,
     value_rhs_attno: Option<i32>,
@@ -310,6 +312,7 @@ pub struct ResidentDenseGroupAggCache {
 pub struct ResidentStarDimGroupAggCache {
     fact_rel_oid: pg_sys::Oid,
     dim_rel_oid: pg_sys::Oid,
+    fingerprints: Vec<RelationFingerprint>,
     fact_key_attno: i32,
     fact_value_attno: i32,
     dim_key_attno: i32,
@@ -387,6 +390,7 @@ impl Eq for ResidentStarDimGroupAggCacheShape {}
 pub struct ResidentHashJoinCountCache {
     outer_rel_oid: pg_sys::Oid,
     inner_rel_oid: pg_sys::Oid,
+    fingerprints: Vec<RelationFingerprint>,
     outer_attno: i32,
     inner_attno: i32,
     key_type: PgaccelKeyType,
@@ -506,6 +510,7 @@ impl ResidentHashJoinCountCache {
 
 pub struct ResidentH3GroupAggCache {
     rel_oid: pg_sys::Oid,
+    fingerprints: Vec<RelationFingerprint>,
     row_count: usize,
     kind: ResidentH3GroupedCountKind,
     input: ResidentH3GroupAggInput,
@@ -2014,8 +2019,23 @@ thread_local! {
 // invalidation that could affect a cached relation (TRUNCATE, ALTER TABLE,
 // DROP TABLE, VACUUM FULL, CLUSTER, ...) into fixed-capacity `Cell` storage,
 // and `process_relcache_invalidations()` — called at the top of every cache
-// accessor — drops the matching slots before the planner or executor can see
-// stale device data.
+// accessor — resolves them before the planner or executor can see stale
+// device data. Resolution is a two-phase suspect/revalidate protocol rather
+// than an unconditional drop, because relcache invalidation also fires for
+// DDL that leaves the cached data perfectly valid (`ALTER TABLE ... RENAME`
+// of a table or column: same OID, same relfilenode, same attnos, same data):
+//
+// - Phase 1 (`mark_suspect_resident_slots`): slots whose relation OIDs match
+//   a pending invalidation are flagged SUSPECT. No catalog access, no device
+//   memory frees.
+// - Phase 2 (`revalidate_suspect_resident_slots`): each SUSPECT slot's
+//   load-time `RelationFingerprint`s (relfilenode, relnatts, per-cached-attno
+//   atttypid/attisdropped — deliberately *not* relname/attname) are
+//   re-fetched from the syscache and compared. Identical → the invalidation
+//   was rename-only metadata churn, keep the cache. Any difference, or the
+//   relation is gone → drop the slot. Both phases run at accessor call sites
+//   in normal backend context (planner recognizers, executor lookups, SRFs),
+//   where syscache lookups are legal — never inside the relcache callback.
 //
 // Known limitations (documented, not hidden):
 //
@@ -2036,6 +2056,194 @@ thread_local! {
 //    TRUNCATE of any table that predates the current transaction rewrites
 //    the relfilenode and IS invalidated (covered by
 //    `tests/phase2_cache.rs`).
+
+/// Validation fingerprint for one relation backing a resident cache slot.
+///
+/// Captured at load time and re-fetched from the syscache when a relcache
+/// invalidation marks the slot SUSPECT. Deliberately excludes `relname` and
+/// `attname`: `ALTER TABLE ... RENAME` (table or column) fires a relcache
+/// invalidation but leaves OID, relfilenode, attnos, types, and data
+/// untouched, so a renamed relation must keep its resident cache. Every
+/// data-affecting DDL change that relcache invalidation can detect *is*
+/// covered: any
+/// rewrite (TRUNCATE, VACUUM FULL, CLUSTER, rewriting ALTERs) changes
+/// `relfilenode`; ADD COLUMN changes `relnatts`; DROP COLUMN flips
+/// `attisdropped`; ALTER COLUMN TYPE changes `atttypid` (even binary-coercible
+/// changes that skip the rewrite). Plain DML remains out of scope exactly as
+/// before — it fires no relcache invalidation (see module comment above).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelationFingerprint {
+    rel_oid: pg_sys::Oid,
+    relfilenode: pg_sys::Oid,
+    relnatts: i16,
+    attrs: Vec<AttributeFingerprint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttributeFingerprint {
+    attno: i16,
+    atttypid: pg_sys::Oid,
+    attisdropped: bool,
+}
+
+impl RelationFingerprint {
+    /// Reads the current fingerprint for `rel_oid` from the syscache.
+    ///
+    /// `cached_attnos = Some(..)` fingerprints exactly the attributes the
+    /// cache extracted; `None` fingerprints every attribute `1..=relnatts`
+    /// (used by caches that resolve columns by name inside their load SQL
+    /// and do not track attnos). Returns `None` when the relation no longer
+    /// exists.
+    ///
+    /// Must run on the main backend thread inside a transaction (normal
+    /// planner/executor/SRF context) — never inside the relcache callback.
+    fn capture(rel_oid: pg_sys::Oid, cached_attnos: Option<&[i16]>) -> Option<Self> {
+        // SAFETY: main backend thread in normal transaction context (all
+        // callers are cache loaders or accessor-driven revalidation, never
+        // the relcache callback). SearchSysCache1(RELOID) takes the relation
+        // OID as its only key; the pinned tuple is released below.
+        let tuple = unsafe {
+            pg_sys::SearchSysCache1(
+                pg_sys::SysCacheIdentifier::RELOID as ::core::ffi::c_int,
+                rel_oid.into(),
+            )
+        };
+        if tuple.is_null() {
+            return None;
+        }
+        // SAFETY: `tuple` is a valid pg_class heap tuple pinned by the
+        // search above; GETSTRUCT yields its FormData_pg_class payload.
+        let (relfilenode, relnatts) = unsafe {
+            let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_class>();
+            ((*form).relfilenode, (*form).relnatts)
+        };
+        // SAFETY: releases the pin taken by the SearchSysCache1 above.
+        unsafe { pg_sys::ReleaseSysCache(tuple) };
+
+        let attrs = match cached_attnos {
+            Some(attnos) => attnos
+                .iter()
+                .map(|attno| Self::capture_attr(rel_oid, *attno))
+                .collect(),
+            None => (1..=relnatts)
+                .map(|attno| Self::capture_attr(rel_oid, attno))
+                .collect(),
+        };
+        Some(Self {
+            rel_oid,
+            relfilenode,
+            relnatts,
+            attrs,
+        })
+    }
+
+    fn capture_attr(rel_oid: pg_sys::Oid, attno: i16) -> AttributeFingerprint {
+        // SAFETY: main backend thread in normal transaction context (see
+        // `capture`). SearchSysCache2(ATTNUM) keys on (attrelid, attnum);
+        // the pinned tuple is released below.
+        let tuple = unsafe {
+            pg_sys::SearchSysCache2(
+                pg_sys::SysCacheIdentifier::ATTNUM as ::core::ffi::c_int,
+                rel_oid.into(),
+                pg_sys::Datum::from(attno),
+            )
+        };
+        if tuple.is_null() {
+            // Attribute row missing entirely. Load-time attnos always exist
+            // (they come from pg_attribute lookups), so this sentinel can
+            // never equal a load-time fingerprint — comparison fails and the
+            // slot is dropped.
+            return AttributeFingerprint {
+                attno,
+                atttypid: pg_sys::InvalidOid,
+                attisdropped: true,
+            };
+        }
+        // SAFETY: `tuple` is a valid pg_attribute heap tuple pinned by the
+        // search above; GETSTRUCT yields its FormData_pg_attribute payload.
+        let (atttypid, attisdropped) = unsafe {
+            let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_attribute>();
+            ((*form).atttypid, (*form).attisdropped)
+        };
+        // SAFETY: releases the pin taken by the SearchSysCache2 above.
+        unsafe { pg_sys::ReleaseSysCache(tuple) };
+        AttributeFingerprint {
+            attno,
+            atttypid,
+            attisdropped,
+        }
+    }
+
+    /// Re-fetches this relation's fingerprint from the catalog and compares.
+    ///
+    /// `false` (drop the slot) when the relation is gone or any of
+    /// relfilenode / relnatts / cached-attribute type or dropped-status
+    /// changed; `true` (keep the cache) when only untracked metadata —
+    /// relname/attname after a RENAME — changed.
+    fn still_matches(&self) -> bool {
+        let attnos: Vec<i16> = self.attrs.iter().map(|attr| attr.attno).collect();
+        Self::capture(self.rel_oid, Some(&attnos)).is_some_and(|fresh| fresh == *self)
+    }
+}
+
+/// Converts loader attnos (`i32`, from `relation_attno`) and captures the
+/// load-time fingerprint, mapping failures into the loaders' `String` error
+/// convention. `cached_attnos = None` fingerprints all attributes.
+fn capture_relation_fingerprint(
+    rel_oid: pg_sys::Oid,
+    table: &str,
+    cached_attnos: Option<&[i32]>,
+) -> Result<RelationFingerprint, String> {
+    let attnos_i16 = cached_attnos
+        .map(|attnos| {
+            attnos
+                .iter()
+                .map(|attno| {
+                    i16::try_from(*attno)
+                        .map_err(|_| format!("{table} attno {attno} exceeds int16 range"))
+                })
+                .collect::<Result<Vec<i16>, String>>()
+        })
+        .transpose()?;
+    RelationFingerprint::capture(rel_oid, attnos_i16.as_deref())
+        .ok_or_else(|| format!("{table} disappeared while loading resident cache"))
+}
+
+/// Read access to the load-time fingerprints of a resident cache slot, used
+/// by the generic suspect-slot revalidation.
+trait ResidentCacheFingerprinted {
+    fn fingerprints(&self) -> &[RelationFingerprint];
+}
+
+impl ResidentCacheFingerprinted for SsbmQ1ResidentCache {
+    fn fingerprints(&self) -> &[RelationFingerprint] {
+        &self.fingerprints
+    }
+}
+
+impl ResidentCacheFingerprinted for ResidentDenseGroupAggCache {
+    fn fingerprints(&self) -> &[RelationFingerprint] {
+        &self.fingerprints
+    }
+}
+
+impl ResidentCacheFingerprinted for ResidentStarDimGroupAggCache {
+    fn fingerprints(&self) -> &[RelationFingerprint] {
+        &self.fingerprints
+    }
+}
+
+impl ResidentCacheFingerprinted for ResidentH3GroupAggCache {
+    fn fingerprints(&self) -> &[RelationFingerprint] {
+        &self.fingerprints
+    }
+}
+
+impl ResidentCacheFingerprinted for ResidentHashJoinCountCache {
+    fn fingerprints(&self) -> &[RelationFingerprint] {
+        &self.fingerprints
+    }
+}
 
 /// Capacity of the pending-invalidation scratch. Sized for the handful of
 /// relations the resident caches can reference (SSBM uses five); overflow
@@ -2062,12 +2270,23 @@ impl PendingRelcacheInvals {
     }
 }
 
+/// Bit assignments for `RESIDENT_SUSPECT_SLOTS`, one per resident cache slot.
+const SUSPECT_SSBM_Q1: u8 = 1 << 0;
+const SUSPECT_DENSE_GROUP_AGG: u8 = 1 << 1;
+const SUSPECT_STAR_DIM_GROUP_AGG: u8 = 1 << 2;
+const SUSPECT_H3_GROUP_AGG: u8 = 1 << 3;
+const SUSPECT_HASH_JOIN_COUNT: u8 = 1 << 4;
+
 thread_local! {
     static RELCACHE_CALLBACK_REGISTERED: Cell<bool> = const { Cell::new(false) };
     static RESIDENT_CACHE_LOAD_IN_PROGRESS: Cell<bool> = const { Cell::new(false) };
     static PENDING_RELCACHE_CLEAR_ALL: Cell<bool> = const { Cell::new(false) };
     static PENDING_RELCACHE_INVALS: Cell<PendingRelcacheInvals> =
         const { Cell::new(PendingRelcacheInvals::empty()) };
+    /// Bitmask of resident slots flagged SUSPECT by
+    /// `mark_suspect_resident_slots` and pending catalog revalidation in
+    /// `revalidate_suspect_resident_slots`.
+    static RESIDENT_SUSPECT_SLOTS: Cell<u8> = const { Cell::new(0) };
     static DML_STALENESS_WARNED_RELIDS: RefCell<BTreeSet<u32>> =
         const { RefCell::new(BTreeSet::new()) };
 }
@@ -2127,9 +2346,9 @@ fn relid_matches_any_resident_cache(relid: pg_sys::Oid) -> bool {
 /// memory — dropping an `ExprDeviceBuffer` calls into the SYCL runtime, which
 /// has no safety contract inside abort-time invalidation processing. The
 /// relid is recorded into fixed-capacity `Cell` storage instead, and the
-/// matching cache slots are dropped lazily by
-/// `process_relcache_invalidations()` on the next cache access, which runs in
-/// normal planner/executor context.
+/// matching cache slots are suspect-flagged and fingerprint-revalidated
+/// lazily by `process_relcache_invalidations()` on the next cache access,
+/// which runs in normal planner/executor context.
 unsafe extern "C-unwind" fn resident_cache_relcache_callback(
     _arg: pg_sys::Datum,
     relid: pg_sys::Oid,
@@ -2196,30 +2415,39 @@ fn ensure_relcache_invalidation_callback_registered() {
     RELCACHE_CALLBACK_REGISTERED.set(true);
 }
 
-/// Drop any resident cache slots invalidated since the last access.
+/// Resolve any resident cache slots invalidated since the last access.
 ///
 /// Called at the top of every resident-cache accessor (planner recognizers,
 /// executor lookups, row-count SRFs) and around cache loads. Runs in normal
-/// backend context, so dropping `ExprDeviceBuffer`s (freeing GPU USM memory)
-/// is safe here — unlike in the relcache callback itself. Device memory for
-/// an invalidated cache is therefore reclaimed on the next access, not at
-/// invalidation time; a cache that is never touched again is freed at backend
-/// exit.
+/// backend context, so both syscache revalidation lookups and dropping
+/// `ExprDeviceBuffer`s (freeing GPU USM memory) are safe here — unlike in the
+/// relcache callback itself. Device memory for a genuinely stale cache is
+/// therefore reclaimed on the next access, not at invalidation time; a cache
+/// that is never touched again is freed at backend exit.
 fn process_relcache_invalidations() {
     let clear_all = PENDING_RELCACHE_CLEAR_ALL.replace(false);
     let pending = PENDING_RELCACHE_INVALS.replace(PendingRelcacheInvals::empty());
-    if !clear_all && pending.len == 0 {
-        return;
+    if clear_all || pending.len > 0 {
+        mark_suspect_resident_slots(clear_all, &pending);
     }
+    revalidate_suspect_resident_slots();
+}
+
+/// Phase 1 of invalidation processing: flag resident slots whose relation
+/// OIDs match a pending relcache invalidation as SUSPECT. No catalog access
+/// and no device-memory frees happen here; the catalog comparison and any
+/// drop are deferred to `revalidate_suspect_resident_slots`.
+fn mark_suspect_resident_slots(clear_all: bool, pending: &PendingRelcacheInvals) {
     let invalidated = |cache_relids: &[pg_sys::Oid]| -> bool {
         clear_all
             || cache_relids
                 .iter()
                 .any(|oid| pending.contains(u32::from(*oid)))
     };
+    let mut suspects = RESIDENT_SUSPECT_SLOTS.get();
 
     SSBM_Q1_CACHE.with(|slot| {
-        let stale = slot.borrow().as_ref().is_some_and(|cache| {
+        let hit = slot.borrow().as_ref().is_some_and(|cache| {
             invalidated(&[
                 cache.fact_rel_oid,
                 cache.date_rel_oid,
@@ -2228,59 +2456,121 @@ fn process_relcache_invalidations() {
                 cache.supplier_rel_oid,
             ])
         });
-        if stale {
-            *slot.borrow_mut() = None;
-            pgrx::debug1!("pg_accel: SSBM resident cache dropped after relcache invalidation");
+        if hit {
+            suspects |= SUSPECT_SSBM_Q1;
         }
     });
     RESIDENT_DENSE_GROUP_AGG_CACHE.with(|slot| {
-        let stale = slot
+        let hit = slot
             .borrow()
             .as_ref()
             .is_some_and(|cache| invalidated(&[cache.rel_oid]));
-        if stale {
-            *slot.borrow_mut() = None;
-            pgrx::debug1!(
-                "pg_accel: resident dense groupagg cache dropped after relcache invalidation"
-            );
+        if hit {
+            suspects |= SUSPECT_DENSE_GROUP_AGG;
         }
     });
     RESIDENT_STAR_DIM_GROUP_AGG_CACHE.with(|slot| {
-        let stale = slot
+        let hit = slot
             .borrow()
             .as_ref()
             .is_some_and(|cache| invalidated(&[cache.fact_rel_oid, cache.dim_rel_oid]));
-        if stale {
-            *slot.borrow_mut() = None;
-            pgrx::debug1!(
-                "pg_accel: resident star groupagg cache dropped after relcache invalidation"
-            );
+        if hit {
+            suspects |= SUSPECT_STAR_DIM_GROUP_AGG;
         }
     });
     RESIDENT_H3_GROUP_AGG_CACHE.with(|slot| {
-        let stale = slot
+        let hit = slot
             .borrow()
             .as_ref()
             .is_some_and(|cache| invalidated(&[cache.rel_oid]));
-        if stale {
-            *slot.borrow_mut() = None;
-            pgrx::debug1!(
-                "pg_accel: resident H3 groupagg cache dropped after relcache invalidation"
-            );
+        if hit {
+            suspects |= SUSPECT_H3_GROUP_AGG;
         }
     });
     RESIDENT_HASH_JOIN_COUNT_CACHE.with(|slot| {
-        let stale = slot
+        let hit = slot
             .borrow()
             .as_ref()
             .is_some_and(|cache| invalidated(&[cache.outer_rel_oid, cache.inner_rel_oid]));
-        if stale {
-            *slot.borrow_mut() = None;
-            pgrx::debug1!(
-                "pg_accel: resident hashjoin count cache dropped after relcache invalidation"
-            );
+        if hit {
+            suspects |= SUSPECT_HASH_JOIN_COUNT;
         }
     });
+
+    RESIDENT_SUSPECT_SLOTS.set(suspects);
+}
+
+/// Phase 2 of invalidation processing: re-fetch every SUSPECT slot's relation
+/// fingerprints from the syscache and compare against the load-time capture.
+/// Identical fingerprints (the `ALTER TABLE ... RENAME` case: same OID,
+/// relfilenode, attnos, and types) keep the cache; any difference — or a
+/// vanished relation — drops the slot, freeing device memory here in normal
+/// backend context. A slot's SUSPECT bit is cleared only after its
+/// revalidation completes, so an ERROR unwind mid-check retries on the next
+/// accessor instead of leaving a stale cache trusted.
+fn revalidate_suspect_resident_slots() {
+    if RESIDENT_SUSPECT_SLOTS.get() == 0 {
+        return;
+    }
+    revalidate_suspect_slot(SUSPECT_SSBM_Q1, &SSBM_Q1_CACHE, "SSBM");
+    revalidate_suspect_slot(
+        SUSPECT_DENSE_GROUP_AGG,
+        &RESIDENT_DENSE_GROUP_AGG_CACHE,
+        "resident dense groupagg",
+    );
+    revalidate_suspect_slot(
+        SUSPECT_STAR_DIM_GROUP_AGG,
+        &RESIDENT_STAR_DIM_GROUP_AGG_CACHE,
+        "resident star groupagg",
+    );
+    revalidate_suspect_slot(
+        SUSPECT_H3_GROUP_AGG,
+        &RESIDENT_H3_GROUP_AGG_CACHE,
+        "resident H3 groupagg",
+    );
+    revalidate_suspect_slot(
+        SUSPECT_HASH_JOIN_COUNT,
+        &RESIDENT_HASH_JOIN_COUNT_CACHE,
+        "resident hashjoin count",
+    );
+}
+
+fn revalidate_suspect_slot<T: ResidentCacheFingerprinted>(
+    bit: u8,
+    slot: &'static std::thread::LocalKey<RefCell<Option<T>>>,
+    label: &str,
+) {
+    if RESIDENT_SUSPECT_SLOTS.get() & bit == 0 {
+        return;
+    }
+    // Clone the fingerprints out so no RefCell borrow is held across the
+    // syscache lookups: SearchSysCache can accept invalidation messages and
+    // re-enter `resident_cache_relcache_callback`, whose `try_borrow` would
+    // otherwise fail and degrade to conservative re-recording.
+    let fingerprints: Option<Vec<RelationFingerprint>> = slot.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|cache| cache.fingerprints().to_vec())
+    });
+    if let Some(fingerprints) = fingerprints {
+        // An empty fingerprint list means the slot cannot be revalidated;
+        // treat it as stale rather than trusting unverifiable device data.
+        let valid =
+            !fingerprints.is_empty() && fingerprints.iter().all(RelationFingerprint::still_matches);
+        if valid {
+            pgrx::debug1!(
+                "pg_accel: {label} resident cache kept after relcache invalidation \
+                 (relation fingerprints unchanged; rename-only DDL)"
+            );
+        } else {
+            slot.with(|slot| *slot.borrow_mut() = None);
+            pgrx::debug1!(
+                "pg_accel: {label} resident cache dropped after relcache invalidation \
+                 (relation fingerprint changed or relation gone)"
+            );
+        }
+    }
+    RESIDENT_SUSPECT_SLOTS.set(RESIDENT_SUSPECT_SLOTS.get() & !bit);
 }
 
 /// Marks a resident-cache load as in progress so the relcache callback
@@ -2962,6 +3252,14 @@ fn load_resident_groupagg_cache(
     let filter_attno = filter_col
         .map(|col| relation_attno(rel_oid, table, col))
         .transpose()?;
+    let mut fingerprint_attnos = vec![group_attno, value_attno];
+    fingerprint_attnos.extend(value_rhs_attno);
+    fingerprint_attnos.extend(filter_attno);
+    let fingerprints = vec![capture_relation_fingerprint(
+        rel_oid,
+        table,
+        Some(&fingerprint_attnos),
+    )?];
     if measure_op != ResidentMeasureOp::Column && value_rhs_col.is_none() {
         return Err(format!(
             "{table}.{value_col} expression measure requires a right-hand column"
@@ -3166,6 +3464,7 @@ fn load_resident_groupagg_cache(
     };
     Ok(ResidentDenseGroupAggCache {
         rel_oid,
+        fingerprints,
         group_attno,
         value_attno,
         value_rhs_attno,
@@ -3281,6 +3580,18 @@ fn load_resident_star_dim_groupagg_cache(
     let dim_key_attno = relation_attno(dim_rel_oid, dim_table, dim_key_col)?;
     let dim_filter_attno = relation_attno(dim_rel_oid, dim_table, dim_filter_col)?;
     let dim_group_attno = relation_attno(dim_rel_oid, dim_table, dim_group_col)?;
+    let fingerprints = vec![
+        capture_relation_fingerprint(
+            fact_rel_oid,
+            fact_table,
+            Some(&[fact_key_attno, fact_value_attno]),
+        )?,
+        capture_relation_fingerprint(
+            dim_rel_oid,
+            dim_table,
+            Some(&[dim_key_attno, dim_filter_attno, dim_group_attno]),
+        )?,
+    ];
 
     let fact_query = format!(
         "SELECT {}, {} FROM {qualified_fact}",
@@ -3478,6 +3789,7 @@ fn load_resident_star_dim_groupagg_cache(
     Ok(ResidentStarDimGroupAggCache {
         fact_rel_oid,
         dim_rel_oid,
+        fingerprints,
         fact_key_attno,
         fact_value_attno,
         dim_key_attno,
@@ -3545,6 +3857,11 @@ fn load_resident_f64_reduce_cache(
     let rel_oid = relation_oid(table)?;
     let qualified_table = relation_qualified_name(rel_oid, table)?;
     let value_attno = relation_attno(rel_oid, table, value_col)?;
+    let fingerprints = vec![capture_relation_fingerprint(
+        rel_oid,
+        table,
+        Some(&[value_attno]),
+    )?];
     let query = format!(
         "SELECT {} FROM {qualified_table}",
         quote_identifier(value_col)
@@ -3592,6 +3909,7 @@ fn load_resident_f64_reduce_cache(
 
     Ok(ResidentDenseGroupAggCache {
         rel_oid,
+        fingerprints,
         group_attno: 0,
         value_attno,
         value_rhs_attno: None,
@@ -3764,6 +4082,10 @@ fn load_resident_hashjoin_count_cache(
     let inner_rel_oid = relation_oid(inner_table)?;
     let outer_attno = relation_attno(outer_rel_oid, outer_table, outer_key_col)?;
     let inner_attno = relation_attno(inner_rel_oid, inner_table, inner_key_col)?;
+    let fingerprints = vec![
+        capture_relation_fingerprint(outer_rel_oid, outer_table, Some(&[outer_attno]))?,
+        capture_relation_fingerprint(inner_rel_oid, inner_table, Some(&[inner_attno]))?,
+    ];
     let outer = read_resident_hashjoin_keys(outer_table, outer_key_col, key_type)?;
     let inner = read_resident_hashjoin_keys(inner_table, inner_key_col, key_type)?;
     if outer.len() == 0 {
@@ -3782,6 +4104,7 @@ fn load_resident_hashjoin_count_cache(
     let mut cache = ResidentHashJoinCountCache {
         outer_rel_oid,
         inner_rel_oid,
+        fingerprints,
         outer_attno,
         inner_attno,
         key_type,
@@ -4011,6 +4334,9 @@ fn load_resident_h3_latlng_groupagg_cache(
     resolution: i32,
 ) -> Result<ResidentH3GroupAggCache, String> {
     let rel_oid = relation_oid(table)?;
+    // The H3 loaders resolve their input column by name inside the load SQL
+    // and never track an attno, so fingerprint every attribute.
+    let fingerprints = vec![capture_relation_fingerprint(rel_oid, table, None)?];
     if !(0..=15).contains(&resolution) {
         return Err(format!("invalid H3 resolution {resolution} for {table}"));
     }
@@ -4049,6 +4375,7 @@ fn load_resident_h3_latlng_groupagg_cache(
 
     Ok(ResidentH3GroupAggCache {
         rel_oid,
+        fingerprints,
         row_count,
         kind: ResidentH3GroupedCountKind::LatLngToCell,
         input: ResidentH3GroupAggInput::LatLngCells {
@@ -4063,6 +4390,9 @@ fn load_resident_h3_parent_groupagg_cache(
     cell_col: &str,
 ) -> Result<ResidentH3GroupAggCache, String> {
     let rel_oid = relation_oid(table)?;
+    // The H3 loaders resolve their input column by name inside the load SQL
+    // and never track an attno, so fingerprint every attribute.
+    let fingerprints = vec![capture_relation_fingerprint(rel_oid, table, None)?];
     let query = format!("SELECT {cell_col}::bigint FROM {table}");
     let cells = crate::engine::ffi::planner_hooks::with_planner_hooks_suspended(|| {
         Spi::connect(|client| {
@@ -4098,6 +4428,7 @@ fn load_resident_h3_parent_groupagg_cache(
     let row_count = cells.len();
     Ok(ResidentH3GroupAggCache {
         rel_oid,
+        fingerprints,
         row_count,
         kind: ResidentH3GroupedCountKind::CellToParent,
         input: ResidentH3GroupAggInput::Cell {
@@ -4112,6 +4443,16 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
     let part_rel_oid = relation_oid("ssbm_part")?;
     let customer_rel_oid = relation_oid("ssbm_customer")?;
     let supplier_rel_oid = relation_oid("ssbm_supplier")?;
+    // The SSBM loader resolves its columns by name inside the load SQL and
+    // never tracks attnos, so fingerprint every attribute of all five
+    // relations.
+    let fingerprints = vec![
+        capture_relation_fingerprint(fact_rel_oid, "ssbm_lineorder", None)?,
+        capture_relation_fingerprint(date_rel_oid, "ssbm_date", None)?,
+        capture_relation_fingerprint(part_rel_oid, "ssbm_part", None)?,
+        capture_relation_fingerprint(customer_rel_oid, "ssbm_customer", None)?,
+        capture_relation_fingerprint(supplier_rel_oid, "ssbm_supplier", None)?,
+    ];
 
     let (
         orderdate,
@@ -4501,6 +4842,7 @@ fn load_ssbm_q1_cache() -> Result<SsbmQ1ResidentCache, String> {
         part_rel_oid,
         customer_rel_oid,
         supplier_rel_oid,
+        fingerprints,
         row_count,
         orderdate: alloc_and_copy_i32(&orderdate, "lo_orderdate")?,
         discount: alloc_and_copy_i32(&discount, "lo_discount")?,

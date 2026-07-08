@@ -1,9 +1,13 @@
 //! Phase 2 resident-cache invalidation pg_tests.
 //!
 //! The resident OLAP caches are backend-local device buffers keyed by relation
-//! OID.  These tests prove that relcache invalidation events (TRUNCATE, DROP,
-//! ALTER) clear the resident caches so accelerated plans can never replay
-//! stale device data after the relation is rewritten or redefined.
+//! OID.  These tests prove that relcache invalidation events that change the
+//! relation (TRUNCATE, DROP, ALTER ADD COLUMN, ALTER COLUMN TYPE) clear the
+//! resident caches so accelerated plans can never replay stale device data —
+//! while rename-only DDL (`ALTER TABLE ... RENAME` of a table or column),
+//! which fires the same relcache invalidation but leaves OID, relfilenode,
+//! attnos, types, and data untouched, keeps the cache alive via the
+//! suspect/revalidate fingerprint protocol in `engine::olap_cache`.
 //!
 //! Each test uses its own table name: pgrx runs `#[pg_test]` functions in
 //! parallel against one test postmaster, so a shared table name would make the
@@ -50,11 +54,16 @@ mod tests {
 
     /// Runs the grouped aggregate and returns `(g, sum, count)` sorted by `g`.
     fn grouped_results(table: &str) -> Vec<(i32, f64, i64)> {
-        let query = grouped_query(table);
+        grouped_results_for(&grouped_query(table))
+    }
+
+    /// Runs an arbitrary 3-column `(int4, float8, int8)` grouped-aggregate
+    /// query and returns `(group, sum, count)` sorted by group.
+    fn grouped_results_for(query: &str) -> Vec<(i32, f64, i64)> {
         Spi::connect(|client| {
             let mut out = Vec::new();
             let rows = client
-                .select(&query, None, &[])
+                .select(query, None, &[])
                 .expect("grouped aggregate query should succeed");
             for row in rows {
                 let g = row
@@ -316,5 +325,199 @@ mod tests {
             "resident groupagg cache must be invalidated by ALTER TABLE"
         );
         assert_grouped_results_eq(&grouped_results(table), &initial_expected());
+    }
+
+    #[pg_test]
+    fn test_resident_groupagg_cache_survives_table_rename() {
+        if !gpu_device_available() {
+            pgrx::notice!(
+                "skipping resident-cache table-rename survival test: no GPU device detected \
+                 (device limits source is not hardware_derived)"
+            );
+            return;
+        }
+        serialize_gpu_tests();
+        let table = "phase2_rename_tbl_t";
+        let renamed = "phase2_rename_tbl_t_v2";
+
+        create_table(table);
+        insert_initial_data(table);
+        let loaded = load_resident_cache(table);
+        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
+        let plan = explain_text(&grouped_query(table));
+        assert!(
+            plan.contains("Custom Scan"),
+            "grouped aggregate should use the resident Custom Scan while the cache is \
+             loaded; got plan:\n{plan}"
+        );
+        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
+
+        // ALTER TABLE ... RENAME fires a relcache invalidation but leaves the
+        // OID, relfilenode, attnos, types, and data untouched: the resident
+        // cache MUST survive it (suspect-revalidation keeps the slot).
+        Spi::run(&format!("ALTER TABLE {table} RENAME TO {renamed}"))
+            .expect("ALTER TABLE RENAME should succeed");
+
+        assert_eq!(
+            resident_cache_rows(),
+            1000,
+            "resident groupagg cache must survive ALTER TABLE ... RENAME (same OID, \
+             relfilenode, attnos, and data)"
+        );
+        let plan_after = explain_text(&grouped_query(renamed));
+        assert!(
+            plan_after.contains("Custom Scan"),
+            "grouped aggregate against the renamed table must still use the resident \
+             Custom Scan; got plan:\n{plan_after}"
+        );
+        assert_grouped_results_eq(&grouped_results(renamed), &initial_expected());
+    }
+
+    #[pg_test]
+    fn test_resident_groupagg_cache_survives_column_rename() {
+        if !gpu_device_available() {
+            pgrx::notice!(
+                "skipping resident-cache column-rename survival test: no GPU device detected \
+                 (device limits source is not hardware_derived)"
+            );
+            return;
+        }
+        serialize_gpu_tests();
+        let table = "phase2_rename_col_t";
+
+        create_table(table);
+        insert_initial_data(table);
+        let loaded = load_resident_cache(table);
+        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
+        let plan = explain_text(&grouped_query(table));
+        assert!(
+            plan.contains("Custom Scan"),
+            "grouped aggregate should use the resident Custom Scan while the cache is \
+             loaded; got plan:\n{plan}"
+        );
+        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
+
+        // Column renames fire relcache invalidations but keep the attnos,
+        // types, and data of the cached columns: the cache MUST survive.
+        Spi::run(&format!("ALTER TABLE {table} RENAME COLUMN g TO grp"))
+            .expect("ALTER TABLE RENAME COLUMN g should succeed");
+        Spi::run(&format!("ALTER TABLE {table} RENAME COLUMN v TO val"))
+            .expect("ALTER TABLE RENAME COLUMN v should succeed");
+
+        assert_eq!(
+            resident_cache_rows(),
+            1000,
+            "resident groupagg cache must survive ALTER TABLE ... RENAME COLUMN (same \
+             attnos, types, and data)"
+        );
+        let renamed_query = format!("SELECT grp, sum(val), count(*) FROM {table} GROUP BY grp");
+        let plan_after = explain_text(&renamed_query);
+        assert!(
+            plan_after.contains("Custom Scan"),
+            "grouped aggregate against the renamed columns must still use the resident \
+             Custom Scan; got plan:\n{plan_after}"
+        );
+        assert_grouped_results_eq(&grouped_results_for(&renamed_query), &initial_expected());
+    }
+
+    #[pg_test]
+    fn test_resident_groupagg_cache_invalidated_by_alter_column_type() {
+        if !gpu_device_available() {
+            pgrx::notice!(
+                "skipping resident-cache ALTER TYPE invalidation test: no GPU device detected \
+                 (device limits source is not hardware_derived)"
+            );
+            return;
+        }
+        serialize_gpu_tests();
+        let table = "phase2_alter_type_t";
+
+        create_table(table);
+        insert_initial_data(table);
+        let loaded = load_resident_cache(table);
+        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
+        assert_eq!(resident_cache_rows(), 1000);
+
+        // ALTER COLUMN TYPE on a cached column changes atttypid (and, for
+        // float8 -> real, rewrites the relfilenode): the cache MUST NOT
+        // survive; the query must decline to native and read the table.
+        Spi::run(&format!("ALTER TABLE {table} ALTER COLUMN v TYPE real"))
+            .expect("ALTER TABLE ALTER COLUMN TYPE should succeed");
+
+        assert_eq!(
+            resident_cache_rows(),
+            0,
+            "resident groupagg cache must be invalidated by ALTER COLUMN TYPE"
+        );
+        // `v` is now real; cast the sum back to float8 for the shared reader.
+        let cast_query = format!("SELECT g, sum(v)::float8, count(*) FROM {table} GROUP BY g");
+        let plan_after = explain_text(&cast_query);
+        assert!(
+            !plan_after.contains("Custom Scan"),
+            "grouped aggregate must decline to native after ALTER COLUMN TYPE invalidated \
+             the resident cache; got plan:\n{plan_after}"
+        );
+        // Group values (10/20/30/40, sums <= 10000) are exact in float4.
+        assert_grouped_results_eq(&grouped_results_for(&cast_query), &initial_expected());
+    }
+
+    #[pg_test]
+    fn test_resident_groupagg_cache_invalidated_by_binary_coercible_alter_type() {
+        if !gpu_device_available() {
+            pgrx::notice!(
+                "skipping resident-cache binary-coercible ALTER TYPE invalidation test: no \
+                 GPU device detected (device limits source is not hardware_derived)"
+            );
+            return;
+        }
+        serialize_gpu_tests();
+        let table = "phase2_alter_type_bc_t";
+
+        // Text group keys so the cached group column can take a
+        // binary-coercible type change (text -> varchar) that does NOT
+        // rewrite the relfilenode: the drop must come from the atttypid
+        // fingerprint comparison alone.
+        Spi::run(&format!(
+            "CREATE TABLE {table} (g text NOT NULL, v float8 NOT NULL)"
+        ))
+        .expect("CREATE TABLE should succeed");
+        Spi::run(&format!(
+            "INSERT INTO {table} \
+             SELECT 'grp_' || ((i % 4) + 1), (((i % 4) + 1) * 10)::float8 \
+             FROM generate_series(0, 999) i",
+        ))
+        .expect("initial INSERT should succeed");
+        let loaded = Spi::get_one::<i64>(&format!(
+            "SELECT pg_accel_load_resident_groupagg_cache(\
+             '{table}', 'g', 'text', 'v', NULL, 'column', NULL, false)",
+        ))
+        .expect("resident cache load should succeed")
+        .expect("resident cache load should return a row count");
+        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
+        assert_eq!(resident_cache_rows(), 1000);
+
+        let relfilenode_query =
+            format!("SELECT relfilenode::int8 FROM pg_catalog.pg_class WHERE relname = '{table}'");
+        let filenode_before = Spi::get_one::<i64>(&relfilenode_query)
+            .expect("relfilenode query should succeed")
+            .expect("relfilenode should not be NULL");
+
+        Spi::run(&format!("ALTER TABLE {table} ALTER COLUMN g TYPE varchar"))
+            .expect("ALTER TABLE ALTER COLUMN TYPE should succeed");
+
+        let filenode_after = Spi::get_one::<i64>(&relfilenode_query)
+            .expect("relfilenode query should succeed")
+            .expect("relfilenode should not be NULL");
+        assert_eq!(
+            filenode_before, filenode_after,
+            "text -> varchar must be binary-coercible (no rewrite) so this test isolates \
+             the atttypid fingerprint lane"
+        );
+        assert_eq!(
+            resident_cache_rows(),
+            0,
+            "resident groupagg cache must be invalidated by a binary-coercible ALTER \
+             COLUMN TYPE even though the relfilenode is unchanged (atttypid changed)"
+        );
     }
 }
