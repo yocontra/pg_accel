@@ -30,7 +30,6 @@ use crate::gpu::PgaccelKeyType;
 mod dsm;
 mod explain;
 mod function_scan;
-mod plan_partial_agg;
 mod private_data;
 mod srf_target_list;
 
@@ -631,7 +630,6 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         // itself in plan.targetlist — not an INDEX_VAR wrapper — otherwise
         // set_upper_references errors with "variable not found in subplan
         // target list".
-        let _ = &plan_partial_agg::build_index_var_tlist; // still used by separate partial planner
         (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
 
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);

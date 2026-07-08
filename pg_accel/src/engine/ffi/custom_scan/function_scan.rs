@@ -1,7 +1,9 @@
 //! FunctionScan executor state (Phase 2 F3).
 //!
 //! Owns the per-invocation cursor and emitted-Datum buffer for a Custom
-//! Scan node injected by [`super::super::planner_hooks::projectset`].
+//! Scan node. Its planner injector (`planner_hooks::projectset`) was deleted
+//! in the 2026-07 Phase 3 demolition, so this machinery is currently
+//! planner-unreachable; it is retained for the Phase 6/9 SRF revival.
 //!
 //! ## Lifecycle
 //!

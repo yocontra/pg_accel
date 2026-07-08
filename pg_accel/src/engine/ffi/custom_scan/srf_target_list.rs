@@ -1,8 +1,10 @@
 //! SRF-in-target-list executor (Phase 2 follow-up to F3).
 //!
 //! Owns the per-invocation child plan cursor, per-row dispatch buffer, and
-//! tuple emission for a Custom Scan node injected by
-//! [`super::super::planner_hooks::srf_target_list`].
+//! tuple emission for a Custom Scan node. Its planner injector
+//! (`planner_hooks::srf_target_list`) was deleted in the 2026-07 Phase 3
+//! demolition, so this machinery is currently planner-unreachable; it is
+//! retained for the Phase 6/9 SRF revival.
 //!
 //! ## Lifecycle
 //!
