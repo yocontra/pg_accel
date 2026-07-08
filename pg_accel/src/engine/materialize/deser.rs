@@ -1,4 +1,11 @@
+#![allow(dead_code)] // reason: loader-v2 candidate (Phase 5 residency decides SPI vs heap-scan); delete in Phase 5 if SPI wins
 //! Column-at-a-time deserialization helpers for late materialization.
+//!
+//! Quarantined 2026-07 executor rebuild (Phase 3B): the cost-tier helpers
+//! (`ColumnCostTier`, `classify_type_cost`, `ColumnCostEstimate`,
+//! `plan_column_order`) have zero callers after the host-staged predicate-chain
+//! path was retired. Retained as a loader-v2 candidate; Phase 5 residency
+//! decides SPI vs heap-scan.
 //!
 //! Classifies column types by deserialization cost so that predicate
 //! ordering can evaluate cheap predicates (integer comparisons) before
