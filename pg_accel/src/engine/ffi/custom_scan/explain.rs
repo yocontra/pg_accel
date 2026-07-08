@@ -16,9 +16,7 @@ use crate::engine::executor::olap::{
     ResidentGroupAggFilterExpr, ResidentGroupAggGroupKeyExpr, ResidentGroupAggMeasureExpr,
     ResidentGroupAggPredicateGuard, ResidentGroupAggValuePredicate,
 };
-use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
-use crate::engine::executor::sort::SortExecState;
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::ResidentProofSnapshot;
 
@@ -228,9 +226,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     agg_state.gpu_dispatched,
                     es,
                 );
-                if agg_state.partial_emitters.is_some() {
-                    pg_sys::ExplainPropertyBool(c"Partial".as_ptr(), true, es);
-                }
             }
 
             if strategy == GpuStrategy::Join && !(*state).accel.executor.is_null() {
@@ -285,76 +280,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     );
                 }
             }
-
-            // For Sort strategy, distinguish rows consumed from rows actually
-            // submitted to the bounded top-k GPU kernel.
-            if strategy == GpuStrategy::Sort && !(*state).accel.executor.is_null() {
-                // SAFETY: executor was Box::into_raw'd as SortExecState.
-                let sort_state = &*(*state).accel.executor.cast::<SortExecState>();
-                pg_sys::ExplainPropertyBool(
-                    c"GPU Dispatched".as_ptr(),
-                    sort_state.gpu_dispatched,
-                    es,
-                );
-                pg_sys::ExplainPropertyInteger(
-                    c"GPU Rows Dispatched".as_ptr(),
-                    std::ptr::null(),
-                    sort_state.gpu_rows_dispatched as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyInteger(
-                    c"Top-K Limit".as_ptr(),
-                    std::ptr::null(),
-                    sort_state.limit().unwrap_or(0) as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyInteger(
-                    c"Input Rows Materialized".as_ptr(),
-                    std::ptr::null(),
-                    sort_state.input_rows_materialized() as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyInteger(
-                    c"Output Tuples Retained".as_ptr(),
-                    std::ptr::null(),
-                    sort_state.retained_output_tuples() as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyInteger(
-                    c"Rows Pruned After Top-K".as_ptr(),
-                    std::ptr::null(),
-                    sort_state.rows_pruned_after_topk() as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyBool(
-                    c"Full Input Materialized".as_ptr(),
-                    sort_state.full_input_materialized(),
-                    es,
-                );
-            }
-
-            // For PreAgg strategy, report fused pipeline metrics.
-            if strategy == GpuStrategy::PreAgg && !(*state).accel.executor.is_null() {
-                // SAFETY: executor was Box::into_raw'd as PreAggExecState.
-                let preagg_state = &*(*state).accel.executor.cast::<PreAggExecState>();
-                pg_sys::ExplainPropertyInteger(
-                    c"Depths".as_ptr(),
-                    std::ptr::null(),
-                    preagg_state.depths.len() as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyInteger(
-                    c"Fact Rows Scanned".as_ptr(),
-                    std::ptr::null(),
-                    preagg_state.rows_dispatched as i64,
-                    es,
-                );
-                pg_sys::ExplainPropertyBool(
-                    c"Has Scan Expr".as_ptr(),
-                    preagg_state.scan_expr.is_some(),
-                    es,
-                );
-            }
         }
     }
 }
@@ -389,10 +314,15 @@ unsafe fn gpu_kernel_dispatched_for_explain(
 
     match strategy {
         GpuStrategy::Agg => unsafe { (*executor.cast::<AggExecState>()).gpu_dispatched },
-        GpuStrategy::Sort => unsafe { (*executor.cast::<SortExecState>()).gpu_dispatched },
+        // GpuSort retired: begin_custom_scan rejects the strategy before an
+        // executor exists, so EXPLAIN can never reach this arm.
+        GpuStrategy::Sort => false,
         GpuStrategy::FunctionScan => unsafe { function_scan::dispatched_ok(executor) },
         GpuStrategy::SrfTargetList => unsafe { srf_target_list::batches_executed(executor) > 0 },
-        GpuStrategy::Scan | GpuStrategy::Join | GpuStrategy::Window | GpuStrategy::PreAgg => unsafe {
+        // GpuPreAgg retired: begin_custom_scan rejects the strategy before an
+        // executor exists, so EXPLAIN can never reach this arm.
+        GpuStrategy::PreAgg => false,
+        GpuStrategy::Scan | GpuStrategy::Join | GpuStrategy::Window => unsafe {
             (*state).accel.batches_executed > 0
         },
     }
@@ -432,9 +362,9 @@ fn gpu_resident_boundary_reason(strategy: GpuStrategy) -> &'static CStr {
         GpuStrategy::Scan => c"GpuScan consumes heap or child tuples on CPU via table_scan_getnextslot/ExecProcNode/MinimalTuple staging and emits PostgreSQL slots",
         GpuStrategy::Join => c"GpuJoin collects child rows through ExecProcNode into host MinimalTuple/key buffers and reconstructs joined PostgreSQL slots",
         GpuStrategy::Agg => c"GpuAgg drains heap or child tuples on CPU and stages host input/key/value buffers before GPU reduce or grouped aggregation",
-        GpuStrategy::Sort => c"GpuSort materializes input tuples on CPU, sends key vectors only, reorders host MinimalTuples, and emits PostgreSQL slots",
+        GpuStrategy::Sort => c"GpuSort strategy retired; no plan can carry it",
         GpuStrategy::Window => c"GpuWindow buffers input MinimalTuples, extracts host columns, stores host result vectors, and emits PostgreSQL slots",
-        GpuStrategy::PreAgg => c"GpuPreAgg materializes dimensions in host HashMap state and scans/probes fact rows through ExecProcNode/materialized slots",
+        GpuStrategy::PreAgg => c"GpuPreAgg strategy retired; no plan can carry it",
         GpuStrategy::FunctionScan => c"GpuFunctionScan dispatches constant arguments once, buffers host Datums, and drains output through PostgreSQL slots",
         GpuStrategy::SrfTargetList => c"GpuAccelSrfTargetList drives ProjectSet input through ExecProcNode, buffers per-row SRF output, and emits expanded PostgreSQL tuples",
     }
@@ -746,9 +676,7 @@ mod tests {
             GpuStrategy::Scan,
             GpuStrategy::Join,
             GpuStrategy::Agg,
-            GpuStrategy::Sort,
             GpuStrategy::Window,
-            GpuStrategy::PreAgg,
             GpuStrategy::FunctionScan,
             GpuStrategy::SrfTargetList,
         ] {
@@ -973,7 +901,17 @@ mod tests {
 
     #[test]
     fn explain_dispatch_flag_uses_strategy_specific_state() {
-        let mut agg = AggExecState::new(AccelStrategy::GpuReduce, 1024, &[(AggOp::Count, 0)]);
+        let mut agg = AggExecState::new_olap(OlapAggSpec::SsbmQ1Revenue(
+            crate::engine::executor::olap::SsbmQ1RevenueSpec {
+                fact_rel_oid: pg_sys::Oid::from(1u32),
+                date_rel_oid: pg_sys::Oid::from(2u32),
+                date_predicate: crate::engine::olap_cache::SsbmQ1DatePredicate::Year(1993),
+                discount_lo: 1,
+                discount_hi: 3,
+                quantity_lo: 0,
+                quantity_hi: 25,
+            },
+        ));
         agg.gpu_dispatched = true;
         let state = GpuAccelScanState {
             css: unsafe { std::mem::zeroed() },

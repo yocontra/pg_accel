@@ -21,8 +21,6 @@ use crate::engine::executor::olap::{
     ResidentStarDimGroupedF64Spec, SsbmQ1RevenueSpec, SsbmQ2GroupedRevenueSpec,
     SsbmQ3GroupedRevenueSpec, SsbmQ4GroupedProfitSpec,
 };
-use crate::engine::executor::preagg::{DimFilter, GroupKeyDesc, JoinDepthDesc, PreAggColDesc};
-use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
 use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 use crate::engine::gucs;
@@ -530,13 +528,11 @@ mod typed_private_tests {
         let payload = PlanPayloadReader::new(&fields);
 
         assert_eq!(payload.agg_count(), 1);
-        assert_eq!(payload.agg_columns(1).len(), 1);
-        let (group_key, group_key_tlist_pos) = payload.agg_group_key(1);
-        let group_key = group_key.expect("H3 group key should decode");
-        assert_eq!(group_key.attno, 2);
-        assert_eq!(group_key.type_oid, pg_sys::INT8OID);
-        assert_eq!(group_key.key_type, H3_LATLNG_GROUP_KEY_TYPE);
-        assert_eq!(group_key_tlist_pos, packed_tlist_pos as usize);
+        // The trailer walker must still skip the full group-key block
+        // (has_gk + 5 ints, tlist pos packed with the H3 resolution) to land
+        // on self_scan_relid — that offset math is what keeps the OLAP
+        // trailer reachable for the surviving resident agg decode.
+        let _ = packed_tlist_pos;
         let (self_scan_relid, agg_scan_expr, partial, olap) =
             payload.agg_self_scan_relid_and_trailers(1);
         assert_eq!(self_scan_relid, 42);
@@ -738,17 +734,6 @@ pub(super) struct CustomPrivateData {
     pub(super) fn_oid: pg_sys::Oid,
     pub(super) target_attno: i32,
     pub(super) accel_strategy: AccelStrategy,
-    pub(super) sort_keys: Vec<SortKeyDesc>,
-    /// Limit for top-k sort optimization. `None` means no limit.
-    pub(super) sort_limit: Option<usize>,
-    /// Aggregate column descriptors `(AggOp, attno, result_type_oid)`.
-    /// Only meaningful when `gpu_strategy == Agg`.
-    pub(super) agg_columns: Vec<(AggOp, i32, u32)>,
-    /// Group key info for grouped aggregation.
-    /// Only meaningful when `gpu_strategy == Agg` and GROUP BY is present.
-    pub(super) group_key: Option<GroupKeyInfo>,
-    /// 0-based position of group key in the output target list.
-    pub(super) group_key_tlist_pos: usize,
     /// Inner relation join key attno (1-based). Only for `GpuHashJoin`.
     pub(super) hash_inner_attno: i32,
     /// Key type for hash join (0=i32, 1=i64, 2=f64). Only for `GpuHashJoin`.
@@ -778,18 +763,6 @@ pub(super) struct CustomPrivateData {
     /// Scan relation index for direct heap scan (Window vectorized path).
     /// 0 means use child plan; > 0 means open this relation directly.
     pub(super) window_scan_relid: pg_sys::Index,
-    /// Base relation index for self-scanning (vectorized pipeline).
-    /// When > 0, the executor opens its own heap scan instead of pulling
-    /// tuples through ExecProcNode. Used by Agg and Sort strategies.
-    pub(super) self_scan_relid: u32,
-    /// Partial-aggregate spec (worker-side of a Gather plan). `Some` means the
-    /// executor emits transition-state tuples instead of final aggregate values.
-    /// `None` on non-parallel paths. Only meaningful when `gpu_strategy == Agg`.
-    pub(super) partial: Option<PartialAggSpec>,
-    /// Optional scan predicate for aggregate self-scan plans. Used by the
-    /// parallel fused `COUNT(*) WHERE template_predicate` path so the
-    /// aggregate owns a parallel table scan and applies the predicate on GPU.
-    pub(super) agg_scan_expr: Option<CompiledExpr>,
     /// Optional resident OLAP aggregate payload. Only meaningful for
     /// `gpu_strategy == Agg`; executor must not pull a child plan in this mode.
     pub(super) olap_agg: Option<OlapAggSpec>,
@@ -851,8 +824,6 @@ struct PlanPayloadReader<'reader, 'source> {
 }
 
 impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
-    const SORT_KEY_COUNT: usize = PLAN_PAYLOAD_START;
-    const SORT_KEYS: usize = Self::SORT_KEY_COUNT + 1;
     const AGG_COUNT: usize = PLAN_PAYLOAD_START;
     const AGGS: usize = Self::AGG_COUNT + 1;
     const WINDOW_COUNT: usize = PLAN_PAYLOAD_START;
@@ -875,99 +846,8 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     }
 
     #[must_use]
-    fn sort_key_count(&self) -> usize {
-        self.fields.int_at(Self::SORT_KEY_COUNT) as usize
-    }
-
-    #[must_use]
-    fn sort_keys(&self, count: usize) -> Vec<SortKeyDesc> {
-        let mut keys = Vec::with_capacity(count);
-        for key_index in 0..count {
-            let offset = Self::SORT_KEYS + key_index * SORT_KEY_INTS;
-            if !self.fields.contains_range(offset, SORT_KEY_INTS) {
-                break;
-            }
-            let mut key = self.fields.cursor_at(offset);
-            keys.push(SortKeyDesc {
-                attno: key.read_int() as i16,
-                sort_op: key.read_oid(),
-                collation: key.read_oid(),
-                nulls_first: key.read_bool(),
-            });
-        }
-        keys
-    }
-
-    #[must_use]
-    fn sort_limit(&self, key_count: usize) -> Option<usize> {
-        let limit_idx = Self::SORT_KEYS + key_count * SORT_KEY_INTS;
-        self.fields
-            .get(limit_idx)
-            .and_then(|value| (value > 0).then_some(value as usize))
-    }
-
-    #[must_use]
-    fn sort_self_scan_relid(&self, key_count: usize) -> u32 {
-        let relid_idx = Self::SORT_KEYS + key_count * SORT_KEY_INTS + 1;
-        self.fields
-            .get(relid_idx)
-            .map_or(0, |value| if value > 0 { value as u32 } else { 0 })
-    }
-
-    #[must_use]
     fn agg_count(&self) -> usize {
         self.fields.int_at(Self::AGG_COUNT) as usize
-    }
-
-    #[must_use]
-    fn agg_columns(&self, count: usize) -> Vec<(AggOp, i32, u32)> {
-        let mut columns = Vec::with_capacity(count);
-        for agg_index in 0..count {
-            let offset = Self::AGGS + agg_index * 3;
-            if !self.fields.contains_range(offset, 3) {
-                break;
-            }
-            let mut agg = self.fields.cursor_at(offset);
-            let op_raw = agg.read_int();
-            let Some(op) = AggOp::from_i32(op_raw) else {
-                pgrx::error!("pg_accel: invalid aggregate op tag {op_raw}");
-            };
-            columns.push((op, agg.read_int(), agg.read_u32()));
-        }
-        columns
-    }
-
-    #[must_use]
-    fn agg_group_key(&self, agg_count: usize) -> (Option<GroupKeyInfo>, usize) {
-        let group_key_base = Self::AGGS + agg_count * 3;
-        let Some(has_group_key) = self.fields.get(group_key_base) else {
-            return (None, 0);
-        };
-        if has_group_key == 0 || !self.fields.contains_range(group_key_base + 1, 5) {
-            return (None, 0);
-        }
-
-        let mut group_key = self.fields.cursor_at(group_key_base + 1);
-        let attno = group_key.read_int();
-        let type_oid = group_key.read_oid();
-        let key_type = group_key.read_int();
-        let _group_key2_attno = group_key.read_int();
-        let tlist_pos = group_key.read_int();
-
-        if attno > 0
-            && (matches!(key_type, 0 | 1 | 2 | 4 | 5) || is_h3_synthetic_group_key(key_type))
-        {
-            (
-                Some(GroupKeyInfo {
-                    attno,
-                    type_oid,
-                    key_type,
-                }),
-                tlist_pos as usize,
-            )
-        } else {
-            (None, 0)
-        }
     }
 
     #[must_use]
@@ -1107,12 +987,11 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     }
 }
 
-/// Deserialize strategy, batch size, accel context, and sort keys from
+/// Deserialize strategy, batch size, and accel context from
 /// `custom_private`.
 ///
 /// Layout: `[strategy, batch_size, expected_threads, fn_oid, target_attno,
-///   accel_strategy, num_sort_keys?, attno1, sort_op1, collation1,
-///   nulls_first1, ...]`
+///   accel_strategy, ...strategy-specific payload...]`
 ///
 /// Invalid or missing private data raises a PostgreSQL ERROR.
 ///
@@ -1137,49 +1016,12 @@ pub(super) unsafe fn deserialize_custom_private(
     let resident_proof = unsafe { deserialize_resident_proof_snapshot(custom_private) }
         .unwrap_or_else(|| resident_proof_default_for_strategy(gpu_strategy));
 
+    // GpuPreAgg was retired: no plan-time serializer emits PreAgg payloads,
+    // so the reader no longer decodes them.
     if matches!(gpu_strategy, GpuStrategy::PreAgg) {
-        let batch_size_raw = require_reader_field(&fields, "PreAggPlanPrivate", 1, "batch_size")
-            .unwrap_or_else(|err| {
-                pgrx::error!("pg_accel: invalid PreAgg CustomScan private data: {err:?}")
-            });
-        let batch_size = decode_batch_size(batch_size_raw).unwrap_or_else(|err| {
-            pgrx::error!("pg_accel: invalid PreAgg CustomScan private data: {err:?}")
-        });
-        let _expected_threads =
-            require_reader_field(&fields, "PreAggPlanPrivate", 2, "expected_threads")
-                .unwrap_or_else(|err| {
-                    pgrx::error!("pg_accel: invalid PreAgg CustomScan private data: {err:?}")
-                });
-        return CustomPrivateData {
-            gpu_strategy,
-            batch_size,
-            fn_oid: pg_sys::Oid::INVALID,
-            target_attno: 0,
-            accel_strategy: AccelStrategy::GpuReduce,
-            sort_keys: vec![],
-            sort_limit: None,
-            agg_columns: vec![],
-            group_key: None,
-            group_key_tlist_pos: 0,
-            hash_inner_attno: 0,
-            hash_key_type: 0,
-            hash_count_only: false,
-            hash_resident_count: false,
-            hash_outer_rel_oid: pg_sys::InvalidOid,
-            hash_inner_rel_oid: pg_sys::InvalidOid,
-            nlj_shape: 0,
-            nlj_key_type: 0,
-            nlj_op: 0,
-            nlj_inner_lo_attno: 0,
-            nlj_inner_hi_attno: 0,
-            window_specs: vec![],
-            window_scan_relid: 0,
-            self_scan_relid: 0,
-            partial: None,
-            agg_scan_expr: None,
-            olap_agg: None,
-            resident_proof,
-        };
+        pgrx::error!(
+            "pg_accel: GpuPreAgg strategy retired; refusing to decode a PreAgg plan payload"
+        );
     }
 
     let plan_private = PlanPrivate::decode_reader(&fields)
@@ -1191,54 +1033,22 @@ pub(super) unsafe fn deserialize_custom_private(
     let target_attno = plan_private.target_attno;
     let accel_strategy = plan_private.accel_strategy;
 
-    let sort_key_count = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_key_count()
-    } else {
-        0
-    };
-    let sort_keys = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_keys(sort_key_count)
-    } else {
-        vec![]
-    };
+    // GpuSort was retired: no plan-time serializer emits Sort payloads, so
+    // the reader no longer decodes sort keys / limit / self-scan relid.
+    if matches!(gpu_strategy, GpuStrategy::Sort) {
+        pgrx::error!("pg_accel: GpuSort strategy retired; refusing to decode a Sort plan payload");
+    }
 
-    // For Sort strategy, read optional limit after sort keys.
-    // Layout: [...sort keys..., limit_tuples, self_scan_relid]
-    let sort_limit = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_limit(sort_key_count)
-    } else {
-        None
-    };
-
-    // For Sort strategy, read self_scan_relid for VectorizedScan.
-    // It's one position after limit_tuples in the plan's custom_private.
-    let sort_self_scan_relid = if matches!(gpu_strategy, GpuStrategy::Sort) {
-        payload.sort_self_scan_relid(sort_key_count)
-    } else {
-        0
-    };
-
-    // For Agg strategy, read aggregate column descriptors starting at index 6.
+    // For Agg strategy, read the aggregate descriptor count at index 6. The
+    // count is still load-bearing for wire offsets: the OLAP trailer that the
+    // resident agg executor consumes sits after the descriptor + group-key
+    // blocks. The descriptors/group-key themselves fed only the retired
+    // host-staged agg executors and are no longer materialized.
     // Layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...]
     let agg_count = if matches!(gpu_strategy, GpuStrategy::Agg) {
         payload.agg_count()
     } else {
         0
-    };
-    let agg_columns = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        payload.agg_columns(agg_count)
-    } else {
-        vec![]
-    };
-
-    // For Agg strategy, read optional group key info after agg descriptors.
-    // Layout:
-    //   [...agg descs..., has_group_key,
-    //    gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos, self_scan_relid]
-    let (group_key, group_key_tlist_pos) = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        payload.agg_group_key(agg_count)
-    } else {
-        (None, 0)
     };
 
     // For Window strategy, read window function specs starting at index 6.
@@ -1282,24 +1092,23 @@ pub(super) unsafe fn deserialize_custom_private(
             (0, 0, 0, 0, 0)
         };
 
-    // For Agg strategy, find `self_scan_relid` (immediately follows the
-    // group-key block) and optionally a PartialAggSpec sentinel block.
+    // For Agg strategy, walk past `self_scan_relid` (immediately after the
+    // group-key block) to the sentinel trailers and keep the OLAP spec — the
+    // only trailer the surviving resident agg executor consumes. The scan-expr
+    // and partial trailers fed retired host-staged executors; they are still
+    // parsed for wire compatibility but discarded.
     //
     // Layout (Agg):
     //   [..., num_aggs, (op,attno,rtype)*N,
     //    has_gk, (gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)?,
-    //    self_scan_relid,
-    //    (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?]
-    //
-    // The partial block is optional: non-parallel plans omit it entirely.
-    let (self_scan_relid, agg_scan_expr, partial, olap_agg) =
-        if matches!(gpu_strategy, GpuStrategy::Agg) {
-            payload.agg_self_scan_relid_and_trailers(agg_count)
-        } else if matches!(gpu_strategy, GpuStrategy::Sort) {
-            (sort_self_scan_relid, None, None, None)
-        } else {
-            (0, None, None, None)
-        };
+    //    self_scan_relid, sentinel trailers...]
+    let olap_agg = if matches!(gpu_strategy, GpuStrategy::Agg) {
+        let (_self_scan_relid, _agg_scan_expr, _partial, olap_agg) =
+            payload.agg_self_scan_relid_and_trailers(agg_count);
+        olap_agg
+    } else {
+        None
+    };
 
     CustomPrivateData {
         gpu_strategy,
@@ -1307,11 +1116,6 @@ pub(super) unsafe fn deserialize_custom_private(
         fn_oid,
         target_attno,
         accel_strategy,
-        sort_keys,
-        sort_limit,
-        agg_columns,
-        group_key,
-        group_key_tlist_pos,
         hash_inner_attno,
         hash_key_type,
         hash_count_only,
@@ -1325,9 +1129,6 @@ pub(super) unsafe fn deserialize_custom_private(
         nlj_inner_hi_attno,
         window_specs,
         window_scan_relid,
-        self_scan_relid,
-        partial,
-        agg_scan_expr,
         olap_agg,
         resident_proof,
     }
@@ -1814,17 +1615,6 @@ fn deserialize_olap_agg_spec_from_reader(
     }
 }
 
-/// Magic marker for the B5a "PreAgg parallel-safe planner-attached" flag.
-/// When present in the PreAgg `custom_private` layout (after `has_scan_expr`
-/// and before any optional [`PARTIAL_SENTINEL`] block), the next list element
-/// is a `c_int` (1 = the planner attached the fact path as `custom_paths[0]`
-/// and marked the CustomPath `parallel_safe = true`; 0 = serial layout).
-/// Round-tripped via [`PreAggPrivData::parallel_safe_planner_attached`].
-/// Distinct from [`PARTIAL_SENTINEL`] so the deserializer can probe for
-/// either marker independently. Old plans (serialized before B5a) lack this
-/// block entirely; the deserializer treats absence as `false`.
-pub(in crate::engine::ffi) const PREAGG_PARALLEL_ATTACHED_SENTINEL: c_int = 0x5050_5341; // b"PPSA"
-
 /// Magic marker preceding a serialized [`ResidentProofSnapshot`] trailer.
 ///
 /// This block is always appended after each strategy-specific payload so legacy
@@ -1875,18 +1665,6 @@ pub(in crate::engine::ffi) unsafe fn append_resident_proof_snapshot(
     writer.push_bool(proof.has_device_projection);
     writer.push_int(proof.cpu_boundary.to_i32());
     writer.into_list()
-}
-
-/// Append the conservative host-staged proof for a strategy.
-///
-/// # Safety
-/// Must be called in a valid PG memory context on the main backend thread.
-pub(in crate::engine::ffi) unsafe fn append_host_staged_resident_proof(
-    list: *mut pg_sys::List,
-    strategy: GpuStrategy,
-) -> *mut pg_sys::List {
-    // SAFETY: delegated to the caller's valid PG memory context.
-    unsafe { append_resident_proof_snapshot(list, resident_proof_default_for_strategy(strategy)) }
 }
 
 /// Decode the resident-proof trailer if this plan carries one.
@@ -2088,349 +1866,6 @@ fn deserialize_partial_spec_from_reader(
         });
     }
     Some(PartialAggSpec { per_column })
-}
-
-// ---------------------------------------------------------------------------
-// PreAgg serialization / deserialization
-// ---------------------------------------------------------------------------
-
-/// Deserialized PreAgg configuration from `custom_private`.
-#[allow(dead_code)]
-pub(in crate::engine::ffi) struct PreAggPrivData {
-    pub(super) scan_relid: pg_sys::Index,
-    /// Stable relation OID for the fact table. Use this (via `table_open`)
-    /// at execution time rather than `scan_relid`, because the planner's
-    /// `set_plan_refs` pass may rewrite the range-table indices for upper
-    /// plans (scanrelid=0 spanning a join).
-    pub(super) scan_oid: pg_sys::Oid,
-    pub(super) depths: Vec<JoinDepthDesc>,
-    pub(super) agg_descs: Vec<PreAggColDesc>,
-    pub(super) group_keys: Vec<GroupKeyDesc>,
-    pub(super) scan_expr: Option<crate::engine::expr_compiler::CompiledExpr>,
-    /// Partial-aggregate spec (worker-side of a Gather plan). `Some` means
-    /// the executor emits transition-state tuples instead of final aggregate
-    /// Datums. Mirrors the same field on `CustomPrivateData` for the Agg
-    /// strategy. Round-tripped via the existing PARTIAL_SENTINEL block
-    /// (`append_partial_spec` / `deserialize_partial_spec`) appended to the
-    /// PreAgg layout.
-    pub(super) partial: Option<PartialAggSpec>,
-    /// **B5a flag.** `true` when the planner injected this PreAgg path with
-    /// the fact relation's path attached as `custom_paths[0]` (and the
-    /// `CustomPath.path.parallel_safe` bit set). Slot 0 of the deserialized
-    /// `(*node).custom_ps` list is then a fact-side PlanState rather than a
-    /// dimension; `materialize_dimensions` must skip it to keep the depth
-    /// indices aligned with `depths[]`. Round-tripped via the
-    /// [`PREAGG_PARALLEL_ATTACHED_SENTINEL`] block.
-    pub(super) parallel_safe_planner_attached: bool,
-}
-
-/// Serialize PreAgg metadata into a PG `List` of `Integer` nodes.
-///
-/// Layout:
-/// ```text
-/// [STRATEGY=5, batch_size, expected_threads,
-///  scan_relid, scan_oid, n_depths,
-///  // Per depth:
-///  outer_attno, inner_attno, key_type, n_dim_filters,
-///  // Per dim filter: col_idx, cmp_opcode, const_val_hi, const_val_lo
-///  // Per depth group cols: n_group_col_attnos, attno1, attno2, ...
-///  n_agg_ops,
-///  // Per agg: op_type, attno, type_oid
-///  n_group_keys,
-///  // Per group key: source, attno, type_oid
-///  has_scan_expr, (if 1: template_type, ...template_data...),
-///  // Required parallel-attached sentinel block (planner-side wiring):
-///  PREAGG_PARALLEL_ATTACHED_SENTINEL, attached_flag
-///  // Optional partial-agg sentinel block (worker-side parallel preagg):
-///  (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?
-/// ]
-/// ```
-///
-/// `partial` carries the `PartialAggSpec` for parallel partial-emit paths
-/// (workers emit transition-state tuples for PG's Finalize Agg). `None`
-/// means the current plan emits final aggregate Datums.
-///
-/// `parallel_safe_planner_attached` must be `true`: current PreAgg plans
-/// attach the fact path as `custom_paths[0]` and require the slot-based
-/// executor path.
-///
-/// # Safety
-///
-/// Must be called during planning on the main backend thread.
-#[allow(
-    clippy::cast_possible_wrap,
-    clippy::too_many_lines,
-    clippy::too_many_arguments
-)]
-#[must_use]
-pub unsafe fn serialize_preagg_private(
-    scan_relid: pg_sys::Index,
-    scan_oid: pg_sys::Oid,
-    depths: &[JoinDepthDesc],
-    agg_descs: &[PreAggColDesc],
-    group_keys: &[GroupKeyDesc],
-    scan_expr: Option<&crate::engine::expr_compiler::CompiledExpr>,
-    partial: Option<&PartialAggSpec>,
-    parallel_safe_planner_attached: bool,
-) -> *mut pg_sys::List {
-    use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
-
-    if !parallel_safe_planner_attached {
-        pgrx::error!("pg_accel: refusing to serialize PreAgg without attached fact path");
-    }
-
-    let batch_size = gucs::min_batch_size();
-    let expected_threads = super::explain::resolve_thread_count();
-
-    let mut writer = PgListWriter::new();
-    writer.push_int(GpuStrategy::PreAgg as c_int);
-    writer.push_int(batch_size);
-    writer.push_int(expected_threads);
-    writer.push_int(scan_relid as c_int);
-    writer.push_oid(scan_oid);
-    writer.push_len(depths.len());
-
-    // Per depth.
-    for depth in depths {
-        writer.push_int(depth.outer_attno);
-        writer.push_int(depth.inner_attno);
-        writer.push_int(depth.key_type);
-        writer.push_len(depth.dim_filters.len());
-        for filt in &depth.dim_filters {
-            writer.push_int(filt.col_idx as c_int);
-            writer.push_int(filt.cmp_opcode as c_int);
-            writer.push_f64_halves(filt.const_val);
-        }
-        writer.push_len(depth.group_col_attnos.len());
-        for &attno in &depth.group_col_attnos {
-            writer.push_int(attno);
-        }
-    }
-
-    // Aggregates.
-    writer.push_len(agg_descs.len());
-    for desc in agg_descs {
-        writer.push_int(desc.op.to_i32());
-        writer.push_int(desc.attno);
-        writer.push_oid(desc.type_oid);
-    }
-
-    // GROUP BY keys.
-    writer.push_len(group_keys.len());
-    for gk in group_keys {
-        writer.push_u32(gk.source);
-        writer.push_int(gk.attno);
-        writer.push_oid(gk.type_oid);
-    }
-
-    // Serialize fact-side scan expression.
-    match scan_expr {
-        Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-            col_idx,
-            cmp_opcode,
-            const_val,
-        })) => {
-            writer.push_bool(true);
-            writer.push_int(1);
-            writer.push_u32(*col_idx);
-            writer.push_int(*cmp_opcode as c_int);
-            writer.push_f64_halves(*const_val);
-        }
-        Some(CompiledExpr::Template(TemplateKernel::Between { col_idx, lo, hi })) => {
-            writer.push_bool(true);
-            writer.push_int(2);
-            writer.push_u32(*col_idx);
-            writer.push_f64_halves(*lo);
-            writer.push_f64_halves(*hi);
-        }
-        Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-            col1_idx,
-            cmp1_opcode,
-            const1_val,
-            col2_idx,
-            cmp2_opcode,
-            const2_val,
-        })) => {
-            writer.push_bool(true);
-            writer.push_int(3);
-            writer.push_u32(*col1_idx);
-            writer.push_int(*cmp1_opcode as c_int);
-            writer.push_f64_halves(*const1_val);
-            writer.push_u32(*col2_idx);
-            writer.push_int(*cmp2_opcode as c_int);
-            writer.push_f64_halves(*const2_val);
-        }
-        _ => {
-            writer.push_bool(false);
-        }
-    }
-
-    writer.push_int(PREAGG_PARALLEL_ATTACHED_SENTINEL);
-    writer.push_bool(true);
-
-    // Optional partial-agg sentinel block. Mirrors the Agg-strategy
-    // layout (append_partial_spec writes
-    // `[PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols]`)
-    // so deserialize_partial_spec can read it back. Absent when the
-    // plan is non-parallel (the serial preagg path).
-    let mut list = writer.into_list();
-    if let Some(spec) = partial {
-        // SAFETY: this function is called while planning in a valid PG memory context.
-        list = unsafe { append_partial_spec(list, spec) };
-    }
-    // SAFETY: this function is called while planning in a valid PG memory context.
-    unsafe { append_host_staged_resident_proof(list, GpuStrategy::PreAgg) }
-}
-
-/// Deserialize PreAgg configuration from `custom_private`.
-///
-/// # Safety
-///
-/// `custom_private` must be a valid PG `List` of Integer nodes.
-#[allow(clippy::cast_sign_loss, clippy::too_many_lines)]
-pub(in crate::engine::ffi) unsafe fn deserialize_preagg_private(
-    custom_private: *mut pg_sys::List,
-) -> PreAggPrivData {
-    use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
-
-    if custom_private.is_null() {
-        pgrx::error!("pg_accel: missing PreAgg private data");
-    }
-
-    // SAFETY: custom_private is a valid List.
-    let fields = unsafe { IntListReader::from_pg_list(custom_private) };
-    let mut cursor = fields.cursor_at(3); // skip [strategy, batch_size, expected_threads]
-
-    let scan_relid = cursor.read_int() as pg_sys::Index;
-    let scan_oid = cursor.read_oid();
-    let n_depths = cursor.read_usize();
-
-    let mut depths = Vec::with_capacity(n_depths);
-    for _ in 0..n_depths {
-        let outer_attno = cursor.read_int();
-        let inner_attno = cursor.read_int();
-        let key_type = cursor.read_int();
-        let n_filters = cursor.read_usize();
-
-        let mut dim_filters = Vec::with_capacity(n_filters);
-        for _ in 0..n_filters {
-            dim_filters.push(DimFilter {
-                col_idx: cursor.read_usize(),
-                cmp_opcode: cursor.read_int() as u16,
-                const_val: cursor.read_f64_halves(),
-            });
-        }
-
-        let n_group_cols = cursor.read_usize();
-        let mut group_col_attnos = Vec::with_capacity(n_group_cols);
-        for _ in 0..n_group_cols {
-            group_col_attnos.push(cursor.read_int());
-        }
-
-        depths.push(JoinDepthDesc {
-            outer_attno,
-            inner_attno,
-            key_type,
-            dim_filters,
-            group_col_attnos,
-        });
-    }
-
-    // Aggregates.
-    let n_aggs = cursor.read_usize();
-    let mut agg_descs = Vec::with_capacity(n_aggs);
-    for _ in 0..n_aggs {
-        let op_raw = cursor.read_int();
-        let Some(op) = AggOp::from_i32(op_raw) else {
-            pgrx::error!("pg_accel: invalid PreAgg op tag {op_raw}");
-        };
-        agg_descs.push(PreAggColDesc {
-            op,
-            attno: cursor.read_int(),
-            type_oid: cursor.read_oid(),
-        });
-    }
-
-    // GROUP BY keys.
-    let n_gkeys = cursor.read_usize();
-    let mut group_keys = Vec::with_capacity(n_gkeys);
-    for _ in 0..n_gkeys {
-        group_keys.push(GroupKeyDesc {
-            source: cursor.read_u32(),
-            attno: cursor.read_int(),
-            type_oid: cursor.read_oid(),
-        });
-    }
-
-    // Deserialize scan_expr.
-    let scan_expr = if cursor.read_bool() {
-        let template_type = cursor.read_int();
-        match template_type {
-            1 => {
-                // CmpConst
-                Some(CompiledExpr::Template(TemplateKernel::CmpConst {
-                    col_idx: cursor.read_u32(),
-                    cmp_opcode: cursor.read_int() as u16,
-                    const_val: cursor.read_f64_halves(),
-                }))
-            }
-            2 => {
-                // Between
-                Some(CompiledExpr::Template(TemplateKernel::Between {
-                    col_idx: cursor.read_u32(),
-                    lo: cursor.read_f64_halves(),
-                    hi: cursor.read_f64_halves(),
-                }))
-            }
-            3 => {
-                // TwoPredAnd
-                Some(CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                    col1_idx: cursor.read_u32(),
-                    cmp1_opcode: cursor.read_int() as u16,
-                    const1_val: cursor.read_f64_halves(),
-                    col2_idx: cursor.read_u32(),
-                    cmp2_opcode: cursor.read_int() as u16,
-                    const2_val: cursor.read_f64_halves(),
-                }))
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // Required PREAGG_PARALLEL_ATTACHED block, optionally followed by PARTIAL.
-    let mut trailer_idx = cursor.position();
-    if !fields.contains_range(trailer_idx, 2)
-        || fields.int_at(trailer_idx) != PREAGG_PARALLEL_ATTACHED_SENTINEL
-    {
-        pgrx::error!("pg_accel: PreAgg private data missing attached fact child marker");
-    }
-    let parallel_safe_planner_attached = fields.int_at(trailer_idx + 1) != 0;
-    if !parallel_safe_planner_attached {
-        pgrx::error!("pg_accel: PreAgg private data requested unattached fact path");
-    }
-    trailer_idx += 2;
-
-    // Optional PARTIAL_SENTINEL block — present only when the planner
-    // injected a parallel partial-emit path (preagg_partial::try_inject).
-    // Mirrors the Agg-strategy decode at deserialize_custom_private:344-356.
-    let partial = if fields.int_at(trailer_idx) == PARTIAL_SENTINEL {
-        deserialize_partial_spec_from_reader(&fields, trailer_idx + 1)
-    } else {
-        None
-    };
-
-    PreAggPrivData {
-        scan_relid,
-        scan_oid,
-        depths,
-        agg_descs,
-        group_keys,
-        scan_expr,
-        partial,
-        parallel_safe_planner_attached,
-    }
 }
 
 // ---------------------------------------------------------------------------

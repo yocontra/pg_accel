@@ -153,13 +153,6 @@ pub(super) struct PgListWriter {
 
 impl PgListWriter {
     #[must_use]
-    pub(super) const fn new() -> Self {
-        Self {
-            list: std::ptr::null_mut(),
-        }
-    }
-
-    #[must_use]
     pub(super) const fn from_existing(list: *mut pg_sys::List) -> Self {
         Self { list }
     }

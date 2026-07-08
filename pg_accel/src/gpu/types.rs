@@ -155,12 +155,6 @@ mod abi_size_pins {
     // 3 × f64 = 24.
     const _: () = assert!(std::mem::size_of::<PgaccelReclassRule>() == 24);
     const _: () = assert!(std::mem::align_of::<PgaccelReclassRule>() == 8);
-
-    // pgaccel_hash_agg.h — func(4) + pad(4) + size_t(8) = 16.
-    const _: () = assert!(std::mem::size_of::<PgaccelAggCol>() == 16);
-
-    // pgaccel_fused.h — op(int, 4) + pad(4) + ptr(8) = 16.
-    const _: () = assert!(std::mem::size_of::<PgaccelReduceCol>() == 16);
 }
 
 // ---------------------------------------------------------------------------
@@ -361,62 +355,6 @@ pub struct PgaccelDeviceVarOutput {
 // Hash aggregation types (mirrors pgaccel_hash_agg.h).
 // ---------------------------------------------------------------------------
 
-/// Aggregate function tag for GPU hash aggregation.
-///
-/// Variants 0..3 are the *finalize-mode* funcs supported by the original
-/// `pgaccel_hash_agg_execute` entry point. Variants 4..6 (`Avg`, `Stddev`,
-/// `Var`) are emitted **only** by `pgaccel_hash_agg_execute_partial` —
-/// they describe richer per-group transition states (`[N, sum]` for AVG,
-/// `[N, sum, sum_sq]` for STDDEV/VAR, in PG's `float8_accum` layout).
-///
-/// Mirror of the C enum `pgaccel_agg_func` in
-/// `pgaccel-kernels/include/pgaccel_hash_agg.h`. Discriminant values must
-/// stay synced — `bridge.rs` asserts this in `agg_func_discriminant_values_match_c`.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PgaccelAggFunc {
-    Sum = 0,
-    Min = 1,
-    Max = 2,
-    Count = 3,
-    /// AVG transition state: `[N, sum]` per group (partial mode only).
-    Avg = 4,
-    /// `STDDEV_*` transition state: `[N, sum, sum_sq]` per group (partial mode only).
-    Stddev = 5,
-    /// `VAR_*` transition state: `[N, sum, sum_sq]` per group (partial mode only).
-    Var = 6,
-}
-
-impl PgaccelAggFunc {
-    /// Width (number of f64 lanes) the **partial-mode** kernel emits per
-    /// group for this func. SUM/MIN/MAX/COUNT keep their 1-wide finalize
-    /// shape; AVG widens to 2 (`[N, sum]`); STDDEV/VAR widen to 3
-    /// (`[N, sum, sum_sq]`).
-    ///
-    /// Mirror of the C-side `pgaccel_agg_partial_width` (see
-    /// `pgaccel-kernels/include/pgaccel_hash_agg.h`); the Rust copy is
-    /// kept around for planner/executor code that needs the width
-    /// without a kernel-state round-trip — `bridge::pgaccel_agg_get_partial_width`
-    /// reads the per-state width recorded by the kernel.
-    #[allow(dead_code)] // reason: Rust mirror of C-side pgaccel_agg_partial_width; planner-side users land in Phase 3A
-    #[must_use]
-    pub const fn partial_width(self) -> usize {
-        match self {
-            Self::Sum | Self::Min | Self::Max | Self::Count => 1,
-            Self::Avg => 2,
-            Self::Stddev | Self::Var => 3,
-        }
-    }
-}
-
-/// Aggregate column descriptor for GPU hash aggregation.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct PgaccelAggCol {
-    pub func: PgaccelAggFunc,
-    pub col_idx: usize,
-}
-
 /// Opaque handle to GPU hash aggregation state.
 pub enum PgaccelAggState {}
 
@@ -549,42 +487,6 @@ pub struct PgaccelReclassRule {
     pub min_val: f64,
     pub max_val: f64,
     pub new_val: f64,
-}
-
-// ---------------------------------------------------------------------------
-// Fused ops — comparison + reduce op tags and descriptor.
-// ---------------------------------------------------------------------------
-
-/// Comparison operator for fused filter predicates.
-/// Values must stay in sync with `pgaccel_cmp_op` in `pgaccel_fused.h`.
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_cmp_op; constants must match the C enum
-pub mod cmp_op {
-    pub const EQ: i32 = 0;
-    pub const NE: i32 = 1;
-    pub const LT: i32 = 2;
-    pub const LE: i32 = 3;
-    pub const GT: i32 = 4;
-    pub const GE: i32 = 5;
-    pub const ALWAYS_TRUE: i32 = 6;
-}
-
-/// Reduce operation tag for fused multi-reduce.
-/// Values must stay in sync with `pgaccel_reduce_op` in `pgaccel_fused.h`.
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_reduce_op; constants must match the C enum
-pub mod reduce_op {
-    pub const SUM: i32 = 0;
-    pub const MIN: i32 = 1;
-    pub const MAX: i32 = 2;
-    pub const COUNT: i32 = 3;
-}
-
-/// Per-column reduce descriptor (mirrors `pgaccel_reduce_col`).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_reduce_col; struct layout load-bearing
-pub struct PgaccelReduceCol {
-    pub op: i32,
-    pub data: *const f32,
 }
 
 #[cfg(test)]

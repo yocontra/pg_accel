@@ -1,50 +1,16 @@
-//! Partial aggregate emission — worker-side transition state for parallel plans.
+//! Partial aggregate plan metadata.
 //!
-//! When a pg_accel Custom Scan runs inside a parallel Gather, each worker
-//! emits "partial" transition-state tuples that PG's Finalize Aggregate node
-//! combines across workers. This module defines the contract:
-//!
-//! - [`ColumnAccumulator`] — per-column state accumulated during the scan
-//!   (sum, count, min/max, `sum_sq` for stats, `bit_acc`, `bool_acc`).
-//! - [`PartialEmitter`] — trait that converts a `ColumnAccumulator` into
-//!   the Datum PG's combine function expects.
-//! - [`PartialAggSpec`] — per-plan metadata (op, attno, transtype, serialize fn).
-//!
-//! Implementations live in [`emitter`].
+//! The worker-side partial *emission* machinery (`ColumnAccumulator`,
+//! `PartialEmitter` and its implementations) was retired with the host-staged
+//! aggregate executors — only the resident OLAP aggregate survives, and it is
+//! never planned under a parallel Gather. The spec types below remain because
+//! the private-data codec (`ffi/custom_scan/private_data.rs`) still parses
+//! and serializes the sentinel-prefixed partial block for wire-format
+//! compatibility; Phase 5 owns the full codec break.
 
 use pgrx::pg_sys;
 
 use super::AggOp;
-
-pub mod accumulator;
-pub mod emitter;
-
-#[cfg(feature = "pg_test")]
-mod tests;
-
-pub use accumulator::ColumnAccumulator;
-
-// ---------------------------------------------------------------------------
-// PartialEmitter trait
-// ---------------------------------------------------------------------------
-
-/// Produces the partial-state Datum a worker sends to the leader.
-pub trait PartialEmitter: Send {
-    /// Emit a single partial-state Datum from an accumulator.
-    ///
-    /// Returns `(datum, isnull)`. May `palloc`, may call PG functions.
-    ///
-    /// # Safety
-    /// Must be called on the main backend thread.
-    unsafe fn emit(&self, acc: &ColumnAccumulator) -> (pg_sys::Datum, bool);
-
-    /// OID of the transition-state / partial-output type.
-    fn emit_type_oid(&self) -> pg_sys::Oid;
-}
-
-// ---------------------------------------------------------------------------
-// PartialAggSpec — per-plan metadata
-// ---------------------------------------------------------------------------
 
 /// Partial-agg plan metadata. `None` on non-parallel paths; `Some` on paths
 /// injected via `add_partial_path`.

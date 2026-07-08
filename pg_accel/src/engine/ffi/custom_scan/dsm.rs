@@ -108,109 +108,21 @@ const fn align_up_const(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
-unsafe fn agg_parallel_relation_and_snapshot(
-    css: *mut pg_sys::CustomScanState,
-) -> Option<(pg_sys::Relation, pg_sys::Snapshot)> {
-    if css.is_null() {
-        return None;
-    }
-    // SAFETY: css is a live CustomScanState owned by PostgreSQL.
-    let plan = unsafe { (*css).ss.ps.plan };
-    if plan.is_null() || !unsafe { (*plan).parallel_aware } {
-        return None;
-    }
-    let state = css.cast::<GpuAccelScanState>();
-    if GpuStrategy::decode(unsafe { (*state).accel.strategy }) != GpuStrategy::Agg {
-        return None;
-    }
-    let rel = unsafe { (*css).ss.ss_currentRelation };
-    if rel.is_null() {
-        return None;
-    }
-    if !unsafe { relation_uses_heap_am(rel) } {
-        return None;
-    }
-    let estate = unsafe { (*css).ss.ps.state };
-    if estate.is_null() {
-        return None;
-    }
-    let snapshot = unsafe { (*estate).es_snapshot };
-    if snapshot.is_null() {
-        return None;
-    }
-    Some((rel, snapshot))
-}
-
-unsafe fn relation_uses_heap_am(rel: pg_sys::Relation) -> bool {
-    !rel.is_null() && unsafe { (*rel).rd_tableam == pg_sys::GetHeapamTableAmRoutine() }
-}
-
-fn dsm_pscan_bounds_valid(dsm: &GpuAccelDsmState, allocated_len: pg_sys::Size) -> bool {
-    let align = pg_sys::MAXIMUM_ALIGNOF as pg_sys::Size;
-    dsm.pscan_len > 0
-        && dsm.pscan_offset >= DSM_COORD_SIZE
-        && dsm.pscan_offset.is_multiple_of(align)
-        && dsm.pscan_offset <= allocated_len
-        && dsm.pscan_len <= allocated_len.saturating_sub(dsm.pscan_offset)
-}
-
-unsafe fn dsm_pscan_ptr(
-    coordinate: *mut ::core::ffi::c_void,
-    dsm: &GpuAccelDsmState,
-    allocated_len: pg_sys::Size,
-) -> pg_sys::ParallelTableScanDesc {
-    if coordinate.is_null() || !dsm_pscan_bounds_valid(dsm, allocated_len) {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: coordinate points to the CustomScan DSM chunk allocated by PG,
-    // and pscan_offset was written by initialize_dsm_custom_scan.
-    unsafe { coordinate.cast::<u8>().add(dsm.pscan_offset).cast() }
-}
-
-unsafe fn attach_parallel_agg_scan(
-    css: *mut pg_sys::CustomScanState,
-    pscan: pg_sys::ParallelTableScanDesc,
-) {
-    if css.is_null() || pscan.is_null() {
-        return;
-    }
-    let rel = unsafe { (*css).ss.ss_currentRelation };
-    if rel.is_null() {
-        return;
-    }
-    let state = css.cast::<GpuAccelScanState>();
-    if GpuStrategy::decode(unsafe { (*state).accel.strategy }) != GpuStrategy::Agg {
-        return;
-    }
-    let exec_ptr = unsafe { (*state).accel.executor };
-    if exec_ptr.is_null() {
-        return;
-    }
-    // SAFETY: rel and pscan belong to this CustomScan parallel DSM chunk.
-    let scan_desc = unsafe { pg_sys::table_beginscan_parallel(rel, pscan) };
-    // SAFETY: Agg strategy allocated AggExecState in BeginCustomScan.
-    let agg = unsafe { &mut *exec_ptr.cast::<AggExecState>() };
-    agg.attach_owned_fused_scan_desc(scan_desc);
-}
-
 /// `EstimateDSMCustomScan`: each worker runs its own local scan+reduce;
 /// the DSM block is only a small capability/observability handshake.
+///
+/// The parallel fused-count aggregate lane (a shared `ParallelTableScanDesc`
+/// carved out after the coordination header) was retired with the host-staged
+/// aggregate executors, so the estimate is the fixed header size again.
 ///
 /// # Safety
 /// Called once in the leader at plan-execution start to size DSM bytes.
 pub(super) unsafe extern "C-unwind" fn estimate_dsm_custom_scan(
-    css: *mut pg_sys::CustomScanState,
+    _css: *mut pg_sys::CustomScanState,
     _pcxt: *mut pg_sys::ParallelContext,
 ) -> pg_sys::Size {
     tracing::debug!(node = "pg_accel_custom_scan", "dsm.estimate");
-    let pscan_len =
-        if let Some((rel, snapshot)) = unsafe { agg_parallel_relation_and_snapshot(css) } {
-            // SAFETY: rel/snapshot are valid executor-owned objects.
-            unsafe { pg_sys::table_parallelscan_estimate(rel, snapshot) }
-        } else {
-            0
-        };
-    DSM_COORD_SIZE.saturating_add(pscan_len)
+    DSM_COORD_SIZE
 }
 
 /// `InitializeDSMCustomScan`: leader-side DSM init.
@@ -235,13 +147,6 @@ pub(super) unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
         unsafe { (*css.cast::<GpuAccelScanState>()).accel.expected_threads }
     };
 
-    let allocated_len = if css.is_null() {
-        0
-    } else {
-        unsafe { (*css).pscan_len }
-    };
-    let pscan_len = allocated_len.saturating_sub(DSM_COORD_SIZE);
-
     let state = coordinate.cast::<GpuAccelDsmState>();
     // SAFETY: PostgreSQL allocated at least DSM_COORD_SIZE bytes because
     // estimate_dsm_custom_scan returned that size for this node.
@@ -258,27 +163,10 @@ pub(super) unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
             (*scan_state).accel.dsm_counters_recorded = false;
         }
     }
-    if pscan_len > 0
-        && let Some((rel, snapshot)) = unsafe { agg_parallel_relation_and_snapshot(css) }
-    {
-        unsafe {
-            (*state).pscan_len = pscan_len;
-        }
-        let pscan = unsafe { dsm_pscan_ptr(coordinate, &*state, allocated_len) };
-        if !pscan.is_null() {
-            // SAFETY: pscan points into the CustomScan DSM chunk sized by the
-            // earlier table_parallelscan_estimate call.
-            unsafe { pg_sys::table_parallelscan_initialize(rel, pscan, snapshot) };
-            // SAFETY: leader can participate in Gather execution; attach the
-            // same shared scan descriptor to its local aggregate executor.
-            unsafe { attach_parallel_agg_scan(css, pscan) };
-        }
-    }
     tracing::debug!(
         node = "pg_accel_custom_scan",
         expected_threads,
         flags = DSM_FLAG_WORKER_SPATIAL_RECHECK,
-        pscan_len,
         "dsm.initialize"
     );
 }
@@ -299,25 +187,8 @@ pub(super) unsafe extern "C-unwind" fn reinitialize_dsm_custom_scan(
     }
     let dsm = unsafe { &*coordinate.cast::<GpuAccelDsmState>() };
     dsm.reset_agg_counters();
-    if dsm.is_valid()
-        && dsm.pscan_len > 0
-        && let Some((rel, _snapshot)) = unsafe { agg_parallel_relation_and_snapshot(css) }
-    {
-        let allocated_len = if css.is_null() {
-            0
-        } else {
-            unsafe { (*css).pscan_len }
-        };
-        let pscan = unsafe { dsm_pscan_ptr(coordinate, dsm, allocated_len) };
-        if !pscan.is_null() {
-            // SAFETY: pscan points to the shared table scan descriptor in the
-            // CustomScan DSM chunk.
-            unsafe { pg_sys::table_parallelscan_reinitialize(rel, pscan) };
-        }
-    } else {
-        // SAFETY: same inputs and invariants as InitializeDSMCustomScan.
-        unsafe { initialize_dsm_custom_scan(css, pcxt, coordinate) };
-    }
+    // SAFETY: same inputs and invariants as InitializeDSMCustomScan.
+    unsafe { initialize_dsm_custom_scan(css, pcxt, coordinate) };
     tracing::debug!(node = "pg_accel_custom_scan", "dsm.reinitialize");
 }
 
@@ -382,17 +253,6 @@ pub(super) unsafe extern "C-unwind" fn initialize_worker_custom_scan(
             if strategy == GpuStrategy::Scan && !(*state).accel.executor.is_null() {
                 let scan_exec = &mut *(*state).accel.executor.cast::<ScanExecState>();
                 scan_exec.mark_parallel_worker(worker_number, flags);
-            }
-            if strategy == GpuStrategy::Agg && !dsm_state_ptr.is_null() && {
-                let dsm = &*dsm_state_ptr;
-                dsm.pscan_len > 0
-            } {
-                // Worker-local CustomScanState does not carry the leader's
-                // pscan_len; the authoritative bounds are in our DSM header.
-                let dsm = &*dsm_state_ptr;
-                let allocated_len = dsm.pscan_offset.saturating_add(dsm.pscan_len);
-                let pscan = dsm_pscan_ptr(coordinate, dsm, allocated_len);
-                attach_parallel_agg_scan(css, pscan);
             }
         }
     }

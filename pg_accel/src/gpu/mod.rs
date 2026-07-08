@@ -30,13 +30,12 @@ mod three_layer_tests;
 // need to know the bridge module layout.
 #[allow(unused_imports)]
 pub use types::{
-    PGACCEL_RESIDENT_BATCH_ABI_VERSION, PgaccelAggCol, PgaccelAggFunc, PgaccelAggState,
-    PgaccelBatch, PgaccelDeviceInfo, PgaccelDeviceVarOutput, PgaccelExpr, PgaccelExprInst,
-    PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType,
-    PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelMemSpace, PgaccelOp,
-    PgaccelPixelType, PgaccelPlatformCaps, PgaccelReclassRule, PgaccelReduceCol,
-    PgaccelResidentBatch, PgaccelResidentColumnView, PgaccelStatus, PgaccelVal, PgaccelValTag,
-    cmp_op, reduce_op,
+    PGACCEL_RESIDENT_BATCH_ABI_VERSION, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo,
+    PgaccelDeviceVarOutput, PgaccelExpr, PgaccelExprInst, PgaccelExprInstruction,
+    PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType, PgaccelGeometry, PgaccelHashTable,
+    PgaccelKeyType, PgaccelMemSpace, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
+    PgaccelReclassRule, PgaccelResidentBatch, PgaccelResidentColumnView, PgaccelStatus, PgaccelVal,
+    PgaccelValTag,
 };
 
 pub use error::{
@@ -45,15 +44,12 @@ pub use error::{
 
 mod counters;
 mod expr;
-mod fused;
 mod h3;
 mod hash_agg;
 mod hash_join;
 mod nested_loop_ineq;
 mod raster;
-mod reduce;
 mod runtime;
-mod sort;
 mod spatial;
 mod window;
 
@@ -62,14 +58,11 @@ mod mod_tests;
 
 pub use counters::*;
 pub use expr::*;
-pub use fused::*;
 pub use h3::*;
 pub use hash_agg::*;
 pub use hash_join::*;
 pub use nested_loop_ineq::*;
 pub use raster::*;
-pub use reduce::*;
 pub use runtime::*;
-pub use sort::*;
 pub use spatial::*;
 pub use window::*;

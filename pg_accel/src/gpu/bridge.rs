@@ -5,11 +5,10 @@
 //! no-GPU build and no CPU fallback.
 
 pub use super::types::{
-    PgaccelAggCol, PgaccelAggFunc, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr,
-    PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol,
-    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp,
-    PgaccelPixelType, PgaccelPlatformCaps, PgaccelReclassRule, PgaccelReduceCol, PgaccelStatus,
-    PgaccelVal, PgaccelValTag,
+    PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr, PgaccelExprInst,
+    PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType,
+    PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType,
+    PgaccelPlatformCaps, PgaccelReclassRule, PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -19,11 +18,10 @@ pub use super::types::{
 // Scope (honest, verified against `pgaccel-kernels/include/*.h` 2026-07-07):
 // the declarations below cover every header symbol that has a current or
 // staged Rust caller. Declarations match the C signatures exactly, but this
-// is NOT the complete header surface. Six symbols from `pgaccel_ffi.h` are
-// intentionally NOT declared because nothing on the Rust side calls them and
-// an extern declaration carries no cross-checking value on its own (the
-// linker does not type-check, so an unused declaration is dead surface that
-// can silently drift):
+// is NOT the complete header surface. Header symbols with no Rust caller are
+// intentionally NOT declared because an extern declaration carries no
+// cross-checking value on its own (the linker does not type-check, so an
+// unused declaration is dead surface that can silently drift):
 //
 //   - pgaccel_sort_u64                        (pgaccel_ffi.h:174)
 //   - pgaccel_sort_kv_i32_device              (pgaccel_ffi.h:190)
@@ -31,6 +29,9 @@ pub use super::types::{
 //   - pgaccel_sort_window_overlap_probe       (pgaccel_ffi.h:80)
 //   - pgaccel_archive_stats_snapshot          (pgaccel_ffi.h:126)
 //   - pgaccel_archive_jit_cache_dir           (pgaccel_ffi.h:131)
+//   - pgaccel_sort_{f32,f64,i32,i64}          (host tuplesort executor retired)
+//   - pgaccel_sort_kv_{f32,f64,i32,i64}       (host tuplesort executor retired)
+//   - pgaccel_topk_kv_{f32,f64,i32,i64}       (host top-k sort executor retired)
 //
 // When a caller for one of these lands, declare it here (through
 // `bridge_status_fns!` if it returns `pgaccel_status`) in the same change.
@@ -333,274 +334,6 @@ bridge_status_fns! {
         count_b: usize,
         result: *mut u8,
         hit_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    // -- Sort kernels --
-
-    pub fn pgaccel_sort_f32(data: *mut f32, count: usize) -> PgaccelStatus;
-    pub fn pgaccel_sort_f64(data: *mut f64, count: usize) -> PgaccelStatus;
-    pub fn pgaccel_sort_i32(data: *mut i32, count: usize) -> PgaccelStatus;
-    pub fn pgaccel_sort_i64(data: *mut i64, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort: sorts keys and permutes indices to match.
-    pub fn pgaccel_sort_kv_f32(keys: *mut f32, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort (fp64 keys).
-    pub fn pgaccel_sort_kv_f64(keys: *mut f64, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort (i32 keys).
-    pub fn pgaccel_sort_kv_i32(keys: *mut i32, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Key-value sort (i64 keys).
-    pub fn pgaccel_sort_kv_i64(keys: *mut i64, indices: *mut u32, count: usize) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (f32 keys).
-    pub fn pgaccel_topk_kv_f32(
-        keys: *const f32,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (f64 keys).
-    pub fn pgaccel_topk_kv_f64(
-        keys: *const f64,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (i32 keys).
-    pub fn pgaccel_topk_kv_i32(
-        keys: *const i32,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Bounded key-value top-k (i64 keys).
-    pub fn pgaccel_topk_kv_i64(
-        keys: *const i64,
-        count: usize,
-        k: usize,
-        largest: u8,
-        out_indices: *mut u32,
-        out_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    // -- Reduce kernels --
-
-    pub fn pgaccel_reduce_sum_f32(
-        data: *const f32,
-        count: usize,
-        result: *mut f32,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_min_f32(
-        data: *const f32,
-        count: usize,
-        result: *mut f32,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_max_f32(
-        data: *const f32,
-        count: usize,
-        result: *mut f32,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_sum_f64(
-        data: *const f64,
-        count: usize,
-        result: *mut f64,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_min_f64(
-        data: *const f64,
-        count: usize,
-        result: *mut f64,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_max_f64(
-        data: *const f64,
-        count: usize,
-        result: *mut f64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_sum_i64(
-        data: *const i64,
-        count: usize,
-        result: *mut i64,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_min_i64(
-        data: *const i64,
-        count: usize,
-        result: *mut i64,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_max_i64(
-        data: *const i64,
-        count: usize,
-        result: *mut i64,
-    ) -> PgaccelStatus;
-
-    /// Count nonzero bytes in mask (popcount).
-    pub fn pgaccel_reduce_count(mask: *const u8, count: usize, result: *mut usize)
-    -> PgaccelStatus;
-
-    // -- Fused multi-aggregate reduce kernels (Fix Agent 4, 2026-04-11) --
-    //
-    // Single-pass SUM+MIN+MAX+COUNT over the same input column via a
-    // single kernel launch.
-
-    pub fn pgaccel_reduce_multi_f32(
-        data: *const f32,
-        count: usize,
-        out_sum: *mut f32,
-        out_min: *mut f32,
-        out_max: *mut f32,
-        out_count: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_multi_f64(
-        data: *const f64,
-        count: usize,
-        out_sum: *mut f64,
-        out_min: *mut f64,
-        out_max: *mut f64,
-        out_count: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_multi_i64(
-        data: *const i64,
-        count: usize,
-        out_sum: *mut i64,
-        out_min: *mut i64,
-        out_max: *mut i64,
-        out_count: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_multi_masked_f32(
-        data: *const f32,
-        value_nulls: *const u8,
-        selection: *const u8,
-        count: usize,
-        out_sum: *mut f32,
-        out_min: *mut f32,
-        out_max: *mut f32,
-        out_count: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_multi_masked_f64(
-        data: *const f64,
-        value_nulls: *const u8,
-        selection: *const u8,
-        count: usize,
-        out_sum: *mut f64,
-        out_min: *mut f64,
-        out_max: *mut f64,
-        out_count: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_multi_masked_i64(
-        data: *const i64,
-        value_nulls: *const u8,
-        selection: *const u8,
-        count: usize,
-        out_sum: *mut i64,
-        out_min: *mut i64,
-        out_max: *mut i64,
-        out_count: *mut i64,
-    ) -> PgaccelStatus;
-
-    // -- sum_sq and fused stats (count, sum, sum_sq) for partial-agg AVG/STDDEV --
-    //
-    // sum_sq accumulates Σ(x²) in double regardless of input element type.
-    // stats fuses count, sum, sum_sq into a single kernel launch.
-
-    pub fn pgaccel_reduce_sum_sq_f32(
-        data: *const f32,
-        count: usize,
-        result: *mut f64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_sum_sq_f64(
-        data: *const f64,
-        count: usize,
-        result: *mut f64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_stats_f32(
-        data: *const f32,
-        count: usize,
-        out_count: *mut u64,
-        out_sum: *mut f64,
-        out_sum_sq: *mut f64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_stats_f64(
-        data: *const f64,
-        count: usize,
-        out_count: *mut u64,
-        out_sum: *mut f64,
-        out_sum_sq: *mut f64,
-    ) -> PgaccelStatus;
-
-    // -- Boolean and bitwise reductions (Phase 4) --
-    //
-    // Caller filters NULL inputs out of `data` before calling. `count == 0`
-    // returns the kernel identity element; callers materialise SQL NULL by
-    // tracking `has_value` separately.
-    pub fn pgaccel_reduce_bool_and(data: *const u8, count: usize, result: *mut u8)
-    -> PgaccelStatus;
-    pub fn pgaccel_reduce_bool_or(data: *const u8, count: usize, result: *mut u8) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_bit_and_i16(
-        data: *const i16,
-        count: usize,
-        result: *mut i16,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_bit_and_i32(
-        data: *const i32,
-        count: usize,
-        result: *mut i32,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_bit_and_i64(
-        data: *const i64,
-        count: usize,
-        result: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_bit_or_i16(
-        data: *const i16,
-        count: usize,
-        result: *mut i16,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_bit_or_i32(
-        data: *const i32,
-        count: usize,
-        result: *mut i32,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_bit_or_i64(
-        data: *const i64,
-        count: usize,
-        result: *mut i64,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_reduce_bit_xor_i16(
-        data: *const i16,
-        count: usize,
-        result: *mut i16,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_bit_xor_i32(
-        data: *const i32,
-        count: usize,
-        result: *mut i32,
-    ) -> PgaccelStatus;
-    pub fn pgaccel_reduce_bit_xor_i64(
-        data: *const i64,
-        count: usize,
-        result: *mut i64,
     ) -> PgaccelStatus;
 
     // -- H3 cell operations --
@@ -1783,19 +1516,6 @@ bridge_status_fns! {
 
     // -- Fused filter + multi-reduce kernels --
 
-    /// Fused filter + multi-column reduce in a single GPU pass (f32).
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_fused_filter_multi_reduce_f32(
-        filter_data: *const f32,
-        n: usize,
-        cmp_op: i32,
-        cmp_val: f32,
-        cols: *const PgaccelReduceCol,
-        num_cols: usize,
-        results: *mut f32,
-        pass_count: *mut usize,
-    ) -> PgaccelStatus;
-
     // -- NestedLoop scalar inequality kernel --
     //
     // Mirrors `pgaccel-kernels/include/pgaccel_nested_loop_ineq.h`.
@@ -1935,20 +1655,6 @@ unsafe extern "C" {
 
     // -- Hash aggregation kernels --
 
-    /// Perform grouped aggregation on columnar data.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_hash_agg_execute(
-        group_keys: *const std::ffi::c_void,
-        group_null_mask: *const u8,
-        row_count: usize,
-        key_type: i32,
-        value_cols: *const *const std::ffi::c_void,
-        value_nulls: *const *const u8,
-        value_types: *const i32,
-        agg_cols: *const PgaccelAggCol,
-        num_aggs: usize,
-    ) -> *mut PgaccelAggState;
-
     /// Perform grouped COUNT(*) over int64 group keys. This symbol is
     /// fail-closed and has no host hash-table grouping fallback in the C++
     /// implementation.
@@ -1978,42 +1684,6 @@ unsafe extern "C" {
 
     /// Get the group keys as a contiguous buffer.
     pub fn pgaccel_agg_get_group_keys(state: *const PgaccelAggState) -> *const std::ffi::c_void;
-
-    /// Get aggregate results for one aggregate column.
-    pub fn pgaccel_agg_get_results(state: *const PgaccelAggState, agg_idx: usize) -> *const f64;
-
-    /// Perform grouped aggregation in **partial** mode (Phase 3B).
-    ///
-    /// Same input shape as `pgaccel_hash_agg_execute`. Output emits per-group
-    /// transition states matching PG's combine functions: 1 lane for
-    /// SUM/MIN/MAX/COUNT (identical to finalize mode), 2 lanes
-    /// `[N, sum]` for `AVG`, 3 lanes `[N, sum, sum_sq]` for STDDEV/VAR.
-    /// Read per-agg results via `pgaccel_agg_get_partial_results` and
-    /// per-agg lane width via `pgaccel_agg_get_partial_width`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_hash_agg_execute_partial(
-        group_keys: *const std::ffi::c_void,
-        group_null_mask: *const u8,
-        row_count: usize,
-        key_type: i32,
-        value_cols: *const *const std::ffi::c_void,
-        value_nulls: *const *const u8,
-        value_types: *const i32,
-        agg_cols: *const PgaccelAggCol,
-        num_aggs: usize,
-    ) -> *mut PgaccelAggState;
-
-    /// Get partial-mode aggregate results for one aggregate column.
-    ///
-    /// Returns a pointer to `group_count * partial_width(func)` f64 values
-    /// laid out as `[g0_lane0, g0_lane1, ..., g1_lane0, ...]` (group-major).
-    pub fn pgaccel_agg_get_partial_results(
-        state: *const PgaccelAggState,
-        agg_idx: usize,
-    ) -> *const f64;
-
-    /// Get partial-mode lane width for one aggregate column. 0 on error.
-    pub fn pgaccel_agg_get_partial_width(state: *const PgaccelAggState, agg_idx: usize) -> usize;
 
     /// Get per-group row counts.
     pub fn pgaccel_agg_get_counts(state: *const PgaccelAggState) -> *const i64;
@@ -2361,21 +2031,6 @@ mod tests {
     }
 
     #[test]
-    fn agg_col_size_and_alignment() {
-        let size = mem::size_of::<PgaccelAggCol>();
-        let align = mem::align_of::<PgaccelAggCol>();
-        // func (repr(C) enum) + col_idx (usize)
-        assert!(
-            size >= mem::size_of::<usize>(),
-            "PgaccelAggCol too small: {size}"
-        );
-        assert!(
-            align >= mem::align_of::<usize>(),
-            "alignment too small: {align}"
-        );
-    }
-
-    #[test]
     fn reclass_rule_size_is_three_f64s() {
         // min_val + max_val + new_val = 3 * 8 = 24 bytes
         assert_eq!(mem::size_of::<PgaccelReclassRule>(), 24);
@@ -2457,29 +2112,6 @@ mod tests {
         assert_eq!(PgaccelValTag::Float64 as i32, 5);
         assert_eq!(PgaccelValTag::Date as i32, 6);
         assert_eq!(PgaccelValTag::Timestamp as i32, 7);
-    }
-
-    #[test]
-    fn agg_func_discriminant_values_match_c() {
-        assert_eq!(PgaccelAggFunc::Sum as i32, 0);
-        assert_eq!(PgaccelAggFunc::Min as i32, 1);
-        assert_eq!(PgaccelAggFunc::Max as i32, 2);
-        assert_eq!(PgaccelAggFunc::Count as i32, 3);
-        // Partial-mode funcs (used by pgaccel_hash_agg_execute_partial only).
-        assert_eq!(PgaccelAggFunc::Avg as i32, 4);
-        assert_eq!(PgaccelAggFunc::Stddev as i32, 5);
-        assert_eq!(PgaccelAggFunc::Var as i32, 6);
-    }
-
-    #[test]
-    fn agg_func_partial_widths() {
-        assert_eq!(PgaccelAggFunc::Sum.partial_width(), 1);
-        assert_eq!(PgaccelAggFunc::Min.partial_width(), 1);
-        assert_eq!(PgaccelAggFunc::Max.partial_width(), 1);
-        assert_eq!(PgaccelAggFunc::Count.partial_width(), 1);
-        assert_eq!(PgaccelAggFunc::Avg.partial_width(), 2);
-        assert_eq!(PgaccelAggFunc::Stddev.partial_width(), 3);
-        assert_eq!(PgaccelAggFunc::Var.partial_width(), 3);
     }
 
     #[test]
@@ -2627,19 +2259,6 @@ mod tests {
         assert_eq!(cloned.compute_units, 16);
         let dbg = format!("{caps:?}");
         assert!(dbg.contains("PgaccelPlatformCaps"));
-    }
-
-    #[test]
-    fn agg_col_debug_clone() {
-        let col = PgaccelAggCol {
-            func: PgaccelAggFunc::Count,
-            col_idx: 7,
-        };
-        let cloned = col;
-        assert_eq!(cloned.func, PgaccelAggFunc::Count);
-        assert_eq!(cloned.col_idx, 7);
-        let dbg = format!("{col:?}");
-        assert!(dbg.contains("PgaccelAggCol"));
     }
 
     #[test]
