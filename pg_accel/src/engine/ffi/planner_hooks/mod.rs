@@ -15,7 +15,6 @@ use crate::engine::executor::agg::{
     AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, H3_PARENT_GROUP_KEY_TYPE,
     is_h3_synthetic_group_key,
 };
-use crate::engine::executor::preagg::DimFilter;
 use crate::engine::executor::sort::SortKeyDesc;
 use crate::engine::executor::window::{WindowFunc, WindowFuncSpec};
 

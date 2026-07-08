@@ -16,7 +16,6 @@ pub mod agg;
 pub mod join;
 pub mod metrics;
 pub mod olap;
-pub mod preagg;
 pub mod result_drain;
 pub mod scan;
 pub mod sort;

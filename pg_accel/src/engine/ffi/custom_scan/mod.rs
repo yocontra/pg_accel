@@ -18,7 +18,6 @@ use pgrx::pg_sys;
 use super::super::gucs;
 use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo, is_h3_synthetic_group_key};
 use crate::engine::executor::join::JoinExecState;
-use crate::engine::executor::preagg::PreAggExecState;
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::executor::vectorized_scan::VectorizedScan;
 use crate::engine::executor::window::{
@@ -40,7 +39,6 @@ use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
 pub(in crate::engine::ffi) use private_data::HASH_JOIN_RESIDENT_COUNT_SENTINEL;
-pub use private_data::serialize_preagg_private;
 pub(super) use private_data::{
     AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_olap_agg_spec,
     append_partial_spec, deserialize_partial_spec,
@@ -52,13 +50,7 @@ pub use private_data::{
 pub(in crate::engine::ffi) use private_data::{
     append_resident_proof_snapshot, resident_proof_default_for_strategy,
 };
-// Re-exported so round-trip tests can probe the wire layout without reaching
-// into the private_data submodule.
-pub(in crate::engine::ffi) use private_data::{PREAGG_PARALLEL_ATTACHED_SENTINEL, PreAggPrivData};
 use private_data::{deserialize_custom_private, deserialize_resident_proof_snapshot};
-// `deserialize_preagg_private` is consumed both by `begin_custom_scan`
-// (this module) and by the round-trip tests in `tests.rs`.
-pub(in crate::engine::ffi) use private_data::deserialize_preagg_private;
 // SRF executor (Round 3 follow-up) — public re-exports for the planner
 // hook in `srf_target_list.rs` and the executor module in `srf_target_list.rs`.
 pub use private_data::{
@@ -285,17 +277,6 @@ static WINDOW_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScan
     CreateCustomScanState: Some(create_custom_scan_state),
 });
 
-static PREAGG_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
-    CustomName: c"GpuAccelPreAgg".as_ptr(),
-    PlanCustomPath: Some(plan_custom_path_preagg),
-    ReparameterizeCustomPathByChild: None,
-});
-
-static PREAGG_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
-    CustomName: c"GpuAccelPreAgg".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
-});
-
 static FUNCTION_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
     CustomName: c"GpuAccelFunctionScan".as_ptr(),
     PlanCustomPath: Some(plan_custom_path_function),
@@ -368,13 +349,6 @@ pub fn window_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const WINDOW_PATH_METHODS.0
 }
 
-/// Pointer to preagg `CustomPathMethods` vtable.
-#[inline]
-#[must_use]
-pub fn preagg_path_methods() -> *const pg_sys::CustomPathMethods {
-    &raw const PREAGG_PATH_METHODS.0
-}
-
 /// Pointer to FunctionScan `CustomPathMethods` vtable (Phase 2 F3).
 #[inline]
 #[must_use]
@@ -399,7 +373,6 @@ pub fn register() {
         pg_sys::RegisterCustomScanMethods(&raw const JOIN_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const AGG_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const WINDOW_SCAN_METHODS.0);
-        pg_sys::RegisterCustomScanMethods(&raw const PREAGG_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const FUNCTION_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const SRF_TARGET_LIST_SCAN_METHODS.0);
     }
@@ -1032,64 +1005,6 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
     }
 
     tracing::info!("plan_custom_path_window: end");
-    cscan.cast()
-}
-
-/// Convert a PreAgg `CustomPath` into a `CustomScan` plan node.
-///
-/// The PreAgg path carries all join depths + aggregation info in
-/// `custom_private`. This callback copies that into the plan node
-/// and sets up inner (dimension) plans.
-///
-/// # Safety
-///
-/// Called by the PostgreSQL planner on the main backend thread.
-unsafe extern "C-unwind" fn plan_custom_path_preagg(
-    _root: *mut pg_sys::PlannerInfo,
-    _rel: *mut pg_sys::RelOptInfo,
-    best_path: *mut pg_sys::CustomPath,
-    tlist: *mut pg_sys::List,
-    clauses: *mut pg_sys::List,
-    custom_plans: *mut pg_sys::List,
-) -> *mut pg_sys::Plan {
-    let _span = tracing::debug_span!("ffi.plan_custom_path_preagg").entered();
-    tracing::info!("plan_custom_path_preagg: start");
-    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
-    let cscan = unsafe {
-        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
-    };
-
-    // SAFETY: cscan is freshly palloc'd and zeroed; best_path is valid.
-    unsafe {
-        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
-
-        // PreAgg has scanrelid=0 and the planner-supplied tlist contains raw
-        // base-relation Vars (GROUP BY keys referencing fact/dim relids) plus
-        // Aggrefs. For scanrelid=0 CustomScans, PG's
-        // `set_customscan_references` treats the node as an upper-plan
-        // projection: it builds an index from `custom_scan_tlist` and calls
-        // `fix_upper_expr` on `plan.targetlist`/`plan.qual`, rewriting each
-        // Var/Aggref in-place to `Var(INDEX_VAR, position_in_cst)`. Both lists
-        // must hold independent copies so rewriting one does not alias the
-        // other — same pattern as plan_custom_path_agg.
-        // SAFETY: copyObjectImpl deep-copies in CurrentMemoryContext.
-        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-
-        (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
-        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
-        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
-        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
-        (*cscan).custom_plans = custom_plans;
-        (*cscan).flags = (*best_path).flags;
-        (*cscan).scan.scanrelid = 0;
-        (*cscan).methods = &raw const PREAGG_SCAN_METHODS.0;
-
-        // Copy custom_private from path to plan (already serialized by planner hook).
-        (*cscan).custom_private = (*best_path).custom_private;
-    }
-
-    tracing::info!("plan_custom_path_preagg: end");
     cscan.cast()
 }
 
@@ -2657,71 +2572,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     // SAFETY: node points to our extended GpuAccelScanState.
     unsafe {
         (*state).accel.executor = if privdata.gpu_strategy == GpuStrategy::PreAgg {
-            // Deserialize PreAgg configuration from custom_private.
-            let preagg_info = deserialize_preagg_private((*cscan).custom_private);
-
-            let mut exec = Box::new(PreAggExecState::new(
-                preagg_info.depths,
-                preagg_info.agg_descs,
-                preagg_info.group_keys,
-                preagg_info.scan_expr,
-            ));
-
-            // Worker-side partial-emit: when the planner injected a parallel
-            // partial path (preagg_partial::try_inject), the serialized
-            // custom_private carries a `PartialAggSpec`. Enable the
-            // PreaggPartialState so `next()` emits transition-state tuples
-            // for PG's Finalize Aggregate on the leader.
-            if let Some(spec) = preagg_info.partial.as_ref() {
-                exec.enable_partial(spec);
-                pgrx::debug1!(
-                    "pg_accel: begin_custom_scan: PreAgg partial-emit enabled, {} cols",
-                    spec.per_column.len(),
-                );
-            }
-
-            // Materialize dimension tables from child plan states. Slot 0 is
-            // the required fact-side PlanState; dimensions are slots 1..N.
-            let custom_ps = (*node).custom_ps;
-            let mut fact_child: *mut pg_sys::PlanState = std::ptr::null_mut();
-            if !preagg_info.parallel_safe_planner_attached {
-                pgrx::error!("pg_accel: PreAgg private data missing attached fact child marker");
-            }
-            if !custom_ps.is_null() {
-                let n_children = pg_sys::list_length(custom_ps);
-                let start_slot: i32 = 1;
-                if n_children > 0 {
-                    // SAFETY: custom_ps non-null and n_children > 0 → index 0 valid.
-                    fact_child = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
-                }
-                let mut child_states: Vec<*mut pg_sys::PlanState> = Vec::new();
-                for i in start_slot..n_children {
-                    // SAFETY: custom_ps[i] is a valid PlanState; bounds
-                    // checked by `i < n_children` and `start_slot >= 0`.
-                    let child = pg_sys::list_nth(custom_ps, i).cast::<pg_sys::PlanState>();
-                    child_states.push(child);
-                }
-                // SAFETY: child_states are valid PlanState pointers.
-                exec.materialize_dimensions(&child_states);
-            }
-
-            // Hand the fact-side child to the executor. The child PlanState
-            // owns the relation handle and scan lifecycle.
-            if fact_child.is_null() {
-                pgrx::error!(
-                    "pg_accel: PreAgg plan missing fact child; refusing heap-direct CPU fallback"
-                );
-            } else {
-                exec.set_fact_child(fact_child);
-            }
-
-            pgrx::debug1!(
-                "pg_accel: begin_custom_scan: PreAgg, {} depths, {} aggs, {} group keys",
-                exec.depths.len(),
-                exec.agg_descs.len(),
-                exec.group_keys.len(),
+            // GpuPreAgg retired: no planner path-creator emits it and the
+            // private-data reader rejects PreAgg payloads before this point.
+            pgrx::error!(
+                "pg_accel: GpuPreAgg strategy retired; no planner path-creator emits it"
             );
-            Box::into_raw(exec).cast()
         } else if privdata.gpu_strategy == GpuStrategy::Agg {
             let mut exec = if let Some(olap_spec) = privdata.olap_agg {
                 pgrx::debug1!("pg_accel: begin_custom_scan: resident OLAP Agg");
@@ -3350,7 +3205,9 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         let dyn_state: &mut dyn crate::engine::executor::ExecutorState = match gpu_strategy {
             GpuStrategy::Scan => &mut *executor.cast::<ScanExecState>(),
             GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
-            GpuStrategy::PreAgg => &mut *executor.cast::<PreAggExecState>(),
+            GpuStrategy::PreAgg => pgrx::error!(
+                "pg_accel: GpuPreAgg strategy retired; begin_custom_scan rejects it before exec"
+            ),
             GpuStrategy::Sort => pgrx::error!(
                 "pg_accel: GpuSort strategy retired; begin_custom_scan rejects it before exec"
             ),
@@ -3443,9 +3300,12 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
             } else {
                 let gpu_strategy = GpuStrategy::decode((*state).accel.strategy);
                 if gpu_strategy == GpuStrategy::PreAgg {
-                    // SAFETY: executor was Box::into_raw'd as PreAggExecState.
-                    let preagg = Box::from_raw((*state).accel.executor.cast::<PreAggExecState>());
-                    drop(preagg);
+                    // GpuPreAgg retired: begin_custom_scan errors before an
+                    // executor can be allocated, so a non-null executor with
+                    // PreAgg strategy is a state-corruption bug.
+                    pgrx::error!(
+                        "pg_accel: GpuPreAgg strategy retired; no PreAgg executor state can exist"
+                    );
                 } else if gpu_strategy == GpuStrategy::Agg {
                     // SAFETY: executor was Box::into_raw'd as AggExecState.
                     let agg = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
