@@ -226,9 +226,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     agg_state.gpu_dispatched,
                     es,
                 );
-                if agg_state.partial_emitters.is_some() {
-                    pg_sys::ExplainPropertyBool(c"Partial".as_ptr(), true, es);
-                }
             }
 
             if strategy == GpuStrategy::Join && !(*state).accel.executor.is_null() {
@@ -283,7 +280,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     );
                 }
             }
-
         }
     }
 }
@@ -905,7 +901,17 @@ mod tests {
 
     #[test]
     fn explain_dispatch_flag_uses_strategy_specific_state() {
-        let mut agg = AggExecState::new(AccelStrategy::GpuReduce, 1024, &[(AggOp::Count, 0)]);
+        let mut agg = AggExecState::new_olap(OlapAggSpec::SsbmQ1Revenue(
+            crate::engine::executor::olap::SsbmQ1RevenueSpec {
+                fact_rel_oid: pg_sys::Oid::from(1u32),
+                date_rel_oid: pg_sys::Oid::from(2u32),
+                date_predicate: crate::engine::olap_cache::SsbmQ1DatePredicate::Year(1993),
+                discount_lo: 1,
+                discount_hi: 3,
+                quantity_lo: 0,
+                quantity_hi: 25,
+            },
+        ));
         agg.gpu_dispatched = true;
         let state = GpuAccelScanState {
             css: unsafe { std::mem::zeroed() },

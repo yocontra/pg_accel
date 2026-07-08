@@ -46,51 +46,14 @@ pub struct ExprSharedBuffer<T> {
 }
 
 impl<T> ExprSharedBuffer<T> {
-    /// Allocate `len` elements in shared USM.
-    ///
-    /// Returns `None` for zero-sized requests, size overflow, unavailable GPU,
-    /// or allocation failure.
-    pub fn new(len: usize) -> Option<Self> {
-        let bytes = checked_allocation_bytes::<T>(len)?;
-        let mut raw = std::ptr::null_mut::<c_void>();
-        // SAFETY: `raw` is a valid out pointer. The C++ side initializes the
-        // GPU queue and writes a shared-USM allocation pointer on success.
-        let status = unsafe { bridge::pgaccel_expr_shared_alloc(bytes, &raw mut raw) };
-        if !status.is_ok() {
-            return None;
-        }
-        Some(Self {
-            ptr: NonNull::new(raw.cast::<T>())?,
-            len,
-            _not_send_sync: PhantomData,
-        })
-    }
-
     #[must_use]
     pub fn as_ptr(&self) -> *const T {
         self.ptr.as_ptr()
     }
 
     #[must_use]
-    pub fn as_mut_ptr(&self) -> *mut T {
-        self.ptr.as_ptr()
-    }
-
-    #[must_use]
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[T] {
-        // SAFETY: this buffer owns `len` contiguous elements of type T until Drop.
-        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) }
-    }
-
-    #[must_use]
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        // SAFETY: this buffer owns `len` contiguous elements of type T until Drop.
-        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
     }
 }
 
@@ -182,19 +145,6 @@ impl<T> Drop for ExprDeviceBuffer<T> {
         // SAFETY: pointer was returned by a pgaccel_expr_device_alloc* call
         // and is freed exactly once by this owner.
         unsafe { bridge::pgaccel_expr_device_free(self.ptr.as_ptr().cast::<c_void>()) };
-    }
-}
-
-#[must_use]
-pub fn expr_usm_col<T>(
-    values: &ExprSharedBuffer<T>,
-    nulls: Option<&ExprSharedBuffer<u8>>,
-    tag: PgaccelValTag,
-) -> PgaccelExprUsmCol {
-    PgaccelExprUsmCol {
-        values: values.as_ptr().cast::<c_void>(),
-        nulls: nulls.map_or(std::ptr::null(), ExprSharedBuffer::as_ptr),
-        tag,
     }
 }
 
@@ -316,100 +266,6 @@ pub fn expr_template_cmp_const(
         )
     };
     status.is_ok().then_some(results)
-}
-
-/// Template: count TRUE rows for `col <cmp> const` on a batch.
-///
-/// Returns `(true_count, uncertain_count)` or `None` if GPU dispatch fails.
-pub fn expr_template_cmp_const_count(
-    batch: &PgaccelBatch,
-    col_idx: u32,
-    cmp_opcode: u16,
-    const_val: f64,
-) -> Option<(usize, usize)> {
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: batch is a valid reference; output counters are valid pointers.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_cmp_const_count(
-            std::ptr::from_ref(batch),
-            col_idx,
-            cmp_opcode,
-            const_val,
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some((true_count, uncertain_count))
-}
-
-/// Template: count TRUE rows for an already-staged shared-USM column.
-pub fn expr_template_cmp_const_count_usm(
-    col: PgaccelExprUsmCol,
-    row_count: usize,
-    cmp_opcode: u16,
-    const_val: f64,
-) -> Option<(usize, usize)> {
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: caller guarantees `col` points at shared-USM buffers with at
-    // least row_count elements and matching type tag.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_cmp_const_count_usm(
-            col,
-            row_count,
-            cmp_opcode,
-            const_val,
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some((true_count, uncertain_count))
-}
-
-/// Template: write a `1 = TRUE`, `0 = FALSE/NULL` selection mask for an
-/// already-staged shared-USM column and return `(true_count, uncertain_count)`.
-pub fn expr_template_cmp_const_mask_usm(
-    col: PgaccelExprUsmCol,
-    row_count: usize,
-    cmp_opcode: u16,
-    const_val: f64,
-    selection: &mut ExprSharedBuffer<u8>,
-) -> Option<(usize, usize)> {
-    if selection.len() < row_count {
-        return None;
-    }
-
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: caller guarantees `col` points at shared-USM buffers with at
-    // least row_count elements. `selection` is shared USM with row_count bytes.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_cmp_const_mask_usm(
-            col,
-            row_count,
-            cmp_opcode,
-            const_val,
-            selection.as_mut_ptr(),
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some((true_count, uncertain_count))
-}
-
-/// Result of a direct-USM template predicate fused with f32 SUM/MIN/MAX/COUNT.
-#[derive(Debug, Clone, Copy)]
-pub struct ExprTemplateReduceF32 {
-    pub sum: f32,
-    pub min: f32,
-    pub max: f32,
-    pub value_count: i64,
-    pub true_count: usize,
-    pub uncertain_count: usize,
 }
 
 /// Result of the SSBM Q1.x direct-USM filtered revenue aggregate.
@@ -534,52 +390,6 @@ impl ExprTemplateSsbmQ1Scratch<'_> {
 pub fn expr_template_ssbm_q1_scratch_items(row_count: usize) -> usize {
     // SAFETY: pure sizing helper; no pointers cross the ABI.
     unsafe { bridge::pgaccel_expr_template_ssbm_q1_scratch_items(row_count) }
-}
-
-/// Template: fuse `col <cmp> const` with f32 SUM/MIN/MAX/COUNT over TRUE rows.
-///
-/// `true_count` counts all predicate-TRUE rows for `COUNT(*)`; `value_count`
-/// counts predicate-TRUE rows whose value column is non-NULL.
-#[allow(clippy::too_many_arguments)]
-pub fn expr_template_cmp_const_reduce_f32_usm(
-    pred_col: PgaccelExprUsmCol,
-    cmp_opcode: u16,
-    const_val: f64,
-    value_col: PgaccelExprUsmCol,
-    row_count: usize,
-) -> Option<ExprTemplateReduceF32> {
-    let mut out_sum = 0.0f32;
-    let mut out_min = 0.0f32;
-    let mut out_max = 0.0f32;
-    let mut out_value_count = 0i64;
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: caller guarantees predicate/value columns point at shared-USM
-    // buffers with at least row_count elements and matching type tags.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_cmp_const_reduce_f32_usm(
-            pred_col,
-            cmp_opcode,
-            const_val,
-            value_col,
-            row_count,
-            &raw mut out_sum,
-            &raw mut out_min,
-            &raw mut out_max,
-            &raw mut out_value_count,
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some(ExprTemplateReduceF32 {
-        sum: out_sum,
-        min: out_min,
-        max: out_max,
-        value_count: out_value_count,
-        true_count,
-        uncertain_count,
-    })
 }
 
 /// Template: SSBM Q1.x filtered revenue aggregate over resident int32 columns.
@@ -1963,159 +1773,6 @@ pub fn expr_template_two_pred_and(
         )
     };
     status.is_ok().then_some(results)
-}
-
-/// Template: count TRUE rows for
-/// `col1 <cmp1> const1 AND col2 <cmp2> const2` on a batch.
-#[allow(clippy::too_many_arguments)]
-pub fn expr_template_two_pred_and_count(
-    batch: &PgaccelBatch,
-    col1_idx: u32,
-    cmp1_opcode: u16,
-    const1_val: f64,
-    col2_idx: u32,
-    cmp2_opcode: u16,
-    const2_val: f64,
-) -> Option<(usize, usize)> {
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: batch is a valid reference; output counters are valid pointers.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_two_pred_and_count(
-            std::ptr::from_ref(batch),
-            col1_idx,
-            cmp1_opcode,
-            const1_val,
-            col2_idx,
-            cmp2_opcode,
-            const2_val,
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some((true_count, uncertain_count))
-}
-
-/// Template: count TRUE rows for two already-staged shared-USM columns.
-#[allow(clippy::too_many_arguments)]
-pub fn expr_template_two_pred_and_count_usm(
-    col1: PgaccelExprUsmCol,
-    cmp1_opcode: u16,
-    const1_val: f64,
-    col2: PgaccelExprUsmCol,
-    cmp2_opcode: u16,
-    const2_val: f64,
-    row_count: usize,
-) -> Option<(usize, usize)> {
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: caller guarantees both columns point at shared-USM buffers with
-    // at least row_count elements and matching type tags.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_two_pred_and_count_usm(
-            col1,
-            cmp1_opcode,
-            const1_val,
-            col2,
-            cmp2_opcode,
-            const2_val,
-            row_count,
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some((true_count, uncertain_count))
-}
-
-/// Template: write a `1 = TRUE`, `0 = FALSE/NULL` selection mask for
-/// `col1 <cmp1> const1 AND col2 <cmp2> const2` over shared-USM columns.
-#[allow(clippy::too_many_arguments)]
-pub fn expr_template_two_pred_and_mask_usm(
-    col1: PgaccelExprUsmCol,
-    cmp1_opcode: u16,
-    const1_val: f64,
-    col2: PgaccelExprUsmCol,
-    cmp2_opcode: u16,
-    const2_val: f64,
-    row_count: usize,
-    selection: &mut ExprSharedBuffer<u8>,
-) -> Option<(usize, usize)> {
-    if selection.len() < row_count {
-        return None;
-    }
-
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: caller guarantees both columns and selection point at shared-USM
-    // buffers with at least row_count elements.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_two_pred_and_mask_usm(
-            col1,
-            cmp1_opcode,
-            const1_val,
-            col2,
-            cmp2_opcode,
-            const2_val,
-            row_count,
-            selection.as_mut_ptr(),
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some((true_count, uncertain_count))
-}
-
-/// Template: fuse
-/// `col1 <cmp1> const1 AND col2 <cmp2> const2` with f32 SUM/MIN/MAX/COUNT.
-#[allow(clippy::too_many_arguments)]
-pub fn expr_template_two_pred_and_reduce_f32_usm(
-    col1: PgaccelExprUsmCol,
-    cmp1_opcode: u16,
-    const1_val: f64,
-    col2: PgaccelExprUsmCol,
-    cmp2_opcode: u16,
-    const2_val: f64,
-    value_col: PgaccelExprUsmCol,
-    row_count: usize,
-) -> Option<ExprTemplateReduceF32> {
-    let mut out_sum = 0.0f32;
-    let mut out_min = 0.0f32;
-    let mut out_max = 0.0f32;
-    let mut out_value_count = 0i64;
-    let mut true_count = 0usize;
-    let mut uncertain_count = 0usize;
-
-    // SAFETY: caller guarantees all columns point at shared-USM buffers with
-    // at least row_count elements and matching type tags.
-    let status = unsafe {
-        bridge::pgaccel_expr_template_two_pred_and_reduce_f32_usm(
-            col1,
-            cmp1_opcode,
-            const1_val,
-            col2,
-            cmp2_opcode,
-            const2_val,
-            value_col,
-            row_count,
-            &raw mut out_sum,
-            &raw mut out_min,
-            &raw mut out_max,
-            &raw mut out_value_count,
-            &raw mut true_count,
-            &raw mut uncertain_count,
-        )
-    };
-    status.is_ok().then_some(ExprTemplateReduceF32 {
-        sum: out_sum,
-        min: out_min,
-        max: out_max,
-        value_count: out_value_count,
-        true_count,
-        uncertain_count,
-    })
 }
 
 #[cfg(test)]

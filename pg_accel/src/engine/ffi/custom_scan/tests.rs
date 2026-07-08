@@ -6,12 +6,9 @@ use super::*;
 
 use crate::engine::cost;
 use crate::engine::executor::agg::H3_LATLNG_GROUP_KEY_TYPE;
-use crate::engine::executor::agg::ffi_bridge::agg_op_to_ffi;
-use crate::engine::executor::agg::values::oid_to_val_tag;
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::ResidentProofSnapshot;
-use crate::gpu::PgaccelAggFunc;
 
 // -----------------------------------------------------------------------
 // GpuStrategy enum — from_i32 conversions
@@ -454,9 +451,6 @@ fn custom_private_data_default_fields() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuSpatial,
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
         hash_inner_attno: 0,
         hash_key_type: 0,
         hash_count_only: false,
@@ -470,9 +464,6 @@ fn custom_private_data_default_fields() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
         olap_agg: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
@@ -481,8 +472,6 @@ fn custom_private_data_default_fields() {
     assert_eq!(data.fn_oid, pg_sys::Oid::INVALID);
     assert_eq!(data.target_attno, 0);
     assert_eq!(data.accel_strategy, AccelStrategy::GpuSpatial);
-    assert!(data.agg_columns.is_empty());
-    assert!(data.group_key.is_none());
     assert_eq!(data.hash_inner_attno, 0);
     assert_eq!(data.hash_key_type, 0);
     assert!(data.window_specs.is_empty());
@@ -491,90 +480,6 @@ fn custom_private_data_default_fields() {
 // -----------------------------------------------------------------------
 // CustomPrivateData — aggregate column storage
 // -----------------------------------------------------------------------
-
-#[test]
-fn custom_private_data_with_agg_columns() {
-    let data = CustomPrivateData {
-        gpu_strategy: GpuStrategy::Agg,
-        batch_size: 1024,
-        fn_oid: pg_sys::Oid::INVALID,
-        target_attno: 0,
-        accel_strategy: AccelStrategy::GpuReduce,
-        agg_columns: vec![
-            (AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32()),
-            (AggOp::Count, 0, pg_sys::INT8OID.to_u32()),
-            (AggOp::Min, 2, pg_sys::FLOAT8OID.to_u32()),
-            (AggOp::Max, 2, pg_sys::FLOAT8OID.to_u32()),
-            (AggOp::Avg, 3, pg_sys::FLOAT8OID.to_u32()),
-        ],
-        group_key: None,
-        group_key_tlist_pos: 0,
-        hash_inner_attno: 0,
-        hash_key_type: 0,
-        hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
-        nlj_shape: 0,
-        nlj_key_type: 0,
-        nlj_op: 0,
-        nlj_inner_lo_attno: 0,
-        nlj_inner_hi_attno: 0,
-        window_specs: vec![],
-        window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
-        olap_agg: None,
-        resident_proof: ResidentProofSnapshot::not_proven(),
-    };
-    assert_eq!(data.agg_columns.len(), 5);
-    assert!(matches!(data.agg_columns[0].0, AggOp::Sum));
-    assert!(matches!(data.agg_columns[1].0, AggOp::Count));
-    assert!(matches!(data.agg_columns[2].0, AggOp::Min));
-    assert!(matches!(data.agg_columns[3].0, AggOp::Max));
-    assert!(matches!(data.agg_columns[4].0, AggOp::Avg));
-}
-
-#[test]
-fn custom_private_data_with_group_key() {
-    let gk = GroupKeyInfo {
-        attno: 2,
-        type_oid: pg_sys::Oid::from(23u32), // INT4OID
-        key_type: 0,                        // i32
-    };
-    let data = CustomPrivateData {
-        gpu_strategy: GpuStrategy::Agg,
-        batch_size: 256,
-        fn_oid: pg_sys::Oid::INVALID,
-        target_attno: 0,
-        accel_strategy: AccelStrategy::GpuReduce,
-        agg_columns: vec![(AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32())],
-        group_key: Some(gk),
-        group_key_tlist_pos: 0,
-        hash_inner_attno: 0,
-        hash_key_type: 0,
-        hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
-        nlj_shape: 0,
-        nlj_key_type: 0,
-        nlj_op: 0,
-        nlj_inner_lo_attno: 0,
-        nlj_inner_hi_attno: 0,
-        window_specs: vec![],
-        window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
-        olap_agg: None,
-        resident_proof: ResidentProofSnapshot::not_proven(),
-    };
-    let gk_ref = data.group_key.as_ref().unwrap();
-    assert_eq!(gk_ref.attno, 2);
-    assert_eq!(gk_ref.key_type, 0);
-}
 
 // -----------------------------------------------------------------------
 // CustomPrivateData — hash join fields
@@ -588,9 +493,6 @@ fn custom_private_data_hash_join_fields() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 1,
         accel_strategy: AccelStrategy::GpuHashJoin,
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
         hash_inner_attno: 3,
         hash_key_type: 1, // Int64
         hash_count_only: false,
@@ -604,9 +506,6 @@ fn custom_private_data_hash_join_fields() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
         olap_agg: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
@@ -625,9 +524,6 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 1,
         accel_strategy: AccelStrategy::GpuHashJoin,
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
         hash_inner_attno: 3,
         hash_key_type: 1,
         hash_count_only: false,
@@ -641,9 +537,6 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
         olap_agg: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
@@ -710,9 +603,6 @@ fn custom_private_data_with_window_specs() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuWindow,
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
         hash_inner_attno: 0,
         hash_key_type: 0,
         hash_count_only: false,
@@ -726,9 +616,6 @@ fn custom_private_data_with_window_specs() {
         nlj_inner_hi_attno: 0,
         window_specs: specs,
         window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
         olap_agg: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
@@ -747,9 +634,6 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuSort,
-        agg_columns: vec![],
-        group_key: None,
-        group_key_tlist_pos: 0,
         hash_inner_attno: 0,
         hash_key_type: 0,
         hash_count_only: false,
@@ -763,9 +647,6 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
         olap_agg: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
@@ -1288,261 +1169,9 @@ fn hash_key_type_mapping_matches_begin_custom_scan() {
     assert!(matches!(map(99), PgaccelKeyType::Int32));
 }
 
-// -----------------------------------------------------------------------
-// CustomPrivateData — partial-agg spec field
-// -----------------------------------------------------------------------
-
-#[test]
-fn custom_private_data_partial_none_by_default() {
-    let data = CustomPrivateData {
-        gpu_strategy: GpuStrategy::Agg,
-        batch_size: 256,
-        fn_oid: pg_sys::Oid::INVALID,
-        target_attno: 0,
-        accel_strategy: AccelStrategy::GpuReduce,
-        agg_columns: vec![(AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32())],
-        group_key: None,
-        group_key_tlist_pos: 0,
-        hash_inner_attno: 0,
-        hash_key_type: 0,
-        hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
-        nlj_shape: 0,
-        nlj_key_type: 0,
-        nlj_op: 0,
-        nlj_inner_lo_attno: 0,
-        nlj_inner_hi_attno: 0,
-        window_specs: vec![],
-        window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: None,
-        agg_scan_expr: None,
-        olap_agg: None,
-        resident_proof: ResidentProofSnapshot::not_proven(),
-    };
-    assert!(data.partial.is_none());
-}
-
-#[test]
-fn custom_private_data_partial_some_carries_per_column_spec() {
-    use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-
-    let spec = PartialAggSpec {
-        per_column: vec![
-            PartialColumn {
-                op: AggOp::Sum,
-                attno: 1,
-                transtype_oid: pg_sys::FLOAT8OID,
-                serialize_fn_oid: None,
-            },
-            PartialColumn {
-                op: AggOp::Count,
-                attno: 0,
-                transtype_oid: pg_sys::INT8OID,
-                serialize_fn_oid: None,
-            },
-        ],
-    };
-
-    let data = CustomPrivateData {
-        gpu_strategy: GpuStrategy::Agg,
-        batch_size: 256,
-        fn_oid: pg_sys::Oid::INVALID,
-        target_attno: 0,
-        accel_strategy: AccelStrategy::GpuReduce,
-        agg_columns: vec![
-            (AggOp::Sum, 1, pg_sys::FLOAT8OID.to_u32()),
-            (AggOp::Count, 0, pg_sys::INT8OID.to_u32()),
-        ],
-        group_key: None,
-        group_key_tlist_pos: 0,
-        hash_inner_attno: 0,
-        hash_key_type: 0,
-        hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
-        nlj_shape: 0,
-        nlj_key_type: 0,
-        nlj_op: 0,
-        nlj_inner_lo_attno: 0,
-        nlj_inner_hi_attno: 0,
-        window_specs: vec![],
-        window_scan_relid: 0,
-        self_scan_relid: 0,
-        partial: Some(spec),
-        agg_scan_expr: None,
-        olap_agg: None,
-        resident_proof: ResidentProofSnapshot::not_proven(),
-    };
-    let per = &data.partial.as_ref().unwrap().per_column;
-    assert_eq!(per.len(), 2);
-    assert!(matches!(per[0].op, AggOp::Sum));
-    assert_eq!(per[0].attno, 1);
-    assert_eq!(per[0].transtype_oid, pg_sys::FLOAT8OID);
-    assert!(per[0].serialize_fn_oid.is_none());
-    assert!(matches!(per[1].op, AggOp::Count));
-    assert_eq!(per[1].attno, 0);
-    assert_eq!(per[1].transtype_oid, pg_sys::INT8OID);
-}
-
-#[test]
-fn stale_partial_sum_guard_rejects_internal_transition_state() {
-    assert!(unsupported_partial_sum_transtype(pg_sys::INTERNALOID));
-    assert!(unsupported_partial_sum_transtype(pg_sys::NUMERICOID));
-    assert!(!unsupported_partial_sum_transtype(pg_sys::INT8OID));
-    assert!(!unsupported_partial_sum_transtype(pg_sys::FLOAT8OID));
-}
-
 #[test]
 fn partial_sentinel_is_ascii_paag() {
     // PARTIAL_SENTINEL is `b"PAAG"` packed as a big-endian i32.
     let bytes = 0x5041_4147u32.to_be_bytes();
     assert_eq!(&bytes, b"PAAG");
-}
-
-// The pg_test framework hard-codes its SQL function lookup to
-// `tests."<funcname>"()`. To make our `#[pg_test]` functions resolve under
-// schema `tests`, they must sit inside a `#[pgrx::pg_schema] mod tests`
-// block — the schema name comes from the `pg_schema`-annotated module
-// name. We can't put the annotation on the OUTER `mod tests` (it's
-// already declared in `mod.rs` without the attribute and used as a Rust
-// unit-test mod; adding `#[pg_schema]` there would also try to register
-// every `#[pg_test]` in the file, conflicting with the existing
-// `#[test]` ones). Instead, wrap our pg_tests in a NESTED `mod tests`
-// with the annotation; the SQL schema generator picks up the inner
-// module's name (= `tests`) for the `pg_test` functions inside.
-/// `#[pgrx::pg_schema]`-annotated wrapper for the B5a round-trip tests.
-/// See file-level comment above for why this nested `tests` module exists
-/// (the pg_test framework hard-codes `tests."<funcname>"()` lookups).
-#[cfg(feature = "pg_test")]
-#[pgrx::pg_schema]
-mod tests {
-    use super::*;
-    use pgrx::pg_test;
-
-    /// Agg plan-private layout for grouped partial HashAgg:
-    /// group-key metadata must survive ahead of the PAAG sentinel so
-    /// begin_custom_scan builds `AggExecState::new_grouped`, then attaches
-    /// partial emitters for SUM + AVG/STDDEV-family transition states.
-    #[pg_test]
-    fn agg_grouped_partial_private_layout_roundtrips() {
-        use crate::engine::executor::agg::AggOp;
-        use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-        use crate::engine::registry::AccelStrategy;
-
-        let spec = PartialAggSpec {
-            per_column: vec![
-                PartialColumn {
-                    op: AggOp::Sum,
-                    attno: 2,
-                    transtype_oid: pg_sys::FLOAT8OID,
-                    serialize_fn_oid: None,
-                },
-                PartialColumn {
-                    op: AggOp::Avg,
-                    attno: 2,
-                    transtype_oid: pg_sys::FLOAT8ARRAYOID,
-                    serialize_fn_oid: None,
-                },
-            ],
-        };
-
-        // SAFETY: pg_test runs on the main backend thread with a live PG
-        // memory context; makeInteger/lappend allocate List cells there.
-        let parsed = unsafe {
-            let mut list: *mut pg_sys::List = std::ptr::null_mut();
-            list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Agg as i32).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(256).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(AccelStrategy::GpuReduce as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(AggOp::Sum.to_i32()).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(pg_sys::FLOAT8OID) as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(AggOp::Avg.to_i32()).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(pg_sys::FLOAT8OID) as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has_group_key
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // gk attno
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(pg_sys::INT4OID) as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // int32 key
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // group_key2_attno
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // packed tlist pos
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // self_scan_relid
-            list = append_partial_spec(list, &spec);
-            deserialize_custom_private(list)
-        };
-
-        let gk = parsed.group_key.as_ref().expect("group key");
-        assert_eq!(gk.attno, 1);
-        assert_eq!(gk.type_oid, pg_sys::INT4OID);
-        assert_eq!(gk.key_type, 0);
-        assert_eq!(parsed.group_key_tlist_pos, 0);
-        assert_eq!(parsed.self_scan_relid, 0);
-        let partial = parsed.partial.as_ref().expect("partial spec");
-        assert_eq!(partial.per_column.len(), 2);
-        assert!(matches!(partial.per_column[0].op, AggOp::Sum));
-        assert_eq!(partial.per_column[0].transtype_oid, pg_sys::FLOAT8OID);
-        assert!(matches!(partial.per_column[1].op, AggOp::Avg));
-        assert_eq!(partial.per_column[1].transtype_oid, pg_sys::FLOAT8ARRAYOID);
-    }
-
-    #[pg_test]
-    fn agg_private_decode_preserves_h3_packed_group_key_tlist_and_resolution() {
-        let parsed = unsafe {
-            let mut list: *mut pg_sys::List = std::ptr::null_mut();
-            list = pg_sys::lappend(list, pg_sys::makeInteger(GpuStrategy::Agg as i32).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(256).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(AccelStrategy::GpuReduce as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // agg_count
-            list = pg_sys::lappend(list, pg_sys::makeInteger(AggOp::Count.to_i32()).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(pg_sys::INT8OID) as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast()); // has_group_key
-            list = pg_sys::lappend(list, pg_sys::makeInteger(2).cast()); // source point attno
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(u32::from(pg_sys::INT8OID) as i32).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(H3_LATLNG_GROUP_KEY_TYPE).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // group_key2_attno
-            list = pg_sys::lappend(list, pg_sys::makeInteger(2 | (9 << 16)).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(42).cast()); // self_scan_relid
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast()); // is_partial=false
-            deserialize_custom_private(list)
-        };
-
-        let gk = parsed.group_key.as_ref().expect("H3 group key");
-        assert_eq!(gk.attno, 2);
-        assert_eq!(gk.key_type, H3_LATLNG_GROUP_KEY_TYPE);
-        assert_eq!(parsed.group_key_tlist_pos, 2 | (9 << 16));
-        assert_eq!(parsed.self_scan_relid, 42);
-        assert!(parsed.partial.is_none());
-    }
 }

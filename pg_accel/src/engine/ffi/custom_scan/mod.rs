@@ -19,7 +19,6 @@ use super::super::gucs;
 use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo, is_h3_synthetic_group_key};
 use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::scan::ScanExecState;
-use crate::engine::executor::vectorized_scan::VectorizedScan;
 use crate::engine::executor::window::{
     WINDOW_SPEC_INTS, WindowExecState, WindowFunc, WindowFuncSpec,
 };
@@ -57,10 +56,6 @@ pub use private_data::{
     SRF_TARGET_LIST_SENTINEL, SrfTargetListPrivData, append_srf_target_list_priv,
     deserialize_srf_target_list_priv,
 };
-
-unsafe fn relation_uses_heap_am(rel: pg_sys::Relation) -> bool {
-    !rel.is_null() && unsafe { (*rel).rd_tableam == pg_sys::GetHeapamTableAmRoutine() }
-}
 
 // ---------------------------------------------------------------------------
 // FunctionScan output-shape discriminants
@@ -790,65 +785,6 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
     cscan.cast()
 }
 
-/// Build per-column [`PartialEmitter`]s from a [`PartialAggSpec`].
-///
-/// Selects the correct concrete emitter for each op/transtype pair:
-/// - `COUNT(*)` / `COUNT(x)` → `CountEmitter` (int8)
-/// - `SUM(int4)` → `IntegerSumPromotion` (int8)
-/// - `SUM(int8)` / `SUM(numeric)` → rejected by the planner; if a stale
-///   plan reaches execution, raise an ERROR before PG sees a bad transition
-///   Datum.
-/// - `SUM(float4)` / `SUM(float8)` / `MIN` / `MAX` with scalar transtype →
-///   `ScalarPassthrough`
-/// - `AVG` / STDDEV / VAR with INTERNAL transtype → `Float8StatsEmitter`
-///   (requires `serialize_fn_oid`)
-fn build_partial_emitters(
-    spec: &crate::engine::executor::agg::partial::PartialAggSpec,
-) -> Vec<Box<dyn crate::engine::executor::agg::partial::PartialEmitter>> {
-    use crate::engine::executor::agg::partial::PartialEmitter;
-    use crate::engine::executor::agg::partial::emitter::{
-        CountEmitter, Float8StatsEmitter, IntegerSumPromotion, ScalarPassthrough,
-    };
-
-    let mut out: Vec<Box<dyn PartialEmitter>> = Vec::with_capacity(spec.per_column.len());
-    for col in &spec.per_column {
-        let emitter: Box<dyn PartialEmitter> = match col.op {
-            AggOp::Count => Box::new(CountEmitter),
-            AggOp::Sum if col.transtype_oid == pg_sys::INT8OID => Box::new(IntegerSumPromotion),
-            AggOp::Sum if unsupported_partial_sum_transtype(col.transtype_oid) => {
-                pgrx::error!(
-                    "pg_accel: partial SUM(bigint/numeric) is not supported; planner should \
-                     have declined this path before executor init"
-                );
-            }
-            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop => {
-                // Float8StatsEmitter handles both transtype shapes:
-                //  - INTERNAL transtype (numeric_accum, int8_accum) → serialize_fn
-                //    wraps the float8[3] in a bytea, aggtype=BYTEAOID.
-                //  - `_float8` transtype (float4_accum, float8_accum) → no
-                //    serialize fn, emits the float8[3] array directly,
-                //    aggtype=`_float8`.
-                // In both cases the TupleDesc type (set by mark_partial_aggref)
-                // matches the emitter output type.
-                let ser = col.serialize_fn_oid.unwrap_or(pg_sys::InvalidOid);
-                Box::new(Float8StatsEmitter {
-                    serialize_fn_oid: ser,
-                })
-            }
-            _ => Box::new(ScalarPassthrough {
-                transtype: col.transtype_oid,
-            }),
-        };
-        out.push(emitter);
-    }
-    out
-}
-
-#[must_use]
-fn unsupported_partial_sum_transtype(transtype_oid: pg_sys::Oid) -> bool {
-    transtype_oid == pg_sys::NUMERICOID || transtype_oid == pg_sys::INTERNALOID
-}
-
 /// Convert a window `CustomPath` into a `CustomScan` plan node.
 ///
 /// Reads window function specs from the path's `custom_private` and
@@ -1394,9 +1330,7 @@ unsafe fn make_custom_scan_plan(
         // GpuSort was retired: no planner path-creator serializes it anymore.
         // Fail loudly if a stale path payload still carries it.
         if accel_strategy_raw == AccelStrategy::GpuSort as c_int {
-            pgrx::error!(
-                "pg_accel: GpuSort strategy retired; planner must not create sort paths"
-            );
+            pgrx::error!("pg_accel: GpuSort strategy retired; planner must not create sort paths");
         }
         let strategy = if is_scan {
             GpuStrategy::Scan as c_int
@@ -2574,227 +2508,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         (*state).accel.executor = if privdata.gpu_strategy == GpuStrategy::PreAgg {
             // GpuPreAgg retired: no planner path-creator emits it and the
             // private-data reader rejects PreAgg payloads before this point.
-            pgrx::error!(
-                "pg_accel: GpuPreAgg strategy retired; no planner path-creator emits it"
-            );
+            pgrx::error!("pg_accel: GpuPreAgg strategy retired; no planner path-creator emits it");
         } else if privdata.gpu_strategy == GpuStrategy::Agg {
-            let mut exec = if let Some(olap_spec) = privdata.olap_agg {
-                pgrx::debug1!("pg_accel: begin_custom_scan: resident OLAP Agg");
-                Box::new(AggExecState::new_olap(olap_spec))
-            } else if let Some(gk) = privdata.group_key {
-                pgrx::debug1!(
-                    "pg_accel: begin_custom_scan: GroupedAgg, {} aggs, group attno={}, partial={}",
-                    privdata.agg_columns.len(),
-                    gk.attno,
-                    privdata.partial.is_some(),
+            // Only the resident OLAP aggregate survives: the planner path
+            // creator (resident_groupagg_path.rs) always serializes an OLAP
+            // spec. Host-staged grouped/ungrouped/fused/vectorized agg
+            // executors were retired with their planner injectors.
+            let Some(olap_spec) = privdata.olap_agg else {
+                pgrx::error!(
+                    "pg_accel: non-resident GpuAgg retired; plan carries no OLAP agg spec"
                 );
-                Box::new(AggExecState::new_grouped(
-                    AccelStrategy::GpuReduce,
-                    batch_size,
-                    &privdata.agg_columns,
-                    gk,
-                    privdata.group_key_tlist_pos,
-                ))
-            } else {
-                pgrx::debug1!(
-                    "pg_accel: begin_custom_scan: Agg strategy, {} columns, partial={}",
-                    privdata.agg_columns.len(),
-                    privdata.partial.is_some(),
-                );
-                Box::new(AggExecState::new_with_types(
-                    AccelStrategy::GpuReduce,
-                    batch_size,
-                    &privdata.agg_columns,
-                ))
             };
-            // Build per-column emitters for partial (worker-side) paths.
-            if let Some(ref spec) = privdata.partial {
-                exec.partial_emitters = Some(build_partial_emitters(spec));
-                exec.enable_full_stats_for_avg();
-                if !(*node).ss.ps.plan.is_null() && (*(*node).ss.ps.plan).parallel_aware {
-                    exec.set_fused_count_participants_hint(
-                        pg_sys::max_parallel_workers_per_gather.max(1) as usize,
-                    );
-                }
-            }
-
-            // Vectorized/fused self-scan: if self_scan_relid is set, open a
-            // heap scan on the base table. Aggregate scan expressions use
-            // fused template-count mode; plain self-scans use VectorizedScan.
-            let mut agg_self_scan_opened = false;
-            if privdata.self_scan_relid > 0 {
-                let estate = (*node).ss.ps.state;
-                let mut rel: pg_sys::Relation = std::ptr::null_mut();
-                let mut rel_source = "custom scan relation";
-                // Guard: the RTE must be a real heap relation. Non-relation
-                // RTEs (function, VALUES, CTE, subquery) passed to
-                // ExecOpenScanRelation raise ERROR → panic → SIGABRT.
-                if (*node).ss.ss_currentRelation.is_null() {
-                    let rt_entry = pg_sys::exec_rt_fetch(privdata.self_scan_relid, estate);
-                    if !rt_entry.is_null()
-                        && (*rt_entry).rtekind == pg_sys::RTEKind::RTE_RELATION
-                        && (*rt_entry).relid != pg_sys::InvalidOid
-                    {
-                        // SAFETY: estate is valid; self_scan_relid references a
-                        // valid RTE_RELATION range table entry set by the planner.
-                        rel =
-                            pg_sys::ExecOpenScanRelation(estate, privdata.self_scan_relid, eflags);
-                        rel_source = "range table";
-                    }
-                } else {
-                    rel = (*node).ss.ss_currentRelation;
-                }
-                if rel.is_null() {
-                    // Wrapper queries can shift range-table indexes by the
-                    // time execution starts. The child SeqScanState already
-                    // owns the same base relation, so borrow its Relation
-                    // descriptor for our independent TableScanDesc.
-                    let custom_ps = (*node).custom_ps;
-                    if !custom_ps.is_null() && pg_sys::list_length(custom_ps) > 0 {
-                        let child_ps = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
-                        if !child_ps.is_null()
-                            && (*child_ps.cast::<pg_sys::Node>()).type_
-                                == pg_sys::NodeTag::T_SeqScanState
-                        {
-                            rel = (*child_ps.cast::<pg_sys::SeqScanState>())
-                                .ss
-                                .ss_currentRelation;
-                            rel_source = "child SeqScan";
-                        }
-                    }
-                }
-                if !rel.is_null() {
-                    if !relation_uses_heap_am(rel) {
-                        pgrx::error!(
-                            "pg_accel: fused aggregate heap fast path requires the heap table \
-                             access method"
-                        );
-                    }
-                    if let Some(scan_expr) = privdata.agg_scan_expr.clone() {
-                        exec.set_pending_fused_context(scan_expr, Vec::new());
-                        if !(*(*node).ss.ps.plan).parallel_aware {
-                            let snap = (*estate).es_snapshot;
-                            // SAFETY: rel and snap are valid; main backend thread.
-                            let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-                            exec.attach_owned_fused_scan_desc(sd);
-                            agg_self_scan_opened = true;
-                        }
-                    } else {
-                        let snap = (*estate).es_snapshot;
-                        // SAFETY: rel and snap are valid; main backend thread.
-                        let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
-                        // SAFETY: sd is a valid, open TableScanDesc.
-                        let vscan = VectorizedScan::new(sd);
-                        exec.set_vscan(vscan);
-                        agg_self_scan_opened = true;
-                    }
-                    pgrx::debug1!(
-                        "pg_accel: begin_custom_scan: Agg self-scan on relid {} via {}, fused_expr={}",
-                        privdata.self_scan_relid,
-                        rel_source,
-                        privdata.agg_scan_expr.is_some(),
-                    );
-                }
-            }
-            if !agg_self_scan_opened
-                && let Some(gk) = exec.group_key_info()
-                && is_h3_synthetic_group_key(gk.key_type)
-            {
-                let projected_attno = ((privdata.group_key_tlist_pos & 0xffff) + 1) as i32;
-                exec.set_group_key_source(projected_attno, 1);
-                pgrx::debug1!(
-                    "pg_accel: begin_custom_scan: H3 grouped agg using child-projected key attno {} as int64",
-                    projected_attno,
-                );
-            }
-
-            // Pipeline fusion: if the child is a GpuExpr scan with a direct
-            // heap scan and a compiled template expression, the agg can walk
-            // the heap itself and extract aggregate columns directly from
-            // HeapTuples — skipping ExecProcNode, MinimalTuple copy, and
-            // slot deformation entirely.
-            if !exec.is_grouped() {
-                let custom_ps = (*node).custom_ps;
-                if !custom_ps.is_null() && pg_sys::list_length(custom_ps) > 0 {
-                    // SAFETY: custom_ps[0] is a valid PlanState — the child
-                    // Custom Scan node initialised by ExecInitNode.
-                    let child_ps = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
-                    // Verify the child is actually a CustomScanState with our
-                    // exec methods before casting to GpuAccelScanState. Without
-                    // this check, a SeqScan child would be misinterpreted as
-                    // our extended state, reading garbage memory.
-                    if !child_ps.is_null()
-                        && (*child_ps.cast::<pg_sys::Node>()).type_
-                            == pg_sys::NodeTag::T_CustomScanState
-                    {
-                        let child_css = child_ps.cast::<pg_sys::CustomScanState>();
-                        // SAFETY: child_css is a valid CustomScanState (tag
-                        // verified above). Only proceed if it uses our exec
-                        // methods vtable.
-                        if (*child_css).methods == &raw const EXEC_METHODS.0 {
-                            let child_state = child_css.cast::<GpuAccelScanState>();
-                            let child_strategy = GpuStrategy::decode((*child_state).accel.strategy);
-                            if child_strategy == GpuStrategy::Scan {
-                                let child_exec_ptr = (*child_state).accel.executor;
-                                if !child_exec_ptr.is_null() {
-                                    // SAFETY: child executor was allocated as
-                                    // ScanExecState in the Scan branch of
-                                    // begin_custom_scan.
-                                    let child_scan = &*child_exec_ptr.cast::<ScanExecState>();
-                                    let sd = child_scan.scan_desc();
-                                    if !sd.is_null() && child_scan.has_template_expr() {
-                                        let compiled = child_scan.compiled_expr();
-                                        // Build attno map: child scan output position →
-                                        // base table attno. The child's plan target list
-                                        // entries are Vars referencing the base table.
-                                        let mut attno_map = Vec::new();
-                                        let child_plan = (*child_ps).plan;
-                                        if !child_plan.is_null() {
-                                            let tlist = (*child_plan).targetlist;
-                                            if !tlist.is_null() {
-                                                let n = pg_sys::list_length(tlist);
-                                                for j in 0..n {
-                                                    let tle = pg_sys::list_nth(tlist, j)
-                                                        .cast::<pg_sys::TargetEntry>();
-                                                    if !tle.is_null() {
-                                                        let expr = (*tle).expr;
-                                                        if !expr.is_null() {
-                                                            let tag = (*expr
-                                                                .cast::<pg_sys::Node>())
-                                                            .type_;
-                                                            if tag == pg_sys::NodeTag::T_Var {
-                                                                let var =
-                                                                    expr.cast::<pg_sys::Var>();
-                                                                attno_map.push(i32::from(
-                                                                    (*var).varattno,
-                                                                ));
-                                                                continue;
-                                                            }
-                                                        }
-                                                    }
-                                                    // Non-Var entry: use 1-based identity.
-                                                    attno_map.push(j + 1);
-                                                }
-                                            }
-                                        }
-                                        pgrx::debug1!(
-                                            "pg_accel: pipeline fusion attno_map={:?}",
-                                            attno_map,
-                                        );
-                                        exec.set_fused_context(sd, compiled, attno_map);
-                                        pgrx::debug1!(
-                                            "pg_accel: begin_custom_scan: \
-                                         pipeline fusion scan+agg activated",
-                                        );
-                                    }
-                                }
-                            }
-                        } // methods check
-                    }
-                }
-            }
-
-            Box::into_raw(exec).cast()
+            pgrx::debug1!("pg_accel: begin_custom_scan: resident OLAP Agg");
+            Box::into_raw(Box::new(AggExecState::new_olap(olap_spec))).cast()
         } else if privdata.accel_strategy == AccelStrategy::GpuHashJoin {
             // Hash join: create a JoinExecState with hash join context.
             if let Some(reason) = privdata.hash_join_validation_error() {
@@ -2938,9 +2664,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 
             Box::into_raw(exec).cast()
         } else if privdata.gpu_strategy == GpuStrategy::Sort {
-            pgrx::error!(
-                "pg_accel: GpuSort strategy retired; no planner path-creator emits it"
-            );
+            pgrx::error!("pg_accel: GpuSort strategy retired; no planner path-creator emits it");
         } else {
             // Use fn_oid + target_attno + accel_strategy from custom_private
             // (serialized by the planner hook). Fall back to qual discovery
@@ -3240,12 +2964,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     // tuple than plan.targetlist. ExecInitCustomScan builds pi_state for
     // this map; GpuExpr reaches this path after the GPU predicate has
     // selected rows, with PostgreSQL's CPU qual cleared.
-    if !result.is_null()
-        && matches!(
-            gpu_strategy,
-            GpuStrategy::Scan | GpuStrategy::Window
-        )
-    {
+    if !result.is_null() && matches!(gpu_strategy, GpuStrategy::Scan | GpuStrategy::Window) {
         // SAFETY: node is a valid CustomScanState; proj_info may be null
         // when scan slot schema already matches output.
         let proj_info = unsafe { (*node).ss.ps.ps_ProjInfo };
@@ -3308,22 +3027,8 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     );
                 } else if gpu_strategy == GpuStrategy::Agg {
                     // SAFETY: executor was Box::into_raw'd as AggExecState.
+                    // The resident OLAP agg owns no heap scan descriptors.
                     let agg = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
-                    // End the vectorized heap scan if one was started.
-                    if agg.has_vscan() {
-                        let sd = agg.vscan_scan_desc();
-                        if !sd.is_null() {
-                            // SAFETY: sd was created by table_beginscan in
-                            // begin_custom_scan; main backend thread.
-                            pg_sys::table_endscan(sd);
-                        }
-                    }
-                    let fused_sd = agg.owned_fused_scan_desc();
-                    if !fused_sd.is_null() {
-                        // SAFETY: sd was created by table_beginscan(_parallel)
-                        // for this aggregate executor; main backend thread.
-                        pg_sys::table_endscan(fused_sd);
-                    }
                     drop(agg);
                 } else if gpu_strategy == GpuStrategy::Window {
                     // SAFETY: executor was Box::into_raw'd as WindowExecState.
@@ -3412,54 +3117,23 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
         }
 
         if gpu_strategy == GpuStrategy::Agg {
-            // Rescan: rebuild the executor from scratch but preserve agg
-            // descriptors and group-key info. Partial emitters are thrown away
-            // and not rebuilt here — rescan of a partial-agg path (worker-side
-            // of a Gather) is not a path the planner exercises.
-            let (old_descs, old_group_key, old_olap) = if (*state).accel.executor.is_null() {
-                (vec![], None, None)
+            // Rescan: rebuild the resident OLAP executor from its spec. Only
+            // the resident OLAP agg survives — begin_custom_scan rejects any
+            // Agg plan without an OLAP spec before an executor can exist.
+            let old_olap = if (*state).accel.executor.is_null() {
+                None
             } else {
                 // SAFETY: executor was Box::into_raw'd as AggExecState.
                 let old = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
                 (*state).accel.executor = std::ptr::null_mut();
-                let fused_scan_desc = old.owned_fused_scan_desc();
-                if !fused_scan_desc.is_null() {
-                    pg_sys::table_endscan(fused_scan_desc);
-                }
-                if old.is_fused {
-                    pgrx::error!(
-                        "pg_accel: fused aggregate rescan is not supported; refusing to rebuild \
-                         scan state without the original fused context"
-                    );
-                }
-                let descs = old.agg_descs();
-                let gk = old.group_key_info().cloned();
-                let olap = old.olap_spec();
-                (descs, gk, olap)
+                old.olap_spec()
             };
-            let exec = if let Some(olap) = old_olap {
-                Box::new(AggExecState::new_olap(olap))
-            } else {
-                old_group_key.map_or_else(
-                    || {
-                        Box::new(AggExecState::new_with_types(
-                            AccelStrategy::GpuReduce,
-                            batch_size,
-                            &old_descs,
-                        ))
-                    },
-                    |gk| {
-                        Box::new(AggExecState::new_grouped(
-                            AccelStrategy::GpuReduce,
-                            batch_size,
-                            &old_descs,
-                            gk,
-                            0, // rescan: use default position
-                        ))
-                    },
-                )
+            let Some(olap) = old_olap else {
+                pgrx::error!(
+                    "pg_accel: non-resident GpuAgg retired; rescan found no OLAP agg spec"
+                );
             };
-            (*state).accel.executor = Box::into_raw(exec).cast();
+            (*state).accel.executor = Box::into_raw(Box::new(AggExecState::new_olap(olap))).cast();
         } else if gpu_strategy == GpuStrategy::Sort {
             // GpuSort retired: begin_custom_scan errors before an executor
             // can be allocated, so rescan can never see this strategy.
@@ -3589,7 +3263,6 @@ pub(super) unsafe fn list_int_at(list: *mut pg_sys::List, idx: c_int) -> c_int {
     // `ival` field directly — `intVal` is a C macro, not exported.
     unsafe { (*node.cast::<pg_sys::Integer>()).ival }
 }
-
 
 #[cfg(feature = "pg_test")]
 mod tests;

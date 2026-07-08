@@ -77,37 +77,6 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
     status.is_ok().then_some(parents)
 }
 
-/// GPU-accelerated bulk H3 parent-cell grouped COUNT(*).
-///
-/// Computes `h3_cell_to_parent(cell, parent_res)` for each input cell on the
-/// device, then feeds the parent keys directly into the device i64 hash-count
-/// aggregate.
-pub fn h3_cell_to_parent_count_bulk(cells: &[u64], parent_res: i32) -> Option<HashAggResult> {
-    if cells.is_empty() {
-        return None;
-    }
-
-    let mut state: *mut PgaccelAggState = std::ptr::null_mut();
-    let status = unsafe {
-        bridge::pgaccel_h3_cell_to_parent_count_bulk(
-            cells.as_ptr(),
-            cells.len(),
-            parent_res,
-            std::ptr::addr_of_mut!(state),
-        )
-    };
-    if !status.is_ok() {
-        if !state.is_null() {
-            // SAFETY: state was allocated by the C++ hashagg layer.
-            unsafe { bridge::pgaccel_agg_free(state) };
-        }
-        return None;
-    }
-
-    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
-    unsafe { HashAggResult::from_raw(state) }
-}
-
 /// GPU-resident H3 parent-cell grouped COUNT(*).
 ///
 /// The input cells live in device memory owned by the resident OLAP cache.
@@ -209,84 +178,6 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
         }
     }
     Some(cell_ids)
-}
-
-/// GPU-accelerated bulk H3 lat/lng grouped COUNT(*).
-///
-/// Converts each input point to an H3 cell and returns a normal hash
-/// aggregation state whose group keys are H3 cell IDs and whose first result
-/// column contains COUNT(*).
-pub fn h3_lat_lng_count_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> Option<HashAggResult> {
-    let count = lats.len().min(lngs.len());
-    if count == 0 {
-        return None;
-    }
-
-    let mut state: *mut PgaccelAggState = std::ptr::null_mut();
-    let status = unsafe {
-        bridge::pgaccel_h3_lat_lng_count_bulk(
-            lats.as_ptr(),
-            lngs.as_ptr(),
-            count,
-            resolution,
-            std::ptr::addr_of_mut!(state),
-        )
-    };
-    if !status.is_ok() {
-        if !state.is_null() {
-            // SAFETY: state was allocated by the C++ hashagg layer.
-            unsafe { bridge::pgaccel_agg_free(state) };
-        }
-        return None;
-    }
-
-    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
-    unsafe { HashAggResult::from_raw(state) }
-}
-
-/// GPU-accelerated bulk H3 lat/lng grouped COUNT(*) with pre-staged f32
-/// coordinates and f64 originals reserved for exact boundary fixups.
-pub fn h3_lat_lng_count_bulk_f32_exact(
-    lats_f32: &[f32],
-    lngs_f32: &[f32],
-    lats_exact: &[f64],
-    lngs_exact: &[f64],
-    resolution: i32,
-) -> Option<HashAggResult> {
-    let count = lats_f32
-        .len()
-        .min(lngs_f32.len())
-        .min(lats_exact.len())
-        .min(lngs_exact.len());
-    if count == 0 {
-        return None;
-    }
-    if resolution >= 8 {
-        return h3_lat_lng_count_bulk(lats_exact, lngs_exact, resolution);
-    }
-
-    let mut state: *mut PgaccelAggState = std::ptr::null_mut();
-    let status = unsafe {
-        bridge::pgaccel_h3_lat_lng_count_bulk_f32_exact(
-            lats_f32.as_ptr(),
-            lngs_f32.as_ptr(),
-            lats_exact.as_ptr(),
-            lngs_exact.as_ptr(),
-            count,
-            resolution,
-            std::ptr::addr_of_mut!(state),
-        )
-    };
-    if !status.is_ok() {
-        if !state.is_null() {
-            // SAFETY: state was allocated by the C++ hashagg layer.
-            unsafe { bridge::pgaccel_agg_free(state) };
-        }
-        return None;
-    }
-
-    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
-    unsafe { HashAggResult::from_raw(state) }
 }
 
 /// GPU-resident H3 lat/lng grouped COUNT(*).

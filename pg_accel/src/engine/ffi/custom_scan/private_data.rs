@@ -528,13 +528,11 @@ mod typed_private_tests {
         let payload = PlanPayloadReader::new(&fields);
 
         assert_eq!(payload.agg_count(), 1);
-        assert_eq!(payload.agg_columns(1).len(), 1);
-        let (group_key, group_key_tlist_pos) = payload.agg_group_key(1);
-        let group_key = group_key.expect("H3 group key should decode");
-        assert_eq!(group_key.attno, 2);
-        assert_eq!(group_key.type_oid, pg_sys::INT8OID);
-        assert_eq!(group_key.key_type, H3_LATLNG_GROUP_KEY_TYPE);
-        assert_eq!(group_key_tlist_pos, packed_tlist_pos as usize);
+        // The trailer walker must still skip the full group-key block
+        // (has_gk + 5 ints, tlist pos packed with the H3 resolution) to land
+        // on self_scan_relid — that offset math is what keeps the OLAP
+        // trailer reachable for the surviving resident agg decode.
+        let _ = packed_tlist_pos;
         let (self_scan_relid, agg_scan_expr, partial, olap) =
             payload.agg_self_scan_relid_and_trailers(1);
         assert_eq!(self_scan_relid, 42);
@@ -736,14 +734,6 @@ pub(super) struct CustomPrivateData {
     pub(super) fn_oid: pg_sys::Oid,
     pub(super) target_attno: i32,
     pub(super) accel_strategy: AccelStrategy,
-    /// Aggregate column descriptors `(AggOp, attno, result_type_oid)`.
-    /// Only meaningful when `gpu_strategy == Agg`.
-    pub(super) agg_columns: Vec<(AggOp, i32, u32)>,
-    /// Group key info for grouped aggregation.
-    /// Only meaningful when `gpu_strategy == Agg` and GROUP BY is present.
-    pub(super) group_key: Option<GroupKeyInfo>,
-    /// 0-based position of group key in the output target list.
-    pub(super) group_key_tlist_pos: usize,
     /// Inner relation join key attno (1-based). Only for `GpuHashJoin`.
     pub(super) hash_inner_attno: i32,
     /// Key type for hash join (0=i32, 1=i64, 2=f64). Only for `GpuHashJoin`.
@@ -773,18 +763,6 @@ pub(super) struct CustomPrivateData {
     /// Scan relation index for direct heap scan (Window vectorized path).
     /// 0 means use child plan; > 0 means open this relation directly.
     pub(super) window_scan_relid: pg_sys::Index,
-    /// Base relation index for self-scanning (vectorized pipeline).
-    /// When > 0, the executor opens its own heap scan instead of pulling
-    /// tuples through ExecProcNode. Used by Agg and Sort strategies.
-    pub(super) self_scan_relid: u32,
-    /// Partial-aggregate spec (worker-side of a Gather plan). `Some` means the
-    /// executor emits transition-state tuples instead of final aggregate values.
-    /// `None` on non-parallel paths. Only meaningful when `gpu_strategy == Agg`.
-    pub(super) partial: Option<PartialAggSpec>,
-    /// Optional scan predicate for aggregate self-scan plans. Used by the
-    /// parallel fused `COUNT(*) WHERE template_predicate` path so the
-    /// aggregate owns a parallel table scan and applies the predicate on GPU.
-    pub(super) agg_scan_expr: Option<CompiledExpr>,
     /// Optional resident OLAP aggregate payload. Only meaningful for
     /// `gpu_strategy == Agg`; executor must not pull a child plan in this mode.
     pub(super) olap_agg: Option<OlapAggSpec>,
@@ -870,57 +848,6 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     #[must_use]
     fn agg_count(&self) -> usize {
         self.fields.int_at(Self::AGG_COUNT) as usize
-    }
-
-    #[must_use]
-    fn agg_columns(&self, count: usize) -> Vec<(AggOp, i32, u32)> {
-        let mut columns = Vec::with_capacity(count);
-        for agg_index in 0..count {
-            let offset = Self::AGGS + agg_index * 3;
-            if !self.fields.contains_range(offset, 3) {
-                break;
-            }
-            let mut agg = self.fields.cursor_at(offset);
-            let op_raw = agg.read_int();
-            let Some(op) = AggOp::from_i32(op_raw) else {
-                pgrx::error!("pg_accel: invalid aggregate op tag {op_raw}");
-            };
-            columns.push((op, agg.read_int(), agg.read_u32()));
-        }
-        columns
-    }
-
-    #[must_use]
-    fn agg_group_key(&self, agg_count: usize) -> (Option<GroupKeyInfo>, usize) {
-        let group_key_base = Self::AGGS + agg_count * 3;
-        let Some(has_group_key) = self.fields.get(group_key_base) else {
-            return (None, 0);
-        };
-        if has_group_key == 0 || !self.fields.contains_range(group_key_base + 1, 5) {
-            return (None, 0);
-        }
-
-        let mut group_key = self.fields.cursor_at(group_key_base + 1);
-        let attno = group_key.read_int();
-        let type_oid = group_key.read_oid();
-        let key_type = group_key.read_int();
-        let _group_key2_attno = group_key.read_int();
-        let tlist_pos = group_key.read_int();
-
-        if attno > 0
-            && (matches!(key_type, 0 | 1 | 2 | 4 | 5) || is_h3_synthetic_group_key(key_type))
-        {
-            (
-                Some(GroupKeyInfo {
-                    attno,
-                    type_oid,
-                    key_type,
-                }),
-                tlist_pos as usize,
-            )
-        } else {
-            (None, 0)
-        }
     }
 
     #[must_use]
@@ -1112,27 +1039,16 @@ pub(super) unsafe fn deserialize_custom_private(
         pgrx::error!("pg_accel: GpuSort strategy retired; refusing to decode a Sort plan payload");
     }
 
-    // For Agg strategy, read aggregate column descriptors starting at index 6.
+    // For Agg strategy, read the aggregate descriptor count at index 6. The
+    // count is still load-bearing for wire offsets: the OLAP trailer that the
+    // resident agg executor consumes sits after the descriptor + group-key
+    // blocks. The descriptors/group-key themselves fed only the retired
+    // host-staged agg executors and are no longer materialized.
     // Layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...]
     let agg_count = if matches!(gpu_strategy, GpuStrategy::Agg) {
         payload.agg_count()
     } else {
         0
-    };
-    let agg_columns = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        payload.agg_columns(agg_count)
-    } else {
-        vec![]
-    };
-
-    // For Agg strategy, read optional group key info after agg descriptors.
-    // Layout:
-    //   [...agg descs..., has_group_key,
-    //    gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos, self_scan_relid]
-    let (group_key, group_key_tlist_pos) = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        payload.agg_group_key(agg_count)
-    } else {
-        (None, 0)
     };
 
     // For Window strategy, read window function specs starting at index 6.
@@ -1176,22 +1092,23 @@ pub(super) unsafe fn deserialize_custom_private(
             (0, 0, 0, 0, 0)
         };
 
-    // For Agg strategy, find `self_scan_relid` (immediately follows the
-    // group-key block) and optionally a PartialAggSpec sentinel block.
+    // For Agg strategy, walk past `self_scan_relid` (immediately after the
+    // group-key block) to the sentinel trailers and keep the OLAP spec — the
+    // only trailer the surviving resident agg executor consumes. The scan-expr
+    // and partial trailers fed retired host-staged executors; they are still
+    // parsed for wire compatibility but discarded.
     //
     // Layout (Agg):
     //   [..., num_aggs, (op,attno,rtype)*N,
     //    has_gk, (gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)?,
-    //    self_scan_relid,
-    //    (PARTIAL_SENTINEL, n_cols, (op,attno,transtype_oid,serialize_fn_oid)*n_cols)?]
-    //
-    // The partial block is optional: non-parallel plans omit it entirely.
-    let (self_scan_relid, agg_scan_expr, partial, olap_agg) =
-        if matches!(gpu_strategy, GpuStrategy::Agg) {
-            payload.agg_self_scan_relid_and_trailers(agg_count)
-        } else {
-            (0, None, None, None)
-        };
+    //    self_scan_relid, sentinel trailers...]
+    let olap_agg = if matches!(gpu_strategy, GpuStrategy::Agg) {
+        let (_self_scan_relid, _agg_scan_expr, _partial, olap_agg) =
+            payload.agg_self_scan_relid_and_trailers(agg_count);
+        olap_agg
+    } else {
+        None
+    };
 
     CustomPrivateData {
         gpu_strategy,
@@ -1199,9 +1116,6 @@ pub(super) unsafe fn deserialize_custom_private(
         fn_oid,
         target_attno,
         accel_strategy,
-        agg_columns,
-        group_key,
-        group_key_tlist_pos,
         hash_inner_attno,
         hash_key_type,
         hash_count_only,
@@ -1215,9 +1129,6 @@ pub(super) unsafe fn deserialize_custom_private(
         nlj_inner_hi_attno,
         window_specs,
         window_scan_relid,
-        self_scan_relid,
-        partial,
-        agg_scan_expr,
         olap_agg,
         resident_proof,
     }

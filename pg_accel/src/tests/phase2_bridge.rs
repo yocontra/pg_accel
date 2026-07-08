@@ -23,9 +23,9 @@ use std::mem::{align_of, offset_of, size_of};
 
 use crate::gpu::bridge::convert_status;
 use crate::gpu::{
-    GpuFailureDomain, PgaccelAggCol, PgaccelBatch, PgaccelExprInst, PgaccelExprInstruction,
-    PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeometry, PgaccelReclassRule, PgaccelReduceCol,
-    PgaccelStatus, PgaccelVal, kernel_failure_count, unknown_status_count,
+    GpuFailureDomain, PgaccelBatch, PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram,
+    PgaccelExprUsmCol, PgaccelGeometry, PgaccelReclassRule, PgaccelStatus, PgaccelVal,
+    kernel_failure_count, unknown_status_count,
 };
 
 // ---------------------------------------------------------------------------
@@ -236,24 +236,6 @@ fn pgaccel_geometry_layout_matches_pgaccel_ffi_h() {
     assert_eq!(offset_of!(PgaccelGeometry, coord_count), 24);
     assert_eq!(offset_of!(PgaccelGeometry, ring_offsets), 32);
     assert_eq!(offset_of!(PgaccelGeometry, ring_count), 40);
-}
-
-#[cfg(target_pointer_width = "64")]
-#[test]
-fn pgaccel_agg_col_layout_matches_pgaccel_hash_agg_h() {
-    // pgaccel_hash_agg.h: pgaccel_agg_func func (4) + pad(4) + size_t col_idx.
-    assert_eq!(size_of::<PgaccelAggCol>(), 16);
-    assert_eq!(offset_of!(PgaccelAggCol, func), 0);
-    assert_eq!(offset_of!(PgaccelAggCol, col_idx), 8);
-}
-
-#[cfg(target_pointer_width = "64")]
-#[test]
-fn pgaccel_reduce_col_layout_matches_pgaccel_fused_h() {
-    // pgaccel_fused.h: int op (4) + pad(4) + const float* data.
-    assert_eq!(size_of::<PgaccelReduceCol>(), 16);
-    assert_eq!(offset_of!(PgaccelReduceCol, op), 0);
-    assert_eq!(offset_of!(PgaccelReduceCol, data), 8);
 }
 
 #[cfg(target_pointer_width = "64")]

@@ -1,61 +1,38 @@
-//! Batch-dispatch aggregate executor for pg_accel Custom Scan nodes.
+//! Resident OLAP aggregate executor for pg_accel Custom Scan nodes.
 //!
-//! [`AggExecState`] accumulates input tuples in batches and dispatches
-//! them through the GPU reduction pipeline (for `GpuReduce` strategy)
-//! or performs batched CPU aggregation.
-//!
-//! # Supported aggregates
-//!
-//! - `SUM`, `AVG`, `MIN`, `MAX`, `COUNT` via `GpuReduce` strategy.
-//! - Falls back to passthrough for unsupported aggregate types.
+//! [`AggExecState`] adapts the device-resident OLAP aggregate executor
+//! (`executor/olap.rs`) to the Custom Scan FFI layer. It is the only
+//! surviving aggregate executor: `begin_custom_scan` rejects any Agg plan
+//! that does not carry a resident OLAP spec.
 //!
 //! # Lifecycle
 //!
-//! 1. **`begin_custom_scan`** — allocates `AggExecState`.
-//! 2. **`exec_custom_scan`** (repeated) — consumes ALL input, produces
-//!    a single aggregate result tuple.
+//! 1. **`begin_custom_scan`** — allocates `AggExecState` from the plan's
+//!    OLAP spec.
+//! 2. **`exec_custom_scan`** (repeated) — dispatches the resident OLAP
+//!    aggregate and emits result tuples.
 //! 3. **`end_custom_scan`** — reclaims via `Box::from_raw`.
 
 mod execute;
-pub(crate) mod ffi_bridge;
 mod keys;
 mod ops;
 pub mod partial;
-pub(crate) mod values;
-
-#[cfg(feature = "pg_test")]
-mod tests;
 
 pub use execute::AggExecState;
 pub use keys::{
     GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, H3_PARENT_GROUP_KEY_TYPE, is_h3_synthetic_group_key,
 };
 pub use ops::AggOp;
-pub use partial::{ColumnAccumulator, PartialAggSpec, PartialColumn, PartialEmitter};
+pub use partial::{PartialAggSpec, PartialColumn};
 
 use pgrx::pg_sys;
 
 impl crate::engine::executor::state::ExecutorState for AggExecState {
     unsafe fn exec(&mut self, css: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
         let scan_slot = unsafe { (*css).ss.ss_ScanTupleSlot };
-        let result = if self.has_olap() {
-            unsafe { self.next_olap(scan_slot) }
-        } else if self.has_vscan() {
-            if self.is_grouped() {
-                unsafe { self.next_grouped_vectorized(scan_slot) }
-            } else {
-                unsafe { self.next_vectorized(scan_slot) }
-            }
-        } else if self.is_fused {
-            unsafe { self.next_fused(scan_slot) }
-        } else {
-            let child_ps = unsafe { crate::engine::executor::state::child_plan_state(css, 0) };
-            if self.is_grouped() {
-                unsafe { self.next_grouped(child_ps, scan_slot) }
-            } else {
-                unsafe { self.next(child_ps, scan_slot) }
-            }
-        };
+        // Only the resident OLAP aggregate survives; begin_custom_scan rejects
+        // any Agg plan without an OLAP spec before an executor can exist.
+        let result = unsafe { self.next_olap(scan_slot) };
         if result.is_null() {
             unsafe { pg_sys::ExecClearTuple(scan_slot) };
             return scan_slot;

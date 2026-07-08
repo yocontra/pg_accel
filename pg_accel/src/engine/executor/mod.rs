@@ -21,7 +21,6 @@ pub mod scan;
 pub mod sort;
 pub(crate) mod state;
 pub mod tuple;
-pub mod vectorized_scan;
 pub mod window;
 
 pub use metrics::ExecMetrics;
