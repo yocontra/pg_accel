@@ -2064,14 +2064,13 @@ kernels dispatched, and which rows returned to PostgreSQL.
   (`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:690-697`,
   `:1313-1450`); executor materializes all input tuples, sends only key
   vectors to GPU, then reorders/trims host `MinimalTuple`s and emits through
-  PostgreSQL slots (`pg_accel/src/engine/executor/sort/mod.rs:121-124`,
-  `:403-491`, `:679-761`). Work: make sort consume and produce GPU batch
+  PostgreSQL slots (the deleted sort executor). Work: make sort consume and produce GPU batch
   handles, keep payload columns on device, implement GPU gather/top-k payload
   compaction, and decline standalone heap `ORDER BY` until final transfer is
   bounded and winning.
 - `GpuAgg` / `GpuReduce`: not pure GPU. Non-grouped agg drains child tuples and
   builds host value vectors before GPU reduce
-  (`pg_accel/src/engine/executor/agg/execute.rs:1365-1538`); grouped paths use
+  (`pg_accel/src/engine/executor/agg/execute.rs (deleted in the 2026-07 Phase 3 demolition)-1538`); grouped paths use
   direct heap/slot scans and host key/value/null buffers before
   `gpu::hash_agg_execute` (`:1976-2204`, `:3030-3204`); grouped emit reads GPU
   handles into PostgreSQL tuples one group at a time (`:2874-2970`). H3 bulk is
@@ -2113,9 +2112,8 @@ kernels dispatched, and which rows returned to PostgreSQL.
 - `GpuPreAgg`: not pure GPU and not active from normal upper planning. The
   executor materializes dimension tables into host `HashMap`s and scans/probes
   fact rows through `ExecProcNode`/materialized slots
-  (`pg_accel/src/engine/executor/preagg/mod.rs:6-10`, `:117-127`,
-  `:241-378`, `:460-744`); partial preagg scaffolds explicitly avoid CPU child
-  wrappers (`pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:5-30`),
+  (the deleted preagg executor); partial preagg scaffolds explicitly avoid CPU child
+  wrappers (`preagg_partial.rs` (deleted in the 2026-07 Phase 3 demolition)),
   and normal upper planning does not call serial PreAgg until the child is
   GPU-resident (`pg_accel/src/engine/ffi/planner_hooks/mod.rs:203-207`).
   Work: device dimension hash tables, GPU fact scan/probe/filter/grouping, GPU
@@ -2127,10 +2125,10 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `:409-575`, `:577-760`). Work: GPU-resident partition/order metadata,
   segmented kernels, batch-boundary frame state, and downstream GPU batch
   handoff; parallel windows need partition-aware worker ownership
-  (`pg_accel/src/engine/ffi/planner_hooks/window.rs:7-13`).
+  (`planner_hooks/window.rs` (deleted in the 2026-07 Phase 3 demolition)).
 - `GpuFunctionScan`: not a pure GPU pipeline. The legacy path dispatches
   registered SRFs once, but only for constant arguments
-  (`pg_accel/src/engine/ffi/planner_hooks/projectset.rs:23-27`), buffers
+  (`planner_hooks/projectset.rs` (deleted in the 2026-07 Phase 3 demolition)), buffers
   emitted host `Datum`s (`pg_accel/src/engine/ffi/custom_scan/function_scan.rs:35-68`),
   and drains rows through PostgreSQL slots one at a time (`:337-452`). Work:
   keep normal SQL admission behind `no_gpu_resident_pipeline`, produce GPU
@@ -2139,10 +2137,10 @@ kernels dispatched, and which rows returned to PostgreSQL.
 - `GpuAccelSrfTargetList`: not pure GPU. It wraps a `ProjectSet` child, drives
   it through `ExecProcNode`, dispatches the SRF per input batch, and emits every
   expanded row as a PostgreSQL tuple
-  (`pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs:60-84`,
+  (`srf_target_list.rs` (deleted in the 2026-07 Phase 3 demolition),
   `pg_accel/src/engine/ffi/custom_scan/srf_target_list.rs:321-453`,
   `:475-519`). Large outputs are capped because CPU materialization dominates
-  (`pg_accel/src/engine/ffi/planner_hooks/srf_target_list.rs:520-528`).
+  (`srf_target_list.rs` (deleted in the 2026-07 Phase 3 demolition)).
   Normal SQL admission is now held behind `no_gpu_resident_pipeline`. Work:
   batched variable-output SRF kernels with row-id/offset tables on GPU,
   GPU-resident downstream aggregate/sort consumers, and multi-SRF ProjectSet
@@ -2151,10 +2149,10 @@ kernels dispatched, and which rows returned to PostgreSQL.
   `GpuSort`, partial `GpuHashJoin`, and partial aggregate scaffolds currently
   wrap PostgreSQL partial children or duplicate per-worker host work unless the
   child is already GPU-producing
-  (`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:1313-1450`,
-  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:1121-1255`,
-  `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:406-417`,
-  `pg_accel/src/engine/ffi/planner_hooks/preagg_partial.rs:16-30`). Partition
+  (`rel_pathlist.rs` (section removed in the 2026-07 Phase 3 demolition),
+  `join_pathlist.rs` (section removed in the 2026-07 Phase 3 demolition),
+  `partial_agg.rs` (deleted in the 2026-07 Phase 3 demolition),
+  `preagg_partial.rs` (deleted in the 2026-07 Phase 3 demolition)). Partition
   children can receive per-child scan paths, but there is no GPU-resident
   append/merge batch operator; PostgreSQL combines child outputs on CPU. Work:
   only select partial paths when child input and inter-worker state are
@@ -2333,7 +2331,7 @@ previously-known crash families are gated at the planner or kernel layer:
   to all four hashagg kernel lambdas
   (`pgaccel-kernels/src/hash_agg.cpp:393-805`); sort-based path
   Metal-gated off (`hash_agg.cpp:331-334`); grouped `AVG` finalize
-  preemptively rejected (`pg_accel/src/engine/executor/agg/execute.rs:1303-1310`).
+  preemptively rejected (host-staged finalize path (deleted in the 2026-07 Phase 3 demolition)).
 - Hash join Metal host-pointer probe crashes — host-pointer SYCL probe path
   deleted; kernel is a fail-closed stub
   (`pgaccel-kernels/src/hash_join.cpp:14-46`); planner gate at
@@ -2343,9 +2341,9 @@ previously-known crash families are gated at the planner or kernel layer:
   (`pgaccel-kernels/src/spatial_dispatch.cpp:295-622`); cold-fork
   regression coverage in `pgaccel-kernels/test/test_fork_cold.cpp:233-264`.
 - Parallel partial `SUM(bigint)` reduce worker crash — planner gate at
-  `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:46-56`
+  `partial_agg.rs` (deleted in the 2026-07 Phase 3 demolition)
   (`parallel_partial_sum_bigint_rejected`) and mirror in
-  `preagg_partial.rs:378-402`.
+  `preagg_partial.rs` (deleted in the 2026-07 Phase 3 demolition).
 - Broad generic `GpuExpr` scan exposure — the 2026-06-09 live plan-shape
   filter found that an earlier selected `GpuAccelScan`/`GpuExpr` path for
   `count(*) FROM bench_gpuexpr_direct_gate WHERE val > ... AND category < ...`
@@ -2742,7 +2740,7 @@ window work.
 - Work: fix grouped `AVG` finalize. Either route grouped `AVG`
   through partial-mode always (kernel already emits `[N, sum]` lanes
   at `hash_agg.cpp:911-920`), or extend `emit_grouped_tuple`
-  (`execute.rs:2477`) to read the per-group counts buffer
+  (the deleted host-staged grouped emit path) to read the per-group counts buffer
   (`gr.result.counts()`, `hash_agg.cpp:67`) and divide.
 - Work: remove the planner gate and the 4096-group cap only after
   the new kernel benchmarks well at 1M/10M for

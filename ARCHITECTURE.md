@@ -255,8 +255,7 @@ and `1.0` where fp64 is native) is threaded through every planner site via
 | Scan paths  | `pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:220-221` |
 | HashJoin    | `pg_accel/src/engine/ffi/planner_hooks/hashjoin.rs:43-49, :64, :74` |
 | Window      | `pg_accel/src/engine/ffi/planner_hooks/mod.rs:591-597` |
-| Partial agg | `pg_accel/src/engine/ffi/planner_hooks/partial_agg.rs:268-277` |
-| Full agg    | `pg_accel/src/engine/ffi/planner_hooks/mod.rs:2077` |
+| Full agg    | `pg_accel/src/engine/ffi/planner_hooks/mod.rs` (resident recognizer waterfall) |
 
 ## Thread Model
 
@@ -417,8 +416,7 @@ raise `uncertain`, and the planner chooses fp64 when the input column is
 `float8` (applying the `soft_fp64_cost_multiplier` on non-native-fp64 devices).
 
 **PredicateChain for late materialization.** Predicates are sorted by
-`selectivity / cost` (lower is better,
-`pg_accel/src/engine/dispatch/predicate_chain.rs:33-90`). A cheap bbox
+`selectivity / cost` (lower is better; the standalone `predicate_chain` module was removed with the host-staged pipeline in the 2026-07 demolition — late materialization returns with the resident spatial lanes). A cheap bbox
 overlap test that eliminates most rows runs before expensive geometry
 deserialization. Rows rejected early never touch the GPU at all.
 
