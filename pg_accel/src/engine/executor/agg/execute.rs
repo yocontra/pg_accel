@@ -20,6 +20,17 @@ struct DescriptorAggExecState {
     residency: Option<DescriptorResidencyReport>,
 }
 
+fn merge_residency_report(
+    current: &mut Option<DescriptorResidencyReport>,
+    latest: DescriptorResidencyReport,
+) {
+    if let Some(current) = current {
+        current.merge(latest);
+    } else {
+        *current = Some(latest);
+    }
+}
+
 /// Rust-side aggregate executor state shared by the legacy OLAP and neutral
 /// descriptor contracts. Both modes are childless and read only resident data.
 pub struct AggExecState {
@@ -185,7 +196,7 @@ impl AggExecState {
                             "pg_accel: generic aggregate rescan preparation failed ({error}); refusing CPU fallback"
                         )
                     });
-                    descriptor.residency = Some(residency);
+                    merge_residency_report(&mut descriptor.residency, residency);
                 }
             }
         }
@@ -231,11 +242,7 @@ impl AggExecState {
                     self.batches_executed = 1;
                     self.gpu_dispatched = true;
                     if let Some(latest) = dispatch.residency {
-                        if let Some(initial) = &mut descriptor.residency {
-                            initial.merge(latest);
-                        } else {
-                            descriptor.residency = Some(latest);
-                        }
+                        merge_residency_report(&mut descriptor.residency, latest);
                     }
                     descriptor.output = Some(dispatch.output);
                 }
@@ -250,5 +257,45 @@ impl AggExecState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(
+        outcome: ArtifactEnsureOutcome,
+        relid: u32,
+        raw_load_ms: f64,
+        preparation_time_us: u64,
+    ) -> DescriptorResidencyReport {
+        DescriptorResidencyReport {
+            artifact_outcome: outcome,
+            relations: Vec::new(),
+            loaded_relations: vec![pg_sys::Oid::from(relid)],
+            artifact_bytes: u64::from(relid),
+            raw_load_ms,
+            preparation_time_us,
+        }
+    }
+
+    #[test]
+    fn rescan_residency_accounting_preserves_first_use_costs() {
+        let mut accumulated = Some(report(ArtifactEnsureOutcome::Built, 10, 4.25, 6_000));
+        merge_residency_report(
+            &mut accumulated,
+            report(ArtifactEnsureOutcome::Hit, 20, 1.75, 2_000),
+        );
+
+        let accumulated = accumulated.expect("merged residency report");
+        assert_eq!(accumulated.artifact_outcome, ArtifactEnsureOutcome::Built);
+        assert_eq!(
+            accumulated.loaded_relations,
+            [pg_sys::Oid::from(10_u32), pg_sys::Oid::from(20_u32)]
+        );
+        assert_eq!(accumulated.raw_load_ms, 6.0);
+        assert_eq!(accumulated.preparation_time_us, 8_000);
+        assert_eq!(accumulated.artifact_bytes, 20);
     }
 }
