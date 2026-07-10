@@ -18,7 +18,14 @@ use crate::engine::executor::olap::{
 };
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::registry::AccelStrategy;
-use crate::engine::residency::ResidentProofSnapshot;
+use crate::engine::residency::{
+    ArtifactEnsureOutcome, ResidentProofSnapshot, ResidentRelationEvidence,
+};
+use crate::engine::spec::{
+    AggOutputProjection, AggOutputSource, AggQuerySpec, AggregateKind, AggregateSource,
+    BinaryMeasureOp, FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity, MaskKind,
+    MeasureExpr,
+};
 
 use super::private_data::{RESIDENT_PROOF_VERSION, resident_proof_default_for_strategy};
 
@@ -80,6 +87,7 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
         if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {
             let agg_state = &*(*state).accel.executor.cast::<AggExecState>();
             explain_resident_groupagg_logical_spec(agg_state, es);
+            explain_descriptor_agg(agg_state, es);
         }
         pg_sys::ExplainPropertyInteger(
             c"GPU Resident Stage Mask".as_ptr(),
@@ -226,6 +234,25 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     agg_state.gpu_dispatched,
                     es,
                 );
+                if agg_state.descriptor_contract().is_some() {
+                    pg_sys::ExplainPropertyFloat(
+                        c"Raw Relation Load Time".as_ptr(),
+                        c"ms".as_ptr(),
+                        agg_state.descriptor_raw_load_ms().unwrap_or(0.0),
+                        3,
+                        es,
+                    );
+                    #[allow(clippy::cast_precision_loss)]
+                    let preparation_ms =
+                        agg_state.descriptor_preparation_time_us().unwrap_or(0) as f64 / 1000.0;
+                    pg_sys::ExplainPropertyFloat(
+                        c"Total Residency Preparation Time".as_ptr(),
+                        c"ms".as_ptr(),
+                        preparation_ms,
+                        3,
+                        es,
+                    );
+                }
             }
 
             if strategy == GpuStrategy::Join && !(*state).accel.executor.is_null() {
@@ -421,6 +448,357 @@ unsafe fn explain_resident_operator_class(
     };
     unsafe {
         pg_sys::ExplainPropertyText(c"GPU Resident Operator Class".as_ptr(), label.as_ptr(), es);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DescriptorExplainSummary {
+    strategy: &'static str,
+    group_keys: String,
+    aggregates: String,
+    filter: String,
+    star_dimensions: String,
+    output: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DescriptorResidencySummary {
+    state: String,
+    artifact: String,
+    generations: String,
+    bytes: String,
+}
+
+fn descriptor_explain_summary(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> DescriptorExplainSummary {
+    let strategy = if spec.group_keys.is_empty() {
+        "descriptor_ungrouped_aggregate"
+    } else {
+        "descriptor_grouped_aggregate"
+    };
+    let group_keys = format_or_none(spec.group_keys.iter().enumerate().map(|(index, key)| {
+        format!(
+            "k{index}:{} type={} collation={} encoding={}",
+            group_key_source_summary(&key.source),
+            key.type_oid,
+            key.collation_oid,
+            group_key_encoding_summary(key.encoding)
+        )
+    }));
+    let aggregates = format_or_none(spec.measures.iter().enumerate().map(|(index, measure)| {
+        let outputs = format_or_none(measure.outputs.iter().map(|output| {
+            format!(
+                "{}.{}",
+                aggregate_source_label(output.source),
+                aggregate_kind_label(output.kind)
+            )
+        }));
+        format!(
+            "m{index}:{} -> {outputs}",
+            measure_expr_summary(&measure.expression)
+        )
+    }));
+    let measure_filters = format_or_none(
+        spec.measures
+            .iter()
+            .enumerate()
+            .map(|(index, measure)| format!("m{index}={}", filter_summary(&measure.filter))),
+    );
+    let dimension_filters = format_or_none(
+        spec.star_dims
+            .iter()
+            .enumerate()
+            .map(|(index, dimension)| format!("d{index}={}", filter_summary(&dimension.filter))),
+    );
+    let filter = format!(
+        "fact={}; measures=[{measure_filters}]; dimensions=[{dimension_filters}]",
+        filter_summary(&spec.fact_filter)
+    );
+    let star_dimensions =
+        format_or_none(spec.star_dims.iter().enumerate().map(|(index, dimension)| {
+            format!(
+                "d{index}:rel={} join={}<->{} collation={} multiplicity={} filter={}",
+                dimension.relation_oid,
+                column_summary(dimension.fact_key),
+                column_summary(dimension.dim_key),
+                dimension.collation_oid,
+                join_multiplicity_label(dimension.multiplicity),
+                filter_summary(&dimension.filter)
+            )
+        }));
+    let output = format_or_none(projection.slots.iter().enumerate().map(|(index, slot)| {
+        let source = match slot.source {
+            AggOutputSource::GroupKey { key_index } => format!("group[k{key_index}]"),
+            AggOutputSource::Aggregate {
+                measure_index,
+                source,
+                kind,
+            } => format!(
+                "aggregate[m{measure_index}].{}.{}",
+                aggregate_source_label(source),
+                aggregate_kind_label(kind)
+            ),
+        };
+        format!(
+            "slot{index}:{source} source_type={} result_type={} typmod={} collation={} nullable={}",
+            slot.source_type_oid,
+            slot.result_type_oid,
+            slot.result_typmod,
+            slot.result_collation_oid,
+            slot.nullable
+        )
+    }));
+    DescriptorExplainSummary {
+        strategy,
+        group_keys,
+        aggregates,
+        filter,
+        star_dimensions,
+        output,
+    }
+}
+
+fn descriptor_residency_summary(
+    evidence: Option<&[ResidentRelationEvidence]>,
+    loaded_relations: Option<&[pg_sys::Oid]>,
+    artifact_outcome: Option<ArtifactEnsureOutcome>,
+    artifact_bytes: Option<u64>,
+) -> DescriptorResidencySummary {
+    let Some(evidence) = evidence else {
+        return DescriptorResidencySummary {
+            state: "not initialized (EXPLAIN ONLY)".to_owned(),
+            artifact: "not initialized".to_owned(),
+            generations: "not inspected".to_owned(),
+            bytes: "not inspected".to_owned(),
+        };
+    };
+    let raw_bytes = evidence.iter().fold(0_u64, |total, relation| {
+        total.saturating_add(relation.raw_bytes)
+    });
+    let derived_bytes = evidence.iter().fold(0_u64, |total, relation| {
+        total.saturating_add(relation.derived_bytes)
+    });
+    let total_bytes = raw_bytes.saturating_add(derived_bytes);
+    let generations = format_or_none(evidence.iter().map(|relation| {
+        format!(
+            "rel={} generation={} global={} relfilenode={}",
+            u32::from(relation.relid),
+            relation.generation,
+            relation.global_generation,
+            u32::from(relation.relfilenode)
+        )
+    }));
+    let loaded_relations = loaded_relations.unwrap_or_default();
+    let loaded = format_or_none(
+        loaded_relations
+            .iter()
+            .map(|relid| u32::from(*relid).to_string()),
+    );
+    DescriptorResidencySummary {
+        state: format!(
+            "resident ({} relations; loaded/reloaded={loaded})",
+            evidence.len()
+        ),
+        artifact: artifact_outcome.map_or_else(
+            || "unknown".to_owned(),
+            |outcome| artifact_ensure_outcome_label(outcome).to_owned(),
+        ),
+        generations,
+        bytes: format!(
+            "raw={raw_bytes} derived={derived_bytes} artifact={} total={total_bytes}",
+            artifact_bytes.unwrap_or(0)
+        ),
+    }
+}
+
+fn format_or_none(values: impl Iterator<Item = String>) -> String {
+    let values = values.collect::<Vec<_>>();
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join("; ")
+    }
+}
+
+fn column_summary(column: crate::engine::spec::ColumnRef) -> String {
+    format!(
+        "{}.{}:type={}",
+        column.relation_oid, column.attno, column.type_oid
+    )
+}
+
+fn group_key_source_summary(source: &GroupKeySource) -> String {
+    match source {
+        GroupKeySource::FactColumn(column) => format!("fact({})", column_summary(*column)),
+        GroupKeySource::StarDimension {
+            dim_index,
+            group_column,
+        } => format!("dimension[{dim_index}]({})", column_summary(*group_column)),
+        GroupKeySource::Expression { inputs, program } => format!(
+            "expression(inputs={}, words={})",
+            inputs.len(),
+            program.len()
+        ),
+        GroupKeySource::H3Cell { input, resolution } => {
+            format!("h3({}, resolution={resolution})", column_summary(*input))
+        }
+    }
+}
+
+fn group_key_encoding_summary(encoding: GroupKeyEncoding) -> String {
+    match encoding {
+        GroupKeyEncoding::DenseI32 {
+            code_min,
+            cardinality,
+            null_code,
+        } => format!(
+            "dense_i32(min={code_min}, cardinality={cardinality}, null={})",
+            optional_i32_label(null_code)
+        ),
+        GroupKeyEncoding::DictionaryI32 {
+            cardinality,
+            null_code,
+        } => format!(
+            "dictionary_i32(cardinality={cardinality}, null={})",
+            optional_i32_label(null_code)
+        ),
+        GroupKeyEncoding::Hash => "hash".to_owned(),
+    }
+}
+
+fn optional_i32_label(value: Option<i32>) -> String {
+    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+}
+
+fn measure_expr_summary(expression: &MeasureExpr) -> String {
+    match expression {
+        MeasureExpr::CountStar => "count_star".to_owned(),
+        MeasureExpr::Column(column) => format!("column({})", column_summary(*column)),
+        MeasureExpr::Binary { op, lhs, rhs } => format!(
+            "{}({}, {})",
+            binary_measure_op_label(*op),
+            column_summary(*lhs),
+            column_summary(*rhs)
+        ),
+        MeasureExpr::StatsPair { value, rhs } => format!(
+            "stats_pair({}, {})",
+            column_summary(*value),
+            column_summary(*rhs)
+        ),
+        MeasureExpr::Bytecode {
+            inputs,
+            program,
+            result_type_oid,
+        } => format!(
+            "bytecode(inputs={}, words={}, result_type={result_type_oid})",
+            inputs.len(),
+            program.len()
+        ),
+    }
+}
+
+const fn binary_measure_op_label(op: BinaryMeasureOp) -> &'static str {
+    match op {
+        BinaryMeasureOp::Mul => "mul",
+        BinaryMeasureOp::Sub => "sub",
+    }
+}
+
+const fn aggregate_source_label(source: AggregateSource) -> &'static str {
+    match source {
+        AggregateSource::Value => "value",
+        AggregateSource::Rhs => "rhs",
+    }
+}
+
+const fn aggregate_kind_label(kind: AggregateKind) -> &'static str {
+    match kind {
+        AggregateKind::Sum => "sum",
+        AggregateKind::Count => "count",
+        AggregateKind::Min => "min",
+        AggregateKind::Max => "max",
+        AggregateKind::Avg => "avg",
+        AggregateKind::StddevSamp => "stddev_samp",
+    }
+}
+
+fn filter_summary(filter: &FilterSpec) -> String {
+    match filter {
+        FilterSpec::None => "none".to_owned(),
+        FilterSpec::Ranges { input, ranges } => format!(
+            "ranges(input={}, count={})",
+            column_summary(*input),
+            ranges.len()
+        ),
+        FilterSpec::Mask { input, kind } => format!(
+            "{}_mask(input={})",
+            mask_kind_label(*kind),
+            column_summary(*input)
+        ),
+        FilterSpec::Bytecode { inputs, program } => {
+            format!("bytecode(inputs={}, words={})", inputs.len(), program.len())
+        }
+        FilterSpec::Spatial {
+            function_oid,
+            distance,
+            ..
+        } => format!(
+            "spatial(function={function_oid}, distance={})",
+            distance.is_some()
+        ),
+    }
+}
+
+const fn mask_kind_label(kind: MaskKind) -> &'static str {
+    match kind {
+        MaskKind::Sql => "sql",
+        MaskKind::Recheck => "recheck",
+    }
+}
+
+const fn join_multiplicity_label(multiplicity: JoinMultiplicity) -> &'static str {
+    match multiplicity {
+        JoinMultiplicity::Unique => "unique",
+        JoinMultiplicity::Counted => "counted",
+    }
+}
+
+const fn artifact_ensure_outcome_label(outcome: ArtifactEnsureOutcome) -> &'static str {
+    match outcome {
+        ArtifactEnsureOutcome::Hit => "hit",
+        ArtifactEnsureOutcome::Built => "built",
+        ArtifactEnsureOutcome::Rebuilt => "rebuilt",
+    }
+}
+
+unsafe fn explain_descriptor_agg(agg_state: &AggExecState, es: *mut pg_sys::ExplainState) {
+    let Some((spec, projection)) = agg_state.descriptor_contract() else {
+        return;
+    };
+    let logical = descriptor_explain_summary(spec, projection);
+    let residency = descriptor_residency_summary(
+        agg_state.descriptor_residency_evidence(),
+        agg_state.descriptor_loaded_relations(),
+        agg_state.descriptor_artifact_outcome(),
+        agg_state.descriptor_artifact_bytes(),
+    );
+    for (name, value) in [
+        (c"GPU Descriptor Strategy", logical.strategy.to_owned()),
+        (c"GPU Descriptor Group Keys", logical.group_keys),
+        (c"GPU Descriptor Aggregates", logical.aggregates),
+        (c"GPU Descriptor Filter", logical.filter),
+        (c"GPU Descriptor Star Dimensions", logical.star_dimensions),
+        (c"GPU Descriptor Output", logical.output),
+        (c"GPU Descriptor Residency State", residency.state),
+        (c"GPU Descriptor Artifact", residency.artifact),
+        (c"GPU Descriptor Generations", residency.generations),
+        (c"GPU Descriptor Bytes", residency.bytes),
+    ] {
+        let value = CString::new(value).expect("descriptor EXPLAIN values never contain NUL");
+        // SAFETY: name and value are live C strings; `es` is PostgreSQL-owned.
+        unsafe { pg_sys::ExplainPropertyText(name.as_ptr(), value.as_ptr(), es) };
     }
 }
 
@@ -667,8 +1045,204 @@ const fn resident_groupagg_predicate_source_label(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::executor::agg::AggOp;
     use crate::engine::registry::AccelStrategy;
+    use crate::engine::spec::{
+        AggOutputSlot, AggregateOutput, ColumnRef, DimSpec, GroupKeyRef, MeasureSpec, ScalarRange,
+        ScalarValue,
+    };
+
+    fn descriptor_contract() -> (AggQuerySpec, AggOutputProjection) {
+        let fact_column = |attno, type_oid| ColumnRef {
+            relation_oid: 10,
+            attno,
+            type_oid,
+        };
+        let dim_column = |attno, type_oid| ColumnRef {
+            relation_oid: 20,
+            attno,
+            type_oid,
+        };
+        (
+            AggQuerySpec {
+                fact_rel: 10,
+                group_keys: vec![GroupKeyRef {
+                    source: GroupKeySource::StarDimension {
+                        dim_index: 0,
+                        group_column: dim_column(3, 25),
+                    },
+                    type_oid: 25,
+                    collation_oid: 100,
+                    encoding: GroupKeyEncoding::Hash,
+                }],
+                measures: vec![MeasureSpec {
+                    expression: MeasureExpr::Column(fact_column(4, 23)),
+                    outputs: vec![
+                        AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Sum,
+                        },
+                        AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Count,
+                        },
+                    ],
+                    filter: FilterSpec::None,
+                }],
+                fact_filter: FilterSpec::Ranges {
+                    input: fact_column(5, 23),
+                    ranges: vec![ScalarRange {
+                        lo: ScalarValue::I32(1),
+                        hi: ScalarValue::I32(9),
+                    }],
+                },
+                star_dims: vec![DimSpec {
+                    relation_oid: 20,
+                    fact_key: fact_column(2, 23),
+                    dim_key: dim_column(1, 23),
+                    collation_oid: 0,
+                    multiplicity: JoinMultiplicity::Counted,
+                    filter: FilterSpec::Mask {
+                        input: dim_column(4, 16),
+                        kind: MaskKind::Sql,
+                    },
+                }],
+                having: None,
+            },
+            AggOutputProjection {
+                slots: vec![
+                    AggOutputSlot {
+                        source: AggOutputSource::GroupKey { key_index: 0 },
+                        source_type_oid: 25,
+                        result_type_oid: 25,
+                        result_typmod: -1,
+                        result_collation_oid: 100,
+                        nullable: true,
+                    },
+                    AggOutputSlot {
+                        source: AggOutputSource::Aggregate {
+                            measure_index: 0,
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Sum,
+                        },
+                        source_type_oid: 23,
+                        result_type_oid: 20,
+                        result_typmod: -1,
+                        result_collation_oid: 0,
+                        nullable: true,
+                    },
+                    AggOutputSlot {
+                        source: AggOutputSource::Aggregate {
+                            measure_index: 0,
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Count,
+                        },
+                        source_type_oid: 23,
+                        result_type_oid: 20,
+                        result_typmod: -1,
+                        result_collation_oid: 0,
+                        nullable: false,
+                    },
+                ],
+            },
+        )
+    }
+
+    #[test]
+    fn descriptor_logical_and_output_summaries_are_stable() {
+        let (spec, projection) = descriptor_contract();
+        let summary = descriptor_explain_summary(&spec, &projection);
+        assert_eq!(summary.strategy, "descriptor_grouped_aggregate");
+        assert_eq!(
+            summary.group_keys,
+            "k0:dimension[0](20.3:type=25) type=25 collation=100 encoding=hash"
+        );
+        assert_eq!(
+            summary.aggregates,
+            "m0:column(10.4:type=23) -> value.sum; value.count"
+        );
+        assert_eq!(
+            summary.filter,
+            "fact=ranges(input=10.5:type=23, count=1); measures=[m0=none]; dimensions=[d0=sql_mask(input=20.4:type=16)]"
+        );
+        assert_eq!(
+            summary.star_dimensions,
+            "d0:rel=20 join=10.2:type=23<->20.1:type=23 collation=0 multiplicity=counted filter=sql_mask(input=20.4:type=16)"
+        );
+        assert_eq!(
+            summary.output,
+            "slot0:group[k0] source_type=25 result_type=25 typmod=-1 collation=100 nullable=true; slot1:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot2:aggregate[m0].value.count source_type=23 result_type=20 typmod=-1 collation=0 nullable=false"
+        );
+    }
+
+    #[test]
+    fn descriptor_ungrouped_strategy_and_empty_shape_labels_are_stable() {
+        let (mut spec, mut projection) = descriptor_contract();
+        spec.group_keys.clear();
+        spec.star_dims.clear();
+        spec.fact_filter = FilterSpec::None;
+        projection.slots.remove(0);
+        let summary = descriptor_explain_summary(&spec, &projection);
+        assert_eq!(summary.strategy, "descriptor_ungrouped_aggregate");
+        assert_eq!(summary.group_keys, "none");
+        assert_eq!(summary.star_dimensions, "none");
+        assert_eq!(
+            summary.filter,
+            "fact=none; measures=[m0=none]; dimensions=[none]"
+        );
+    }
+
+    #[test]
+    fn descriptor_residency_summary_reports_exact_generations_and_charges() {
+        let evidence = [
+            ResidentRelationEvidence {
+                relid: pg_sys::Oid::from(10u32),
+                generation: 7,
+                global_generation: 2,
+                relfilenode: pg_sys::Oid::from(110u32),
+                row_count: 100,
+                raw_bytes: 100,
+                derived_bytes: 30,
+                loaded_at_us: 1,
+                last_used_us: 2,
+                load_ms: 1.25,
+            },
+            ResidentRelationEvidence {
+                relid: pg_sys::Oid::from(20u32),
+                generation: 9,
+                global_generation: 2,
+                relfilenode: pg_sys::Oid::from(220u32),
+                row_count: 10,
+                raw_bytes: 50,
+                derived_bytes: 0,
+                loaded_at_us: 1,
+                last_used_us: 2,
+                load_ms: 0.75,
+            },
+        ];
+        let loaded = [pg_sys::Oid::from(10u32)];
+        let summary = descriptor_residency_summary(
+            Some(&evidence),
+            Some(&loaded),
+            Some(ArtifactEnsureOutcome::Built),
+            Some(25),
+        );
+        assert_eq!(summary.state, "resident (2 relations; loaded/reloaded=10)");
+        assert_eq!(summary.artifact, "built");
+        assert_eq!(
+            summary.generations,
+            "rel=10 generation=7 global=2 relfilenode=110; rel=20 generation=9 global=2 relfilenode=220"
+        );
+        assert_eq!(summary.bytes, "raw=150 derived=30 artifact=25 total=180");
+    }
+
+    #[test]
+    fn descriptor_explain_only_residency_is_explicitly_uninitialized() {
+        let summary = descriptor_residency_summary(None, None, None, None);
+        assert_eq!(summary.state, "not initialized (EXPLAIN ONLY)");
+        assert_eq!(summary.artifact, "not initialized");
+        assert_eq!(summary.generations, "not inspected");
+        assert_eq!(summary.bytes, "not inspected");
+    }
 
     #[test]
     fn every_gpu_strategy_has_non_resident_boundary_reason() {

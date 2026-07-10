@@ -1,12 +1,11 @@
 //! Childless aggregate executor state.
 
-use std::time::Instant;
-
 use pgrx::pg_sys;
 
-use super::descriptor::DescriptorAggPlan;
+use super::descriptor::{DescriptorAggPlan, DescriptorResidencyReport};
 use super::output::DescriptorAggOutput;
 use crate::engine::executor::olap::{OlapAggExecState, OlapAggSpec};
+use crate::engine::residency::{ArtifactEnsureOutcome, ResidentRelationEvidence};
 use crate::engine::spec::{AggOutputProjection, AggQuerySpec};
 
 enum AggExecMode {
@@ -18,6 +17,7 @@ struct DescriptorAggExecState {
     plan: DescriptorAggPlan,
     output: Option<DescriptorAggOutput>,
     explain_only: bool,
+    residency: Option<DescriptorResidencyReport>,
 }
 
 /// Rust-side aggregate executor state shared by the legacy OLAP and neutral
@@ -58,9 +58,9 @@ impl AggExecState {
         explain_only: bool,
     ) -> Result<Self, String> {
         let plan = DescriptorAggPlan::new(spec, projection)?;
-        if !explain_only {
-            plan.ensure_artifact()?;
-        }
+        let residency = (!explain_only)
+            .then(|| plan.ensure_artifact())
+            .transpose()?;
         Ok(Self {
             gpu_dispatched: false,
             rows_dispatched: 0,
@@ -70,6 +70,7 @@ impl AggExecState {
                 plan,
                 output: None,
                 explain_only,
+                residency,
             })),
         })
     }
@@ -94,6 +95,78 @@ impl AggExecState {
         }
     }
 
+    /// Exact dependency evidence captured while preparing a descriptor plan.
+    #[must_use]
+    pub fn descriptor_residency_evidence(&self) -> Option<&[ResidentRelationEvidence]> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => descriptor
+                .residency
+                .as_ref()
+                .map(|residency| residency.relations.as_slice()),
+        }
+    }
+
+    /// Derived-artifact cache outcome observed by the descriptor executor.
+    #[must_use]
+    pub fn descriptor_artifact_outcome(&self) -> Option<ArtifactEnsureOutcome> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => descriptor
+                .residency
+                .as_ref()
+                .map(|residency| residency.artifact_outcome),
+        }
+    }
+
+    /// Exact byte charge for this descriptor's derived artifact.
+    #[must_use]
+    pub fn descriptor_artifact_bytes(&self) -> Option<u64> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => descriptor
+                .residency
+                .as_ref()
+                .map(|residency| residency.artifact_bytes),
+        }
+    }
+
+    /// Relations loaded or reloaded while preparing this descriptor.
+    #[must_use]
+    pub fn descriptor_loaded_relations(&self) -> Option<&[pg_sys::Oid]> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => descriptor
+                .residency
+                .as_ref()
+                .map(|residency| residency.loaded_relations.as_slice()),
+        }
+    }
+
+    /// Raw relation staging time charged to this descriptor's first use.
+    #[must_use]
+    pub fn descriptor_raw_load_ms(&self) -> Option<f64> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => descriptor
+                .residency
+                .as_ref()
+                .map(|residency| residency.raw_load_ms),
+        }
+    }
+
+    /// Total begin-time residency and derived-artifact preparation time.
+    #[must_use]
+    pub fn descriptor_preparation_time_us(&self) -> Option<u64> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => descriptor
+                .residency
+                .as_ref()
+                .map(|residency| residency.preparation_time_us),
+        }
+    }
+
     /// Reset cursor/device state for PostgreSQL ExecReScan.
     pub fn reset_for_rescan(&mut self) {
         self.gpu_dispatched = false;
@@ -107,11 +180,12 @@ impl AggExecState {
             AggExecMode::Descriptor(descriptor) => {
                 descriptor.output = None;
                 if !descriptor.explain_only {
-                    descriptor.plan.ensure_artifact().unwrap_or_else(|error| {
+                    let residency = descriptor.plan.ensure_artifact().unwrap_or_else(|error| {
                         pgrx::error!(
                             "pg_accel: generic aggregate rescan preparation failed ({error}); refusing CPU fallback"
                         )
                     });
+                    descriptor.residency = Some(residency);
                 }
             }
         }
@@ -143,14 +217,12 @@ impl AggExecState {
                     return std::ptr::null_mut();
                 }
                 if descriptor.output.is_none() {
-                    let started = Instant::now();
                     let dispatch = descriptor.plan.execute().unwrap_or_else(|error| {
                         pgrx::error!(
                             "pg_accel: generic aggregate dispatch failed ({error}); refusing CPU fallback"
                         )
                     });
-                    self.dispatch_time_us =
-                        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                    self.dispatch_time_us = dispatch.dispatch_time_us;
                     self.rows_dispatched = u64::try_from(dispatch.fact_rows).unwrap_or_else(|_| {
                         pgrx::error!(
                             "pg_accel: generic aggregate fact row count exceeds EXPLAIN counter capacity"
@@ -158,6 +230,13 @@ impl AggExecState {
                     });
                     self.batches_executed = 1;
                     self.gpu_dispatched = true;
+                    if let Some(latest) = dispatch.residency {
+                        if let Some(initial) = &mut descriptor.residency {
+                            initial.merge(latest);
+                        } else {
+                            descriptor.residency = Some(latest);
+                        }
+                    }
                     descriptor.output = Some(dispatch.output);
                 }
                 // SAFETY: output was synchronously detached from the device

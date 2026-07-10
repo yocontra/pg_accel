@@ -625,6 +625,16 @@ pub struct ResidentLoadEstimate {
     pub amortization_queries: u32,
 }
 
+/// Exact result of ensuring one selected descriptor dependency set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectedRelationsEnsureOutcome {
+    pub evidence: Vec<ResidentRelationEvidence>,
+    /// Relations staged during this call, including reloads after invalidation.
+    pub loaded_relations: Vec<pg_sys::Oid>,
+    /// Sum of raw relation staging times for `loaded_relations` only.
+    pub raw_load_ms: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResidentLoadError {
     AutoLoadDisabled {
@@ -939,6 +949,7 @@ fn ensure_one(
 struct EnsureOutcome {
     evidence: ResidentRelationEvidence,
     installed_trigger: bool,
+    loaded: bool,
 }
 
 fn ensure_one_after_invalidations(
@@ -968,6 +979,7 @@ fn ensure_one_after_invalidations(
         return Ok(EnsureOutcome {
             evidence,
             installed_trigger: false,
+            loaded: false,
         });
     }
     if !force && !gucs::auto_load() {
@@ -997,6 +1009,7 @@ fn ensure_one_after_invalidations(
     Ok(EnsureOutcome {
         evidence,
         installed_trigger: matches!(trigger, loader::TriggerInstall::New),
+        loaded: true,
     })
 }
 
@@ -1025,7 +1038,7 @@ fn selected_relation_relids(requests: &[SelectedRelation]) -> BTreeSet<u32> {
 /// loaded and begin-time revalidated.
 pub fn ensure_selected_relations(
     requests: &[SelectedRelation],
-) -> Result<Vec<ResidentRelationEvidence>, ResidentLoadError> {
+) -> Result<SelectedRelationsEnsureOutcome, ResidentLoadError> {
     process_invalidations();
     // A selected batch is one executor dependency set. Keep every requested
     // relation protected while loading each member so a later dimension
@@ -1033,10 +1046,16 @@ pub fn ensure_selected_relations(
     let protected = selected_relation_relids(requests);
     let mut evidence = Vec::with_capacity(requests.len());
     let mut newly_managed = Vec::new();
+    let mut loaded_relations = Vec::new();
+    let mut raw_load_ms = 0.0;
     for request in requests {
         let outcome = ensure_one_after_invalidations(request, false, &protected)?;
         if outcome.installed_trigger {
             newly_managed.push(request.relid);
+        }
+        if outcome.loaded {
+            loaded_relations.push(request.relid);
+            raw_load_ms += outcome.evidence.load_ms;
         }
         evidence.push(outcome.evidence);
     }
@@ -1045,7 +1064,11 @@ pub fn ensure_selected_relations(
     // batch so a later relation load cannot invalidate an earlier one from
     // the same selected plan.
     finalize_batch_first_use(&newly_managed, current_command_scope());
-    Ok(evidence)
+    Ok(SelectedRelationsEnsureOutcome {
+        evidence,
+        loaded_relations,
+        raw_load_ms,
+    })
 }
 
 /// Planner-visible state and byte estimate for first-use load costing.

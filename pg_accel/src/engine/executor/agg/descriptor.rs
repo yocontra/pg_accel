@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
+use std::time::Instant;
 
 use pgrx::pg_sys;
 
@@ -11,8 +12,8 @@ use super::artifact::{
 use super::output::DescriptorAggOutput;
 use crate::engine::residency::{
     ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentColumnRef, ResidentColumnView,
-    ResidentLoadError, ResolvedDerivedInputs, SelectedRelation, ensure_derived_artifact,
-    ensure_selected_relations, with_derived_artifact_inputs,
+    ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs, SelectedRelation,
+    ensure_derived_artifact, ensure_selected_relations, with_derived_artifact_inputs,
 };
 use crate::engine::spec::abi;
 use crate::engine::spec::{
@@ -493,6 +494,34 @@ pub(super) struct DescriptorAggPlan {
     max_groups: usize,
 }
 
+pub(super) struct DescriptorResidencyReport {
+    pub(super) artifact_outcome: ArtifactEnsureOutcome,
+    pub(super) relations: Vec<ResidentRelationEvidence>,
+    pub(super) loaded_relations: Vec<pg_sys::Oid>,
+    pub(super) artifact_bytes: u64,
+    pub(super) raw_load_ms: f64,
+    pub(super) preparation_time_us: u64,
+}
+
+impl DescriptorResidencyReport {
+    pub(super) fn merge(&mut self, latest: Self) {
+        if latest.artifact_outcome != ArtifactEnsureOutcome::Hit {
+            self.artifact_outcome = latest.artifact_outcome;
+        }
+        self.relations = latest.relations;
+        for relid in latest.loaded_relations {
+            if !self.loaded_relations.contains(&relid) {
+                self.loaded_relations.push(relid);
+            }
+        }
+        self.artifact_bytes = latest.artifact_bytes;
+        self.raw_load_ms += latest.raw_load_ms;
+        self.preparation_time_us = self
+            .preparation_time_us
+            .saturating_add(latest.preparation_time_us);
+    }
+}
+
 impl DescriptorAggPlan {
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
         validate_runtime_capability(&spec, &projection)?;
@@ -529,9 +558,11 @@ impl DescriptorAggPlan {
         &self.projection
     }
 
-    pub(super) fn ensure_artifact(&self) -> Result<ArtifactEnsureOutcome, String> {
-        ensure_selected_relations(&self.selected).map_err(|error| error.to_string())?;
-        ensure_derived_artifact(
+    pub(super) fn ensure_artifact(&self) -> Result<DescriptorResidencyReport, String> {
+        let preparation_started = Instant::now();
+        let selected =
+            ensure_selected_relations(&self.selected).map_err(|error| error.to_string())?;
+        let artifact_outcome = ensure_derived_artifact(
             pg_sys::Oid::from(self.spec.fact_rel),
             &self.identity,
             &self.dependencies,
@@ -541,7 +572,23 @@ impl DescriptorAggPlan {
             },
             DescriptorAggArtifact::build,
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        let (relations, artifact_bytes) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+            pg_sys::Oid::from(self.spec.fact_rel),
+            &self.identity,
+            &[],
+            |inputs| (inputs.evidence, inputs.device_bytes),
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(DescriptorResidencyReport {
+            artifact_outcome,
+            relations,
+            loaded_relations: selected.loaded_relations,
+            artifact_bytes,
+            raw_load_ms: selected.raw_load_ms,
+            preparation_time_us: u64::try_from(preparation_started.elapsed().as_micros())
+                .unwrap_or(u64::MAX),
+        })
     }
 
     fn execute_once(&self) -> Result<Result<DescriptorAggDispatch, String>, ResidentLoadError> {
@@ -554,24 +601,28 @@ impl DescriptorAggPlan {
     }
 
     pub(super) fn execute(&self) -> Result<DescriptorAggDispatch, String> {
-        self.ensure_artifact()?;
-        match self.execute_once() {
-            Ok(result) => result,
+        let mut residency = self.ensure_artifact()?;
+        let mut result = match self.execute_once() {
+            Ok(result) => result?,
             Err(
                 ResidentLoadError::ArtifactDependencyChanged { .. }
                 | ResidentLoadError::ArtifactNotFound { .. },
             ) => {
-                self.ensure_artifact()?;
-                self.execute_once().map_err(|error| error.to_string())?
+                residency.merge(self.ensure_artifact()?);
+                self.execute_once().map_err(|error| error.to_string())??
             }
-            Err(error) => Err(error.to_string()),
-        }
+            Err(error) => return Err(error.to_string()),
+        };
+        result.residency = Some(residency);
+        Ok(result)
     }
 }
 
 pub(super) struct DescriptorAggDispatch {
     pub output: DescriptorAggOutput,
     pub fact_rows: usize,
+    pub dispatch_time_us: u64,
+    pub residency: Option<DescriptorResidencyReport>,
 }
 
 fn find_view<'a>(
@@ -1020,8 +1071,11 @@ fn build_and_execute(
         .map_err(|error| format!("generic aggregate descriptor rejected: {error}"))?;
     let mut storage = GroupedAggOutputStorage::new(&plan)
         .map_err(|error| format!("generic aggregate output allocation failed: {error}"))?;
+    let dispatch_started = Instant::now();
     let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
         .map_err(|error| format!("generic aggregate kernel failed: {error}"))?;
+    let dispatch_time_us =
+        u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let output = DescriptorAggOutput::new(
         storage,
         outcome,
@@ -1032,6 +1086,8 @@ fn build_and_execute(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.fact_rows,
+        dispatch_time_us,
+        residency: None,
     })
 }
 
