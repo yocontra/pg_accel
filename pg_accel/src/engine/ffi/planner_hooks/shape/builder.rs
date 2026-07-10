@@ -153,9 +153,6 @@ fn validate_measure_descriptor_capability(
             if lhs.type_oid != rhs.type_oid {
                 return Err(ShapeDecline::UnsupportedBinaryMeasure);
             }
-            if lhs.type_oid == INT4OID {
-                return Err(ShapeDecline::IntegerExpressionOverflowSemantics);
-            }
             if lhs.type_oid == FLOAT8OID {
                 return Err(ShapeDecline::FloatingExpressionSemantics);
             }

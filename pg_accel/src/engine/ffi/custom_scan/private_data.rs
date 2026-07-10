@@ -739,6 +739,21 @@ mod typed_private_tests {
     }
 
     #[test]
+    fn selected_path_contract_decoder_stops_before_resident_proof() {
+        let frame = generic_agg_frame();
+        let reader = IntListReader::from_slice(&frame);
+        let contract = decode_agg_query_contract_at(&reader, PLAN_PAYLOAD_START + 3)
+            .expect("strict path contract decodes")
+            .expect("generic aggregate carries a path contract");
+        let proof_start = frame.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        assert_eq!(contract.2, proof_start);
+        contract
+            .1
+            .validate(&contract.0)
+            .expect("projection matches spec");
+    }
+
+    #[test]
     fn oversized_plan_frame_is_rejected_before_payload_decode() {
         let words = vec![0; MAX_PLAN_WIRE_INTS + 1];
         assert!(matches!(
@@ -1706,6 +1721,68 @@ fn copy_wire_words(
     Ok(words)
 }
 
+fn decode_agg_query_contract_at(
+    fields: &IntListReader<'_>,
+    mut index: usize,
+) -> Result<Option<(AggQuerySpec, AggOutputProjection, usize)>, DecodeError> {
+    if fields.get(index) != Some(AGG_QUERY_SPEC_SENTINEL) {
+        return Ok(None);
+    }
+    let spec_start = index + 1;
+    let remaining = fields.len().saturating_sub(spec_start);
+    let prefix_words = copy_wire_words(fields, spec_start, remaining, "aggregate query spec")?;
+    let spec_len = AggQuerySpec::encoded_i32_prefix_len(&prefix_words)?;
+    let spec = AggQuerySpec::decode_i32(&prefix_words[..spec_len])?;
+    index = spec_start + spec_len;
+    if fields.get(index) != Some(AGG_OUTPUT_PROJECTION_SENTINEL) {
+        return Err(DecodeError::Truncated {
+            index,
+            field: "aggregate output projection",
+        });
+    }
+    let projection_start = index + 1;
+    let length_index = projection_start + 2;
+    let projection_len_raw =
+        strict_word(fields, length_index, "aggregate output projection length")?;
+    let projection_len =
+        usize::try_from(projection_len_raw).map_err(|_| DecodeError::InvalidValue {
+            index: length_index,
+            field: "aggregate output projection length",
+            raw: projection_len_raw,
+        })?;
+    if projection_len > AGG_OUTPUT_PROJECTION_MAX_WORDS {
+        return Err(DecodeError::LimitExceeded {
+            index: length_index,
+            field: "aggregate output projection length",
+            declared: projection_len,
+            maximum: AGG_OUTPUT_PROJECTION_MAX_WORDS,
+        });
+    }
+    let projection_words = copy_wire_words(
+        fields,
+        projection_start,
+        projection_len,
+        "aggregate output projection",
+    )?;
+    let projection = AggOutputProjection::decode_i32(&projection_words, &spec)?;
+    Ok(Some((spec, projection, projection_start + projection_len)))
+}
+
+/// Decode the strict AQS2/AOP2 trailer carried by a selected aggregate path.
+///
+/// # Safety
+/// `path_private` must be a valid PostgreSQL `List<Integer>` emitted by this
+/// extension in the current planner context.
+pub(super) unsafe fn deserialize_agg_query_path_contract(
+    path_private: *mut pg_sys::List,
+    index: usize,
+) -> Result<Option<(AggQuerySpec, AggOutputProjection, usize)>, DecodeError> {
+    // SAFETY: caller supplies a planner-owned list; the reader validates every
+    // node before any integer is interpreted.
+    let fields = unsafe { IntListReader::from_pg_list(path_private) };
+    decode_agg_query_contract_at(&fields, index)
+}
+
 fn strict_f64_at(
     fields: &IntListReader<'_>,
     index: usize,
@@ -2433,47 +2510,16 @@ fn validate_agg_payload(
 
     let mut agg_query_spec = None;
     let mut agg_output_projection = None;
-    if fields.get(index) == Some(AGG_QUERY_SPEC_SENTINEL) {
-        let remaining = payload_end.saturating_sub(index + 1);
-        let prefix_words = copy_wire_words(fields, index + 1, remaining, "aggregate query spec")?;
-        let spec_len = AggQuerySpec::encoded_i32_prefix_len(&prefix_words)?;
-        let spec_words = &prefix_words[..spec_len];
-        agg_query_spec = Some(AggQuerySpec::decode_i32(spec_words)?);
-        index += 1 + spec_len;
-        if fields.get(index) != Some(AGG_OUTPUT_PROJECTION_SENTINEL) {
+    if let Some((spec, projection, end)) = decode_agg_query_contract_at(fields, index)? {
+        if end > payload_end {
             return Err(DecodeError::Truncated {
-                index,
-                field: "aggregate output projection",
+                index: payload_end,
+                field: "aggregate query/projection contract",
             });
         }
-        let length_index = index + 3;
-        let projection_len_raw =
-            strict_word(fields, length_index, "aggregate output projection length")?;
-        let projection_len =
-            usize::try_from(projection_len_raw).map_err(|_| DecodeError::InvalidValue {
-                index: length_index,
-                field: "aggregate output projection length",
-                raw: projection_len_raw,
-            })?;
-        if projection_len > AGG_OUTPUT_PROJECTION_MAX_WORDS {
-            return Err(DecodeError::LimitExceeded {
-                index: length_index,
-                field: "aggregate output projection length",
-                declared: projection_len,
-                maximum: AGG_OUTPUT_PROJECTION_MAX_WORDS,
-            });
-        }
-        let projection_words = copy_wire_words(
-            fields,
-            index + 1,
-            projection_len,
-            "aggregate output projection",
-        )?;
-        agg_output_projection = Some(AggOutputProjection::decode_i32(
-            &projection_words,
-            agg_query_spec.as_ref().expect("query spec assigned above"),
-        )?);
-        index += 1 + projection_len;
+        agg_query_spec = Some(spec);
+        agg_output_projection = Some(projection);
+        index = end;
     }
     if legacy_olap && agg_query_spec.is_some() {
         return Err(DecodeError::InvalidValue {

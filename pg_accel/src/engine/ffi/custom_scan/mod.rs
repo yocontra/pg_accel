@@ -37,6 +37,7 @@ use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
 pub(in crate::engine::ffi) use private_data::HASH_JOIN_RESIDENT_COUNT_SENTINEL;
+use private_data::deserialize_agg_query_path_contract;
 pub(super) use private_data::{
     AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_query_plan,
     append_olap_agg_spec, append_partial_spec, deserialize_partial_spec,
@@ -644,7 +645,16 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             }
             trailer_idx += olap_trailer_ints;
         }
-        let sentinel_idx = trailer_idx;
+        let agg_query_contract = deserialize_agg_query_path_contract(path_priv, trailer_idx)
+            .unwrap_or_else(|error| {
+                pgrx::error!("pg_accel: malformed aggregate AQS2/AOP2 path contract: {error}")
+            });
+        if has_olap_block && agg_query_contract.is_some() {
+            pgrx::error!("pg_accel: aggregate path carries duplicate execution contracts");
+        }
+        let sentinel_idx = agg_query_contract
+            .as_ref()
+            .map_or(trailer_idx, |(_, _, end)| *end);
         let has_sentinel_block = sentinel_idx < path_len
             && list_int_at(path_priv, sentinel_idx as c_int) == PARTIAL_SENTINEL;
 
@@ -794,13 +804,17 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         // Append self-scan relid so begin_custom_scan can open the heap.
         list = pg_sys::lappend(list, pg_sys::makeInteger(self_scan_relid).cast());
 
-        if sentinel_idx > is_partial_idx + 1 {
-            for idx in is_partial_idx + 1..sentinel_idx {
+        if trailer_idx > is_partial_idx + 1 {
+            for idx in is_partial_idx + 1..trailer_idx {
                 list = pg_sys::lappend(
                     list,
                     pg_sys::makeInteger(list_int_at(path_priv, idx as c_int)).cast(),
                 );
             }
+        }
+
+        if let Some((spec, projection, _)) = &agg_query_contract {
+            list = append_agg_query_plan(list, spec, projection, cscan);
         }
 
         // When this path was injected on a partial (worker-side) Gather branch,
@@ -2635,17 +2649,27 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // private-data reader rejects PreAgg payloads before this point.
             pgrx::error!("pg_accel: GpuPreAgg strategy retired; no planner path-creator emits it");
         } else if privdata.gpu_strategy == GpuStrategy::Agg {
-            // Only the resident OLAP aggregate survives: the planner path
-            // creator (resident_groupagg_path.rs) always serializes an OLAP
-            // spec. Host-staged grouped/ungrouped/fused/vectorized agg
-            // executors were retired with their planner injectors.
-            let Some(olap_spec) = privdata.olap_agg else {
+            if let (Some(spec), Some(projection)) = (
+                privdata.agg_query_spec.clone(),
+                privdata.agg_output_projection.clone(),
+            ) {
+                let explain_only = (eflags as u32 & pg_sys::EXEC_FLAG_EXPLAIN_ONLY) != 0;
+                pgrx::debug1!("pg_accel: begin_custom_scan: generic descriptor Agg");
+                let executor = AggExecState::new_descriptor(spec, projection, explain_only)
+                    .unwrap_or_else(|error| {
+                        pgrx::error!(
+                            "pg_accel: generic aggregate Begin failed ({error}); refusing CPU fallback"
+                        )
+                    });
+                Box::into_raw(Box::new(executor)).cast()
+            } else if let Some(olap_spec) = privdata.olap_agg {
+                pgrx::debug1!("pg_accel: begin_custom_scan: resident OLAP Agg");
+                Box::into_raw(Box::new(AggExecState::new_olap(olap_spec))).cast()
+            } else {
                 pgrx::error!(
-                    "pg_accel: non-resident GpuAgg retired; plan carries no OLAP agg spec"
+                    "pg_accel: aggregate plan carries neither OLAP nor AQS2/AOP2 execution contract"
                 );
-            };
-            pgrx::debug1!("pg_accel: begin_custom_scan: resident OLAP Agg");
-            Box::into_raw(Box::new(AggExecState::new_olap(olap_spec))).cast()
+            }
         } else if privdata.accel_strategy == AccelStrategy::GpuHashJoin {
             // Hash join: create a JoinExecState with hash join context.
             if let Some(reason) = privdata.hash_join_validation_error() {
@@ -3244,23 +3268,11 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
         }
 
         if gpu_strategy == GpuStrategy::Agg {
-            // Rescan: rebuild the resident OLAP executor from its spec. Only
-            // the resident OLAP agg survives — begin_custom_scan rejects any
-            // Agg plan without an OLAP spec before an executor can exist.
-            let old_olap = if (*state).accel.executor.is_null() {
-                None
-            } else {
-                // SAFETY: executor was Box::into_raw'd as AggExecState.
-                let old = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
-                (*state).accel.executor = std::ptr::null_mut();
-                old.olap_spec()
-            };
-            let Some(olap) = old_olap else {
-                pgrx::error!(
-                    "pg_accel: non-resident GpuAgg retired; rescan found no OLAP agg spec"
-                );
-            };
-            (*state).accel.executor = Box::into_raw(Box::new(AggExecState::new_olap(olap))).cast();
+            if (*state).accel.executor.is_null() {
+                pgrx::error!("pg_accel: aggregate rescan found no executor state");
+            }
+            // SAFETY: BeginCustomScan allocated this pointer as AggExecState.
+            (*(*state).accel.executor.cast::<AggExecState>()).reset_for_rescan();
         } else if gpu_strategy == GpuStrategy::Sort {
             // GpuSort retired: begin_custom_scan errors before an executor
             // can be allocated, so rescan can never see this strategy.

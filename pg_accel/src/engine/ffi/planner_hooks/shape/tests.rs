@@ -1135,24 +1135,142 @@ fn unsupported_phase4_measure_types_decline_before_descriptor_build() {
 }
 
 #[test]
-fn int4_binary_expression_declines_until_per_row_overflow_matches_sql() {
+fn int4_binary_mul_and_sub_admit_all_descriptor_outputs() {
+    for op in [BinaryMeasureOp::Mul, BinaryMeasureOp::Sub] {
+        for kind in [
+            AggregateKind::Sum,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ] {
+            let mut input = single_table_input();
+            let result_type_oid = if matches!(kind, AggregateKind::Sum | AggregateKind::Count) {
+                u32::from(pg_sys::INT8OID)
+            } else {
+                u32::from(pg_sys::INT4OID)
+            };
+            let (aggregate, projection) = aggregate(
+                MeasureExpr::Binary {
+                    op,
+                    lhs: ColumnRef {
+                        relation_oid: 100,
+                        attno: 1,
+                        type_oid: u32::from(pg_sys::INT4OID),
+                    },
+                    rhs: ColumnRef {
+                        relation_oid: 100,
+                        attno: 2,
+                        type_oid: u32::from(pg_sys::INT4OID),
+                    },
+                },
+                kind,
+                result_type_oid,
+            );
+            input.aggregates = vec![aggregate];
+            input.projections = vec![InputProjection::Aggregate {
+                aggregate_index: 0,
+                output: projection,
+            }];
+
+            build_shape(input, &model()).unwrap_or_else(|error| {
+                panic!("INT4 {op:?} feeding {kind:?} should be admitted: {error:?}")
+            });
+        }
+    }
+}
+
+#[test]
+fn int8_binary_mul_remains_declined_for_per_row_overflow_semantics() {
     let mut input = single_table_input();
-    input.aggregates[0].expression = MeasureExpr::Binary {
-        op: BinaryMeasureOp::Sub,
-        lhs: ColumnRef {
-            relation_oid: 100,
-            attno: 1,
-            type_oid: 23,
+    let (aggregate, projection) = aggregate(
+        MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs: ColumnRef {
+                relation_oid: 100,
+                attno: 2,
+                type_oid: u32::from(pg_sys::INT8OID),
+            },
+            rhs: ColumnRef {
+                relation_oid: 100,
+                attno: 3,
+                type_oid: u32::from(pg_sys::INT8OID),
+            },
         },
-        rhs: ColumnRef {
-            relation_oid: 100,
-            attno: 2,
-            type_oid: 23,
-        },
-    };
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    input.aggregates = vec![aggregate];
+    input.projections = vec![InputProjection::Aggregate {
+        aggregate_index: 0,
+        output: projection,
+    }];
+
     assert_eq!(
         build_shape(input, &model()),
         Err(ShapeDecline::IntegerExpressionOverflowSemantics)
+    );
+}
+
+#[test]
+fn int8_binary_sub_admits_count_min_max_but_not_sum() {
+    for kind in [AggregateKind::Count, AggregateKind::Min, AggregateKind::Max] {
+        let mut input = single_table_input();
+        let (aggregate, projection) = aggregate(
+            MeasureExpr::Binary {
+                op: BinaryMeasureOp::Sub,
+                lhs: ColumnRef {
+                    relation_oid: 100,
+                    attno: 2,
+                    type_oid: u32::from(pg_sys::INT8OID),
+                },
+                rhs: ColumnRef {
+                    relation_oid: 100,
+                    attno: 3,
+                    type_oid: u32::from(pg_sys::INT8OID),
+                },
+            },
+            kind,
+            u32::from(pg_sys::INT8OID),
+        );
+        input.aggregates = vec![aggregate];
+        input.projections = vec![InputProjection::Aggregate {
+            aggregate_index: 0,
+            output: projection,
+        }];
+
+        build_shape(input, &model()).unwrap_or_else(|error| {
+            panic!("INT8 SUB feeding {kind:?} should be admitted: {error:?}")
+        });
+    }
+
+    let mut input = single_table_input();
+    let (sum, projection) = aggregate(
+        MeasureExpr::Binary {
+            op: BinaryMeasureOp::Sub,
+            lhs: ColumnRef {
+                relation_oid: 100,
+                attno: 2,
+                type_oid: u32::from(pg_sys::INT8OID),
+            },
+            rhs: ColumnRef {
+                relation_oid: 100,
+                attno: 3,
+                type_oid: u32::from(pg_sys::INT8OID),
+            },
+        },
+        AggregateKind::Sum,
+        u32::from(pg_sys::INT8OID),
+    );
+    input.aggregates = vec![sum];
+    input.projections = vec![InputProjection::Aggregate {
+        aggregate_index: 0,
+        output: projection,
+    }];
+    assert_eq!(
+        build_shape(input, &model()),
+        Err(ShapeDecline::NumericAccumulatorTypeUnavailable {
+            type_oid: u32::from(pg_sys::INT8OID),
+        })
     );
 }
 

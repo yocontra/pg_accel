@@ -1,42 +1,44 @@
-//! Resident OLAP aggregate executor state.
-//!
-//! Only the resident OLAP aggregate survives the Phase 3 demolition: the
-//! planner's sole Agg path creator (`resident_groupagg_path.rs`) always
-//! serializes an [`OlapAggSpec`], and `begin_custom_scan` rejects any Agg
-//! plan without one. The host-staged aggregate machinery that used to live
-//! here (child-plan ExecProcNode draining, grouped hash aggregation,
-//! vectorized self-scan, fused filter-count/filter-reduce pipelines, and
-//! worker-side partial emission) was deleted with its planner injectors.
-//!
-//! [`AggExecState`] is a thin adapter between the Custom Scan FFI layer and
-//! [`OlapAggExecState`] (`executor/olap.rs`), which owns the device-resident
-//! dispatch. The adapter mirrors the OLAP executor's counters into the
-//! fields EXPLAIN ANALYZE reads.
+//! Childless aggregate executor state.
+
+use std::time::Instant;
 
 use pgrx::pg_sys;
 
+use super::descriptor::DescriptorAggPlan;
+use super::output::DescriptorAggOutput;
 use crate::engine::executor::olap::{OlapAggExecState, OlapAggSpec};
+use crate::engine::spec::{AggOutputProjection, AggQuerySpec};
 
-/// Rust-side aggregate executor state for the resident OLAP submode.
+enum AggExecMode {
+    Legacy(Box<OlapAggExecState>),
+    Descriptor(Box<DescriptorAggExecState>),
+}
+
+struct DescriptorAggExecState {
+    plan: DescriptorAggPlan,
+    output: Option<DescriptorAggOutput>,
+    explain_only: bool,
+}
+
+/// Rust-side aggregate executor state shared by the legacy OLAP and neutral
+/// descriptor contracts. Both modes are childless and read only resident data.
 pub struct AggExecState {
-    /// Whether the OLAP dispatch ran on the GPU (for EXPLAIN ANALYZE).
+    /// Whether a device aggregate dispatch completed (for EXPLAIN ANALYZE).
     pub gpu_dispatched: bool,
 
     // -- Counters for EXPLAIN ANALYZE --
-    /// Total rows consumed by the OLAP dispatch.
+    /// Total fact rows presented to the resident dispatch.
     pub rows_dispatched: u64,
-    /// Number of batches processed.
+    /// Number of device aggregate dispatches.
     pub batches_executed: u64,
     /// Cumulative microseconds in dispatch.
     pub dispatch_time_us: u64,
 
-    /// Resident OLAP aggregate submode. This GpuAgg owns no child plan and
-    /// dispatches directly from a resident cache/source.
-    olap: OlapAggExecState,
+    mode: AggExecMode,
 }
 
 impl AggExecState {
-    /// Create a resident OLAP aggregate executor from its plan spec.
+    /// Create a legacy resident OLAP aggregate executor.
     #[must_use]
     pub fn new_olap(spec: OlapAggSpec) -> Self {
         Self {
@@ -44,38 +46,130 @@ impl AggExecState {
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
-            olap: OlapAggExecState::new(spec),
+            mode: AggExecMode::Legacy(Box::new(OlapAggExecState::new(spec))),
         }
     }
 
-    /// The plan spec this executor was built from (used by rescan and
-    /// EXPLAIN's logical-spec rendering).
-    #[must_use]
-    pub fn olap_spec(&self) -> Option<OlapAggSpec> {
-        Some(self.olap.spec())
+    /// Validate a strict neutral contract and prepare its dependency-stamped
+    /// derived artifact during BeginCustomScan.
+    pub fn new_descriptor(
+        spec: AggQuerySpec,
+        projection: AggOutputProjection,
+        explain_only: bool,
+    ) -> Result<Self, String> {
+        let plan = DescriptorAggPlan::new(spec, projection)?;
+        if !explain_only {
+            plan.ensure_artifact()?;
+        }
+        Ok(Self {
+            gpu_dispatched: false,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            dispatch_time_us: 0,
+            mode: AggExecMode::Descriptor(Box::new(DescriptorAggExecState {
+                plan,
+                output: None,
+                explain_only,
+            })),
+        })
     }
 
-    /// Produce the next OLAP result tuple (or null when exhausted), mirroring
-    /// the OLAP executor's counters into the EXPLAIN-visible fields after the
-    /// dispatch completes.
+    /// Legacy logical spec used by the existing EXPLAIN renderer.
+    #[must_use]
+    pub fn olap_spec(&self) -> Option<OlapAggSpec> {
+        match &self.mode {
+            AggExecMode::Legacy(olap) => Some(olap.spec()),
+            AggExecMode::Descriptor(_) => None,
+        }
+    }
+
+    /// Borrow the neutral logical contract for generic EXPLAIN rendering.
+    #[must_use]
+    pub fn descriptor_contract(&self) -> Option<(&AggQuerySpec, &AggOutputProjection)> {
+        match &self.mode {
+            AggExecMode::Legacy(_) => None,
+            AggExecMode::Descriptor(descriptor) => {
+                Some((descriptor.plan.spec(), descriptor.plan.projection()))
+            }
+        }
+    }
+
+    /// Reset cursor/device state for PostgreSQL ExecReScan.
+    pub fn reset_for_rescan(&mut self) {
+        self.gpu_dispatched = false;
+        self.rows_dispatched = 0;
+        self.batches_executed = 0;
+        self.dispatch_time_us = 0;
+        match &mut self.mode {
+            AggExecMode::Legacy(olap) => {
+                **olap = OlapAggExecState::new(olap.spec());
+            }
+            AggExecMode::Descriptor(descriptor) => {
+                descriptor.output = None;
+                if !descriptor.explain_only {
+                    descriptor.plan.ensure_artifact().unwrap_or_else(|error| {
+                        pgrx::error!(
+                            "pg_accel: generic aggregate rescan preparation failed ({error}); refusing CPU fallback"
+                        )
+                    });
+                }
+            }
+        }
+    }
+
+    /// Produce the next resident aggregate result tuple, or NULL at EOF.
     ///
     /// # Safety
-    ///
-    /// Must be called on the main backend thread. `result_slot` must be a
-    /// valid `TupleTableSlot`.
-    pub unsafe fn next_olap(
+    /// Must be called on the main backend thread with a valid result slot.
+    pub unsafe fn next(
         &mut self,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
-        let was_dispatched = self.olap.gpu_dispatched();
-        // SAFETY: caller upholds the main-thread + valid-slot contract.
-        let result = unsafe { self.olap.next(result_slot) };
-        if !was_dispatched && self.olap.gpu_dispatched() {
-            self.rows_dispatched = self.olap.rows_dispatched();
-            self.batches_executed = self.olap.batches_executed();
-            self.dispatch_time_us = self.olap.dispatch_time_us();
-            self.gpu_dispatched = true;
+        match &mut self.mode {
+            AggExecMode::Legacy(olap) => {
+                let was_dispatched = olap.gpu_dispatched();
+                // SAFETY: caller upholds the slot/main-thread contract.
+                let result = unsafe { olap.next(result_slot) };
+                if !was_dispatched && olap.gpu_dispatched() {
+                    self.rows_dispatched = olap.rows_dispatched();
+                    self.batches_executed = olap.batches_executed();
+                    self.dispatch_time_us = olap.dispatch_time_us();
+                    self.gpu_dispatched = true;
+                }
+                result
+            }
+            AggExecMode::Descriptor(descriptor) => {
+                if descriptor.explain_only {
+                    return std::ptr::null_mut();
+                }
+                if descriptor.output.is_none() {
+                    let started = Instant::now();
+                    let dispatch = descriptor.plan.execute().unwrap_or_else(|error| {
+                        pgrx::error!(
+                            "pg_accel: generic aggregate dispatch failed ({error}); refusing CPU fallback"
+                        )
+                    });
+                    self.dispatch_time_us =
+                        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+                    self.rows_dispatched = u64::try_from(dispatch.fact_rows).unwrap_or_else(|_| {
+                        pgrx::error!(
+                            "pg_accel: generic aggregate fact row count exceeds EXPLAIN counter capacity"
+                        )
+                    });
+                    self.batches_executed = 1;
+                    self.gpu_dispatched = true;
+                    descriptor.output = Some(dispatch.output);
+                }
+                // SAFETY: output was synchronously detached from the device
+                // call and caller supplies the initialized result slot.
+                unsafe {
+                    descriptor
+                        .output
+                        .as_mut()
+                        .expect("descriptor output assigned above")
+                        .next(result_slot)
+                }
+            }
         }
-        result
     }
 }

@@ -1,9 +1,7 @@
 //! Resident OLAP aggregate executor for pg_accel Custom Scan nodes.
 //!
-//! [`AggExecState`] adapts the device-resident OLAP aggregate executor
-//! (`executor/olap.rs`) to the Custom Scan FFI layer. It is the only
-//! surviving aggregate executor: `begin_custom_scan` rejects any Agg plan
-//! that does not carry a resident OLAP spec.
+//! [`AggExecState`] adapts both the legacy resident OLAP executor and the
+//! strict neutral AQS2/AOP2 descriptor executor to the Custom Scan FFI layer.
 //!
 //! # Lifecycle
 //!
@@ -13,9 +11,12 @@
 //!    aggregate and emits result tuples.
 //! 3. **`end_custom_scan`** — reclaims via `Box::from_raw`.
 
+mod artifact;
+mod descriptor;
 mod execute;
 mod keys;
 mod ops;
+mod output;
 pub mod partial;
 
 pub use execute::AggExecState;
@@ -32,10 +33,8 @@ impl crate::engine::executor::state::ExecutorState for AggExecState {
         // SAFETY: trait contract — main backend thread, `css` is a valid
         // CustomScanState whose scan slot was built by ExecInitCustomScan.
         let scan_slot = unsafe { (*css).ss.ss_ScanTupleSlot };
-        // Only the resident OLAP aggregate survives; begin_custom_scan rejects
-        // any Agg plan without an OLAP spec before an executor can exist.
         // SAFETY: main backend thread; scan_slot is a valid TupleTableSlot.
-        let result = unsafe { self.next_olap(scan_slot) };
+        let result = unsafe { self.next(scan_slot) };
         if result.is_null() {
             // SAFETY: scan_slot is a valid TupleTableSlot on the main thread.
             unsafe { pg_sys::ExecClearTuple(scan_slot) };
