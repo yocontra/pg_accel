@@ -157,6 +157,9 @@ target_link_libraries(test_fork_warmed PRIVATE pgaccel_kernels_shared)
 add_executable(test_fork_archive_stress test/test_fork_archive_stress.cpp)
 target_link_libraries(test_fork_archive_stress PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_fork_cold_barrier test/test_fork_cold_barrier.cpp)
+target_link_libraries(test_fork_cold_barrier PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
 target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 
@@ -267,6 +270,7 @@ add_pgaccel_gpu_test(test_exec_gpu)
 add_pgaccel_gpu_test(test_fork)
 add_pgaccel_gpu_test(test_fork_warmed)
 add_pgaccel_gpu_test(test_fork_cold)
+add_pgaccel_gpu_test(test_fork_cold_barrier TIMEOUT 1200)
 add_pgaccel_gpu_test(test_sycl_basic)
 add_pgaccel_gpu_test(test_reduce_stats)
 add_pgaccel_gpu_test(test_reduce_bool_bit)
