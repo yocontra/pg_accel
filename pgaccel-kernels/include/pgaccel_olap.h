@@ -92,6 +92,22 @@ typedef enum {
   PGACCEL_GROUPED_AGG_ACCUM_INTERVAL = 4,
 } pgaccel_grouped_agg_accum_kind;
 
+/* Physical measure inputs deliberately use an OLAP-owned type domain rather
+ * than pgaccel_val_tag. The latter cannot describe fixed-width NUMERIC limbs
+ * or PostgreSQL interval states. INVALID is the canonical zeroed/unused view. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_PHYSICAL_INVALID = 0,
+  PGACCEL_GROUPED_AGG_PHYSICAL_BOOL = 1,
+  PGACCEL_GROUPED_AGG_PHYSICAL_INT32 = 2,
+  PGACCEL_GROUPED_AGG_PHYSICAL_INT64 = 3,
+  PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32 = 4,
+  PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64 = 5,
+  PGACCEL_GROUPED_AGG_PHYSICAL_DATE = 6,
+  PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP = 7,
+  PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC = 8,
+  PGACCEL_GROUPED_AGG_PHYSICAL_INTERVAL = 9,
+} pgaccel_grouped_agg_physical_type;
+
 /* One logical grouping key. FACT reads values for the current row. Dense
  * radix mode requires an INT32 dictionary/dense code column. Hash mode also
  * accepts INT64, including H3 indexes. DIM sources ignore values and use the
@@ -116,21 +132,34 @@ typedef struct {
   uint32_t _pad0;
 } pgaccel_grouped_agg_key;
 
-/* One expression/accumulator slot. value and rhs contain physical type tags.
- * ABI v1 supports FLOAT64 -> F64 and INT32/INT64 -> I64. I64 arithmetic is
- * checked; overflow returns PGACCEL_ERROR. COUNT_STAR has zeroed value/rhs
- * views. scale is zero for I64/F64, a decimal scale for NUMERIC, and reserved
- * interval fractional precision for INTERVAL. state_bytes is sizeof(int64_t)
- * or sizeof(double) for v1 and the fixed limb/state width for later kinds. */
+/* One physical measure input. element_bytes is the width of one value, not the
+ * accumulator state. scale is zero for scalar types, the fixed-point decimal
+ * scale for NUMERIC, and interval fractional precision for INTERVAL. flags is
+ * zero in v1. nulls may be NULL, meaning every row is non-NULL. */
 typedef struct {
-  pgaccel_expr_usm_col value;
-  pgaccel_expr_usm_col rhs;
+  const void* values;
+  const uint8_t* nulls;
+  int32_t physical_type;
+  uint32_t element_bytes;
+  int32_t scale;
+  uint32_t flags;
+} pgaccel_grouped_agg_measure_col;
+
+/* One expression/accumulator slot. ABI v1 supports FLOAT64 -> F64 and
+ * INT32/INT64 -> I64. I64 arithmetic is checked; overflow returns
+ * PGACCEL_ERROR. NUMERIC/INTERVAL inputs are physically representable now but
+ * may return UNSUPPORTED until their kernels land. COUNT_STAR has canonical
+ * zero value/rhs views. accumulator_kind and state_bytes describe output and
+ * workspace state independently of each input's physical width. */
+typedef struct {
+  pgaccel_grouped_agg_measure_col value;
+  pgaccel_grouped_agg_measure_col rhs;
   int32_t op;
   uint32_t agg_mask;
   int32_t accumulator_kind;
-  int32_t scale;
   uint32_t state_bytes;
   uint32_t flags;
+  uint32_t _pad0;
 } pgaccel_grouped_agg_measure;
 
 /* A composable predicate. mask is an optional tri-state byte sidecar using
@@ -265,8 +294,9 @@ typedef struct {
  *
  * emitted_group_count is the active-group count in both modes. A zero-key
  * aggregate always has one active group, even on empty input. A keyed aggregate
- * on empty input has none. Inactive value lanes and MIN/MAX for all-NULL groups
- * are unspecified; count and nonnull_count lanes are always written as zero.
+ * on empty input has none. Count and nonnull_count lanes are always written as
+ * zero for inactive/all-NULL groups. SUM/SUMSQ are canonical numeric zero when
+ * nonnull_count is zero; MIN/MAX bytes are unspecified and must not be read.
  * Buffers may not overlap one another, inputs, or scratch. */
 typedef struct {
   uint32_t abi_version;
@@ -305,17 +335,32 @@ PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, null_code) == 44, "key.null_co
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, flags) == 48, "key.flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, _pad0) == 52, "key._pad0");
 
-PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure) == 72, "grouped_agg_measure size");
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_col) == 32,
+                "grouped_agg_measure_col size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, values) == 0,
+                "measure_col.values");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, nulls) == 8,
+                "measure_col.nulls");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, physical_type) == 16,
+                "measure_col.physical_type");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, element_bytes) == 20,
+                "measure_col.element_bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, scale) == 24,
+                "measure_col.scale");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, flags) == 28,
+                "measure_col.flags");
+
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure) == 88, "grouped_agg_measure size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, value) == 0, "measure.value");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, rhs) == 24, "measure.rhs");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, op) == 48, "measure.op");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, agg_mask) == 52, "measure.mask");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, accumulator_kind) == 56,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, rhs) == 32, "measure.rhs");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, op) == 64, "measure.op");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, agg_mask) == 68, "measure.mask");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, accumulator_kind) == 72,
                 "measure.accumulator_kind");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, scale) == 60, "measure.scale");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, state_bytes) == 64,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, state_bytes) == 76,
                 "measure.state_bytes");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, flags) == 68, "measure.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, flags) == 80, "measure.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, _pad0) == 84, "measure._pad0");
 
 PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_filter) == 176, "grouped_agg_filter size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, kind) == 0, "filter.kind");
@@ -345,7 +390,7 @@ PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, key_count) == 44, "dim.key_cou
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, flags) == 48, "dim.flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, _pad0) == 52, "dim._pad0");
 
-PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_desc) == 1648, "grouped_agg_desc size");
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_desc) == 1712, "grouped_agg_desc size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, abi_version) == 0, "desc.version");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, size_bytes) == 4, "desc.size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, row_count) == 8, "desc.rows");
@@ -365,20 +410,20 @@ PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, execution_flags) == 212,
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, flags) == 216, "desc.flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad1) == 220, "desc._pad1");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measures) == 224, "desc.measures");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, where_filter) == 512,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, where_filter) == 576,
                 "desc.where_filter");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_filters) == 688,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_filters) == 752,
                 "desc.measure_filters");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dim_count) == 1392,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dim_count) == 1456,
                 "desc.dim_count");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad2) == 1396, "desc._pad2");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dims) == 1400, "desc.dims");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch) == 1624, "desc.scratch");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_bytes) == 1632,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad2) == 1460, "desc._pad2");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dims) == 1464, "desc.dims");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch) == 1688, "desc.scratch");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_bytes) == 1696,
                 "desc.scratch_bytes");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_space) == 1640,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_space) == 1704,
                 "desc.scratch_space");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_alignment) == 1644,
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_alignment) == 1708,
                 "desc.scratch_alignment");
 
 PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_workspace_req) == 32,

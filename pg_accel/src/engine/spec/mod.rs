@@ -7,12 +7,22 @@
 pub mod abi;
 mod codec;
 
-pub use codec::SpecCodecError;
+pub use codec::{
+    AGG_QUERY_SPEC_HEADER_WORDS, AGG_QUERY_SPEC_MAX_WORDS, AGG_QUERY_SPEC_WIRE_MAGIC,
+    SpecCodecError,
+};
 
-pub const AGG_QUERY_SPEC_VERSION: u32 = 1;
+pub const AGG_QUERY_SPEC_VERSION: u32 = 2;
 
 const MAX_BYTECODE_WORDS: usize = 65_536;
 const MAX_PROGRAM_INPUTS: usize = 64;
+const MAX_AGGREGATE_OUTPUTS: usize = 9;
+
+const BOOLOID: u32 = 16;
+const INT8OID: u32 = 20;
+const INT4OID: u32 = 23;
+const FLOAT4OID: u32 = 700;
+const FLOAT8OID: u32 = 701;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColumnRef {
@@ -26,6 +36,7 @@ pub enum ScalarValue {
     Bool(bool),
     I32(i32),
     I64(i64),
+    F32(f32),
     F64(f64),
 }
 
@@ -137,10 +148,22 @@ pub enum AggregateKind {
     Stddev,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateSource {
+    Value,
+    Rhs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AggregateOutput {
+    pub source: AggregateSource,
+    pub kind: AggregateKind,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeasureSpec {
     pub expression: MeasureExpr,
-    pub aggregates: Vec<AggregateKind>,
+    pub outputs: Vec<AggregateOutput>,
     pub filter: FilterSpec,
 }
 
@@ -160,8 +183,15 @@ pub struct DimSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateRef {
+    pub measure_index: u32,
+    pub source: AggregateSource,
+    pub kind: AggregateKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HavingSpec {
-    pub input_slots: Vec<u32>,
+    pub inputs: Vec<AggregateRef>,
     pub program: Vec<i32>,
 }
 
@@ -204,17 +234,19 @@ impl ColumnRef {
 }
 
 impl ScalarValue {
-    const fn type_tag(self) -> u8 {
+    const fn type_oid(self) -> u32 {
         match self {
-            Self::Bool(_) => 1,
-            Self::I32(_) => 2,
-            Self::I64(_) => 3,
-            Self::F64(_) => 4,
+            Self::Bool(_) => BOOLOID,
+            Self::I32(_) => INT4OID,
+            Self::I64(_) => INT8OID,
+            Self::F32(_) => FLOAT4OID,
+            Self::F64(_) => FLOAT8OID,
         }
     }
 
     fn is_nan(self) -> bool {
-        matches!(self, Self::F64(value) if value.is_nan())
+        matches!(self, Self::F32(value) if value.is_nan())
+            || matches!(self, Self::F64(value) if value.is_nan())
     }
 
     fn is_nonnegative_finite(self) -> bool {
@@ -222,20 +254,28 @@ impl ScalarValue {
             Self::Bool(_) => false,
             Self::I32(value) => value >= 0,
             Self::I64(value) => value >= 0,
+            Self::F32(value) => value.is_finite() && value >= 0.0,
             Self::F64(value) => value.is_finite() && value >= 0.0,
         }
     }
 }
 
 impl ScalarRange {
-    fn validate(self) -> Result<(), SpecValidationError> {
-        if self.lo.type_tag() != self.hi.type_tag() || self.lo.is_nan() || self.hi.is_nan() {
-            return Err(SpecValidationError::new("invalid range endpoint types"));
+    fn validate(self, input_type_oid: u32) -> Result<(), SpecValidationError> {
+        if self.lo.type_oid() != input_type_oid
+            || self.hi.type_oid() != input_type_oid
+            || self.lo.is_nan()
+            || self.hi.is_nan()
+        {
+            return Err(SpecValidationError::new(
+                "range endpoint type does not match input column",
+            ));
         }
         let ordered = match (self.lo, self.hi) {
             (ScalarValue::Bool(lo), ScalarValue::Bool(hi)) => !lo || hi,
             (ScalarValue::I32(lo), ScalarValue::I32(hi)) => lo <= hi,
             (ScalarValue::I64(lo), ScalarValue::I64(hi)) => lo <= hi,
+            (ScalarValue::F32(lo), ScalarValue::F32(hi)) => lo <= hi,
             (ScalarValue::F64(lo), ScalarValue::F64(hi)) => lo <= hi,
             _ => false,
         };
@@ -269,7 +309,7 @@ impl FilterSpec {
                     return Err(SpecValidationError::new("invalid filter range count"));
                 }
                 for range in ranges {
-                    range.validate()?;
+                    range.validate(input.type_oid)?;
                 }
                 Ok(())
             }
@@ -292,6 +332,31 @@ impl FilterSpec {
                 Ok(())
             }
         }
+    }
+
+    fn validate_relation_scope(
+        &self,
+        relation_allowed: impl Fn(u32) -> bool,
+    ) -> Result<(), SpecValidationError> {
+        self.validate()?;
+        let valid = match self {
+            Self::None => true,
+            Self::Ranges { input, .. } | Self::Mask { input, .. } => {
+                relation_allowed(input.relation_oid)
+            }
+            Self::Bytecode { inputs, .. } => inputs
+                .iter()
+                .all(|input| relation_allowed(input.relation_oid)),
+            Self::Spatial { left, right, .. } => {
+                relation_allowed(left.relation_oid) && relation_allowed(right.relation_oid)
+            }
+        };
+        if !valid {
+            return Err(SpecValidationError::new(
+                "filter references an unrelated relation",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -365,12 +430,26 @@ impl GroupKeyRef {
                         "dimension key belongs to another relation",
                     ));
                 }
+                if dim.multiplicity != JoinMultiplicity::Unique {
+                    return Err(SpecValidationError::new("grouping dimension is not unique"));
+                }
                 Ok(())
             }
-            GroupKeySource::Expression { inputs, program } => validate_program(inputs, program),
+            GroupKeySource::Expression { inputs, program } => {
+                validate_program(inputs, program)?;
+                if inputs.iter().any(|input| input.relation_oid != fact_rel) {
+                    return Err(SpecValidationError::new(
+                        "group-key expression references a non-fact relation",
+                    ));
+                }
+                Ok(())
+            }
             GroupKeySource::H3Cell { input, resolution } => {
                 input.validate()?;
-                if !(0..=15).contains(resolution) || self.encoding != GroupKeyEncoding::Hash {
+                if input.relation_oid != fact_rel
+                    || !(0..=15).contains(resolution)
+                    || self.encoding != GroupKeyEncoding::Hash
+                {
                     return Err(SpecValidationError::new("invalid H3 group key"));
                 }
                 Ok(())
@@ -380,25 +459,44 @@ impl GroupKeyRef {
 }
 
 impl MeasureSpec {
-    fn validate(&self) -> Result<(), SpecValidationError> {
-        if self.aggregates.is_empty() || self.aggregates.len() > 6 {
-            return Err(SpecValidationError::new("invalid aggregate lane count"));
+    fn validate(&self, fact_rel: u32, dims: &[DimSpec]) -> Result<(), SpecValidationError> {
+        if self.outputs.is_empty() || self.outputs.len() > MAX_AGGREGATE_OUTPUTS {
+            return Err(SpecValidationError::new("invalid aggregate output count"));
         }
-        for (index, aggregate) in self.aggregates.iter().enumerate() {
-            if self.aggregates[..index].contains(aggregate) {
-                return Err(SpecValidationError::new("duplicate aggregate lane"));
+        for (index, output) in self.outputs.iter().enumerate() {
+            if self.outputs[..index].contains(output) {
+                return Err(SpecValidationError::new("duplicate aggregate output"));
             }
         }
         match &self.expression {
             MeasureExpr::CountStar => {
-                if self.aggregates.as_slice() != [AggregateKind::Count] {
-                    return Err(SpecValidationError::new("COUNT(*) slot has non-COUNT lane"));
+                if self.outputs.as_slice()
+                    != [AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    }]
+                {
+                    return Err(SpecValidationError::new(
+                        "COUNT(*) slot has an invalid output",
+                    ));
                 }
             }
-            MeasureExpr::Column(column) => column.validate()?,
+            MeasureExpr::Column(column) => {
+                column.validate()?;
+                if column.relation_oid != fact_rel {
+                    return Err(SpecValidationError::new(
+                        "measure references a non-fact relation",
+                    ));
+                }
+            }
             MeasureExpr::Binary { lhs, rhs, .. } | MeasureExpr::StatsPair { value: lhs, rhs } => {
                 lhs.validate()?;
                 rhs.validate()?;
+                if lhs.relation_oid != fact_rel || rhs.relation_oid != fact_rel {
+                    return Err(SpecValidationError::new(
+                        "measure references a non-fact relation",
+                    ));
+                }
             }
             MeasureExpr::Bytecode {
                 inputs,
@@ -411,9 +509,33 @@ impl MeasureSpec {
                         "bytecode measure has invalid result type",
                     ));
                 }
+                if inputs.iter().any(|input| input.relation_oid != fact_rel) {
+                    return Err(SpecValidationError::new(
+                        "measure references a non-fact relation",
+                    ));
+                }
             }
         }
-        self.filter.validate()
+        for output in &self.outputs {
+            if output.source == AggregateSource::Rhs {
+                if !matches!(self.expression, MeasureExpr::StatsPair { .. }) {
+                    return Err(SpecValidationError::new(
+                        "RHS aggregate output requires STATS_PAIR",
+                    ));
+                }
+                if !matches!(
+                    output.kind,
+                    AggregateKind::Sum | AggregateKind::Count | AggregateKind::Avg
+                ) {
+                    return Err(SpecValidationError::new(
+                        "aggregate kind has no RHS ABI lane",
+                    ));
+                }
+            }
+        }
+        self.filter.validate_relation_scope(|relation_oid| {
+            relation_oid == fact_rel || dims.iter().any(|dim| dim.relation_oid == relation_oid)
+        })
     }
 }
 
@@ -430,21 +552,41 @@ impl DimSpec {
                 "join key belongs to another relation",
             ));
         }
-        self.filter.validate()
+        if self.fact_key.type_oid != self.dim_key.type_oid {
+            return Err(SpecValidationError::new("join key type OIDs do not match"));
+        }
+        self.filter
+            .validate_relation_scope(|relation_oid| relation_oid == self.relation_oid)
     }
 }
 
 impl HavingSpec {
-    fn validate(&self, measure_count: usize) -> Result<(), SpecValidationError> {
+    fn validate(&self, measures: &[MeasureSpec]) -> Result<(), SpecValidationError> {
         if self.program.is_empty()
             || self.program.len() > MAX_BYTECODE_WORDS
-            || self.input_slots.len() > MAX_PROGRAM_INPUTS
-            || self
-                .input_slots
-                .iter()
-                .any(|slot| usize::try_from(*slot).map_or(true, |slot| slot >= measure_count))
+            || self.inputs.len() > MAX_PROGRAM_INPUTS
         {
             return Err(SpecValidationError::new("invalid HAVING program"));
+        }
+        for input in &self.inputs {
+            let Ok(index) = usize::try_from(input.measure_index) else {
+                return Err(SpecValidationError::new(
+                    "HAVING references a missing aggregate output",
+                ));
+            };
+            let Some(measure) = measures.get(index) else {
+                return Err(SpecValidationError::new(
+                    "HAVING references a missing aggregate output",
+                ));
+            };
+            if !measure.outputs.contains(&AggregateOutput {
+                source: input.source,
+                kind: input.kind,
+            }) {
+                return Err(SpecValidationError::new(
+                    "HAVING references a missing aggregate output",
+                ));
+            }
         }
         Ok(())
     }
@@ -486,11 +628,17 @@ impl AggQuerySpec {
             return Err(SpecValidationError::new("mixed dense/hash key encodings"));
         }
         for measure in &self.measures {
-            measure.validate()?;
+            measure.validate(self.fact_rel, &self.star_dims)?;
         }
-        self.fact_filter.validate()?;
+        self.fact_filter.validate_relation_scope(|relation_oid| {
+            relation_oid == self.fact_rel
+                || self
+                    .star_dims
+                    .iter()
+                    .any(|dim| dim.relation_oid == relation_oid)
+        })?;
         if let Some(having) = &self.having {
-            having.validate(self.measures.len())?;
+            having.validate(&self.measures)?;
         }
         let _ = dense_product;
         Ok(())

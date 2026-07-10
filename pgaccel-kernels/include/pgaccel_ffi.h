@@ -23,6 +23,9 @@ typedef enum {
   PGACCEL_ERROR_UNSUPPORTED = -2,
 } pgaccel_status;
 
+/* Opaque hash-aggregate state returned by the H3 grouped-count entry points. */
+struct pgaccel_agg_state;
+
 typedef struct {
   char device_name[128];
   char backend_name[64];

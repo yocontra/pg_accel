@@ -1,13 +1,36 @@
 //! Strict versioned `i32` wire codec for [`AggQuerySpec`].
 
 use super::{
-    AGG_QUERY_SPEC_VERSION, AggQuerySpec, AggregateKind, BinaryMeasureOp, ColumnRef, DimSpec,
-    FilterSpec, GroupKeyEncoding, GroupKeyRef, GroupKeySource, HavingSpec, JoinMultiplicity,
-    MaskKind, MeasureExpr, MeasureSpec, ScalarRange, ScalarValue, SpecValidationError,
+    AGG_QUERY_SPEC_VERSION, AggQuerySpec, AggregateKind, AggregateOutput, AggregateRef,
+    AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, FilterSpec, GroupKeyEncoding,
+    GroupKeyRef, GroupKeySource, HavingSpec, JoinMultiplicity, MAX_AGGREGATE_OUTPUTS,
+    MAX_BYTECODE_WORDS, MAX_PROGRAM_INPUTS, MaskKind, MeasureExpr, MeasureSpec, ScalarRange,
+    ScalarValue, SpecValidationError, abi,
 };
 
-const WIRE_MAGIC: i32 = 0x5047_4132; // "PGA2"
-const HEADER_WORDS: usize = 3;
+pub const AGG_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5047_4132; // "PGA2"
+pub const AGG_QUERY_SPEC_HEADER_WORDS: usize = 3;
+const MAX_COLUMN_LIST_WORDS: usize = 1 + MAX_PROGRAM_INPUTS * 3;
+const MAX_BYTECODE_BLOCK_WORDS: usize = 1 + MAX_BYTECODE_WORDS;
+const MAX_FILTER_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS;
+const MAX_GROUP_KEY_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 5;
+const MAX_MEASURE_EXPR_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 1;
+const MAX_OUTPUT_LIST_WORDS: usize = 1 + MAX_AGGREGATE_OUTPUTS * 2;
+const MAX_MEASURE_WORDS: usize = MAX_MEASURE_EXPR_WORDS + MAX_OUTPUT_LIST_WORDS + MAX_FILTER_WORDS;
+const MAX_DIM_WORDS: usize = 1 + 3 + 3 + 1 + MAX_FILTER_WORDS;
+const MAX_HAVING_WORDS: usize = 1 + 1 + MAX_PROGRAM_INPUTS * 3 + MAX_BYTECODE_BLOCK_WORDS;
+
+/// Exact maximum word length of any semantically valid v2 spec.
+pub const AGG_QUERY_SPEC_MAX_WORDS: usize = AGG_QUERY_SPEC_HEADER_WORDS
+    + 1
+    + 1
+    + abi::PGACCEL_GROUPED_AGG_MAX_KEYS * MAX_GROUP_KEY_WORDS
+    + 1
+    + abi::PGACCEL_GROUPED_AGG_MAX_MEASURES * MAX_MEASURE_WORDS
+    + MAX_FILTER_WORDS
+    + 1
+    + abi::PGACCEL_GROUPED_AGG_MAX_DIMS * MAX_DIM_WORDS
+    + MAX_HAVING_WORDS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpecCodecError {
@@ -34,6 +57,15 @@ pub enum SpecCodecError {
     TrailingWords {
         index: usize,
         total: usize,
+    },
+    LimitExceeded {
+        index: usize,
+        context: &'static str,
+        declared: usize,
+        maximum: usize,
+    },
+    AllocationFailed {
+        context: &'static str,
     },
     LengthOverflow,
 }
@@ -69,6 +101,18 @@ impl std::fmt::Display for SpecCodecError {
             Self::TrailingWords { index, total } => {
                 write!(f, "aggregate spec has trailing words at {index} of {total}")
             }
+            Self::LimitExceeded {
+                index,
+                context,
+                declared,
+                maximum,
+            } => write!(
+                f,
+                "{context} {declared} at word {index} exceeds schema maximum {maximum}"
+            ),
+            Self::AllocationFailed { context } => {
+                write!(f, "could not allocate aggregate spec {context}")
+            }
             Self::LengthOverflow => f.write_str("aggregate spec exceeds i32-list length limit"),
         }
     }
@@ -89,11 +133,19 @@ struct Encoder {
 impl Encoder {
     fn new() -> Self {
         Self {
-            words: vec![WIRE_MAGIC, AGG_QUERY_SPEC_VERSION as i32, 0],
+            words: vec![AGG_QUERY_SPEC_WIRE_MAGIC, AGG_QUERY_SPEC_VERSION as i32, 0],
         }
     }
 
     fn finish(mut self) -> Result<Vec<i32>, SpecCodecError> {
+        if self.words.len() > AGG_QUERY_SPEC_MAX_WORDS {
+            return Err(SpecCodecError::LimitExceeded {
+                index: 2,
+                context: "wire length",
+                declared: self.words.len(),
+                maximum: AGG_QUERY_SPEC_MAX_WORDS,
+            });
+        }
         let len = i32::try_from(self.words.len()).map_err(|_| SpecCodecError::LengthOverflow)?;
         self.words[2] = len;
         Ok(self.words)
@@ -126,6 +178,28 @@ impl Encoder {
         let bits = value.to_bits();
         self.push((bits >> 32) as i32);
         self.push(bits as u32 as i32);
+    }
+
+    fn push_f32(&mut self, value: f32) {
+        self.push(value.to_bits() as i32);
+    }
+
+    fn push_aggregate_source(&mut self, source: AggregateSource) {
+        self.push(match source {
+            AggregateSource::Value => 0,
+            AggregateSource::Rhs => 1,
+        });
+    }
+
+    fn push_aggregate_kind(&mut self, kind: AggregateKind) {
+        self.push(match kind {
+            AggregateKind::Sum => 0,
+            AggregateKind::Count => 1,
+            AggregateKind::Min => 2,
+            AggregateKind::Max => 3,
+            AggregateKind::Avg => 4,
+            AggregateKind::Stddev => 5,
+        });
     }
 
     fn push_column(&mut self, column: ColumnRef) {
@@ -162,8 +236,12 @@ impl Encoder {
                 self.push(3);
                 self.push_i64(value);
             }
-            ScalarValue::F64(value) => {
+            ScalarValue::F32(value) => {
                 self.push(4);
+                self.push_f32(value);
+            }
+            ScalarValue::F64(value) => {
+                self.push(5);
                 self.push_f64(value);
             }
         }
@@ -300,16 +378,10 @@ impl Encoder {
                 self.push_u32(*result_type_oid);
             }
         }
-        self.push_len(measure.aggregates.len())?;
-        for aggregate in &measure.aggregates {
-            self.push(match aggregate {
-                AggregateKind::Sum => 0,
-                AggregateKind::Count => 1,
-                AggregateKind::Min => 2,
-                AggregateKind::Max => 3,
-                AggregateKind::Avg => 4,
-                AggregateKind::Stddev => 5,
-            });
+        self.push_len(measure.outputs.len())?;
+        for output in &measure.outputs {
+            self.push_aggregate_source(output.source);
+            self.push_aggregate_kind(output.kind);
         }
         self.push_filter(&measure.filter)
     }
@@ -360,18 +432,47 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_len(&mut self, context: &'static str) -> Result<usize, SpecCodecError> {
+    fn read_count(
+        &mut self,
+        context: &'static str,
+        maximum: usize,
+        minimum_words_per_item: usize,
+    ) -> Result<usize, SpecCodecError> {
         let index = self.index;
         let raw = self.read(context)?;
         let len =
             usize::try_from(raw).map_err(|_| SpecCodecError::InvalidValue { index, context })?;
-        if len > self.words.len().saturating_sub(self.index) {
+        if len > maximum {
+            return Err(SpecCodecError::LimitExceeded {
+                index,
+                context,
+                declared: len,
+                maximum,
+            });
+        }
+        let Some(minimum_words) = len.checked_mul(minimum_words_per_item) else {
+            return Err(SpecCodecError::LimitExceeded {
+                index,
+                context,
+                declared: len,
+                maximum,
+            });
+        };
+        if minimum_words > self.words.len().saturating_sub(self.index) {
             return Err(SpecCodecError::Truncated {
                 index: self.index,
                 context,
             });
         }
         Ok(len)
+    }
+
+    fn empty_vec<T>(len: usize, context: &'static str) -> Result<Vec<T>, SpecCodecError> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(len)
+            .map_err(|_| SpecCodecError::AllocationFailed { context })?;
+        Ok(values)
     }
 
     fn read_tag(
@@ -403,6 +504,30 @@ impl<'a> Decoder<'a> {
         Ok(f64::from_bits((hi << 32) | lo))
     }
 
+    fn read_f32(&mut self, context: &'static str) -> Result<f32, SpecCodecError> {
+        Ok(f32::from_bits(self.read_u32(context)?))
+    }
+
+    fn read_aggregate_source(&mut self) -> Result<AggregateSource, SpecCodecError> {
+        match self.read_tag("aggregate source", 1)? {
+            0 => Ok(AggregateSource::Value),
+            1 => Ok(AggregateSource::Rhs),
+            _ => unreachable!(),
+        }
+    }
+
+    fn read_aggregate_kind(&mut self) -> Result<AggregateKind, SpecCodecError> {
+        Ok(match self.read_tag("aggregate kind", 5)? {
+            0 => AggregateKind::Sum,
+            1 => AggregateKind::Count,
+            2 => AggregateKind::Min,
+            3 => AggregateKind::Max,
+            4 => AggregateKind::Avg,
+            5 => AggregateKind::Stddev,
+            _ => unreachable!(),
+        })
+    }
+
     fn read_column(&mut self) -> Result<ColumnRef, SpecCodecError> {
         Ok(ColumnRef {
             relation_oid: self.read_u32("column relation OID")?,
@@ -412,8 +537,8 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_columns(&mut self) -> Result<Vec<ColumnRef>, SpecCodecError> {
-        let len = self.read_len("column count")?;
-        let mut columns = Vec::with_capacity(len);
+        let len = self.read_count("column count", MAX_PROGRAM_INPUTS, 3)?;
+        let mut columns = Self::empty_vec(len, "column list")?;
         for _ in 0..len {
             columns.push(self.read_column()?);
         }
@@ -421,19 +546,21 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_words(&mut self, context: &'static str) -> Result<Vec<i32>, SpecCodecError> {
-        let len = self.read_len(context)?;
+        let len = self.read_count(context, MAX_BYTECODE_WORDS, 1)?;
         let end = self.index + len;
-        let values = self.words[self.index..end].to_vec();
+        let mut values = Self::empty_vec(len, "bytecode words")?;
+        values.extend_from_slice(&self.words[self.index..end]);
         self.index = end;
         Ok(values)
     }
 
     fn read_scalar(&mut self) -> Result<ScalarValue, SpecCodecError> {
-        match self.read_tag("scalar", 4)? {
+        match self.read_tag("scalar", 5)? {
             1 => Ok(ScalarValue::Bool(self.read_bool("boolean scalar")?)),
             2 => Ok(ScalarValue::I32(self.read("i32 scalar")?)),
             3 => Ok(ScalarValue::I64(self.read_i64("i64 scalar")?)),
-            4 => Ok(ScalarValue::F64(self.read_f64("f64 scalar")?)),
+            4 => Ok(ScalarValue::F32(self.read_f32("f32 scalar")?)),
+            5 => Ok(ScalarValue::F64(self.read_f64("f64 scalar")?)),
             tag => Err(SpecCodecError::InvalidTag {
                 index: self.index.saturating_sub(1),
                 context: "scalar",
@@ -447,8 +574,9 @@ impl<'a> Decoder<'a> {
             0 => Ok(FilterSpec::None),
             1 => {
                 let input = self.read_column()?;
-                let len = self.read_len("range count")?;
-                let mut ranges = Vec::with_capacity(len);
+                let len =
+                    self.read_count("range count", abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES, 4)?;
+                let mut ranges = Self::empty_vec(len, "filter ranges")?;
                 for _ in 0..len {
                     ranges.push(ScalarRange {
                         lo: self.read_scalar()?,
@@ -564,22 +692,17 @@ impl<'a> Decoder<'a> {
             },
             _ => unreachable!(),
         };
-        let aggregate_count = self.read_len("aggregate lane count")?;
-        let mut aggregates = Vec::with_capacity(aggregate_count);
-        for _ in 0..aggregate_count {
-            aggregates.push(match self.read_tag("aggregate lane", 5)? {
-                0 => AggregateKind::Sum,
-                1 => AggregateKind::Count,
-                2 => AggregateKind::Min,
-                3 => AggregateKind::Max,
-                4 => AggregateKind::Avg,
-                5 => AggregateKind::Stddev,
-                _ => unreachable!(),
+        let output_count = self.read_count("aggregate output count", MAX_AGGREGATE_OUTPUTS, 2)?;
+        let mut outputs = Self::empty_vec(output_count, "aggregate outputs")?;
+        for _ in 0..output_count {
+            outputs.push(AggregateOutput {
+                source: self.read_aggregate_source()?,
+                kind: self.read_aggregate_kind()?,
             });
         }
         Ok(MeasureSpec {
             expression,
-            aggregates,
+            outputs,
             filter: self.read_filter()?,
         })
     }
@@ -623,19 +746,24 @@ impl AggQuerySpec {
         }
         encoder.push_bool(self.having.is_some());
         if let Some(having) = &self.having {
-            encoder.push_len(having.input_slots.len())?;
-            for slot in &having.input_slots {
-                encoder.push_u32(*slot);
+            encoder.push_len(having.inputs.len())?;
+            for input in &having.inputs {
+                encoder.push_u32(input.measure_index);
+                encoder.push_aggregate_source(input.source);
+                encoder.push_aggregate_kind(input.kind);
             }
             encoder.push_words(&having.program)?;
         }
         encoder.finish()
     }
 
-    pub fn decode_i32(words: &[i32]) -> Result<Self, SpecCodecError> {
+    /// Validate an encoded spec header at the start of `words` and return the
+    /// exact number of words occupied by that spec. Trailing words are allowed
+    /// so planner `private_data` can length-delimit a spec before decoding it.
+    pub fn encoded_i32_prefix_len(words: &[i32]) -> Result<usize, SpecCodecError> {
         let mut decoder = Decoder::new(words);
         let magic = decoder.read("wire magic")?;
-        if magic != WIRE_MAGIC {
+        if magic != AGG_QUERY_SPEC_WIRE_MAGIC {
             return Err(SpecCodecError::InvalidMagic(magic));
         }
         let version = decoder.read_u32("wire version")?;
@@ -648,43 +776,73 @@ impl AggQuerySpec {
             index: declared_index,
             context: "wire length",
         })?;
+        if declared < AGG_QUERY_SPEC_HEADER_WORDS {
+            return Err(SpecCodecError::InvalidValue {
+                index: declared_index,
+                context: "wire length",
+            });
+        }
+        if declared > AGG_QUERY_SPEC_MAX_WORDS {
+            return Err(SpecCodecError::LimitExceeded {
+                index: declared_index,
+                context: "wire length",
+                declared,
+                maximum: AGG_QUERY_SPEC_MAX_WORDS,
+            });
+        }
+        if declared > words.len() {
+            return Err(SpecCodecError::Truncated {
+                index: words.len(),
+                context: "wire payload",
+            });
+        }
+        Ok(declared)
+    }
+
+    pub fn decode_i32(words: &[i32]) -> Result<Self, SpecCodecError> {
+        let declared = Self::encoded_i32_prefix_len(words)?;
         if declared != words.len() {
             return Err(SpecCodecError::LengthMismatch {
                 declared,
                 actual: words.len(),
             });
         }
-        if declared < HEADER_WORDS {
-            return Err(SpecCodecError::InvalidValue {
-                index: declared_index,
-                context: "wire length",
-            });
-        }
+        let mut decoder = Decoder {
+            words,
+            index: AGG_QUERY_SPEC_HEADER_WORDS,
+        };
         let fact_rel = decoder.read_u32("fact relation OID")?;
-        let key_count = decoder.read_len("group-key count")?;
-        let mut group_keys = Vec::with_capacity(key_count);
+        let key_count =
+            decoder.read_count("group-key count", abi::PGACCEL_GROUPED_AGG_MAX_KEYS, 5)?;
+        let mut group_keys = Decoder::empty_vec(key_count, "group keys")?;
         for _ in 0..key_count {
             group_keys.push(decoder.read_group_key()?);
         }
-        let measure_count = decoder.read_len("measure count")?;
-        let mut measures = Vec::with_capacity(measure_count);
+        let measure_count =
+            decoder.read_count("measure count", abi::PGACCEL_GROUPED_AGG_MAX_MEASURES, 5)?;
+        let mut measures = Decoder::empty_vec(measure_count, "measures")?;
         for _ in 0..measure_count {
             measures.push(decoder.read_measure()?);
         }
         let fact_filter = decoder.read_filter()?;
-        let dim_count = decoder.read_len("dimension count")?;
-        let mut star_dims = Vec::with_capacity(dim_count);
+        let dim_count =
+            decoder.read_count("dimension count", abi::PGACCEL_GROUPED_AGG_MAX_DIMS, 9)?;
+        let mut star_dims = Decoder::empty_vec(dim_count, "dimensions")?;
         for _ in 0..dim_count {
             star_dims.push(decoder.read_dim()?);
         }
         let having = if decoder.read_bool("HAVING presence")? {
-            let input_count = decoder.read_len("HAVING input count")?;
-            let mut input_slots = Vec::with_capacity(input_count);
+            let input_count = decoder.read_count("HAVING input count", MAX_PROGRAM_INPUTS, 3)?;
+            let mut inputs = Decoder::empty_vec(input_count, "HAVING inputs")?;
             for _ in 0..input_count {
-                input_slots.push(decoder.read_u32("HAVING input slot")?);
+                inputs.push(AggregateRef {
+                    measure_index: decoder.read_u32("HAVING measure index")?,
+                    source: decoder.read_aggregate_source()?,
+                    kind: decoder.read_aggregate_kind()?,
+                });
             }
             Some(HavingSpec {
-                input_slots,
+                inputs,
                 program: decoder.read_words("HAVING bytecode word count")?,
             })
         } else {
@@ -726,13 +884,17 @@ mod tests {
         }
     }
 
+    const fn output(source: AggregateSource, kind: AggregateKind) -> AggregateOutput {
+        AggregateOutput { source, kind }
+    }
+
     fn minimal_spec() -> AggQuerySpec {
         AggQuerySpec {
             fact_rel: 10,
             group_keys: Vec::new(),
             measures: vec![MeasureSpec {
                 expression: MeasureExpr::CountStar,
-                aggregates: vec![AggregateKind::Count],
+                outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
                 filter: FilterSpec::None,
             }],
             fact_filter: FilterSpec::None,
@@ -778,13 +940,13 @@ mod tests {
             measures: vec![
                 MeasureSpec {
                     expression: MeasureExpr::Column(column(10, 4, FLOAT8_OID)),
-                    aggregates: vec![
-                        AggregateKind::Sum,
-                        AggregateKind::Count,
-                        AggregateKind::Min,
-                        AggregateKind::Max,
-                        AggregateKind::Avg,
-                        AggregateKind::Stddev,
+                    outputs: vec![
+                        output(AggregateSource::Value, AggregateKind::Sum),
+                        output(AggregateSource::Value, AggregateKind::Count),
+                        output(AggregateSource::Value, AggregateKind::Min),
+                        output(AggregateSource::Value, AggregateKind::Max),
+                        output(AggregateSource::Value, AggregateKind::Avg),
+                        output(AggregateSource::Value, AggregateKind::Stddev),
                     ],
                     filter: FilterSpec::Ranges {
                         input: column(10, 4, FLOAT8_OID),
@@ -800,7 +962,10 @@ mod tests {
                         lhs: column(10, 5, INT4_OID),
                         rhs: column(10, 6, INT4_OID),
                     },
-                    aggregates: vec![AggregateKind::Sum, AggregateKind::Count],
+                    outputs: vec![
+                        output(AggregateSource::Value, AggregateKind::Sum),
+                        output(AggregateSource::Value, AggregateKind::Count),
+                    ],
                     filter: FilterSpec::Mask {
                         input: column(10, 7, BOOL_OID),
                         kind: MaskKind::Sql,
@@ -811,7 +976,10 @@ mod tests {
                         value: column(10, 8, FLOAT8_OID),
                         rhs: column(10, 9, FLOAT8_OID),
                     },
-                    aggregates: vec![AggregateKind::Avg, AggregateKind::Stddev],
+                    outputs: vec![
+                        output(AggregateSource::Value, AggregateKind::Stddev),
+                        output(AggregateSource::Rhs, AggregateKind::Avg),
+                    ],
                     filter: FilterSpec::Spatial {
                         function_oid: 42,
                         left: column(10, 10, 1_000),
@@ -825,7 +993,7 @@ mod tests {
                         program: vec![0, 1, 11],
                         result_type_oid: INT8_OID,
                     },
-                    aggregates: vec![AggregateKind::Sum],
+                    outputs: vec![output(AggregateSource::Value, AggregateKind::Sum)],
                     filter: FilterSpec::None,
                 },
             ],
@@ -837,14 +1005,25 @@ mod tests {
                 relation_oid: 20,
                 fact_key: column(10, 13, INT4_OID),
                 dim_key: column(20, 1, INT4_OID),
-                multiplicity: JoinMultiplicity::Counted,
+                multiplicity: JoinMultiplicity::Unique,
                 filter: FilterSpec::Mask {
                     input: column(20, 2, BOOL_OID),
                     kind: MaskKind::Sql,
                 },
             }],
             having: Some(HavingSpec {
-                input_slots: vec![0, 1],
+                inputs: vec![
+                    AggregateRef {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    },
+                    AggregateRef {
+                        measure_index: 1,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    },
+                ],
                 program: vec![0, 1, 44],
             }),
         }
@@ -862,7 +1041,7 @@ mod tests {
             }],
             measures: vec![MeasureSpec {
                 expression: MeasureExpr::CountStar,
-                aggregates: vec![AggregateKind::Count],
+                outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
                 filter: FilterSpec::None,
             }],
             fact_filter: FilterSpec::Mask {
@@ -934,7 +1113,7 @@ mod tests {
         ));
 
         let mut bad_aggregate_tag = encoded.clone();
-        bad_aggregate_tag[8] = 99;
+        bad_aggregate_tag[9] = 99;
         assert!(matches!(
             AggQuerySpec::decode_i32(&bad_aggregate_tag),
             Err(SpecCodecError::InvalidTag { .. })
@@ -974,5 +1153,256 @@ mod tests {
             AggQuerySpec::decode_i32(&encoded),
             Err(SpecCodecError::InvalidSpec(_))
         ));
+    }
+
+    #[test]
+    fn prefix_length_validates_framing_without_rejecting_following_words() {
+        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 1_117_561);
+        let encoded = dense_spec().encode_i32().expect("valid spec encodes");
+        let mut framed = encoded.clone();
+        framed.extend([17, 18, 19]);
+        assert_eq!(
+            AggQuerySpec::encoded_i32_prefix_len(&framed).expect("prefix is valid"),
+            encoded.len()
+        );
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&framed),
+            Err(SpecCodecError::LengthMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn source_aware_outputs_and_exact_having_references_are_validated() {
+        let mut spec = dense_spec();
+        spec.measures[1]
+            .outputs
+            .push(output(AggregateSource::Rhs, AggregateKind::Sum));
+        assert!(
+            spec.validate().is_err(),
+            "non-STATS_PAIR RHS output accepted"
+        );
+
+        let mut spec = dense_spec();
+        spec.measures[2]
+            .outputs
+            .push(output(AggregateSource::Rhs, AggregateKind::Stddev));
+        assert!(
+            spec.validate().is_err(),
+            "unsupported RHS SUMSQ lane accepted"
+        );
+
+        let mut spec = dense_spec();
+        spec.having.as_mut().expect("fixture has HAVING").inputs[0].kind = AggregateKind::Min;
+        assert!(
+            spec.validate().is_ok(),
+            "HAVING should accept another projected primary output"
+        );
+        spec.having.as_mut().expect("fixture has HAVING").inputs[0].source = AggregateSource::Rhs;
+        assert!(
+            spec.validate().is_err(),
+            "HAVING accepted an output absent from the measure"
+        );
+    }
+
+    #[test]
+    fn ranges_must_match_the_input_oid_and_preserve_float_edges() {
+        let mut spec = minimal_spec();
+        spec.fact_filter = FilterSpec::Ranges {
+            input: column(10, 2, FLOAT8_OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::F64(f64::NEG_INFINITY),
+                hi: ScalarValue::F64(f64::INFINITY),
+            }],
+        };
+        assert!(spec.validate().is_ok(), "ordered infinities were rejected");
+
+        if let FilterSpec::Ranges { ranges, .. } = &mut spec.fact_filter {
+            ranges[0].hi = ScalarValue::I64(i64::MAX);
+        }
+        assert!(spec.validate().is_err(), "mixed endpoints were accepted");
+        if let FilterSpec::Ranges { ranges, .. } = &mut spec.fact_filter {
+            ranges[0].lo = ScalarValue::I64(0);
+        }
+        assert!(
+            spec.validate().is_err(),
+            "endpoints mismatching the input OID were accepted"
+        );
+        if let FilterSpec::Ranges { ranges, .. } = &mut spec.fact_filter {
+            ranges[0] = ScalarRange {
+                lo: ScalarValue::F64(f64::NAN),
+                hi: ScalarValue::F64(f64::INFINITY),
+            };
+        }
+        assert!(spec.validate().is_err(), "NaN endpoint was accepted");
+        if let FilterSpec::Ranges { ranges, .. } = &mut spec.fact_filter {
+            ranges[0] = ScalarRange {
+                lo: ScalarValue::F64(f64::INFINITY),
+                hi: ScalarValue::F64(f64::NEG_INFINITY),
+            };
+        }
+        assert!(
+            spec.validate().is_err(),
+            "reversed infinities were accepted"
+        );
+    }
+
+    #[test]
+    fn float4_ranges_round_trip_without_widening() {
+        let mut spec = minimal_spec();
+        spec.fact_filter = FilterSpec::Ranges {
+            input: column(10, 2, 700),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::F32(f32::NEG_INFINITY),
+                hi: ScalarValue::F32(f32::INFINITY),
+            }],
+        };
+        let encoded = spec.encode_i32().expect("valid float4 range encodes");
+        assert_eq!(
+            AggQuerySpec::decode_i32(&encoded).expect("float4 range decodes"),
+            spec
+        );
+    }
+
+    #[test]
+    fn every_wire_count_is_schema_bounded_before_allocation() {
+        let mut wire_too_large = vec![
+            AGG_QUERY_SPEC_WIRE_MAGIC,
+            AGG_QUERY_SPEC_VERSION as i32,
+            i32::try_from(AGG_QUERY_SPEC_MAX_WORDS + 1).expect("test limit fits i32"),
+        ];
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&wire_too_large),
+            Err(SpecCodecError::LimitExceeded {
+                context: "wire length",
+                ..
+            })
+        ));
+
+        let encoded = minimal_spec().encode_i32().expect("valid spec encodes");
+        for (index, value, context) in [
+            (4, 4, "group-key count"),
+            (5, 5, "measure count"),
+            (7, 10, "aggregate output count"),
+            (12, 5, "dimension count"),
+        ] {
+            let mut oversized = encoded.clone();
+            oversized[index] = value;
+            assert!(matches!(
+                AggQuerySpec::decode_i32(&oversized),
+                Err(SpecCodecError::LimitExceeded {
+                    context: actual,
+                    ..
+                }) if actual == context
+            ));
+        }
+
+        let mut oversized_having = encoded;
+        oversized_having[13] = 1;
+        oversized_having.push(65);
+        oversized_having[2] =
+            i32::try_from(oversized_having.len()).expect("test encoding length fits i32");
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&oversized_having),
+            Err(SpecCodecError::LimitExceeded {
+                context: "HAVING input count",
+                ..
+            })
+        ));
+
+        wire_too_large[2] = 2;
+        assert!(matches!(
+            AggQuerySpec::encoded_i32_prefix_len(&wire_too_large),
+            Err(SpecCodecError::InvalidValue {
+                context: "wire length",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nested_decoder_counts_are_bounded_before_reserve_or_copy() {
+        let mut bytecode_spec = minimal_spec();
+        bytecode_spec.measures[0] = MeasureSpec {
+            expression: MeasureExpr::Bytecode {
+                inputs: vec![column(10, 2, INT4_OID)],
+                program: vec![0],
+                result_type_oid: INT4_OID,
+            },
+            outputs: vec![output(AggregateSource::Value, AggregateKind::Sum)],
+            filter: FilterSpec::None,
+        };
+        let encoded = bytecode_spec.encode_i32().expect("valid spec encodes");
+
+        let mut oversized_columns = encoded.clone();
+        oversized_columns[7] = 65;
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&oversized_columns),
+            Err(SpecCodecError::LimitExceeded {
+                context: "column count",
+                ..
+            })
+        ));
+
+        let mut oversized_program = encoded;
+        oversized_program[11] = 65_537;
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&oversized_program),
+            Err(SpecCodecError::LimitExceeded {
+                context: "measure bytecode word count",
+                ..
+            })
+        ));
+
+        let mut range_spec = minimal_spec();
+        range_spec.fact_filter = FilterSpec::Ranges {
+            input: column(10, 2, INT4_OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(0),
+                hi: ScalarValue::I32(1),
+            }],
+        };
+        let mut oversized_ranges = range_spec.encode_i32().expect("valid spec encodes");
+        oversized_ranges[15] = 5;
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&oversized_ranges),
+            Err(SpecCodecError::LimitExceeded {
+                context: "range count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relation_scope_join_types_and_grouped_dimension_uniqueness_are_validated() {
+        let mut spec = dense_spec();
+        spec.star_dims[0].dim_key.type_oid = INT8_OID;
+        assert!(
+            spec.validate().is_err(),
+            "mismatched join-key OIDs accepted"
+        );
+
+        let mut spec = dense_spec();
+        spec.star_dims[0].multiplicity = JoinMultiplicity::Counted;
+        assert!(
+            spec.validate().is_err(),
+            "counted dimension used as a group source was accepted"
+        );
+
+        let mut spec = dense_spec();
+        spec.measures[0].expression = MeasureExpr::Column(column(99, 1, FLOAT8_OID));
+        assert!(
+            spec.validate().is_err(),
+            "measure from an unrelated relation was accepted"
+        );
+
+        let mut spec = dense_spec();
+        spec.fact_filter = FilterSpec::Mask {
+            input: column(99, 1, BOOL_OID),
+            kind: MaskKind::Sql,
+        };
+        assert!(
+            spec.validate().is_err(),
+            "filter from an unrelated relation was accepted"
+        );
     }
 }

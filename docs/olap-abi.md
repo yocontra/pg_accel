@@ -36,23 +36,50 @@ changing any embedded fixed-size struct, or changing a discriminant also
 requires a new version. Adding support for a value already represented by an
 existing enum, such as implementing NUMERIC or HASH, does not change the ABI.
 
-## Query spec wire format
+This correction defines the still-unmerged execution ABI v1; after publication
+the evolution rule above applies. The independently serialized query spec is
+v2. On LP64, the corrected physical-measure layout is pinned as follows in both
+C and Rust:
+
+| Struct | Size | Selected offsets |
+|---|---:|---|
+| `pgaccel_grouped_agg_measure_col` | 32 | values 0, nulls 8, physical_type 16, element_bytes 20, scale 24, flags 28 |
+| `pgaccel_grouped_agg_measure` | 88 | value 0, rhs 32, op 64, agg_mask 68, accumulator_kind 72, state_bytes 76, flags 80, pad 84 |
+| `pgaccel_grouped_agg_desc` | 1712 | measures 224, where_filter 576, measure_filters 752, dim_count 1456, dims 1464, scratch 1688 |
+
+## Query spec wire format v2
 
 `AggQuerySpec::encode_i32` produces a PostgreSQL-compatible integer list:
 
 1. magic `0x50474132` (`PGA2`),
-2. `AGG_QUERY_SPEC_VERSION`,
+2. `AGG_QUERY_SPEC_VERSION` (2),
 3. exact total word count,
 4. tagged, length-delimited fields in `AggQuerySpec` declaration order.
 
 Every enum/variant has an explicit tag. OIDs are stored bit-for-bit as one
-`i32`; i64/f64 values use high and low 32-bit words. Booleans accept only zero
-or one. The decoder rejects unknown versions/tags, negative or impossible
-lengths, malformed values, truncation, and trailing words. It then runs the
-same semantic validation used before encoding. It never performs the historic
-out-of-bounds-as-zero read. Tests reject every proper prefix of a valid
-encoding and cover header, tag, length, boolean, semantic, and trailing-word
-corruption.
+`i32`; i64/f64 values use high and low 32-bit words and f32 uses one exact bit
+word. Booleans accept only zero or one. Each aggregate output encodes both its
+VALUE/RHS source and aggregate kind. Each HAVING input encodes the exact
+`(measure_index, source, kind)` output it consumes; validation rejects a
+reference that is not projected by that measure. RHS is legal only for a
+STATS_PAIR expression, and only RHS SUM, COUNT, and AVG are representable.
+
+`AGG_QUERY_SPEC_WIRE_MAGIC`, `AGG_QUERY_SPEC_HEADER_WORDS`, and
+`AGG_QUERY_SPEC_MAX_WORDS` are exported with the codec.
+`AggQuerySpec::encoded_i32_prefix_len` validates that framing and returns the
+first spec's exact word length even when another private-data payload follows.
+Callers must use it instead of duplicating header offsets.
+
+Before any allocation, the decoder bounds every declared count by its schema
+maximum and by the minimum words remaining for those items. Bytecode is capped
+at 65,536 words, program/HAVING inputs at 64, aggregate outputs at nine, and
+the top-level counts by the C ABI maxima. All untrusted vectors use fallible
+`try_reserve_exact`; allocation failure and schema-limit failure are distinct
+codec errors. Slice copies occur only after both bounds pass. The decoder
+rejects unknown versions/tags, negative or impossible lengths, malformed
+values, truncation, and trailing words, then runs the same semantic validation
+used before encoding. Tests reject every proper prefix and cover oversized
+top-level and nested counts.
 
 ## Producer-stage contract
 
@@ -78,6 +105,121 @@ columns:
 These producer stages are lossless. They permit later planners and residency
 implementations to change without adding device program pointers or PostgreSQL
 objects to the kernel ABI.
+
+## Normative canonical form and pointer matrices
+
+The tables in this section are validation rules. "MUST-NONNULL" is conditional
+on the addressed logical length being nonzero (`row_count`, `key_count`, or
+`group_capacity` as applicable); a zero-length input may use NULL. "Optional"
+means NULL selects the documented identity/default. "Canonical zero" means a
+NULL pointer or integer zero. A canonical `pgaccel_val` NULL has tag
+`PGACCEL_VAL_NULL` and every data byte zero.
+
+A canonical zero measure view is exactly:
+
+| `values` | `nulls` | `physical_type` | `element_bytes` | `scale` | `flags` |
+|---|---|---:|---:|---:|---:|
+| MUST-NULL | MUST-NULL | `PHYSICAL_INVALID` (0) | 0 | 0 | 0 |
+
+Every `_pad` and `flags` field in every struct is canonical zero. A producer
+must initialize complete fixed arrays, including slots above each active
+count; a consumer must reject noncanonical ignored data rather than silently
+accepting hidden pointers.
+
+### FACT, DIM, and measure inputs
+
+| Descriptor case | Value pointer/view | NULL sidecar | Other pointer | Required canonical form |
+|---|---|---|---|---|
+| FACT grouping key | `keys[i].values.values` MUST-NONNULL | optional; NULL means all rows valid | `lookup_by_key` MUST-NULL | `values.type` is the validated scalar key type |
+| DIM grouping key | `keys[i].values` is the zero `pgaccel_expr_usm_col` | MUST-NULL as part of that view | `lookup_by_key` MUST-NONNULL for the referenced dimension domain | `source` names an existing UNIQUE dimension |
+| COLUMN measure | `value.values` MUST-NONNULL | `value.nulls` optional | `rhs` is a canonical zero measure view | physical metadata matches the staged value |
+| MUL or SUB measure | both `value.values` and `rhs.values` MUST-NONNULL | each sidecar independently optional | none | both physical views are fully specified |
+| STATS_PAIR measure | both `value.values` and `rhs.values` MUST-NONNULL | each sidecar independently optional | none | VALUE and RHS validity remain independent |
+| COUNT_STAR measure | both measure views MUST-NULL | both MUST-NULL | none | both measure views are canonical zero |
+| Dimension fact join key | `dims[j].fact_key.values` MUST-NONNULL | optional | `match_by_key` and `multiplicity_by_key` are independently optional | NULL match map means all in-domain keys match; NULL multiplicity map means one |
+
+The spec requires each join-key OID pair to agree. Measure expressions resolve
+only fact columns. Fact/measure filters may reference the fact relation and
+dimensions explicitly declared by the same spec, never an unrelated relation.
+A dimension-local filter resolves only that dimension. Expression/H3 fact keys
+resolve only fact columns. A dimension referenced by a group key must use
+`JoinMultiplicity::Unique`.
+
+### Fixed slots and disabled filters
+
+| Slot/case | Required form |
+|---|---|
+| `keys[key_count..MAX_KEYS]` | every byte canonical zero |
+| `measures[measure_count..MAX_MEASURES]` | every byte canonical zero, including both measure views |
+| `dims[dim_count..MAX_DIMS]` | every byte canonical zero |
+| `measure_filters[measure_count..MAX_MEASURES]` | canonical disabled filter below |
+| `out.keys[key_count..MAX_KEYS]` | all pointers MUST-NULL; type/flags canonical zero |
+| `out.measures[measure_count..MAX_MEASURES]` | every pointer MUST-NULL |
+
+A canonical disabled filter is not bytewise zero because its compare opcode is
+`PGACCEL_EXPR_OP_ALWAYS_TRUE`:
+
+| Field | Canonical disabled value |
+|---|---|
+| `kind` | `FILTER_NONE` |
+| `predicate_source`, `predicate_measure_slot`, `predicate_range_count` | 0, 0, 0 |
+| every `predicate_lo[]`, `predicate_hi[]` | canonical `pgaccel_val` NULL |
+| `value_cmp_opcode` | `PGACCEL_EXPR_OP_ALWAYS_TRUE` |
+| `_pad0`, `flags` | 0, 0 |
+| `value_cmp_const` | canonical `pgaccel_val` NULL |
+| `mask` | MUST-NULL |
+
+Active filter fields obey this matrix:
+
+| Condition | `kind` | `mask` | Scalar fields |
+|---|---|---|---|
+| no producer mask | MUST be `FILTER_NONE` | MUST-NULL | ranges/compare may still be active |
+| SQL mask | MUST be `FILTER_SQL` | MUST-NONNULL | ranges/compare optional |
+| recheck mask | MUST be `FILTER_RECHECK` | MUST-NONNULL | ranges/compare optional |
+| `predicate_range_count = n` | any valid kind | as above | slots `[0,n)` typed and ordered; slots `[n,MAX)` canonical NULL |
+| compare disabled | any valid kind | as above | opcode ALWAYS_TRUE and constant canonical NULL |
+| compare enabled | any valid kind | as above | valid comparison opcode and constant tag exactly matching its source |
+
+`predicate_measure_slot` must name an active measure whenever a scalar range or
+compare is enabled. RHS requires that measure to be STATS_PAIR. For
+PHYSICAL_NUMERIC and PHYSICAL_INTERVAL there is no `pgaccel_val` representation;
+their scalar predicate fields MUST remain disabled and a producer mask is
+required.
+
+### Output mode, keys, and sidecars
+
+| Grouping/output mode | `active_groups` | `group_codes` | active key output lanes |
+|---|---|---|---|
+| DENSE_RADIX + DENSE | MUST-NONNULL | optional; NULL omits the redundant positional code | optional; an omitted lane is canonical zero |
+| DENSE_RADIX + COMPACT | MUST-NULL | optional; when present it receives the stable composite code | `keys[0..key_count]` values MUST-NONNULL |
+| HASH + COMPACT | MUST-NULL | MUST-NULL | `keys[0..key_count]` values MUST-NONNULL |
+| HASH + DENSE | invalid descriptor | invalid descriptor | invalid descriptor |
+
+For every provided key lane, `type` must equal the validated materialized key
+type and `flags` is zero. Its `nulls` pointer is MUST-NONNULL when the key can
+produce SQL NULL (an explicit dense `null_code`, a nullable hash input, or a
+nullable dimension lookup); it is MUST-NULL when the producer proves the key
+non-NULL. When `values` is omitted in DENSE output, `nulls` also MUST-NULL and
+type/flags are canonical zero.
+
+### Measure output pointers and zero states
+
+| Requested state | Pointer requirement | All other/unused state |
+|---|---|---|
+| VALUE SUM/MIN/MAX/SUMSQ | matching pointer MUST-NONNULL exactly when its lane bit is set | pointer MUST-NULL when bit is clear |
+| VALUE COUNT | `count` MUST-NONNULL exactly when COUNT is projected | MUST-NULL otherwise |
+| VALUE validity | `nonnull_count` MUST-NONNULL when SUM, MIN, MAX, or SUMSQ state is requested | may be NULL only for COUNT-only |
+| RHS SUM | `rhs_sum` MUST-NONNULL exactly when RHS_SUM is requested | MUST-NULL otherwise |
+| RHS COUNT | `rhs_count` MUST-NONNULL exactly when RHS_COUNT is projected | MUST-NULL otherwise |
+| RHS validity | `rhs_nonnull_count` MUST-NONNULL when RHS_SUM is requested | may be NULL only for RHS_COUNT-only |
+| inactive measure slot | no state requested | every pointer MUST-NULL |
+
+All provided count and nonnull buffers are always written. Inactive groups and
+active all-NULL groups receive canonical u64 zero counts. SUM/SUMSQ state bytes
+are canonical numeric zero when their corresponding nonnull count is zero.
+MIN/MAX bytes are unspecified in that case and must not be read. On entry to a
+FINALIZE call, `emitted_group_count`, `selected_count`, and `uncertain_count`
+are canonical zero; successful finalization overwrites them.
 
 ## Grouping keys and group existence
 
@@ -169,10 +311,23 @@ SELECT sum(x) FILTER (WHERE a), count(y) FILTER (WHERE b) FROM t;
 ```
 
 Each filter ANDs its optional mask, inclusive range union, and compare-constant
-term. `pgaccel_val` bounds preserve exact INT64 constants beyond 2^53. Tags
-must match the referenced measure column. Unused bound slots and constants are
-canonical NULL values. Range endpoints reject NaN but permit ordered
-infinities, matching PostgreSQL float comparisons.
+term. `pgaccel_val` bounds preserve exact INT64 constants beyond 2^53. Every
+endpoint in every range must have the same scalar variant and that variant must
+exactly match the referenced `ColumnRef.type_oid`:
+
+| Wire scalar | Required PostgreSQL OID |
+|---|---:|
+| BOOL | 16 |
+| I32 | 23 |
+| I64 | 20 |
+| F32 | 700 |
+| F64 | 701 |
+
+Mixed range types and a physically compatible but different OID are invalid.
+Unused bound slots and constants are canonical NULL values. F32/F64 endpoints
+reject NaN, permit `-infinity <= finite <= +infinity`, and reject reversed
+infinities. NUMERIC and INTERVAL predicates require producer masks because
+`pgaccel_val` has no representation for their fixed-width physical states.
 
 Mask bytes are interpreted exactly, never as `nonzero == true`:
 
@@ -192,9 +347,50 @@ to one measure slot, arrive through a producer mask.
 
 ## Measures, validity, and counts
 
-A measure slot owns one expression and a lane mask. AVG uses SUM plus hidden
-`nonnull_count`; STDDEV uses SUM, SUMSQ, and hidden `nonnull_count`.
-`STATS_PAIR` maintains primary and RHS validity independently.
+Measure inputs use `pgaccel_grouped_agg_measure_col`, not
+`pgaccel_expr_usm_col` or `pgaccel_val`. Physical input representation is
+therefore independent from accumulator representation:
+
+| Physical type | `element_bytes` | `scale` | Accumulator compatibility |
+|---|---:|---:|---|
+| INVALID | 0 | 0 | canonical unused view only |
+| BOOL | 1 | 0 | COUNT; other lanes may be unsupported |
+| INT32 | 4 | 0 | checked I64 |
+| INT64 | 8 | 0 | checked I64 |
+| FLOAT32 | 4 | 0 | F64 or an explicitly supported widened path |
+| FLOAT64 | 8 | 0 | F64 |
+| DATE | 4 | 0 | I64 state for supported order/count lanes |
+| TIMESTAMP | 8 | 0 | I64 state for supported order/count lanes |
+| NUMERIC | fixed producer limb width | decimal scale | NUMERIC state |
+| INTERVAL | fixed producer state width | fractional precision | INTERVAL state |
+
+`physical_type` identifies the input bytes, `element_bytes` is one input
+element, and per-input `scale` belongs to that input. The measure's separate
+`accumulator_kind` and `state_bytes` identify workspace/output state; input
+width must never be inferred from `state_bytes`. Unknown widths, nonzero scalar
+scales, or nonzero view flags are descriptor errors. Represented
+NUMERIC/INTERVAL shapes may return UNSUPPORTED until their kernels land.
+
+A measure slot owns one expression and source-aware aggregate outputs. The
+logical-to-ABI mapping is exact:
+
+| Logical output | Required ABI state |
+|---|---|
+| VALUE SUM | SUM |
+| VALUE COUNT | COUNT |
+| VALUE MIN | MIN |
+| VALUE MAX | MAX |
+| VALUE AVG | SUM plus hidden `nonnull_count` |
+| VALUE STDDEV | SUM + SUMSQ plus hidden `nonnull_count` |
+| RHS SUM | RHS_SUM |
+| RHS COUNT | RHS_COUNT |
+| RHS AVG | RHS_SUM plus hidden `rhs_nonnull_count` |
+
+RHS outputs require STATS_PAIR. RHS MIN, MAX, and STDDEV are invalid because
+the v1 ABI has no corresponding state lanes. STATS_PAIR maintains VALUE and
+RHS validity independently. HAVING inputs reference an exact projected triple
+`(measure_index, source, kind)`; naming a measure that lacks that output is
+invalid.
 
 `selected_count` is the cumulative checked sum of logical joined-row weights
 after dimension, key, and global WHERE gating. Per-measure FILTER and NULL
@@ -226,22 +422,22 @@ STATS_PAIR primary and RHS rows need not be valid together.
 - `rhs_nonnull_count`: non-NULL whenever RHS_SUM is requested. It may be NULL
   for RHS_COUNT-only.
 - COUNT_STAR requires `op=COUNT_STAR`, `agg_mask=COUNT`,
-  `accumulator_kind=I64`, `scale=0`, `state_bytes=8`, zeroed value/rhs views,
-  a non-NULL `count`, and all other measure output pointers NULL.
+  `accumulator_kind=I64`, `state_bytes=8`, canonical zero value/rhs views, a
+  non-NULL `count`, and all other measure output pointers NULL.
 
 All count/nonnull buffers are u64 and always written. Inactive groups and
-all-NULL active groups have zero count/nonnull values. SUM/SUMSQ may be written
-as zero when nonnull is zero; MIN/MAX and inactive value-state bytes are
-unspecified. PostgreSQL NULL emission must consult nonnull counts.
+all-NULL active groups have zero count/nonnull values. SUM/SUMSQ are canonical
+numeric zero when nonnull is zero; MIN/MAX value-state bytes are unspecified.
+PostgreSQL NULL emission must consult nonnull counts.
 
 Accumulator states are explicit:
 
-| Kind | V1 input | `state_bytes` | Status |
+| Kind | V1 physical input | `state_bytes` | Status |
 |---|---|---:|---|
 | I64 | INT32/INT64 | 8 | Phase 4B exact checked path |
 | F64 | FLOAT64 | 8 | Phase 4B path |
-| NUMERIC | fixed-point limbs, scale set | fixed width | represented; Phase 9 implementation |
-| INTERVAL | interval state, scale/precision set | fixed width | represented; Phase 9 implementation |
+| NUMERIC | fixed-point limbs with view scale | fixed width | represented; Phase 9 implementation |
+| INTERVAL | interval state with view precision | fixed width | represented; Phase 9 implementation |
 
 ## Output modes and memory
 

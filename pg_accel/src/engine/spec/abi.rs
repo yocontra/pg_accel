@@ -59,6 +59,17 @@ pub const PGACCEL_GROUPED_AGG_ACCUM_F64: i32 = 2;
 pub const PGACCEL_GROUPED_AGG_ACCUM_NUMERIC: i32 = 3;
 pub const PGACCEL_GROUPED_AGG_ACCUM_INTERVAL: i32 = 4;
 
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_INVALID: i32 = 0;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_BOOL: i32 = 1;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_INT32: i32 = 2;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_INT64: i32 = 3;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32: i32 = 4;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64: i32 = 5;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_DATE: i32 = 6;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP: i32 = 7;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC: i32 = 8;
+pub const PGACCEL_GROUPED_AGG_PHYSICAL_INTERVAL: i32 = 9;
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PgaccelGroupedAggKey {
@@ -74,15 +85,26 @@ pub struct PgaccelGroupedAggKey {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct PgaccelGroupedAggMeasureCol {
+    pub values: *const c_void,
+    pub nulls: *const u8,
+    pub physical_type: i32,
+    pub element_bytes: u32,
+    pub scale: i32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct PgaccelGroupedAggMeasure {
-    pub value: PgaccelExprUsmCol,
-    pub rhs: PgaccelExprUsmCol,
+    pub value: PgaccelGroupedAggMeasureCol,
+    pub rhs: PgaccelGroupedAggMeasureCol,
     pub op: i32,
     pub agg_mask: u32,
     pub accumulator_kind: i32,
-    pub scale: i32,
     pub state_bytes: u32,
     pub flags: u32,
+    pub pad0: u32,
 }
 
 #[repr(C)]
@@ -195,10 +217,11 @@ pub struct PgaccelGroupedAggOut {
 #[cfg(target_pointer_width = "64")]
 const _: () = {
     assert!(std::mem::size_of::<PgaccelGroupedAggKey>() == 56);
-    assert!(std::mem::size_of::<PgaccelGroupedAggMeasure>() == 72);
+    assert!(std::mem::size_of::<PgaccelGroupedAggMeasureCol>() == 32);
+    assert!(std::mem::size_of::<PgaccelGroupedAggMeasure>() == 88);
     assert!(std::mem::size_of::<PgaccelGroupedAggFilter>() == 176);
     assert!(std::mem::size_of::<PgaccelGroupedAggDim>() == 56);
-    assert!(std::mem::size_of::<PgaccelGroupedAggDesc>() == 1648);
+    assert!(std::mem::size_of::<PgaccelGroupedAggDesc>() == 1712);
     assert!(std::mem::size_of::<PgaccelGroupedAggWorkspaceReq>() == 32);
     assert!(std::mem::size_of::<PgaccelGroupedAggMeasureOut>() == 72);
     assert!(std::mem::size_of::<PgaccelGroupedAggKeyOut>() == 24);
@@ -223,15 +246,23 @@ mod tests {
         assert_eq!(offset_of!(PgaccelGroupedAggKey, flags), 48);
         assert_eq!(offset_of!(PgaccelGroupedAggKey, pad0), 52);
 
-        assert_eq!(size_of::<PgaccelGroupedAggMeasure>(), 72);
+        assert_eq!(size_of::<PgaccelGroupedAggMeasureCol>(), 32);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasureCol, values), 0);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasureCol, nulls), 8);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasureCol, physical_type), 16);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasureCol, element_bytes), 20);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasureCol, scale), 24);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasureCol, flags), 28);
+
+        assert_eq!(size_of::<PgaccelGroupedAggMeasure>(), 88);
         assert_eq!(offset_of!(PgaccelGroupedAggMeasure, value), 0);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, rhs), 24);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, op), 48);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, agg_mask), 52);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, accumulator_kind), 56);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, scale), 60);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, state_bytes), 64);
-        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, flags), 68);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, rhs), 32);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, op), 64);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, agg_mask), 68);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, accumulator_kind), 72);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, state_bytes), 76);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, flags), 80);
+        assert_eq!(offset_of!(PgaccelGroupedAggMeasure, pad0), 84);
 
         assert_eq!(size_of::<PgaccelGroupedAggFilter>(), 176);
         assert_eq!(offset_of!(PgaccelGroupedAggFilter, kind), 0);
@@ -264,7 +295,7 @@ mod tests {
 
     #[test]
     fn grouped_agg_descriptor_layout_matches_c_header() {
-        assert_eq!(size_of::<PgaccelGroupedAggDesc>(), 1648);
+        assert_eq!(size_of::<PgaccelGroupedAggDesc>(), 1712);
         assert_eq!(offset_of!(PgaccelGroupedAggDesc, abi_version), 0);
         assert_eq!(offset_of!(PgaccelGroupedAggDesc, size_bytes), 4);
         assert_eq!(offset_of!(PgaccelGroupedAggDesc, row_count), 8);
@@ -279,15 +310,15 @@ mod tests {
         assert_eq!(offset_of!(PgaccelGroupedAggDesc, flags), 216);
         assert_eq!(offset_of!(PgaccelGroupedAggDesc, pad1), 220);
         assert_eq!(offset_of!(PgaccelGroupedAggDesc, measures), 224);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, where_filter), 512);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, measure_filters), 688);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, dim_count), 1392);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, pad2), 1396);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, dims), 1400);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch), 1624);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch_bytes), 1632);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch_space), 1640);
-        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch_alignment), 1644);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, where_filter), 576);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, measure_filters), 752);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, dim_count), 1456);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, pad2), 1460);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, dims), 1464);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch), 1688);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch_bytes), 1696);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch_space), 1704);
+        assert_eq!(offset_of!(PgaccelGroupedAggDesc, scratch_alignment), 1708);
     }
 
     #[test]
@@ -342,6 +373,16 @@ mod tests {
         assert_eq!(PGACCEL_GROUPED_AGG_FILTER_RECHECK, 2);
         assert_eq!(PGACCEL_GROUPED_AGG_GROUPING_HASH, 1);
         assert_eq!(PGACCEL_GROUPED_AGG_ACCUM_INTERVAL, 4);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_INVALID, 0);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_INT32, 2);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_INT64, 3);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, 4);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64, 5);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_DATE, 6);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, 7);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_NUMERIC, 8);
+        assert_eq!(PGACCEL_GROUPED_AGG_PHYSICAL_INTERVAL, 9);
         assert_eq!(PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN, 0x7f);
         assert_eq!(PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN, 0x7);
     }
