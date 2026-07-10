@@ -567,7 +567,7 @@ impl RelationStore {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.pinned && !entry.derived.is_empty())
+            .filter(|(_, entry)| !entry.derived.is_empty())
             .min_by_key(|(_, entry)| entry.last_used_tick)
             .map(|(index, _)| index);
         candidate.is_some_and(|index| {
@@ -623,6 +623,37 @@ pub struct ResidentLoadEstimate {
     pub estimated_bytes: u64,
     pub last_load_ms: Option<f64>,
     pub amortization_queries: u32,
+}
+
+/// Planner-time view of the bytes that survive local LRU reclamation.
+///
+/// A selected plan replaces or reuses its selected raw relations, so their
+/// full post-load snapshots are supplied to [`Self::projected_final_bytes`].
+/// Unrelated unpinned raw relations and every derived artifact can be evicted;
+/// only raw bytes pinned by an unrelated relation must survive locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentBudgetSnapshot {
+    pub cluster_live_bytes: u64,
+    pub current_backend_live_bytes: u64,
+    pub other_backend_live_bytes: u64,
+    pub pinned_unselected_raw_bytes: u64,
+    pub evictable_or_replaced_local_bytes: u64,
+}
+
+impl ResidentBudgetSnapshot {
+    /// Upper-bound the final cluster footprint after local eviction and
+    /// selected-relation replacement. Returns `None` on byte-count overflow.
+    #[must_use]
+    pub fn projected_final_bytes(
+        &self,
+        selected_raw_bytes: u64,
+        descriptor_artifact_bytes: u64,
+    ) -> Option<u64> {
+        self.other_backend_live_bytes
+            .checked_add(self.pinned_unselected_raw_bytes)?
+            .checked_add(selected_raw_bytes)?
+            .checked_add(descriptor_artifact_bytes)
+    }
 }
 
 /// Exact result of ensuring one selected descriptor dependency set.
@@ -1098,6 +1129,68 @@ pub fn estimate_selected_relation(
         estimated_bytes,
         last_load_ms,
         amortization_queries: crate::engine::cost::device_limits().auto_load_amortization_queries,
+    })
+}
+
+fn summarize_local_budget_bytes(
+    entries: impl IntoIterator<Item = (u32, bool, u64, u64)>,
+    selected_relids: &BTreeSet<u32>,
+) -> Option<(u64, u64)> {
+    entries.into_iter().try_fold(
+        (0_u64, 0_u64),
+        |(local_total, pinned_unselected_raw), (relid, pinned, raw_bytes, derived_bytes)| {
+            let relation_total = raw_bytes.checked_add(derived_bytes)?;
+            let local_total = local_total.checked_add(relation_total)?;
+            let pinned_unselected_raw = if pinned && !selected_relids.contains(&relid) {
+                pinned_unselected_raw.checked_add(raw_bytes)?
+            } else {
+                pinned_unselected_raw
+            };
+            Some((local_total, pinned_unselected_raw))
+        },
+    )
+}
+
+/// Capture the exact non-evictable base for planner admission of one selected
+/// descriptor dependency set.
+///
+/// `None` means a byte counter overflowed or the backend-local store no longer
+/// agrees with its cluster-ledger slot. Callers must decline rather than admit
+/// against an incomplete footprint in either case.
+#[must_use]
+pub fn resident_budget_snapshot(selected_relids: &[pg_sys::Oid]) -> Option<ResidentBudgetSnapshot> {
+    process_invalidations();
+    let selected_relids = selected_relids
+        .iter()
+        .map(|relid| u32::from(*relid))
+        .collect::<BTreeSet<_>>();
+    let (local_store_bytes, pinned_unselected_raw_bytes) = STORE.with(|store| {
+        let store = store.borrow();
+        summarize_local_budget_bytes(
+            store.entries.iter().map(|entry| {
+                (
+                    u32::from(entry.relid),
+                    entry.pinned,
+                    entry.raw_bytes(),
+                    entry.derived_bytes(),
+                )
+            }),
+            &selected_relids,
+        )
+    })?;
+    let (cluster_live_bytes, current_backend_live_bytes) = ledger::byte_snapshot();
+    if local_store_bytes != current_backend_live_bytes
+        || current_backend_live_bytes > cluster_live_bytes
+    {
+        return None;
+    }
+    Some(ResidentBudgetSnapshot {
+        cluster_live_bytes,
+        current_backend_live_bytes,
+        other_backend_live_bytes: cluster_live_bytes.checked_sub(current_backend_live_bytes)?,
+        pinned_unselected_raw_bytes,
+        evictable_or_replaced_local_bytes: current_backend_live_bytes
+            .checked_sub(pinned_unselected_raw_bytes)?,
     })
 }
 
@@ -2172,6 +2265,75 @@ mod tests {
                 .iter()
                 .any(|entry| entry.relid == pg_sys::Oid::from(300_u32))
         );
+    }
+
+    #[test]
+    fn budget_eviction_can_reclaim_artifacts_owned_by_pinned_relations() {
+        let mut store = RelationStore::default();
+        let mut pinned = empty_relation(300, true, 1);
+        pinned.derived.push(DerivedEntry {
+            digest: 8,
+            canonical_words: Box::default(),
+            dependencies: Box::default(),
+            artifact: Box::new(EmptyArtifact),
+            charge: LedgerCharge::reserve(0, 0).expect("zero-byte artifact charge"),
+        });
+        store.entries.push(pinned);
+
+        assert_eq!(
+            store.evict_one_for_budget(pg_sys::InvalidOid),
+            Some(EvictionKind::Derived)
+        );
+        assert_eq!(store.entries.len(), 1);
+        assert!(store.entries[0].pinned);
+        assert!(store.entries[0].derived.is_empty());
+        assert_eq!(
+            store.evict_one_for_budget(pg_sys::InvalidOid),
+            None,
+            "pin protects the raw relation after its artifact is reclaimed"
+        );
+    }
+
+    #[test]
+    fn planner_budget_projection_counts_only_surviving_local_bytes() {
+        let selected = BTreeSet::from([10_u32]);
+        let (local_total, pinned_unselected) = summarize_local_budget_bytes(
+            [
+                (10, true, 100, 7),
+                (20, true, 200, 11),
+                (30, false, 300, 13),
+            ],
+            &selected,
+        )
+        .expect("byte summary fits");
+        assert_eq!(local_total, 631);
+        assert_eq!(pinned_unselected, 200);
+
+        let snapshot = ResidentBudgetSnapshot {
+            cluster_live_bytes: 1_631,
+            current_backend_live_bytes: local_total,
+            other_backend_live_bytes: 1_000,
+            pinned_unselected_raw_bytes: pinned_unselected,
+            evictable_or_replaced_local_bytes: local_total - pinned_unselected,
+        };
+        assert_eq!(snapshot.evictable_or_replaced_local_bytes, 431);
+        assert_eq!(snapshot.projected_final_bytes(150, 25), Some(1_375));
+    }
+
+    #[test]
+    fn planner_budget_projection_fails_closed_on_overflow() {
+        assert_eq!(
+            summarize_local_budget_bytes([(10, false, u64::MAX, 1)], &BTreeSet::new()),
+            None
+        );
+        let snapshot = ResidentBudgetSnapshot {
+            cluster_live_bytes: u64::MAX,
+            current_backend_live_bytes: 0,
+            other_backend_live_bytes: u64::MAX,
+            pinned_unselected_raw_bytes: 0,
+            evictable_or_replaced_local_bytes: 0,
+        };
+        assert_eq!(snapshot.projected_final_bytes(1, 0), None);
     }
 
     #[test]

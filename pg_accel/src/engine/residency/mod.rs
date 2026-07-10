@@ -15,13 +15,14 @@ pub mod legacy;
 pub use proof::*;
 pub use store::{
     ArtifactEnsureOutcome, DerivedArtifact, DerivedArtifactIdentity, PreparedDerived,
-    ResidentColumn, ResidentColumnRef, ResidentColumnView, ResidentDependencyStamp,
-    ResidentInputBundle, ResidentKeyDecoder, ResidentLoadError, ResidentLoadEstimate,
-    ResidentRelationEvidence, ResidentRelationStatus, ResolvedArtifactBundle,
+    ResidentBudgetSnapshot, ResidentColumn, ResidentColumnRef, ResidentColumnView,
+    ResidentDependencyStamp, ResidentInputBundle, ResidentKeyDecoder, ResidentLoadError,
+    ResidentLoadEstimate, ResidentRelationEvidence, ResidentRelationStatus, ResolvedArtifactBundle,
     ResolvedDerivedInputs, SelectedRelation, SelectedRelationsEnsureOutcome,
     ensure_derived_artifact, ensure_selected_relations, estimate_selected_relation,
-    register_derived_artifact, resident_live_bytes, shape_digest, with_derived_artifact,
-    with_derived_artifact_inputs, with_resident_column, with_resolved_artifact,
+    register_derived_artifact, resident_budget_snapshot, resident_live_bytes, shape_digest,
+    with_derived_artifact, with_derived_artifact_inputs, with_resident_column,
+    with_resolved_artifact,
 };
 
 /// Register residency shared memory. Must be called from `_PG_init`.

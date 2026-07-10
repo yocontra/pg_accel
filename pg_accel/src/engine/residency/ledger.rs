@@ -259,6 +259,20 @@ pub(super) fn total_bytes() -> u64 {
     shared::with_ref(|ledger| ledger.total_bytes)
 }
 
+/// Cluster and current-backend resident bytes captured under one ledger lock.
+#[must_use]
+pub(super) fn byte_snapshot() -> (u64, u64) {
+    let pid = current_pid();
+    shared::with_ref(|ledger| {
+        let current_backend = ledger
+            .backends
+            .iter()
+            .find(|slot| slot.pid == pid)
+            .map_or(0, |slot| slot.bytes);
+        (ledger.total_bytes, current_backend)
+    })
+}
+
 #[must_use]
 pub(super) fn generation_stamp(relid: pg_sys::Oid) -> GenerationStamp {
     let database_oid = current_database_oid();
@@ -412,8 +426,10 @@ mod tests {
         let charge = LedgerCharge::reserve(257, 1024).expect("reserve");
         assert_eq!(charge.bytes(), 257);
         assert_eq!(total_bytes(), 257);
+        assert_eq!(byte_snapshot(), (257, 257));
         drop(charge);
         assert_eq!(total_bytes(), 0);
+        assert_eq!(byte_snapshot(), (0, 0));
     }
 
     #[test]
