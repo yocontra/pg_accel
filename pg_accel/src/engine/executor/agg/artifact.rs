@@ -995,6 +995,34 @@ impl DerivedArtifact for DescriptorAggArtifact {
 mod tests {
     use super::*;
 
+    fn column(relation_oid: u32, type_oid: u32) -> ColumnRef {
+        ColumnRef {
+            relation_oid,
+            attno: 1,
+            type_oid,
+        }
+    }
+
+    fn host_columns(fact: HostColumn, dimension: HostColumn) -> HostColumns {
+        let fact_rows = fact.len();
+        let dimension_rows = dimension.len();
+        HostColumns {
+            columns: BTreeMap::from([((100, 1), fact), ((200, 1), dimension)]),
+            row_counts: BTreeMap::from([(100, fact_rows), (200, dimension_rows)]),
+        }
+    }
+
+    fn dimension(type_oid: u32, multiplicity: JoinMultiplicity) -> crate::engine::spec::DimSpec {
+        crate::engine::spec::DimSpec {
+            relation_oid: 200,
+            fact_key: column(100, type_oid),
+            dim_key: column(200, type_oid),
+            collation_oid: u32::from(type_oid != INT4OID),
+            multiplicity,
+            filter: FilterSpec::None,
+        }
+    }
+
     #[test]
     fn float_grouping_canonicalizes_zero_and_nan() {
         assert_eq!(canonical_f64(0.0), canonical_f64(-0.0));
@@ -1073,6 +1101,92 @@ mod tests {
         assert_eq!(
             scalar_cmp(ScalarValue::Date(1), ScalarValue::Date(2)),
             Ok(std::cmp::Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn int4_join_correlation_never_matches_null_or_missing_keys() {
+        let columns = host_columns(
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1, 2, 3, 0],
+                nulls: Some(vec![0, 0, 0, 1]),
+            },
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![3, 1, 0],
+                nulls: Some(vec![0, 0, 1]),
+            },
+        );
+        let prepared =
+            prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Unique), &columns, 4)
+                .expect("unique INT4 dimension prepares");
+        assert_eq!(prepared.fact_codes, vec![1, -1, 0, -1]);
+        assert_eq!(prepared.row_codes, vec![Some(0), Some(1), None]);
+        assert_eq!(prepared.match_by_key, vec![1, 1]);
+        assert_eq!(prepared.multiplicity_by_key, None);
+    }
+
+    #[test]
+    fn bpchar_join_correlates_independent_dictionaries() {
+        let columns = host_columns(
+            HostColumn::Text {
+                type_oid: BPCHAROID,
+                codes: vec![1, 0, 2],
+                nulls: None,
+                labels: vec!["APAC".into(), "EU   ".into(), "NA".into()],
+            },
+            HostColumn::Text {
+                type_oid: BPCHAROID,
+                codes: vec![2, 0, 1],
+                nulls: None,
+                labels: vec!["EU".into(), "NA".into(), "APAC".into()],
+            },
+        );
+        let prepared =
+            prepare_dimension(&dimension(BPCHAROID, JoinMultiplicity::Unique), &columns, 3)
+                .expect("independent BPCHAR dictionaries correlate");
+        assert_eq!(prepared.fact_codes, vec![1, 0, 2]);
+        assert_eq!(prepared.match_by_key, vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn counted_dimension_preserves_filtered_multiplicity() {
+        let columns = host_columns(
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1, 2, 3, 0],
+                nulls: Some(vec![0, 0, 0, 1]),
+            },
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1, 1, 2, 0],
+                nulls: Some(vec![0, 0, 0, 1]),
+            },
+        );
+        let prepared =
+            prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Counted), &columns, 4)
+                .expect("counted dimension prepares");
+        assert_eq!(prepared.fact_codes, vec![0, 1, -1, -1]);
+        assert_eq!(prepared.multiplicity_by_key, Some(vec![2, 1]));
+    }
+
+    #[test]
+    fn unique_dimension_rejects_duplicate_nonnull_keys() {
+        let columns = host_columns(
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1],
+                nulls: None,
+            },
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1, 1],
+                nulls: None,
+            },
+        );
+        assert!(
+            prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Unique), &columns, 1).is_err()
         );
     }
 
