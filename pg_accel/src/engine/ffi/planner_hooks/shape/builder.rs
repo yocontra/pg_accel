@@ -172,8 +172,10 @@ fn validate_measure_descriptor_capability(
 fn aggregate_source_type(aggregate: &super::AggregateExpr) -> Result<u32, ShapeDecline> {
     let source = match (&aggregate.expression, aggregate.output.source) {
         (MeasureExpr::CountStar, AggregateSource::Value) => 0,
-        (MeasureExpr::Column(column), AggregateSource::Value)
-        | (MeasureExpr::Binary { lhs: column, .. }, AggregateSource::Value) => column.type_oid,
+        (
+            MeasureExpr::Column(column) | MeasureExpr::Binary { lhs: column, .. },
+            AggregateSource::Value,
+        ) => column.type_oid,
         (MeasureExpr::StatsPair { value, .. }, AggregateSource::Value) => value.type_oid,
         (MeasureExpr::StatsPair { rhs, .. }, AggregateSource::Rhs) => rhs.type_oid,
         (
@@ -192,8 +194,7 @@ fn expected_aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> 
     const INT8OID: u32 = 20;
     const FLOAT8OID: u32 = 701;
     match (source_type_oid, kind) {
-        (0, AggregateKind::Count)
-        | (INT4OID | INT8OID | FLOAT8OID, AggregateKind::Count)
+        (0 | INT4OID | INT8OID | FLOAT8OID, AggregateKind::Count)
         | (INT4OID, AggregateKind::Sum) => Some(INT8OID),
         (INT4OID, AggregateKind::Min | AggregateKind::Max) => Some(INT4OID),
         (INT8OID, AggregateKind::Min | AggregateKind::Max) => Some(INT8OID),

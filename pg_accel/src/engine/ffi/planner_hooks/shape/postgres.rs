@@ -93,7 +93,7 @@ unsafe fn rte_for_varno(
     query: &pg_sys::Query,
     varno: pg_sys::Index,
 ) -> Option<*mut pg_sys::RangeTblEntry> {
-    if varno <= 0 {
+    if varno == 0 {
         return None;
     }
     let index = usize::try_from(varno - 1).ok()?;
@@ -127,8 +127,9 @@ unsafe fn direct_var(node: *mut Node, query: &pg_sys::Query) -> Option<PlannerCo
     if var.varlevelsup != 0 || var.varattno <= 0 || var.varno <= 0 {
         return None;
     }
+    let varno = pg_sys::Index::try_from(var.varno).ok()?;
     // SAFETY: var.varno comes from this Query and rte_for_varno bounds-checks.
-    let rte = unsafe { rte_for_varno(query, var.varno) }?;
+    let rte = unsafe { rte_for_varno(query, varno) }?;
     // SAFETY: rte_for_varno returned a non-null RTE in planner-owned memory.
     let rte = unsafe { &*rte };
     if rte.rtekind != pg_sys::RTEKind::RTE_RELATION || rte.relid == pg_sys::InvalidOid {
@@ -153,7 +154,7 @@ unsafe fn direct_var(node: *mut Node, query: &pg_sys::Query) -> Option<PlannerCo
             // its explicit CollateExpr and is looked up on the backend thread.
             && unsafe { pg_sys::get_collation_isdeterministic(collation_oid) });
     Some(PlannerColumn {
-        varno: var.varno,
+        varno,
         column: ColumnRef {
             relation_oid: u32::from(rte.relid),
             attno: i32::from(var.varattno),
@@ -194,7 +195,7 @@ unsafe fn default_equality_operator(type_oid: pg_sys::Oid) -> Option<pg_sys::Oid
     (equality != pg_sys::InvalidOid).then_some(equality)
 }
 
-pub(super) const fn is_ordinary_hash_equality(
+pub(super) fn is_ordinary_hash_equality(
     actual: pg_sys::Oid,
     ordinary: pg_sys::Oid,
     hashable: bool,
@@ -900,10 +901,12 @@ unsafe fn parse_qual(
     }
 }
 
+type ExtractedPredicates = (Vec<EquiJoin>, Vec<(u32, FilterSpec)>);
+
 unsafe fn joins_and_filters(
     query: &pg_sys::Query,
     inventory: &ExpressionInventory,
-) -> Result<(Vec<EquiJoin>, Vec<(u32, FilterSpec)>), ShapeDecline> {
+) -> Result<ExtractedPredicates, ShapeDecline> {
     let mut joins = Vec::new();
     let mut filters = BTreeMap::new();
     let mut seen_joins = BTreeSet::new();
@@ -978,6 +981,7 @@ unsafe fn planner_relation(
 /// current transaction. The unified star executor therefore uses this
 /// stricter predicate and also excludes partial/hypothetical indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub(super) struct IndexUniquenessFacts {
     pub unique: bool,
     pub immediate: bool,

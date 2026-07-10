@@ -108,6 +108,7 @@ pub enum InputProjection {
 
 /// Query features that are not part of a reducing aggregate shape.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ShapeModifiers {
     pub has_window_functions: bool,
     pub has_target_srfs: bool,
