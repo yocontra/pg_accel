@@ -195,6 +195,21 @@ void set_f64_view(pgaccel_grouped_agg_measure_col& col, const double* values,
   col.element_bytes = sizeof(double);
 }
 
+void set_count_only_view(pgaccel_grouped_agg_desc& desc, uint32_t slot, const void* values,
+                         const uint8_t* nulls, int32_t physical_type, uint32_t element_bytes,
+                         int32_t accumulator_kind) {
+  desc.measures[slot] = {};
+  desc.measures[slot].value.values = values;
+  desc.measures[slot].value.nulls = nulls;
+  desc.measures[slot].value.physical_type = physical_type;
+  desc.measures[slot].value.element_bytes = element_bytes;
+  desc.measures[slot].op = PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
+  desc.measures[slot].agg_mask = PGACCEL_GROUPED_AGG_LANE_COUNT;
+  desc.measures[slot].accumulator_kind = accumulator_kind;
+  desc.measures[slot].state_bytes = sizeof(uint64_t);
+  desc.measure_count = std::max(desc.measure_count, slot + 1);
+}
+
 void finish_i64_measure(pgaccel_grouped_agg_desc& desc, uint32_t slot, int32_t op, uint32_t mask) {
   desc.measures[slot].op = op;
   desc.measures[slot].agg_mask = mask;
@@ -255,6 +270,34 @@ void set_dim_key(pgaccel_grouped_agg_desc& desc, uint32_t slot, uint32_t dim_slo
 pgaccel_val val_i64(int64_t value) {
   pgaccel_val result = {};
   result.tag = PGACCEL_VAL_INT64;
+  result.data.i64 = value;
+  return result;
+}
+
+pgaccel_val val_bool(bool value) {
+  pgaccel_val result = {};
+  result.tag = PGACCEL_VAL_BOOL;
+  result.data.b = value;
+  return result;
+}
+
+pgaccel_val val_f32(float value) {
+  pgaccel_val result = {};
+  result.tag = PGACCEL_VAL_FLOAT32;
+  result.data.f32 = value;
+  return result;
+}
+
+pgaccel_val val_date(int32_t value) {
+  pgaccel_val result = {};
+  result.tag = PGACCEL_VAL_DATE;
+  result.data.i32 = value;
+  return result;
+}
+
+pgaccel_val val_timestamp(int64_t value) {
+  pgaccel_val result = {};
+  result.tag = PGACCEL_VAL_TIMESTAMP;
   result.data.i64 = value;
   return result;
 }
@@ -328,8 +371,13 @@ class OutputStorage {
         storage.count.assign(capacity, kSentinel);
         lane.count = storage.count.data();
       }
-      if (mask & (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
-                  PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_SUMSQ)) {
+      const bool value_state =
+          (mask & (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                   PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_SUMSQ)) != 0;
+      const bool count_column =
+          desc.measures[i].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
+          (mask & PGACCEL_GROUPED_AGG_LANE_COUNT) != 0;
+      if (value_state || count_column) {
         storage.nonnull.assign(capacity, kSentinel);
         lane.nonnull_count = storage.nonnull.data();
       }
@@ -645,6 +693,100 @@ void test_global_and_measure_filters() {
   CHECK(output.i64(output.measures[1].sum, 0) == 20);
   CHECK(output.measures[1].count[0] == 1);
   CHECK(output.measures[1].nonnull[0] == 1);
+}
+
+void test_predicate_only_physical_count() {
+  std::printf("--- predicate-only physical COUNT lanes ---\n");
+
+  {
+    SharedArray<uint8_t> values({0, 1, 1});
+    SharedArray<uint8_t> nulls({0, 0, 1});
+    pgaccel_grouped_agg_desc desc = base_desc(3);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_bool(true);
+    desc.where_filter.predicate_hi[0] = val_bool(true);
+
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 1);
+    CHECK(output.out.uncertain_count == 0);
+    CHECK(output.measures[0].count[0] == 1);
+    CHECK(output.measures[0].nonnull[0] == 1);
+  }
+
+  {
+    SharedArray<float> values({-1.0F, 1.0F, 2.0F});
+    SharedArray<uint8_t> nulls({0, 0, 1});
+    pgaccel_grouped_agg_desc desc = base_desc(3);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, sizeof(float),
+                        PGACCEL_GROUPED_AGG_ACCUM_F64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_f32(0.0F);
+    desc.where_filter.predicate_hi[0] = val_f32(2.0F);
+
+    pgaccel_grouped_agg_desc unsupported = desc;
+    unsupported.measures[0].agg_mask |= PGACCEL_GROUPED_AGG_LANE_SUM;
+    pgaccel_status unsupported_status = PGACCEL_ERROR;
+    workspace_req(unsupported, &unsupported_status);
+    CHECK(unsupported_status == PGACCEL_UNSUPPORTED);
+
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 1);
+    CHECK(output.out.uncertain_count == 0);
+    CHECK(output.measures[0].count[0] == 1);
+    CHECK(output.measures[0].nonnull[0] == 1);
+  }
+
+  {
+    SharedArray<int32_t> values({0, 10, 20});
+    SharedArray<uint8_t> nulls({0, 0, 1});
+    pgaccel_grouped_agg_desc desc = base_desc(3);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_DATE, sizeof(int32_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_date(5);
+    desc.where_filter.predicate_hi[0] = val_date(20);
+
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 1);
+    CHECK(output.out.uncertain_count == 0);
+    CHECK(output.measures[0].count[0] == 1);
+    CHECK(output.measures[0].nonnull[0] == 1);
+  }
+
+  {
+    SharedArray<int64_t> values({0, 10, 20});
+    SharedArray<uint8_t> nulls({0, 1, 0});
+    pgaccel_grouped_agg_desc desc = base_desc(3);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, sizeof(int64_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_timestamp(5);
+    desc.where_filter.predicate_hi[0] = val_timestamp(25);
+
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 1);
+    CHECK(output.out.uncertain_count == 0);
+    CHECK(output.measures[0].count[0] == 1);
+    CHECK(output.measures[0].nonnull[0] == 1);
+  }
 }
 
 void test_four_dimensions_and_multiplicity() {
@@ -1289,6 +1431,7 @@ int main() {
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
     test_global_and_measure_filters();
+    test_predicate_only_physical_count();
     test_four_dimensions_and_multiplicity();
     test_mixed_radix_compact_and_keyed_empty();
     test_group_activity_ignores_measure_validity();

@@ -419,6 +419,9 @@ exactly match the referenced `ColumnRef.type_oid`:
 | I64 | 20 |
 | F32 | 700 |
 | F64 | 701 |
+| DATE | 1082 |
+| TIMESTAMP | 1114 |
+| TIMESTAMPTZ | 1184 |
 
 Mixed range types and a physically compatible but different OID are invalid.
 Unused bound slots and constants are canonical NULL values. F32/F64 endpoints
@@ -451,13 +454,13 @@ therefore independent from accumulator representation:
 | Physical type | `element_bytes` | `scale` | Accumulator compatibility |
 |---|---:|---:|---|
 | INVALID | 0 | 0 | canonical unused view only |
-| BOOL | 1 | 0 | COUNT; other lanes may be unsupported |
+| BOOL | 1 | 0 | count-only COLUMN |
 | INT32 | 4 | 0 | checked I64 |
 | INT64 | 8 | 0 | checked I64 |
-| FLOAT32 | 4 | 0 | F64 or an explicitly supported widened path |
+| FLOAT32 | 4 | 0 | count-only COLUMN; other F64 lanes may be unsupported |
 | FLOAT64 | 8 | 0 | F64 |
-| DATE | 4 | 0 | I64 state for supported order/count lanes |
-| TIMESTAMP | 8 | 0 | I64 state for supported order/count lanes |
+| DATE | 4 | 0 | count-only COLUMN; other I64 lanes may be unsupported |
+| TIMESTAMP | 8 | 0 | count-only COLUMN; other I64 lanes may be unsupported |
 | NUMERIC | fixed producer limb width | decimal scale | NUMERIC state |
 | INTERVAL | fixed producer state width | fractional precision | INTERVAL state |
 
@@ -467,6 +470,10 @@ element, and per-input `scale` belongs to that input. The measure's separate
 width must never be inferred from `state_bytes`. Unknown widths, nonzero scalar
 scales, or nonzero view flags are descriptor errors. Represented
 NUMERIC/INTERVAL shapes may return UNSUPPORTED until their kernels land.
+
+A COLUMN measure whose mask is exactly COUNT consumes only nullness and row
+weight. This predicate-source form is supported for BOOL, FLOAT32, DATE, and
+TIMESTAMP without pretending those inputs support SUM/MIN/MAX state.
 
 A measure slot owns one expression and source-aware aggregate outputs. The
 logical-to-ABI mapping is exact:

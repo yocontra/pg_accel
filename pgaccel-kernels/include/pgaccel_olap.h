@@ -146,11 +146,13 @@ typedef struct {
 } pgaccel_grouped_agg_measure_col;
 
 /* One expression/accumulator slot. ABI v1 supports FLOAT64 -> F64 and
- * INT32/INT64 -> I64. Integer expression results are checked at their input
- * SQL width before any aggregate lane consumes them, and I64 accumulator
- * arithmetic is checked; overflow returns PGACCEL_ERROR. NUMERIC/INTERVAL
- * inputs are physically representable now but may return UNSUPPORTED until
- * their kernels land. COUNT_STAR has canonical zero value/rhs views.
+ * INT32/INT64 -> I64. A COLUMN slot projecting only COUNT also accepts BOOL,
+ * FLOAT32, DATE, and TIMESTAMP because no numeric value state is consumed.
+ * Integer expression results are checked at their input SQL width before any
+ * aggregate lane consumes them, and I64 accumulator arithmetic is checked;
+ * overflow returns PGACCEL_ERROR. NUMERIC/INTERVAL inputs are physically
+ * representable now but may return UNSUPPORTED until their kernels land.
+ * COUNT_STAR has canonical zero value/rhs views.
  * accumulator_kind and state_bytes describe output and workspace state
  * independently of each input's physical width. */
 typedef struct {
@@ -267,7 +269,8 @@ typedef struct {
 /* Per-measure output lanes. Value-state pointers use the descriptor's
  * accumulator kind and state_bytes. count is required iff COUNT is projected.
  * nonnull_count is always required for SUM/MIN/MAX/SUMSQ, even when COUNT is
- * not projected, so an all-NULL group is distinguishable from a numeric zero.
+ * not projected, so an all-NULL group is distinguishable from a numeric zero;
+ * a non-COUNT_STAR COUNT slot may also provide it as validity state.
  * STATS_PAIR uses independent rhs_count/rhs_nonnull_count. All counts are u64
  * and every weighted addition is checked. */
 typedef struct {

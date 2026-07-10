@@ -410,6 +410,9 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
   const bool rhs_required = measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
                             measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB ||
                             measure.op == PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR;
+  const bool count_only_column =
+      measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT;
   if (!validate_measure_col(measure.value, row_count, true) ||
       !validate_measure_col(measure.rhs, row_count, rhs_required))
     return false;
@@ -434,7 +437,8 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP)))
         return false;
       if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
-          measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT64)
+          measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT64 &&
+          !count_only_column)
         validation->supported = false;
       if (rhs_required && measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
           measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT64)
@@ -454,7 +458,8 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
             (!rhs_required || measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32 ||
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64)))
         return false;
-      if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64)
+      if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64 &&
+          !count_only_column)
         validation->supported = false;
       if (rhs_required && measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64)
         validation->supported = false;
@@ -909,6 +914,10 @@ inline bool accumulate_i64(const pgaccel_grouped_agg_measure& measure,
   }
   if (lhs_null || rhs_null)
     return true;
+  if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT)
+    return accumulate_count(buffers.count, group, weight) &&
+           accumulate_count(buffers.nonnull, group, weight);
   int64_t value = 0;
   int64_t rhs = 0;
   if (!load_i64(measure.value, row, &value))
@@ -967,6 +976,10 @@ inline bool accumulate_f64(const pgaccel_grouped_agg_measure& measure,
   }
   if (lhs_null || rhs_null)
     return true;
+  if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT)
+    return accumulate_count(buffers.count, group, weight) &&
+           accumulate_count(buffers.nonnull, group, weight);
   double value = 0;
   double rhs = 0;
   if (!load_f64(measure.value, row, &value))

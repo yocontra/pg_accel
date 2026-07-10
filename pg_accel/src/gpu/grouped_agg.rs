@@ -535,13 +535,15 @@ impl MeasureOutputStorage {
         if mask & abi::PGACCEL_GROUPED_AGG_LANE_COUNT != 0 {
             output.count = Some(zero_vec(capacity)?);
         }
-        if mask
+        let value_state = mask
             & (abi::PGACCEL_GROUPED_AGG_LANE_SUM
                 | abi::PGACCEL_GROUPED_AGG_LANE_MIN
                 | abi::PGACCEL_GROUPED_AGG_LANE_MAX
                 | abi::PGACCEL_GROUPED_AGG_LANE_SUMSQ)
-            != 0
-        {
+            != 0;
+        let count_column = measure.op != abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR
+            && mask & abi::PGACCEL_GROUPED_AGG_LANE_COUNT != 0;
+        if value_state || count_column {
             output.nonnull_count = Some(zero_vec(capacity)?);
         }
         if mask & abi::PGACCEL_GROUPED_AGG_LANE_RHS_SUM != 0 {
@@ -1179,6 +1181,36 @@ mod tests {
         assert!(raw.measures[1..].iter().all(|measure| measure.sum.is_null()
             && measure.count.is_null()
             && measure.nonnull_count.is_null()));
+    }
+
+    #[test]
+    fn count_only_column_allocates_validity_but_count_star_does_not() {
+        let mut column_desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        column_desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        // SAFETY: this pointer-free fixture is used only to allocate host output.
+        let column_plan = unsafe { ResolvedGroupedAggPlan::from_abi(column_desc) }
+            .expect("count column fixture is structurally valid");
+        let mut column_storage =
+            GroupedAggOutputStorage::new(&column_plan).expect("count column output allocates");
+        let column_raw = column_storage.raw();
+        assert!(!column_raw.measures[0].count.is_null());
+        assert!(!column_raw.measures[0].nonnull_count.is_null());
+
+        let mut star_desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        star_desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+        star_desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        // SAFETY: canonical COUNT_STAR input views are all zero bytes.
+        star_desc.measures[0].value = unsafe { std::mem::zeroed() };
+        // SAFETY: canonical COUNT_STAR input views are all zero bytes.
+        star_desc.measures[0].rhs = unsafe { std::mem::zeroed() };
+        // SAFETY: this pointer-free fixture is used only to allocate host output.
+        let star_plan = unsafe { ResolvedGroupedAggPlan::from_abi(star_desc) }
+            .expect("count star fixture is structurally valid");
+        let mut star_storage =
+            GroupedAggOutputStorage::new(&star_plan).expect("count star output allocates");
+        let star_raw = star_storage.raw();
+        assert!(!star_raw.measures[0].count.is_null());
+        assert!(star_raw.measures[0].nonnull_count.is_null());
     }
 
     #[test]
