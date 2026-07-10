@@ -4,8 +4,8 @@ use super::{
     AGG_QUERY_SPEC_VERSION, AggQuerySpec, AggregateKind, AggregateOutput, AggregateRef,
     AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, FilterSpec, GroupKeyEncoding,
     GroupKeyRef, GroupKeySource, HavingSpec, JoinMultiplicity, MAX_AGGREGATE_OUTPUTS,
-    MAX_BYTECODE_WORDS, MAX_PROGRAM_INPUTS, MaskKind, MeasureExpr, MeasureSpec, ScalarRange,
-    ScalarValue, SpecValidationError, abi,
+    MAX_BYTECODE_WORDS, MAX_PROGRAM_INPUTS, MAX_VALUE_AGGREGATE_OUTPUTS, MaskKind, MeasureExpr,
+    MeasureSpec, ScalarRange, ScalarValue, SpecValidationError, abi,
 };
 
 pub const AGG_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5047_4132; // "PGA2"
@@ -14,9 +14,20 @@ const MAX_COLUMN_LIST_WORDS: usize = 1 + MAX_PROGRAM_INPUTS * 3;
 const MAX_BYTECODE_BLOCK_WORDS: usize = 1 + MAX_BYTECODE_WORDS;
 const MAX_FILTER_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS;
 const MAX_GROUP_KEY_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 5;
-const MAX_MEASURE_EXPR_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 1;
-const MAX_OUTPUT_LIST_WORDS: usize = 1 + MAX_AGGREGATE_OUTPUTS * 2;
-const MAX_MEASURE_WORDS: usize = MAX_MEASURE_EXPR_WORDS + MAX_OUTPUT_LIST_WORDS + MAX_FILTER_WORDS;
+const MAX_BYTECODE_MEASURE_EXPR_WORDS: usize =
+    1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 1;
+const STATS_PAIR_MEASURE_EXPR_WORDS: usize = 1 + 3 + 3;
+const MAX_VALUE_OUTPUT_LIST_WORDS: usize = 1 + MAX_VALUE_AGGREGATE_OUTPUTS * 2;
+const MAX_STATS_PAIR_OUTPUT_LIST_WORDS: usize = 1 + MAX_AGGREGATE_OUTPUTS * 2;
+const MAX_BYTECODE_MEASURE_WORDS: usize =
+    MAX_BYTECODE_MEASURE_EXPR_WORDS + MAX_VALUE_OUTPUT_LIST_WORDS + MAX_FILTER_WORDS;
+const MAX_STATS_PAIR_MEASURE_WORDS: usize =
+    STATS_PAIR_MEASURE_EXPR_WORDS + MAX_STATS_PAIR_OUTPUT_LIST_WORDS + MAX_FILTER_WORDS;
+const MAX_MEASURE_WORDS: usize = if MAX_BYTECODE_MEASURE_WORDS > MAX_STATS_PAIR_MEASURE_WORDS {
+    MAX_BYTECODE_MEASURE_WORDS
+} else {
+    MAX_STATS_PAIR_MEASURE_WORDS
+};
 const MAX_DIM_WORDS: usize = 1 + 3 + 3 + 1 + MAX_FILTER_WORDS;
 const MAX_HAVING_WORDS: usize = 1 + 1 + MAX_PROGRAM_INPUTS * 3 + MAX_BYTECODE_BLOCK_WORDS;
 
@@ -1053,6 +1064,82 @@ mod tests {
         }
     }
 
+    fn maximal_program() -> Vec<i32> {
+        vec![0; MAX_BYTECODE_WORDS]
+    }
+
+    fn maximal_inputs(relation_oid: u32) -> Vec<ColumnRef> {
+        vec![column(relation_oid, 1, INT4_OID); MAX_PROGRAM_INPUTS]
+    }
+
+    fn maximal_filter(relation_oid: u32) -> FilterSpec {
+        FilterSpec::Bytecode {
+            inputs: maximal_inputs(relation_oid),
+            program: maximal_program(),
+        }
+    }
+
+    fn maximal_spec() -> AggQuerySpec {
+        let group_key = GroupKeyRef {
+            source: GroupKeySource::Expression {
+                inputs: maximal_inputs(10),
+                program: maximal_program(),
+            },
+            encoding: GroupKeyEncoding::DenseI32 {
+                code_min: 0,
+                cardinality: 1,
+                null_code: Some(0),
+            },
+        };
+        let measure = MeasureSpec {
+            expression: MeasureExpr::Bytecode {
+                inputs: maximal_inputs(10),
+                program: maximal_program(),
+                result_type_oid: INT4_OID,
+            },
+            outputs: vec![
+                output(AggregateSource::Value, AggregateKind::Sum),
+                output(AggregateSource::Value, AggregateKind::Count),
+                output(AggregateSource::Value, AggregateKind::Min),
+                output(AggregateSource::Value, AggregateKind::Max),
+                output(AggregateSource::Value, AggregateKind::Avg),
+                output(AggregateSource::Value, AggregateKind::Stddev),
+            ],
+            filter: maximal_filter(10),
+        };
+        let star_dims = (0..abi::PGACCEL_GROUPED_AGG_MAX_DIMS)
+            .map(|index| {
+                let relation_oid = 20 + u32::try_from(index).expect("dimension index fits in u32");
+                DimSpec {
+                    relation_oid,
+                    fact_key: column(10, 1, INT4_OID),
+                    dim_key: column(relation_oid, 1, INT4_OID),
+                    multiplicity: JoinMultiplicity::Unique,
+                    filter: maximal_filter(relation_oid),
+                }
+            })
+            .collect();
+
+        AggQuerySpec {
+            fact_rel: 10,
+            group_keys: vec![group_key; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
+            measures: vec![measure; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
+            fact_filter: maximal_filter(10),
+            star_dims,
+            having: Some(HavingSpec {
+                inputs: vec![
+                    AggregateRef {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    };
+                    MAX_PROGRAM_INPUTS
+                ],
+                program: maximal_program(),
+            }),
+        }
+    }
+
     #[test]
     fn round_trips_minimal_dense_and_hash_specs() {
         for spec in [minimal_spec(), dense_spec(), h3_spec()] {
@@ -1060,6 +1147,18 @@ mod tests {
             let decoded = AggQuerySpec::decode_i32(&encoded).expect("encoded spec decodes");
             assert_eq!(decoded, spec);
         }
+    }
+
+    #[test]
+    fn exported_max_words_is_reached_by_a_valid_maximal_spec() {
+        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 1_117_537);
+        let spec = maximal_spec();
+        let encoded = spec.encode_i32().expect("maximal valid spec encodes");
+        assert_eq!(encoded.len(), AGG_QUERY_SPEC_MAX_WORDS);
+        assert_eq!(
+            AggQuerySpec::decode_i32(&encoded).expect("maximal valid spec decodes"),
+            spec
+        );
     }
 
     #[test]
@@ -1157,7 +1256,6 @@ mod tests {
 
     #[test]
     fn prefix_length_validates_framing_without_rejecting_following_words() {
-        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 1_117_561);
         let encoded = dense_spec().encode_i32().expect("valid spec encodes");
         let mut framed = encoded.clone();
         framed.extend([17, 18, 19]);
