@@ -290,22 +290,40 @@ int main() {
     {
       constexpr size_t HN = 32;
       int64_t keys[HN];
-      uint8_t knulls[HN] = {};
       for (size_t i = 0; i < HN; ++i) {
         keys[i] = static_cast<int64_t>(i % 4);
       }
-      pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys, knulls, HN);
+
+      void* device_keys = nullptr;
+      st = pgaccel_expr_device_alloc_copy(keys, sizeof(keys), &device_keys);
+      if (st != PGACCEL_OK || device_keys == nullptr) {
+        fprintf(stderr, "Child: resident hash_count_i64 allocation status=%d\n", st);
+        _exit(14);
+      }
+
+      const uint64_t before = pgaccel_gpu_exec_count();
+      pgaccel_agg_state* state = pgaccel_hash_count_i64_device_hash_execute_bounded(
+          static_cast<int64_t*>(device_keys), HN, 4);
+      const uint64_t after = pgaccel_gpu_exec_count();
+      pgaccel_expr_device_free(device_keys);
       if (!state) {
-        fprintf(stderr, "Child: hash_count_i64 returned NULL\n");
+        fprintf(stderr, "Child: resident hash_count_i64 returned NULL\n");
+        _exit(14);
+      }
+      if (after <= before) {
+        fprintf(stderr, "Child: resident hash_count_i64 did not dispatch\n");
+        pgaccel_agg_free(state);
         _exit(14);
       }
       if (pgaccel_agg_group_count(state) != 4) {
-        fprintf(stderr, "Child: hash_count_i64 wrong groups=%zu\n", pgaccel_agg_group_count(state));
+        fprintf(stderr, "Child: resident hash_count_i64 wrong groups=%zu\n",
+                pgaccel_agg_group_count(state));
         pgaccel_agg_free(state);
         _exit(14);
       }
       pgaccel_agg_free(state);
-      printf("Child: cold hash_count_i64 OK\n");
+      printf("Child: cold resident hash_count_i64 OK (gpu_exec %llu -> %llu)\n",
+             (unsigned long long)before, (unsigned long long)after);
     }
     // bbox_f64
     {

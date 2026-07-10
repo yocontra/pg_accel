@@ -1664,9 +1664,9 @@ unsafe extern "C" {
 
     // -- Hash aggregation kernels --
 
-    /// Perform grouped COUNT(*) over int64 group keys. This symbol is
-    /// fail-closed and has no host hash-table grouping fallback in the C++
-    /// implementation.
+    /// Deprecated host-key grouped COUNT(*) ABI. Always returns null before
+    /// GPU execution; resident callers use the device-buffer entry points.
+    #[allow(dead_code)] // reason: compatibility ABI hard-declines host-key grouping
     pub fn pgaccel_hash_count_i64_execute(
         group_keys: *const i64,
         group_null_mask: *const u8,

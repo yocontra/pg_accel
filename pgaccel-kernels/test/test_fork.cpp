@@ -161,19 +161,34 @@ static int run_fp64_fork_matrix(const char* label) {
   {
     constexpr size_t HN = 64;
     int64_t keys[HN];
-    uint8_t key_nulls[HN] = {};
     for (size_t i = 0; i < HN; ++i) {
       keys[i] = static_cast<int64_t>(i % 4);  // 4 groups
     }
-    pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys, key_nulls, HN);
+
+    void* device_keys = nullptr;
+    pgaccel_status st = pgaccel_expr_device_alloc_copy(keys, sizeof(keys), &device_keys);
+    if (st != PGACCEL_OK || device_keys == nullptr) {
+      fprintf(stderr, "[%s] resident hash_count_i64 allocation failed: status=%d\n", label, st);
+      return 1;
+    }
+
+    const uint64_t before = pgaccel_gpu_exec_count();
+    pgaccel_agg_state* state = pgaccel_hash_count_i64_device_hash_execute_bounded(
+        static_cast<int64_t*>(device_keys), HN, 4);
+    const uint64_t after = pgaccel_gpu_exec_count();
+    pgaccel_expr_device_free(device_keys);
     if (!state) {
-      fprintf(stderr, "[%s] fp64 matrix: hash_count_i64 returned NULL\n", label);
+      fprintf(stderr, "[%s] resident hash_count_i64 returned NULL\n", label);
+      return 1;
+    }
+    if (after <= before) {
+      fprintf(stderr, "[%s] resident hash_count_i64 did not dispatch\n", label);
+      pgaccel_agg_free(state);
       return 1;
     }
     size_t ngroups = pgaccel_agg_group_count(state);
     if (ngroups != 4) {
-      fprintf(stderr, "[%s] fp64 matrix: hash_count_i64 ngroups=%zu (expected 4)\n", label,
-              ngroups);
+      fprintf(stderr, "[%s] resident hash_count_i64 ngroups=%zu (expected 4)\n", label, ngroups);
       pgaccel_agg_free(state);
       return 1;
     }
@@ -182,12 +197,13 @@ static int run_fp64_fork_matrix(const char* label) {
     for (size_t i = 0; i < ngroups; ++i)
       total += results[i];
     if (std::fabs(total - static_cast<double>(HN)) > 1e-9) {
-      fprintf(stderr, "[%s] fp64 matrix: hash_count_i64 total %.9g != %zu\n", label, total, HN);
+      fprintf(stderr, "[%s] resident hash_count_i64 total %.9g != %zu\n", label, total, HN);
       pgaccel_agg_free(state);
       return 1;
     }
     pgaccel_agg_free(state);
-    printf("[%s] fp64 matrix: hash_count_i64 OK\n", label);
+    printf("[%s] resident hash_count_i64 OK (gpu_exec %llu -> %llu)\n", label,
+           (unsigned long long)before, (unsigned long long)after);
   }
 
   // ── bbox_f64 (fp64 bbox-intersects-bulk correctness fallback) ────

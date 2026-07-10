@@ -76,22 +76,6 @@ impl HashAggResult {
     }
 }
 
-/// Execute fail-closed grouped COUNT(*) over int64 keys.
-///
-/// This does not fall back to the legacy host hash-table group-assignment
-/// path.
-#[allow(dead_code)] // reason: generic count-only FFI wrapper; H3 currently uses fused lat/lng+count
-pub fn hash_count_i64_execute(keys: &[i64], nulls: Option<&[u8]>) -> Option<HashAggResult> {
-    if keys.is_empty() {
-        return None;
-    }
-    let null_ptr = nulls.map_or(std::ptr::null(), |n| n.as_ptr());
-    let state =
-        unsafe { bridge::pgaccel_hash_count_i64_execute(keys.as_ptr(), null_ptr, keys.len()) };
-    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
-    unsafe { HashAggResult::from_raw(state) }
-}
-
 /// Execute grouped COUNT(*) over an existing resident int64 key column.
 ///
 /// The input buffer must be device-accessible and remains owned by the caller.

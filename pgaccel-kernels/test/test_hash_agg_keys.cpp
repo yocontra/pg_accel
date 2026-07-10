@@ -757,8 +757,29 @@ static void test_hash_agg_count_star_without_value_cols() {
   pgaccel_agg_free(state);
 }
 
-static void test_hash_count_i64_high_cardinality_gpu_path() {
-  printf("--- test_hash_count_i64_high_cardinality_gpu_path ---\n");
+static void test_hash_count_i64_host_keys_decline_without_dispatch() {
+  printf("--- test_hash_count_i64_host_keys_decline_without_dispatch ---\n");
+
+  constexpr size_t N = 100000;
+  std::vector<int64_t> keys(N);
+  std::vector<uint8_t> nulls(N, 0);
+  for (size_t i = 0; i < N; ++i) {
+    keys[i] = static_cast<int64_t>(i % 4096);
+  }
+  nulls.back() = 1;
+
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys.data(), nulls.data(), N);
+  ASSERT_TRUE("host-key hash_count_i64 hard-declines", state == nullptr);
+  ASSERT_EQ_SZ("host-key hash_count_i64 launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+  if (state != nullptr) {
+    pgaccel_agg_free(state);
+  }
+}
+
+static void test_hash_count_i64_high_cardinality_resident_gpu_path() {
+  printf("--- test_hash_count_i64_high_cardinality_resident_gpu_path ---\n");
 
   constexpr size_t N = 100000;
   constexpr int64_t BASE = 0x0870000000000000LL;
@@ -771,10 +792,22 @@ static void test_hash_count_i64_high_cardinality_gpu_path() {
     expected_sum += static_cast<uint64_t>(keys[i]);
   }
 
+  void* device_keys = nullptr;
+  const pgaccel_status alloc_status =
+      pgaccel_expr_device_alloc_copy(keys.data(), keys.size() * sizeof(int64_t), &device_keys);
+  ASSERT_EQ_INT("resident high-cardinality key allocation", alloc_status, PGACCEL_OK);
+  ASSERT_TRUE("resident high-cardinality keys are device-accessible", device_keys != nullptr);
+  if (device_keys == nullptr) {
+    return;
+  }
+
   pgaccel_reset_gpu_exec_count();
-  pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys.data(), nullptr, N);
-  ASSERT_TRUE("hash_count_i64 returned non-null state", state != nullptr);
-  ASSERT_TRUE("hash_count_i64 launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  pgaccel_agg_state* state =
+      pgaccel_hash_count_i64_device_hash_execute_bounded(static_cast<int64_t*>(device_keys), N, N);
+  const uint64_t dispatches = pgaccel_gpu_exec_count();
+  pgaccel_expr_device_free(device_keys);
+  ASSERT_TRUE("resident hash_count_i64 returned non-null state", state != nullptr);
+  ASSERT_TRUE("resident hash_count_i64 launched GPU kernels", dispatches > 0);
   if (!state) {
     return;
   }
@@ -808,8 +841,8 @@ static void test_hash_count_i64_high_cardinality_gpu_path() {
   pgaccel_agg_free(state);
 }
 
-static void test_hash_count_i64_duplicate_counts_gpu_path() {
-  printf("--- test_hash_count_i64_duplicate_counts_gpu_path ---\n");
+static void test_hash_count_i64_duplicate_counts_resident_gpu_path() {
+  printf("--- test_hash_count_i64_duplicate_counts_resident_gpu_path ---\n");
 
   constexpr size_t N = 131072;
   constexpr size_t NUM_GROUPS = 4096;
@@ -819,10 +852,22 @@ static void test_hash_count_i64_duplicate_counts_gpu_path() {
     keys[i] = BASE + (static_cast<int64_t>(i % NUM_GROUPS) << 24);
   }
 
+  void* device_keys = nullptr;
+  const pgaccel_status alloc_status =
+      pgaccel_expr_device_alloc_copy(keys.data(), keys.size() * sizeof(int64_t), &device_keys);
+  ASSERT_EQ_INT("resident duplicate-count key allocation", alloc_status, PGACCEL_OK);
+  ASSERT_TRUE("resident duplicate-count keys are device-accessible", device_keys != nullptr);
+  if (device_keys == nullptr) {
+    return;
+  }
+
   pgaccel_reset_gpu_exec_count();
-  pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys.data(), nullptr, N);
-  ASSERT_TRUE("hash_count_i64 duplicate-count state non-null", state != nullptr);
-  ASSERT_TRUE("hash_count_i64 duplicate-count launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  pgaccel_agg_state* state = pgaccel_hash_count_i64_device_hash_execute_bounded(
+      static_cast<int64_t*>(device_keys), N, NUM_GROUPS);
+  const uint64_t dispatches = pgaccel_gpu_exec_count();
+  pgaccel_expr_device_free(device_keys);
+  ASSERT_TRUE("resident hash_count_i64 duplicate-count state non-null", state != nullptr);
+  ASSERT_TRUE("resident hash_count_i64 duplicate-count launched GPU kernels", dispatches > 0);
   if (!state) {
     return;
   }
@@ -875,8 +920,9 @@ int main() {
 
   test_hash_agg_invalid_inputs_return_null();
   test_hash_agg_count_star_without_value_cols();
-  test_hash_count_i64_high_cardinality_gpu_path();
-  test_hash_count_i64_duplicate_counts_gpu_path();
+  test_hash_count_i64_host_keys_decline_without_dispatch();
+  test_hash_count_i64_high_cardinality_resident_gpu_path();
+  test_hash_count_i64_duplicate_counts_resident_gpu_path();
   test_hash_agg_int64_baseline();
   test_sort_based_hash_agg_int32_1m_sum_count();
   test_metal_sort_based_hashagg_unsupported_diagnostic();

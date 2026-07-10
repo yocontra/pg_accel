@@ -108,9 +108,10 @@ pgaccel_hash_agg_execute(const void* group_keys, const uint8_t* group_null_mask,
                          const int* value_types,            /* [num_aggs] pgaccel_val_tag */
                          const pgaccel_agg_col* agg_cols, size_t num_aggs);
 
-/// Perform grouped COUNT(*) over int64 group keys using a GPU ordering path.
-/// This entry point is intentionally fail-closed: it does not fall back to the
-/// legacy host hash-table group-assignment path.
+/// Deprecated host-key grouped COUNT(*) entry point.
+///
+/// Always returns NULL before GPU execution. Resident callers must allocate a
+/// device-accessible key buffer and use one of the `*_device_*` entry points.
 pgaccel_agg_state* pgaccel_hash_count_i64_execute(const int64_t* group_keys,
                                                   const uint8_t* group_null_mask, size_t row_count);
 
