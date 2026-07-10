@@ -25,6 +25,13 @@ static KERNEL_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(5000);
 /// Cluster-wide cap for pg_accel-owned host worker threads. 0 means unlimited.
 static MAX_WORKERS_TOTAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 
+/// Cluster-wide resident GPU-memory cap in MiB. -1 derives the cap from the
+/// active device profile through `DeviceLimits`.
+static RESIDENT_MEMORY_BUDGET_MB: GucSetting<i32> = GucSetting::<i32>::new(-1);
+
+/// Whether a selected resident plan may synchronously load missing columns.
+static AUTO_LOAD: GucSetting<bool> = GucSetting::<bool>::new(true);
+
 /// Global multiplier for pg_accel cost estimates (1.0 = default).
 /// Values >1.0 make pg_accel more conservative (less likely to be chosen),
 /// values <1.0 make it more aggressive (more likely to be chosen).
@@ -162,6 +169,27 @@ pub fn init_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_int_guc(
+        c"pg_accel.resident_memory_budget_mb",
+        c"Cluster-wide GPU-memory budget for resident relation data, in MiB.",
+        c"-1 derives a conservative cap from the active DeviceLimits profile. \
+          Pinned entries are protected from LRU eviction but cannot exceed the cap.",
+        &RESIDENT_MEMORY_BUDGET_MB,
+        -1,
+        1_048_576,
+        GucContext::Suset,
+        GucFlags::UNIT_MB,
+    );
+
+    GucRegistry::define_bool_guc(
+        c"pg_accel.auto_load",
+        c"Load missing resident columns when a resident GPU plan is selected.",
+        c"When false, selected plans must find an already loaded or pinned relation entry.",
+        &AUTO_LOAD,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_float_guc(
         c"pg_accel.cost_multiplier",
         c"Global multiplier for pg_accel cost estimates.",
@@ -256,6 +284,26 @@ pub fn min_batch_size() -> i32 {
 #[must_use]
 pub fn gpu_enabled() -> bool {
     GPU_ENABLED.get()
+}
+
+/// Whether selected resident plans may synchronously load missing columns.
+#[inline]
+#[must_use]
+pub fn auto_load() -> bool {
+    AUTO_LOAD.get()
+}
+
+/// Effective cluster-wide resident-memory budget in bytes.
+#[must_use]
+pub fn resident_memory_budget_bytes() -> u64 {
+    let configured = RESIDENT_MEMORY_BUDGET_MB.get();
+    if configured >= 0 {
+        return u64::try_from(configured)
+            .unwrap_or(0)
+            .saturating_mul(1024 * 1024);
+    }
+    u64::try_from(crate::engine::cost::device_limits().resident_memory_budget_bytes)
+        .unwrap_or(u64::MAX)
 }
 
 /// GPU kernel warning threshold in milliseconds.

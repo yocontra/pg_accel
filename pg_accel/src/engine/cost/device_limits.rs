@@ -13,6 +13,12 @@ use super::platform::PlatformProfile;
 /// runs on instead of relying on constants tuned for a single machine.
 #[derive(Debug, Clone)]
 pub struct DeviceLimits {
+    /// Default cluster-wide cap for backend-local resident GPU allocations.
+    /// The `pg_accel.resident_memory_budget_mb` GUC overrides this value.
+    pub resident_memory_budget_bytes: usize,
+    /// Number of expected reuses over which planner costing amortizes a
+    /// synchronous first-use resident load.
+    pub auto_load_amortization_queries: u32,
     /// Minimum rows before generic GPU dispatch is considered.
     pub gpu_min_rows: usize,
     /// Minimum rows for GPU sort at executor level.
@@ -304,6 +310,11 @@ impl DeviceLimits {
     pub fn from_profile(profile: &PlatformProfile) -> Self {
         let cus = profile.compute_units.max(1);
         let mem = profile.gpu_max_alloc_bytes;
+        let resident_memory_budget_bytes = if mem == 0 {
+            256 * 1024 * 1024
+        } else {
+            (mem / 4).clamp(64 * 1024 * 1024, 8 * 1024 * 1024 * 1024)
+        };
 
         // Scale factor: more CUs -> lower thresholds (better GPU).
         let cu_scale = |base: usize| -> usize {
@@ -375,6 +386,8 @@ impl DeviceLimits {
         };
 
         Self {
+            resident_memory_budget_bytes,
+            auto_load_amortization_queries: 8,
             gpu_min_rows,
             gpu_sort_min_rows,
             gpu_sort_planner_min_rows,
@@ -583,6 +596,8 @@ impl DeviceLimits {
     #[must_use]
     pub const fn cpu_only() -> Self {
         Self {
+            resident_memory_budget_bytes: 256 * 1024 * 1024,
+            auto_load_amortization_queries: 8,
             gpu_min_rows: 10_000,
             gpu_sort_min_rows: 100_000,
             // Planner threshold tracks the executor threshold — see comment

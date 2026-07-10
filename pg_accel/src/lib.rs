@@ -215,6 +215,7 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     #[cfg(not(test))]
     {
         engine::thread_budget::init_shmem();
+        engine::residency::init_shmem();
 
         // SAFETY: `before_shmem_exit` is a PostgreSQL API that registers a
         // callback invoked when the backend detaches from shared memory.
@@ -255,6 +256,8 @@ pub unsafe extern "C-unwind" fn _PG_init() {
 #[cfg(not(test))]
 #[pg_guard]
 unsafe extern "C-unwind" fn pgaccel_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
+    // Resident device owners must drop before the queue/runtime is shut down.
+    engine::residency::cleanup_backend();
     let gpu_status = crate::gpu::shutdown();
     if !gpu_status.is_ok() {
         pgrx::warning!(
