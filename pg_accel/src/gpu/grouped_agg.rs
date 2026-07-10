@@ -1205,6 +1205,20 @@ mod tests {
     }
 
     #[test]
+    fn hash_fact_key_output_preserves_scalar_width() {
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        descriptor.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+        descriptor.keys[0].values.tag = PgaccelValTag::Int64;
+        // SAFETY: zero-row fixture is not dispatched.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("int64 hash fact fixture is structurally valid");
+        let mut output = GroupedAggOutputStorage::new(&plan).expect("output allocates");
+        assert_eq!(output.key_values(0).expect("key bytes").len(), 32);
+        assert_eq!(output.key_type(0), Some(PgaccelValTag::Int64 as i32));
+        assert_eq!(output.raw().keys[0].value_type, PgaccelValTag::Int64 as i32);
+    }
+
+    #[test]
     fn lifecycle_flags_reject_use_after_finalize_and_allow_reset() {
         let (first, accumulating) =
             lifecycle_flags(LifecycleState::Ready, LifecycleAction::Accumulate)
