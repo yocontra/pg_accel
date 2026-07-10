@@ -33,6 +33,26 @@ Current integration pins:
   `xcodebuild -downloadComponent MetalToolchain` before treating local PG bench
   failures as pg_accel regressions.
 
+## Owner-Deferred CUDA Work
+
+The project owner has deferred the following CUDA-device work until an NVIDIA
+CUDA host is available. These items do not block the current Metal and no-GPU
+Linux rebuild, but must be completed before making CUDA support or performance
+claims:
+
+- Provision the CUDA test host and validate the pinned AdaptiveCpp CUDA backend,
+  cross-backend ABI compatibility, and Metal/CUDA result parity.
+- Run `just cuda-stress`, the generic benchmark subset, cold/warm evidence runs,
+  crash-band probes, and the full CUDA correctness matrix.
+- Debug and tune every selected CUDA benchmark cell; retain only evidenced GPU
+  wins and record honest planner declines for cells that cannot beat PostgreSQL.
+- Run the CUDA fp64 calibration sweep and set any CUDA-specific cost parameters
+  only from correctness-clean, crash-free evidence.
+- Install and benchmark PG-Strom on the same CUDA host for like-for-like
+  comparison artifacts.
+- Add CUDA smoke, stress, packaging, and release-checklist evidence to CI before
+  advertising CUDA as release-validated.
+
 ## Critical Path Now
 
 Work is organized by common OLAP query families. A lane is not complete when a
