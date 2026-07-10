@@ -63,6 +63,16 @@ VALUE/RHS source and aggregate kind. Each HAVING input encodes the exact
 `(measure_index, source, kind)` output it consumes; validation rejects a
 reference that is not projected by that measure. RHS is legal only for a
 STATS_PAIR expression, and only RHS SUM, COUNT, and AVG are representable.
+Aggregate kind tag 5 means sample standard deviation (`STDDEV_SAMP`) exactly;
+population standard deviation and variance have no wire kind.
+
+Every group key carries its logical PostgreSQL `type_oid` and `collation_oid`
+after its source and encoding payload. Type OID is nonzero. Direct fact and
+dimension keys must equal their source `ColumnRef` type; Expression/H3 keys
+carry the planner-analyzed result type explicitly. Collation is preserved
+bit-for-bit and may be invalid OID for noncollatable types. Every `DimSpec`
+likewise carries the one analyzed equijoin-input collation after its two key
+columns; the planner must establish that both operands use that collation.
 
 `AGG_QUERY_SPEC_WIRE_MAGIC`, `AGG_QUERY_SPEC_HEADER_WORDS`, and
 `AGG_QUERY_SPEC_MAX_WORDS` are exported with the codec.
@@ -80,6 +90,72 @@ rejects unknown versions/tags, negative or impossible lengths, malformed
 values, truncation, and trailing words, then runs the same semantic validation
 used before encoding. Tests reject every proper prefix and cover oversized
 top-level and nested counts.
+
+F32/F64 signed zero is canonical positive zero. The encoder normalizes `-0.0`
+and the decoder rejects a negative-zero spelling after semantic decode. More
+generally, a decoded spec must re-encode word-for-word to the input; a
+semantically valid alias is still a wire error.
+
+## Output projection wire format v2
+
+`AggOutputProjection` is a separate, exactly framed contract. Its ordered slots
+reference either a group-key index or an exact aggregate lane
+`(measure_index, VALUE|RHS, aggregate kind)`. Every slot also carries the
+PostgreSQL source type OID, expected result type OID, typmod, collation OID,
+and a canonical zero/one nullable flag. References are validated against the
+associated `AggQuerySpec`; a measure output that the query spec did not project
+cannot be named. `COUNT(*)` alone uses invalid OID as its canonical source type;
+`COUNT(expr)` retains the expression source type. Direct group-key source types
+must match their `ColumnRef`; Expression/H3 group keys carry an explicit,
+nonzero analyzed source type. Every group-key result type equals its source
+type, and its result collation equals the AQS2 group-key collation. Numeric
+aggregate results require invalid collation OID. `COUNT` slots are non-nullable,
+while SUM/MIN/MAX/AVG/STDDEV_SAMP slots must preserve SQL NULL for empty or
+all-NULL input.
+
+The projection header is magic `0x50474f32` (`PGO2`), version 2, exact total
+word count, and bounded slot count. Each slot is a fixed nine words, in order:
+source tag, source index, aggregate source, aggregate kind, source type OID,
+result type OID, result typmod, result collation OID, and nullable flag. Group-key
+slots require their unused aggregate source/kind words to be canonical zero.
+Unknown tags, noncanonical flags, invalid references, truncation at any
+word/byte boundary, oversized counts, and trailing data are rejected before
+allocation.
+
+The canonical aggregate type mappings represented by AOP2 are `COUNT(*) ->
+int8`; `COUNT(int4|int8|float8) -> int8`; `SUM(int4) -> int8`; `SUM(float8) ->
+float8`; `MIN/MAX(T) -> T` for int4, int8, and float8; and `AVG(float8)` or sample
+`STDDEV_SAMP(float8) -> float8`. AOP2 records PostgreSQL result semantics; it does
+not assert that the current planner, resident producer, or runtime can execute
+every representable mapping. Population stddev and variance are not
+representable because `AggQuerySpec` exposes no corresponding kind, so those
+operations cannot be encoded as the `STDDEV_SAMP` lane.
+
+The projection's result metadata is expected metadata, not authority. Plan
+creation compares slot count/order and `(type_oid, typmod, collation)` against
+both `custom_scan_tlist` (the scan-slot source in PG18 `nodeCustom.c`) and
+`plan.targetlist` (the result-slot source). `CreateCustomScanState` repeats both
+checks. `BeginCustomScan` then compares the same metadata against both actual
+`ss_ScanTupleSlot` and `ps_ResultTupleSlot` `TupleDesc`s before any Datum
+materialization. Canonically encoded but corrupt type metadata therefore cannot
+select a reinterpretation path.
+
+## CustomScan private-data frame v2
+
+Every executable pg_accel CustomScan private list ends with one canonical
+resident-proof block followed by `[0x50435732, 2, total_words, exec_method]`.
+The method identity is distinct for Scan, Join, Agg, Window, FunctionScan, and
+SRF-target-list vtables. The serialized `GpuStrategy`, method footer, selected
+`CustomScanMethods`, and concrete `CustomExecMethods` must all agree.
+
+Before PostgreSQL allocates an executor state, the decoder validates every
+Integer NodeTag, the exact frame length, all strategy-specific tags/counts and
+zero/one flags, the resident proof, and the complete payload endpoint. Missing
+fields are never read as zero, optional legacy sections cannot hide malformed
+data, and unknown or trailing sections are errors. Generic aggregate plans use
+one `AQS2` query-spec block immediately followed by one `AOP2` output-projection
+block; neither can appear without the other, and legacy shape prefixes must be
+canonical zero when this neutral pair is present.
 
 ## Producer-stage contract
 

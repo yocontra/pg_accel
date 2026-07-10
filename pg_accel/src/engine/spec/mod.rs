@@ -1,15 +1,23 @@
 //! Neutral planner specification and frozen grouped-aggregate ABI.
 //!
 //! Planner-facing types contain relation/column identities and logical
-//! operations only. Device pointers live exclusively in [`abi`]. Phase 5 can
-//! therefore analyze and serialize a query before residency exists.
+//! operations only. [`AggOutputProjection`] separately describes ordered
+//! PostgreSQL result slots. Device pointers live exclusively in [`abi`]. Phase
+//! 5 can therefore analyze and serialize a query before residency exists.
 
 pub mod abi;
 mod codec;
+mod projection;
 
 pub use codec::{
     AGG_QUERY_SPEC_HEADER_WORDS, AGG_QUERY_SPEC_MAX_WORDS, AGG_QUERY_SPEC_WIRE_MAGIC,
     SpecCodecError,
+};
+pub use projection::{
+    AGG_OUTPUT_PROJECTION_HEADER_WORDS, AGG_OUTPUT_PROJECTION_MAX_WORDS,
+    AGG_OUTPUT_PROJECTION_SLOT_WORDS, AGG_OUTPUT_PROJECTION_VERSION,
+    AGG_OUTPUT_PROJECTION_WIRE_MAGIC, AggOutputProjection, AggOutputSlot, AggOutputSource,
+    MAX_AGG_OUTPUT_PROJECTION_SLOTS, ProjectionCodecError,
 };
 
 pub const AGG_QUERY_SPEC_VERSION: u32 = 2;
@@ -112,6 +120,10 @@ pub enum GroupKeyEncoding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupKeyRef {
     pub source: GroupKeySource,
+    /// Logical PostgreSQL type produced by this group-key expression.
+    pub type_oid: u32,
+    /// Logical PostgreSQL collation, or invalid OID when not collatable.
+    pub collation_oid: u32,
     pub encoding: GroupKeyEncoding,
 }
 
@@ -148,7 +160,8 @@ pub enum AggregateKind {
     Min,
     Max,
     Avg,
-    Stddev,
+    /// PostgreSQL sample standard deviation (`stddev` / `stddev_samp`).
+    StddevSamp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +194,8 @@ pub struct DimSpec {
     pub relation_oid: u32,
     pub fact_key: ColumnRef,
     pub dim_key: ColumnRef,
+    /// Analyzed collation shared by both equijoin inputs.
+    pub collation_oid: u32,
     pub multiplicity: JoinMultiplicity,
     pub filter: FilterSpec,
 }
@@ -417,6 +432,11 @@ impl GroupKeyEncoding {
 
 impl GroupKeyRef {
     fn validate(&self, fact_rel: u32, dims: &[DimSpec]) -> Result<(), SpecValidationError> {
+        if self.type_oid == 0 {
+            return Err(SpecValidationError::new(
+                "group key has invalid logical type OID",
+            ));
+        }
         self.encoding.validate()?;
         match &self.source {
             GroupKeySource::FactColumn(column) => {
@@ -424,6 +444,11 @@ impl GroupKeyRef {
                 if column.relation_oid != fact_rel {
                     return Err(SpecValidationError::new(
                         "fact key belongs to another relation",
+                    ));
+                }
+                if self.type_oid != column.type_oid {
+                    return Err(SpecValidationError::new(
+                        "fact group-key logical type does not match its column",
                     ));
                 }
                 Ok(())
@@ -446,6 +471,11 @@ impl GroupKeyRef {
                 if group_column.relation_oid != dim.relation_oid {
                     return Err(SpecValidationError::new(
                         "dimension key belongs to another relation",
+                    ));
+                }
+                if self.type_oid != group_column.type_oid {
+                    return Err(SpecValidationError::new(
+                        "dimension group-key logical type does not match its column",
                     ));
                 }
                 if dim.multiplicity != JoinMultiplicity::Unique {

@@ -136,9 +136,8 @@ pub(super) struct SrfTargetListExecState {
 /// `node->custom_ps[0]` before this function runs (PG's standard custom_plans
 /// → custom_ps wiring).
 ///
-/// Returns null on unrecoverable setup error (missing registry entry,
-/// invalid priv block, or SRF position outside the output tuple). The
-/// caller short-circuits to passthrough_exec in that case.
+/// Returns a non-null executor pointer. Missing registry state, invalid private
+/// data, or an invalid output position is a PostgreSQL error after selection.
 ///
 /// # Safety
 ///
@@ -155,29 +154,29 @@ pub(super) unsafe fn init_state(
     let cscan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
     let priv_list = unsafe { (*cscan).custom_private };
     if priv_list.is_null() {
-        pgrx::debug1!("pg_accel: srf_target_list init: null custom_private");
-        return std::ptr::null_mut();
+        pgrx::error!("pg_accel: srf_target_list init: missing validated custom_private");
     }
 
     // The plan's custom_private layout starts with the standard 6-element header,
     // then the SRF_TARGET_LIST_SENTINEL block at index 6.
     // SAFETY: deserialize_srf_target_list_priv validates sentinel + length.
-    let Some(priv_data) = (unsafe { super::deserialize_srf_target_list_priv(priv_list, 6) }) else {
-        pgrx::warning!(
-            "pg_accel: srf_target_list init: deserialize_srf_target_list_priv failed at idx 6"
-        );
-        return std::ptr::null_mut();
-    };
+    let priv_data = unsafe { super::deserialize_srf_target_list_priv(priv_list, 6) }
+        .unwrap_or_else(|| {
+            pgrx::error!(
+                "pg_accel: srf_target_list init: validated private payload failed strict re-decode"
+            )
+        });
 
     // Look up the registry entry to get the strategy + output shape.
     registry::lazy_init();
-    let Some(entry) = registry::global_registry().lookup(priv_data.fn_oid) else {
-        pgrx::warning!(
-            "pg_accel: srf_target_list init: fn_oid={} not registered",
-            u32::from(priv_data.fn_oid),
-        );
-        return std::ptr::null_mut();
-    };
+    let entry = registry::global_registry()
+        .lookup(priv_data.fn_oid)
+        .unwrap_or_else(|| {
+            pgrx::error!(
+                "pg_accel: srf_target_list init: selected function OID {} is not registered",
+                u32::from(priv_data.fn_oid),
+            )
+        });
 
     // Build the FmgrInfo for dispatch.
     let mut fmgr_buf: pg_sys::FmgrInfo = unsafe { std::mem::zeroed() };
@@ -191,13 +190,12 @@ pub(super) unsafe fn init_state(
     // vector. Otherwise we cannot place the SRF result into the output tuple.
     let n_out = priv_data.passthrough_attnos.len();
     if priv_data.srf_tlist_pos < 0 || (priv_data.srf_tlist_pos as usize) >= n_out {
-        pgrx::warning!(
+        pgrx::error!(
             "pg_accel: srf_target_list init: srf_tlist_pos={} out of bounds for {} \
-             output columns; declining",
+             output columns",
             priv_data.srf_tlist_pos,
             n_out,
         );
-        return std::ptr::null_mut();
     }
 
     let state = Box::new(SrfTargetListExecState {
@@ -205,7 +203,7 @@ pub(super) unsafe fn init_state(
         output_shape: entry.output_shape,
         fmgr_info: fmgr_buf,
         strategy: entry.strategy,
-        batch_size: batch_size.max(1),
+        batch_size,
         expansion: ExpansionBuffer::empty(),
         rows_dispatched: 0,
         batches_executed: 0,
@@ -238,12 +236,10 @@ pub(super) unsafe fn next_tuple(
     // by ExecInitCustomScan from custom_scan_tlist.
     let slot = unsafe { (*node).ss.ss_ScanTupleSlot };
     if slot.is_null() {
-        return std::ptr::null_mut();
+        pgrx::error!("pg_accel: SRF target-list executor has no scan tuple slot");
     }
     if executor.is_null() {
-        // SAFETY: ExecClearTuple resets the slot on the main thread.
-        unsafe { pg_sys::ExecClearTuple(slot) };
-        return slot;
+        pgrx::error!("pg_accel: SRF target-list executor state is null");
     }
     // SAFETY: executor was Box::into_raw'd as SrfTargetListExecState in
     // init_state. Reborrow as &mut to advance the cursor.
@@ -255,10 +251,7 @@ pub(super) unsafe fn next_tuple(
     // by our begin_custom_scan child-init path.
     let child_state = unsafe { child_plan_state(node) };
     if child_state.is_null() {
-        pgrx::warning!("pg_accel: srf_target_list next_tuple: null child PlanState");
-        // SAFETY: ExecClearTuple resets the slot.
-        unsafe { pg_sys::ExecClearTuple(slot) };
-        return slot;
+        pgrx::error!("pg_accel: SRF target-list executor has no child PlanState");
     }
 
     // Loop until we either emit an output row or hit child EOF.

@@ -254,6 +254,7 @@ fn accel_state_created_has_expected_defaults() {
     // non-parallel worker marker initialization.
     let state = GpuAccelState {
         strategy: 0,
+        exec_method: PlanExecMethod::Scan as i32,
         batch_size: 0,
         expected_threads: 0,
         rows_dispatched: 0,
@@ -288,6 +289,7 @@ fn accel_state_created_has_expected_defaults() {
 fn accel_state_strategy_field_maps_to_gpu_strategy() {
     let mut state = GpuAccelState {
         strategy: 0,
+        exec_method: PlanExecMethod::Scan as i32,
         batch_size: 256,
         expected_threads: 4,
         rows_dispatched: 0,
@@ -326,6 +328,7 @@ fn accel_state_strategy_field_maps_to_gpu_strategy() {
 fn accel_state_counter_accumulation() {
     let mut state = GpuAccelState {
         strategy: GpuStrategy::Scan as i32,
+        exec_method: PlanExecMethod::Scan as i32,
         batch_size: 1024,
         expected_threads: 2,
         rows_dispatched: 0,
@@ -358,6 +361,7 @@ fn accel_state_counter_accumulation() {
 fn accel_state_counters_no_overflow_at_large_values() {
     let mut state = GpuAccelState {
         strategy: GpuStrategy::Agg as i32,
+        exec_method: PlanExecMethod::Agg as i32,
         batch_size: 4096,
         expected_threads: 8,
         rows_dispatched: u64::MAX - 10,
@@ -387,6 +391,7 @@ fn accel_state_counters_no_overflow_at_large_values() {
 fn accel_state_dispatch_time_to_ms_conversion() {
     let state = GpuAccelState {
         strategy: GpuStrategy::Scan as i32,
+        exec_method: PlanExecMethod::Scan as i32,
         batch_size: 256,
         expected_threads: 1,
         rows_dispatched: 1000,
@@ -414,6 +419,7 @@ fn accel_state_dispatch_time_to_ms_conversion() {
 fn accel_state_dispatch_time_zero_us_is_zero_ms() {
     let state = GpuAccelState {
         strategy: GpuStrategy::Scan as i32,
+        exec_method: PlanExecMethod::Scan as i32,
         batch_size: 256,
         expected_threads: 1,
         rows_dispatched: 0,
@@ -437,17 +443,15 @@ fn accel_state_dispatch_time_zero_us_is_zero_ms() {
 }
 
 // -----------------------------------------------------------------------
-// CustomPrivateData — default (null custom_private) path
+// CustomPrivateData — typed field fixtures
 // -----------------------------------------------------------------------
 
 #[test]
-fn custom_private_data_default_fields() {
-    // When custom_private is null, deserialize should produce defaults.
-    // We can't call deserialize_custom_private (needs PG List), but
-    // we can verify the struct's default construction matches expectations.
+fn custom_private_data_typed_fields() {
     let data = CustomPrivateData {
         gpu_strategy: GpuStrategy::Scan,
         batch_size: 256,
+        expected_threads: 1,
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuSpatial,
@@ -465,6 +469,8 @@ fn custom_private_data_default_fields() {
         window_specs: vec![],
         window_scan_relid: 0,
         olap_agg: None,
+        agg_query_spec: None,
+        agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert_eq!(data.gpu_strategy, GpuStrategy::Scan);
@@ -490,6 +496,7 @@ fn custom_private_data_hash_join_fields() {
     let data = CustomPrivateData {
         gpu_strategy: GpuStrategy::Join,
         batch_size: 512,
+        expected_threads: 1,
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 1,
         accel_strategy: AccelStrategy::GpuHashJoin,
@@ -507,6 +514,8 @@ fn custom_private_data_hash_join_fields() {
         window_specs: vec![],
         window_scan_relid: 0,
         olap_agg: None,
+        agg_query_spec: None,
+        agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert_eq!(data.hash_inner_attno, 3);
@@ -521,6 +530,7 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
     let mut data = CustomPrivateData {
         gpu_strategy: GpuStrategy::Join,
         batch_size: 512,
+        expected_threads: 1,
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 1,
         accel_strategy: AccelStrategy::GpuHashJoin,
@@ -538,6 +548,8 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         window_specs: vec![],
         window_scan_relid: 0,
         olap_agg: None,
+        agg_query_spec: None,
+        agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
 
@@ -600,6 +612,7 @@ fn custom_private_data_with_window_specs() {
     let data = CustomPrivateData {
         gpu_strategy: GpuStrategy::Window,
         batch_size: 256,
+        expected_threads: 1,
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuWindow,
@@ -617,6 +630,8 @@ fn custom_private_data_with_window_specs() {
         window_specs: specs,
         window_scan_relid: 0,
         olap_agg: None,
+        agg_query_spec: None,
+        agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert_eq!(data.window_specs.len(), 2);
@@ -631,6 +646,7 @@ fn custom_private_data_empty_window_specs_for_non_window() {
     let data = CustomPrivateData {
         gpu_strategy: GpuStrategy::Sort,
         batch_size: 256,
+        expected_threads: 1,
         fn_oid: pg_sys::Oid::INVALID,
         target_attno: 0,
         accel_strategy: AccelStrategy::GpuSort,
@@ -648,6 +664,8 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         window_specs: vec![],
         window_scan_relid: 0,
         olap_agg: None,
+        agg_query_spec: None,
+        agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert!(data.window_specs.is_empty());
@@ -727,20 +745,28 @@ fn scan_methods_custom_names_match_path_methods() {
 
 #[test]
 fn exec_methods_has_required_callbacks() {
-    // Verify the critical executor callbacks are wired (not None).
-    assert!(EXEC_METHODS.0.BeginCustomScan.is_some());
-    assert!(EXEC_METHODS.0.ExecCustomScan.is_some());
-    assert!(EXEC_METHODS.0.EndCustomScan.is_some());
-    assert!(EXEC_METHODS.0.ReScanCustomScan.is_some());
-    assert!(EXEC_METHODS.0.ExplainCustomScan.is_some());
+    for methods in [
+        &SCAN_EXEC_METHODS,
+        &JOIN_EXEC_METHODS,
+        &AGG_EXEC_METHODS,
+        &WINDOW_EXEC_METHODS,
+        &FUNCTION_EXEC_METHODS,
+        &SRF_TARGET_LIST_EXEC_METHODS,
+    ] {
+        assert!(methods.0.BeginCustomScan.is_some());
+        assert!(methods.0.ExecCustomScan.is_some());
+        assert!(methods.0.EndCustomScan.is_some());
+        assert!(methods.0.ReScanCustomScan.is_some());
+        assert!(methods.0.ExplainCustomScan.is_some());
+    }
 }
 
 #[test]
 fn exec_methods_mark_restore_are_none() {
     // MarkPos/RestrPos are for scans that act as the inner side of a
     // merge join — pg_accel never plays that role.
-    assert!(EXEC_METHODS.0.MarkPosCustomScan.is_none());
-    assert!(EXEC_METHODS.0.RestrPosCustomScan.is_none());
+    assert!(SCAN_EXEC_METHODS.0.MarkPosCustomScan.is_none());
+    assert!(SCAN_EXEC_METHODS.0.RestrPosCustomScan.is_none());
 }
 
 #[test]
@@ -748,11 +774,48 @@ fn exec_methods_parallel_callbacks_are_wired() {
     // DSM hooks must be Some for PG to schedule the node inside a parallel
     // Gather. They also carry the worker-side spatial recheck capability
     // marker used by InitializeWorkerCustomScan.
-    assert!(EXEC_METHODS.0.EstimateDSMCustomScan.is_some());
-    assert!(EXEC_METHODS.0.InitializeDSMCustomScan.is_some());
-    assert!(EXEC_METHODS.0.ReInitializeDSMCustomScan.is_some());
-    assert!(EXEC_METHODS.0.InitializeWorkerCustomScan.is_some());
-    assert!(EXEC_METHODS.0.ShutdownCustomScan.is_some());
+    assert!(SCAN_EXEC_METHODS.0.EstimateDSMCustomScan.is_some());
+    assert!(SCAN_EXEC_METHODS.0.InitializeDSMCustomScan.is_some());
+    assert!(SCAN_EXEC_METHODS.0.ReInitializeDSMCustomScan.is_some());
+    assert!(SCAN_EXEC_METHODS.0.InitializeWorkerCustomScan.is_some());
+    assert!(SCAN_EXEC_METHODS.0.ShutdownCustomScan.is_some());
+}
+
+#[test]
+fn strategy_exec_method_vtables_are_distinct() {
+    let methods = [
+        &raw const SCAN_EXEC_METHODS.0,
+        &raw const JOIN_EXEC_METHODS.0,
+        &raw const AGG_EXEC_METHODS.0,
+        &raw const WINDOW_EXEC_METHODS.0,
+        &raw const FUNCTION_EXEC_METHODS.0,
+        &raw const SRF_TARGET_LIST_EXEC_METHODS.0,
+    ];
+    for left in 0..methods.len() {
+        for right in left + 1..methods.len() {
+            assert_ne!(methods[left], methods[right]);
+        }
+    }
+}
+
+#[test]
+fn strategy_scan_methods_use_distinct_state_factories() {
+    let factories = [
+        SCAN_SCAN_METHODS.0.CreateCustomScanState,
+        JOIN_SCAN_METHODS.0.CreateCustomScanState,
+        AGG_SCAN_METHODS.0.CreateCustomScanState,
+        WINDOW_SCAN_METHODS.0.CreateCustomScanState,
+        FUNCTION_SCAN_METHODS.0.CreateCustomScanState,
+        SRF_TARGET_LIST_SCAN_METHODS.0.CreateCustomScanState,
+    ];
+    for left in 0..factories.len() {
+        for right in left + 1..factories.len() {
+            assert_ne!(
+                factories[left].map(|callback| callback as usize),
+                factories[right].map(|callback| callback as usize)
+            );
+        }
+    }
 }
 
 #[test]

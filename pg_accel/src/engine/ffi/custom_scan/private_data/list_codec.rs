@@ -13,10 +13,11 @@ enum IntListSource<'a> {
     },
 }
 
-/// Read-only integer list view with PostgreSQL-compatible lossy reads.
+/// Read-only integer list view.
 ///
-/// Out-of-bounds reads return zero to match the historic `list_int_at`
-/// behavior used by `custom_private` deserializers.
+/// Production constructors reject non-`Integer` nodes before any payload is
+/// read. Strict decoders use [`get`](Self::get) and never infer an omitted
+/// field as zero.
 pub(super) struct IntListReader<'a> {
     source: IntListSource<'a>,
 }
@@ -43,6 +44,18 @@ impl<'a> IntListReader<'a> {
             // SAFETY: caller guarantees `list` is a valid List when non-null.
             unsafe { pg_sys::list_length(list) as usize }
         };
+        for index in 0..len {
+            // SAFETY: caller guarantees `list` is a valid PostgreSQL List.
+            let node = unsafe { pg_sys::list_nth(list, index as c_int) };
+            if node.is_null() {
+                pgrx::error!("pg_accel: null node at custom_private index {index}");
+            }
+            // SAFETY: every PostgreSQL node starts with a NodeTag.
+            let tag = unsafe { (*node.cast::<pg_sys::Node>()).type_ };
+            if tag != pg_sys::NodeTag::T_Integer {
+                pgrx::error!("pg_accel: non-Integer node at custom_private index {index}: {tag:?}");
+            }
+        }
         Self {
             source: IntListSource::PgList { list, len },
         }
@@ -73,19 +86,21 @@ impl<'a> IntListReader<'a> {
             IntListSource::PgList { list, .. } => {
                 // SAFETY: bounds checked above and caller guaranteed Integer nodes.
                 let node = unsafe { pg_sys::list_nth(list, index as c_int) };
-                if node.is_null() {
-                    0
-                } else {
-                    // SAFETY: caller guaranteed Integer nodes.
-                    unsafe { (*node.cast::<pg_sys::Integer>()).ival }
-                }
+                // SAFETY: `from_pg_list` checked every node and PostgreSQL does
+                // not mutate a plan's private list during one decode.
+                unsafe { (*node.cast::<pg_sys::Integer>()).ival }
             }
         })
     }
 
     #[must_use]
     pub(super) fn int_at(&self, index: usize) -> c_int {
-        self.get(index).unwrap_or_default()
+        self.get(index).unwrap_or_else(|| {
+            pgrx::error!(
+                "pg_accel: custom_private decoder read word {index} past exact length {}",
+                self.len()
+            )
+        })
     }
 
     #[must_use]
@@ -174,7 +189,9 @@ impl PgListWriter {
     }
 
     pub(super) fn push_len(&mut self, value: usize) {
-        self.push_int(value as c_int);
+        self.push_int(c_int::try_from(value).unwrap_or_else(|_| {
+            pgrx::error!("pg_accel: private-data length {value} exceeds i32 wire capacity")
+        }));
     }
 
     pub(super) fn push_u32(&mut self, value: u32) {
@@ -192,7 +209,7 @@ impl PgListWriter {
     }
 
     pub(super) fn push_f64_halves(&mut self, value: f64) {
-        let bits = value.to_bits();
+        let bits = if value == 0.0 { 0 } else { value.to_bits() };
         self.push_int((bits >> 32) as c_int);
         self.push_int(bits as u32 as c_int);
     }

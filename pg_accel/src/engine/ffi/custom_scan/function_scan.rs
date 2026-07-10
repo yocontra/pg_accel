@@ -118,11 +118,8 @@ impl FunctionScanExecState {
 /// Reads the `FUNCTIONSCAN_SENTINEL`-prefixed block from `cscan.custom_private`,
 /// looks up the registry entry, builds a TupleDesc for the scan slot,
 /// dispatches the call once, and stashes the buffered output. Returns a
-/// raw pointer suitable for `(*state).accel.executor`.
-///
-/// Returns null on any unrecoverable setup error (missing registry entry,
-/// invalid priv block, TupleDesc construction failure). The caller short-
-/// circuits to passthrough_exec in that case.
+/// non-null raw pointer suitable for `(*state).accel.executor`; selected-plan
+/// setup failures are PostgreSQL errors.
 ///
 /// # Safety
 ///
@@ -136,8 +133,7 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     let cscan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
     let priv_list = unsafe { (*cscan).custom_private };
     if priv_list.is_null() {
-        pgrx::debug1!("pg_accel: function_scan init: null custom_private");
-        return std::ptr::null_mut();
+        pgrx::error!("pg_accel: function_scan init: missing validated custom_private");
     }
 
     // The plan's custom_private layout is:
@@ -145,22 +141,22 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     //    target_attno_placeholder=0, accel_strategy_hint, FUNCTIONSCAN_SENTINEL, ...]
     // The FSCA block starts at index 6 (after the standard 6-element header).
     // SAFETY: deserialize_functionscan_priv validates sentinel + length.
-    let Some(priv_data) = (unsafe { deserialize_functionscan_priv(priv_list, 6) }) else {
-        pgrx::warning!(
-            "pg_accel: function_scan init: deserialize_functionscan_priv failed at idx 6"
-        );
-        return std::ptr::null_mut();
-    };
+    let priv_data = unsafe { deserialize_functionscan_priv(priv_list, 6) }.unwrap_or_else(|| {
+        pgrx::error!(
+            "pg_accel: function_scan init: validated private payload failed strict re-decode"
+        )
+    });
 
     // Look up the registry entry to get the strategy + field metadata.
     registry::lazy_init();
-    let Some(entry) = registry::global_registry().lookup(priv_data.fn_oid) else {
-        pgrx::warning!(
-            "pg_accel: function_scan init: fn_oid={} not registered",
-            u32::from(priv_data.fn_oid),
-        );
-        return std::ptr::null_mut();
-    };
+    let entry = registry::global_registry()
+        .lookup(priv_data.fn_oid)
+        .unwrap_or_else(|| {
+            pgrx::error!(
+                "pg_accel: function_scan init: selected function OID {} is not registered",
+                u32::from(priv_data.fn_oid),
+            )
+        });
 
     // The scan slot's TupleDesc is set up by `ExecInitCustomScan`
     // (`src/backend/executor/nodeCustom.c:ExecInitScanTupleSlot`) from our
@@ -175,7 +171,7 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     // descriptor at BeginCustomScan time is forbidden.
     //
     // Instead we validate the slot's existing descriptor against the
-    // registry's expected shape and bail out cleanly on mismatch — PG's
+    // registry's expected shape and error on mismatch — PG's
     // `ExecTypeFromTL(custom_scan_tlist)` already produced the correct
     // column count + type OIDs because `custom_scan_tlist` mirrors the
     // parser-resolved tlist for the SRF (each column expanded from the
@@ -187,28 +183,27 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     unsafe {
         let scan_slot = (*node).ss.ss_ScanTupleSlot;
         if scan_slot.is_null() {
-            pgrx::warning!("pg_accel: function_scan init: ss_ScanTupleSlot is null");
-            return std::ptr::null_mut();
+            pgrx::error!("pg_accel: function_scan init: ss_ScanTupleSlot is null");
         }
         let slot_tupdesc = (*scan_slot).tts_tupleDescriptor;
         if slot_tupdesc.is_null() {
-            pgrx::warning!(
+            pgrx::error!(
                 "pg_accel: function_scan init: scan slot has null tupdesc; \
                  ExecInitCustomScan should have populated it from custom_scan_tlist"
             );
-            return std::ptr::null_mut();
         }
         let slot_natts = (*slot_tupdesc).natts;
-        let expected_natts = i32::try_from(entry.output_field_types.len()).unwrap_or(0);
+        let expected_natts = i32::try_from(entry.output_field_types.len()).unwrap_or_else(|_| {
+            pgrx::error!("pg_accel: function_scan registry output column count exceeds i32")
+        });
         if slot_natts != expected_natts {
-            pgrx::warning!(
+            pgrx::error!(
                 "pg_accel: function_scan init: scan slot natts={} but registry expects {} \
-                 columns for fn_oid={}; declining to dispatch (planner-tlist mismatch)",
+                 columns for fn_oid={} (planner-tlist mismatch)",
                 slot_natts,
                 expected_natts,
                 u32::from(priv_data.fn_oid),
             );
-            return std::ptr::null_mut();
         }
     }
 
@@ -355,19 +350,10 @@ pub(super) unsafe fn next_tuple(
     // init_state.
     let slot = unsafe { (*node).ss.ss_ScanTupleSlot };
     if slot.is_null() {
-        return std::ptr::null_mut();
+        pgrx::error!("pg_accel: FunctionScan executor has no scan tuple slot");
     }
-    // init_state returns null on shape/registry mismatch; in that case
-    // emit a clean EOF rather than dereferencing the null state pointer
-    // (otherwise the executor's first ExecScan call segfaults). Per
-    // anti-cheat ban #4 we surface the shape mismatch via the
-    // pgrx::warning! at init_state but do not pretend to dispatch.
     if executor.is_null() {
-        // SAFETY: ExecClearTuple resets the slot on the main thread.
-        unsafe {
-            pg_sys::ExecClearTuple(slot);
-        }
-        return slot;
+        pgrx::error!("pg_accel: FunctionScan executor state is null");
     }
     // SAFETY: executor was Box::into_raw'd as FunctionScanExecState in
     // init_state. We reborrow as &mut to advance the cursor.

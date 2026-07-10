@@ -1348,7 +1348,9 @@ mod partial_agg_spec_roundtrip {
 
         use crate::engine::executor::agg::AggOp;
         use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-        use crate::engine::ffi::custom_scan::{append_partial_spec, deserialize_partial_spec};
+        use crate::engine::ffi::custom_scan::{
+            PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec,
+        };
 
         #[pg_test]
         fn paag_roundtrip_preserves_serialize_fn_oid_for_avg() {
@@ -1409,18 +1411,16 @@ mod partial_agg_spec_roundtrip {
         }
 
         #[pg_test]
-        fn paag_roundtrip_empty_spec_yields_empty_per_column() {
-            let spec = PartialAggSpec {
-                per_column: Vec::new(),
-            };
-            // SAFETY: Main backend thread, live memory context.
-            let round = unsafe {
-                let list: *mut pg_sys::List = std::ptr::null_mut();
-                let list = append_partial_spec(list, &spec);
+        fn paag_zero_column_wire_is_rejected() {
+            // SAFETY: Main backend thread, live memory context. Both list
+            // elements are valid PostgreSQL Integer nodes.
+            let decoded = unsafe {
+                let mut list: *mut pg_sys::List = std::ptr::null_mut();
+                list = pg_sys::lappend(list, pg_sys::makeInteger(PARTIAL_SENTINEL).cast());
+                list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
                 deserialize_partial_spec(list, 1)
             };
-            let back = round.expect("zero-column spec should still roundtrip");
-            assert!(back.per_column.is_empty());
+            assert!(decoded.is_none(), "zero-column PAAG wire was accepted");
         }
     }
 }

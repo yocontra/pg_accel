@@ -38,12 +38,16 @@ use explain::{explain_custom_scan, resolve_thread_count};
 use private_data::CustomPrivateData;
 pub(in crate::engine::ffi) use private_data::HASH_JOIN_RESIDENT_COUNT_SENTINEL;
 pub(super) use private_data::{
-    AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_olap_agg_spec,
-    append_partial_spec, deserialize_partial_spec,
+    AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_query_plan,
+    append_olap_agg_spec, append_partial_spec, deserialize_partial_spec,
 };
 pub use private_data::{
     FUNCTIONSCAN_SENTINEL, FunctionScanPrivData, append_functionscan_priv,
     deserialize_functionscan_priv,
+};
+use private_data::{
+    MAX_PLAN_BATCH_SIZE, PlanExecMethod, RESIDENT_PROOF_TRAILER_INTS, append_plan_wire_footer,
+    validate_custom_private_wire, validate_projection_tuple_desc,
 };
 pub(in crate::engine::ffi) use private_data::{
     append_resident_proof_snapshot, resident_proof_default_for_strategy,
@@ -183,6 +187,7 @@ pub(super) struct GpuAccelScanState {
 #[repr(C)]
 pub(super) struct GpuAccelState {
     pub(super) strategy: i32,
+    pub(super) exec_method: i32,
     pub(super) batch_size: i32,
     pub(super) expected_threads: i32,
     pub(super) rows_dispatched: u64,
@@ -247,17 +252,17 @@ static AGG_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMet
 
 static SCAN_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelScan".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
+    CreateCustomScanState: Some(create_scan_state),
 });
 
 static JOIN_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelJoin".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
+    CreateCustomScanState: Some(create_join_state),
 });
 
 static AGG_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelAgg".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
+    CreateCustomScanState: Some(create_agg_state),
 });
 
 static WINDOW_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
@@ -268,7 +273,7 @@ static WINDOW_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPath
 
 static WINDOW_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelWindow".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
+    CreateCustomScanState: Some(create_window_state),
 });
 
 static FUNCTION_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
@@ -279,7 +284,7 @@ static FUNCTION_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPa
 
 static FUNCTION_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelFunctionScan".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
+    CreateCustomScanState: Some(create_function_state),
 });
 
 static SRF_TARGET_LIST_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
@@ -290,26 +295,35 @@ static SRF_TARGET_LIST_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::C
 
 static SRF_TARGET_LIST_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelSrfTargetList".as_ptr(),
-    CreateCustomScanState: Some(create_custom_scan_state),
+    CreateCustomScanState: Some(create_srf_target_list_state),
 });
 
-static EXEC_METHODS: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods {
-    CustomName: c"GpuAccelScan".as_ptr(),
-    BeginCustomScan: Some(begin_custom_scan),
-    ExecCustomScan: Some(exec_custom_scan),
-    EndCustomScan: Some(end_custom_scan),
-    ReScanCustomScan: Some(rescan_custom_scan),
-    MarkPosCustomScan: None,
-    RestrPosCustomScan: None,
-    // Parallel-worker DSM state coordinates worker-local scans and snapshots
-    // aggregate counters for EXPLAIN after PostgreSQL tears down DSM.
-    EstimateDSMCustomScan: Some(dsm::estimate_dsm_custom_scan),
-    InitializeDSMCustomScan: Some(dsm::initialize_dsm_custom_scan),
-    ReInitializeDSMCustomScan: Some(dsm::reinitialize_dsm_custom_scan),
-    InitializeWorkerCustomScan: Some(dsm::initialize_worker_custom_scan),
-    ShutdownCustomScan: Some(dsm::shutdown_custom_scan),
-    ExplainCustomScan: Some(explain_custom_scan),
-});
+macro_rules! exec_methods {
+    ($name:ident, $label:literal) => {
+        static $name: SyncExecMethods = SyncExecMethods(pg_sys::CustomExecMethods {
+            CustomName: $label.as_ptr(),
+            BeginCustomScan: Some(begin_custom_scan),
+            ExecCustomScan: Some(exec_custom_scan),
+            EndCustomScan: Some(end_custom_scan),
+            ReScanCustomScan: Some(rescan_custom_scan),
+            MarkPosCustomScan: None,
+            RestrPosCustomScan: None,
+            EstimateDSMCustomScan: Some(dsm::estimate_dsm_custom_scan),
+            InitializeDSMCustomScan: Some(dsm::initialize_dsm_custom_scan),
+            ReInitializeDSMCustomScan: Some(dsm::reinitialize_dsm_custom_scan),
+            InitializeWorkerCustomScan: Some(dsm::initialize_worker_custom_scan),
+            ShutdownCustomScan: Some(dsm::shutdown_custom_scan),
+            ExplainCustomScan: Some(explain_custom_scan),
+        });
+    };
+}
+
+exec_methods!(SCAN_EXEC_METHODS, c"GpuAccelScan");
+exec_methods!(JOIN_EXEC_METHODS, c"GpuAccelJoin");
+exec_methods!(AGG_EXEC_METHODS, c"GpuAccelAgg");
+exec_methods!(WINDOW_EXEC_METHODS, c"GpuAccelWindow");
+exec_methods!(FUNCTION_EXEC_METHODS, c"GpuAccelFunctionScan");
+exec_methods!(SRF_TARGET_LIST_EXEC_METHODS, c"GpuAccelSrfTargetList");
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -416,25 +430,55 @@ unsafe extern "C-unwind" fn plan_custom_path_join(
     plan
 }
 
-/// Append the proof carried by a planner CustomPath, or a conservative
-/// host-staged default for older path payloads that predate proof trailers.
+/// Append the proof carried by a planner CustomPath and seal the v2 frame.
 ///
 /// # Safety
 ///
 /// Must run in a valid PostgreSQL planner memory context. `path_private`, when
 /// non-null, must be a `List<Integer>` emitted by pg_accel.
-unsafe fn append_path_resident_proof_or_default(
+unsafe fn append_path_resident_proof(
     list: *mut pg_sys::List,
     path_private: *mut pg_sys::List,
     strategy: GpuStrategy,
 ) -> *mut pg_sys::List {
-    let proof = if path_private.is_null() {
-        resident_proof_default_for_strategy(strategy)
-    } else {
-        unsafe { deserialize_resident_proof_snapshot(path_private) }
-            .unwrap_or_else(|| resident_proof_default_for_strategy(strategy))
-    };
-    unsafe { append_resident_proof_snapshot(list, proof) }
+    if path_private.is_null() {
+        pgrx::error!("pg_accel: selected CustomPath is missing private data and resident proof");
+    }
+    // SAFETY: path_private is non-null and is owned by the selected CustomPath.
+    let proof = unsafe { deserialize_resident_proof_snapshot(path_private) }
+        .unwrap_or_else(|| pgrx::error!("pg_accel: selected CustomPath is missing resident proof"));
+    // SAFETY: list and proof are planner-owned values in the active memory context.
+    let list = unsafe { append_resident_proof_snapshot(list, proof) };
+    let method = PlanExecMethod::for_strategy(strategy).unwrap_or_else(|| {
+        pgrx::error!(
+            "pg_accel: retired GPU strategy {strategy:?} has no CustomExecMethods identity"
+        )
+    });
+    // SAFETY: list is a planner-owned List<Integer> with a canonical proof trailer.
+    unsafe { append_plan_wire_footer(list, method) }
+}
+
+/// Attach proof/framing and validate the complete CustomScan wire while the
+/// planner's target list is still available.
+unsafe fn seal_custom_scan_private(
+    cscan: *mut pg_sys::CustomScan,
+    list: *mut pg_sys::List,
+    path_private: *mut pg_sys::List,
+    strategy: GpuStrategy,
+) {
+    let method = PlanExecMethod::for_strategy(strategy).unwrap_or_else(|| {
+        pgrx::error!("pg_accel: retired GPU strategy {strategy:?} cannot seal a plan")
+    });
+    // SAFETY: all pointers are planner-owned and strategy selected this path.
+    let list = unsafe { append_path_resident_proof(list, path_private, strategy) };
+    // SAFETY: cscan is the planner-owned node being sealed.
+    unsafe {
+        (*cscan).custom_private = list;
+    }
+    // SAFETY: cscan now owns the complete List<Integer> frame and both target lists.
+    unsafe { validate_custom_private_wire(cscan, method) }.unwrap_or_else(|error| {
+        pgrx::error!("pg_accel: planner emitted invalid CustomScan private data: {error}");
+    });
 }
 
 /// Return the planned child `SeqScan` range-table index when an agg wraps a
@@ -775,8 +819,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             list = append_partial_spec(list, &spec);
         }
 
-        list = append_path_resident_proof_or_default(list, path_priv, GpuStrategy::Agg);
-        (*cscan).custom_private = list;
+        seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::Agg);
     }
 
     tracing::info!("plan_custom_path_agg: end");
@@ -934,8 +977,7 @@ unsafe extern "C-unwind" fn plan_custom_path_window(
             list = pg_sys::lappend(list, pg_sys::makeInteger(scan_relid).cast());
         }
 
-        list = append_path_resident_proof_or_default(list, path_priv, GpuStrategy::Window);
-        (*cscan).custom_private = list;
+        seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::Window);
     }
 
     tracing::info!("plan_custom_path_window: end");
@@ -1056,7 +1098,8 @@ unsafe extern "C-unwind" fn plan_custom_path_function(
     //
     // SAFETY: best_path was validated by the planner; deserialize reads
     // sentinel-tagged Integer nodes and returns Option.
-    let priv_data = unsafe { deserialize_functionscan_priv((*best_path).custom_private, 0) };
+    let priv_data = unsafe { deserialize_functionscan_priv((*best_path).custom_private, 0) }
+        .unwrap_or_else(|| pgrx::error!("pg_accel: malformed FunctionScan path private data"));
 
     // SAFETY: cscan is freshly palloc'd and zeroed; best_path + tlist are
     // valid planner pointers.
@@ -1066,12 +1109,13 @@ unsafe extern "C-unwind" fn plan_custom_path_function(
         // `INDEX_VAR` offsets into `custom_scan_tlist` to resolve references).
         // SAFETY: copyObjectImpl deep-copies in CurrentMemoryContext.
         (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-        // SAFETY: builds TargetEntry/Var nodes from registry metadata. Falls
-        // back to copying the planner tlist if registry lookup fails (which
-        // preserves the previous behaviour for unknown fn_oids and lets
-        // begin_custom_scan validation surface the error).
-        (*cscan).custom_scan_tlist = build_function_scan_tlist(priv_data.as_ref())
-            .unwrap_or_else(|| pg_sys::copyObjectImpl(tlist.cast()).cast());
+        // SAFETY: builds TargetEntry/Var nodes from registry metadata. Missing
+        // registry output metadata is a malformed selected plan and errors.
+        (*cscan).custom_scan_tlist = build_function_scan_tlist(Some(&priv_data)).unwrap_or_else(|| {
+            pgrx::error!(
+                "pg_accel: FunctionScan registry output shape is unavailable; refusing malformed plan"
+            )
+        });
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
         (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
@@ -1104,15 +1148,19 @@ unsafe extern "C-unwind" fn plan_custom_path_function(
         // The planner hook stored it at index 0 of the path's custom_private.
         let path_priv = (*best_path).custom_private;
         if !path_priv.is_null() {
-            let n = pg_sys::list_length(path_priv);
+            let path_len = pg_sys::list_length(path_priv) as usize;
+            let n = path_len
+                .checked_sub(RESIDENT_PROOF_TRAILER_INTS)
+                .unwrap_or_else(|| {
+                    pgrx::error!("pg_accel: FunctionScan path is missing its resident proof")
+                });
             for i in 0..n {
-                let cell = pg_sys::list_nth(path_priv, i);
+                let cell = pg_sys::list_nth(path_priv, i as c_int);
                 list = pg_sys::lappend(list, cell);
             }
         }
 
-        list = append_path_resident_proof_or_default(list, path_priv, GpuStrategy::FunctionScan);
-        (*cscan).custom_private = list;
+        seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::FunctionScan);
     }
 
     cscan.cast()
@@ -1196,15 +1244,19 @@ unsafe extern "C-unwind" fn plan_custom_path_srf_target_list(
         // Copy the SRF_TARGET_LIST_SENTINEL-prefixed payload from the path.
         let path_priv = (*best_path).custom_private;
         if !path_priv.is_null() {
-            let n = pg_sys::list_length(path_priv);
+            let path_len = pg_sys::list_length(path_priv) as usize;
+            let n = path_len
+                .checked_sub(RESIDENT_PROOF_TRAILER_INTS)
+                .unwrap_or_else(|| {
+                    pgrx::error!("pg_accel: SRF target-list path is missing its resident proof")
+                });
             for i in 0..n {
-                let cell = pg_sys::list_nth(path_priv, i);
+                let cell = pg_sys::list_nth(path_priv, i as c_int);
                 list = pg_sys::lappend(list, cell);
             }
         }
 
-        list = append_path_resident_proof_or_default(list, path_priv, GpuStrategy::SrfTargetList);
-        (*cscan).custom_private = list;
+        seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::SrfTargetList);
     }
 
     cscan.cast()
@@ -1549,9 +1601,7 @@ unsafe fn make_custom_scan_plan(
             }
         }
 
-        list =
-            append_path_resident_proof_or_default(list, path_priv, GpuStrategy::decode(strategy));
-        (*cscan).custom_private = list;
+        seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::decode(strategy));
     }
 
     cscan.cast()
@@ -1592,10 +1642,21 @@ unsafe fn strip_child_cpu_quals(child: *mut pg_sys::Plan) {
 /// # Safety
 ///
 /// Called by the executor on the main backend thread.
-unsafe extern "C-unwind" fn create_custom_scan_state(
+unsafe fn create_custom_scan_state(
     cscan: *mut pg_sys::CustomScan,
+    method: PlanExecMethod,
+    exec_methods: *const pg_sys::CustomExecMethods,
 ) -> *mut pg_sys::Node {
     let _span = tracing::debug_span!("ffi.create_custom_scan_state").entered();
+    if cscan.is_null() {
+        pgrx::error!("pg_accel: CreateCustomScanState received a null plan");
+    }
+    // Validate the full frame and the serialized method identity before an
+    // executor state exists. This prevents a copied/corrupt plan from selecting
+    // one vtable while its payload names another concrete Rust state type.
+    // SAFETY: cscan was checked non-null and is owned by the executor callback.
+    unsafe { validate_custom_private_wire(cscan, method) }
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid CustomScan private data: {error}"));
     // SAFETY: palloc0 returns zeroed, maximally-aligned memory. We allocate
     // our extended struct which has CustomScanState as first field.
     #[allow(clippy::cast_ptr_alignment)]
@@ -1607,7 +1668,8 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
     unsafe {
         (*state).css.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
         (*state).css.flags = (*cscan).flags;
-        (*state).css.methods = &raw const EXEC_METHODS.0;
+        (*state).css.methods = exec_methods;
+        (*state).accel.exec_method = method as i32;
         (*state).accel.executor = std::ptr::null_mut();
         (*state).accel.parallel_worker_number = -1;
         (*state).accel.resident_proof = ResidentProofSnapshot::not_proven();
@@ -1619,6 +1681,35 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
 
     state.cast()
 }
+
+macro_rules! create_state_callback {
+    ($function:ident, $method:expr, $exec_methods:ident) => {
+        unsafe extern "C-unwind" fn $function(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
+            // SAFETY: PostgreSQL invokes this callback with the CustomScan node
+            // registered for this exact method table.
+            unsafe { create_custom_scan_state(cscan, $method, &raw const $exec_methods.0) }
+        }
+    };
+}
+
+create_state_callback!(create_scan_state, PlanExecMethod::Scan, SCAN_EXEC_METHODS);
+create_state_callback!(create_join_state, PlanExecMethod::Join, JOIN_EXEC_METHODS);
+create_state_callback!(create_agg_state, PlanExecMethod::Agg, AGG_EXEC_METHODS);
+create_state_callback!(
+    create_window_state,
+    PlanExecMethod::Window,
+    WINDOW_EXEC_METHODS
+);
+create_state_callback!(
+    create_function_state,
+    PlanExecMethod::FunctionScan,
+    FUNCTION_EXEC_METHODS
+);
+create_state_callback!(
+    create_srf_target_list_state,
+    PlanExecMethod::SrfTargetList,
+    SRF_TARGET_LIST_EXEC_METHODS
+);
 
 // ---------------------------------------------------------------------------
 // GPU context discovery from plan quals
@@ -2437,21 +2528,58 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     }
 
     // Deserialize strategy and config from custom_private.
-    // Layout: [strategy, batch_size, expected_threads, fn_oid,
-    //          target_attno, accel_strategy, ...sort keys if Sort].
-    // Fall back to GUC values if custom_private is missing or malformed.
+    // V2 layout is exactly framed and ends with the strategy-specific
+    // CustomExecMethods identity. Missing, malformed, or mismatched data is a
+    // hard error; no executor is allowed to start from inferred defaults.
     // SAFETY: cscan is a valid CustomScan plan node; custom_private was
     // populated by make_custom_scan_plan with Integer nodes.
-    let privdata = unsafe { deserialize_custom_private((*cscan).custom_private) };
+    let exec_method_raw = unsafe { (*state).accel.exec_method };
+    let exec_method = PlanExecMethod::from_i32(exec_method_raw).unwrap_or_else(|| {
+        pgrx::error!(
+            "pg_accel: invalid executor-method identity {exec_method_raw}; refusing to decode plan"
+        )
+    });
+    // SAFETY: cscan is the plan node owned by this initialized CustomScanState.
+    let privdata = unsafe { deserialize_custom_private(cscan, exec_method) };
+    if let Some(projection) = &privdata.agg_output_projection {
+        // ExecInitCustomScan has already built the scan slot from the target
+        // list validated at plan creation. Bind the wire metadata to that
+        // concrete TupleDesc again before any Datum materialization can occur.
+        // SAFETY: node is initialized by ExecInitCustomScan, which installs both slots.
+        let slots = unsafe {
+            [
+                ("scan", (*node).ss.ss_ScanTupleSlot),
+                ("result", (*node).ss.ps.ps_ResultTupleSlot),
+            ]
+        };
+        for (name, slot) in slots {
+            if slot.is_null() {
+                pgrx::error!("pg_accel: aggregate output projection has no {name} tuple slot");
+            }
+            // SAFETY: slot was checked non-null and is owned by this plan state.
+            let tuple_desc = unsafe { (*slot).tts_tupleDescriptor };
+            // SAFETY: tuple_desc belongs to the checked, initialized slot.
+            unsafe { validate_projection_tuple_desc(projection, tuple_desc) }.unwrap_or_else(
+                |error| {
+                    pgrx::error!(
+                        "pg_accel: aggregate output projection/{name} TupleDesc mismatch: {error}"
+                    );
+                },
+            );
+        }
+    }
 
     // SAFETY: state points to our GpuAccelScanState, allocated and zeroed
     // in create_custom_scan_state.
     unsafe {
         (*state).accel.strategy = privdata.gpu_strategy as c_int;
-        (*state).accel.batch_size = privdata.batch_size.max(1);
-        (*state).accel.expected_threads = resolve_thread_count();
+        (*state).accel.batch_size = privdata.batch_size;
+        (*state).accel.expected_threads = privdata.expected_threads;
         (*state).accel.resident_proof = privdata.resident_proof;
     }
+    let batch_size = usize::try_from(privdata.batch_size).unwrap_or_else(|_| {
+        pgrx::error!("pg_accel: validated batch size does not fit executor usize")
+    });
 
     // FunctionScan: short-circuit before allocating scan/aggregate/sort
     // executor states (the FunctionScan flow doesn't share their
@@ -2460,6 +2588,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     if privdata.gpu_strategy == GpuStrategy::FunctionScan {
         // SAFETY: node is a valid CustomScanState on the main backend thread.
         let exec = unsafe { function_scan::init_state(node) };
+        if exec.is_null() {
+            pgrx::error!("pg_accel: FunctionScan initializer returned a null executor");
+        }
         // SAFETY: state points to our extended GpuAccelScanState; writing
         // executor pointer + zero counters.
         unsafe {
@@ -2477,8 +2608,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     // per row using a buffered cursor.
     if privdata.gpu_strategy == GpuStrategy::SrfTargetList {
         // SAFETY: node is a valid CustomScanState on the main backend thread.
-        let exec =
-            unsafe { srf_target_list::init_state(node, privdata.batch_size.max(1) as usize) };
+        let exec = unsafe { srf_target_list::init_state(node, batch_size) };
+        if exec.is_null() {
+            pgrx::error!("pg_accel: SRF target-list initializer returned a null executor");
+        }
         // SAFETY: state points to our extended GpuAccelScanState; writing
         // executor pointer + zero counters.
         unsafe {
@@ -2489,12 +2622,6 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         }
         return;
     }
-
-    let batch_size = if privdata.batch_size > 0 {
-        privdata.batch_size as usize
-    } else {
-        256
-    };
 
     // Allocate the appropriate Rust-side executor state based on strategy.
     //
@@ -3093,11 +3220,13 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
     // pointer was previously produced by Box::into_raw for the matching type.
     unsafe {
         let gpu_strategy = GpuStrategy::decode((*state).accel.strategy);
-        let batch_size = if (*state).accel.batch_size > 0 {
-            (*state).accel.batch_size as usize
-        } else {
-            256
-        };
+        let batch_size_raw = (*state).accel.batch_size;
+        if !(1..=MAX_PLAN_BATCH_SIZE).contains(&batch_size_raw) {
+            pgrx::error!("pg_accel: validated batch size was corrupted before rescan");
+        }
+        let batch_size = usize::try_from(batch_size_raw).unwrap_or_else(|_| {
+            pgrx::error!("pg_accel: validated batch size was corrupted before rescan")
+        });
 
         // FunctionScan: just reset the cursor; do not rebuild the buffered
         // dispatch (constant args ⇒ same output is correct).
@@ -3241,21 +3370,27 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
 
 /// Read an `Integer` node value from a PG `List` at position `idx`.
 ///
-/// Returns `0` if the list is null, too short, or the node is null.
-///
 /// # Safety
 ///
 /// `list` must be null or a valid PG `List` of `Integer` nodes.
 pub(super) unsafe fn list_int_at(list: *mut pg_sys::List, idx: c_int) -> c_int {
-    // SAFETY: list_length is safe on null (returns 0 in PG) but our
-    // null guard is explicit for clarity.
-    if list.is_null() || unsafe { pg_sys::list_length(list) } <= idx {
-        return 0;
+    if list.is_null() || idx < 0 {
+        pgrx::error!("pg_accel: private-data read at invalid index {idx}");
+    }
+    // SAFETY: list was checked non-null and the caller promises a valid PG List.
+    let length = unsafe { pg_sys::list_length(list) };
+    if length <= idx {
+        pgrx::error!("pg_accel: private-data read at invalid index {idx}");
     }
     // SAFETY: list_nth returns the idx-th cell's pointer field.
     let node = unsafe { pg_sys::list_nth(list, idx) };
     if node.is_null() {
-        return 0;
+        pgrx::error!("pg_accel: null private-data node at index {idx}");
+    }
+    // SAFETY: all PostgreSQL nodes begin with NodeTag.
+    let tag = unsafe { (*node.cast::<pg_sys::Node>()).type_ };
+    if tag != pg_sys::NodeTag::T_Integer {
+        pgrx::error!("pg_accel: non-Integer private-data node at index {idx}: {tag:?}");
     }
     // SAFETY: node is a valid Integer (T_Integer) node. Access the
     // `ival` field directly — `intVal` is a C macro, not exported.

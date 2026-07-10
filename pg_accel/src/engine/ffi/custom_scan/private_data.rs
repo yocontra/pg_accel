@@ -7,7 +7,7 @@ use std::ffi::c_int;
 
 use pgrx::pg_sys;
 
-use super::GpuStrategy;
+use super::{GpuStrategy, OutputShapeDisc};
 use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::executor::agg::{
     AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, is_h3_synthetic_group_key,
@@ -32,6 +32,10 @@ use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::{
     CpuBoundaryReason, ResidentMaterializationKind, ResidentOperatorClass, ResidentProofSnapshot,
 };
+use crate::engine::spec::{
+    AGG_OUTPUT_PROJECTION_MAX_WORDS, AGG_QUERY_SPEC_MAX_WORDS, AggOutputProjection, AggQuerySpec,
+    ProjectionCodecError, SpecCodecError,
+};
 use crate::gpu::PgaccelKeyType;
 
 mod list_codec;
@@ -41,6 +45,57 @@ use list_codec::{IntListReader, PgListWriter};
 const PATH_PRIVATE_HEADER_INTS: usize = 3;
 const PLAN_PRIVATE_HEADER_INTS: usize = 6;
 const PLAN_PAYLOAD_START: usize = PLAN_PRIVATE_HEADER_INTS;
+pub(super) const PLAN_WIRE_MAGIC: c_int = 0x5043_5732; // b"PCW2"
+pub(super) const PLAN_WIRE_VERSION: c_int = 2;
+pub(super) const PLAN_WIRE_FOOTER_INTS: usize = 4;
+pub(in crate::engine::ffi) const AGG_QUERY_SPEC_SENTINEL: c_int = 0x4151_5332; // b"AQS2"
+pub(in crate::engine::ffi) const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = 0x414F_5032; // b"AOP2"
+const MAX_LEGACY_AGGREGATES: usize = 64;
+const MAX_WINDOW_SPECS: usize = 64;
+const MAX_FUNCTION_ARGS: usize = 100;
+const MAX_TUPLE_COLUMNS: usize = 1_664;
+pub(super) const MAX_PLAN_BATCH_SIZE: c_int = 16_777_216;
+const MAX_EXPECTED_THREADS: c_int = 4_096;
+const MAX_PLAN_WIRE_INTS: usize = AGG_QUERY_SPEC_MAX_WORDS + 32_768;
+
+/// Strategy-specific PostgreSQL `CustomExecMethods` identity serialized in
+/// every v2 plan-private frame.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PlanExecMethod {
+    Scan = 1,
+    Join = 2,
+    Agg = 3,
+    Window = 4,
+    FunctionScan = 5,
+    SrfTargetList = 6,
+}
+
+impl PlanExecMethod {
+    pub(super) const fn from_i32(raw: c_int) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Scan),
+            2 => Some(Self::Join),
+            3 => Some(Self::Agg),
+            4 => Some(Self::Window),
+            5 => Some(Self::FunctionScan),
+            6 => Some(Self::SrfTargetList),
+            _ => None,
+        }
+    }
+
+    pub(super) const fn for_strategy(strategy: GpuStrategy) -> Option<Self> {
+        match strategy {
+            GpuStrategy::Scan => Some(Self::Scan),
+            GpuStrategy::Join => Some(Self::Join),
+            GpuStrategy::Agg => Some(Self::Agg),
+            GpuStrategy::Window => Some(Self::Window),
+            GpuStrategy::FunctionScan => Some(Self::FunctionScan),
+            GpuStrategy::SrfTargetList => Some(Self::SrfTargetList),
+            GpuStrategy::Sort | GpuStrategy::PreAgg => None,
+        }
+    }
+}
 
 /// Error returned by private-data decoders.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +115,85 @@ pub(super) enum DecodeError {
     InvalidBatchSize {
         raw: c_int,
     },
+    InvalidExpectedThreads {
+        raw: c_int,
+    },
+    UnsupportedGpuStrategy {
+        strategy: GpuStrategy,
+    },
+    InvalidExecutionMethod {
+        raw: c_int,
+    },
+    ExecutionMethodMismatch {
+        expected: PlanExecMethod,
+        actual: PlanExecMethod,
+    },
+    StrategyMethodMismatch {
+        strategy: GpuStrategy,
+        method: PlanExecMethod,
+    },
+    StrategyAccelMismatch {
+        strategy: GpuStrategy,
+        accel: AccelStrategy,
+    },
+    InvalidValue {
+        index: usize,
+        field: &'static str,
+        raw: c_int,
+    },
+    LimitExceeded {
+        index: usize,
+        field: &'static str,
+        declared: usize,
+        maximum: usize,
+    },
+    LengthMismatch {
+        declared: usize,
+        actual: usize,
+    },
+    UnsupportedVersion {
+        version: c_int,
+    },
+    Truncated {
+        index: usize,
+        field: &'static str,
+    },
+    TrailingPayload {
+        index: usize,
+        payload_end: usize,
+    },
+    InvalidResidentProof {
+        field: &'static str,
+    },
+    InvalidAggQuerySpec(SpecCodecError),
+    InvalidAggOutputProjection(ProjectionCodecError),
+    AllocationFailed {
+        field: &'static str,
+    },
+    ProjectionTargetMismatch {
+        index: usize,
+        field: &'static str,
+    },
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl From<SpecCodecError> for DecodeError {
+    fn from(value: SpecCodecError) -> Self {
+        Self::InvalidAggQuerySpec(value)
+    }
+}
+
+impl From<ProjectionCodecError> for DecodeError {
+    fn from(value: ProjectionCodecError) -> Self {
+        Self::InvalidAggOutputProjection(value)
+    }
 }
 
 /// Decode a `GpuStrategy` from the current integer wire layout.
@@ -95,10 +229,48 @@ pub(super) const fn decode_accel_strategy(raw: c_int) -> Result<AccelStrategy, D
 
 #[inline]
 fn decode_batch_size(raw: c_int) -> Result<c_int, DecodeError> {
-    if raw > 0 {
+    if (1..=MAX_PLAN_BATCH_SIZE).contains(&raw) {
         Ok(raw)
     } else {
         Err(DecodeError::InvalidBatchSize { raw })
+    }
+}
+
+#[inline]
+fn decode_expected_threads(raw: c_int) -> Result<c_int, DecodeError> {
+    if (1..=MAX_EXPECTED_THREADS).contains(&raw) {
+        Ok(raw)
+    } else {
+        Err(DecodeError::InvalidExpectedThreads { raw })
+    }
+}
+
+fn validate_strategy_accel(strategy: GpuStrategy, accel: AccelStrategy) -> Result<(), DecodeError> {
+    let valid = match strategy {
+        GpuStrategy::Scan => matches!(
+            accel,
+            AccelStrategy::GpuSpatial
+                | AccelStrategy::GpuRaster
+                | AccelStrategy::GpuH3
+                | AccelStrategy::GpuReduce
+                | AccelStrategy::GpuExpr
+        ),
+        GpuStrategy::Join => matches!(
+            accel,
+            AccelStrategy::GpuHashJoin | AccelStrategy::GpuNestedLoopIneq
+        ),
+        GpuStrategy::Agg => accel == AccelStrategy::GpuReduce,
+        GpuStrategy::Window => accel == AccelStrategy::GpuWindow,
+        GpuStrategy::FunctionScan | GpuStrategy::SrfTargetList => matches!(
+            accel,
+            AccelStrategy::GpuSpatial | AccelStrategy::GpuRaster | AccelStrategy::GpuH3
+        ),
+        GpuStrategy::Sort | GpuStrategy::PreAgg => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(DecodeError::StrategyAccelMismatch { strategy, accel })
     }
 }
 
@@ -199,13 +371,23 @@ impl PlanPrivate {
         let target_attno = require_reader_field(reader, "PlanPrivate", 4, "target_attno")?;
         let accel_strategy_raw = require_reader_field(reader, "PlanPrivate", 5, "accel_strategy")?;
 
+        let gpu_strategy = decode_gpu_strategy(gpu_strategy_raw)?;
+        let accel_strategy = decode_accel_strategy(accel_strategy_raw)?;
+        validate_strategy_accel(gpu_strategy, accel_strategy)?;
+        if target_attno < 0 {
+            return Err(DecodeError::InvalidValue {
+                index: 4,
+                field: "target attno",
+                raw: target_attno,
+            });
+        }
         Ok(Self {
-            gpu_strategy: decode_gpu_strategy(gpu_strategy_raw)?,
+            gpu_strategy,
             batch_size: decode_batch_size(batch_size_raw)?,
-            expected_threads,
+            expected_threads: decode_expected_threads(expected_threads)?,
             fn_oid: pg_sys::Oid::from(fn_oid_raw),
             target_attno,
-            accel_strategy: decode_accel_strategy(accel_strategy_raw)?,
+            accel_strategy,
         })
     }
 
@@ -230,7 +412,153 @@ mod typed_private_tests {
     use crate::engine::executor::olap::{
         ResidentGroupAggFilterExpr, ResidentGroupAggGroupKeyExpr, ResidentGroupAggMeasureExpr,
     };
-    use crate::engine::residency::{ResidentOperatorStage, ResidentProofDecodeError};
+    use crate::engine::residency::ResidentOperatorStage;
+    use crate::engine::spec::{
+        AggOutputProjection, AggOutputSlot, AggOutputSource, AggregateKind, AggregateOutput,
+        AggregateSource, FilterSpec, MeasureExpr, MeasureSpec,
+    };
+
+    fn append_proof_words(words: &mut Vec<i32>, proof: ResidentProofSnapshot) {
+        words.extend([
+            RESIDENT_PROOF_SENTINEL,
+            RESIDENT_PROOF_VERSION,
+            proof.operator_class.to_i32(),
+            proof.stage_mask as i32,
+            proof.materialization_kind.to_i32(),
+            proof.device_columns as i32,
+            i32::from(proof.has_device_selection),
+            i32::from(proof.has_device_projection),
+            proof.cpu_boundary.to_i32(),
+        ]);
+    }
+
+    fn frame(mut words: Vec<i32>, strategy: GpuStrategy, method: PlanExecMethod) -> Vec<i32> {
+        append_proof_words(&mut words, resident_proof_default_for_strategy(strategy));
+        let total = words.len() + PLAN_WIRE_FOOTER_INTS;
+        words.extend([
+            PLAN_WIRE_MAGIC,
+            PLAN_WIRE_VERSION,
+            total as i32,
+            method as i32,
+        ]);
+        words
+    }
+
+    fn header(strategy: GpuStrategy, accel: AccelStrategy) -> Vec<i32> {
+        vec![strategy as i32, 256, 1, 0, 0, accel as i32]
+    }
+
+    fn generic_agg_frame() -> Vec<i32> {
+        let spec = AggQuerySpec {
+            fact_rel: 42,
+            group_keys: Vec::new(),
+            measures: vec![MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            }],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        };
+        let projection = AggOutputProjection {
+            slots: vec![AggOutputSlot {
+                source: AggOutputSource::Aggregate {
+                    measure_index: 0,
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                },
+                source_type_oid: 0,
+                result_type_oid: pg_sys::INT8OID.to_u32(),
+                result_typmod: -1,
+                result_collation_oid: 0,
+                nullable: false,
+            }],
+        };
+        let mut words = header(GpuStrategy::Agg, AccelStrategy::GpuReduce);
+        words.extend([0, 0, 0, AGG_QUERY_SPEC_SENTINEL]);
+        words.extend(spec.encode_i32().expect("query spec encodes"));
+        words.push(AGG_OUTPUT_PROJECTION_SENTINEL);
+        words.extend(projection.encode_i32(&spec).expect("projection encodes"));
+        frame(words, GpuStrategy::Agg, PlanExecMethod::Agg)
+    }
+
+    fn legacy_h3_agg_frame() -> Vec<i32> {
+        let mut words = header(GpuStrategy::Agg, AccelStrategy::GpuReduce);
+        words.extend([
+            1,
+            AggOp::Count.to_i32(),
+            0,
+            pg_sys::INT8OID.to_u32() as i32,
+            0,
+            42,
+            AGG_OLAP_SENTINEL,
+            OLAP_KIND_RESIDENT_H3_GROUPED_COUNT,
+            42,
+            ResidentH3GroupedCountKind::LatLngToCell.to_i32(),
+            9,
+        ]);
+        frame(words, GpuStrategy::Agg, PlanExecMethod::Agg)
+    }
+
+    fn valid_plan_frames() -> Vec<(PlanExecMethod, Vec<i32>)> {
+        let scan = frame(
+            header(GpuStrategy::Scan, AccelStrategy::GpuSpatial),
+            GpuStrategy::Scan,
+            PlanExecMethod::Scan,
+        );
+
+        let mut join = header(GpuStrategy::Join, AccelStrategy::GpuHashJoin);
+        join[4] = 1;
+        join.extend([2, 0, 0, 0, 0, 0]);
+        let join = frame(join, GpuStrategy::Join, PlanExecMethod::Join);
+
+        let mut window = header(GpuStrategy::Window, AccelStrategy::GpuWindow);
+        window.extend([1, 0, 1, 2, 0, 0, 0, pg_sys::INT8OID.to_u32() as i32, 0, 0]);
+        let window = frame(window, GpuStrategy::Window, PlanExecMethod::Window);
+
+        let mut function = header(GpuStrategy::FunctionScan, AccelStrategy::GpuH3);
+        function.extend([FUNCTIONSCAN_SENTINEL, 42, 2, 0, 1, 0, 7, 23]);
+        let function = frame(
+            function,
+            GpuStrategy::FunctionScan,
+            PlanExecMethod::FunctionScan,
+        );
+
+        let mut srf = header(GpuStrategy::SrfTargetList, AccelStrategy::GpuH3);
+        srf.extend([
+            SRF_TARGET_LIST_SENTINEL,
+            42,
+            2,
+            0,
+            1,
+            1,
+            2,
+            1,
+            0,
+            1,
+            0,
+            7,
+            23,
+        ]);
+        let srf = frame(
+            srf,
+            GpuStrategy::SrfTargetList,
+            PlanExecMethod::SrfTargetList,
+        );
+
+        vec![
+            (PlanExecMethod::Scan, scan),
+            (PlanExecMethod::Join, join),
+            (PlanExecMethod::Agg, generic_agg_frame()),
+            (PlanExecMethod::Window, window),
+            (PlanExecMethod::FunctionScan, function),
+            (PlanExecMethod::SrfTargetList, srf),
+        ]
+    }
 
     #[test]
     fn strict_gpu_strategy_decoder_accepts_current_wire_values() {
@@ -265,24 +593,211 @@ mod typed_private_tests {
     }
 
     #[test]
+    fn v2_plan_frames_validate_for_every_execution_method() {
+        for (method, words) in valid_plan_frames() {
+            validate_plan_wire_slice(&words, method)
+                .unwrap_or_else(|error| panic!("{method:?} frame failed: {error}"));
+        }
+    }
+
+    #[test]
+    fn v2_frame_preserves_strict_legacy_h3_aggregate_compatibility() {
+        let words = legacy_h3_agg_frame();
+        validate_plan_wire_slice(&words, PlanExecMethod::Agg)
+            .unwrap_or_else(|error| panic!("legacy H3 aggregate frame failed: {error}"));
+
+        for end in 0..words.len() {
+            assert!(
+                validate_plan_wire_slice(&words[..end], PlanExecMethod::Agg).is_err(),
+                "legacy H3 aggregate word prefix {end} unexpectedly decoded"
+            );
+        }
+    }
+
+    #[test]
+    fn every_plan_frame_truncation_boundary_is_rejected() {
+        for (method, words) in valid_plan_frames() {
+            for end in 0..words.len() {
+                assert!(
+                    validate_plan_wire_slice(&words[..end], method).is_err(),
+                    "{method:?} word prefix {end} unexpectedly decoded"
+                );
+            }
+            let bytes = words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>();
+            for end in 0..bytes.len() {
+                let result = if end % 4 == 0 {
+                    let prefix = bytes[..end]
+                        .chunks_exact(4)
+                        .map(|chunk| {
+                            i32::from_le_bytes(chunk.try_into().expect("four-byte wire word"))
+                        })
+                        .collect::<Vec<_>>();
+                    validate_plan_wire_slice(&prefix, method)
+                } else {
+                    Err(DecodeError::Truncated {
+                        index: end / 4,
+                        field: "partial plan-private word",
+                    })
+                };
+                assert!(
+                    result.is_err(),
+                    "{method:?} byte prefix {end} unexpectedly decoded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn execution_method_identity_mismatch_matrix_is_rejected() {
+        let methods = [
+            PlanExecMethod::Scan,
+            PlanExecMethod::Join,
+            PlanExecMethod::Agg,
+            PlanExecMethod::Window,
+            PlanExecMethod::FunctionScan,
+            PlanExecMethod::SrfTargetList,
+        ];
+        for (actual, words) in valid_plan_frames() {
+            for expected in methods {
+                let result = validate_plan_wire_slice(&words, expected);
+                assert_eq!(
+                    result.is_ok(),
+                    expected == actual,
+                    "expected {expected:?}, serialized {actual:?}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_plan_frames_reject_noncanonical_flags_counts_tags_and_trailing_payload() {
+        let frames = valid_plan_frames();
+
+        let mut bad_proof_bool = frames[0].1.clone();
+        let proof_start =
+            bad_proof_bool.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        bad_proof_bool[proof_start + 6] = 2;
+        assert!(validate_plan_wire_slice(&bad_proof_bool, PlanExecMethod::Scan).is_err());
+
+        let mut negative_window_count = frames[3].1.clone();
+        negative_window_count[PLAN_PAYLOAD_START] = -1;
+        assert!(validate_plan_wire_slice(&negative_window_count, PlanExecMethod::Window).is_err());
+
+        let mut bad_pair = frames[0].1.clone();
+        bad_pair[5] = AccelStrategy::GpuHashJoin as i32;
+        assert!(validate_plan_wire_slice(&bad_pair, PlanExecMethod::Scan).is_err());
+
+        let mut trailing = frames[0].1.clone();
+        let footer = trailing.len() - PLAN_WIRE_FOOTER_INTS;
+        trailing.insert(footer - RESIDENT_PROOF_TRAILER_INTS, 99);
+        let new_footer = trailing.len() - PLAN_WIRE_FOOTER_INTS;
+        trailing[new_footer + 2] = trailing.len() as i32;
+        assert!(validate_plan_wire_slice(&trailing, PlanExecMethod::Scan).is_err());
+    }
+
+    #[test]
+    fn neutral_aggregate_rejects_all_legacy_execution_fields() {
+        let mut self_scan = generic_agg_frame();
+        self_scan[PLAN_PAYLOAD_START + 2] = 42;
+        assert!(validate_plan_wire_slice(&self_scan, PlanExecMethod::Agg).is_err());
+
+        let mut scan_expr = generic_agg_frame();
+        scan_expr.splice(
+            PLAN_PAYLOAD_START + 3..PLAN_PAYLOAD_START + 3,
+            [
+                AGG_SCAN_EXPR_SENTINEL,
+                1,
+                0,
+                i32::from(crate::engine::expr_compiler::opcode::EQ),
+                0,
+                0,
+            ],
+        );
+        let footer = scan_expr.len() - PLAN_WIRE_FOOTER_INTS;
+        scan_expr[footer + 2] = scan_expr.len() as i32;
+        assert!(validate_plan_wire_slice(&scan_expr, PlanExecMethod::Agg).is_err());
+
+        let mut partial = generic_agg_frame();
+        let proof = partial.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        partial.splice(
+            proof..proof,
+            [
+                PARTIAL_SENTINEL,
+                1,
+                AggOp::Count.to_i32(),
+                1,
+                pg_sys::INT8OID.to_u32() as i32,
+                0,
+            ],
+        );
+        let footer = partial.len() - PLAN_WIRE_FOOTER_INTS;
+        partial[footer + 2] = partial.len() as i32;
+        assert!(validate_plan_wire_slice(&partial, PlanExecMethod::Agg).is_err());
+    }
+
+    #[test]
+    fn oversized_plan_frame_is_rejected_before_payload_decode() {
+        let words = vec![0; MAX_PLAN_WIRE_INTS + 1];
+        assert!(matches!(
+            validate_plan_wire_slice(&words, PlanExecMethod::Scan),
+            Err(DecodeError::LimitExceeded {
+                field: "plan-private word count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn deterministic_adversarial_plan_words_never_panic() {
+        let mut state = 0x3C6E_F372_FE94_F82B_u64;
+        for case in 0..4_096usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let len = state as usize % 257;
+            let mut words = Vec::with_capacity(len);
+            for _ in 0..len {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                words.push((state >> 32) as i32);
+            }
+            if case % 4 == 0 && words.len() >= PLAN_WIRE_FOOTER_INTS {
+                let footer = words.len() - PLAN_WIRE_FOOTER_INTS;
+                words[footer] = PLAN_WIRE_MAGIC;
+                words[footer + 1] = PLAN_WIRE_VERSION;
+                words[footer + 2] = words.len() as i32;
+                words[footer + 3] = PlanExecMethod::Scan as i32;
+            }
+            let outcome = std::panic::catch_unwind(|| {
+                let _ = validate_plan_wire_slice(&words, PlanExecMethod::Scan);
+            });
+            assert!(outcome.is_ok(), "adversarial frame {case} panicked");
+        }
+    }
+
+    #[test]
     fn plan_private_decodes_and_reencodes_header() {
         let raw = [
-            GpuStrategy::Sort as c_int,
+            GpuStrategy::Scan as c_int,
             2048,
             6,
             1234,
             5,
-            AccelStrategy::GpuSort as c_int,
+            AccelStrategy::GpuSpatial as c_int,
         ];
 
         let decoded = PlanPrivate::decode(&raw).expect("valid plan header should decode");
 
-        assert_eq!(decoded.gpu_strategy, GpuStrategy::Sort);
+        assert_eq!(decoded.gpu_strategy, GpuStrategy::Scan);
         assert_eq!(decoded.batch_size, 2048);
         assert_eq!(decoded.expected_threads, 6);
         assert_eq!(u32::from(decoded.fn_oid), 1234);
         assert_eq!(decoded.target_attno, 5);
-        assert_eq!(decoded.accel_strategy, AccelStrategy::GpuSort);
+        assert_eq!(decoded.accel_strategy, AccelStrategy::GpuSpatial);
         assert_eq!(decoded.to_ints(), raw);
     }
 
@@ -304,17 +819,51 @@ mod typed_private_tests {
 
     #[test]
     fn plan_private_decode_rejects_bad_batch_size() {
-        let err = PlanPrivate::decode(&[
+        for raw in [0, MAX_PLAN_BATCH_SIZE + 1] {
+            let err = PlanPrivate::decode(&[
+                GpuStrategy::Scan as c_int,
+                raw,
+                1,
+                42,
+                7,
+                AccelStrategy::GpuH3 as c_int,
+            ])
+            .expect_err("out-of-range batch size should fail");
+
+            assert_eq!(err, DecodeError::InvalidBatchSize { raw });
+        }
+    }
+
+    #[test]
+    fn plan_private_decode_rejects_nonpositive_thread_count_and_method_pair() {
+        let mut raw = [
             GpuStrategy::Scan as c_int,
+            256,
             0,
-            1,
             42,
             7,
             AccelStrategy::GpuH3 as c_int,
-        ])
-        .expect_err("zero batch size should fail");
-
-        assert_eq!(err, DecodeError::InvalidBatchSize { raw: 0 });
+        ];
+        assert_eq!(
+            PlanPrivate::decode(&raw),
+            Err(DecodeError::InvalidExpectedThreads { raw: 0 })
+        );
+        raw[2] = MAX_EXPECTED_THREADS + 1;
+        assert_eq!(
+            PlanPrivate::decode(&raw),
+            Err(DecodeError::InvalidExpectedThreads {
+                raw: MAX_EXPECTED_THREADS + 1
+            })
+        );
+        raw[2] = 1;
+        raw[5] = AccelStrategy::GpuHashJoin as c_int;
+        assert_eq!(
+            PlanPrivate::decode(&raw),
+            Err(DecodeError::StrategyAccelMismatch {
+                strategy: GpuStrategy::Scan,
+                accel: AccelStrategy::GpuHashJoin,
+            })
+        );
     }
 
     #[test]
@@ -419,7 +968,7 @@ mod typed_private_tests {
     }
 
     #[test]
-    fn resident_proof_snapshot_zero_stage_mask_is_not_resident() {
+    fn resident_proof_snapshot_zero_stage_mask_is_rejected() {
         let raw = [
             GpuStrategy::Scan as c_int,
             256,
@@ -439,14 +988,14 @@ mod typed_private_tests {
         ];
         let fields = IntListReader::from_slice(&raw);
 
-        let proof = deserialize_resident_proof_snapshot_from_reader(&fields)
-            .expect("tail resident proof trailer should decode");
-
-        assert!(!proof.gpu_resident_pipeline());
+        assert!(matches!(
+            decode_resident_proof_at(&fields, raw.len() - RESIDENT_PROOF_TRAILER_INTS),
+            Err(DecodeError::InvalidResidentProof { field: "semantics" })
+        ));
     }
 
     #[test]
-    fn resident_proof_snapshot_unspecified_operator_class_is_not_resident() {
+    fn resident_proof_snapshot_unspecified_operator_class_is_rejected() {
         let raw = [
             GpuStrategy::Scan as c_int,
             256,
@@ -466,14 +1015,10 @@ mod typed_private_tests {
         ];
         let fields = IntListReader::from_slice(&raw);
 
-        let proof = deserialize_resident_proof_snapshot_from_reader(&fields)
-            .expect("tail resident proof trailer should decode");
-
-        assert!(!proof.gpu_resident_pipeline());
-        assert_eq!(
-            proof.to_proof(),
-            Err(ResidentProofDecodeError::MissingOperatorClass)
-        );
+        assert!(matches!(
+            decode_resident_proof_at(&fields, raw.len() - RESIDENT_PROOF_TRAILER_INTS),
+            Err(DecodeError::InvalidResidentProof { field: "semantics" })
+        ));
     }
 
     #[test]
@@ -731,6 +1276,7 @@ mod typed_private_tests {
 pub(super) struct CustomPrivateData {
     pub(super) gpu_strategy: GpuStrategy,
     pub(super) batch_size: c_int,
+    pub(super) expected_threads: c_int,
     pub(super) fn_oid: pg_sys::Oid,
     pub(super) target_attno: i32,
     pub(super) accel_strategy: AccelStrategy,
@@ -766,6 +1312,12 @@ pub(super) struct CustomPrivateData {
     /// Optional resident OLAP aggregate payload. Only meaningful for
     /// `gpu_strategy == Agg`; executor must not pull a child plan in this mode.
     pub(super) olap_agg: Option<OlapAggSpec>,
+    /// Neutral grouped-aggregate query contract carried by the v2 wire.
+    /// Residency resolves its relation/column references after decode.
+    #[allow(dead_code)] // consumed by the descriptor executor landing in Phase 5D
+    pub(super) agg_query_spec: Option<AggQuerySpec>,
+    /// Ordered PostgreSQL result slots for the neutral aggregate contract.
+    pub(super) agg_output_projection: Option<AggOutputProjection>,
     /// Versioned resident-pipeline proof decoded from the plan trailer.
     pub(super) resident_proof: ResidentProofSnapshot,
 }
@@ -861,10 +1413,7 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
         Option<OlapAggSpec>,
     ) {
         let relid_idx = self.agg_self_scan_relid_index(agg_count);
-        let relid = self
-            .fields
-            .get(relid_idx)
-            .map_or(0, |value| value as pg_sys::Index);
+        let relid = self.fields.int_at(relid_idx) as pg_sys::Index;
         let mut scan_expr = None;
         let mut partial = None;
         let mut olap = None;
@@ -902,9 +1451,7 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     #[must_use]
     fn agg_self_scan_relid_index(&self, agg_count: usize) -> usize {
         let group_key_base = Self::AGGS + agg_count * 3;
-        let Some(has_group_key) = self.fields.get(group_key_base) else {
-            return self.fields.len().saturating_sub(1);
-        };
+        let has_group_key = self.fields.int_at(group_key_base);
         if has_group_key == 0 {
             return group_key_base + 1;
         }
@@ -918,12 +1465,12 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
         for spec_index in 0..count {
             let offset = Self::WINDOW_SPECS + spec_index * WINDOW_SPEC_INTS;
             if !self.fields.contains_range(offset, WINDOW_SPEC_INTS) {
-                break;
+                pgrx::error!("pg_accel: truncated validated window private payload");
             }
             let mut spec = self.fields.cursor_at(offset);
-            let Some(func) = WindowFunc::from_i32(spec.read_int()) else {
-                break;
-            };
+            let func = WindowFunc::from_i32(spec.read_int()).unwrap_or_else(|| {
+                pgrx::error!("pg_accel: invalid function in validated window private payload")
+            });
             specs.push(WindowFuncSpec {
                 func,
                 partition_attno: spec.read_int(),
@@ -942,56 +1489,1329 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     fn window_scan_relid(&self) -> pg_sys::Index {
         let spec_count = self.fields.int_at(Self::WINDOW_COUNT) as usize;
         let relid_idx = Self::WINDOW_SPECS + spec_count * WINDOW_SPEC_INTS;
-        self.fields
-            .get(relid_idx)
-            .map_or(0, |value| value as pg_sys::Index)
+        self.fields.int_at(relid_idx) as pg_sys::Index
     }
 
     #[must_use]
     fn hash_join_info(&self) -> (i32, i32, bool, bool, pg_sys::Oid, pg_sys::Oid) {
-        if self.fields.contains_range(Self::HASH_INNER_ATTNO, 2) {
-            (
-                self.fields.int_at(Self::HASH_INNER_ATTNO),
-                self.fields.int_at(Self::HASH_KEY_TYPE),
-                self.fields
-                    .get(Self::HASH_COUNT_ONLY)
-                    .is_some_and(|value| value != 0),
-                self.fields
-                    .get(Self::HASH_RESIDENT_COUNT)
-                    .is_some_and(|value| value != 0),
-                self.fields
-                    .get(Self::HASH_OUTER_REL_OID)
-                    .map_or(pg_sys::InvalidOid, |value| pg_sys::Oid::from(value as u32)),
-                self.fields
-                    .get(Self::HASH_INNER_REL_OID)
-                    .map_or(pg_sys::InvalidOid, |value| pg_sys::Oid::from(value as u32)),
-            )
-        } else {
-            (0, 0, false, false, pg_sys::InvalidOid, pg_sys::InvalidOid)
-        }
+        (
+            self.fields.int_at(Self::HASH_INNER_ATTNO),
+            self.fields.int_at(Self::HASH_KEY_TYPE),
+            self.fields.int_at(Self::HASH_COUNT_ONLY) == 1,
+            self.fields.int_at(Self::HASH_RESIDENT_COUNT) == 1,
+            pg_sys::Oid::from(self.fields.int_at(Self::HASH_OUTER_REL_OID) as u32),
+            pg_sys::Oid::from(self.fields.int_at(Self::HASH_INNER_REL_OID) as u32),
+        )
     }
 
     #[must_use]
     fn nlj_info(&self) -> (i32, i32, i32, i32, i32) {
-        if self.fields.contains_range(Self::NLJ_SHAPE, 5) {
-            (
-                self.fields.int_at(Self::NLJ_SHAPE),
-                self.fields.int_at(Self::NLJ_KEY_TYPE),
-                self.fields.int_at(Self::NLJ_OP),
-                self.fields.int_at(Self::NLJ_INNER_LO_ATTNO),
-                self.fields.int_at(Self::NLJ_INNER_HI_ATTNO),
-            )
+        (
+            self.fields.int_at(Self::NLJ_SHAPE),
+            self.fields.int_at(Self::NLJ_KEY_TYPE),
+            self.fields.int_at(Self::NLJ_OP),
+            self.fields.int_at(Self::NLJ_INNER_LO_ATTNO),
+            self.fields.int_at(Self::NLJ_INNER_HI_ATTNO),
+        )
+    }
+}
+
+#[derive(Debug)]
+struct ValidatedPlanWire {
+    plan_private: PlanPrivate,
+    resident_proof: ResidentProofSnapshot,
+    agg_query_spec: Option<AggQuerySpec>,
+    agg_output_projection: Option<AggOutputProjection>,
+}
+
+fn strict_word(
+    fields: &IntListReader<'_>,
+    index: usize,
+    field: &'static str,
+) -> Result<c_int, DecodeError> {
+    fields
+        .get(index)
+        .ok_or(DecodeError::Truncated { index, field })
+}
+
+fn strict_bool(
+    fields: &IntListReader<'_>,
+    index: usize,
+    field: &'static str,
+) -> Result<bool, DecodeError> {
+    match strict_word(fields, index, field)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        raw => Err(DecodeError::InvalidValue { index, field, raw }),
+    }
+}
+
+fn strict_count(
+    fields: &IntListReader<'_>,
+    index: usize,
+    field: &'static str,
+    maximum: usize,
+    minimum_words_per_item: usize,
+    payload_end: usize,
+) -> Result<usize, DecodeError> {
+    let raw = strict_word(fields, index, field)?;
+    let count =
+        usize::try_from(raw).map_err(|_| DecodeError::InvalidValue { index, field, raw })?;
+    if count > maximum {
+        return Err(DecodeError::LimitExceeded {
+            index,
+            field,
+            declared: count,
+            maximum,
+        });
+    }
+    let needed = count
+        .checked_mul(minimum_words_per_item)
+        .ok_or(DecodeError::LimitExceeded {
+            index,
+            field,
+            declared: count,
+            maximum,
+        })?;
+    if index
+        .checked_add(1)
+        .and_then(|start| start.checked_add(needed))
+        .is_none_or(|end| end > payload_end)
+    {
+        return Err(DecodeError::Truncated {
+            index: payload_end,
+            field,
+        });
+    }
+    Ok(count)
+}
+
+fn require_payload_end(index: usize, payload_end: usize) -> Result<(), DecodeError> {
+    if index == payload_end {
+        Ok(())
+    } else {
+        Err(DecodeError::TrailingPayload { index, payload_end })
+    }
+}
+
+fn payload_end_before_proof(fields: &IntListReader<'_>) -> usize {
+    let frame_end = if fields.len() >= PLAN_WIRE_FOOTER_INTS
+        && fields.get(fields.len() - PLAN_WIRE_FOOTER_INTS) == Some(PLAN_WIRE_MAGIC)
+    {
+        fields.len() - PLAN_WIRE_FOOTER_INTS
+    } else {
+        fields.len()
+    };
+    if frame_end >= RESIDENT_PROOF_TRAILER_INTS
+        && fields.get(frame_end - RESIDENT_PROOF_TRAILER_INTS) == Some(RESIDENT_PROOF_SENTINEL)
+    {
+        frame_end - RESIDENT_PROOF_TRAILER_INTS
+    } else {
+        frame_end
+    }
+}
+
+fn decode_resident_proof_at(
+    fields: &IntListReader<'_>,
+    index: usize,
+) -> Result<ResidentProofSnapshot, DecodeError> {
+    if !fields.contains_range(index, RESIDENT_PROOF_TRAILER_INTS) {
+        return Err(DecodeError::Truncated {
+            index,
+            field: "resident proof",
+        });
+    }
+    if strict_word(fields, index, "resident proof sentinel")? != RESIDENT_PROOF_SENTINEL {
+        return Err(DecodeError::InvalidResidentProof { field: "sentinel" });
+    }
+    if strict_word(fields, index + 1, "resident proof version")? != RESIDENT_PROOF_VERSION {
+        return Err(DecodeError::InvalidResidentProof { field: "version" });
+    }
+    let operator_class = ResidentOperatorClass::from_i32(strict_word(
+        fields,
+        index + 2,
+        "resident proof operator class",
+    )?)
+    .ok_or(DecodeError::InvalidResidentProof {
+        field: "operator class",
+    })?;
+    let stage_mask = strict_word(fields, index + 3, "resident proof stage mask")? as u32;
+    let known_stage_mask = crate::engine::residency::ResidentOperatorStage::ALL
+        .iter()
+        .fold(0u32, |mask, stage| mask | stage.bit());
+    if stage_mask & !known_stage_mask != 0 {
+        return Err(DecodeError::InvalidResidentProof {
+            field: "stage mask",
+        });
+    }
+    let materialization_kind = ResidentMaterializationKind::from_i32(strict_word(
+        fields,
+        index + 4,
+        "resident proof materialization",
+    )?)
+    .ok_or(DecodeError::InvalidResidentProof {
+        field: "materialization",
+    })?;
+    let device_columns = strict_word(fields, index + 5, "resident proof device columns")? as u32;
+    let has_device_selection = strict_bool(fields, index + 6, "resident proof selection")?;
+    let has_device_projection = strict_bool(fields, index + 7, "resident proof projection")?;
+    let cpu_boundary = CpuBoundaryReason::from_i32(strict_word(
+        fields,
+        index + 8,
+        "resident proof CPU boundary",
+    )?)
+    .ok_or(DecodeError::InvalidResidentProof {
+        field: "CPU boundary",
+    })?;
+    let snapshot = ResidentProofSnapshot {
+        operator_class,
+        stage_mask,
+        materialization_kind,
+        device_columns,
+        has_device_selection,
+        has_device_projection,
+        cpu_boundary,
+    };
+    let canonical = snapshot
+        .to_proof()
+        .map_err(|_| DecodeError::InvalidResidentProof { field: "semantics" })?
+        .snapshot();
+    if canonical != snapshot {
+        return Err(DecodeError::InvalidResidentProof {
+            field: "canonical form",
+        });
+    }
+    Ok(snapshot)
+}
+
+fn copy_wire_words(
+    fields: &IntListReader<'_>,
+    start: usize,
+    len: usize,
+    field: &'static str,
+) -> Result<Vec<i32>, DecodeError> {
+    if !fields.contains_range(start, len) {
+        return Err(DecodeError::Truncated {
+            index: fields.len(),
+            field,
+        });
+    }
+    let mut words = Vec::new();
+    words
+        .try_reserve_exact(len)
+        .map_err(|_| DecodeError::AllocationFailed { field })?;
+    for index in start..start + len {
+        words.push(strict_word(fields, index, field)?);
+    }
+    Ok(words)
+}
+
+fn strict_f64_at(
+    fields: &IntListReader<'_>,
+    index: usize,
+    field: &'static str,
+) -> Result<f64, DecodeError> {
+    let high = strict_word(fields, index, field)? as u32 as u64;
+    let low = strict_word(fields, index + 1, field)? as u32 as u64;
+    let value = f64::from_bits((high << 32) | low);
+    if value == 0.0 && value.is_sign_negative() {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field,
+            raw: i32::MIN,
+        });
+    }
+    Ok(value)
+}
+
+fn validate_function_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<(), DecodeError> {
+    if strict_word(fields, start, "FunctionScan sentinel")? != FUNCTIONSCAN_SENTINEL {
+        return Err(DecodeError::InvalidValue {
+            index: start,
+            field: "FunctionScan sentinel",
+            raw: strict_word(fields, start, "FunctionScan sentinel")?,
+        });
+    }
+    if strict_word(fields, start + 1, "FunctionScan function OID")? == 0 {
+        return Err(DecodeError::InvalidValue {
+            index: start + 1,
+            field: "FunctionScan function OID",
+            raw: 0,
+        });
+    }
+    let shape_raw = strict_word(fields, start + 2, "FunctionScan output shape")?;
+    let shape = OutputShapeDisc::from_i32(shape_raw).ok_or(DecodeError::InvalidValue {
+        index: start + 2,
+        field: "FunctionScan output shape",
+        raw: shape_raw,
+    })?;
+    let field_count = strict_word(fields, start + 3, "FunctionScan field count")? as u32;
+    if match shape {
+        OutputShapeDisc::Record => field_count == 0 || field_count as usize > MAX_TUPLE_COLUMNS,
+        OutputShapeDisc::Scalar | OutputShapeDisc::VarLen => field_count != 0,
+    } {
+        return Err(DecodeError::InvalidValue {
+            index: start + 3,
+            field: "FunctionScan field count",
+            raw: field_count as i32,
+        });
+    }
+    let count = strict_count(
+        fields,
+        start + 4,
+        "FunctionScan argument count",
+        MAX_FUNCTION_ARGS,
+        3,
+        payload_end,
+    )?;
+    let mut index = start + 5;
+    for _ in 0..count {
+        let type_index = index + 2;
+        if strict_word(fields, type_index, "FunctionScan argument type OID")? == 0 {
+            return Err(DecodeError::InvalidValue {
+                index: type_index,
+                field: "FunctionScan argument type OID",
+                raw: 0,
+            });
+        }
+        index += 3;
+    }
+    require_payload_end(index, payload_end)
+}
+
+fn validate_srf_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<(), DecodeError> {
+    let sentinel = strict_word(fields, start, "SRF target-list sentinel")?;
+    if sentinel != SRF_TARGET_LIST_SENTINEL {
+        return Err(DecodeError::InvalidValue {
+            index: start,
+            field: "SRF target-list sentinel",
+            raw: sentinel,
+        });
+    }
+    if strict_word(fields, start + 1, "SRF function OID")? == 0 {
+        return Err(DecodeError::InvalidValue {
+            index: start + 1,
+            field: "SRF function OID",
+            raw: 0,
+        });
+    }
+    let shape_raw = strict_word(fields, start + 2, "SRF output shape")?;
+    let shape = OutputShapeDisc::from_i32(shape_raw).ok_or(DecodeError::InvalidValue {
+        index: start + 2,
+        field: "SRF output shape",
+        raw: shape_raw,
+    })?;
+    let field_count = strict_word(fields, start + 3, "SRF field count")? as u32;
+    if match shape {
+        OutputShapeDisc::Record => field_count == 0 || field_count as usize > MAX_TUPLE_COLUMNS,
+        OutputShapeDisc::Scalar | OutputShapeDisc::VarLen => field_count != 0,
+    } {
+        return Err(DecodeError::InvalidValue {
+            index: start + 3,
+            field: "SRF field count",
+            raw: field_count as i32,
+        });
+    }
+    let arg_attno = strict_word(fields, start + 4, "SRF argument attno")?;
+    let tlist_pos = strict_word(fields, start + 5, "SRF target-list position")?;
+    if arg_attno <= 0 || tlist_pos < 0 {
+        return Err(DecodeError::InvalidValue {
+            index: if arg_attno <= 0 { start + 4 } else { start + 5 },
+            field: if arg_attno <= 0 {
+                "SRF argument attno"
+            } else {
+                "SRF target-list position"
+            },
+            raw: if arg_attno <= 0 { arg_attno } else { tlist_pos },
+        });
+    }
+    let passthrough_count = strict_count(
+        fields,
+        start + 6,
+        "SRF passthrough count",
+        MAX_TUPLE_COLUMNS,
+        1,
+        payload_end,
+    )?;
+    let tlist_pos = usize::try_from(tlist_pos).map_err(|_| DecodeError::InvalidValue {
+        index: start + 5,
+        field: "SRF target-list position",
+        raw: tlist_pos,
+    })?;
+    if passthrough_count == 0 || tlist_pos >= passthrough_count {
+        return Err(DecodeError::InvalidValue {
+            index: start + 5,
+            field: "SRF target-list position",
+            raw: tlist_pos as i32,
+        });
+    }
+    let pass_start = start + 7;
+    for offset in 0..passthrough_count {
+        let raw = strict_word(fields, pass_start + offset, "SRF passthrough attno")?;
+        let valid = if offset == tlist_pos {
+            raw == 0
         } else {
-            (0, 0, 0, 0, 0)
+            raw > 0
+        };
+        if !valid {
+            return Err(DecodeError::InvalidValue {
+                index: pass_start + offset,
+                field: "SRF passthrough attno",
+                raw,
+            });
         }
     }
+    let qual_count_index = pass_start + passthrough_count;
+    let qual_count = strict_count(
+        fields,
+        qual_count_index,
+        "SRF constant argument count",
+        MAX_FUNCTION_ARGS,
+        3,
+        payload_end,
+    )?;
+    let mut index = qual_count_index + 1;
+    for _ in 0..qual_count {
+        let type_index = index + 2;
+        if strict_word(fields, type_index, "SRF argument type OID")? == 0 {
+            return Err(DecodeError::InvalidValue {
+                index: type_index,
+                field: "SRF argument type OID",
+                raw: 0,
+            });
+        }
+        index += 3;
+    }
+    require_payload_end(index, payload_end)
+}
+
+fn validate_window_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<(), DecodeError> {
+    let count = strict_count(
+        fields,
+        start,
+        "window spec count",
+        MAX_WINDOW_SPECS,
+        WINDOW_SPEC_INTS,
+        payload_end,
+    )?;
+    if count == 0 {
+        return Err(DecodeError::InvalidValue {
+            index: start,
+            field: "window spec count",
+            raw: 0,
+        });
+    }
+    let mut index = start + 1;
+    for _ in 0..count {
+        let func_raw = strict_word(fields, index, "window function")?;
+        if WindowFunc::from_i32(func_raw).is_none() {
+            return Err(DecodeError::InvalidValue {
+                index,
+                field: "window function",
+                raw: func_raw,
+            });
+        }
+        for attno_index in [index + 1, index + 2, index + 3] {
+            let raw = strict_word(fields, attno_index, "window attno")?;
+            if raw < 0 {
+                return Err(DecodeError::InvalidValue {
+                    index: attno_index,
+                    field: "window attno",
+                    raw,
+                });
+            }
+        }
+        if strict_word(fields, index + 6, "window result type OID")? == 0 {
+            return Err(DecodeError::InvalidValue {
+                index: index + 6,
+                field: "window result type OID",
+                raw: 0,
+            });
+        }
+        strict_bool(fields, index + 7, "window uses-fp64 flag")?;
+        index += WINDOW_SPEC_INTS;
+    }
+    let scan_relid = strict_word(fields, index, "window scan relid")?;
+    if scan_relid < 0 {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "window scan relid",
+            raw: scan_relid,
+        });
+    }
+    require_payload_end(index + 1, payload_end)
+}
+
+fn validate_join_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+    plan: PlanPrivate,
+) -> Result<(), DecodeError> {
+    match plan.accel_strategy {
+        AccelStrategy::GpuHashJoin => {
+            if payload_end.saturating_sub(start) != 6 {
+                return Err(DecodeError::LengthMismatch {
+                    declared: 6,
+                    actual: payload_end.saturating_sub(start),
+                });
+            }
+            let inner_attno = strict_word(fields, start, "hash inner attno")?;
+            let key_type = strict_word(fields, start + 1, "hash key type")?;
+            let count_only = strict_bool(fields, start + 2, "hash count-only flag")?;
+            let resident = strict_bool(fields, start + 3, "hash resident-count flag")?;
+            let outer_oid = strict_word(fields, start + 4, "hash outer relation OID")? as u32;
+            let inner_oid = strict_word(fields, start + 5, "hash inner relation OID")? as u32;
+            if plan.target_attno <= 0 || inner_attno <= 0 || !matches!(key_type, 0..=2) {
+                return Err(DecodeError::InvalidValue {
+                    index: start,
+                    field: "hash join payload",
+                    raw: inner_attno,
+                });
+            }
+            if resident {
+                if !count_only || outer_oid == 0 || inner_oid == 0 {
+                    return Err(DecodeError::InvalidValue {
+                        index: start + 3,
+                        field: "resident hash join payload",
+                        raw: 1,
+                    });
+                }
+            } else if outer_oid != 0 || inner_oid != 0 {
+                return Err(DecodeError::InvalidValue {
+                    index: start + 4,
+                    field: "nonresident hash relation OIDs",
+                    raw: outer_oid as i32,
+                });
+            }
+            Ok(())
+        }
+        AccelStrategy::GpuNestedLoopIneq => {
+            if payload_end.saturating_sub(start) != 5 {
+                return Err(DecodeError::LengthMismatch {
+                    declared: 5,
+                    actual: payload_end.saturating_sub(start),
+                });
+            }
+            let shape = strict_word(fields, start, "NLJ shape")?;
+            let key_type = strict_word(fields, start + 1, "NLJ key type")?;
+            let op = strict_word(fields, start + 2, "NLJ operation")?;
+            let lo = strict_word(fields, start + 3, "NLJ lower attno")?;
+            let hi = strict_word(fields, start + 4, "NLJ upper attno")?;
+            if plan.target_attno <= 0
+                || shape != 2
+                || !matches!(key_type, 0..=2)
+                || op != 0
+                || lo <= 0
+                || hi <= 0
+            {
+                return Err(DecodeError::InvalidValue {
+                    index: start,
+                    field: "NLJ payload",
+                    raw: shape,
+                });
+            }
+            Ok(())
+        }
+        _ => Err(DecodeError::StrategyAccelMismatch {
+            strategy: plan.gpu_strategy,
+            accel: plan.accel_strategy,
+        }),
+    }
+}
+
+fn legacy_olap_payload_words(kind: c_int) -> Option<usize> {
+    match kind {
+        OLAP_KIND_SSBM_Q1_REVENUE => Some(10),
+        OLAP_KIND_SSBM_Q2_GROUPED_REVENUE | OLAP_KIND_SSBM_Q3_GROUPED_REVENUE => Some(6),
+        OLAP_KIND_SSBM_Q4_GROUPED_PROFIT => Some(7),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64 => Some(24),
+        OLAP_KIND_RESIDENT_H3_GROUPED_COUNT => Some(4),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE => Some(25),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL => Some(29),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => Some(33),
+        OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 => Some(18),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_lines)] // fixed legacy variants are quarantined here until Phase 5E deletion
+fn validate_legacy_olap_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<usize, DecodeError> {
+    let kind = strict_word(fields, start, "legacy OLAP kind")?;
+    let words = legacy_olap_payload_words(kind).ok_or(DecodeError::InvalidValue {
+        index: start,
+        field: "legacy OLAP kind",
+        raw: kind,
+    })?;
+    let end = start.checked_add(words).ok_or(DecodeError::LimitExceeded {
+        index: start,
+        field: "legacy OLAP payload",
+        declared: words,
+        maximum: MAX_PLAN_WIRE_INTS,
+    })?;
+    if end > payload_end {
+        return Err(DecodeError::Truncated {
+            index: payload_end,
+            field: "legacy OLAP payload",
+        });
+    }
+    let decoded_end = deserialize_olap_agg_spec_from_reader(fields, start)
+        .map(|(_, next)| next)
+        .ok_or(DecodeError::InvalidValue {
+            index: start,
+            field: "legacy OLAP payload",
+            raw: kind,
+        })?;
+    if decoded_end != end {
+        return Err(DecodeError::LengthMismatch {
+            declared: end,
+            actual: decoded_end,
+        });
+    }
+    let relation_indices: &[usize] = match kind {
+        OLAP_KIND_SSBM_Q1_REVENUE => &[1, 2],
+        OLAP_KIND_SSBM_Q2_GROUPED_REVENUE | OLAP_KIND_SSBM_Q3_GROUPED_REVENUE => &[1, 2, 3, 4],
+        OLAP_KIND_SSBM_Q4_GROUPED_PROFIT => &[1, 2, 3, 4, 5],
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64
+        | OLAP_KIND_RESIDENT_H3_GROUPED_COUNT
+        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
+        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL
+        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => &[1],
+        OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 => &[1, 2],
+        _ => &[],
+    };
+    for offset in relation_indices {
+        if strict_word(fields, start + offset, "legacy OLAP relation OID")? == 0 {
+            return Err(DecodeError::InvalidValue {
+                index: start + offset,
+                field: "legacy OLAP relation OID",
+                raw: 0,
+            });
+        }
+    }
+    let requires_rhs_index = match kind {
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64
+        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
+        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL => Some(start + 4),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => Some(start + 8),
+        _ => None,
+    };
+    if let Some(index) = requires_rhs_index {
+        strict_bool(fields, index, "legacy OLAP requires-rhs flag")?;
+    }
+    if kind == OLAP_KIND_SSBM_Q1_REVENUE {
+        let date_kind = strict_word(fields, start + 3, "SSBM date predicate")?;
+        if !matches!(
+            date_kind,
+            OLAP_DATE_YEAR | OLAP_DATE_YEARMONTHNUM | OLAP_DATE_YEAR_WEEK
+        ) {
+            return Err(DecodeError::InvalidValue {
+                index: start + 3,
+                field: "SSBM date predicate",
+                raw: date_kind,
+            });
+        }
+        if date_kind != OLAP_DATE_YEAR_WEEK
+            && strict_word(fields, start + 5, "SSBM unused date argument")? != 0
+        {
+            return Err(DecodeError::InvalidValue {
+                index: start + 5,
+                field: "SSBM unused date argument",
+                raw: strict_word(fields, start + 5, "SSBM unused date argument")?,
+            });
+        }
+        for (lo_offset, hi_offset) in [(6, 7), (8, 9)] {
+            let lo = strict_word(fields, start + lo_offset, "SSBM range lower bound")?;
+            let hi = strict_word(fields, start + hi_offset, "SSBM range upper bound")?;
+            if lo > hi {
+                return Err(DecodeError::InvalidValue {
+                    index: start + lo_offset,
+                    field: "SSBM range",
+                    raw: lo,
+                });
+            }
+        }
+    }
+    if kind == OLAP_KIND_RESIDENT_H3_GROUPED_COUNT {
+        let resolution = strict_word(fields, start + 3, "resident H3 resolution")?;
+        if !(0..=15).contains(&resolution) {
+            return Err(DecodeError::InvalidValue {
+                index: start + 3,
+                field: "resident H3 resolution",
+                raw: resolution,
+            });
+        }
+    }
+    let range_layout = match kind {
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64 => Some((start + 7, start + 8)),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
+        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL => Some((start + 8, start + 9)),
+        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => Some((start + 12, start + 13)),
+        _ => None,
+    };
+    if let Some((count_index, ranges_start)) = range_layout {
+        let range_count_raw = strict_word(fields, count_index, "legacy OLAP range count")?;
+        let range_count =
+            usize::try_from(range_count_raw).map_err(|_| DecodeError::InvalidValue {
+                index: count_index,
+                field: "legacy OLAP range count",
+                raw: range_count_raw,
+            })?;
+        for range in 0..RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES {
+            let range_start = ranges_start + range * 4;
+            let lo = strict_f64_at(fields, range_start, "legacy OLAP range lower bound")?;
+            let hi = strict_f64_at(fields, range_start + 2, "legacy OLAP range upper bound")?;
+            if range < range_count {
+                if lo.is_nan() || hi.is_nan() || lo > hi {
+                    return Err(DecodeError::InvalidValue {
+                        index: range_start,
+                        field: "legacy OLAP range",
+                        raw: 0,
+                    });
+                }
+            } else if lo.to_bits() != 0 || hi.to_bits() != 0 {
+                return Err(DecodeError::InvalidValue {
+                    index: range_start,
+                    field: "unused legacy OLAP range",
+                    raw: strict_word(fields, range_start, "unused legacy OLAP range")?,
+                });
+            }
+        }
+    }
+    if kind == OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 {
+        for index in [start + 8, start + 11] {
+            let opcode = strict_word(fields, index, "legacy star comparison opcode")?;
+            if !(i32::from(crate::engine::expr_compiler::opcode::EQ)
+                ..=i32::from(crate::engine::expr_compiler::opcode::ALWAYS_TRUE))
+                .contains(&opcode)
+            {
+                return Err(DecodeError::InvalidValue {
+                    index,
+                    field: "legacy star comparison opcode",
+                    raw: opcode,
+                });
+            }
+        }
+        for index in [start + 9, start + 12] {
+            let value = strict_f64_at(fields, index, "legacy star comparison constant")?;
+            if value.is_nan() {
+                return Err(DecodeError::InvalidValue {
+                    index,
+                    field: "legacy star comparison constant",
+                    raw: 0,
+                });
+            }
+        }
+    }
+    Ok(end)
+}
+
+fn validate_partial_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<usize, DecodeError> {
+    let count = strict_count(
+        fields,
+        start,
+        "partial aggregate column count",
+        MAX_LEGACY_AGGREGATES,
+        4,
+        payload_end,
+    )?;
+    if count == 0 {
+        return Err(DecodeError::InvalidValue {
+            index: start,
+            field: "partial aggregate column count",
+            raw: 0,
+        });
+    }
+    let mut index = start + 1;
+    for _ in 0..count {
+        let op = strict_word(fields, index, "partial aggregate operation")?;
+        if AggOp::from_i32(op).is_none() {
+            return Err(DecodeError::InvalidValue {
+                index,
+                field: "partial aggregate operation",
+                raw: op,
+            });
+        }
+        if strict_word(fields, index + 1, "partial aggregate attno")? <= 0
+            || strict_word(fields, index + 2, "partial aggregate transition type")? == 0
+        {
+            return Err(DecodeError::InvalidValue {
+                index: index + 1,
+                field: "partial aggregate column",
+                raw: strict_word(fields, index + 1, "partial aggregate attno")?,
+            });
+        }
+        index += 4;
+    }
+    Ok(index)
+}
+
+#[allow(clippy::too_many_lines)] // validates the complete ordered aggregate extension grammar
+fn validate_agg_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<(Option<AggQuerySpec>, Option<AggOutputProjection>), DecodeError> {
+    let count = strict_count(
+        fields,
+        start,
+        "legacy aggregate count",
+        MAX_LEGACY_AGGREGATES,
+        3,
+        payload_end,
+    )?;
+    let mut index = start + 1;
+    for _ in 0..count {
+        let op = strict_word(fields, index, "aggregate operation")?;
+        if AggOp::from_i32(op).is_none() {
+            return Err(DecodeError::InvalidValue {
+                index,
+                field: "aggregate operation",
+                raw: op,
+            });
+        }
+        let attno = strict_word(fields, index + 1, "aggregate attno")?;
+        if attno < 0 || strict_word(fields, index + 2, "aggregate result type OID")? == 0 {
+            return Err(DecodeError::InvalidValue {
+                index: index + 1,
+                field: "aggregate descriptor",
+                raw: attno,
+            });
+        }
+        index += 3;
+    }
+    let has_group = strict_bool(fields, index, "aggregate group-key presence")?;
+    index += 1;
+    if has_group {
+        let attno = strict_word(fields, index, "aggregate group-key attno")?;
+        let type_oid = strict_word(fields, index + 1, "aggregate group-key type OID")?;
+        let key_type = strict_word(fields, index + 2, "aggregate group-key type")?;
+        let attno2 = strict_word(fields, index + 3, "aggregate second group-key attno")?;
+        let tlist_pos = strict_word(fields, index + 4, "aggregate group-key target position")?;
+        if attno <= 0
+            || type_oid == 0
+            || !(matches!(key_type, 0 | 1 | 2 | 4 | 5) || is_h3_synthetic_group_key(key_type))
+            || attno2 < 0
+            || tlist_pos < 0
+        {
+            return Err(DecodeError::InvalidValue {
+                index,
+                field: "aggregate group-key descriptor",
+                raw: attno,
+            });
+        }
+        index += 5;
+    }
+    let self_scan_relid = strict_word(fields, index, "aggregate self-scan relid")?;
+    if self_scan_relid < 0 {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "aggregate self-scan relid",
+            raw: self_scan_relid,
+        });
+    }
+    index += 1;
+
+    let mut legacy_scan_expr = false;
+    if fields.get(index) == Some(AGG_SCAN_EXPR_SENTINEL) {
+        legacy_scan_expr = true;
+        let template = strict_word(fields, index + 1, "aggregate scan-expression template")?;
+        let width = match template {
+            1 => 6,
+            2 => 7,
+            3 => 10,
+            raw => {
+                return Err(DecodeError::InvalidValue {
+                    index: index + 1,
+                    field: "aggregate scan-expression template",
+                    raw,
+                });
+            }
+        };
+        if index + width > payload_end {
+            return Err(DecodeError::Truncated {
+                index: payload_end,
+                field: "aggregate scan expression",
+            });
+        }
+        let validate_column = |offset: usize| -> Result<(), DecodeError> {
+            let raw = strict_word(fields, index + offset, "aggregate scan-expression column")?;
+            if raw < 0 || raw as usize >= MAX_TUPLE_COLUMNS {
+                return Err(DecodeError::InvalidValue {
+                    index: index + offset,
+                    field: "aggregate scan-expression column",
+                    raw,
+                });
+            }
+            Ok(())
+        };
+        let validate_opcode = |offset: usize| -> Result<(), DecodeError> {
+            let raw = strict_word(fields, index + offset, "aggregate scan-expression opcode")?;
+            if !(i32::from(crate::engine::expr_compiler::opcode::EQ)
+                ..=i32::from(crate::engine::expr_compiler::opcode::ALWAYS_TRUE))
+                .contains(&raw)
+            {
+                return Err(DecodeError::InvalidValue {
+                    index: index + offset,
+                    field: "aggregate scan-expression opcode",
+                    raw,
+                });
+            }
+            Ok(())
+        };
+        match template {
+            1 => {
+                validate_column(2)?;
+                validate_opcode(3)?;
+                let value = strict_f64_at(fields, index + 4, "aggregate scan constant")?;
+                if value.is_nan() {
+                    return Err(DecodeError::InvalidValue {
+                        index: index + 4,
+                        field: "aggregate scan constant",
+                        raw: 0,
+                    });
+                }
+            }
+            2 => {
+                validate_column(2)?;
+                let lo = strict_f64_at(fields, index + 3, "aggregate scan lower bound")?;
+                let hi = strict_f64_at(fields, index + 5, "aggregate scan upper bound")?;
+                if lo.is_nan() || hi.is_nan() || lo > hi {
+                    return Err(DecodeError::InvalidValue {
+                        index: index + 3,
+                        field: "aggregate scan range",
+                        raw: 0,
+                    });
+                }
+            }
+            3 => {
+                validate_column(2)?;
+                validate_opcode(3)?;
+                validate_column(6)?;
+                validate_opcode(7)?;
+                for constant_index in [index + 4, index + 8] {
+                    let value = strict_f64_at(fields, constant_index, "aggregate scan constant")?;
+                    if value.is_nan() {
+                        return Err(DecodeError::InvalidValue {
+                            index: constant_index,
+                            field: "aggregate scan constant",
+                            raw: 0,
+                        });
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+        index += width;
+    }
+
+    let mut legacy_olap = false;
+    if fields.get(index) == Some(AGG_OLAP_SENTINEL) {
+        legacy_olap = true;
+        index = validate_legacy_olap_payload(fields, index + 1, payload_end)?;
+    }
+
+    let mut agg_query_spec = None;
+    let mut agg_output_projection = None;
+    if fields.get(index) == Some(AGG_QUERY_SPEC_SENTINEL) {
+        let remaining = payload_end.saturating_sub(index + 1);
+        let prefix_words = copy_wire_words(fields, index + 1, remaining, "aggregate query spec")?;
+        let spec_len = AggQuerySpec::encoded_i32_prefix_len(&prefix_words)?;
+        let spec_words = &prefix_words[..spec_len];
+        agg_query_spec = Some(AggQuerySpec::decode_i32(spec_words)?);
+        index += 1 + spec_len;
+        if fields.get(index) != Some(AGG_OUTPUT_PROJECTION_SENTINEL) {
+            return Err(DecodeError::Truncated {
+                index,
+                field: "aggregate output projection",
+            });
+        }
+        let length_index = index + 3;
+        let projection_len_raw =
+            strict_word(fields, length_index, "aggregate output projection length")?;
+        let projection_len =
+            usize::try_from(projection_len_raw).map_err(|_| DecodeError::InvalidValue {
+                index: length_index,
+                field: "aggregate output projection length",
+                raw: projection_len_raw,
+            })?;
+        if projection_len > AGG_OUTPUT_PROJECTION_MAX_WORDS {
+            return Err(DecodeError::LimitExceeded {
+                index: length_index,
+                field: "aggregate output projection length",
+                declared: projection_len,
+                maximum: AGG_OUTPUT_PROJECTION_MAX_WORDS,
+            });
+        }
+        let projection_words = copy_wire_words(
+            fields,
+            index + 1,
+            projection_len,
+            "aggregate output projection",
+        )?;
+        agg_output_projection = Some(AggOutputProjection::decode_i32(
+            &projection_words,
+            agg_query_spec.as_ref().expect("query spec assigned above"),
+        )?);
+        index += 1 + projection_len;
+    }
+    if legacy_olap && agg_query_spec.is_some() {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "duplicate aggregate execution contracts",
+            raw: AGG_QUERY_SPEC_SENTINEL,
+        });
+    }
+
+    let mut legacy_partial = false;
+    if fields.get(index) == Some(PARTIAL_SENTINEL) {
+        legacy_partial = true;
+        index = validate_partial_payload(fields, index + 1, payload_end)?;
+    }
+    require_payload_end(index, payload_end)?;
+    if !legacy_olap && agg_query_spec.is_none() {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "aggregate execution contract",
+            raw: 0,
+        });
+    }
+    if agg_query_spec.is_some() != agg_output_projection.is_some() {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "generic aggregate projection contract",
+            raw: 0,
+        });
+    }
+    if agg_query_spec.is_some()
+        && (count != 0 || has_group || self_scan_relid != 0 || legacy_scan_expr || legacy_partial)
+    {
+        return Err(DecodeError::InvalidValue {
+            index: start,
+            field: "noncanonical generic aggregate legacy fields",
+            raw: count as i32,
+        });
+    }
+    Ok((agg_query_spec, agg_output_projection))
+}
+
+fn validate_plan_wire_from_reader(
+    fields: &IntListReader<'_>,
+    expected_method: Option<PlanExecMethod>,
+) -> Result<ValidatedPlanWire, DecodeError> {
+    let minimum = PLAN_PRIVATE_HEADER_INTS + RESIDENT_PROOF_TRAILER_INTS + PLAN_WIRE_FOOTER_INTS;
+    if fields.len() < minimum {
+        return Err(DecodeError::Truncated {
+            index: fields.len(),
+            field: "plan-private v2 frame",
+        });
+    }
+    if fields.len() > MAX_PLAN_WIRE_INTS {
+        return Err(DecodeError::LimitExceeded {
+            index: 0,
+            field: "plan-private word count",
+            declared: fields.len(),
+            maximum: MAX_PLAN_WIRE_INTS,
+        });
+    }
+    let footer = fields.len() - PLAN_WIRE_FOOTER_INTS;
+    let magic = strict_word(fields, footer, "plan-private magic")?;
+    if magic != PLAN_WIRE_MAGIC {
+        return Err(DecodeError::InvalidValue {
+            index: footer,
+            field: "plan-private magic",
+            raw: magic,
+        });
+    }
+    let version = strict_word(fields, footer + 1, "plan-private version")?;
+    if version != PLAN_WIRE_VERSION {
+        return Err(DecodeError::UnsupportedVersion { version });
+    }
+    let declared_raw = strict_word(fields, footer + 2, "plan-private word count")?;
+    let declared = usize::try_from(declared_raw).map_err(|_| DecodeError::InvalidValue {
+        index: footer + 2,
+        field: "plan-private word count",
+        raw: declared_raw,
+    })?;
+    if declared != fields.len() {
+        return Err(DecodeError::LengthMismatch {
+            declared,
+            actual: fields.len(),
+        });
+    }
+    let method_raw = strict_word(fields, footer + 3, "execution method")?;
+    let method = PlanExecMethod::from_i32(method_raw)
+        .ok_or(DecodeError::InvalidExecutionMethod { raw: method_raw })?;
+    if let Some(expected) = expected_method
+        && expected != method
+    {
+        return Err(DecodeError::ExecutionMethodMismatch {
+            expected,
+            actual: method,
+        });
+    }
+    let plan_private = PlanPrivate::decode_reader(fields)?;
+    let strategy_method = PlanExecMethod::for_strategy(plan_private.gpu_strategy).ok_or(
+        DecodeError::UnsupportedGpuStrategy {
+            strategy: plan_private.gpu_strategy,
+        },
+    )?;
+    if strategy_method != method {
+        return Err(DecodeError::StrategyMethodMismatch {
+            strategy: plan_private.gpu_strategy,
+            method,
+        });
+    }
+    let proof_start = footer - RESIDENT_PROOF_TRAILER_INTS;
+    let resident_proof = decode_resident_proof_at(fields, proof_start)?;
+
+    let (agg_query_spec, agg_output_projection) = match method {
+        PlanExecMethod::Scan => {
+            require_payload_end(PLAN_PAYLOAD_START, proof_start)?;
+            (None, None)
+        }
+        PlanExecMethod::Join => {
+            validate_join_payload(fields, PLAN_PAYLOAD_START, proof_start, plan_private)?;
+            (None, None)
+        }
+        PlanExecMethod::Agg => validate_agg_payload(fields, PLAN_PAYLOAD_START, proof_start)?,
+        PlanExecMethod::Window => {
+            validate_window_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
+            (None, None)
+        }
+        PlanExecMethod::FunctionScan => {
+            validate_function_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
+            (None, None)
+        }
+        PlanExecMethod::SrfTargetList => {
+            validate_srf_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
+            (None, None)
+        }
+    };
+
+    Ok(ValidatedPlanWire {
+        plan_private,
+        resident_proof,
+        agg_query_spec,
+        agg_output_projection,
+    })
+}
+
+#[cfg(test)]
+fn validate_plan_wire_slice(
+    fields: &[c_int],
+    expected_method: PlanExecMethod,
+) -> Result<(), DecodeError> {
+    validate_plan_wire_from_reader(&IntListReader::from_slice(fields), Some(expected_method))
+        .map(|_| ())
+}
+
+/// Bind neutral projection metadata to the PostgreSQL target list that defines
+/// the CustomScan's output tuple descriptor.
+///
+/// # Safety
+/// `target_list` must be null or a planner-owned `List<TargetEntry>`.
+unsafe fn validate_projection_target_list(
+    projection: &AggOutputProjection,
+    target_list: *mut pg_sys::List,
+) -> Result<(), DecodeError> {
+    if target_list.is_null() {
+        return Err(DecodeError::ProjectionTargetMismatch {
+            index: 0,
+            field: "slot count",
+        });
+    }
+    // SAFETY: target_list was checked non-null and the caller promises a valid PG List.
+    let target_count = unsafe { pg_sys::list_length(target_list) as usize };
+    if target_count != projection.slots.len() {
+        return Err(DecodeError::ProjectionTargetMismatch {
+            index: 0,
+            field: "slot count",
+        });
+    }
+    for (index, slot) in projection.slots.iter().enumerate() {
+        // SAFETY: length was checked above and target_list is planner-owned.
+        let node = unsafe { pg_sys::list_nth(target_list, index as c_int) };
+        if node.is_null() {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "TargetEntry node tag",
+            });
+        }
+        // SAFETY: every PostgreSQL node begins with a NodeTag.
+        let node_tag = unsafe { (*node.cast::<pg_sys::Node>()).type_ };
+        if node_tag != pg_sys::NodeTag::T_TargetEntry {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "TargetEntry node tag",
+            });
+        }
+        // SAFETY: NodeTag was checked above.
+        let target = unsafe { &*node.cast::<pg_sys::TargetEntry>() };
+        if i32::from(target.resno) != i32::try_from(index + 1).expect("target index fits i32")
+            || target.expr.is_null()
+        {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "target-list order",
+            });
+        }
+        // SAFETY: target.expr is a non-null planner-owned expression node.
+        let (result_type_oid, result_typmod, result_collation_oid) = unsafe {
+            (
+                pg_sys::exprType(target.expr.cast()),
+                pg_sys::exprTypmod(target.expr.cast()),
+                pg_sys::exprCollation(target.expr.cast()),
+            )
+        };
+        if result_type_oid.to_u32() != slot.result_type_oid {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "result type OID",
+            });
+        }
+        if result_typmod != slot.result_typmod {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "result typmod",
+            });
+        }
+        if result_collation_oid.to_u32() != slot.result_collation_oid {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "result collation OID",
+            });
+        }
+    }
+    Ok(())
+}
+
+unsafe fn validate_projection_plan_lists(
+    projection: &AggOutputProjection,
+    cscan: *mut pg_sys::CustomScan,
+) -> Result<(), DecodeError> {
+    // PG18 nodeCustom.c builds the scan and result slots from different lists;
+    // a neutral aggregate plan promises both are one-to-one with projection.
+    // SAFETY: the caller promises cscan is a valid planner/executor-owned node.
+    let custom_scan_tlist = unsafe { (*cscan).custom_scan_tlist };
+    // SAFETY: custom_scan_tlist belongs to cscan and is valid for this call.
+    unsafe { validate_projection_target_list(projection, custom_scan_tlist) }?;
+    // SAFETY: the caller promises cscan is a valid planner/executor-owned node.
+    let plan_targetlist = unsafe { (*cscan).scan.plan.targetlist };
+    // SAFETY: plan_targetlist belongs to cscan and is valid for this call.
+    unsafe { validate_projection_target_list(projection, plan_targetlist) }?;
+    Ok(())
+}
+
+/// Re-bind projection metadata to the actual scan-slot descriptor after
+/// PostgreSQL has initialized the CustomScan state.
+///
+/// # Safety
+/// `tuple_desc` must be null or a valid PostgreSQL `TupleDesc`.
+pub(super) unsafe fn validate_projection_tuple_desc(
+    projection: &AggOutputProjection,
+    tuple_desc: pg_sys::TupleDesc,
+) -> Result<(), DecodeError> {
+    if tuple_desc.is_null() {
+        return Err(DecodeError::ProjectionTargetMismatch {
+            index: 0,
+            field: "TupleDesc slot count",
+        });
+    }
+    // SAFETY: tuple_desc was checked non-null and the caller promises it is valid.
+    let attribute_count = unsafe { (*tuple_desc).natts as usize };
+    if attribute_count != projection.slots.len() {
+        return Err(DecodeError::ProjectionTargetMismatch {
+            index: 0,
+            field: "TupleDesc slot count",
+        });
+    }
+    for (index, slot) in projection.slots.iter().enumerate() {
+        // SAFETY: natts was checked and tuple_desc is valid.
+        let attribute = unsafe { &*crate::engine::pg_compat::tuple_desc_attr(tuple_desc, index) };
+        if attribute.atttypid.to_u32() != slot.result_type_oid {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "TupleDesc type OID",
+            });
+        }
+        if attribute.atttypmod != slot.result_typmod {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "TupleDesc typmod",
+            });
+        }
+        if attribute.attcollation.to_u32() != slot.result_collation_oid {
+            return Err(DecodeError::ProjectionTargetMismatch {
+                index,
+                field: "TupleDesc collation OID",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate the complete production plan-private frame before PostgreSQL is
+/// allowed to allocate an executor state for it.
+///
+/// # Safety
+/// `custom_private` must be null or a valid PostgreSQL `List *`. Every element
+/// is checked for `T_Integer` before it is interpreted.
+pub(super) unsafe fn validate_custom_private_wire(
+    cscan: *mut pg_sys::CustomScan,
+    expected_method: PlanExecMethod,
+) -> Result<(), DecodeError> {
+    if cscan.is_null() {
+        return Err(DecodeError::Truncated {
+            index: 0,
+            field: "CustomScan plan",
+        });
+    }
+    // SAFETY: cscan was checked above.
+    let custom_private = unsafe { (*cscan).custom_private };
+    if custom_private.is_null() {
+        return Err(DecodeError::Truncated {
+            index: 0,
+            field: "plan-private v2 frame",
+        });
+    }
+    // SAFETY: caller guarantees a valid PostgreSQL List pointer; the reader
+    // checks each element's NodeTag before casting it to Integer.
+    let fields = unsafe { IntListReader::from_pg_list(custom_private) };
+    let validated = validate_plan_wire_from_reader(&fields, Some(expected_method))?;
+    if let Some(projection) = &validated.agg_output_projection {
+        // SAFETY: cscan is a valid planner/executor-owned CustomScan.
+        unsafe { validate_projection_plan_lists(projection, cscan) }?;
+    }
+    Ok(())
 }
 
 /// Deserialize strategy, batch size, and accel context from
 /// `custom_private`.
 ///
 /// Layout: `[strategy, batch_size, expected_threads, fn_oid, target_attno,
-///   accel_strategy, ...strategy-specific payload...]`
+///   accel_strategy, ...strategy-specific payload, resident-proof-v2,
+///   plan-wire-magic, version, exact-word-count, execution-method]`.
 ///
 /// Invalid or missing private data raises a PostgreSQL ERROR.
 ///
@@ -1001,43 +2821,37 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
 /// planner hooks.
 #[allow(clippy::too_many_lines)]
 pub(super) unsafe fn deserialize_custom_private(
-    custom_private: *mut pg_sys::List,
+    cscan: *mut pg_sys::CustomScan,
+    expected_method: PlanExecMethod,
 ) -> CustomPrivateData {
+    if cscan.is_null() {
+        pgrx::error!("pg_accel: missing CustomScan plan");
+    }
+    // SAFETY: cscan was checked above.
+    let custom_private = unsafe { (*cscan).custom_private };
     if custom_private.is_null() {
         pgrx::error!("pg_accel: missing CustomScan private data");
     }
 
     // SAFETY: custom_private is a valid List of Integer nodes.
     let fields = unsafe { IntListReader::from_pg_list(custom_private) };
-    let gpu_strategy_raw = require_reader_field(&fields, "CustomPrivateData", 0, "strategy")
-        .unwrap_or_else(|err| pgrx::error!("pg_accel: invalid CustomScan private data: {err:?}"));
-    let gpu_strategy = decode_gpu_strategy(gpu_strategy_raw)
-        .unwrap_or_else(|err| pgrx::error!("pg_accel: invalid CustomScan private data: {err:?}"));
-    let resident_proof = unsafe { deserialize_resident_proof_snapshot(custom_private) }
-        .unwrap_or_else(|| resident_proof_default_for_strategy(gpu_strategy));
-
-    // GpuPreAgg was retired: no plan-time serializer emits PreAgg payloads,
-    // so the reader no longer decodes them.
-    if matches!(gpu_strategy, GpuStrategy::PreAgg) {
-        pgrx::error!(
-            "pg_accel: GpuPreAgg strategy retired; refusing to decode a PreAgg plan payload"
-        );
+    let validated = validate_plan_wire_from_reader(&fields, Some(expected_method))
+        .unwrap_or_else(|err| pgrx::error!("pg_accel: invalid CustomScan private data: {err}"));
+    if let Some(projection) = &validated.agg_output_projection {
+        // SAFETY: cscan is a valid planner/executor-owned CustomScan.
+        unsafe { validate_projection_plan_lists(projection, cscan) }.unwrap_or_else(|error| {
+            pgrx::error!("pg_accel: invalid aggregate output projection: {error}");
+        });
     }
-
-    let plan_private = PlanPrivate::decode_reader(&fields)
-        .unwrap_or_else(|err| pgrx::error!("pg_accel: invalid CustomScan private data: {err:?}"));
+    let plan_private = validated.plan_private;
+    let gpu_strategy = plan_private.gpu_strategy;
+    let resident_proof = validated.resident_proof;
     let payload = PlanPayloadReader::new(&fields);
     let batch_size = plan_private.batch_size;
-    let _expected_threads = plan_private.expected_threads;
+    let expected_threads = plan_private.expected_threads;
     let fn_oid = plan_private.fn_oid;
     let target_attno = plan_private.target_attno;
     let accel_strategy = plan_private.accel_strategy;
-
-    // GpuSort was retired: no plan-time serializer emits Sort payloads, so
-    // the reader no longer decodes sort keys / limit / self-scan relid.
-    if matches!(gpu_strategy, GpuStrategy::Sort) {
-        pgrx::error!("pg_accel: GpuSort strategy retired; refusing to decode a Sort plan payload");
-    }
 
     // For Agg strategy, read the aggregate descriptor count at index 6. The
     // count is still load-bearing for wire offsets: the OLAP trailer that the
@@ -1113,6 +2927,7 @@ pub(super) unsafe fn deserialize_custom_private(
     CustomPrivateData {
         gpu_strategy,
         batch_size,
+        expected_threads,
         fn_oid,
         target_attno,
         accel_strategy,
@@ -1130,6 +2945,8 @@ pub(super) unsafe fn deserialize_custom_private(
         window_specs,
         window_scan_relid,
         olap_agg,
+        agg_query_spec: validated.agg_query_spec,
+        agg_output_projection: validated.agg_output_projection,
         resident_proof,
     }
 }
@@ -1164,6 +2981,73 @@ const OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64: c_int = 10;
 const OLAP_DATE_YEAR: c_int = 1;
 const OLAP_DATE_YEARMONTHNUM: c_int = 2;
 const OLAP_DATE_YEAR_WEEK: c_int = 3;
+
+/// Append the neutral aggregate query and ordered output contracts consumed by
+/// the Phase 5 descriptor executor. Both blocks own independent v2 framing.
+///
+/// # Safety
+/// Must be called in a valid PostgreSQL planner memory context. `cscan` must
+/// own one-to-one `custom_scan_tlist` and `plan.targetlist` lists matching the
+/// ordered projection.
+#[allow(dead_code)] // Cross-branch API consumed by the Phase 5C shape planner after integration.
+pub(in crate::engine::ffi) unsafe fn append_agg_query_plan(
+    list: *mut pg_sys::List,
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+    cscan: *mut pg_sys::CustomScan,
+) -> *mut pg_sys::List {
+    let spec_words = spec
+        .encode_i32()
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid aggregate query spec: {error}"));
+    let projection_words = projection.encode_i32(spec).unwrap_or_else(|error| {
+        pgrx::error!("pg_accel: invalid aggregate output projection: {error}")
+    });
+    if cscan.is_null() {
+        pgrx::error!("pg_accel: aggregate output projection has no CustomScan plan");
+    }
+    // SAFETY: caller supplies the planner-owned CustomScan being serialized.
+    unsafe { validate_projection_plan_lists(projection, cscan) }.unwrap_or_else(|error| {
+        pgrx::error!("pg_accel: aggregate output projection does not match plan lists: {error}");
+    });
+    let mut writer = PgListWriter::from_existing(list);
+    writer.push_int(AGG_QUERY_SPEC_SENTINEL);
+    for word in spec_words {
+        writer.push_int(word);
+    }
+    writer.push_int(AGG_OUTPUT_PROJECTION_SENTINEL);
+    for word in projection_words {
+        writer.push_int(word);
+    }
+    writer.into_list()
+}
+
+/// Seal a plan-private list with the required v2 footer.
+///
+/// # Safety
+/// Must be called in a valid PostgreSQL planner memory context. `list` must be
+/// a `List<Integer>` whose final section is a resident-proof trailer.
+pub(super) unsafe fn append_plan_wire_footer(
+    list: *mut pg_sys::List,
+    method: PlanExecMethod,
+) -> *mut pg_sys::List {
+    let current_len = if list.is_null() {
+        0usize
+    } else {
+        // SAFETY: caller guarantees a valid list.
+        unsafe { pg_sys::list_length(list) as usize }
+    };
+    let total_len = current_len
+        .checked_add(PLAN_WIRE_FOOTER_INTS)
+        .filter(|len| *len <= MAX_PLAN_WIRE_INTS)
+        .and_then(|len| c_int::try_from(len).ok())
+        .unwrap_or_else(|| pgrx::error!("pg_accel: plan-private v2 frame is too large"));
+    let mut writer = PgListWriter::from_existing(list);
+    writer.push_int(PLAN_WIRE_MAGIC);
+    writer.push_int(PLAN_WIRE_VERSION);
+    writer.push_int(total_len);
+    writer.push_int(method as c_int);
+    writer.into_list()
+}
 
 /// Append a resident OLAP aggregate payload after the standard Agg fields.
 ///
@@ -1623,7 +3507,7 @@ fn deserialize_olap_agg_spec_from_reader(
 /// starts at index 3.
 pub(in crate::engine::ffi) const RESIDENT_PROOF_SENTINEL: c_int = 0x5250_5246; // b"RPRF"
 pub(in crate::engine::ffi) const RESIDENT_PROOF_VERSION: c_int = 2;
-const RESIDENT_PROOF_TRAILER_INTS: usize = 9;
+pub(super) const RESIDENT_PROOF_TRAILER_INTS: usize = 9;
 
 /// Strategy-local default proof for currently selected host-staged executors.
 ///
@@ -1654,6 +3538,13 @@ pub(in crate::engine::ffi) unsafe fn append_resident_proof_snapshot(
     list: *mut pg_sys::List,
     proof: ResidentProofSnapshot,
 ) -> *mut pg_sys::List {
+    let canonical = proof
+        .to_proof()
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid resident proof: {error:?}"))
+        .snapshot();
+    if canonical != proof {
+        pgrx::error!("pg_accel: resident proof is not canonically encoded");
+    }
     let mut writer = PgListWriter::from_existing(list);
     writer.push_int(RESIDENT_PROOF_SENTINEL);
     writer.push_int(RESIDENT_PROOF_VERSION);
@@ -1669,10 +3560,9 @@ pub(in crate::engine::ffi) unsafe fn append_resident_proof_snapshot(
 
 /// Decode the resident-proof trailer if this plan carries one.
 ///
-/// Absence means "old layout"; callers should fall back to
-/// [`resident_proof_default_for_strategy`]. A present but malformed trailer is
-/// an ERROR, because silently treating corrupt proof data as valid would reopen
-/// CPU-backed plan reporting.
+/// Absence returns `None`; every selected v2 path/plan caller treats that as an
+/// error. A present but malformed trailer is also an ERROR, because silently
+/// treating corrupt proof data as valid would reopen CPU-backed plan reporting.
 ///
 /// # Safety
 /// `list` must be a valid PG `List *` of `Integer` nodes.
@@ -1690,44 +3580,25 @@ pub(in crate::engine::ffi) unsafe fn deserialize_resident_proof_snapshot(
 fn deserialize_resident_proof_snapshot_from_reader(
     fields: &IntListReader<'_>,
 ) -> Option<ResidentProofSnapshot> {
-    if fields.len() < RESIDENT_PROOF_TRAILER_INTS {
+    let payload_end = if fields.len() >= PLAN_WIRE_FOOTER_INTS
+        && fields.get(fields.len() - PLAN_WIRE_FOOTER_INTS) == Some(PLAN_WIRE_MAGIC)
+    {
+        fields.len() - PLAN_WIRE_FOOTER_INTS
+    } else {
+        fields.len()
+    };
+    if payload_end < RESIDENT_PROOF_TRAILER_INTS {
         return None;
     }
-    let idx = fields.len() - RESIDENT_PROOF_TRAILER_INTS;
+    let idx = payload_end - RESIDENT_PROOF_TRAILER_INTS;
     if fields.int_at(idx) != RESIDENT_PROOF_SENTINEL {
         return None;
     }
-    let mut proof = fields.cursor_at(idx + 1);
-    let version = proof.read_int();
-    if version != RESIDENT_PROOF_VERSION {
-        pgrx::error!("pg_accel: unsupported resident proof trailer version {version}");
-    }
-    let operator_class_raw = proof.read_int();
-    let Some(operator_class) = ResidentOperatorClass::from_i32(operator_class_raw) else {
-        pgrx::error!("pg_accel: invalid resident proof operator class tag {operator_class_raw}");
-    };
-    let stage_mask = proof.read_u32();
-    let materialization_raw = proof.read_int();
-    let Some(materialization_kind) = ResidentMaterializationKind::from_i32(materialization_raw)
-    else {
-        pgrx::error!("pg_accel: invalid resident proof materialization tag {materialization_raw}");
-    };
-    let device_columns = proof.read_u32();
-    let has_device_selection = proof.read_bool();
-    let has_device_projection = proof.read_bool();
-    let boundary_raw = proof.read_int();
-    let Some(cpu_boundary) = CpuBoundaryReason::from_i32(boundary_raw) else {
-        pgrx::error!("pg_accel: invalid resident proof CPU boundary tag {boundary_raw}");
-    };
-    Some(ResidentProofSnapshot {
-        operator_class,
-        stage_mask,
-        materialization_kind,
-        device_columns,
-        has_device_selection,
-        has_device_projection,
-        cpu_boundary,
-    })
+    Some(
+        decode_resident_proof_at(fields, idx).unwrap_or_else(|error| {
+            pgrx::error!("pg_accel: invalid resident proof trailer: {error}")
+        }),
+    )
 }
 
 /// Append a [`PartialAggSpec`] onto `list` using the sentinel-prefixed
@@ -1743,6 +3614,14 @@ pub(in crate::engine::ffi) unsafe fn append_partial_spec(
     list: *mut pg_sys::List,
     spec: &PartialAggSpec,
 ) -> *mut pg_sys::List {
+    if spec.per_column.is_empty() || spec.per_column.len() > MAX_LEGACY_AGGREGATES {
+        pgrx::error!("pg_accel: invalid partial aggregate column count");
+    }
+    for column in &spec.per_column {
+        if column.attno <= 0 || column.transtype_oid == pg_sys::InvalidOid {
+            pgrx::error!("pg_accel: invalid partial aggregate column metadata");
+        }
+    }
     let mut writer = PgListWriter::from_existing(list);
     writer.push_int(PARTIAL_SENTINEL);
     writer.push_len(spec.per_column.len());
@@ -1830,28 +3709,35 @@ fn deserialize_partial_spec_from_reader(
     fields: &IntListReader<'_>,
     start_idx: usize,
 ) -> Option<PartialAggSpec> {
-    if start_idx >= fields.len() {
-        return None;
-    }
-    let n_cols = fields.int_at(start_idx) as usize;
+    let payload_end = payload_end_before_proof(fields);
+    let n_cols = strict_count(
+        fields,
+        start_idx,
+        "partial aggregate column count",
+        MAX_LEGACY_AGGREGATES,
+        4,
+        payload_end,
+    )
+    .ok()?;
     if n_cols == 0 {
-        return Some(PartialAggSpec {
-            per_column: Vec::new(),
-        });
+        return None;
     }
     let base = start_idx + 1;
-    if !fields.contains_range(base, n_cols * 4) {
+    let end = base.checked_add(n_cols.checked_mul(4)?)?;
+    if end > payload_end {
         return None;
     }
-    let mut per_column = Vec::with_capacity(n_cols);
+    let mut per_column = Vec::new();
+    per_column.try_reserve_exact(n_cols).ok()?;
     for k in 0..n_cols {
         let mut column = fields.cursor_at(base + k * 4);
         let op_raw = column.read_int();
-        let Some(op) = AggOp::from_i32(op_raw) else {
-            pgrx::error!("pg_accel: invalid partial aggregate op tag {op_raw}");
-        };
+        let op = AggOp::from_i32(op_raw)?;
         let attno = column.read_int();
         let transtype_oid = column.read_oid();
+        if attno <= 0 || transtype_oid == pg_sys::InvalidOid {
+            return None;
+        }
         let ser_raw = column.read_u32();
         let serialize_fn_oid = if ser_raw == 0 {
             None
@@ -1937,6 +3823,24 @@ pub unsafe fn append_functionscan_priv(
     list: *mut pg_sys::List,
     priv_data: &FunctionScanPrivData,
 ) -> *mut pg_sys::List {
+    let shape = OutputShapeDisc::from_i32(priv_data.output_shape_disc)
+        .unwrap_or_else(|| pgrx::error!("pg_accel: invalid FunctionScan output shape"));
+    let invalid_field_count = match shape {
+        OutputShapeDisc::Record => {
+            priv_data.output_shape_field_count == 0
+                || priv_data.output_shape_field_count as usize > MAX_TUPLE_COLUMNS
+        }
+        OutputShapeDisc::Scalar | OutputShapeDisc::VarLen => {
+            priv_data.output_shape_field_count != 0
+        }
+    };
+    if priv_data.fn_oid == pg_sys::InvalidOid
+        || invalid_field_count
+        || priv_data.args.len() > MAX_FUNCTION_ARGS
+        || priv_data.args.iter().any(|(_, type_oid)| *type_oid == 0)
+    {
+        pgrx::error!("pg_accel: invalid FunctionScan private data");
+    }
     let mut writer = PgListWriter::from_existing(list);
     writer.push_int(FUNCTIONSCAN_SENTINEL);
     writer.push_oid(priv_data.fn_oid);
@@ -1969,22 +3873,17 @@ pub unsafe fn deserialize_functionscan_priv(
     }
     // SAFETY: caller guarantees a valid PG List.
     let fields = unsafe { IntListReader::from_pg_list(list) };
-    if !fields.contains_range(start_idx, 5) {
-        return None;
-    }
+    let payload_end = payload_end_before_proof(&fields);
+    validate_function_payload(&fields, start_idx, payload_end).ok()?;
     let mut fixed = fields.cursor_at(start_idx);
-    if fixed.read_int() != FUNCTIONSCAN_SENTINEL {
-        return None;
-    }
+    let _sentinel = fixed.read_int();
     let fn_oid = fixed.read_oid();
     let output_shape_disc = fixed.read_int();
     let output_shape_field_count = fixed.read_u32();
     let n_args = fixed.read_usize();
     let payload_base = fixed.position();
-    if !fields.contains_range(payload_base, n_args * 3) {
-        return None;
-    }
-    let mut args = Vec::with_capacity(n_args);
+    let mut args = Vec::new();
+    args.try_reserve_exact(n_args).ok()?;
     let mut arg = fields.cursor_at(payload_base);
     for _ in 0..n_args {
         args.push((arg.read_i64_halves(), arg.read_u32()));
@@ -2123,6 +4022,46 @@ pub unsafe fn append_srf_target_list_priv(
     list: *mut pg_sys::List,
     priv_data: &SrfTargetListPrivData,
 ) -> *mut pg_sys::List {
+    let shape = OutputShapeDisc::from_i32(priv_data.output_shape_disc)
+        .unwrap_or_else(|| pgrx::error!("pg_accel: invalid SRF output shape"));
+    let invalid_field_count = match shape {
+        OutputShapeDisc::Record => {
+            priv_data.output_shape_field_count == 0
+                || priv_data.output_shape_field_count as usize > MAX_TUPLE_COLUMNS
+        }
+        OutputShapeDisc::Scalar | OutputShapeDisc::VarLen => {
+            priv_data.output_shape_field_count != 0
+        }
+    };
+    let srf_position = usize::try_from(priv_data.srf_tlist_pos).ok();
+    let passthrough_valid = srf_position.is_some_and(|position| {
+        !priv_data.passthrough_attnos.is_empty()
+            && position < priv_data.passthrough_attnos.len()
+            && priv_data
+                .passthrough_attnos
+                .iter()
+                .enumerate()
+                .all(|(index, attno)| {
+                    if index == position {
+                        *attno == 0
+                    } else {
+                        *attno > 0
+                    }
+                })
+    });
+    if priv_data.fn_oid == pg_sys::InvalidOid
+        || invalid_field_count
+        || priv_data.srf_arg_attno <= 0
+        || priv_data.passthrough_attnos.len() > MAX_TUPLE_COLUMNS
+        || !passthrough_valid
+        || priv_data.qual_args.len() > MAX_FUNCTION_ARGS
+        || priv_data
+            .qual_args
+            .iter()
+            .any(|(_, type_oid)| *type_oid == 0)
+    {
+        pgrx::error!("pg_accel: invalid SRF target-list private data");
+    }
     let mut writer = PgListWriter::from_existing(list);
     writer.push_int(SRF_TARGET_LIST_SENTINEL);
     writer.push_oid(priv_data.fn_oid);
@@ -2162,13 +4101,10 @@ pub unsafe fn deserialize_srf_target_list_priv(
     // Need at least sentinel + 6 fixed fields + n_passthrough(0) + n_qual_args(0)
     // SAFETY: caller guarantees a valid PG List.
     let fields = unsafe { IntListReader::from_pg_list(list) };
-    if !fields.contains_range(start_idx, 7) {
-        return None;
-    }
+    let payload_end = payload_end_before_proof(&fields);
+    validate_srf_payload(&fields, start_idx, payload_end).ok()?;
     let mut fixed = fields.cursor_at(start_idx);
-    if fixed.read_int() != SRF_TARGET_LIST_SENTINEL {
-        return None;
-    }
+    let _sentinel = fixed.read_int();
     let fn_oid = fixed.read_oid();
     let output_shape_disc = fixed.read_int();
     let output_shape_field_count = fixed.read_u32();
@@ -2176,20 +4112,16 @@ pub unsafe fn deserialize_srf_target_list_priv(
     let srf_tlist_pos = fixed.read_int();
     let n_passthrough = fixed.read_usize();
     let pass_base = fixed.position();
-    if !fields.contains_range(pass_base, n_passthrough + 1) {
-        return None;
-    }
-    let mut passthrough_attnos = Vec::with_capacity(n_passthrough);
+    let mut passthrough_attnos = Vec::new();
+    passthrough_attnos.try_reserve_exact(n_passthrough).ok()?;
     let mut passthrough = fields.cursor_at(pass_base);
     for _ in 0..n_passthrough {
         passthrough_attnos.push(passthrough.read_int());
     }
     let n_qual_args = passthrough.read_usize();
     let qual_base = passthrough.position();
-    if !fields.contains_range(qual_base, n_qual_args * 3) {
-        return None;
-    }
-    let mut qual_args = Vec::with_capacity(n_qual_args);
+    let mut qual_args = Vec::new();
+    qual_args.try_reserve_exact(n_qual_args).ok()?;
     let mut qual_arg = fields.cursor_at(qual_base);
     for _ in 0..n_qual_args {
         qual_args.push((qual_arg.read_i64_halves(), qual_arg.read_u32()));

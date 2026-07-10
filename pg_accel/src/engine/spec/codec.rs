@@ -13,7 +13,7 @@ pub const AGG_QUERY_SPEC_HEADER_WORDS: usize = 3;
 const MAX_COLUMN_LIST_WORDS: usize = 1 + MAX_PROGRAM_INPUTS * 3;
 const MAX_BYTECODE_BLOCK_WORDS: usize = 1 + MAX_BYTECODE_WORDS;
 const MAX_FILTER_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS;
-const MAX_GROUP_KEY_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 5;
+const MAX_GROUP_KEY_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 7;
 const MAX_BYTECODE_MEASURE_EXPR_WORDS: usize =
     1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 1;
 const STATS_PAIR_MEASURE_EXPR_WORDS: usize = 1 + 3 + 3;
@@ -28,7 +28,7 @@ const MAX_MEASURE_WORDS: usize = if MAX_BYTECODE_MEASURE_WORDS > MAX_STATS_PAIR_
 } else {
     MAX_STATS_PAIR_MEASURE_WORDS
 };
-const MAX_DIM_WORDS: usize = 1 + 3 + 3 + 1 + MAX_FILTER_WORDS;
+const MAX_DIM_WORDS: usize = 1 + 3 + 3 + 1 + 1 + MAX_FILTER_WORDS;
 const MAX_HAVING_WORDS: usize = 1 + 1 + MAX_PROGRAM_INPUTS * 3 + MAX_BYTECODE_BLOCK_WORDS;
 
 /// Exact maximum word length of any semantically valid v2 spec.
@@ -68,6 +68,9 @@ pub enum SpecCodecError {
     TrailingWords {
         index: usize,
         total: usize,
+    },
+    NonCanonical {
+        index: usize,
     },
     LimitExceeded {
         index: usize,
@@ -111,6 +114,12 @@ impl std::fmt::Display for SpecCodecError {
             }
             Self::TrailingWords { index, total } => {
                 write!(f, "aggregate spec has trailing words at {index} of {total}")
+            }
+            Self::NonCanonical { index } => {
+                write!(
+                    f,
+                    "aggregate spec is not canonically encoded at word {index}"
+                )
             }
             Self::LimitExceeded {
                 index,
@@ -186,13 +195,17 @@ impl Encoder {
     }
 
     fn push_f64(&mut self, value: f64) {
-        let bits = value.to_bits();
+        let bits = if value == 0.0 { 0 } else { value.to_bits() };
         self.push((bits >> 32) as i32);
         self.push(bits as u32 as i32);
     }
 
     fn push_f32(&mut self, value: f32) {
-        self.push(value.to_bits() as i32);
+        self.push(if value == 0.0 {
+            0
+        } else {
+            value.to_bits() as i32
+        });
     }
 
     fn push_aggregate_source(&mut self, source: AggregateSource) {
@@ -209,7 +222,7 @@ impl Encoder {
             AggregateKind::Min => 2,
             AggregateKind::Max => 3,
             AggregateKind::Avg => 4,
-            AggregateKind::Stddev => 5,
+            AggregateKind::StddevSamp => 5,
         });
     }
 
@@ -354,6 +367,8 @@ impl Encoder {
             }
             GroupKeyEncoding::Hash => self.push(2),
         }
+        self.push_u32(key.type_oid);
+        self.push_u32(key.collation_oid);
         Ok(())
     }
 
@@ -401,6 +416,7 @@ impl Encoder {
         self.push_u32(dim.relation_oid);
         self.push_column(dim.fact_key);
         self.push_column(dim.dim_key);
+        self.push_u32(dim.collation_oid);
         self.push(match dim.multiplicity {
             JoinMultiplicity::Unique => 0,
             JoinMultiplicity::Counted => 1,
@@ -534,7 +550,7 @@ impl<'a> Decoder<'a> {
             2 => AggregateKind::Min,
             3 => AggregateKind::Max,
             4 => AggregateKind::Avg,
-            5 => AggregateKind::Stddev,
+            5 => AggregateKind::StddevSamp,
             _ => unreachable!(),
         })
     }
@@ -673,7 +689,12 @@ impl<'a> Decoder<'a> {
             2 => GroupKeyEncoding::Hash,
             _ => unreachable!(),
         };
-        Ok(GroupKeyRef { source, encoding })
+        Ok(GroupKeyRef {
+            source,
+            type_oid: self.read_u32("group-key logical type OID")?,
+            collation_oid: self.read_u32("group-key collation OID")?,
+            encoding,
+        })
     }
 
     fn read_measure(&mut self) -> Result<MeasureSpec, SpecCodecError> {
@@ -722,6 +743,7 @@ impl<'a> Decoder<'a> {
         let relation_oid = self.read_u32("dimension relation OID")?;
         let fact_key = self.read_column()?;
         let dim_key = self.read_column()?;
+        let collation_oid = self.read_u32("dimension join collation OID")?;
         let multiplicity = match self.read_tag("join multiplicity", 1)? {
             0 => JoinMultiplicity::Unique,
             1 => JoinMultiplicity::Counted,
@@ -731,6 +753,7 @@ impl<'a> Decoder<'a> {
             relation_oid,
             fact_key,
             dim_key,
+            collation_oid,
             multiplicity,
             filter: self.read_filter()?,
         })
@@ -874,6 +897,15 @@ impl AggQuerySpec {
             having,
         };
         spec.validate()?;
+        let canonical = spec.encode_i32()?;
+        if canonical != words {
+            let index = canonical
+                .iter()
+                .zip(words)
+                .position(|(expected, actual)| expected != actual)
+                .unwrap_or(words.len().min(canonical.len()));
+            return Err(SpecCodecError::NonCanonical { index });
+        }
         Ok(spec)
     }
 }
@@ -920,6 +952,8 @@ mod tests {
             group_keys: vec![
                 GroupKeyRef {
                     source: GroupKeySource::FactColumn(column(10, 1, INT4_OID)),
+                    type_oid: INT4_OID,
+                    collation_oid: 0,
                     encoding: GroupKeyEncoding::DenseI32 {
                         code_min: 1992,
                         cardinality: 8,
@@ -931,6 +965,8 @@ mod tests {
                         dim_index: 0,
                         group_column: column(20, 3, INT4_OID),
                     },
+                    type_oid: INT4_OID,
+                    collation_oid: 0,
                     encoding: GroupKeyEncoding::DictionaryI32 {
                         cardinality: 16,
                         null_code: None,
@@ -941,6 +977,8 @@ mod tests {
                         inputs: vec![column(10, 2, INT4_OID)],
                         program: vec![0, 2, 40],
                     },
+                    type_oid: INT4_OID,
+                    collation_oid: 0,
                     encoding: GroupKeyEncoding::DenseI32 {
                         code_min: 0,
                         cardinality: 2,
@@ -957,7 +995,7 @@ mod tests {
                         output(AggregateSource::Value, AggregateKind::Min),
                         output(AggregateSource::Value, AggregateKind::Max),
                         output(AggregateSource::Value, AggregateKind::Avg),
-                        output(AggregateSource::Value, AggregateKind::Stddev),
+                        output(AggregateSource::Value, AggregateKind::StddevSamp),
                     ],
                     filter: FilterSpec::Ranges {
                         input: column(10, 4, FLOAT8_OID),
@@ -988,7 +1026,7 @@ mod tests {
                         rhs: column(10, 9, FLOAT8_OID),
                     },
                     outputs: vec![
-                        output(AggregateSource::Value, AggregateKind::Stddev),
+                        output(AggregateSource::Value, AggregateKind::StddevSamp),
                         output(AggregateSource::Rhs, AggregateKind::Avg),
                     ],
                     filter: FilterSpec::Spatial {
@@ -1016,6 +1054,7 @@ mod tests {
                 relation_oid: 20,
                 fact_key: column(10, 13, INT4_OID),
                 dim_key: column(20, 1, INT4_OID),
+                collation_oid: 0,
                 multiplicity: JoinMultiplicity::Unique,
                 filter: FilterSpec::Mask {
                     input: column(20, 2, BOOL_OID),
@@ -1048,6 +1087,8 @@ mod tests {
                     input: column(30, 1, INT8_OID),
                     resolution: 9,
                 },
+                type_oid: INT8_OID,
+                collation_oid: 0,
                 encoding: GroupKeyEncoding::Hash,
             }],
             measures: vec![MeasureSpec {
@@ -1085,6 +1126,8 @@ mod tests {
                 inputs: maximal_inputs(10),
                 program: maximal_program(),
             },
+            type_oid: INT4_OID,
+            collation_oid: 0,
             encoding: GroupKeyEncoding::DenseI32 {
                 code_min: 0,
                 cardinality: 1,
@@ -1103,7 +1146,7 @@ mod tests {
                 output(AggregateSource::Value, AggregateKind::Min),
                 output(AggregateSource::Value, AggregateKind::Max),
                 output(AggregateSource::Value, AggregateKind::Avg),
-                output(AggregateSource::Value, AggregateKind::Stddev),
+                output(AggregateSource::Value, AggregateKind::StddevSamp),
             ],
             filter: maximal_filter(10),
         };
@@ -1114,6 +1157,7 @@ mod tests {
                     relation_oid,
                     fact_key: column(10, 1, INT4_OID),
                     dim_key: column(relation_oid, 1, INT4_OID),
+                    collation_oid: 0,
                     multiplicity: JoinMultiplicity::Unique,
                     filter: maximal_filter(relation_oid),
                 }
@@ -1150,8 +1194,54 @@ mod tests {
     }
 
     #[test]
+    fn group_and_dimension_logical_metadata_are_strict_and_bit_exact() {
+        let mut spec = dense_spec();
+        spec.group_keys[2].type_oid = 9_999;
+        spec.group_keys[2].collation_oid = 0xF123_4567;
+        spec.star_dims[0].collation_oid = 0x8765_4321;
+        let encoded = spec.encode_i32().expect("logical metadata encodes");
+        assert_eq!(
+            AggQuerySpec::decode_i32(&encoded).expect("logical metadata decodes"),
+            spec,
+            "logical type and collation OIDs did not round-trip bit-exactly"
+        );
+
+        let mut invalid = dense_spec();
+        invalid.group_keys[0].type_oid = INT8_OID;
+        assert!(
+            invalid.validate().is_err(),
+            "fact group key accepted a logical type different from its column"
+        );
+
+        let mut invalid = dense_spec();
+        invalid.group_keys[1].type_oid = INT8_OID;
+        assert!(
+            invalid.validate().is_err(),
+            "dimension group key accepted a logical type different from its column"
+        );
+
+        let mut invalid = dense_spec();
+        invalid.group_keys[2].type_oid = 0;
+        assert!(
+            invalid.validate().is_err(),
+            "expression group key accepted an omitted logical type"
+        );
+
+        let mut explicit_h3 = h3_spec();
+        explicit_h3.group_keys[0].type_oid = 9_999;
+        explicit_h3
+            .validate()
+            .expect("H3 group key accepts an explicit analyzed result type");
+        explicit_h3.group_keys[0].type_oid = 0;
+        assert!(
+            explicit_h3.validate().is_err(),
+            "H3 group key accepted an omitted logical type"
+        );
+    }
+
+    #[test]
     fn exported_max_words_is_reached_by_a_valid_maximal_spec() {
-        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 1_117_537);
+        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 1_117_547);
         let spec = maximal_spec();
         let encoded = spec.encode_i32().expect("maximal valid spec encodes");
         assert_eq!(encoded.len(), AGG_QUERY_SPEC_MAX_WORDS);
@@ -1163,12 +1253,100 @@ mod tests {
 
     #[test]
     fn every_truncated_prefix_is_rejected() {
-        let encoded = dense_spec().encode_i32().expect("valid spec encodes");
-        for end in 0..encoded.len() {
-            assert!(
-                AggQuerySpec::decode_i32(&encoded[..end]).is_err(),
-                "prefix {end} unexpectedly decoded"
-            );
+        for spec in [minimal_spec(), dense_spec(), h3_spec()] {
+            let encoded = spec.encode_i32().expect("valid spec encodes");
+            for end in 0..encoded.len() {
+                assert!(
+                    AggQuerySpec::decode_i32(&encoded[..end]).is_err(),
+                    "prefix {end} of {} words unexpectedly decoded",
+                    encoded.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_truncated_byte_prefix_is_rejected() {
+        fn decode_bytes(bytes: &[u8]) -> Result<AggQuerySpec, SpecCodecError> {
+            if bytes.len() % std::mem::size_of::<i32>() != 0 {
+                return Err(SpecCodecError::Truncated {
+                    index: bytes.len() / std::mem::size_of::<i32>(),
+                    context: "partial wire word",
+                });
+            }
+            let words = bytes
+                .chunks_exact(std::mem::size_of::<i32>())
+                .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("four-byte chunk")))
+                .collect::<Vec<_>>();
+            AggQuerySpec::decode_i32(&words)
+        }
+
+        for spec in [minimal_spec(), dense_spec(), h3_spec()] {
+            let words = spec.encode_i32().expect("valid spec encodes");
+            let bytes = words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<_>>();
+            assert_eq!(decode_bytes(&bytes).expect("full byte wire decodes"), spec);
+            for end in 0..bytes.len() {
+                assert!(
+                    decode_bytes(&bytes[..end]).is_err(),
+                    "byte prefix {end} of {} bytes unexpectedly decoded",
+                    bytes.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn noncanonical_negative_zero_is_rejected() {
+        let mut spec = minimal_spec();
+        spec.fact_filter = FilterSpec::Ranges {
+            input: column(10, 2, FLOAT8_OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::F64(0.0),
+                hi: ScalarValue::F64(1.0),
+            }],
+        };
+        let mut encoded = spec.encode_i32().expect("valid spec encodes");
+        let scalar_tag = encoded
+            .windows(3)
+            .position(|words| words == [5, 0, 0])
+            .expect("canonical f64 zero is present");
+        encoded[scalar_tag + 1] = i32::MIN;
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&encoded),
+            Err(SpecCodecError::NonCanonical { index }) if index == scalar_tag + 1
+        ));
+    }
+
+    #[test]
+    fn deterministic_adversarial_words_never_panic_or_decode_noncanonically() {
+        let mut state = 0x6A09_E667_F3BC_C909_u64;
+        for case in 0..4_096usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let len = (state as usize) % 257;
+            let mut words = Vec::with_capacity(len);
+            for _ in 0..len {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                words.push((state >> 32) as i32);
+            }
+            if case % 4 == 0 && words.len() >= AGG_QUERY_SPEC_HEADER_WORDS {
+                words[0] = AGG_QUERY_SPEC_WIRE_MAGIC;
+                words[1] = AGG_QUERY_SPEC_VERSION as i32;
+                words[2] = i32::try_from(words.len()).expect("fuzz case length fits i32");
+            }
+            if let Ok(spec) = AggQuerySpec::decode_i32(&words) {
+                assert_eq!(
+                    spec.encode_i32().expect("decoded spec re-encodes"),
+                    words,
+                    "case {case} decoded from a noncanonical representation"
+                );
+            }
         }
     }
 
@@ -1283,7 +1461,7 @@ mod tests {
         let mut spec = dense_spec();
         spec.measures[2]
             .outputs
-            .push(output(AggregateSource::Rhs, AggregateKind::Stddev));
+            .push(output(AggregateSource::Rhs, AggregateKind::StddevSamp));
         assert!(
             spec.validate().is_err(),
             "unsupported RHS SUMSQ lane accepted"
@@ -1508,6 +1686,7 @@ mod tests {
             relation_oid: self_dimension.fact_rel,
             fact_key: column(10, 2, INT4_OID),
             dim_key: column(10, 1, INT4_OID),
+            collation_oid: 0,
             multiplicity: JoinMultiplicity::Unique,
             filter: FilterSpec::None,
         });
@@ -1521,6 +1700,7 @@ mod tests {
             relation_oid: 20,
             fact_key: column(10, 2, INT4_OID),
             dim_key: column(20, 1, INT4_OID),
+            collation_oid: 0,
             multiplicity: JoinMultiplicity::Unique,
             filter: FilterSpec::None,
         };
@@ -1538,6 +1718,7 @@ mod tests {
             relation_oid: 20,
             fact_key: column(10, 2, INT4_OID),
             dim_key: column(20, 1, INT4_OID),
+            collation_oid: 0,
             multiplicity: JoinMultiplicity::Counted,
             filter: FilterSpec::None,
         });

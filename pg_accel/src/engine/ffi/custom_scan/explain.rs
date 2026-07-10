@@ -917,6 +917,7 @@ mod tests {
             css: unsafe { std::mem::zeroed() },
             accel: super::super::GpuAccelState {
                 strategy: GpuStrategy::Agg as i32,
+                exec_method: super::super::PlanExecMethod::Agg as i32,
                 batch_size: 1024,
                 expected_threads: 1,
                 rows_dispatched: 0,
@@ -947,6 +948,7 @@ mod tests {
             css: unsafe { std::mem::zeroed() },
             accel: super::super::GpuAccelState {
                 strategy: GpuStrategy::Scan as i32,
+                exec_method: super::super::PlanExecMethod::Scan as i32,
                 batch_size: 1024,
                 expected_threads: 1,
                 rows_dispatched: 0,
