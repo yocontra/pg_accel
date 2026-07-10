@@ -1,31 +1,26 @@
-//! Phase 2 resident-cache invalidation pg_tests.
+//! Residency v2 invalidation and generic aggregate pg_tests.
 //!
-//! The resident OLAP caches are backend-local device buffers keyed by relation
-//! OID.  These tests prove that relcache invalidation events that change the
-//! relation (TRUNCATE, DROP, ALTER ADD COLUMN, ALTER COLUMN TYPE) clear the
-//! resident caches so accelerated plans can never replay stale device data —
-//! while rename-only DDL (`ALTER TABLE ... RENAME` of a table or column),
-//! which fires the same relcache invalidation but leaves OID, relfilenode,
-//! attnos, types, and data untouched, keeps the cache alive via the
-//! suspect/revalidate fingerprint protocol in `engine::olap_cache`.
-//!
-//! Each test uses its own table name: pgrx runs `#[pg_test]` functions in
-//! parallel against one test postmaster, so a shared table name would make the
-//! tests serialize on (or deadlock over) each other's DDL locks.
+//! These tests pin exact relation columns, run supported integer grouped
+//! aggregates through the descriptor CustomScan, and prove that generation or
+//! relcache invalidation never exposes stale device data. With auto-load
+//! enabled, an invalidated relation is reloaded by the next selected plan.
 
-// The module must be named `tests`: pgrx-tests hardcodes the SQL schema it
-// invokes `#[pg_test]` functions from (`framework.rs`: `let schema = "tests"`).
-// `CREATE SCHEMA IF NOT EXISTS` makes the duplicate module name safe.
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
 mod tests {
     use pgrx::prelude::*;
 
-    /// The resident cache loaders allocate GPU device buffers, so these tests
-    /// only exercise the accelerated lane when the session actually derived
-    /// hardware limits from a detected GPU (mirrors runtime safety rule #2:
-    /// no GPU means the planner hooks are a no-op and there is nothing to
-    /// invalidate).
+    const DEVICE_ROWS: i32 = 262_144;
+
+    #[derive(Debug, Clone, Copy)]
+    struct ResidentStatus {
+        column_count: i32,
+        raw_bytes: i64,
+        derived_bytes: i64,
+        pinned: bool,
+        generation: i64,
+    }
+
     fn gpu_device_available() -> bool {
         Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
             .ok()
@@ -33,170 +28,25 @@ mod tests {
             .is_some_and(|source| source == "hardware_derived")
     }
 
-    fn explain_text(query: &str) -> String {
-        Spi::connect(|client| {
-            let mut lines = Vec::new();
-            let table = client
-                .select(&format!("EXPLAIN (FORMAT TEXT) {query}"), None, &[])
-                .expect("EXPLAIN should succeed");
-            for row in table {
-                if let Some(line) = row.get::<String>(1).ok().flatten() {
-                    lines.push(line);
-                }
-            }
-            lines.join("\n")
-        })
-    }
-
-    fn grouped_query(table: &str) -> String {
-        format!("SELECT g, sum(v), count(*) FROM {table} GROUP BY g")
-    }
-
-    /// Runs the grouped aggregate and returns `(g, sum, count)` sorted by `g`.
-    fn grouped_results(table: &str) -> Vec<(i32, f64, i64)> {
-        grouped_results_for(&grouped_query(table))
-    }
-
-    /// Runs an arbitrary 3-column `(int4, float8, int8)` grouped-aggregate
-    /// query and returns `(group, sum, count)` sorted by group.
-    fn grouped_results_for(query: &str) -> Vec<(i32, f64, i64)> {
-        Spi::connect(|client| {
-            let mut out = Vec::new();
-            let rows = client
-                .select(query, None, &[])
-                .expect("grouped aggregate query should succeed");
-            for row in rows {
-                let g = row
-                    .get::<i32>(1)
-                    .expect("g read")
-                    .expect("g should not be NULL");
-                let sum = row
-                    .get::<f64>(2)
-                    .expect("sum read")
-                    .expect("sum should not be NULL");
-                let count = row
-                    .get::<i64>(3)
-                    .expect("count read")
-                    .expect("count should not be NULL");
-                out.push((g, sum, count));
-            }
-            out.sort_by_key(|row| row.0);
-            out
-        })
-    }
-
-    fn assert_grouped_results_eq(actual: &[(i32, f64, i64)], expected: &[(i32, f64, i64)]) {
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "group count mismatch: actual={actual:?} expected={expected:?}"
-        );
-        for (a, e) in actual.iter().zip(expected.iter()) {
-            assert_eq!(
-                a.0, e.0,
-                "group key mismatch: actual={actual:?} expected={expected:?}"
-            );
-            assert!(
-                (a.1 - e.1).abs() < 1e-6,
-                "sum mismatch for group {}: actual={actual:?} expected={expected:?}",
-                a.0
-            );
-            assert_eq!(
-                a.2, e.2,
-                "count mismatch for group {}: actual={actual:?} expected={expected:?}",
-                a.0
-            );
-        }
-    }
-
-    /// Populates `table` with 1000 rows over groups 1..=4 where every row of
-    /// group `g` carries value `g * 10.0` (each group has 250 rows).
-    fn insert_initial_data(table: &str) {
-        Spi::run(&format!(
-            "INSERT INTO {table} \
-             SELECT (i % 4) + 1, (((i % 4) + 1) * 10)::float8 \
-             FROM generate_series(0, 999) i",
-        ))
-        .expect("initial INSERT should succeed");
-    }
-
-    fn initial_expected() -> Vec<(i32, f64, i64)> {
-        (1..=4)
-            .map(|g| (g, f64::from(g) * 10.0 * 250.0, 250))
-            .collect()
-    }
-
-    /// Replacement data: 500 rows over groups 1..=2 where every row of group
-    /// `g` carries value `g * 7.5` (each group has 250 rows).
-    fn insert_replacement_data(table: &str) {
-        Spi::run(&format!(
-            "INSERT INTO {table} \
-             SELECT (i % 2) + 1, (((i % 2) + 1) * 7.5)::float8 \
-             FROM generate_series(0, 499) i",
-        ))
-        .expect("replacement INSERT should succeed");
-    }
-
-    fn replacement_expected() -> Vec<(i32, f64, i64)> {
-        (1..=2)
-            .map(|g| (g, f64::from(g) * 7.5 * 250.0, 250))
-            .collect()
-    }
-
-    fn create_table(table: &str) {
-        Spi::run(&format!(
-            "CREATE TABLE {table} (g int4 NOT NULL, v float8 NOT NULL)"
-        ))
-        .expect("CREATE TABLE should succeed");
-    }
-
-    fn load_resident_cache(table: &str) -> i64 {
-        Spi::get_one::<i64>(&format!(
-            "SELECT pg_accel_load_resident_groupagg_cache(\
-             '{table}', 'g', 'int4', 'v', NULL, 'column', NULL, false)",
-        ))
-        .expect("resident cache load should succeed")
-        .expect("resident cache load should return a row count")
-    }
-
-    fn resident_cache_rows() -> i64 {
-        Spi::get_one::<i64>("SELECT pg_accel_resident_groupagg_cache_rows()")
-            .expect("cache rows query should succeed")
-            .expect("cache rows should not be NULL")
-    }
-
-    /// Serialize the GPU-dispatching invalidation tests against each other.
-    ///
-    /// These are the only pg_tests that initialize Metal in forked test
-    /// backends; when several do so concurrently, Metal's context-creation
-    /// telemetry (`__createContextTelemetryDataWithQueueLabelAndCallstack` →
-    /// CoreAnalytics → `os_log_create`) can SIGSEGV on a dispatch worker
-    /// thread in the forked child — the known fork-safety edge documented at
-    /// `pgaccel-kernels/src/expr_templates.cpp` ("Apple's telemetry/logging
-    /// helper thread"). The lock serializes execution only; every test still
-    /// runs its full GPU path. The transaction-scoped lock releases itself at
-    /// test rollback.
     fn serialize_gpu_tests() {
         Spi::run("SELECT pg_advisory_xact_lock(882201)")
             .expect("advisory lock acquisition should succeed");
     }
 
-    /// Runs `sql` inside an internal subtransaction (the PL/pgSQL
-    /// exception-block pattern from `pl_exec.c`).
-    ///
-    /// Needed because every `#[pg_test]` executes inside one wrapping
-    /// transaction, and TRUNCATE of a table created earlier in the *same*
-    /// (sub)transaction takes PostgreSQL's non-transactional in-place
-    /// shortcut (`ExecuteTruncateGuts`: `rd_createSubid == mySubid` →
-    /// `heap_truncate_one_rel`), which skips the relfilenode rewrite and its
-    /// relcache invalidation. Running the TRUNCATE in a child subtransaction
-    /// restores the production shape: the relation predates
-    /// `GetCurrentSubTransactionId()`, so TRUNCATE assigns a new relfilenode
-    /// and fires the relcache invalidation under test.
+    fn configure_generic_aggregate() {
+        for statement in [
+            "SET LOCAL pg_accel.enabled = on",
+            "SET LOCAL pg_accel.auto_load = on",
+            "SET LOCAL pg_accel.cost_multiplier = 0.1",
+            "SET LOCAL pg_accel.min_batch_size = 65536",
+        ] {
+            Spi::run(statement).expect(statement);
+        }
+    }
+
     fn run_in_subtransaction(sql: &str) {
-        // SAFETY: main backend thread inside a pg_test transaction. The
-        // save/restore of CurrentMemoryContext and CurrentResourceOwner
-        // mirrors PL/pgSQL's exception-block subtransaction handling.
+        // SAFETY: backend main thread inside the pg_test transaction. This is
+        // the same save/restore sequence used by PL/pgSQL exception blocks.
         unsafe {
             let old_context = pg_sys::CurrentMemoryContext;
             let old_owner = pg_sys::CurrentResourceOwner;
@@ -209,315 +59,432 @@ mod tests {
         }
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_invalidated_by_truncate() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache TRUNCATE invalidation test: no GPU device detected \
-                 (device limits source is not hardware_derived)"
-            );
-            return;
-        }
-        serialize_gpu_tests();
-        let table = "phase2_inval_trunc_t";
-
-        create_table(table);
-        insert_initial_data(table);
-        let loaded = load_resident_cache(table);
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-        assert_eq!(resident_cache_rows(), 1000);
-
-        // While the cache is fresh the grouped aggregate must take the
-        // accelerated lane and produce correct results.
-        let plan = explain_text(&grouped_query(table));
-        assert!(
-            plan.contains("Custom Scan"),
-            "grouped aggregate should use the resident Custom Scan while the cache is \
-             loaded; got plan:\n{plan}"
-        );
-        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
-
-        // TRUNCATE assigns a new relfilenode and fires a relcache invalidation
-        // for the table; the resident cache MUST NOT survive it. The
-        // subtransaction wrapper exists only to defeat pg_test's single
-        // wrapping transaction (see `run_in_subtransaction`); a production
-        // TRUNCATE of a pre-existing table takes this transactional path
-        // directly.
-        run_in_subtransaction(&format!("TRUNCATE {table}"));
-        insert_replacement_data(table);
-
-        assert_eq!(
-            resident_cache_rows(),
-            0,
-            "resident groupagg cache must be invalidated by TRUNCATE"
-        );
-        let plan_after = explain_text(&grouped_query(table));
-        assert!(
-            !plan_after.contains("Custom Scan"),
-            "grouped aggregate must decline to native after TRUNCATE invalidated the \
-             resident cache; got plan:\n{plan_after}"
-        );
-        assert_grouped_results_eq(&grouped_results(table), &replacement_expected());
+    fn table_oid(table: &str) -> i64 {
+        Spi::get_one::<i64>(&format!("SELECT '{table}'::regclass::oid::bigint"))
+            .expect("table OID query should succeed")
+            .expect("table OID should not be NULL")
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_invalidated_by_drop_and_recreate() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache DROP invalidation test: no GPU device detected \
-                 (device limits source is not hardware_derived)"
-            );
-            return;
-        }
-        serialize_gpu_tests();
-        let table = "phase2_inval_drop_t";
-
-        create_table(table);
-        insert_initial_data(table);
-        let loaded = load_resident_cache(table);
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
-
-        Spi::run(&format!("DROP TABLE {table}")).expect("DROP TABLE should succeed");
-        assert_eq!(
-            resident_cache_rows(),
-            0,
-            "resident groupagg cache must be invalidated by DROP TABLE"
-        );
-
-        // Recreate with different contents; the query must see the new table
-        // (never device buffers loaded from the dropped one).
-        create_table(table);
-        insert_replacement_data(table);
-        let plan = explain_text(&grouped_query(table));
-        assert!(
-            !plan.contains("Custom Scan"),
-            "grouped aggregate must run native against the recreated table; got plan:\n{plan}"
-        );
-        assert_grouped_results_eq(&grouped_results(table), &replacement_expected());
+    fn resident_status_by_oid(relid: i64) -> Option<ResidentStatus> {
+        Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    &format!(
+                        "SELECT cardinality(columns)::int4, raw_bytes, derived_bytes,                                 pinned, generation                          FROM pg_accel_resident_status()                          WHERE relid = {relid}::oid"
+                    ),
+                    None,
+                    &[],
+                )
+                .expect("resident status query should succeed");
+            let row = rows.next()?;
+            Some(ResidentStatus {
+                column_count: row
+                    .get::<i32>(1)
+                    .expect("column count read")
+                    .expect("column count should not be NULL"),
+                raw_bytes: row
+                    .get::<i64>(2)
+                    .expect("raw bytes read")
+                    .expect("raw bytes should not be NULL"),
+                derived_bytes: row
+                    .get::<i64>(3)
+                    .expect("derived bytes read")
+                    .expect("derived bytes should not be NULL"),
+                pinned: row
+                    .get::<bool>(4)
+                    .expect("pinned read")
+                    .expect("pinned should not be NULL"),
+                generation: row
+                    .get::<i64>(5)
+                    .expect("generation read")
+                    .expect("generation should not be NULL"),
+            })
+        })
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_invalidated_by_alter_table() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache ALTER invalidation test: no GPU device detected \
-                 (device limits source is not hardware_derived)"
-            );
-            return;
-        }
-        serialize_gpu_tests();
-        let table = "phase2_inval_alter_t";
-
-        create_table(table);
-        insert_initial_data(table);
-        let loaded = load_resident_cache(table);
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-
-        // ALTER TABLE fires a relcache invalidation; column additions can move
-        // attribute numbers out from under the cached attno-based shape, so the
-        // cache must not survive.
-        Spi::run(&format!("ALTER TABLE {table} ADD COLUMN extra int4"))
-            .expect("ALTER TABLE should succeed");
-        assert_eq!(
-            resident_cache_rows(),
-            0,
-            "resident groupagg cache must be invalidated by ALTER TABLE"
-        );
-        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
+    fn resident_status(table: &str) -> ResidentStatus {
+        resident_status_by_oid(table_oid(table)).expect("relation should have resident status")
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_survives_table_rename() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache table-rename survival test: no GPU device detected \
-                 (device limits source is not hardware_derived)"
-            );
-            return;
-        }
-        serialize_gpu_tests();
-        let table = "phase2_rename_tbl_t";
-        let renamed = "phase2_rename_tbl_t_v2";
-
-        create_table(table);
-        insert_initial_data(table);
-        let loaded = load_resident_cache(table);
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-        let plan = explain_text(&grouped_query(table));
-        assert!(
-            plan.contains("Custom Scan"),
-            "grouped aggregate should use the resident Custom Scan while the cache is \
-             loaded; got plan:\n{plan}"
-        );
-        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
-
-        // ALTER TABLE ... RENAME fires a relcache invalidation but leaves the
-        // OID, relfilenode, attnos, types, and data untouched: the resident
-        // cache MUST survive it (suspect-revalidation keeps the slot).
-        Spi::run(&format!("ALTER TABLE {table} RENAME TO {renamed}"))
-            .expect("ALTER TABLE RENAME should succeed");
-
-        assert_eq!(
-            resident_cache_rows(),
-            1000,
-            "resident groupagg cache must survive ALTER TABLE ... RENAME (same OID, \
-             relfilenode, attnos, and data)"
-        );
-        let plan_after = explain_text(&grouped_query(renamed));
-        assert!(
-            plan_after.contains("Custom Scan"),
-            "grouped aggregate against the renamed table must still use the resident \
-             Custom Scan; got plan:\n{plan_after}"
-        );
-        assert_grouped_results_eq(&grouped_results(renamed), &initial_expected());
+    fn kernel_executions() -> i64 {
+        Spi::get_one::<i64>("SELECT pg_accel_kernel_executions()")
+            .expect("kernel execution query should succeed")
+            .expect("kernel execution count should not be NULL")
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_survives_column_rename() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache column-rename survival test: no GPU device detected \
-                 (device limits source is not hardware_derived)"
-            );
-            return;
-        }
-        serialize_gpu_tests();
-        let table = "phase2_rename_col_t";
-
-        create_table(table);
-        insert_initial_data(table);
-        let loaded = load_resident_cache(table);
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-        let plan = explain_text(&grouped_query(table));
-        assert!(
-            plan.contains("Custom Scan"),
-            "grouped aggregate should use the resident Custom Scan while the cache is \
-             loaded; got plan:\n{plan}"
-        );
-        assert_grouped_results_eq(&grouped_results(table), &initial_expected());
-
-        // Column renames fire relcache invalidations but keep the attnos,
-        // types, and data of the cached columns: the cache MUST survive.
-        Spi::run(&format!("ALTER TABLE {table} RENAME COLUMN g TO grp"))
-            .expect("ALTER TABLE RENAME COLUMN g should succeed");
-        Spi::run(&format!("ALTER TABLE {table} RENAME COLUMN v TO val"))
-            .expect("ALTER TABLE RENAME COLUMN v should succeed");
-
-        assert_eq!(
-            resident_cache_rows(),
-            1000,
-            "resident groupagg cache must survive ALTER TABLE ... RENAME COLUMN (same \
-             attnos, types, and data)"
-        );
-        let renamed_query = format!("SELECT grp, sum(val), count(*) FROM {table} GROUP BY grp");
-        let plan_after = explain_text(&renamed_query);
-        assert!(
-            plan_after.contains("Custom Scan"),
-            "grouped aggregate against the renamed columns must still use the resident \
-             Custom Scan; got plan:\n{plan_after}"
-        );
-        assert_grouped_results_eq(&grouped_results_for(&renamed_query), &initial_expected());
+    fn explain_text(query: &str) -> String {
+        Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let rows = client
+                .select(&format!("EXPLAIN (VERBOSE, COSTS OFF) {query}"), None, &[])
+                .expect("EXPLAIN should succeed");
+            for row in rows {
+                if let Some(line) = row.get::<String>(1).expect("EXPLAIN line read") {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n").to_lowercase()
+        })
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_invalidated_by_alter_column_type() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache ALTER TYPE invalidation test: no GPU device detected \
-                 (device limits source is not hardware_derived)"
-            );
-            return;
-        }
-        serialize_gpu_tests();
-        let table = "phase2_alter_type_t";
-
-        create_table(table);
-        insert_initial_data(table);
-        let loaded = load_resident_cache(table);
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-        assert_eq!(resident_cache_rows(), 1000);
-
-        // ALTER COLUMN TYPE on a cached column changes atttypid (and, for
-        // float8 -> real, rewrites the relfilenode): the cache MUST NOT
-        // survive; the query must decline to native and read the table.
-        Spi::run(&format!("ALTER TABLE {table} ALTER COLUMN v TYPE real"))
-            .expect("ALTER TABLE ALTER COLUMN TYPE should succeed");
-
-        assert_eq!(
-            resident_cache_rows(),
-            0,
-            "resident groupagg cache must be invalidated by ALTER COLUMN TYPE"
-        );
-        // `v` is now real; cast the sum back to float8 for the shared reader.
-        let cast_query = format!("SELECT g, sum(v)::float8, count(*) FROM {table} GROUP BY g");
-        let plan_after = explain_text(&cast_query);
-        assert!(
-            !plan_after.contains("Custom Scan"),
-            "grouped aggregate must decline to native after ALTER COLUMN TYPE invalidated \
-             the resident cache; got plan:\n{plan_after}"
-        );
-        // Group values (10/20/30/40, sums <= 10000) are exact in float4.
-        assert_grouped_results_eq(&grouped_results_for(&cast_query), &initial_expected());
+    fn result_rows(query: &str) -> Vec<String> {
+        Spi::connect(|client| {
+            let mut output = Vec::new();
+            let rows = client
+                .select(
+                    &format!("SELECT row_to_json(q)::text FROM ({query}) AS q"),
+                    None,
+                    &[],
+                )
+                .expect("aggregate query should succeed");
+            for row in rows {
+                output.push(
+                    row.get::<String>(1)
+                        .expect("JSON row read")
+                        .expect("JSON row should not be NULL"),
+                );
+            }
+            output
+        })
     }
 
-    #[pg_test]
-    fn test_resident_groupagg_cache_invalidated_by_binary_coercible_alter_type() {
-        if !gpu_device_available() {
-            pgrx::notice!(
-                "skipping resident-cache binary-coercible ALTER TYPE invalidation test: no \
-                 GPU device detected (device limits source is not hardware_derived)"
+    fn assert_descriptor_plan(plan: &str) {
+        for expected in [
+            "custom scan (gpuaccelagg)",
+            "strategy: gpuagg",
+            "gpu descriptor strategy: descriptor_grouped_aggregate",
+        ] {
+            assert!(
+                plan.contains(expected),
+                "generic aggregate plan missing '{expected}':\n{plan}"
             );
-            return;
         }
-        serialize_gpu_tests();
-        let table = "phase2_alter_type_bc_t";
+    }
 
-        // Text group keys so the cached group column can take a
-        // binary-coercible type change (text -> varchar) that does NOT
-        // rewrite the relfilenode: the drop must come from the atttypid
-        // fingerprint comparison alone.
+    fn assert_generic_matches_native(query: &str) {
+        Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
+        let native = result_rows(query);
+
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("enable pg_accel");
+        let plan = explain_text(query);
+        assert_descriptor_plan(&plan);
+
+        let before = kernel_executions();
+        let accelerated = result_rows(query);
+        let after = kernel_executions();
+        assert!(
+            after > before,
+            "generic aggregate did not dispatch a GPU kernel: before={before} after={after}"
+        );
+        assert_eq!(
+            accelerated, native,
+            "generic aggregate result differs from native PostgreSQL"
+        );
+    }
+
+    fn int4_grouped_query(table: &str, group: &str, value: &str) -> String {
+        format!(
+            "SELECT {group}, sum({value}), min({value}), max({value}), count(*)              FROM {table} GROUP BY {group} ORDER BY {group}"
+        )
+    }
+
+    fn int8_grouped_query(table: &str, group: &str, value: &str) -> String {
+        format!(
+            "SELECT {group}, min({value}), max({value}), count(*)              FROM {table} GROUP BY {group} ORDER BY {group}"
+        )
+    }
+
+    fn create_int4_fixture(table: &str, rows: i32, group_count: i32, offset: i32) {
         Spi::run(&format!(
-            "CREATE TABLE {table} (g text NOT NULL, v float8 NOT NULL)"
+            "CREATE UNLOGGED TABLE {table} (g int4 NOT NULL, v int4 NOT NULL)"
         ))
         .expect("CREATE TABLE should succeed");
         Spi::run(&format!(
-            "INSERT INTO {table} \
-             SELECT 'grp_' || ((i % 4) + 1), (((i % 4) + 1) * 10)::float8 \
-             FROM generate_series(0, 999) i",
+            "INSERT INTO {table}              SELECT (i % {group_count})::int4, ((i % 997) - 498 + {offset})::int4              FROM generate_series(1, {rows}) AS i"
         ))
-        .expect("initial INSERT should succeed");
+        .expect("fixture INSERT should succeed");
+        Spi::run(&format!("ANALYZE {table}")).expect("ANALYZE should succeed");
+    }
+
+    fn pin_int4_fixture(table: &str) {
         let loaded = Spi::get_one::<i64>(&format!(
-            "SELECT pg_accel_load_resident_groupagg_cache(\
-             '{table}', 'g', 'text', 'v', NULL, 'column', NULL, false)",
+            "SELECT pg_accel_pin('{table}'::regclass, ARRAY['g', 'v'])"
         ))
-        .expect("resident cache load should succeed")
-        .expect("resident cache load should return a row count");
-        assert_eq!(loaded, 1000, "resident cache should load all 1000 rows");
-        assert_eq!(resident_cache_rows(), 1000);
+        .expect("pg_accel_pin should succeed")
+        .expect("pg_accel_pin should return a row count");
+        assert_eq!(loaded, i64::from(DEVICE_ROWS));
 
-        let relfilenode_query =
-            format!("SELECT relfilenode::int8 FROM pg_catalog.pg_class WHERE relname = '{table}'");
-        let filenode_before = Spi::get_one::<i64>(&relfilenode_query)
-            .expect("relfilenode query should succeed")
-            .expect("relfilenode should not be NULL");
+        let status = resident_status(table);
+        assert_eq!(status.column_count, 2);
+        assert!(status.raw_bytes > 0);
+        assert_eq!(status.derived_bytes, 0);
+        assert!(status.pinned);
+    }
 
-        Spi::run(&format!("ALTER TABLE {table} ALTER COLUMN g TYPE varchar"))
-            .expect("ALTER TABLE ALTER COLUMN TYPE should succeed");
-
-        let filenode_after = Spi::get_one::<i64>(&relfilenode_query)
-            .expect("relfilenode query should succeed")
-            .expect("relfilenode should not be NULL");
-        assert_eq!(
-            filenode_before, filenode_after,
-            "text -> varchar must be binary-coercible (no rewrite) so this test isolates \
-             the atttypid fingerprint lane"
+    fn assert_invalidated_pin(table: &str, previous_generation: i64) {
+        let status = resident_status(table);
+        assert_eq!(status.column_count, 2);
+        assert_eq!(status.raw_bytes, 0);
+        assert_eq!(status.derived_bytes, 0);
+        assert!(status.pinned);
+        assert!(
+            status.generation > previous_generation,
+            "relation generation did not advance: before={previous_generation} after={}",
+            status.generation
         );
+    }
+
+    fn assert_loaded_status(table: &str) -> ResidentStatus {
+        let status = resident_status(table);
+        assert_eq!(status.column_count, 2);
+        assert!(status.raw_bytes > 0);
+        assert!(
+            status.derived_bytes > 0,
+            "descriptor aggregate should publish a charged derived artifact"
+        );
+        status
+    }
+
+    fn begin_gpu_test() -> bool {
+        if !gpu_device_available() {
+            pgrx::notice!(
+                "skipping Residency v2 generic aggregate test: no hardware-derived GPU device"
+            );
+            return false;
+        }
+        serialize_gpu_tests();
+        configure_generic_aggregate();
+        true
+    }
+
+    #[pg_test]
+    fn test_residency_v2_dml_freshness_and_auto_reload() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_dml_t";
+        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
+        pin_int4_fixture(table);
+
+        let query = int4_grouped_query(table, "g", "v");
+        assert_generic_matches_native(&query);
+        let mut loaded = assert_loaded_status(table);
+
+        Spi::run(&format!(
+            "INSERT INTO {table}              SELECT 99, 7 FROM generate_series(1, 4096)"
+        ))
+        .expect("resident INSERT should succeed");
+        assert_invalidated_pin(table, loaded.generation);
+        assert_generic_matches_native(&query);
+        loaded = assert_loaded_status(table);
+
+        Spi::run(&format!("UPDATE {table} SET v = v + 1 WHERE g = 0"))
+            .expect("resident UPDATE should succeed");
+        assert_invalidated_pin(table, loaded.generation);
+        assert_generic_matches_native(&query);
+        loaded = assert_loaded_status(table);
+
+        Spi::run(&format!("DELETE FROM {table} WHERE g = 1"))
+            .expect("resident DELETE should succeed");
+        assert_invalidated_pin(table, loaded.generation);
+        assert_generic_matches_native(&query);
+        let final_status = assert_loaded_status(table);
+        assert!(final_status.generation > loaded.generation);
+    }
+
+    #[pg_test]
+    fn test_residency_v2_truncate_freshness_and_auto_reload() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_truncate_t";
+        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
+        pin_int4_fixture(table);
+        let query = int4_grouped_query(table, "g", "v");
+        assert_generic_matches_native(&query);
+        let loaded = assert_loaded_status(table);
+
+        run_in_subtransaction(&format!("TRUNCATE {table}"));
+        Spi::run(&format!(
+            "INSERT INTO {table}              SELECT (i % 8)::int4, ((i % 101) + 500)::int4              FROM generate_series(1, {DEVICE_ROWS}) AS i"
+        ))
+        .expect("replacement INSERT should succeed");
+        Spi::run(&format!("ANALYZE {table}")).expect("ANALYZE should succeed");
+
+        assert_invalidated_pin(table, loaded.generation);
+        assert_generic_matches_native(&query);
+        let refreshed = assert_loaded_status(table);
+        assert!(refreshed.generation > loaded.generation);
+    }
+
+    #[pg_test]
+    fn test_residency_v2_drop_recreate_uses_new_relation() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_drop_t";
+        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
+        pin_int4_fixture(table);
+        let query = int4_grouped_query(table, "g", "v");
+        assert_generic_matches_native(&query);
+        let old_oid = table_oid(table);
+
+        Spi::run(&format!("DROP TABLE {table}")).expect("DROP TABLE should succeed");
+        if let Some(old_status) = resident_status_by_oid(old_oid) {
+            assert_eq!(old_status.raw_bytes, 0);
+            assert_eq!(old_status.derived_bytes, 0);
+        }
+
+        create_int4_fixture(table, DEVICE_ROWS, 8, 1000);
+        let new_oid = table_oid(table);
+        assert_ne!(
+            new_oid, old_oid,
+            "DROP/recreate must assign a new relation OID"
+        );
+
+        assert_generic_matches_native(&query);
+        let status = assert_loaded_status(table);
+        assert!(
+            !status.pinned,
+            "the recreated relation must auto-load under its new OID, not inherit the old pin"
+        );
+    }
+
+    #[pg_test]
+    fn test_residency_v2_ddl_rename_alter_and_type_freshness() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let original = "phase2_v2_ddl_t";
+        let renamed = "phase2_v2_ddl_t_v2";
+        create_int4_fixture(original, DEVICE_ROWS, 16, 0);
+        pin_int4_fixture(original);
+
+        let original_query = int4_grouped_query(original, "g", "v");
+        assert_generic_matches_native(&original_query);
+        assert_loaded_status(original);
+
+        Spi::run(&format!("ALTER TABLE {original} ADD COLUMN extra int4"))
+            .expect("ALTER TABLE ADD COLUMN should succeed");
+        let invalidated = resident_status(original);
+        assert_eq!(invalidated.raw_bytes, 0);
+        assert!(invalidated.pinned);
+        assert_generic_matches_native(&original_query);
+        let loaded = assert_loaded_status(original);
+
+        for statement in [
+            format!("ALTER TABLE {original} RENAME TO {renamed}"),
+            format!("ALTER TABLE {renamed} RENAME COLUMN g TO grp"),
+            format!("ALTER TABLE {renamed} RENAME COLUMN v TO val"),
+        ] {
+            Spi::run(&statement).expect("rename should succeed");
+        }
+        let renamed_status = resident_status(renamed);
+        assert_eq!(renamed_status.raw_bytes, 0);
+        assert!(renamed_status.pinned);
+        let renamed_query = int4_grouped_query(renamed, "grp", "val");
+        assert_generic_matches_native(&renamed_query);
+        let after_rename = assert_loaded_status(renamed);
         assert_eq!(
-            resident_cache_rows(),
-            0,
-            "resident groupagg cache must be invalidated by a binary-coercible ALTER \
-             COLUMN TYPE even though the relfilenode is unchanged (atttypid changed)"
+            after_rename.generation, loaded.generation,
+            "rename-only DDL should preserve the relation generation"
+        );
+
+        Spi::run(&format!(
+            "ALTER TABLE {renamed} ALTER COLUMN val TYPE int8 USING val::int8"
+        ))
+        .expect("ALTER COLUMN TYPE should succeed");
+        let type_invalidated = resident_status(renamed);
+        assert_eq!(type_invalidated.raw_bytes, 0);
+        assert!(type_invalidated.pinned);
+
+        let int8_query = int8_grouped_query(renamed, "grp", "val");
+        assert_generic_matches_native(&int8_query);
+        let type_reloaded = assert_loaded_status(renamed);
+        assert!(type_reloaded.raw_bytes > 0);
+    }
+
+    #[pg_test]
+    fn test_generic_groupagg_omitted_group_key_declines_and_matches_native() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_omitted_group_key_t";
+        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
+        pin_int4_fixture(table);
+        let query = format!("SELECT sum(v) FROM {table} GROUP BY g");
+
+        Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
+        let mut native = result_rows(&query);
+        native.sort_unstable();
+
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("enable pg_accel");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset pg_accel stats");
+        let before = kernel_executions();
+        let plan = explain_text(&query);
+        assert!(
+            !plan.contains("custom scan (gpuaccelagg)"),
+            "omitted group key must stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("omitted group key should record a planner decline");
+        assert_eq!(rejection, "shape_unprojected_group_key");
+
+        let mut accelerated = result_rows(&query);
+        let after = kernel_executions();
+        accelerated.sort_unstable();
+
+        assert_eq!(
+            after, before,
+            "omitted-group-key aggregate dispatched despite planner decline"
+        );
+        assert_eq!(accelerated, native);
+    }
+
+    #[pg_test]
+    fn test_generic_int4_expression_overflow_reports_22003_after_dispatch() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_overflow_t";
+        Spi::run(&format!(
+            "CREATE UNLOGGED TABLE {table} (                  g int4 NOT NULL, lhs int4 NOT NULL, rhs int4 NOT NULL)"
+        ))
+        .expect("CREATE overflow table should succeed");
+        Spi::run(&format!(
+            "INSERT INTO {table}              SELECT 0,                     CASE WHEN i = {DEVICE_ROWS} THEN 2147483647 ELSE 1000 END,                     2              FROM generate_series(1, {DEVICE_ROWS}) AS i"
+        ))
+        .expect("overflow fixture INSERT should succeed");
+        Spi::run(&format!("ANALYZE {table}")).expect("ANALYZE should succeed");
+        let loaded = Spi::get_one::<i64>(&format!(
+            "SELECT pg_accel_pin(                  '{table}'::regclass, ARRAY['g', 'lhs', 'rhs'])"
+        ))
+        .expect("overflow fixture pin should succeed")
+        .expect("overflow fixture pin should return rows");
+        assert_eq!(loaded, i64::from(DEVICE_ROWS));
+
+        let query = format!(
+            "SELECT g, sum(lhs * rhs), count(*)              FROM {table} GROUP BY g ORDER BY g"
+        );
+        assert_descriptor_plan(&explain_text(&query));
+
+        Spi::run("CREATE TEMP TABLE phase2_v2_overflow_observed (sqlstate text NOT NULL)")
+            .expect("create overflow observation table");
+        let before = kernel_executions();
+        Spi::run(&format!(
+            "DO $block$              DECLARE ignored_g int4; ignored_sum bigint; ignored_count bigint;              BEGIN                  SELECT g, sum(lhs * rhs), count(*) INTO ignored_g, ignored_sum, ignored_count FROM {table} GROUP BY g ORDER BY g;                  INSERT INTO phase2_v2_overflow_observed VALUES ('no_error');              EXCEPTION WHEN numeric_value_out_of_range THEN                  INSERT INTO phase2_v2_overflow_observed VALUES (SQLSTATE);              END              $block$"
+        ))
+        .expect("PL/pgSQL overflow catcher should succeed");
+        let after = kernel_executions();
+
+        let observed = Spi::get_one::<String>("SELECT sqlstate FROM phase2_v2_overflow_observed")
+            .expect("overflow observation query should succeed")
+            .expect("overflow SQLSTATE should not be NULL");
+        assert_eq!(observed, "22003");
+        assert!(
+            after > before,
+            "numeric overflow must be reported after a device dispatch: before={before} after={after}"
         );
     }
 }

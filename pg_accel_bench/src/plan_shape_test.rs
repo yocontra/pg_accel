@@ -20,6 +20,37 @@ use crate::integration_connection::live_pg_test_lock;
 use crate::integration_connection::test_connection;
 use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
 
+#[test]
+fn plan_shape_cost_multiplier_settings_respect_documented_floor() {
+    const DOCUMENTED_FLOOR: f64 = 0.1;
+    let marker = ["SET pg_accel.", "cost_multiplier = "].concat();
+    let mut setting_count = 0;
+
+    for (line_index, line) in include_str!("plan_shape_test.rs").lines().enumerate() {
+        let Some((_, suffix)) = line.split_once(&marker) else {
+            continue;
+        };
+        let numeric = suffix
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
+            .collect::<String>();
+        let value = numeric.parse::<f64>().unwrap_or_else(|error| {
+            panic!(
+                "plan-shape cost multiplier on line {} is not numeric: {error}",
+                line_index + 1
+            )
+        });
+        assert!(
+            value >= DOCUMENTED_FLOOR,
+            "plan-shape cost multiplier {value} on line {} is below the documented floor {DOCUMENTED_FLOOR}",
+            line_index + 1
+        );
+        setting_count += 1;
+    }
+
+    assert!(setting_count > 0, "plan-shape suite has no cost settings");
+}
+
 fn connect() -> Client {
     let connection = test_connection();
     let mut client = Client::connect(&connection, NoTls).expect("connect to bench PG");
@@ -72,43 +103,6 @@ fn explain_analyze(c: &mut Client, sql: &str) -> String {
         "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)",
         sql,
     )
-}
-
-#[derive(Debug, Clone)]
-struct ExplainAnalyzeTiming {
-    plan: String,
-    planning_ms: f64,
-    execution_ms: f64,
-}
-
-impl ExplainAnalyzeTiming {
-    fn total_ms(&self) -> f64 {
-        self.planning_ms + self.execution_ms
-    }
-}
-
-fn explain_analyze_timing(c: &mut Client, sql: &str) -> ExplainAnalyzeTiming {
-    let plan = explain_query(
-        c,
-        "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY ON)",
-        sql,
-    );
-    ExplainAnalyzeTiming {
-        planning_ms: explain_time_ms(&plan, "planning time")
-            .unwrap_or_else(|| panic!("EXPLAIN ANALYZE missing Planning Time:\n{plan}")),
-        execution_ms: explain_time_ms(&plan, "execution time")
-            .unwrap_or_else(|| panic!("EXPLAIN ANALYZE missing Execution Time:\n{plan}")),
-        plan,
-    }
-}
-
-fn explain_time_ms(plan: &str, metric: &str) -> Option<f64> {
-    let needle = format!("{metric}:");
-    plan.lines().find_map(|line| {
-        let suffix = line.trim().strip_prefix(&needle)?;
-        let ms = suffix.trim().strip_suffix("ms")?.trim();
-        ms.parse::<f64>().ok()
-    })
 }
 
 fn kernel_executions(c: &mut Client) -> i64 {
@@ -448,15 +442,6 @@ fn ensure_gpuexpr_bigint_count_isolated_fixture(c: &mut Client, table_suffix: &s
     table
 }
 
-fn parallel_fused_count_evidence_rows() -> i64 {
-    const DEFAULT_ROWS: i64 = 2_000_000;
-    std::env::var("PG_ACCEL_PARALLEL_FUSED_COUNT_EVIDENCE_ROWS")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|rows| *rows > 0)
-        .unwrap_or(DEFAULT_ROWS)
-}
-
 fn set_parallel_count_common_settings(c: &mut Client) {
     for stmt in [
         "SET jit = off",
@@ -753,53 +738,33 @@ fn ensure_nlj_between_fixture(c: &mut Client) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GroupSumAvgCountRow {
+struct GroupIntStatsRow {
     group_key: i32,
-    sum_milli: i64,
-    avg_milli: i64,
+    sum: i64,
+    min: i32,
+    max: i32,
     count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct GroupSumCountRow {
+struct GroupIntSumCountRow {
     group_key: i32,
-    sum_milli: i64,
+    sum: Option<i64>,
     count: i64,
 }
 
-fn round_milli(value: f64) -> i64 {
-    (value * 1000.0).round() as i64
-}
-
-fn ensure_resident_groupagg_renamed_direct_fixture(c: &mut Client) {
+fn ensure_descriptor_groupagg_renamed_direct_fixture(c: &mut Client) {
     for stmt in [
         "DROP TABLE IF EXISTS pg_accel_rg_rename_direct",
         "DROP TABLE IF EXISTS bench_employees_agg",
-        "CREATE UNLOGGED TABLE bench_employees_agg ( \
-            id serial PRIMARY KEY, \
-            dept int4 NOT NULL, \
-            salary float8 NOT NULL \
-         )",
-        "INSERT INTO bench_employees_agg (dept, salary) \
-         SELECT (g % 64)::int4, (1000.0 + ((g % 1000)::float8 * 0.25)) \
-         FROM generate_series(1, 100000) AS g",
+        "CREATE UNLOGGED TABLE bench_employees_agg (             id serial PRIMARY KEY,             dept int4 NOT NULL,             salary int4 NOT NULL          )",
+        "INSERT INTO bench_employees_agg (dept, salary)          SELECT (g % 64)::int4, (1000 + (g % 1000))::int4          FROM generate_series(1, 100000) AS g",
         "ANALYZE bench_employees_agg",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
-    c.simple_query(
-        "SELECT pg_accel_load_resident_groupagg_cache(
-            'bench_employees_agg',
-            'dept',
-            'int4',
-            'salary',
-            NULL,
-            'column',
-            NULL,
-            false
-        )::bigint",
-    )
-    .expect("load grouped agg resident cache");
+    c.simple_query("SELECT pg_accel_pin('bench_employees_agg'::regclass, ARRAY['dept', 'salary'])")
+        .expect("pin grouped aggregate inputs");
     for stmt in [
         "ALTER TABLE bench_employees_agg RENAME TO pg_accel_rg_rename_direct",
         "ALTER TABLE pg_accel_rg_rename_direct RENAME COLUMN dept TO grp",
@@ -810,38 +775,23 @@ fn ensure_resident_groupagg_renamed_direct_fixture(c: &mut Client) {
     }
 }
 
-fn ensure_resident_groupagg_renamed_expression_fixture(c: &mut Client) {
+fn ensure_descriptor_groupagg_renamed_expression_fixture(c: &mut Client) {
     for stmt in [
         "DROP TABLE IF EXISTS pg_accel_rg_rename_expr",
         "DROP TABLE IF EXISTS bench_expression_sales",
-        "CREATE UNLOGGED TABLE bench_expression_sales ( \
-            id serial PRIMARY KEY, \
-            product_id int4 NOT NULL, \
-            price float8 NOT NULL, \
-            discount float8 NOT NULL \
-         )",
-        "INSERT INTO bench_expression_sales (product_id, price, discount) \
-         SELECT (g % 128)::int4, \
-                (1.0 + ((g % 997)::float8 * 0.5)), \
-                (0.01 + ((g % 49)::float8 * 0.01)) \
-         FROM generate_series(1, 100000) AS g",
+        "CREATE UNLOGGED TABLE bench_expression_sales (             id serial PRIMARY KEY,             product_id int4 NOT NULL,             price int4 NOT NULL,             discount int4 NOT NULL          )",
+        "INSERT INTO bench_expression_sales (product_id, price, discount)          SELECT (g % 128)::int4,                 (1 + (g % 997))::int4,                 (1 + (g % 49))::int4          FROM generate_series(1, 100000) AS g",
         "ANALYZE bench_expression_sales",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
     c.simple_query(
-        "SELECT pg_accel_load_resident_groupagg_cache(
-            'bench_expression_sales',
-            'product_id',
-            'int4',
-            'price',
-            'discount',
-            'mul',
-            NULL,
-            false
-        )::bigint",
+        "SELECT pg_accel_pin(
+            'bench_expression_sales'::regclass,
+            ARRAY['product_id', 'price', 'discount']
+        )",
     )
-    .expect("load expression grouped agg resident cache");
+    .expect("pin expression aggregate inputs");
     for stmt in [
         "ALTER TABLE bench_expression_sales RENAME TO pg_accel_rg_rename_expr",
         "ALTER TABLE pg_accel_rg_rename_expr RENAME COLUMN product_id TO grp",
@@ -853,82 +803,71 @@ fn ensure_resident_groupagg_renamed_expression_fixture(c: &mut Client) {
     }
 }
 
-fn ensure_resident_groupagg_filter_range_fixture(c: &mut Client) {
+fn ensure_aggregate_filter_decline_fixture(c: &mut Client) {
     for stmt in [
-        "DROP TABLE IF EXISTS bench_rg_filter_range",
-        "CREATE UNLOGGED TABLE bench_rg_filter_range ( \
-            id serial PRIMARY KEY, \
-            product_id int4 NOT NULL, \
-            price float8 NOT NULL, \
-            discount float8 NOT NULL, \
-            active boolean NOT NULL \
-         )",
-        "INSERT INTO bench_rg_filter_range (product_id, price, discount, active) \
-         SELECT (g % 64)::int4, \
-                (1.0 + ((g % 997)::float8 * 0.5)), \
-                (0.20 + ((g % 5)::float8 * 0.05)), \
-                (g % 3) <> 0 \
-         FROM generate_series(1, 100000) AS g",
-        "ANALYZE bench_rg_filter_range",
+        "DROP TABLE IF EXISTS bench_rg_filter_decline",
+        "CREATE UNLOGGED TABLE bench_rg_filter_decline (             id serial PRIMARY KEY,             product_id int4 NOT NULL,             price int4 NOT NULL,             discount int4 NOT NULL,             active boolean NOT NULL          )",
+        "INSERT INTO bench_rg_filter_decline (product_id, price, discount, active)          SELECT (g % 64)::int4,                 (1 + (g % 997))::int4,                 (1 + (g % 49))::int4,                 (g % 3) <> 0          FROM generate_series(1, 100000) AS g",
+        "ANALYZE bench_rg_filter_decline",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
     c.simple_query(
-        "SELECT pg_accel_load_resident_groupagg_cache(
-            'bench_rg_filter_range',
-            'product_id',
-            'int4',
-            'price',
-            'discount',
-            'mul',
-            'active',
-            false
-        )::bigint",
+        "SELECT pg_accel_pin(
+            'bench_rg_filter_decline'::regclass,
+            ARRAY['product_id', 'price', 'discount', 'active']
+        )",
     )
-    .expect("load filtered range expression grouped agg resident cache");
+    .expect("pin aggregate FILTER decline inputs");
 }
 
-fn direct_groupagg_rows(c: &mut Client, sql: &str) -> Vec<GroupSumAvgCountRow> {
+fn direct_groupagg_rows(c: &mut Client, sql: &str) -> Vec<GroupIntStatsRow> {
     c.query(sql, &[])
         .unwrap_or_else(|e| panic!("query `{sql}` failed: {e}"))
         .into_iter()
-        .map(|row| GroupSumAvgCountRow {
+        .map(|row| GroupIntStatsRow {
             group_key: row.get::<_, i32>(0),
-            sum_milli: round_milli(row.get::<_, f64>(1)),
-            avg_milli: round_milli(row.get::<_, f64>(2)),
-            count: row.get::<_, i64>(3),
+            sum: row.get::<_, i64>(1),
+            min: row.get::<_, i32>(2),
+            max: row.get::<_, i32>(3),
+            count: row.get::<_, i64>(4),
         })
         .collect()
 }
 
-fn expression_groupagg_rows(c: &mut Client, sql: &str) -> Vec<GroupSumCountRow> {
+fn expression_groupagg_rows(c: &mut Client, sql: &str) -> Vec<GroupIntSumCountRow> {
     c.query(sql, &[])
         .unwrap_or_else(|e| panic!("query `{sql}` failed: {e}"))
         .into_iter()
-        .map(|row| GroupSumCountRow {
+        .map(|row| GroupIntSumCountRow {
             group_key: row.get::<_, i32>(0),
-            sum_milli: round_milli(row.get::<_, f64>(1)),
+            sum: row.get::<_, Option<i64>>(1),
             count: row.get::<_, i64>(2),
         })
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn assert_descriptor_groupagg_plan(plan: &str, context: &str) {
+    for needle in [
+        "custom scan (gpuaccelagg)",
+        "strategy: gpuagg",
+        "gpu descriptor strategy: descriptor_grouped_aggregate",
+    ] {
+        assert!(
+            plan.contains(needle),
+            "{context}: descriptor plan missing `{needle}`:\n{plan}"
+        );
+    }
+}
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_resident_groupagg_survives_table_and_column_rename() {
+fn plan_shape_descriptor_groupagg_survives_table_and_column_rename() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
-    ensure_resident_groupagg_renamed_direct_fixture(&mut c);
-    force_parallel(&mut c);
+    ensure_descriptor_groupagg_renamed_direct_fixture(&mut c);
 
-    let sql = "SELECT grp, SUM(measure), AVG(measure), COUNT(*) \
-               FROM pg_accel_rg_rename_direct \
-               GROUP BY grp \
-               ORDER BY grp";
+    let sql = "SELECT grp, SUM(measure), MIN(measure), MAX(measure), COUNT(*)                FROM pg_accel_rg_rename_direct                GROUP BY grp                ORDER BY grp";
 
     c.simple_query("SET pg_accel.enabled = off")
         .expect("disable pg_accel");
@@ -936,60 +875,36 @@ fn plan_shape_resident_groupagg_survives_table_and_column_rename() {
 
     for stmt in [
         "SET pg_accel.enabled = on",
+        "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 1",
+        "SET pg_accel.min_batch_size = 65536",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
 
     let plan = explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", sql);
-    for needle in [
-        "custom scan",
-        "gpuagg",
-        "gpu resident pipeline: true",
-        "gpu resident operator class: resident_groupagg",
-        "gpu resident groupagg key: resident_i32",
-        "gpu resident groupagg measure: direct_column",
-        "gpu resident groupagg filter: none",
-        "gpu resident groupagg predicate guard: none",
-        "gpu resident groupagg value predicate: none",
-        "gpu resident groupagg predicate ir: guard=none;value=none",
-        "gpu resident groupagg aggregate mask: 9",
-    ] {
-        assert!(
-            plan.contains(needle),
-            "renamed resident groupagg plan missing `{needle}`:\n{plan}"
-        );
-    }
+    assert_descriptor_groupagg_plan(&plan, "renamed direct integer groupagg");
 
     let before = kernel_executions(&mut c);
     let accelerated = direct_groupagg_rows(&mut c, sql);
     let after = kernel_executions(&mut c);
     assert!(
         after > before,
-        "renamed resident groupagg should dispatch a GPU kernel"
+        "renamed descriptor groupagg should dispatch a GPU kernel"
     );
-    assert_eq!(
-        pg_accel_stat_i64(&mut c, "stock_exec_count"),
-        0,
-        "renamed resident groupagg must not use stock fallback"
-    );
+    assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
     assert_eq!(accelerated, native);
 }
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_resident_expression_groupagg_survives_table_and_column_rename() {
+fn plan_shape_descriptor_expression_groupagg_survives_rename() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
-    ensure_resident_groupagg_renamed_expression_fixture(&mut c);
-    force_parallel(&mut c);
+    ensure_descriptor_groupagg_renamed_expression_fixture(&mut c);
 
-    let sql = "SELECT grp, SUM(lhs * rhs), COUNT(*) \
-               FROM pg_accel_rg_rename_expr \
-               GROUP BY grp \
-               ORDER BY grp";
+    let sql = "SELECT grp, SUM(lhs * rhs), COUNT(*)                FROM pg_accel_rg_rename_expr                GROUP BY grp                ORDER BY grp";
 
     c.simple_query("SET pg_accel.enabled = off")
         .expect("disable pg_accel");
@@ -997,141 +912,71 @@ fn plan_shape_resident_expression_groupagg_survives_table_and_column_rename() {
 
     for stmt in [
         "SET pg_accel.enabled = on",
+        "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 1",
+        "SET pg_accel.min_batch_size = 65536",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
 
     let plan = explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", sql);
-    for needle in [
-        "custom scan",
-        "gpuagg",
-        "gpu resident pipeline: true",
-        "gpu resident operator class: resident_groupagg",
-        "gpu resident groupagg key: resident_i32",
-        "gpu resident groupagg measure: binary_mul",
-        "gpu resident groupagg filter: none",
-        "gpu resident groupagg predicate guard: none",
-        "gpu resident groupagg value predicate: none",
-        "gpu resident groupagg predicate ir: guard=none;value=none",
-        "gpu resident groupagg aggregate mask: 9",
-    ] {
-        assert!(
-            plan.contains(needle),
-            "renamed resident expression groupagg plan missing `{needle}`:\n{plan}"
-        );
-    }
+    assert_descriptor_groupagg_plan(&plan, "renamed int4 expression groupagg");
 
     let before = kernel_executions(&mut c);
     let accelerated = expression_groupagg_rows(&mut c, sql);
     let after = kernel_executions(&mut c);
     assert!(
         after > before,
-        "renamed resident expression groupagg should dispatch a GPU kernel"
+        "renamed descriptor expression groupagg should dispatch a GPU kernel"
     );
-    assert_eq!(
-        pg_accel_stat_i64(&mut c, "stock_exec_count"),
-        0,
-        "renamed resident expression groupagg must not use stock fallback"
-    );
+    assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
     assert_eq!(accelerated, native);
 }
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_resident_groupagg_reuses_predicate_ir_for_where_and_filter_ranges() {
+fn plan_shape_aggregate_filter_has_precise_structural_decline() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
-    ensure_resident_groupagg_filter_range_fixture(&mut c);
-    force_parallel(&mut c);
+    ensure_aggregate_filter_decline_fixture(&mut c);
 
-    let where_sql = "SELECT product_id, SUM(price * discount), COUNT(*) \
-                     FROM bench_rg_filter_range \
-                     WHERE active AND discount BETWEEN 0.25 AND 0.40 \
-                     GROUP BY product_id \
-                     ORDER BY product_id";
-    let aggregate_filter_sql = "SELECT product_id, \
-                SUM(price * discount) FILTER \
-                    (WHERE active AND discount BETWEEN 0.25 AND 0.40), \
-                COUNT(*) FILTER \
-                    (WHERE active AND discount BETWEEN 0.25 AND 0.40) \
-         FROM bench_rg_filter_range GROUP BY product_id ORDER BY product_id";
+    let sql = "SELECT product_id,                       SUM(price * discount) FILTER (WHERE active),                       COUNT(*)                FROM bench_rg_filter_decline                GROUP BY product_id                ORDER BY product_id";
 
     c.simple_query("SET pg_accel.enabled = off")
         .expect("disable pg_accel");
-    let native_where = expression_groupagg_rows(&mut c, where_sql);
-    let native_aggregate_filter = expression_groupagg_rows(&mut c, aggregate_filter_sql);
+    let native = expression_groupagg_rows(&mut c, sql);
 
     for stmt in [
         "SET pg_accel.enabled = on",
+        "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 1",
+        "SET pg_accel.min_batch_size = 65536",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
 
-    let where_plan = explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", where_sql);
-    for needle in [
-        "custom scan",
-        "gpuagg",
-        "gpu resident pipeline: true",
-        "gpu resident operator class: resident_groupagg",
-        "gpu resident groupagg measure: binary_mul",
-        "gpu resident groupagg filter: where_bool_and_rhs_ranges",
-        "gpu resident groupagg predicate guard: resident_bool_column",
-        "gpu resident groupagg value predicate: rhs_ranges",
-        "gpu resident groupagg predicate ir: guard=resident_bool_column;scope=row;value=rhs_ranges;ranges=1",
-    ] {
-        assert!(
-            where_plan.contains(needle),
-            "resident WHERE range groupagg plan missing `{needle}`:\n{where_plan}"
-        );
-    }
+    let plan = explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", sql);
+    assert!(
+        !plan.contains("custom scan"),
+        "aggregate FILTER must stay native until descriptor FILTER execution exists:\n{plan}"
+    );
+    assert_rejection_reason_observed(
+        &mut c,
+        &["shape_aggregate_modifier"],
+        "aggregate FILTER descriptor decline",
+    );
 
     let before = kernel_executions(&mut c);
-    let accelerated_where = expression_groupagg_rows(&mut c, where_sql);
-    let after_where = kernel_executions(&mut c);
-    assert!(
-        after_where > before,
-        "resident WHERE range groupagg should dispatch a GPU kernel"
-    );
-    assert_eq!(accelerated_where, native_where);
-
-    let aggregate_filter_plan =
-        explain_query(&mut c, "EXPLAIN (VERBOSE, COSTS OFF)", aggregate_filter_sql);
-    for needle in [
-        "custom scan",
-        "gpuagg",
-        "gpu resident pipeline: true",
-        "gpu resident operator class: resident_groupagg",
-        "gpu resident groupagg measure: binary_mul",
-        "gpu resident groupagg filter: aggregate_filter_bool_and_rhs_ranges",
-        "gpu resident groupagg predicate guard: resident_bool_column",
-        "gpu resident groupagg value predicate: rhs_ranges",
-        "gpu resident groupagg predicate ir: guard=resident_bool_column;scope=aggregate_filter;value=rhs_ranges;ranges=1",
-    ] {
-        assert!(
-            aggregate_filter_plan.contains(needle),
-            "resident aggregate FILTER range groupagg plan missing `{needle}`:\n{aggregate_filter_plan}"
-        );
-    }
-
-    let before_filter = kernel_executions(&mut c);
-    let accelerated_aggregate_filter = expression_groupagg_rows(&mut c, aggregate_filter_sql);
-    let after_filter = kernel_executions(&mut c);
-    assert!(
-        after_filter > before_filter,
-        "resident aggregate FILTER range groupagg should dispatch a GPU kernel"
-    );
-    assert_eq!(accelerated_aggregate_filter, native_aggregate_filter);
+    let enabled = expression_groupagg_rows(&mut c, sql);
+    let after = kernel_executions(&mut c);
     assert_eq!(
-        pg_accel_stat_i64(&mut c, "stock_exec_count"),
-        0,
-        "resident predicate-IR groupagg must not use stock fallback"
+        after, before,
+        "structural decline must not dispatch a kernel"
     );
+    assert_eq!(enabled, native);
+    assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1757,12 +1602,11 @@ fn plan_shape_parallel_fused_gpuexpr_count_default_off_stays_native() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
-#[ignore = "opt-in performance evidence; run with --ignored --nocapture"]
-fn plan_shape_parallel_fused_gpuexpr_count_perf_gate_evidence() {
+fn plan_shape_parallel_fused_gpuexpr_count_bounded_crash_gate() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
-    let rows = parallel_fused_count_evidence_rows();
-    let table = ensure_gpuexpr_count_isolated_fixture(&mut c, "parallel_fused_perf", rows);
+    let rows = 1_000_000;
+    let table = ensure_gpuexpr_count_isolated_fixture(&mut c, "parallel_fused_bounded", rows);
     let sql = format!("SELECT count(*) FROM {table} WHERE val > 500.0::float4");
 
     set_parallel_count_native_mode(&mut c);
@@ -1771,84 +1615,50 @@ fn plan_shape_parallel_fused_gpuexpr_count_perf_gate_evidence() {
     for needle in ["gather", "partial aggregate", "parallel seq scan"] {
         assert!(
             native_plan.contains(needle),
-            "native parallel baseline should select `{needle}`:\n{native_plan}"
+            "bounded native parallel baseline should select `{needle}`:\n{native_plan}"
         );
     }
     assert!(
         !native_plan.contains("custom scan"),
-        "native parallel baseline must not select pg_accel:\n{native_plan}"
+        "bounded native parallel baseline must not select pg_accel:\n{native_plan}"
     );
-    let native_timing = explain_analyze_timing(&mut c, &sql);
 
     set_parallel_count_accel_mode(&mut c);
     let accel_plan = explain(&mut c, &sql);
     for needle in ["gather", "partial aggregate", "parallel seq scan"] {
         assert!(
             accel_plan.contains(needle),
-            "crash-gated pg_accel parallel fused COUNT should stay native on `{needle}`:\n{accel_plan}"
+            "bounded crash-gated parallel count should stay on `{needle}`:\n{accel_plan}"
         );
     }
     assert!(
         !accel_plan.contains("custom scan"),
-        "GUC-on parallel fused COUNT must not select the crash-gated CustomScan:\n{accel_plan}"
+        "bounded GUC-on parallel count must not select the crash-gated CustomScan:\n{accel_plan}"
     );
     assert_rejection_reason_observed(
         &mut c,
         &["parallel_fused_count_unstable"],
-        "parallel fused COUNT perf evidence crash gate",
-    );
-
-    let accel_count = scalar_i64(&mut c, &sql);
-    assert_eq!(
-        accel_count, native_count,
-        "pg_accel parallel fused COUNT differs from native PostgreSQL"
+        "bounded parallel fused count crash gate",
     );
 
     c.simple_query("SELECT pg_accel_reset_stats()")
-        .expect("reset stats before timed pg_accel evidence");
-    let before_kernels = kernel_executions(&mut c);
-    let accel_timing = explain_analyze_timing(&mut c, &sql);
-    let after_kernels = kernel_executions(&mut c);
-    let accel_analyzed = accel_timing.plan.to_lowercase();
+        .expect("reset stats before bounded crash-gate execution");
+    let before = kernel_executions(&mut c);
+    let analyzed = explain_analyze(&mut c, &sql);
+    let after = kernel_executions(&mut c);
     assert!(
-        !accel_analyzed.contains("custom scan"),
-        "timed pg_accel evidence must stay native while parallel fused-count is crash-gated:\n{}",
-        accel_timing.plan
+        !analyzed.contains("custom scan"),
+        "bounded crash-gate execution must stay native:\n{analyzed}"
     );
     assert_eq!(
-        pg_accel_stat_i64(&mut c, "stock_exec_count"),
-        0,
-        "parallel fused COUNT evidence must not use stock fallback"
+        after, before,
+        "bounded crash-gated count must not dispatch a GPU kernel"
     );
-    assert_eq!(
-        after_kernels, before_kernels,
-        "crash-gated parallel fused COUNT timing must not dispatch GPU kernels \
-         (before={before_kernels}, after={after_kernels})"
-    );
-
-    let stock_fallback = pg_accel_stat_i64(&mut c, "stock_exec_count");
-    println!(
-        "\nparallel fused COUNT crash-gate evidence\
-         \n  table: {table}\
-         \n  rows: {rows}\
-         \n  count: {native_count}\
-         \n  native parallel: planning={:.3} ms execution={:.3} ms total={:.3} ms\
-         \n  pg_accel.parallel_fused_count=on: native crash-gated fallback planning={:.3} ms execution={:.3} ms total={:.3} ms\
-         \n  kernel delta during timed EXPLAIN: {}\
-         \n  stock fallback executions: {}\
-         \n  gate: parallel_fused_count_unstable",
-        native_timing.planning_ms,
-        native_timing.execution_ms,
-        native_timing.total_ms(),
-        accel_timing.planning_ms,
-        accel_timing.execution_ms,
-        accel_timing.total_ms(),
-        after_kernels - before_kernels,
-        stock_fallback
-    );
+    assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
+    assert_eq!(scalar_i64(&mut c, &sql), native_count);
 
     c.simple_query(&format!("DROP TABLE IF EXISTS {table}"))
-        .expect("drop parallel fused-count perf evidence fixture");
+        .expect("drop bounded parallel fused-count fixture");
 }
 
 #[cfg(feature = "integration_tests")]

@@ -1,12 +1,11 @@
-//! H3 winning-lane integration assertions (TODO Phase 5).
+//! H3 integration assertions across the Phase 5E legacy cut-over.
 //!
 //! These tests guard the H3 wins documented in `TODO.md` Phase 5 against
 //! silent regression by exercising the running pgrx PostgreSQL backend:
 //!
-//! 1. **Plan-shape guards** — `h3_bulk`, `h3_resolution_sweep`, and the
-//!    admitted SRF lane go through GPU dispatch, and the H3 GPU kernel counter
-//!    MUST increment. Host-staged grouped SQL plans stay native until they can
-//!    prove a GPU-resident pipeline.
+//! 1. **Plan-shape guards** - grouped H3 workloads remain unpinned and native
+//!    with a visible generic-shape decline and zero GPU dispatch until Phase 6
+//!    implements descriptor H3 grouping and H3 input residency.
 //! 2. **Parity-lane guards** — standalone `h3_cell_to_parent` and
 //!    `h3_grid_distance` must NOT increment the GPU kernel counter, since the
 //!    h3 adapter intentionally does not register them for normal scalar
@@ -17,15 +16,11 @@
 //!    `pg_accel.enabled=on` and `pg_accel.enabled=off` over a fixed
 //!    `setseed(0.42)` source MUST return identical row sets (modulo
 //!    ordering). This catches GPU kernels that silently corrupt output.
-//! 4. **Warm dispatch latency budget** — after a warmup pass that JITs the
-//!    `pgaccel_h3_lat_lng_to_cell_bulk` kernel, a subsequent 10K-row
-//!    `h3_latlng_to_cell` call must complete inside a generous warm budget.
-//!    The cold first-compile (up to ~4 min per `TODO.md` Phase 2) is allowed
-//!    via an unbounded warmup; the gated assertion is on the second call.
-//! 5. **Grouped-count resolution matrix** — deterministic res7 coordinates
+//! 4. **Warm fallback latency budget** - the bounded grouped fixture remains
+//!    protected while it executes through native PostgreSQL.
+//! 5. **Grouped-count resolution matrix** - deterministic res7 coordinates
 //!    that need fp64 exact fixup, plus poles/antimeridian/city points, must
-//!    match h3-pg while the grouped SQL lane remains native under the hard
-//!    resident-only planner gate.
+//!    match h3-pg under the Phase 5E structural decline.
 //!
 //! Operation-specific thresholds — the bench classifier in
 //! `pg_accel_bench/src/workloads/mod.rs` (`h3_lane_class`) is the source of
@@ -84,11 +79,9 @@ const H3_GROUPED_COUNT_MATRIX_POINTS_SQL: &str = "\
   (37.6173::float8, 55.7558::float8), \
   (18.4241::float8, -33.9249::float8)";
 
-// Warm-dispatch latency budget. The 2026-05-14 full-run pass measured
-// `h3_bulk @ 10K` at ~8 ms accelerated; this gate is 2000x that and is
-// purely a catch-all that fires if the function/SRF dispatch path catastrophe-
-// regresses or starts blocking on `MTLCompilerService` mid-query.
-const WARM_DISPATCH_BUDGET: Duration = Duration::from_secs(16);
+// The Phase 5 historical warm budget remains intentionally generous while the
+// grouped lane runs native; Phase 6 will restore its device interpretation.
+const WARM_GROUPED_FALLBACK_BUDGET: Duration = Duration::from_secs(16);
 
 /// Open a fresh libpq connection to the bench database and trigger pg_accel
 /// load by calling its public surface.
@@ -248,94 +241,7 @@ fn apply_setup(c: &mut Client, wl: &dyn Workload, rows: usize) {
     }
 }
 
-#[cfg(feature = "integration_tests")]
-#[derive(Debug, Clone, Copy)]
-struct ResidentH3GroupAggCacheSpec {
-    table: &'static str,
-    input_col: &'static str,
-    input_kind: &'static str,
-    resolution: i32,
-}
-
-#[cfg(feature = "integration_tests")]
-impl ResidentH3GroupAggCacheSpec {
-    const fn latlng(table: &'static str, input_col: &'static str, resolution: i32) -> Self {
-        Self {
-            table,
-            input_col,
-            input_kind: "latlng_to_cell",
-            resolution,
-        }
-    }
-
-    const fn cell_to_parent(table: &'static str, input_col: &'static str, resolution: i32) -> Self {
-        Self {
-            table,
-            input_col,
-            input_kind: "cell_to_parent",
-            resolution,
-        }
-    }
-}
-
-#[cfg(feature = "integration_tests")]
-fn resident_h3_groupagg_cache_spec(name: &str) -> Option<ResidentH3GroupAggCacheSpec> {
-    match name {
-        "h3_bulk" => Some(ResidentH3GroupAggCacheSpec::latlng(
-            "bench_h3_points",
-            "geom",
-            7,
-        )),
-        "h3_resolution_sweep" => Some(ResidentH3GroupAggCacheSpec::latlng(
-            "bench_h3_sweep",
-            "geom",
-            9,
-        )),
-        "h3_latlng_res15" => Some(ResidentH3GroupAggCacheSpec::latlng(
-            "bench_h3_var",
-            "geom",
-            15,
-        )),
-        "h3_cell_to_parent" => Some(ResidentH3GroupAggCacheSpec::cell_to_parent(
-            "bench_h3_parent",
-            "cell",
-            4,
-        )),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "integration_tests")]
-fn load_resident_h3_groupagg_cache(c: &mut Client, spec: ResidentH3GroupAggCacheSpec) -> i64 {
-    c.query_one(
-        "SELECT pg_accel_load_resident_h3_groupagg_cache($1,$2,$3,$4)::bigint",
-        &[
-            &spec.table,
-            &spec.input_col,
-            &spec.input_kind,
-            &spec.resolution,
-        ],
-    )
-    .unwrap_or_else(|e| {
-        panic!(
-            "resident H3 cache loader for {}.{} kind={} res={} failed: {e}",
-            spec.table, spec.input_col, spec.input_kind, spec.resolution
-        )
-    })
-    .get::<_, i64>(0)
-}
-
-#[cfg(feature = "integration_tests")]
-fn prime_resident_h3_groupagg_cache(c: &mut Client, name: &str) {
-    let Some(spec) = resident_h3_groupagg_cache_spec(name) else {
-        return;
-    };
-    let loaded = load_resident_h3_groupagg_cache(c, spec);
-    assert!(
-        loaded > 0,
-        "resident H3 cache loader for {name} loaded {loaded} rows"
-    );
-}
+const H3_GROUPED_PHASE5E_DECLINE: &str = "shape_group_expression";
 
 /// Apply the workload's cleanup statements. Tolerates errors so a previous
 /// failed run leaves the fixture in a recoverable state.
@@ -346,40 +252,51 @@ fn apply_cleanup(c: &mut Client, wl: &dyn Workload) {
     }
 }
 
-/// Assert that an H3 winning workload actually dispatches a GPU kernel.
+/// Phase 5E keeps grouped H3 execution native after removing the legacy H3
+/// CustomScan. Phase 6 will flip this helper back to descriptor dispatch.
 #[cfg(feature = "integration_tests")]
-fn assert_workload_dispatches_kernel_counter(name: &str) {
-    assert_workload_dispatches_kernel_counter_at_rows(name, SETUP_ROWS);
-}
-
-/// Assert that an H3 winning workload actually dispatches at a specific scale.
-#[cfg(feature = "integration_tests")]
-fn assert_workload_dispatches_kernel_counter_at_rows(name: &str, rows: usize) {
+fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     let wl = find_workload(name).unwrap_or_else(|| panic!("workload `{name}` not registered"));
     let mut c = connect();
     apply_setup(&mut c, wl.as_ref(), rows);
-    prime_resident_h3_groupagg_cache(&mut c, name);
-    c.simple_query("SET pg_accel.enabled = on")
-        .expect("enable pg_accel");
 
-    let _ = c.simple_query(&wl.query_sql()).expect("warmup query");
+    c.simple_query("SET pg_accel.enabled = off")
+        .expect("disable pg_accel for stock H3 baseline");
+    let baseline_sql = wl.baseline_query_sql().unwrap_or_else(|| wl.query_sql());
+    let native = execute_to_rows(&mut c, &baseline_sql, H3_EXPLAIN_ROW_CAP);
+
+    c.simple_query("SET pg_accel.enabled = on;          SELECT pg_accel_reset_stats()")
+        .expect("enable pg_accel and reset planner stats");
+    let query = wl.query_sql();
+    let plan = explain_text(&mut c, &query);
+    let plan_lc = plan.to_lowercase();
+    assert!(
+        !plan_lc.contains("custom scan") && !plan_lc.contains("gpuaccelagg"),
+        "{name}: grouped H3 must stay native until Phase 6:\n{plan}"
+    );
+    assert_planner_rejection_observed(
+        &mut c,
+        H3_GROUPED_PHASE5E_DECLINE,
+        &format!("{name}: grouped H3 Phase 5E structural decline"),
+    );
 
     let before = kernel_executions(&mut c);
-    let _ = c.simple_query(&wl.query_sql()).expect("measured query");
+    let enabled = execute_to_rows(&mut c, &query, H3_EXPLAIN_ROW_CAP);
     let after = kernel_executions(&mut c);
+    assert_eq!(
+        after, before,
+        "{name}: Phase 5E grouped H3 decline must not dispatch a GPU kernel"
+    );
+    assert_eq!(
+        enabled, native,
+        "{name}: native pg_accel wrapper output differs from stock h3-pg"
+    );
 
     apply_cleanup(&mut c, wl.as_ref());
-
-    assert!(
-        after > before,
-        "{name} @ {rows} rows must increment pg_accel_kernel_executions() \
-         (before={before}, after={after}); flat counter = lost H3 winning-lane dispatch."
-    );
 }
-
 // ---------------------------------------------------------------------------
 // Static (no-PG) assertions — these are #[test] but do not require a live
-// database connection. They pin the relationship between the lane classifier
+// database connection. They bind the relationship between the lane classifier
 // and the H3 workloads referenced by this integration suite, so a future
 // refactor that renames or drops a winning lane fails the build instead of
 // silently shrinking the protection surface.
@@ -430,8 +347,8 @@ fn h3_protection_canonical_winning_names_registered() {
 }
 
 /// `h3_grid_distance` and the deep parent variant remain canonical Phase 5
-/// parity lanes; same pin. The canonical `h3_cell_to_parent` workload is now
-/// the fused grouped-count winner.
+/// parity lanes. The canonical `h3_cell_to_parent` workload is now the fused
+/// grouped-count winner.
 #[test]
 fn h3_protection_canonical_parity_names_registered() {
     for name in ["h3_grid_distance", "h3_parent_deep"] {
@@ -446,50 +363,39 @@ fn h3_protection_canonical_parity_names_registered() {
 // Plan-shape / dispatch-counter tests (live PG)
 // ---------------------------------------------------------------------------
 
-/// `h3_bulk` must increment the GPU kernel counter under the H3
-/// function/SRF dispatch path. A regression in the function dispatch hook
-/// would make this counter stay flat and the bench would silently drop
-/// the headline H3 win.
+/// The canonical resolution-7 grouped lane remains correctness-protected
+/// while its generic descriptor implementation is deferred to Phase 6.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_bulk_function_srf_dispatch_increments_kernel_counter() {
+fn h3_bulk_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_workload_dispatches_kernel_counter_at_rows("h3_bulk", H3_GROUPED_DISPATCH_ROWS);
+    assert_grouped_h3_declines_and_matches_native("h3_bulk", H3_GROUPED_DISPATCH_ROWS);
 }
 
-/// Same assertion for `h3_resolution_sweep`.
+/// Same Phase 5E contract for the canonical resolution-9 lane.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_resolution_sweep_dispatch_increments_kernel_counter() {
+fn h3_resolution_sweep_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_workload_dispatches_kernel_counter_at_rows(
-        "h3_resolution_sweep",
-        H3_GROUPED_DISPATCH_ROWS,
-    );
+    assert_grouped_h3_declines_and_matches_native("h3_resolution_sweep", H3_GROUPED_DISPATCH_ROWS);
 }
 
-/// The high-resolution grouped H3 lane shares the same LatLngToCell GPU
-/// kernel but takes the resolution >= 8 path. It needs explicit dispatch
-/// evidence so a workload-shape drift cannot hide behind the aggregate H3
-/// report.
+/// Keep resolution-15 exactness visible without selecting the deleted legacy
+/// grouped H3 path.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_high_resolution_grouped_lane_dispatches_kernel_counter() {
+fn h3_high_resolution_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_workload_dispatches_kernel_counter_at_rows("h3_latlng_res15", H3_GROUPED_DISPATCH_ROWS);
+    assert_grouped_h3_declines_and_matches_native("h3_latlng_res15", H3_GROUPED_DISPATCH_ROWS);
 }
 
-/// The grouped parent-count lane is the only normal-planning
-/// `h3_cell_to_parent` winner. It must dispatch through a selected aggregate
-/// path, while the standalone scalar guard below must remain native.
+/// Parent-cell grouping also stays native until Phase 6; the standalone scalar
+/// quarantine below remains a separate invariant.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_cell_to_parent_grouped_count_dispatches_kernel_counter() {
+fn h3_cell_to_parent_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_workload_dispatches_kernel_counter_at_rows(
-        "h3_cell_to_parent",
-        H3_GROUPED_DISPATCH_ROWS,
-    );
+    assert_grouped_h3_declines_and_matches_native("h3_cell_to_parent", H3_GROUPED_DISPATCH_ROWS);
 }
 
 /// `h3_fp64_ops` belongs to the fp64 calibration matrix, but its current
@@ -884,15 +790,15 @@ fn assert_h3_grouped_count_resolution_matches_native(
     resolution: i32,
     expected_input_rows: usize,
 ) {
-    let accel_sql =
-        h3_grouped_count_sql("_h3_grouped_count_matrix", "h3_latlng_to_cell", resolution);
-    c.simple_query("SET pg_accel.enabled = off")
-        .expect("disable pg_accel for native h3-pg baseline");
+    let query = h3_grouped_count_sql("_h3_grouped_count_matrix", "h3_latlng_to_cell", resolution);
     let native_sql = h3_grouped_count_sql(
         "_h3_grouped_count_matrix",
         "public.h3_lat_lng_to_cell",
         resolution,
     );
+
+    c.simple_query("SET pg_accel.enabled = off")
+        .expect("disable pg_accel for native h3-pg baseline");
     let native_rows = execute_to_rows(c, &native_sql, expected_input_rows);
     assert_eq!(
         grouped_count_total(&native_rows),
@@ -900,63 +806,35 @@ fn assert_h3_grouped_count_resolution_matches_native(
         "res {resolution}: native h3-pg grouped output must consume every input point"
     );
 
-    let loaded = load_resident_h3_groupagg_cache(
-        c,
-        ResidentH3GroupAggCacheSpec::latlng("_h3_grouped_count_matrix", "geom", resolution),
-    );
-    assert_eq!(
-        usize::try_from(loaded).unwrap_or(0),
-        expected_input_rows,
-        "res {resolution}: generic resident H3 groupagg cache should load the matrix fixture"
-    );
-    c.simple_query("SET pg_accel.enabled = on; SET pg_accel.cost_multiplier = 0.1")
-        .expect("enable pg_accel for grouped H3 matrix query");
-    c.simple_query("SELECT pg_accel_reset_stats()")
-        .expect("reset pg_accel stats before grouped H3 plan check");
-    let plan = explain_text(c, &accel_sql);
+    c.simple_query("SET pg_accel.enabled = on;          SELECT pg_accel_reset_stats()")
+        .expect("enable pg_accel and reset grouped H3 stats");
+    let plan = explain_text(c, &query);
     let plan_lc = plan.to_lowercase();
-    for needle in [
-        "custom scan",
-        "gpuaccelagg",
-        "gpu resident pipeline: true",
-        "gpu resident operator class: resident_groupagg",
-        "gpu resident groupagg key: h3index",
-        "gpu resident groupagg measure: count_star",
-        "gpu resident groupagg filter: none",
-        "gpu resident groupagg aggregate mask: 8",
-    ] {
-        assert!(
-            plan_lc.contains(needle),
-            "res {resolution}: resident H3 grouped-count plan missing `{needle}`:\n{plan}"
-        );
-    }
+    assert!(
+        !plan_lc.contains("custom scan") && !plan_lc.contains("gpuaccelagg"),
+        "res {resolution}: grouped H3 must stay native until Phase 6:\n{plan}"
+    );
+    assert_planner_rejection_observed(
+        c,
+        H3_GROUPED_PHASE5E_DECLINE,
+        &format!("res {resolution}: grouped H3 Phase 5E decline"),
+    );
 
     let before = kernel_executions(c);
-    let warm_rows = execute_to_rows(c, &accel_sql, expected_input_rows);
-    assert!(
-        !warm_rows.is_empty(),
-        "res {resolution}: grouped-count query returned no rows"
-    );
-    assert_eq!(
-        grouped_count_total(&warm_rows),
-        expected_input_rows,
-        "res {resolution}: warm grouped-count output must consume every input point"
-    );
-
-    let accel_rows = execute_to_rows(c, &accel_sql, expected_input_rows);
+    let enabled_rows = execute_to_rows(c, &query, expected_input_rows);
     let after = kernel_executions(c);
-    assert!(
-        after > before,
-        "res {resolution}: resident grouped-count query must dispatch a GPU kernel \
-         (before={before}, after={after}); plan:\n{plan}"
+    assert_eq!(
+        after, before,
+        "res {resolution}: grouped H3 structural decline must not dispatch a GPU kernel"
     );
     assert_eq!(
-        accel_rows, warm_rows,
-        "res {resolution}: grouped-count output changed between warmup and measured GPU runs"
+        grouped_count_total(&enabled_rows),
+        expected_input_rows,
+        "res {resolution}: enabled native output must consume every input point"
     );
     assert_eq!(
-        accel_rows, native_rows,
-        "res {resolution}: resident GPU grouped counts must match stock h3-pg exactly"
+        enabled_rows, native_rows,
+        "res {resolution}: pg_accel wrapper grouped counts must match stock h3-pg"
     );
 }
 
@@ -988,46 +866,58 @@ fn h3_grouped_count_resolution_matrix_matches_native_h3() {
 }
 
 // ---------------------------------------------------------------------------
-// Warm dispatch latency budget (live PG)
+// Warm native-fallback latency budget (live PG)
 // ---------------------------------------------------------------------------
 
-/// After a warmup pass that JITs the H3 LatLngToCell kernel, a second
-/// invocation over an admitted fixture must complete inside the warm budget.
-/// The cold first-compile (up to ~4 minutes for
-/// `pgaccel_h3_lat_lng_to_cell_bulk` per `TODO.md` Phase 2) is allowed via
-/// the warmup pass; this gate only fires if the warm dispatch path
-/// regresses (e.g. archive cache misses, repeated JIT, XPC stalls).
+/// Preserve the former warm-lane budget as a bounded Phase 5E native fallback
+/// check. Phase 6 will restore device-dispatch timing when grouped H3 becomes
+/// descriptor-compatible.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_warm_dispatch_latency_bounded() {
+fn h3_warm_grouped_fallback_latency_bounded() {
     let _live_pg_guard = live_pg_test_lock();
     let wl = H3Bulk;
     let mut c = connect();
     apply_setup(&mut c, &wl, H3_GROUPED_DISPATCH_ROWS);
-    prime_resident_h3_groupagg_cache(&mut c, wl.name());
-    c.simple_query("SET pg_accel.enabled = on")
-        .expect("enable pg_accel");
 
-    // Allow as long as needed for the first call — this may include cold
-    // JIT + archive build. Not gated.
-    let _ = c.simple_query(&wl.query_sql()).expect("warmup query");
+    c.simple_query("SET pg_accel.enabled = off")
+        .expect("disable pg_accel for H3 fallback baseline");
+    let baseline_sql = wl
+        .baseline_query_sql()
+        .expect("h3_bulk has a stock h3-pg baseline");
+    let native = execute_to_rows(&mut c, &baseline_sql, H3_EXPLAIN_ROW_CAP);
 
-    // Run the gated measurement. The budget is generous (16s) because this
-    // test must remain stable on macOS Metal where AdaptiveCpp can
-    // occasionally re-enter `MTLCompilerService` for the second dispatch
-    // on a freshly forked backend. A real regression that bypasses the
-    // archive cache entirely shows up as a multi-second outlier, while
-    // pure jitter sits around 10-100ms.
+    c.simple_query("SET pg_accel.enabled = on;          SELECT pg_accel_reset_stats()")
+        .expect("enable pg_accel and reset H3 fallback stats");
+    let query = wl.query_sql();
+    let plan = explain_text(&mut c, &query);
+    assert!(
+        !plan.to_lowercase().contains("custom scan"),
+        "Phase 5E grouped H3 fallback must stay native:\n{plan}"
+    );
+    assert_planner_rejection_observed(
+        &mut c,
+        H3_GROUPED_PHASE5E_DECLINE,
+        "h3_bulk warm grouped fallback",
+    );
+
+    let warm = execute_to_rows(&mut c, &query, H3_EXPLAIN_ROW_CAP);
+    assert_eq!(warm, native);
+    let before = kernel_executions(&mut c);
     let t0 = Instant::now();
-    let _ = c.simple_query(&wl.query_sql()).expect("measured query");
+    let measured = execute_to_rows(&mut c, &query, H3_EXPLAIN_ROW_CAP);
     let elapsed = t0.elapsed();
+    let after = kernel_executions(&mut c);
 
     apply_cleanup(&mut c, &wl);
 
+    assert_eq!(measured, native);
+    assert_eq!(
+        after, before,
+        "Phase 5E grouped H3 fallback must not dispatch a GPU kernel"
+    );
     assert!(
-        elapsed <= WARM_DISPATCH_BUDGET,
-        "h3_bulk warm dispatch took {elapsed:?}, exceeds budget {WARM_DISPATCH_BUDGET:?}; \
-         likely cause: archive cache miss or MTLCompilerService stall on the second \
-         dispatch — see CLAUDE.md `MTLBinaryArchive cache` section."
+        elapsed <= WARM_GROUPED_FALLBACK_BUDGET,
+        "h3_bulk warm native fallback took {elapsed:?}, exceeds budget          {WARM_GROUPED_FALLBACK_BUDGET:?}"
     );
 }

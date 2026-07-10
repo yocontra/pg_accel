@@ -1681,134 +1681,33 @@ fn prime_pg_accel_backend(client: &mut Client) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// Prime the accel backend and load any GPU-resident cache the workload
-/// requires. Returns `Some(load_ms)` — the wall-clock time spent loading the
-/// resident cache **off** the timed region — for resident-lane workloads, or
-/// `None` for workloads with no resident-cache prerequisite. The caller
-/// records this so the report can surface the off-clock cost the accel side
-/// pays while the PG baseline pays scan I/O on the clock.
+/// Prime the accel backend and pin every exact relation/column set required by
+/// the workload. Returns `Some(load_ms)` for resident lanes so reports retain
+/// the first-use conversion cost separately from the timed warm execution.
 fn prime_workload_accel_backend(
     client: &mut Client,
     workload: &dyn Workload,
 ) -> Result<Option<f64>, Box<dyn std::error::Error>> {
     prime_pg_accel_backend(client)?;
-    let resident_lane = workload_is_resident_lane(workload.name());
+    let pins = resident_pin_specs(workload.name());
+    let resident_lane = !pins.is_empty();
     let resident_load_start = std::time::Instant::now();
-    if ssbm_requires_resident_cache(workload.name()) {
-        let row = client.query_one("SELECT pg_accel_load_ssbm_q1_cache()::bigint", &[])?;
-        let loaded_rows: i64 = row.get(0);
-        if loaded_rows <= 0 {
-            return Err(format!(
-                "pg_accel_load_ssbm_q1_cache loaded {loaded_rows} rows for {}",
-                workload.name()
-            )
-            .into());
-        }
-    }
-    if let Some(cache_spec) = resident_groupagg_cache_loader(workload.name()) {
+    for pin in pins {
+        let columns = pin
+            .columns
+            .iter()
+            .map(|column| (*column).to_owned())
+            .collect::<Vec<_>>();
         let row = client.query_one(
-            "SELECT pg_accel_load_resident_groupagg_cache($1,$2,$3,$4,$5,$6,$7,$8)::bigint",
-            &[
-                &cache_spec.table,
-                &cache_spec.group_col,
-                &cache_spec.group_key_type,
-                &cache_spec.value_col,
-                &cache_spec.value_rhs_col,
-                &cache_spec.measure_op,
-                &cache_spec.filter_col,
-                &cache_spec.allow_nullable_f64,
-            ],
+            "SELECT pg_accel_pin($1::regclass, $2::text[])::bigint",
+            &[&pin.table, &columns],
         )?;
         let loaded_rows: i64 = row.get(0);
         if loaded_rows <= 0 {
             return Err(format!(
-                "resident groupagg cache loader loaded {loaded_rows} rows for {}",
-                workload.name()
-            )
-            .into());
-        }
-    }
-    if let Some(cache_spec) = resident_f64_reduce_cache_loader(workload.name()) {
-        let row = client.query_one(
-            "SELECT pg_accel_load_resident_f64_reduce_cache($1,$2,$3)::bigint",
-            &[
-                &cache_spec.table,
-                &cache_spec.value_col,
-                &cache_spec.allow_nullable_f64,
-            ],
-        )?;
-        let loaded_rows: i64 = row.get(0);
-        if loaded_rows <= 0 {
-            return Err(format!(
-                "resident f64 reduce cache loader loaded {loaded_rows} rows for {}",
-                workload.name()
-            )
-            .into());
-        }
-    }
-    if let Some(cache_spec) = resident_h3_groupagg_cache_loader(workload.name()) {
-        let row = client.query_one(
-            "SELECT pg_accel_load_resident_h3_groupagg_cache($1,$2,$3,$4)::bigint",
-            &[
-                &cache_spec.table,
-                &cache_spec.input_col,
-                &cache_spec.input_kind,
-                &cache_spec.resolution,
-            ],
-        )?;
-        let loaded_rows: i64 = row.get(0);
-        if loaded_rows <= 0 {
-            return Err(format!(
-                "resident H3 groupagg cache loader loaded {loaded_rows} rows for {}",
-                workload.name()
-            )
-            .into());
-        }
-    }
-    if let Some(cache_spec) = resident_star_dim_groupagg_cache_loader(workload.name()) {
-        let row = client.query_one(
-            "SELECT pg_accel_load_resident_star_dim_groupagg_cache($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)::bigint",
-            &[
-                &cache_spec.fact_table,
-                &cache_spec.fact_key_col,
-                &cache_spec.fact_value_col,
-                &cache_spec.fact_value_cmp_op,
-                &cache_spec.fact_value_cmp_const,
-                &cache_spec.dim_table,
-                &cache_spec.dim_key_col,
-                &cache_spec.dim_filter_col,
-                &cache_spec.dim_filter_cmp_op,
-                &cache_spec.dim_filter_cmp_const,
-                &cache_spec.dim_group_col,
-                &cache_spec.dim_group_key_type,
-                &cache_spec.allow_nullable_f64,
-            ],
-        )?;
-        let loaded_rows: i64 = row.get(0);
-        if loaded_rows <= 0 {
-            return Err(format!(
-                "resident star groupagg cache loader loaded {loaded_rows} rows for {}",
-                workload.name()
-            )
-            .into());
-        }
-    }
-    if let Some(cache_spec) = resident_hashjoin_count_cache_loader(workload.name()) {
-        let row = client.query_one(
-            "SELECT pg_accel_load_resident_hashjoin_count_cache($1,$2,$3,$4,$5)::bigint",
-            &[
-                &cache_spec.outer_table,
-                &cache_spec.outer_key_col,
-                &cache_spec.inner_table,
-                &cache_spec.inner_key_col,
-                &cache_spec.key_type,
-            ],
-        )?;
-        let loaded_rows: i64 = row.get(0);
-        if loaded_rows <= 0 {
-            return Err(format!(
-                "resident hashjoin count cache loader loaded {loaded_rows} rows for {}",
-                workload.name()
+                "pg_accel_pin loaded {loaded_rows} rows from {} for {}",
+                pin.table,
+                workload.name(),
             )
             .into());
         }
@@ -1820,426 +1719,205 @@ fn prime_workload_accel_backend(
 /// `ssbm_*` / `resident_*` lanes). Used to tag resident-lane rows and to
 /// decide whether resident-load time should be recorded.
 fn workload_is_resident_lane(name: &str) -> bool {
-    ssbm_requires_resident_cache(name)
-        || resident_groupagg_cache_loader(name).is_some()
-        || resident_f64_reduce_cache_loader(name).is_some()
-        || resident_h3_groupagg_cache_loader(name).is_some()
-        || resident_star_dim_groupagg_cache_loader(name).is_some()
-        || resident_hashjoin_count_cache_loader(name).is_some()
+    !resident_pin_specs(name).is_empty()
 }
 
-fn ssbm_requires_resident_cache(name: &str) -> bool {
-    matches!(
-        name,
-        "ssbm_q1_1"
-            | "ssbm_q1_2"
-            | "ssbm_q1_3"
-            | "ssbm_q2_1"
-            | "ssbm_q2_2"
-            | "ssbm_q2_3"
-            | "ssbm_q3_1"
-            | "ssbm_q3_2"
-            | "ssbm_q3_3"
-            | "ssbm_q3_4"
-            | "ssbm_q4_1"
-            | "ssbm_q4_2"
-            | "ssbm_q4_3"
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResidentGroupAggCacheSpec {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResidentPinSpec {
     table: &'static str,
-    group_col: &'static str,
-    group_key_type: &'static str,
-    value_col: &'static str,
-    value_rhs_col: Option<&'static str>,
-    measure_op: &'static str,
-    filter_col: Option<&'static str>,
-    allow_nullable_f64: bool,
+    columns: Vec<&'static str>,
 }
 
-impl ResidentGroupAggCacheSpec {
-    const fn direct_i32(
-        table: &'static str,
-        group_col: &'static str,
-        value_col: &'static str,
-        filter_col: Option<&'static str>,
-    ) -> Self {
-        Self {
-            table,
-            group_col,
-            group_key_type: "int4",
-            value_col,
-            value_rhs_col: None,
-            measure_op: "column",
-            filter_col,
-            allow_nullable_f64: false,
-        }
-    }
-
-    const fn direct_text(
-        table: &'static str,
-        group_col: &'static str,
-        value_col: &'static str,
-    ) -> Self {
-        Self {
-            table,
-            group_col,
-            group_key_type: "text",
-            value_col,
-            value_rhs_col: None,
-            measure_op: "column",
-            filter_col: None,
-            allow_nullable_f64: false,
-        }
-    }
-
-    const fn mul_i32(
-        table: &'static str,
-        group_col: &'static str,
-        value_col: &'static str,
-        value_rhs_col: &'static str,
-        filter_col: Option<&'static str>,
-        allow_nullable_f64: bool,
-    ) -> Self {
-        Self {
-            table,
-            group_col,
-            group_key_type: "int4",
-            value_col,
-            value_rhs_col: Some(value_rhs_col),
-            measure_op: "mul",
-            filter_col,
-            allow_nullable_f64,
-        }
-    }
-
-    const fn stats_pair_i32(
-        table: &'static str,
-        group_col: &'static str,
-        value_col: &'static str,
-        value_rhs_col: &'static str,
-    ) -> Self {
-        Self {
-            table,
-            group_col,
-            group_key_type: "int4",
-            value_col,
-            value_rhs_col: Some(value_rhs_col),
-            measure_op: "stats_pair",
-            filter_col: None,
-            allow_nullable_f64: false,
-        }
+fn resident_pin(table: &'static str, columns: &[&'static str]) -> ResidentPinSpec {
+    ResidentPinSpec {
+        table,
+        columns: columns.to_vec(),
     }
 }
 
-fn resident_groupagg_cache_loader(name: &str) -> Option<ResidentGroupAggCacheSpec> {
+fn ssbm_resident_pin_specs(name: &str) -> Vec<ResidentPinSpec> {
+    const Q1_FACT: &[&str] = &[
+        "lo_orderdate",
+        "lo_extendedprice",
+        "lo_discount",
+        "lo_quantity",
+    ];
+    const Q2_FACT: &[&str] = &["lo_orderdate", "lo_partkey", "lo_suppkey", "lo_revenue"];
+    const Q3_FACT: &[&str] = &["lo_orderdate", "lo_custkey", "lo_suppkey", "lo_revenue"];
+    const Q4_FACT: &[&str] = &[
+        "lo_orderdate",
+        "lo_custkey",
+        "lo_suppkey",
+        "lo_partkey",
+        "lo_revenue",
+        "lo_supplycost",
+    ];
+
     match name {
-        "hashagg_10g" | "hashagg_100g" | "hashagg_256g" | "hashagg_1kg" | "hashagg_10kg" => Some(
-            ResidentGroupAggCacheSpec::direct_i32("bench_hagg_sweep", "grp", "val", None),
-        ),
-        "gpu_hashagg_med_card" => Some(ResidentGroupAggCacheSpec::direct_i32(
-            "bench_hashagg_med",
-            "user_id",
-            "val",
-            None,
-        )),
-        "filtered_grouped_agg" => Some(ResidentGroupAggCacheSpec::direct_i32(
+        "ssbm_q1_1" => vec![
+            resident_pin("ssbm_lineorder", Q1_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+        ],
+        "ssbm_q1_2" => vec![
+            resident_pin("ssbm_lineorder", Q1_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_yearmonthnum"]),
+        ],
+        "ssbm_q1_3" => vec![
+            resident_pin("ssbm_lineorder", Q1_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_weeknuminyear", "d_year"]),
+        ],
+        "ssbm_q2_1" => vec![
+            resident_pin("ssbm_lineorder", Q2_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_part", &["p_partkey", "p_category", "p_brand1"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_region"]),
+        ],
+        "ssbm_q2_2" | "ssbm_q2_3" => vec![
+            resident_pin("ssbm_lineorder", Q2_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_part", &["p_partkey", "p_brand1"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_region"]),
+        ],
+        "ssbm_q3_1" => vec![
+            resident_pin("ssbm_lineorder", Q3_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_nation", "c_region"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_nation", "s_region"]),
+        ],
+        "ssbm_q3_2" => vec![
+            resident_pin("ssbm_lineorder", Q3_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_city", "c_nation"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_city", "s_nation"]),
+        ],
+        "ssbm_q3_3" => vec![
+            resident_pin("ssbm_lineorder", Q3_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_city"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_city"]),
+        ],
+        "ssbm_q3_4" => vec![
+            resident_pin("ssbm_lineorder", Q3_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year", "d_yearmonth"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_city"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_city"]),
+        ],
+        "ssbm_q4_1" => vec![
+            resident_pin("ssbm_lineorder", Q4_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_nation", "c_region"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_region"]),
+            resident_pin("ssbm_part", &["p_partkey", "p_mfgr"]),
+        ],
+        "ssbm_q4_2" => vec![
+            resident_pin("ssbm_lineorder", Q4_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_region"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_nation", "s_region"]),
+            resident_pin("ssbm_part", &["p_partkey", "p_category", "p_mfgr"]),
+        ],
+        "ssbm_q4_3" => vec![
+            resident_pin("ssbm_lineorder", Q4_FACT),
+            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            resident_pin("ssbm_customer", &["c_custkey", "c_region"]),
+            resident_pin("ssbm_supplier", &["s_suppkey", "s_city", "s_nation"]),
+            resident_pin("ssbm_part", &["p_partkey", "p_brand1", "p_category"]),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn resident_pin_specs(name: &str) -> Vec<ResidentPinSpec> {
+    let ssbm = ssbm_resident_pin_specs(name);
+    if !ssbm.is_empty() {
+        return ssbm;
+    }
+
+    match name {
+        "hashagg_10g" | "hashagg_100g" | "hashagg_256g" | "hashagg_1kg" | "hashagg_10kg" => {
+            vec![resident_pin("bench_hagg_sweep", &["grp", "val"])]
+        }
+        "gpu_hashagg_med_card" => {
+            vec![resident_pin("bench_hashagg_med", &["user_id", "val"])]
+        }
+        "filtered_grouped_agg" => vec![resident_pin(
             "bench_employees",
-            "dept",
-            "salary",
-            Some("active"),
-        )),
-        "grouped_agg" => Some(ResidentGroupAggCacheSpec::direct_i32(
-            "bench_employees_agg",
-            "dept",
-            "salary",
-            None,
-        )),
-        "grouped_agg_high_card" => Some(ResidentGroupAggCacheSpec::direct_i32(
-            "bench_events_agg",
-            "user_id",
-            "val",
-            None,
-        )),
-        "timeseries_sensor_rollup" => Some(ResidentGroupAggCacheSpec::direct_i32(
-            "sensor_data",
-            "sensor_id",
-            "value",
-            None,
-        )),
-        "dictionary_grouped_agg" => Some(ResidentGroupAggCacheSpec::direct_text(
+            &["dept", "salary", "active"],
+        )],
+        "grouped_agg" => vec![resident_pin("bench_employees_agg", &["dept", "salary"])],
+        "grouped_agg_high_card" => vec![resident_pin("bench_events_agg", &["user_id", "val"])],
+        "timeseries_sensor_rollup" => {
+            vec![resident_pin("sensor_data", &["sensor_id", "value"])]
+        }
+        "dictionary_grouped_agg" => vec![resident_pin(
             "bench_dictionary_sales",
-            "region",
-            "amount",
-        )),
-        "expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["region", "amount"],
+        )],
+        "expression_grouped_agg" => vec![resident_pin(
             "bench_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            None,
-            false,
-        )),
-        "predicate_filter_expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["product_id", "price", "discount"],
+        )],
+        "predicate_filter_expression_grouped_agg" => vec![resident_pin(
             "bench_predicate_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            Some("active"),
-            false,
-        )),
-        "case_when_expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_expression_grouped_agg" => vec![resident_pin(
             "bench_case_when_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            Some("active"),
-            false,
-        )),
-        "case_when_range_expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_range_expression_grouped_agg" => vec![resident_pin(
             "bench_case_when_range_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            Some("active"),
-            false,
-        )),
-        "case_when_value_predicate_expression_grouped_agg" => {
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_value_predicate_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        }
-        "case_when_null_predicate_expression_grouped_agg" => {
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_null_predicate_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                true,
-            ))
-        }
-        "case_when_or_expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_value_predicate_expression_grouped_agg" => vec![resident_pin(
+            "bench_case_when_value_predicate_expression_sales",
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_null_predicate_expression_grouped_agg" => vec![resident_pin(
+            "bench_case_when_null_predicate_expression_sales",
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_or_expression_grouped_agg" => vec![resident_pin(
             "bench_case_when_or_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            Some("active"),
-            false,
-        )),
-        "case_when_in_expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_in_expression_grouped_agg" => vec![resident_pin(
             "bench_case_when_in_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            Some("active"),
-            false,
-        )),
-        "case_when_not_expression_grouped_agg" => Some(ResidentGroupAggCacheSpec::mul_i32(
+            &["product_id", "price", "discount", "active"],
+        )],
+        "case_when_not_expression_grouped_agg" => vec![resident_pin(
             "bench_case_when_not_expression_sales",
-            "product_id",
-            "price",
-            "discount",
-            Some("active"),
-            false,
-        )),
-        "hashagg_f64_aggs" => Some(ResidentGroupAggCacheSpec::stats_pair_i32(
-            "bench_fp64_num",
-            "gk",
-            "v_f64",
-            "w_f64",
-        )),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResidentF64ReduceCacheSpec {
-    table: &'static str,
-    value_col: &'static str,
-    allow_nullable_f64: bool,
-}
-
-impl ResidentF64ReduceCacheSpec {
-    const fn direct(table: &'static str, value_col: &'static str) -> Self {
-        Self {
-            table,
-            value_col,
-            allow_nullable_f64: true,
+            &["product_id", "price", "discount", "active"],
+        )],
+        "hashagg_f64_aggs" => vec![resident_pin("bench_fp64_num", &["gk", "v_f64", "w_f64"])],
+        "reduce_f64_sum" | "reduce_f64_minmax" | "reduce_f64_stats" => {
+            vec![resident_pin("bench_fp64_num", &["v_f64"])]
         }
-    }
-}
-
-fn resident_f64_reduce_cache_loader(name: &str) -> Option<ResidentF64ReduceCacheSpec> {
-    match name {
-        "reduce_f64_sum" | "reduce_f64_minmax" | "reduce_f64_stats" => Some(
-            ResidentF64ReduceCacheSpec::direct("bench_fp64_num", "v_f64"),
-        ),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResidentH3GroupAggCacheSpec {
-    table: &'static str,
-    input_col: &'static str,
-    input_kind: &'static str,
-    resolution: i32,
-}
-
-impl ResidentH3GroupAggCacheSpec {
-    const fn latlng(table: &'static str, input_col: &'static str, resolution: i32) -> Self {
-        Self {
-            table,
-            input_col,
-            input_kind: "latlng_to_cell",
-            resolution,
+        "hash_join" => vec![
+            resident_pin("bench_orders", &["customer_id"]),
+            resident_pin("bench_customers", &["customer_id"]),
+        ],
+        "hashjoin_100_1m" | "hashjoin_1k_1m" | "hashjoin_10k_1m" | "hashjoin_100k_1m" => {
+            vec![
+                resident_pin("bench_hj_outer", &["key"]),
+                resident_pin("bench_hj_inner", &["key"]),
+            ]
         }
-    }
-
-    const fn cell_to_parent(table: &'static str, input_col: &'static str, resolution: i32) -> Self {
-        Self {
-            table,
-            input_col,
-            input_kind: "cell_to_parent",
-            resolution,
-        }
-    }
-}
-
-fn resident_h3_groupagg_cache_loader(name: &str) -> Option<ResidentH3GroupAggCacheSpec> {
-    match name {
-        "h3_bulk" => Some(ResidentH3GroupAggCacheSpec::latlng(
-            "bench_h3_points",
-            "geom",
-            7,
-        )),
-        "h3_resolution_sweep" => Some(ResidentH3GroupAggCacheSpec::latlng(
-            "bench_h3_sweep",
-            "geom",
-            9,
-        )),
-        "h3_latlng_res15" => Some(ResidentH3GroupAggCacheSpec::latlng(
-            "bench_h3_var",
-            "geom",
-            15,
-        )),
-        "h3_cell_to_parent" => Some(ResidentH3GroupAggCacheSpec::cell_to_parent(
-            "bench_h3_parent",
-            "cell",
-            4,
-        )),
-        _ => None,
+        "gpu_hashjoin_large_build" => vec![
+            resident_pin("bench_hj_left", &["key"]),
+            resident_pin("bench_hj_right", &["key"]),
+        ],
+        "gpu_hashjoin_filter" => vec![
+            resident_pin("bench_hjf_fact", &["dim_id", "amount"]),
+            resident_pin("bench_hjf_dim", &["id", "category", "name"]),
+        ],
+        "mixed_join_agg" => vec![
+            resident_pin("bench_mixed_facts", &["dim_id", "amount"]),
+            resident_pin("bench_mixed_dims", &["id", "label"]),
+        ],
+        _ => Vec::new(),
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResidentHashJoinCountCacheSpec {
-    outer_table: &'static str,
-    outer_key_col: &'static str,
-    inner_table: &'static str,
-    inner_key_col: &'static str,
-    key_type: &'static str,
-}
-
-impl ResidentHashJoinCountCacheSpec {
-    const fn int4(
-        outer_table: &'static str,
-        outer_key_col: &'static str,
-        inner_table: &'static str,
-        inner_key_col: &'static str,
-    ) -> Self {
-        Self {
-            outer_table,
-            outer_key_col,
-            inner_table,
-            inner_key_col,
-            key_type: "int4",
-        }
-    }
-}
-
-fn resident_hashjoin_count_cache_loader(name: &str) -> Option<ResidentHashJoinCountCacheSpec> {
-    match name {
-        "hash_join" => Some(ResidentHashJoinCountCacheSpec::int4(
-            "bench_orders",
-            "customer_id",
-            "bench_customers",
-            "customer_id",
-        )),
-        "hashjoin_100_1m" | "hashjoin_1k_1m" | "hashjoin_10k_1m" | "hashjoin_100k_1m" => Some(
-            ResidentHashJoinCountCacheSpec::int4("bench_hj_outer", "key", "bench_hj_inner", "key"),
-        ),
-        "gpu_hashjoin_large_build" => Some(ResidentHashJoinCountCacheSpec::int4(
-            "bench_hj_left",
-            "key",
-            "bench_hj_right",
-            "key",
-        )),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ResidentStarDimGroupAggCacheSpec {
-    fact_table: &'static str,
-    fact_key_col: &'static str,
-    fact_value_col: &'static str,
-    fact_value_cmp_op: &'static str,
-    fact_value_cmp_const: f64,
-    dim_table: &'static str,
-    dim_key_col: &'static str,
-    dim_filter_col: &'static str,
-    dim_filter_cmp_op: &'static str,
-    dim_filter_cmp_const: f64,
-    dim_group_col: &'static str,
-    dim_group_key_type: &'static str,
-    allow_nullable_f64: bool,
-}
-
-fn resident_star_dim_groupagg_cache_loader(name: &str) -> Option<ResidentStarDimGroupAggCacheSpec> {
-    match name {
-        "gpu_hashjoin_filter" => Some(ResidentStarDimGroupAggCacheSpec {
-            fact_table: "bench_hjf_fact",
-            fact_key_col: "dim_id",
-            fact_value_col: "amount",
-            fact_value_cmp_op: ">",
-            fact_value_cmp_const: 5000.0,
-            dim_table: "bench_hjf_dim",
-            dim_key_col: "id",
-            dim_filter_col: "category",
-            dim_filter_cmp_op: "<",
-            dim_filter_cmp_const: 50.0,
-            dim_group_col: "name",
-            dim_group_key_type: "text",
-            allow_nullable_f64: false,
-        }),
-        "mixed_join_agg" => Some(ResidentStarDimGroupAggCacheSpec {
-            fact_table: "bench_mixed_facts",
-            fact_key_col: "dim_id",
-            fact_value_col: "amount",
-            fact_value_cmp_op: "always_true",
-            fact_value_cmp_const: 0.0,
-            dim_table: "bench_mixed_dims",
-            dim_key_col: "id",
-            dim_filter_col: "label",
-            dim_filter_cmp_op: "always_true",
-            dim_filter_cmp_const: 0.0,
-            dim_group_col: "label",
-            dim_group_key_type: "int4",
-            allow_nullable_f64: false,
-        }),
-        _ => None,
-    }
-}
-
 fn i64_to_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
@@ -5042,287 +4720,127 @@ mod tests {
     }
 
     #[test]
-    fn test_resident_groupagg_cache_loader_covers_canonical_groupagg_workloads() {
+    fn test_resident_pin_specs_cover_grouped_aggregate_inputs_exactly() {
         assert_eq!(
-            resident_groupagg_cache_loader("grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::direct_i32(
-                "bench_employees_agg",
-                "dept",
-                "salary",
-                None,
-            ))
+            resident_pin_specs("grouped_agg"),
+            vec![resident_pin("bench_employees_agg", &["dept", "salary"],)]
         );
         assert_eq!(
-            resident_groupagg_cache_loader("hashagg_256g"),
-            Some(ResidentGroupAggCacheSpec::direct_i32(
-                "bench_hagg_sweep",
-                "grp",
-                "val",
-                None,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("grouped_agg_high_card"),
-            Some(ResidentGroupAggCacheSpec::direct_i32(
-                "bench_events_agg",
-                "user_id",
-                "val",
-                None,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("timeseries_sensor_rollup"),
-            Some(ResidentGroupAggCacheSpec::direct_i32(
-                "sensor_data",
-                "sensor_id",
-                "value",
-                None,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("dictionary_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::direct_text(
-                "bench_dictionary_sales",
-                "region",
-                "amount",
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                None,
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("predicate_filter_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
+            resident_pin_specs("predicate_filter_expression_grouped_agg"),
+            vec![resident_pin(
                 "bench_predicate_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
+                &["product_id", "price", "discount", "active"],
+            )]
         );
         assert_eq!(
-            resident_groupagg_cache_loader("case_when_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("case_when_range_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_range_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("case_when_value_predicate_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_value_predicate_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("case_when_null_predicate_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_null_predicate_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                true,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("case_when_or_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_or_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("case_when_in_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_in_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("case_when_not_expression_grouped_agg"),
-            Some(ResidentGroupAggCacheSpec::mul_i32(
-                "bench_case_when_not_expression_sales",
-                "product_id",
-                "price",
-                "discount",
-                Some("active"),
-                false,
-            ))
-        );
-        assert_eq!(
-            resident_groupagg_cache_loader("hashagg_f64_aggs"),
-            Some(ResidentGroupAggCacheSpec::stats_pair_i32(
-                "bench_fp64_num",
-                "gk",
-                "v_f64",
-                "w_f64",
-            ))
+            resident_pin_specs("hashagg_f64_aggs"),
+            vec![resident_pin("bench_fp64_num", &["gk", "v_f64", "w_f64"],)]
         );
     }
 
     #[test]
-    fn test_resident_f64_reduce_cache_loader_covers_fp64_reduce_workloads() {
-        let expected = Some(ResidentF64ReduceCacheSpec::direct(
-            "bench_fp64_num",
-            "v_f64",
-        ));
-        assert_eq!(resident_f64_reduce_cache_loader("reduce_f64_sum"), expected);
+    fn test_resident_pin_specs_cover_ssbm_inputs_exactly() {
         assert_eq!(
-            resident_f64_reduce_cache_loader("reduce_f64_minmax"),
-            expected
+            resident_pin_specs("ssbm_q1_3"),
+            vec![
+                resident_pin(
+                    "ssbm_lineorder",
+                    &[
+                        "lo_orderdate",
+                        "lo_extendedprice",
+                        "lo_discount",
+                        "lo_quantity",
+                    ],
+                ),
+                resident_pin("ssbm_date", &["d_datekey", "d_weeknuminyear", "d_year"],),
+            ]
         );
         assert_eq!(
-            resident_f64_reduce_cache_loader("reduce_f64_stats"),
-            expected
-        );
-    }
-
-    #[test]
-    fn test_resident_h3_groupagg_cache_loader_covers_canonical_h3_rollups() {
-        assert_eq!(
-            resident_h3_groupagg_cache_loader("h3_bulk"),
-            Some(ResidentH3GroupAggCacheSpec::latlng(
-                "bench_h3_points",
-                "geom",
-                7
-            ))
-        );
-        assert_eq!(
-            resident_h3_groupagg_cache_loader("h3_resolution_sweep"),
-            Some(ResidentH3GroupAggCacheSpec::latlng(
-                "bench_h3_sweep",
-                "geom",
-                9
-            ))
-        );
-        assert_eq!(
-            resident_h3_groupagg_cache_loader("h3_latlng_res15"),
-            Some(ResidentH3GroupAggCacheSpec::latlng(
-                "bench_h3_var",
-                "geom",
-                15
-            ))
-        );
-        assert_eq!(
-            resident_h3_groupagg_cache_loader("h3_cell_to_parent"),
-            Some(ResidentH3GroupAggCacheSpec::cell_to_parent(
-                "bench_h3_parent",
-                "cell",
-                4
-            ))
+            resident_pin_specs("ssbm_q4_3"),
+            vec![
+                resident_pin(
+                    "ssbm_lineorder",
+                    &[
+                        "lo_orderdate",
+                        "lo_custkey",
+                        "lo_suppkey",
+                        "lo_partkey",
+                        "lo_revenue",
+                        "lo_supplycost",
+                    ],
+                ),
+                resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+                resident_pin("ssbm_customer", &["c_custkey", "c_region"]),
+                resident_pin("ssbm_supplier", &["s_suppkey", "s_city", "s_nation"],),
+                resident_pin("ssbm_part", &["p_partkey", "p_brand1", "p_category"],),
+            ]
         );
     }
 
     #[test]
-    fn test_resident_hashjoin_count_cache_loader_covers_canonical_hashjoin_workloads() {
+    fn test_resident_pin_specs_cover_star_inputs_without_duplicates() {
         assert_eq!(
-            resident_hashjoin_count_cache_loader("hash_join"),
-            Some(ResidentHashJoinCountCacheSpec::int4(
-                "bench_orders",
-                "customer_id",
-                "bench_customers",
-                "customer_id",
-            ))
+            resident_pin_specs("gpu_hashjoin_filter"),
+            vec![
+                resident_pin("bench_hjf_fact", &["dim_id", "amount"]),
+                resident_pin("bench_hjf_dim", &["id", "category", "name"]),
+            ]
         );
         assert_eq!(
-            resident_hashjoin_count_cache_loader("hashjoin_10k_1m"),
-            Some(ResidentHashJoinCountCacheSpec::int4(
-                "bench_hj_outer",
-                "key",
-                "bench_hj_inner",
-                "key",
-            ))
-        );
-        assert_eq!(
-            resident_hashjoin_count_cache_loader("gpu_hashjoin_large_build"),
-            Some(ResidentHashJoinCountCacheSpec::int4(
-                "bench_hj_left",
-                "key",
-                "bench_hj_right",
-                "key",
-            ))
+            resident_pin_specs("mixed_join_agg"),
+            vec![
+                resident_pin("bench_mixed_facts", &["dim_id", "amount"]),
+                resident_pin("bench_mixed_dims", &["id", "label"]),
+            ]
         );
     }
 
     #[test]
-    fn test_resident_star_dim_groupagg_cache_loader_covers_join_groupagg_workloads() {
+    fn test_h3_workloads_have_no_phase5_resident_pins() {
+        for name in [
+            "h3_bulk",
+            "h3_resolution_sweep",
+            "h3_latlng_res15",
+            "h3_cell_to_parent",
+        ] {
+            assert!(
+                resident_pin_specs(name).is_empty(),
+                "{name} must remain unpinned until Phase 6 supports H3 inputs"
+            );
+            assert!(
+                !workload_is_resident_lane(name),
+                "{name} must not be classified as a Phase 5 resident lane"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resident_pin_specs_cover_hashjoin_inputs_exactly() {
         assert_eq!(
-            resident_star_dim_groupagg_cache_loader("gpu_hashjoin_filter"),
-            Some(ResidentStarDimGroupAggCacheSpec {
-                fact_table: "bench_hjf_fact",
-                fact_key_col: "dim_id",
-                fact_value_col: "amount",
-                fact_value_cmp_op: ">",
-                fact_value_cmp_const: 5000.0,
-                dim_table: "bench_hjf_dim",
-                dim_key_col: "id",
-                dim_filter_col: "category",
-                dim_filter_cmp_op: "<",
-                dim_filter_cmp_const: 50.0,
-                dim_group_col: "name",
-                dim_group_key_type: "text",
-                allow_nullable_f64: false,
-            })
+            resident_pin_specs("hash_join"),
+            vec![
+                resident_pin("bench_orders", &["customer_id"]),
+                resident_pin("bench_customers", &["customer_id"]),
+            ]
         );
         assert_eq!(
-            resident_star_dim_groupagg_cache_loader("mixed_join_agg"),
-            Some(ResidentStarDimGroupAggCacheSpec {
-                fact_table: "bench_mixed_facts",
-                fact_key_col: "dim_id",
-                fact_value_col: "amount",
-                fact_value_cmp_op: "always_true",
-                fact_value_cmp_const: 0.0,
-                dim_table: "bench_mixed_dims",
-                dim_key_col: "id",
-                dim_filter_col: "label",
-                dim_filter_cmp_op: "always_true",
-                dim_filter_cmp_const: 0.0,
-                dim_group_col: "label",
-                dim_group_key_type: "int4",
-                allow_nullable_f64: false,
-            })
+            resident_pin_specs("hashjoin_10k_1m"),
+            vec![
+                resident_pin("bench_hj_outer", &["key"]),
+                resident_pin("bench_hj_inner", &["key"]),
+            ]
         );
     }
 
     #[test]
-    fn test_correctness_projection_rounds_resident_groupagg_float_lanes() {
+    fn test_resident_lane_classification_follows_exact_pin_mapping() {
+        assert!(workload_is_resident_lane("grouped_agg"));
+        assert!(workload_is_resident_lane("ssbm_q2_1"));
+        assert!(!workload_is_resident_lane("small_table"));
+        assert!(resident_pin_specs("small_table").is_empty());
+    }
+    #[test]
+    fn test_correctness_projection_rounds_aggregate_float_lanes() {
         let spatial_sort = correctness_projection_sql(
             "SELECT id, ST_Distance(geom, ref) AS dist FROM bench_spatial_sort \
              ORDER BY dist, id LIMIT 500",
