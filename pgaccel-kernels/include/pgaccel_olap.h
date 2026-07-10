@@ -168,6 +168,9 @@ typedef struct {
  * mask and the optional compare-constant term. Bounds and constants are
  * pgaccel_val so INT64 predicates never round through f64. Their tags must
  * match the referenced source column. ALWAYS_TRUE disables compare-constant.
+ * When predicate_range_count is zero and the compare is ALWAYS_TRUE,
+ * predicate_source and predicate_measure_slot must both be canonical zero,
+ * including when mask is non-NULL.
  *
  * The descriptor has one global where_filter and one independent filter per
  * measure. Bytecode and spatial programs are producer stages: they write mask
@@ -285,19 +288,22 @@ typedef struct {
   uint32_t flags;
 } pgaccel_grouped_agg_key_out;
 
-/* Result buffers share output_space, which must be HOST or SHARED_USM. Dense
- * output is positional; active_groups is required and has group_capacity
+/* Result buffers share output_space, which must be HOST or SHARED_USM. For
+ * execute, out.group_capacity must equal desc.group_capacity exactly; every
+ * provided group/key/measure buffer must have at least that many elements.
+ * Dense output is positional; active_groups is required and has group_capacity
  * bytes. It records group existence after key/dim/WHERE gating independently
  * of aggregate validity. Compact output requires typed key lanes. HASH always
  * uses compact output and requires group_codes == NULL because no stable dense
  * composite code exists.
  *
- * emitted_group_count is the active-group count in both modes. A zero-key
- * aggregate always has one active group, even on empty input. A keyed aggregate
- * on empty input has none. Count and nonnull_count lanes are always written as
- * zero for inactive/all-NULL groups. SUM/SUMSQ are canonical numeric zero when
- * nonnull_count is zero; MIN/MAX bytes are unspecified and must not be read.
- * Buffers may not overlap one another, inputs, or scratch. */
+ * emitted_group_count is the active-group count in both modes and never exceeds
+ * group_capacity; in COMPACT mode only [0, emitted_group_count) is emitted. A
+ * zero-key aggregate always has one active group, even on empty input. A keyed
+ * aggregate on empty input has none. Count and nonnull_count lanes are always
+ * written as zero for inactive/all-NULL groups. SUM/SUMSQ are canonical numeric
+ * zero when nonnull_count is zero; MIN/MAX bytes are unspecified and must not be
+ * read. Buffers may not overlap one another, inputs, or scratch. */
 typedef struct {
   uint32_t abi_version;
   uint32_t size_bytes;

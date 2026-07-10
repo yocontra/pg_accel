@@ -358,6 +358,21 @@ impl FilterSpec {
         }
         Ok(())
     }
+
+    fn references_relation(&self, relation_oid: u32) -> bool {
+        match self {
+            Self::None => false,
+            Self::Ranges { input, .. } | Self::Mask { input, .. } => {
+                input.relation_oid == relation_oid
+            }
+            Self::Bytecode { inputs, .. } => inputs
+                .iter()
+                .any(|input| input.relation_oid == relation_oid),
+            Self::Spatial { left, right, .. } => {
+                left.relation_oid == relation_oid || right.relation_oid == relation_oid
+            }
+        }
+    }
 }
 
 impl GroupKeyEncoding {
@@ -533,6 +548,14 @@ impl MeasureSpec {
                 }
             }
         }
+        if dims.iter().any(|dim| {
+            dim.multiplicity == JoinMultiplicity::Counted
+                && self.filter.references_relation(dim.relation_oid)
+        }) {
+            return Err(SpecValidationError::new(
+                "measure filter references a counted dimension",
+            ));
+        }
         self.filter.validate_relation_scope(|relation_oid| {
             relation_oid == fact_rel || dims.iter().any(|dim| dim.relation_oid == relation_oid)
         })
@@ -543,6 +566,11 @@ impl DimSpec {
     fn validate(&self, fact_rel: u32) -> Result<(), SpecValidationError> {
         if self.relation_oid == 0 {
             return Err(SpecValidationError::new("invalid dimension relation OID"));
+        }
+        if self.relation_oid == fact_rel {
+            return Err(SpecValidationError::new(
+                "dimension relation OID equals the fact relation OID",
+            ));
         }
         self.fact_key.validate()?;
         self.dim_key.validate()?;
@@ -602,7 +630,13 @@ impl AggQuerySpec {
         {
             return Err(SpecValidationError::new("invalid aggregate query shape"));
         }
-        for dim in &self.star_dims {
+        for (index, dim) in self.star_dims.iter().enumerate() {
+            if self.star_dims[..index]
+                .iter()
+                .any(|prior| prior.relation_oid == dim.relation_oid)
+            {
+                return Err(SpecValidationError::new("duplicate dimension relation OID"));
+            }
             dim.validate(self.fact_rel)?;
         }
         let mut dense_product = 1usize;

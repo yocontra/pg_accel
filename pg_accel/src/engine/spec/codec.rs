@@ -1404,5 +1404,55 @@ mod tests {
             spec.validate().is_err(),
             "filter from an unrelated relation was accepted"
         );
+
+        let mut self_dimension = minimal_spec();
+        self_dimension.star_dims.push(DimSpec {
+            relation_oid: self_dimension.fact_rel,
+            fact_key: column(10, 2, INT4_OID),
+            dim_key: column(10, 1, INT4_OID),
+            multiplicity: JoinMultiplicity::Unique,
+            filter: FilterSpec::None,
+        });
+        assert!(
+            self_dimension.validate().is_err(),
+            "dimension sharing the fact relation OID was accepted"
+        );
+
+        let mut duplicate_dimensions = minimal_spec();
+        let dimension = DimSpec {
+            relation_oid: 20,
+            fact_key: column(10, 2, INT4_OID),
+            dim_key: column(20, 1, INT4_OID),
+            multiplicity: JoinMultiplicity::Unique,
+            filter: FilterSpec::None,
+        };
+        duplicate_dimensions.star_dims = vec![dimension.clone(), dimension];
+        assert!(
+            duplicate_dimensions.validate().is_err(),
+            "duplicate dimension relation OIDs were accepted"
+        );
+    }
+
+    #[test]
+    fn measure_filter_cannot_collapse_two_dimension_rows_to_one_fact_mask() {
+        let mut spec = minimal_spec();
+        spec.star_dims.push(DimSpec {
+            relation_oid: 20,
+            fact_key: column(10, 2, INT4_OID),
+            dim_key: column(20, 1, INT4_OID),
+            multiplicity: JoinMultiplicity::Counted,
+            filter: FilterSpec::None,
+        });
+        spec.measures[0].filter = FilterSpec::Mask {
+            input: column(20, 2, BOOL_OID),
+            kind: MaskKind::Sql,
+        };
+
+        // One fact key may join two dimension rows with different mask values;
+        // one fact-row mask cannot preserve both aggregate FILTER outcomes.
+        assert!(
+            spec.validate().is_err(),
+            "counted-dimension measure FILTER was accepted"
+        );
     }
 }

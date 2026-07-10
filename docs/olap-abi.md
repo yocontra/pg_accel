@@ -109,10 +109,12 @@ objects to the kernel ABI.
 ## Normative canonical form and pointer matrices
 
 The tables in this section are validation rules. "MUST-NONNULL" is conditional
-on the addressed logical length being nonzero (`row_count`, `key_count`, or
-`group_capacity` as applicable); a zero-length input may use NULL. "Optional"
-means NULL selects the documented identity/default. "Canonical zero" means a
-NULL pointer or integer zero. A canonical `pgaccel_val` NULL has tag
+on the addressed logical length being nonzero (`row_count`, a dimension's
+`key_count`, or `out.group_capacity` as applicable); a zero-length input may use
+NULL. Execute requires `out.group_capacity == desc.group_capacity`, so every
+provided output buffer has that one common declared capacity. "Optional" means
+NULL selects the documented identity/default. "Canonical zero" means a NULL
+pointer or integer zero. A canonical `pgaccel_val` NULL has tag
 `PGACCEL_VAL_NULL` and every data byte zero.
 
 A canonical zero measure view is exactly:
@@ -138,12 +140,16 @@ accepting hidden pointers.
 | COUNT_STAR measure | both measure views MUST-NULL | both MUST-NULL | none | both measure views are canonical zero |
 | Dimension fact join key | `dims[j].fact_key.values` MUST-NONNULL | optional | `match_by_key` and `multiplicity_by_key` are independently optional | NULL match map means all in-domain keys match; NULL multiplicity map means one |
 
-The spec requires each join-key OID pair to agree. Measure expressions resolve
-only fact columns. Fact/measure filters may reference the fact relation and
-dimensions explicitly declared by the same spec, never an unrelated relation.
-A dimension-local filter resolves only that dimension. Expression/H3 fact keys
-resolve only fact columns. A dimension referenced by a group key must use
-`JoinMultiplicity::Unique`.
+The spec requires each join-key OID pair to agree. `ColumnRef` has no range-table
+index identity, so every dimension relation OID must differ from `fact_rel` and
+from every other dimension relation OID. Measure expressions resolve only fact
+columns. Fact filters may reference the fact relation and dimensions explicitly
+declared by the same spec. A measure FILTER may reference a declared dimension
+only when that dimension uses `JoinMultiplicity::Unique`; a Counted dimension
+can produce two differently filtered join rows for one fact row and cannot be
+represented by one fact-row mask. A dimension-local filter resolves only that
+dimension. Expression/H3 fact keys resolve only fact columns. A dimension
+referenced by a group key must also use `JoinMultiplicity::Unique`.
 
 ### Fixed slots and disabled filters
 
@@ -176,17 +182,25 @@ Active filter fields obey this matrix:
 | no producer mask | MUST be `FILTER_NONE` | MUST-NULL | ranges/compare may still be active |
 | SQL mask | MUST be `FILTER_SQL` | MUST-NONNULL | ranges/compare optional |
 | recheck mask | MUST be `FILTER_RECHECK` | MUST-NONNULL | ranges/compare optional |
-| `predicate_range_count = n` | any valid kind | as above | slots `[0,n)` typed and ordered; slots `[n,MAX)` canonical NULL |
+| `predicate_range_count = n > 0` | any valid kind | as above | slots `[0,n)` typed and ordered; slots `[n,MAX)` canonical NULL |
 | compare disabled | any valid kind | as above | opcode ALWAYS_TRUE and constant canonical NULL |
 | compare enabled | any valid kind | as above | valid comparison opcode and constant tag exactly matching its source |
+| no scalar predicate (`range_count=0` and compare disabled) | any valid kind | MAY be active | `predicate_source=0` and `predicate_measure_slot=0`; every bound and constant canonical NULL |
 
 `predicate_measure_slot` must name an active measure whenever a scalar range or
-compare is enabled. RHS requires that measure to be STATS_PAIR. For
-PHYSICAL_NUMERIC and PHYSICAL_INTERVAL there is no `pgaccel_val` representation;
-their scalar predicate fields MUST remain disabled and a producer mask is
-required.
+compare is enabled. RHS requires that measure to be STATS_PAIR. When neither
+scalar form is enabled, source and slot remain canonical zero even if `mask` is
+non-NULL. For PHYSICAL_NUMERIC and PHYSICAL_INTERVAL there is no `pgaccel_val`
+representation; their scalar predicate fields MUST remain disabled and a
+producer mask is required.
 
 ### Output mode, keys, and sidecars
+
+For every execute call, `out.group_capacity` MUST equal
+`desc.group_capacity`; larger output descriptors are not accepted as a generic
+capacity reserve and smaller ones are not truncated. Every provided output
+array has at least that many elements. COMPACT output writes only
+`[0, emitted_group_count)`, and `emitted_group_count <= group_capacity`.
 
 | Grouping/output mode | `active_groups` | `group_codes` | active key output lanes |
 |---|---|---|---|
@@ -443,8 +457,10 @@ Accumulator states are explicit:
 
 All output buffers share `output_space`, which is HOST or SHARED_USM. DEVICE
 output is invalid because the executor must materialize PostgreSQL tuples.
-Buffers must have at least `out.group_capacity` elements, must not overlap one
-another, and must not alias descriptor inputs or workspace.
+Execute requires `out.group_capacity == desc.group_capacity`; every provided
+buffer has at least that many elements. Buffers must not overlap one another
+and must not alias descriptor inputs or workspace. COMPACT output's valid
+prefix ends at `emitted_group_count`, which never exceeds the common capacity.
 
 DENSE mode is positional. `group_codes` and typed key lanes may be NULL; the
 executor decomposes the slot index with key radices and derived dictionaries.
