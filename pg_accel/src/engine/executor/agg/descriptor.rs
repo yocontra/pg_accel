@@ -68,10 +68,26 @@ fn validate_filter(filter: &FilterSpec, relation_oid: u32, dimension: bool) -> R
                 && if dimension {
                     matches!(
                         input.type_oid,
-                        BOOLOID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID
+                        BOOLOID
+                            | INT4OID
+                            | INT8OID
+                            | FLOAT4OID
+                            | FLOAT8OID
+                            | DATEOID
+                            | TIMESTAMPOID
+                            | TIMESTAMPTZOID
                     )
                 } else {
-                    matches!(input.type_oid, INT4OID | INT8OID | FLOAT8OID)
+                    matches!(
+                        input.type_oid,
+                        INT4OID
+                            | INT8OID
+                            | FLOAT4OID
+                            | FLOAT8OID
+                            | DATEOID
+                            | TIMESTAMPOID
+                            | TIMESTAMPTZOID
+                    )
                 } =>
         {
             Ok(())
@@ -122,6 +138,16 @@ fn validate_measure_outputs(
         }
         MeasureExpr::Column(column)
             if matches!(column.type_oid, INT8OID | FLOAT8OID) && count_min_max() =>
+        {
+            Ok(())
+        }
+        MeasureExpr::Column(column)
+            if matches!(
+                column.type_oid,
+                BOOLOID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID
+            ) && outputs
+                .iter()
+                .all(|output| output.kind == AggregateKind::Count) =>
         {
             Ok(())
         }
@@ -245,6 +271,57 @@ fn validate_catalog_collations(spec: &AggQuerySpec) -> Result<(), String> {
                 "collation OID {oid} is missing or nondeterministic at execution time"
             ));
         }
+    }
+    let validate_column = |column: ColumnRef, expected_collation: u32| -> Result<(), String> {
+        let attnum = i16::try_from(column.attno)
+            .map_err(|_| format!("attribute {} exceeds int16", column.attno))?;
+        let mut type_oid = pg_sys::InvalidOid;
+        let mut typmod = -1;
+        let mut collation_oid = pg_sys::InvalidOid;
+        // SAFETY: executor Begin runs on the main backend thread. The strict
+        // spec proved positive relation/attribute identities before lookup.
+        unsafe {
+            pg_sys::get_atttypetypmodcoll(
+                pg_sys::Oid::from(column.relation_oid),
+                attnum,
+                std::ptr::from_mut(&mut type_oid),
+                std::ptr::from_mut(&mut typmod),
+                std::ptr::from_mut(&mut collation_oid),
+            );
+        }
+        if u32::from(type_oid) != column.type_oid {
+            return Err(format!(
+                "column ({}, {}) catalog type OID {} does not match planned OID {}",
+                column.relation_oid,
+                column.attno,
+                u32::from(type_oid),
+                column.type_oid
+            ));
+        }
+        if u32::from(collation_oid) != expected_collation {
+            return Err(format!(
+                "column ({}, {}) catalog collation OID {} does not match planned OID {}",
+                column.relation_oid,
+                column.attno,
+                u32::from(collation_oid),
+                expected_collation
+            ));
+        }
+        Ok(())
+    };
+    for key in &spec.group_keys {
+        match key.source {
+            GroupKeySource::FactColumn(column)
+            | GroupKeySource::StarDimension {
+                group_column: column,
+                ..
+            } => validate_column(column, key.collation_oid)?,
+            GroupKeySource::Expression { .. } | GroupKeySource::H3Cell { .. } => {}
+        }
+    }
+    for dimension in &spec.star_dims {
+        validate_column(dimension.fact_key, dimension.collation_oid)?;
+        validate_column(dimension.dim_key, dimension.collation_oid)?;
     }
     Ok(())
 }
@@ -525,6 +602,12 @@ fn measure_column(
     }
     let (values, nulls, physical_type, element_bytes) = match view {
         ResidentColumnView::Empty { type_oid } => match u32::from(*type_oid) {
+            BOOLOID => (
+                std::ptr::null(),
+                std::ptr::null(),
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+                1,
+            ),
             INT4OID => (
                 std::ptr::null(),
                 std::ptr::null(),
@@ -543,8 +626,36 @@ fn measure_column(
                 abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64,
                 8,
             ),
+            FLOAT4OID => (
+                std::ptr::null(),
+                std::ptr::null(),
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32,
+                4,
+            ),
+            DATEOID => (
+                std::ptr::null(),
+                std::ptr::null(),
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
+                4,
+            ),
+            TIMESTAMPOID | TIMESTAMPTZOID => (
+                std::ptr::null(),
+                std::ptr::null(),
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP,
+                8,
+            ),
             type_oid => return Err(format!("type OID {type_oid} cannot be a measure")),
         },
+        ResidentColumnView::Bool {
+            type_oid,
+            values,
+            nulls,
+        } if u32::from(*type_oid) == BOOLOID => (
+            values.as_ptr().cast::<c_void>(),
+            null_ptr(*nulls),
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+            1,
+        ),
         ResidentColumnView::I32 {
             type_oid,
             values,
@@ -553,6 +664,16 @@ fn measure_column(
             values.as_ptr().cast::<c_void>(),
             null_ptr(*nulls),
             abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+            4,
+        ),
+        ResidentColumnView::I32 {
+            type_oid,
+            values,
+            nulls,
+        } if u32::from(*type_oid) == DATEOID => (
+            values.as_ptr().cast::<c_void>(),
+            null_ptr(*nulls),
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
             4,
         ),
         ResidentColumnView::I64 {
@@ -564,6 +685,26 @@ fn measure_column(
             null_ptr(*nulls),
             abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64,
             8,
+        ),
+        ResidentColumnView::I64 {
+            type_oid,
+            values,
+            nulls,
+        } if matches!(u32::from(*type_oid), TIMESTAMPOID | TIMESTAMPTZOID) => (
+            values.as_ptr().cast::<c_void>(),
+            null_ptr(*nulls),
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP,
+            8,
+        ),
+        ResidentColumnView::F32 {
+            type_oid,
+            values,
+            nulls,
+        } if u32::from(*type_oid) == FLOAT4OID => (
+            values.as_ptr().cast::<c_void>(),
+            null_ptr(*nulls),
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32,
+            4,
         ),
         ResidentColumnView::F64 {
             type_oid,
@@ -618,6 +759,14 @@ fn scalar_value(value: ScalarValue) -> PgaccelVal {
         ScalarValue::I64(value) => PgaccelVal::from_i64(value),
         ScalarValue::F32(value) => PgaccelVal::from_f32(value),
         ScalarValue::F64(value) => PgaccelVal::from_f64(value),
+        ScalarValue::Date(value) => PgaccelVal {
+            tag: PgaccelValTag::Date,
+            data: value as u64,
+        },
+        ScalarValue::Timestamp(value) | ScalarValue::TimestampTz(value) => PgaccelVal {
+            tag: PgaccelValTag::Timestamp,
+            data: value as u64,
+        },
     }
 }
 
@@ -769,7 +918,7 @@ fn build_descriptor(
                     abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
                     measure_column(view, artifact.fact_rows)?,
                     unsafe { std::mem::zeroed() },
-                    if column.type_oid == FLOAT8OID {
+                    if matches!(column.type_oid, FLOAT4OID | FLOAT8OID) {
                         abi::PGACCEL_GROUPED_AGG_ACCUM_F64
                     } else {
                         abi::PGACCEL_GROUPED_AGG_ACCUM_I64
@@ -977,5 +1126,79 @@ mod tests {
             }],
         };
         assert!(validate_runtime_capability(&spec, &projection).is_err());
+    }
+
+    #[test]
+    fn logical_temporal_scalars_map_to_distinct_abi_tags() {
+        let date = scalar_value(ScalarValue::Date(-7));
+        let timestamp = scalar_value(ScalarValue::Timestamp(-11));
+        let timestamptz = scalar_value(ScalarValue::TimestampTz(13));
+        assert_eq!(date.tag, PgaccelValTag::Date);
+        assert_eq!(date.data, (-7_i32) as u64);
+        assert_eq!(timestamp.tag, PgaccelValTag::Timestamp);
+        assert_eq!(timestamp.data, (-11_i64) as u64);
+        assert_eq!(timestamptz.tag, PgaccelValTag::Timestamp);
+        assert_eq!(timestamptz.data, 13);
+    }
+
+    #[test]
+    fn predicate_only_columns_use_exact_physical_types() {
+        for (type_oid, expected_physical, expected_bytes) in [
+            (BOOLOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1),
+            (FLOAT4OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, 4),
+            (DATEOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE, 4),
+            (TIMESTAMPOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, 8),
+            (
+                TIMESTAMPTZOID,
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP,
+                8,
+            ),
+        ] {
+            let column = measure_column(
+                &ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(type_oid),
+                },
+                0,
+            )
+            .expect("predicate-only type binds");
+            assert_eq!(column.physical_type, expected_physical);
+            assert_eq!(column.element_bytes, expected_bytes);
+        }
+    }
+
+    #[test]
+    fn runtime_backstop_accepts_hidden_temporal_and_float4_counts() {
+        let cases = [
+            (FLOAT4OID, ScalarValue::F32(1.0), ScalarValue::F32(2.0)),
+            (DATEOID, ScalarValue::Date(1), ScalarValue::Date(2)),
+            (
+                TIMESTAMPOID,
+                ScalarValue::Timestamp(1),
+                ScalarValue::Timestamp(2),
+            ),
+            (
+                TIMESTAMPTZOID,
+                ScalarValue::TimestampTz(1),
+                ScalarValue::TimestampTz(2),
+            ),
+        ];
+        for (type_oid, lo, hi) in cases {
+            let mut spec = spec(MeasureExpr::CountStar, AggregateKind::Count);
+            let input = column(type_oid);
+            spec.measures.push(MeasureSpec {
+                expression: MeasureExpr::Column(input),
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            });
+            spec.fact_filter = FilterSpec::Ranges {
+                input,
+                ranges: vec![crate::engine::spec::ScalarRange { lo, hi }],
+            };
+            validate_runtime_capability(&spec, &projection(AggregateKind::Count, 0, INT8OID))
+                .unwrap_or_else(|error| panic!("type OID {type_oid} should bind: {error}"));
+        }
     }
 }

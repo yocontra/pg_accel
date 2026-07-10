@@ -277,6 +277,11 @@ impl HostColumn {
     }
 
     fn validate_nulls(&self) -> Result<(), String> {
+        if let Self::Bool { values, .. } = self
+            && values.iter().any(|value| *value > 1)
+        {
+            return Err("resident boolean column contains a noncanonical value".to_owned());
+        }
         let Some(nulls) = self.nulls() else {
             return Ok(());
         };
@@ -364,7 +369,22 @@ impl HostColumn {
         }
         let value = match self {
             Self::Bool { values, .. } => ScalarValue::Bool(values[row] != 0),
+            Self::I32 {
+                type_oid: DATEOID,
+                values,
+                ..
+            } => ScalarValue::Date(values[row]),
             Self::I32 { values, .. } => ScalarValue::I32(values[row]),
+            Self::I64 {
+                type_oid: TIMESTAMPOID,
+                values,
+                ..
+            } => ScalarValue::Timestamp(values[row]),
+            Self::I64 {
+                type_oid: TIMESTAMPTZOID,
+                values,
+                ..
+            } => ScalarValue::TimestampTz(values[row]),
             Self::I64 { values, .. } => ScalarValue::I64(values[row]),
             Self::F32 { values, .. } => ScalarValue::F32(values[row]),
             Self::F64 { values, .. } => ScalarValue::F64(values[row]),
@@ -512,6 +532,9 @@ fn scalar_cmp(left: ScalarValue, right: ScalarValue) -> Result<std::cmp::Orderin
         (ScalarValue::Bool(left), ScalarValue::Bool(right)) => left.cmp(&right),
         (ScalarValue::I32(left), ScalarValue::I32(right)) => left.cmp(&right),
         (ScalarValue::I64(left), ScalarValue::I64(right)) => left.cmp(&right),
+        (ScalarValue::Date(left), ScalarValue::Date(right)) => left.cmp(&right),
+        (ScalarValue::Timestamp(left), ScalarValue::Timestamp(right))
+        | (ScalarValue::TimestampTz(left), ScalarValue::TimestampTz(right)) => left.cmp(&right),
         (ScalarValue::F32(left), ScalarValue::F32(right)) => {
             if left.is_nan() {
                 if right.is_nan() {
@@ -1019,6 +1042,38 @@ mod tests {
         };
         assert!(in_range(ScalarValue::F64(1.0), range).expect("range"));
         assert!(!in_range(ScalarValue::F64(f64::NAN), range).expect("range"));
+    }
+
+    #[test]
+    fn temporal_host_filters_preserve_logical_scalar_identity() {
+        let date = HostColumn::I32 {
+            type_oid: DATEOID,
+            values: vec![17],
+            nulls: None,
+        };
+        let timestamp = HostColumn::I64 {
+            type_oid: TIMESTAMPOID,
+            values: vec![42],
+            nulls: None,
+        };
+        let timestamptz = HostColumn::I64 {
+            type_oid: TIMESTAMPTZOID,
+            values: vec![84],
+            nulls: None,
+        };
+        assert_eq!(date.filter_value(0), Ok(Some(ScalarValue::Date(17))));
+        assert_eq!(
+            timestamp.filter_value(0),
+            Ok(Some(ScalarValue::Timestamp(42)))
+        );
+        assert_eq!(
+            timestamptz.filter_value(0),
+            Ok(Some(ScalarValue::TimestampTz(84)))
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::Date(1), ScalarValue::Date(2)),
+            Ok(std::cmp::Ordering::Less)
+        );
     }
 
     #[test]
