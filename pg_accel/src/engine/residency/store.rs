@@ -562,16 +562,12 @@ impl RelationStore {
         })
     }
 
-    fn evict_lru_derived(&mut self, protected: &BTreeSet<u32>) -> bool {
+    fn evict_lru_derived(&mut self) -> bool {
         let candidate = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
-                !entry.pinned
-                    && !entry.derived.is_empty()
-                    && !protected.contains(&u32::from(entry.relid))
-            })
+            .filter(|(_, entry)| !entry.pinned && !entry.derived.is_empty())
             .min_by_key(|(_, entry)| entry.last_used_tick)
             .map(|(index, _)| index);
         candidate.is_some_and(|index| {
@@ -590,7 +586,7 @@ impl RelationStore {
         &mut self,
         protected: &BTreeSet<u32>,
     ) -> Option<EvictionKind> {
-        if self.evict_lru_derived(protected) {
+        if self.evict_lru_derived() {
             Some(EvictionKind::Derived)
         } else if self.evict_lru_unpinned(protected) {
             Some(EvictionKind::RawRelation)
@@ -2204,7 +2200,7 @@ mod tests {
     }
 
     #[test]
-    fn protected_dependencies_are_not_eviction_candidates() {
+    fn protected_raw_dependencies_can_release_derived_artifacts() {
         let mut store = RelationStore::default();
         let mut protected_owner = empty_relation(900, false, 1);
         protected_owner.derived.push(DerivedEntry {
@@ -2229,12 +2225,13 @@ mod tests {
             store.evict_one_for_budget_excluding(&protected),
             Some(EvictionKind::Derived)
         );
-        assert_eq!(store.entries[0].derived.len(), 1);
-        assert!(store.entries[1].derived.is_empty());
+        assert!(store.entries[0].derived.is_empty());
+        assert_eq!(store.entries[1].derived.len(), 1);
+        assert_eq!(store.entries[0].relid, pg_sys::Oid::from(900_u32));
     }
 
     #[test]
-    fn finite_budget_retry_protects_every_declared_dependency() {
+    fn finite_budget_replaces_owner_artifact_without_evicting_raw_dependencies() {
         let owner = pg_sys::Oid::from(910_u32);
         let dimension_a = pg_sys::Oid::from(911_u32);
         let dimension_b = pg_sys::Oid::from(912_u32);
@@ -2291,28 +2288,25 @@ mod tests {
         assert_eq!(evicted.get(), Some(EvictionKind::Derived));
         assert_eq!(live.get(), 32);
         STORE.with(|store| {
-            let store = store.borrow();
+            let mut store = store.borrow_mut();
             for relid in [owner, dimension_a, dimension_b] {
-                assert_eq!(
-                    store
-                        .entries
-                        .iter()
-                        .find(|entry| entry.relid == relid)
-                        .expect("protected relation remains")
-                        .derived
-                        .len(),
-                    1
-                );
+                assert!(store.entries.iter().any(|entry| entry.relid == relid));
             }
-            assert!(
-                store
-                    .entries
-                    .iter()
-                    .find(|entry| entry.relid == evictable)
-                    .expect("raw relation remains")
-                    .derived
-                    .is_empty()
-            );
+            let owner_entry = store
+                .entries
+                .iter_mut()
+                .find(|entry| entry.relid == owner)
+                .expect("protected owner remains");
+            assert!(owner_entry.derived.is_empty());
+            owner_entry.derived.push(DerivedEntry {
+                digest: 999,
+                canonical_words: vec![99].into_boxed_slice(),
+                dependencies: Box::default(),
+                artifact: Box::new(SizedArtifact(8)),
+                charge: LedgerCharge::reserve(0, 0).expect("modeled replacement charge"),
+            });
+            assert_eq!(owner_entry.derived.len(), 1);
+            assert!(store.entries.iter().any(|entry| entry.relid == evictable));
         });
         STORE.with(|store| store.borrow_mut().entries.clear());
     }
