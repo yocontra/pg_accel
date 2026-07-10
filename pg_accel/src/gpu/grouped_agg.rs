@@ -610,6 +610,16 @@ fn key_width(tag: PgaccelValTag) -> Option<usize> {
     }
 }
 
+fn key_output_nullable(desc: &abi::PgaccelGroupedAggDesc, key: &abi::PgaccelGroupedAggKey) -> bool {
+    if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
+        && key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
+    {
+        !key.values.nulls.is_null()
+    } else {
+        key.null_code != abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE
+    }
+}
+
 /// Host-visible buffers owned for one grouped-aggregate result.
 pub struct GroupedAggOutputStorage {
     capacity: usize,
@@ -656,10 +666,7 @@ impl GroupedAggOutputStorage {
                     .ok_or_else(|| descriptor_error("compact output key has invalid type"))?;
                 key_values[index] = Some(RawHostBuffer::zeroed(capacity, width)?);
                 key_types[index] = tag as i32;
-                if key.null_code != abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE
-                    || (desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
-                        && !key.values.nulls.is_null())
-                {
+                if key_output_nullable(desc, key) {
                     key_nulls[index] = Some(zero_vec(capacity)?);
                 }
             }
@@ -1172,6 +1179,29 @@ mod tests {
         assert_eq!(storage.key_type(0), Some(PgaccelValTag::Int32 as i32));
         let raw = storage.raw();
         assert_eq!(raw.keys[0].value_type, PgaccelValTag::Int32 as i32);
+    }
+
+    #[test]
+    fn hash_fact_key_nullability_comes_only_from_input_sidecar() {
+        static NULLS: [u8; 1] = [0];
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        descriptor.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+        descriptor.keys[0].null_code = 0;
+        // SAFETY: pointer-free fixture is not dispatched.
+        let nonnullable = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("hash fact fixture is structurally valid");
+        let mut output = GroupedAggOutputStorage::new(&nonnullable).expect("output allocates");
+        assert!(output.key_nulls(0).is_none());
+        assert!(output.raw().keys[0].nulls.is_null());
+
+        descriptor.keys[0].null_code = abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE;
+        descriptor.keys[0].values.nulls = NULLS.as_ptr();
+        // SAFETY: static sidecar remains valid and the fixture is not dispatched.
+        let nullable = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("nullable hash fact fixture is structurally valid");
+        let mut output = GroupedAggOutputStorage::new(&nullable).expect("output allocates");
+        assert_eq!(output.key_nulls(0).expect("NULL lane").len(), 4);
+        assert!(!output.raw().keys[0].nulls.is_null());
     }
 
     #[test]
