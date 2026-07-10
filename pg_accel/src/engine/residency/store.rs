@@ -259,6 +259,39 @@ pub enum ResidentColumnView<'a> {
     },
 }
 
+impl ResidentColumnView<'_> {
+    #[must_use]
+    pub const fn type_oid(&self) -> pg_sys::Oid {
+        match self {
+            Self::Empty { type_oid }
+            | Self::Bool { type_oid, .. }
+            | Self::I32 { type_oid, .. }
+            | Self::I64 { type_oid, .. }
+            | Self::F32 { type_oid, .. }
+            | Self::F64 { type_oid, .. }
+            | Self::TextDictionary { type_oid, .. } => *type_oid,
+        }
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Empty { .. } => 0,
+            Self::Bool { values, .. } => values.len(),
+            Self::I32 { values, .. } => values.len(),
+            Self::I64 { values, .. } => values.len(),
+            Self::F32 { values, .. } => values.len(),
+            Self::F64 { values, .. } => values.len(),
+            Self::TextDictionary { codes, .. } => codes.len(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Typed output decoder carried beside a resolved derived artifact.
 pub enum ResidentKeyDecoder<'a> {
     Scalar(pg_sys::Oid),
@@ -285,8 +318,95 @@ pub trait DerivedArtifact: Any {
     fn as_any(&self) -> &dyn Any;
 }
 
+/// Exact identity for one derived shape. The digest is an index accelerator;
+/// correctness always compares the complete canonical word sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedArtifactIdentity {
+    digest: u64,
+    canonical_words: Box<[i32]>,
+}
+
+impl DerivedArtifactIdentity {
+    #[must_use]
+    pub fn from_canonical_words(words: Vec<i32>) -> Self {
+        let digest = shape_digest(&words);
+        Self {
+            digest,
+            canonical_words: words.into_boxed_slice(),
+        }
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> u64 {
+        self.digest
+    }
+
+    #[must_use]
+    pub fn canonical_words(&self) -> &[i32] {
+        &self.canonical_words
+    }
+}
+
+/// Ordered resident-column request used by bulk artifact preparation and use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentColumnRef {
+    pub relid: pg_sys::Oid,
+    pub attno: i16,
+}
+
+/// Relation version captured with a derived artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentDependencyStamp {
+    pub relid: pg_sys::Oid,
+    pub generation: u64,
+    pub global_generation: u64,
+    pub relfilenode: pg_sys::Oid,
+}
+
+impl ResidentDependencyStamp {
+    fn from_relation(relation: &ResidentRelation) -> Self {
+        Self {
+            relid: relation.relid,
+            generation: relation.generation.relation,
+            global_generation: relation.generation.global,
+            relfilenode: relation.relfilenode,
+        }
+    }
+}
+
+/// Host-only result of preparing a derived artifact. The store reserves the
+/// declared device bytes before passing `prepared` to the device builder.
+pub struct PreparedDerived<P> {
+    pub prepared: P,
+    pub device_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactEnsureOutcome {
+    Hit,
+    Built,
+    Rebuilt,
+}
+
+/// All requested raw columns and dependency evidence under one store borrow.
+pub struct ResidentInputBundle<'a> {
+    pub columns: Vec<ResidentColumnView<'a>>,
+    pub evidence: Vec<ResidentRelationEvidence>,
+}
+
+/// Typed derived artifact plus raw inputs under one store borrow. No device
+/// pointer reachable from this value may escape the callback receiving it.
+pub struct ResolvedDerivedInputs<'a, T> {
+    pub artifact: &'a T,
+    pub columns: Vec<ResidentColumnView<'a>>,
+    pub evidence: Vec<ResidentRelationEvidence>,
+    pub device_bytes: u64,
+}
+
 pub(super) struct DerivedEntry {
     digest: u64,
+    canonical_words: Box<[i32]>,
+    dependencies: Box<[ResidentDependencyStamp]>,
     artifact: Box<dyn DerivedArtifact>,
     charge: LedgerCharge,
 }
@@ -294,6 +414,11 @@ pub(super) struct DerivedEntry {
 impl DerivedEntry {
     fn bytes(&self) -> u64 {
         self.charge.bytes()
+    }
+
+    fn has_identity(&self, identity: &DerivedArtifactIdentity) -> bool {
+        self.digest == identity.digest
+            && self.canonical_words.as_ref() == identity.canonical_words()
     }
 }
 
@@ -423,12 +548,12 @@ impl RelationStore {
         self.entries.len() != old_len
     }
 
-    fn evict_lru_unpinned(&mut self, except: pg_sys::Oid) -> bool {
+    fn evict_lru_unpinned(&mut self, protected: &BTreeSet<u32>) -> bool {
         let candidate = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.pinned && entry.relid != except)
+            .filter(|(_, entry)| !entry.pinned && !protected.contains(&u32::from(entry.relid)))
             .min_by_key(|(_, entry)| entry.last_used_tick)
             .map(|(index, _)| index);
         candidate.is_some_and(|index| {
@@ -437,12 +562,16 @@ impl RelationStore {
         })
     }
 
-    fn evict_lru_derived(&mut self) -> bool {
+    fn evict_lru_derived(&mut self, protected: &BTreeSet<u32>) -> bool {
         let candidate = self
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| !entry.pinned && !entry.derived.is_empty())
+            .filter(|(_, entry)| {
+                !entry.pinned
+                    && !entry.derived.is_empty()
+                    && !protected.contains(&u32::from(entry.relid))
+            })
             .min_by_key(|(_, entry)| entry.last_used_tick)
             .map(|(index, _)| index);
         candidate.is_some_and(|index| {
@@ -451,10 +580,19 @@ impl RelationStore {
         })
     }
 
+    #[cfg(test)]
     fn evict_one_for_budget(&mut self, except: pg_sys::Oid) -> Option<EvictionKind> {
-        if self.evict_lru_derived() {
+        let protected = BTreeSet::from([u32::from(except)]);
+        self.evict_one_for_budget_excluding(&protected)
+    }
+
+    fn evict_one_for_budget_excluding(
+        &mut self,
+        protected: &BTreeSet<u32>,
+    ) -> Option<EvictionKind> {
+        if self.evict_lru_derived(protected) {
             Some(EvictionKind::Derived)
-        } else if self.evict_lru_unpinned(except) {
+        } else if self.evict_lru_unpinned(protected) {
             Some(EvictionKind::RawRelation)
         } else {
             None
@@ -507,8 +645,15 @@ pub enum ResidentLoadError {
         budget: u64,
     },
     Loader(String),
+    InvalidArtifactDependencies(String),
+    ArtifactNotFound {
+        digest: u64,
+    },
     ArtifactTypeMismatch {
         digest: u64,
+    },
+    ArtifactDependencyChanged {
+        relid: pg_sys::Oid,
     },
     ArtifactByteMismatch {
         declared: u64,
@@ -536,9 +681,19 @@ impl fmt::Display for ResidentLoadError {
                 "resident allocation of {requested} bytes exceeds cluster budget {budget} bytes ({live} bytes live); evict/unpin entries or raise pg_accel.resident_memory_budget_mb"
             ),
             Self::Loader(detail) => f.write_str(detail),
+            Self::InvalidArtifactDependencies(detail) => {
+                write!(f, "invalid resident artifact dependencies: {detail}")
+            }
+            Self::ArtifactNotFound { digest } => {
+                write!(f, "resident derived artifact {digest:#x} is not available")
+            }
             Self::ArtifactTypeMismatch { digest } => write!(
                 f,
                 "resident derived artifact {digest:#x} has a different Rust type"
+            ),
+            Self::ArtifactDependencyChanged { relid } => write!(
+                f,
+                "resident derived artifact dependency relation OID {relid} changed during resolution"
             ),
             Self::ArtifactByteMismatch { declared, actual } => write!(
                 f,
@@ -550,6 +705,7 @@ impl fmt::Display for ResidentLoadError {
 
 impl std::error::Error for ResidentLoadError {}
 
+#[cfg(not(test))]
 unsafe extern "C-unwind" fn resident_relcache_callback(_arg: pg_sys::Datum, relid: pg_sys::Oid) {
     if relid == pg_sys::InvalidOid {
         let _ = PENDING_RELCACHE_CLEAR_ALL.try_with(|pending| pending.set(true));
@@ -580,6 +736,7 @@ unsafe extern "C-unwind" fn resident_relcache_callback(_arg: pg_sys::Datum, reli
     });
 }
 
+#[cfg(not(test))]
 fn ensure_relcache_callback() {
     if RELCACHE_CALLBACK_REGISTERED.with(Cell::get) {
         return;
@@ -595,6 +752,7 @@ fn ensure_relcache_callback() {
     RELCACHE_CALLBACK_REGISTERED.with(|registered| registered.set(true));
 }
 
+#[cfg(not(test))]
 fn process_invalidations() {
     ensure_relcache_callback();
     let clear_all = PENDING_RELCACHE_CLEAR_ALL.with(|pending| pending.replace(false));
@@ -613,6 +771,13 @@ fn process_invalidations() {
                     .is_none_or(|scope| scope == current_command_scope())
         });
     });
+}
+
+#[cfg(test)]
+fn process_invalidations() {
+    // Plain Rust unit tests install synthetic relation entries without a live
+    // PostgreSQL catalog. Production and pg_test builds always use the
+    // relcache/generation implementation above.
 }
 
 pub(super) fn cleanup_backend() {
@@ -643,13 +808,27 @@ fn reserve_with_local_eviction(
     relid: pg_sys::Oid,
     bytes: u64,
 ) -> Result<LedgerCharge, ResidentLoadError> {
+    reserve_with_local_eviction_excluding(&BTreeSet::from([u32::from(relid)]), bytes)
+}
+
+fn reserve_with_local_eviction_excluding(
+    protected: &BTreeSet<u32>,
+    bytes: u64,
+) -> Result<LedgerCharge, ResidentLoadError> {
+    #[cfg(test)]
+    let budget = u64::MAX;
+    #[cfg(not(test))]
     let budget = gucs::resident_memory_budget_bytes();
     loop {
         match LedgerCharge::reserve(bytes, budget) {
             Ok(charge) => return Ok(charge),
             Err(live) => {
-                let evicted =
-                    STORE.with(|store| store.borrow_mut().evict_one_for_budget(relid).is_some());
+                let evicted = STORE.with(|store| {
+                    store
+                        .borrow_mut()
+                        .evict_one_for_budget_excluding(protected)
+                        .is_some()
+                });
                 if !evicted {
                     return Err(ResidentLoadError::BudgetExceeded {
                         requested: bytes,
@@ -890,6 +1069,345 @@ pub fn with_resident_column<R>(
     })
 }
 
+fn canonical_dependency_relids(
+    owner_relid: pg_sys::Oid,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+) -> Result<BTreeSet<u32>, ResidentLoadError> {
+    if owner_relid == pg_sys::InvalidOid {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "owner relation OID is invalid".to_owned(),
+        ));
+    }
+    let mut dependencies = BTreeSet::from([u32::from(owner_relid)]);
+    for relid in dependency_relids {
+        if *relid == pg_sys::InvalidOid {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(
+                "dependency relation OID is invalid".to_owned(),
+            ));
+        }
+        dependencies.insert(u32::from(*relid));
+    }
+    let mut seen_columns = BTreeSet::new();
+    for column in columns {
+        if column.relid == pg_sys::InvalidOid || column.attno <= 0 {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(format!(
+                "invalid resident column reference ({}, {})",
+                u32::from(column.relid),
+                column.attno
+            )));
+        }
+        if !dependencies.contains(&u32::from(column.relid)) {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(format!(
+                "column relation OID {} is not a declared dependency",
+                u32::from(column.relid)
+            )));
+        }
+        if !seen_columns.insert((u32::from(column.relid), column.attno)) {
+            return Err(ResidentLoadError::InvalidArtifactDependencies(format!(
+                "duplicate resident column reference ({}, {})",
+                u32::from(column.relid),
+                column.attno
+            )));
+        }
+    }
+    Ok(dependencies)
+}
+
+fn dependency_stamps(
+    store: &RelationStore,
+    dependency_relids: &BTreeSet<u32>,
+) -> Result<Box<[ResidentDependencyStamp]>, ResidentLoadError> {
+    dependency_relids
+        .iter()
+        .map(|raw_relid| {
+            let relid = pg_sys::Oid::from(*raw_relid);
+            store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == relid)
+                .map(ResidentDependencyStamp::from_relation)
+                .ok_or(ResidentLoadError::MissingRelation(relid))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Vec::into_boxed_slice)
+}
+
+fn first_dependency_mismatch(
+    store: &RelationStore,
+    expected: &[ResidentDependencyStamp],
+) -> Option<pg_sys::Oid> {
+    expected.iter().find_map(|stamp| {
+        let current = store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == stamp.relid)
+            .map(ResidentDependencyStamp::from_relation);
+        (current != Some(*stamp)).then_some(stamp.relid)
+    })
+}
+
+fn resolve_column_views<'a>(
+    store: &'a RelationStore,
+    columns: &[ResidentColumnRef],
+) -> Result<Vec<ResidentColumnView<'a>>, ResidentLoadError> {
+    columns
+        .iter()
+        .map(|request| {
+            let relation = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == request.relid)
+                .ok_or(ResidentLoadError::MissingRelation(request.relid))?;
+            relation
+                .columns
+                .get(&request.attno)
+                .map(ResidentColumn::view)
+                .ok_or(ResidentLoadError::MissingColumn {
+                    relid: request.relid,
+                    attno: request.attno,
+                })
+        })
+        .collect()
+}
+
+fn dependency_evidence(
+    store: &RelationStore,
+    dependencies: &[ResidentDependencyStamp],
+) -> Result<Vec<ResidentRelationEvidence>, ResidentLoadError> {
+    dependencies
+        .iter()
+        .map(|dependency| {
+            store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == dependency.relid)
+                .map(ResidentRelation::evidence)
+                .ok_or(ResidentLoadError::MissingRelation(dependency.relid))
+        })
+        .collect()
+}
+
+/// Find or build a dependency-stamped derived artifact.
+///
+/// `prepare` runs while all requested resident inputs are held under one
+/// immutable store borrow and must only create host-owned data. The exact
+/// device-byte charge is reserved after that borrow ends and before `build`
+/// may allocate device memory.
+pub fn ensure_derived_artifact<T: DerivedArtifact, P>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    prepare: impl FnOnce(ResidentInputBundle<'_>) -> Result<PreparedDerived<P>, String>,
+    build: impl FnOnce(P) -> Result<T, String>,
+) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
+    if identity.canonical_words().is_empty() {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "canonical artifact identity is empty".to_owned(),
+        ));
+    }
+    process_invalidations();
+    let protected = canonical_dependency_relids(owner_relid, dependency_relids, columns)?;
+
+    let mut replacing_stale = false;
+    let hit = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let owner_index = store
+            .entries
+            .iter()
+            .position(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        let exact_index = store.entries[owner_index]
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity));
+        let Some(exact_index) = exact_index else {
+            return Ok(false);
+        };
+        let stale = first_dependency_mismatch(
+            &store,
+            &store.entries[owner_index].derived[exact_index].dependencies,
+        )
+        .is_some();
+        if stale {
+            store.entries[owner_index].derived.remove(exact_index);
+            replacing_stale = true;
+            return Ok(false);
+        }
+        if !store.entries[owner_index].derived[exact_index]
+            .artifact
+            .as_any()
+            .is::<T>()
+        {
+            return Err(ResidentLoadError::ArtifactTypeMismatch {
+                digest: identity.digest(),
+            });
+        }
+        Ok(true)
+    })?;
+    if hit {
+        for raw_relid in &protected {
+            STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+        }
+        return Ok(ArtifactEnsureOutcome::Hit);
+    }
+
+    for raw_relid in &protected {
+        STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+    }
+    let (prepared, captured_dependencies) = STORE.with(|store| {
+        let store = store.borrow();
+        let captured_dependencies = dependency_stamps(&store, &protected)?;
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        let prepared = prepare(ResidentInputBundle { columns, evidence })
+            .map_err(ResidentLoadError::Loader)?;
+        Ok::<_, ResidentLoadError>((prepared, captured_dependencies))
+    })?;
+
+    let charge = reserve_with_local_eviction_excluding(&protected, prepared.device_bytes)?;
+    let artifact = build(prepared.prepared).map_err(ResidentLoadError::Loader)?;
+    let actual = artifact.device_bytes();
+    if actual != prepared.device_bytes {
+        drop(artifact);
+        return Err(ResidentLoadError::ArtifactByteMismatch {
+            declared: prepared.device_bytes,
+            actual,
+        });
+    }
+
+    process_invalidations();
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let owner = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        if let Some(index) = owner
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity))
+        {
+            owner.derived.remove(index);
+            replacing_stale = true;
+        }
+        owner.derived.push(DerivedEntry {
+            digest: identity.digest(),
+            canonical_words: identity.canonical_words().to_vec().into_boxed_slice(),
+            dependencies: captured_dependencies,
+            artifact: Box::new(artifact),
+            charge,
+        });
+        Ok(())
+    })?;
+    Ok(if replacing_stale {
+        ArtifactEnsureOutcome::Rebuilt
+    } else {
+        ArtifactEnsureOutcome::Built
+    })
+}
+
+/// Resolve an exact dependency-stamped artifact and all requested raw inputs
+/// under one immutable store borrow. Stale artifacts are removed before this
+/// function returns an error, so callers may rebuild and retry once.
+///
+/// The callback must not re-enter residency APIs or execute SPI/catalog work:
+/// the backend-local `RefCell` borrow intentionally stays live for the complete
+/// synchronous callback so every exposed device pointer remains pinned.
+pub fn with_derived_artifact_inputs<T: Any, R>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    columns: &[ResidentColumnRef],
+    callback: impl FnOnce(ResolvedDerivedInputs<'_, T>) -> R,
+) -> Result<R, ResidentLoadError> {
+    process_invalidations();
+    let dependencies = STORE.with(|store| {
+        let store = store.borrow();
+        let owner = store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        owner
+            .derived
+            .iter()
+            .find(|entry| entry.has_identity(identity))
+            .map(|entry| entry.dependencies.clone())
+            .ok_or(ResidentLoadError::ArtifactNotFound {
+                digest: identity.digest(),
+            })
+    })?;
+
+    if let Some(relid) = STORE.with(|store| {
+        let store = store.borrow();
+        first_dependency_mismatch(&store, &dependencies)
+    }) {
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            if let Some(owner) = store
+                .entries
+                .iter_mut()
+                .find(|entry| entry.relid == owner_relid)
+                && let Some(index) = owner
+                    .derived
+                    .iter()
+                    .position(|entry| entry.has_identity(identity))
+            {
+                owner.derived.remove(index);
+            }
+        });
+        return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+    }
+
+    let dependency_relids = dependencies
+        .iter()
+        .map(|dependency| u32::from(dependency.relid))
+        .collect::<BTreeSet<_>>();
+    let dependency_oids = dependency_relids
+        .iter()
+        .copied()
+        .map(pg_sys::Oid::from)
+        .collect::<Vec<_>>();
+    canonical_dependency_relids(owner_relid, &dependency_oids, columns)?;
+    for raw_relid in &dependency_relids {
+        STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+    }
+
+    STORE.with(|store| {
+        let store = store.borrow();
+        let owner = store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        let entry = owner
+            .derived
+            .iter()
+            .find(|entry| entry.has_identity(identity))
+            .ok_or(ResidentLoadError::ArtifactNotFound {
+                digest: identity.digest(),
+            })?;
+        let artifact = entry.artifact.as_any().downcast_ref::<T>().ok_or(
+            ResidentLoadError::ArtifactTypeMismatch {
+                digest: identity.digest(),
+            },
+        )?;
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &entry.dependencies)?;
+        Ok(callback(ResolvedDerivedInputs {
+            artifact,
+            columns,
+            evidence,
+            device_bytes: entry.bytes(),
+        }))
+    })
+}
+
 /// Register or replace a shape-digested derived artifact on its owner relation.
 pub fn register_derived_artifact<T: DerivedArtifact>(
     owner_relid: pg_sys::Oid,
@@ -909,7 +1427,7 @@ pub fn register_derived_artifact<T: DerivedArtifact>(
             relation
                 .derived
                 .iter()
-                .position(|entry| entry.digest == digest)
+                .position(|entry| entry.digest == digest && entry.canonical_words.is_empty())
                 .map(|index| relation.derived.remove(index)),
         )
     })?;
@@ -937,6 +1455,8 @@ pub fn register_derived_artifact<T: DerivedArtifact>(
             .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
         relation.derived.push(DerivedEntry {
             digest,
+            canonical_words: Box::default(),
+            dependencies: Box::default(),
             artifact: Box::new(artifact),
             charge,
         });
@@ -961,7 +1481,7 @@ pub fn with_derived_artifact<T: Any, R>(
         let entry = relation
             .derived
             .iter()
-            .find(|entry| entry.digest == digest)
+            .find(|entry| entry.digest == digest && entry.canonical_words.is_empty())
             .ok_or(ResidentLoadError::ArtifactTypeMismatch { digest })?;
         let artifact = entry
             .artifact
@@ -993,7 +1513,7 @@ pub fn with_resolved_artifact<T: Any, R>(
         let entry = owner
             .derived
             .iter()
-            .find(|entry| entry.digest == digest)
+            .find(|entry| entry.digest == digest && entry.canonical_words.is_empty())
             .ok_or(ResidentLoadError::ArtifactTypeMismatch { digest })?;
         let artifact = entry
             .artifact
@@ -1409,6 +1929,18 @@ mod tests {
         }
     }
 
+    struct SizedArtifact(u64);
+
+    impl DerivedArtifact for SizedArtifact {
+        fn device_bytes(&self) -> u64 {
+            self.0
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
     fn empty_relation(relid: u32, pinned: bool, last_used_tick: u64) -> ResidentRelation {
         ResidentRelation {
             relid: pg_sys::Oid::from(relid),
@@ -1430,12 +1962,27 @@ mod tests {
         }
     }
 
+    fn install_test_relations(relids: &[u32]) {
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            store.entries.clear();
+            store.entries.extend(
+                relids
+                    .iter()
+                    .enumerate()
+                    .map(|(index, relid)| empty_relation(*relid, false, index as u64 + 1)),
+            );
+        });
+    }
+
     #[test]
     fn budget_eviction_drops_derived_before_raw_and_respects_pin() {
         let mut store = RelationStore::default();
         let mut old = empty_relation(100, false, 1);
         old.derived.push(DerivedEntry {
             digest: 7,
+            canonical_words: Box::default(),
+            dependencies: Box::default(),
             artifact: Box::new(EmptyArtifact),
             charge: LedgerCharge::reserve(0, 0).expect("zero-byte artifact charge"),
         });
@@ -1461,6 +2008,220 @@ mod tests {
                 .iter()
                 .any(|entry| entry.relid == pg_sys::Oid::from(300_u32))
         );
+    }
+
+    #[test]
+    fn exact_identity_disambiguates_digest_collisions() {
+        let first = DerivedArtifactIdentity {
+            digest: 77,
+            canonical_words: vec![1, 2, 3].into_boxed_slice(),
+        };
+        let collision = DerivedArtifactIdentity {
+            digest: 77,
+            canonical_words: vec![1, 2, 4].into_boxed_slice(),
+        };
+        let entry = DerivedEntry {
+            digest: 77,
+            canonical_words: first.canonical_words.clone(),
+            dependencies: Box::default(),
+            artifact: Box::new(EmptyArtifact),
+            charge: LedgerCharge::reserve(0, 0).expect("zero-byte artifact charge"),
+        };
+
+        assert!(entry.has_identity(&first));
+        assert!(!entry.has_identity(&collision));
+    }
+
+    #[test]
+    fn dependency_stamps_detect_non_owner_changes() {
+        let mut store = RelationStore::default();
+        let owner = empty_relation(700, false, 1);
+        let dimension = empty_relation(800, false, 2);
+        let expected = [
+            ResidentDependencyStamp::from_relation(&owner),
+            ResidentDependencyStamp::from_relation(&dimension),
+        ];
+        store.entries.push(owner);
+        store.entries.push(dimension);
+        assert_eq!(first_dependency_mismatch(&store, &expected), None);
+
+        store.entries[1].generation.relation += 1;
+        assert_eq!(
+            first_dependency_mismatch(&store, &expected),
+            Some(pg_sys::Oid::from(800_u32))
+        );
+        store.entries[1].generation.relation -= 1;
+        store.entries[1].relfilenode = pg_sys::Oid::from(9_999_u32);
+        assert_eq!(
+            first_dependency_mismatch(&store, &expected),
+            Some(pg_sys::Oid::from(800_u32))
+        );
+    }
+
+    #[test]
+    fn protected_dependencies_are_not_eviction_candidates() {
+        let mut store = RelationStore::default();
+        let mut protected_owner = empty_relation(900, false, 1);
+        protected_owner.derived.push(DerivedEntry {
+            digest: 1,
+            canonical_words: vec![1].into_boxed_slice(),
+            dependencies: Box::default(),
+            artifact: Box::new(EmptyArtifact),
+            charge: LedgerCharge::reserve(0, 0).expect("zero-byte artifact charge"),
+        });
+        let mut evictable = empty_relation(901, false, 2);
+        evictable.derived.push(DerivedEntry {
+            digest: 2,
+            canonical_words: vec![2].into_boxed_slice(),
+            dependencies: Box::default(),
+            artifact: Box::new(EmptyArtifact),
+            charge: LedgerCharge::reserve(0, 0).expect("zero-byte artifact charge"),
+        });
+        store.entries.extend([protected_owner, evictable]);
+
+        let protected = BTreeSet::from([900_u32]);
+        assert_eq!(
+            store.evict_one_for_budget_excluding(&protected),
+            Some(EvictionKind::Derived)
+        );
+        assert_eq!(store.entries[0].derived.len(), 1);
+        assert!(store.entries[1].derived.is_empty());
+    }
+
+    #[test]
+    fn public_api_keeps_digest_collisions_as_distinct_entries() {
+        install_test_relations(&[1_000]);
+        let owner = pg_sys::Oid::from(1_000_u32);
+        let first = DerivedArtifactIdentity {
+            digest: 88,
+            canonical_words: vec![1, 2].into_boxed_slice(),
+        };
+        let second = DerivedArtifactIdentity {
+            digest: 88,
+            canonical_words: vec![1, 3].into_boxed_slice(),
+        };
+        for identity in [&first, &second] {
+            assert_eq!(
+                ensure_derived_artifact(
+                    owner,
+                    identity,
+                    &[owner],
+                    &[],
+                    |_| {
+                        Ok(PreparedDerived {
+                            prepared: (),
+                            device_bytes: 0,
+                        })
+                    },
+                    |()| Ok(EmptyArtifact),
+                )
+                .expect("artifact build succeeds"),
+                ArtifactEnsureOutcome::Built
+            );
+        }
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(store.entries[0].derived.len(), 2);
+            assert!(store.entries[0].derived[0].has_identity(&first));
+            assert!(store.entries[0].derived[1].has_identity(&second));
+        });
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn byte_mismatch_drops_artifact_and_reserved_charge() {
+        install_test_relations(&[1_100]);
+        let owner = pg_sys::Oid::from(1_100_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 1]);
+        let before = ledger::total_bytes();
+        let result = ensure_derived_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(PreparedDerived {
+                    prepared: (),
+                    device_bytes: 16,
+                })
+            },
+            |()| {
+                assert!(ledger::total_bytes() >= before.saturating_add(16));
+                Ok(SizedArtifact(8))
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactByteMismatch {
+                declared: 16,
+                actual: 8
+            })
+        ));
+        assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn dependency_change_before_publish_drops_built_artifact() {
+        install_test_relations(&[1_200, 1_201]);
+        let owner = pg_sys::Oid::from(1_200_u32);
+        let dimension = pg_sys::Oid::from(1_201_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 2]);
+        let result = ensure_derived_artifact(
+            owner,
+            &identity,
+            &[owner, dimension],
+            &[],
+            |_| {
+                Ok(PreparedDerived {
+                    prepared: (),
+                    device_bytes: 0,
+                })
+            },
+            |()| {
+                STORE.with(|store| store.borrow_mut().entries[1].generation.relation += 1);
+                Ok(EmptyArtifact)
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == dimension
+        ));
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn stale_artifact_is_removed_before_use() {
+        install_test_relations(&[1_300, 1_301]);
+        let owner = pg_sys::Oid::from(1_300_u32);
+        let dimension = pg_sys::Oid::from(1_301_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 3]);
+        ensure_derived_artifact(
+            owner,
+            &identity,
+            &[owner, dimension],
+            &[],
+            |_| {
+                Ok(PreparedDerived {
+                    prepared: (),
+                    device_bytes: 0,
+                })
+            },
+            |()| Ok(EmptyArtifact),
+        )
+        .expect("artifact build succeeds");
+        STORE.with(|store| store.borrow_mut().entries[1].generation.global += 1);
+
+        let result =
+            with_derived_artifact_inputs::<EmptyArtifact, _>(owner, &identity, &[], |_| ());
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == dimension
+        ));
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
     }
 
     #[test]
