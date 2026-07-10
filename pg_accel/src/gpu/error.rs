@@ -27,6 +27,7 @@ pub enum GpuErrorDomain {
     Sort,
     Reduce,
     HashAgg,
+    GroupedAgg,
     HashJoin,
     Window,
 }
@@ -44,6 +45,7 @@ impl fmt::Display for GpuErrorDomain {
             Self::Sort => "sort",
             Self::Reduce => "reduce",
             Self::HashAgg => "hash_agg",
+            Self::GroupedAgg => "grouped_agg",
             Self::HashJoin => "hash_join",
             Self::Window => "window",
         };
@@ -85,7 +87,7 @@ impl fmt::Display for GpuOperation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuStatusDetail {
     Ok,
-    InitFailed,
+    ExecutionFailed,
     Unsupported,
     OutOfMemory,
     Timeout,
@@ -108,7 +110,7 @@ impl From<PgaccelStatus> for GpuStatusDetail {
     fn from(status: PgaccelStatus) -> Self {
         match status {
             PgaccelStatus::Ok => Self::Ok,
-            PgaccelStatus::ErrorInit => Self::InitFailed,
+            PgaccelStatus::Error => Self::ExecutionFailed,
             PgaccelStatus::ErrorUnsupported => Self::Unsupported,
             PgaccelStatus::ErrorOom => Self::OutOfMemory,
             PgaccelStatus::ErrorTimeout => Self::Timeout,
@@ -121,7 +123,7 @@ impl fmt::Display for GpuStatusDetail {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self {
             Self::Ok => "ok",
-            Self::InitFailed => "init_failed",
+            Self::ExecutionFailed => "execution_failed",
             Self::Unsupported => "unsupported",
             Self::OutOfMemory => "out_of_memory",
             Self::Timeout => "timeout",
@@ -232,8 +234,8 @@ mod tests {
             GpuStatusDetail::Ok
         );
         assert_eq!(
-            GpuStatusDetail::from(PgaccelStatus::ErrorInit),
-            GpuStatusDetail::InitFailed
+            GpuStatusDetail::from(PgaccelStatus::Error),
+            GpuStatusDetail::ExecutionFailed
         );
         assert_eq!(
             GpuStatusDetail::from(PgaccelStatus::ErrorUnsupported),

@@ -35,7 +35,7 @@ use crate::gpu::{
 #[test]
 fn from_raw_maps_every_known_discriminant() {
     assert_eq!(PgaccelStatus::from_raw(0), Ok(PgaccelStatus::Ok));
-    assert_eq!(PgaccelStatus::from_raw(-1), Ok(PgaccelStatus::ErrorInit));
+    assert_eq!(PgaccelStatus::from_raw(-1), Ok(PgaccelStatus::Error));
     assert_eq!(
         PgaccelStatus::from_raw(-2),
         Ok(PgaccelStatus::ErrorUnsupported)
@@ -63,7 +63,7 @@ fn from_raw_rejects_out_of_range_values_with_raw_payload() {
 fn from_raw_round_trips_every_variant_discriminant() {
     for status in [
         PgaccelStatus::Ok,
-        PgaccelStatus::ErrorInit,
+        PgaccelStatus::Error,
         PgaccelStatus::ErrorUnsupported,
         PgaccelStatus::ErrorOom,
         PgaccelStatus::ErrorTimeout,
@@ -110,7 +110,7 @@ fn convert_status_never_treats_unknown_values_as_ok() {
         !got.is_ok(),
         "unknown raw status 42 must surface as an error, got {got:?}"
     );
-    assert_eq!(got, PgaccelStatus::ErrorUnsupported);
+    assert_eq!(got, PgaccelStatus::Error);
     assert_eq!(
         unknown_status_count(),
         unknown_before + 1,
@@ -144,6 +144,8 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_reduce_multi_masked_i64", D::Reduce),
         ("pgaccel_fused_filter_multi_reduce_f32", D::Reduce),
         ("pgaccel_expr_template_cmp_const", D::Expr),
+        ("pgaccel_grouped_agg_execute", D::GroupedAgg),
+        ("pgaccel_grouped_agg_workspace_alloc", D::GroupedAgg),
         ("pgaccel_hash_join_probe", D::HashJoin),
         ("pgaccel_hash_agg_execute", D::HashAgg),
         ("pgaccel_hash_count_i64_execute", D::HashAgg),

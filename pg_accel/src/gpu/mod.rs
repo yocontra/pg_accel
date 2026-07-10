@@ -21,6 +21,8 @@ pub mod error;
 
 pub mod bridge;
 
+pub mod grouped_agg;
+
 pub mod three_layer;
 
 #[cfg(feature = "pg_test")]
@@ -58,6 +60,7 @@ mod mod_tests;
 
 pub use counters::*;
 pub use expr::*;
+pub use grouped_agg::*;
 pub use h3::*;
 pub use hash_agg::*;
 pub use hash_join::*;

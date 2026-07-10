@@ -322,6 +322,15 @@ typedef struct {
 pgaccel_status pgaccel_grouped_agg_workspace_requirements(
     const pgaccel_grouped_agg_desc* desc, pgaccel_grouped_agg_workspace_req* out);
 
+/* Allocate/free an aligned workspace in the same AdaptiveCpp context used by
+ * grouped aggregation. `space` accepts SHARED_USM or DEVICE, never HOST.
+ * `alignment` must be a nonzero power of two. A zero-byte request succeeds
+ * with `*out == NULL`; every nonzero successful result satisfies the requested
+ * alignment and is released exactly once with the matching free function. */
+pgaccel_status pgaccel_grouped_agg_workspace_alloc(size_t bytes, size_t alignment,
+                                                    int32_t space, void** out);
+void pgaccel_grouped_agg_workspace_free(void* ptr);
+
 /* Phase 4B replaces the dark UNSUPPORTED implementation. Invalid descriptors,
  * runtime codes/masks, overflow, or device execution errors return ERROR and
  * never partial success. Well-formed capabilities not implemented in the

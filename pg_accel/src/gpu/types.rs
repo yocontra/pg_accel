@@ -30,7 +30,10 @@ use std::ffi::{c_char, c_void};
 #[allow(dead_code)] // reason: ABI mirror of pgaccel_status; all variants must exist for FFI parity
 pub enum PgaccelStatus {
     Ok = 0,
-    ErrorInit = -1,
+    /// Generic execution/validation failure (`PGACCEL_ERROR`). The C enum
+    /// also exposes `PGACCEL_ERROR_INIT` as an alias of this value, so the
+    /// operation context, not the discriminant, identifies init failures.
+    Error = -1,
     ErrorUnsupported = -2,
     ErrorOom = -3,
     ErrorTimeout = -4,
@@ -54,7 +57,7 @@ impl PgaccelStatus {
     pub const fn from_raw(raw: i32) -> Result<Self, i32> {
         match raw {
             0 => Ok(Self::Ok),
-            -1 => Ok(Self::ErrorInit),
+            -1 => Ok(Self::Error),
             -2 => Ok(Self::ErrorUnsupported),
             -3 => Ok(Self::ErrorOom),
             -4 => Ok(Self::ErrorTimeout),

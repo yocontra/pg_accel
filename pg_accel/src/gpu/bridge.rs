@@ -102,8 +102,8 @@ macro_rules! bridge_status_fns {
 ///
 /// - Unknown raw values (ABI drift / corruption) are logged at error level
 ///   with the raw value, counted via `counters::record_unknown_status`, and
-///   mapped to [`PgaccelStatus::ErrorUnsupported`] so no caller can treat
-///   them as success.
+///   mapped to [`PgaccelStatus::Error`] so no caller can confuse ABI drift
+///   with a supported capability decline.
 /// - Every non-OK status is logged at error level with the failing symbol
 ///   name and counted per kernel domain via
 ///   `counters::record_kernel_failure` — kernel dispatch failures are no
@@ -136,9 +136,9 @@ pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
                 raw = unknown,
                 domain = domain.as_str(),
                 "GPU kernel returned an UNKNOWN status value (ABI drift or \
-                 memory corruption on the C side); treating as ErrorUnsupported"
+                 memory corruption on the C side); treating as generic Error"
             );
-            PgaccelStatus::ErrorUnsupported
+            PgaccelStatus::Error
         }
     }
 }
@@ -703,6 +703,29 @@ bridge_status_fns! {
         src: *const std::ffi::c_void,
         bytes: usize,
         out: *mut *mut std::ffi::c_void,
+    ) -> PgaccelStatus;
+
+    // -- Descriptor-driven grouped aggregation --
+
+    /// Validate a grouped-aggregate descriptor and return its exact workspace
+    /// requirement. The output struct must carry the frozen ABI version/size.
+    pub fn pgaccel_grouped_agg_workspace_requirements(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggWorkspaceReq,
+    ) -> PgaccelStatus;
+
+    /// Allocate an aligned grouped-aggregate workspace in shared/device USM.
+    pub fn pgaccel_grouped_agg_workspace_alloc(
+        bytes: usize,
+        alignment: usize,
+        space: i32,
+        out: *mut *mut std::ffi::c_void,
+    ) -> PgaccelStatus;
+
+    /// Execute one grouped-aggregate lifecycle transition.
+    pub fn pgaccel_grouped_agg_execute(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggOut,
     ) -> PgaccelStatus;
 
     /// Template: col <cmp> const.
@@ -1638,6 +1661,9 @@ unsafe extern "C" {
     /// Free a pointer returned by `pgaccel_expr_device_alloc_copy`.
     pub fn pgaccel_expr_device_free(ptr: *mut std::ffi::c_void);
 
+    /// Free a pointer returned by `pgaccel_grouped_agg_workspace_alloc`.
+    pub fn pgaccel_grouped_agg_workspace_free(ptr: *mut std::ffi::c_void);
+
     pub fn pgaccel_expr_template_ssbm_q1_scratch_items(row_count: usize) -> usize;
 
     // -- Hash join kernels --
@@ -1948,7 +1974,7 @@ mod tests {
     #[test]
     fn status_discriminant_values() {
         assert_eq!(PgaccelStatus::Ok as i32, 0);
-        assert_eq!(PgaccelStatus::ErrorInit as i32, -1);
+        assert_eq!(PgaccelStatus::Error as i32, -1);
         assert_eq!(PgaccelStatus::ErrorNoDevice as i32, -5);
         assert_eq!(PgaccelStatus::ErrorOom as i32, -3);
         assert_eq!(PgaccelStatus::ErrorTimeout as i32, -4);
@@ -1958,7 +1984,7 @@ mod tests {
     #[test]
     fn status_is_ok_returns_true_only_for_ok() {
         assert!(PgaccelStatus::Ok.is_ok());
-        assert!(!PgaccelStatus::ErrorInit.is_ok());
+        assert!(!PgaccelStatus::Error.is_ok());
         assert!(!PgaccelStatus::ErrorNoDevice.is_ok());
         assert!(!PgaccelStatus::ErrorOom.is_ok());
         assert!(!PgaccelStatus::ErrorTimeout.is_ok());

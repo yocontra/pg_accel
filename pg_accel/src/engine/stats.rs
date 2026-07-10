@@ -371,7 +371,7 @@ pub fn kernel_executions_snapshot() -> u64 {
 fn pg_accel_gpu_failures()
 -> TableIterator<'static, (name!(domain, String), name!(failure_count, i64))> {
     use crate::gpu::{GpuFailureDomain as D, kernel_failure_count, unknown_status_count};
-    const DOMAINS: [(D, &str); 12] = [
+    const DOMAINS: [(D, &str); 13] = [
         (D::Runtime, "runtime"),
         (D::Spatial, "spatial"),
         (D::H3, "h3"),
@@ -380,6 +380,7 @@ fn pg_accel_gpu_failures()
         (D::Reduce, "reduce"),
         (D::Expr, "expr"),
         (D::HashAgg, "hash_agg"),
+        (D::GroupedAgg, "grouped_agg"),
         (D::HashJoin, "hash_join"),
         (D::Window, "window"),
         (D::NestedLoop, "nested_loop"),

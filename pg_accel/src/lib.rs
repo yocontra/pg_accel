@@ -279,6 +279,15 @@ pub mod adapters;
 pub mod engine;
 mod gpu;
 
+// Phase 4C's descriptor bridge is a typed Rust facade rather than a SQL
+// surface. Re-export only that facade; the legacy low-level GPU module stays
+// private until the Phase 5 executor consumes it internally.
+pub use gpu::{
+    GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, GroupedAggChunk,
+    GroupedAggOutcome, GroupedAggOutputStorage, GroupedAggResult, GroupedAggSession,
+    GroupedAggStateLane, GroupedAggWorkspace, ResolvedGroupedAggPlan, execute_grouped_agg_one_shot,
+};
+
 #[cfg(feature = "pg_test")]
 mod tests;
 

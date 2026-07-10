@@ -32,6 +32,7 @@ set(KERNEL_SOURCES
     src/hash_agg.cpp
     src/olap_ssbm.cpp
     src/grouped_agg.cpp
+    src/grouped_agg_workspace.cpp
     src/window.cpp
     src/fused_ops.cpp
     src/nested_loop_ineq.cpp
@@ -172,6 +173,9 @@ target_link_libraries(test_olap_ssbm PRIVATE pgaccel_kernels_shared)
 add_executable(test_grouped_agg test/test_grouped_agg.cpp)
 target_link_libraries(test_grouped_agg PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_grouped_agg_workspace test/test_grouped_agg_workspace.cpp)
+target_link_libraries(test_grouped_agg_workspace PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_reduce_stats test/test_reduce_stats.cpp)
 target_link_libraries(test_reduce_stats PRIVATE pgaccel_kernels_shared)
 
@@ -283,6 +287,7 @@ add_pgaccel_gpu_test(test_reduce_stats)
 add_pgaccel_gpu_test(test_reduce_bool_bit)
 add_pgaccel_gpu_test(test_olap_ssbm)
 add_pgaccel_gpu_test(test_grouped_agg)
+add_pgaccel_gpu_test(test_grouped_agg_workspace)
 add_pgaccel_gpu_test(test_hash_agg_partial)
 add_pgaccel_gpu_test(test_hash_agg_keys)
 add_pgaccel_gpu_test(test_hash_join)

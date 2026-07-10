@@ -60,10 +60,11 @@ pub enum GpuFailureDomain {
     Window = 9,
     NestedLoop = 10,
     Memory = 11,
+    GroupedAgg = 12,
 }
 
 /// Number of [`GpuFailureDomain`] variants (array size below).
-pub const GPU_FAILURE_DOMAIN_COUNT: usize = 12;
+pub const GPU_FAILURE_DOMAIN_COUNT: usize = 13;
 
 impl GpuFailureDomain {
     /// Classify a `pgaccel_*` symbol name into a failure domain.
@@ -80,6 +81,8 @@ impl GpuFailureDomain {
             Self::Reduce
         } else if func.starts_with("pgaccel_expr_") {
             Self::Expr
+        } else if func.starts_with("pgaccel_grouped_agg_") {
+            Self::GroupedAgg
         } else if func.starts_with("pgaccel_hash_join_") {
             Self::HashJoin
         } else if func.starts_with("pgaccel_hash_agg_")
@@ -123,6 +126,7 @@ impl GpuFailureDomain {
             Self::Reduce => "reduce",
             Self::Expr => "expr",
             Self::HashAgg => "hash_agg",
+            Self::GroupedAgg => "grouped_agg",
             Self::HashJoin => "hash_join",
             Self::Window => "window",
             Self::NestedLoop => "nested_loop",

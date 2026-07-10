@@ -499,6 +499,20 @@ Execute accepts exactly two scratch forms:
 The caller owns external scratch, keeps it live through execute, and may not
 reuse it concurrently. Input/output/scratch aliasing is invalid.
 
+The Rust bridge queries this requirement before every new session and uses
+`pgaccel_grouped_agg_workspace_alloc` to obtain a pointer with the exact
+reported alignment in SHARED_USM or DEVICE space. Its RAII owner is backend
+local (`!Send`/`!Sync`), is freed with the matching grouped allocator, and is
+marked poisoned after ERROR, OOM, TIMEOUT, or NO_DEVICE. A well-formed
+UNSUPPORTED capability does not poison state. Unknown raw status integers are
+logged/counted and become the generic hard execution error; they are never
+laundered into UNSUPPORTED.
+
+The bridge owns every output buffer and derives its pointer matrix solely from
+the descriptor lane bits. A successful call with `uncertain_count > 0` returns
+`NeedsRecheck`, not a publishable result. Dense active-group bytes and emitted
+capacity metadata are revalidated before any executor can read a lane.
+
 ## Chunk state machine
 
 Chunking is reserved now for Phase 10 cancellation and bounded dispatch:
