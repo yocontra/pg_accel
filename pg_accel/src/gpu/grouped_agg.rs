@@ -645,10 +645,12 @@ impl GroupedAggOutputStorage {
         if !dense_output {
             for index in 0..key_count {
                 let key = &desc.keys[index];
-                let tag = if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX {
-                    PgaccelValTag::Int32
-                } else {
+                let tag = if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
+                    && key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
+                {
                     key.values.tag
+                } else {
+                    PgaccelValTag::Int32
                 };
                 let width = key_width(tag)
                     .ok_or_else(|| descriptor_error("compact output key has invalid type"))?;
@@ -1147,6 +1149,29 @@ mod tests {
         assert!(!raw.keys[0].values.is_null());
         assert_eq!(raw.keys[0].value_type, PgaccelValTag::Int32 as i32);
         assert!(raw.keys[1].values.is_null());
+    }
+
+    #[test]
+    fn hash_dimension_key_output_uses_materialized_int32_codes() {
+        static LOOKUP: [i32; 4] = [0, 1, 2, 3];
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        descriptor.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+        descriptor.keys[0].values.values = std::ptr::null();
+        descriptor.keys[0].values.nulls = std::ptr::null();
+        descriptor.keys[0].values.tag = PgaccelValTag::Null;
+        descriptor.keys[0].lookup_by_key = LOOKUP.as_ptr();
+        descriptor.keys[0].source = abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM0;
+        descriptor.dim_count = 1;
+        descriptor.dims[0].fact_key.tag = PgaccelValTag::Int32;
+        descriptor.dims[0].key_count = LOOKUP.len() as u32;
+        // SAFETY: static lookup remains valid and the fixture is not dispatched.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("hash dimension fixture is structurally valid");
+        let mut storage = GroupedAggOutputStorage::new(&plan).expect("output allocates");
+        assert_eq!(storage.key_values(0).expect("key bytes").len(), 16);
+        assert_eq!(storage.key_type(0), Some(PgaccelValTag::Int32 as i32));
+        let raw = storage.raw();
+        assert_eq!(raw.keys[0].value_type, PgaccelValTag::Int32 as i32);
     }
 
     #[test]
