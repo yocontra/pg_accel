@@ -705,6 +705,13 @@ bridge_status_fns! {
         out: *mut *mut std::ffi::c_void,
     ) -> PgaccelStatus;
 
+    /// Copy device-resident bytes into caller-owned host memory.
+    pub fn pgaccel_expr_device_copy_to_host(
+        dst: *mut std::ffi::c_void,
+        src: *const std::ffi::c_void,
+        bytes: usize,
+    ) -> PgaccelStatus;
+
     // -- Descriptor-driven grouped aggregation --
 
     /// Validate a grouped-aggregate descriptor and return its exact workspace

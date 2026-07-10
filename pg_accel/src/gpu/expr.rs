@@ -3,8 +3,9 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use super::{
-    PgaccelBatch, PgaccelExprProgram, PgaccelExprUsmCol, PgaccelStatus, PgaccelVal, PgaccelValTag,
-    bridge,
+    GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, PgaccelBatch,
+    PgaccelExprProgram, PgaccelExprUsmCol, PgaccelStatus, PgaccelVal, PgaccelValTag, bridge,
+    status_to_result,
 };
 
 fn checked_allocation_bytes<T>(len: usize) -> Option<usize> {
@@ -137,6 +138,46 @@ impl<T> ExprDeviceBuffer<T> {
     #[must_use]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Copy the complete device buffer into owned host memory.
+    pub fn copy_to_vec(&self) -> GpuResult<Vec<T>>
+    where
+        T: Copy + Default,
+    {
+        let bytes = checked_allocation_bytes::<T>(self.len).ok_or_else(|| {
+            GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceOutput,
+                GpuStatusDetail::CapacityOverflow,
+                "device-to-host copy size overflow",
+            )
+        })?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(self.len).map_err(|_| {
+            GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::BuildColumnBatch,
+                GpuStatusDetail::OutOfMemory,
+                "device-to-host output allocation failed",
+            )
+        })?;
+        output.resize(self.len, T::default());
+        // SAFETY: output is initialized for `bytes`, and self owns a live
+        // device allocation of the same byte length.
+        let status = unsafe {
+            bridge::pgaccel_expr_device_copy_to_host(
+                output.as_mut_ptr().cast::<c_void>(),
+                self.ptr.as_ptr().cast::<c_void>(),
+                bytes,
+            )
+        };
+        status_to_result(
+            status,
+            GpuErrorDomain::Memory,
+            GpuOperation::Kernel("pgaccel_expr_device_copy_to_host"),
+        )?;
+        Ok(output)
     }
 }
 

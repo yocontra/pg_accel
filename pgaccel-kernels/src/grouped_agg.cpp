@@ -922,6 +922,13 @@ inline bool accumulate_i64(const pgaccel_grouped_agg_measure& measure,
     if (!load_i64(measure.rhs, row, &rhs) || !sub_i64(value, rhs, &value))
       return false;
   }
+  if ((measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
+       measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) &&
+      measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
+      measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
+      (value < std::numeric_limits<int32_t>::min() ||
+       value > std::numeric_limits<int32_t>::max()))
+    return false;
   if (!accumulate_count(buffers.count, group, weight) ||
       !accumulate_count(buffers.nonnull, group, weight))
     return false;

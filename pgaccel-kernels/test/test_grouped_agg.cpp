@@ -753,6 +753,72 @@ void test_group_activity_ignores_measure_validity() {
   check_u64_lane(output.measures[0].nonnull, {0, 0});
 }
 
+void test_integer_expression_overflow_semantics() {
+  std::printf("--- integer expression overflow semantics ---\n");
+
+  {
+    SharedArray<int32_t> lhs({46340});
+    SharedArray<int32_t> rhs({46340});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, lhs.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                       PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                           PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.i64(output.measures[0].sum, 0) == INT64_C(2147395600));
+    CHECK(output.i64(output.measures[0].min, 0) == INT64_C(2147395600));
+    CHECK(output.i64(output.measures[0].max, 0) == INT64_C(2147395600));
+    CHECK(output.measures[0].count[0] == 1);
+  }
+
+  {
+    SharedArray<int32_t> lhs({std::numeric_limits<int32_t>::max(),
+                              std::numeric_limits<int32_t>::min()});
+    SharedArray<int32_t> rhs({0, 0});
+    pgaccel_grouped_agg_desc desc = base_desc(2);
+    set_i32_view(desc.measures[0].value, lhs.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                       PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                           PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.i64(output.measures[0].sum, 0) == -1);
+    CHECK(output.i64(output.measures[0].min, 0) == std::numeric_limits<int32_t>::min());
+    CHECK(output.i64(output.measures[0].max, 0) == std::numeric_limits<int32_t>::max());
+    CHECK(output.measures[0].count[0] == 2);
+  }
+
+  constexpr std::array<uint32_t, 4> lanes = {
+      PGACCEL_GROUPED_AGG_LANE_SUM,
+      PGACCEL_GROUPED_AGG_LANE_MIN,
+      PGACCEL_GROUPED_AGG_LANE_MAX,
+      PGACCEL_GROUPED_AGG_LANE_COUNT,
+  };
+  for (const uint32_t lane : lanes) {
+    SharedArray<int32_t> lhs({46341});
+    SharedArray<int32_t> rhs({46341});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, lhs.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL, lane);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+  for (const uint32_t lane : lanes) {
+    SharedArray<int32_t> lhs({std::numeric_limits<int32_t>::min()});
+    SharedArray<int32_t> rhs({1});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, lhs.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB, lane);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+}
+
 void test_error_and_unsupported_statuses() {
   std::printf("--- error and unsupported statuses ---\n");
 
@@ -1226,6 +1292,7 @@ int main() {
     test_four_dimensions_and_multiplicity();
     test_mixed_radix_compact_and_keyed_empty();
     test_group_activity_ignores_measure_validity();
+    test_integer_expression_overflow_semantics();
     test_error_and_unsupported_statuses();
     test_fixed_seed_mixed_radix_fuzz();
     test_dense_v9_differential();

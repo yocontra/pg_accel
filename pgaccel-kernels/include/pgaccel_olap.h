@@ -146,11 +146,13 @@ typedef struct {
 } pgaccel_grouped_agg_measure_col;
 
 /* One expression/accumulator slot. ABI v1 supports FLOAT64 -> F64 and
- * INT32/INT64 -> I64. I64 arithmetic is checked; overflow returns
- * PGACCEL_ERROR. NUMERIC/INTERVAL inputs are physically representable now but
- * may return UNSUPPORTED until their kernels land. COUNT_STAR has canonical
- * zero value/rhs views. accumulator_kind and state_bytes describe output and
- * workspace state independently of each input's physical width. */
+ * INT32/INT64 -> I64. Integer expression results are checked at their input
+ * SQL width before any aggregate lane consumes them, and I64 accumulator
+ * arithmetic is checked; overflow returns PGACCEL_ERROR. NUMERIC/INTERVAL
+ * inputs are physically representable now but may return UNSUPPORTED until
+ * their kernels land. COUNT_STAR has canonical zero value/rhs views.
+ * accumulator_kind and state_bytes describe output and workspace state
+ * independently of each input's physical width. */
 typedef struct {
   pgaccel_grouped_agg_measure_col value;
   pgaccel_grouped_agg_measure_col rhs;

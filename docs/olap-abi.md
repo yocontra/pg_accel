@@ -386,10 +386,12 @@ Weight applies as follows:
   artifact.
 
 Any u64 weight/count overflow or i64 accumulator overflow returns
-`PGACCEL_ERROR`. ABI v1 permits checked INT32/INT64 SUM and SUB, and checked
-INT32 multiplication accumulated in i64. INT64 MUL and integer SUMSQ return
-`PGACCEL_UNSUPPORTED` unless the implementation proves the operation safe or
-adds checked wide arithmetic. No signed operation wraps.
+`PGACCEL_ERROR`. INT32 MUL/SUB is also checked at INT32 expression width before
+SUM, MIN, MAX, or COUNT consumes the expression, matching PostgreSQL even when
+the accumulator itself is i64. ABI v1 permits checked INT32/INT64 SUM and SUB,
+and checked INT32 multiplication accumulated in i64. INT64 MUL and integer
+SUMSQ return `PGACCEL_UNSUPPORTED` unless the implementation proves the
+operation safe or adds checked wide arithmetic. No signed operation wraps.
 
 ## Filters and masks
 

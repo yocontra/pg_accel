@@ -478,6 +478,8 @@ pub enum GroupedAggStateLane {
 }
 
 struct MeasureOutputStorage {
+    accumulator_kind: i32,
+    state_bytes: usize,
     sum: Option<RawHostBuffer>,
     min: Option<RawHostBuffer>,
     max: Option<RawHostBuffer>,
@@ -492,6 +494,8 @@ struct MeasureOutputStorage {
 impl MeasureOutputStorage {
     fn empty() -> Self {
         Self {
+            accumulator_kind: 0,
+            state_bytes: 0,
             sum: None,
             min: None,
             max: None,
@@ -514,6 +518,8 @@ impl MeasureOutputStorage {
         let state_bytes = usize::try_from(measure.state_bytes)
             .map_err(|_| descriptor_error("measure state width does not fit usize"))?;
         let mut output = Self::empty();
+        output.accumulator_kind = measure.accumulator_kind;
+        output.state_bytes = state_bytes;
         if mask & abi::PGACCEL_GROUPED_AGG_LANE_SUM != 0 {
             output.sum = Some(RawHostBuffer::zeroed(capacity, state_bytes)?);
         }
@@ -598,6 +604,28 @@ impl MeasureOutputStorage {
             GroupedAggStateLane::RhsSum => self.rhs_sum.as_ref(),
         }
         .map(RawHostBuffer::as_bytes)
+    }
+
+    fn state_at<const WIDTH: usize>(
+        &self,
+        lane: GroupedAggStateLane,
+        group: usize,
+    ) -> GpuResult<[u8; WIDTH]> {
+        if self.state_bytes != WIDTH {
+            return Err(descriptor_error(
+                "aggregate state width does not match typed accessor",
+            ));
+        }
+        let offset = group
+            .checked_mul(WIDTH)
+            .ok_or_else(|| capacity_error("aggregate state offset overflow"))?;
+        let end = offset
+            .checked_add(WIDTH)
+            .ok_or_else(|| capacity_error("aggregate state end offset overflow"))?;
+        self.state(lane)
+            .and_then(|bytes| bytes.get(offset..end))
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| capacity_error("aggregate state index is out of bounds"))
     }
 }
 
@@ -806,6 +834,42 @@ impl GroupedAggOutputStorage {
     #[must_use]
     pub fn measure_state(&self, index: usize, lane: GroupedAggStateLane) -> Option<&[u8]> {
         self.measures.get(index)?.state(lane)
+    }
+
+    pub fn measure_i64_at(
+        &self,
+        index: usize,
+        lane: GroupedAggStateLane,
+        group: usize,
+    ) -> GpuResult<i64> {
+        let measure = self
+            .measures
+            .get(index)
+            .ok_or_else(|| capacity_error("aggregate measure index is out of bounds"))?;
+        if measure.accumulator_kind != abi::PGACCEL_GROUPED_AGG_ACCUM_I64 {
+            return Err(descriptor_error(
+                "aggregate state is not an I64 accumulator",
+            ));
+        }
+        Ok(i64::from_ne_bytes(measure.state_at(lane, group)?))
+    }
+
+    pub fn measure_f64_at(
+        &self,
+        index: usize,
+        lane: GroupedAggStateLane,
+        group: usize,
+    ) -> GpuResult<f64> {
+        let measure = self
+            .measures
+            .get(index)
+            .ok_or_else(|| capacity_error("aggregate measure index is out of bounds"))?;
+        if measure.accumulator_kind != abi::PGACCEL_GROUPED_AGG_ACCUM_F64 {
+            return Err(descriptor_error(
+                "aggregate state is not an F64 accumulator",
+            ));
+        }
+        Ok(f64::from_ne_bytes(measure.state_at(lane, group)?))
     }
 
     #[must_use]
@@ -1115,6 +1179,54 @@ mod tests {
         assert!(raw.measures[1..].iter().all(|measure| measure.sum.is_null()
             && measure.count.is_null()
             && measure.nonnull_count.is_null()));
+    }
+
+    #[test]
+    fn typed_measure_accessors_enforce_kind_width_and_bounds() {
+        let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        let storage = GroupedAggOutputStorage::new(&plan).expect("output allocates");
+        assert_eq!(
+            storage
+                .measure_i64_at(0, GroupedAggStateLane::Sum, 3)
+                .expect("i64 state"),
+            0
+        );
+        assert!(
+            storage
+                .measure_i64_at(0, GroupedAggStateLane::Sum, 4)
+                .is_err()
+        );
+        assert!(
+            storage
+                .measure_f64_at(0, GroupedAggStateLane::Sum, 0)
+                .is_err()
+        );
+
+        let mut f64_desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        f64_desc.measures[0].accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_F64;
+        // SAFETY: pointer-free fixture is used only to allocate host output.
+        let f64_plan = unsafe { ResolvedGroupedAggPlan::from_abi(f64_desc) }
+            .expect("f64 fixture is structurally valid");
+        let f64_storage = GroupedAggOutputStorage::new(&f64_plan).expect("f64 output allocates");
+        assert_eq!(
+            f64_storage
+                .measure_f64_at(0, GroupedAggStateLane::Sum, 0)
+                .expect("f64 state"),
+            0.0
+        );
+
+        let mut narrow_desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        narrow_desc.measures[0].state_bytes = 4;
+        // SAFETY: pointer-free fixture is used only to allocate host output.
+        let narrow_plan = unsafe { ResolvedGroupedAggPlan::from_abi(narrow_desc) }
+            .expect("narrow fixture is structurally valid");
+        let narrow_storage =
+            GroupedAggOutputStorage::new(&narrow_plan).expect("narrow output allocates");
+        assert!(
+            narrow_storage
+                .measure_i64_at(0, GroupedAggStateLane::Sum, 0)
+                .is_err()
+        );
     }
 
     #[test]
