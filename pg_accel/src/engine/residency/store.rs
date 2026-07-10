@@ -752,24 +752,42 @@ fn ensure_relcache_callback() {
     RELCACHE_CALLBACK_REGISTERED.with(|registered| registered.set(true));
 }
 
+fn prune_invalid_relations(
+    store: &mut RelationStore,
+    clear_all: bool,
+    pending: &PendingRelcacheInvalidations,
+    command_scope: CommandScope,
+    mut generation_stamp: impl FnMut(pg_sys::Oid) -> GenerationStamp,
+    mut current_relfilenode: impl FnMut(pg_sys::Oid) -> Option<pg_sys::Oid>,
+) {
+    store.entries.retain(|entry| {
+        if clear_all || pending.contains(u32::from(entry.relid)) {
+            return false;
+        }
+        entry.generation == generation_stamp(entry.relid)
+            && current_relfilenode(entry.relid) == Some(entry.relfilenode)
+            && entry
+                .first_use_scope
+                .is_none_or(|scope| scope == command_scope)
+    });
+}
+
 #[cfg(not(test))]
 fn process_invalidations() {
     ensure_relcache_callback();
     let clear_all = PENDING_RELCACHE_CLEAR_ALL.with(|pending| pending.replace(false));
     let pending =
         PENDING_RELCACHE.with(|pending| pending.replace(PendingRelcacheInvalidations::empty()));
+    let command_scope = current_command_scope();
     STORE.with(|store| {
-        let mut store = store.borrow_mut();
-        store.entries.retain(|entry| {
-            if clear_all || pending.contains(u32::from(entry.relid)) {
-                return false;
-            }
-            entry.generation == ledger::generation_stamp(entry.relid)
-                && loader::current_relfilenode(entry.relid) == Some(entry.relfilenode)
-                && entry
-                    .first_use_scope
-                    .is_none_or(|scope| scope == current_command_scope())
-        });
+        prune_invalid_relations(
+            &mut store.borrow_mut(),
+            clear_all,
+            &pending,
+            command_scope,
+            ledger::generation_stamp,
+            loader::current_relfilenode,
+        );
     });
 }
 
@@ -819,17 +837,27 @@ fn reserve_with_local_eviction_excluding(
     let budget = u64::MAX;
     #[cfg(not(test))]
     let budget = gucs::resident_memory_budget_bytes();
+    reserve_with_eviction(bytes, budget, LedgerCharge::reserve, || {
+        STORE.with(|store| {
+            store
+                .borrow_mut()
+                .evict_one_for_budget_excluding(protected)
+                .is_some()
+        })
+    })
+}
+
+fn reserve_with_eviction<T>(
+    bytes: u64,
+    budget: u64,
+    mut reserve: impl FnMut(u64, u64) -> Result<T, u64>,
+    mut evict: impl FnMut() -> bool,
+) -> Result<T, ResidentLoadError> {
     loop {
-        match LedgerCharge::reserve(bytes, budget) {
+        match reserve(bytes, budget) {
             Ok(charge) => return Ok(charge),
             Err(live) => {
-                let evicted = STORE.with(|store| {
-                    store
-                        .borrow_mut()
-                        .evict_one_for_budget_excluding(protected)
-                        .is_some()
-                });
-                if !evicted {
+                if !evict() {
                     return Err(ResidentLoadError::BudgetExceeded {
                         requested: bytes,
                         live,
@@ -845,12 +873,13 @@ fn install_staged(
     staged: StagedRelation,
     pinned: bool,
     first_use_scope: Option<CommandScope>,
+    protected: &BTreeSet<u32>,
 ) -> Result<(), ResidentLoadError> {
     let bytes = staged.device_bytes().map_err(ResidentLoadError::Loader)?;
     STORE.with(|store| {
         store.borrow_mut().remove_relation(staged.relid());
     });
-    let charge = reserve_with_local_eviction(staged.relid(), bytes)?;
+    let charge = reserve_with_local_eviction_excluding(protected, bytes)?;
     let mut relation = staged
         .materialize(charge)
         .map_err(ResidentLoadError::Loader)?;
@@ -907,7 +936,8 @@ fn ensure_one(
     force: bool,
 ) -> Result<ResidentRelationEvidence, ResidentLoadError> {
     process_invalidations();
-    ensure_one_after_invalidations(request, force).map(|outcome| outcome.evidence)
+    let protected = BTreeSet::from([u32::from(request.relid)]);
+    ensure_one_after_invalidations(request, force, &protected).map(|outcome| outcome.evidence)
 }
 
 struct EnsureOutcome {
@@ -918,6 +948,7 @@ struct EnsureOutcome {
 fn ensure_one_after_invalidations(
     request: &SelectedRelation,
     force: bool,
+    protected: &BTreeSet<u32>,
 ) -> Result<EnsureOutcome, ResidentLoadError> {
     let present = STORE.with(|store| {
         store
@@ -957,7 +988,7 @@ fn ensure_one_after_invalidations(
     let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(request.relid)));
     let first_use_scope =
         matches!(trigger, loader::TriggerInstall::New).then(current_command_scope);
-    install_staged(staged, pinned, first_use_scope)?;
+    install_staged(staged, pinned, first_use_scope, protected)?;
     let evidence = STORE.with(|store| {
         store
             .borrow()
@@ -987,16 +1018,27 @@ fn finalize_batch_first_use(relids: &[pg_sys::Oid], scope: CommandScope) {
     });
 }
 
+fn selected_relation_relids(requests: &[SelectedRelation]) -> BTreeSet<u32> {
+    requests
+        .iter()
+        .map(|request| u32::from(request.relid))
+        .collect()
+}
+
 /// Ensure every relation/attribute required by a selected resident plan is
 /// loaded and begin-time revalidated.
 pub fn ensure_selected_relations(
     requests: &[SelectedRelation],
 ) -> Result<Vec<ResidentRelationEvidence>, ResidentLoadError> {
     process_invalidations();
+    // A selected batch is one executor dependency set. Keep every requested
+    // relation protected while loading each member so a later dimension
+    // reservation cannot evict an earlier fact (or vice versa).
+    let protected = selected_relation_relids(requests);
     let mut evidence = Vec::with_capacity(requests.len());
     let mut newly_managed = Vec::new();
     for request in requests {
-        let outcome = ensure_one_after_invalidations(request, false)?;
+        let outcome = ensure_one_after_invalidations(request, false, &protected)?;
         if outcome.installed_trigger {
             newly_managed.push(request.relid);
         }
@@ -1147,6 +1189,17 @@ fn first_dependency_mismatch(
     })
 }
 
+fn dependency_relids_match(
+    dependencies: &[ResidentDependencyStamp],
+    requested: &BTreeSet<u32>,
+) -> bool {
+    dependencies.len() == requested.len()
+        && dependencies
+            .iter()
+            .zip(requested)
+            .all(|(dependency, requested)| u32::from(dependency.relid) == *requested)
+}
+
 fn resolve_column_views<'a>(
     store: &'a RelationStore,
     columns: &[ResidentColumnRef],
@@ -1225,11 +1278,9 @@ pub fn ensure_derived_artifact<T: DerivedArtifact, P>(
         let Some(exact_index) = exact_index else {
             return Ok(false);
         };
-        let stale = first_dependency_mismatch(
-            &store,
-            &store.entries[owner_index].derived[exact_index].dependencies,
-        )
-        .is_some();
+        let stored_dependencies = &store.entries[owner_index].derived[exact_index].dependencies;
+        let stale = !dependency_relids_match(stored_dependencies, &protected)
+            || first_dependency_mismatch(&store, stored_dependencies).is_some();
         if stale {
             store.entries[owner_index].derived.remove(exact_index);
             replacing_stale = true;
@@ -1662,7 +1713,8 @@ fn refresh_relation(relid: pg_sys::Oid) -> Result<u64, ResidentLoadError> {
     let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(relid)));
     let first_use_scope =
         matches!(trigger, loader::TriggerInstall::New).then(current_command_scope);
-    install_staged(staged, pinned, first_use_scope)?;
+    let protected = BTreeSet::from([u32::from(relid)]);
+    install_staged(staged, pinned, first_use_scope, &protected)?;
     if update_pin {
         STORE.with(|store| {
             if let Some(pin) = store.borrow_mut().pins.get_mut(&u32::from(relid)) {
@@ -1871,6 +1923,7 @@ fn pg_accel_residency_invalidate<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
 
     #[test]
     fn shape_digest_is_stable_and_order_sensitive() {
@@ -1887,6 +1940,65 @@ mod tests {
         }
         assert!(pending.contains(1));
         assert!(!pending.contains(10_000));
+    }
+
+    #[test]
+    fn invalidation_prunes_pending_generation_relfilenode_and_scope_changes() {
+        let current_scope = CommandScope {
+            xid: 11,
+            command_id: 22,
+        };
+        let mut store = RelationStore::default();
+        store.entries.extend(
+            [10_u32, 20, 30, 40, 50, 60]
+                .into_iter()
+                .enumerate()
+                .map(|(index, relid)| empty_relation(relid, false, index as u64 + 1)),
+        );
+        store.entries[4].first_use_scope = Some(CommandScope {
+            xid: current_scope.xid,
+            command_id: current_scope.command_id + 1,
+        });
+
+        let mut pending = PendingRelcacheInvalidations::empty();
+        pending.relids[0] = 20;
+        pending.len = 1;
+        prune_invalid_relations(
+            &mut store,
+            false,
+            &pending,
+            current_scope,
+            |relid| GenerationStamp {
+                global: 1,
+                relation: u64::from(u32::from(relid) == 30) + 1,
+            },
+            |relid| match u32::from(relid) {
+                40 => Some(pg_sys::Oid::from(9_999_u32)),
+                60 => None,
+                raw => Some(pg_sys::Oid::from(raw + 100)),
+            },
+        );
+
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(store.entries[0].relid, pg_sys::Oid::from(10_u32));
+    }
+
+    #[test]
+    fn invalidation_clear_all_does_not_consult_catalog_state() {
+        let mut store = RelationStore::default();
+        store.entries.push(empty_relation(70, false, 1));
+        prune_invalid_relations(
+            &mut store,
+            true,
+            &PendingRelcacheInvalidations::empty(),
+            CommandScope {
+                xid: 1,
+                command_id: 1,
+            },
+            |_| panic!("clear-all must not read a generation"),
+            |_| panic!("clear-all must not read a relfilenode"),
+        );
+        assert!(store.entries.is_empty());
     }
 
     #[test]
@@ -1938,6 +2050,39 @@ mod tests {
 
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    struct MarkerArtifact(u8);
+
+    impl DerivedArtifact for MarkerArtifact {
+        fn device_bytes(&self) -> u64 {
+            0
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct DropTrackedArtifact {
+        bytes: u64,
+        dropped: Rc<Cell<bool>>,
+    }
+
+    impl DerivedArtifact for DropTrackedArtifact {
+        fn device_bytes(&self) -> u64 {
+            self.bytes
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    impl Drop for DropTrackedArtifact {
+        fn drop(&mut self) {
+            self.dropped.set(true);
         }
     }
 
@@ -2089,7 +2234,184 @@ mod tests {
     }
 
     #[test]
-    fn public_api_keeps_digest_collisions_as_distinct_entries() {
+    fn finite_budget_retry_protects_every_declared_dependency() {
+        let owner = pg_sys::Oid::from(910_u32);
+        let dimension_a = pg_sys::Oid::from(911_u32);
+        let dimension_b = pg_sys::Oid::from(912_u32);
+        let evictable = pg_sys::Oid::from(913_u32);
+        install_test_relations(&[910, 911, 912, 913]);
+        STORE.with(|store| {
+            for (index, relation) in store.borrow_mut().entries.iter_mut().enumerate() {
+                relation.derived.push(DerivedEntry {
+                    digest: 100 + index as u64,
+                    canonical_words: vec![index as i32 + 1].into_boxed_slice(),
+                    dependencies: Box::default(),
+                    artifact: Box::new(SizedArtifact(8)),
+                    charge: LedgerCharge::reserve(0, 0).expect("zero-byte artifact charge"),
+                });
+            }
+        });
+        let protected =
+            canonical_dependency_relids(owner, &[dimension_a, dimension_b], &[]).expect("valid");
+        let live = Cell::new(32_u64);
+        let attempts = Cell::new(0_u32);
+        let evicted = Cell::new(None);
+
+        reserve_with_eviction(
+            8,
+            32,
+            |requested, budget| {
+                attempts.set(attempts.get() + 1);
+                let next = live.get().checked_add(requested);
+                if next.is_some_and(|next| next <= budget) {
+                    live.set(next.expect("checked above"));
+                    Ok(())
+                } else {
+                    Err(live.get())
+                }
+            },
+            || {
+                let outcome = STORE.with(|store| {
+                    store
+                        .borrow_mut()
+                        .evict_one_for_budget_excluding(&protected)
+                });
+                evicted.set(outcome);
+                if outcome.is_some() {
+                    live.set(live.get().checked_sub(8).expect("modeled charge exists"));
+                    true
+                } else {
+                    false
+                }
+            },
+        )
+        .expect("eviction makes room within the finite budget");
+
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(evicted.get(), Some(EvictionKind::Derived));
+        assert_eq!(live.get(), 32);
+        STORE.with(|store| {
+            let store = store.borrow();
+            for relid in [owner, dimension_a, dimension_b] {
+                assert_eq!(
+                    store
+                        .entries
+                        .iter()
+                        .find(|entry| entry.relid == relid)
+                        .expect("protected relation remains")
+                        .derived
+                        .len(),
+                    1
+                );
+            }
+            assert!(
+                store
+                    .entries
+                    .iter()
+                    .find(|entry| entry.relid == evictable)
+                    .expect("raw relation remains")
+                    .derived
+                    .is_empty()
+            );
+        });
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn finite_budget_batch_keeps_the_fact_or_returns_budget_exceeded() {
+        let fact = pg_sys::Oid::from(920_u32);
+        let dimension = pg_sys::Oid::from(921_u32);
+        let unrelated = pg_sys::Oid::from(922_u32);
+        let requests = [
+            SelectedRelation {
+                relid: fact,
+                columns: vec![1],
+            },
+            SelectedRelation {
+                relid: dimension,
+                columns: vec![1],
+            },
+        ];
+        let protected = selected_relation_relids(&requests);
+
+        // When an unrelated entry can make room, it is evicted and the
+        // earlier fact remains available for dimension preparation.
+        install_test_relations(&[920, 922]);
+        let live = Cell::new(16_u64);
+        reserve_with_eviction(
+            8,
+            16,
+            |requested, budget| {
+                let next = live.get().checked_add(requested);
+                if next.is_some_and(|next| next <= budget) {
+                    live.set(next.expect("checked above"));
+                    Ok(())
+                } else {
+                    Err(live.get())
+                }
+            },
+            || {
+                let evicted = STORE.with(|store| {
+                    store
+                        .borrow_mut()
+                        .evict_one_for_budget_excluding(&protected)
+                        .is_some()
+                });
+                if evicted {
+                    live.set(live.get().checked_sub(8).expect("modeled charge exists"));
+                }
+                evicted
+            },
+        )
+        .expect("unrelated relation makes room");
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            assert!(store.entries.iter().any(|entry| entry.relid == fact));
+            assert!(!store.entries.iter().any(|entry| entry.relid == unrelated));
+            store.entries.push(empty_relation(921, false, 3));
+            assert!(
+                [fact, dimension]
+                    .into_iter()
+                    .all(|relid| store.entries.iter().any(|entry| entry.relid == relid))
+            );
+            store.entries.clear();
+        });
+
+        // With no unprotected entry, fail before evicting the already loaded
+        // fact. The caller receives the budget error instead of a later
+        // MissingRelation during artifact preparation.
+        install_test_relations(&[920]);
+        let result = reserve_with_eviction(
+            8,
+            8,
+            |_, _| Err::<(), _>(8),
+            || {
+                STORE.with(|store| {
+                    store
+                        .borrow_mut()
+                        .evict_one_for_budget_excluding(&protected)
+                        .is_some()
+                })
+            },
+        );
+        assert_eq!(
+            result,
+            Err(ResidentLoadError::BudgetExceeded {
+                requested: 8,
+                live: 8,
+                budget: 8,
+            })
+        );
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(store.entries.len(), 1);
+            assert_eq!(store.entries[0].relid, fact);
+        });
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn forced_digest_collisions_build_and_resolve_distinct_artifacts() {
         install_test_relations(&[1_000]);
         let owner = pg_sys::Oid::from(1_000_u32);
         let first = DerivedArtifactIdentity {
@@ -2100,7 +2422,7 @@ mod tests {
             digest: 88,
             canonical_words: vec![1, 3].into_boxed_slice(),
         };
-        for identity in [&first, &second] {
+        for (marker, identity) in [(1_u8, &first), (2, &second)] {
             assert_eq!(
                 ensure_derived_artifact(
                     owner,
@@ -2113,7 +2435,7 @@ mod tests {
                             device_bytes: 0,
                         })
                     },
-                    |()| Ok(EmptyArtifact),
+                    |()| Ok(MarkerArtifact(marker)),
                 )
                 .expect("artifact build succeeds"),
                 ArtifactEnsureOutcome::Built
@@ -2125,6 +2447,77 @@ mod tests {
             assert!(store.entries[0].derived[0].has_identity(&first));
             assert!(store.entries[0].derived[1].has_identity(&second));
         });
+        assert_eq!(
+            with_derived_artifact_inputs::<MarkerArtifact, _>(owner, &first, &[], |resolved| {
+                resolved.artifact.0
+            })
+            .expect("first collision resolves"),
+            1
+        );
+        assert_eq!(
+            with_derived_artifact_inputs::<MarkerArtifact, _>(owner, &second, &[], |resolved| {
+                resolved.artifact.0
+            })
+            .expect("second collision resolves"),
+            2
+        );
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn artifact_hit_requires_the_exact_requested_dependency_set() {
+        install_test_relations(&[1_010, 1_011, 1_012]);
+        let owner = pg_sys::Oid::from(1_010_u32);
+        let dimension_a = pg_sys::Oid::from(1_011_u32);
+        let dimension_b = pg_sys::Oid::from(1_012_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![5, 4, 3]);
+        assert_eq!(
+            ensure_derived_artifact(
+                owner,
+                &identity,
+                &[owner, dimension_a],
+                &[],
+                |_| Ok(PreparedDerived {
+                    prepared: (),
+                    device_bytes: 0,
+                }),
+                |()| Ok(MarkerArtifact(1)),
+            )
+            .expect("first artifact builds"),
+            ArtifactEnsureOutcome::Built
+        );
+        assert_eq!(
+            ensure_derived_artifact(
+                owner,
+                &identity,
+                &[dimension_b, owner],
+                &[],
+                |_| Ok(PreparedDerived {
+                    prepared: (),
+                    device_bytes: 0,
+                }),
+                |()| Ok(MarkerArtifact(2)),
+            )
+            .expect("different dependency set rebuilds"),
+            ArtifactEnsureOutcome::Rebuilt
+        );
+
+        STORE.with(|store| {
+            let store = store.borrow();
+            let entry = &store.entries[0].derived[0];
+            assert_eq!(store.entries[0].derived.len(), 1);
+            assert!(dependency_relids_match(
+                &entry.dependencies,
+                &BTreeSet::from([u32::from(owner), u32::from(dimension_b)])
+            ));
+        });
+        assert_eq!(
+            with_derived_artifact_inputs::<MarkerArtifact, _>(owner, &identity, &[], |resolved| {
+                resolved.artifact.0
+            })
+            .expect("replacement resolves"),
+            2
+        );
         STORE.with(|store| store.borrow_mut().entries.clear());
     }
 
@@ -2163,11 +2556,14 @@ mod tests {
     }
 
     #[test]
-    fn dependency_change_before_publish_drops_built_artifact() {
+    fn nonzero_charge_dependency_race_drops_charge_and_built_artifact() {
         install_test_relations(&[1_200, 1_201]);
         let owner = pg_sys::Oid::from(1_200_u32);
         let dimension = pg_sys::Oid::from(1_201_u32);
         let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 2]);
+        let before = ledger::total_bytes();
+        let dropped = Rc::new(Cell::new(false));
+        let dropped_by_artifact = Rc::clone(&dropped);
         let result = ensure_derived_artifact(
             owner,
             &identity,
@@ -2176,18 +2572,24 @@ mod tests {
             |_| {
                 Ok(PreparedDerived {
                     prepared: (),
-                    device_bytes: 0,
+                    device_bytes: 23,
                 })
             },
-            |()| {
+            move |()| {
+                assert!(ledger::total_bytes() >= before.saturating_add(23));
                 STORE.with(|store| store.borrow_mut().entries[1].generation.relation += 1);
-                Ok(EmptyArtifact)
+                Ok(DropTrackedArtifact {
+                    bytes: 23,
+                    dropped: dropped_by_artifact,
+                })
             },
         );
         assert!(matches!(
             result,
             Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == dimension
         ));
+        assert!(dropped.get());
+        assert_eq!(ledger::total_bytes(), before);
         STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
         STORE.with(|store| store.borrow_mut().entries.clear());
     }
@@ -2271,5 +2673,122 @@ mod tests {
         assert!(has_requested_columns(&relation, &[]));
         assert_eq!(relation.raw_bytes(), 0);
         assert!(relation.columns.is_empty());
+    }
+}
+
+#[cfg(feature = "pg_test")]
+mod pg_tests {
+    #[pgrx::pg_schema]
+    mod tests {
+        use std::collections::BTreeMap;
+
+        use pgrx::{
+            pg_sys,
+            prelude::{Spi, pg_test},
+        };
+
+        use super::super::{
+            LedgerCharge, PENDING_RELCACHE, PENDING_RELCACHE_CLEAR_ALL,
+            PendingRelcacheInvalidations, ResidentLoadError, ResidentRelation, STORE,
+            cleanup_backend, ledger, loader, now_us, process_invalidations,
+            reserve_with_local_eviction,
+        };
+
+        fn test_relation_oid(name: &str) -> pg_sys::Oid {
+            let raw = Spi::get_one::<i64>(&format!("SELECT '{name}'::regclass::oid::int8"))
+                .expect("relation OID query succeeds")
+                .expect("relation exists");
+            pg_sys::Oid::from(u32::try_from(raw).expect("relation OID fits u32"))
+        }
+
+        fn install_catalog_backed_entry(relid: pg_sys::Oid) -> pg_sys::Oid {
+            let relfilenode = loader::current_relfilenode(relid).expect("relation has relfilenode");
+            STORE.with(|store| {
+                let mut store = store.borrow_mut();
+                store.remove_relation(relid);
+                store.tick = store.tick.wrapping_add(1).max(1);
+                let tick = store.tick;
+                store.entries.push(ResidentRelation {
+                    relid,
+                    relfilenode,
+                    generation: ledger::generation_stamp(relid),
+                    columns: BTreeMap::new(),
+                    row_count: 0,
+                    loaded_at_us: now_us(),
+                    last_used_us: now_us(),
+                    load_ms: 0.0,
+                    last_used_tick: tick,
+                    pinned: false,
+                    raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
+                    first_use_scope: None,
+                    derived: Vec::new(),
+                });
+            });
+            relfilenode
+        }
+
+        fn run_in_subtransaction(sql: &str) {
+            // SAFETY: this mirrors PL/pgSQL's exception-block subtransaction
+            // resource/context save and restore on the backend main thread.
+            unsafe {
+                let old_context = pg_sys::CurrentMemoryContext;
+                let old_owner = pg_sys::CurrentResourceOwner;
+                pg_sys::BeginInternalSubTransaction(std::ptr::null());
+                pg_sys::MemoryContextSwitchTo(old_context);
+                Spi::run(sql).expect("subtransaction statement succeeds");
+                pg_sys::ReleaseCurrentSubTransaction();
+                pg_sys::MemoryContextSwitchTo(old_context);
+                pg_sys::CurrentResourceOwner = old_owner;
+            }
+        }
+
+        #[pg_test]
+        fn live_relcache_and_relfilenode_invalidation_prune_resident_entries() {
+            cleanup_backend();
+            Spi::run("CREATE TEMP TABLE pgaccel_residency_live_inval (value int4)")
+                .expect("temporary table creation succeeds");
+            let relid = test_relation_oid("pgaccel_residency_live_inval");
+            let old_relfilenode = install_catalog_backed_entry(relid);
+
+            process_invalidations();
+            STORE.with(|store| assert_eq!(store.borrow().entries.len(), 1));
+
+            run_in_subtransaction("TRUNCATE pgaccel_residency_live_inval");
+            let new_relfilenode =
+                loader::current_relfilenode(relid).expect("relation still has relfilenode");
+            assert_ne!(old_relfilenode, new_relfilenode);
+
+            // Isolate the relfilenode predicate from the callback notification
+            // produced by TRUNCATE; both independently fail closed.
+            PENDING_RELCACHE_CLEAR_ALL.with(|pending| pending.set(false));
+            PENDING_RELCACHE.with(|pending| pending.set(PendingRelcacheInvalidations::empty()));
+            process_invalidations();
+            STORE.with(|store| assert!(store.borrow().entries.is_empty()));
+
+            install_catalog_backed_entry(relid);
+            Spi::run("ALTER TABLE pgaccel_residency_live_inval ADD COLUMN marker int4")
+                .expect("catalog-only ALTER TABLE succeeds");
+            process_invalidations();
+            STORE.with(|store| assert!(store.borrow().entries.is_empty()));
+            cleanup_backend();
+        }
+
+        #[pg_test]
+        fn live_resident_budget_guc_rejects_a_nonzero_reservation_at_zero() {
+            cleanup_backend();
+            Spi::run("SET LOCAL pg_accel.resident_memory_budget_mb = 0")
+                .expect("resident budget GUC accepts zero");
+            let error = reserve_with_local_eviction(pg_sys::InvalidOid, 1)
+                .expect_err("one byte exceeds a zero-byte live budget");
+            assert_eq!(
+                error,
+                ResidentLoadError::BudgetExceeded {
+                    requested: 1,
+                    live: 0,
+                    budget: 0,
+                }
+            );
+            cleanup_backend();
+        }
     }
 }
