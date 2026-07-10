@@ -104,8 +104,8 @@ fn validate_descriptor_shell(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<()>
 /// lifecycle transition is safe and preserves the descriptor's borrow.
 pub struct ResolvedGroupedAggPlan<'input> {
     desc: abi::PgaccelGroupedAggDesc,
+    identity: Rc<()>,
     _input_lifetime: PhantomData<&'input [u8]>,
-    _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl<'input> ResolvedGroupedAggPlan<'input> {
@@ -118,8 +118,8 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
         validate_descriptor_shell(&desc)?;
         Ok(Self {
             desc,
+            identity: Rc::new(()),
             _input_lifetime: PhantomData,
-            _not_send_sync: PhantomData,
         })
     }
 
@@ -300,8 +300,15 @@ pub struct GroupedAggWorkspace {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
+fn workspace_query_descriptor(plan: &ResolvedGroupedAggPlan<'_>) -> abi::PgaccelGroupedAggDesc {
+    let mut desc = plan.desc;
+    desc.execution_flags = abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN;
+    desc
+}
+
 impl GroupedAggWorkspace {
     pub fn allocate(plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<Self> {
+        let query_desc = workspace_query_descriptor(plan);
         let mut requirement = abi::PgaccelGroupedAggWorkspaceReq {
             abi_version: abi::PGACCEL_OLAP_ABI_VERSION,
             size_bytes: WORKSPACE_REQ_SIZE,
@@ -314,7 +321,7 @@ impl GroupedAggWorkspace {
         // the duration of the synchronous call.
         let status = unsafe {
             bridge::pgaccel_grouped_agg_workspace_requirements(
-                std::ptr::from_ref(&plan.desc),
+                std::ptr::from_ref(&query_desc),
                 std::ptr::from_mut(&mut requirement),
             )
         };
@@ -613,7 +620,7 @@ pub struct GroupedAggOutputStorage {
     key_nulls: [Option<Vec<u8>>; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
     key_types: [i32; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
     measures: [MeasureOutputStorage; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
-    _not_send_sync: PhantomData<Rc<()>>,
+    plan_identity: Rc<()>,
 }
 
 impl GroupedAggOutputStorage {
@@ -673,8 +680,18 @@ impl GroupedAggOutputStorage {
             key_nulls,
             key_types,
             measures,
-            _not_send_sync: PhantomData,
+            plan_identity: Rc::clone(&plan.identity),
         })
+    }
+
+    fn validate_for_plan(&self, plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<()> {
+        if Rc::ptr_eq(&self.plan_identity, &plan.identity) {
+            Ok(())
+        } else {
+            Err(descriptor_error(
+                "grouped output storage belongs to a different resolved plan",
+            ))
+        }
     }
 
     fn raw(&mut self) -> abi::PgaccelGroupedAggOut {
@@ -930,6 +947,7 @@ pub fn execute_grouped_agg_one_shot(
     plan: &ResolvedGroupedAggPlan<'_>,
     output: &mut GroupedAggOutputStorage,
 ) -> GpuResult<GroupedAggOutcome> {
+    output.validate_for_plan(plan)?;
     let mut workspace = GroupedAggWorkspace::allocate(plan)?;
     execute_call(
         plan.desc,
@@ -982,6 +1000,7 @@ impl<'plan, 'input> GroupedAggSession<'plan, 'input> {
         &mut self,
         output: &mut GroupedAggOutputStorage,
     ) -> GpuResult<GroupedAggOutcome> {
+        output.validate_for_plan(self.plan)?;
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Finalize)?;
         match execute_call(self.plan.desc, flags, &mut self.workspace, Some(output)) {
             Ok(Some(outcome)) => {
@@ -1087,6 +1106,31 @@ mod tests {
         assert!(raw.measures[1..].iter().all(|measure| measure.sum.is_null()
             && measure.count.is_null()
             && measure.nonnull_count.is_null()));
+    }
+
+    #[test]
+    fn output_storage_is_bound_to_its_exact_resolved_plan() {
+        let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        let mut narrower = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        narrower.measures[0].state_bytes = 1;
+        // SAFETY: pointer-free fixture is not dispatched.
+        let other = unsafe { ResolvedGroupedAggPlan::from_abi(narrower) }
+            .expect("shell accepts the alternate allocation shape");
+        let storage = GroupedAggOutputStorage::new(&other).expect("narrow output allocates");
+        assert!(storage.validate_for_plan(&plan).is_err());
+        assert!(storage.validate_for_plan(&other).is_ok());
+    }
+
+    #[test]
+    fn workspace_query_uses_execute_flags_without_mutating_plan() {
+        let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        assert_eq!(plan.desc.execution_flags, 0);
+        let query = workspace_query_descriptor(&plan);
+        assert_eq!(
+            query.execution_flags,
+            abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN
+        );
+        assert_eq!(plan.desc.execution_flags, 0);
     }
 
     #[test]

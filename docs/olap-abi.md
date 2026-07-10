@@ -509,9 +509,12 @@ logged/counted and become the generic hard execution error; they are never
 laundered into UNSUPPORTED.
 
 The bridge owns every output buffer and derives its pointer matrix solely from
-the descriptor lane bits. A successful call with `uncertain_count > 0` returns
-`NeedsRecheck`, not a publishable result. Dense active-group bytes and emitted
-capacity metadata are revalidated before any executor can read a lane.
+the descriptor lane bits. Each output owner is identity-bound to the resolved
+plan that sized it, so another plan cannot reuse narrower state/key buffers even
+when its capacity and lane mask happen to match. A successful call with
+`uncertain_count > 0` returns `NeedsRecheck`, not a publishable result. Dense
+active-group bytes and emitted capacity metadata are revalidated before any
+executor can read a lane.
 
 ## Chunk state machine
 

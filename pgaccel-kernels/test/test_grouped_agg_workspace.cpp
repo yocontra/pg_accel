@@ -49,7 +49,7 @@ int main() {
   check_space(PGACCEL_MEM_SPACE_SHARED_USM, "shared workspace allocation");
   check_space(PGACCEL_MEM_SPACE_DEVICE, "device workspace allocation");
   pgaccel_grouped_agg_workspace_free(nullptr);
-  (void)pgaccel_shutdown();
+  check(pgaccel_shutdown() == PGACCEL_OK, "GPU shutdown");
 
   if (failures != 0) {
     std::fprintf(stderr, "%d grouped workspace checks failed\n", failures);
