@@ -1470,11 +1470,20 @@ bool validate_aliases(const pgaccel_grouped_agg_desc& desc, const pgaccel_groupe
   return true;
 }
 
+bool same_queue_device(sycl::queue& queue, const void* ptr) {
+  try {
+    return sycl::get_pointer_device(ptr, queue.get_context()) == queue.get_device();
+  } catch (...) {
+    return false;
+  }
+}
+
 bool device_accessible(sycl::queue& queue, const void* ptr) {
   if (ptr == nullptr)
     return true;
   const sycl::usm::alloc type = sycl::get_pointer_type(ptr, queue.get_context());
-  return type == sycl::usm::alloc::device || type == sycl::usm::alloc::shared;
+  return (type == sycl::usm::alloc::device || type == sycl::usm::alloc::shared) &&
+         same_queue_device(queue, ptr);
 }
 
 bool validate_input_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc) {
@@ -1542,7 +1551,7 @@ bool validate_output_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& des
       continue;
     const sycl::usm::alloc actual = sycl::get_pointer_type(pointer, queue.get_context());
     if (out.output_space == PGACCEL_MEM_SPACE_SHARED_USM) {
-      if (actual != sycl::usm::alloc::shared)
+      if (actual != sycl::usm::alloc::shared || !same_queue_device(queue, pointer))
         return false;
     } else if (actual == sycl::usm::alloc::device || actual == sycl::usm::alloc::shared) {
       return false;
@@ -1569,9 +1578,10 @@ bool validate_scratch_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& de
   if (desc.scratch == nullptr)
     return true;
   const sycl::usm::alloc actual = sycl::get_pointer_type(desc.scratch, queue.get_context());
-  return (desc.scratch_space == PGACCEL_MEM_SPACE_SHARED_USM &&
-          actual == sycl::usm::alloc::shared) ||
-         (desc.scratch_space == PGACCEL_MEM_SPACE_DEVICE && actual == sycl::usm::alloc::device);
+  const bool expected_space =
+      (desc.scratch_space == PGACCEL_MEM_SPACE_SHARED_USM && actual == sycl::usm::alloc::shared) ||
+      (desc.scratch_space == PGACCEL_MEM_SPACE_DEVICE && actual == sycl::usm::alloc::device);
+  return expected_space && same_queue_device(queue, desc.scratch);
 }
 
 void enqueue_copy(sycl::queue& queue, void* dst, const void* src, size_t count, size_t width) {
