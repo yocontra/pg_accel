@@ -133,6 +133,7 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_sphere_distance_bulk", D::Spatial),
         ("pgaccel_segment_intersects_bulk", D::Spatial),
         ("pgaccel_st_area_bulk", D::Spatial),
+        ("pgaccel_spatial_intersects_pairwise", D::Spatial),
         ("pgaccel_spatial_intersects", D::Spatial),
         ("pgaccel_bbox_intersects_bulk_f32", D::Spatial),
         ("pgaccel_h3_lat_lng_to_cell_bulk", D::H3),

@@ -787,8 +787,8 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_nlj_per_pair_cost.to_string(),
         ),
         (
-            "gpu_spatial_pairwise_max_rows".into(),
-            limits.gpu_spatial_pairwise_max_rows.to_string(),
+            "gpu_spatial_pairwise_chunk_rows".into(),
+            limits.gpu_spatial_pairwise_chunk_rows.to_string(),
         ),
         ("has_native_fp64".into(), limits.has_native_fp64.to_string()),
         (

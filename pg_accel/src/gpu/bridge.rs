@@ -235,10 +235,19 @@ bridge_status_fns! {
         lengths: *mut std::ffi::c_void,
     ) -> PgaccelStatus;
 
-    /// Three-layer spatial intersection pipeline.
+    /// Linear row-wise spatial intersection classification.
     ///
-    /// Takes arrays of geometry descriptors and partitions pairs into
-    /// definite-true, definite-false, and uncertain buckets.
+    /// Pair `i` is `(geoms_a[i], geoms_b[i])`. Each result is 1 for definite
+    /// true, -1 for definite false, or 0 for uncertain.
+    pub fn pgaccel_spatial_intersects_pairwise(
+        geoms_a: *const PgaccelGeometry,
+        geoms_b: *const PgaccelGeometry,
+        count: usize,
+        results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// Deprecated cross-product ABI. Non-empty inputs are unsupported.
+    #[allow(dead_code)] // reason: ABI symbol retained for compatibility audits
     pub fn pgaccel_spatial_intersects(
         geoms_a: *const PgaccelGeometry,
         count_a: usize,

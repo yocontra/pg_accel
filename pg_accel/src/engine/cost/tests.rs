@@ -251,6 +251,32 @@ fn high_cu_gpu_lowers_thresholds() {
     assert!(lh.gpu_hash_agg_max_groups > ll.gpu_hash_agg_max_groups);
 }
 
+#[test]
+fn spatial_pairwise_chunk_rows_derive_from_max_alloc() {
+    let low = PlatformProfile {
+        cpu_cores: 8,
+        has_gpu: true,
+        estimated_gpu_gflops: 500.0,
+        compute_units: 8,
+        gpu_max_alloc_bytes: 128 * 1024 * 1024,
+        has_native_fp64: false,
+    };
+    let high = PlatformProfile {
+        gpu_max_alloc_bytes: 8 * 1024 * 1024 * 1024,
+        ..low.clone()
+    };
+
+    let low_rows = DeviceLimits::from_profile(&low).gpu_spatial_pairwise_chunk_rows;
+    let high_rows = DeviceLimits::from_profile(&high).gpu_spatial_pairwise_chunk_rows;
+    assert_eq!(low_rows, 256);
+    assert!(high_rows > low_rows);
+    assert!(high_rows <= 65_536);
+    assert_eq!(
+        DeviceLimits::cpu_only().gpu_spatial_pairwise_chunk_rows,
+        2_048
+    );
+}
+
 // -- should_batch cost boundary -------------------------------------------
 
 #[test]

@@ -483,8 +483,8 @@ typedef struct pgaccel_geometry_s {
 
 /*
  * Bulk point-in-polygon: tests each point against a single polygon.
- * Inline bbox pre-filter, then GPU dispatch (>=256 survivors) or CPU scalar.
- * results[i]: 1=inside, -1=outside, 0=uncertain.
+ * Inline bbox pre-filter, then device-only dispatch for nonempty survivors.
+ * results[i]: 1=inside, -1=outside, 0=uncertain/boundary.
  */
 pgaccel_status pgaccel_point_in_polygon_bulk(
     const float* points_xy,                     /* [N * 2] interleaved x,y */
@@ -496,6 +496,18 @@ pgaccel_status pgaccel_point_in_polygon_bulk(
     int8_t* results                             /* [N] output */
 );
 
+/* Linear row-wise intersection classification. Pair i is
+ * (geoms_a[i], geoms_b[i]); results[i] is 1=true, -1=false, 0=uncertain.
+ * Supported predicates execute in one GPU kernel with a single packed device
+ * allocation. Unsupported geometry combinations remain uncertain for exact
+ * PostgreSQL/PostGIS recheck; no host predicate fallback is performed. */
+pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geometry* geoms_a,
+                                                   const pgaccel_geometry* geoms_b, size_t count,
+                                                   int8_t* results);
+
+/* Deprecated cross-product ABI retained for link compatibility. Non-empty
+ * inputs return PGACCEL_UNSUPPORTED with zero counts and no GPU dispatch.
+ * New callers must use pgaccel_spatial_intersects_pairwise. */
 pgaccel_status pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
                                           const pgaccel_geometry* geoms_b, size_t count_b,
                                           uint32_t* definite_true_pairs,

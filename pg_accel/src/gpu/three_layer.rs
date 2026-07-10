@@ -129,10 +129,10 @@ pub struct SpatialResult {
 
 /// Execute spatial intersection predicate on geometry pairs.
 ///
-/// Dispatches GPU classification via `pgaccel_spatial_intersects`. If kernel
-/// dispatch fails (e.g. the device died mid-query), returns all pairs as
-/// `Uncertain`; selected pg_accel callers must reject that result instead of
-/// evaluating the predicate on CPU.
+/// Dispatches GPU classification via the bounded, pairwise spatial bridge. If
+/// kernel dispatch fails (e.g. the device died mid-query), returns all pairs
+/// as `Uncertain`; selected pg_accel callers must reject that result instead
+/// of evaluating the predicate on CPU.
 ///
 /// # Panics
 ///
@@ -611,18 +611,17 @@ fn spatial_dwithin(
 /// Dispatch spatial intersection to the GPU kernel library.
 ///
 /// Converts `ExtractedGeometry` slices into the C `pgaccel_geometry` layout
-/// and calls `pgaccel_spatial_intersects`. Returns `None` if the kernel
-/// dispatch fails, causing the caller to mark all pairs as uncertain.
+/// and calls `pgaccel_spatial_intersects_pairwise` through the shared bounded
+/// bridge. Returns `None` if dispatch fails, causing the caller to mark all
+/// pairs as uncertain.
 fn try_gpu_dispatch(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
 ) -> Option<SpatialResult> {
-    use super::bridge::{self, PgaccelGeomType, PgaccelGeometry, PgaccelStatus};
+    use super::bridge::{PgaccelGeomType, PgaccelGeometry};
 
     // Per the public `spatial_intersects` contract, pairs are row-wise:
     // pair i = (geoms_a[i], geoms_b[i]), truncated to the shorter slice.
-    // The underlying C kernel takes count_a and count_b and computes the
-    // full cross-product; we filter to the diagonal below.
     let n = geoms_a.len().min(geoms_b.len());
     if n == 0 {
         return Some(SpatialResult {
@@ -633,40 +632,39 @@ fn try_gpu_dispatch(
     }
     let geoms_a = &geoms_a[..n];
     let geoms_b = &geoms_b[..n];
-    let count_a = n;
-    let count_b = n;
-
-    // n² blowup guard: the current kernel evaluates the full n×n
-    // cross-product and this function allocates three n²×2 u32 host pair
-    // buffers (24·n² bytes) even though only the n diagonal pairs are
-    // consumed. Decline above the hardware-derived cap instead of
-    // allocating gigabytes (e.g. ~2.4 GB at n = 10K). The caller surfaces
-    // the batch as Uncertain and pg_accel declines the accelerated path.
-    // Diagonal/pairwise kernel is Phase 4 work.
-    let pairwise_cap = crate::engine::cost::device_limits().gpu_spatial_pairwise_max_rows;
-    if n > pairwise_cap {
-        tracing::debug!(
-            target: "pg_accel::gpu",
-            n,
-            pairwise_cap,
-            "spatial_intersects declined: row count exceeds gpu_spatial_pairwise_max_rows \
-             (n×n cross-product kernel; diagonal kernel is Phase 4)"
-        );
-        return None;
-    }
 
     // The C spatial kernel assumes well-formed inputs. Degenerate inputs
     // (Point with no coords, Polygon ring with < 3 vertices, Unknown type)
     // cause out-of-bounds reads inside the kernel, so short-circuit the
     // entire batch to the uncertain path.
     let is_degenerate = |g: &ExtractedGeometry| -> bool {
+        let coords_well_formed = g
+            .coord_count
+            .checked_mul(2)
+            .is_some_and(|required| g.coords.len() >= required);
+        if !coords_well_formed {
+            return true;
+        }
+
         match g.geom_type {
-            GeomType::Point => g.coord_count == 0 || g.coords.len() < 2,
-            GeomType::LineString => g.coord_count < 2 || g.coords.len() < 4,
+            GeomType::Point => g.coord_count == 0 || !g.ring_offsets.is_empty(),
+            GeomType::LineString => g.coord_count < 2 || !g.ring_offsets.is_empty(),
             // Polygon ring must have at least 3 distinct vertices (6 coord
             // floats). PostGIS also stores the closing vertex, so 4 pairs
             // (8 floats) is typical — but the bare minimum is 3 pairs.
-            GeomType::Polygon => g.coord_count < 3 || g.coords.len() < 6,
+            GeomType::Polygon => {
+                if g.coord_count < 3 || g.ring_offsets.first().is_some_and(|offset| *offset != 0) {
+                    return true;
+                }
+                g.ring_offsets.iter().enumerate().any(|(ring, &start)| {
+                    let start = start as usize;
+                    let end = g
+                        .ring_offsets
+                        .get(ring + 1)
+                        .map_or(g.coord_count, |offset| *offset as usize);
+                    start >= end || end > g.coord_count || end - start < 3
+                })
+            }
             GeomType::Unknown => true,
         }
     };
@@ -717,56 +715,26 @@ fn try_gpu_dispatch(
         })
         .collect();
 
-    // Checked pair-buffer sizing: `n` is already bounded by `pairwise_cap`
-    // above, so these cannot overflow in practice; the checked ops make the
-    // bound load-bearing rather than assumed.
-    let total_pairs = count_a.checked_mul(count_b)?;
-    let buf_len = total_pairs.checked_mul(2)?;
-    let mut true_pairs = vec![0u32; buf_len];
-    let mut false_pairs = vec![0u32; buf_len];
-    let mut uncertain_pairs = vec![0u32; buf_len];
-    let mut true_count: usize = 0;
-    let mut false_count: usize = 0;
-    let mut uncertain_count: usize = 0;
+    let pairwise_results = super::spatial_intersects_pairwise_gpu(&c_geoms_a, &c_geoms_b)?;
+    let mut definite_true = Vec::new();
+    let mut definite_false = Vec::new();
+    let mut uncertain = Vec::new();
+    definite_true.reserve(n);
+    definite_false.reserve(n);
+    uncertain.reserve(n);
 
-    // SAFETY: All pointers reference live Rust-owned memory.  The C function
-    // reads from c_geoms and writes into the output arrays within bounds.
-    let status = unsafe {
-        bridge::pgaccel_spatial_intersects(
-            c_geoms_a.as_ptr(),
-            count_a,
-            c_geoms_b.as_ptr(),
-            count_b,
-            true_pairs.as_mut_ptr(),
-            &raw mut true_count,
-            false_pairs.as_mut_ptr(),
-            &raw mut false_count,
-            uncertain_pairs.as_mut_ptr(),
-            &raw mut uncertain_count,
-        )
-    };
-
-    if status != PgaccelStatus::Ok {
-        return None;
+    for (index, result) in pairwise_results.into_iter().enumerate() {
+        match result {
+            1 => definite_true.push(index),
+            -1 => definite_false.push(index),
+            _ => uncertain.push(index),
+        }
     }
 
-    // The C kernel returns the full cross-product (i, j). The public API
-    // is row-wise, so keep only the diagonal pairs where i == j and emit
-    // their row index. Everything off-diagonal was extra work we ignore.
-    let diagonal = |pairs: &[u32], count: usize| -> Vec<usize> {
-        (0..count)
-            .filter_map(|k| {
-                let i = pairs[k * 2] as usize;
-                let j = pairs[k * 2 + 1] as usize;
-                (i == j).then_some(i)
-            })
-            .collect()
-    };
-
     Some(SpatialResult {
-        definite_true: diagonal(&true_pairs, true_count),
-        definite_false: diagonal(&false_pairs, false_count),
-        uncertain: diagonal(&uncertain_pairs, uncertain_count),
+        definite_true,
+        definite_false,
+        uncertain,
     })
 }
 

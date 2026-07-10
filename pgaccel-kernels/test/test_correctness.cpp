@@ -121,6 +121,62 @@ struct DispatchResult {
       : dt(max_pairs * 2), df(max_pairs * 2), unc(max_pairs * 2) {}
 };
 
+/* Test-only compatibility adapter for the legacy pair-bucket assertions in
+ * this file. Production callers use the linear pairwise ABI directly. */
+static pgaccel_status
+test_spatial_cross_product(const pgaccel_geometry* geoms_a, size_t count_a,
+                           const pgaccel_geometry* geoms_b, size_t count_b,
+                           uint32_t* definite_true_pairs, size_t* definite_true_count,
+                           uint32_t* definite_false_pairs, size_t* definite_false_count,
+                           uint32_t* uncertain_pairs, size_t* uncertain_count) {
+  *definite_true_count = 0;
+  *definite_false_count = 0;
+  *uncertain_count = 0;
+  if (count_a == 0 || count_b == 0)
+    return PGACCEL_OK;
+  if (count_a > std::numeric_limits<size_t>::max() / count_b)
+    return PGACCEL_ERROR;
+
+  const size_t count = count_a * count_b;
+  std::vector<pgaccel_geometry> pair_a;
+  std::vector<pgaccel_geometry> pair_b;
+  pair_a.reserve(count);
+  pair_b.reserve(count);
+  for (size_t i = 0; i < count_a; ++i) {
+    for (size_t j = 0; j < count_b; ++j) {
+      pair_a.push_back(geoms_a[i]);
+      pair_b.push_back(geoms_b[j]);
+    }
+  }
+
+  std::vector<int8_t> results(count, 99);
+  const pgaccel_status status =
+      pgaccel_spatial_intersects_pairwise(pair_a.data(), pair_b.data(), count, results.data());
+  if (status != PGACCEL_OK)
+    return status;
+
+  for (size_t k = 0; k < count; ++k) {
+    const uint32_t i = static_cast<uint32_t>(k / count_b);
+    const uint32_t j = static_cast<uint32_t>(k % count_b);
+    uint32_t* pairs = nullptr;
+    size_t* pair_count = nullptr;
+    if (results[k] == 1) {
+      pairs = definite_true_pairs;
+      pair_count = definite_true_count;
+    } else if (results[k] == -1) {
+      pairs = definite_false_pairs;
+      pair_count = definite_false_count;
+    } else {
+      pairs = uncertain_pairs;
+      pair_count = uncertain_count;
+    }
+    pairs[*pair_count * 2] = i;
+    pairs[*pair_count * 2 + 1] = j;
+    ++*pair_count;
+  }
+  return PGACCEL_OK;
+}
+
 // =========================================================================
 // HASH JOIN EDGE CASES
 // =========================================================================
@@ -467,7 +523,7 @@ static void test_dispatch_0_geoms_a() {
   pgaccel_geometry b = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
   DispatchResult r(1);
   pgaccel_status s =
-      pgaccel_spatial_intersects(nullptr, 0, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(nullptr, 0, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("0 geoms A status", s);
   ASSERT_EQ("0 geoms A -> 0 pairs", r.dt_count + r.df_count + r.unc_count, 0);
@@ -480,7 +536,7 @@ static void test_dispatch_0_geoms_b() {
   pgaccel_geometry a = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
   DispatchResult r(1);
   pgaccel_status s =
-      pgaccel_spatial_intersects(&a, 1, nullptr, 0, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(&a, 1, nullptr, 0, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("0 geoms B status", s);
   ASSERT_EQ("0 geoms B -> 0 pairs", r.dt_count + r.df_count + r.unc_count, 0);
@@ -493,10 +549,10 @@ static void test_dispatch_point_equal() {
   pgaccel_geometry a = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
   pgaccel_geometry b = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
   DispatchResult r(1);
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("equal points status", s);
-  ASSERT_TRUE("equal points -> definite true", has_pair(r.dt.data(), r.dt_count, 0, 0));
+  ASSERT_TRUE("equal points -> exact recheck", has_pair(r.unc.data(), r.unc_count, 0, 0));
 }
 
 static void test_dispatch_point_not_equal() {
@@ -508,7 +564,7 @@ static void test_dispatch_point_not_equal() {
   pgaccel_geometry a = {PGACCEL_GEOM_POINT, bb_a, ca, 1, nullptr, 0};
   pgaccel_geometry b = {PGACCEL_GEOM_POINT, bb_b, cb, 1, nullptr, 0};
   DispatchResult r(1);
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("unequal points status", s);
   ASSERT_TRUE("unequal points -> definite false", has_pair(r.df.data(), r.df_count, 0, 0));
@@ -523,7 +579,7 @@ static void test_dispatch_line_crossing() {
   pgaccel_geometry a = {PGACCEL_GEOM_LINESTRING, bba, ca, 2, nullptr, 0};
   pgaccel_geometry b = {PGACCEL_GEOM_LINESTRING, bbb, cb, 2, nullptr, 0};
   DispatchResult r(1);
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("crossing lines status", s);
   ASSERT_TRUE("crossing lines -> definite true", has_pair(r.dt.data(), r.dt_count, 0, 0));
@@ -538,7 +594,7 @@ static void test_dispatch_line_parallel() {
   pgaccel_geometry a = {PGACCEL_GEOM_LINESTRING, bba, ca, 2, nullptr, 0};
   pgaccel_geometry b = {PGACCEL_GEOM_LINESTRING, bbb, cb, 2, nullptr, 0};
   DispatchResult r(1);
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("parallel lines status", s);
   // Bbox miss: definite false
@@ -563,7 +619,7 @@ static void test_dispatch_polygon_with_hole_point_in_hole() {
 
   DispatchResult r(1);
   pgaccel_status s =
-      pgaccel_spatial_intersects(&pt, 1, &polygon, 1, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(&pt, 1, &polygon, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("point in hole status", s);
   // Should be false or uncertain (hole cancels containment)
@@ -586,7 +642,7 @@ static void test_dispatch_polygon_with_hole_point_in_shell() {
 
   DispatchResult r(1);
   pgaccel_status s =
-      pgaccel_spatial_intersects(&pt, 1, &polygon, 1, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(&pt, 1, &polygon, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("point in shell status", s);
   // Should be true or uncertain (inside outer, outside hole)
@@ -600,7 +656,7 @@ static void test_dispatch_unknown_geom_type() {
   pgaccel_geometry a = {PGACCEL_GEOM_UNKNOWN, bb, c, 1, nullptr, 0};
   pgaccel_geometry b = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
   DispatchResult r(1);
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_STATUS_OK("unknown type status", s);
   // Bbox overlaps so not filtered, but unknown type -> uncertain
@@ -615,7 +671,7 @@ static void test_dispatch_null_bbox() {
   float bb[] = {0, 0, 1, 1};
   pgaccel_geometry b = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
   DispatchResult r(1);
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
   // Should not crash; result is uncertain or an error
   ASSERT_TRUE("null bbox no crash", s == PGACCEL_OK || s == PGACCEL_ERROR);

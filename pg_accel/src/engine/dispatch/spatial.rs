@@ -355,8 +355,7 @@ pub unsafe fn dispatch_gpu_spatial(
 
     // Predicate routing.
     //
-    // - st_intersects: existing `gpu::spatial_intersects_gpu` cross-product
-    //   kernel below.
+    // - st_intersects: row-wise `gpu::spatial_intersects_gpu` kernel below.
     // - st_contains / st_within / st_equals / st_touches / st_crosses /
     //   st_overlaps: route through `three_layer::spatial_eval` so each
     //   predicate hits its dedicated `pgaccel_st_*_bulk` SYCL kernel
@@ -482,9 +481,8 @@ pub unsafe fn dispatch_gpu_spatial(
         return DispatchResult::Deferred;
     }
 
-    // ── ST_Intersects → existing N×1 cross-product kernel via
-    // `gpu::spatial_intersects_gpu`. ────────────────────────
-    let ring_offset_zero: u32 = 0;
+    // ── ST_Intersects → linear pairwise kernel. The constant geometry
+    // descriptor is repeated; the C bridge deduplicates its payload. ────────
     let to_pgaccel = |eg: &three_layer::ExtractedGeometry| gpu::PgaccelGeometry {
         geom_type: match eg.geom_type {
             three_layer::GeomType::Point => gpu::PgaccelGeomType::Point,
@@ -495,14 +493,19 @@ pub unsafe fn dispatch_gpu_spatial(
         bbox: eg.bbox.as_ptr(),
         coords: eg.coords.as_ptr(),
         coord_count: eg.coord_count,
-        ring_offsets: std::ptr::addr_of!(ring_offset_zero),
-        ring_count: usize::from(matches!(eg.geom_type, three_layer::GeomType::Polygon)),
+        ring_offsets: if eg.ring_offsets.is_empty() {
+            std::ptr::null()
+        } else {
+            eg.ring_offsets.as_ptr()
+        },
+        ring_count: eg.ring_offsets.len(),
     };
 
     let pgaccel_a: Vec<gpu::PgaccelGeometry> = geoms_a.iter().map(to_pgaccel).collect();
-    let pgaccel_b = [to_pgaccel(&geom_b)];
+    let pgaccel_b: Vec<gpu::PgaccelGeometry> =
+        (0..pgaccel_a.len()).map(|_| to_pgaccel(&geom_b)).collect();
 
-    // Try GPU kernel: N variable geometries × 1 constant geometry.
+    // Try GPU kernel: N row-wise pairs with one shared constant payload.
     let timeout_ms = gucs::kernel_timeout_ms();
     let start = std::time::Instant::now();
     pgrx::debug1!(
@@ -532,7 +535,7 @@ pub unsafe fn dispatch_gpu_spatial(
         uc_pairs.len(),
     );
 
-    // Apply GPU results. Each pair is (i, j) where j=0 (constant geom).
+    // Apply GPU results. Each compatibility pair is row-wise `(i, i)`.
     let bool_true = pgrx::pg_sys::Datum::from(true);
     let bool_false = pgrx::pg_sys::Datum::from(false);
 

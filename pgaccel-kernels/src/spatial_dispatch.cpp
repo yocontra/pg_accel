@@ -2,8 +2,13 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <map>
+#include <new>
+#include <utility>
 #include <vector>
 
 #include "pgaccel_ffi.h"
@@ -14,20 +19,8 @@
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  Written once during pgaccel_init(), read-only thereafter.
 
-/* ----------------------------------------------------------------
- * Layer 2 — scalar predicate evaluator for heterogeneous geometry
- * pairs, plus SYCL-accelerated bulk point-in-polygon kernel.
- *
- * The scalar predicate dispatcher (evaluate_predicate) is the sole
- * implementation for geometry-type combinations that do not yet
- * have a dedicated SYCL kernel — it is NOT a CPU fallback for a
- * GPU path.
- *
- * Return values:
- *    1  = DEFINITE_TRUE   (geometries definitely intersect)
- *   -1  = DEFINITE_FALSE  (geometries definitely do not intersect)
- *    0  = UNCERTAIN       (needs PG exact recheck for correctness)
- * ---------------------------------------------------------------- */
+/* Spatial predicates return 1=definite true, -1=definite false, and
+ * 0=uncertain. Heterogeneous pair evaluation is device-only. */
 
 static constexpr float EPSILON = 1.0e-7f;
 
@@ -42,211 +35,6 @@ static bool point_on_segment(float px, float py, float ax, float ay, float bx, f
   const float max_y = ay > by ? ay : by;
   return px >= min_x - EPSILON && px <= max_x + EPSILON && py >= min_y - EPSILON &&
          py <= max_y + EPSILON;
-}
-
-/* Point-in-ring via ray casting.
- * ring_coords: flat x,y pairs for a single ring.
- * ring_len:    number of coordinate pairs in the ring, including the repeated
- *              closing point for PostGIS polygon rings.
- * Returns 1 for inside, 0 for boundary, -1 for outside. */
-static int8_t point_in_ring_relation(float px, float py, const float* ring_coords,
-                                     size_t ring_len) {
-  bool inside = false;
-  for (size_t i = 0, j = ring_len - 1; i < ring_len; j = i++) {
-    float xi = ring_coords[i * 2];
-    float yi = ring_coords[i * 2 + 1];
-    float xj = ring_coords[j * 2];
-    float yj = ring_coords[j * 2 + 1];
-
-    /* Check if the point lies exactly on a vertex. */
-    if (std::fabs(px - xi) < EPSILON && std::fabs(py - yi) < EPSILON) {
-      return 0; /* boundary */
-    }
-    if (point_on_segment(px, py, xi, yi, xj, yj)) {
-      return 0; /* boundary */
-    }
-
-    bool crosses = ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
-    if (crosses) {
-      inside = !inside;
-    }
-  }
-  return inside ? 1 : -1;
-}
-
-/* Point-in-polygon with holes.
- * Outer ring must contain the point AND no hole ring may contain it. */
-static int8_t point_in_polygon_check(const float* pt_coords, const float* poly_coords,
-                                     size_t poly_coord_count, const uint32_t* ring_offsets,
-                                     size_t ring_count) {
-  float px = pt_coords[0];
-  float py = pt_coords[1];
-
-  if (ring_count == 0 || ring_offsets == nullptr) {
-    /* Treat the whole coord array as one ring. */
-    int8_t rel = point_in_ring_relation(px, py, poly_coords, poly_coord_count);
-    return rel >= 0 ? 1 : -1;
-  }
-
-  /* Outer ring is ring 0.  Compute its length. */
-  size_t outer_start = ring_offsets[0];
-  size_t outer_end = (ring_count > 1) ? ring_offsets[1] : poly_coord_count;
-  size_t outer_len = outer_end - outer_start;
-
-  int8_t outer_rel = point_in_ring_relation(px, py, poly_coords + outer_start * 2, outer_len);
-  if (outer_rel < 0) {
-    return -1; /* outside outer ring */
-  }
-  if (outer_rel == 0) {
-    return 1; /* on outer boundary intersects the polygon */
-  }
-
-  /* Check hole rings. */
-  for (size_t r = 1; r < ring_count; ++r) {
-    size_t start = ring_offsets[r];
-    size_t end = (r + 1 < ring_count) ? ring_offsets[r + 1] : poly_coord_count;
-    size_t len = end - start;
-    int8_t hole_rel = point_in_ring_relation(px, py, poly_coords + start * 2, len);
-    if (hole_rel == 0) {
-      return 1; /* on an interior-ring boundary still intersects */
-    }
-    if (hole_rel > 0) {
-      return -1; /* inside a hole */
-    }
-  }
-
-  return 1; /* inside polygon, not in any hole */
-}
-
-/* 2D cross product of vectors (b-a) and (c-a). */
-static float cross2d(float ax, float ay, float bx, float by, float cx, float cy) {
-  return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-}
-
-/* Test if segments (p1-p2) and (p3-p4) intersect. */
-static int8_t segments_intersect(float p1x, float p1y, float p2x, float p2y, float p3x, float p3y,
-                                 float p4x, float p4y) {
-  float d1 = cross2d(p3x, p3y, p4x, p4y, p1x, p1y);
-  float d2 = cross2d(p3x, p3y, p4x, p4y, p2x, p2y);
-  float d3 = cross2d(p1x, p1y, p2x, p2y, p3x, p3y);
-  float d4 = cross2d(p1x, p1y, p2x, p2y, p4x, p4y);
-
-  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
-    return 1; /* proper intersection */
-  }
-
-  /* Collinear / endpoint touch — uncertain, caller must reject this GPU path. */
-  if (std::fabs(d1) < EPSILON || std::fabs(d2) < EPSILON || std::fabs(d3) < EPSILON ||
-      std::fabs(d4) < EPSILON) {
-    return 0; /* UNCERTAIN */
-  }
-
-  return -1; /* no intersection */
-}
-
-/* Check if any segment of linestring A intersects any segment of linestring B. */
-static int8_t linestring_intersect_check(const pgaccel_geometry& a, const pgaccel_geometry& b) {
-  if (a.coord_count < 2 || b.coord_count < 2) {
-    return -1; /* degenerate linestrings cannot intersect as lines */
-  }
-
-  for (size_t i = 0; i + 1 < a.coord_count; ++i) {
-    float ax1 = a.coords[i * 2];
-    float ay1 = a.coords[i * 2 + 1];
-    float ax2 = a.coords[(i + 1) * 2];
-    float ay2 = a.coords[(i + 1) * 2 + 1];
-
-    for (size_t j = 0; j + 1 < b.coord_count; ++j) {
-      float bx1 = b.coords[j * 2];
-      float by1 = b.coords[j * 2 + 1];
-      float bx2 = b.coords[(j + 1) * 2];
-      float by2 = b.coords[(j + 1) * 2 + 1];
-
-      int8_t r = segments_intersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2);
-      if (r == 1)
-        return 1; /* definite intersection found */
-      if (r == 0)
-        return 0; /* uncertain — bail to CPU */
-    }
-  }
-
-  return -1; /* no segment pair intersects */
-}
-
-/* Point vs point: equal within epsilon. */
-static int8_t points_equal_check(const float* a, const float* b) {
-  if (std::fabs(a[0] - b[0]) < EPSILON && std::fabs(a[1] - b[1]) < EPSILON) {
-    return 1; /* coincident */
-  }
-  return -1;
-}
-
-/* Top-level predicate dispatch for a single pair.
- *
- * Supported geometry-type pairs (handled by a dedicated scalar check):
- *   - Point × Polygon (and reverse)     → point_in_polygon_check
- *   - LineString × LineString           → linestring_intersect_check
- *   - Point × Point                     → points_equal_check
- *
- * UNSUPPORTED pairs that currently return UNCERTAIN (grep "UNSUPPORTED"
- * to find every gap). These fall through to PG's exact recheck via
- * PostGIS; the caller never observes a silent skip — the pair is routed
- * to the uncertain bucket, which the executor's Layer 3 always rechecks.
- * Adding a kernel here means adding both a <pair>_check() helper and an
- * explicit branch above.
- *
- *   - Point × LineString (and reverse)  — UNSUPPORTED: no
- *       point_on_linestring_check() helper. A future kernel symbol
- *       `pgaccel_point_on_linestring_bulk` would plug in here.
- *   - LineString × Polygon (and reverse) — UNSUPPORTED: no
- *       linestring_polygon_check() helper. A future kernel symbol
- *       `pgaccel_linestring_polygon_intersects_bulk` would plug in here.
- *   - Polygon × Polygon                 — UNSUPPORTED: no
- *       polygon_polygon_check() helper. A future kernel symbol
- *       `pgaccel_polygon_polygon_intersects_bulk` would plug in here.
- *   - anything involving PGACCEL_GEOM_UNKNOWN — UNSUPPORTED by design:
- *       we don't know the layout, so we cannot evaluate. Routed to
- *       uncertain so PostGIS parses it.
- */
-static int8_t evaluate_predicate(const pgaccel_geometry& a, const pgaccel_geometry& b) {
-  /* Point vs Polygon */
-  if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POLYGON) {
-    return point_in_polygon_check(a.coords, b.coords, b.coord_count, b.ring_offsets, b.ring_count);
-  }
-  /* Polygon vs Point (reverse) */
-  if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POINT) {
-    return point_in_polygon_check(b.coords, a.coords, a.coord_count, a.ring_offsets, a.ring_count);
-  }
-  /* Linestring vs Linestring */
-  if (a.type == PGACCEL_GEOM_LINESTRING && b.type == PGACCEL_GEOM_LINESTRING) {
-    return linestring_intersect_check(a, b);
-  }
-  /* Point vs Point */
-  if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POINT) {
-    return points_equal_check(a.coords, b.coords);
-  }
-
-  /* UNSUPPORTED: Point × LineString — no kernel for
-   * pgaccel_point_on_linestring_bulk. Route to UNCERTAIN so PG rechecks. */
-  if ((a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_LINESTRING) ||
-      (a.type == PGACCEL_GEOM_LINESTRING && b.type == PGACCEL_GEOM_POINT)) {
-    return 0;
-  }
-  /* UNSUPPORTED: LineString × Polygon — no kernel for
-   * pgaccel_linestring_polygon_intersects_bulk. Route to UNCERTAIN. */
-  if ((a.type == PGACCEL_GEOM_LINESTRING && b.type == PGACCEL_GEOM_POLYGON) ||
-      (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_LINESTRING)) {
-    return 0;
-  }
-  /* UNSUPPORTED: Polygon × Polygon — no kernel for
-   * pgaccel_polygon_polygon_intersects_bulk. Route to UNCERTAIN. */
-  if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POLYGON) {
-    return 0;
-  }
-  /* UNSUPPORTED: any pair involving PGACCEL_GEOM_UNKNOWN (MultiPoint,
-   * MultiLineString, MultiPolygon, GeometryCollection, CurvePolygon,
-   * Triangle, etc.). We can't decode the layout here — PostGIS handles. */
-  return 0;
 }
 
 /* ================================================================
@@ -293,7 +81,7 @@ static int8_t device_point_in_polygon(float px, float py, const float* poly_coor
                                       size_t ring_count) {
   if constexpr (!HasRings) {
     int8_t rel = device_point_in_ring_relation(px, py, poly_coords, poly_coord_count);
-    return rel >= 0 ? 1 : -1;
+    return rel;
   } else {
     size_t outer_start = ring_offsets[0];
     size_t outer_end = (ring_count > 1) ? ring_offsets[1] : poly_coord_count;
@@ -305,7 +93,7 @@ static int8_t device_point_in_polygon(float px, float py, const float* poly_coor
       return -1;
     }
     if (outer_rel == 0) {
-      return 1;
+      return 0;
     }
 
     for (size_t r = 1; r < ring_count; ++r) {
@@ -314,7 +102,7 @@ static int8_t device_point_in_polygon(float px, float py, const float* poly_coor
       size_t len = end - start;
       int8_t hole_rel = device_point_in_ring_relation(px, py, poly_coords + start * 2, len);
       if (hole_rel == 0) {
-        return 1;
+        return 0;
       }
       if (hole_rel > 0) {
         return -1;
@@ -323,6 +111,44 @@ static int8_t device_point_in_polygon(float px, float py, const float* poly_coor
 
     return 1;
   }
+}
+
+static float device_cross2d(float ax, float ay, float bx, float by, float cx, float cy) {
+  return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+}
+
+static int8_t device_segments_intersect(float p1x, float p1y, float p2x, float p2y, float p3x,
+                                        float p3y, float p4x, float p4y) {
+  const float d1 = device_cross2d(p3x, p3y, p4x, p4y, p1x, p1y);
+  const float d2 = device_cross2d(p3x, p3y, p4x, p4y, p2x, p2y);
+  const float d3 = device_cross2d(p1x, p1y, p2x, p2y, p3x, p3y);
+  const float d4 = device_cross2d(p1x, p1y, p2x, p2y, p4x, p4y);
+
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
+    return 1;
+  }
+
+  if ((d1 > -EPSILON && d1 < EPSILON) || (d2 > -EPSILON && d2 < EPSILON) ||
+      (d3 > -EPSILON && d3 < EPSILON) || (d4 > -EPSILON && d4 < EPSILON)) {
+    return 0;
+  }
+  return -1;
+}
+
+static int8_t device_linestring_intersects(const float* a, size_t count_a, const float* b,
+                                           size_t count_b) {
+  bool uncertain = false;
+  for (size_t i = 0; i + 1 < count_a; ++i) {
+    for (size_t j = 0; j + 1 < count_b; ++j) {
+      const int8_t result =
+          device_segments_intersect(a[i * 2], a[i * 2 + 1], a[(i + 1) * 2], a[(i + 1) * 2 + 1],
+                                    b[j * 2], b[j * 2 + 1], b[(j + 1) * 2], b[(j + 1) * 2 + 1]);
+      if (result == 1)
+        return 1;
+      uncertain = uncertain || result == 0;
+    }
+  }
+  return uncertain ? 0 : -1;
 }
 
 /* Threshold: polygons with this many outer-ring vertices trigger the
@@ -597,7 +423,7 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t s
          if (r == 0) {
            // Outer ring.
            if (onedge != 0u) {
-             result = 1;
+             result = 0;
              definitive = true;
            } else if (parity == 0u) {
              result = -1;
@@ -606,7 +432,7 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t s
          } else {
            // Hole ring.
            if (onedge != 0u) {
-             result = 1;
+             result = 0;
              definitive = true;
            } else if (parity != 0u) {
              result = -1;
@@ -694,6 +520,306 @@ static pgaccel_status sycl_point_in_polygon_bulk(const float* surv_pts, size_t s
 }
 
 /* ================================================================
+ * Linear heterogeneous pairwise intersection kernel
+ * ================================================================ */
+
+static constexpr size_t SPATIAL_PAIRWISE_NO_OFFSET = std::numeric_limits<size_t>::max();
+static constexpr float SPATIAL_PAIRWISE_BBOX_TOL = 1.0e-4f;
+
+struct SpatialPairwiseMeta {
+  int32_t type;
+  uint32_t has_bbox;
+  float bbox[4];
+  size_t coords_off;
+  size_t coord_count;
+  size_t rings_off;
+  size_t ring_count;
+};
+
+struct SpatialPairwiseSlabHeader {
+  size_t count;
+  size_t geoms_a_off;
+  size_t geoms_b_off;
+  size_t results_off;
+};
+
+struct SpatialPairwisePayloadCopy {
+  size_t off;
+  const void* src;
+  size_t bytes;
+};
+
+static bool spatial_checked_add(size_t a, size_t b, size_t* out) {
+  if (out == nullptr || b > std::numeric_limits<size_t>::max() - a)
+    return false;
+  *out = a + b;
+  return true;
+}
+
+static bool spatial_checked_mul(size_t a, size_t b, size_t* out) {
+  if (out == nullptr || (a != 0 && b > std::numeric_limits<size_t>::max() / a))
+    return false;
+  *out = a * b;
+  return true;
+}
+
+static bool spatial_checked_align(size_t value, size_t alignment, size_t* out) {
+  if (out == nullptr || alignment == 0)
+    return false;
+  const size_t remainder = value % alignment;
+  return remainder == 0 ? (*out = value, true)
+                        : spatial_checked_add(value, alignment - remainder, out);
+}
+
+static bool spatial_add_region(size_t* cursor, size_t bytes, size_t alignment, size_t* out_off) {
+  if (cursor == nullptr || out_off == nullptr || bytes == 0)
+    return false;
+  size_t aligned = 0;
+  size_t next = 0;
+  if (!spatial_checked_align(*cursor, alignment, &aligned) ||
+      !spatial_checked_add(aligned, bytes, &next)) {
+    return false;
+  }
+  *out_off = aligned;
+  *cursor = next;
+  return true;
+}
+
+static bool spatial_validate_rings(const pgaccel_geometry& geom) {
+  if (geom.ring_count == 0)
+    return true;
+  if (geom.ring_count > geom.coord_count / 3)
+    return false;
+  if (geom.ring_offsets == nullptr || geom.ring_offsets[0] != 0)
+    return false;
+  for (size_t ring = 0; ring < geom.ring_count; ++ring) {
+    const size_t start = geom.ring_offsets[ring];
+    const size_t end = ring + 1 < geom.ring_count ? geom.ring_offsets[ring + 1] : geom.coord_count;
+    if (start >= end || end > geom.coord_count || end - start < 3)
+      return false;
+  }
+  return true;
+}
+
+static bool spatial_register_payload(const void* src, size_t bytes, size_t alignment,
+                                     size_t* cursor,
+                                     std::map<std::pair<uintptr_t, size_t>, size_t>* offsets,
+                                     std::vector<SpatialPairwisePayloadCopy>* copies,
+                                     size_t* out_off) {
+  if (src == nullptr || bytes == 0 || cursor == nullptr || offsets == nullptr ||
+      copies == nullptr || out_off == nullptr) {
+    return false;
+  }
+
+  const auto key = std::make_pair(reinterpret_cast<uintptr_t>(src), bytes);
+  const auto found = offsets->find(key);
+  if (found != offsets->end()) {
+    *out_off = found->second;
+    return true;
+  }
+
+  size_t off = 0;
+  if (!spatial_add_region(cursor, bytes, alignment, &off))
+    return false;
+  offsets->emplace(key, off);
+  copies->push_back({off, src, bytes});
+  *out_off = off;
+  return true;
+}
+
+static bool
+spatial_build_pairwise_meta(const pgaccel_geometry& geom, SpatialPairwiseMeta* meta, size_t* cursor,
+                            std::map<std::pair<uintptr_t, size_t>, size_t>* coord_offsets,
+                            std::map<std::pair<uintptr_t, size_t>, size_t>* ring_offsets,
+                            std::vector<SpatialPairwisePayloadCopy>* copies) {
+  if (meta == nullptr)
+    return false;
+
+  *meta = {};
+  meta->type = static_cast<int32_t>(geom.type);
+  meta->coords_off = SPATIAL_PAIRWISE_NO_OFFSET;
+  meta->rings_off = SPATIAL_PAIRWISE_NO_OFFSET;
+
+  const bool known = geom.type == PGACCEL_GEOM_POINT || geom.type == PGACCEL_GEOM_LINESTRING ||
+                     geom.type == PGACCEL_GEOM_POLYGON;
+  if (!known)
+    return true;
+  if (geom.bbox != nullptr) {
+    std::memcpy(meta->bbox, geom.bbox, sizeof(meta->bbox));
+    meta->has_bbox = 1;
+  }
+
+  const size_t minimum_coords = geom.type == PGACCEL_GEOM_POINT        ? 1
+                                : geom.type == PGACCEL_GEOM_LINESTRING ? 2
+                                                                       : 3;
+  if (geom.coords == nullptr || geom.coord_count < minimum_coords)
+    return false;
+  if (geom.type != PGACCEL_GEOM_POLYGON && geom.ring_count != 0)
+    return false;
+  if (geom.type == PGACCEL_GEOM_POLYGON && !spatial_validate_rings(geom))
+    return false;
+
+  size_t coord_values = 0;
+  size_t coord_bytes = 0;
+  if (!spatial_checked_mul(geom.coord_count, size_t{2}, &coord_values) ||
+      !spatial_checked_mul(coord_values, sizeof(float), &coord_bytes) ||
+      !spatial_register_payload(geom.coords, coord_bytes, alignof(float), cursor, coord_offsets,
+                                copies, &meta->coords_off)) {
+    return false;
+  }
+  meta->coord_count = geom.coord_count;
+
+  if (geom.ring_count > 0) {
+    size_t ring_bytes = 0;
+    if (!spatial_checked_mul(geom.ring_count, sizeof(uint32_t), &ring_bytes) ||
+        !spatial_register_payload(geom.ring_offsets, ring_bytes, alignof(uint32_t), cursor,
+                                  ring_offsets, copies, &meta->rings_off)) {
+      return false;
+    }
+    meta->ring_count = geom.ring_count;
+  }
+  return true;
+}
+
+static int8_t device_pairwise_intersects(const uint8_t* slab, const SpatialPairwiseMeta& a,
+                                         const SpatialPairwiseMeta& b) {
+  if (a.has_bbox && b.has_bbox) {
+    const bool disjoint = a.bbox[2] + SPATIAL_PAIRWISE_BBOX_TOL < b.bbox[0] ||
+                          b.bbox[2] + SPATIAL_PAIRWISE_BBOX_TOL < a.bbox[0] ||
+                          a.bbox[3] + SPATIAL_PAIRWISE_BBOX_TOL < b.bbox[1] ||
+                          b.bbox[3] + SPATIAL_PAIRWISE_BBOX_TOL < a.bbox[1];
+    if (disjoint)
+      return -1;
+  }
+
+  const auto* coords_a = a.coords_off == SPATIAL_PAIRWISE_NO_OFFSET
+                             ? nullptr
+                             : reinterpret_cast<const float*>(slab + a.coords_off);
+  const auto* coords_b = b.coords_off == SPATIAL_PAIRWISE_NO_OFFSET
+                             ? nullptr
+                             : reinterpret_cast<const float*>(slab + b.coords_off);
+
+  if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POINT) {
+    /* The extractor narrows PostGIS coordinates to float, so rounded-equal
+     * or epsilon-close points cannot be certified as equal. Coordinates
+     * separated beyond the tolerance are still safely non-intersecting. */
+    const float dx = coords_a[0] - coords_b[0];
+    const float dy = coords_a[1] - coords_b[1];
+    return dx > -EPSILON && dx < EPSILON && dy > -EPSILON && dy < EPSILON ? 0 : -1;
+  }
+
+  if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POLYGON) {
+    const auto* rings = b.rings_off == SPATIAL_PAIRWISE_NO_OFFSET
+                            ? nullptr
+                            : reinterpret_cast<const uint32_t*>(slab + b.rings_off);
+    return b.ring_count > 0 ? device_point_in_polygon<true>(coords_a[0], coords_a[1], coords_b,
+                                                            b.coord_count, rings, b.ring_count)
+                            : device_point_in_polygon<false>(coords_a[0], coords_a[1], coords_b,
+                                                             b.coord_count, nullptr, 0);
+  }
+
+  if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POINT) {
+    const auto* rings = a.rings_off == SPATIAL_PAIRWISE_NO_OFFSET
+                            ? nullptr
+                            : reinterpret_cast<const uint32_t*>(slab + a.rings_off);
+    return a.ring_count > 0 ? device_point_in_polygon<true>(coords_b[0], coords_b[1], coords_a,
+                                                            a.coord_count, rings, a.ring_count)
+                            : device_point_in_polygon<false>(coords_b[0], coords_b[1], coords_a,
+                                                             a.coord_count, nullptr, 0);
+  }
+
+  if (a.type == PGACCEL_GEOM_LINESTRING && b.type == PGACCEL_GEOM_LINESTRING) {
+    return device_linestring_intersects(coords_a, a.coord_count, coords_b, b.coord_count);
+  }
+
+  return 0;
+}
+
+extern "C" pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geometry* geoms_a,
+                                                              const pgaccel_geometry* geoms_b,
+                                                              size_t count, int8_t* results) try {
+  if (count == 0)
+    return PGACCEL_OK;
+  if (geoms_a == nullptr || geoms_b == nullptr || results == nullptr)
+    return PGACCEL_ERROR;
+
+  size_t meta_bytes = 0;
+  if (!spatial_checked_mul(count, sizeof(SpatialPairwiseMeta), &meta_bytes))
+    return PGACCEL_ERROR;
+
+  SpatialPairwiseSlabHeader header{};
+  header.count = count;
+  size_t cursor = sizeof(SpatialPairwiseSlabHeader);
+  if (!spatial_add_region(&cursor, meta_bytes, alignof(SpatialPairwiseMeta), &header.geoms_a_off) ||
+      !spatial_add_region(&cursor, meta_bytes, alignof(SpatialPairwiseMeta), &header.geoms_b_off) ||
+      !spatial_add_region(&cursor, count, alignof(int8_t), &header.results_off)) {
+    return PGACCEL_ERROR;
+  }
+
+  std::vector<SpatialPairwiseMeta> metas_a(count);
+  std::vector<SpatialPairwiseMeta> metas_b(count);
+  std::vector<SpatialPairwisePayloadCopy> copies;
+  std::map<std::pair<uintptr_t, size_t>, size_t> coord_offsets;
+  std::map<std::pair<uintptr_t, size_t>, size_t> ring_offsets;
+  for (size_t i = 0; i < count; ++i) {
+    if (!spatial_build_pairwise_meta(geoms_a[i], &metas_a[i], &cursor, &coord_offsets,
+                                     &ring_offsets, &copies) ||
+        !spatial_build_pairwise_meta(geoms_b[i], &metas_b[i], &cursor, &coord_offsets,
+                                     &ring_offsets, &copies)) {
+      return PGACCEL_ERROR;
+    }
+  }
+
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (caps.max_alloc_bytes > 0 && cursor > caps.max_alloc_bytes)
+    return PGACCEL_OOM;
+
+  std::vector<uint8_t> staged(cursor, 0);
+  std::memcpy(staged.data(), &header, sizeof(header));
+  std::memcpy(staged.data() + header.geoms_a_off, metas_a.data(), meta_bytes);
+  std::memcpy(staged.data() + header.geoms_b_off, metas_b.data(), meta_bytes);
+  for (const SpatialPairwisePayloadCopy& copy : copies)
+    std::memcpy(staged.data() + copy.off, copy.src, copy.bytes);
+
+  sycl::queue* q = pgaccel_get_queue();
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  uint8_t* slab = pgaccel_alloc<uint8_t>(cursor, *q);
+  if (slab == nullptr)
+    return PGACCEL_OOM;
+
+  try {
+    q->memcpy(slab, staged.data(), cursor).wait_and_throw();
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const auto* local_header = reinterpret_cast<const SpatialPairwiseSlabHeader*>(slab);
+       const auto* local_a =
+           reinterpret_cast<const SpatialPairwiseMeta*>(slab + local_header->geoms_a_off);
+       const auto* local_b =
+           reinterpret_cast<const SpatialPairwiseMeta*>(slab + local_header->geoms_b_off);
+       auto* local_results = reinterpret_cast<int8_t*>(slab + local_header->results_off);
+       const size_t i = id[0];
+       local_results[i] = device_pairwise_intersects(slab, local_a[i], local_b[i]);
+     }).wait_and_throw();
+    pgaccel_d2h(*q, results, reinterpret_cast<const int8_t*>(slab + header.results_off), count);
+    pgaccel_record_gpu_exec();
+    sycl::free(slab, *q);
+    return PGACCEL_OK;
+  } catch (...) {
+    sycl::free(slab, *q);
+    throw;
+  }
+} catch (const std::bad_alloc&) {
+  return PGACCEL_OOM;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_spatial_intersects_pairwise", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_spatial_intersects_pairwise", nullptr);
+}
+
+/* ================================================================
  * pgaccel_spatial_intersects — three-layer spatial dispatch
  * ================================================================ */
 extern "C" pgaccel_status
@@ -701,94 +827,22 @@ pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
                            const pgaccel_geometry* geoms_b, size_t count_b,
                            uint32_t* definite_true_pairs, size_t* definite_true_count,
                            uint32_t* definite_false_pairs, size_t* definite_false_count,
-                           uint32_t* uncertain_pairs, size_t* uncertain_count) try {
+                           uint32_t* uncertain_pairs, size_t* uncertain_count) {
+  (void)geoms_a;
+  (void)geoms_b;
+  (void)definite_true_pairs;
+  (void)definite_false_pairs;
+  (void)uncertain_pairs;
+  if (definite_true_count == nullptr || definite_false_count == nullptr ||
+      uncertain_count == nullptr)
+    return PGACCEL_ERROR;
   *definite_true_count = 0;
   *definite_false_count = 0;
   *uncertain_count = 0;
 
-  if (count_a == 0 || count_b == 0) {
+  if (count_a == 0 || count_b == 0)
     return PGACCEL_OK;
-  }
-
-  /* ----------------------------------------------------------
-   * Layer 1: Bbox filter
-   * ---------------------------------------------------------- */
-  size_t total_pairs = count_a * count_b;
-
-  std::vector<float> bboxes_a(count_a * 4);
-  std::vector<float> bboxes_b(count_b * 4);
-
-  for (size_t i = 0; i < count_a; ++i) {
-    if (geoms_a[i].bbox != nullptr) {
-      std::memcpy(&bboxes_a[i * 4], geoms_a[i].bbox, 4 * sizeof(float));
-    } else {
-      bboxes_a[i * 4 + 0] = 1.0f;
-      bboxes_a[i * 4 + 1] = 1.0f;
-      bboxes_a[i * 4 + 2] = -1.0f;
-      bboxes_a[i * 4 + 3] = -1.0f;
-    }
-  }
-  for (size_t j = 0; j < count_b; ++j) {
-    if (geoms_b[j].bbox != nullptr) {
-      std::memcpy(&bboxes_b[j * 4], geoms_b[j].bbox, 4 * sizeof(float));
-    } else {
-      bboxes_b[j * 4 + 0] = 1.0f;
-      bboxes_b[j * 4 + 1] = 1.0f;
-      bboxes_b[j * 4 + 2] = -1.0f;
-      bboxes_b[j * 4 + 3] = -1.0f;
-    }
-  }
-
-  std::vector<uint8_t> bbox_results(total_pairs);
-
-  pgaccel_status bbox_status = pgaccel_bbox_intersects_bulk_f32(
-      bboxes_a.data(), count_a, bboxes_b.data(), count_b, bbox_results.data(), nullptr);
-
-  if (bbox_status != PGACCEL_OK) {
-    return bbox_status;
-  }
-
-  /* ----------------------------------------------------------
-   * Layer 2: Geometric predicate for bbox survivors
-   * ---------------------------------------------------------- */
-  for (size_t i = 0; i < count_a; ++i) {
-    for (size_t j = 0; j < count_b; ++j) {
-      if (bbox_results[i * count_b + j] == 0) {
-        definite_false_pairs[(*definite_false_count) * 2] = static_cast<uint32_t>(i);
-        definite_false_pairs[(*definite_false_count) * 2 + 1] = static_cast<uint32_t>(j);
-        (*definite_false_count)++;
-        continue;
-      }
-
-      int8_t result = evaluate_predicate(geoms_a[i], geoms_b[j]);
-
-      switch (result) {
-        case 1:
-          definite_true_pairs[(*definite_true_count) * 2] = static_cast<uint32_t>(i);
-          definite_true_pairs[(*definite_true_count) * 2 + 1] = static_cast<uint32_t>(j);
-          (*definite_true_count)++;
-          break;
-        case -1:
-          definite_false_pairs[(*definite_false_count) * 2] = static_cast<uint32_t>(i);
-          definite_false_pairs[(*definite_false_count) * 2 + 1] = static_cast<uint32_t>(j);
-          (*definite_false_count)++;
-          break;
-        default:
-          uncertain_pairs[(*uncertain_count) * 2] = static_cast<uint32_t>(i);
-          uncertain_pairs[(*uncertain_count) * 2 + 1] = static_cast<uint32_t>(j);
-          (*uncertain_count)++;
-          break;
-      }
-    }
-  }
-
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_spatial_intersects", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_spatial_intersects", nullptr);
+  return PGACCEL_UNSUPPORTED;
 }
 
 /* ================================================================
@@ -799,10 +853,9 @@ pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
  * Tiny batches are rejected by the upstream planner gate; this
  * kernel always dispatches to SYCL when called.
  * ================================================================ */
-extern "C" pgaccel_status
-pgaccel_point_in_polygon_bulk(const float* points_xy, size_t point_count, const float* poly_bbox,
-                              const float* poly_coords, size_t poly_coord_count,
-                              const uint32_t* ring_offsets, size_t ring_count, int8_t* results) try {
+extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
+    const float* points_xy, size_t point_count, const float* poly_bbox, const float* poly_coords,
+    size_t poly_coord_count, const uint32_t* ring_offsets, size_t ring_count, int8_t* results) try {
   if (point_count == 0)
     return PGACCEL_OK;
   if (!points_xy || !poly_coords || !poly_bbox || !results)

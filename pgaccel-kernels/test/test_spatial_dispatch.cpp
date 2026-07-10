@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "pgaccel_ffi.h"
@@ -54,6 +55,63 @@ static bool has_pair(const uint32_t* pairs, size_t count, uint32_t i, uint32_t j
     }
   }
   return false;
+}
+
+/* Test-only adapter: expand tiny fixture cross-products into the new linear
+ * pairwise ABI, then retain the old pair-bucket assertions below. Production
+ * callers never allocate this shape. */
+static pgaccel_status
+test_spatial_cross_product(const pgaccel_geometry* geoms_a, size_t count_a,
+                           const pgaccel_geometry* geoms_b, size_t count_b,
+                           uint32_t* definite_true_pairs, size_t* definite_true_count,
+                           uint32_t* definite_false_pairs, size_t* definite_false_count,
+                           uint32_t* uncertain_pairs, size_t* uncertain_count) {
+  *definite_true_count = 0;
+  *definite_false_count = 0;
+  *uncertain_count = 0;
+  if (count_a == 0 || count_b == 0)
+    return PGACCEL_OK;
+  if (count_a > std::numeric_limits<size_t>::max() / count_b)
+    return PGACCEL_ERROR;
+
+  const size_t count = count_a * count_b;
+  std::vector<pgaccel_geometry> pair_a;
+  std::vector<pgaccel_geometry> pair_b;
+  pair_a.reserve(count);
+  pair_b.reserve(count);
+  for (size_t i = 0; i < count_a; ++i) {
+    for (size_t j = 0; j < count_b; ++j) {
+      pair_a.push_back(geoms_a[i]);
+      pair_b.push_back(geoms_b[j]);
+    }
+  }
+
+  std::vector<int8_t> results(count, 99);
+  const pgaccel_status status =
+      pgaccel_spatial_intersects_pairwise(pair_a.data(), pair_b.data(), count, results.data());
+  if (status != PGACCEL_OK)
+    return status;
+
+  for (size_t k = 0; k < count; ++k) {
+    const uint32_t i = static_cast<uint32_t>(k / count_b);
+    const uint32_t j = static_cast<uint32_t>(k % count_b);
+    uint32_t* pairs = nullptr;
+    size_t* pair_count = nullptr;
+    if (results[k] == 1) {
+      pairs = definite_true_pairs;
+      pair_count = definite_true_count;
+    } else if (results[k] == -1) {
+      pairs = definite_false_pairs;
+      pair_count = definite_false_count;
+    } else {
+      pairs = uncertain_pairs;
+      pair_count = uncertain_count;
+    }
+    pairs[*pair_count * 2] = i;
+    pairs[*pair_count * 2 + 1] = j;
+    ++*pair_count;
+  }
+  return PGACCEL_OK;
 }
 
 struct PipCounts {
@@ -122,7 +180,7 @@ TEST(empty_inputs) {
   pgaccel_status s;
 
   /* Both empty */
-  s = pgaccel_spatial_intersects(nullptr, 0, nullptr, 0, r.dt.data(), &r.dt_count, r.df.data(),
+  s = test_spatial_cross_product(nullptr, 0, nullptr, 0, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_EQ(s, PGACCEL_OK);
   ASSERT_EQ(r.dt_count, 0u);
@@ -138,10 +196,87 @@ TEST(empty_inputs) {
   g.coords = coords;
   g.coord_count = 1;
 
-  s = pgaccel_spatial_intersects(&g, 1, nullptr, 0, r.dt.data(), &r.dt_count, r.df.data(),
+  s = test_spatial_cross_product(&g, 1, nullptr, 0, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
   ASSERT_EQ(s, PGACCEL_OK);
   ASSERT_EQ(r.dt_count, 0u);
+}
+
+TEST(legacy_cross_product_declines) {
+  float bbox[] = {0, 0, 0, 0};
+  float coords[] = {0, 0};
+  pgaccel_geometry point = {PGACCEL_GEOM_POINT, bbox, coords, 1, nullptr, 0};
+  DispatchResult r(1);
+
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status status =
+      pgaccel_spatial_intersects(&point, 1, &point, 1, r.dt.data(), &r.dt_count, r.df.data(),
+                                 &r.df_count, r.unc.data(), &r.unc_count);
+  ASSERT_EQ(status, PGACCEL_UNSUPPORTED);
+  ASSERT_EQ(r.dt_count, 0u);
+  ASSERT_EQ(r.df_count, 0u);
+  ASSERT_EQ(r.unc_count, 0u);
+  ASSERT_EQ(pgaccel_gpu_exec_count(), 0u);
+}
+
+TEST(pairwise_recheck_boundaries) {
+  float equal_bbox[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float equal_coords[] = {1.0f, 1.0f};
+
+  float near_a_bbox[] = {0.0f, 0.0f, 0.0f, 0.0f};
+  float near_a_coords[] = {0.0f, 0.0f};
+  float near_b_bbox[] = {5.0e-8f, 0.0f, 5.0e-8f, 0.0f};
+  float near_b_coords[] = {5.0e-8f, 0.0f};
+
+  float outside_bbox[] = {-5.0e-8f, 0.5f, -5.0e-8f, 0.5f};
+  float outside_coords[] = {-5.0e-8f, 0.5f};
+  float poly_bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  float poly_coords[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  uint32_t rings[] = {0};
+
+  pgaccel_geometry a[] = {
+      {PGACCEL_GEOM_POINT, equal_bbox, equal_coords, 1, nullptr, 0},
+      {PGACCEL_GEOM_POINT, near_a_bbox, near_a_coords, 1, nullptr, 0},
+      {PGACCEL_GEOM_POINT, outside_bbox, outside_coords, 1, nullptr, 0},
+  };
+  pgaccel_geometry b[] = {
+      {PGACCEL_GEOM_POINT, equal_bbox, equal_coords, 1, nullptr, 0},
+      {PGACCEL_GEOM_POINT, near_b_bbox, near_b_coords, 1, nullptr, 0},
+      {PGACCEL_GEOM_POLYGON, poly_bbox, poly_coords, 5, rings, 1},
+  };
+  int8_t results[] = {99, 99, 99};
+
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status status = pgaccel_spatial_intersects_pairwise(a, b, 3, results);
+  ASSERT_EQ(status, PGACCEL_OK);
+  ASSERT_EQ(results[0], 0);
+  ASSERT_EQ(results[1], 0);
+  ASSERT_EQ(results[2], 0);
+  ASSERT_EQ(pgaccel_gpu_exec_count(), 1u);
+}
+
+TEST(malformed_pairwise_rings_decline_before_dispatch) {
+  float point_bbox[] = {0.5f, 0.5f, 0.5f, 0.5f};
+  float point_coords[] = {0.5f, 0.5f};
+  float poly_bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  float poly_coords[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  uint32_t one_ring_offset[] = {0};
+
+  pgaccel_geometry point = {PGACCEL_GEOM_POINT, point_bbox, point_coords, 1, nullptr, 0};
+  pgaccel_geometry malformed = {PGACCEL_GEOM_POLYGON, poly_bbox,
+                                poly_coords,          5,
+                                one_ring_offset,      std::numeric_limits<size_t>::max()};
+  int8_t result = 99;
+
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status status = pgaccel_spatial_intersects_pairwise(&point, &malformed, 1, &result);
+  ASSERT_EQ(status, PGACCEL_ERROR);
+  ASSERT_EQ(result, 99);
+  ASSERT_EQ(pgaccel_gpu_exec_count(), 0u);
 }
 
 /* ----------------------------------------------------------------
@@ -151,7 +286,7 @@ TEST(empty_inputs) {
  * Point 0: (0.5, 0.5) — inside → DEFINITE_TRUE
  * Point 1: (0.2, 0.8) — inside → DEFINITE_TRUE
  * Point 2: (2.0, 2.0) — outside bbox → DEFINITE_FALSE
- * Point 3: (0.0, 0.5) — on edge → either TRUE or UNCERTAIN is acceptable
+ * Point 3: (0.0, 0.5) — on edge → UNCERTAIN for exact PG recheck
  * ---------------------------------------------------------------- */
 TEST(points_vs_polygon) {
   /* Polygon: unit square */
@@ -189,7 +324,7 @@ TEST(points_vs_polygon) {
   DispatchResult r(4);
 
   pgaccel_status s =
-      pgaccel_spatial_intersects(points, 4, &polygon, 1, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(points, 4, &polygon, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
 
   ASSERT_EQ(s, PGACCEL_OK);
@@ -206,8 +341,8 @@ TEST(points_vs_polygon) {
   /* Point 2 (2.0,2.0) outside bbox → definite false */
   assert(has_pair(r.df.data(), r.df_count, 2, 0));
 
-  /* Point 3 (0.0,0.5) on edge → TRUE or UNCERTAIN (not false) */
-  assert(has_pair(r.dt.data(), r.dt_count, 3, 0) || has_pair(r.unc.data(), r.unc_count, 3, 0));
+  /* Point 3 (0.0,0.5) on edge → uncertain. */
+  assert(has_pair(r.unc.data(), r.unc_count, 3, 0));
 }
 
 /* ----------------------------------------------------------------
@@ -224,7 +359,7 @@ TEST(all_bbox_miss) {
 
   DispatchResult r(1);
 
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
 
   ASSERT_EQ(s, PGACCEL_OK);
@@ -254,13 +389,13 @@ TEST(point_vs_point) {
   DispatchResult r(2);
 
   pgaccel_status s =
-      pgaccel_spatial_intersects(pts, 2, &target, 1, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(pts, 2, &target, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
 
   ASSERT_EQ(s, PGACCEL_OK);
 
-  /* pt[0] == target → definite true */
-  assert(has_pair(r.dt.data(), r.dt_count, 0, 0));
+  /* f32-equal points may differ before extraction, so PG must recheck. */
+  assert(has_pair(r.unc.data(), r.unc_count, 0, 0));
 
   /* pt[1] bbox misses target → definite false */
   assert(has_pair(r.df.data(), r.df_count, 1, 0));
@@ -295,7 +430,7 @@ TEST(line_vs_line) {
   DispatchResult r(2);
 
   pgaccel_status s =
-      pgaccel_spatial_intersects(lines_a, 1, lines_b, 2, r.dt.data(), &r.dt_count, r.df.data(),
+      test_spatial_cross_product(lines_a, 1, lines_b, 2, r.dt.data(), &r.dt_count, r.df.data(),
                                  &r.df_count, r.unc.data(), &r.unc_count);
 
   ASSERT_EQ(s, PGACCEL_OK);
@@ -313,19 +448,20 @@ TEST(line_vs_line) {
  * Test: unknown geometry type → uncertain
  * ---------------------------------------------------------------- */
 TEST(unknown_geom_type) {
-  float bb[] = {0, 0, 1, 1};
+  float unknown_bb[] = {100, 100, 101, 101};
+  float point_bb[] = {0, 0, 1, 1};
   float c[] = {0.5f, 0.5f};
 
-  pgaccel_geometry a = {PGACCEL_GEOM_UNKNOWN, bb, c, 1, nullptr, 0};
-  pgaccel_geometry b = {PGACCEL_GEOM_POINT, bb, c, 1, nullptr, 0};
+  pgaccel_geometry a = {PGACCEL_GEOM_UNKNOWN, unknown_bb, c, 1, nullptr, 0};
+  pgaccel_geometry b = {PGACCEL_GEOM_POINT, point_bb, c, 1, nullptr, 0};
 
   DispatchResult r(1);
 
-  pgaccel_status s = pgaccel_spatial_intersects(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(&a, 1, &b, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
 
   ASSERT_EQ(s, PGACCEL_OK);
-  /* Bbox overlaps, but unknown type → uncertain */
+  /* Unknown types stay uncertain even when their synthetic bbox is disjoint. */
   ASSERT_EQ(r.unc_count, 1u);
   ASSERT_EQ(r.dt_count, 0u);
 }
@@ -355,15 +491,15 @@ TEST(total_partitioning) {
 
   DispatchResult r(6);
 
-  pgaccel_status s = pgaccel_spatial_intersects(ga, 3, gb, 2, r.dt.data(), &r.dt_count, r.df.data(),
+  pgaccel_status s = test_spatial_cross_product(ga, 3, gb, 2, r.dt.data(), &r.dt_count, r.df.data(),
                                                 &r.df_count, r.unc.data(), &r.unc_count);
 
   ASSERT_EQ(s, PGACCEL_OK);
   /* All 6 pairs must be accounted for. */
   ASSERT_EQ(r.dt_count + r.df_count + r.unc_count, 6u);
 
-  /* Each of the 3 a-points matches gb[0] (same coords). */
-  ASSERT_EQ(r.dt_count, 3u);
+  /* Rounded-equal coordinates require exact PG recheck. */
+  ASSERT_EQ(r.unc_count, 3u);
   /* Each of the 3 a-points does NOT match gb[1] (different coords). */
   ASSERT_EQ(r.df_count, 3u);
 }
@@ -457,17 +593,16 @@ TEST(point_in_polygon_bulk_coop_1024v_100k) {
  * Test: unsupported geometry-type pairs must be UNCERTAIN, never
  * silently DEFINITE_TRUE or DEFINITE_FALSE from the predicate layer.
  *
- * These pairs are listed as UNSUPPORTED in the evaluate_predicate
- * comment in spatial_dispatch.cpp and correspond to missing kernels:
+ * These pairs are UNSUPPORTED in device_pairwise_intersects and correspond
+ * to missing kernels:
  *   - Point × LineString            — no pgaccel_point_on_linestring_bulk
  *   - LineString × Polygon          — no pgaccel_linestring_polygon_intersects_bulk
  *   - Polygon × Polygon             — no pgaccel_polygon_polygon_intersects_bulk
  *
  * All bboxes overlap so the Layer-1 bbox filter cannot prune them;
  * every pair must therefore reach Layer-2 and land in UNCERTAIN.
- * Future kernels that close one of these gaps must add a scalar check
- * helper and an explicit branch in evaluate_predicate — never remove
- * the UNCERTAIN fallback silently.
+ * Future kernels that close one of these gaps must add an explicit device
+ * branch; never remove the UNCERTAIN result silently.
  * ---------------------------------------------------------------- */
 TEST(unsupported_pairs_are_uncertain) {
   /* Shared bbox that every geometry below overlaps. */
@@ -486,7 +621,7 @@ TEST(unsupported_pairs_are_uncertain) {
   {
     DispatchResult r(1);
     pgaccel_status s =
-        pgaccel_spatial_intersects(&pt, 1, &line, 1, r.dt.data(), &r.dt_count, r.df.data(),
+        test_spatial_cross_product(&pt, 1, &line, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                    &r.df_count, r.unc.data(), &r.unc_count);
     ASSERT_EQ(s, PGACCEL_OK);
     ASSERT_EQ(r.unc_count, 1u);
@@ -496,7 +631,7 @@ TEST(unsupported_pairs_are_uncertain) {
   {
     DispatchResult r(1);
     pgaccel_status s =
-        pgaccel_spatial_intersects(&line, 1, &pt, 1, r.dt.data(), &r.dt_count, r.df.data(),
+        test_spatial_cross_product(&line, 1, &pt, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                    &r.df_count, r.unc.data(), &r.unc_count);
     ASSERT_EQ(s, PGACCEL_OK);
     ASSERT_EQ(r.unc_count, 1u);
@@ -508,7 +643,7 @@ TEST(unsupported_pairs_are_uncertain) {
   {
     DispatchResult r(1);
     pgaccel_status s =
-        pgaccel_spatial_intersects(&line, 1, &poly, 1, r.dt.data(), &r.dt_count, r.df.data(),
+        test_spatial_cross_product(&line, 1, &poly, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                    &r.df_count, r.unc.data(), &r.unc_count);
     ASSERT_EQ(s, PGACCEL_OK);
     ASSERT_EQ(r.unc_count, 1u);
@@ -518,7 +653,7 @@ TEST(unsupported_pairs_are_uncertain) {
   {
     DispatchResult r(1);
     pgaccel_status s =
-        pgaccel_spatial_intersects(&poly, 1, &line, 1, r.dt.data(), &r.dt_count, r.df.data(),
+        test_spatial_cross_product(&poly, 1, &line, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                    &r.df_count, r.unc.data(), &r.unc_count);
     ASSERT_EQ(s, PGACCEL_OK);
     ASSERT_EQ(r.unc_count, 1u);
@@ -530,7 +665,7 @@ TEST(unsupported_pairs_are_uncertain) {
   {
     DispatchResult r(1);
     pgaccel_status s =
-        pgaccel_spatial_intersects(&poly, 1, &poly, 1, r.dt.data(), &r.dt_count, r.df.data(),
+        test_spatial_cross_product(&poly, 1, &poly, 1, r.dt.data(), &r.dt_count, r.df.data(),
                                    &r.df_count, r.unc.data(), &r.unc_count);
     ASSERT_EQ(s, PGACCEL_OK);
     ASSERT_EQ(r.unc_count, 1u);
@@ -545,7 +680,15 @@ TEST(unsupported_pairs_are_uncertain) {
 int main() {
   printf("spatial_dispatch tests\n");
 
+  if (pgaccel_init() != PGACCEL_OK) {
+    fprintf(stderr, "pgaccel_init failed\n");
+    return 1;
+  }
+
   run_empty_inputs();
+  run_legacy_cross_product_declines();
+  run_pairwise_recheck_boundaries();
+  run_malformed_pairwise_rings_decline_before_dispatch();
   run_points_vs_polygon();
   run_all_bbox_miss();
   run_point_vs_point();

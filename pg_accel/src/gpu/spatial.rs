@@ -1,87 +1,86 @@
 use super::{PgaccelGeometry, bridge};
 
-/// Run the GPU three-layer spatial intersection pipeline.
+/// Run the linear row-wise GPU spatial intersection kernel.
 ///
-/// Returns `(definite_true, definite_false, uncertain)` as vectors of
-/// `(idx_a, idx_b)` pair indices, or `None` if no GPU device is available
-/// or the kernel failed. Callers handle `None` by deferring to the stock
-/// PostgreSQL executor (the planner would not have injected this path if
-/// the GPU were unavailable — a `None` here indicates a kernel failure).
+/// Pair `i` is `(geoms_a[i], geoms_b[i])`; extra rows in the longer slice are
+/// ignored. Results use the recheck-safe convention 1=true, -1=false,
+/// 0=uncertain. `None` means the GPU path failed and the caller must decline.
+pub fn spatial_intersects_pairwise_gpu(
+    geoms_a: &[PgaccelGeometry],
+    geoms_b: &[PgaccelGeometry],
+) -> Option<Vec<i8>> {
+    let count = geoms_a.len().min(geoms_b.len());
+    let _span = tracing::info_span!("gpu.spatial_intersects_pairwise", count).entered();
+    if count == 0 {
+        return Some(Vec::new());
+    }
+
+    let chunk_rows = crate::engine::cost::device_limits()
+        .gpu_spatial_pairwise_chunk_rows
+        .max(1);
+    let mut results = Vec::with_capacity(count);
+
+    for start in (0..count).step_by(chunk_rows) {
+        let end = start.saturating_add(chunk_rows).min(count);
+        let chunk_count = end - start;
+        let mut chunk_results = vec![0i8; chunk_count];
+
+        // SAFETY: both descriptor subslices contain `chunk_count` elements
+        // and `chunk_results` has exactly `chunk_count` writable bytes.
+        let status = unsafe {
+            bridge::pgaccel_spatial_intersects_pairwise(
+                geoms_a[start..end].as_ptr(),
+                geoms_b[start..end].as_ptr(),
+                chunk_count,
+                chunk_results.as_mut_ptr(),
+            )
+        };
+        if !status.is_ok() {
+            tracing::debug!(
+                ?status,
+                chunk_count,
+                start,
+                "spatial pairwise bridge declined"
+            );
+            return None;
+        }
+        if !chunk_results.iter().all(|result| matches!(result, -1..=1)) {
+            tracing::debug!(
+                chunk_count,
+                start,
+                "spatial pairwise bridge returned invalid class"
+            );
+            return None;
+        }
+        results.extend(chunk_results);
+    }
+
+    Some(results)
+}
+
+/// Compatibility bucketing wrapper over the linear pairwise kernel.
 ///
-/// The C++ kernel evaluates all `count_a × count_b` pairs and partitions
-/// them into the three buckets.  Each output pair is two consecutive `u32`
-/// values `(i, j)` written by the C side.
-#[allow(clippy::similar_names, clippy::type_complexity)]
+/// Returned pair indices are `(i, i)` because this API is row-wise. It no
+/// longer allocates or evaluates a cross product.
+#[allow(clippy::type_complexity)]
 pub fn spatial_intersects_gpu(
     geoms_a: &[PgaccelGeometry],
     geoms_b: &[PgaccelGeometry],
 ) -> Option<(Vec<(u32, u32)>, Vec<(u32, u32)>, Vec<(u32, u32)>)> {
-    let count_a = geoms_a.len();
-    let count_b = geoms_b.len();
-    let _span = tracing::info_span!("gpu.spatial_intersects", count_a, count_b,).entered();
-    if count_a == 0 || count_b == 0 {
-        return Some((Vec::new(), Vec::new(), Vec::new()));
+    let results = spatial_intersects_pairwise_gpu(geoms_a, geoms_b)?;
+    let mut definite_true = Vec::new();
+    let mut definite_false = Vec::new();
+    let mut uncertain = Vec::new();
+    for (index, result) in results.into_iter().enumerate() {
+        let index = u32::try_from(index).ok()?;
+        match result {
+            1 => definite_true.push((index, index)),
+            -1 => definite_false.push((index, index)),
+            _ => uncertain.push((index, index)),
+        }
     }
 
-    // The C++ kernel writes (i, j) pair indices — 2 u32 values per pair.
-    // Worst case: all pairs land in one bucket = count_a * count_b pairs.
-    let total_pairs = count_a.checked_mul(count_b)?;
-    // Cap pair buffer at 128 MB (3 buffers × buf_len × 4 bytes each).
-    // Beyond this, defer to PG recheck — the transfer overhead dominates.
-    const MAX_PAIRS: usize = 8_000_000; // 3 × 16M × 4 = ~192 MB total
-    if total_pairs > MAX_PAIRS {
-        return None;
-    }
-
-    let buf_len = total_pairs * 2;
-    let mut dt_buf = vec![0u32; buf_len];
-    let mut df_buf = vec![0u32; buf_len];
-    let mut uc_buf = vec![0u32; buf_len];
-    let mut dt_count: usize = 0;
-    let mut df_count: usize = 0;
-    let mut uc_count: usize = 0;
-
-    // SAFETY: geoms arrays are valid slices.  Output buffers are
-    // pre-allocated to `total_pairs * 2` u32 elements each.  The C
-    // function writes at most `total_pairs` pairs (2 u32 each) into
-    // each buffer and sets the count to the number of pairs written.
-    let status = unsafe {
-        bridge::pgaccel_spatial_intersects(
-            geoms_a.as_ptr(),
-            count_a,
-            geoms_b.as_ptr(),
-            count_b,
-            dt_buf.as_mut_ptr(),
-            std::ptr::addr_of_mut!(dt_count),
-            df_buf.as_mut_ptr(),
-            std::ptr::addr_of_mut!(df_count),
-            uc_buf.as_mut_ptr(),
-            std::ptr::addr_of_mut!(uc_count),
-        )
-    };
-    if !status.is_ok() {
-        pgrx::debug1!(
-            "pg_accel: spatial_intersects_gpu bridge returned {:?} for {}x{} pairs",
-            status,
-            count_a,
-            count_b,
-        );
-        return None;
-    }
-
-    // Each count is the number of PAIRS; each pair is 2 consecutive u32s.
-    let parse_pairs = |buf: &[u32], pair_count: usize| -> Vec<(u32, u32)> {
-        buf[..pair_count * 2]
-            .chunks_exact(2)
-            .map(|c| (c[0], c[1]))
-            .collect()
-    };
-
-    Some((
-        parse_pairs(&dt_buf, dt_count),
-        parse_pairs(&df_buf, df_count),
-        parse_pairs(&uc_buf, uc_count),
-    ))
+    Some((definite_true, definite_false, uncertain))
 }
 
 // ---------------------------------------------------------------------------

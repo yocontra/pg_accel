@@ -31,13 +31,11 @@ pub fn adapter() -> ExtensionAdapter {
 ///
 /// # Geometry-pair coverage inside the dormant `st_intersects` kernel
 ///
-/// Within the `st_intersects` kernel, the Layer-2 scalar
-/// dispatcher in `spatial_dispatch.cpp:evaluate_predicate` handles the
-/// following geometry-type pairs directly, and explicitly routes every
-/// other pair to `UNCERTAIN`. Since pg_accel is GPU-only, runtime
-/// `UNCERTAIN` now errors rather than rechecking through PostGIS. Closing a
-/// gap means adding a scalar helper and a concrete GPU branch in
-/// `evaluate_predicate`.
+/// Within the `st_intersects` kernel, the linear device dispatcher
+/// `device_pairwise_intersects` handles the following geometry-type pairs
+/// directly and routes every other pair to `UNCERTAIN`. Since pg_accel is
+/// GPU-only, runtime `UNCERTAIN` now errors rather than rechecking through
+/// PostGIS. Closing a gap means adding a concrete device branch.
 ///
 /// | Pair (A × B)                 | Status      | Missing kernel symbol |
 /// |------------------------------|-------------|------------------------|

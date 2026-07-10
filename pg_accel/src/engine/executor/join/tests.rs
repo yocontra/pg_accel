@@ -580,9 +580,10 @@ fn default_hash_key_type_is_int32() {
 // with a wired three-layer GPU path resolve to a `SpatialPredicate`, and
 // every unknown / unregistered name is rejected (returns `None`). The
 // previous `_ => Intersects` fall-through silently misdispatched any
-// non-matching name — see `spatial_dispatch.cpp:evaluate_predicate` for the
-// UNSUPPORTED geometry-pair table and `adapters/postgis.rs:gpu_spatial_entries`
-// for the registered-function table that mirrors this allowlist.
+// non-matching name. See `spatial_dispatch.cpp:device_pairwise_intersects`
+// for the UNSUPPORTED geometry-pair behavior and
+// `adapters/postgis.rs:gpu_spatial_entries` for the registered-function table
+// that mirrors this allowlist.
 
 #[test]
 fn resolve_st_intersects_is_intersects() {
