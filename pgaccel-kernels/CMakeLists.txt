@@ -31,6 +31,7 @@ set(KERNEL_SOURCES
     src/hash_join.cpp
     src/hash_agg.cpp
     src/olap_ssbm.cpp
+    src/grouped_agg.cpp
     src/window.cpp
     src/fused_ops.cpp
     src/nested_loop_ineq.cpp
@@ -104,6 +105,7 @@ set_source_files_properties(
     src/window.cpp
     src/reduce.cpp
     src/olap_ssbm.cpp
+    src/grouped_agg.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
 # Standalone test binary
@@ -293,5 +295,6 @@ add_pgaccel_gpu_test(test_kernel_failure_status)
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
 install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h
+              include/pgaccel_olap.h
               include/pgaccel_nested_loop_ineq.h
         DESTINATION include)

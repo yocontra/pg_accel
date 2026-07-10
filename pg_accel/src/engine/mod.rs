@@ -18,6 +18,7 @@ pub mod panic_hook;
 pub mod pg_compat;
 pub mod registry;
 pub mod residency;
+pub mod spec;
 pub mod stats;
 pub mod thread_budget;
 pub mod type_extractor;
