@@ -117,6 +117,7 @@ const fn align_up_const(value: usize, align: usize) -> usize {
 ///
 /// # Safety
 /// Called once in the leader at plan-execution start to size DSM bytes.
+#[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn estimate_dsm_custom_scan(
     _css: *mut pg_sys::CustomScanState,
     _pcxt: *mut pg_sys::ParallelContext,
@@ -129,6 +130,7 @@ pub(super) unsafe extern "C-unwind" fn estimate_dsm_custom_scan(
 ///
 /// # Safety
 /// Called in the leader after DSM is allocated.
+#[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
     css: *mut pg_sys::CustomScanState,
     _pcxt: *mut pg_sys::ParallelContext,
@@ -176,6 +178,7 @@ pub(super) unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
 ///
 /// # Safety
 /// Called in the leader when the plan is rescanned.
+#[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn reinitialize_dsm_custom_scan(
     css: *mut pg_sys::CustomScanState,
     pcxt: *mut pg_sys::ParallelContext,
@@ -202,6 +205,7 @@ pub(super) unsafe extern "C-unwind" fn reinitialize_dsm_custom_scan(
 ///
 /// # Safety
 /// Called in each worker backend after fork.
+#[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn initialize_worker_custom_scan(
     css: *mut pg_sys::CustomScanState,
     _toc: *mut pg_sys::shm_toc,
@@ -269,6 +273,7 @@ pub(super) unsafe extern "C-unwind" fn initialize_worker_custom_scan(
 ///
 /// # Safety
 /// Called in the leader when shutting down parallel execution.
+#[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn shutdown_custom_scan(css: *mut pg_sys::CustomScanState) {
     unsafe { snapshot_parallel_agg_counters_to_state(css.cast::<GpuAccelScanState>()) };
     tracing::debug!(node = "pg_accel_custom_scan", "dsm.shutdown");

@@ -27,6 +27,13 @@ pub use keys::{
 pub use ops::AggOp;
 pub use partial::{PartialAggSpec, PartialColumn};
 
+pub(crate) fn validate_descriptor_capability(
+    spec: &crate::engine::spec::AggQuerySpec,
+    projection: &crate::engine::spec::AggOutputProjection,
+) -> Result<(), String> {
+    descriptor::validate_runtime_capability(spec, projection)
+}
+
 use pgrx::pg_sys;
 
 impl crate::engine::executor::state::ExecutorState for AggExecState {

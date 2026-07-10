@@ -2358,6 +2358,7 @@ fn relid_matches_any_resident_cache(relid: pg_sys::Oid) -> bool {
 /// matching cache slots are suspect-flagged and fingerprint-revalidated
 /// lazily by `process_relcache_invalidations()` on the next cache access,
 /// which runs in normal planner/executor context.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn resident_cache_relcache_callback(
     _arg: pg_sys::Datum,
     relid: pg_sys::Oid,

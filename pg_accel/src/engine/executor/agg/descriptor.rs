@@ -177,7 +177,7 @@ fn validate_measure_outputs(
     }
 }
 
-fn validate_runtime_capability(
+pub(super) fn validate_runtime_capability(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
 ) -> Result<(), String> {

@@ -37,6 +37,7 @@ use super::private_data::{RESIDENT_PROOF_VERSION, resident_proof_default_for_str
 /// # Safety
 ///
 /// Called by the executor on the main backend thread.
+#[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
     node: *mut pg_sys::CustomScanState,
     _ancestors: *mut pg_sys::List,

@@ -1,11 +1,9 @@
 //! Catalog-driven aggregate-shape extraction for the unified OLAP path.
 //!
-//! This module deliberately does not inject a path yet. Phase 5A owns
-//! residency and Phase 5B owns the final plan wire, so admitting the new
-//! shape before those contracts land would create another partial execution
-//! path. [`extract_shape`] is the dark planner entry point: it emits a
-//! logical [`AggQuerySpec`], ordered output projection metadata, exact
-//! relation/attribute requirements, and typed cost/residency metadata.
+//! [`extract_shape`] emits a logical [`AggQuerySpec`], ordered output
+//! projection metadata, exact relation/attribute requirements, and typed
+//! cost/residency metadata. The generic upper-path hook resolves the initially
+//! unknown residency facts before it can admit the childless descriptor path.
 
 mod builder;
 mod cost;
@@ -49,7 +47,7 @@ pub enum RelationResidency {
     Resident,
     /// Phase 5A can load the selected columns before execution.
     AutoLoad,
-    /// The dark planner has not yet consulted the residency store.
+    /// Shape extraction has not yet consulted the residency store.
     Unknown,
 }
 
@@ -315,6 +313,10 @@ pub enum ShapeDecline {
     UnsupportedAggregateModifier,
     UnsupportedMeasureExpression,
     UnsupportedProjection,
+    UnprojectedGroupKey {
+        relation_oid: u32,
+        attno: i32,
+    },
     UnsupportedGroupExpression,
     UnsupportedColumn {
         relation_oid: u32,
@@ -418,6 +420,7 @@ impl ShapeDecline {
             Self::UnsupportedAggregateModifier => "shape_aggregate_modifier",
             Self::UnsupportedMeasureExpression => "shape_measure_expression",
             Self::UnsupportedProjection => "shape_projection",
+            Self::UnprojectedGroupKey { .. } => "shape_unprojected_group_key",
             Self::UnsupportedGroupExpression => "shape_group_expression",
             Self::UnsupportedColumn { .. } => "shape_unsupported_column",
             Self::TooManyRelations { .. } => "shape_too_many_relations",
@@ -542,9 +545,6 @@ impl ShapePlan {
 }
 
 /// Extract a neutral aggregate plan from PostgreSQL planner state.
-///
-/// The function is intentionally not called by the upper-path hook until the
-/// Phase 5A residency and Phase 5B wire contracts are integrated.
 ///
 /// # Safety
 ///

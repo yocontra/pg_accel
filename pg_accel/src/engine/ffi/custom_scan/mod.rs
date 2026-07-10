@@ -40,7 +40,7 @@ pub(in crate::engine::ffi) use private_data::HASH_JOIN_RESIDENT_COUNT_SENTINEL;
 use private_data::deserialize_agg_query_path_contract;
 pub(super) use private_data::{
     AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_query_plan,
-    append_olap_agg_spec, append_partial_spec, deserialize_partial_spec,
+    append_partial_spec, deserialize_partial_spec,
 };
 pub use private_data::{
     FUNCTIONSCAN_SENTINEL, FunctionScanPrivData, append_functionscan_priv,
@@ -396,6 +396,7 @@ pub fn register() {
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn plan_custom_path_scan(
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
@@ -414,6 +415,7 @@ unsafe extern "C-unwind" fn plan_custom_path_scan(
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn plan_custom_path_join(
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
@@ -522,6 +524,7 @@ unsafe fn planned_child_seqscan_relid(custom_plans: *mut pg_sys::List) -> Option
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 #[allow(clippy::too_many_lines, clippy::cast_ptr_alignment)]
 unsafe extern "C-unwind" fn plan_custom_path_agg(
     _root: *mut pg_sys::PlannerInfo,
@@ -672,9 +675,6 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         //     after the planner zeroes out Aggref sub-fields in a partial
         //     context, `unrecognized node type: 0`).
         //
-        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
-        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
-
         // For partial paths, the Aggrefs in `tlist` are AGGSPLIT_INITIAL_SERIAL
         // (produced by make_partial_grouping_target on partially_grouped_rel's
         // reltarget). The Finalize Agg node above our Gather runs
@@ -684,6 +684,8 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         // itself in plan.targetlist — not an INDEX_VAR wrapper — otherwise
         // set_upper_references errors with "variable not found in subplan
         // target list".
+        // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
         (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
 
         (*cscan).scan.plan.qual = pg_sys::extract_actual_clauses(clauses, false);
@@ -848,6 +850,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 #[allow(clippy::too_many_lines, clippy::cast_ptr_alignment)]
 unsafe extern "C-unwind" fn plan_custom_path_window(
     _root: *mut pg_sys::PlannerInfo,
@@ -1082,6 +1085,7 @@ unsafe fn build_function_scan_tlist(
     Some(list)
 }
 
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn plan_custom_path_function(
     _root: *mut pg_sys::PlannerInfo,
     _rel: *mut pg_sys::RelOptInfo,
@@ -1201,6 +1205,7 @@ unsafe extern "C-unwind" fn plan_custom_path_function(
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn plan_custom_path_srf_target_list(
     _root: *mut pg_sys::PlannerInfo,
     _rel: *mut pg_sys::RelOptInfo,
@@ -1698,6 +1703,7 @@ unsafe fn create_custom_scan_state(
 
 macro_rules! create_state_callback {
     ($function:ident, $method:expr, $exec_methods:ident) => {
+        #[pgrx::pg_guard]
         unsafe extern "C-unwind" fn $function(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
             // SAFETY: PostgreSQL invokes this callback with the CustomScan node
             // registered for this exact method table.
@@ -2500,6 +2506,7 @@ unsafe fn compile_node(
 /// # Safety
 ///
 /// Called by the executor on the main backend thread.
+#[pgrx::pg_guard]
 #[allow(clippy::too_many_lines)]
 unsafe extern "C-unwind" fn begin_custom_scan(
     node: *mut pg_sys::CustomScanState,
@@ -3014,6 +3021,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 }
 
 /// Called by the executor on the main backend thread.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn exec_custom_scan(
     node: *mut pg_sys::CustomScanState,
 ) -> *mut pg_sys::TupleTableSlot {
@@ -3140,6 +3148,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
 /// # Safety
 ///
 /// Called by the executor on the main backend thread.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
     let _span = tracing::debug_span!("ffi.end_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();
@@ -3342,6 +3351,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
 /// # Safety
 ///
 /// Called by the executor on the main backend thread.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanState) {
     let _span = tracing::debug_span!("ffi.rescan_custom_scan").entered();
     let state = node.cast::<GpuAccelScanState>();

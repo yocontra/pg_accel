@@ -424,6 +424,7 @@ unsafe fn args_contain_wrapped_postgis_intersects(args: *mut List) -> bool {
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 #[allow(clippy::too_many_lines)]
 pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     root: *mut PlannerInfo,
@@ -484,7 +485,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // scan/sort/function-scan CustomPath. Record the honest decline and leave
     // the query on PostgreSQL's native plan. When `gpu_enabled` is off,
     // pg_accel injects nothing here either.
-    if gucs::gpu_enabled() && super::gpu_resident_pipeline_required() {
+    if gucs::gpu_enabled() {
         // SAFETY: all pointers are planner-owned for this hook invocation.
         unsafe {
             observe_resident_only_rel_declines(root, rel, rte, has_sort, has_restrictions);

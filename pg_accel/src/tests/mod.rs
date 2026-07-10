@@ -48,6 +48,18 @@ mod tests {
         Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
     }
 
+    fn gpu_device_available() -> bool {
+        Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
+            .ok()
+            .flatten()
+            .is_some_and(|source| source == "hardware_derived")
+    }
+
+    fn serialize_gpu_tests() {
+        Spi::run("SELECT pg_advisory_xact_lock(882201)")
+            .expect("GPU test advisory lock should succeed");
+    }
+
     // =========================================================================
     // 1. Extension loads without crash
     // =========================================================================
@@ -522,6 +534,143 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_generic_resident_groupagg_dispatches_and_matches_native() {
+        if !gpu_device_available() {
+            pgrx::notice!("skipping generic resident aggregate dispatch test: no GPU device");
+            return;
+        }
+        serialize_gpu_tests();
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.auto_load = off").expect("SET AUTO LOAD OFF");
+        Spi::run(
+            "CREATE TEMP TABLE _generic_resident_agg AS \
+             SELECT (i % 64)::int4 AS g, (i % 1000)::int4 AS v \
+             FROM generate_series(1, 500000) i",
+        )
+        .expect("create generic aggregate fixture");
+        Spi::run("ANALYZE _generic_resident_agg").expect("ANALYZE fixture");
+        let pinned = Spi::get_one::<i64>(
+            "SELECT pg_accel_pin('_generic_resident_agg'::regclass, ARRAY['g', 'v'])",
+        )
+        .expect("pin query succeeds")
+        .expect("pin returns row count");
+        assert_eq!(pinned, 500_000);
+
+        let query = "SELECT g, sum(v), count(*) \
+                     FROM _generic_resident_agg GROUP BY g ORDER BY g";
+        let read_results = || {
+            Spi::connect(|client| {
+                client
+                    .select(query, None, &[])
+                    .expect("grouped aggregate query succeeds")
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.get::<i32>(1)
+                                .expect("group key read")
+                                .expect("group key"),
+                            row.get::<i64>(2).expect("sum read").expect("sum"),
+                            row.get::<i64>(3).expect("count read").expect("count"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let native = read_results();
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let plan = explain_text(query);
+        assert!(
+            plan.contains("Custom Scan (GpuAccelAgg)"),
+            "eligible resident aggregate must choose the generic childless path:\n{plan}"
+        );
+
+        crate::gpu::reset_gpu_exec_count();
+        let accelerated = read_results();
+        assert_eq!(accelerated, native, "generic aggregate result mismatch");
+        crate::gpu::assert_gpu_executed(1);
+    }
+
+    #[pg_test]
+    fn test_generic_groupagg_declines_expansion_but_only_parent_is_exact() {
+        if !gpu_device_available() {
+            pgrx::notice!("skipping generic inheritance aggregate test: no GPU device");
+            return;
+        }
+        serialize_gpu_tests();
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.auto_load = off").expect("SET AUTO LOAD OFF");
+        Spi::run(
+            "CREATE TEMP TABLE _generic_parent (v int4 NOT NULL); \
+             CREATE TEMP TABLE _generic_child () INHERITS (_generic_parent); \
+             INSERT INTO _generic_parent SELECT 1 FROM generate_series(1, 300000); \
+             INSERT INTO _generic_child SELECT 100 FROM generate_series(1, 100000); \
+             ANALYZE _generic_parent; \
+             ANALYZE _generic_child",
+        )
+        .expect("create inheritance fixture");
+
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+        let expanded_plan = explain_text("SELECT sum(v) FROM _generic_parent");
+        assert!(
+            !expanded_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "inherited expansion must stay native:\n{expanded_plan}"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                .expect("rejection query")
+                .expect("expansion decline"),
+            "shape_unsupported_rte"
+        );
+
+        let pinned =
+            Spi::get_one::<i64>("SELECT pg_accel_pin('_generic_parent'::regclass, ARRAY['v'])")
+                .expect("pin query succeeds")
+                .expect("pin returns row count");
+        assert_eq!(pinned, 300_000, "relation-keyed residency must load ONLY");
+
+        let only_query = "SELECT sum(v) FROM ONLY _generic_parent";
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let native = Spi::get_one::<i64>(only_query)
+            .expect("native ONLY query")
+            .expect("native sum");
+        assert_eq!(native, 300_000);
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let only_plan = explain_text(only_query);
+        assert!(
+            only_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "ONLY parent should admit the exact relation snapshot:\n{only_plan}"
+        );
+        crate::gpu::reset_gpu_exec_count();
+        let accelerated = Spi::get_one::<i64>(only_query)
+            .expect("accelerated ONLY query")
+            .expect("accelerated sum");
+        assert_eq!(accelerated, native);
+        crate::gpu::assert_gpu_executed(1);
+
+        Spi::run(
+            "CREATE TEMP TABLE _generic_partitioned (v int4) PARTITION BY RANGE (v); \
+             CREATE TEMP TABLE _generic_partitioned_1 PARTITION OF _generic_partitioned \
+             FOR VALUES FROM (0) TO (100)",
+        )
+        .expect("create partition fixture");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+        let partitioned_plan = explain_text("SELECT sum(v) FROM _generic_partitioned");
+        assert!(
+            !partitioned_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "partition expansion must stay native:\n{partitioned_plan}"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                .expect("rejection query")
+                .expect("partition decline"),
+            "shape_unsupported_rte"
+        );
+    }
+
+    #[pg_test]
     fn test_aggregate_avg() {
         Spi::run("CREATE TEMP TABLE t_avg (x float8)").expect("CREATE TABLE");
         Spi::run("INSERT INTO t_avg SELECT g::float8 FROM generate_series(1, 100) g")
@@ -568,8 +717,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("grouped AVG finalize decline should record a reason");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "grouped AVG should expose the resident-only gate before legacy finalize lanes; plan:\n{plan_text}"
+            rejection, "shape_floating_accumulator_semantics",
+            "grouped AVG should expose the exact generic accumulator decline; plan:\n{plan_text}"
         );
     }
 
@@ -611,8 +760,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("non-float AVG should record a decline for {query}"));
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "non-float AVG should expose the resident-only gate before legacy accumulator lanes; plan:\n{plan_text}"
+                rejection, "shape_numeric_accumulator_unavailable",
+                "non-float AVG should expose the exact generic accumulator decline; plan:\n{plan_text}"
             );
         }
     }
@@ -630,13 +779,31 @@ mod tests {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
 
-        for query in [
-            "SELECT sum(n) FROM t_numeric_agg",
-            "SELECT avg(n) FROM t_numeric_agg",
-            "SELECT min(n) FROM t_numeric_agg",
-            "SELECT max(n) FROM t_numeric_agg",
-            "SELECT stddev(n) FROM t_numeric_agg",
-            "SELECT var_samp(n) FROM t_numeric_agg",
+        for (query, expected_reason) in [
+            (
+                "SELECT sum(n) FROM t_numeric_agg",
+                "shape_numeric_accumulator_unavailable",
+            ),
+            (
+                "SELECT avg(n) FROM t_numeric_agg",
+                "shape_numeric_accumulator_unavailable",
+            ),
+            (
+                "SELECT min(n) FROM t_numeric_agg",
+                "shape_unsupported_aggregate",
+            ),
+            (
+                "SELECT max(n) FROM t_numeric_agg",
+                "shape_unsupported_aggregate",
+            ),
+            (
+                "SELECT stddev(n) FROM t_numeric_agg",
+                "shape_unsupported_aggregate",
+            ),
+            (
+                "SELECT var_samp(n) FROM t_numeric_agg",
+                "shape_unsupported_aggregate",
+            ),
         ] {
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
             let plan_text = explain_text(query);
@@ -653,8 +820,8 @@ mod tests {
                         panic!("NUMERIC aggregate should record a decline for {query}")
                     });
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "NUMERIC aggregate should expose the resident-only gate before legacy accumulator lanes; plan:\n{plan_text}"
+                rejection, expected_reason,
+                "NUMERIC aggregate should expose its exact generic shape decline; plan:\n{plan_text}"
             );
         }
     }
@@ -696,8 +863,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .expect("semantic aggregate modifier should record a reason");
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "aggregate semantic modifier should expose the resident-only gate before legacy semantic lanes; plan:\n{plan_text}"
+                rejection, "shape_aggregate_modifier",
+                "aggregate semantic modifier should expose the exact generic shape decline; plan:\n{plan_text}"
             );
         }
     }
@@ -1474,8 +1641,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("simple PostGIS predicate should record a planner decline");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "ST_Intersects should expose the resident-only gate before legacy spatial lanes; plan:\n{plan}"
+            rejection, "shape_unsupported_predicate",
+            "ST_Intersects should expose the exact generic predicate decline; plan:\n{plan}"
         );
     }
 
@@ -1606,8 +1773,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("{label} should record a planner decline"));
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "{label} should expose the resident-only gate before legacy ST_Intersects shape lanes; plan:\n{plan}"
+                rejection, "shape_unsupported_predicate",
+                "{label} should expose the exact generic predicate decline; plan:\n{plan}"
             );
         }
 
@@ -1626,8 +1793,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("structurally covered ST_Intersects should record a planner decline");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "structurally covered ST_Intersects should expose the resident-only gate; plan:\n{plan}"
+            rejection, "shape_unsupported_predicate",
+            "structurally covered ST_Intersects should expose the generic predicate decline; plan:\n{plan}"
         );
     }
 
@@ -1712,8 +1879,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("{label} should record a planner decline"));
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "{label} should expose the resident-only gate before legacy spatial predicate lanes; plan:\n{plan}"
+                rejection, "shape_unsupported_predicate",
+                "{label} should expose the exact generic predicate decline; plan:\n{plan}"
             );
         }
     }
@@ -1790,8 +1957,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("{label} should record a planner decline"));
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "{label} should expose the resident-only gate before legacy distance-kernel lanes; plan:\n{plan}"
+                rejection, "shape_unsupported_predicate",
+                "{label} should expose the exact generic predicate decline; plan:\n{plan}"
             );
         }
     }
@@ -1850,8 +2017,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("{label} should record a planner decline"));
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "{label} should expose the resident-only gate before legacy output-protocol lanes; plan:\n{plan}"
+                rejection, "shape_unsupported_predicate",
+                "{label} should expose the exact generic predicate decline; plan:\n{plan}"
             );
         }
     }
@@ -1986,8 +2153,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("correlated H3 SRF should record a planner decline");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "correlated H3 SRF should expose the resident-only gate before legacy LATERAL lanes; plan:\n{plan}"
+            rejection, "shape_unsupported_rte",
+            "correlated H3 SRF should expose the exact unsupported-input decline; plan:\n{plan}"
         );
     }
 
@@ -2071,8 +2238,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("{label} H3 predicate should record a decline"));
             assert_eq!(
-                rejection, RESIDENT_ONLY_REJECTION,
-                "{label} H3 predicate should expose the resident-only gate before legacy H3 scan lanes; plan:\n{plan}"
+                rejection, "shape_unsupported_predicate",
+                "{label} H3 predicate should expose the exact generic predicate decline; plan:\n{plan}"
             );
         }
 
@@ -2092,8 +2259,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("small-relation H3 predicate should record a decline");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "small-relation H3 predicate should expose the resident-only gate before legacy H3 scan lanes; plan:\n{plan}"
+            rejection, "shape_unsupported_predicate",
+            "small-relation H3 predicate should expose the exact generic predicate decline; plan:\n{plan}"
         );
     }
 
@@ -3845,8 +4012,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("partial agg CPU-child decline should record a reason");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "partial aggregate CPU-child query should expose the resident-only gate before legacy partial lanes; plan:\n{plan}"
+            rejection, "shape_unsupported_measure_type",
+            "float4 SUM should expose the exact generic measure-type decline; plan:\n{plan}"
         );
 
         Spi::run("DROP TABLE _agg_par_t").expect("drop table");
@@ -3914,8 +4081,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("grouped join aggregate PreAgg decline should record a reason");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "grouped join aggregate should expose the resident-only gate before legacy PreAgg lanes; plan:\n{plan}"
+            rejection, "shape_unsupported_predicate",
+            "filtered grouped join should expose the exact generic predicate decline; plan:\n{plan}"
         );
 
         Spi::run("DROP TABLE _preagg_fact").expect("drop fact");

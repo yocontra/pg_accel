@@ -352,6 +352,23 @@ fn grouped_plan_requires_exact_dictionary_resolution_before_descriptor_use() {
 }
 
 #[test]
+fn omitted_group_key_declines_before_path_construction() {
+    let mut input = single_table_input();
+    let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
+    input.group_columns = vec![group];
+
+    let decline = build_shape(input, &model()).expect_err("hidden group output must decline");
+    assert_eq!(
+        decline,
+        ShapeDecline::UnprojectedGroupKey {
+            relation_oid: 100,
+            attno: 1,
+        }
+    );
+    assert_eq!(decline.code(), "shape_unprojected_group_key");
+}
+
+#[test]
 fn repeated_sql_aggregate_reuses_one_output_lane() {
     let mut input = single_table_input();
     input.aggregates.push(input.aggregates[0].clone());
@@ -1120,6 +1137,27 @@ fn unsupported_phase4_measure_types_decline_before_descriptor_build() {
         u32::from(pg_sys::FLOAT4OID),
         u32::from(pg_sys::DATEOID),
         u32::from(pg_sys::TIMESTAMPOID),
+    ] {
+        let mut input = single_table_input();
+        input.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 100,
+            attno: 2,
+            type_oid,
+        });
+        assert_eq!(
+            build_shape(input, &model()),
+            Err(ShapeDecline::UnsupportedMeasureType { type_oid })
+        );
+    }
+}
+
+#[test]
+fn structured_and_extension_measure_types_decline_in_generic_shape_analysis() {
+    for type_oid in [
+        114,  // json
+        3802, // jsonb
+        1007, // int4[]
+        pg_sys::FirstNormalObjectId,
     ] {
         let mut input = single_table_input();
         input.aggregates[0].expression = MeasureExpr::Column(ColumnRef {

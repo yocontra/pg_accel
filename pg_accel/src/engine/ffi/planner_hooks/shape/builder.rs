@@ -683,6 +683,14 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
         validate_planner_column(&input, *group)?;
         validate_group_key_type(group.column.type_oid)?;
         validate_key_collation(*group)?;
+        if !input.projections.iter().any(
+            |projection| matches!(projection, InputProjection::Group { column, .. } if column == group),
+        ) {
+            return Err(ShapeDecline::UnprojectedGroupKey {
+                relation_oid: group.column.relation_oid,
+                attno: group.column.attno,
+            });
+        }
     }
 
     let fact_varno = choose_fact_varno(&input)?;

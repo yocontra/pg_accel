@@ -207,10 +207,4 @@ impl PgListWriter {
         self.push_int((value >> 32) as c_int);
         self.push_int(value as u32 as c_int);
     }
-
-    pub(super) fn push_f64_halves(&mut self, value: f64) {
-        let bits = if value == 0.0 { 0 } else { value.to_bits() };
-        self.push_int((bits >> 32) as c_int);
-        self.push_int(bits as u32 as c_int);
-    }
 }

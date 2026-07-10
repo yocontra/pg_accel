@@ -743,6 +743,7 @@ impl fmt::Display for ResidentLoadError {
 impl std::error::Error for ResidentLoadError {}
 
 #[cfg(not(test))]
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn resident_relcache_callback(_arg: pg_sys::Datum, relid: pg_sys::Oid) {
     if relid == pg_sys::InvalidOid {
         let _ = PENDING_RELCACHE_CLEAR_ALL.try_with(|pending| pending.set(true));

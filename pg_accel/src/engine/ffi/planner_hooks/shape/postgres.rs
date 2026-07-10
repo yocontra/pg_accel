@@ -29,6 +29,7 @@ struct ExpressionInventory {
 /// PostgreSQL owns recursion and therefore automatically follows node kinds
 /// added to expression trees; this pass only records nodes relevant to the
 /// shape contract instead of maintaining a brittle allowed-node whitelist.
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn inventory_walker(node: *mut Node, context: *mut c_void) -> bool {
     if node.is_null() || context.is_null() {
         return false;
@@ -1112,7 +1113,13 @@ unsafe fn relation_shapes(
         )?;
         // SAFETY: list_item returned a non-null RangeTblEntry.
         let rte_ref = unsafe { &*rte };
-        if rte_ref.rtekind == pg_sys::RTEKind::RTE_JOIN {
+        // Join RTEs only alias base-relation Vars. PostgreSQL can also append
+        // synthetic RESULT and GROUP RTEs while building aggregate paths;
+        // neither represents another base input.
+        if matches!(
+            rte_ref.rtekind,
+            pg_sys::RTEKind::RTE_JOIN | pg_sys::RTEKind::RTE_RESULT | pg_sys::RTEKind::RTE_GROUP
+        ) {
             continue;
         }
         reject_table_sample(!rte_ref.tablesample.is_null())?;

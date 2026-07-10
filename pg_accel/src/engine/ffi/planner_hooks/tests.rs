@@ -3,8 +3,7 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
 use super::*;
-
-use super::*;
+use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
 
 // =====================================================================
 // Existing tests (preserved)
@@ -129,48 +128,6 @@ fn all_path_subtypes_at_least_as_large_as_base_path() {
             "subtype index {i} (size {size}) smaller than base Path (size {base})"
         );
     }
-}
-
-// =====================================================================
-// EquiJoinKey struct construction and field access
-// =====================================================================
-
-#[test]
-fn equi_join_key_int32_construction() {
-    let k = EquiJoinKey {
-        outer_attno: 1,
-        inner_attno: 2,
-        outer_varno: 1,
-        inner_varno: 2,
-        key_type: 0, // Int32
-    };
-    assert_eq!(k.outer_attno, 1);
-    assert_eq!(k.inner_attno, 2);
-    assert_eq!(k.key_type, 0);
-}
-
-#[test]
-fn equi_join_key_int64_construction() {
-    let k = EquiJoinKey {
-        outer_attno: 5,
-        inner_attno: 3,
-        outer_varno: 1,
-        inner_varno: 2,
-        key_type: 1, // Int64
-    };
-    assert_eq!(k.key_type, 1);
-}
-
-#[test]
-fn equi_join_key_float64_construction() {
-    let k = EquiJoinKey {
-        outer_attno: 2,
-        inner_attno: 7,
-        outer_varno: 1,
-        inner_varno: 2,
-        key_type: 2, // Float64
-    };
-    assert_eq!(k.key_type, 2);
 }
 
 // =====================================================================
@@ -377,39 +334,6 @@ fn sort_key_desc_nulls_first() {
         nulls_first: true,
     };
     assert!(sk.nulls_first);
-}
-
-// =====================================================================
-// Explicit unsupported type policy
-// =====================================================================
-
-#[test]
-fn unsupported_type_policy_classifies_structured_builtin_types() {
-    assert_eq!(
-        builtin_rejected_type_policy(114),
-        Some(UnsupportedTypePolicy::Json)
-    );
-    assert_eq!(
-        builtin_rejected_type_policy(3802),
-        Some(UnsupportedTypePolicy::Jsonb)
-    );
-    assert_eq!(
-        builtin_rejected_type_policy(1186),
-        Some(UnsupportedTypePolicy::Interval)
-    );
-    assert_eq!(
-        builtin_rejected_type_policy(1007),
-        Some(UnsupportedTypePolicy::Array)
-    );
-}
-
-#[test]
-fn unsupported_type_policy_classifies_user_oid_as_custom() {
-    let user_oid = pg_sys::FirstNormalObjectId;
-    assert_eq!(
-        gpu_supported_scalar_type_policy(user_oid),
-        GpuTypeSupport::ExplicitReject(UnsupportedTypePolicy::Custom)
-    );
 }
 
 #[test]
@@ -1064,61 +988,6 @@ fn empty_registry_is_empty() {
 fn empty_registry_lookup_returns_none() {
     let reg = registry::AdapterRegistry::new();
     assert!(reg.lookup(pg_sys::Oid::from(12345u32)).is_none());
-}
-
-// =====================================================================
-// Precision gate: SUM(numeric) must not be accelerated.
-//
-// The partial-agg accumulator (`ColumnAccumulator.sum`) is f64 — arbitrary-
-// precision NUMERIC silently loses precision above 2^53 when it rides the
-// NumericSumEmitter path. `classify_aggref` is the gate: returning None for
-// F_SUM_NUMERIC forces the planner to let PG handle it natively.
-//
-// SUM(int8) must stay accelerated on the non-parallel direct typed i64 reduce
-// path, while parallel partial SUM(int8) remains planner-guarded until it can
-// emit PG's internal transition-state shape.
-// =====================================================================
-
-#[test]
-fn classify_aggref_rejects_sum_numeric() {
-    let aggref = pg_sys::Aggref {
-        aggfnoid: pg_sys::Oid::from(pg_sys::F_SUM_NUMERIC),
-        ..pg_sys::Aggref::default()
-    };
-    // SAFETY: `aggref` is a valid, zero-initialised Aggref on the stack;
-    // classify_aggref only reads `aggfnoid` for the F_SUM_NUMERIC arm.
-    let result = unsafe { super::agg_common::classify_aggref(&raw const aggref) };
-    assert!(
-        result.is_none(),
-        "SUM(numeric) must be rejected at classification to avoid the f64 \
-         accumulator precision loss above 2^53"
-    );
-}
-
-#[test]
-fn classify_aggref_accepts_sum_int8() {
-    let aggref = pg_sys::Aggref {
-        aggfnoid: pg_sys::Oid::from(pg_sys::F_SUM_INT8),
-        ..pg_sys::Aggref::default()
-    };
-    // SAFETY: same contract as above — classify_aggref only reads aggfnoid
-    // for the F_SUM_INT8 arm.
-    let result = unsafe { super::agg_common::classify_aggref(&raw const aggref) };
-    assert!(
-        matches!(
-            result,
-            Some((AggOp::Sum, super::agg_common::AggClass::NumericSum))
-        ),
-        "SUM(int8) must still be accelerated; got {result:?}"
-    );
-}
-
-#[test]
-fn classify_aggref_null_pointer_returns_none() {
-    // SAFETY: classify_aggref is documented to accept a null pointer and
-    // return None (belt-and-suspenders defense for planner edge cases).
-    let result = unsafe { super::agg_common::classify_aggref(std::ptr::null()) };
-    assert!(result.is_none());
 }
 
 /// Gate: the window cost site must route through the fp64-aware helper —

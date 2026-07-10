@@ -782,6 +782,85 @@ fn exec_methods_parallel_callbacks_are_wired() {
 }
 
 #[test]
+fn every_manually_registered_postgres_callback_is_pg_guarded() {
+    fn assert_guarded(source: &str, signature: &str) {
+        let signature_offset = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("callback signature not found: {signature}"));
+        let guarded = source[..signature_offset]
+            .lines()
+            .rev()
+            .take(3)
+            .any(|line| line.trim() == "#[pgrx::pg_guard]");
+        assert!(
+            guarded,
+            "callback is missing #[pgrx::pg_guard]: {signature}"
+        );
+    }
+
+    let custom_scan = include_str!("mod.rs");
+    for signature in [
+        "unsafe extern \"C-unwind\" fn plan_custom_path_scan(",
+        "unsafe extern \"C-unwind\" fn plan_custom_path_join(",
+        "unsafe extern \"C-unwind\" fn plan_custom_path_agg(",
+        "unsafe extern \"C-unwind\" fn plan_custom_path_window(",
+        "unsafe extern \"C-unwind\" fn plan_custom_path_function(",
+        "unsafe extern \"C-unwind\" fn plan_custom_path_srf_target_list(",
+        "unsafe extern \"C-unwind\" fn $function(",
+        "unsafe extern \"C-unwind\" fn begin_custom_scan(",
+        "unsafe extern \"C-unwind\" fn exec_custom_scan(",
+        "unsafe extern \"C-unwind\" fn end_custom_scan(",
+        "unsafe extern \"C-unwind\" fn rescan_custom_scan(",
+    ] {
+        assert_guarded(custom_scan, signature);
+    }
+
+    let dsm = include_str!("dsm.rs");
+    for signature in [
+        "unsafe extern \"C-unwind\" fn estimate_dsm_custom_scan(",
+        "unsafe extern \"C-unwind\" fn initialize_dsm_custom_scan(",
+        "unsafe extern \"C-unwind\" fn reinitialize_dsm_custom_scan(",
+        "unsafe extern \"C-unwind\" fn initialize_worker_custom_scan(",
+        "unsafe extern \"C-unwind\" fn shutdown_custom_scan(",
+    ] {
+        assert_guarded(dsm, signature);
+    }
+    assert_guarded(
+        include_str!("explain.rs"),
+        "unsafe extern \"C-unwind\" fn explain_custom_scan(",
+    );
+
+    for (source, signature) in [
+        (
+            include_str!("../planner_hooks/rel_pathlist.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_set_rel_pathlist(",
+        ),
+        (
+            include_str!("../planner_hooks/join_pathlist.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_set_join_pathlist(",
+        ),
+        (
+            include_str!("../planner_hooks/mod.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_create_upper_paths(",
+        ),
+        (
+            include_str!("../planner_hooks/shape/postgres.rs"),
+            "unsafe extern \"C-unwind\" fn inventory_walker(",
+        ),
+        (
+            include_str!("../../residency/store.rs"),
+            "unsafe extern \"C-unwind\" fn resident_relcache_callback(",
+        ),
+        (
+            include_str!("../../residency/legacy.rs"),
+            "unsafe extern \"C-unwind\" fn resident_cache_relcache_callback(",
+        ),
+    ] {
+        assert_guarded(source, signature);
+    }
+}
+
+#[test]
 fn strategy_exec_method_vtables_are_distinct() {
     let methods = [
         &raw const SCAN_EXEC_METHODS.0,

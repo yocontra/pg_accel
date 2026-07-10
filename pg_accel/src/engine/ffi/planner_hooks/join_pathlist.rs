@@ -21,6 +21,7 @@ use crate::engine::stats;
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
 #[allow(clippy::too_many_lines)]
 pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     root: *mut PlannerInfo,
@@ -117,7 +118,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // GPU-resident-only admission: pg_accel no longer injects a host-staged
     // join CustomPath. The NLJ opportunity observers above still record their
     // decline reasons; here we record the resident-pipeline decline.
-    if super::gpu_resident_pipeline_required() {
+    if gucs::gpu_enabled() {
         super::record_no_gpu_resident_pipeline_decline(
             "join_pathlist_no_resident_pipeline",
             joinrel,
