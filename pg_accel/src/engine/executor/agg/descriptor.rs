@@ -251,7 +251,10 @@ fn validate_runtime_capability(
     Ok(())
 }
 
-fn validate_catalog_collations(spec: &AggQuerySpec) -> Result<(), String> {
+fn validate_catalog_contract(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
     let collations = spec
         .group_keys
         .iter()
@@ -272,7 +275,7 @@ fn validate_catalog_collations(spec: &AggQuerySpec) -> Result<(), String> {
             ));
         }
     }
-    let validate_column = |column: ColumnRef, expected_collation: u32| -> Result<(), String> {
+    let validate_column = |column: ColumnRef, expected_collation: u32| -> Result<i32, String> {
         let attnum = i16::try_from(column.attno)
             .map_err(|_| format!("attribute {} exceeds int16", column.attno))?;
         let mut type_oid = pg_sys::InvalidOid;
@@ -307,21 +310,39 @@ fn validate_catalog_collations(spec: &AggQuerySpec) -> Result<(), String> {
                 expected_collation
             ));
         }
-        Ok(())
+        Ok(typmod)
     };
+    let mut key_typmods = Vec::with_capacity(spec.group_keys.len());
     for key in &spec.group_keys {
-        match key.source {
+        let typmod = match key.source {
             GroupKeySource::FactColumn(column)
             | GroupKeySource::StarDimension {
                 group_column: column,
                 ..
             } => validate_column(column, key.collation_oid)?,
-            GroupKeySource::Expression { .. } | GroupKeySource::H3Cell { .. } => {}
-        }
+            GroupKeySource::Expression { .. } | GroupKeySource::H3Cell { .. } => -1,
+        };
+        key_typmods.push(typmod);
     }
     for dimension in &spec.star_dims {
         validate_column(dimension.fact_key, dimension.collation_oid)?;
         validate_column(dimension.dim_key, dimension.collation_oid)?;
+    }
+    for slot in &projection.slots {
+        if let crate::engine::spec::AggOutputSource::GroupKey { key_index } = slot.source {
+            let key_index = usize::try_from(key_index)
+                .map_err(|_| "group projection key index exceeds usize".to_owned())?;
+            let actual_typmod = key_typmods
+                .get(key_index)
+                .copied()
+                .ok_or_else(|| "group projection references a missing key typmod".to_owned())?;
+            if slot.result_typmod != actual_typmod {
+                return Err(format!(
+                    "group projection key {key_index} typmod {} does not match catalog typmod {actual_typmod}",
+                    slot.result_typmod
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -475,7 +496,7 @@ pub(super) struct DescriptorAggPlan {
 impl DescriptorAggPlan {
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
         validate_runtime_capability(&spec, &projection)?;
-        validate_catalog_collations(&spec)?;
+        validate_catalog_contract(&spec, &projection)?;
         let mut identity_words = spec
             .encode_i32()
             .map_err(|error| format!("could not encode aggregate query spec: {error}"))?;
