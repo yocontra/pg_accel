@@ -666,6 +666,12 @@ struct PreparedDimension {
     multiplicity_by_key: Option<Vec<u64>>,
 }
 
+fn device_dimension_code(code: Option<usize>) -> Result<i32, String> {
+    code.map_or(Ok(-1), |code| {
+        i32::try_from(code).map_err(|_| "dimension dictionary exceeds i32 code space".to_owned())
+    })
+}
+
 fn prepare_dimension(
     dimension: &crate::engine::spec::DimSpec,
     columns: &HostColumns,
@@ -720,11 +726,10 @@ fn prepare_dimension(
 
     let mut fact_codes = Vec::with_capacity(fact_rows);
     for row in 0..fact_rows {
-        let code = fact
-            .join_key(row)?
-            .and_then(|key| by_key.get(&key).copied())
-            .and_then(|code| i32::try_from(code).ok())
-            .unwrap_or(-1);
+        let code = device_dimension_code(
+            fact.join_key(row)?
+                .and_then(|key| by_key.get(&key).copied()),
+        )?;
         fact_codes.push(code);
     }
     Ok(PreparedDimension {
@@ -1187,6 +1192,19 @@ mod tests {
         );
         assert!(
             prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Unique), &columns, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn dimension_dictionary_code_overflow_is_not_a_join_miss() {
+        assert_eq!(device_dimension_code(None).expect("missing key code"), -1);
+        assert_eq!(
+            device_dimension_code(Some(i32::MAX as usize)).expect("largest device code"),
+            i32::MAX
+        );
+        assert_eq!(
+            device_dimension_code(Some(i32::MAX as usize + 1)),
+            Err("dimension dictionary exceeds i32 code space".to_owned())
         );
     }
 
