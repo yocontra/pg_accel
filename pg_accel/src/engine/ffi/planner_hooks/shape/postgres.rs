@@ -560,6 +560,13 @@ fn scalar_value(constant: &pg_sys::Const) -> Result<ScalarValue, ShapeDecline> {
             pg_sys::INT8OID => ScalarValue::I64(pg_sys::DatumGetInt64(constant.constvalue)),
             pg_sys::FLOAT4OID => ScalarValue::F32(pg_sys::DatumGetFloat4(constant.constvalue)),
             pg_sys::FLOAT8OID => ScalarValue::F64(pg_sys::DatumGetFloat8(constant.constvalue)),
+            pg_sys::DATEOID => ScalarValue::Date(pg_sys::DatumGetDateADT(constant.constvalue)),
+            pg_sys::TIMESTAMPOID => {
+                ScalarValue::Timestamp(pg_sys::DatumGetTimestamp(constant.constvalue))
+            }
+            pg_sys::TIMESTAMPTZOID => {
+                ScalarValue::TimestampTz(pg_sys::DatumGetTimestampTz(constant.constvalue))
+            }
             _ => return Err(ShapeDecline::UnsupportedFilterType { type_oid }),
         }
     };
@@ -573,6 +580,9 @@ fn scalar_min(value: ScalarValue) -> ScalarValue {
         ScalarValue::I64(_) => ScalarValue::I64(i64::MIN),
         ScalarValue::F32(_) => ScalarValue::F32(f32::NEG_INFINITY),
         ScalarValue::F64(_) => ScalarValue::F64(f64::NEG_INFINITY),
+        ScalarValue::Date(_) => ScalarValue::Date(i32::MIN),
+        ScalarValue::Timestamp(_) => ScalarValue::Timestamp(i64::MIN),
+        ScalarValue::TimestampTz(_) => ScalarValue::TimestampTz(i64::MIN),
     }
 }
 
@@ -583,6 +593,9 @@ fn scalar_max(value: ScalarValue) -> ScalarValue {
         ScalarValue::I64(_) => ScalarValue::I64(i64::MAX),
         ScalarValue::F32(_) => ScalarValue::F32(f32::INFINITY),
         ScalarValue::F64(_) => ScalarValue::F64(f64::INFINITY),
+        ScalarValue::Date(_) => ScalarValue::Date(i32::MAX),
+        ScalarValue::Timestamp(_) => ScalarValue::Timestamp(i64::MAX),
+        ScalarValue::TimestampTz(_) => ScalarValue::TimestampTz(i64::MAX),
     }
 }
 
@@ -593,6 +606,11 @@ fn scalar_cmp(left: ScalarValue, right: ScalarValue) -> Option<std::cmp::Orderin
         (ScalarValue::I64(left), ScalarValue::I64(right)) => left.partial_cmp(&right),
         (ScalarValue::F32(left), ScalarValue::F32(right)) => left.partial_cmp(&right),
         (ScalarValue::F64(left), ScalarValue::F64(right)) => left.partial_cmp(&right),
+        (ScalarValue::Date(left), ScalarValue::Date(right)) => left.partial_cmp(&right),
+        (ScalarValue::Timestamp(left), ScalarValue::Timestamp(right))
+        | (ScalarValue::TimestampTz(left), ScalarValue::TimestampTz(right)) => {
+            left.partial_cmp(&right)
+        }
         _ => None,
     }
 }
@@ -601,6 +619,9 @@ fn scalar_next(value: ScalarValue) -> Option<ScalarValue> {
     match value {
         ScalarValue::I32(value) => value.checked_add(1).map(ScalarValue::I32),
         ScalarValue::I64(value) => value.checked_add(1).map(ScalarValue::I64),
+        ScalarValue::Date(value) => value.checked_add(1).map(ScalarValue::Date),
+        ScalarValue::Timestamp(value) => value.checked_add(1).map(ScalarValue::Timestamp),
+        ScalarValue::TimestampTz(value) => value.checked_add(1).map(ScalarValue::TimestampTz),
         _ => None,
     }
 }
@@ -609,6 +630,9 @@ fn scalar_previous(value: ScalarValue) -> Option<ScalarValue> {
     match value {
         ScalarValue::I32(value) => value.checked_sub(1).map(ScalarValue::I32),
         ScalarValue::I64(value) => value.checked_sub(1).map(ScalarValue::I64),
+        ScalarValue::Date(value) => value.checked_sub(1).map(ScalarValue::Date),
+        ScalarValue::Timestamp(value) => value.checked_sub(1).map(ScalarValue::Timestamp),
+        ScalarValue::TimestampTz(value) => value.checked_sub(1).map(ScalarValue::TimestampTz),
         _ => None,
     }
 }
@@ -1091,6 +1115,7 @@ unsafe fn relation_shapes(
         if rte_ref.rtekind == pg_sys::RTEKind::RTE_JOIN {
             continue;
         }
+        reject_table_sample(!rte_ref.tablesample.is_null())?;
         let varno = u32::try_from(index + 1).unwrap_or(u32::MAX);
         if rte_ref.rtekind != pg_sys::RTEKind::RTE_RELATION
             || rte_ref.relid == pg_sys::InvalidOid
@@ -1156,6 +1181,14 @@ unsafe fn relation_shapes(
         });
     }
     Ok(relations)
+}
+
+pub(super) fn reject_table_sample(has_table_sample: bool) -> Result<(), ShapeDecline> {
+    if has_table_sample {
+        Err(ShapeDecline::TableSample)
+    } else {
+        Ok(())
+    }
 }
 
 /// Adapt planner-owned PostgreSQL nodes into the pure [`ShapeInput`].

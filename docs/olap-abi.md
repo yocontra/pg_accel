@@ -96,6 +96,11 @@ and the decoder rejects a negative-zero spelling after semantic decode. More
 generally, a decoded spec must re-encode word-for-word to the input; a
 semantically valid alias is still a wire error.
 
+Scalar tags preserve logical PostgreSQL identity: BOOL, INT4, INT8, FLOAT4,
+FLOAT8, DATE, TIMESTAMP, and TIMESTAMPTZ are distinct even where their physical
+payload widths match. This prevents date/time bounds from being reinterpreted
+as ordinary integers during descriptor binding.
+
 ## Output projection wire format v2
 
 `AggOutputProjection` is a separate, exactly framed contract. Its ordered slots

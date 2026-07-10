@@ -34,6 +34,9 @@ const INT8OID: u32 = 20;
 const INT4OID: u32 = 23;
 const FLOAT4OID: u32 = 700;
 const FLOAT8OID: u32 = 701;
+const DATEOID: u32 = 1082;
+const TIMESTAMPOID: u32 = 1114;
+const TIMESTAMPTZOID: u32 = 1184;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColumnRef {
@@ -49,6 +52,9 @@ pub enum ScalarValue {
     I64(i64),
     F32(f32),
     F64(f64),
+    Date(i32),
+    Timestamp(i64),
+    TimestampTz(i64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -252,13 +258,17 @@ impl ColumnRef {
 }
 
 impl ScalarValue {
-    const fn type_oid(self) -> u32 {
+    #[must_use]
+    pub const fn type_oid(self) -> u32 {
         match self {
             Self::Bool(_) => BOOLOID,
             Self::I32(_) => INT4OID,
             Self::I64(_) => INT8OID,
             Self::F32(_) => FLOAT4OID,
             Self::F64(_) => FLOAT8OID,
+            Self::Date(_) => DATEOID,
+            Self::Timestamp(_) => TIMESTAMPOID,
+            Self::TimestampTz(_) => TIMESTAMPTZOID,
         }
     }
 
@@ -274,6 +284,7 @@ impl ScalarValue {
             Self::I64(value) => value >= 0,
             Self::F32(value) => value.is_finite() && value >= 0.0,
             Self::F64(value) => value.is_finite() && value >= 0.0,
+            Self::Date(_) | Self::Timestamp(_) | Self::TimestampTz(_) => false,
         }
     }
 }
@@ -295,6 +306,9 @@ impl ScalarRange {
             (ScalarValue::I64(lo), ScalarValue::I64(hi)) => lo <= hi,
             (ScalarValue::F32(lo), ScalarValue::F32(hi)) => lo <= hi,
             (ScalarValue::F64(lo), ScalarValue::F64(hi)) => lo <= hi,
+            (ScalarValue::Date(lo), ScalarValue::Date(hi)) => lo <= hi,
+            (ScalarValue::Timestamp(lo), ScalarValue::Timestamp(hi))
+            | (ScalarValue::TimestampTz(lo), ScalarValue::TimestampTz(hi)) => lo <= hi,
             _ => false,
         };
         if !ordered {

@@ -268,6 +268,18 @@ impl Encoder {
                 self.push(5);
                 self.push_f64(value);
             }
+            ScalarValue::Date(value) => {
+                self.push(6);
+                self.push(value);
+            }
+            ScalarValue::Timestamp(value) => {
+                self.push(7);
+                self.push_i64(value);
+            }
+            ScalarValue::TimestampTz(value) => {
+                self.push(8);
+                self.push_i64(value);
+            }
         }
     }
 
@@ -582,12 +594,17 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_scalar(&mut self) -> Result<ScalarValue, SpecCodecError> {
-        match self.read_tag("scalar", 5)? {
+        match self.read_tag("scalar", 8)? {
             1 => Ok(ScalarValue::Bool(self.read_bool("boolean scalar")?)),
             2 => Ok(ScalarValue::I32(self.read("i32 scalar")?)),
             3 => Ok(ScalarValue::I64(self.read_i64("i64 scalar")?)),
             4 => Ok(ScalarValue::F32(self.read_f32("f32 scalar")?)),
             5 => Ok(ScalarValue::F64(self.read_f64("f64 scalar")?)),
+            6 => Ok(ScalarValue::Date(self.read("date scalar")?)),
+            7 => Ok(ScalarValue::Timestamp(self.read_i64("timestamp scalar")?)),
+            8 => Ok(ScalarValue::TimestampTz(
+                self.read_i64("timestamp with time zone scalar")?,
+            )),
             tag => Err(SpecCodecError::InvalidTag {
                 index: self.index.saturating_sub(1),
                 context: "scalar",
@@ -918,6 +935,9 @@ mod tests {
     const INT8_OID: u32 = 20;
     const FLOAT8_OID: u32 = 701;
     const BOOL_OID: u32 = 16;
+    const DATE_OID: u32 = 1082;
+    const TIMESTAMP_OID: u32 = 1114;
+    const TIMESTAMPTZ_OID: u32 = 1184;
 
     const fn column(relation_oid: u32, attno: i32, type_oid: u32) -> ColumnRef {
         ColumnRef {
@@ -1536,6 +1556,47 @@ mod tests {
         assert_eq!(
             AggQuerySpec::decode_i32(&encoded).expect("float4 range decodes"),
             spec
+        );
+    }
+
+    #[test]
+    fn temporal_ranges_round_trip_with_distinct_logical_tags() {
+        for (type_oid, lo, hi) in [
+            (DATE_OID, ScalarValue::Date(-10), ScalarValue::Date(10)),
+            (
+                TIMESTAMP_OID,
+                ScalarValue::Timestamp(-20),
+                ScalarValue::Timestamp(20),
+            ),
+            (
+                TIMESTAMPTZ_OID,
+                ScalarValue::TimestampTz(-30),
+                ScalarValue::TimestampTz(30),
+            ),
+        ] {
+            let mut spec = minimal_spec();
+            spec.fact_filter = FilterSpec::Ranges {
+                input: column(10, 2, type_oid),
+                ranges: vec![ScalarRange { lo, hi }],
+            };
+            let encoded = spec.encode_i32().expect("valid temporal range encodes");
+            assert_eq!(
+                AggQuerySpec::decode_i32(&encoded).expect("temporal range decodes"),
+                spec
+            );
+        }
+
+        let mut mismatched = minimal_spec();
+        mismatched.fact_filter = FilterSpec::Ranges {
+            input: column(10, 2, DATE_OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(-10),
+                hi: ScalarValue::I32(10),
+            }],
+        };
+        assert!(
+            mismatched.validate().is_err(),
+            "DATE bounds were accepted as ordinary INT4 scalars"
         );
     }
 

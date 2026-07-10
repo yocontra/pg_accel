@@ -444,7 +444,12 @@ fn relation_filter(input: &ShapeInput, relation_oid: u32) -> Result<FilterSpec, 
 fn validate_dimension_filter(filter: &FilterSpec) -> Result<(), ShapeDecline> {
     match filter {
         FilterSpec::None => Ok(()),
-        FilterSpec::Ranges { input, .. } if matches!(input.type_oid, 16 | 20 | 23 | 700 | 701) => {
+        FilterSpec::Ranges { input, .. }
+            if matches!(
+                input.type_oid,
+                16 | 20 | 23 | 700 | 701 | 1082 | 1114 | 1184
+            ) =>
+        {
             Ok(())
         }
         FilterSpec::Mask {
@@ -535,7 +540,11 @@ fn fact_filter_binding(
                 derived_fact_mask: Some(*input),
             });
         }
-        FilterSpec::Ranges { input, .. } if matches!(input.type_oid, 20 | 23 | 701) => input,
+        FilterSpec::Ranges { input, .. }
+            if matches!(input.type_oid, 20 | 23 | 700 | 701 | 1082 | 1114 | 1184) =>
+        {
+            input
+        }
         FilterSpec::Ranges { input, .. } | FilterSpec::Mask { input, .. } => {
             return Err(ShapeDecline::UnsupportedFilterType {
                 type_oid: input.type_oid,

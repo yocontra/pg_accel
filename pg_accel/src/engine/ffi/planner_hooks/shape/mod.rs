@@ -264,6 +264,7 @@ pub enum ShapeDecline {
     UnsupportedRangeTableEntry {
         varno: pg_sys::Index,
     },
+    TableSample,
     UnsupportedOuterJoin,
     UnsupportedPredicate,
     UnsupportedFilterType {
@@ -391,6 +392,7 @@ impl ShapeDecline {
             Self::SetOperations => "shape_set_operations",
             Self::RowMarks => "shape_row_marks",
             Self::UnsupportedRangeTableEntry { .. } => "shape_unsupported_rte",
+            Self::TableSample => "shape_table_sample",
             Self::UnsupportedOuterJoin => "shape_outer_join",
             Self::UnsupportedPredicate => "shape_unsupported_predicate",
             Self::UnsupportedFilterType { .. } => "shape_unsupported_filter_type",

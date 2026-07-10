@@ -531,28 +531,52 @@ fn sql_boolean_fact_filter_requires_begin_time_null_aware_mask() {
 }
 
 #[test]
-fn float4_fact_range_declines_before_hidden_measure_creation() {
-    let mut input = single_table_input();
-    input.relation_filters.push((
-        100,
-        FilterSpec::Ranges {
-            input: ColumnRef {
-                relation_oid: 100,
-                attno: 3,
-                type_oid: u32::from(pg_sys::FLOAT4OID),
+fn physical_fact_range_types_create_hidden_descriptor_inputs() {
+    for (type_oid, lo, hi) in [
+        (
+            u32::from(pg_sys::FLOAT4OID),
+            ScalarValue::F32(0.0),
+            ScalarValue::F32(1.0),
+        ),
+        (
+            u32::from(pg_sys::DATEOID),
+            ScalarValue::Date(-10),
+            ScalarValue::Date(10),
+        ),
+        (
+            u32::from(pg_sys::TIMESTAMPOID),
+            ScalarValue::Timestamp(-20),
+            ScalarValue::Timestamp(20),
+        ),
+        (
+            u32::from(pg_sys::TIMESTAMPTZOID),
+            ScalarValue::TimestampTz(-30),
+            ScalarValue::TimestampTz(30),
+        ),
+    ] {
+        let mut input = single_table_input();
+        input.relation_filters.push((
+            100,
+            FilterSpec::Ranges {
+                input: ColumnRef {
+                    relation_oid: 100,
+                    attno: 3,
+                    type_oid,
+                },
+                ranges: vec![ScalarRange { lo, hi }],
             },
-            ranges: vec![ScalarRange {
-                lo: ScalarValue::F32(0.0),
-                hi: ScalarValue::F32(1.0),
-            }],
-        },
-    ));
-    assert_eq!(
-        build_shape(input, &model()),
-        Err(ShapeDecline::UnsupportedFilterType {
-            type_oid: u32::from(pg_sys::FLOAT4OID),
-        })
-    );
+        ));
+        let plan = build_shape(input, &model()).expect("physical fact filter should build");
+        assert_eq!(plan.descriptor_measures.descriptor_measure_count, 2);
+        assert_eq!(
+            plan.descriptor_measures.fact_filter,
+            Some(DescriptorFilterBinding {
+                measure_index: 1,
+                source: AggregateSource::Value,
+                hidden: true,
+            })
+        );
+    }
 }
 
 #[test]
@@ -569,6 +593,45 @@ fn float_predicate_adapter_does_not_fake_an_upper_bound_below_nan() {
         super::postgres::range_for_strategy(ScalarValue::F64(f64::NAN), equal),
         Err(ShapeDecline::UnsupportedPredicate)
     );
+}
+
+#[test]
+fn temporal_predicate_ranges_preserve_temporal_scalar_identity() {
+    let less_equal = pg_sys::BTLessEqualStrategyNumber as i32;
+    let greater = pg_sys::BTGreaterStrategyNumber as i32;
+    assert_eq!(
+        super::postgres::range_for_strategy(ScalarValue::Date(7), less_equal).expect("date range"),
+        ScalarRange {
+            lo: ScalarValue::Date(i32::MIN),
+            hi: ScalarValue::Date(7),
+        }
+    );
+    assert_eq!(
+        super::postgres::range_for_strategy(ScalarValue::Timestamp(11), greater)
+            .expect("timestamp range"),
+        ScalarRange {
+            lo: ScalarValue::Timestamp(12),
+            hi: ScalarValue::Timestamp(i64::MAX),
+        }
+    );
+    assert_eq!(
+        super::postgres::range_for_strategy(ScalarValue::TimestampTz(13), greater)
+            .expect("timestamptz range"),
+        ScalarRange {
+            lo: ScalarValue::TimestampTz(14),
+            hi: ScalarValue::TimestampTz(i64::MAX),
+        }
+    );
+}
+
+#[test]
+fn table_sample_is_a_structural_decline() {
+    assert_eq!(
+        super::postgres::reject_table_sample(true),
+        Err(ShapeDecline::TableSample)
+    );
+    assert_eq!(super::postgres::reject_table_sample(false), Ok(()));
+    assert_eq!(ShapeDecline::TableSample.code(), "shape_table_sample");
 }
 
 #[test]
