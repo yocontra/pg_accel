@@ -961,6 +961,24 @@ const fn status_poisons_workspace(status: PgaccelStatus) -> bool {
     !matches!(status, PgaccelStatus::Ok | PgaccelStatus::ErrorUnsupported)
 }
 
+fn grouped_agg_kernel_error(status: PgaccelStatus, detail: i32) -> GpuError {
+    if status == PgaccelStatus::Error
+        && detail == abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW
+    {
+        GpuError::new(
+            GpuErrorDomain::GroupedAgg,
+            GpuOperation::Kernel("grouped_agg_execute"),
+            GpuStatusDetail::NumericOverflow,
+        )
+    } else {
+        GpuError::from_status(
+            GpuErrorDomain::GroupedAgg,
+            GpuOperation::Kernel("grouped_agg_execute"),
+            status,
+        )
+    }
+}
+
 fn execute_call(
     mut desc: abi::PgaccelGroupedAggDesc,
     flags: u32,
@@ -978,16 +996,24 @@ fn execute_call(
         .map_or(std::ptr::null_mut(), std::ptr::from_mut);
     // SAFETY: descriptor, optional output, and workspace remain live through
     // the synchronous FFI call and were built from pinned ABI types.
-    let status =
-        unsafe { bridge::pgaccel_grouped_agg_execute(std::ptr::from_ref(&desc), output_ptr) };
+    let mut detail = abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    let status = unsafe {
+        bridge::pgaccel_grouped_agg_execute_ex(
+            std::ptr::from_ref(&desc),
+            output_ptr,
+            std::ptr::from_mut(&mut detail),
+        )
+    };
     if !status.is_ok() {
         if status_poisons_workspace(status) {
             workspace.poisoned = true;
         }
-        return Err(GpuError::from_status(
-            GpuErrorDomain::GroupedAgg,
-            GpuOperation::Kernel("grouped_agg_execute"),
-            status,
+        return Err(grouped_agg_kernel_error(status, detail));
+    }
+    if detail != abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE {
+        workspace.poisoned = true;
+        return Err(descriptor_error(
+            "successful grouped aggregate returned a device error detail",
         ));
     }
     if flags & abi::PGACCEL_GROUPED_AGG_EXEC_RESET != 0 {
@@ -1395,6 +1421,27 @@ mod tests {
         ] {
             assert!(status_poisons_workspace(status), "{status:?}");
         }
+    }
+
+    #[test]
+    fn numeric_overflow_detail_refines_only_generic_execution_errors() {
+        let overflow = grouped_agg_kernel_error(
+            PgaccelStatus::Error,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW,
+        );
+        assert_eq!(overflow.status, GpuStatusDetail::NumericOverflow);
+
+        let invalid = grouped_agg_kernel_error(
+            PgaccelStatus::Error,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID,
+        );
+        assert_eq!(invalid.status, GpuStatusDetail::ExecutionFailed);
+
+        let oom = grouped_agg_kernel_error(
+            PgaccelStatus::ErrorOom,
+            abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW,
+        );
+        assert_eq!(oom.status, GpuStatusDetail::OutOfMemory);
     }
 
     #[test]

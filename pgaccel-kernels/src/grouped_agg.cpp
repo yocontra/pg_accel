@@ -894,42 +894,50 @@ inline bool load_f64(const pgaccel_grouped_agg_measure_col& col, size_t row, dou
   return true;
 }
 
-inline bool accumulate_count(uint64_t* counts, size_t group, uint64_t weight) {
+inline pgaccel_grouped_agg_device_error accumulate_count(uint64_t* counts, size_t group,
+                                                         uint64_t weight) {
   if (counts == nullptr)
-    return true;
-  return add_u64(counts[group], weight, &counts[group]);
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  return add_u64(counts[group], weight, &counts[group])
+             ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+             : PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
 }
 
-inline bool accumulate_i64(const pgaccel_grouped_agg_measure& measure,
-                           const DeviceMeasureBuffers& buffers, size_t row, size_t group,
-                           uint64_t weight) {
+inline pgaccel_grouped_agg_device_error
+accumulate_i64(const pgaccel_grouped_agg_measure& measure,
+               const DeviceMeasureBuffers& buffers, size_t row, size_t group, uint64_t weight) {
   bool lhs_null = false;
   bool rhs_null = false;
   if (!null_at(measure.value.nulls, row, &lhs_null))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
       measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) {
     if (!null_at(measure.rhs.nulls, row, &rhs_null))
-      return false;
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   }
   if (lhs_null || rhs_null)
-    return true;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
-      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT)
-    return accumulate_count(buffers.count, group, weight) &&
-           accumulate_count(buffers.nonnull, group, weight);
+      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT) {
+    const auto count_error = accumulate_count(buffers.count, group, weight);
+    return count_error == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+               ? accumulate_count(buffers.nonnull, group, weight)
+               : count_error;
+  }
   int64_t value = 0;
   int64_t rhs = 0;
   if (!load_i64(measure.value, row, &value))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL) {
     if (!load_i64(measure.rhs, row, &rhs))
-      return false;
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     value = static_cast<int64_t>(static_cast<int32_t>(value)) *
             static_cast<int64_t>(static_cast<int32_t>(rhs));
   } else if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) {
-    if (!load_i64(measure.rhs, row, &rhs) || !sub_i64(value, rhs, &value))
-      return false;
+    if (!load_i64(measure.rhs, row, &rhs))
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    if (!sub_i64(value, rhs, &value))
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
   }
   if ((measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
        measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) &&
@@ -937,15 +945,18 @@ inline bool accumulate_i64(const pgaccel_grouped_agg_measure& measure,
       measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
       (value < std::numeric_limits<int32_t>::min() ||
        value > std::numeric_limits<int32_t>::max()))
-    return false;
-  if (!accumulate_count(buffers.count, group, weight) ||
-      !accumulate_count(buffers.nonnull, group, weight))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+  const auto count_error = accumulate_count(buffers.count, group, weight);
+  if (count_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE)
+    return count_error;
+  const auto nonnull_error = accumulate_count(buffers.nonnull, group, weight);
+  if (nonnull_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE)
+    return nonnull_error;
   if (buffers.sum != nullptr) {
     int64_t weighted = 0;
     int64_t current = sycl::bit_cast<int64_t>(buffers.sum[group]);
     if (!weight_i64(value, weight, &weighted) || !add_i64(current, weighted, &current))
-      return false;
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
     buffers.sum[group] = sycl::bit_cast<uint64_t>(current);
   }
   const uint64_t valid = buffers.nonnull == nullptr ? 0 : buffers.nonnull[group];
@@ -959,43 +970,49 @@ inline bool accumulate_i64(const pgaccel_grouped_agg_measure& measure,
     if (valid == weight || value > current)
       buffers.max[group] = sycl::bit_cast<uint64_t>(value);
   }
-  return true;
+  return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
 }
 
-inline bool accumulate_f64(const pgaccel_grouped_agg_measure& measure,
-                           const DeviceMeasureBuffers& buffers, size_t row, size_t group,
-                           uint64_t weight) {
+inline pgaccel_grouped_agg_device_error
+accumulate_f64(const pgaccel_grouped_agg_measure& measure,
+               const DeviceMeasureBuffers& buffers, size_t row, size_t group, uint64_t weight) {
   bool lhs_null = false;
   bool rhs_null = false;
   if (!null_at(measure.value.nulls, row, &lhs_null))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL ||
       measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) {
     if (!null_at(measure.rhs.nulls, row, &rhs_null))
-      return false;
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   }
   if (lhs_null || rhs_null)
-    return true;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
-      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT)
-    return accumulate_count(buffers.count, group, weight) &&
-           accumulate_count(buffers.nonnull, group, weight);
+      measure.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT) {
+    const auto count_error = accumulate_count(buffers.count, group, weight);
+    return count_error == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE
+               ? accumulate_count(buffers.nonnull, group, weight)
+               : count_error;
+  }
   double value = 0;
   double rhs = 0;
   if (!load_f64(measure.value, row, &value))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_MUL) {
     if (!load_f64(measure.rhs, row, &rhs))
-      return false;
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     value *= rhs;
   } else if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_SUB) {
     if (!load_f64(measure.rhs, row, &rhs))
-      return false;
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     value -= rhs;
   }
-  if (!accumulate_count(buffers.count, group, weight) ||
-      !accumulate_count(buffers.nonnull, group, weight))
-    return false;
+  const auto count_error = accumulate_count(buffers.count, group, weight);
+  if (count_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE)
+    return count_error;
+  const auto nonnull_error = accumulate_count(buffers.nonnull, group, weight);
+  if (nonnull_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE)
+    return nonnull_error;
   const double weighted = value * static_cast<double>(weight);
   if (buffers.sum != nullptr) {
     const double current = sycl::bit_cast<double>(buffers.sum[group]);
@@ -1017,40 +1034,44 @@ inline bool accumulate_f64(const pgaccel_grouped_agg_measure& measure,
     if (valid == weight || pg_order_f64(value, current) > 0)
       buffers.max[group] = sycl::bit_cast<uint64_t>(value);
   }
-  return true;
+  return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
 }
 
-inline bool accumulate_rhs(const pgaccel_grouped_agg_measure& measure,
-                           const DeviceMeasureBuffers& buffers, size_t row, size_t group,
-                           uint64_t weight) {
+inline pgaccel_grouped_agg_device_error
+accumulate_rhs(const pgaccel_grouped_agg_measure& measure,
+               const DeviceMeasureBuffers& buffers, size_t row, size_t group, uint64_t weight) {
   if (measure.op != PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR)
-    return true;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   bool is_null = false;
   if (!null_at(measure.rhs.nulls, row, &is_null))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   if (is_null)
-    return true;
-  if (!accumulate_count(buffers.rhs_count, group, weight) ||
-      !accumulate_count(buffers.rhs_nonnull, group, weight))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  const auto count_error = accumulate_count(buffers.rhs_count, group, weight);
+  if (count_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE)
+    return count_error;
+  const auto nonnull_error = accumulate_count(buffers.rhs_nonnull, group, weight);
+  if (nonnull_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE)
+    return nonnull_error;
   if (buffers.rhs_sum == nullptr)
-    return true;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   if (measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64) {
     int64_t value = 0;
     int64_t weighted = 0;
     int64_t current = sycl::bit_cast<int64_t>(buffers.rhs_sum[group]);
-    if (!load_i64(measure.rhs, row, &value) || !weight_i64(value, weight, &weighted) ||
-        !add_i64(current, weighted, &current))
-      return false;
+    if (!load_i64(measure.rhs, row, &value))
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    if (!weight_i64(value, weight, &weighted) || !add_i64(current, weighted, &current))
+      return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
     buffers.rhs_sum[group] = sycl::bit_cast<uint64_t>(current);
-    return true;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   }
   double value = 0;
   if (!load_f64(measure.rhs, row, &value))
-    return false;
+    return PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   const double current = sycl::bit_cast<double>(buffers.rhs_sum[group]);
   buffers.rhs_sum[group] = sycl::bit_cast<uint64_t>(current + value * static_cast<double>(weight));
-  return true;
+  return PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
 }
 
 inline void copy_group_state(DeviceMeasureBuffers& buffers, size_t dst, size_t src) {
@@ -1128,7 +1149,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       const pgaccel_grouped_agg_dim& dim = params.dims[d];
       bool is_null = false;
       if (!null_at(dim.fact_key.nulls, row, &is_null)) {
-        meta.error = 1;
+        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
         break;
       }
       if (is_null) {
@@ -1145,7 +1166,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       if (dim.match_by_key != nullptr) {
         const uint8_t match = dim.match_by_key[digit];
         if (match > 1) {
-          meta.error = 1;
+          meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
           break;
         }
         if (match == 0) {
@@ -1160,7 +1181,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
         break;
       }
       if (!mul_u64(weight, multiplicity, &weight)) {
-        meta.error = 1;
+        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
         break;
       }
     }
@@ -1174,7 +1195,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       if (key.source == PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT) {
         bool is_null = false;
         if (!null_at(key.values.nulls, row, &is_null)) {
-          meta.error = 1;
+          meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
           break;
         }
         raw = is_null ? key.null_code : static_cast<const int32_t*>(key.values.values)[row];
@@ -1183,14 +1204,14 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
         const pgaccel_grouped_agg_dim& source_dim = params.dims[dim];
         if (source_dim.multiplicity_by_key != nullptr &&
             source_dim.multiplicity_by_key[dim_indexes[dim]] != 1) {
-          meta.error = 1;
+          meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
           break;
         }
         raw = key.lookup_by_key[dim_indexes[dim]];
       }
       const int64_t digit = static_cast<int64_t>(raw) - key.code_min;
       if (digit < 0 || static_cast<uint64_t>(digit) >= key.cardinality) {
-        meta.error = 1;
+        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
         break;
       }
       // Descriptor validation proves the complete radix product fits size_t.
@@ -1201,18 +1222,18 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
 
     const FilterResult where = evaluate_filter(params.where_filter, params, row);
     if (where == FilterResult::Error) {
-      meta.error = 1;
+      meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       break;
     }
     if (where == FilterResult::Uncertain) {
       if (!add_u64(meta.uncertain, 1, &meta.uncertain))
-        meta.error = 1;
+        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
       continue;
     }
     if (where == FilterResult::Reject)
       continue;
     if (!add_u64(meta.selected, weight, &meta.selected)) {
-      meta.error = 1;
+      meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
       break;
     }
     params.active[group] = 1;
@@ -1221,7 +1242,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
     for (size_t m = 0; m < params.measure_count; ++m) {
       const FilterResult filter = evaluate_filter(params.measure_filters[m], params, row);
       if (filter == FilterResult::Error) {
-        meta.error = 1;
+        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
         break;
       }
       if (filter == FilterResult::Uncertain) {
@@ -1233,29 +1254,29 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       const pgaccel_grouped_agg_measure& measure = params.measures[m];
       DeviceMeasureBuffers& buffers = params.buffers[m];
       if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
-        if (!accumulate_count(buffers.count, group, weight))
-          meta.error = 1;
+        meta.error = accumulate_count(buffers.count, group, weight);
         continue;
       }
       const uint32_t primary_mask = PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
                                     PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT |
                                     PGACCEL_GROUPED_AGG_LANE_SUMSQ;
-      bool ok = true;
+      auto measure_error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
       if ((measure.agg_mask & primary_mask) != 0) {
-        ok = measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64
-                 ? accumulate_i64(measure, buffers, row, group, weight)
-                 : accumulate_f64(measure, buffers, row, group, weight);
+        measure_error = measure.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64
+                            ? accumulate_i64(measure, buffers, row, group, weight)
+                            : accumulate_f64(measure, buffers, row, group, weight);
       }
-      if (ok && (measure.agg_mask &
-                 (PGACCEL_GROUPED_AGG_LANE_RHS_SUM | PGACCEL_GROUPED_AGG_LANE_RHS_COUNT)) != 0)
-        ok = accumulate_rhs(measure, buffers, row, group, weight);
-      if (!ok) {
-        meta.error = 1;
+      if (measure_error == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE &&
+          (measure.agg_mask &
+           (PGACCEL_GROUPED_AGG_LANE_RHS_SUM | PGACCEL_GROUPED_AGG_LANE_RHS_COUNT)) != 0)
+        measure_error = accumulate_rhs(measure, buffers, row, group, weight);
+      if (measure_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE) {
+        meta.error = measure_error;
         break;
       }
     }
     if (row_uncertain && !add_u64(meta.uncertain, 1, &meta.uncertain))
-      meta.error = 1;
+      meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
   }
 
   if (meta.error != 0)
@@ -1689,18 +1710,28 @@ pgaccel_grouped_agg_workspace_requirements(const pgaccel_grouped_agg_desc* desc,
   return status;
 }
 
-extern "C" pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_desc* desc,
-                                                      pgaccel_grouped_agg_out* out) {
+extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_agg_desc* desc,
+                                                         pgaccel_grouped_agg_out* out,
+                                                         int32_t* detail) {
+  if (detail == nullptr)
+    return PGACCEL_ERROR;
+  *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   Validation validation;
   WorkspaceLayout layout;
   const pgaccel_status descriptor_status = validate_desc(desc, &validation, &layout);
-  if (descriptor_status == PGACCEL_ERROR)
+  if (descriptor_status == PGACCEL_ERROR) {
+    *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     return descriptor_status;
-  if (!validate_scratch_shape(*desc, layout))
+  }
+  if (!validate_scratch_shape(*desc, layout)) {
+    *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     return PGACCEL_ERROR;
+  }
   if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0) {
-    if (!validate_out(*desc, out) || !validate_aliases(*desc, *out))
+    if (!validate_out(*desc, out) || !validate_aliases(*desc, *out)) {
+      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       return PGACCEL_ERROR;
+    }
   }
   if (descriptor_status == PGACCEL_UNSUPPORTED)
     return descriptor_status;
@@ -1708,8 +1739,10 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_
   try {
     sycl::queue& queue = pgaccel_require_queue();
     if (!validate_input_usm(queue, *desc) || !validate_scratch_usm(queue, *desc) ||
-        !validate_output_usm(queue, *desc, *out))
+        !validate_output_usm(queue, *desc, *out)) {
+      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       return PGACCEL_ERROR;
+    }
 
     void* scratch = desc->scratch;
     if (scratch == nullptr) {
@@ -1730,8 +1763,12 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_
 
     DeviceMeta meta{};
     queue.memcpy(&meta, arena_ptr<DeviceMeta>(scratch, layout.meta), sizeof(meta)).wait_and_throw();
-    if (meta.error != 0)
+    if (meta.error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE) {
+      *detail = meta.error == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW
+                    ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW
+                    : PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       return PGACCEL_ERROR;
+    }
     publish_output(queue, *desc, layout, scratch, meta, out);
     return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
@@ -1739,8 +1776,14 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_
   } catch (const std::bad_alloc&) {
     return PGACCEL_OOM;
   } catch (const std::exception& error) {
-    return pgaccel_kernel_failure("pgaccel_grouped_agg_execute", &error);
+    return pgaccel_kernel_failure("pgaccel_grouped_agg_execute_ex", &error);
   } catch (...) {
-    return pgaccel_kernel_failure("pgaccel_grouped_agg_execute", nullptr);
+    return pgaccel_kernel_failure("pgaccel_grouped_agg_execute_ex", nullptr);
   }
+}
+
+extern "C" pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_desc* desc,
+                                                      pgaccel_grouped_agg_out* out) {
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  return pgaccel_grouped_agg_execute_ex(desc, out, &detail);
 }

@@ -42,6 +42,14 @@ extern "C" {
 
 #define PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE INT32_MIN
 
+/* Detailed device failures returned by grouped_agg_execute_ex. These refine
+ * PGACCEL_ERROR only; other pgaccel_status values leave detail as NONE. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE = 0,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID = 1,
+  PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW = 2,
+} pgaccel_grouped_agg_device_error;
+
 typedef enum {
   PGACCEL_GROUPED_AGG_MEASURE_COLUMN = 0,
   PGACCEL_GROUPED_AGG_MEASURE_MUL = 1,
@@ -336,10 +344,13 @@ pgaccel_status pgaccel_grouped_agg_workspace_alloc(size_t bytes, size_t alignmen
                                                     int32_t space, void** out);
 void pgaccel_grouped_agg_workspace_free(void* ptr);
 
-/* Phase 4B replaces the dark UNSUPPORTED implementation. Invalid descriptors,
- * runtime codes/masks, overflow, or device execution errors return ERROR and
- * never partial success. Well-formed capabilities not implemented in the
- * current phase return UNSUPPORTED. */
+/* Invalid descriptors, runtime codes/masks, overflow, or device execution
+ * errors return ERROR and never partial success. The additive _ex entry point
+ * distinguishes numeric overflow from invalid runtime data through `detail`;
+ * the original entry point remains an ABI-compatible wrapper. Well-formed
+ * capabilities not implemented in the current phase return UNSUPPORTED. */
+pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_agg_desc* desc,
+                                              pgaccel_grouped_agg_out* out, int32_t* detail);
 pgaccel_status pgaccel_grouped_agg_execute(const pgaccel_grouped_agg_desc* desc,
                                            pgaccel_grouped_agg_out* out);
 

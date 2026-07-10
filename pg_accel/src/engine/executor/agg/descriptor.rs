@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
+use std::fmt;
 use std::time::Instant;
 
 use pgrx::pg_sys;
@@ -22,8 +23,8 @@ use crate::engine::spec::{
     ScalarValue,
 };
 use crate::gpu::{
-    GroupedAggOutcome, GroupedAggOutputStorage, PgaccelExprUsmCol, PgaccelVal, PgaccelValTag,
-    ResolvedGroupedAggPlan, execute_grouped_agg_one_shot,
+    GpuError, GpuStatusDetail, GroupedAggOutcome, GroupedAggOutputStorage, PgaccelExprUsmCol,
+    PgaccelVal, PgaccelValTag, ResolvedGroupedAggPlan, execute_grouped_agg_one_shot,
 };
 
 const BOOLOID: u32 = 16;
@@ -503,6 +504,29 @@ pub(super) struct DescriptorResidencyReport {
     pub(super) preparation_time_us: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DescriptorAggExecutionError {
+    NumericOverflow,
+    Failure(String),
+}
+
+impl fmt::Display for DescriptorAggExecutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NumericOverflow => formatter.write_str("numeric value out of range"),
+            Self::Failure(message) => formatter.write_str(message),
+        }
+    }
+}
+
+fn gpu_execution_error(context: &'static str, error: GpuError) -> DescriptorAggExecutionError {
+    if error.status == GpuStatusDetail::NumericOverflow {
+        DescriptorAggExecutionError::NumericOverflow
+    } else {
+        DescriptorAggExecutionError::Failure(format!("{context}: {error}"))
+    }
+}
+
 impl DescriptorResidencyReport {
     pub(super) fn merge(&mut self, latest: Self) {
         if latest.artifact_outcome != ArtifactEnsureOutcome::Hit {
@@ -591,7 +615,9 @@ impl DescriptorAggPlan {
         })
     }
 
-    fn execute_once(&self) -> Result<Result<DescriptorAggDispatch, String>, ResidentLoadError> {
+    fn execute_once(
+        &self,
+    ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
         with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
             pg_sys::Oid::from(self.spec.fact_rel),
             &self.identity,
@@ -600,18 +626,24 @@ impl DescriptorAggPlan {
         )
     }
 
-    pub(super) fn execute(&self) -> Result<DescriptorAggDispatch, String> {
-        let mut residency = self.ensure_artifact()?;
+    pub(super) fn execute(&self) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+        let mut residency = self
+            .ensure_artifact()
+            .map_err(DescriptorAggExecutionError::Failure)?;
         let mut result = match self.execute_once() {
             Ok(result) => result?,
             Err(
                 ResidentLoadError::ArtifactDependencyChanged { .. }
                 | ResidentLoadError::ArtifactNotFound { .. },
             ) => {
-                residency.merge(self.ensure_artifact()?);
-                self.execute_once().map_err(|error| error.to_string())??
+                residency.merge(
+                    self.ensure_artifact()
+                        .map_err(DescriptorAggExecutionError::Failure)?,
+                );
+                self.execute_once()
+                    .map_err(|error| DescriptorAggExecutionError::Failure(error.to_string()))??
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(DescriptorAggExecutionError::Failure(error.to_string())),
         };
         result.residency = Some(residency);
         Ok(result)
@@ -1063,17 +1095,19 @@ fn build_and_execute(
     inputs: ResolvedDerivedInputs<'_, DescriptorAggArtifact>,
     requests: &[ResidentColumnRef],
     projection: &AggOutputProjection,
-) -> Result<DescriptorAggDispatch, String> {
-    let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)?;
+) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+    let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
+        .map_err(DescriptorAggExecutionError::Failure)?;
     // SAFETY: every active pointer is owned by the artifact/raw resident views
     // held by this residency callback and the kernel call below is synchronous.
     let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
-        .map_err(|error| format!("generic aggregate descriptor rejected: {error}"))?;
-    let mut storage = GroupedAggOutputStorage::new(&plan)
-        .map_err(|error| format!("generic aggregate output allocation failed: {error}"))?;
+        .map_err(|error| gpu_execution_error("generic aggregate descriptor rejected", error))?;
+    let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
+        gpu_execution_error("generic aggregate output allocation failed", error)
+    })?;
     let dispatch_started = Instant::now();
     let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
-        .map_err(|error| format!("generic aggregate kernel failed: {error}"))?;
+        .map_err(|error| gpu_execution_error("generic aggregate kernel failed", error))?;
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let output = DescriptorAggOutput::new(
@@ -1082,7 +1116,8 @@ fn build_and_execute(
         inputs.artifact.domains.clone(),
         inputs.artifact.resolved_spec.clone(),
         projection.clone(),
-    )?;
+    )
+    .map_err(DescriptorAggExecutionError::Failure)?;
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.fact_rows,
@@ -1277,5 +1312,32 @@ mod tests {
             validate_runtime_capability(&spec, &projection(AggregateKind::Count, 0, INT8OID))
                 .unwrap_or_else(|error| panic!("type OID {type_oid} should bind: {error}"));
         }
+    }
+
+    #[test]
+    fn only_typed_gpu_numeric_overflow_reaches_sql_overflow_path() {
+        let numeric = gpu_execution_error(
+            "kernel failed",
+            GpuError::new(
+                crate::gpu::GpuErrorDomain::GroupedAgg,
+                crate::gpu::GpuOperation::Kernel("grouped_agg_execute"),
+                GpuStatusDetail::NumericOverflow,
+            ),
+        );
+        assert_eq!(numeric, DescriptorAggExecutionError::NumericOverflow);
+
+        let invalid = gpu_execution_error(
+            "kernel failed",
+            GpuError::new(
+                crate::gpu::GpuErrorDomain::GroupedAgg,
+                crate::gpu::GpuOperation::Kernel("grouped_agg_execute"),
+                GpuStatusDetail::ExecutionFailed,
+            ),
+        );
+        let DescriptorAggExecutionError::Failure(message) = invalid else {
+            panic!("invalid runtime metadata must stay a generic execution failure")
+        };
+        assert!(message.contains("kernel failed"));
+        assert!(message.contains("execution_failed"));
     }
 }

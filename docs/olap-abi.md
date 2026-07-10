@@ -23,7 +23,10 @@ ABI v1 has these hard rules:
 - Counts/capacities are validated before multiplication or addition. Runtime
   key codes, mask bytes, multiplicities, indices, and integer arithmetic are
   checked on device and surfaced as `PGACCEL_ERROR`; they are never silently
-  skipped, wrapped, clamped, or truncated.
+  skipped, wrapped, clamped, or truncated. `pgaccel_grouped_agg_execute_ex`
+  refines that status as `DEVICE_ERROR_INVALID` or
+  `DEVICE_ERROR_NUMERIC_OVERFLOW`; the original execute symbol is its
+  compatibility wrapper.
 - `PGACCEL_UNSUPPORTED` means the descriptor is well formed but the running
   kernel version does not implement that capability. It is not success and a
   selected Custom Scan must report it loudly.
@@ -391,12 +394,15 @@ Weight applies as follows:
   artifact.
 
 Any u64 weight/count overflow or i64 accumulator overflow returns
-`PGACCEL_ERROR`. INT32 MUL/SUB is also checked at INT32 expression width before
-SUM, MIN, MAX, or COUNT consumes the expression, matching PostgreSQL even when
-the accumulator itself is i64. ABI v1 permits checked INT32/INT64 SUM and SUB,
-and checked INT32 multiplication accumulated in i64. INT64 MUL and integer
-SUMSQ return `PGACCEL_UNSUPPORTED` unless the implementation proves the
-operation safe or adds checked wide arithmetic. No signed operation wraps.
+`PGACCEL_ERROR` with `DEVICE_ERROR_NUMERIC_OVERFLOW`. Invalid sidecars, runtime
+codes, and load/type invariants return `DEVICE_ERROR_INVALID`; callers must not
+label every generic execution error as numeric. INT32 MUL/SUB is also checked at
+INT32 expression width before SUM, MIN, MAX, or COUNT consumes the expression,
+matching PostgreSQL even when the accumulator itself is i64. ABI v1 permits
+checked INT32/INT64 SUM and SUB, and checked INT32 multiplication accumulated in
+i64. INT64 MUL and integer SUMSQ return `PGACCEL_UNSUPPORTED` unless the
+implementation proves the operation safe or adds checked wide arithmetic. No
+signed operation wraps.
 
 ## Filters and masks
 

@@ -442,6 +442,21 @@ pgaccel_status execute_external(const pgaccel_grouped_agg_desc& original,
   return pgaccel_grouped_agg_execute(&desc, out);
 }
 
+pgaccel_status execute_external_ex(const pgaccel_grouped_agg_desc& original,
+                                   pgaccel_grouped_agg_out* out, int32_t* detail) {
+  pgaccel_status query_status = PGACCEL_ERROR;
+  const pgaccel_grouped_agg_workspace_req req = workspace_req(original, &query_status);
+  if (query_status != PGACCEL_OK)
+    return query_status;
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  pgaccel_grouped_agg_desc desc = original;
+  desc.scratch = workspace.data();
+  desc.scratch_bytes = req.bytes;
+  desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+  desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+  return pgaccel_grouped_agg_execute_ex(&desc, out, detail);
+}
+
 void check_i64_lane(const OutputStorage& output, const std::vector<uint64_t>& lane,
                     std::initializer_list<int64_t> expected) {
   CHECK(lane.size() == expected.size());
@@ -947,7 +962,9 @@ void test_integer_expression_overflow_semantics() {
     set_i32_view(desc.measures[0].rhs, rhs.data());
     finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL, lane);
     OutputStorage output(desc);
-    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
   }
   for (const uint32_t lane : lanes) {
     SharedArray<int32_t> lhs({std::numeric_limits<int32_t>::min()});
@@ -957,7 +974,23 @@ void test_integer_expression_overflow_semantics() {
     set_i32_view(desc.measures[0].rhs, rhs.data());
     finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB, lane);
     OutputStorage output(desc);
-    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+  }
+
+  {
+    SharedArray<int64_t> lhs({std::numeric_limits<int64_t>::min()});
+    SharedArray<int64_t> rhs({1});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i64_view(desc.measures[0].value, lhs.data());
+    set_i64_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                       PGACCEL_GROUPED_AGG_LANE_COUNT);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
   }
 }
 
@@ -965,12 +998,24 @@ void test_error_and_unsupported_statuses() {
   std::printf("--- error and unsupported statuses ---\n");
 
   {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_OK);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, nullptr), PGACCEL_ERROR);
+  }
+
+  {
     SharedArray<int32_t> keys({0, 2});
     pgaccel_grouped_agg_desc desc = base_desc(2);
     set_fact_key(desc, 0, keys.data(), nullptr, 0, 2);
     set_count_star(desc, 0);
     OutputStorage output(desc);
-    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
     CHECK(output.measures[0].count[0] == OutputStorage::kSentinel);
     CHECK(output.measures[0].count[1] == OutputStorage::kSentinel);
   }
@@ -982,7 +1027,9 @@ void test_error_and_unsupported_statuses() {
     desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
     desc.where_filter.mask = mask.data();
     OutputStorage output(desc);
-    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
     CHECK(output.measures[0].count[0] == OutputStorage::kSentinel);
   }
 
@@ -992,7 +1039,9 @@ void test_error_and_unsupported_statuses() {
     set_i64_view(desc.measures[0].value, values.data());
     finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN, PGACCEL_GROUPED_AGG_LANE_SUM);
     OutputStorage output(desc);
-    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
     CHECK(output.measures[0].sum[0] == OutputStorage::kSentinel);
   }
 
@@ -1006,7 +1055,9 @@ void test_error_and_unsupported_statuses() {
     set_dim(desc, 1, fact1.data(), nullptr, 0, 1, nullptr, mult1.data());
     set_count_star(desc, 0);
     OutputStorage output(desc);
-    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
     CHECK(output.measures[0].count[0] == OutputStorage::kSentinel);
   }
 

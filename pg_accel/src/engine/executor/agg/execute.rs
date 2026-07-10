@@ -2,7 +2,9 @@
 
 use pgrx::pg_sys;
 
-use super::descriptor::{DescriptorAggPlan, DescriptorResidencyReport};
+use super::descriptor::{
+    DescriptorAggExecutionError, DescriptorAggPlan, DescriptorResidencyReport,
+};
 use super::output::DescriptorAggOutput;
 use crate::engine::executor::olap::{OlapAggExecState, OlapAggSpec};
 use crate::engine::residency::{ArtifactEnsureOutcome, ResidentRelationEvidence};
@@ -28,6 +30,23 @@ fn merge_residency_report(
         current.merge(latest);
     } else {
         *current = Some(latest);
+    }
+}
+
+fn raise_descriptor_execution_error(error: DescriptorAggExecutionError) -> ! {
+    match error {
+        DescriptorAggExecutionError::NumericOverflow => {
+            pgrx::ereport!(
+                ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+                "pg_accel: generic aggregate numeric value is out of range; refusing CPU fallback"
+            );
+        }
+        DescriptorAggExecutionError::Failure(message) => {
+            pgrx::error!(
+                "pg_accel: generic aggregate dispatch failed ({message}); refusing CPU fallback"
+            )
+        }
     }
 }
 
@@ -228,11 +247,10 @@ impl AggExecState {
                     return std::ptr::null_mut();
                 }
                 if descriptor.output.is_none() {
-                    let dispatch = descriptor.plan.execute().unwrap_or_else(|error| {
-                        pgrx::error!(
-                            "pg_accel: generic aggregate dispatch failed ({error}); refusing CPU fallback"
-                        )
-                    });
+                    let dispatch = descriptor
+                        .plan
+                        .execute()
+                        .unwrap_or_else(|error| raise_descriptor_execution_error(error));
                     self.dispatch_time_us = dispatch.dispatch_time_us;
                     self.rows_dispatched = u64::try_from(dispatch.fact_rows).unwrap_or_else(|_| {
                         pgrx::error!(

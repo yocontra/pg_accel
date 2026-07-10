@@ -145,6 +145,7 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_fused_filter_multi_reduce_f32", D::Reduce),
         ("pgaccel_expr_template_cmp_const", D::Expr),
         ("pgaccel_grouped_agg_execute", D::GroupedAgg),
+        ("pgaccel_grouped_agg_execute_ex", D::GroupedAgg),
         ("pgaccel_grouped_agg_workspace_alloc", D::GroupedAgg),
         ("pgaccel_hash_join_probe", D::HashJoin),
         ("pgaccel_hash_agg_execute", D::HashAgg),

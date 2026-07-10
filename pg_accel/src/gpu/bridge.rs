@@ -735,6 +735,15 @@ bridge_status_fns! {
         out: *mut crate::engine::spec::abi::PgaccelGroupedAggOut,
     ) -> PgaccelStatus;
 
+    /// Execute one transition and refine `PGACCEL_ERROR` with a grouped-agg
+    /// device detail code. The legacy entry point remains exported for ABI
+    /// compatibility.
+    pub fn pgaccel_grouped_agg_execute_ex(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        out: *mut crate::engine::spec::abi::PgaccelGroupedAggOut,
+        detail: *mut i32,
+    ) -> PgaccelStatus;
+
     /// Template: col <cmp> const.
     pub fn pgaccel_expr_template_cmp_const(
         batch: *const PgaccelBatch,

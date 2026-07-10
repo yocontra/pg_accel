@@ -95,6 +95,7 @@ pub enum GpuStatusDetail {
     InvalidDescriptor,
     ShapeMismatch,
     CapacityOverflow,
+    NumericOverflow,
 }
 
 #[allow(dead_code)] // reason: additive facade helper; future typed callers use this instead of raw status checks
@@ -131,6 +132,7 @@ impl fmt::Display for GpuStatusDetail {
             Self::InvalidDescriptor => "invalid_descriptor",
             Self::ShapeMismatch => "shape_mismatch",
             Self::CapacityOverflow => "capacity_overflow",
+            Self::NumericOverflow => "numeric_overflow",
         };
         f.write_str(label)
     }
@@ -252,6 +254,10 @@ mod tests {
         assert_eq!(
             GpuStatusDetail::from(PgaccelStatus::ErrorNoDevice),
             GpuStatusDetail::NoDevice
+        );
+        assert_eq!(
+            GpuStatusDetail::NumericOverflow.to_string(),
+            "numeric_overflow"
         );
     }
 
