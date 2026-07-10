@@ -149,6 +149,7 @@ fn backend_slot(ledger: &ResidencyLedger, pid: i32) -> Option<usize> {
         .or_else(|| ledger.backends.iter().position(|slot| slot.pid == 0))
 }
 
+#[cfg(any(test, not(feature = "pg_test")))]
 fn reclaim_dead_backends_with(
     ledger: &mut ResidencyLedger,
     mut is_alive: impl FnMut(i32) -> bool,

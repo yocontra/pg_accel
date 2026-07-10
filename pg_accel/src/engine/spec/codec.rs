@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn every_truncated_byte_prefix_is_rejected() {
         fn decode_bytes(bytes: &[u8]) -> Result<AggQuerySpec, SpecCodecError> {
-            if bytes.len() % std::mem::size_of::<i32>() != 0 {
+            if !bytes.len().is_multiple_of(std::mem::size_of::<i32>()) {
                 return Err(SpecCodecError::Truncated {
                     index: bytes.len() / std::mem::size_of::<i32>(),
                     context: "partial wire word",
