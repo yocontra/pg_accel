@@ -891,6 +891,10 @@ fn scan_projection(names: &[String]) -> String {
     }
 }
 
+fn exact_relation_scan_query(qualified: &str, names: &[String]) -> String {
+    format!("SELECT {} FROM ONLY {qualified}", scan_projection(names))
+}
+
 pub(super) fn stage_relation(
     relid: pg_sys::Oid,
     requests: &[ColumnRequest],
@@ -914,8 +918,7 @@ pub(super) fn stage_relation(
             ));
         }
         let names = column_names(relid, requests)?;
-        let select_list = scan_projection(&names);
-        let query = format!("SELECT {select_list} FROM {qualified}");
+        let query = exact_relation_scan_query(&qualified, &names);
         let mut builders = requests
             .iter()
             .map(|request| ColumnBuilder::for_type(request.type_oid))
@@ -1107,6 +1110,14 @@ mod tests {
     fn count_only_projection_scans_one_constant_per_visible_row() {
         assert_eq!(scan_projection(&[]), "1");
         assert_eq!(scan_projection(&["a\"b".to_owned()]), "\"a\"\"b\"");
+        assert_eq!(
+            exact_relation_scan_query("\"s\".\"parent\"", &[]),
+            "SELECT 1 FROM ONLY \"s\".\"parent\""
+        );
+        assert_eq!(
+            exact_relation_scan_query("\"s\".\"parent\"", &["a\"b".to_owned()]),
+            "SELECT \"a\"\"b\" FROM ONLY \"s\".\"parent\""
+        );
     }
 
     #[test]
