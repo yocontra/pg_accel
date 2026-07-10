@@ -123,20 +123,6 @@ pgaccel_expr_usm_col i32_col(const int32_t* values, const uint8_t* nulls = nullp
   return col;
 }
 
-pgaccel_expr_usm_col f64_col(const double* values, const uint8_t* nulls = nullptr) {
-  pgaccel_expr_usm_col col = {};
-  col.values = values;
-  col.nulls = nulls;
-  col.type = PGACCEL_VAL_FLOAT64;
-  return col;
-}
-
-pgaccel_expr_usm_col null_col() {
-  pgaccel_expr_usm_col col = {};
-  col.type = PGACCEL_VAL_NULL;
-  return col;
-}
-
 pgaccel_grouped_agg_filter disabled_filter() {
   pgaccel_grouped_agg_filter filter = {};
   filter.kind = PGACCEL_GROUPED_AGG_FILTER_NONE;
@@ -374,9 +360,8 @@ class OutputStorage {
       const bool value_state =
           (mask & (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
                    PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_SUMSQ)) != 0;
-      const bool count_column =
-          desc.measures[i].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
-          (mask & PGACCEL_GROUPED_AGG_LANE_COUNT) != 0;
+      const bool count_column = desc.measures[i].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
+                                (mask & PGACCEL_GROUPED_AGG_LANE_COUNT) != 0;
       if (value_state || count_column) {
         storage.nonnull.assign(capacity, kSentinel);
         lane.nonnull_count = storage.nonnull.data();
@@ -717,9 +702,8 @@ void test_predicate_only_physical_count() {
     SharedArray<uint8_t> values({0, 1, 1});
     SharedArray<uint8_t> nulls({0, 0, 1});
     pgaccel_grouped_agg_desc desc = base_desc(3);
-    set_count_only_view(desc, 0, values.data(), nulls.data(),
-                        PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
-                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    set_count_only_view(desc, 0, values.data(), nulls.data(), PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+                        sizeof(uint8_t), PGACCEL_GROUPED_AGG_ACCUM_I64);
     desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
     desc.where_filter.predicate_measure_slot = 0;
     desc.where_filter.predicate_range_count = 1;
@@ -738,9 +722,8 @@ void test_predicate_only_physical_count() {
     SharedArray<float> values({-1.0F, 1.0F, 2.0F});
     SharedArray<uint8_t> nulls({0, 0, 1});
     pgaccel_grouped_agg_desc desc = base_desc(3);
-    set_count_only_view(desc, 0, values.data(), nulls.data(),
-                        PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, sizeof(float),
-                        PGACCEL_GROUPED_AGG_ACCUM_F64);
+    set_count_only_view(desc, 0, values.data(), nulls.data(), PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32,
+                        sizeof(float), PGACCEL_GROUPED_AGG_ACCUM_F64);
     desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
     desc.where_filter.predicate_measure_slot = 0;
     desc.where_filter.predicate_range_count = 1;
@@ -765,9 +748,8 @@ void test_predicate_only_physical_count() {
     SharedArray<int32_t> values({0, 10, 20});
     SharedArray<uint8_t> nulls({0, 0, 1});
     pgaccel_grouped_agg_desc desc = base_desc(3);
-    set_count_only_view(desc, 0, values.data(), nulls.data(),
-                        PGACCEL_GROUPED_AGG_PHYSICAL_DATE, sizeof(int32_t),
-                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    set_count_only_view(desc, 0, values.data(), nulls.data(), PGACCEL_GROUPED_AGG_PHYSICAL_DATE,
+                        sizeof(int32_t), PGACCEL_GROUPED_AGG_ACCUM_I64);
     desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
     desc.where_filter.predicate_measure_slot = 0;
     desc.where_filter.predicate_range_count = 1;
@@ -931,8 +913,8 @@ void test_integer_expression_overflow_semantics() {
   }
 
   {
-    SharedArray<int32_t> lhs({std::numeric_limits<int32_t>::max(),
-                              std::numeric_limits<int32_t>::min()});
+    SharedArray<int32_t> lhs(
+        {std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::min()});
     SharedArray<int32_t> rhs({0, 0});
     pgaccel_grouped_agg_desc desc = base_desc(2);
     set_i32_view(desc.measures[0].value, lhs.data());
@@ -985,8 +967,7 @@ void test_integer_expression_overflow_semantics() {
     pgaccel_grouped_agg_desc desc = base_desc(1);
     set_i64_view(desc.measures[0].value, lhs.data());
     set_i64_view(desc.measures[0].rhs, rhs.data());
-    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB,
-                       PGACCEL_GROUPED_AGG_LANE_COUNT);
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB, PGACCEL_GROUPED_AGG_LANE_COUNT);
     OutputStorage output(desc);
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
     CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
@@ -1216,39 +1197,16 @@ void test_fixed_seed_mixed_radix_fuzz() {
   }
 }
 
-void test_dense_v9_differential() {
-  std::printf("--- dense v9 differential ---\n");
+void test_dense_full_lane_reference() {
+  std::printf("--- dense full-lane reference ---\n");
   constexpr size_t rows = 8;
   constexpr size_t groups_count = 3;
   SharedArray<int32_t> groups({10, 11, 10, 12, 10, 11, 12, 12});
   SharedArray<double> values({1.0, 2.5, 3.0, 4.0, 5.0, 6.5, 8.0, 16.0});
-  SharedArray<double> scratch_sum(groups_count);
-  SharedArray<double> scratch_min(groups_count);
-  SharedArray<double> scratch_max(groups_count);
-  SharedArray<uint32_t> scratch_count(groups_count);
-  SharedArray<uint32_t> scratch_start(groups_count);
-  SharedArray<uint32_t> scratch_cursor(groups_count);
-  SharedArray<int32_t> scratch_sorted(rows);
-  SharedArray<uint32_t> scratch_index(rows);
-
-  std::array<double, groups_count> legacy_sum = {};
-  std::array<double, groups_count> legacy_min = {};
-  std::array<double, groups_count> legacy_max = {};
-  std::array<uint32_t, groups_count> legacy_count = {};
-  size_t legacy_selected = 0;
-  size_t legacy_uncertain = 0;
-  const pgaccel_status legacy_status = pgaccel_expr_template_resident_dense_grouped_f64_usm_v9(
-      i32_col(groups.data()), f64_col(values.data()), null_col(),
-      PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
-      PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN | PGACCEL_GROUPED_AGG_LANE_MAX |
-          PGACCEL_GROUPED_AGG_LANE_COUNT,
-      0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null_col(), rows, 10, groups_count,
-      scratch_sum.data(), scratch_min.data(), scratch_max.data(), scratch_count.data(),
-      scratch_start.data(), scratch_cursor.data(), groups_count, scratch_sorted.data(),
-      scratch_index.data(), rows, nullptr, nullptr, nullptr, nullptr, 0, legacy_sum.data(),
-      legacy_min.data(), legacy_max.data(), legacy_count.data(), groups_count, &legacy_selected,
-      &legacy_uncertain);
-  CHECK(legacy_status == PGACCEL_OK);
+  constexpr std::array<double, groups_count> expected_sum = {9.0, 9.0, 28.0};
+  constexpr std::array<double, groups_count> expected_min = {1.0, 2.5, 4.0};
+  constexpr std::array<double, groups_count> expected_max = {5.0, 6.5, 16.0};
+  constexpr std::array<uint64_t, groups_count> expected_count = {3, 2, 3};
 
   pgaccel_grouped_agg_desc desc = base_desc(rows);
   set_fact_key(desc, 0, groups.data(), nullptr, 10, groups_count);
@@ -1258,19 +1216,21 @@ void test_dense_v9_differential() {
                          PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT);
   OutputStorage output(desc);
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
-  CHECK(output.out.selected_count == legacy_selected);
-  CHECK(output.out.uncertain_count == legacy_uncertain);
+  CHECK(output.out.selected_count == rows);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == groups_count);
   for (size_t group = 0; group < groups_count; ++group) {
-    CHECK(output.f64(output.measures[0].sum, group) == legacy_sum[group]);
-    CHECK(output.f64(output.measures[0].min, group) == legacy_min[group]);
-    CHECK(output.f64(output.measures[0].max, group) == legacy_max[group]);
-    CHECK(output.measures[0].count[group] == legacy_count[group]);
-    CHECK(output.measures[0].nonnull[group] == legacy_count[group]);
+    CHECK(output.f64(output.measures[0].sum, group) == expected_sum[group]);
+    CHECK(output.f64(output.measures[0].min, group) == expected_min[group]);
+    CHECK(output.f64(output.measures[0].max, group) == expected_max[group]);
+    CHECK(output.measures[0].count[group] == expected_count[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(output.active[group] == 1);
   }
 }
 
-void test_ssbm_q1_differential() {
-  std::printf("--- SSBM Q1 differential ---\n");
+void test_filtered_product_reference() {
+  std::printf("--- filtered product reference ---\n");
   SharedArray<int32_t> orderdate({19930001, 19930002, 19930003, 19930004, 19940101, 19940102,
                                   19940103, 19940104, 19940040, 19940041, 19940042, 19940043});
   SharedArray<int32_t> discount({1, 2, 3, 4, 4, 5, 6, 7, 5, 6, 7, 8});
@@ -1278,15 +1238,6 @@ void test_ssbm_q1_differential() {
   SharedArray<int32_t> extendedprice(
       {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200});
   constexpr size_t rows = 12;
-
-  int64_t legacy_sum = 0;
-  size_t legacy_selected = 0;
-  size_t legacy_uncertain = 0;
-  const pgaccel_status legacy_status = pgaccel_expr_template_ssbm_q1_revenue_i64_usm(
-      i32_col(orderdate.data()), i32_col(discount.data()), i32_col(quantity.data()),
-      i32_col(extendedprice.data()), rows, 19930001, 19930099, nullptr, 0, 1, 3, 0, 24, &legacy_sum,
-      &legacy_selected, &legacy_uncertain);
-  CHECK(legacy_status == PGACCEL_OK);
 
   std::vector<int8_t> selection(rows, PGACCEL_EXPR_FALSE);
   for (size_t row = 0; row < rows; ++row) {
@@ -1304,14 +1255,16 @@ void test_ssbm_q1_differential() {
   desc.where_filter.mask = selection_usm.data();
   OutputStorage output(desc);
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
-  CHECK(output.i64(output.measures[0].sum, 0) == legacy_sum);
-  CHECK(output.out.selected_count == legacy_selected);
-  CHECK(output.out.uncertain_count == legacy_uncertain);
-  CHECK(output.measures[0].nonnull[0] == legacy_selected);
+  CHECK(output.i64(output.measures[0].sum, 0) == 1400);
+  CHECK(output.out.selected_count == 3);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == 1);
+  CHECK(output.measures[0].nonnull[0] == 3);
+  CHECK(output.active[0] == 1);
 }
 
-void test_ssbm_q2_differential() {
-  std::printf("--- SSBM Q2 differential ---\n");
+void test_two_key_dimension_reference() {
+  std::printf("--- two-key dimension reference ---\n");
   constexpr size_t rows = 8;
   constexpr size_t group_count = 8;
   SharedArray<int32_t> orderdate({100, 101, 102, 103, 100, 101, 102, 103});
@@ -1323,16 +1276,8 @@ void test_ssbm_q2_differential() {
   SharedArray<uint8_t> part_match({0, 1, 1, 0, 1});
   SharedArray<uint8_t> supplier_match({0, 1, 0});
 
-  std::array<int64_t, group_count> legacy_sum = {};
-  std::array<uint32_t, group_count> legacy_count = {};
-  size_t legacy_selected = 0;
-  size_t legacy_uncertain = 0;
-  const pgaccel_status legacy_status = pgaccel_expr_template_ssbm_q2_grouped_revenue_i64_usm(
-      i32_col(orderdate.data()), i32_col(partkey.data()), i32_col(suppkey.data()),
-      i32_col(revenue.data()), rows, 100, date_year.data(), date_year.size(), part_brand.data(),
-      part_match.data(), part_match.size(), supplier_match.data(), supplier_match.size(), 1992, 2,
-      4, legacy_sum.data(), legacy_count.data(), group_count, &legacy_selected, &legacy_uncertain);
-  CHECK(legacy_status == PGACCEL_OK);
+  constexpr std::array<int64_t, group_count> expected_sum = {10, 20, 0, 0, 0, 0, 0, 40};
+  constexpr std::array<uint64_t, group_count> expected_count = {1, 1, 0, 0, 0, 0, 0, 1};
 
   pgaccel_grouped_agg_desc desc = base_desc(rows);
   set_dim(desc, 0, orderdate.data(), nullptr, 100, date_year.size());
@@ -1345,18 +1290,19 @@ void test_ssbm_q2_differential() {
                      PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_COUNT);
   OutputStorage output(desc);
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
-  CHECK(output.out.selected_count == legacy_selected);
-  CHECK(output.out.uncertain_count == legacy_uncertain);
+  CHECK(output.out.selected_count == 3);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == 3);
   for (size_t group = 0; group < group_count; ++group) {
-    CHECK(output.i64(output.measures[0].sum, group) == legacy_sum[group]);
-    CHECK(output.measures[0].count[group] == legacy_count[group]);
-    CHECK(output.measures[0].nonnull[group] == legacy_count[group]);
-    CHECK(output.active[group] == (legacy_count[group] != 0 ? 1 : 0));
+    CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
+    CHECK(output.measures[0].count[group] == expected_count[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(output.active[group] == (expected_count[group] != 0 ? 1 : 0));
   }
 }
 
-void test_ssbm_q3_differential() {
-  std::printf("--- SSBM Q3 differential ---\n");
+void test_three_key_dimension_reference() {
+  std::printf("--- three-key dimension reference ---\n");
   constexpr size_t rows = 8;
   constexpr size_t group_count = 8;
   SharedArray<int32_t> orderdate({100, 101, 102, 103, 100, 101, 102, 103});
@@ -1370,17 +1316,8 @@ void test_ssbm_q3_differential() {
   SharedArray<int32_t> supplier_code({-1, 0, 1, 0});
   SharedArray<uint8_t> supplier_match({0, 1, 1, 0});
 
-  std::array<int64_t, group_count> legacy_sum = {};
-  std::array<uint32_t, group_count> legacy_count = {};
-  size_t legacy_selected = 0;
-  size_t legacy_uncertain = 0;
-  const pgaccel_status legacy_status = pgaccel_expr_template_ssbm_q3_grouped_revenue_i64_usm(
-      i32_col(orderdate.data()), i32_col(custkey.data()), i32_col(suppkey.data()),
-      i32_col(revenue.data()), rows, 100, date_year.data(), date_match.data(), date_year.size(),
-      customer_code.data(), customer_match.data(), customer_code.size(), supplier_code.data(),
-      supplier_match.data(), supplier_code.size(), 1992, 2, 2, 2, legacy_sum.data(),
-      legacy_count.data(), group_count, &legacy_selected, &legacy_uncertain);
-  CHECK(legacy_status == PGACCEL_OK);
+  constexpr std::array<int64_t, group_count> expected_sum = {10, 60, 20, 0, 0, 30, 70, 0};
+  constexpr std::array<uint64_t, group_count> expected_count = {1, 1, 1, 0, 0, 1, 1, 0};
 
   pgaccel_grouped_agg_desc desc = base_desc(rows);
   set_dim(desc, 0, orderdate.data(), nullptr, 100, date_year.size(), date_match.data());
@@ -1394,18 +1331,19 @@ void test_ssbm_q3_differential() {
                      PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_COUNT);
   OutputStorage output(desc);
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
-  CHECK(output.out.selected_count == legacy_selected);
-  CHECK(output.out.uncertain_count == legacy_uncertain);
+  CHECK(output.out.selected_count == 5);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == 5);
   for (size_t group = 0; group < group_count; ++group) {
-    CHECK(output.i64(output.measures[0].sum, group) == legacy_sum[group]);
-    CHECK(output.measures[0].count[group] == legacy_count[group]);
-    CHECK(output.measures[0].nonnull[group] == legacy_count[group]);
-    CHECK(output.active[group] == (legacy_count[group] != 0 ? 1 : 0));
+    CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
+    CHECK(output.measures[0].count[group] == expected_count[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(output.active[group] == (expected_count[group] != 0 ? 1 : 0));
   }
 }
 
-void test_ssbm_q4_differential() {
-  std::printf("--- SSBM Q4 differential ---\n");
+void test_dimension_subtraction_reference() {
+  std::printf("--- dimension subtraction reference ---\n");
   constexpr size_t rows = 8;
   constexpr size_t group_count = 8;
   SharedArray<int32_t> orderdate({100, 101, 102, 103, 100, 101, 102, 102});
@@ -1422,23 +1360,8 @@ void test_ssbm_q4_differential() {
   SharedArray<uint8_t> supplier_match({0, 1, 1});
   SharedArray<int32_t> part_code({-1, 0, 1, 0});
   SharedArray<uint8_t> part_match({0, 1, 1, 0});
-  SharedArray<uint32_t> scratch_profit_lo(group_count);
-  SharedArray<uint32_t> scratch_profit_hi(group_count);
-  SharedArray<uint32_t> scratch_count(group_count);
-
-  std::array<int64_t, group_count> legacy_sum = {};
-  std::array<uint32_t, group_count> legacy_count = {};
-  size_t legacy_selected = 0;
-  size_t legacy_uncertain = 0;
-  const pgaccel_status legacy_status = pgaccel_expr_template_ssbm_q4_grouped_profit_i64_usm(
-      i32_col(orderdate.data()), i32_col(custkey.data()), i32_col(suppkey.data()),
-      i32_col(partkey.data()), i32_col(revenue.data()), i32_col(supplycost.data()), rows, 100,
-      date_year.data(), date_match.data(), date_year.size(), customer_code.data(),
-      customer_match.data(), customer_code.size(), supplier_code.data(), supplier_match.data(),
-      supplier_code.size(), part_code.data(), part_match.data(), part_code.size(), 2, 1992, 2, 2, 2,
-      scratch_profit_lo.data(), scratch_profit_hi.data(), scratch_count.data(), group_count,
-      legacy_sum.data(), legacy_count.data(), group_count, &legacy_selected, &legacy_uncertain);
-  CHECK(legacy_status == PGACCEL_OK);
+  constexpr std::array<int64_t, group_count> expected_sum = {40, 0, -20, 0, 0, 50, 0, 30};
+  constexpr std::array<uint64_t, group_count> expected_count = {2, 0, 1, 0, 0, 1, 0, 2};
 
   pgaccel_grouped_agg_desc desc = base_desc(rows);
   set_dim(desc, 0, orderdate.data(), nullptr, 100, date_year.size(), date_match.data());
@@ -1454,13 +1377,14 @@ void test_ssbm_q4_differential() {
                      PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_COUNT);
   OutputStorage output(desc);
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
-  CHECK(output.out.selected_count == legacy_selected);
-  CHECK(output.out.uncertain_count == legacy_uncertain);
+  CHECK(output.out.selected_count == 6);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == 4);
   for (size_t group = 0; group < group_count; ++group) {
-    CHECK(output.i64(output.measures[0].sum, group) == legacy_sum[group]);
-    CHECK(output.measures[0].count[group] == legacy_count[group]);
-    CHECK(output.measures[0].nonnull[group] == legacy_count[group]);
-    CHECK(output.active[group] == (legacy_count[group] != 0 ? 1 : 0));
+    CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
+    CHECK(output.measures[0].count[group] == expected_count[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(output.active[group] == (expected_count[group] != 0 ? 1 : 0));
   }
 }
 
@@ -1489,11 +1413,11 @@ int main() {
     test_integer_expression_overflow_semantics();
     test_error_and_unsupported_statuses();
     test_fixed_seed_mixed_radix_fuzz();
-    test_dense_v9_differential();
-    test_ssbm_q1_differential();
-    test_ssbm_q2_differential();
-    test_ssbm_q3_differential();
-    test_ssbm_q4_differential();
+    test_dense_full_lane_reference();
+    test_filtered_product_reference();
+    test_two_key_dimension_reference();
+    test_three_key_dimension_reference();
+    test_dimension_subtraction_reference();
 
     CHECK_STATUS(pgaccel_shutdown(), PGACCEL_OK);
   } catch (const std::exception& exception) {

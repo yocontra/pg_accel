@@ -30,7 +30,6 @@ set(KERNEL_SOURCES
     src/expr_templates.cpp
     src/hash_join.cpp
     src/hash_agg.cpp
-    src/olap_ssbm.cpp
     src/grouped_agg.cpp
     src/grouped_agg_workspace.cpp
     src/window.cpp
@@ -93,9 +92,6 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #                         (pgaccel_ffi.h "NaN handling matches PG's
 #                         SUM/MIN/MAX semantics") is void under
 #                         -ffinite-math-only; MIN/MAX identities are ±inf.
-#   olap_ssbm          — grouped MIN/MAX lanes rely on sycl::fmin/fmax NaN
-#                         propagation and ±inf accumulator identities in
-#                         the dense-group tree reduction.
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
@@ -105,7 +101,6 @@ set_source_files_properties(
     src/bbox_ops_f64.cpp
     src/window.cpp
     src/reduce.cpp
-    src/olap_ssbm.cpp
     src/grouped_agg.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
@@ -166,9 +161,6 @@ target_link_libraries(test_fork_cold_barrier PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_reduce_minimal test/test_reduce_minimal.cpp)
 target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
-
-add_executable(test_olap_ssbm test/test_olap_ssbm.cpp)
-target_link_libraries(test_olap_ssbm PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_grouped_agg test/test_grouped_agg.cpp)
 target_link_libraries(test_grouped_agg PRIVATE pgaccel_kernels_shared)
@@ -285,7 +277,6 @@ add_pgaccel_gpu_test(test_fork_cold_barrier TIMEOUT 1200)
 add_pgaccel_gpu_test(test_sycl_basic)
 add_pgaccel_gpu_test(test_reduce_stats)
 add_pgaccel_gpu_test(test_reduce_bool_bit)
-add_pgaccel_gpu_test(test_olap_ssbm)
 add_pgaccel_gpu_test(test_grouped_agg)
 add_pgaccel_gpu_test(test_grouped_agg_workspace)
 add_pgaccel_gpu_test(test_hash_agg_partial)
