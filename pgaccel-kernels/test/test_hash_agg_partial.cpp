@@ -15,11 +15,8 @@
 //                         host converts to Sxx = sum_sq - sum²/N at
 //                         emit time (matches Float8StatsEmitter)
 //
-// We exercise both grouping paths via row counts on either side of
-// SORT_AGG_MIN_ROWS = 100k:
-//   - small N (< 100k) -> agg_hash_partial (host hashtable + SYCL kernel)
-//   - large N (>= 100k) -> agg_sort_based_partial where supported; Metal
-//     intentionally uses the guarded hash fallback until the sort path is safe.
+// Supported backends exercise the GPU sort/group path at multiple row counts.
+// Metal is quarantined and must return PGACCEL_UNSUPPORTED before dispatch.
 //
 // Per CLAUDE.md anti-cheat ban #1, every assertion runs against a
 // real kernel dispatch and the comparison is exact (or 1e-6 relative
@@ -88,6 +85,41 @@ struct GroupRef {
   int64_t non_null_count;
   int64_t total_rows;
 };
+
+static bool is_metal_backend() {
+  return std::strcmp(pgaccel_get_caps().backend_name, "metal") == 0;
+}
+
+static void test_partial_checked_admission() {
+  printf("--- test_partial_checked_admission ---\n");
+
+  std::vector<int64_t> keys = {1, 2, 1, 2};
+  std::vector<double> values = {1.0, 2.0, 3.0, 4.0};
+  const void* val_arrays[1] = {values.data()};
+  const uint8_t* val_null_arrays[1] = {nullptr};
+  int val_types[1] = {PGACCEL_VAL_FLOAT64};
+  pgaccel_agg_col agg_cols[1] = {{PGACCEL_AGG_AVG, 0}};
+
+  pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status status = pgaccel_hash_agg_execute_partial_checked(
+      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, val_arrays, val_null_arrays, val_types,
+      agg_cols, 1, &state);
+
+  if (is_metal_backend()) {
+    ASSERT_TRUE("Metal partial hash_agg returns UNSUPPORTED", status == PGACCEL_UNSUPPORTED);
+    ASSERT_TRUE("Metal partial hash_agg clears output state", state == nullptr);
+    ASSERT_EQ_SZ("Metal partial hash_agg launches no GPU kernels", pgaccel_gpu_exec_count(),
+                 (uint64_t)0);
+    return;
+  }
+
+  ASSERT_TRUE("partial checked hash_agg status OK", status == PGACCEL_OK);
+  ASSERT_TRUE("partial checked hash_agg state non-null", state != nullptr);
+  ASSERT_TRUE("partial checked hash_agg launched GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (state != nullptr)
+    pgaccel_agg_free(state);
+}
 
 // ---------------------------------------------------------------------------
 // SUM(int64) on float-typed value column — small-N agg_hash_partial path.
@@ -498,6 +530,12 @@ int main() {
   if (pgaccel_init() != PGACCEL_OK) {
     fprintf(stderr, "FATAL: pgaccel_init() failed; cannot run partial-mode tests\n");
     return 1;
+  }
+
+  test_partial_checked_admission();
+  if (is_metal_backend()) {
+    printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
+    return g_fail > 0 ? 1 : 0;
   }
 
   test_partial_sum_int64_small_n();

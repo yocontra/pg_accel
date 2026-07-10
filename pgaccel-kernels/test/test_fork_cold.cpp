@@ -286,34 +286,26 @@ int main() {
       }
       printf("Child: cold fp64 h3_lat_lng_to_cell OK (cell=0x%llx)\n", (unsigned long long)cell);
     }
-    // hashagg_f64
+    // resident GPU hash COUNT
     {
       constexpr size_t HN = 32;
       int64_t keys[HN];
       uint8_t knulls[HN] = {};
-      double vals[HN];
-      uint8_t vnulls[HN] = {};
       for (size_t i = 0; i < HN; ++i) {
         keys[i] = static_cast<int64_t>(i % 4);
-        vals[i] = static_cast<double>(i) + 0.25;
       }
-      const void* varr[1] = {vals};
-      const uint8_t* vnull_arr[1] = {vnulls};
-      int vtypes[1] = {PGACCEL_VAL_FLOAT64};
-      pgaccel_agg_col ac[1] = {{PGACCEL_AGG_SUM, 0}};
-      pgaccel_agg_state* state = pgaccel_hash_agg_execute(keys, knulls, HN, PGACCEL_KEY_INT64, varr,
-                                                          vnull_arr, vtypes, ac, 1);
+      pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys, knulls, HN);
       if (!state) {
-        fprintf(stderr, "Child: fp64 hashagg returned NULL\n");
+        fprintf(stderr, "Child: hash_count_i64 returned NULL\n");
         _exit(14);
       }
       if (pgaccel_agg_group_count(state) != 4) {
-        fprintf(stderr, "Child: fp64 hashagg wrong groups=%zu\n", pgaccel_agg_group_count(state));
+        fprintf(stderr, "Child: hash_count_i64 wrong groups=%zu\n", pgaccel_agg_group_count(state));
         pgaccel_agg_free(state);
         _exit(14);
       }
       pgaccel_agg_free(state);
-      printf("Child: cold fp64 hashagg_f64 OK\n");
+      printf("Child: cold hash_count_i64 OK\n");
     }
     // bbox_f64
     {

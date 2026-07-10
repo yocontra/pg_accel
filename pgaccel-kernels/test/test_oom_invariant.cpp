@@ -200,10 +200,22 @@ static FamilyResult run_hashagg_family(size_t N, size_t rss_ceiling) {
   int vtypes[1] = {PGACCEL_VAL_FLOAT64};
   pgaccel_agg_col ac[1] = {{PGACCEL_AGG_SUM, 0}};
   const size_t rss_before = current_rss_bytes();
-  pgaccel_agg_state* state = pgaccel_hash_agg_execute(
-      keys.data(), knulls.data(), N, PGACCEL_KEY_INT64, varr, vnull_arr, vtypes, ac, 1);
+  pgaccel_agg_state* state = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status status = pgaccel_hash_agg_execute_checked(
+      keys.data(), knulls.data(), N, PGACCEL_KEY_INT64, varr, vnull_arr, vtypes, ac, 1, &state);
   const size_t rss_after = peak_rss_bytes();
-  r.status_ok = (state != nullptr);
+  if (status == PGACCEL_UNSUPPORTED) {
+    r.status_ok = state == nullptr && pgaccel_gpu_exec_count() == 0;
+    r.correct = r.status_ok;
+    r.peak_rss_bytes = rss_after;
+    const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
+    r.under_ceiling = rss_delta <= rss_ceiling;
+    r.note = "generic hashagg unsupported before GPU dispatch on this backend";
+    return r;
+  }
+
+  r.status_ok = (status == PGACCEL_OK && state != nullptr);
   r.peak_rss_bytes = rss_after;
   if (state) {
     // Each of the 4 groups should have exactly N/4 rows, sum = N/4.

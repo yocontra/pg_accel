@@ -88,7 +88,17 @@ typedef struct pgaccel_agg_state pgaccel_agg_state;
 /// `group_null_mask[i] == 1` means row i has a NULL group key.
 /// `agg_cols` describes each aggregate to compute.
 ///
-/// Returns aggregation state, or NULL on failure.
+/// This checked entry point never assigns groups with a host hash table.
+/// Unsupported backend/key/aggregate shapes return PGACCEL_UNSUPPORTED before
+/// any GPU dispatch and leave `out_state` NULL.
+pgaccel_status pgaccel_hash_agg_execute_checked(
+    const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
+    const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state);
+
+/// Compatibility wrapper for pgaccel_hash_agg_execute_checked.
+///
+/// Returns aggregation state on PGACCEL_OK, or NULL for every non-OK status.
 /// Use pgaccel_agg_get_results to extract results.
 pgaccel_agg_state*
 pgaccel_hash_agg_execute(const void* group_keys, const uint8_t* group_null_mask, size_t row_count,
@@ -171,7 +181,16 @@ const double* pgaccel_agg_get_results(const pgaccel_agg_state* state, size_t agg
 /// Use `pgaccel_agg_get_partial_results` to read per-agg results and
 /// `pgaccel_agg_partial_width` (above) to interpret lane shape.
 ///
-/// Returns aggregation state, or NULL on failure.
+/// Checked partial-mode entry point. Like the finalize-mode checked API, it
+/// has no host hash-table fallback and returns PGACCEL_UNSUPPORTED without a
+/// GPU dispatch when the selected shape is not GPU-resident.
+pgaccel_status pgaccel_hash_agg_execute_partial_checked(
+    const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
+    const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state);
+
+/// Compatibility wrapper for pgaccel_hash_agg_execute_partial_checked.
+/// Returns aggregation state on PGACCEL_OK, or NULL otherwise.
 pgaccel_agg_state*
 pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_null_mask,
                                  size_t row_count, int key_type, const void* const* value_cols,

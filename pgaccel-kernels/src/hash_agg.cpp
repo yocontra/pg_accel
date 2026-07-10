@@ -1,12 +1,9 @@
 /*
  * hash_agg.cpp — GPU hash aggregation: grouped SUM/MIN/MAX/COUNT.
  *
- * Two paths:
- *   - `agg_hash`: hash-table group assignment + SYCL accumulation kernel
- *     (one work-item per row, atomic accumulation per group).
- *   - `agg_sort_based`: GPU sort by group key → boundary scan → SYCL
- *     accumulation kernel (one work-item per group, sequential per-group
- *     scan over the contiguous sorted range).
+ * Group assignment is performed only by GPU-resident paths:
+ *   - `agg_hash_row_parallel`: device hash-table group assignment.
+ *   - `agg_sort_based`: GPU sort by group key, followed by grouped reduce.
  *
  * All accumulators use f64 internally to prevent integer overflow
  * (int32 SUM can overflow int32 after ~2B rows; f64 gives ~15 digits
@@ -15,11 +12,8 @@
  * NULL group keys are accumulated into a single "NULL group" (like PG).
  * NULL values are skipped for SUM/MIN/MAX but not for COUNT(*).
  *
- * Per CLAUDE.md rules #11/#12 (GPU-only, SYCL-only) — both paths are
- * SYCL kernels. The host-side hash table and boundary scan that remain
- * are orchestration glue that decides which rows belong to which
- * group, not row-iteration "kernels". Once the row-to-group mapping is
- * known, all per-row work runs as a `sycl::parallel_for`.
+ * Unsupported shapes are declined before queue creation. There is no host
+ * hash-table fallback behind the public pgaccel hash-aggregate APIs.
  */
 
 #include <sycl/sycl.hpp>
@@ -32,13 +26,11 @@
 #include <exception>
 #include <limits>
 #include <new>
-#include <unordered_map>
 #include <vector>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_queue.h"
 #include "pgaccel_hash_agg.h"
-
+#include "pgaccel_queue.h"
 
 // ---------------------------------------------------------------------------
 // Hash functions (same as hash_join.cpp)
@@ -100,56 +92,6 @@ struct val_read {
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Group-key hash + equality (host side)
-// ---------------------------------------------------------------------------
-
-static inline uint64_t read_key_u64(const void* keys, size_t row, int key_type) {
-  switch (key_type) {
-    case 0: {  // INT32
-      int32_t k = static_cast<const int32_t*>(keys)[row];
-      return hash64(static_cast<uint64_t>(static_cast<uint32_t>(k)));
-    }
-    case 1: {  // INT64
-      int64_t k = static_cast<const int64_t*>(keys)[row];
-      return hash64(static_cast<uint64_t>(k));
-    }
-    case 2: {  // FLOAT64
-      double k = static_cast<const double*>(keys)[row];
-      if (k != k)
-        return hash64(0x7FF8000000000000ULL);
-      if (k == 0.0)
-        k = 0.0;
-      uint64_t bits;
-      memcpy(&bits, &k, sizeof(bits));
-      return hash64(bits);
-    }
-    case 4: {  // UUID (16 bytes)
-      // Read both u64 halves, mix each through hash64, XOR. Byte-equal
-      // UUIDs map to identical hashes; any single bit flip propagates
-      // through hash64's full diffusion.
-      const uint8_t* p = static_cast<const uint8_t*>(keys) + row * 16;
-      uint64_t lo, hi;
-      memcpy(&lo, p, 8);
-      memcpy(&hi, p + 8, 8);
-      return hash64(lo) ^ hash64(hi);
-    }
-    case 5: {  // INET / CIDR (24-byte canonical key)
-      // Layout: family(1) + bits(1) + ipaddr(16, IPv4 zero-padded) +
-      //         pad(6) = 24 bytes = 3 uint64_t. Mix each via hash64
-      //         and XOR for full diffusion.
-      const uint8_t* p = static_cast<const uint8_t*>(keys) + row * 24;
-      uint64_t a, b, c;
-      memcpy(&a, p, 8);
-      memcpy(&b, p + 8, 8);
-      memcpy(&c, p + 16, 8);
-      return hash64(a) ^ hash64(b) ^ hash64(c);
-    }
-    default:
-      return 0;
-  }
-}
-
 static inline size_t key_size_for_type(int key_type) {
   switch (key_type) {
     case 0:
@@ -165,20 +107,6 @@ static inline size_t key_size_for_type(int key_type) {
     default:
       return 0;
   }
-}
-
-static inline bool key_bytes_equal(const uint8_t* stored, const uint8_t* current, size_t ksz,
-                                   int key_type) {
-  if (key_type != 2)
-    return memcmp(stored, current, ksz) == 0;
-
-  double a;
-  double b;
-  memcpy(&a, stored, sizeof(a));
-  memcpy(&b, current, sizeof(b));
-  const bool a_nan = (a != a);
-  const bool b_nan = (b != b);
-  return (a_nan && b_nan) || a == b;
 }
 
 static inline bool null_sort_sentinel_collides(const void* group_keys,
@@ -1241,11 +1169,6 @@ void free_staged_columns(sycl::queue& q, StagedColumnArrays* s, size_t /*num_agg
 /// that path because AdaptiveCpp can abort the process during argument-buffer
 /// validation before C++ error handling can run.
 static constexpr size_t SORT_AGG_MIN_ROWS = 100000;
-
-/// If a large batch cannot use the sort path, the alternate GPU accumulation
-/// kernel is admitted only for low-cardinality cases. High-cardinality large
-/// batches return unsupported rather than running a CPU-backed pg_accel plan.
-static constexpr size_t HASH_AGG_MAX_LARGE_UNSORTED_GROUPS = 4096;
 
 /// Row-parallel hash grouping path: narrow, benchmarkable vertical slice.
 ///
@@ -2613,147 +2536,6 @@ static pgaccel_agg_state* agg_count_i64_sort_reduce_device(int64_t* group_keys, 
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Legacy hash-based grouped aggregation (host-side group assignment + GPU
-// accumulation kernel).
-// ---------------------------------------------------------------------------
-
-static pgaccel_agg_state* agg_hash(const void* group_keys, const uint8_t* group_null_mask,
-                                   size_t row_count, int key_type, const void* const* value_cols,
-                                   const uint8_t* const* value_nulls, const int* value_types,
-                                   const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  sycl::queue* q = pgaccel_get_queue();
-  if (q == nullptr)
-    return nullptr;
-
-  // -- Phase 1 (host orchestration): assign every row to a group via hash
-  // table. Hash collisions are resolved via byte-equality on the key
-  // bytes. Group order matches first-occurrence order.
-  std::unordered_map<uint64_t, std::vector<size_t>> hash_to_groups;
-  std::vector<uint8_t> group_key_buf;
-  size_t ksz = key_size_for_type(key_type);
-  if (ksz == 0)
-    return nullptr;
-
-  size_t* row_to_group = sycl::malloc_shared<size_t>(row_count, *q);
-  if (row_to_group == nullptr)
-    return nullptr;
-
-  size_t n_groups = 0;
-  size_t null_group_idx = SIZE_MAX;
-  for (size_t r = 0; r < row_count; ++r) {
-    bool is_null = (group_null_mask != nullptr && group_null_mask[r]);
-    if (is_null) {
-      if (null_group_idx == SIZE_MAX) {
-        null_group_idx = n_groups++;
-        row_to_group[r] = null_group_idx;
-        group_key_buf.resize(group_key_buf.size() + ksz, 0);
-      } else {
-        row_to_group[r] = null_group_idx;
-      }
-      continue;
-    }
-
-    uint64_t h = read_key_u64(group_keys, r, key_type);
-    auto it = hash_to_groups.find(h);
-    bool found = false;
-    if (it != hash_to_groups.end()) {
-      for (size_t gidx : it->second) {
-        const uint8_t* stored = group_key_buf.data() + gidx * ksz;
-        const uint8_t* current = static_cast<const uint8_t*>(group_keys) + r * ksz;
-        if (key_bytes_equal(stored, current, ksz, key_type)) {
-          row_to_group[r] = gidx;
-          found = true;
-          break;
-        }
-      }
-    }
-
-    if (!found) {
-      size_t gidx = n_groups++;
-      hash_to_groups[h].push_back(gidx);
-      row_to_group[r] = gidx;
-      const uint8_t* kb = static_cast<const uint8_t*>(group_keys) + r * ksz;
-      group_key_buf.insert(group_key_buf.end(), kb, kb + ksz);
-    }
-  }
-
-  if (row_count >= SORT_AGG_MIN_ROWS && n_groups > HASH_AGG_MAX_LARGE_UNSORTED_GROUPS) {
-    std::fprintf(stderr,
-                 "pgaccel: hash_agg large unsorted fallback rejected "
-                 "(rows=%zu groups=%zu)\n",
-                 row_count, n_groups);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  // -- Phase 2 (SYCL kernel): per-group accumulation. Stage value
-  // columns into shared memory and dispatch one work-item per group.
-  StagedColumnArrays* sc =
-      stage_columns(*q, row_count, num_aggs, value_cols, value_nulls, value_types, agg_cols);
-  if (sc == nullptr) {
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  size_t result_count = 0;
-  if (!checked_mul_size(num_aggs, n_groups, &result_count)) {
-    free_staged_columns(*q, sc, num_aggs);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  double* d_results = sycl::malloc_shared<double>(result_count, *q);
-  int64_t* d_counts = sycl::malloc_shared<int64_t>(n_groups, *q);
-  if (d_results == nullptr || d_counts == nullptr) {
-    if (d_results)
-      sycl::free(d_results, *q);
-    if (d_counts)
-      sycl::free(d_counts, *q);
-    free_staged_columns(*q, sc, num_aggs);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  if (!run_unsorted_accum_kernel(
-          *q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data, sc->value_data_bytes,
-          sc->d_null_data, sc->null_data_bytes, sc->d_value_offsets, sc->d_null_offsets,
-          sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx, d_results, d_counts)) {
-    sycl::free(d_results, *q);
-    sycl::free(d_counts, *q);
-    free_staged_columns(*q, sc, num_aggs);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  // -- Phase 3: build the result state.
-  auto* state = new (std::nothrow) pgaccel_agg_state();
-  if (state == nullptr) {
-    sycl::free(d_results, *q);
-    sycl::free(d_counts, *q);
-    free_staged_columns(*q, sc, num_aggs);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-  state->group_key_buf = std::move(group_key_buf);
-  state->key_size = ksz;
-  state->key_type = key_type;
-  state->group_count = n_groups;
-  state->num_aggs = num_aggs;
-  state->counts.assign(d_counts, d_counts + n_groups);
-  state->results.resize(num_aggs);
-  for (size_t a = 0; a < num_aggs; ++a) {
-    state->results[a].assign(d_results + a * n_groups, d_results + (a + 1) * n_groups);
-  }
-
-  sycl::free(d_results, *q);
-  sycl::free(d_counts, *q);
-  free_staged_columns(*q, sc, num_aggs);
-  sycl::free(row_to_group, *q);
-  pgaccel_record_gpu_exec();
-  return state;
-}
-
-// ---------------------------------------------------------------------------
 // Sort-based grouped aggregation (GPU sort + SYCL per-group reduce).
 // ---------------------------------------------------------------------------
 
@@ -2987,10 +2769,9 @@ static pgaccel_agg_state* agg_sort_based(const void* group_keys, const uint8_t* 
 // ===========================================================================
 // PARTIAL-MODE host dispatch (Phase 3B).
 //
-// Mirrors agg_hash / agg_sort_based but calls the partial kernel and
+// Mirrors agg_sort_based but calls the partial kernel and
 // stores per-agg per-group transition states with widths matching
-// pgaccel_agg_partial_width. The phase-1 grouping logic (hash table or
-// GPU sort + boundary scan) is identical to finalize-mode.
+// pgaccel_agg_partial_width. Group assignment remains GPU-only.
 // ===========================================================================
 
 namespace {
@@ -3017,160 +2798,6 @@ bool compute_partial_layout(const pgaccel_agg_col* agg_cols, size_t num_aggs, si
 }
 
 }  // namespace
-
-static pgaccel_agg_state*
-agg_hash_partial(const void* group_keys, const uint8_t* group_null_mask, size_t row_count,
-                 int key_type, const void* const* value_cols, const uint8_t* const* value_nulls,
-                 const int* value_types, const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  sycl::queue* q = pgaccel_get_queue();
-  if (q == nullptr)
-    return nullptr;
-
-  std::unordered_map<uint64_t, std::vector<size_t>> hash_to_groups;
-  std::vector<uint8_t> group_key_buf;
-  size_t ksz = key_size_for_type(key_type);
-  if (ksz == 0)
-    return nullptr;
-
-  size_t* row_to_group = sycl::malloc_shared<size_t>(row_count, *q);
-  if (row_to_group == nullptr)
-    return nullptr;
-
-  size_t n_groups = 0;
-  size_t null_group_idx = SIZE_MAX;
-  for (size_t r = 0; r < row_count; ++r) {
-    bool is_null = (group_null_mask != nullptr && group_null_mask[r]);
-    if (is_null) {
-      if (null_group_idx == SIZE_MAX) {
-        null_group_idx = n_groups++;
-        row_to_group[r] = null_group_idx;
-        group_key_buf.resize(group_key_buf.size() + ksz, 0);
-      } else {
-        row_to_group[r] = null_group_idx;
-      }
-      continue;
-    }
-
-    uint64_t h = read_key_u64(group_keys, r, key_type);
-    auto it = hash_to_groups.find(h);
-    bool found = false;
-    if (it != hash_to_groups.end()) {
-      for (size_t gidx : it->second) {
-        const uint8_t* stored = group_key_buf.data() + gidx * ksz;
-        const uint8_t* current = static_cast<const uint8_t*>(group_keys) + r * ksz;
-        if (key_bytes_equal(stored, current, ksz, key_type)) {
-          row_to_group[r] = gidx;
-          found = true;
-          break;
-        }
-      }
-    }
-
-    if (!found) {
-      size_t gidx = n_groups++;
-      hash_to_groups[h].push_back(gidx);
-      row_to_group[r] = gidx;
-      const uint8_t* kb = static_cast<const uint8_t*>(group_keys) + r * ksz;
-      group_key_buf.insert(group_key_buf.end(), kb, kb + ksz);
-    }
-  }
-
-  if (row_count >= SORT_AGG_MIN_ROWS && n_groups > HASH_AGG_MAX_LARGE_UNSORTED_GROUPS) {
-    std::fprintf(stderr,
-                 "pgaccel: hash_agg partial large unsorted fallback rejected "
-                 "(rows=%zu groups=%zu)\n",
-                 row_count, n_groups);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  // Per-agg width / offset layout.
-  std::vector<size_t> widths_h, offsets_h;
-  size_t total = 0;
-  if (!compute_partial_layout(agg_cols, num_aggs, n_groups, widths_h, offsets_h, total)) {
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  StagedColumnArrays* sc =
-      stage_columns(*q, row_count, num_aggs, value_cols, value_nulls, value_types, agg_cols);
-  if (sc == nullptr) {
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-
-  size_t* d_widths = sycl::malloc_shared<size_t>(num_aggs, *q);
-  size_t* d_offsets = sycl::malloc_shared<size_t>(num_aggs, *q);
-  // Allocate at least 1 element to keep pointer non-null when total == 0.
-  double* d_partials = sycl::malloc_shared<double>(total > 0 ? total : 1, *q);
-  int64_t* d_counts = sycl::malloc_shared<int64_t>(n_groups > 0 ? n_groups : 1, *q);
-  if (d_widths == nullptr || d_offsets == nullptr || d_partials == nullptr || d_counts == nullptr) {
-    if (d_widths)
-      sycl::free(d_widths, *q);
-    if (d_offsets)
-      sycl::free(d_offsets, *q);
-    if (d_partials)
-      sycl::free(d_partials, *q);
-    if (d_counts)
-      sycl::free(d_counts, *q);
-    free_staged_columns(*q, sc, num_aggs);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-  for (size_t a = 0; a < num_aggs; ++a) {
-    d_widths[a] = widths_h[a];
-    d_offsets[a] = offsets_h[a];
-  }
-
-  if (n_groups > 0) {
-    if (!run_unsorted_partial_kernel(
-            *q, n_groups, row_count, num_aggs, row_to_group, sc->d_value_data, sc->value_data_bytes,
-            sc->d_null_data, sc->null_data_bytes, sc->d_value_offsets, sc->d_null_offsets,
-            sc->d_null_present, sc->d_value_types, sc->d_funcs, sc->d_col_idx, d_offsets, d_widths,
-            d_partials, d_counts, total)) {
-      sycl::free(d_widths, *q);
-      sycl::free(d_offsets, *q);
-      sycl::free(d_partials, *q);
-      sycl::free(d_counts, *q);
-      free_staged_columns(*q, sc, num_aggs);
-      sycl::free(row_to_group, *q);
-      return nullptr;
-    }
-  }
-
-  auto* state = new (std::nothrow) pgaccel_agg_state();
-  if (state == nullptr) {
-    sycl::free(d_widths, *q);
-    sycl::free(d_offsets, *q);
-    sycl::free(d_partials, *q);
-    sycl::free(d_counts, *q);
-    free_staged_columns(*q, sc, num_aggs);
-    sycl::free(row_to_group, *q);
-    return nullptr;
-  }
-  state->group_key_buf = std::move(group_key_buf);
-  state->key_size = ksz;
-  state->key_type = key_type;
-  state->group_count = n_groups;
-  state->num_aggs = num_aggs;
-  state->counts.assign(d_counts, d_counts + n_groups);
-  state->partial_widths = std::move(widths_h);
-  state->partial_results.resize(num_aggs);
-  for (size_t a = 0; a < num_aggs; ++a) {
-    const size_t off = offsets_h[a];
-    const size_t len = state->partial_widths[a] * n_groups;
-    state->partial_results[a].assign(d_partials + off, d_partials + off + len);
-  }
-
-  sycl::free(d_widths, *q);
-  sycl::free(d_offsets, *q);
-  sycl::free(d_partials, *q);
-  sycl::free(d_counts, *q);
-  free_staged_columns(*q, sc, num_aggs);
-  sycl::free(row_to_group, *q);
-  pgaccel_record_gpu_exec();
-  return state;
-}
 
 static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
                                                  const uint8_t* group_null_mask, size_t row_count,
@@ -3409,11 +3036,79 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
   return state;
 }
 
+namespace {
+
+enum class HashAggGpuPath { unsupported, row_parallel, sort };
+
+bool hashagg_sort_shape_supported(const void* group_keys, const uint8_t* group_null_mask,
+                                  size_t row_count, int key_type) {
+  return (key_type == 0 || key_type == 1 || key_type == 2) &&
+         row_count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()) &&
+         !null_sort_sentinel_collides(group_keys, group_null_mask, row_count, key_type);
+}
+
+HashAggGpuPath select_hashagg_finalize_path(const void* group_keys, const uint8_t* group_null_mask,
+                                            size_t row_count, int key_type, const int* value_types,
+                                            const pgaccel_agg_col* agg_cols, size_t num_aggs) {
+  if (!hashagg_sort_based_available())
+    return HashAggGpuPath::unsupported;
+
+  if (row_parallel_hashagg_supported(key_type, row_count) &&
+      row_parallel_hashagg_agg_shape_supported(value_types, agg_cols, num_aggs)) {
+    return HashAggGpuPath::row_parallel;
+  }
+
+  return hashagg_sort_shape_supported(group_keys, group_null_mask, row_count, key_type)
+             ? HashAggGpuPath::sort
+             : HashAggGpuPath::unsupported;
+}
+
+}  // namespace
+
 // ===========================================================================
 // Public C API
 // ===========================================================================
 
 extern "C" {
+
+pgaccel_status pgaccel_hash_agg_execute_checked(
+    const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
+    const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state) try {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR;
+  *out_state = nullptr;
+
+  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
+                               num_aggs, false))
+    return PGACCEL_ERROR;
+
+  pgaccel_agg_state* state = nullptr;
+  switch (select_hashagg_finalize_path(group_keys, group_null_mask, row_count, key_type,
+                                       value_types, agg_cols, num_aggs)) {
+    case HashAggGpuPath::row_parallel:
+      state = agg_hash_row_parallel(group_keys, group_null_mask, row_count, key_type, value_cols,
+                                    value_nulls, value_types, agg_cols, num_aggs);
+      break;
+    case HashAggGpuPath::sort:
+      state = agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols,
+                             value_nulls, value_types, agg_cols, num_aggs);
+      break;
+    case HashAggGpuPath::unsupported:
+      return PGACCEL_UNSUPPORTED;
+  }
+
+  if (state == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  *out_state = state;
+  return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_hash_agg_execute_checked", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_hash_agg_execute_checked", nullptr);
+}
 
 pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_t* group_null_mask,
                                             size_t row_count, int key_type,
@@ -3421,38 +3116,11 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
                                             const uint8_t* const* value_nulls,
                                             const int* value_types, const pgaccel_agg_col* agg_cols,
                                             size_t num_aggs) {
-  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
-                               num_aggs, false))
-    return nullptr;
-
-  // Use sort-based path for large datasets except on Metal, where the
-  // AdaptiveCpp backend can abort the process while validating sort/hashagg
-  // argument buffers. High-cardinality large batches return unsupported.
-  try {
-    if (row_parallel_hashagg_supported(key_type, row_count)) {
-      pgaccel_agg_state* st =
-          agg_hash_row_parallel(group_keys, group_null_mask, row_count, key_type, value_cols,
-                                value_nulls, value_types, agg_cols, num_aggs);
-      if (st != nullptr)
-        return st;
-    }
-
-    if (row_count >= SORT_AGG_MIN_ROWS && hashagg_sort_based_available()) {
-      pgaccel_agg_state* st =
-          agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
-                         value_types, agg_cols, num_aggs);
-      if (st != nullptr)
-        return st;
-    }
-
-    return agg_hash(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
-                    value_types, agg_cols, num_aggs);
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "pgaccel: hash_agg_execute failed: %s\n", e.what());
-  } catch (...) {
-    std::fprintf(stderr, "pgaccel: hash_agg_execute failed (unknown)\n");
-  }
-  return nullptr;
+  pgaccel_agg_state* state = nullptr;
+  (void)pgaccel_hash_agg_execute_checked(group_keys, group_null_mask, row_count, key_type,
+                                         value_cols, value_nulls, value_types, agg_cols, num_aggs,
+                                         &state);
+  return state;
 }
 
 pgaccel_agg_state* pgaccel_hash_count_i64_execute(const int64_t* group_keys,
@@ -3592,7 +3260,8 @@ pgaccel_status pgaccel_hash_agg_execute_sort_based(
                                num_aggs, false))
     return PGACCEL_ERROR;
 
-  if (!hashagg_sort_based_available())
+  if (!hashagg_sort_based_available() ||
+      !hashagg_sort_shape_supported(group_keys, group_null_mask, row_count, key_type))
     return PGACCEL_UNSUPPORTED;
 
   try {
@@ -3637,32 +3306,47 @@ const double* pgaccel_agg_get_results(const pgaccel_agg_state* state, size_t agg
   return state->results[agg_idx].data();
 }
 
+pgaccel_status pgaccel_hash_agg_execute_partial_checked(
+    const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
+    const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,
+    const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state) try {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR;
+  *out_state = nullptr;
+
+  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
+                               num_aggs, true))
+    return PGACCEL_ERROR;
+
+  if (!hashagg_sort_based_available() ||
+      !hashagg_sort_shape_supported(group_keys, group_null_mask, row_count, key_type))
+    return PGACCEL_UNSUPPORTED;
+
+  pgaccel_agg_state* state =
+      agg_sort_based_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
+                             value_nulls, value_types, agg_cols, num_aggs);
+  if (state == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  *out_state = state;
+  return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& e) {
+  return pgaccel_kernel_failure("pgaccel_hash_agg_execute_partial_checked", &e);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_hash_agg_execute_partial_checked", nullptr);
+}
+
 pgaccel_agg_state*
 pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_null_mask,
                                  size_t row_count, int key_type, const void* const* value_cols,
                                  const uint8_t* const* value_nulls, const int* value_types,
                                  const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
-                               num_aggs, true))
-    return nullptr;
-
-  try {
-    if (row_count >= SORT_AGG_MIN_ROWS && hashagg_sort_based_available()) {
-      pgaccel_agg_state* st =
-          agg_sort_based_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
-                                 value_nulls, value_types, agg_cols, num_aggs);
-      if (st != nullptr)
-        return st;
-    }
-
-    return agg_hash_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
-                            value_nulls, value_types, agg_cols, num_aggs);
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "pgaccel: hash_agg_execute_partial failed: %s\n", e.what());
-  } catch (...) {
-    std::fprintf(stderr, "pgaccel: hash_agg_execute_partial failed (unknown)\n");
-  }
-  return nullptr;
+  pgaccel_agg_state* state = nullptr;
+  (void)pgaccel_hash_agg_execute_partial_checked(group_keys, group_null_mask, row_count, key_type,
+                                                 value_cols, value_nulls, value_types, agg_cols,
+                                                 num_aggs, &state);
+  return state;
 }
 
 const double* pgaccel_agg_get_partial_results(const pgaccel_agg_state* state, size_t agg_idx) {

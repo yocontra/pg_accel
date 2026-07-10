@@ -157,50 +157,37 @@ static int run_fp64_fork_matrix(const char* label) {
     printf("[%s] fp64 matrix: h3_f64 (lat_lng_to_cell) OK\n", label);
   }
 
-  // ── hashagg_f64 (fp64 sum over fp64 values, i64 keys) ────────────
+  // ── resident GPU hash COUNT over i64 keys ────────────────────────
   {
     constexpr size_t HN = 64;
     int64_t keys[HN];
     uint8_t key_nulls[HN] = {};
-    double vals[HN];
-    uint8_t val_nulls[HN] = {};
     for (size_t i = 0; i < HN; ++i) {
       keys[i] = static_cast<int64_t>(i % 4);  // 4 groups
-      vals[i] = static_cast<double>(i) + 0.5;
     }
-    const void* val_arrays[1] = {vals};
-    const uint8_t* val_null_arrays[1] = {val_nulls};
-    int val_types[1] = {PGACCEL_VAL_FLOAT64};
-    pgaccel_agg_col agg_cols[1] = {{PGACCEL_AGG_SUM, 0}};
-    pgaccel_agg_state* state =
-        pgaccel_hash_agg_execute(keys, key_nulls, HN, PGACCEL_KEY_INT64, val_arrays,
-                                 val_null_arrays, val_types, agg_cols, 1);
+    pgaccel_agg_state* state = pgaccel_hash_count_i64_execute(keys, key_nulls, HN);
     if (!state) {
-      fprintf(stderr, "[%s] fp64 matrix: hashagg_f64 returned NULL\n", label);
+      fprintf(stderr, "[%s] fp64 matrix: hash_count_i64 returned NULL\n", label);
       return 1;
     }
     size_t ngroups = pgaccel_agg_group_count(state);
     if (ngroups != 4) {
-      fprintf(stderr, "[%s] fp64 matrix: hashagg_f64 ngroups=%zu (expected 4)\n", label, ngroups);
+      fprintf(stderr, "[%s] fp64 matrix: hash_count_i64 ngroups=%zu (expected 4)\n", label,
+              ngroups);
       pgaccel_agg_free(state);
       return 1;
     }
     const double* results = pgaccel_agg_get_results(state, 0);
-    // Sum check: total should equal sum of vals[0..63]
     double total = 0.0;
     for (size_t i = 0; i < ngroups; ++i)
       total += results[i];
-    double ref_total = 0.0;
-    for (size_t i = 0; i < HN; ++i)
-      ref_total += vals[i];
-    if (std::fabs(total - ref_total) > 1e-9) {
-      fprintf(stderr, "[%s] fp64 matrix: hashagg_f64 total %.9g != %.9g\n", label, total,
-              ref_total);
+    if (std::fabs(total - static_cast<double>(HN)) > 1e-9) {
+      fprintf(stderr, "[%s] fp64 matrix: hash_count_i64 total %.9g != %zu\n", label, total, HN);
       pgaccel_agg_free(state);
       return 1;
     }
     pgaccel_agg_free(state);
-    printf("[%s] fp64 matrix: hashagg_f64 OK\n", label);
+    printf("[%s] fp64 matrix: hash_count_i64 OK\n", label);
   }
 
   // ── bbox_f64 (fp64 bbox-intersects-bulk correctness fallback) ────
