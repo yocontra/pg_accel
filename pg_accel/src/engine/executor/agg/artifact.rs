@@ -757,6 +757,61 @@ pub(super) struct PreparedAggArtifact {
     device_bytes: u64,
 }
 
+/// Conservative upper bound for the derived device buffers built from a
+/// logical descriptor spec. Raw resident columns are intentionally excluded.
+///
+/// `None` means a required relation estimate is absent, the key/filter shape
+/// is outside the Phase 5D artifact subset, or checked byte arithmetic
+/// overflowed. Callers must decline rather than treating `None` as zero.
+#[allow(dead_code, clippy::redundant_pub_crate)] // reason: Phase 5E consumes this crate re-export after rebasing this prerequisite
+pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
+    spec: &AggQuerySpec,
+    relation_rows: &BTreeMap<u32, u64>,
+) -> Option<u64> {
+    let mut bytes = 0_u64;
+    let mut add = |rows: u64, width: u64| -> Option<()> {
+        bytes = bytes.checked_add(rows.checked_mul(width)?)?;
+        Some(())
+    };
+    let fact_rows = || relation_rows.get(&spec.fact_rel).copied();
+
+    for key in &spec.group_keys {
+        match &key.source {
+            GroupKeySource::FactColumn(column) if column.relation_oid == spec.fact_rel => {
+                add(fact_rows()?, 4)?;
+            }
+            GroupKeySource::StarDimension { dim_index, .. } => {
+                let dimension = spec.star_dims.get(usize::try_from(*dim_index).ok()?)?;
+                add(*relation_rows.get(&dimension.relation_oid)?, 4)?;
+            }
+            GroupKeySource::FactColumn(_)
+            | GroupKeySource::Expression { .. }
+            | GroupKeySource::H3Cell { .. } => return None,
+        }
+    }
+
+    for dimension in &spec.star_dims {
+        let dimension_rows = *relation_rows.get(&dimension.relation_oid)?;
+        add(fact_rows()?, 4)?;
+        add(dimension_rows, 1)?;
+        if dimension.multiplicity == JoinMultiplicity::Counted {
+            add(dimension_rows, 8)?;
+        }
+    }
+
+    match &spec.fact_filter {
+        FilterSpec::Mask {
+            kind: MaskKind::Sql,
+            ..
+        } => add(fact_rows()?, 1)?,
+        FilterSpec::None | FilterSpec::Ranges { .. } => {}
+        FilterSpec::Mask { .. } | FilterSpec::Bytecode { .. } | FilterSpec::Spatial { .. } => {
+            return None;
+        }
+    }
+    Some(bytes)
+}
+
 fn checked_device_bytes(prepared: &PreparedAggArtifact) -> Result<u64, String> {
     let mut bytes = 0_usize;
     let mut add = |elements: usize, width: usize| -> Result<(), String> {
@@ -999,6 +1054,9 @@ impl DerivedArtifact for DescriptorAggArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::spec::{
+        AggregateKind, AggregateOutput, AggregateSource, GroupKeyRef, MeasureExpr, MeasureSpec,
+    };
 
     fn column(relation_oid: u32, type_oid: u32) -> ColumnRef {
         ColumnRef {
@@ -1026,6 +1084,98 @@ mod tests {
             multiplicity,
             filter: FilterSpec::None,
         }
+    }
+
+    fn count_star_spec() -> AggQuerySpec {
+        AggQuerySpec {
+            fact_rel: 100,
+            group_keys: Vec::new(),
+            measures: vec![MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            }],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        }
+    }
+
+    #[test]
+    fn artifact_estimator_matches_every_runtime_device_buffer_term() {
+        let mut spec = count_star_spec();
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(column(100, INT4OID)),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::StarDimension {
+                dim_index: 0,
+                group_column: column(200, INT4OID),
+            },
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        spec.star_dims
+            .push(dimension(INT4OID, JoinMultiplicity::Unique));
+        let mut counted = dimension(INT4OID, JoinMultiplicity::Counted);
+        counted.relation_oid = 300;
+        counted.dim_key.relation_oid = 300;
+        counted.fact_key.attno = 2;
+        spec.star_dims.push(counted);
+        spec.fact_filter = FilterSpec::Mask {
+            input: column(100, BOOLOID),
+            kind: MaskKind::Sql,
+        };
+
+        let rows = BTreeMap::from([(100, 100), (200, 10), (300, 20)]);
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&spec, &rows),
+            Some(1_530)
+        );
+    }
+
+    #[test]
+    fn artifact_estimator_is_zero_for_a_bufferless_count_star() {
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&count_star_spec(), &BTreeMap::new()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn artifact_estimator_fails_closed_on_missing_rows_and_overflow() {
+        let mut spec = count_star_spec();
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(column(100, INT4OID)),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(
+                &spec,
+                &BTreeMap::from([(100, u64::MAX)])
+            ),
+            None
+        );
+
+        spec.group_keys[0].source = GroupKeySource::StarDimension {
+            dim_index: 0,
+            group_column: column(200, INT4OID),
+        };
+        spec.star_dims
+            .push(dimension(INT4OID, JoinMultiplicity::Unique));
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&spec, &BTreeMap::from([(100, 1)])),
+            None
+        );
     }
 
     #[test]
