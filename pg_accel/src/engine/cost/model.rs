@@ -1,5 +1,7 @@
 //! Typed cost-model views over the existing flat device limits.
 
+use std::num::NonZeroU32;
+
 use super::device_limits::DeviceLimits;
 use super::units::{Bytes, PgCost, Rows, WorkProduct};
 
@@ -144,6 +146,10 @@ impl From<&DeviceLimits> for CostCoefficients {
 /// Planner thresholds and admission policy.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct PlannerPolicy {
+    /// Expected statement-local reuse count used to amortize synchronous
+    /// first-use resident loads. Zero-valued flat configuration is clamped to
+    /// one at this typed boundary.
+    pub auto_load_amortization_queries: NonZeroU32,
     /// Minimum rows before generic GPU dispatch is considered.
     pub gpu_min_rows: Rows,
     /// Minimum rows for GPU sort at executor level.
@@ -197,6 +203,8 @@ pub struct PlannerPolicy {
 impl From<&DeviceLimits> for PlannerPolicy {
     fn from(limits: &DeviceLimits) -> Self {
         Self {
+            auto_load_amortization_queries: NonZeroU32::new(limits.auto_load_amortization_queries)
+                .unwrap_or(NonZeroU32::MIN),
             gpu_min_rows: Rows::new(limits.gpu_min_rows),
             gpu_sort_min_rows: Rows::new(limits.gpu_sort_min_rows),
             gpu_sort_planner_min_rows: Rows::new(limits.gpu_sort_planner_min_rows),
@@ -378,6 +386,10 @@ mod tests {
 
         assert_eq!(model.planner.gpu_min_rows.get(), limits.gpu_min_rows);
         assert_eq!(
+            model.planner.auto_load_amortization_queries.get(),
+            limits.auto_load_amortization_queries.max(1),
+        );
+        assert_eq!(
             model.planner.gpu_sort_min_rows.get(),
             limits.gpu_sort_min_rows,
         );
@@ -548,6 +560,17 @@ mod tests {
         assert_eq!(
             KernelHealthRegistry::from(&limits).gpu_hash_agg_unsafe_input_rows,
             Rows::new(limits.gpu_hash_agg_unsafe_input_rows),
+        );
+    }
+
+    #[test]
+    fn planner_policy_clamps_zero_auto_load_amortization_to_one() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.auto_load_amortization_queries = 0;
+
+        assert_eq!(
+            PlannerPolicy::from(&limits).auto_load_amortization_queries,
+            NonZeroU32::MIN,
         );
     }
 }

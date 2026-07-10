@@ -40,6 +40,7 @@ mod resident_groupagg;
 mod resident_groupagg_path;
 mod resident_h3_groupagg;
 mod resident_star_groupagg;
+pub mod shape;
 mod ssbm_q1;
 
 pub(in crate::engine::ffi::planner_hooks) use decision::{
