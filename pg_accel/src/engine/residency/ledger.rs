@@ -30,6 +30,9 @@ pub(super) struct ResidencyLedger {
 }
 
 impl Default for ResidencyLedger {
+    // The shared-memory value must remain one fixed-layout allocation; a
+    // heap-backed generation table cannot live inside PostgreSQL shmem.
+    #[allow(clippy::large_stack_arrays)]
     fn default() -> Self {
         Self {
             total_bytes: 0,
@@ -138,7 +141,7 @@ fn current_database_oid() -> u32 {
     }
 }
 
-fn backend_slot(ledger: &mut ResidencyLedger, pid: i32) -> Option<usize> {
+fn backend_slot(ledger: &ResidencyLedger, pid: i32) -> Option<usize> {
     ledger
         .backends
         .iter()
@@ -168,6 +171,10 @@ fn reclaim_dead_backends_with(
     reclaimed
 }
 
+// The production cfg mutates `ledger`; the unit-test cfg intentionally leaves
+// the synthetic backend alone and exercises reclamation through the injected
+// predicate helper.
+#[allow(clippy::needless_pass_by_ref_mut)]
 fn reclaim_dead_backends(ledger: &mut ResidencyLedger) {
     #[cfg(all(not(test), not(feature = "pg_test")))]
     {
@@ -413,7 +420,10 @@ mod tests {
         let _guard = test_guard();
         cleanup_backend();
         let _first = LedgerCharge::reserve(800, 1024).expect("first reserve");
-        assert_eq!(LedgerCharge::reserve(225, 1024).unwrap_err(), 800);
+        assert_eq!(
+            LedgerCharge::reserve(225, 1024).expect_err("reservation must exceed budget"),
+            800
+        );
     }
 
     #[test]

@@ -368,7 +368,7 @@ impl ColumnBuilder {
                     pg_sys::INT2OID => row.get::<i16>(ordinal).map(|value| value.map(i32::from)),
                     pg_sys::DATEOID => row
                         .get::<Date>(ordinal)
-                        .map(|value| value.map(|date| pg_sys::DateADT::from(date))),
+                        .map(|value| value.map(pg_sys::DateADT::from)),
                     _ => row.get::<i32>(ordinal),
                 }
                 .map_err(|error| format!("column {ordinal} integer read failed: {error:?}"))?;
@@ -506,19 +506,16 @@ impl ColumnBuilder {
                 let mut codes = Vec::with_capacity(values.len());
                 let mut nulls = Vec::with_capacity(values.len());
                 for value in &values {
-                    match value {
-                        Some(label) => {
-                            codes.push(
-                                *by_label
-                                    .get(label.as_str())
-                                    .ok_or("text dictionary code disappeared")?,
-                            );
-                            nulls.push(0);
-                        }
-                        None => {
-                            codes.push(0);
-                            nulls.push(1);
-                        }
+                    if let Some(label) = value {
+                        codes.push(
+                            *by_label
+                                .get(label.as_str())
+                                .ok_or("text dictionary code disappeared")?,
+                        );
+                        nulls.push(0);
+                    } else {
+                        codes.push(0);
+                        nulls.push(1);
                     }
                 }
                 StagedColumn::TextDictionary {

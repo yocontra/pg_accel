@@ -108,6 +108,11 @@ impl ResidentColumn {
     }
 
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[must_use]
     pub fn device_bytes(&self) -> Option<u64> {
         let checked = |len: usize, width: usize, nulls: usize| {
             len.checked_mul(width)
@@ -1175,7 +1180,7 @@ fn _pg_accel_evict(table_oid: pg_sys::Oid) -> bool {
 }
 
 pgrx::extension_sql!(
-    r#"
+    r"
 CREATE FUNCTION pg_accel_pin(table_name regclass, columns text[] DEFAULT NULL)
 RETURNS bigint LANGUAGE SQL VOLATILE PARALLEL UNSAFE
 BEGIN ATOMIC
@@ -1199,7 +1204,7 @@ RETURNS boolean LANGUAGE SQL VOLATILE PARALLEL UNSAFE
 BEGIN ATOMIC
     SELECT _pg_accel_evict(table_name::oid);
 END;
-"#,
+",
     name = "pg_accel_residency_v2_sql",
     requires = [
         _pg_accel_pin,
@@ -1210,6 +1215,7 @@ END;
 );
 
 #[pg_extern]
+#[allow(clippy::type_complexity)] // SQL column names are encoded in the tuple type.
 fn pg_accel_resident_status() -> TableIterator<
     'static,
     (
