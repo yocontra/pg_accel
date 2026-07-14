@@ -70,16 +70,11 @@ pub(super) struct SpatialSnapshotLayout {
     pub prepared_base_host_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct SpatialChunkLayout {
-    pub first_row: usize,
-    pub row_count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SpatialPreflight {
     pub fact_rows: usize,
-    pub chunks: Box<[SpatialChunkLayout]>,
+    pub chunk_count: usize,
+    pub chunk_limit: usize,
     pub max_referenced_bytes: usize,
     pub published_accounting: ResidentByteAccounting,
     pub transient_accounting: ResidentByteAccounting,
@@ -145,17 +140,7 @@ pub(super) fn spatial_preflight(
     if chunk_limit > PGACCEL_SPATIAL_MAX_CHUNK_ROWS {
         return Err(SpatialPreflightError::ChunkLimitExceedsNativeMaximum);
     }
-    let mut chunks = Vec::new();
     let chunk_count = base.fact_rows.div_ceil(chunk_limit);
-    chunks
-        .try_reserve_exact(chunk_count)
-        .map_err(|_| SpatialPreflightError::AccountingOverflow)?;
-    for first_row in (0..base.fact_rows).step_by(chunk_limit) {
-        chunks.push(SpatialChunkLayout {
-            first_row,
-            row_count: (base.fact_rows - first_row).min(chunk_limit),
-        });
-    }
 
     let base_device_bytes =
         padded_base_device_bytes(base).ok_or(SpatialPreflightError::AccountingOverflow)?;
@@ -165,9 +150,10 @@ pub(super) fn spatial_preflight(
         .checked_add(final_mask_bytes)
         .ok_or(SpatialPreflightError::AccountingOverflow)?;
 
-    let chunk_scratch = chunks.iter().try_fold(0_u64, |total, chunk| {
-        total.checked_add(chunk_device_bytes(chunk.row_count)?)
-    });
+    let fixed_chunk_scratch =
+        chunk_device_bytes(0).and_then(|bytes| bytes.checked_mul(u64::try_from(chunk_count).ok()?));
+    let row_chunk_scratch = checked_mul(base.fact_rows, 10);
+    let chunk_scratch = fixed_chunk_scratch.and_then(|fixed| fixed.checked_add(row_chunk_scratch?));
     let transient_device_bytes = constant
         .device_bytes()
         .and_then(|bytes| bytes.checked_add(chunk_scratch?))
@@ -208,7 +194,8 @@ pub(super) fn spatial_preflight(
 
     Ok(SpatialPreflight {
         fact_rows: base.fact_rows,
-        chunks: chunks.into_boxed_slice(),
+        chunk_count,
+        chunk_limit,
         max_referenced_bytes,
         published_accounting: ResidentByteAccounting {
             device_bytes: published_device_bytes,
@@ -267,9 +254,8 @@ impl DerivedArtifact for SpatialAggArtifact {
     }
 }
 
-/// Accounting-only shell for the transient W checkpoint. Buffer ownership and
-/// launch outcomes are added in the dispatch checkpoint; the exact declaration
-/// is already pinned here and is independently checked by the store lifecycle.
+/// Accounting declaration consumed by the post-charge workspace builder.
+/// Buffer ownership and launch outcomes are added in the dispatch checkpoint.
 pub(super) struct SpatialWorkspace {
     pub preflight: SpatialPreflight,
 }
@@ -323,9 +309,8 @@ mod tests {
             PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
         )
         .expect("bounded preflight");
-        assert_eq!(preflight.chunks.len(), 2);
-        assert_eq!(preflight.chunks[0].row_count, 65_536);
-        assert_eq!(preflight.chunks[1].row_count, 3);
+        assert_eq!(preflight.chunk_count, 2);
+        assert_eq!(preflight.chunk_limit, 65_536);
         let full_uncertainty_host = (PGACCEL_SPATIAL_MAX_CHUNK_ROWS as u64 + 3) * 9;
         assert!(preflight.transient_accounting.retained_host_exact_bytes >= full_uncertainty_host);
     }
@@ -426,5 +411,20 @@ mod tests {
             ),
             Err(SpatialPreflightError::AccountingOverflow)
         );
+    }
+
+    #[test]
+    fn preflight_performs_no_allocation_or_snapshot_copy() {
+        let base = shape(10);
+        let constant = constant();
+        let snapshot = SpatialSnapshotLayout {
+            exact_snapshot_words: 10,
+            prepared_base_host_bytes: 20,
+        };
+        crate::engine::residency::begin_test_allocation_count();
+        let result = spatial_preflight(&base, constant, snapshot, 4);
+        let allocation_count = crate::engine::residency::finish_test_allocation_count();
+        assert!(result.is_ok());
+        assert_eq!(allocation_count, 0);
     }
 }
