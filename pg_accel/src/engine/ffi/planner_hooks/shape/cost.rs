@@ -136,6 +136,8 @@ pub fn estimate_shape_cost(
         model.coefficients.gpu_op_cost_hash_agg
     };
     let h3_resolution = h3_parent_resolution(spec);
+    let h3_group_rows_bound =
+        h3_resolution.and_then(|resolution| h3_group_bound(fact_rows, resolution));
     let aggregate =
         mul_cost(fact_rows, aggregate_coefficient) * spec.measures.len() as f64 * fp64_multiplier;
     let aggregate = aggregate
@@ -146,10 +148,11 @@ pub fn estimate_shape_cost(
                 * GPU_LAUNCH_OVERHEAD;
             transform + launches
         });
-    let output_materialization = mul_cost(
-        input.estimated_output_rows,
-        model.coefficients.preagg_yield_cost,
-    );
+    let estimated_output_rows = h3_group_rows_bound.map_or(input.estimated_output_rows, |bound| {
+        input.estimated_output_rows.min(bound)
+    });
+    let output_materialization =
+        mul_cost(estimated_output_rows, model.coefficients.preagg_yield_cost);
     let amortized_auto_load = residency.amortized_load_cost.get();
     let total = fact_scan
         + dimension_setup
@@ -203,9 +206,7 @@ pub fn estimate_shape_cost(
             maximum: model.memory.gpu_preagg_max_dim_rows,
         }
     } else {
-        let gate_group_rows = h3_resolution
-            .and_then(|resolution| h3_group_bound(fact_rows, resolution))
-            .unwrap_or(input.estimated_output_rows);
+        let gate_group_rows = h3_group_rows_bound.unwrap_or(input.estimated_output_rows);
         let estimated_groups = Rows::new(rows(gate_group_rows));
         if !spec.group_keys.is_empty() && estimated_groups > model.memory.gpu_hash_agg_max_groups {
             ShapeCostGate::GroupsExceedDeviceMaximum {

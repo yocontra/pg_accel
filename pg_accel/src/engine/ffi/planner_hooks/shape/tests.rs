@@ -1171,6 +1171,35 @@ fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
 }
 
 #[test]
+fn h3_parent_output_cost_caps_postgres_group_estimate_to_exact_universe() {
+    let mut input = h3_parent_input(1_000_000, 0);
+    input.estimated_output_rows = 1_000_000;
+    input.relations[0].residency = RelationResidency::Resident;
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_h3_group_min_rows = 1;
+    limits.gpu_hash_agg_min_rows = 1;
+
+    let plan = build_shape(input, &TypedCostModel::from_limits(&limits))
+        .expect("resolution-zero H3 shape should build");
+    let bounded_output_cost = 123.0 * limits.preagg_yield_cost;
+    assert!(
+        (plan.cost.output_materialization.get() - bounded_output_cost).abs() < 1.0e-12,
+        "resolution zero has at most 122 H3 cells plus one NULL group",
+    );
+
+    // Reproduce the PG18 admission miss: the raw expression-group estimate
+    // alone exceeded the required native-path margin before applying the bound.
+    let required_cost = 22_879.0 * limits.gpu_agg_cost_ratio;
+    let unbounded_total =
+        plan.cost.total.get() - bounded_output_cost + 1_000_000.0 * limits.preagg_yield_cost;
+    assert!(unbounded_total > required_cost);
+    assert!(
+        crate::engine::cost::GPU_LAUNCH_OVERHEAD + plan.cost.total.get() <= required_cost,
+        "the exact H3 output bound restores the native-path cost margin",
+    );
+}
+
+#[test]
 fn fp64_cost_uses_typed_device_multiplier() {
     let input = single_table_input();
     let mut limits = DeviceLimits::cpu_only();
