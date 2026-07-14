@@ -160,6 +160,107 @@ mod abi_size_pins {
     // 3 × f64 = 24.
     const _: () = assert!(std::mem::size_of::<PgaccelReclassRule>() == 24);
     const _: () = assert!(std::mem::align_of::<PgaccelReclassRule>() == 8);
+
+    // Exact resident raster Reclass ABI (pgaccel_ffi.h, LP64).
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentRasterRow>() == 72);
+    const _: () = assert!(std::mem::align_of::<PgaccelResidentRasterRow>() == 8);
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentRasterBand>() == 16);
+    const _: () = assert!(std::mem::align_of::<PgaccelResidentRasterBand>() == 8);
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentRasterView>() == 104);
+    const _: () = assert!(std::mem::align_of::<PgaccelResidentRasterView>() == 8);
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentRasterReclassRule>() == 16);
+    const _: () = assert!(std::mem::align_of::<PgaccelResidentRasterReclassRule>() == 8);
+    const _: () = assert!(std::mem::size_of::<PgaccelResidentRasterValidationScratch>() == 24);
+    const _: () = assert!(std::mem::align_of::<PgaccelResidentRasterValidationScratch>() == 8);
+    const _: () = assert!(std::mem::size_of::<PgaccelRasterReclassResidentRequest>() == 240);
+    const _: () = assert!(std::mem::align_of::<PgaccelRasterReclassResidentRequest>() == 8);
+
+    macro_rules! offset_pin {
+        ($type:ty, $field:ident, $offset:expr) => {
+            const _: () = assert!(std::mem::offset_of!($type, $field) == $offset);
+        };
+    }
+
+    offset_pin!(PgaccelResidentRasterRow, width, 0);
+    offset_pin!(PgaccelResidentRasterRow, height, 4);
+    offset_pin!(PgaccelResidentRasterRow, first_band, 8);
+    offset_pin!(PgaccelResidentRasterRow, band_count, 12);
+    offset_pin!(PgaccelResidentRasterRow, srid, 16);
+    offset_pin!(PgaccelResidentRasterRow, flags, 20);
+    offset_pin!(PgaccelResidentRasterRow, scale_x, 24);
+    offset_pin!(PgaccelResidentRasterRow, scale_y, 32);
+    offset_pin!(PgaccelResidentRasterRow, ip_x, 40);
+    offset_pin!(PgaccelResidentRasterRow, ip_y, 48);
+    offset_pin!(PgaccelResidentRasterRow, skew_x, 56);
+    offset_pin!(PgaccelResidentRasterRow, skew_y, 64);
+
+    offset_pin!(PgaccelResidentRasterBand, pixel_type, 0);
+    offset_pin!(PgaccelResidentRasterBand, flags, 4);
+    offset_pin!(PgaccelResidentRasterBand, nodata, 8);
+
+    offset_pin!(PgaccelResidentRasterView, abi_version, 0);
+    offset_pin!(PgaccelResidentRasterView, flags, 4);
+    offset_pin!(PgaccelResidentRasterView, pixels, 8);
+    offset_pin!(PgaccelResidentRasterView, pixels_bytes, 16);
+    offset_pin!(PgaccelResidentRasterView, band_offsets, 24);
+    offset_pin!(PgaccelResidentRasterView, band_offsets_bytes, 32);
+    offset_pin!(PgaccelResidentRasterView, rows, 40);
+    offset_pin!(PgaccelResidentRasterView, rows_bytes, 48);
+    offset_pin!(PgaccelResidentRasterView, bands, 56);
+    offset_pin!(PgaccelResidentRasterView, bands_bytes, 64);
+    offset_pin!(PgaccelResidentRasterView, nulls, 72);
+    offset_pin!(PgaccelResidentRasterView, nulls_bytes, 80);
+    offset_pin!(PgaccelResidentRasterView, row_count, 88);
+    offset_pin!(PgaccelResidentRasterView, band_count, 96);
+
+    offset_pin!(PgaccelResidentRasterReclassRule, source, 0);
+    offset_pin!(PgaccelResidentRasterReclassRule, destination, 8);
+
+    offset_pin!(PgaccelResidentRasterValidationScratch, failures, 0);
+    offset_pin!(PgaccelResidentRasterValidationScratch, pad, 4);
+    offset_pin!(
+        PgaccelResidentRasterValidationScratch,
+        first_output_offset,
+        8
+    );
+    offset_pin!(
+        PgaccelResidentRasterValidationScratch,
+        last_output_offset,
+        16
+    );
+
+    offset_pin!(PgaccelRasterReclassResidentRequest, abi_version, 0);
+    offset_pin!(PgaccelRasterReclassResidentRequest, flags, 4);
+    offset_pin!(PgaccelRasterReclassResidentRequest, input, 8);
+    offset_pin!(PgaccelRasterReclassResidentRequest, first_row, 112);
+    offset_pin!(PgaccelRasterReclassResidentRequest, count, 120);
+    offset_pin!(PgaccelRasterReclassResidentRequest, output_pixel_type, 128);
+    offset_pin!(PgaccelRasterReclassResidentRequest, pad, 132);
+    offset_pin!(PgaccelRasterReclassResidentRequest, rules, 136);
+    offset_pin!(PgaccelRasterReclassResidentRequest, rules_bytes, 144);
+    offset_pin!(PgaccelRasterReclassResidentRequest, rule_count, 152);
+    offset_pin!(PgaccelRasterReclassResidentRequest, output_offsets, 160);
+    offset_pin!(
+        PgaccelRasterReclassResidentRequest,
+        output_offsets_bytes,
+        168
+    );
+    offset_pin!(PgaccelRasterReclassResidentRequest, output_pixels, 176);
+    offset_pin!(
+        PgaccelRasterReclassResidentRequest,
+        output_pixels_bytes,
+        184
+    );
+    offset_pin!(PgaccelRasterReclassResidentRequest, row_actions, 192);
+    offset_pin!(PgaccelRasterReclassResidentRequest, row_actions_bytes, 200);
+    offset_pin!(PgaccelRasterReclassResidentRequest, validation_scratch, 208);
+    offset_pin!(
+        PgaccelRasterReclassResidentRequest,
+        validation_scratch_bytes,
+        216
+    );
+    offset_pin!(PgaccelRasterReclassResidentRequest, max_total_pixels, 224);
+    offset_pin!(PgaccelRasterReclassResidentRequest, max_chunk_pixels, 232);
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +540,206 @@ pub enum PgaccelPixelType {
     Float64 = 4,
 }
 
+/// ABI version for the exact resident PostGIS Reclass descriptor.
+pub const PGACCEL_RESIDENT_RASTER_ABI_VERSION: u32 = 1;
+#[allow(dead_code)] // reason: exact resident ABI cap consumed by executor wiring landing separately
+pub const PGACCEL_RESIDENT_RASTER_MAX_RECLASS_RULES: u32 = 64;
+#[allow(dead_code)] // reason: exact resident ABI cap consumed by executor wiring landing separately
+pub const PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH: u32 = 65_536;
+#[allow(dead_code)] // reason: exact resident ABI cap consumed by executor wiring landing separately
+pub const PGACCEL_RESIDENT_RASTER_MAX_LAUNCH_CHUNKS: u32 = 4_096;
+
+// Literal PostGIS 3.6.4 rt_pixtype tags. These stay raw u32 values instead of
+// a Rust enum so validation tests can safely construct malformed descriptors.
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_BOOL: u32 = 0;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_UINT2: u32 = 1;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_UINT4: u32 = 2;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_INT8: u32 = 3;
+pub const PGACCEL_RESIDENT_RASTER_UINT8: u32 = 4;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_INT16: u32 = 5;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_UINT16: u32 = 6;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_INT32: u32 = 7;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag
+pub const PGACCEL_RESIDENT_RASTER_UINT32: u32 = 8;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag retained for input views
+pub const PGACCEL_RESIDENT_RASTER_FLOAT32: u32 = 10;
+#[allow(dead_code)] // reason: literal PostGIS resident ABI tag retained for input views
+pub const PGACCEL_RESIDENT_RASTER_FLOAT64: u32 = 11;
+
+#[allow(dead_code)] // reason: raw resident ABI flag consumed by executor wiring landing separately
+pub const PGACCEL_RESIDENT_RASTER_BAND_HAS_NODATA: u32 = 1 << 0;
+#[allow(dead_code)] // reason: raw resident ABI flag consumed by executor wiring landing separately
+pub const PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA: u32 = 1 << 1;
+
+#[allow(dead_code)] // reason: native row action consumed by executor wiring landing separately
+pub const PGACCEL_RASTER_ROW_NULL: u8 = 0;
+#[allow(dead_code)] // reason: native row action consumed by executor wiring landing separately
+pub const PGACCEL_RASTER_ROW_PASSTHROUGH: u8 = 1;
+#[allow(dead_code)] // reason: native row action consumed by executor wiring landing separately
+pub const PGACCEL_RASTER_ROW_RECLASSIFIED: u8 = 2;
+
+#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
+pub const PGACCEL_RASTER_VALIDATION_VIEW: u32 = 1 << 0;
+#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
+pub const PGACCEL_RASTER_VALIDATION_RULES: u32 = 1 << 1;
+#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
+pub const PGACCEL_RASTER_VALIDATION_OFFSETS: u32 = 1 << 2;
+#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
+pub const PGACCEL_RASTER_VALIDATION_CAPACITY: u32 = 1 << 3;
+#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
+pub const PGACCEL_RASTER_VALIDATION_BYTE_BUDGET: u32 = 1 << 4;
+#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
+pub const PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW: u32 = 1 << 5;
+
+/// Per-row raster metadata consumed directly from resident device storage.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PgaccelResidentRasterRow {
+    pub width: u32,
+    pub height: u32,
+    pub first_band: u32,
+    pub band_count: u32,
+    pub srid: i32,
+    pub flags: u32,
+    pub scale_x: f64,
+    pub scale_y: f64,
+    pub ip_x: f64,
+    pub ip_y: f64,
+    pub skew_x: f64,
+    pub skew_y: f64,
+}
+
+/// Per-band raster metadata consumed directly from resident device storage.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PgaccelResidentRasterBand {
+    pub pixel_type: u32,
+    pub flags: u32,
+    pub nodata: f64,
+}
+
+/// Exact device pointer/span view over one resident raster column.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PgaccelResidentRasterView {
+    pub abi_version: u32,
+    pub flags: u32,
+    pub pixels: *const u8,
+    pub pixels_bytes: usize,
+    pub band_offsets: *const u64,
+    pub band_offsets_bytes: usize,
+    pub rows: *const PgaccelResidentRasterRow,
+    pub rows_bytes: usize,
+    pub bands: *const PgaccelResidentRasterBand,
+    pub bands_bytes: usize,
+    pub nulls: *const u8,
+    pub nulls_bytes: usize,
+    pub row_count: usize,
+    pub band_count: usize,
+}
+
+impl Default for PgaccelResidentRasterView {
+    fn default() -> Self {
+        Self {
+            abi_version: PGACCEL_RESIDENT_RASTER_ABI_VERSION,
+            flags: 0,
+            pixels: std::ptr::null(),
+            pixels_bytes: 0,
+            band_offsets: std::ptr::null(),
+            band_offsets_bytes: 0,
+            rows: std::ptr::null(),
+            rows_bytes: 0,
+            bands: std::ptr::null(),
+            bands_bytes: 0,
+            nulls: std::ptr::null(),
+            nulls_bytes: 0,
+            row_count: 0,
+            band_count: 0,
+        }
+    }
+}
+
+/// One sorted, singular integer Reclass mapping.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PgaccelResidentRasterReclassRule {
+    pub source: i64,
+    pub destination: i64,
+}
+
+/// Caller-owned device validation output. The raw launch never copies this
+/// allocation to host; the caller does so only after releasing the input-store
+/// borrow and then passes the host value to the typed validation mapper.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PgaccelResidentRasterValidationScratch {
+    pub failures: u32,
+    pub pad: u32,
+    pub first_output_offset: u64,
+    pub last_output_offset: u64,
+}
+
+/// Exact resident Reclass launch descriptor. Every pointer names device or
+/// shared USM; byte counts are spans/capacities, and output offsets are bytes.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct PgaccelRasterReclassResidentRequest {
+    pub abi_version: u32,
+    pub flags: u32,
+    pub input: PgaccelResidentRasterView,
+    pub first_row: usize,
+    pub count: usize,
+    pub output_pixel_type: u32,
+    pub pad: u32,
+    pub rules: *const PgaccelResidentRasterReclassRule,
+    pub rules_bytes: usize,
+    pub rule_count: usize,
+    pub output_offsets: *const u64,
+    pub output_offsets_bytes: usize,
+    pub output_pixels: *mut u8,
+    pub output_pixels_bytes: usize,
+    pub row_actions: *mut u8,
+    pub row_actions_bytes: usize,
+    pub validation_scratch: *mut PgaccelResidentRasterValidationScratch,
+    pub validation_scratch_bytes: usize,
+    pub max_total_pixels: usize,
+    pub max_chunk_pixels: usize,
+}
+
+impl Default for PgaccelRasterReclassResidentRequest {
+    fn default() -> Self {
+        Self {
+            abi_version: PGACCEL_RESIDENT_RASTER_ABI_VERSION,
+            flags: 0,
+            input: PgaccelResidentRasterView::default(),
+            first_row: 0,
+            count: 0,
+            output_pixel_type: PGACCEL_RESIDENT_RASTER_UINT8,
+            pad: 0,
+            rules: std::ptr::null(),
+            rules_bytes: 0,
+            rule_count: 0,
+            output_offsets: std::ptr::null(),
+            output_offsets_bytes: 0,
+            output_pixels: std::ptr::null_mut(),
+            output_pixels_bytes: 0,
+            row_actions: std::ptr::null_mut(),
+            row_actions_bytes: 0,
+            validation_scratch: std::ptr::null_mut(),
+            validation_scratch_bytes: 0,
+            max_total_pixels: 0,
+            max_chunk_pixels: 0,
+        }
+    }
+}
+
 /// Map-algebra opcode (mirrors `pgaccel_op` in `pgaccel_ffi.h`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -511,5 +812,234 @@ mod resident_abi_tests {
         assert_eq!(std::mem::size_of::<PgaccelResidentColumnView>(), 48);
         assert_eq!(std::mem::size_of::<PgaccelResidentBatch>(), 56);
         assert_eq!(std::mem::size_of::<PgaccelDeviceVarOutput>(), 104);
+    }
+
+    #[test]
+    fn resident_raster_constants_match_c_header() {
+        assert_eq!(PGACCEL_RESIDENT_RASTER_ABI_VERSION, 1);
+        assert_eq!(PGACCEL_RESIDENT_RASTER_MAX_RECLASS_RULES, 64);
+        assert_eq!(PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH, 65_536);
+        assert_eq!(PGACCEL_RESIDENT_RASTER_MAX_LAUNCH_CHUNKS, 4_096);
+        assert_eq!(
+            [
+                PGACCEL_RESIDENT_RASTER_BOOL,
+                PGACCEL_RESIDENT_RASTER_UINT2,
+                PGACCEL_RESIDENT_RASTER_UINT4,
+                PGACCEL_RESIDENT_RASTER_INT8,
+                PGACCEL_RESIDENT_RASTER_UINT8,
+                PGACCEL_RESIDENT_RASTER_INT16,
+                PGACCEL_RESIDENT_RASTER_UINT16,
+                PGACCEL_RESIDENT_RASTER_INT32,
+                PGACCEL_RESIDENT_RASTER_UINT32,
+                PGACCEL_RESIDENT_RASTER_FLOAT32,
+                PGACCEL_RESIDENT_RASTER_FLOAT64,
+            ],
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+        );
+        assert_eq!(PGACCEL_RASTER_ROW_NULL, 0);
+        assert_eq!(PGACCEL_RASTER_ROW_PASSTHROUGH, 1);
+        assert_eq!(PGACCEL_RASTER_ROW_RECLASSIFIED, 2);
+        assert_eq!(PGACCEL_RASTER_VALIDATION_VIEW, 1);
+        assert_eq!(PGACCEL_RASTER_VALIDATION_RULES, 2);
+        assert_eq!(PGACCEL_RASTER_VALIDATION_OFFSETS, 4);
+        assert_eq!(PGACCEL_RASTER_VALIDATION_CAPACITY, 8);
+        assert_eq!(PGACCEL_RASTER_VALIDATION_BYTE_BUDGET, 16);
+        assert_eq!(PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW, 32);
+    }
+
+    #[test]
+    fn resident_raster_row_band_and_view_layouts_match_c_header() {
+        assert_eq!(std::mem::size_of::<PgaccelResidentRasterRow>(), 72);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, width), 0);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, height), 4);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterRow, first_band),
+            8
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterRow, band_count),
+            12
+        );
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, srid), 16);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, flags), 20);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, scale_x), 24);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, scale_y), 32);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, ip_x), 40);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, ip_y), 48);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, skew_x), 56);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterRow, skew_y), 64);
+
+        assert_eq!(std::mem::size_of::<PgaccelResidentRasterBand>(), 16);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterBand, pixel_type),
+            0
+        );
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterBand, flags), 4);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterBand, nodata), 8);
+
+        assert_eq!(std::mem::size_of::<PgaccelResidentRasterView>(), 104);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, abi_version),
+            0
+        );
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterView, flags), 4);
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterView, pixels), 8);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, pixels_bytes),
+            16
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, band_offsets),
+            24
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, band_offsets_bytes),
+            32
+        );
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterView, rows), 40);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, rows_bytes),
+            48
+        );
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterView, bands), 56);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, bands_bytes),
+            64
+        );
+        assert_eq!(std::mem::offset_of!(PgaccelResidentRasterView, nulls), 72);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, nulls_bytes),
+            80
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, row_count),
+            88
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterView, band_count),
+            96
+        );
+    }
+
+    #[test]
+    fn resident_raster_rule_scratch_and_request_layouts_match_c_header() {
+        assert_eq!(std::mem::size_of::<PgaccelResidentRasterReclassRule>(), 16);
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterReclassRule, source),
+            0
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterReclassRule, destination),
+            8
+        );
+
+        assert_eq!(
+            std::mem::size_of::<PgaccelResidentRasterValidationScratch>(),
+            24
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterValidationScratch, failures),
+            0
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterValidationScratch, pad),
+            4
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterValidationScratch, first_output_offset),
+            8
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelResidentRasterValidationScratch, last_output_offset),
+            16
+        );
+
+        assert_eq!(
+            std::mem::size_of::<PgaccelRasterReclassResidentRequest>(),
+            240
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, abi_version),
+            0
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, flags),
+            4
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, input),
+            8
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, first_row),
+            112
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, count),
+            120
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, output_pixel_type),
+            128
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, pad),
+            132
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, rules),
+            136
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, rules_bytes),
+            144
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, rule_count),
+            152
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, output_offsets),
+            160
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, output_offsets_bytes),
+            168
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, output_pixels),
+            176
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, output_pixels_bytes),
+            184
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, row_actions),
+            192
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, row_actions_bytes),
+            200
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, validation_scratch),
+            208
+        );
+        assert_eq!(
+            std::mem::offset_of!(
+                PgaccelRasterReclassResidentRequest,
+                validation_scratch_bytes
+            ),
+            216
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, max_total_pixels),
+            224
+        );
+        assert_eq!(
+            std::mem::offset_of!(PgaccelRasterReclassResidentRequest, max_chunk_pixels),
+            232
+        );
     }
 }

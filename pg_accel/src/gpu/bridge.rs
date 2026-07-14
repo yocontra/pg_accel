@@ -9,7 +9,8 @@ pub use super::types::{
     PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr, PgaccelExprInst,
     PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType,
     PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType,
-    PgaccelPlatformCaps, PgaccelReclassRule, PgaccelStatus, PgaccelVal, PgaccelValTag,
+    PgaccelPlatformCaps, PgaccelRasterReclassResidentRequest, PgaccelReclassRule, PgaccelStatus,
+    PgaccelVal, PgaccelValTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -1072,6 +1073,43 @@ bridge_status_fns! {
         max_pairs: usize,
         pair_count_out: *mut usize,
     ) -> PgaccelStatus;
+}
+
+/// Raw resident raster entry point kept outside [`bridge_status_fns!`].
+///
+/// This is the one status-returning kernel symbol whose caller must retain the
+/// unconverted status while a resident-store dispatch borrow is active. The
+/// generated status wrapper cannot be used there because [`convert_status`]
+/// records counters and traces failures.
+mod resident_raster_raw {
+    use super::PgaccelRasterReclassResidentRequest;
+
+    unsafe extern "C" {
+        pub fn pgaccel_raster_reclass_resident_ex(
+            request: *const PgaccelRasterReclassResidentRequest,
+            detail: *mut i32,
+        ) -> i32;
+    }
+}
+
+/// Submit the exact resident PostGIS Reclass launch without converting its
+/// raw status. This function performs no allocation, tracing, counter updates,
+/// or validation-scratch copy.
+///
+/// # Safety
+///
+/// The caller must uphold the pointer/span and initialized-queue contract in
+/// `pgaccel_ffi.h`. The returned status must be converted after releasing the
+/// resident-store dispatch borrow.
+#[must_use]
+#[inline]
+pub(super) unsafe fn pgaccel_raster_reclass_resident_ex_raw(
+    request: *const PgaccelRasterReclassResidentRequest,
+    detail: *mut i32,
+) -> i32 {
+    // SAFETY: forwards verbatim to the C symbol; the caller upholds its
+    // documented request and queue contract.
+    unsafe { resident_raster_raw::pgaccel_raster_reclass_resident_ex(request, detail) }
 }
 
 // Non-status externs: entry points returning pointers, scalars, structs, or
