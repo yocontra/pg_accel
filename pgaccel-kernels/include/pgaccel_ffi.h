@@ -534,12 +534,12 @@ typedef struct {
 typedef struct {
   uint32_t abi_version;
   uint32_t flags;
-  const double* coordinates;       /* [coordinate_pair_count * 2] */
-  const double* bboxes;            /* [row_count * 4] */
-  const uint64_t* geometry_offsets; /* [row_count + 1], coordinate-pair offsets */
-  const uint64_t* ring_offsets;     /* [ring_count], coordinate-pair offsets */
+  const double* coordinates;                 /* [coordinate_pair_count * 2] */
+  const double* bboxes;                      /* [row_count * 4] */
+  const uint64_t* geometry_offsets;          /* [row_count + 1], coordinate-pair offsets */
+  const uint64_t* ring_offsets;              /* [ring_count], coordinate-pair offsets */
   const pgaccel_resident_geometry_row* rows; /* [row_count] */
-  const uint8_t* nulls;             /* optional [row_count], canonical 0/1 */
+  const uint8_t* nulls;                      /* optional [row_count], canonical 0/1 */
   size_t row_count;
   size_t coordinate_pair_count;
   size_t ring_count;
@@ -577,8 +577,8 @@ typedef struct {
   size_t max_referenced_bytes; /* defensive per-call geometry work cap */
   pgaccel_resident_geometry_operand left;
   pgaccel_resident_geometry_operand right;
-  int8_t* predicate_results; /* device [output_capacity], boolean predicates */
-  double* distances;         /* device [output_capacity], Distance only */
+  int8_t* predicate_results;   /* device [output_capacity], boolean predicates */
+  double* distances;           /* device [output_capacity], Distance only */
   uint8_t* distance_uncertain; /* device [output_capacity], Distance only */
   size_t output_capacity;
 } pgaccel_spatial_resident_request;
@@ -590,9 +590,8 @@ typedef struct {
  * Distance uses its dedicated fp64 output and uncertainty sidecar. Descriptor,
  * pointer, geometry-shape, SRID, byte-budget, device, allocation, and runtime
  * failures are hard non-OK statuses and never synthesize UNCERTAIN rows. */
-pgaccel_status
-pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
-                                 int32_t* detail);
+pgaccel_status pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
+                                                int32_t* detail);
 
 /* Deprecated cross-product ABI retained for link compatibility. Non-empty
  * inputs return PGACCEL_UNSUPPORTED with zero counts and no GPU dispatch.

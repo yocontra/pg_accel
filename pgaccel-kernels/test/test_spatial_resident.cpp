@@ -1,0 +1,498 @@
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <utility>
+#include <vector>
+
+#include "pgaccel_expr.h"
+#include "pgaccel_ffi.h"
+
+namespace {
+
+int passed = 0;
+int failed = 0;
+
+#define CHECK(label, condition)                                              \
+  do {                                                                       \
+    if (condition) {                                                         \
+      ++passed;                                                              \
+    } else {                                                                 \
+      std::fprintf(stderr, "FAIL: %s (%s:%d)\n", label, __FILE__, __LINE__); \
+      ++failed;                                                              \
+    }                                                                        \
+  } while (0)
+
+template <typename T>
+class DeviceBuffer {
+ public:
+  DeviceBuffer() = default;
+  explicit DeviceBuffer(const std::vector<T>& values) { copy(values); }
+  explicit DeviceBuffer(size_t count) { allocate(count); }
+  DeviceBuffer(const DeviceBuffer&) = delete;
+  DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+  DeviceBuffer(DeviceBuffer&& other) noexcept : pointer_(other.pointer_), count_(other.count_) {
+    other.pointer_ = nullptr;
+    other.count_ = 0;
+  }
+  DeviceBuffer& operator=(DeviceBuffer&& other) noexcept {
+    if (this != &other) {
+      reset();
+      pointer_ = other.pointer_;
+      count_ = other.count_;
+      other.pointer_ = nullptr;
+      other.count_ = 0;
+    }
+    return *this;
+  }
+  ~DeviceBuffer() { reset(); }
+
+  void copy(const std::vector<T>& values) {
+    reset();
+    count_ = values.size();
+    if (values.empty())
+      return;
+    void* raw = nullptr;
+    if (pgaccel_expr_device_alloc_copy(values.data(), values.size() * sizeof(T), &raw) !=
+            PGACCEL_OK ||
+        raw == nullptr) {
+      std::fprintf(stderr, "device copy allocation failed\n");
+      std::exit(2);
+    }
+    pointer_ = static_cast<T*>(raw);
+  }
+
+  void allocate(size_t count) {
+    reset();
+    count_ = count;
+    if (count == 0)
+      return;
+    void* raw = nullptr;
+    if (pgaccel_expr_device_alloc(count * sizeof(T), &raw) != PGACCEL_OK || raw == nullptr) {
+      std::fprintf(stderr, "device output allocation failed\n");
+      std::exit(2);
+    }
+    pointer_ = static_cast<T*>(raw);
+  }
+
+  std::vector<T> to_host() const {
+    std::vector<T> result(count_);
+    if (count_ != 0 && pgaccel_expr_device_copy_to_host(result.data(), pointer_,
+                                                        count_ * sizeof(T)) != PGACCEL_OK) {
+      std::fprintf(stderr, "device output copy failed\n");
+      std::exit(2);
+    }
+    return result;
+  }
+
+  T* get() const { return pointer_; }
+  size_t size() const { return count_; }
+
+ private:
+  void reset() {
+    if (pointer_ != nullptr)
+      pgaccel_expr_device_free(pointer_);
+    pointer_ = nullptr;
+    count_ = 0;
+  }
+
+  T* pointer_ = nullptr;
+  size_t count_ = 0;
+};
+
+struct HostGeometry {
+  uint32_t type;
+  std::vector<double> coordinates;
+  std::vector<uint64_t> rings;
+  int32_t srid = 4326;
+  bool is_null = false;
+};
+
+HostGeometry point(double x, double y, int32_t srid = 4326) {
+  return {PGACCEL_RESIDENT_GEOMETRY_POINT, {x, y}, {}, srid, false};
+}
+
+HostGeometry line(std::initializer_list<double> coordinates, int32_t srid = 4326) {
+  return {PGACCEL_RESIDENT_GEOMETRY_LINESTRING, coordinates, {}, srid, false};
+}
+
+HostGeometry polygon(std::initializer_list<double> coordinates,
+                     std::initializer_list<uint64_t> rings = {0}, int32_t srid = 4326) {
+  return {PGACCEL_RESIDENT_GEOMETRY_POLYGON, coordinates, rings, srid, false};
+}
+
+HostGeometry empty_point() {
+  return {PGACCEL_RESIDENT_GEOMETRY_POINT, {}, {}, 4326, false};
+}
+
+HostGeometry null_geometry() {
+  return {0, {}, {}, 0, true};
+}
+
+struct DeviceLane {
+  DeviceBuffer<double> coordinates;
+  DeviceBuffer<double> bboxes;
+  DeviceBuffer<uint64_t> geometry_offsets;
+  DeviceBuffer<uint64_t> ring_offsets;
+  DeviceBuffer<pgaccel_resident_geometry_row> rows;
+  DeviceBuffer<uint8_t> nulls;
+  size_t row_count = 0;
+  size_t coordinate_pair_count = 0;
+  size_t ring_count = 0;
+
+  pgaccel_resident_geometry_view view() const {
+    return {PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION,
+            0,
+            coordinates.get(),
+            bboxes.get(),
+            geometry_offsets.get(),
+            ring_offsets.get(),
+            rows.get(),
+            nulls.get(),
+            row_count,
+            coordinate_pair_count,
+            ring_count};
+  }
+};
+
+DeviceLane make_lane(const std::vector<HostGeometry>& geometries) {
+  std::vector<double> coordinates;
+  std::vector<double> bboxes;
+  std::vector<uint64_t> geometry_offsets{0};
+  std::vector<uint64_t> ring_offsets;
+  std::vector<pgaccel_resident_geometry_row> rows;
+  std::vector<uint8_t> nulls;
+  for (const HostGeometry& geometry : geometries) {
+    const uint64_t pair_begin = coordinates.size() / 2;
+    if (!geometry.is_null)
+      coordinates.insert(coordinates.end(), geometry.coordinates.begin(),
+                         geometry.coordinates.end());
+    const uint64_t pair_end = coordinates.size() / 2;
+    geometry_offsets.push_back(pair_end);
+    nulls.push_back(geometry.is_null ? 1 : 0);
+    if (geometry.is_null) {
+      rows.push_back({});
+      bboxes.insert(bboxes.end(), {0.0, 0.0, 0.0, 0.0});
+      continue;
+    }
+    const uint64_t first_ring = ring_offsets.size();
+    for (uint64_t local : geometry.rings)
+      ring_offsets.push_back(pair_begin + local);
+    const uint32_t flags = pair_begin == pair_end ? 0 : PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID;
+    rows.push_back({geometry.type, geometry.srid, first_ring,
+                    static_cast<uint32_t>(geometry.rings.size()), flags});
+    if (pair_begin == pair_end) {
+      bboxes.insert(bboxes.end(), {0.0, 0.0, 0.0, 0.0});
+      continue;
+    }
+    double min_x = std::numeric_limits<double>::max();
+    double min_y = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double max_y = std::numeric_limits<double>::lowest();
+    for (size_t index = 0; index < geometry.coordinates.size(); index += 2) {
+      min_x = std::fmin(min_x, geometry.coordinates[index]);
+      min_y = std::fmin(min_y, geometry.coordinates[index + 1]);
+      max_x = std::fmax(max_x, geometry.coordinates[index]);
+      max_y = std::fmax(max_y, geometry.coordinates[index + 1]);
+    }
+    bboxes.insert(bboxes.end(), {min_x, min_y, max_x, max_y});
+  }
+  DeviceLane lane;
+  lane.row_count = geometries.size();
+  lane.coordinate_pair_count = coordinates.size() / 2;
+  lane.ring_count = ring_offsets.size();
+  lane.coordinates.copy(coordinates);
+  lane.bboxes.copy(bboxes);
+  lane.geometry_offsets.copy(geometry_offsets);
+  lane.ring_offsets.copy(ring_offsets);
+  lane.rows.copy(rows);
+  lane.nulls.copy(nulls);
+  return lane;
+}
+
+struct PredicateRun {
+  pgaccel_status status;
+  int32_t detail;
+  std::vector<int8_t> results;
+};
+
+PredicateRun run_predicate(const DeviceLane& left, bool left_constant, const DeviceLane& right,
+                           bool right_constant, size_t count, pgaccel_spatial_predicate predicate,
+                           double threshold = 0.0, size_t byte_budget = 256 * 1024 * 1024) {
+  DeviceBuffer<int8_t> output(count);
+  pgaccel_spatial_resident_request request{};
+  request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+  request.predicate = predicate;
+  request.distance_threshold = threshold;
+  request.count = count;
+  request.max_referenced_bytes = byte_budget;
+  request.left = {left.view(), 0, left_constant ? 0u : 1u};
+  request.right = {right.view(), 0, right_constant ? 0u : 1u};
+  request.predicate_results = output.get();
+  request.output_capacity = count;
+  int32_t detail = -1;
+  const pgaccel_status status = pgaccel_spatial_eval_resident_ex(&request, &detail);
+  return {status, detail, status == PGACCEL_OK ? output.to_host() : std::vector<int8_t>{}};
+}
+
+void check_results(const char* label, const PredicateRun& run,
+                   std::initializer_list<int8_t> expected) {
+  CHECK(label, run.status == PGACCEL_OK && run.detail == PGACCEL_SPATIAL_DETAIL_NONE &&
+                   run.results == std::vector<int8_t>(expected));
+}
+
+void test_intersects_pair_matrix() {
+  const DeviceLane square = make_lane({polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0})});
+  const DeviceLane points = make_lane({point(1, 1), point(0, 1), point(3, 3)});
+  check_results("Point/Polygon",
+                run_predicate(points, false, square, true, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, 0, -1});
+  check_results("Polygon/Point",
+                run_predicate(square, true, points, false, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, 0, -1});
+
+  const DeviceLane point_pairs_left = make_lane({point(1, 1), point(1, 1)});
+  const DeviceLane point_pairs_right = make_lane({point(1, 1), point(2, 2)});
+  check_results("Point/Point",
+                run_predicate(point_pairs_left, false, point_pairs_right, false, 2,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, -1});
+
+  const DeviceLane vertex_points = make_lane({point(1, 1), point(5, 5)});
+  const DeviceLane point_lines = make_lane({line({0, 0, 1, 1, 2, 0}), line({0, 0, 1, 1, 2, 0})});
+  check_results("Point/Line",
+                run_predicate(vertex_points, false, point_lines, false, 2,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, -1});
+  check_results("Line/Point",
+                run_predicate(point_lines, false, vertex_points, false, 2,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, -1});
+
+  const DeviceLane lines = make_lane({line({-1, 1, 3, 1}), line({3, 0, 3, 2}), line({1, 1, 1, 1})});
+  check_results("Line/Polygon",
+                run_predicate(lines, false, square, true, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, -1, 1});
+  check_results("Polygon/Line",
+                run_predicate(square, true, lines, false, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, -1, 1});
+
+  const DeviceLane line_left =
+      make_lane({line({0, 0, 2, 2}), line({0, 0, 2, 0}), line({0, 0, 1, 0})});
+  const DeviceLane line_right =
+      make_lane({line({0, 2, 2, 0}), line({0, 2, 2, 2}), line({1, 0, 2, 0})});
+  check_results(
+      "Line/Line",
+      run_predicate(line_left, false, line_right, false, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1, -1, 0});
+
+  const DeviceLane polygons =
+      make_lane({polygon({1, 1, 3, 1, 3, 3, 1, 3, 1, 1}), polygon({3, 3, 4, 3, 4, 4, 3, 4, 3, 3}),
+                 polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0})});
+  check_results(
+      "Polygon/Polygon",
+      run_predicate(polygons, false, square, true, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1, -1, 0});
+  check_results(
+      "Polygon/Polygon reverse",
+      run_predicate(square, true, polygons, false, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1, -1, 0});
+}
+
+void test_holes_boundaries_and_predicates() {
+  const DeviceLane holed =
+      make_lane({polygon({0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 1, 1, 3, 1, 3, 3, 1, 3, 1, 1}, {0, 5})});
+  const DeviceLane points = make_lane({point(0.5, 0.5), point(2, 2), point(1, 2)});
+  check_results("holes and boundaries",
+                run_predicate(points, false, holed, true, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, -1, 0});
+
+  const DeviceLane square = make_lane({polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0})});
+  const DeviceLane contain_points = make_lane({point(1, 1), point(0, 1), point(3, 3)});
+  check_results(
+      "Contains Point",
+      run_predicate(square, true, contain_points, false, 3, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {1, 0, -1});
+  check_results(
+      "Within Point",
+      run_predicate(contain_points, false, square, true, 3, PGACCEL_SPATIAL_PREDICATE_WITHIN),
+      {1, 0, -1});
+
+  const DeviceLane contain_lines = make_lane({line({0.5, 0.5, 1.5, 1.5}), line({-1, 1, 3, 1})});
+  check_results(
+      "Contains Line",
+      run_predicate(square, true, contain_lines, false, 2, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {1, -1});
+
+  const DeviceLane origins = make_lane({point(0, 0), point(0, 0), point(0, 0)});
+  const DeviceLane targets = make_lane({point(1, 0), point(3, 0), point(2, 0)});
+  check_results(
+      "DWithin",
+      run_predicate(origins, false, targets, false, 3, PGACCEL_SPATIAL_PREDICATE_DWITHIN, 2.0),
+      {1, -1, 0});
+
+  const DeviceLane null_empty = make_lane({null_geometry(), empty_point()});
+  check_results(
+      "NULL and EMPTY filters",
+      run_predicate(null_empty, false, square, true, 2, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {-1, -1});
+}
+
+void test_distance() {
+  const DeviceLane origins = make_lane({point(0, 0), point(0, 0)});
+  const DeviceLane targets = make_lane({point(3, 4), point(0, 0)});
+  DeviceBuffer<double> distances(2);
+  DeviceBuffer<uint8_t> uncertain(2);
+  pgaccel_spatial_resident_request request{};
+  request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_DISTANCE;
+  request.count = 2;
+  request.max_referenced_bytes = 1 << 20;
+  request.left = {origins.view(), 0, 1};
+  request.right = {targets.view(), 0, 1};
+  request.distances = distances.get();
+  request.distance_uncertain = uncertain.get();
+  request.output_capacity = 2;
+  int32_t detail = -1;
+  const pgaccel_status status = pgaccel_spatial_eval_resident_ex(&request, &detail);
+  const std::vector<double> values = distances.to_host();
+  const std::vector<uint8_t> flags = uncertain.to_host();
+  CHECK("Distance status", status == PGACCEL_OK && detail == PGACCEL_SPATIAL_DETAIL_NONE);
+  CHECK("Distance values", std::fabs(values[0] - 5.0) < 1e-12 && values[1] == 0.0);
+  CHECK("Distance uncertainty sidecar", flags == std::vector<uint8_t>({0, 0}));
+}
+
+void test_hard_failures() {
+  const DeviceLane left = make_lane({point(0, 0)});
+  const DeviceLane wrong_srid = make_lane({point(0, 0, 3857)});
+  PredicateRun srid =
+      run_predicate(left, true, wrong_srid, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("SRID mismatch is hard", srid.status == PGACCEL_INVALID_ARGUMENT &&
+                                     srid.detail == PGACCEL_SPATIAL_DETAIL_SRID_MISMATCH &&
+                                     srid.results.empty());
+
+  const DeviceLane right = make_lane({point(1, 1)});
+  PredicateRun budget =
+      run_predicate(left, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS, 0.0, 1);
+  CHECK("byte budget is hard", budget.status == PGACCEL_INVALID_ARGUMENT &&
+                                   budget.detail == PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET);
+
+  PredicateRun zero_budget =
+      run_predicate(left, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS, 0.0, 0);
+  CHECK("zero byte budget is hard", zero_budget.status == PGACCEL_INVALID_ARGUMENT &&
+                                        zero_budget.detail == PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET);
+
+  const DeviceLane square = make_lane({polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0})});
+  PredicateRun lopsided =
+      run_predicate(square, true, left, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS, 0.0, 300);
+  CHECK("lopsided budget conservatively rejects",
+        lopsided.status == PGACCEL_INVALID_ARGUMENT &&
+            lopsided.detail == PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET);
+
+  DeviceBuffer<int8_t> output(1);
+  pgaccel_spatial_resident_request request{};
+  request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_INTERSECTS;
+  request.count = 1;
+  request.max_referenced_bytes = 1 << 20;
+  request.left = {left.view(), 0, 0};
+  request.right = {right.view(), 0, 0};
+  request.predicate_results = output.get();
+  request.output_capacity = 0;
+  int32_t detail = -1;
+  CHECK("output capacity is hard",
+        pgaccel_spatial_eval_resident_ex(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  int8_t host_output = 99;
+  request.output_capacity = 1;
+  request.predicate_results = &host_output;
+  detail = -1;
+  CHECK("host output pointer is hard",
+        pgaccel_spatial_eval_resident_ex(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT && host_output == 99);
+
+  request.predicate_results = output.get();
+  request.distance_threshold = std::numeric_limits<double>::quiet_NaN();
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_DWITHIN;
+  detail = -1;
+  CHECK("NaN DWithin threshold is hard",
+        pgaccel_spatial_eval_resident_ex(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_INTERSECTS;
+  request.distance_threshold = 0.0;
+  request.count = std::numeric_limits<size_t>::max();
+  request.output_capacity = std::numeric_limits<size_t>::max();
+  detail = -1;
+  CHECK("output span overflow is hard",
+        pgaccel_spatial_eval_resident_ex(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  DeviceLane invalid_null = make_lane({point(0, 0)});
+  const uint8_t invalid_null_byte = 2;
+  CHECK("invalid NULL sidecar setup",
+        pgaccel_expr_device_copy_from_host(invalid_null.nulls.get(), &invalid_null_byte, 1) ==
+            PGACCEL_OK);
+  PredicateRun invalid_null_run =
+      run_predicate(invalid_null, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("invalid NULL sidecar is hard",
+        invalid_null_run.status == PGACCEL_INVALID_ARGUMENT &&
+            invalid_null_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY);
+}
+
+void test_large_rows_and_vertices() {
+  constexpr size_t row_count = 150'001;
+  std::vector<HostGeometry> points;
+  points.reserve(row_count);
+  for (size_t index = 0; index < row_count; ++index)
+    points.push_back((index & 1) == 0 ? point(0.5, 0.5) : point(2.0, 2.0));
+  const DeviceLane point_lane = make_lane(points);
+  const DeviceLane square = make_lane({polygon({0, 0, 1, 0, 1, 1, 0, 1, 0, 0})});
+  pgaccel_reset_gpu_exec_count();
+  const PredicateRun run =
+      run_predicate(point_lane, false, square, true, row_count,
+                    PGACCEL_SPATIAL_PREDICATE_INTERSECTS, 0.0, 32 * 1024 * 1024);
+  CHECK("150001 row status", run.status == PGACCEL_OK && run.results.size() == row_count);
+  bool correct = run.results.size() == row_count;
+  for (size_t index = 0; correct && index < run.results.size(); ++index)
+    correct = run.results[index] == ((index & 1) == 0 ? 1 : -1);
+  CHECK("150001 row classification", correct);
+  CHECK("150001 row call records one dispatch", pgaccel_gpu_exec_count() == 1);
+
+  constexpr size_t vertices = 4096;
+  std::vector<double> ring((vertices + 1) * 2);
+  constexpr double pi = 3.1415926535897932384626433832795;
+  for (size_t index = 0; index < vertices; ++index) {
+    const double angle = 2.0 * pi * static_cast<double>(index) / vertices;
+    ring[index * 2] = std::cos(angle);
+    ring[index * 2 + 1] = std::sin(angle);
+  }
+  ring[vertices * 2] = ring[0];
+  ring[vertices * 2 + 1] = ring[1];
+  const DeviceLane large_polygon =
+      make_lane({{PGACCEL_RESIDENT_GEOMETRY_POLYGON, std::move(ring), {0}, 4326, false}});
+  const DeviceLane probes = make_lane({point(0, 0), point(2, 2)});
+  check_results(
+      "4096 vertex polygon",
+      run_predicate(probes, false, large_polygon, true, 2, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1, -1});
+}
+
+}  // namespace
+
+int main() {
+  if (pgaccel_init() != PGACCEL_OK) {
+    std::fprintf(stderr, "pgaccel_init failed\n");
+    return 1;
+  }
+  test_intersects_pair_matrix();
+  test_holes_boundaries_and_predicates();
+  test_distance();
+  test_hard_failures();
+  test_large_rows_and_vertices();
+  CHECK("shutdown", pgaccel_shutdown() == PGACCEL_OK);
+  std::printf("test_spatial_resident: %d passed, %d failed\n", passed, failed);
+  return failed == 0 ? 0 : 1;
+}

@@ -120,6 +120,9 @@ target_link_libraries(test_spatial_dispatch PRIVATE pgaccel_kernels_shared)
 add_executable(test_spatial_pairwise_boundary test/test_spatial_pairwise_boundary.cpp)
 target_link_libraries(test_spatial_pairwise_boundary PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_spatial_resident test/test_spatial_resident.cpp)
+target_link_libraries(test_spatial_resident PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_h3 test/test_h3.cpp)
 target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
 
@@ -269,6 +272,7 @@ add_pgaccel_gpu_test(test_bbox)
 add_pgaccel_gpu_test(test_spatial)
 add_pgaccel_gpu_test(test_spatial_dispatch)
 add_pgaccel_gpu_test(test_spatial_pairwise_boundary TIMEOUT 1800)
+add_pgaccel_gpu_test(test_spatial_resident TIMEOUT 1800)
 add_pgaccel_gpu_test(test_h3)
 add_pgaccel_gpu_test(test_raster)
 add_pgaccel_gpu_test(test_correctness)
