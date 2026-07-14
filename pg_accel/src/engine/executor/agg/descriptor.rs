@@ -11,7 +11,7 @@ use super::artifact::{
     ArtifactKeyInput, DescriptorAggArtifact, H3ParentArtifact, artifact_column_refs,
     prepare_agg_artifact,
 };
-use super::output::DescriptorAggOutput;
+use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use crate::engine::residency::{
     ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnRef,
     ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
@@ -1605,6 +1605,15 @@ fn validate_h3_compact_outcome(
     let counts = storage
         .measure_count(0)
         .ok_or_else(|| "H3 compact output is missing its COUNT(*) lane".to_owned())?;
+    let key_values = storage
+        .key_values(0)
+        .ok_or_else(|| "H3 compact output is missing its key lane".to_owned())?;
+    validate_h3_compact_key_buffers(
+        key_values,
+        storage.key_nulls(0),
+        result.group_capacity,
+        result.emitted_group_count,
+    )?;
     validate_h3_count_partition(
         counts,
         result.group_capacity,

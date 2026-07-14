@@ -106,6 +106,7 @@ impl DescriptorAggOutput {
                 key_values,
                 storage.key_nulls(0),
                 result.group_capacity,
+                result.emitted_group_count,
             )?;
             (
                 GroupDecoder::H3Compact { type_oid },
@@ -436,10 +437,11 @@ impl DescriptorAggOutput {
     }
 }
 
-fn validate_h3_compact_key_buffers(
+pub(super) fn validate_h3_compact_key_buffers(
     values: &[u8],
     nulls: Option<&[u8]>,
     group_capacity: usize,
+    emitted_group_count: usize,
 ) -> Result<(), String> {
     let expected_key_bytes = group_capacity
         .checked_mul(std::mem::size_of::<u64>())
@@ -447,18 +449,43 @@ fn validate_h3_compact_key_buffers(
     if values.len() != expected_key_bytes {
         return Err("compact H3 output key buffer has an invalid shape".to_owned());
     }
-    let Some(nulls) = nulls else {
-        return Ok(());
-    };
-    if nulls.len() != group_capacity || nulls.iter().any(|value| *value > 1) {
-        return Err("compact H3 output NULL sidecar has an invalid shape/value".to_owned());
+    if emitted_group_count > group_capacity {
+        return Err("compact H3 emitted key count exceeds capacity".to_owned());
     }
-    if nulls
-        .iter()
-        .zip(values.chunks_exact(std::mem::size_of::<u64>()))
-        .any(|(is_null, payload)| *is_null == 1 && payload.iter().any(|byte| *byte != 0))
+    if let Some(nulls) = nulls {
+        if nulls.len() != group_capacity || nulls.iter().any(|value| *value > 1) {
+            return Err("compact H3 output NULL sidecar has an invalid shape/value".to_owned());
+        }
+        if nulls
+            .iter()
+            .zip(values.chunks_exact(std::mem::size_of::<u64>()))
+            .any(|(is_null, payload)| *is_null == 1 && payload.iter().any(|byte| *byte != 0))
+        {
+            return Err("compact H3 NULL key payload is not canonical zero".to_owned());
+        }
+    }
+
+    let mut previous_nonnull = None;
+    for (index, payload) in values
+        .chunks_exact(std::mem::size_of::<u64>())
+        .take(emitted_group_count)
+        .enumerate()
     {
-        return Err("compact H3 NULL key payload is not canonical zero".to_owned());
+        let is_null = nulls.is_some_and(|nulls| nulls[index] == 1);
+        if is_null {
+            if index != 0 {
+                return Err("compact H3 NULL key is not the first emitted group".to_owned());
+            }
+            continue;
+        }
+        let key_bytes: [u8; std::mem::size_of::<u64>()] = payload
+            .try_into()
+            .map_err(|_| "compact H3 key payload has an invalid width".to_owned())?;
+        let key = u64::from_ne_bytes(key_bytes);
+        if previous_nonnull.is_some_and(|previous| key <= previous) {
+            return Err("compact H3 non-NULL keys are not strictly unsigned ascending".to_owned());
+        }
+        previous_nonnull = Some(key);
     }
     Ok(())
 }
@@ -642,6 +669,14 @@ mod tests {
         }
     }
 
+    fn h3_key_bytes(keys: &[u64]) -> Vec<u8> {
+        let mut values = Vec::with_capacity(std::mem::size_of_val(keys));
+        for key in keys {
+            values.extend_from_slice(&key.to_ne_bytes());
+        }
+        values
+    }
+
     #[test]
     fn reverses_dense_mixed_radix_in_key_order() {
         let domains = [domain(2), domain(3), domain(4)];
@@ -696,7 +731,41 @@ mod tests {
 
     #[test]
     fn h3_compact_boundary_requires_zero_null_payload() {
-        assert!(validate_h3_compact_key_buffers(&0_u64.to_ne_bytes(), Some(&[1]), 1).is_ok());
-        assert!(validate_h3_compact_key_buffers(&u64::MAX.to_ne_bytes(), Some(&[1]), 1).is_err());
+        assert!(validate_h3_compact_key_buffers(&0_u64.to_ne_bytes(), Some(&[1]), 1, 1).is_ok());
+        assert!(
+            validate_h3_compact_key_buffers(&u64::MAX.to_ne_bytes(), Some(&[1]), 1, 1).is_err()
+        );
+    }
+
+    #[test]
+    fn h3_compact_boundary_accepts_null_first_then_sorted_keys() {
+        let values = h3_key_bytes(&[0, 2, 4]);
+        validate_h3_compact_key_buffers(&values, Some(&[1, 0, 0]), 3, 3)
+            .expect("NULL-first strictly ascending compact prefix");
+    }
+
+    #[test]
+    fn h3_compact_boundary_rejects_null_after_value() {
+        let values = h3_key_bytes(&[2, 0]);
+        assert!(validate_h3_compact_key_buffers(&values, Some(&[0, 1]), 2, 2).is_err());
+    }
+
+    #[test]
+    fn h3_compact_boundary_rejects_duplicate_nonnull_key() {
+        let values = h3_key_bytes(&[7, 7]);
+        assert!(validate_h3_compact_key_buffers(&values, None, 2, 2).is_err());
+    }
+
+    #[test]
+    fn h3_compact_boundary_rejects_descending_nonnull_keys() {
+        let values = h3_key_bytes(&[8, 7]);
+        assert!(validate_h3_compact_key_buffers(&values, None, 2, 2).is_err());
+    }
+
+    #[test]
+    fn h3_compact_boundary_uses_unsigned_order_and_ignores_unused_tail() {
+        let values = h3_key_bytes(&[0x7fff_ffff_ffff_ffff, 0x8000_0000_0000_0000, u64::MAX, 9, 1]);
+        validate_h3_compact_key_buffers(&values, None, 5, 3)
+            .expect("high-bit keys are unsigned ascending; unused tail is outside the prefix");
     }
 }
