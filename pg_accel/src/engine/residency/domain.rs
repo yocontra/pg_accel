@@ -480,6 +480,87 @@ pub struct ResidentRasterBand {
     pub nodata: f64,
 }
 
+pub const RESIDENT_RASTER_WORK_NULL: u8 = 0;
+pub const RESIDENT_RASTER_WORK_MISSING_BAND: u8 = 1;
+pub const RESIDENT_RASTER_WORK_RECLASS: u8 = 2;
+
+/// Host-retained facts for one raster row. Executors clone this compact lane
+/// in a short metadata snapshot, release the store borrow, and reserve exact
+/// output/scratch bytes before borrowing device input.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResidentRasterWorkRow {
+    pub grid_pixels: u64,
+    pub exact_wkb_bytes: u64,
+    pub source_pixel_width: u8,
+    pub action: u8,
+    pub reserved: [u8; 6],
+}
+
+/// Host-retained work metadata used by the raster planner without copying
+/// GPU buffers or reparsing every exact WKB value during planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentRasterStats {
+    pub row_count: u64,
+    pub non_null_rows: u64,
+    pub total_grid_pixels: u64,
+    pub total_band_pixels: u64,
+    pub input_wkb_bytes: u64,
+    /// One entry per one-based band ordinal. Missing bands contribute zero.
+    pub band_pixels: Box<[u64]>,
+    /// Rows in which each one-based band ordinal is present. This remains
+    /// distinct from pixel count for zero-dimensional rasters.
+    pub band_rows: Box<[u64]>,
+    /// Exact full-WKB result totals for output pixel widths 1, 2, and 4.
+    reclass_output_wkb_bytes: [u64; 3],
+    pub work_rows: Box<[ResidentRasterWorkRow]>,
+}
+
+impl ResidentRasterStats {
+    #[must_use]
+    pub fn selected_band_pixels(&self, band: u32) -> Option<u64> {
+        let index = usize::try_from(band.checked_sub(1)?).ok()?;
+        Some(self.band_pixels.get(index).copied().unwrap_or(0))
+    }
+
+    #[must_use]
+    pub fn selected_band_rows(&self, band: u32) -> Option<u64> {
+        let index = usize::try_from(band.checked_sub(1)?).ok()?;
+        Some(self.band_rows.get(index).copied().unwrap_or(0))
+    }
+
+    #[must_use]
+    pub const fn reclass_output_wkb_bytes(&self, pixel_type_tag: u32) -> Option<u64> {
+        match pixel_type_tag {
+            0..=4 => Some(self.reclass_output_wkb_bytes[0]),
+            5..=6 => Some(self.reclass_output_wkb_bytes[1]),
+            7..=8 => Some(self.reclass_output_wkb_bytes[2]),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn reclass_output_pixel_bytes(&self, pixel_type_tag: u32) -> Option<u64> {
+        let width = match pixel_type_tag {
+            0..=4 => 1_u64,
+            5..=6 => 2,
+            7..=8 => 4,
+            _ => return None,
+        };
+        self.selected_band_pixels(1)?.checked_mul(width)
+    }
+
+    fn retained_bytes(&self) -> Result<u64, DomainContractError> {
+        bytes_for_len::<u64>(self.band_pixels.len())?
+            .checked_add(bytes_for_len::<u64>(self.band_rows.len())?)
+            .and_then(|bytes| {
+                bytes
+                    .checked_add(bytes_for_len::<ResidentRasterWorkRow>(self.work_rows.len()).ok()?)
+            })
+            .ok_or(DomainContractError::ByteCountOverflow)
+    }
+}
+
 /// Flattened raster pixel bytes and metadata plus retained exact WKB values.
 /// Each band keeps its native PostGIS pixel representation; `band_offsets`
 /// are byte offsets, not pixel indexes.
@@ -509,6 +590,160 @@ fn raster_row_is_canonical_zero(row: &ResidentRasterRow) -> bool {
 }
 
 impl ResidentRasterData {
+    pub fn stats(&self) -> Result<ResidentRasterStats, DomainContractError> {
+        let max_band_count = self
+            .rows
+            .iter()
+            .map(|row| usize::try_from(row.band_count).unwrap_or(usize::MAX))
+            .max()
+            .unwrap_or(0);
+        if max_band_count == usize::MAX {
+            return Err(DomainContractError::ByteCountOverflow);
+        }
+        let mut band_pixels = Vec::new();
+        band_pixels.try_reserve_exact(max_band_count).map_err(|_| {
+            DomainContractError::Invalid("resident raster statistics allocation failed")
+        })?;
+        band_pixels.resize(max_band_count, 0_u64);
+        let mut band_rows = Vec::new();
+        band_rows.try_reserve_exact(max_band_count).map_err(|_| {
+            DomainContractError::Invalid("resident raster statistics allocation failed")
+        })?;
+        band_rows.resize(max_band_count, 0_u64);
+        let mut work_rows = Vec::new();
+        work_rows.try_reserve_exact(self.rows.len()).map_err(|_| {
+            DomainContractError::Invalid("resident raster statistics allocation failed")
+        })?;
+        let mut non_null_rows = 0_u64;
+        let mut total_grid_pixels = 0_u64;
+        let mut total_band_pixels = 0_u64;
+        let mut input_wkb_bytes = 0_u64;
+        let mut reclass_output_wkb_bytes = [0_u64; 3];
+        for (row_index, row) in self.rows.iter().enumerate() {
+            let exact_wkb_bytes = u64::try_from(
+                self.exact
+                    .value(row_index)
+                    .ok_or(DomainContractError::Invalid(
+                        "resident raster exact row metadata is invalid",
+                    ))?
+                    .len(),
+            )
+            .map_err(|_| DomainContractError::ByteCountOverflow)?;
+            input_wkb_bytes = input_wkb_bytes
+                .checked_add(exact_wkb_bytes)
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            if self
+                .nulls
+                .as_ref()
+                .is_some_and(|nulls| nulls.get(row_index) == Some(&1))
+            {
+                work_rows.push(ResidentRasterWorkRow {
+                    exact_wkb_bytes,
+                    action: RESIDENT_RASTER_WORK_NULL,
+                    ..ResidentRasterWorkRow::default()
+                });
+                continue;
+            }
+            non_null_rows = non_null_rows
+                .checked_add(1)
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            let pixels = u64::from(row.width)
+                .checked_mul(u64::from(row.height))
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            total_grid_pixels = total_grid_pixels
+                .checked_add(pixels)
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            total_band_pixels = total_band_pixels
+                .checked_add(
+                    pixels
+                        .checked_mul(u64::from(row.band_count))
+                        .ok_or(DomainContractError::ByteCountOverflow)?,
+                )
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            let band_count = usize::try_from(row.band_count)
+                .map_err(|_| DomainContractError::ByteCountOverflow)?;
+            for (pixel_count, row_count) in
+                band_pixels.iter_mut().zip(&mut band_rows).take(band_count)
+            {
+                *pixel_count = pixel_count
+                    .checked_add(pixels)
+                    .ok_or(DomainContractError::ByteCountOverflow)?;
+                *row_count = row_count
+                    .checked_add(1)
+                    .ok_or(DomainContractError::ByteCountOverflow)?;
+            }
+            if band_count == 0 {
+                for output in &mut reclass_output_wkb_bytes {
+                    *output = output
+                        .checked_add(exact_wkb_bytes)
+                        .ok_or(DomainContractError::ByteCountOverflow)?;
+                }
+                work_rows.push(ResidentRasterWorkRow {
+                    grid_pixels: pixels,
+                    exact_wkb_bytes,
+                    action: RESIDENT_RASTER_WORK_MISSING_BAND,
+                    ..ResidentRasterWorkRow::default()
+                });
+                continue;
+            }
+            let first_band = usize::try_from(row.first_band)
+                .map_err(|_| DomainContractError::ByteCountOverflow)?;
+            let source_pixel_width = self
+                .bands
+                .get(first_band)
+                .and_then(|band| raster_pixel_width(band.pixel_type))
+                .ok_or(DomainContractError::Invalid(
+                    "resident raster band-one metadata is invalid",
+                ))?;
+            let serialized_values = pixels
+                .checked_add(1)
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            let old_band_values = serialized_values
+                .checked_mul(
+                    u64::try_from(source_pixel_width)
+                        .map_err(|_| DomainContractError::ByteCountOverflow)?,
+                )
+                .ok_or(DomainContractError::ByteCountOverflow)?;
+            let base_wkb_bytes = exact_wkb_bytes.checked_sub(old_band_values).ok_or(
+                DomainContractError::Invalid(
+                    "resident raster exact WKB is shorter than band-one payload",
+                ),
+            )?;
+            for (index, output_width) in [1_u64, 2, 4].into_iter().enumerate() {
+                let output_values = serialized_values
+                    .checked_mul(output_width)
+                    .ok_or(DomainContractError::ByteCountOverflow)?;
+                reclass_output_wkb_bytes[index] = reclass_output_wkb_bytes[index]
+                    .checked_add(
+                        base_wkb_bytes
+                            .checked_add(output_values)
+                            .ok_or(DomainContractError::ByteCountOverflow)?,
+                    )
+                    .ok_or(DomainContractError::ByteCountOverflow)?;
+            }
+            work_rows.push(ResidentRasterWorkRow {
+                grid_pixels: pixels,
+                exact_wkb_bytes,
+                source_pixel_width: u8::try_from(source_pixel_width)
+                    .map_err(|_| DomainContractError::ByteCountOverflow)?,
+                action: RESIDENT_RASTER_WORK_RECLASS,
+                reserved: [0; 6],
+            });
+        }
+        Ok(ResidentRasterStats {
+            row_count: u64::try_from(self.rows.len())
+                .map_err(|_| DomainContractError::ByteCountOverflow)?,
+            non_null_rows,
+            total_grid_pixels,
+            total_band_pixels,
+            input_wkb_bytes,
+            band_pixels: band_pixels.into_boxed_slice(),
+            band_rows: band_rows.into_boxed_slice(),
+            reclass_output_wkb_bytes,
+            work_rows: work_rows.into_boxed_slice(),
+        })
+    }
+
     pub fn validate(&self, max_exact_value_bytes: usize) -> Result<(), DomainContractError> {
         let band_offset_count = self
             .bands
@@ -614,6 +849,7 @@ impl ResidentRasterData {
         max_exact_value_bytes: usize,
     ) -> Result<ResidentByteAccounting, DomainContractError> {
         self.validate(max_exact_value_bytes)?;
+        let stats = self.stats()?;
         let device = ResidentByteAccounting {
             device_bytes: bytes_for_len::<u8>(self.pixels.len())?
                 .checked_add(bytes_for_len::<u64>(self.band_offsets.len())?)
@@ -631,7 +867,14 @@ impl ResidentRasterData {
                 .ok_or(DomainContractError::ByteCountOverflow)?,
             retained_host_exact_bytes: 0,
         };
-        device.checked_add(self.exact.accounting()?)
+        let exact = self.exact.accounting()?;
+        device.checked_add(ResidentByteAccounting {
+            device_bytes: exact.device_bytes,
+            retained_host_exact_bytes: exact
+                .retained_host_exact_bytes
+                .checked_add(stats.retained_bytes()?)
+                .ok_or(DomainContractError::ByteCountOverflow)?,
+        })
     }
 }
 
@@ -684,7 +927,7 @@ mod tests {
                 ..ResidentRasterBand::default()
             }],
             nulls: Some(vec![0]),
-            exact: exact(vec![0, 4], vec![1, 2, 3, 4]),
+            exact: exact(vec![0, 64], vec![0; 64]),
         }
     }
 
@@ -699,6 +942,8 @@ mod tests {
         assert_eq!(std::mem::size_of::<ResidentRasterBand>(), 16);
         assert_eq!(std::mem::align_of::<ResidentRasterBand>(), 8);
         assert_eq!(std::mem::offset_of!(ResidentRasterBand, nodata), 8);
+        assert_eq!(std::mem::size_of::<ResidentRasterWorkRow>(), 24);
+        assert_eq!(std::mem::align_of::<ResidentRasterWorkRow>(), 8);
         assert_eq!(std::mem::size_of::<[f64; 4]>(), 32);
         assert_eq!(RESIDENT_GEOMETRY_BBOX_VALID, 1);
         assert_eq!(RESIDENT_RASTER_FLOAT32, 10);
@@ -922,7 +1167,7 @@ mod tests {
                 nodata: -9_999.0,
             }],
             nulls: Some(vec![0]),
-            exact: exact(vec![0, 5], vec![1, 2, 3, 4, 5]),
+            exact: exact(vec![0, 64], vec![0; 64]),
         };
         assert_eq!(
             raster
@@ -930,7 +1175,28 @@ mod tests {
                 .expect("valid raster accounting"),
             ResidentByteAccounting {
                 device_bytes: 16 + 16 + 72 + 16 + 1,
-                retained_host_exact_bytes: 16 + 5,
+                retained_host_exact_bytes: 16 + 64 + 8 + 8 + 24,
+            }
+        );
+        assert_eq!(
+            raster.stats().expect("valid raster statistics"),
+            ResidentRasterStats {
+                row_count: 1,
+                non_null_rows: 1,
+                total_grid_pixels: 4,
+                total_band_pixels: 4,
+                input_wkb_bytes: 64,
+                band_pixels: vec![4].into_boxed_slice(),
+                band_rows: vec![1].into_boxed_slice(),
+                reclass_output_wkb_bytes: [49, 54, 64],
+                work_rows: vec![ResidentRasterWorkRow {
+                    grid_pixels: 4,
+                    exact_wkb_bytes: 64,
+                    source_pixel_width: 4,
+                    action: RESIDENT_RASTER_WORK_RECLASS,
+                    reserved: [0; 6],
+                }]
+                .into_boxed_slice(),
             }
         );
     }
@@ -955,6 +1221,47 @@ mod tests {
         let mut negative_zero = null;
         negative_zero.rows[0].scale_x = -0.0;
         assert!(negative_zero.validate(MAX_EXACT_VALUE_BYTES).is_err());
+    }
+
+    #[test]
+    fn raster_stats_distinguish_zero_pixel_band_from_missing_band() {
+        let raster = ResidentRasterData {
+            pixels: Vec::new(),
+            band_offsets: vec![0, 0],
+            rows: vec![
+                ResidentRasterRow {
+                    first_band: 0,
+                    band_count: 1,
+                    scale_x: 1.0,
+                    scale_y: -1.0,
+                    ..ResidentRasterRow::default()
+                },
+                ResidentRasterRow {
+                    first_band: 1,
+                    scale_x: 1.0,
+                    scale_y: -1.0,
+                    ..ResidentRasterRow::default()
+                },
+            ],
+            bands: vec![ResidentRasterBand {
+                pixel_type: RESIDENT_RASTER_FLOAT32,
+                ..ResidentRasterBand::default()
+            }],
+            nulls: None,
+            exact: exact(vec![0, 64, 128], vec![0; 128]),
+        };
+        raster
+            .validate(MAX_EXACT_VALUE_BYTES)
+            .expect("zero-dimensional raster rows validate");
+        let stats = raster.stats().expect("statistics are exact");
+        assert_eq!(stats.non_null_rows, 2);
+        assert_eq!(stats.selected_band_pixels(1), Some(0));
+        assert_eq!(stats.selected_band_rows(1), Some(1));
+        assert_eq!(stats.work_rows[0].action, RESIDENT_RASTER_WORK_RECLASS);
+        assert_eq!(stats.work_rows[1].action, RESIDENT_RASTER_WORK_MISSING_BAND);
+        assert_eq!(stats.reclass_output_wkb_bytes(4), Some(125));
+        assert_eq!(stats.reclass_output_wkb_bytes(5), Some(126));
+        assert_eq!(stats.reclass_output_wkb_bytes(7), Some(128));
     }
 
     #[test]

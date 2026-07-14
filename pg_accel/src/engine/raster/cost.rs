@@ -10,6 +10,8 @@ pub struct RasterResidentWork {
     pub selected_band_rows: u64,
     pub selected_pixels: u64,
     pub input_wkb_bytes: u64,
+    /// Exact native band-one bytes copied back from the device.
+    pub reclass_output_pixel_bytes: Option<u64>,
     /// Exact reconstructed WKB bytes for the selected reclass output type.
     pub reclass_output_wkb_bytes: Option<u64>,
 }
@@ -52,9 +54,10 @@ pub enum RasterCostGate {
 pub struct RasterCost {
     pub work: Option<RasterResidentWork>,
     pub launches: u64,
-    /// Exact bytes returned from device work before PostgreSQL result
-    /// construction: WKB for reclass, fixed-width fields for summary stats.
-    pub output_bytes: Option<u64>,
+    /// Exact native band-one bytes returned from device work.
+    pub device_output_bytes: Option<u64>,
+    /// Exact full WKB bytes reconstructed on the host.
+    pub wkb_construction_bytes: Option<u64>,
     /// No numeric total is published before calibration.
     pub total: Option<PgCost>,
     pub native_total: PgCost,
@@ -65,7 +68,8 @@ fn declined(input: RasterCostInput, gate: RasterCostGate) -> RasterCost {
     RasterCost {
         work: None,
         launches: 0,
-        output_bytes: None,
+        device_output_bytes: None,
+        wkb_construction_bytes: None,
         total: None,
         native_total: input.native_total_cost,
         gate,
@@ -100,7 +104,10 @@ pub fn estimate_raster_cost(input: RasterCostInput, limits: &DeviceLimits) -> Ra
             },
         );
     }
-    let Some(output_bytes) = work.reclass_output_wkb_bytes else {
+    let (Some(device_output_bytes), Some(wkb_construction_bytes)) = (
+        work.reclass_output_pixel_bytes,
+        work.reclass_output_wkb_bytes,
+    ) else {
         return declined(input, RasterCostGate::ReclassOutputBytesUnavailable);
     };
     let minimum = u64::try_from(limits.gpu_raster_min_pixels).unwrap_or(u64::MAX);
@@ -126,7 +133,8 @@ pub fn estimate_raster_cost(input: RasterCostInput, limits: &DeviceLimits) -> Ra
     RasterCost {
         work: Some(work),
         launches,
-        output_bytes: Some(output_bytes),
+        device_output_bytes: Some(device_output_bytes),
+        wkb_construction_bytes: Some(wkb_construction_bytes),
         total: None,
         native_total: input.native_total_cost,
         gate: RasterCostGate::UncalibratedCoefficients,
@@ -144,6 +152,7 @@ mod tests {
             selected_band_rows: 999,
             selected_pixels: pixels,
             input_wkb_bytes: 1_000_000,
+            reclass_output_pixel_bytes: Some(500_000),
             reclass_output_wkb_bytes: Some(750_000),
         }
     }
@@ -197,7 +206,14 @@ mod tests {
             input(RasterWorkEstimate::ResidentExact(resident), 1_000_000.0),
             &limits,
         );
-        assert_eq!(cost.output_bytes, resident.reclass_output_wkb_bytes);
+        assert_eq!(
+            cost.device_output_bytes,
+            resident.reclass_output_pixel_bytes
+        );
+        assert_eq!(
+            cost.wkb_construction_bytes,
+            resident.reclass_output_wkb_bytes
+        );
     }
 
     #[test]

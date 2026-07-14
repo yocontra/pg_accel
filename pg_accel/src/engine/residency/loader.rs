@@ -322,6 +322,9 @@ impl StagedColumn {
             } => {
                 data.validate(max_exact_value_bytes)
                     .map_err(|error| format!("resident raster validation failed: {error}"))?;
+                let stats = data
+                    .stats()
+                    .map_err(|error| format!("resident raster statistics failed: {error}"))?;
                 let ResidentRasterData {
                     pixels,
                     band_offsets,
@@ -341,6 +344,7 @@ impl StagedColumn {
                     bands: copy_optional_buffer(bands, &format!("{label} raster bands"))?,
                     nulls: copy_optional_nulls(nulls, &format!("{label} raster"))?,
                     exact,
+                    stats,
                 })
             }
             Self::F32 {
@@ -1889,8 +1893,47 @@ mod tests {
         assert_eq!(data.exact.value(1), Some(wkb.as_slice()));
         assert_eq!(
             accounting.retained_host_exact_bytes,
-            u64::try_from(3 * std::mem::size_of::<u64>() + wkb.len()).expect("test bytes fit")
+            u64::try_from(
+                3 * std::mem::size_of::<u64>()
+                    + wkb.len()
+                    + 2 * 8
+                    + 2 * 8
+                    + 2 * std::mem::size_of::<crate::engine::residency::ResidentRasterWorkRow>()
+            )
+            .expect("test bytes fit")
         );
+        let stats = data.stats().expect("staged raster statistics validate");
+        assert_eq!(stats.row_count, 2);
+        assert_eq!(stats.non_null_rows, 1);
+        assert_eq!(stats.total_grid_pixels, 2);
+        assert_eq!(stats.total_band_pixels, 4);
+        assert_eq!(
+            stats.input_wkb_bytes,
+            u64::try_from(wkb.len()).expect("test WKB length fits")
+        );
+        assert_eq!(stats.selected_band_pixels(1), Some(2));
+        assert_eq!(stats.selected_band_pixels(2), Some(2));
+        assert_eq!(stats.selected_band_pixels(3), Some(0));
+        assert_eq!(stats.selected_band_pixels(0), None);
+        assert_eq!(stats.selected_band_rows(1), Some(1));
+        assert_eq!(stats.selected_band_rows(2), Some(1));
+        assert_eq!(stats.selected_band_rows(3), Some(0));
+        assert_eq!(stats.selected_band_rows(0), None);
+        let input_bytes = u64::try_from(wkb.len()).expect("test WKB length fits");
+        assert_eq!(
+            stats.reclass_output_wkb_bytes(4),
+            Some(input_bytes - 12 + 3)
+        );
+        assert_eq!(
+            stats.reclass_output_wkb_bytes(5),
+            Some(input_bytes - 12 + 6)
+        );
+        assert_eq!(stats.reclass_output_wkb_bytes(7), Some(input_bytes));
+        assert_eq!(stats.reclass_output_wkb_bytes(10), None);
+        assert_eq!(stats.reclass_output_pixel_bytes(4), Some(2));
+        assert_eq!(stats.reclass_output_pixel_bytes(5), Some(4));
+        assert_eq!(stats.reclass_output_pixel_bytes(7), Some(8));
+        assert_eq!(stats.reclass_output_pixel_bytes(10), None);
     }
 
     #[test]

@@ -11,7 +11,8 @@ use crate::engine::gucs;
 use crate::gpu::{ExprDeviceBuffer, GpuError};
 
 use super::domain::{
-    ResidentByteAccounting, ResidentRasterBand, ResidentRasterRow, RetainedExactValues,
+    ResidentByteAccounting, ResidentRasterBand, ResidentRasterRow, ResidentRasterStats,
+    RetainedExactValues,
 };
 use super::geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
@@ -83,6 +84,7 @@ pub enum ResidentColumn {
         bands: Option<ExprDeviceBuffer<ResidentRasterBand>>,
         nulls: Option<ExprDeviceBuffer<u8>>,
         exact: RetainedExactValues,
+        stats: ResidentRasterStats,
     },
     F32 {
         type_oid: pg_sys::Oid,
@@ -223,13 +225,36 @@ impl ResidentColumn {
     pub fn accounting(&self) -> Option<ResidentByteAccounting> {
         match self {
             Self::Geometry { data, .. } => Some(data.accounting()),
-            Self::Raster { exact, .. } => Some(ResidentByteAccounting {
+            Self::Raster { exact, stats, .. } => Some(ResidentByteAccounting {
                 device_bytes: self.device_bytes()?,
                 retained_host_exact_bytes: exact
                     .offsets
                     .len()
                     .checked_mul(std::mem::size_of::<u64>())
                     .and_then(|offsets| offsets.checked_add(exact.bytes.len()))
+                    .and_then(|host| {
+                        stats
+                            .band_pixels
+                            .len()
+                            .checked_mul(std::mem::size_of::<u64>())
+                            .and_then(|bytes| {
+                                stats
+                                    .band_rows
+                                    .len()
+                                    .checked_mul(std::mem::size_of::<u64>())
+                                    .and_then(|band_rows| bytes.checked_add(band_rows))
+                            })
+                            .and_then(|bytes| {
+                                stats
+                                    .work_rows
+                                    .len()
+                                    .checked_mul(std::mem::size_of::<
+                                        super::domain::ResidentRasterWorkRow,
+                                    >())
+                                    .and_then(|work_rows| bytes.checked_add(work_rows))
+                            })
+                            .and_then(|stats| host.checked_add(stats))
+                    })
                     .and_then(|bytes| u64::try_from(bytes).ok())?,
             }),
             _ => Some(ResidentByteAccounting {
@@ -293,6 +318,7 @@ impl ResidentColumn {
                 bands,
                 nulls,
                 exact,
+                stats,
             } => ResidentColumnView::Raster {
                 type_oid: *type_oid,
                 pixels: pixels.as_ref(),
@@ -301,6 +327,7 @@ impl ResidentColumn {
                 bands: bands.as_ref(),
                 nulls: nulls.as_ref(),
                 exact,
+                stats,
             },
             Self::F32 {
                 type_oid,
@@ -373,6 +400,7 @@ pub enum ResidentColumnView<'a> {
         bands: Option<&'a ExprDeviceBuffer<ResidentRasterBand>>,
         nulls: Option<&'a ExprDeviceBuffer<u8>>,
         exact: &'a RetainedExactValues,
+        stats: &'a ResidentRasterStats,
     },
     F32 {
         type_oid: pg_sys::Oid,
