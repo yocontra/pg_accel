@@ -507,11 +507,13 @@ pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geometry* geoms
                                                    int8_t* results);
 
 /* Resident fp64 spatial ABI. All lane and output pointers are current-context
- * DEVICE or SHARED_USM allocations. The descriptor itself remains host-owned
- * for the duration of the synchronous call. Geometry/ring offsets count
- * coordinate pairs (not scalar doubles or bytes), matching ResidentGeometryData.
+ * DEVICE or SHARED_USM allocations. Each byte field is the actual readable or
+ * writable allocation span from its paired pointer, not a size inferred from
+ * logical counts. The descriptor itself remains host-owned for the duration of
+ * the synchronous call. Geometry/ring offsets count coordinate pairs (not
+ * scalar doubles or bytes), matching ResidentGeometryData.
  */
-#define PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION 1u
+#define PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION 2u
 
 typedef enum {
   PGACCEL_RESIDENT_GEOMETRY_POINT = 1,
@@ -534,12 +536,18 @@ typedef struct {
 typedef struct {
   uint32_t abi_version;
   uint32_t flags;
-  const double* coordinates;       /* [coordinate_pair_count * 2] */
-  const double* bboxes;            /* [row_count * 4] */
-  const uint64_t* geometry_offsets; /* [row_count + 1], coordinate-pair offsets */
-  const uint64_t* ring_offsets;     /* [ring_count], coordinate-pair offsets */
+  const double* coordinates;                 /* [coordinate_pair_count * 2] */
+  const double* bboxes;                      /* [row_count * 4] */
+  const uint64_t* geometry_offsets;          /* [row_count + 1], coordinate-pair offsets */
+  const uint64_t* ring_offsets;              /* [ring_count], coordinate-pair offsets */
   const pgaccel_resident_geometry_row* rows; /* [row_count] */
-  const uint8_t* nulls;             /* optional [row_count], canonical 0/1 */
+  const uint8_t* nulls;                      /* optional [row_count], canonical 0/1 */
+  size_t coordinates_bytes;                  /* readable bytes from coordinates */
+  size_t bboxes_bytes;                       /* readable bytes from bboxes */
+  size_t geometry_offsets_bytes;             /* readable bytes from geometry_offsets */
+  size_t ring_offsets_bytes;                 /* readable bytes from ring_offsets */
+  size_t rows_bytes;                         /* readable bytes from rows */
+  size_t nulls_bytes;                        /* readable bytes from nulls, zero when NULL */
   size_t row_count;
   size_t coordinate_pair_count;
   size_t ring_count;
@@ -565,6 +573,9 @@ typedef enum {
   PGACCEL_SPATIAL_DETAIL_GEOMETRY = 2,
   PGACCEL_SPATIAL_DETAIL_SRID_MISMATCH = 3,
   PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET = 4,
+  PGACCEL_SPATIAL_DETAIL_TRISTATE = 5,
+  PGACCEL_SPATIAL_DETAIL_RECHECK_INDEX = 6,
+  PGACCEL_SPATIAL_DETAIL_RECHECK_PATCH = 7,
 } pgaccel_spatial_detail;
 
 typedef struct {
@@ -577,11 +588,61 @@ typedef struct {
   size_t max_referenced_bytes; /* defensive per-call geometry work cap */
   pgaccel_resident_geometry_operand left;
   pgaccel_resident_geometry_operand right;
-  int8_t* predicate_results; /* device [output_capacity], boolean predicates */
-  double* distances;         /* device [output_capacity], Distance only */
-  uint8_t* distance_uncertain; /* device [output_capacity], Distance only */
+  int8_t* predicate_results;       /* device [output_capacity], boolean predicates */
+  size_t predicate_results_bytes;  /* writable bytes from predicate_results */
+  double* distances;               /* device [output_capacity], Distance only */
+  size_t distances_bytes;          /* writable bytes from distances */
+  uint8_t* distance_uncertain;     /* device [output_capacity], Distance only */
+  size_t distance_uncertain_bytes; /* writable bytes from distance_uncertain */
   size_t output_capacity;
 } pgaccel_spatial_resident_request;
+
+/* Caller-owned device scratch shared by the resident evaluation and exact
+ * recheck helpers. `control_bytes` and `failure_flags_bytes` are exact spans,
+ * not capacities or upper bounds. Launch functions only copy control metadata
+ * H2D and execute device work; the finish function performs the sole D2H
+ * status read after resident input borrows have been released. */
+#define PGACCEL_SPATIAL_WORKSPACE_ABI_VERSION 1u
+#define PGACCEL_SPATIAL_RECHECK_ABI_VERSION 1u
+#define PGACCEL_SPATIAL_CONTROL_BYTES 384u
+#define PGACCEL_SPATIAL_MAX_CHUNK_ROWS 65536u
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  uint8_t* control;
+  size_t control_bytes;
+  uint32_t* failure_flags;
+  size_t failure_flags_bytes;
+} pgaccel_spatial_workspace;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const int8_t* tri_state; /* device [row_count], exactly {-1,0,+1} */
+  size_t tri_state_bytes;
+  int8_t* final_mask; /* device [row_count], SQL {-1,+1} */
+  size_t final_mask_bytes;
+  uint64_t* uncertain_indices; /* device [uncertain_capacity] */
+  size_t uncertain_indices_bytes;
+  uint64_t* uncertain_count; /* device scalar */
+  size_t uncertain_count_bytes;
+  size_t row_count;
+  size_t uncertain_capacity;
+} pgaccel_spatial_recheck_compact_request;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const uint64_t* indices; /* device [patch_count], strictly increasing */
+  size_t indices_bytes;
+  const int8_t* results; /* device [patch_count], exactly {-1,+1} */
+  size_t results_bytes;
+  int8_t* final_mask; /* device [row_count] */
+  size_t final_mask_bytes;
+  size_t row_count;
+  size_t patch_count;
+} pgaccel_spatial_recheck_patch_request;
 
 /* Evaluate one resident column/column or column/constant spatial operation.
  * Successful boolean rows write exactly {-1,0,+1}; zero is reserved for a
@@ -590,9 +651,32 @@ typedef struct {
  * Distance uses its dedicated fp64 output and uncertainty sidecar. Descriptor,
  * pointer, geometry-shape, SRID, byte-budget, device, allocation, and runtime
  * failures are hard non-OK statuses and never synthesize UNCERTAIN rows. */
+/* Legacy synchronous entry point retained for link compatibility. Non-empty
+ * requests return PGACCEL_UNSUPPORTED without dispatch or output writes. */
+pgaccel_status pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
+                                                int32_t* detail);
+
+/* Evaluation begins a launch chain and clears failure_flags. Compaction must
+ * immediately follow evaluation on the same workspace: it preserves a sticky
+ * evaluation failure and performs no writes when that failure is set. Call
+ * workspace_finish after compaction and after releasing resident borrows.
+ * Patching begins a separate chain after that finish and clears failure_flags;
+ * call workspace_finish again after patching. Every non-empty launch is
+ * limited to PGACCEL_SPATIAL_MAX_CHUNK_ROWS rows. */
+pgaccel_status pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* request,
+                                                    const pgaccel_spatial_workspace* workspace,
+                                                    int32_t* detail);
+
 pgaccel_status
-pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
-                                 int32_t* detail);
+pgaccel_spatial_recheck_compact_launch(const pgaccel_spatial_recheck_compact_request* request,
+                                       const pgaccel_spatial_workspace* workspace, int32_t* detail);
+
+pgaccel_status
+pgaccel_spatial_recheck_patch_launch(const pgaccel_spatial_recheck_patch_request* request,
+                                     const pgaccel_spatial_workspace* workspace, int32_t* detail);
+
+pgaccel_status pgaccel_spatial_workspace_finish(const pgaccel_spatial_workspace* workspace,
+                                                int32_t* detail);
 
 /* Deprecated cross-product ABI retained for link compatibility. Non-empty
  * inputs return PGACCEL_UNSUPPORTED with zero counts and no GPU dispatch.
@@ -816,117 +900,156 @@ pgaccel_status pgaccel_h3_cells_to_multi_polygon_emit(const uint64_t* cells, siz
 
 /* ── Raster Operations ───────────────────────────────────────────── */
 
-typedef enum {
-  PGACCEL_PT_INT8 = 0,
-  PGACCEL_PT_INT16 = 1,
-  PGACCEL_PT_INT32 = 2,
-  PGACCEL_PT_FLOAT32 = 3,
-  PGACCEL_PT_FLOAT64 = 4,
-} pgaccel_pixel_type;
-
-typedef enum {
-  PGACCEL_OP_LOAD_BAND = 0,
-  PGACCEL_OP_LOAD_CONST = 1,
-  PGACCEL_OP_ADD = 2,
-  PGACCEL_OP_SUB = 3,
-  PGACCEL_OP_MUL = 4,
-  PGACCEL_OP_DIV = 5,
-  PGACCEL_OP_SQRT = 6,
-  PGACCEL_OP_ABS = 7,
-  PGACCEL_OP_LOG = 8,
-  PGACCEL_OP_POW = 9,
-  PGACCEL_OP_GT = 10,
-  PGACCEL_OP_LT = 11,
-  PGACCEL_OP_EQ = 12,
-  PGACCEL_OP_SELECT = 13,
-} pgaccel_op;
-
-typedef struct {
-  pgaccel_op op;
-  union {
-    int band_index;
-    double constant;
-  } arg;
-} pgaccel_expr_inst;
-
-typedef struct {
-  pgaccel_expr_inst* instructions;
-  size_t inst_count;
-  size_t band_count;
-} pgaccel_expr;
-
-typedef struct {
-  double min_val;
-  double max_val;
-  double new_val;
-} pgaccel_reclass_rule;
-
-pgaccel_status pgaccel_map_algebra(const void* const* band_pixels, size_t pixel_count,
-                                   int pixel_type, const pgaccel_expr* expr, void* output_pixels,
-                                   uint8_t* nodata_mask);
-
-pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t width, size_t height,
-                                   double origin_x, double origin_y, double scale_x, double scale_y,
-                                   int pixel_type, const float* clip_ring_xy, size_t vertex_count,
-                                   void* output_pixels, uint8_t* nodata_mask);
-
-pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_count, int input_type,
-                                      const pgaccel_reclass_rule* rules, size_t rule_count,
-                                      int output_type, void* output_pixels);
-
-/* ── BEGIN raster-extensions (Agent 3A insertion zone) ──────────────
- * Agent 3A appends here:
- *   - pgaccel_raster_resample (bilinear)
- *   - pgaccel_raster_slope (Horn's method)
- *   - pgaccel_raster_aspect (3×3 gradient → compass)
- *   - pgaccel_raster_hillshade (slope + aspect + sun)
- *   - pgaccel_raster_value (single-pixel lookup at point geometry)
- *   - pgaccel_raster_summarystats (count/sum/mean/stddev/min/max)
- * Keep declarations in this block so dispatch wiring stays grouped.
+/* Exact resident PostGIS 3.6.4 ST_Reclass(raster,text,text) ABI.
+ *
+ * This is intentionally a Reclass-only surface. There is no resident summary-
+ * statistics operation tag or entry point: PostGIS' sequential fp64/Welford
+ * accumulation and host sqrt result are not proven bit-identical on every
+ * supported device backend.
+ *
+ * Every non-empty pointer/span pair below names a current-context DEVICE or
+ * SHARED_USM allocation. Span byte counts are exact, not lower bounds. Pixel
+ * lanes use the literal PostGIS rt_pixtype tags and one native little-endian
+ * element per pixel (1BB/2BUI/4BUI each occupy one byte in PostGIS WKB).
+ * The descriptor itself remains host-owned for this synchronous call.
  */
+#define PGACCEL_RESIDENT_RASTER_ABI_VERSION 1u
+#define PGACCEL_RESIDENT_RASTER_MAX_RECLASS_RULES 64u
+#define PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH 65536u
+#define PGACCEL_RESIDENT_RASTER_MAX_LAUNCH_CHUNKS 4096u
 
-/* Bilinear-interpolate src_pixels (W×H, fp32) to dst_pixels (new_W×new_H,
- * fp32). Out-of-range neighbours clamp to nearest edge. */
-pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_t src_w, size_t src_h,
-                                       size_t dst_w, size_t dst_h, float* dst_pixels);
+typedef enum {
+  PGACCEL_RESIDENT_RASTER_BOOL = 0,
+  PGACCEL_RESIDENT_RASTER_UINT2 = 1,
+  PGACCEL_RESIDENT_RASTER_UINT4 = 2,
+  PGACCEL_RESIDENT_RASTER_INT8 = 3,
+  PGACCEL_RESIDENT_RASTER_UINT8 = 4,
+  PGACCEL_RESIDENT_RASTER_INT16 = 5,
+  PGACCEL_RESIDENT_RASTER_UINT16 = 6,
+  PGACCEL_RESIDENT_RASTER_INT32 = 7,
+  PGACCEL_RESIDENT_RASTER_UINT32 = 8,
+  PGACCEL_RESIDENT_RASTER_FLOAT32 = 10,
+  PGACCEL_RESIDENT_RASTER_FLOAT64 = 11,
+} pgaccel_resident_raster_pixel_type;
 
-/* Per-pixel slope angle in degrees via Horn's 3×3 gradient. Edge pixels
- * (1-pixel border) get 0 — the stencil is undefined there. cell_size_x/y
- * are world units per pixel. Output is fp32 degrees [0, 90]. */
-pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t width, size_t height,
-                                    double cell_size_x, double cell_size_y, float* slope_out);
+typedef enum {
+  PGACCEL_RESIDENT_RASTER_BAND_HAS_NODATA = 1u << 0,
+  PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA = 1u << 1,
+} pgaccel_resident_raster_band_flags;
 
-/* Per-pixel aspect (compass direction of steepest descent) in degrees
- * [0, 360). N=0, E=90, S=180, W=270. Flat areas and edge pixels get -1. */
-pgaccel_status pgaccel_raster_aspect(const float* src_pixels, size_t width, size_t height,
-                                     float* aspect_out);
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  uint32_t first_band;
+  uint32_t band_count;
+  int32_t srid;
+  uint32_t flags;
+  double scale_x;
+  double scale_y;
+  double ip_x;
+  double ip_y;
+  double skew_x;
+  double skew_y;
+} pgaccel_resident_raster_row;
 
-/* Per-pixel shaded relief value [0, 255]. sun_azimuth_deg is compass
- * (N=0 CW); sun_altitude_deg is degrees above horizon. z_factor scales
- * pixel-value height units to match cell_size units. Edge pixels get 0. */
-pgaccel_status pgaccel_raster_hillshade(const float* src_pixels, size_t width, size_t height,
-                                        double cell_size_x, double cell_size_y,
-                                        double sun_azimuth_deg, double sun_altitude_deg,
-                                        double z_factor, float* shade_out);
+typedef struct {
+  uint32_t pixel_type;
+  uint32_t flags;
+  double nodata;
+} pgaccel_resident_raster_band;
 
-/* Per-point pixel-value lookup. Translates each (x, y) in `point_xy` to
- * (col, row) via the raster's affine, bounds-checks, writes the pixel
- * value into `output[i]`. Out-of-bounds points get NaN. Pixel buffer is
- * fp32, output is fp64. */
-pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t width, size_t height,
-                                    double origin_x, double origin_y, double scale_x,
-                                    double scale_y, const double* point_xy, size_t point_count,
-                                    double* output);
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const uint8_t* pixels;
+  size_t pixels_bytes;
+  const uint64_t* band_offsets; /* [band_count + 1], byte offsets */
+  size_t band_offsets_bytes;
+  const pgaccel_resident_raster_row* rows; /* [row_count] */
+  size_t rows_bytes;
+  const pgaccel_resident_raster_band* bands; /* [band_count] */
+  size_t bands_bytes;
+  const uint8_t* nulls; /* optional [row_count], canonical 0/1 */
+  size_t nulls_bytes;
+  size_t row_count;
+  size_t band_count;
+} pgaccel_resident_raster_view;
 
-/* Per-row 6-scalar summary stats over fp32 raster pixels. Output layout
- * is `[count, sum, mean, stddev, min, max]` per row × `row_count` rows
- * (`6 * sizeof(double) * row_count` total). When `nodata_masks` is non-
- * null, mask byte `1` skips that pixel. NaN/inf pixels are skipped.
- * Coordinates with `OutputShape::Record { field_count: 6 }` in Rust. */
-pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_count,
-                                           size_t pixels_per_row, const uint8_t* nodata_masks,
-                                           double* output);
-/* ── END raster-extensions ─────────────────────────────────────────── */
+typedef struct {
+  int64_t source;
+  int64_t destination;
+} pgaccel_resident_raster_reclass_rule;
+
+typedef enum {
+  PGACCEL_RASTER_ROW_NULL = 0,
+  PGACCEL_RASTER_ROW_PASSTHROUGH = 1,
+  PGACCEL_RASTER_ROW_RECLASSIFIED = 2,
+} pgaccel_resident_raster_row_action;
+
+typedef enum {
+  PGACCEL_RASTER_DETAIL_NONE = 0,
+  PGACCEL_RASTER_DETAIL_CONTRACT = 1,
+  PGACCEL_RASTER_DETAIL_VIEW = 2,
+  PGACCEL_RASTER_DETAIL_RULES = 3,
+  PGACCEL_RASTER_DETAIL_OFFSETS = 4,
+  PGACCEL_RASTER_DETAIL_CAPACITY = 5,
+  PGACCEL_RASTER_DETAIL_BYTE_BUDGET = 6,
+  PGACCEL_RASTER_DETAIL_NUMERIC_OVERFLOW = 7,
+} pgaccel_resident_raster_detail;
+
+typedef enum {
+  PGACCEL_RASTER_VALIDATION_VIEW = 1u << 0,
+  PGACCEL_RASTER_VALIDATION_RULES = 1u << 1,
+  PGACCEL_RASTER_VALIDATION_OFFSETS = 1u << 2,
+  PGACCEL_RASTER_VALIDATION_CAPACITY = 1u << 3,
+  PGACCEL_RASTER_VALIDATION_BYTE_BUDGET = 1u << 4,
+  PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW = 1u << 5,
+} pgaccel_resident_raster_validation_failure;
+
+/* Caller-owned device scratch. It is output-only and may be reused after the
+ * synchronous call returns. Keeping this allocation outside the helper is
+ * required by the resident-store borrow contract. */
+typedef struct {
+  uint32_t failures;
+  uint32_t pad;
+  uint64_t first_output_offset;
+  uint64_t last_output_offset;
+} pgaccel_resident_raster_validation_scratch;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  pgaccel_resident_raster_view input;
+  size_t first_row;
+  size_t count;
+  uint32_t output_pixel_type; /* integer resident pixel tags 0..8 only */
+  uint32_t pad;
+  const pgaccel_resident_raster_reclass_rule* rules; /* [rule_count] */
+  size_t rules_bytes;
+  size_t rule_count;
+  const uint64_t* output_offsets; /* [count + 1], global output byte offsets */
+  size_t output_offsets_bytes;
+  uint8_t* output_pixels;
+  size_t output_pixels_bytes;
+  uint8_t* row_actions; /* [count] */
+  size_t row_actions_bytes;
+  pgaccel_resident_raster_validation_scratch* validation_scratch; /* [1] */
+  size_t validation_scratch_bytes;
+  size_t max_total_pixels; /* exact selected pixels and defensive work cap */
+  size_t max_chunk_pixels; /* maximum pixels in one device launch */
+} pgaccel_raster_reclass_resident_request;
+
+/* Exact output_offsets deltas are zero for NULL/passthrough rows and
+ * width*height*output_pixel_width for reclassified rows. Offsets are caller-
+ * owned and read-only. The function writes only output_pixels and row_actions;
+ * Host descriptor/allocation failures are hard non-OK statuses. Device-view,
+ * rule, offset, capacity, and budget failures are written to validation_scratch
+ * and make every ordered output kernel a no-op. The caller reads/maps that
+ * scratch only after releasing its resident-input borrow; no failed result may
+ * be reconstructed or published. */
+pgaccel_status
+pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request* request,
+                                   int32_t* detail);
 
 /* Window-function declarations live in pgaccel_window.h (separate header
  * so the dispatcher can include just the window API without the rest of
@@ -942,36 +1065,198 @@ pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_
  * numbers must hold across the fp64-unlock rename (2026-04-22).
  */
 #ifdef __cplusplus
-static_assert(sizeof(pgaccel_platform_caps) == 88,
-              "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
-static_assert(sizeof(pgaccel_device_info) == 216,
-              "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
-static_assert(sizeof(pgaccel_geometry) == 48,
-              "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
-static_assert(offsetof(pgaccel_geometry, bbox) == 8, "pgaccel_geometry.bbox at offset 8");
-static_assert(offsetof(pgaccel_geometry, coords) == 16, "pgaccel_geometry.coords at offset 16");
-static_assert(offsetof(pgaccel_geometry, coord_count) == 24,
-              "pgaccel_geometry.coord_count at offset 24");
-static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
-              "pgaccel_geometry.ring_offsets at offset 32");
-static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
-              "pgaccel_geometry.ring_count at offset 40");
+#define PGACCEL_ABI_ASSERT(condition, message) static_assert(condition, message)
 #else
-_Static_assert(sizeof(pgaccel_platform_caps) == 88,
-               "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
-_Static_assert(sizeof(pgaccel_device_info) == 216,
-               "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
-_Static_assert(sizeof(pgaccel_geometry) == 48,
-               "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
-_Static_assert(offsetof(pgaccel_geometry, bbox) == 8, "pgaccel_geometry.bbox at offset 8");
-_Static_assert(offsetof(pgaccel_geometry, coords) == 16, "pgaccel_geometry.coords at offset 16");
-_Static_assert(offsetof(pgaccel_geometry, coord_count) == 24,
-               "pgaccel_geometry.coord_count at offset 24");
-_Static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
-               "pgaccel_geometry.ring_offsets at offset 32");
-_Static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
-               "pgaccel_geometry.ring_count at offset 40");
+#define PGACCEL_ABI_ASSERT(condition, message) _Static_assert(condition, message)
 #endif
+
+#define PGACCEL_ABI_OFFSET(type, field, offset) \
+  PGACCEL_ABI_ASSERT(offsetof(type, field) == offset, #type "." #field " ABI offset drifted")
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_platform_caps) == 88,
+                   "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_device_info) == 216,
+                   "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_geometry) == 48,
+                   "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
+PGACCEL_ABI_OFFSET(pgaccel_geometry, bbox, 8);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, coords, 16);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, coord_count, 24);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, ring_offsets, 32);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, ring_count, 40);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_row) == 72,
+                   "resident raster row ABI pinned at 72 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, width, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, height, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, first_band, 8);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, band_count, 12);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, srid, 16);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, flags, 20);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, scale_x, 24);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, scale_y, 32);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, ip_x, 40);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, ip_y, 48);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, skew_x, 56);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, skew_y, 64);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_band) == 16,
+                   "resident raster band ABI pinned at 16 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_band, pixel_type, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_band, flags, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_band, nodata, 8);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_view) == 104,
+                   "resident raster view ABI pinned at 104 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, abi_version, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, flags, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, pixels, 8);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, pixels_bytes, 16);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, band_offsets, 24);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, band_offsets_bytes, 32);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, rows, 40);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, rows_bytes, 48);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, bands, 56);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, bands_bytes, 64);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, nulls, 72);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, nulls_bytes, 80);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, row_count, 88);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, band_count, 96);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_reclass_rule) == 16,
+                   "resident raster rule ABI pinned at 16 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_reclass_rule, source, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_reclass_rule, destination, 8);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_validation_scratch) == 24,
+                   "resident raster validation scratch ABI pinned at 24 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, failures, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, pad, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, first_output_offset, 8);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, last_output_offset, 16);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_raster_reclass_resident_request) == 240,
+                   "resident raster request ABI pinned at 240 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, abi_version, 0);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, flags, 4);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, input, 8);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, first_row, 112);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, count, 120);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_pixel_type, 128);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, pad, 132);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, rules, 136);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, rules_bytes, 144);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, rule_count, 152);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_offsets, 160);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_offsets_bytes, 168);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_pixels, 176);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_pixels_bytes, 184);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, row_actions, 192);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, row_actions_bytes, 200);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, validation_scratch, 208);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, validation_scratch_bytes, 216);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, max_total_pixels, 224);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, max_chunk_pixels, 232);
+
+#undef PGACCEL_ABI_OFFSET
+#undef PGACCEL_ABI_ASSERT
+
+#ifdef __cplusplus
+#define PGACCEL_RESIDENT_ABI_PIN(condition) static_assert(condition, #condition)
+#else
+#define PGACCEL_RESIDENT_ABI_PIN(condition) _Static_assert(condition, #condition)
+#endif
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_resident_geometry_row) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, geom_type) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, srid) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, first_ring) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, ring_count) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, flags) == 20);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_resident_geometry_view) == 128);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, coordinates) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, bboxes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, geometry_offsets) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, ring_offsets) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, rows) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, nulls) == 48);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, coordinates_bytes) == 56);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, bboxes_bytes) == 64);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, geometry_offsets_bytes) == 72);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, ring_offsets_bytes) == 80);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, rows_bytes) == 88);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, nulls_bytes) == 96);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, row_count) == 104);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, coordinate_pair_count) == 112);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, ring_count) == 120);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_resident_geometry_operand) == 144);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_operand, view) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_operand, first_row) == 128);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_operand, row_stride) == 136);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_resident_request) == 384);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, pad) == 12);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_threshold) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, count) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, max_referenced_bytes) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, left) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, right) == 184);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results) == 328);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results_bytes) ==
+                         336);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distances) == 344);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distances_bytes) == 352);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain) == 360);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain_bytes) ==
+                         368);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, output_capacity) == 376);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_workspace) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, control) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, control_bytes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, failure_flags) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, failure_flags_bytes) == 32);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_recheck_compact_request) == 88);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, tri_state) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, tri_state_bytes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, final_mask) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, final_mask_bytes) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_indices) ==
+                         40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request,
+                                  uncertain_indices_bytes) == 48);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_count) == 56);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_count_bytes) ==
+                         64);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, row_count) == 72);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_capacity) ==
+                         80);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_recheck_patch_request) == 72);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, indices) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, indices_bytes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, results) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, results_bytes) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, final_mask) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, final_mask_bytes) == 48);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, row_count) == 56);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, patch_count) == 64);
+
+#undef PGACCEL_RESIDENT_ABI_PIN
 
 #ifdef __cplusplus
 }

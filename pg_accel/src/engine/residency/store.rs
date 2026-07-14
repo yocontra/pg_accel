@@ -10,7 +10,11 @@ use pgrx::{default, name, pg_sys, prelude::*};
 use crate::engine::gucs;
 use crate::gpu::{ExprDeviceBuffer, GpuError};
 
-use super::domain::ResidentByteAccounting;
+use super::domain::{
+    ResidentByteAccounting, ResidentRasterBand, ResidentRasterRow, ResidentRasterStats,
+    RetainedExactValues,
+};
+use super::geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::loader::{self, ColumnRequest, StagedRelation};
 
@@ -68,6 +72,20 @@ pub enum ResidentColumn {
         values: ExprDeviceBuffer<u64>,
         nulls: Option<ExprDeviceBuffer<u8>>,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        data: ResidentGeometryColumn,
+    },
+    Raster {
+        type_oid: pg_sys::Oid,
+        pixels: Option<ExprDeviceBuffer<u8>>,
+        band_offsets: ExprDeviceBuffer<u64>,
+        rows: ExprDeviceBuffer<ResidentRasterRow>,
+        bands: Option<ExprDeviceBuffer<ResidentRasterBand>>,
+        nulls: Option<ExprDeviceBuffer<u8>>,
+        exact: RetainedExactValues,
+        stats: ResidentRasterStats,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: ExprDeviceBuffer<f32>,
@@ -95,6 +113,8 @@ impl ResidentColumn {
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
+            | Self::Geometry { type_oid, .. }
+            | Self::Raster { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -109,6 +129,8 @@ impl ResidentColumn {
             Self::I32 { values, .. } => values.len(),
             Self::I64 { values, .. } => values.len(),
             Self::H3 { values, .. } => values.len(),
+            Self::Geometry { data, .. } => data.view().row_count,
+            Self::Raster { rows, .. } => rows.len(),
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -149,6 +171,38 @@ impl ResidentColumn {
                 8,
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
             ),
+            Self::Geometry { data, .. } => Some(data.accounting().device_bytes),
+            Self::Raster {
+                pixels,
+                band_offsets,
+                rows,
+                bands,
+                nulls,
+                ..
+            } => pixels
+                .as_ref()
+                .map_or(Some(0), |values| checked(values.len(), 1, 0))
+                .and_then(|bytes| {
+                    checked(band_offsets.len(), std::mem::size_of::<u64>(), 0)
+                        .and_then(|offsets| bytes.checked_add(offsets))
+                })
+                .and_then(|bytes| {
+                    checked(rows.len(), std::mem::size_of::<ResidentRasterRow>(), 0)
+                        .and_then(|rows| bytes.checked_add(rows))
+                })
+                .and_then(|bytes| {
+                    bands
+                        .as_ref()
+                        .map_or(Some(0), |bands| {
+                            checked(bands.len(), std::mem::size_of::<ResidentRasterBand>(), 0)
+                        })
+                        .and_then(|bands| bytes.checked_add(bands))
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        u64::try_from(nulls.as_ref().map_or(0, ExprDeviceBuffer::len)).ok()?,
+                    )
+                }),
             Self::F32 { values, nulls, .. } => checked(
                 values.len(),
                 4,
@@ -164,6 +218,49 @@ impl ResidentColumn {
                 4,
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
             ),
+        }
+    }
+
+    #[must_use]
+    pub fn accounting(&self) -> Option<ResidentByteAccounting> {
+        match self {
+            Self::Geometry { data, .. } => Some(data.accounting()),
+            Self::Raster { exact, stats, .. } => Some(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: exact
+                    .offsets
+                    .len()
+                    .checked_mul(std::mem::size_of::<u64>())
+                    .and_then(|offsets| offsets.checked_add(exact.bytes.len()))
+                    .and_then(|host| {
+                        stats
+                            .band_pixels
+                            .len()
+                            .checked_mul(std::mem::size_of::<u64>())
+                            .and_then(|bytes| {
+                                stats
+                                    .band_rows
+                                    .len()
+                                    .checked_mul(std::mem::size_of::<u64>())
+                                    .and_then(|band_rows| bytes.checked_add(band_rows))
+                            })
+                            .and_then(|bytes| {
+                                stats
+                                    .work_rows
+                                    .len()
+                                    .checked_mul(std::mem::size_of::<
+                                        super::domain::ResidentRasterWorkRow,
+                                    >())
+                                    .and_then(|work_rows| bytes.checked_add(work_rows))
+                            })
+                            .and_then(|stats| host.checked_add(stats))
+                    })
+                    .and_then(|bytes| u64::try_from(bytes).ok())?,
+            }),
+            _ => Some(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: 0,
+            }),
         }
     }
 
@@ -208,6 +305,29 @@ impl ResidentColumn {
                 type_oid: *type_oid,
                 values,
                 nulls: nulls.as_ref(),
+            },
+            Self::Geometry { type_oid, data } => ResidentColumnView::Geometry {
+                type_oid: *type_oid,
+                data: data.view(),
+            },
+            Self::Raster {
+                type_oid,
+                pixels,
+                band_offsets,
+                rows,
+                bands,
+                nulls,
+                exact,
+                stats,
+            } => ResidentColumnView::Raster {
+                type_oid: *type_oid,
+                pixels: pixels.as_ref(),
+                band_offsets,
+                rows,
+                bands: bands.as_ref(),
+                nulls: nulls.as_ref(),
+                exact,
+                stats,
             },
             Self::F32 {
                 type_oid,
@@ -268,6 +388,20 @@ pub enum ResidentColumnView<'a> {
         values: &'a ExprDeviceBuffer<u64>,
         nulls: Option<&'a ExprDeviceBuffer<u8>>,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        data: ResidentGeometryColumnView<'a>,
+    },
+    Raster {
+        type_oid: pg_sys::Oid,
+        pixels: Option<&'a ExprDeviceBuffer<u8>>,
+        band_offsets: &'a ExprDeviceBuffer<u64>,
+        rows: &'a ExprDeviceBuffer<ResidentRasterRow>,
+        bands: Option<&'a ExprDeviceBuffer<ResidentRasterBand>>,
+        nulls: Option<&'a ExprDeviceBuffer<u8>>,
+        exact: &'a RetainedExactValues,
+        stats: &'a ResidentRasterStats,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: &'a ExprDeviceBuffer<f32>,
@@ -295,6 +429,8 @@ impl ResidentColumnView<'_> {
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
+            | Self::Geometry { type_oid, .. }
+            | Self::Raster { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -309,6 +445,8 @@ impl ResidentColumnView<'_> {
             Self::I32 { values, .. } => values.len(),
             Self::I64 { values, .. } => values.len(),
             Self::H3 { values, .. } => values.len(),
+            Self::Geometry { data, .. } => data.row_count,
+            Self::Raster { rows, .. } => rows.len(),
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -420,6 +558,39 @@ pub struct PreparedDerived<P> {
     pub device_bytes: u64,
 }
 
+/// Exact accounting and transient host preparation computed before a staged
+/// artifact reserves its complete physical footprint.
+pub struct StagedDerivedPreflight<P> {
+    pub prepared: P,
+    pub accounting: ResidentByteAccounting,
+}
+
+/// Exact persistent and transient accounting established before a staged
+/// workspace allocates any buffers.
+pub struct StagedTransformPreflight<P> {
+    pub prepared: P,
+    pub published_accounting: ResidentByteAccounting,
+    pub transient_accounting: ResidentByteAccounting,
+}
+
+/// A non-publishable transform workspace that reports its complete physical
+/// footprint. Host bytes include snapshots, layouts, and preallocated D2H
+/// destinations, regardless of whether they contain exact source values.
+pub trait StagedTransformWorkspace {
+    fn device_bytes(&self) -> u64;
+
+    fn host_bytes(&self) -> u64;
+}
+
+fn workspace_accounting<W: StagedTransformWorkspace + ?Sized>(
+    workspace: &W,
+) -> ResidentByteAccounting {
+    ResidentByteAccounting {
+        device_bytes: workspace.device_bytes(),
+        retained_host_exact_bytes: workspace.host_bytes(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactEnsureOutcome {
     Hit,
@@ -431,6 +602,218 @@ pub enum ArtifactEnsureOutcome {
 pub struct ResidentInputBundle<'a> {
     pub columns: Vec<ResidentColumnView<'a>>,
     pub evidence: Vec<ResidentRelationEvidence>,
+}
+
+/// Nonallocating on-demand raw-input resolver for staged device dispatch.
+///
+/// Unlike [`ResidentInputBundle`], this value does not collect column views or
+/// evidence. Each accessor performs a bounded lookup in the already-borrowed
+/// store and returns a view/value directly.
+pub struct ResidentDispatchBundle<'a> {
+    store: &'a RelationStore,
+    columns: &'a [ResidentColumnRef],
+    dependencies: &'a [ResidentDependencyStamp],
+}
+
+impl ResidentDispatchBundle<'_> {
+    #[must_use]
+    pub const fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    #[must_use]
+    pub const fn dependency_count(&self) -> usize {
+        self.dependencies.len()
+    }
+
+    pub fn column(&self, index: usize) -> Result<ResidentColumnView<'_>, ResidentLoadError> {
+        let request =
+            self.columns
+                .get(index)
+                .ok_or(ResidentLoadError::DispatchColumnIndexOutOfBounds {
+                    index,
+                    column_count: self.columns.len(),
+                })?;
+        self.find_column(*request)
+    }
+
+    pub fn find_column(
+        &self,
+        column: ResidentColumnRef,
+    ) -> Result<ResidentColumnView<'_>, ResidentLoadError> {
+        if !self.columns.contains(&column) {
+            return Err(ResidentLoadError::MissingColumn {
+                relid: column.relid,
+                attno: column.attno,
+            });
+        }
+        let relation = self
+            .store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == column.relid)
+            .ok_or(ResidentLoadError::MissingRelation(column.relid))?;
+        relation
+            .columns
+            .get(&column.attno)
+            .map(ResidentColumn::view)
+            .ok_or(ResidentLoadError::MissingColumn {
+                relid: column.relid,
+                attno: column.attno,
+            })
+    }
+
+    pub fn evidence(&self, index: usize) -> Result<ResidentRelationEvidence, ResidentLoadError> {
+        let dependency = self.dependencies.get(index).ok_or(
+            ResidentLoadError::DispatchDependencyIndexOutOfBounds {
+                index,
+                dependency_count: self.dependencies.len(),
+            },
+        )?;
+        self.evidence_for(dependency.relid)
+    }
+
+    pub fn evidence_for(
+        &self,
+        relid: pg_sys::Oid,
+    ) -> Result<ResidentRelationEvidence, ResidentLoadError> {
+        if !self
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.relid == relid)
+        {
+            return Err(ResidentLoadError::MissingRelation(relid));
+        }
+        self.store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == relid)
+            .map(ResidentRelation::evidence)
+            .ok_or(ResidentLoadError::MissingRelation(relid))
+    }
+}
+
+/// Owned, generation-stamped exact geometry bytes for post-borrow rechecks.
+///
+/// `storage` is supplied by the caller after the artifact ledger reservation
+/// and before this snapshot touches the store. The first `row_count + 1`
+/// words are exact-value offsets; the remaining aligned bytes retain the
+/// original flat GSERIALIZED values. Its complete allocation is charged to
+/// the derived artifact that owns the snapshot.
+pub struct ResidentGeometryExactSnapshot {
+    column: ResidentColumnRef,
+    dependency: ResidentDependencyStamp,
+    type_oid: pg_sys::Oid,
+    row_count: usize,
+    exact_byte_count: usize,
+    storage: Box<[u64]>,
+}
+
+impl ResidentGeometryExactSnapshot {
+    #[must_use]
+    pub const fn column(&self) -> ResidentColumnRef {
+        self.column
+    }
+
+    #[must_use]
+    pub const fn dependency(&self) -> ResidentDependencyStamp {
+        self.dependency
+    }
+
+    #[must_use]
+    pub const fn type_oid(&self) -> pg_sys::Oid {
+        self.type_oid
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    #[must_use]
+    pub fn retained_host_bytes(&self) -> Option<u64> {
+        self.storage
+            .len()
+            .checked_mul(std::mem::size_of::<u64>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+    }
+
+    #[must_use]
+    pub fn exact_value(&self, row_index: usize) -> Option<&[u8]> {
+        if row_index >= self.row_count {
+            return None;
+        }
+        let offset_count = self.row_count.checked_add(1)?;
+        let start = usize::try_from(*self.storage.get(row_index)?).ok()?;
+        let end = usize::try_from(*self.storage.get(row_index.checked_add(1)?)?).ok()?;
+        if start > end || end > self.exact_byte_count {
+            return None;
+        }
+        let payload_bytes = self
+            .storage
+            .len()
+            .checked_sub(offset_count)?
+            .checked_mul(std::mem::size_of::<u64>())?;
+        // SAFETY: storage is an aligned contiguous u64 allocation. The
+        // offset table occupies offset_count words, and payload_bytes is the
+        // complete remaining initialized allocation.
+        let payload = unsafe {
+            std::slice::from_raw_parts(
+                self.storage.as_ptr().add(offset_count).cast(),
+                payload_bytes,
+            )
+        };
+        payload.get(start..end)
+    }
+}
+
+fn build_geometry_exact_snapshot(
+    column: ResidentColumnRef,
+    dependency: ResidentDependencyStamp,
+    type_oid: pg_sys::Oid,
+    row_count: usize,
+    exact: &RetainedExactValues,
+    mut storage: Box<[u64]>,
+) -> Result<ResidentGeometryExactSnapshot, ResidentLoadError> {
+    let offset_count = row_count
+        .checked_add(1)
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    if exact.offsets.len() != offset_count {
+        return Err(ResidentLoadError::Loader(
+            "resident geometry exact offsets do not match the relation row count".to_owned(),
+        ));
+    }
+    let payload_words = storage.len().checked_sub(offset_count).ok_or_else(|| {
+        ResidentLoadError::Loader(
+            "preallocated geometry snapshot is shorter than its offset table".to_owned(),
+        )
+    })?;
+    let payload_bytes = payload_words
+        .checked_mul(std::mem::size_of::<u64>())
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    if exact.bytes.len() > payload_bytes {
+        return Err(ResidentLoadError::Loader(
+            "preallocated geometry snapshot is shorter than its exact payload".to_owned(),
+        ));
+    }
+    storage[..offset_count].copy_from_slice(&exact.offsets);
+    // SAFETY: the mutable payload begins after offset_count in-bounds words
+    // and covers payload_bytes initialized bytes in the owned allocation.
+    let payload = unsafe {
+        std::slice::from_raw_parts_mut(
+            storage.as_mut_ptr().add(offset_count).cast::<u8>(),
+            payload_bytes,
+        )
+    };
+    payload[..exact.bytes.len()].copy_from_slice(&exact.bytes);
+    Ok(ResidentGeometryExactSnapshot {
+        column,
+        dependency,
+        type_oid,
+        row_count,
+        exact_byte_count: exact.bytes.len(),
+        storage,
+    })
 }
 
 /// Typed derived artifact plus raw inputs under one store borrow. No device
@@ -481,6 +864,7 @@ pub struct ResidentRelationEvidence {
     pub relfilenode: pg_sys::Oid,
     pub row_count: u64,
     pub raw_bytes: u64,
+    pub raw_accounting: ResidentByteAccounting,
     pub derived_bytes: u64,
     pub loaded_at_us: i64,
     pub last_used_us: i64,
@@ -505,6 +889,7 @@ pub(super) struct ResidentRelation {
     pub(super) last_used_tick: u64,
     pub(super) pinned: bool,
     pub(super) raw_charge: LedgerCharge,
+    pub(super) raw_accounting: ResidentByteAccounting,
     pub(super) first_use_scope: Option<CommandScope>,
     pub(super) derived: Vec<DerivedEntry>,
 }
@@ -567,6 +952,7 @@ impl ResidentRelation {
             relfilenode: self.relfilenode,
             row_count: self.row_count,
             raw_bytes: self.raw_bytes(),
+            raw_accounting: self.raw_accounting,
             derived_bytes: self.derived_bytes(),
             loaded_at_us: self.loaded_at_us,
             last_used_us: self.last_used_us,
@@ -710,6 +1096,7 @@ pub struct ResidentRelationStatus {
     pub relid: pg_sys::Oid,
     pub columns: Vec<i16>,
     pub raw_bytes: u64,
+    pub raw_accounting: ResidentByteAccounting,
     pub derived_bytes: u64,
     pub pinned: bool,
     pub generation: u64,
@@ -796,8 +1183,20 @@ pub enum ResidentLoadError {
     ArtifactDependencyChanged {
         relid: pg_sys::Oid,
     },
+    DispatchColumnIndexOutOfBounds {
+        index: usize,
+        column_count: usize,
+    },
+    DispatchDependencyIndexOutOfBounds {
+        index: usize,
+        dependency_count: usize,
+    },
     ArtifactAccountingOverflow,
     ArtifactAccountingMismatch {
+        declared: ResidentByteAccounting,
+        actual: ResidentByteAccounting,
+    },
+    TransformWorkspaceAccountingMismatch {
         declared: ResidentByteAccounting,
         actual: ResidentByteAccounting,
     },
@@ -844,12 +1243,34 @@ impl fmt::Display for ResidentLoadError {
                 f,
                 "resident derived artifact dependency relation OID {relid} changed during resolution"
             ),
+            Self::DispatchColumnIndexOutOfBounds {
+                index,
+                column_count,
+            } => write!(
+                f,
+                "resident dispatch column index {index} exceeds column count {column_count}"
+            ),
+            Self::DispatchDependencyIndexOutOfBounds {
+                index,
+                dependency_count,
+            } => write!(
+                f,
+                "resident dispatch dependency index {index} exceeds dependency count {dependency_count}"
+            ),
             Self::ArtifactAccountingOverflow => {
                 f.write_str("resident derived artifact byte accounting overflows u64")
             }
             Self::ArtifactAccountingMismatch { declared, actual } => write!(
                 f,
                 "resident derived artifact accounting mismatch: declared {} device + {} retained host bytes, actual {} device + {} retained host bytes",
+                declared.device_bytes,
+                declared.retained_host_exact_bytes,
+                actual.device_bytes,
+                actual.retained_host_exact_bytes
+            ),
+            Self::TransformWorkspaceAccountingMismatch { declared, actual } => write!(
+                f,
+                "resident transform workspace accounting mismatch: declared {} device + {} host bytes, actual {} device + {} host bytes",
                 declared.device_bytes,
                 declared.retained_host_exact_bytes,
                 actual.device_bytes,
@@ -959,8 +1380,33 @@ fn process_invalidations() {
 #[cfg(test)]
 fn process_invalidations() {
     // Plain Rust unit tests install synthetic relation entries without a live
-    // PostgreSQL catalog. Production and pg_test builds always use the
-    // relcache/generation implementation above.
+    // PostgreSQL catalog. A one-shot generation bump lets lifecycle tests
+    // model invalidations precisely between immutable-borrow stages.
+    let pending = TEST_PENDING_GENERATION_BUMP.with(Cell::take);
+    if let Some(relid) = pending {
+        STORE.with(|store| {
+            if let Some(relation) = store
+                .borrow_mut()
+                .entries
+                .iter_mut()
+                .find(|entry| entry.relid == relid)
+            {
+                relation.generation.relation += 1;
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_PENDING_GENERATION_BUMP: Cell<Option<pg_sys::Oid>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn schedule_test_generation_bump(relid: pg_sys::Oid) {
+    TEST_PENDING_GENERATION_BUMP.with(|pending| {
+        assert!(pending.replace(Some(relid)).is_none());
+    });
 }
 
 pub(super) fn cleanup_backend() {
@@ -1013,6 +1459,44 @@ fn reserve_with_local_eviction_excluding(
     })
 }
 
+fn reserve_transform_charges_excluding(
+    protected: &BTreeSet<u32>,
+    persistent_bytes: u64,
+    transient_bytes: u64,
+) -> Result<(LedgerCharge, LedgerCharge), ResidentLoadError> {
+    crate::ensure_backend_exit_callback();
+    #[cfg(test)]
+    let budget = u64::MAX;
+    #[cfg(not(test))]
+    let budget = gucs::resident_memory_budget_bytes();
+    reserve_transform_charges(
+        persistent_bytes,
+        transient_bytes,
+        budget,
+        LedgerCharge::reserve,
+        || {
+            STORE.with(|store| {
+                store
+                    .borrow_mut()
+                    .evict_one_for_budget_excluding(protected)
+                    .is_some()
+            })
+        },
+    )
+}
+
+fn reserve_transform_charges<T>(
+    persistent_bytes: u64,
+    transient_bytes: u64,
+    budget: u64,
+    mut reserve: impl FnMut(u64, u64) -> Result<T, u64>,
+    mut evict: impl FnMut() -> bool,
+) -> Result<(T, T), ResidentLoadError> {
+    let persistent = reserve_with_eviction(persistent_bytes, budget, &mut reserve, &mut evict)?;
+    let transient = reserve_with_eviction(transient_bytes, budget, &mut reserve, &mut evict)?;
+    Ok((persistent, transient))
+}
+
 fn reserve_with_eviction<T>(
     bytes: u64,
     budget: u64,
@@ -1041,13 +1525,16 @@ fn install_staged(
     first_use_scope: Option<CommandScope>,
     protected: &BTreeSet<u32>,
 ) -> Result<(), ResidentLoadError> {
-    let bytes = staged.device_bytes().map_err(ResidentLoadError::Loader)?;
+    let accounting = staged.accounting().map_err(ResidentLoadError::Loader)?;
+    let bytes = accounting
+        .checked_total()
+        .map_err(|error| ResidentLoadError::Loader(error.to_string()))?;
     STORE.with(|store| {
         store.borrow_mut().remove_relation(staged.relid());
     });
     let charge = reserve_with_local_eviction_excluding(protected, bytes)?;
     let mut relation = staged
-        .materialize(charge)
+        .materialize(charge, accounting)
         .map_err(ResidentLoadError::Loader)?;
     relation.pinned = pinned;
     relation.first_use_scope = first_use_scope;
@@ -1240,7 +1727,7 @@ pub fn estimate_selected_relation(
 ) -> Result<ResidentLoadEstimate, ResidentLoadError> {
     process_invalidations();
     let columns = required_columns_for(request)?;
-    let estimated_bytes = loader::estimate_device_bytes(request.relid, &columns)
+    let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
         .map_err(ResidentLoadError::Loader)?;
     let (loaded, pinned, last_load_ms) = STORE.with(|store| {
         let store = store.borrow();
@@ -1360,6 +1847,115 @@ pub fn with_resident_column<R>(
             .ok_or(ResidentLoadError::MissingColumn { relid, attno })?;
         Ok(callback(column.view()))
     })
+}
+
+fn resident_geometry_snapshot_source<'bundle, 'resident>(
+    requests: &[ResidentColumnRef],
+    inputs: &'bundle ResidentInputBundle<'resident>,
+    column: ResidentColumnRef,
+) -> Result<
+    (
+        pg_sys::Oid,
+        &'bundle ResidentGeometryColumnView<'resident>,
+        ResidentDependencyStamp,
+    ),
+    ResidentLoadError,
+> {
+    if requests.len() != inputs.columns.len() {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "resident snapshot requests do not match supplied column views".to_owned(),
+        ));
+    }
+    let index = requests
+        .iter()
+        .position(|request| *request == column)
+        .ok_or(ResidentLoadError::MissingColumn {
+            relid: column.relid,
+            attno: column.attno,
+        })?;
+    let (type_oid, data) = match &inputs.columns[index] {
+        ResidentColumnView::Geometry { type_oid, data } => (*type_oid, data),
+        _ => {
+            return Err(ResidentLoadError::Loader(format!(
+                "resident attribute ({}, {}) is not a geometry column",
+                u32::from(column.relid),
+                column.attno,
+            )));
+        }
+    };
+    let evidence = inputs
+        .evidence
+        .iter()
+        .find(|evidence| evidence.relid == column.relid)
+        .ok_or(ResidentLoadError::MissingRelation(column.relid))?;
+    let evidence_rows = usize::try_from(evidence.row_count).map_err(|_| {
+        ResidentLoadError::Loader("resident geometry row count exceeds usize".to_owned())
+    })?;
+    if evidence_rows != data.row_count {
+        return Err(ResidentLoadError::Loader(
+            "resident geometry snapshot row count does not match dependency evidence".to_owned(),
+        ));
+    }
+    Ok((
+        type_oid,
+        data,
+        ResidentDependencyStamp {
+            relid: evidence.relid,
+            generation: evidence.generation,
+            global_generation: evidence.global_generation,
+            relfilenode: evidence.relfilenode,
+        },
+    ))
+}
+
+/// Exact aligned-word count required by [`snapshot_resident_geometry_exact`].
+pub fn resident_geometry_exact_snapshot_words(
+    requests: &[ResidentColumnRef],
+    inputs: &ResidentInputBundle<'_>,
+    column: ResidentColumnRef,
+) -> Result<usize, ResidentLoadError> {
+    let (_, data, _) = resident_geometry_snapshot_source(requests, inputs, column)?;
+    data.row_count
+        .checked_add(1)
+        .and_then(|offset_words| {
+            data.exact
+                .bytes
+                .len()
+                .checked_add(std::mem::size_of::<u64>() - 1)
+                .map(|bytes| bytes / std::mem::size_of::<u64>())
+                .and_then(|payload_words| offset_words.checked_add(payload_words))
+        })
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)
+}
+
+/// Fill caller-preallocated aligned storage from an already-borrowed input
+/// bundle, without re-entering the resident store.
+///
+/// The caller must reserve the snapshot's exact padded retained-host charge
+/// before invoking this helper. No device pointer escapes and no
+/// device-to-host transfer is performed; the source exact values are already
+/// host-resident.
+pub fn snapshot_resident_geometry_exact(
+    requests: &[ResidentColumnRef],
+    inputs: &ResidentInputBundle<'_>,
+    column: ResidentColumnRef,
+    storage: Box<[u64]>,
+) -> Result<ResidentGeometryExactSnapshot, ResidentLoadError> {
+    let (type_oid, data, dependency) = resident_geometry_snapshot_source(requests, inputs, column)?;
+    let expected_words = resident_geometry_exact_snapshot_words(requests, inputs, column)?;
+    if storage.len() != expected_words {
+        return Err(ResidentLoadError::Loader(
+            "geometry snapshot allocation does not match its exact padded word count".to_owned(),
+        ));
+    }
+    build_geometry_exact_snapshot(
+        column,
+        dependency,
+        type_oid,
+        data.row_count,
+        data.exact,
+        storage,
+    )
 }
 
 fn canonical_dependency_relids(
@@ -1732,6 +2328,374 @@ pub fn ensure_device_derived_artifact<T: DerivedArtifact>(
             dependencies: captured_dependencies,
             artifact: Box::new(artifact),
             charge,
+        });
+        Ok(())
+    })?;
+    Ok(if replacing_stale {
+        ArtifactEnsureOutcome::Rebuilt
+    } else {
+        ArtifactEnsureOutcome::Built
+    })
+}
+
+/// Build one composite dependency-stamped artifact through explicit staged
+/// borrows and one exact reserve-first ledger charge.
+///
+/// `preflight` runs only on a cache miss and may compute transient host state
+/// needed to determine the exact physical accounting. After that exact charge
+/// is reserved, `snapshot_prepare` may copy host-resident exact values and
+/// finish host preparation under the same dependency generations. `build`
+/// then allocates/uploads every artifact-owned host and device buffer outside
+/// the store borrow. Finally, `dispatch` reborrows the raw inputs, requires the
+/// same generations again, and must perform only checked pointer/device work:
+/// it must not allocate, perform catalog/SPI work, or copy device metadata to
+/// host. `finalize` runs outside the store borrow before one final dependency
+/// check and publication.
+///
+/// The built artifact's device and retained-host byte categories must exactly
+/// equal the preflight declaration; upper-bound or padded hidden accounting is
+/// rejected.
+#[allow(clippy::too_many_arguments)]
+pub fn ensure_staged_device_derived_artifact<T: DerivedArtifact, P, S>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    preflight: impl FnOnce(
+        ResidentInputBundle<'_>,
+    ) -> Result<StagedDerivedPreflight<P>, ResidentLoadError>,
+    snapshot_prepare: impl FnOnce(P, ResidentInputBundle<'_>) -> Result<S, ResidentLoadError>,
+    build: impl FnOnce(S) -> Result<T, ResidentLoadError>,
+    dispatch: impl FnOnce(&mut T, ResidentDispatchBundle<'_>) -> Result<(), ResidentLoadError>,
+    finalize: impl FnOnce(&mut T) -> Result<(), ResidentLoadError>,
+) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
+    if identity.canonical_words().is_empty() {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "canonical artifact identity is empty".to_owned(),
+        ));
+    }
+    process_invalidations();
+    let protected = canonical_dependency_relids(owner_relid, dependency_relids, columns)?;
+
+    let mut replacing_stale = false;
+    let hit = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let owner_index = store
+            .entries
+            .iter()
+            .position(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        let exact_index = store.entries[owner_index]
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity));
+        let Some(exact_index) = exact_index else {
+            return Ok(false);
+        };
+        let stored_dependencies = &store.entries[owner_index].derived[exact_index].dependencies;
+        let stale = !dependency_relids_match(stored_dependencies, &protected)
+            || first_dependency_mismatch(&store, stored_dependencies).is_some();
+        if stale {
+            store.entries[owner_index].remove_derived(exact_index);
+            replacing_stale = true;
+            return Ok(false);
+        }
+        if !store.entries[owner_index].derived[exact_index]
+            .artifact
+            .as_any()
+            .is::<T>()
+        {
+            return Err(ResidentLoadError::ArtifactTypeMismatch {
+                digest: identity.digest(),
+            });
+        }
+        Ok(true)
+    })?;
+    if hit {
+        for raw_relid in &protected {
+            STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+        }
+        return Ok(ArtifactEnsureOutcome::Hit);
+    }
+
+    for raw_relid in &protected {
+        STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+    }
+    let (preflight, captured_dependencies) = STORE.with(|store| {
+        let store = store.borrow();
+        let captured_dependencies = dependency_stamps(&store, &protected)?;
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        let preflight = preflight(ResidentInputBundle { columns, evidence })?;
+        Ok::<_, ResidentLoadError>((preflight, captured_dependencies))
+    })?;
+    let declared = preflight.accounting;
+    let declared_total = declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    let charge = reserve_with_local_eviction_excluding(&protected, declared_total)?;
+
+    process_invalidations();
+    let snapshot = STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        snapshot_prepare(
+            preflight.prepared,
+            ResidentInputBundle { columns, evidence },
+        )
+    })?;
+    let mut artifact = build(snapshot)?;
+    let actual = artifact_accounting(&artifact);
+    if actual != declared {
+        drop(artifact);
+        return Err(ResidentLoadError::ArtifactAccountingMismatch { declared, actual });
+    }
+
+    process_invalidations();
+    STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        dispatch(
+            &mut artifact,
+            ResidentDispatchBundle {
+                store: &store,
+                columns,
+                dependencies: &captured_dependencies,
+            },
+        )
+    })?;
+    finalize(&mut artifact)?;
+    let actual = artifact_accounting(&artifact);
+    if actual != declared {
+        drop(artifact);
+        return Err(ResidentLoadError::ArtifactAccountingMismatch { declared, actual });
+    }
+
+    process_invalidations();
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let owner = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        if let Some(index) = owner
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity))
+        {
+            owner.remove_derived(index);
+            replacing_stale = true;
+        }
+        owner.derived.push(DerivedEntry {
+            digest: identity.digest(),
+            canonical_words: identity.canonical_words().to_vec().into_boxed_slice(),
+            dependencies: captured_dependencies,
+            artifact: Box::new(artifact),
+            charge,
+        });
+        Ok(())
+    })?;
+    Ok(if replacing_stale {
+        ArtifactEnsureOutcome::Rebuilt
+    } else {
+        ArtifactEnsureOutcome::Built
+    })
+}
+
+/// Build one dependency-stamped artifact through an exactly charged transient
+/// workspace.
+///
+/// `preflight` declares the final published footprint and the complete
+/// physical footprint of `W`. The store reserves those as distinct persistent
+/// and transient ledger charges before `snapshot_prepare` allocates or copies
+/// host state. `build_workspace` must preallocate every workspace-owned device
+/// buffer and host destination, and the store rejects it unless its reported
+/// accounting exactly matches the transient declaration.
+///
+/// `dispatch` runs under the checked raw-input borrow and therefore must be a
+/// nonallocating raw launch. `finalize` consumes `W` outside that borrow while
+/// both charges remain held; it may fill preallocated host destinations and
+/// construct `T`, but it must not introduce an unaccounted allocation
+/// category. The transient charge is released only after `T` exactly matches
+/// the published declaration, then one final dependency check publishes `T`
+/// with the persistent charge alone.
+#[allow(clippy::too_many_arguments)]
+pub fn ensure_staged_device_transform_artifact<
+    T: DerivedArtifact,
+    W: StagedTransformWorkspace,
+    P,
+    S,
+>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    preflight: impl FnOnce(
+        ResidentInputBundle<'_>,
+    ) -> Result<StagedTransformPreflight<P>, ResidentLoadError>,
+    snapshot_prepare: impl FnOnce(P, ResidentInputBundle<'_>) -> Result<S, ResidentLoadError>,
+    build_workspace: impl FnOnce(S) -> Result<W, ResidentLoadError>,
+    dispatch: impl FnOnce(&mut W, ResidentDispatchBundle<'_>) -> Result<(), ResidentLoadError>,
+    finalize: impl FnOnce(W) -> Result<T, ResidentLoadError>,
+) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
+    if identity.canonical_words().is_empty() {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "canonical artifact identity is empty".to_owned(),
+        ));
+    }
+    process_invalidations();
+    let protected = canonical_dependency_relids(owner_relid, dependency_relids, columns)?;
+
+    let mut replacing_stale = false;
+    let hit = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let owner_index = store
+            .entries
+            .iter()
+            .position(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        let exact_index = store.entries[owner_index]
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity));
+        let Some(exact_index) = exact_index else {
+            return Ok(false);
+        };
+        let stored_dependencies = &store.entries[owner_index].derived[exact_index].dependencies;
+        let stale = !dependency_relids_match(stored_dependencies, &protected)
+            || first_dependency_mismatch(&store, stored_dependencies).is_some();
+        if stale {
+            store.entries[owner_index].remove_derived(exact_index);
+            replacing_stale = true;
+            return Ok(false);
+        }
+        if !store.entries[owner_index].derived[exact_index]
+            .artifact
+            .as_any()
+            .is::<T>()
+        {
+            return Err(ResidentLoadError::ArtifactTypeMismatch {
+                digest: identity.digest(),
+            });
+        }
+        Ok(true)
+    })?;
+    if hit {
+        for raw_relid in &protected {
+            STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+        }
+        return Ok(ArtifactEnsureOutcome::Hit);
+    }
+
+    for raw_relid in &protected {
+        STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+    }
+    let (preflight, captured_dependencies) = STORE.with(|store| {
+        let store = store.borrow();
+        let captured_dependencies = dependency_stamps(&store, &protected)?;
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        let preflight = preflight(ResidentInputBundle { columns, evidence })?;
+        Ok::<_, ResidentLoadError>((preflight, captured_dependencies))
+    })?;
+    let published_declared = preflight.published_accounting;
+    let transient_declared = preflight.transient_accounting;
+    let published_total = published_declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    let transient_total = transient_declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    published_total
+        .checked_add(transient_total)
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    let (persistent_charge, transient_charge) =
+        reserve_transform_charges_excluding(&protected, published_total, transient_total)?;
+
+    process_invalidations();
+    let snapshot = STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        snapshot_prepare(
+            preflight.prepared,
+            ResidentInputBundle { columns, evidence },
+        )
+    })?;
+    let mut workspace = build_workspace(snapshot)?;
+    let workspace_actual = workspace_accounting(&workspace);
+    if workspace_actual != transient_declared {
+        drop(workspace);
+        return Err(ResidentLoadError::TransformWorkspaceAccountingMismatch {
+            declared: transient_declared,
+            actual: workspace_actual,
+        });
+    }
+
+    process_invalidations();
+    STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        dispatch(
+            &mut workspace,
+            ResidentDispatchBundle {
+                store: &store,
+                columns,
+                dependencies: &captured_dependencies,
+            },
+        )
+    })?;
+    let artifact = finalize(workspace)?;
+    let artifact_actual = artifact_accounting(&artifact);
+    if artifact_actual != published_declared {
+        drop(artifact);
+        return Err(ResidentLoadError::ArtifactAccountingMismatch {
+            declared: published_declared,
+            actual: artifact_actual,
+        });
+    }
+
+    drop(transient_charge);
+    process_invalidations();
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let owner = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        if let Some(index) = owner
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity))
+        {
+            owner.remove_derived(index);
+            replacing_stale = true;
+        }
+        owner.derived.push(DerivedEntry {
+            digest: identity.digest(),
+            canonical_words: identity.canonical_words().to_vec().into_boxed_slice(),
+            dependencies: captured_dependencies,
+            artifact: Box::new(artifact),
+            charge: persistent_charge,
         });
         Ok(())
     })?;
@@ -2317,9 +3281,74 @@ fn pg_accel_residency_invalidate<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::rc::Rc;
+
+    struct TestCountingAllocator;
+
+    std::thread_local! {
+        static COUNT_TEST_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
+        static TEST_ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn record_test_allocation() {
+        let _ = COUNT_TEST_ALLOCATIONS.try_with(|enabled| {
+            if enabled.get() {
+                let _ = TEST_ALLOCATION_COUNT.try_with(|count| {
+                    count.set(count.get().saturating_add(1));
+                });
+            }
+        });
+    }
+
+    // SAFETY: every operation delegates to `System` with the original layout
+    // and pointer. The thread-local counters do not allocate.
+    unsafe impl std::alloc::GlobalAlloc for TestCountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            record_test_allocation();
+            // SAFETY: delegated with the caller-provided valid layout.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            record_test_allocation();
+            // SAFETY: delegated with the caller-provided valid layout.
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            // SAFETY: delegated with the original allocation pointer/layout.
+            unsafe { std::alloc::System.dealloc(ptr, layout) };
+        }
+
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            record_test_allocation();
+            // SAFETY: delegated with the original pointer/layout and requested size.
+            unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static TEST_COUNTING_ALLOCATOR: TestCountingAllocator = TestCountingAllocator;
+
+    pub fn begin_test_allocation_count() {
+        TEST_ALLOCATION_COUNT.with(|count| count.set(0));
+        COUNT_TEST_ALLOCATIONS.with(|enabled| enabled.set(true));
+    }
+
+    pub fn finish_test_allocation_count() -> usize {
+        COUNT_TEST_ALLOCATIONS.with(|enabled| enabled.set(false));
+        TEST_ALLOCATION_COUNT.with(Cell::get)
+    }
+
+    static RESERVED_LIFECYCLE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[test]
     fn shape_digest_is_stable_and_order_sensitive() {
@@ -2611,6 +3640,60 @@ mod tests {
         }
     }
 
+    struct AccountedWorkspace {
+        device_bytes: u64,
+        host_bytes: u64,
+    }
+
+    impl StagedTransformWorkspace for AccountedWorkspace {
+        fn device_bytes(&self) -> u64 {
+            self.device_bytes
+        }
+
+        fn host_bytes(&self) -> u64 {
+            self.host_bytes
+        }
+    }
+
+    struct CompositeAccountedArtifact {
+        base: AccountedArtifact,
+        spatial: AccountedArtifact,
+    }
+
+    impl DerivedArtifact for CompositeAccountedArtifact {
+        fn device_bytes(&self) -> u64 {
+            self.base.device_bytes + self.spatial.device_bytes
+        }
+
+        fn retained_host_exact_bytes(&self) -> u64 {
+            self.base.retained_host_exact_bytes + self.spatial.retained_host_exact_bytes
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct GeometrySnapshotArtifact {
+        snapshot: ResidentGeometryExactSnapshot,
+    }
+
+    impl DerivedArtifact for GeometrySnapshotArtifact {
+        fn device_bytes(&self) -> u64 {
+            0
+        }
+
+        fn retained_host_exact_bytes(&self) -> u64 {
+            self.snapshot
+                .retained_host_bytes()
+                .expect("test snapshot byte count")
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
     struct MarkerArtifact(u8);
 
     impl DerivedArtifact for MarkerArtifact {
@@ -2668,6 +3751,7 @@ mod tests {
             last_used_tick,
             pinned,
             raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
+            raw_accounting: ResidentByteAccounting::default(),
             first_use_scope: None,
             derived: Vec::new(),
         }
@@ -2948,6 +4032,131 @@ mod tests {
             assert!(store.entries.iter().any(|entry| entry.relid == evictable));
         });
         STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn transform_charges_evict_without_removing_protected_dependencies_and_release_on_failure() {
+        struct ModeledCharge {
+            bytes: u64,
+            live: Rc<Cell<u64>>,
+        }
+
+        impl Drop for ModeledCharge {
+            fn drop(&mut self) {
+                self.live.set(
+                    self.live
+                        .get()
+                        .checked_sub(self.bytes)
+                        .expect("modeled charge is live"),
+                );
+            }
+        }
+
+        let owner = pg_sys::Oid::from(914_u32);
+        let dimension = pg_sys::Oid::from(915_u32);
+        let unrelated = pg_sys::Oid::from(916_u32);
+        install_test_relations(&[914, 915, 916]);
+        STORE.with(|store| {
+            for (index, relation) in store.borrow_mut().entries.iter_mut().enumerate() {
+                relation.derived.push(DerivedEntry {
+                    digest: 200 + index as u64,
+                    canonical_words: vec![index as i32 + 1].into_boxed_slice(),
+                    dependencies: Box::default(),
+                    artifact: Box::new(SizedArtifact(8)),
+                    charge: LedgerCharge::reserve(0, 0).expect("modeled artifact charge"),
+                });
+            }
+        });
+        let protected = canonical_dependency_relids(owner, &[dimension], &[]).expect("valid");
+        let live = Rc::new(Cell::new(24_u64));
+        let reserve_live = Rc::clone(&live);
+        let evict_live = Rc::clone(&live);
+        let charges = reserve_transform_charges(
+            8,
+            8,
+            32,
+            move |requested, budget| {
+                let Some(next) = reserve_live.get().checked_add(requested) else {
+                    return Err(reserve_live.get());
+                };
+                if next > budget {
+                    return Err(reserve_live.get());
+                }
+                reserve_live.set(next);
+                Ok(ModeledCharge {
+                    bytes: requested,
+                    live: Rc::clone(&reserve_live),
+                })
+            },
+            || {
+                let evicted = STORE.with(|store| {
+                    store
+                        .borrow_mut()
+                        .evict_one_for_budget_excluding(&protected)
+                        .is_some()
+                });
+                if evicted {
+                    evict_live.set(
+                        evict_live
+                            .get()
+                            .checked_sub(8)
+                            .expect("modeled evicted charge is live"),
+                    );
+                }
+                evicted
+            },
+        )
+        .expect("one eviction makes room for both transform charges");
+        assert_eq!(live.get(), 32);
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert!(store.entries.iter().any(|entry| entry.relid == owner));
+            assert!(store.entries.iter().any(|entry| entry.relid == dimension));
+            assert!(store.entries.iter().any(|entry| entry.relid == unrelated));
+            assert_eq!(
+                store
+                    .entries
+                    .iter()
+                    .map(|entry| entry.derived.len())
+                    .sum::<usize>(),
+                2
+            );
+        });
+        drop(charges);
+        assert_eq!(live.get(), 16);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+
+        let failed_live = Rc::new(Cell::new(0_u64));
+        let failed_reserve_live = Rc::clone(&failed_live);
+        let result = reserve_transform_charges(
+            8,
+            1,
+            8,
+            move |requested, budget| {
+                let next = failed_reserve_live
+                    .get()
+                    .checked_add(requested)
+                    .ok_or(failed_reserve_live.get())?;
+                if next > budget {
+                    return Err(failed_reserve_live.get());
+                }
+                failed_reserve_live.set(next);
+                Ok(ModeledCharge {
+                    bytes: requested,
+                    live: Rc::clone(&failed_reserve_live),
+                })
+            },
+            || false,
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::BudgetExceeded {
+                requested: 1,
+                live: 8,
+                budget: 8,
+            })
+        ));
+        assert_eq!(failed_live.get(), 0);
     }
 
     #[test]
@@ -3264,6 +4473,868 @@ mod tests {
     }
 
     #[test]
+    fn staged_device_lifecycle_prepares_only_on_miss_and_outside_raw_dispatch_borrow() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_151]);
+        let owner = pg_sys::Oid::from(1_151_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 151]);
+        let accounting = ResidentByteAccounting {
+            device_bytes: 11,
+            retained_host_exact_bytes: 13,
+        };
+        let before = ledger::total_bytes();
+        let preflight_calls = Cell::new(0_u32);
+        let snapshot_calls = Cell::new(0_u32);
+        let build_calls = Cell::new(0_u32);
+        let dispatch_calls = Cell::new(0_u32);
+        let finalize_calls = Cell::new(0_u32);
+        let build = || {
+            ensure_staged_device_derived_artifact(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                |inputs| {
+                    preflight_calls.set(preflight_calls.get() + 1);
+                    assert_eq!(inputs.evidence.len(), 1);
+                    Ok(StagedDerivedPreflight {
+                        prepared: (),
+                        accounting,
+                    })
+                },
+                |(), inputs| {
+                    snapshot_calls.set(snapshot_calls.get() + 1);
+                    assert_eq!(inputs.evidence.len(), 1);
+                    assert!(ledger::total_bytes() >= before.saturating_add(24));
+                    Ok(())
+                },
+                |()| {
+                    build_calls.set(build_calls.get() + 1);
+                    STORE.with(|store| {
+                        let _borrow = store
+                            .try_borrow_mut()
+                            .expect("composite build must run outside the STORE borrow");
+                    });
+                    Ok(AccountedArtifact {
+                        device_bytes: 11,
+                        retained_host_exact_bytes: 13,
+                    })
+                },
+                |artifact, inputs| {
+                    dispatch_calls.set(dispatch_calls.get() + 1);
+                    assert_eq!(inputs.dependency_count(), 1);
+                    assert_eq!(inputs.column_count(), 0);
+                    assert_eq!(inputs.evidence(0)?.relid, owner);
+                    assert_eq!(artifact.device_bytes, 11);
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(())
+                },
+                |artifact| {
+                    finalize_calls.set(finalize_calls.get() + 1);
+                    assert_eq!(artifact.device_bytes, 11);
+                    STORE.with(|store| {
+                        let _borrow = store
+                            .try_borrow_mut()
+                            .expect("finalize must run outside the STORE borrow");
+                    });
+                    Ok(())
+                },
+            )
+        };
+
+        assert_eq!(
+            build().expect("first lifecycle build"),
+            ArtifactEnsureOutcome::Built
+        );
+        assert_eq!(
+            build().expect("second lifecycle hit"),
+            ArtifactEnsureOutcome::Hit
+        );
+        assert_eq!(preflight_calls.get(), 1);
+        assert_eq!(snapshot_calls.get(), 1);
+        assert_eq!(build_calls.get(), 1);
+        assert_eq!(dispatch_calls.get(), 1);
+        assert_eq!(finalize_calls.get(), 1);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(ledger::total_bytes(), before);
+    }
+
+    #[test]
+    fn staged_transform_lifecycle_holds_distinct_exact_charges_and_publishes_only_persistent() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_164]);
+        let owner = pg_sys::Oid::from(1_164_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 164]);
+        let published = ResidentByteAccounting {
+            device_bytes: 7,
+            retained_host_exact_bytes: 11,
+        };
+        let transient = ResidentByteAccounting {
+            device_bytes: 13,
+            retained_host_exact_bytes: 17,
+        };
+        let before = ledger::total_bytes();
+        let preflight_calls = Cell::new(0_u32);
+        let snapshot_calls = Cell::new(0_u32);
+        let build_calls = Cell::new(0_u32);
+        let dispatch_calls = Cell::new(0_u32);
+        let finalize_calls = Cell::new(0_u32);
+        let build = || {
+            ensure_staged_device_transform_artifact(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                |inputs| {
+                    preflight_calls.set(preflight_calls.get() + 1);
+                    assert_eq!(inputs.evidence.len(), 1);
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(StagedTransformPreflight {
+                        prepared: (),
+                        published_accounting: published,
+                        transient_accounting: transient,
+                    })
+                },
+                |(), inputs| {
+                    snapshot_calls.set(snapshot_calls.get() + 1);
+                    assert_eq!(inputs.evidence.len(), 1);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(())
+                },
+                |()| {
+                    build_calls.set(build_calls.get() + 1);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    STORE.with(|store| {
+                        let _borrow = store
+                            .try_borrow_mut()
+                            .expect("workspace build must run outside STORE borrow");
+                    });
+                    Ok(AccountedWorkspace {
+                        device_bytes: 13,
+                        host_bytes: 17,
+                    })
+                },
+                |workspace, inputs| {
+                    dispatch_calls.set(dispatch_calls.get() + 1);
+                    assert_eq!(workspace.device_bytes, 13);
+                    assert_eq!(inputs.dependency_count(), 1);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(())
+                },
+                |workspace| {
+                    finalize_calls.set(finalize_calls.get() + 1);
+                    assert_eq!(workspace.host_bytes, 17);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    STORE.with(|store| {
+                        let _borrow = store
+                            .try_borrow_mut()
+                            .expect("transform finalize must run outside STORE borrow");
+                    });
+                    Ok(AccountedArtifact {
+                        device_bytes: 7,
+                        retained_host_exact_bytes: 11,
+                    })
+                },
+            )
+        };
+
+        assert_eq!(
+            build().expect("first transform build"),
+            ArtifactEnsureOutcome::Built
+        );
+        assert_eq!(ledger::total_bytes(), before.saturating_add(18));
+        assert_eq!(
+            build().expect("second transform hit"),
+            ArtifactEnsureOutcome::Hit
+        );
+        assert_eq!(preflight_calls.get(), 1);
+        assert_eq!(snapshot_calls.get(), 1);
+        assert_eq!(build_calls.get(), 1);
+        assert_eq!(dispatch_calls.get(), 1);
+        assert_eq!(finalize_calls.get(), 1);
+        STORE.with(|store| store.borrow_mut().entries[0].generation.relation += 1);
+        assert_eq!(
+            build().expect("stale transform rebuild"),
+            ArtifactEnsureOutcome::Rebuilt
+        );
+        assert_eq!(ledger::total_bytes(), before.saturating_add(18));
+        assert_eq!(preflight_calls.get(), 2);
+        assert_eq!(snapshot_calls.get(), 2);
+        assert_eq!(build_calls.get(), 2);
+        assert_eq!(dispatch_calls.get(), 2);
+        assert_eq!(finalize_calls.get(), 2);
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(store.entries[0].derived.len(), 1);
+            assert_eq!(store.entries[0].derived[0].bytes(), 18);
+        });
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(ledger::total_bytes(), before);
+    }
+
+    #[test]
+    fn staged_transform_failures_release_both_charges_without_publication() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+
+        fn assert_clean(owner_raw: u32, identity_word: i32, fail_stage: u8) {
+            install_test_relations(&[owner_raw]);
+            let owner = pg_sys::Oid::from(owner_raw);
+            let identity = DerivedArtifactIdentity::from_canonical_words(vec![identity_word]);
+            let before = ledger::total_bytes();
+            let snapshot_called = Cell::new(false);
+            let build_called = Cell::new(false);
+            let dispatch_called = Cell::new(false);
+            let finalize_called = Cell::new(false);
+            let result = ensure_staged_device_transform_artifact(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                |_| {
+                    if fail_stage == 6 {
+                        schedule_test_generation_bump(owner);
+                    }
+                    Ok(StagedTransformPreflight {
+                        prepared: (),
+                        published_accounting: ResidentByteAccounting {
+                            device_bytes: 17,
+                            retained_host_exact_bytes: 19,
+                        },
+                        transient_accounting: ResidentByteAccounting {
+                            device_bytes: 23,
+                            retained_host_exact_bytes: 29,
+                        },
+                    })
+                },
+                |(), _| {
+                    snapshot_called.set(true);
+                    if fail_stage == 0 {
+                        Err(ResidentLoadError::Loader("snapshot failure".to_owned()))
+                    } else {
+                        if fail_stage == 7 {
+                            schedule_test_generation_bump(owner);
+                        }
+                        Ok(())
+                    }
+                },
+                |()| {
+                    build_called.set(true);
+                    if fail_stage == 1 {
+                        Err(ResidentLoadError::Loader("workspace failure".to_owned()))
+                    } else {
+                        Ok(AccountedWorkspace {
+                            device_bytes: if fail_stage == 2 { 24 } else { 23 },
+                            host_bytes: 29,
+                        })
+                    }
+                },
+                |_, _| {
+                    dispatch_called.set(true);
+                    if fail_stage == 3 {
+                        Err(ResidentLoadError::Loader("dispatch failure".to_owned()))
+                    } else {
+                        if fail_stage == 8 {
+                            schedule_test_generation_bump(owner);
+                        }
+                        Ok(())
+                    }
+                },
+                |_| {
+                    finalize_called.set(true);
+                    if fail_stage == 4 {
+                        return Err(ResidentLoadError::Loader("finalize failure".to_owned()));
+                    }
+                    Ok(AccountedArtifact {
+                        device_bytes: if fail_stage == 5 { 18 } else { 17 },
+                        retained_host_exact_bytes: 19,
+                    })
+                },
+            );
+            match fail_stage {
+                0 | 1 | 3 | 4 => {
+                    assert!(matches!(result, Err(ResidentLoadError::Loader(_))));
+                }
+                2 => assert!(matches!(
+                    result,
+                    Err(ResidentLoadError::TransformWorkspaceAccountingMismatch { .. })
+                )),
+                5 => assert!(matches!(
+                    result,
+                    Err(ResidentLoadError::ArtifactAccountingMismatch { .. })
+                )),
+                6..=8 => assert!(matches!(
+                    result,
+                    Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == owner
+                )),
+                _ => unreachable!("unknown failure stage"),
+            }
+            if matches!(fail_stage, 2 | 6 | 7) {
+                assert!(!dispatch_called.get());
+            }
+            if fail_stage == 6 {
+                assert!(!snapshot_called.get());
+                assert!(!build_called.get());
+                assert!(!finalize_called.get());
+            } else if fail_stage == 7 {
+                assert!(snapshot_called.get());
+                assert!(build_called.get());
+                assert!(!finalize_called.get());
+            } else if fail_stage == 8 {
+                assert!(snapshot_called.get());
+                assert!(build_called.get());
+                assert!(dispatch_called.get());
+                assert!(finalize_called.get());
+            }
+            assert_eq!(ledger::total_bytes(), before);
+            STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+            STORE.with(|store| store.borrow_mut().entries.clear());
+        }
+
+        assert_clean(1_165, 165, 0);
+        assert_clean(1_166, 166, 1);
+        assert_clean(1_167, 167, 2);
+        assert_clean(1_168, 168, 3);
+        assert_clean(1_169, 169, 4);
+        assert_clean(1_170, 170, 5);
+        assert_clean(1_171, 171, 6);
+        assert_clean(1_172, 172, 7);
+        assert_clean(1_173, 173, 8);
+    }
+
+    #[test]
+    fn staged_transform_accounting_overflow_prevents_reservation_and_callbacks() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_174]);
+        let owner = pg_sys::Oid::from(1_174_u32);
+        let before = ledger::total_bytes();
+        let snapshot_called = Cell::new(false);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![174, 1]);
+        let result = ensure_staged_device_transform_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedTransformPreflight {
+                    prepared: (),
+                    published_accounting: ResidentByteAccounting {
+                        device_bytes: u64::MAX,
+                        retained_host_exact_bytes: 0,
+                    },
+                    transient_accounting: ResidentByteAccounting {
+                        device_bytes: 1,
+                        retained_host_exact_bytes: 0,
+                    },
+                })
+            },
+            |(), _| {
+                snapshot_called.set(true);
+                Ok(())
+            },
+            |()| {
+                Ok(AccountedWorkspace {
+                    device_bytes: 1,
+                    host_bytes: 0,
+                })
+            },
+            |_, _| Ok(()),
+            |_| Ok(EmptyArtifact),
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactAccountingOverflow)
+        ));
+        assert!(!snapshot_called.get());
+        assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![174, 2]);
+        let result = ensure_staged_device_transform_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedTransformPreflight {
+                    prepared: (),
+                    published_accounting: ResidentByteAccounting::default(),
+                    transient_accounting: ResidentByteAccounting {
+                        device_bytes: u64::MAX,
+                        retained_host_exact_bytes: 1,
+                    },
+                })
+            },
+            |(), _| Ok(()),
+            |()| {
+                Ok(AccountedWorkspace {
+                    device_bytes: 0,
+                    host_bytes: 0,
+                })
+            },
+            |_, _| Ok(()),
+            |_| Ok(EmptyArtifact),
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactAccountingOverflow)
+        ));
+        assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn dispatch_resolver_valid_and_error_paths_allocate_nothing() {
+        let requested = ResidentColumnRef {
+            relid: pg_sys::Oid::from(1_163_u32),
+            attno: 4,
+        };
+        let mut store = RelationStore::default();
+        let mut relation = empty_relation(1_163, false, 1);
+        relation.columns.insert(
+            requested.attno,
+            ResidentColumn::Empty {
+                type_oid: pg_sys::Oid::from(23_u32),
+            },
+        );
+        let dependency = ResidentDependencyStamp::from_relation(&relation);
+        store.entries.push(relation);
+        let columns = [requested];
+        let dependencies = [dependency];
+        let resolver = ResidentDispatchBundle {
+            store: &store,
+            columns: &columns,
+            dependencies: &dependencies,
+        };
+
+        begin_test_allocation_count();
+        let valid_column = matches!(resolver.column(0), Ok(ResidentColumnView::Empty { .. }));
+        let valid_evidence = resolver
+            .evidence(0)
+            .is_ok_and(|evidence| evidence.relid == requested.relid);
+        let invalid_column_index = matches!(
+            resolver.column(1),
+            Err(ResidentLoadError::DispatchColumnIndexOutOfBounds {
+                index: 1,
+                column_count: 1,
+            })
+        );
+        let invalid_dependency_index = matches!(
+            resolver.evidence(1),
+            Err(ResidentLoadError::DispatchDependencyIndexOutOfBounds {
+                index: 1,
+                dependency_count: 1,
+            })
+        );
+        let unrequested_column = matches!(
+            resolver.find_column(ResidentColumnRef {
+                relid: requested.relid,
+                attno: 5,
+            }),
+            Err(ResidentLoadError::MissingColumn { attno: 5, .. })
+        );
+        let unrequested_relation = matches!(
+            resolver.evidence_for(pg_sys::Oid::from(9_999_u32)),
+            Err(ResidentLoadError::MissingRelation(relid))
+                if relid == pg_sys::Oid::from(9_999_u32)
+        );
+        let allocation_count = finish_test_allocation_count();
+
+        assert!(valid_column);
+        assert!(valid_evidence);
+        assert!(invalid_column_index);
+        assert!(invalid_dependency_index);
+        assert!(unrequested_column);
+        assert!(unrequested_relation);
+        assert_eq!(allocation_count, 0);
+    }
+
+    #[test]
+    fn staged_device_lifecycle_rejects_dispatch_generation_mismatch() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_152]);
+        let owner = pg_sys::Oid::from(1_152_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 152]);
+        let dispatch_called = Cell::new(false);
+        let result = ensure_staged_device_derived_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |inputs| {
+                Ok(StagedDerivedPreflight {
+                    prepared: inputs.evidence[0],
+                    accounting: ResidentByteAccounting {
+                        device_bytes: 0,
+                        retained_host_exact_bytes: 0,
+                    },
+                })
+            },
+            |snapshot_evidence, inputs| {
+                assert_eq!(snapshot_evidence, inputs.evidence[0]);
+                Ok(())
+            },
+            |()| {
+                STORE.with(|store| store.borrow_mut().entries[0].generation.relation += 1);
+                Ok(EmptyArtifact)
+            },
+            |_, _| {
+                dispatch_called.set(true);
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == owner
+        ));
+        assert!(!dispatch_called.get());
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn staged_device_lifecycle_failures_release_charge_without_publication() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        fn assert_clean(owner_raw: u32, identity_word: i32, fail_stage: u8) {
+            install_test_relations(&[owner_raw]);
+            let owner = pg_sys::Oid::from(owner_raw);
+            let identity = DerivedArtifactIdentity::from_canonical_words(vec![identity_word]);
+            let before = ledger::total_bytes();
+            let result = ensure_staged_device_derived_artifact(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                |_| {
+                    Ok(StagedDerivedPreflight {
+                        prepared: (),
+                        accounting: ResidentByteAccounting {
+                            device_bytes: 17,
+                            retained_host_exact_bytes: 19,
+                        },
+                    })
+                },
+                |(), _| {
+                    if fail_stage == 0 {
+                        Err(ResidentLoadError::Loader("prepare failure".to_owned()))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |()| {
+                    if fail_stage == 1 {
+                        Err(ResidentLoadError::Loader("build failure".to_owned()))
+                    } else {
+                        Ok(AccountedArtifact {
+                            device_bytes: 17,
+                            retained_host_exact_bytes: 19,
+                        })
+                    }
+                },
+                |_, _| {
+                    if fail_stage == 2 {
+                        Err(ResidentLoadError::Loader("dispatch failure".to_owned()))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |_| {
+                    if fail_stage == 3 {
+                        Err(ResidentLoadError::Loader("finalize failure".to_owned()))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert!(matches!(result, Err(ResidentLoadError::Loader(_))));
+            assert_eq!(ledger::total_bytes(), before);
+            STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+            STORE.with(|store| store.borrow_mut().entries.clear());
+        }
+
+        assert_clean(1_153, 153, 0);
+        assert_clean(1_154, 154, 1);
+        assert_clean(1_155, 155, 2);
+        assert_clean(1_158, 158, 3);
+    }
+
+    #[test]
+    fn dependency_change_during_finalize_prevents_reserved_publication() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_156]);
+        let owner = pg_sys::Oid::from(1_156_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![156]);
+        let before = ledger::total_bytes();
+        let result = ensure_staged_device_derived_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedDerivedPreflight {
+                    prepared: (),
+                    accounting: ResidentByteAccounting {
+                        device_bytes: 7,
+                        retained_host_exact_bytes: 5,
+                    },
+                })
+            },
+            |(), _| Ok(()),
+            |()| {
+                Ok(AccountedArtifact {
+                    device_bytes: 7,
+                    retained_host_exact_bytes: 5,
+                })
+            },
+            |_, _| Ok(()),
+            |_| {
+                STORE.with(|store| store.borrow_mut().entries[0].generation.relation += 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == owner
+        ));
+        assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn staged_composite_accounting_matches_device_and_host_categories_exactly() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_159]);
+        let owner = pg_sys::Oid::from(1_159_u32);
+        let exact_identity = DerivedArtifactIdentity::from_canonical_words(vec![159, 1]);
+        let declared = ResidentByteAccounting {
+            device_bytes: 16,
+            retained_host_exact_bytes: 20,
+        };
+        let outcome = ensure_staged_device_derived_artifact(
+            owner,
+            &exact_identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedDerivedPreflight {
+                    prepared: (),
+                    accounting: declared,
+                })
+            },
+            |(), _| Ok(()),
+            |()| {
+                Ok(CompositeAccountedArtifact {
+                    base: AccountedArtifact {
+                        device_bytes: 5,
+                        retained_host_exact_bytes: 7,
+                    },
+                    spatial: AccountedArtifact {
+                        device_bytes: 11,
+                        retained_host_exact_bytes: 13,
+                    },
+                })
+            },
+            |_, _| Ok(()),
+            |_| Ok(()),
+        )
+        .expect("exact composite accounting should publish");
+        assert_eq!(outcome, ArtifactEnsureOutcome::Built);
+        STORE.with(|store| assert_eq!(store.borrow().entries[0].derived[0].bytes(), 36));
+
+        let mismatch_identity = DerivedArtifactIdentity::from_canonical_words(vec![159, 2]);
+        let mismatch_dispatch_called = Cell::new(false);
+        let mismatch = ensure_staged_device_derived_artifact(
+            owner,
+            &mismatch_identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedDerivedPreflight {
+                    prepared: (),
+                    accounting: declared,
+                })
+            },
+            |(), _| Ok(()),
+            |()| {
+                Ok(CompositeAccountedArtifact {
+                    base: AccountedArtifact {
+                        device_bytes: 6,
+                        retained_host_exact_bytes: 6,
+                    },
+                    spatial: AccountedArtifact {
+                        device_bytes: 11,
+                        retained_host_exact_bytes: 13,
+                    },
+                })
+            },
+            |_, _| {
+                mismatch_dispatch_called.set(true);
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(
+            mismatch,
+            Err(ResidentLoadError::ArtifactAccountingMismatch {
+                declared: ResidentByteAccounting {
+                    device_bytes: 16,
+                    retained_host_exact_bytes: 20,
+                },
+                actual: ResidentByteAccounting {
+                    device_bytes: 17,
+                    retained_host_exact_bytes: 19,
+                },
+            })
+        ));
+        assert!(!mismatch_dispatch_called.get());
+        STORE.with(|store| assert_eq!(store.borrow().entries[0].derived.len(), 1));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn exact_geometry_snapshot_accounts_padded_storage_bit_exactly() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let column = ResidentColumnRef {
+            relid: pg_sys::Oid::from(1_157_u32),
+            attno: 3,
+        };
+        let dependency = ResidentDependencyStamp {
+            relid: column.relid,
+            generation: 7,
+            global_generation: 9,
+            relfilenode: pg_sys::Oid::from(88_u32),
+        };
+        let exact = RetainedExactValues {
+            offsets: vec![0, 3, 3, 8].into_boxed_slice(),
+            bytes: b"abcdefgh".to_vec().into_boxed_slice(),
+        };
+        let snapshot = build_geometry_exact_snapshot(
+            column,
+            dependency,
+            pg_sys::Oid::from(42_u32),
+            3,
+            &exact,
+            vec![0_u64; 8].into_boxed_slice(),
+        )
+        .expect("padded snapshot should build");
+        assert_eq!(snapshot.retained_host_bytes(), Some(64));
+        assert_eq!(snapshot.exact_value(0), Some(&b"abc"[..]));
+        assert_eq!(snapshot.exact_value(1), Some(&b""[..]));
+        assert_eq!(snapshot.exact_value(2), Some(&b"defgh"[..]));
+        assert_eq!(snapshot.exact_value(3), None);
+        assert_eq!(snapshot.dependency(), dependency);
+    }
+
+    #[test]
+    fn staged_geometry_snapshot_uses_supplied_borrow_and_captured_dependency() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let owner = pg_sys::Oid::from(1_162_u32);
+        let column = ResidentColumnRef {
+            relid: owner,
+            attno: 2,
+        };
+        let mut point = vec![0_u8, 0, 0, 0, 0, 0x10, 0xe6, 0];
+        point.extend_from_slice(&1_u32.to_le_bytes());
+        point.extend_from_slice(&1_u32.to_le_bytes());
+        point.extend_from_slice(&1.25_f64.to_le_bytes());
+        point.extend_from_slice(&(-2.5_f64).to_le_bytes());
+        let geometry = crate::engine::residency::geometry::materialize_resident_geometry_constant(
+            &point, 1_024, 8,
+        )
+        .expect("test resident point");
+        install_test_relations(&[1_162]);
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            store.entries[0].row_count = 1;
+            store.entries[0].columns.insert(
+                column.attno,
+                ResidentColumn::Geometry {
+                    type_oid: pg_sys::Oid::from(42_u32),
+                    data: geometry,
+                },
+            );
+        });
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![162, 2]);
+        let requests = [column];
+        let outcome = ensure_staged_device_derived_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &requests,
+            |inputs| {
+                let words = resident_geometry_exact_snapshot_words(&requests, &inputs, column)?;
+                let retained_host_exact_bytes = words
+                    .checked_mul(std::mem::size_of::<u64>())
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+                Ok(StagedDerivedPreflight {
+                    prepared: words,
+                    accounting: ResidentByteAccounting {
+                        device_bytes: 0,
+                        retained_host_exact_bytes,
+                    },
+                })
+            },
+            |words, inputs| {
+                snapshot_resident_geometry_exact(
+                    &requests,
+                    &inputs,
+                    column,
+                    vec![0_u64; words].into_boxed_slice(),
+                )
+            },
+            |snapshot| Ok(GeometrySnapshotArtifact { snapshot }),
+            |artifact, inputs| {
+                let evidence = inputs.evidence_for(owner)?;
+                assert_eq!(
+                    artifact.snapshot.dependency().generation,
+                    evidence.generation
+                );
+                assert_eq!(
+                    artifact.snapshot.dependency().global_generation,
+                    evidence.global_generation
+                );
+                assert_eq!(
+                    artifact.snapshot.dependency().relfilenode,
+                    evidence.relfilenode
+                );
+                assert!(matches!(
+                    inputs.find_column(column)?,
+                    ResidentColumnView::Geometry { .. }
+                ));
+                Ok(())
+            },
+            |artifact| {
+                STORE.with(|store| {
+                    let _borrow = store
+                        .try_borrow_mut()
+                        .expect("snapshot finalize must run outside STORE borrow");
+                });
+                assert_eq!(artifact.snapshot.exact_value(0), Some(point.as_slice()));
+                Ok(())
+            },
+        )
+        .expect("staged snapshot should publish");
+        assert_eq!(outcome, ArtifactEnsureOutcome::Built);
+        with_derived_artifact_inputs::<GeometrySnapshotArtifact, _>(
+            owner,
+            &identity,
+            &[],
+            |resolved| {
+                assert_eq!(
+                    resolved.artifact.snapshot.exact_value(0),
+                    Some(point.as_slice())
+                );
+            },
+        )
+        .expect("snapshot artifact resolves");
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
     fn reserve_first_device_build_rejects_category_mismatch_and_releases_charge() {
         install_test_relations(&[1_160]);
         let owner = pg_sys::Oid::from(1_160_u32);
@@ -3474,6 +5545,7 @@ mod pg_tests {
                     last_used_tick: tick,
                     pinned: false,
                     raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
+                    raw_accounting: super::super::ResidentByteAccounting::default(),
                     first_use_scope: None,
                     derived: Vec::new(),
                 });

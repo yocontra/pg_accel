@@ -6,15 +6,28 @@ use std::num::NonZeroU32;
 
 use pgrx::pg_sys::{self, Node, NodeTag};
 
+use crate::engine::ffi::syscache::{PostgisCatalogIdentity, PostgisSpatialFunction};
 use crate::engine::spec::{
     AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp, ColumnRef, FilterSpec,
-    GroupKeySource, MaskKind, MeasureExpr, ScalarRange, ScalarValue,
+    GroupKeySource, MaskKind, MeasureExpr, ScalarRange, ScalarValue, SpatialOperand,
+    SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
 };
 
 use super::{
     AggregateExpr, EquiJoin, InputProjection, OutputMetadata, PlannerColumn, PlannerGroupKey,
     RelationResidency, RelationShape, ShapeDecline, ShapeInput, ShapeModifiers,
 };
+
+const MAX_QUAL_CONJUNCTS: usize = 64;
+
+pub(super) fn bounded_qual_conjunct_indices(
+    count: usize,
+) -> Result<std::ops::Range<usize>, ShapeDecline> {
+    if count == 0 || count > MAX_QUAL_CONJUNCTS {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    Ok(0..count)
+}
 
 #[derive(Default)]
 struct ExpressionInventory {
@@ -161,6 +174,7 @@ unsafe fn direct_var(node: *mut Node, query: &pg_sys::Query) -> Option<PlannerCo
             attno: i32::from(var.varattno),
             type_oid: u32::from(var.vartype),
         },
+        type_modifier: var.vartypmod,
         collation_oid: u32::from(collation_oid),
         collation_is_deterministic,
     })
@@ -841,6 +855,135 @@ unsafe fn btree_strategy(operator: pg_sys::Oid, type_oid: pg_sys::Oid) -> Option
     (ordinary == operator).then_some(strategy)
 }
 
+pub(super) fn postgis_geometry_typmod_metadata(typmod: i32) -> Option<SpatialValueMetadata> {
+    if typmod < 0 || typmod & 0b11 != 0 {
+        return None;
+    }
+    let geom_type = u32::try_from((typmod & 0xfc) >> 2).ok()?;
+    if !matches!(
+        geom_type,
+        crate::engine::residency::RESIDENT_GEOMETRY_POINT
+            | crate::engine::residency::RESIDENT_GEOMETRY_LINESTRING
+            | crate::engine::residency::RESIDENT_GEOMETRY_POLYGON
+    ) {
+        return None;
+    }
+    let srid = ((typmod & 0x0fff_ff00) - (typmod & 0x1000_0000)) >> 8;
+    if !(0..=999_999).contains(&srid) {
+        return None;
+    }
+    Some(SpatialValueMetadata {
+        kind: SpatialValueKind::Geometry,
+        typmod,
+        srid: Some(srid),
+    })
+}
+
+pub(super) fn require_valid_spatial_constant(is_valid: bool) -> Result<(), ShapeDecline> {
+    is_valid
+        .then_some(())
+        .ok_or(ShapeDecline::InvalidSpatialConstant)
+}
+
+unsafe fn spatial_constant_operand(
+    constant: &pg_sys::Const,
+    catalog: &PostgisCatalogIdentity,
+) -> Result<SpatialOperand, ShapeDecline> {
+    if constant.consttype != catalog.geometry_type_oid
+        || constant.consttypmod < -1
+        || constant.constcollid != pg_sys::InvalidOid
+        || constant.constlen != -1
+        || constant.constbyval
+        || constant.constisnull
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    // SAFETY: this is a non-NULL pass-by-reference Const of the exact
+    // catalog-proved PostGIS geometry type in the active planner context.
+    let original = constant.constvalue.cast_mut_ptr::<pg_sys::varlena>();
+    let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
+    if detoasted.is_null() {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    // SAFETY: pg_detoast_datum returned a flat varlena readable for VARSIZE
+    // bytes until the planner context is released.
+    let byte_count = unsafe { pgrx::varsize(detoasted.cast()) };
+    let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), byte_count) }.to_vec();
+    if detoasted != original {
+        // SAFETY: a distinct pg_detoast_datum result is palloc-owned; bytes
+        // now owns the complete copy used by every validation path below.
+        unsafe { pg_sys::pfree(detoasted.cast()) };
+    }
+    let limits = crate::engine::cost::device_limits();
+    let maximum = limits
+        .resident_domain_max_exact_value_bytes
+        .min(crate::engine::spec::MAX_SPATIAL_CONSTANT_BYTES);
+    let parsed = crate::engine::residency::validate_resident_geometry_value(&bytes, maximum)
+        .map_err(|_| ShapeDecline::UnsupportedPredicate)?;
+    if parsed.coordinate_pairs > limits.gpu_spatial_max_vertices_per_row {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    if let Some(typmod) = postgis_geometry_typmod_metadata(constant.consttypmod)
+        && (typmod.srid != Some(parsed.srid)
+            || u32::try_from((constant.consttypmod & 0xfc) >> 2).ok() != Some(parsed.geom_type))
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    // Run GEOS only after the strict byte, dimensionality, type, SRID, and
+    // device-cap checks above. The original planner Const remains alive even
+    // when pg_detoast_datum returned and freed a distinct flat copy.
+    // SAFETY: the catalog identity proves this exact extension-owned OID is
+    // canonical strict ST_IsValid(geometry), and constvalue is the exact
+    // non-NULL catalog-proved geometry Datum checked above.
+    let valid = unsafe {
+        pg_sys::OidFunctionCall1Coll(
+            catalog.is_valid_fn_oid,
+            pg_sys::InvalidOid,
+            constant.constvalue,
+        )
+    }
+    .value()
+        != 0;
+    require_valid_spatial_constant(valid)?;
+    Ok(SpatialOperand::Constant {
+        metadata: SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: constant.consttypmod,
+            srid: Some(parsed.srid),
+        },
+        bytes: bytes.into_boxed_slice(),
+    })
+}
+
+unsafe fn spatial_operand(
+    node: *mut Node,
+    query: &pg_sys::Query,
+    catalog: &PostgisCatalogIdentity,
+) -> Result<(SpatialOperand, Option<pg_sys::Index>), ShapeDecline> {
+    // SAFETY: node belongs to the active analyzed Query.
+    if let Some(column) = unsafe { direct_var(node, query) } {
+        if pg_sys::Oid::from(column.column.type_oid) != catalog.geometry_type_oid
+            || column.collation_oid != 0
+        {
+            return Err(ShapeDecline::UnsupportedPredicate);
+        }
+        let metadata = postgis_geometry_typmod_metadata(column.type_modifier)
+            .ok_or(ShapeDecline::UnsupportedPredicate)?;
+        return Ok((
+            SpatialOperand::Column {
+                column: column.column,
+                metadata,
+            },
+            Some(column.varno),
+        ));
+    }
+    // SAFETY: node belongs to the active planner expression.
+    let constant = unsafe { direct_const(node) }.ok_or(ShapeDecline::UnsupportedPredicate)?;
+    // SAFETY: the exact catalog type and Const physical shape are checked by
+    // spatial_constant_operand before detoasting.
+    unsafe { spatial_constant_operand(&constant, catalog) }.map(|operand| (operand, None))
+}
+
 #[derive(Debug, Clone)]
 enum PendingFilter {
     Ranges {
@@ -848,6 +991,10 @@ enum PendingFilter {
         range: ScalarRange,
     },
     Mask(PlannerColumn),
+    Spatial {
+        relation_oid: u32,
+        filter: FilterSpec,
+    },
 }
 
 fn merge_range(left: ScalarRange, right: ScalarRange) -> Result<ScalarRange, ShapeDecline> {
@@ -871,10 +1018,11 @@ fn add_filter(
     filters: &mut BTreeMap<u32, PendingFilter>,
     filter: PendingFilter,
 ) -> Result<(), ShapeDecline> {
-    let (relation_oid, column) = match &filter {
+    let relation_oid = match &filter {
         PendingFilter::Ranges { input, .. } | PendingFilter::Mask(input) => {
-            (input.column.relation_oid, *input)
+            input.column.relation_oid
         }
+        PendingFilter::Spatial { relation_oid, .. } => *relation_oid,
     };
     let Some(existing) = filters.get_mut(&relation_oid) else {
         filters.insert(relation_oid, filter);
@@ -899,9 +1047,17 @@ fn add_filter(
         {
             Ok(())
         }
-        _ => Err(ShapeDecline::MultipleFiltersPerRelation {
-            relation_oid: column.column.relation_oid,
-        }),
+        (
+            PendingFilter::Spatial {
+                relation_oid: existing_relation,
+                filter: existing_filter,
+            },
+            PendingFilter::Spatial {
+                relation_oid: new_relation,
+                filter: new_filter,
+            },
+        ) if *existing_relation == new_relation && *existing_filter == new_filter => Ok(()),
+        _ => Err(ShapeDecline::MultipleFiltersPerRelation { relation_oid }),
     }
 }
 
@@ -1007,6 +1163,128 @@ unsafe fn parse_operator_predicate(
     )
 }
 
+fn spatial_operand_metadata(operand: &SpatialOperand) -> SpatialValueMetadata {
+    match operand {
+        SpatialOperand::Column { metadata, .. } | SpatialOperand::Constant { metadata, .. } => {
+            *metadata
+        }
+    }
+}
+
+unsafe fn spatial_distance(node: *mut Node) -> Result<ScalarValue, ShapeDecline> {
+    // SAFETY: node belongs to the current analyzed function expression.
+    let constant = unsafe { direct_const(node) }.ok_or(ShapeDecline::UnsupportedPredicate)?;
+    if constant.consttype != pg_sys::FLOAT8OID
+        || constant.consttypmod != -1
+        || constant.constcollid != pg_sys::InvalidOid
+        || constant.constlen != 8
+        || !constant.constbyval
+        || constant.constisnull
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    // SAFETY: the exact non-NULL FLOAT8 Const physical contract was checked.
+    let value = unsafe { pg_sys::DatumGetFloat8(constant.constvalue) };
+    if !value.is_finite() || value < 0.0 {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    Ok(ScalarValue::F64(value))
+}
+
+pub(super) fn require_postgis_function_member(is_member: bool) -> Result<(), ShapeDecline> {
+    is_member
+        .then_some(())
+        .ok_or(ShapeDecline::UnsupportedPredicate)
+}
+
+unsafe fn parse_function_predicate(
+    function: &pg_sys::FuncExpr,
+    query: &pg_sys::Query,
+    filters: &mut BTreeMap<u32, PendingFilter>,
+) -> Result<(), ShapeDecline> {
+    if function.funcid == pg_sys::InvalidOid
+        || function.funcretset
+        || function.funcvariadic
+        || function.funcresulttype != pg_sys::BOOLOID
+        || function.funccollid != pg_sys::InvalidOid
+        || function.inputcollid != pg_sys::InvalidOid
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    // SAFETY: this cheap extension-membership check runs on the backend main
+    // thread. Ordinary FuncExprs and same-name impostors decline without
+    // requiring PostGIS to be installed or resolving its complete catalog.
+    require_postgis_function_member(unsafe {
+        crate::engine::ffi::syscache::function_is_extension_member(function.funcid, "postgis")
+    })?;
+    // SAFETY: planner extraction runs on PostgreSQL's main backend thread.
+    let catalog = unsafe { crate::engine::ffi::syscache::resolve_postgis_catalog() }
+        .map_err(ShapeDecline::PostgisCatalog)?;
+    let operation = catalog
+        .classify_function(function.funcid)
+        .ok_or(ShapeDecline::UnsupportedPredicate)?;
+    let (predicate, argument_count) = match operation {
+        PostgisSpatialFunction::Intersects => (SpatialPredicateKind::Intersects, 2),
+        PostgisSpatialFunction::Contains => (SpatialPredicateKind::Contains, 2),
+        PostgisSpatialFunction::Within => (SpatialPredicateKind::Within, 2),
+        PostgisSpatialFunction::DWithin => (SpatialPredicateKind::DWithin, 3),
+        // ST_Distance is a scalar value producer, not a boolean fact filter.
+        PostgisSpatialFunction::Distance => return Err(ShapeDecline::UnsupportedPredicate),
+    };
+    if list_len(function.args) != argument_count {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    // SAFETY: the exact argument-count check bounds both geometry reads.
+    let left_node =
+        unsafe { list_item::<Node>(function.args, 0) }.ok_or(ShapeDecline::UnsupportedPredicate)?;
+    let right_node =
+        unsafe { list_item::<Node>(function.args, 1) }.ok_or(ShapeDecline::UnsupportedPredicate)?;
+    // SAFETY: both arguments belong to this analyzed Query and catalog is the
+    // freshly proved PostGIS identity.
+    let (left, left_varno) = unsafe { spatial_operand(left_node, query, &catalog) }?;
+    let (right, right_varno) = unsafe { spatial_operand(right_node, query, &catalog) }?;
+    let relation_oid = match (left.column(), right.column()) {
+        (Some(left), Some(right)) if left.relation_oid == right.relation_oid => left.relation_oid,
+        (Some(left), None) => left.relation_oid,
+        (None, Some(right)) => right.relation_oid,
+        _ => return Err(ShapeDecline::UnsupportedPredicate),
+    };
+    if let (Some(left_varno), Some(right_varno)) = (left_varno, right_varno)
+        && left_varno != right_varno
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    let left_metadata = spatial_operand_metadata(&left);
+    let right_metadata = spatial_operand_metadata(&right);
+    if left_metadata.kind != SpatialValueKind::Geometry
+        || right_metadata.kind != SpatialValueKind::Geometry
+        || left_metadata.srid != right_metadata.srid
+    {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    let distance = if predicate == SpatialPredicateKind::DWithin {
+        // SAFETY: DWithin's exact three-argument count bounds this read.
+        let distance_node = unsafe { list_item::<Node>(function.args, 2) }
+            .ok_or(ShapeDecline::UnsupportedPredicate)?;
+        // SAFETY: distance_node belongs to the analyzed function expression.
+        Some(unsafe { spatial_distance(distance_node) }?)
+    } else {
+        None
+    };
+    add_filter(
+        filters,
+        PendingFilter::Spatial {
+            relation_oid,
+            filter: FilterSpec::Spatial {
+                predicate,
+                left,
+                right,
+                distance,
+            },
+        },
+    )
+}
+
 unsafe fn parse_qual(
     node: *mut Node,
     query: &pg_sys::Query,
@@ -1021,13 +1299,25 @@ unsafe fn parse_qual(
     let node = unsafe { pg_sys::strip_implicit_coercions(node) };
     // SAFETY: node is non-null planner memory here.
     match unsafe { (*node).type_ } {
+        NodeTag::T_List => {
+            let list = node.cast::<pg_sys::List>();
+            for index in bounded_qual_conjunct_indices(list_len(list))? {
+                // SAFETY: index is bounded by list_len(list), and the implicit
+                // AND list contains planner-owned expression pointers.
+                let child = unsafe { list_item::<Node>(list, index) }
+                    .ok_or(ShapeDecline::UnsupportedPredicate)?;
+                // SAFETY: child and query belong to the same qualifier tree.
+                unsafe { parse_qual(child, query, joins, filters) }?;
+            }
+            Ok(())
+        }
         NodeTag::T_BoolExpr => {
             // SAFETY: the NodeTag arm proves the BoolExpr layout.
             let boolean = unsafe { &*node.cast::<pg_sys::BoolExpr>() };
             if boolean.boolop != pg_sys::BoolExprType::AND_EXPR {
                 return Err(ShapeDecline::UnsupportedPredicate);
             }
-            for index in 0..list_len(boolean.args) {
+            for index in bounded_qual_conjunct_indices(list_len(boolean.args))? {
                 // SAFETY: index is bounded by list_len(boolean.args).
                 let child = unsafe { list_item::<Node>(boolean.args, index) }
                     .ok_or(ShapeDecline::UnsupportedPredicate)?;
@@ -1040,6 +1330,11 @@ unsafe fn parse_qual(
         // share the active planner lifetime.
         NodeTag::T_OpExpr => unsafe {
             parse_operator_predicate(&*node.cast::<pg_sys::OpExpr>(), query, joins, filters)
+        },
+        // SAFETY: this NodeTag arm proves the FuncExpr layout; query and node
+        // share the active planner lifetime.
+        NodeTag::T_FuncExpr => unsafe {
+            parse_function_predicate(&*node.cast::<pg_sys::FuncExpr>(), query, filters)
         },
         NodeTag::T_Var => {
             // SAFETY: node is a Var in this Query's qualifier tree.
@@ -1092,6 +1387,7 @@ unsafe fn joins_and_filters(
                     input: input.column,
                     kind: MaskKind::Sql,
                 },
+                PendingFilter::Spatial { filter, .. } => filter,
             };
             (relation_oid, filter)
         })

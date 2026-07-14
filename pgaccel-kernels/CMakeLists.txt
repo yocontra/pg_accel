@@ -70,8 +70,10 @@ target_compile_options(pgaccel_kernels        PRIVATE -ffast-math)
 target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 
 # Files that rely on IEEE NaN/Inf semantics opt out of -ffast-math:
-#   raster_ops         — isnan/isinf drive NODATA propagation
+#   raster_ops         — resident metadata and NODATA validation use isfinite
 #   spatial_predicates — isfinite gates NaN/Inf → UNCERTAIN
+#   spatial_dispatch   — resident fp64 validation and uncertainty gates depend
+#                         on finite intermediates and signed-zero semantics.
 #   sort               — pad_value<float>() uses +infinity as the bitonic
 #                         sentinel; -ffast-math's no-infinities assumption
 #                         makes pad elements leak into the output with
@@ -95,6 +97,7 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
+    src/spatial_dispatch.cpp
     src/sort.cpp
     src/hash_agg.cpp
     src/fused_ops.cpp
@@ -120,6 +123,9 @@ target_link_libraries(test_spatial_dispatch PRIVATE pgaccel_kernels_shared)
 add_executable(test_spatial_pairwise_boundary test/test_spatial_pairwise_boundary.cpp)
 target_link_libraries(test_spatial_pairwise_boundary PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_spatial_resident test/test_spatial_resident.cpp)
+target_link_libraries(test_spatial_resident PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_h3 test/test_h3.cpp)
 target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
 
@@ -138,8 +144,8 @@ target_link_libraries(test_hash_agg_partial PRIVATE pgaccel_kernels_shared)
 add_executable(test_expr_templates test/test_expr_templates.cpp)
 target_link_libraries(test_expr_templates PRIVATE pgaccel_kernels_shared)
 
-add_executable(test_raster test/test_raster.cpp)
-target_link_libraries(test_raster PRIVATE pgaccel_kernels_shared)
+add_executable(test_raster_resident test/test_raster_resident.cpp)
+target_link_libraries(test_raster_resident PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_correctness test/test_correctness.cpp)
 target_link_libraries(test_correctness PRIVATE pgaccel_kernels_shared)
@@ -188,9 +194,6 @@ target_link_libraries(test_ooo_overlap PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_spatial_bench test/test_spatial_bench.cpp)
 target_link_libraries(test_spatial_bench PRIVATE pgaccel_kernels_shared)
-
-add_executable(test_raster_bench test/test_raster_bench.cpp)
-target_link_libraries(test_raster_bench PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_sycl_basic test/test_sycl_basic.cpp)
 target_link_libraries(test_sycl_basic PRIVATE pgaccel_kernels_shared)
@@ -269,8 +272,9 @@ add_pgaccel_gpu_test(test_bbox)
 add_pgaccel_gpu_test(test_spatial)
 add_pgaccel_gpu_test(test_spatial_dispatch)
 add_pgaccel_gpu_test(test_spatial_pairwise_boundary TIMEOUT 1800)
+add_pgaccel_gpu_test(test_spatial_resident TIMEOUT 1800)
 add_pgaccel_gpu_test(test_h3)
-add_pgaccel_gpu_test(test_raster)
+add_pgaccel_gpu_test(test_raster_resident TIMEOUT 600)
 add_pgaccel_gpu_test(test_correctness)
 add_pgaccel_gpu_test(test_exec_gpu)
 add_pgaccel_gpu_test(test_fork)

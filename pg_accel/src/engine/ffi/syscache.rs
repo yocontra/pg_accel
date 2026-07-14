@@ -4,6 +4,15 @@
 
 use pgrx::{FromDatum, pg_sys};
 
+mod postgis;
+mod raster;
+
+pub use postgis::{PostgisCatalogIdentity, PostgisSpatialFunction, resolve_postgis_catalog};
+pub use raster::{
+    PostgisRasterCatalogIdentity, PostgisRasterFunction, resolve_postgis_raster_catalog,
+    resolve_postgis_raster_function, validate_postgis_raster_type,
+};
+
 // pg_aggregate column attnos (see src/include/catalog/pg_aggregate_d.h).
 const ANUM_PG_AGGREGATE_AGGSERIALFN: i16 = 7;
 
@@ -573,12 +582,15 @@ fn operator_fingerprint(shape: &H3OperatorShape) -> Vec<i32> {
     ]
 }
 
-unsafe fn extension_identity() -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
-    let extension_name = std::ffi::CString::new(H3_EXTENSION_NAME)
-        .map_err(|_| "invalid H3 extension name".to_owned())?;
+unsafe fn named_extension_identity(
+    expected_name: &str,
+    required_relocatable: Option<bool>,
+) -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
+    let extension_name = std::ffi::CString::new(expected_name)
+        .map_err(|_| format!("invalid extension name {expected_name:?}"))?;
     let extension_oid = unsafe { pg_sys::get_extension_oid(extension_name.as_ptr(), true) };
     if extension_oid == pg_sys::InvalidOid {
-        return Err("extension h3 is not installed".to_owned());
+        return Err(format!("extension {expected_name} is not installed"));
     }
 
     let tuple = unsafe {
@@ -588,25 +600,74 @@ unsafe fn extension_identity() -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
         )
     };
     if tuple.is_null() {
-        return Err("extension h3 disappeared during catalog validation".to_owned());
+        return Err(format!(
+            "extension {expected_name} disappeared during catalog validation"
+        ));
     }
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_extension>();
         let name = std::ffi::CStr::from_ptr((*form).extname.data.as_ptr())
             .to_str()
-            .map_err(|_| "extension h3 has an invalid catalog name".to_owned())?;
-        if name != H3_EXTENSION_NAME {
+            .map_err(|_| format!("extension {expected_name} has an invalid catalog name"))?;
+        if name != expected_name {
             Err("extension OID resolved to an unexpected catalog row".to_owned())
-        } else if !(*form).extrelocatable {
-            Err("extension h3 must be relocatable".to_owned())
+        } else if required_relocatable.is_some_and(|value| value != (*form).extrelocatable) {
+            Err(format!(
+                "extension {expected_name} has unexpected relocatability"
+            ))
         } else if (*form).extnamespace == pg_sys::InvalidOid {
-            Err("extension h3 has no installation schema".to_owned())
+            Err(format!(
+                "extension {expected_name} has no installation schema"
+            ))
         } else {
             Ok((extension_oid, (*form).extnamespace))
         }
     })();
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
+}
+
+unsafe fn extension_identity() -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
+    unsafe { named_extension_identity(H3_EXTENSION_NAME, Some(true)) }
+}
+
+unsafe fn find_exact_function(
+    schema_oid: pg_sys::Oid,
+    function_name: &str,
+    argument_types: &[pg_sys::Oid],
+) -> Result<pg_sys::Oid, String> {
+    let function_name_c = std::ffi::CString::new(function_name)
+        .map_err(|_| format!("invalid function name {function_name:?}"))?;
+    let argument_count = i32::try_from(argument_types.len())
+        .map_err(|_| format!("function {function_name} has too many argument types"))?;
+    let argument_vector =
+        unsafe { pg_sys::buildoidvector(argument_types.as_ptr(), argument_count) };
+    if argument_vector.is_null() {
+        return Err(format!(
+            "could not build function signature for {function_name}"
+        ));
+    }
+    let tuple = unsafe {
+        pg_sys::SearchSysCache3(
+            pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
+            pg_sys::PointerGetDatum(function_name_c.as_ptr().cast()),
+            pg_sys::PointerGetDatum(argument_vector.cast()),
+            pg_sys::ObjectIdGetDatum(schema_oid),
+        )
+    };
+    unsafe { pg_sys::pfree(argument_vector.cast()) };
+    if tuple.is_null() {
+        return Err(format!(
+            "schema OID {} has no exact {function_name} function",
+            u32::from(schema_oid)
+        ));
+    }
+    let fn_oid = unsafe {
+        let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_proc>();
+        (*form).oid
+    };
+    unsafe { pg_sys::ReleaseSysCache(tuple) };
+    Ok(fn_oid)
 }
 
 unsafe fn find_h3_type_oid(schema_oid: pg_sys::Oid) -> Result<pg_sys::Oid, String> {

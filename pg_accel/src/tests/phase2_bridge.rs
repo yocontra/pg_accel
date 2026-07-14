@@ -23,9 +23,8 @@ use std::mem::{align_of, offset_of, size_of};
 
 use crate::gpu::bridge::convert_status;
 use crate::gpu::{
-    GpuFailureDomain, PgaccelBatch, PgaccelExprInst, PgaccelExprInstruction, PgaccelExprProgram,
-    PgaccelExprUsmCol, PgaccelGeometry, PgaccelReclassRule, PgaccelStatus, PgaccelVal,
-    kernel_failure_count, unknown_status_count,
+    GpuFailureDomain, PgaccelBatch, PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol,
+    PgaccelGeometry, PgaccelStatus, PgaccelVal, kernel_failure_count, unknown_status_count,
 };
 
 // ---------------------------------------------------------------------------
@@ -143,8 +142,7 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_bbox_intersects_bulk_f32", D::Spatial),
         ("pgaccel_h3_lat_lng_to_cell_bulk", D::H3),
         ("pgaccel_h3_cell_to_parent_resident_ex", D::H3),
-        ("pgaccel_map_algebra", D::Raster),
-        ("pgaccel_raster_slope", D::Raster),
+        ("pgaccel_raster_reclass_resident_ex", D::Raster),
         ("pgaccel_sort_kv_i64", D::Sort),
         ("pgaccel_topk_kv_f32", D::Sort),
         ("pgaccel_reduce_multi_masked_i64", D::Reduce),
@@ -246,20 +244,6 @@ fn pgaccel_geometry_layout_matches_pgaccel_ffi_h() {
     assert_eq!(offset_of!(PgaccelGeometry, coord_count), 24);
     assert_eq!(offset_of!(PgaccelGeometry, ring_offsets), 32);
     assert_eq!(offset_of!(PgaccelGeometry, ring_count), 40);
-}
-
-#[cfg(target_pointer_width = "64")]
-#[test]
-fn pgaccel_expr_inst_and_reclass_rule_layouts_match_pgaccel_ffi_h() {
-    // pgaccel_ffi.h: pgaccel_op op (4) + pad(4) + union { int; double } (8).
-    assert_eq!(size_of::<PgaccelExprInst>(), 16);
-    assert_eq!(offset_of!(PgaccelExprInst, op), 0);
-    assert_eq!(offset_of!(PgaccelExprInst, arg), 8);
-    // pgaccel_ffi.h: three doubles.
-    assert_eq!(size_of::<PgaccelReclassRule>(), 24);
-    assert_eq!(offset_of!(PgaccelReclassRule, min_val), 0);
-    assert_eq!(offset_of!(PgaccelReclassRule, max_val), 8);
-    assert_eq!(offset_of!(PgaccelReclassRule, new_val), 16);
 }
 
 // ---------------------------------------------------------------------------

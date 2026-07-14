@@ -1579,21 +1579,6 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_adapter_postgis_raster_structure() {
-        let a = crate::adapters::postgis_raster::adapter();
-        assert_eq!(a.name, "postgis_raster");
-        let expected = a.functions.len();
-        assert!(expected >= 9, "expected full GPU raster adapter surface");
-
-        let gpu_count = a
-            .functions
-            .iter()
-            .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuRaster)
-            .count();
-        assert_eq!(gpu_count, expected);
-    }
-
-    #[pg_test]
     fn test_postgis_oid_resolution_when_installed() {
         if !ensure_extension("postgis") {
             return;
@@ -1662,6 +1647,132 @@ mod tests {
         assert_eq!(
             rejection, "shape_unsupported_predicate",
             "ST_Intersects should expose the exact generic predicate decline; plan:\n{plan}"
+        );
+    }
+
+    #[pg_test]
+    fn test_postgis_bowtie_constant_declines_before_spatial_costing() {
+        if !ensure_extension("postgis") {
+            return;
+        }
+
+        // SAFETY: pg_test runs synchronously on the backend main thread.
+        let catalog = unsafe { crate::engine::ffi::syscache::resolve_postgis_catalog() }
+            .expect("installed PostGIS catalog should satisfy the exact identity proof");
+        assert!(
+            unsafe {
+                crate::engine::ffi::syscache::function_is_extension_member(
+                    catalog.is_valid_fn_oid,
+                    "postgis",
+                )
+            },
+            "proved ST_IsValid must remain extension-owned",
+        );
+        let live_is_valid_oid = Spi::get_one::<i64>(
+            "SELECT 'public.st_isvalid(public.geometry)'::regprocedure::oid::bigint",
+        )
+        .expect("live ST_IsValid OID query should succeed")
+        .expect("live ST_IsValid OID should exist");
+        assert_eq!(
+            u32::from(catalog.is_valid_fn_oid),
+            u32::try_from(live_is_valid_oid).expect("PostgreSQL OID fits u32"),
+        );
+        assert!(!catalog.fingerprint_words.is_empty());
+
+        let (literal_bytes, literal_is_valid) = Spi::connect(|client| {
+            let row = client
+                .select(
+                    "SELECT 'SRID=4326;POLYGON((0 0,20 20,0 20,20 0,0 0))'::geometry",
+                    Some(1),
+                    &[],
+                )
+                .expect("bowtie literal query should succeed")
+                .first();
+            let datum = row
+                .get_datum_by_ordinal(1)
+                .expect("bowtie literal datum should be readable")
+                .expect("bowtie literal must not be NULL");
+            let original = datum.cast_mut_ptr::<pgrx::pg_sys::varlena>();
+            // SAFETY: SPI returned a non-NULL pass-by-reference geometry Datum
+            // that remains alive for this synchronous callback.
+            let detoasted = unsafe { pgrx::pg_sys::pg_detoast_datum(original) };
+            assert!(!detoasted.is_null());
+            // SAFETY: pg_detoast_datum returned a flat varlena readable for
+            // VARSIZE bytes until it is freed below.
+            let byte_count = unsafe { pgrx::varsize(detoasted.cast()) };
+            // SAFETY: the flat varlena allocation contains byte_count bytes.
+            let bytes =
+                unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), byte_count).to_vec() };
+            if detoasted != original {
+                // SAFETY: a distinct detoast result is palloc-owned and the
+                // exact bytes have already been copied into Rust storage.
+                unsafe { pgrx::pg_sys::pfree(detoasted.cast()) };
+            }
+            // SAFETY: the catalog proof pins this OID to strict
+            // ST_IsValid(geometry), and datum is the live geometry argument.
+            let is_valid = unsafe {
+                pgrx::pg_sys::OidFunctionCall1Coll(
+                    catalog.is_valid_fn_oid,
+                    pgrx::pg_sys::InvalidOid,
+                    datum,
+                )
+            }
+            .value()
+                != 0;
+            (bytes, is_valid)
+        });
+        let literal_metadata = crate::engine::residency::validate_resident_geometry_value(
+            &literal_bytes,
+            crate::engine::cost::device_limits().resident_domain_max_exact_value_bytes,
+        )
+        .expect("bowtie literal should satisfy the strict resident byte shape");
+        assert_eq!(literal_metadata.geom_type, 3);
+        assert_eq!(literal_metadata.srid, 4326);
+        assert_eq!(literal_metadata.coordinate_pairs, 5);
+        assert!(
+            !literal_is_valid,
+            "catalog-proved ST_IsValid must reject bowtie"
+        );
+
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             CREATE TEMP TABLE _postgis_bowtie_decline(\
+               id int4, geom geometry(Point, 4326) NOT NULL); \
+             INSERT INTO _postgis_bowtie_decline \
+               SELECT i, ST_SetSRID(ST_MakePoint(i::float8, i::float8), 4326)::geometry(Point, 4326) \
+               FROM generate_series(1, 10) AS g(i); \
+             ANALYZE _postgis_bowtie_decline; \
+             SELECT pg_accel_reset_stats()",
+        )
+        .expect("bowtie admission fixture should be created");
+
+        let plan = explain_text(
+            "SELECT count(*) FROM _postgis_bowtie_decline \
+             WHERE ST_Intersects(geom, \
+               'SRID=4326;POLYGON((0 0,20 20,0 20,20 0,0 0))'::geometry)",
+        );
+        assert!(
+            !plan.contains("GpuAccelScan")
+                && !plan.contains("Strategy: GpuSpatial")
+                && !plan.contains("Accel Strategy: GpuSpatial"),
+            "topologically invalid constant must remain native:\n{plan}",
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("invalid constant should record a planner decline");
+        let invalid_count = Spi::get_one::<i64>(
+            "SELECT pg_accel_planner_rejection_count('shape_invalid_spatial_constant')",
+        )
+        .expect("specific rejection count should be readable")
+        .expect("specific rejection count should not be NULL");
+        let unsupported_count = Spi::get_one::<i64>(
+            "SELECT pg_accel_planner_rejection_count('shape_unsupported_predicate')",
+        )
+        .expect("generic rejection count should be readable")
+        .expect("generic rejection count should not be NULL");
+        assert_eq!(
+            rejection, "shape_invalid_spatial_constant",
+            "specific={invalid_count}, generic={unsupported_count}",
         );
     }
 

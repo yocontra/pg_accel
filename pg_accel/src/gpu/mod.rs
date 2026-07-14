@@ -32,12 +32,24 @@ mod three_layer_tests;
 // need to know the bridge module layout.
 #[allow(unused_imports)]
 pub use types::{
-    PGACCEL_RESIDENT_BATCH_ABI_VERSION, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo,
-    PgaccelDeviceVarOutput, PgaccelExpr, PgaccelExprInst, PgaccelExprInstruction,
-    PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType, PgaccelGeometry, PgaccelHashTable,
-    PgaccelKeyType, PgaccelMemSpace, PgaccelOp, PgaccelPixelType, PgaccelPlatformCaps,
-    PgaccelReclassRule, PgaccelResidentBatch, PgaccelResidentColumnView, PgaccelStatus, PgaccelVal,
-    PgaccelValTag,
+    PGACCEL_RASTER_ROW_NULL, PGACCEL_RASTER_ROW_PASSTHROUGH, PGACCEL_RASTER_ROW_RECLASSIFIED,
+    PGACCEL_RASTER_VALIDATION_BYTE_BUDGET, PGACCEL_RASTER_VALIDATION_CAPACITY,
+    PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW, PGACCEL_RASTER_VALIDATION_OFFSETS,
+    PGACCEL_RASTER_VALIDATION_RULES, PGACCEL_RASTER_VALIDATION_VIEW,
+    PGACCEL_RESIDENT_BATCH_ABI_VERSION, PGACCEL_RESIDENT_RASTER_ABI_VERSION,
+    PGACCEL_RESIDENT_RASTER_BAND_HAS_NODATA, PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA,
+    PGACCEL_RESIDENT_RASTER_BOOL, PGACCEL_RESIDENT_RASTER_FLOAT32, PGACCEL_RESIDENT_RASTER_FLOAT64,
+    PGACCEL_RESIDENT_RASTER_INT8, PGACCEL_RESIDENT_RASTER_INT16, PGACCEL_RESIDENT_RASTER_INT32,
+    PGACCEL_RESIDENT_RASTER_MAX_LAUNCH_CHUNKS, PGACCEL_RESIDENT_RASTER_MAX_RECLASS_RULES,
+    PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH, PGACCEL_RESIDENT_RASTER_UINT2,
+    PGACCEL_RESIDENT_RASTER_UINT4, PGACCEL_RESIDENT_RASTER_UINT8, PGACCEL_RESIDENT_RASTER_UINT16,
+    PGACCEL_RESIDENT_RASTER_UINT32, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo,
+    PgaccelDeviceVarOutput, PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol,
+    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelMemSpace,
+    PgaccelPlatformCaps, PgaccelRasterReclassResidentRequest, PgaccelResidentBatch,
+    PgaccelResidentColumnView, PgaccelResidentRasterBand, PgaccelResidentRasterReclassRule,
+    PgaccelResidentRasterRow, PgaccelResidentRasterValidationScratch, PgaccelResidentRasterView,
+    PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
 
 pub use error::{

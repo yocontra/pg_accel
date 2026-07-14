@@ -9,7 +9,6 @@
 pub mod extractors;
 pub mod h3;
 pub mod postgis;
-pub mod postgis_raster;
 
 // Phase 2 dispatch-correctness `#[pg_test]`s (Agent 2B). Included here — a file
 // this agent owns — via `#[path]` so `src/tests/mod.rs` (owned by another agent
@@ -34,9 +33,8 @@ use crate::engine::registry::AccelStrategy;
 ///   double-precision lat/lng (`h3_latlng_to_cell`); `false` for pure
 ///   integer/bit-twiddling cell ops (`h3_grid_distance`, `h3_cell_to_parent`,
 ///   `h3_get_resolution`).
-/// - **PostGIS raster** (`GpuRaster`): `false` — raster map-algebra kernels
-///   operate on the raster's native pixel type (uint8/uint16/float32);
-///   the adapter does not advertise any fp64 raster functions today.
+/// - **PostGIS raster** (`GpuRaster`): `false` — raster calls are not exposed
+///   through the generic adapter; the exact-OID planner owns classification.
 /// - Other strategies (`GpuSort` / `GpuReduce` / `GpuHashAgg` / `GpuHashJoin`
 ///   / `GpuWindow` / `GpuExpr`): these are op-level, not function-level — the
 ///   planner hooks classify `uses_fp64` from the actual key/accumulator Oid
@@ -84,7 +82,7 @@ mod uses_fp64_tests {
 
     #[test]
     fn raster_does_not_use_fp64() {
-        assert!(!uses_fp64(AccelStrategy::GpuRaster, "rt_mapalgebra"));
+        assert!(!uses_fp64(AccelStrategy::GpuRaster, "st_reclass"));
     }
 
     #[test]

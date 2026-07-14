@@ -74,6 +74,8 @@ pub struct MemoryModel {
     pub gpu_preagg_max_dim_rows: Rows,
     /// Maximum state bytes per group for hash aggregation.
     pub hashagg_max_state_bytes_per_group: Bytes,
+    /// Maximum coordinate pairs admitted for one resident spatial row.
+    pub gpu_spatial_max_vertices_per_row: Rows,
 }
 
 impl From<&DeviceLimits> for MemoryModel {
@@ -82,6 +84,7 @@ impl From<&DeviceLimits> for MemoryModel {
             gpu_hash_agg_max_groups: Rows::new(limits.gpu_hash_agg_max_groups),
             gpu_preagg_max_dim_rows: Rows::new(limits.gpu_preagg_max_dim_rows),
             hashagg_max_state_bytes_per_group: Bytes::new(limits.hashagg_max_state_bytes_per_group),
+            gpu_spatial_max_vertices_per_row: Rows::new(limits.gpu_spatial_max_vertices_per_row),
         }
     }
 }
@@ -109,6 +112,8 @@ pub struct CostCoefficients {
     pub gpu_op_cost_window: PgCost,
     /// GPU filter per-row operation cost.
     pub gpu_op_cost_filter: PgCost,
+    /// CPU PostGIS exact-recheck cost per uncertain row.
+    pub cpu_spatial_recheck_per_row: PgCost,
     /// Resident H3 cell-to-parent device transform per-row cost.
     pub gpu_op_cost_h3_parent_resident: PgCost,
     /// GPU hash-join build-side per-row cost.
@@ -136,6 +141,7 @@ impl From<&DeviceLimits> for CostCoefficients {
             gpu_op_cost_sort: PgCost::new(limits.gpu_op_cost_sort),
             gpu_op_cost_window: PgCost::new(limits.gpu_op_cost_window),
             gpu_op_cost_filter: PgCost::new(limits.gpu_op_cost_filter),
+            cpu_spatial_recheck_per_row: PgCost::new(limits.cpu_spatial_recheck_per_row),
             gpu_op_cost_h3_parent_resident: PgCost::new(limits.gpu_op_cost_h3_parent_resident),
             gpu_hashjoin_build_per_row: PgCost::new(limits.gpu_hashjoin_build_per_row),
             gpu_hashjoin_probe_per_row: PgCost::new(limits.gpu_hashjoin_probe_per_row),
@@ -171,6 +177,8 @@ pub struct PlannerPolicy {
     pub gpu_spatial_min_vertices: usize,
     /// Maximum estimated output fraction for heap-backed GPU spatial scans.
     pub gpu_spatial_max_output_fraction: f64,
+    /// Maximum fraction reserved for exact spatial rechecks.
+    pub gpu_spatial_max_recheck_fraction: f64,
     /// Minimum rows for GPU expression scan dispatch.
     pub gpu_expr_min_rows: Rows,
     /// Minimum rows for pipeline fusion.
@@ -219,6 +227,7 @@ impl From<&DeviceLimits> for PlannerPolicy {
             gpu_h3_group_min_rows: Rows::new(limits.gpu_h3_group_min_rows),
             gpu_spatial_min_vertices: limits.gpu_spatial_min_vertices,
             gpu_spatial_max_output_fraction: limits.gpu_spatial_max_output_fraction,
+            gpu_spatial_max_recheck_fraction: limits.gpu_spatial_max_recheck_fraction,
             gpu_expr_min_rows: Rows::new(limits.gpu_expr_min_rows),
             gpu_pipeline_fusion_min_rows: Rows::new(limits.gpu_pipeline_fusion_min_rows),
             gpu_preagg_min_fact_rows: Rows::new(limits.gpu_preagg_min_fact_rows),
@@ -252,6 +261,8 @@ pub struct ExecutorLimits {
     pub gpu_sort_max_elements: Rows,
     /// Maximum resident H3 rows per device-to-device transform launch.
     pub gpu_h3_max_chunk_rows: Rows,
+    /// Maximum resident spatial pairs per device launch.
+    pub gpu_spatial_pairwise_chunk_rows: Rows,
     /// Lower bound for `optimal_batch_size`.
     pub optimal_batch_min: Rows,
     /// Upper bound for `optimal_batch_size`.
@@ -266,6 +277,7 @@ impl From<&DeviceLimits> for ExecutorLimits {
             gpu_reduce_max_chunk: Rows::new(limits.gpu_reduce_max_chunk),
             gpu_sort_max_elements: Rows::new(limits.gpu_sort_max_elements),
             gpu_h3_max_chunk_rows: Rows::new(limits.gpu_h3_max_chunk_rows),
+            gpu_spatial_pairwise_chunk_rows: Rows::new(limits.gpu_spatial_pairwise_chunk_rows),
             optimal_batch_min: Rows::new(limits.optimal_batch_min),
             optimal_batch_max: Rows::new(limits.optimal_batch_max),
             fused_interrupt_interval: Rows::new(limits.fused_interrupt_interval),
@@ -331,6 +343,10 @@ mod tests {
             model.memory.hashagg_max_state_bytes_per_group.get(),
             limits.hashagg_max_state_bytes_per_group,
         );
+        assert_eq!(
+            model.memory.gpu_spatial_max_vertices_per_row.get(),
+            limits.gpu_spatial_max_vertices_per_row,
+        );
 
         assert_eq!(
             model.coefficients.preagg_dim_materialize_cost.get(),
@@ -371,6 +387,10 @@ mod tests {
         assert_eq!(
             model.coefficients.gpu_op_cost_filter.get(),
             limits.gpu_op_cost_filter,
+        );
+        assert_eq!(
+            model.coefficients.cpu_spatial_recheck_per_row.get(),
+            limits.cpu_spatial_recheck_per_row,
         );
         assert_eq!(
             model.coefficients.gpu_op_cost_h3_parent_resident.get(),
@@ -433,6 +453,10 @@ mod tests {
         assert_eq!(
             model.planner.gpu_spatial_max_output_fraction,
             limits.gpu_spatial_max_output_fraction,
+        );
+        assert_eq!(
+            model.planner.gpu_spatial_max_recheck_fraction,
+            limits.gpu_spatial_max_recheck_fraction,
         );
         assert_eq!(
             model.planner.gpu_expr_min_rows.get(),
@@ -510,6 +534,10 @@ mod tests {
         assert_eq!(
             model.executor.gpu_h3_max_chunk_rows.get(),
             limits.gpu_h3_max_chunk_rows,
+        );
+        assert_eq!(
+            model.executor.gpu_spatial_pairwise_chunk_rows.get(),
+            limits.gpu_spatial_pairwise_chunk_rows,
         );
         assert_eq!(
             model.executor.optimal_batch_min.get(),

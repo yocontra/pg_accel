@@ -14,6 +14,7 @@ pub mod materialize;
 pub mod otel;
 pub mod panic_hook;
 pub mod pg_compat;
+pub mod raster;
 pub mod registry;
 pub mod residency;
 pub mod spec;

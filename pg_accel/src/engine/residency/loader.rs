@@ -9,10 +9,20 @@ use std::time::Instant;
 
 use pgrx::{pg_sys, prelude::*};
 
+use crate::adapters::extractors::raster::parse_resident_raster;
+use crate::engine::cost::device_limits;
 use crate::engine::ffi::syscache;
 use crate::engine::gucs;
 use crate::gpu::ExprDeviceBuffer;
 
+use super::domain::{
+    RESIDENT_RASTER_BAND_HAS_NODATA, RESIDENT_RASTER_BAND_IS_NODATA, ResidentByteAccounting,
+    ResidentGeometryData, ResidentRasterBand, ResidentRasterData, ResidentRasterRow,
+    RetainedExactValues,
+};
+use super::geometry::{
+    ResidentGeometryBuilder, ResidentGeometryColumn, ResidentGeometryReferencedBytes,
+};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::store::{ResidentColumn, ResidentRelation};
 
@@ -33,9 +43,104 @@ impl FromDatum for RawH3Datum {
     }
 }
 
+/// Owned detoasted GSERIALIZED bytes. The dynamic type is proved before this
+/// wrapper is ever requested from SPI.
+struct RawGeometryDatum(Vec<u8>);
+
+impl FromDatum for RawGeometryDatum {
+    unsafe fn from_polymorphic_datum(
+        datum: pg_sys::Datum,
+        is_null: bool,
+        _type_oid: pg_sys::Oid,
+    ) -> Option<Self> {
+        if is_null {
+            return None;
+        }
+        // SAFETY: SPI supplied a non-NULL Datum of the catalog-proved PostGIS
+        // varlena type on the backend main thread.
+        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
+        if detoasted.is_null() {
+            return Some(Self(Vec::new()));
+        }
+        // SAFETY: pg_detoast_datum returned a flat varlena whose complete
+        // allocation is readable for VARSIZE bytes during this SPI callback.
+        let length = unsafe { pgrx::varsize(detoasted.cast()) };
+        let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) }.to_vec();
+        if detoasted != original {
+            // SAFETY: a distinct pg_detoast_datum result is a palloc-owned
+            // flat copy; the owned Vec above no longer borrows it.
+            unsafe { pg_sys::pfree(detoasted.cast()) };
+        }
+        Some(Self(bytes))
+    }
+}
+
+impl IntoDatum for RawGeometryDatum {
+    fn into_datum(self) -> Option<pg_sys::Datum> {
+        None
+    }
+
+    fn type_oid() -> pg_sys::Oid {
+        pg_sys::InvalidOid
+    }
+
+    fn is_compatible_with(_other: pg_sys::Oid) -> bool {
+        true
+    }
+}
+
 impl IntoDatum for RawH3Datum {
     fn into_datum(self) -> Option<pg_sys::Datum> {
         Some(pg_sys::Datum::from(self.0))
+    }
+
+    fn type_oid() -> pg_sys::Oid {
+        pg_sys::InvalidOid
+    }
+
+    fn is_compatible_with(_other: pg_sys::Oid) -> bool {
+        true
+    }
+}
+
+/// Owned detoasted PostGIS Raster WKB. The exact type proof is completed
+/// before SPI asks `FromDatum` to interpret the by-reference value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawRasterDatum(Vec<u8>);
+
+impl FromDatum for RawRasterDatum {
+    unsafe fn from_polymorphic_datum(
+        datum: pg_sys::Datum,
+        is_null: bool,
+        _type_oid: pg_sys::Oid,
+    ) -> Option<Self> {
+        if is_null || datum.value() == 0 {
+            return None;
+        }
+        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+        // SAFETY: the exact catalog proof establishes a varlena, pass-by-ref
+        // raster Datum and this runs on the PostgreSQL backend main thread.
+        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
+        if detoasted.is_null() {
+            return None;
+        }
+        // SAFETY: detoast returns a flat varlena whose payload is valid for the
+        // reported length. Copying makes its lifetime independent of SPI.
+        let len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
+        let data = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+        if detoasted != original {
+            // SAFETY: a distinct detoast result is palloc-owned by this call.
+            unsafe { pg_sys::pfree(detoasted.cast()) };
+        }
+        Some(Self(bytes))
+    }
+}
+
+impl IntoDatum for RawRasterDatum {
+    fn into_datum(self) -> Option<pg_sys::Datum> {
+        None
     }
 
     fn type_oid() -> pg_sys::Oid {
@@ -83,6 +188,18 @@ enum StagedColumn {
         values: Vec<u64>,
         nulls: Option<Vec<u8>>,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        data: ResidentGeometryData,
+        referenced_bytes: ResidentGeometryReferencedBytes,
+        accounting: ResidentByteAccounting,
+        max_exact_value_bytes: usize,
+    },
+    Raster {
+        type_oid: pg_sys::Oid,
+        data: ResidentRasterData,
+        max_exact_value_bytes: usize,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: Vec<f32>,
@@ -126,6 +243,15 @@ impl StagedColumn {
             Self::H3 { values, nulls, .. } => {
                 checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
             }
+            Self::Geometry { accounting, .. } => Ok(accounting.device_bytes),
+            Self::Raster {
+                data,
+                max_exact_value_bytes,
+                ..
+            } => data
+                .accounting(*max_exact_value_bytes)
+                .map(|accounting| accounting.device_bytes)
+                .map_err(|error| format!("resident raster accounting failed: {error}")),
             Self::F64 { values, nulls, .. } => {
                 checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
             }
@@ -174,6 +300,53 @@ impl StagedColumn {
                 values: copy_buffer(&values, label)?,
                 nulls: copy_optional_nulls(nulls, label)?,
             }),
+            Self::Geometry {
+                type_oid,
+                data,
+                referenced_bytes,
+                max_exact_value_bytes,
+                ..
+            } => Ok(ResidentColumn::Geometry {
+                type_oid,
+                data: ResidentGeometryColumn::materialize(
+                    data,
+                    referenced_bytes,
+                    max_exact_value_bytes,
+                    label,
+                )?,
+            }),
+            Self::Raster {
+                type_oid,
+                data,
+                max_exact_value_bytes,
+            } => {
+                data.validate(max_exact_value_bytes)
+                    .map_err(|error| format!("resident raster validation failed: {error}"))?;
+                let stats = data
+                    .stats()
+                    .map_err(|error| format!("resident raster statistics failed: {error}"))?;
+                let ResidentRasterData {
+                    pixels,
+                    band_offsets,
+                    rows,
+                    bands,
+                    nulls,
+                    exact,
+                } = data;
+                Ok(ResidentColumn::Raster {
+                    type_oid,
+                    pixels: copy_optional_buffer(pixels, &format!("{label} raster pixels"))?,
+                    band_offsets: copy_buffer(
+                        &band_offsets,
+                        &format!("{label} raster band offsets"),
+                    )?,
+                    rows: copy_buffer(&rows, &format!("{label} raster rows"))?,
+                    bands: copy_optional_buffer(bands, &format!("{label} raster bands"))?,
+                    nulls: copy_optional_nulls(nulls, &format!("{label} raster"))?,
+                    exact,
+                    stats,
+                })
+            }
             Self::F32 {
                 type_oid,
                 values,
@@ -205,11 +378,39 @@ impl StagedColumn {
             }),
         }
     }
+
+    fn accounting(&self) -> Result<ResidentByteAccounting, String> {
+        match self {
+            Self::Geometry { accounting, .. } => Ok(*accounting),
+            Self::Raster {
+                data,
+                max_exact_value_bytes,
+                ..
+            } => data
+                .accounting(*max_exact_value_bytes)
+                .map_err(|error| format!("resident raster accounting failed: {error}")),
+            _ => Ok(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: 0,
+            }),
+        }
+    }
 }
 
 fn copy_buffer<T>(values: &[T], label: &str) -> Result<ExprDeviceBuffer<T>, String> {
     ExprDeviceBuffer::copy_from_slice(values)
         .ok_or_else(|| format!("device allocation/copy failed for {label}"))
+}
+
+fn copy_optional_buffer<T>(
+    values: Vec<T>,
+    label: &str,
+) -> Result<Option<ExprDeviceBuffer<T>>, String> {
+    if values.is_empty() {
+        Ok(None)
+    } else {
+        copy_buffer(&values, label).map(Some)
+    }
 }
 
 fn copy_optional_nulls(
@@ -240,15 +441,35 @@ impl StagedRelation {
         self.row_count
     }
 
-    pub(super) fn device_bytes(&self) -> Result<u64, String> {
-        self.columns.values().try_fold(0_u64, |total, column| {
-            total
-                .checked_add(column.device_bytes()?)
-                .ok_or_else(|| "resident relation byte count overflow".to_owned())
-        })
+    pub(super) fn accounting(&self) -> Result<ResidentByteAccounting, String> {
+        let accounting = self.columns.values().try_fold(
+            ResidentByteAccounting::default(),
+            |mut total, column| {
+                let column = column.accounting()?;
+                total.device_bytes = total
+                    .device_bytes
+                    .checked_add(column.device_bytes)
+                    .ok_or_else(|| "resident relation device byte count overflow".to_owned())?;
+                total.retained_host_exact_bytes = total
+                    .retained_host_exact_bytes
+                    .checked_add(column.retained_host_exact_bytes)
+                    .ok_or_else(|| {
+                        "resident relation retained-host byte count overflow".to_owned()
+                    })?;
+                Ok::<_, String>(total)
+            },
+        )?;
+        accounting
+            .checked_total()
+            .map_err(|error| error.to_string())?;
+        Ok(accounting)
     }
 
-    pub(super) fn materialize(self, charge: LedgerCharge) -> Result<ResidentRelation, String> {
+    pub(super) fn materialize(
+        self,
+        charge: LedgerCharge,
+        accounting: ResidentByteAccounting,
+    ) -> Result<ResidentRelation, String> {
         let mut columns = BTreeMap::new();
         for (attno, staged) in self.columns {
             let label = format!(
@@ -256,6 +477,30 @@ impl StagedRelation {
                 u32::from(self.relid)
             );
             columns.insert(attno, staged.materialize(&label)?);
+        }
+        let actual_accounting =
+            columns
+                .values()
+                .try_fold(ResidentByteAccounting::default(), |mut total, column| {
+                    let column = column
+                        .accounting()
+                        .ok_or_else(|| "resident column byte count overflow".to_owned())?;
+                    total.device_bytes = total
+                        .device_bytes
+                        .checked_add(column.device_bytes)
+                        .ok_or_else(|| "resident relation device byte count overflow".to_owned())?;
+                    total.retained_host_exact_bytes = total
+                        .retained_host_exact_bytes
+                        .checked_add(column.retained_host_exact_bytes)
+                        .ok_or_else(|| {
+                            "resident relation retained-host byte count overflow".to_owned()
+                        })?;
+                    Ok::<_, String>(total)
+                })?;
+        if actual_accounting != accounting {
+            return Err(format!(
+                "resident relation accounting mismatch: staged={accounting:?}, materialized={actual_accounting:?}"
+            ));
         }
         let now = now_us();
         Ok(ResidentRelation {
@@ -270,8 +515,162 @@ impl StagedRelation {
             last_used_tick: 0,
             pinned: false,
             raw_charge: charge,
+            raw_accounting: accounting,
             first_use_scope: None,
             derived: Vec::new(),
+        })
+    }
+}
+
+struct RasterColumnBuilder {
+    type_oid: pg_sys::Oid,
+    pixels: Vec<u8>,
+    band_offsets: Vec<u64>,
+    rows: Vec<ResidentRasterRow>,
+    bands: Vec<ResidentRasterBand>,
+    nulls: Vec<u8>,
+    saw_null: bool,
+    exact_offsets: Vec<u64>,
+    exact_bytes: Vec<u8>,
+    max_exact_value_bytes: usize,
+}
+
+impl RasterColumnBuilder {
+    fn new(type_oid: pg_sys::Oid, max_exact_value_bytes: usize) -> Self {
+        Self {
+            type_oid,
+            pixels: Vec::new(),
+            band_offsets: vec![0],
+            rows: Vec::new(),
+            bands: Vec::new(),
+            nulls: Vec::new(),
+            saw_null: false,
+            exact_offsets: vec![0],
+            exact_bytes: Vec::new(),
+            max_exact_value_bytes,
+        }
+    }
+
+    fn reserve_rows(&mut self, additional: usize) -> Result<(), String> {
+        let reserve = |result: Result<(), std::collections::TryReserveError>| {
+            result
+                .map_err(|error| format!("resident raster host staging allocation failed: {error}"))
+        };
+        reserve(self.rows.try_reserve(additional))?;
+        reserve(self.nulls.try_reserve(additional))?;
+        reserve(self.exact_offsets.try_reserve(additional))
+    }
+
+    fn push_value(&mut self, value: Option<&[u8]>) -> Result<(), String> {
+        self.reserve_rows(1)?;
+        let Some(value) = value else {
+            self.rows.push(ResidentRasterRow::default());
+            self.nulls.push(1);
+            self.saw_null = true;
+            self.exact_offsets.push(
+                *self
+                    .exact_offsets
+                    .last()
+                    .ok_or("resident raster exact offsets lost their sentinel")?,
+            );
+            return Ok(());
+        };
+        if value.len() > self.max_exact_value_bytes {
+            return Err(format!(
+                "resident raster exact value is {} bytes, exceeding the per-value limit of {} bytes",
+                value.len(),
+                self.max_exact_value_bytes
+            ));
+        }
+        let parsed = parse_resident_raster(value)
+            .map_err(|error| format!("resident raster structural decline: {error}"))?;
+        let first_band = u32::try_from(self.bands.len())
+            .map_err(|_| "resident raster flattened band index exceeds u32".to_owned())?;
+        let band_count = u32::try_from(parsed.bands.len())
+            .map_err(|_| "resident raster band count exceeds u32".to_owned())?;
+        let pixel_bytes = parsed.bands.iter().try_fold(0_usize, |total, band| {
+            total
+                .checked_add(band.pixels.len())
+                .ok_or_else(|| "resident raster pixel byte count overflow".to_owned())
+        })?;
+        let exact_end = self
+            .exact_bytes
+            .len()
+            .checked_add(value.len())
+            .and_then(|end| u64::try_from(end).ok())
+            .ok_or_else(|| "resident raster exact byte count overflow".to_owned())?;
+        self.pixels
+            .try_reserve(pixel_bytes)
+            .map_err(|error| format!("resident raster pixel staging allocation failed: {error}"))?;
+        self.bands
+            .try_reserve(parsed.bands.len())
+            .map_err(|error| format!("resident raster band staging allocation failed: {error}"))?;
+        self.band_offsets
+            .try_reserve(parsed.bands.len())
+            .map_err(|error| {
+                format!("resident raster offset staging allocation failed: {error}")
+            })?;
+        self.exact_bytes
+            .try_reserve(value.len())
+            .map_err(|error| format!("resident raster exact staging allocation failed: {error}"))?;
+
+        self.rows.push(ResidentRasterRow {
+            width: u32::from(parsed.header.width),
+            height: u32::from(parsed.header.height),
+            first_band,
+            band_count,
+            srid: parsed.header.srid,
+            flags: 0,
+            scale_x: parsed.header.scale_x,
+            scale_y: parsed.header.scale_y,
+            ip_x: parsed.header.ip_x,
+            ip_y: parsed.header.ip_y,
+            skew_x: parsed.header.skew_x,
+            skew_y: parsed.header.skew_y,
+        });
+        for band in parsed.bands {
+            let mut flags = 0;
+            if band.has_nodata {
+                flags |= RESIDENT_RASTER_BAND_HAS_NODATA;
+            }
+            if band.is_nodata {
+                flags |= RESIDENT_RASTER_BAND_IS_NODATA;
+            }
+            self.bands.push(ResidentRasterBand {
+                pixel_type: u32::from(band.pixel_type.code()),
+                flags,
+                nodata: band.nodata,
+            });
+            self.pixels.extend_from_slice(&band.pixels);
+            self.band_offsets.push(
+                u64::try_from(self.pixels.len())
+                    .map_err(|_| "resident raster pixel byte count exceeds u64".to_owned())?,
+            );
+        }
+        self.nulls.push(0);
+        self.exact_bytes.extend_from_slice(value);
+        self.exact_offsets.push(exact_end);
+        Ok(())
+    }
+
+    fn finish(self) -> Result<StagedColumn, String> {
+        let data = ResidentRasterData {
+            pixels: self.pixels,
+            band_offsets: self.band_offsets,
+            rows: self.rows,
+            bands: self.bands,
+            nulls: self.saw_null.then_some(self.nulls),
+            exact: RetainedExactValues {
+                offsets: self.exact_offsets.into_boxed_slice(),
+                bytes: self.exact_bytes.into_boxed_slice(),
+            },
+        };
+        data.validate(self.max_exact_value_bytes)
+            .map_err(|error| format!("resident raster staging contract failed: {error}"))?;
+        Ok(StagedColumn::Raster {
+            type_oid: self.type_oid,
+            data,
+            max_exact_value_bytes: self.max_exact_value_bytes,
         })
     }
 }
@@ -301,6 +700,11 @@ enum ColumnBuilder {
         nulls: Vec<u8>,
         saw_null: bool,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        builder: ResidentGeometryBuilder,
+    },
+    Raster(RasterColumnBuilder),
     F32 {
         type_oid: pg_sys::Oid,
         values: Vec<f32>,
@@ -338,7 +742,71 @@ fn validate_h3_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_geometry_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
+    // SAFETY: residency resolution runs synchronously on the backend main
+    // thread before interpreting any extension-owned varlena payload.
+    let catalog = unsafe { syscache::resolve_postgis_catalog() }?;
+    if type_oid != catalog.geometry_type_oid {
+        return Err(format!(
+            "type OID {} is not the catalog-proved PostGIS geometry type",
+            u32::from(type_oid)
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionColumnKind {
+    H3,
+    Geometry,
+    Raster,
+}
+
+fn classify_extension_column_type(type_oid: pg_sys::Oid) -> Result<ExtensionColumnKind, String> {
+    // SAFETY: extension membership and exact catalog proofs are inspected on
+    // the PostgreSQL backend main thread before selecting a Datum reader.
+    if unsafe { syscache::type_is_extension_member(type_oid, "postgis") } {
+        validate_geometry_column_type(type_oid)?;
+        return Ok(ExtensionColumnKind::Geometry);
+    }
+
+    // SAFETY: residency resolution and load run on the backend main thread.
+    match unsafe { syscache::validate_postgis_raster_type(type_oid) } {
+        Ok(_) => Ok(ExtensionColumnKind::Raster),
+        Err(raster_detail) => match validate_h3_column_type(type_oid) {
+            Ok(()) => Ok(ExtensionColumnKind::H3),
+            Err(h3_detail) => Err(format!(
+                "type OID {} is not supported by residency v2; exact PostGIS Raster validation failed: {raster_detail}; exact H3 validation failed: {h3_detail}",
+                u32::from(type_oid)
+            )),
+        },
+    }
+}
+
 impl ColumnBuilder {
+    fn type_oid(&self) -> pg_sys::Oid {
+        match self {
+            Self::Raster(builder) => builder.type_oid,
+            Self::Bool { type_oid, .. }
+            | Self::I32 { type_oid, .. }
+            | Self::I64 { type_oid, .. }
+            | Self::H3 { type_oid, .. }
+            | Self::Geometry { type_oid, .. }
+            | Self::F32 { type_oid, .. }
+            | Self::F64 { type_oid, .. }
+            | Self::Text { type_oid, .. } => *type_oid,
+        }
+    }
+
+    fn finish_empty(self) -> Result<StagedColumn, String> {
+        let type_oid = self.type_oid();
+        if matches!(&self, Self::Geometry { .. }) {
+            self.finish()
+        } else {
+            Ok(StagedColumn::Empty { type_oid })
+        }
+    }
+
     fn for_type(type_oid: pg_sys::Oid) -> Result<Self, String> {
         match type_oid {
             pg_sys::BOOLOID => Ok(Self::Bool {
@@ -375,15 +843,28 @@ impl ColumnBuilder {
                 type_oid,
                 values: Vec::new(),
             }),
-            _ => {
-                validate_h3_column_type(type_oid)?;
-                Ok(Self::H3 {
+            _ => match classify_extension_column_type(type_oid)? {
+                ExtensionColumnKind::H3 => Ok(Self::H3 {
                     type_oid,
                     values: Vec::new(),
                     nulls: Vec::new(),
                     saw_null: false,
-                })
-            }
+                }),
+                ExtensionColumnKind::Geometry => {
+                    let limits = device_limits();
+                    Ok(Self::Geometry {
+                        type_oid,
+                        builder: ResidentGeometryBuilder::new(
+                            limits.resident_domain_max_exact_value_bytes,
+                            limits.gpu_spatial_max_vertices_per_row,
+                        ),
+                    })
+                }
+                ExtensionColumnKind::Raster => Ok(Self::Raster(RasterColumnBuilder::new(
+                    type_oid,
+                    device_limits().resident_domain_max_exact_value_bytes,
+                ))),
+            },
         }
     }
 
@@ -408,6 +889,8 @@ impl ColumnBuilder {
                 reserve(values.try_reserve(additional))?;
                 reserve(nulls.try_reserve(additional))
             }
+            Self::Geometry { builder, .. } => builder.try_reserve_rows(additional),
+            Self::Raster(builder) => builder.reserve_rows(additional),
             Self::F32 { values, nulls, .. } => {
                 reserve(values.try_reserve(additional))?;
                 reserve(nulls.try_reserve(additional))
@@ -490,6 +973,18 @@ impl ColumnBuilder {
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
+            Self::Geometry { builder, .. } => {
+                let value = row
+                    .get::<RawGeometryDatum>(ordinal)
+                    .map_err(|error| format!("column {ordinal} geometry read failed: {error:?}"))?;
+                builder.push(value.map(|value| value.0))?;
+            }
+            Self::Raster(builder) => {
+                let value = row
+                    .get::<RawRasterDatum>(ordinal)
+                    .map_err(|error| format!("column {ordinal} raster read failed: {error:?}"))?;
+                builder.push_value(value.as_ref().map(|value| value.0.as_slice()))?;
+            }
             Self::F32 {
                 values,
                 nulls,
@@ -568,6 +1063,27 @@ impl ColumnBuilder {
                 values,
                 nulls: saw_null.then_some(nulls),
             },
+            Self::Geometry { type_oid, builder } => {
+                let max_exact_value_bytes =
+                    crate::engine::cost::device_limits().resident_domain_max_exact_value_bytes;
+                let data = builder.finish()?;
+                let referenced_bytes = ResidentGeometryReferencedBytes::build(&data)?;
+                let mut accounting = data
+                    .accounting(max_exact_value_bytes)
+                    .map_err(|error| error.to_string())?;
+                accounting.retained_host_exact_bytes = accounting
+                    .retained_host_exact_bytes
+                    .checked_add(referenced_bytes.accounting_bytes()?)
+                    .ok_or_else(|| "geometry retained-host accounting overflow".to_owned())?;
+                StagedColumn::Geometry {
+                    type_oid,
+                    data,
+                    referenced_bytes,
+                    accounting,
+                    max_exact_value_bytes,
+                }
+            }
+            Self::Raster(builder) => return builder.finish(),
             Self::F32 {
                 type_oid,
                 values,
@@ -813,7 +1329,7 @@ pub(super) fn resolve_column_names(
     Ok(resolved)
 }
 
-pub(super) fn estimate_device_bytes(
+pub(super) fn estimate_resident_bytes(
     relid: pg_sys::Oid,
     requests: &[ColumnRequest],
 ) -> Result<u64, String> {
@@ -894,10 +1410,38 @@ pub(super) fn estimate_device_bytes(
             pg_sys::INT8OID | pg_sys::TIMESTAMPOID | pg_sys::TIMESTAMPTZOID | pg_sys::FLOAT8OID => {
                 8
             }
-            _ => {
-                validate_h3_column_type(request.type_oid)?;
-                8
-            }
+            _ => match classify_extension_column_type(request.type_oid)? {
+                ExtensionColumnKind::H3 => 8,
+                ExtensionColumnKind::Geometry => {
+                    // Geometry retains the exact varlena and publishes fp64
+                    // coordinates plus fixed row metadata. PostgreSQL's
+                    // analyzed average width is the best available pre-scan
+                    // estimate; the exact post-scan accounting remains the
+                    // authoritative reservation.
+                    // SAFETY: relation/attribute identities were read from the
+                    // active catalog on the backend main thread.
+                    let average_width = unsafe { pg_sys::get_attavgwidth(relid, request.attno) };
+                    let average_width = u64::try_from(average_width.max(32))
+                        .map_err(|_| "geometry average width exceeds u64".to_owned())?;
+                    average_width
+                        .checked_mul(2)
+                        .and_then(|bytes| bytes.checked_add(72))
+                        .ok_or_else(|| "resident geometry width estimate overflow".to_owned())?
+                }
+                ExtensionColumnKind::Raster => {
+                    // The exact charge is computed after staging. This planner
+                    // estimate uses catalog width for both retained WKB and
+                    // native pixels, plus fixed row/offset/band overhead.
+                    // SAFETY: estimate resolution runs on the backend thread.
+                    let average = unsafe { pg_sys::get_attavgwidth(relid, request.attno) };
+                    let average = u64::try_from(average.max(1))
+                        .map_err(|_| "raster average width exceeds u64".to_owned())?;
+                    average
+                        .checked_mul(2)
+                        .and_then(|bytes| bytes.checked_add(104))
+                        .ok_or_else(|| "resident raster byte estimate overflow".to_owned())?
+                }
+            },
         };
         let width = width + u64::from(!not_null.get(&request.attno).copied().unwrap_or(false));
         let column_bytes = rows
@@ -1011,7 +1555,7 @@ pub(super) fn stage_relation(
         })?;
         let started = Instant::now();
         let qualified = qualified_relation_name(relid)?;
-        let estimated_bytes = estimate_device_bytes(relid, requests)?;
+        let estimated_bytes = estimate_resident_bytes(relid, requests)?;
         let budget = gucs::resident_memory_budget_bytes();
         if estimated_bytes > budget {
             return Err(format!(
@@ -1040,15 +1584,10 @@ pub(super) fn stage_relation(
         let columns = if row_count == 0 {
             requests
                 .iter()
-                .map(|request| {
-                    (
-                        request.attno,
-                        StagedColumn::Empty {
-                            type_oid: request.type_oid,
-                        },
-                    )
-                })
-                .collect()
+                .map(|request| request.attno)
+                .zip(builders.into_iter().map(ColumnBuilder::finish_empty))
+                .map(|(attno, column)| column.map(|column| (attno, column)))
+                .collect::<Result<BTreeMap<_, _>, _>>()?
         } else {
             requests
                 .iter()
@@ -1281,5 +1820,173 @@ mod tests {
             StagedColumn::H3 { nulls, .. } => assert_eq!(nulls, Some(vec![0, 1])),
             _ => panic!("H3 builder changed staging representation"),
         }
+    }
+
+    fn raster_header(width: u16, height: u16, band_count: u16) -> Vec<u8> {
+        let mut wkb = Vec::new();
+        wkb.push(1);
+        wkb.extend_from_slice(&0_u16.to_le_bytes());
+        wkb.extend_from_slice(&band_count.to_le_bytes());
+        for value in [2.0_f64, -3.0, 10.0, 20.0, 0.25, -0.5] {
+            wkb.extend_from_slice(&value.to_le_bytes());
+        }
+        wkb.extend_from_slice(&4_326_i32.to_le_bytes());
+        wkb.extend_from_slice(&width.to_le_bytes());
+        wkb.extend_from_slice(&height.to_le_bytes());
+        wkb
+    }
+
+    fn multiband_raster() -> Vec<u8> {
+        let mut wkb = raster_header(2, 1, 2);
+        wkb.push(0x0a | 0x40);
+        wkb.extend_from_slice(&f32::NAN.to_le_bytes());
+        wkb.extend_from_slice(&1.5_f32.to_le_bytes());
+        wkb.extend_from_slice(&2.5_f32.to_le_bytes());
+        wkb.push(6 | 0x40 | 0x20);
+        wkb.extend_from_slice(&u16::MAX.to_le_bytes());
+        wkb.extend_from_slice(&7_u16.to_le_bytes());
+        wkb.extend_from_slice(&8_u16.to_le_bytes());
+        wkb
+    }
+
+    #[test]
+    fn raster_staging_retains_exact_wkb_and_charges_host_plus_device_bytes() {
+        let wkb = multiband_raster();
+        let mut builder = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), 1_024);
+        builder.push_value(None).expect("NULL raster stages");
+        builder
+            .push_value(Some(&wkb))
+            .expect("valid multiband raster stages");
+        let staged = builder.finish().expect("raster domain validates");
+        let declared = staged
+            .accounting()
+            .expect("raster accounting validates")
+            .checked_total()
+            .expect("raster bytes fit u64");
+        let StagedColumn::Raster {
+            data,
+            max_exact_value_bytes,
+            ..
+        } = staged
+        else {
+            panic!("raster builder changed staging representation");
+        };
+        let accounting = data
+            .accounting(max_exact_value_bytes)
+            .expect("staged raster accounting validates");
+        assert_eq!(declared, accounting.checked_total().expect("total fits"));
+        assert_eq!(data.nulls, Some(vec![1, 0]));
+        assert_eq!(data.rows[0], ResidentRasterRow::default());
+        assert_eq!(data.rows[1].first_band, 0);
+        assert_eq!(data.rows[1].band_count, 2);
+        assert_eq!(data.rows[1].srid, 4_326);
+        assert_eq!(data.rows[1].skew_x, 0.25);
+        assert_eq!(data.rows[1].skew_y, -0.5);
+        assert_eq!(data.band_offsets, vec![0, 8, 12]);
+        assert!(data.bands[0].nodata.is_nan());
+        assert_eq!(data.bands[0].pixel_type, 10);
+        assert_eq!(
+            data.bands[1].flags,
+            RESIDENT_RASTER_BAND_HAS_NODATA | RESIDENT_RASTER_BAND_IS_NODATA
+        );
+        assert_eq!(data.exact.value(0), Some(&[][..]));
+        assert_eq!(data.exact.value(1), Some(wkb.as_slice()));
+        assert_eq!(
+            accounting.retained_host_exact_bytes,
+            u64::try_from(
+                3 * std::mem::size_of::<u64>()
+                    + wkb.len()
+                    + 2 * 8
+                    + 2 * 8
+                    + 2 * std::mem::size_of::<crate::engine::residency::ResidentRasterWorkRow>()
+            )
+            .expect("test bytes fit")
+        );
+        let stats = data.stats().expect("staged raster statistics validate");
+        assert_eq!(stats.row_count, 2);
+        assert_eq!(stats.non_null_rows, 1);
+        assert_eq!(stats.total_grid_pixels, 2);
+        assert_eq!(stats.total_band_pixels, 4);
+        assert_eq!(
+            stats.input_wkb_bytes,
+            u64::try_from(wkb.len()).expect("test WKB length fits")
+        );
+        assert_eq!(stats.selected_band_pixels(1), Some(2));
+        assert_eq!(stats.selected_band_pixels(2), Some(2));
+        assert_eq!(stats.selected_band_pixels(3), Some(0));
+        assert_eq!(stats.selected_band_pixels(0), None);
+        assert_eq!(stats.selected_band_rows(1), Some(1));
+        assert_eq!(stats.selected_band_rows(2), Some(1));
+        assert_eq!(stats.selected_band_rows(3), Some(0));
+        assert_eq!(stats.selected_band_rows(0), None);
+        let input_bytes = u64::try_from(wkb.len()).expect("test WKB length fits");
+        assert_eq!(
+            stats.reclass_output_wkb_bytes(4),
+            Some(input_bytes - 12 + 3)
+        );
+        assert_eq!(
+            stats.reclass_output_wkb_bytes(5),
+            Some(input_bytes - 12 + 6)
+        );
+        assert_eq!(stats.reclass_output_wkb_bytes(7), Some(input_bytes));
+        assert_eq!(stats.reclass_output_wkb_bytes(10), None);
+        assert_eq!(stats.reclass_output_pixel_bytes(4), Some(2));
+        assert_eq!(stats.reclass_output_pixel_bytes(5), Some(4));
+        assert_eq!(stats.reclass_output_pixel_bytes(7), Some(8));
+        assert_eq!(stats.reclass_output_pixel_bytes(10), None);
+    }
+
+    #[test]
+    fn raster_staging_preserves_empty_zero_band_values() {
+        let wkb = raster_header(0, 0, 0);
+        let mut builder = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), 1_024);
+        builder
+            .push_value(Some(&wkb))
+            .expect("zero-band raster is a non-NULL value");
+        let StagedColumn::Raster { data, .. } = builder.finish().expect("empty raster validates")
+        else {
+            panic!("raster builder changed staging representation");
+        };
+        assert!(data.pixels.is_empty());
+        assert_eq!(data.band_offsets, vec![0]);
+        assert!(data.bands.is_empty());
+        assert_eq!(data.rows.len(), 1);
+        assert_eq!(data.rows[0].width, 0);
+        assert_eq!(data.rows[0].band_count, 0);
+        assert_eq!(data.exact.value(0), Some(wkb.as_slice()));
+    }
+
+    #[test]
+    fn raster_staging_rejects_structural_values_before_adding_rows() {
+        const HEADER_BYTES: usize = 61;
+        let valid = multiband_raster();
+        let mut offline = valid.clone();
+        offline[HEADER_BYTES] |= 0x80;
+        let mut reserved = valid.clone();
+        reserved[HEADER_BYTES] |= 0x10;
+        let mut unknown = valid.clone();
+        unknown[HEADER_BYTES] = (unknown[HEADER_BYTES] & 0xf0) | 9;
+
+        for (value, reason) in [
+            (offline, "offline raster bands cannot enter residency"),
+            (reserved, "raster WKB contains invalid band flags"),
+            (unknown, "raster WKB contains an unknown pixel type"),
+        ] {
+            let mut builder = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), 1_024);
+            let error = builder
+                .push_value(Some(&value))
+                .expect_err("unsupported raster must decline during staging");
+            assert!(error.contains(reason), "unexpected decline: {error}");
+            assert!(builder.rows.is_empty());
+            assert_eq!(builder.band_offsets, vec![0]);
+            assert_eq!(builder.exact_offsets, vec![0]);
+        }
+
+        let mut capped = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), valid.len() - 1);
+        let error = capped
+            .push_value(Some(&valid))
+            .expect_err("oversized exact value must decline during staging");
+        assert!(error.contains("exceeding the per-value limit"));
+        assert!(capped.rows.is_empty());
     }
 }

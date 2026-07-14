@@ -15,6 +15,7 @@
 pub mod agg;
 pub mod join;
 pub mod metrics;
+pub mod raster;
 pub mod result_drain;
 pub mod scan;
 pub mod sort;

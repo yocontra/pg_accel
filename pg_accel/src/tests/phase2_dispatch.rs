@@ -26,7 +26,7 @@
 // IF NOT EXISTS so this coexists with the other `mod tests` files.
 #[pgrx::pg_schema]
 mod tests {
-    use crate::adapters::extractors::raster::{PixelType, extract_pixels_f64, parse_band_info};
+    use crate::adapters::extractors::raster::{PixelType, parse_resident_raster};
     use pgrx::prelude::*;
 
     /// `CREATE EXTENSION IF NOT EXISTS <name> CASCADE`, returning whether the
@@ -75,14 +75,14 @@ mod tests {
             return;
         }
         let wkb = build_2x2("8BUI", 0.0, 10.0, 250.0);
-        let band = parse_band_info(&wkb, 0).expect("band 0 should parse");
+        let parsed = parse_resident_raster(&wkb).expect("resident raster should parse");
+        let band = &parsed.bands[0];
         assert_eq!(
             band.pixel_type,
             PixelType::UInt8,
             "8BUI must decode as UInt8"
         );
-        let px = extract_pixels_f64(&wkb, 0).expect("pixels should extract");
-        assert_eq!(px, vec![10.0, 0.0, 0.0, 250.0], "8BUI pixel values");
+        assert_eq!(band.pixels, [10, 0, 0, 250], "8BUI pixel bytes");
     }
 
     /// 32BF: real 32-bit float band must decode as `Float32` (the pre-fix
@@ -94,13 +94,18 @@ mod tests {
             return;
         }
         let wkb = build_2x2("32BF", 0.0, 3.5, -1.25);
-        let band = parse_band_info(&wkb, 0).expect("band 0 should parse");
+        let parsed = parse_resident_raster(&wkb).expect("resident raster should parse");
+        let band = &parsed.bands[0];
         assert_eq!(
             band.pixel_type,
             PixelType::Float32,
             "32BF must decode as Float32"
         );
-        let px = extract_pixels_f64(&wkb, 0).expect("pixels should extract");
+        let px: Vec<f32> = band
+            .pixels
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().expect("four-byte pixel")))
+            .collect();
         assert_eq!(px.len(), 4, "2x2 raster has 4 pixels");
         assert!((px[0] - 3.5).abs() < 1e-6, "px[0] == 3.5, got {}", px[0]);
         assert!(
@@ -119,13 +124,18 @@ mod tests {
             return;
         }
         let wkb = build_2x2("16BSI", 0.0, -1000.0, 32000.0);
-        let band = parse_band_info(&wkb, 0).expect("band 0 should parse");
+        let parsed = parse_resident_raster(&wkb).expect("resident raster should parse");
+        let band = &parsed.bands[0];
         assert_eq!(
             band.pixel_type,
             PixelType::Int16,
             "16BSI must decode as Int16"
         );
-        let px = extract_pixels_f64(&wkb, 0).expect("pixels should extract");
-        assert_eq!(px, vec![-1000.0, 0.0, 0.0, 32000.0], "16BSI pixel values");
+        let px: Vec<i16> = band
+            .pixels
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes(bytes.try_into().expect("two-byte pixel")))
+            .collect();
+        assert_eq!(px, [-1000, 0, 0, 32000], "16BSI pixel values");
     }
 }

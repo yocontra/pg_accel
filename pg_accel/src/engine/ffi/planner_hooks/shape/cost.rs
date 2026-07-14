@@ -1,7 +1,10 @@
 //! DeviceLimits-derived costing for neutral aggregate shapes.
 
-use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel};
-use crate::engine::spec::{AggQuerySpec, ColumnRef, GroupKeySource, MeasureExpr};
+use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel, WorkProduct};
+use crate::engine::spec::{
+    AggQuerySpec, ColumnRef, FilterSpec, GroupKeySource, MeasureExpr, SpatialOperand,
+    SpatialPredicateKind, SpatialValueKind,
+};
 
 use super::{ResidencyEstimate, ShapeInput};
 
@@ -11,6 +14,8 @@ pub struct ShapeCost {
     pub fact_scan: PgCost,
     pub dimension_setup: PgCost,
     pub join_probe: PgCost,
+    pub spatial_filter: PgCost,
+    pub spatial_recheck_reserve: PgCost,
     pub aggregate: PgCost,
     pub output_materialization: PgCost,
     pub amortized_auto_load: PgCost,
@@ -22,10 +27,42 @@ pub struct ShapeCost {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeCostGate {
     Eligible,
-    FactRowsBelowDeviceMinimum { estimated: Rows, required: Rows },
-    H3RowsBelowDeviceMinimum { estimated: Rows, required: Rows },
-    DimensionRowsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
-    GroupsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
+    FactRowsBelowDeviceMinimum {
+        estimated: Rows,
+        required: Rows,
+    },
+    H3RowsBelowDeviceMinimum {
+        estimated: Rows,
+        required: Rows,
+    },
+    SpatialRowsBelowDeviceMinimum {
+        estimated: Rows,
+        required: Rows,
+    },
+    SpatialVerticesBelowDeviceMinimum {
+        estimated: Rows,
+        required: Rows,
+    },
+    SpatialVerticesExceedDeviceMaximum {
+        estimated: Rows,
+        maximum: Rows,
+    },
+    SpatialWorkBelowDeviceMinimum {
+        estimated: WorkProduct,
+        required: WorkProduct,
+    },
+    SpatialWorkExceedsDeviceMaximum {
+        estimated: WorkProduct,
+        maximum: WorkProduct,
+    },
+    DimensionRowsExceedDeviceMaximum {
+        estimated: Rows,
+        maximum: Rows,
+    },
+    GroupsExceedDeviceMaximum {
+        estimated: Rows,
+        maximum: Rows,
+    },
 }
 
 fn rows(value: u64) -> usize {
@@ -87,6 +124,82 @@ fn h3_transform_chunks(fact_rows: u64, max_chunk_rows: Rows) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn has_spatial_filter(spec: &AggQuerySpec) -> bool {
+    matches!(spec.fact_filter, FilterSpec::Spatial { .. })
+}
+
+fn geometry_type_from_typmod(typmod: i32) -> Option<u32> {
+    (typmod >= 0 && typmod.trailing_zeros() >= 2)
+        .then(|| u32::try_from((typmod & 0xfc) >> 2).ok())
+        .flatten()
+}
+
+fn is_point_column(operand: &SpatialOperand) -> bool {
+    matches!(
+        operand,
+        SpatialOperand::Column { metadata, .. }
+            if metadata.kind == SpatialValueKind::Geometry
+                && metadata.srid.is_some()
+                && geometry_type_from_typmod(metadata.typmod)
+                    == Some(crate::engine::residency::RESIDENT_GEOMETRY_POINT)
+    )
+}
+
+fn constant_polygon_vertices(operand: &SpatialOperand) -> Option<usize> {
+    let SpatialOperand::Constant { metadata, bytes } = operand else {
+        return None;
+    };
+    if metadata.kind != SpatialValueKind::Geometry || metadata.srid.is_none() {
+        return None;
+    }
+    let parsed = crate::engine::residency::validate_resident_geometry_value(
+        bytes,
+        crate::engine::spec::MAX_SPATIAL_CONSTANT_BYTES,
+    )
+    .ok()?;
+    (parsed.geom_type == crate::engine::residency::RESIDENT_GEOMETRY_POLYGON
+        && parsed.srid == metadata.srid?
+        && parsed.coordinate_pairs > 0)
+        .then_some(parsed.coordinate_pairs)
+}
+
+/// Return the exact constant polygon size for the currently proved resident
+/// lane. Column-by-column spatial work stays declined until catalog statistics
+/// can prove a conservative per-row vertex bound.
+pub(super) fn spatial_point_polygon_vertices(filter: &FilterSpec) -> Option<usize> {
+    let FilterSpec::Spatial {
+        predicate,
+        left,
+        right,
+        ..
+    } = filter
+    else {
+        return None;
+    };
+    match predicate {
+        SpatialPredicateKind::Intersects | SpatialPredicateKind::DWithin => {
+            if is_point_column(left) {
+                constant_polygon_vertices(right)
+            } else if is_point_column(right) {
+                constant_polygon_vertices(left)
+            } else {
+                None
+            }
+        }
+        SpatialPredicateKind::Contains => {
+            constant_polygon_vertices(left).filter(|_| is_point_column(right))
+        }
+        SpatialPredicateKind::Within => is_point_column(left)
+            .then(|| constant_polygon_vertices(right))
+            .flatten(),
+        SpatialPredicateKind::Disjoint
+        | SpatialPredicateKind::Equals
+        | SpatialPredicateKind::Touches
+        | SpatialPredicateKind::Crosses
+        | SpatialPredicateKind::Overlaps => None,
+    }
+}
+
 /// Cost one normalized shape exclusively from typed device coefficients.
 #[must_use]
 pub fn estimate_shape_cost(
@@ -130,6 +243,36 @@ pub fn estimate_shape_cost(
     );
     let join_probe =
         mul_cost(fact_rows, model.coefficients.preagg_probe_cost) * spec.star_dims.len() as f64;
+    let has_spatial = has_spatial_filter(spec);
+    let spatial_vertices = spatial_point_polygon_vertices(&spec.fact_filter);
+    let spatial_fp64_multiplier = if has_spatial && !model.hardware.has_native_fp64 {
+        model.coefficients.soft_fp64_cost_multiplier
+    } else {
+        1.0
+    };
+    let spatial_filter = if has_spatial {
+        let vertex_scale = spatial_vertices.map_or(1.0, |vertices| {
+            (vertices as f64 / model.planner.gpu_spatial_min_vertices.max(1) as f64).max(1.0)
+        });
+        let operation = mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter)
+            * vertex_scale
+            * spatial_fp64_multiplier;
+        let launches =
+            h3_transform_chunks(fact_rows, model.executor.gpu_spatial_pairwise_chunk_rows) as f64
+                * GPU_LAUNCH_OVERHEAD;
+        operation + launches
+    } else {
+        0.0
+    };
+    // The exact uncertainty count is unavailable before execution. Reserve
+    // the configured maximum at the separate CPU PostGIS coefficient so a
+    // spatial path is never priced as bbox-only or as a second cheap GPU op.
+    let spatial_recheck_reserve = if has_spatial {
+        mul_cost(fact_rows, model.coefficients.cpu_spatial_recheck_per_row)
+            * model.planner.gpu_spatial_max_recheck_fraction
+    } else {
+        0.0
+    };
     let aggregate_coefficient = if spec.group_keys.is_empty() {
         model.coefficients.gpu_op_cost_reduce
     } else {
@@ -157,6 +300,8 @@ pub fn estimate_shape_cost(
     let total = fact_scan
         + dimension_setup
         + join_probe
+        + spatial_filter
+        + spatial_recheck_reserve
         + aggregate
         + output_materialization
         + amortized_auto_load;
@@ -165,13 +310,17 @@ pub fn estimate_shape_cost(
         fact_scan: PgCost::new(fact_scan),
         dimension_setup: PgCost::new(dimension_setup),
         join_probe: PgCost::new(join_probe),
+        spatial_filter: PgCost::new(spatial_filter),
+        spatial_recheck_reserve: PgCost::new(spatial_recheck_reserve),
         aggregate: PgCost::new(aggregate),
         output_materialization: PgCost::new(output_materialization),
         amortized_auto_load: PgCost::new(amortized_auto_load),
         total: PgCost::new(total),
     };
 
-    let required_fact_rows = if h3_resolution.is_some() {
+    let required_fact_rows = if has_spatial {
+        model.planner.gpu_reduce_min_rows
+    } else if h3_resolution.is_some() {
         model.planner.gpu_h3_group_min_rows
     } else if !spec.star_dims.is_empty() {
         model.planner.gpu_preagg_min_fact_rows
@@ -181,8 +330,22 @@ pub fn estimate_shape_cost(
         model.planner.gpu_hash_agg_min_rows
     };
     let estimated_fact_rows = Rows::new(rows(fact_rows));
+    debug_assert!(!has_spatial || spatial_vertices.is_some());
+    let estimated_spatial_vertices = Rows::new(spatial_vertices.unwrap_or(0));
+    let spatial_work = WorkProduct::new(
+        fact_rows.saturating_mul(
+            spatial_vertices
+                .and_then(|vertices| u64::try_from(vertices).ok())
+                .unwrap_or(0),
+        ),
+    );
     let gate = if estimated_fact_rows < required_fact_rows {
-        if h3_resolution.is_some() {
+        if has_spatial {
+            ShapeCostGate::SpatialRowsBelowDeviceMinimum {
+                estimated: estimated_fact_rows,
+                required: required_fact_rows,
+            }
+        } else if h3_resolution.is_some() {
             ShapeCostGate::H3RowsBelowDeviceMinimum {
                 estimated: estimated_fact_rows,
                 required: required_fact_rows,
@@ -192,6 +355,34 @@ pub fn estimate_shape_cost(
                 estimated: estimated_fact_rows,
                 required: required_fact_rows,
             }
+        }
+    } else if has_spatial
+        && estimated_spatial_vertices < Rows::new(model.planner.gpu_spatial_min_vertices)
+    {
+        ShapeCostGate::SpatialVerticesBelowDeviceMinimum {
+            estimated: estimated_spatial_vertices,
+            required: Rows::new(model.planner.gpu_spatial_min_vertices),
+        }
+    } else if has_spatial
+        && estimated_spatial_vertices > model.memory.gpu_spatial_max_vertices_per_row
+    {
+        ShapeCostGate::SpatialVerticesExceedDeviceMaximum {
+            estimated: estimated_spatial_vertices,
+            maximum: model.memory.gpu_spatial_max_vertices_per_row,
+        }
+    } else if has_spatial
+        && spatial_work < model.planner.spatial_point_in_ring_break_even_verts_x_rows
+    {
+        ShapeCostGate::SpatialWorkBelowDeviceMinimum {
+            estimated: spatial_work,
+            required: model.planner.spatial_point_in_ring_break_even_verts_x_rows,
+        }
+    } else if has_spatial
+        && spatial_work > model.kernel_health.spatial_point_in_ring_max_verts_x_rows
+    {
+        ShapeCostGate::SpatialWorkExceedsDeviceMaximum {
+            estimated: spatial_work,
+            maximum: model.kernel_health.spatial_point_in_ring_max_verts_x_rows,
         }
     } else if let Some(too_large) = spec.star_dims.iter().find_map(|dimension| {
         let relation = input

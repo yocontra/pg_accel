@@ -244,6 +244,18 @@ impl HostColumn {
                     u32::from(type_oid)
                 ));
             }
+            ResidentColumnView::Geometry { type_oid, .. } => {
+                return Err(format!(
+                    "resident geometry type OID {} cannot enter dense host dictionary preparation",
+                    u32::from(type_oid)
+                ));
+            }
+            ResidentColumnView::Raster { type_oid, .. } => {
+                return Err(format!(
+                    "resident raster type OID {} requires the raster executor",
+                    u32::from(type_oid)
+                ));
+            }
         };
         result.validate_nulls()?;
         Ok(result)

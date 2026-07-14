@@ -161,6 +161,10 @@ pub struct DeviceLimits {
     /// GPU filter (spatial/expr) per-row op cost.
     /// Includes predicate evaluation on GPU.
     pub gpu_op_cost_filter: f64,
+    /// CPU PostGIS exact-recheck cost per uncertain spatial row.
+    /// This stays separate from GPU filter cost so uncertainty cannot be
+    /// costed as another cheap device predicate.
+    pub cpu_spatial_recheck_per_row: f64,
     /// Resident H3 cell-to-parent per-row transform cost.
     ///
     /// This charges only the device-to-device integer transform after the
@@ -594,6 +598,7 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
+            cpu_spatial_recheck_per_row: 0.05,
             gpu_op_cost_h3_parent_resident: 0.001,
 
             // Phase 6 dispatch-perf calibration: per-row hash-join +
@@ -761,6 +766,7 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
+            cpu_spatial_recheck_per_row: 0.05,
             // Match the conservative resident-filter estimate; extraction
             // and host staging are intentionally excluded.
             gpu_op_cost_h3_parent_resident: 0.001,
@@ -945,6 +951,10 @@ impl DeviceLimits {
             ("gpu_op_cost_window", self.gpu_op_cost_window),
             ("gpu_op_cost_filter", self.gpu_op_cost_filter),
             (
+                "cpu_spatial_recheck_per_row",
+                self.cpu_spatial_recheck_per_row,
+            ),
+            (
                 "gpu_op_cost_h3_parent_resident",
                 self.gpu_op_cost_h3_parent_resident,
             ),
@@ -1031,6 +1041,7 @@ mod tests {
         );
         assert_eq!(limits.gpu_spatial_max_vertices_per_row, 1_000_000);
         assert_eq!(limits.gpu_spatial_max_recheck_fraction, 0.10);
+        assert_eq!(limits.cpu_spatial_recheck_per_row, 0.05);
         assert_eq!(limits.gpu_raster_min_pixels, 65_536);
         assert_eq!(limits.gpu_raster_max_chunk_pixels, 1_000_000);
         assert_eq!(limits.resident_domain_max_exact_value_bytes, 1024 * 1024);
@@ -1211,6 +1222,16 @@ mod tests {
             limits.validate(),
             Err(DeviceLimitsValidationError::InvalidPositiveFloat {
                 field: "gpu_op_cost_h3_parent_resident",
+                value: 0.0,
+            })
+        );
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.cpu_spatial_recheck_per_row = 0.0;
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidPositiveFloat {
+                field: "cpu_spatial_recheck_per_row",
                 value: 0.0,
             })
         );

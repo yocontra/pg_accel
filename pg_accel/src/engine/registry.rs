@@ -11,7 +11,7 @@
 //! ## Re-resolution after deferred CREATE EXTENSION
 //!
 //! `lazy_init` only fires once per backend, but supporting extensions
-//! (PostGIS / h3 / postgis_raster) may be `CREATE EXTENSION`-installed
+//! (PostGIS / h3) may be `CREATE EXTENSION`-installed
 //! *after* the first planner-hook invocation that triggered init. To handle
 //! that case, the registry now wraps its mutable state in a `RwLock`:
 //! [`AdapterRegistry::resolve_oids_again`] re-runs adapter detection +
@@ -89,7 +89,6 @@ impl AdapterRegistry {
     pub fn init_adapters(&self) {
         let all_adapters = vec![
             crate::adapters::postgis::adapter(),
-            crate::adapters::postgis_raster::adapter(),
             crate::adapters::h3::adapter(),
         ];
 
@@ -214,7 +213,6 @@ impl AdapterRegistry {
 
         let candidate_adapters = vec![
             crate::adapters::postgis::adapter(),
-            crate::adapters::postgis_raster::adapter(),
             crate::adapters::h3::adapter(),
         ];
 

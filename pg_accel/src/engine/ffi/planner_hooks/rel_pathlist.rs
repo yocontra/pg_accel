@@ -486,14 +486,18 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // pg_accel injects nothing here either.
     if gucs::gpu_enabled() {
         // SAFETY: all pointers are planner-owned for this hook invocation.
-        unsafe {
-            observe_resident_only_rel_declines(root, rel, rte, has_sort, has_restrictions);
-        }
-        if rte_ref.rtekind == pg_sys::RTEKind::RTE_FUNCTION || has_sort || has_restrictions {
-            super::record_no_gpu_resident_pipeline_decline(
-                "rel_pathlist_no_resident_pipeline",
-                rel,
-            );
+        let raster_observed = unsafe { super::raster::observe(root, rel, rti, rte) };
+        if !raster_observed {
+            // SAFETY: all pointers are planner-owned for this hook invocation.
+            unsafe {
+                observe_resident_only_rel_declines(root, rel, rte, has_sort, has_restrictions);
+            }
+            if rte_ref.rtekind == pg_sys::RTEKind::RTE_FUNCTION || has_sort || has_restrictions {
+                super::record_no_gpu_resident_pipeline_decline(
+                    "rel_pathlist_no_resident_pipeline",
+                    rel,
+                );
+            }
         }
     }
 }

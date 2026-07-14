@@ -109,6 +109,21 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum { .. }) => {
                 "h3_rows_below_grouped_agg_min"
             }
+            Self::DeviceCostGate(ShapeCostGate::SpatialRowsBelowDeviceMinimum { .. }) => {
+                "postgis_rows_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialVerticesBelowDeviceMinimum { .. }) => {
+                "postgis_vertices_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialVerticesExceedDeviceMaximum { .. }) => {
+                "postgis_vertices_exceed_device_maximum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialWorkBelowDeviceMinimum { .. }) => {
+                "postgis_work_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialWorkExceedsDeviceMaximum { .. }) => {
+                "postgis_work_exceeds_device_maximum"
+            }
             Self::DeviceCostGate(ShapeCostGate::DimensionRowsExceedDeviceMaximum { .. }) => {
                 "generic_dimension_rows_exceed_device_maximum"
             }
@@ -372,18 +387,33 @@ fn encode_shape_path_private(
 }
 
 fn shape_stages(shape: &ShapePlan) -> (Vec<ResidentOperatorStage>, bool) {
-    let has_filter = shape.spec.fact_filter != FilterSpec::None
+    let has_spatial = matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. })
         || shape
             .spec
             .measures
             .iter()
-            .any(|measure| measure.filter != FilterSpec::None)
+            .any(|measure| matches!(measure.filter, FilterSpec::Spatial { .. }))
         || shape
             .spec
             .star_dims
             .iter()
-            .any(|dimension| dimension.filter != FilterSpec::None);
-    let has_expression = has_filter
+            .any(|dimension| matches!(dimension.filter, FilterSpec::Spatial { .. }));
+    let has_non_spatial_filter = (!matches!(shape.spec.fact_filter, FilterSpec::None)
+        && !matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. }))
+        || shape.spec.measures.iter().any(|measure| {
+            !matches!(
+                measure.filter,
+                FilterSpec::None | FilterSpec::Spatial { .. }
+            )
+        })
+        || shape.spec.star_dims.iter().any(|dimension| {
+            !matches!(
+                dimension.filter,
+                FilterSpec::None | FilterSpec::Spatial { .. }
+            )
+        });
+    let has_filter = has_spatial || has_non_spatial_filter;
+    let has_expression = has_non_spatial_filter
         || shape.spec.measures.iter().any(|measure| {
             !matches!(
                 measure.expression,
@@ -396,6 +426,9 @@ fn shape_stages(shape: &ShapePlan) -> (Vec<ResidentOperatorStage>, bool) {
     }
     if has_expression {
         stages.push(ResidentOperatorStage::Expression);
+    }
+    if has_spatial {
+        stages.push(ResidentOperatorStage::Postgis);
     }
     if shape.spec.group_keys.iter().any(|key| {
         matches!(
@@ -633,6 +666,8 @@ mod tests {
             fact_scan: PgCost::new(10.0),
             dimension_setup: PgCost::new(0.0),
             join_probe: PgCost::new(0.0),
+            spatial_filter: PgCost::new(0.0),
+            spatial_recheck_reserve: PgCost::new(0.0),
             aggregate: PgCost::new(5.0),
             output_materialization: PgCost::new(1.0),
             amortized_auto_load: PgCost::new(0.0),
@@ -652,6 +687,7 @@ mod tests {
                 descriptor_measure_count: 1,
                 fact_filter: None,
                 derived_fact_mask: None,
+                derived_spatial_mask: false,
             },
             residency: ResidencyEstimate {
                 relations: vec![RelationResidencyRequirement {
