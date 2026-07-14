@@ -428,7 +428,13 @@ pub unsafe fn dispatch_gpu_spatial(
             geoms_a.len(),
             pred,
         );
-        let result = three_layer::spatial_eval(pred, &geoms_a, &geom_b_repeated, _skip_bbox);
+        let result = three_layer::spatial_eval(pred, &geoms_a, &geom_b_repeated, _skip_bbox)
+            .unwrap_or_else(|error| {
+                pgrx::error!(
+                    "pg_accel: spatial GPU dispatch failed after path selection: {}",
+                    error
+                )
+            });
         let elapsed_ms = start.elapsed().as_millis() as i32;
         if timeout_ms > 0 && elapsed_ms > timeout_ms {
             pgrx::warning!(

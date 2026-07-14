@@ -1,18 +1,20 @@
-use super::{PgaccelGeometry, bridge};
+use super::{
+    GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, PgaccelGeometry, bridge,
+    status_to_result,
+};
 
-/// Run the linear row-wise GPU spatial intersection kernel.
+/// Typed row-wise spatial intersection dispatch.
 ///
-/// Pair `i` is `(geoms_a[i], geoms_b[i])`; extra rows in the longer slice are
-/// ignored. Results use the recheck-safe convention 1=true, -1=false,
-/// 0=uncertain. `None` means the GPU path failed and the caller must decline.
-pub fn spatial_intersects_pairwise_gpu(
+/// Only a successful kernel may return the recheck-safe `0` classification.
+/// Runtime, device, and output-contract failures remain hard `GpuError`s.
+pub fn spatial_intersects_pairwise_result(
     geoms_a: &[PgaccelGeometry],
     geoms_b: &[PgaccelGeometry],
-) -> Option<Vec<i8>> {
+) -> GpuResult<Vec<i8>> {
     let count = geoms_a.len().min(geoms_b.len());
     let _span = tracing::info_span!("gpu.spatial_intersects_pairwise", count).entered();
     if count == 0 {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
 
     let chunk_rows = crate::engine::cost::device_limits()
@@ -35,27 +37,35 @@ pub fn spatial_intersects_pairwise_gpu(
                 chunk_results.as_mut_ptr(),
             )
         };
-        if !status.is_ok() {
-            tracing::debug!(
-                ?status,
-                chunk_count,
-                start,
-                "spatial pairwise bridge declined"
-            );
-            return None;
-        }
+        status_to_result(
+            status,
+            GpuErrorDomain::Spatial,
+            GpuOperation::Kernel("spatial_intersects_pairwise"),
+        )?;
         if !chunk_results.iter().all(|result| matches!(result, -1..=1)) {
-            tracing::debug!(
-                chunk_count,
-                start,
-                "spatial pairwise bridge returned invalid class"
-            );
-            return None;
+            return Err(GpuError::with_detail(
+                GpuErrorDomain::Spatial,
+                GpuOperation::ValidateDeviceOutput,
+                GpuStatusDetail::InvalidDescriptor,
+                "spatial classification must be -1, 0, or 1",
+            ));
         }
         results.extend(chunk_results);
     }
 
-    Some(results)
+    Ok(results)
+}
+
+/// Run the linear row-wise GPU spatial intersection kernel.
+///
+/// Pair `i` is `(geoms_a[i], geoms_b[i])`; extra rows in the longer slice are
+/// ignored. Results use the recheck-safe convention 1=true, -1=false,
+/// 0=uncertain. `None` means the GPU path failed and the caller must decline.
+pub fn spatial_intersects_pairwise_gpu(
+    geoms_a: &[PgaccelGeometry],
+    geoms_b: &[PgaccelGeometry],
+) -> Option<Vec<i8>> {
+    spatial_intersects_pairwise_result(geoms_a, geoms_b).ok()
 }
 
 /// Compatibility bucketing wrapper over the linear pairwise kernel.

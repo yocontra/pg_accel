@@ -106,10 +106,9 @@ macro_rules! bridge_status_fns {
 ///   with a supported capability decline.
 /// - Every non-OK status is logged at error level with the failing symbol
 ///   name and counted per kernel domain via
-///   `counters::record_kernel_failure` — kernel dispatch failures are no
-///   longer silent even when the caller collapses them to a degraded value
-///   (`None` / `all_uncertain`). The degraded-return semantics themselves
-///   are unchanged (Phase 6 owns that policy).
+///   `counters::record_kernel_failure`. Typed domain dispatchers preserve the
+///   status as a hard error; legacy compatibility wrappers may still expose
+///   `None` where their public API predates [`crate::gpu::GpuResult`].
 pub fn convert_status(func: &'static str, raw: i32) -> PgaccelStatus {
     match PgaccelStatus::from_raw(raw) {
         Ok(PgaccelStatus::Ok) => PgaccelStatus::Ok,

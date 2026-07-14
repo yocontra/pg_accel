@@ -212,16 +212,17 @@ Input: N geometry pairs (a[i], b[i])
                                 TRUE/FALSE
 ```
 
-**Three-result model.** GPU kernels return `true`, `false`, or **`uncertain`**.
-"Uncertain" is a numerical-edge-case flag, not a precision-tier fallback:
+**Three-result model.** Successful GPU kernels return `true`, `false`, or
+**`uncertain`**. "Uncertain" is a numerical-edge-case or incomplete-topology
+classification, not a precision-tier fallback:
 see `pgaccel-kernels/src/spatial_predicates.cpp:122-160` (the sphere-distance
 kernel raises `out_uncertain=1` when the inputs are near-antipodal on either
-fp32 *or* fp64). The Rust pipeline then reruns those specific pairs through
-PostGIS on the main thread (`pg_accel/src/gpu/three_layer.rs:9-13`). This is
-a **correctness recheck for ambiguous geometry**, not a CPU fallback: if the
-GPU kernel fails to dispatch at all, the pipeline returns every pair as
-`Uncertain` so PG handles the whole batch (`three_layer.rs:19-22`) — there is
-no CPU kernel (see CLAUDE.md rule 12).
+fp32 *or* fp64). Such rows are eligible for exact PostGIS recheck on the main
+thread; a selected path without that recheck stage rejects them. This is a
+**correctness recheck for ambiguous geometry**, not a CPU fallback. Runtime,
+bridge, device, timeout, allocation, and output-contract failures return a
+typed `GpuError` and abort the selected GPU path; they can never be converted
+to an all-uncertain result (see CLAUDE.md rule 12).
 
 **fp32 vs fp64 selection.** Every public spatial entrypoint takes a `use_fp64`
 parameter selecting between the fp32 and fp64 template instantiations
@@ -331,7 +332,7 @@ a `HashMap<Oid, FunctionAccelEntry>` for O(1) lookup during planning
 
 | Strategy | When Used | Execution Path |
 |---|---|---|
-| `GpuSpatial` | `ST_Intersects`, `ST_Contains`, `ST_DWithin`, … | Bbox → GPU kernel → PG recheck for `Uncertain` |
+| `GpuSpatial` | `ST_Intersects`, `ST_Contains`, `ST_DWithin`, … | Bbox → GPU kernel → exact recheck when available; otherwise reject `Uncertain` |
 | `GpuRaster`  | `ST_MapAlgebra`, raster clip | GPU map-algebra expression evaluator |
 | `GpuH3`      | `h3_latlng_to_cell`, grid distance | GPU H3 cell computation |
 | `GpuSort`    | `ORDER BY` on numeric columns | GPU radix / merge sort |
@@ -370,7 +371,14 @@ Geometry types go through the adapter-specific extractors in
 `pg_accel/src/adapters/extractors/geometry/`, which parse `GSERIALIZED` into
 `ExtractedGeometry` (bbox + flat f32 coordinate array +
 ring offsets, `pg_accel/src/gpu/three_layer.rs:67-75`) only when the GPU
-pipeline actually needs it.
+pipeline actually needs the legacy scalar path. The resident-domain contract
+instead uses validated fp64 coordinate lanes, one fixed fp64 bbox lane per row,
+row/ring offsets, fixed metadata, and retained exact GSERIALIZED bytes. Bbox
+validity is explicit; NULL and empty rows use a canonical positive-zero bbox.
+H3 uses a u64 lane. Raster retains native typed pixel bytes with literal
+PostGIS pixel tags (`32BF=10`, `64BF=11`). Exact offsets/payloads are boxed,
+NULL-correlated, and bounded per value. All three report device bytes and
+retained exact host bytes separately, and residency charges their checked sum.
 
 ## Cost Model
 
@@ -388,8 +396,12 @@ Thresholds live in `DeviceLimits`
 (`pg_accel/src/engine/cost/device_limits.rs:70-175`), derived from the
 hardware profile at startup. There are **no magic constants** in the planner
 or executor — every threshold (`optimal_batch_min`, `optimal_batch_max`,
-`gpu_op_cost_reduce`, `gpu_op_cost_window`, `soft_fp64_cost_multiplier`, …)
-is a field on `DeviceLimits`. This is enforced by CLAUDE.md rule 10.
+`gpu_h3_group_min_rows`, `gpu_spatial_max_vertices_per_row`,
+`gpu_spatial_max_recheck_fraction`, `gpu_raster_max_chunk_pixels`,
+`resident_domain_max_exact_value_bytes`, `soft_fp64_cost_multiplier`, etc.) is
+a field on `DeviceLimits`. This is enforced by CLAUDE.md rule 10. Startup
+validation rejects zero capacities, incoherent ranges, non-finite fractions,
+and fractions outside `[0,1]` before the limits are published.
 
 **Batch size selection.** `optimal_batch_size`
 (`pg_accel/src/engine/cost/formulas.rs:85-88`) clamps the estimated row count

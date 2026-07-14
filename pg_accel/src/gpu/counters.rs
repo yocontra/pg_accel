@@ -37,9 +37,8 @@ pub fn assert_gpu_executed(min_count: u64) {
 //
 // Every non-OK status crossing the bridge conversion layer
 // (`bridge::convert_status`) is recorded here, keyed by kernel domain,
-// *before* the wrapper returns its degraded value (`None` /
-// `all_uncertain`). Phase 2 only makes failures visible and countable —
-// the degraded-return policy itself is Phase 6 work.
+// before typed dispatchers propagate the failure or a legacy compatibility
+// wrapper maps it to its historical `None` result.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

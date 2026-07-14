@@ -41,7 +41,7 @@ existing enum, such as implementing NUMERIC or HASH, does not change the ABI.
 
 This correction defines the still-unmerged execution ABI v1; after publication
 the evolution rule above applies. The independently serialized query spec is
-v2. On LP64, the corrected physical-measure layout is pinned as follows in both
+v3. On LP64, the corrected physical-measure layout is pinned as follows in both
 C and Rust:
 
 | Struct | Size | Selected offsets |
@@ -50,12 +50,12 @@ C and Rust:
 | `pgaccel_grouped_agg_measure` | 88 | value 0, rhs 32, op 64, agg_mask 68, accumulator_kind 72, state_bytes 76, flags 80, pad 84 |
 | `pgaccel_grouped_agg_desc` | 1712 | measures 224, where_filter 576, measure_filters 752, dim_count 1456, dims 1464, scratch 1688 |
 
-## Query spec wire format v2
+## Query spec wire format v3
 
 `AggQuerySpec::encode_i32` produces a PostgreSQL-compatible integer list:
 
-1. magic `0x50474132` (`PGA2`),
-2. `AGG_QUERY_SPEC_VERSION` (2),
+1. magic `0x50474133` (`PGA3`),
+2. `AGG_QUERY_SPEC_VERSION` (3),
 3. exact total word count,
 4. tagged, length-delimited fields in `AggQuerySpec` declaration order.
 
@@ -76,6 +76,31 @@ carry the planner-analyzed result type explicitly. Collation is preserved
 bit-for-bit and may be invalid OID for noncollatable types. Every `DimSpec`
 likewise carries the one analyzed equijoin-input collation after its two key
 columns; the planner must establish that both operands use that collation.
+
+H3 group-key sources are semantic variants, never function OIDs:
+`H3CellToParent { cell, resolution }` and
+`H3LatLngToCell { latitude, longitude, resolution }`. Resolution is an exact
+integer in `[0,15]`; parent keys require a catalog-proved h3index lane, while
+lat/lng inputs are matching FLOAT4 or FLOAT8 fact columns. A parent key's
+input and result type OIDs must be the same catalog-proved h3index type; the
+wire cannot reinterpret the raw u64 lane as bigint or another SQL type. Both
+variants remain HASH keys after their Begin-time derived lanes are resolved.
+
+The PostgreSQL shape extractor does not yet construct expression or H3 group
+keys: it accepts direct `Var` keys only and structurally declines function
+expressions. AQS3 freezes the semantic producer contract; it does not admit an
+H3 path before catalog identity checks, u64 resident-lane production, and the
+generic HASH executor are wired together.
+
+Spatial filters likewise carry a stable predicate tag (`Intersects`,
+`Contains`, `Within`, `DWithin`, `Disjoint`, `Equals`, `Touches`, `Crosses`, or
+`Overlaps`) and two typed operands. An operand is either a `ColumnRef` or owned
+constant bytes plus `(geometry|geography, typmod, SRID)` metadata. No Datum,
+backend pointer, or PostGIS function OID enters AQS3. Constant payloads are
+nonempty, capped at 1 MiB, packed little-endian into i32 words, and require
+canonical zero padding. At least one operand is a relation column. Operand
+families and known SRIDs must agree. Only DWithin carries a finite,
+nonnegative distance, and every DWithin carries one.
 
 `AGG_QUERY_SPEC_WIRE_MAGIC`, `AGG_QUERY_SPEC_HEADER_WORDS`, and
 `AGG_QUERY_SPEC_MAX_WORDS` are exported with the codec.
@@ -116,7 +141,7 @@ cannot be named. `COUNT(*)` alone uses invalid OID as its canonical source type;
 `COUNT(expr)` retains the expression source type. Direct group-key source types
 must match their `ColumnRef`; Expression/H3 group keys carry an explicit,
 nonzero analyzed source type. Every group-key result type equals its source
-type, and its result collation equals the AQS2 group-key collation. Numeric
+type, and its result collation equals the AQS3 group-key collation. Numeric
 aggregate results require invalid collation OID. `COUNT` slots are non-nullable,
 while SUM/MIN/MAX/AVG/STDDEV_SAMP slots must preserve SQL NULL for empty or
 all-NULL input.
@@ -161,7 +186,7 @@ Integer NodeTag, the exact frame length, all strategy-specific tags/counts and
 zero/one flags, the resident proof, and the complete payload endpoint. Missing
 fields are never read as zero, optional legacy sections cannot hide malformed
 data, and unknown or trailing sections are errors. Generic aggregate plans use
-one `AQS2` query-spec block immediately followed by one `AOP2` output-projection
+one `AQS3` query-spec block immediately followed by one `AOP2` output-projection
 block; neither can appear without the other, and legacy shape prefixes must be
 canonical zero when this neutral pair is present.
 
@@ -189,6 +214,70 @@ columns:
 These producer stages are lossless. They permit later planners and residency
 implementations to change without adding device program pointers or PostgreSQL
 objects to the kernel ABI.
+
+Begin-time resolution distinguishes `DenseDictionary` from `Hash` grouping.
+Dense mode proves every dictionary domain and rewrites its logical HASH
+placeholder to an exact INT32 domain. Hash mode instead proves each expression
+or H3 derived lane against the complete AQS3 source and result type and leaves
+its HASH encoding unchanged. A descriptor cannot be borrowed while either
+artifact set remains unresolved.
+
+### Resident domain layouts and accounting
+
+The Phase 6 resident layouts are explicit staging contracts, not PostgreSQL
+objects:
+
+- H3 is a u64 value lane plus an optional canonical u8 NULL sidecar.
+- Geometry is flattened fp64 x/y coordinates, one fp64
+  `[min_x,min_y,max_x,max_y]` bbox per row, row coordinate offsets, polygon
+  ring starts, fixed 24-byte row metadata, a NULL sidecar, and retained exact
+  detoasted bytes for PostGIS recheck. A nonempty row sets `BBOX_VALID`; its
+  bbox is finite, ordered, and covers every coordinate. Empty rows have no
+  coordinates or rings, clear `BBOX_VALID`, and carry a canonical positive-zero
+  bbox. NULL rows additionally use zero row metadata and retain no exact bytes.
+  Point, line, and polygon cardinalities, ring ownership, SRID, tags, flags,
+  and offsets are validated before publication.
+- Raster is native typed pixel bytes, byte offsets per band, fixed 72-byte row
+  metadata, fixed 16-byte band metadata, a NULL sidecar, and retained exact WKB
+  bytes. Pixel tags are the literal PostGIS `rt_pixtype` values; tag 9 is
+  invalid, `32BF` is 10, and `64BF` is 11.
+
+For `N` rows, `C` coordinate scalars, `R` ring starts, `B` raster bands, `P`
+pixel bytes, and `E` retained exact bytes, the exact category charges are:
+
+| Layout | Device bytes | Retained-host exact bytes |
+|---|---:|---:|
+| H3 | `8*N + nulls_len` | `0` |
+| Geometry | `8*C + 32*N + 8*(N+1) + 8*R + 24*N + nulls_len` | `8*(N+1) + E` |
+| Raster | `P + 8*(B+1) + 72*N + 16*B + nulls_len` | `8*(N+1) + E` |
+
+`nulls_len` is either zero or `N`; a present sidecar always contains exactly
+one canonical zero/one byte per row. Checked arithmetic is mandatory for every
+term and sum.
+
+Every layout reports `ResidentByteAccounting { device_bytes,
+retained_host_exact_bytes }`. The residency ledger charges their checked sum
+for the artifact lifetime while preserving the categories for diagnostics. A
+device-to-device producer reserves that total before borrowing raw resident
+inputs, builds synchronously while those inputs are pinned, verifies both
+categories exactly, rechecks dependency generations, and only then publishes.
+The build callback may not re-enter residency or execute SPI/catalog work.
+
+Retained exact offsets and bytes are canonical boxed slices, so their reported
+length is their requested allocation rather than an undercounted `Vec`
+capacity. `RetainedExactValues::value` exposes a checked, zero-copy row view.
+Every NULL segment is empty, every non-NULL geometry or raster segment is
+nonempty (including an empty domain value), and every segment is at most
+`resident_domain_max_exact_value_bytes`. Raster NULL metadata and absent nodata
+payloads require positive-zero float bit patterns; negative zero is not a
+canonical spelling.
+
+Typed spatial GPU entrypoints return `GpuResult<SpatialResult>`. Runtime,
+bridge, device, timeout, allocation, and output-contract failures are hard
+errors. UNCERTAIN is representable only inside a successful result and means
+the completed spatial algorithm requires exact PostGIS recheck; a failure is
+never converted to an all-UNCERTAIN batch. Legacy `Option` wrappers remain API
+adapters, but a selected path treats their `None` result as a hard error.
 
 ## Normative canonical form and pointer matrices
 

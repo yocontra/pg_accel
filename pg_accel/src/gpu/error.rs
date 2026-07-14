@@ -1,16 +1,13 @@
-//! Typed error surface for future GPU facade calls.
+//! Typed error surface for GPU facade calls.
 //!
-//! Existing wrappers in `gpu/mod.rs` intentionally keep their historical
-//! `Option` return values.  These types are additive scaffolding for new
-//! facade entry points that need to preserve domain, operation, and status
-//! details without changing the current wrapper behaviour.
+//! Domain dispatchers use this result when runtime failure must remain
+//! distinct from a successful algorithmic result such as spatial UNCERTAIN.
 
 use std::fmt;
 
 use super::types::PgaccelStatus;
 
 /// Result type used by typed GPU facade helpers.
-#[allow(dead_code)] // reason: additive facade surface; current wrappers still return Option
 pub type GpuResult<T> = Result<T, GpuError>;
 
 /// High-level GPU subsystem associated with an error.
@@ -139,7 +136,6 @@ impl fmt::Display for GpuStatusDetail {
 }
 
 /// Typed GPU error with domain, operation, status, and optional detail text.
-#[allow(dead_code)] // reason: additive facade error type; existing wrappers intentionally remain Option-based
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuError {
     pub domain: GpuErrorDomain,
@@ -148,7 +144,6 @@ pub struct GpuError {
     pub detail: Option<&'static str>,
 }
 
-#[allow(dead_code)] // reason: additive facade constructors; future typed callers will construct these errors
 impl GpuError {
     /// Build an error with no extra detail text.
     #[must_use]
@@ -212,7 +207,6 @@ impl fmt::Display for GpuError {
 impl std::error::Error for GpuError {}
 
 /// Convert a raw FFI status into a typed result.
-#[allow(dead_code)] // reason: additive facade adapter; existing wrappers intentionally remain Option-based
 pub fn status_to_result(
     status: PgaccelStatus,
     domain: GpuErrorDomain,

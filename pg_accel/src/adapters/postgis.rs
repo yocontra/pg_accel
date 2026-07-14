@@ -65,8 +65,8 @@ pub fn adapter() -> ExtensionAdapter {
 /// | `st_overlaps`    | NO          | Mostly UNCERTAIN. |
 ///
 /// Per `CLAUDE.md` anti-cheat ban #7 ("no stubs masquerading as done"),
-/// predicates whose kernel paths are absent or return
-/// `all_uncertain()` are left unregistered rather than padded in.
+/// predicates whose kernel paths are absent or classify every supported row
+/// as algorithmically UNCERTAIN are left unregistered rather than padded in.
 fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
     GPU_ONLY_ALLOWLIST
         .iter()

@@ -10,9 +10,10 @@
 //! GPU plans. PostgreSQL's native plan remains outside pg_accel; this module
 //! does not authorize runtime PostGIS evaluation inside accelerator nodes.
 //!
-//! If the GPU kernel itself fails to dispatch, the pipeline returns all pairs
-//! as `Uncertain`. Callers then error or decline the accelerated path rather
-//! than computing the predicate on CPU inside pg_accel.
+//! GPU dispatch failures are typed hard errors. Only a successful kernel may
+//! place rows in the algorithmic `Uncertain` bucket.
+
+use super::{GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -129,28 +130,20 @@ pub struct SpatialResult {
 
 /// Execute spatial intersection predicate on geometry pairs.
 ///
-/// Dispatches GPU classification via the bounded, pairwise spatial bridge. If
-/// kernel dispatch fails (e.g. the device died mid-query), returns all pairs
-/// as `Uncertain`; selected pg_accel callers must reject that result instead
-/// of evaluating the predicate on CPU.
+/// Dispatches GPU classification via the bounded, pairwise spatial bridge.
+/// Kernel dispatch failures remain typed errors; `Uncertain` is reserved for
+/// successful classification whose exact topology needs PostgreSQL recheck.
 ///
 /// # Panics
 ///
 /// Does not panic.  If the two slices differ in length the shorter length is
 /// used and extra elements are ignored.
-#[must_use]
 pub fn spatial_intersects(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
     _skip_bbox: bool,
-) -> SpatialResult {
-    if let Some(result) = try_gpu_dispatch(geoms_a, geoms_b) {
-        return result;
-    }
-
-    // GPU dispatch failed — mark all pairs as uncertain so GPU-only callers
-    // reject or decline the accelerated path.
-    all_uncertain(geoms_a.len().min(geoms_b.len()))
+) -> GpuResult<SpatialResult> {
+    try_gpu_dispatch(geoms_a, geoms_b)
 }
 
 /// Evaluate a spatial predicate on geometry pairs.
@@ -163,13 +156,12 @@ pub fn spatial_intersects(
 ///
 /// Uncertain pairs are left to the caller, which must reject them under a
 /// selected GPU-only pg_accel plan.
-#[must_use]
 pub fn spatial_eval(
     predicate: SpatialPredicate,
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
     skip_bbox: bool,
-) -> SpatialResult {
+) -> GpuResult<SpatialResult> {
     match predicate {
         SpatialPredicate::Intersects => spatial_intersects(geoms_a, geoms_b, skip_bbox),
         SpatialPredicate::Contains => spatial_contains(geoms_a, geoms_b, skip_bbox),
@@ -186,12 +178,7 @@ pub fn spatial_eval(
             // st_disjoint = NOT st_intersects. Run intersects, then
             // swap the definite buckets. uncertain stays uncertain and is
             // rejected by GPU-only callers.
-            let r = spatial_intersects(geoms_a, geoms_b, skip_bbox);
-            SpatialResult {
-                definite_true: r.definite_false,
-                definite_false: r.definite_true,
-                uncertain: r.uncertain,
-            }
+            spatial_intersects(geoms_a, geoms_b, skip_bbox).map(invert_intersects_result)
         }
         SpatialPredicate::Equals => {
             spatial_algorithmic(geoms_a, geoms_b, AlgorithmicPredicateKind::Equals)
@@ -219,6 +206,15 @@ enum AlgorithmicPredicateKind {
     Overlaps,
 }
 
+fn invalid_spatial_output(detail: &'static str) -> GpuError {
+    GpuError::with_detail(
+        GpuErrorDomain::Spatial,
+        GpuOperation::ValidateDeviceOutput,
+        GpuStatusDetail::InvalidDescriptor,
+        detail,
+    )
+}
+
 /// Evaluate one of the four algorithmic predicates (`ST_Equals`,
 /// `ST_Touches`, `ST_Crosses`, `ST_Overlaps`) on geometry pairs.
 ///
@@ -228,19 +224,18 @@ enum AlgorithmicPredicateKind {
 /// is the documented classification for full DE-9IM topology that is not
 /// implemented in the kernel. Selected pg_accel plans reject those pairs
 /// instead of routing them to PostGIS evaluation inside pg_accel.
-#[must_use]
 fn spatial_algorithmic(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
     kind: AlgorithmicPredicateKind,
-) -> SpatialResult {
+) -> GpuResult<SpatialResult> {
     let n = geoms_a.len().min(geoms_b.len());
     if n == 0 {
-        return SpatialResult {
+        return Ok(SpatialResult {
             definite_true: Vec::new(),
             definite_false: Vec::new(),
             uncertain: Vec::new(),
-        };
+        });
     }
 
     use super::bridge::{self, PgaccelGeomType, PgaccelGeometry, PgaccelStatus};
@@ -323,9 +318,17 @@ fn spatial_algorithmic(
     };
 
     if !matches!(status, PgaccelStatus::Ok) {
-        // Kernel reported failure — surface every pair as Uncertain so the
-        // selected GPU-only caller rejects the batch.
-        return all_uncertain(n);
+        let kernel = match kind {
+            AlgorithmicPredicateKind::Equals => "st_equals_bulk",
+            AlgorithmicPredicateKind::Touches => "st_touches_bulk",
+            AlgorithmicPredicateKind::Crosses => "st_crosses_bulk",
+            AlgorithmicPredicateKind::Overlaps => "st_overlaps_bulk",
+        };
+        return Err(GpuError::from_status(
+            GpuErrorDomain::Spatial,
+            GpuOperation::Kernel(kernel),
+            status,
+        ));
     }
 
     let mut definite_true = Vec::new();
@@ -335,14 +338,19 @@ fn spatial_algorithmic(
         match r {
             1 => definite_true.push(i),
             -1 => definite_false.push(i),
-            _ => uncertain.push(i),
+            0 => uncertain.push(i),
+            _ => {
+                return Err(invalid_spatial_output(
+                    "spatial classification must be -1, 0, or 1",
+                ));
+            }
         }
     }
-    SpatialResult {
+    Ok(SpatialResult {
         definite_true,
         definite_false,
         uncertain,
-    }
+    })
 }
 
 /// Evaluate `ST_Contains(A, B)` — does A fully contain B?
@@ -364,19 +372,18 @@ fn spatial_algorithmic(
 /// fast paths handled by a single dispatch over all points. A future
 /// `pgaccel_polygon_polygon_contains_bulk` kernel could close the per-
 /// pair dispatch overhead but doesn't exist yet.
-#[must_use]
 pub fn spatial_contains(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
     _skip_bbox: bool,
-) -> SpatialResult {
+) -> GpuResult<SpatialResult> {
     let n = geoms_a.len().min(geoms_b.len());
     if n == 0 {
-        return SpatialResult {
+        return Ok(SpatialResult {
             definite_true: Vec::new(),
             definite_false: Vec::new(),
             uncertain: Vec::new(),
-        };
+        });
     }
 
     // Containment shape gate: Polygon (A) ⊇ Point (B). Any other shape
@@ -386,7 +393,7 @@ pub fn spatial_contains(
         .zip(geoms_b[..n].iter())
         .all(|(a, b)| a.geom_type == GeomType::Polygon && b.geom_type == GeomType::Point);
     if !shape_ok {
-        return all_uncertain(n);
+        return Ok(algorithmic_uncertain(n));
     }
 
     // Polygon needs >= 3 distinct vertices (>= 6 floats); Point needs
@@ -399,7 +406,7 @@ pub fn spatial_contains(
             .iter()
             .any(|g| g.coord_count == 0 || g.coords.len() < 2);
     if degenerate {
-        return all_uncertain(n);
+        return Ok(algorithmic_uncertain(n));
     }
 
     use super::bridge::{self, PgaccelStatus};
@@ -441,20 +448,29 @@ pub fn spatial_contains(
             )
         };
         if !matches!(status, PgaccelStatus::Ok) {
-            return all_uncertain(n);
+            return Err(GpuError::from_status(
+                GpuErrorDomain::Spatial,
+                GpuOperation::Kernel("point_in_ring_bulk_f32"),
+                status,
+            ));
         }
         for (i, &r) in results.iter().enumerate() {
             match r {
                 1 => definite_true.push(i),
                 -1 => definite_false.push(i),
-                _ => uncertain.push(i),
+                0 => uncertain.push(i),
+                _ => {
+                    return Err(invalid_spatial_output(
+                        "point-in-ring classification must be -1, 0, or 1",
+                    ));
+                }
             }
         }
-        return SpatialResult {
+        return Ok(SpatialResult {
             definite_true,
             definite_false,
             uncertain,
-        };
+        });
     }
 
     // Slow path: per-pair dispatch. Each pair gets one kernel call
@@ -477,21 +493,29 @@ pub fn spatial_contains(
             )
         };
         if !matches!(status, PgaccelStatus::Ok) {
-            uncertain.push(i);
-            continue;
+            return Err(GpuError::from_status(
+                GpuErrorDomain::Spatial,
+                GpuOperation::Kernel("point_in_ring_bulk_f32"),
+                status,
+            ));
         }
         match result[0] {
             1 => definite_true.push(i),
             -1 => definite_false.push(i),
-            _ => uncertain.push(i),
+            0 => uncertain.push(i),
+            _ => {
+                return Err(invalid_spatial_output(
+                    "point-in-ring classification must be -1, 0, or 1",
+                ));
+            }
         }
     }
 
-    SpatialResult {
+    Ok(SpatialResult {
         definite_true,
         definite_false,
         uncertain,
-    }
+    })
 }
 
 /// Evaluate `ST_DWithin(A, B, threshold)` — are A and B within `threshold_m`
@@ -503,20 +527,24 @@ pub fn spatial_contains(
 /// pg_accel plans reject them. The kernel also has an fp64 entry point, used by
 /// the top-level point-distance dispatcher; this three-layer helper stays f32
 /// until the shared typed geometry contract lands.
-#[must_use]
 fn spatial_dwithin(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
     threshold_m: f64,
     _skip_bbox: bool,
-) -> SpatialResult {
+) -> GpuResult<SpatialResult> {
     let n = geoms_a.len().min(geoms_b.len());
     if n == 0 {
-        return SpatialResult {
+        return Ok(SpatialResult {
             definite_true: Vec::new(),
             definite_false: Vec::new(),
             uncertain: Vec::new(),
-        };
+        });
+    }
+    if !threshold_m.is_finite() || threshold_m < 0.0 {
+        return Err(invalid_spatial_output(
+            "DWithin threshold must be finite and nonnegative",
+        ));
     }
 
     // Point-only kernel: any non-Point pair short-circuits the entire
@@ -528,7 +556,7 @@ fn spatial_dwithin(
         .zip(geoms_b[..n].iter())
         .all(|(a, b)| a.geom_type == GeomType::Point && b.geom_type == GeomType::Point);
     if !all_points {
-        return all_uncertain(n);
+        return Ok(algorithmic_uncertain(n));
     }
 
     // Each Point's coords vector holds [x, y] (interleaved per-vertex
@@ -539,7 +567,7 @@ fn spatial_dwithin(
         .chain(geoms_b[..n].iter())
         .any(|g| g.coord_count == 0 || g.coords.len() < 2);
     if degenerate {
-        return all_uncertain(n);
+        return Ok(algorithmic_uncertain(n));
     }
 
     // Build flat fp32 lon/lat pairs. Sphere-distance treats the first
@@ -578,9 +606,11 @@ fn spatial_dwithin(
     };
 
     if !matches!(status, PgaccelStatus::Ok) {
-        // Kernel reported failure — surface as Uncertain so selected
-        // GPU-only callers reject instead of recomputing on CPU.
-        return all_uncertain(n);
+        return Err(GpuError::from_status(
+            GpuErrorDomain::Spatial,
+            GpuOperation::Kernel("sphere_distance_bulk_f32"),
+            status,
+        ));
     }
 
     // Distances come back as f32; comparing to a f64 threshold would
@@ -592,8 +622,17 @@ fn spatial_dwithin(
     let mut definite_false = Vec::new();
     let mut uncertain = Vec::new();
     for i in 0..n {
-        if uncertain_flags[i] != 0 {
+        if uncertain_flags[i] > 1 {
+            return Err(invalid_spatial_output(
+                "sphere-distance uncertainty flag must be 0 or 1",
+            ));
+        }
+        if uncertain_flags[i] == 1 {
             uncertain.push(i);
+        } else if !distances[i].is_finite() || distances[i] < 0.0 {
+            return Err(invalid_spatial_output(
+                "definite sphere-distance output must be finite and nonnegative",
+            ));
         } else if distances[i] <= threshold_f32 {
             definite_true.push(i);
         } else {
@@ -601,37 +640,36 @@ fn spatial_dwithin(
         }
     }
 
-    SpatialResult {
+    Ok(SpatialResult {
         definite_true,
         definite_false,
         uncertain,
-    }
+    })
 }
 
 /// Dispatch spatial intersection to the GPU kernel library.
 ///
 /// Converts `ExtractedGeometry` slices into the C `pgaccel_geometry` layout
 /// and calls `pgaccel_spatial_intersects_pairwise` through the shared bounded
-/// bridge. Returns `None` if dispatch fails, causing the caller to mark all
-/// pairs as uncertain.
+/// bridge. Degenerate geometry remains a successful algorithmic UNCERTAIN
+/// classification; bridge failures remain typed errors.
 fn try_gpu_dispatch(
     geoms_a: &[ExtractedGeometry],
     geoms_b: &[ExtractedGeometry],
-) -> Option<SpatialResult> {
+) -> GpuResult<SpatialResult> {
     use super::bridge::{PgaccelGeomType, PgaccelGeometry};
 
     // Per the public `spatial_intersects` contract, pairs are row-wise:
     // pair i = (geoms_a[i], geoms_b[i]), truncated to the shorter slice.
-    let n = geoms_a.len().min(geoms_b.len());
+    let (geoms_a, geoms_b) = paired_prefix(geoms_a, geoms_b);
+    let n = geoms_a.len();
     if n == 0 {
-        return Some(SpatialResult {
+        return Ok(SpatialResult {
             definite_true: Vec::new(),
             definite_false: Vec::new(),
             uncertain: Vec::new(),
         });
     }
-    let geoms_a = &geoms_a[..n];
-    let geoms_b = &geoms_b[..n];
 
     // The C spatial kernel assumes well-formed inputs. Degenerate inputs
     // (Point with no coords, Polygon ring with < 3 vertices, Unknown type)
@@ -669,7 +707,7 @@ fn try_gpu_dispatch(
         }
     };
     if geoms_a.iter().any(is_degenerate) || geoms_b.iter().any(is_degenerate) {
-        return None;
+        return Ok(algorithmic_uncertain(n));
     }
 
     let to_c_type = |gt: GeomType| -> PgaccelGeomType {
@@ -715,7 +753,7 @@ fn try_gpu_dispatch(
         })
         .collect();
 
-    let pairwise_results = super::spatial_intersects_pairwise_gpu(&c_geoms_a, &c_geoms_b)?;
+    let pairwise_results = super::spatial_intersects_pairwise_result(&c_geoms_a, &c_geoms_b)?;
     let mut definite_true = Vec::new();
     let mut definite_false = Vec::new();
     let mut uncertain = Vec::new();
@@ -731,24 +769,117 @@ fn try_gpu_dispatch(
         }
     }
 
-    Some(SpatialResult {
+    Ok(SpatialResult {
         definite_true,
         definite_false,
         uncertain,
     })
 }
 
-/// Build a [`SpatialResult`] where all `n` pairs are `Uncertain`.
-///
-/// Used when the GPU kernel dispatch fails, or when no kernel exists for the
-/// predicate. Selected pg_accel plans reject this result rather than running
-/// host-side predicate evaluation inside pg_accel.
+/// Successful algorithmic classification for rows outside the implemented
+/// exact topology or geometry-shape envelope.
 #[must_use]
-fn all_uncertain(n: usize) -> SpatialResult {
+fn algorithmic_uncertain(n: usize) -> SpatialResult {
     SpatialResult {
         definite_true: Vec::new(),
         definite_false: Vec::new(),
         uncertain: (0..n).collect(),
+    }
+}
+
+fn paired_prefix<'a, 'b>(
+    geoms_a: &'a [ExtractedGeometry],
+    geoms_b: &'b [ExtractedGeometry],
+) -> (&'a [ExtractedGeometry], &'b [ExtractedGeometry]) {
+    let n = geoms_a.len().min(geoms_b.len());
+    (&geoms_a[..n], &geoms_b[..n])
+}
+
+fn invert_intersects_result(result: SpatialResult) -> SpatialResult {
+    SpatialResult {
+        definite_true: result.definite_false,
+        definite_false: result.definite_true,
+        uncertain: result.uncertain,
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn degenerate_geometry_is_successful_uncertain_not_a_dispatch_error() {
+        let unknown = ExtractedGeometry {
+            bbox: [0.0; 4],
+            coords: Vec::new(),
+            coord_count: 0,
+            geom_type: GeomType::Unknown,
+            ring_offsets: Vec::new(),
+        };
+        let result = spatial_intersects(
+            std::slice::from_ref(&unknown),
+            std::slice::from_ref(&unknown),
+            false,
+        )
+        .expect("algorithmic limitation is a successful classification");
+        assert!(result.definite_true.is_empty());
+        assert!(result.definite_false.is_empty());
+        assert_eq!(result.uncertain, vec![0]);
+    }
+
+    #[test]
+    fn paired_prefix_excludes_ignored_degenerate_tails() {
+        let point = ExtractedGeometry {
+            bbox: [2.0, 2.0, 2.0, 2.0],
+            coords: vec![2.0, 2.0],
+            coord_count: 1,
+            geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
+        };
+        let polygon = ExtractedGeometry {
+            bbox: [0.0, 0.0, 4.0, 4.0],
+            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
+            coord_count: 5,
+            geom_type: GeomType::Polygon,
+            ring_offsets: vec![0],
+        };
+        let degenerate = ExtractedGeometry {
+            bbox: [0.0; 4],
+            coords: Vec::new(),
+            coord_count: 0,
+            geom_type: GeomType::Point,
+            ring_offsets: Vec::new(),
+        };
+
+        let a_with_tail = [point.clone(), degenerate.clone()];
+        let b = [polygon.clone()];
+        let (paired_a, paired_b) = paired_prefix(&a_with_tail, &b);
+        assert_eq!(paired_a.len(), 1);
+        assert_eq!(paired_b.len(), 1);
+        assert_eq!(paired_a[0].coords, point.coords);
+        assert_eq!(paired_b[0].coords, polygon.coords);
+        assert_eq!(a_with_tail[1].coord_count, 0);
+
+        let a = [point];
+        let b_with_tail = [polygon, degenerate];
+        let (paired_a, paired_b) = paired_prefix(&a, &b_with_tail);
+        assert_eq!(paired_a.len(), 1);
+        assert_eq!(paired_b.len(), 1);
+        assert_eq!(paired_a[0].coords, a[0].coords);
+        assert_eq!(paired_b[0].coords, b_with_tail[0].coords);
+        assert_eq!(b_with_tail[1].coord_count, 0);
+    }
+
+    #[test]
+    fn disjoint_inversion_swaps_only_definite_buckets() {
+        let inverted = invert_intersects_result(SpatialResult {
+            definite_true: vec![0, 3],
+            definite_false: vec![1],
+            uncertain: vec![2],
+        });
+        assert_eq!(inverted.definite_true, vec![1]);
+        assert_eq!(inverted.definite_false, vec![0, 3]);
+        assert_eq!(inverted.uncertain, vec![2]);
     }
 }
 
@@ -760,19 +891,46 @@ fn all_uncertain(n: usize) -> SpatialResult {
 mod tests {
     use super::*;
 
-    // -- all_uncertain helper -----------------------------------------------
+    #[cfg(test)]
+    fn assert_typed_spatial_error(error: &GpuError) {
+        assert_eq!(error.domain, GpuErrorDomain::Spatial);
+        assert!(!error.status.is_ok());
+    }
+
+    #[cfg(test)]
+    fn assert_complete_partition(result: &SpatialResult, expected_pairs: usize) {
+        let mut indices: Vec<_> = result
+            .definite_true
+            .iter()
+            .chain(&result.definite_false)
+            .chain(&result.uncertain)
+            .copied()
+            .collect();
+        indices.sort_unstable();
+        assert_eq!(indices, (0..expected_pairs).collect::<Vec<_>>());
+    }
+
+    #[cfg(test)]
+    fn assert_partition_or_spatial_error(result: GpuResult<SpatialResult>, expected_pairs: usize) {
+        match result {
+            Ok(result) => assert_complete_partition(&result, expected_pairs),
+            Err(error) => assert_typed_spatial_error(&error),
+        }
+    }
+
+    // -- algorithmic_uncertain helper ---------------------------------------
 
     #[test]
-    fn all_uncertain_produces_correct_indices() {
-        let r = all_uncertain(5);
+    fn algorithmic_uncertain_produces_correct_indices() {
+        let r = algorithmic_uncertain(5);
         assert!(r.definite_true.is_empty());
         assert!(r.definite_false.is_empty());
         assert_eq!(r.uncertain, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
-    fn all_uncertain_zero_is_empty() {
-        let r = all_uncertain(0);
+    fn algorithmic_uncertain_zero_is_empty() {
+        let r = algorithmic_uncertain(0);
         assert!(r.uncertain.is_empty());
     }
 
@@ -780,7 +938,8 @@ mod tests {
 
     #[test]
     fn empty_inputs_produce_empty_result() {
-        let result = spatial_intersects(&[], &[], false);
+        let result = spatial_intersects(&[], &[], false)
+            .expect("empty inputs are a successful empty classification");
         assert!(result.definite_true.is_empty());
         assert!(result.definite_false.is_empty());
         assert!(result.uncertain.is_empty());
@@ -804,16 +963,13 @@ mod tests {
         };
         // 1 vs 2: should process min(1,2)=1 pair
         let result = spatial_intersects(&[pt], &[poly.clone(), poly], false);
-        assert_eq!(
-            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
-            1
-        );
+        assert_partition_or_spatial_error(result, 1);
     }
 
     #[test]
-    fn single_pair_lands_in_exactly_one_bucket() {
-        // Whether the GPU classifies the pair as true, false, or uncertain
-        // depends on the device — but it must land in exactly one bucket.
+    fn single_pair_partitions_or_reports_typed_error() {
+        // On success the pair must land in exactly one bucket; device/runtime
+        // failures remain explicit typed spatial errors.
         let pt = ExtractedGeometry {
             bbox: [2.0, 2.0, 2.0, 2.0],
             coords: vec![2.0, 2.0],
@@ -829,10 +985,7 @@ mod tests {
             ring_offsets: vec![0],
         };
         let result = spatial_intersects(&[pt], &[poly], false);
-        assert_eq!(
-            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
-            1
-        );
+        assert_partition_or_spatial_error(result, 1);
     }
 
     #[test]
@@ -851,7 +1004,8 @@ mod tests {
             geom_type: GeomType::Unknown,
             ring_offsets: Vec::new(),
         };
-        let result = spatial_intersects(&[a], &[b], false);
+        let result = spatial_intersects(&[a], &[b], false)
+            .expect("unknown geometries are a successful uncertain classification");
         // Degenerate/unknown geoms short-circuit to uncertain.
         assert_eq!(
             result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
@@ -862,7 +1016,7 @@ mod tests {
     // -- spatial_contains ----------------------------------------------------
 
     #[test]
-    fn contains_polygon_point_lands_in_exactly_one_bucket() {
+    fn contains_polygon_point_partitions_or_reports_typed_error() {
         let poly = ExtractedGeometry {
             bbox: [0.0, 0.0, 4.0, 4.0],
             coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
@@ -878,10 +1032,7 @@ mod tests {
             ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::Contains, &[poly], &[pt], false);
-        assert_eq!(
-            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
-            1
-        );
+        assert_partition_or_spatial_error(result, 1);
     }
 
     // -- spatial_eval / Within (swapped Contains) ---------------------------
@@ -902,16 +1053,17 @@ mod tests {
             geom_type: GeomType::Polygon,
             ring_offsets: vec![0],
         };
-        // ST_Within(pt, poly) = ST_Contains(poly, pt). The bucket may be
-        // definite_true or uncertain depending on GPU availability, but the
-        // swapped routes must agree.
+        // Use an unsupported shape ordering so both routes exercise the swap
+        // without dispatching against mutable global device state.
         let via_within = spatial_eval(
             SpatialPredicate::Within,
-            std::slice::from_ref(&pt),
             std::slice::from_ref(&poly),
+            std::slice::from_ref(&pt),
             false,
-        );
-        let via_contains = spatial_eval(SpatialPredicate::Contains, &[poly], &[pt], false);
+        )
+        .expect("unsupported Within shape is a successful uncertain classification");
+        let via_contains = spatial_eval(SpatialPredicate::Contains, &[pt], &[poly], false)
+            .expect("unsupported Contains shape is a successful uncertain classification");
         assert_eq!(via_within.definite_true, via_contains.definite_true);
         assert_eq!(via_within.definite_false, via_contains.definite_false);
         assert_eq!(via_within.uncertain, via_contains.uncertain);
@@ -920,7 +1072,7 @@ mod tests {
     // -- spatial_eval / DWithin --------------------------------------------
 
     #[test]
-    fn dwithin_point_pair_lands_in_exactly_one_bucket() {
+    fn dwithin_point_pair_partitions_or_reports_typed_error() {
         let a = ExtractedGeometry {
             bbox: [13.405, 52.52, 13.405, 52.52],
             coords: vec![13.405, 52.52],
@@ -936,10 +1088,7 @@ mod tests {
             ring_offsets: Vec::new(),
         };
         let result = spatial_eval(SpatialPredicate::DWithin(5000.0), &[a], &[b], false);
-        assert_eq!(
-            result.definite_true.len() + result.definite_false.len() + result.uncertain.len(),
-            1
-        );
+        assert_partition_or_spatial_error(result, 1);
     }
 
     #[test]
@@ -958,34 +1107,35 @@ mod tests {
             geom_type: GeomType::Point,
             ring_offsets: Vec::new(),
         };
-        let result = spatial_eval(SpatialPredicate::DWithin(1000.0), &[line], &[pt], false);
+        let result = spatial_eval(SpatialPredicate::DWithin(1000.0), &[line], &[pt], false)
+            .expect("non-point DWithin is a successful uncertain classification");
         assert_eq!(result.uncertain, vec![0]);
     }
 
     #[test]
     fn spatial_eval_routes_intersects() {
-        // Verify that spatial_eval with Intersects matches spatial_intersects.
-        let pt = ExtractedGeometry {
-            bbox: [2.0, 2.0, 2.0, 2.0],
-            coords: vec![2.0, 2.0],
-            coord_count: 1,
-            geom_type: GeomType::Point,
+        // A degenerate input makes route equivalence independent of global
+        // device state while still reaching the Intersects routing arm.
+        let unknown = ExtractedGeometry {
+            bbox: [0.0; 4],
+            coords: Vec::new(),
+            coord_count: 0,
+            geom_type: GeomType::Unknown,
             ring_offsets: Vec::new(),
-        };
-        let poly = ExtractedGeometry {
-            bbox: [0.0, 0.0, 4.0, 4.0],
-            coords: vec![0.0, 0.0, 4.0, 0.0, 4.0, 4.0, 0.0, 4.0, 0.0, 0.0],
-            coord_count: 5,
-            geom_type: GeomType::Polygon,
-            ring_offsets: vec![0],
         };
         let r1 = spatial_eval(
             SpatialPredicate::Intersects,
-            &[pt.clone()],
-            &[poly.clone()],
+            std::slice::from_ref(&unknown),
+            std::slice::from_ref(&unknown),
             false,
-        );
-        let r2 = spatial_intersects(&[pt], &[poly], false);
+        )
+        .expect("unknown Intersects input is a successful uncertain classification");
+        let r2 = spatial_intersects(
+            std::slice::from_ref(&unknown),
+            std::slice::from_ref(&unknown),
+            false,
+        )
+        .expect("unknown direct input is a successful uncertain classification");
         assert_eq!(r1.definite_true, r2.definite_true);
         assert_eq!(r1.definite_false, r2.definite_false);
         assert_eq!(r1.uncertain, r2.uncertain);
