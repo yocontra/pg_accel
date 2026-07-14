@@ -815,7 +815,7 @@ unsafe fn language_name(language_oid: pg_sys::Oid) -> Result<String, String> {
             u32::from(language_oid)
         ));
     }
-    let result = (|| unsafe {
+    let result = unsafe {
         std::ffi::CStr::from_ptr(name_ptr)
             .to_str()
             .map(str::to_owned)
@@ -825,7 +825,7 @@ unsafe fn language_name(language_oid: pg_sys::Oid) -> Result<String, String> {
                     u32::from(language_oid)
                 )
             })
-    })();
+    };
     unsafe { pg_sys::pfree(name_ptr.cast()) };
     result
 }
