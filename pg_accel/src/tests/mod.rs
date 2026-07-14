@@ -2175,21 +2175,77 @@ mod tests {
              ANALYZE _h3_parent_groupagg",
         )
         .expect("create nullable H3 parent grouped-count fixture");
+        let query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
+                            count(*) AS row_count \
+                     FROM _h3_parent_groupagg GROUP BY 1";
+        let read_grouped_results = |sql: &str| {
+            Spi::connect(|client| {
+                client
+                    .select(
+                        &format!(
+                            "SELECT parent::text, row_count \
+                             FROM ({sql}) AS grouped \
+                             ORDER BY parent NULLS FIRST"
+                        ),
+                        None,
+                        &[],
+                    )
+                    .expect("H3 grouped result query should succeed")
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.get::<String>(1).expect("H3 parent text read"),
+                            row.get::<i64>(2)
+                                .expect("H3 grouped count read")
+                                .expect("H3 grouped count should not be NULL"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        Spi::run("SET pg_accel.enabled = off").expect("disable acceleration for native result");
+        let native = read_grouped_results(query);
+
+        let mismatch_query = "SELECT h3_cell_to_parent(cell, 3) AS parent, \
+                                     count(*) AS row_count \
+                              FROM _h3_parent_groupagg GROUP BY 1";
+        Spi::run(
+            "CREATE TEMP TABLE _h3_parent_error_state( \
+               mode text PRIMARY KEY, sqlstate text NOT NULL)",
+        )
+        .expect("create H3 error-state observation table");
+        Spi::run(&format!(
+            "DO $h3_error$ \
+             BEGIN \
+               PERFORM mismatch.parent, mismatch.row_count \
+               FROM ({mismatch_query}) AS mismatch; \
+               INSERT INTO _h3_parent_error_state \
+               VALUES ('native', 'no_error'); \
+             EXCEPTION WHEN OTHERS THEN \
+               INSERT INTO _h3_parent_error_state \
+               VALUES ('native', SQLSTATE); \
+             END \
+             $h3_error$"
+        ))
+        .expect("capture native H3 resolution-mismatch SQLSTATE");
+
+        Spi::run("SET pg_accel.enabled = on").expect("enable acceleration for H3 result");
         let pinned = Spi::get_one::<i64>(
             "SELECT pg_accel_pin('_h3_parent_groupagg'::regclass, ARRAY['cell'])",
         )
         .expect("H3 fixture pin should succeed")
         .expect("H3 fixture pin should return its row count");
         assert_eq!(pinned, 1_000_000);
-
-        let query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
-                            count(*) AS row_count \
-                     FROM _h3_parent_groupagg GROUP BY 1";
-        Spi::run("SET pg_accel.enabled = off").expect("disable acceleration for native result");
-        Spi::run(&format!("CREATE TEMP TABLE _h3_parent_native AS {query}"))
-            .expect("capture native H3 grouped count");
-
-        Spi::run("SET pg_accel.enabled = on").expect("enable acceleration for H3 result");
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT raw_bytes > 0 AND loaded_at IS NOT NULL \
+                 FROM pg_accel_resident_status() \
+                 WHERE relid = '_h3_parent_groupagg'::regclass"
+            )
+            .expect("H3 fixture resident status should be readable"),
+            Some(true),
+            "pin must publish a material resident snapshot before accelerated planning"
+        );
         let plan = explain_text(query);
         assert!(
             plan.contains("Custom Scan (GpuAccelAgg)"),
@@ -2205,32 +2261,11 @@ mod tests {
         );
 
         crate::gpu::reset_gpu_exec_count();
-        Spi::run(&format!(
-            "CREATE TEMP TABLE _h3_parent_accelerated AS {query}"
-        ))
-        .expect("capture accelerated H3 grouped count");
+        let accelerated = read_grouped_results(query);
         crate::gpu::assert_gpu_executed(2);
-
-        let symmetric_difference_count = |left: &str, right: &str| {
-            Spi::get_one::<i64>(&format!(
-                "SELECT count(*) FROM ( \
-                   (SELECT parent, row_count FROM {left} \
-                    EXCEPT ALL \
-                    SELECT parent, row_count FROM {right}) \
-                   UNION ALL \
-                   (SELECT parent, row_count FROM {right} \
-                    EXCEPT ALL \
-                    SELECT parent, row_count FROM {left}) \
-                 ) AS delta"
-            ))
-            .expect("H3 symmetric-difference query should succeed")
-            .expect("H3 symmetric-difference count should not be NULL")
-        };
-        let symmetric_difference =
-            symmetric_difference_count("_h3_parent_accelerated", "_h3_parent_native");
         assert_eq!(
-            symmetric_difference, 0,
-            "accelerated H3 parent grouped count must equal native in both directions"
+            accelerated, native,
+            "accelerated H3 parent grouped count must equal native"
         );
 
         let analyzed = explain_analyze_text(query);
@@ -2278,39 +2313,26 @@ mod tests {
             "resident proof must include grouped aggregation: {analyzed}"
         );
 
-        let mismatch_query = "SELECT h3_cell_to_parent(cell, 3) AS parent, \
-                                     count(*) AS row_count \
-                              FROM _h3_parent_groupagg GROUP BY 1";
         let mismatch_plan = explain_text(mismatch_query);
         assert!(
             mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
             "resolution mismatch must reach the selected GPU path before failing:\n{mismatch_plan}"
         );
-        Spi::run(
-            "CREATE TEMP TABLE _h3_parent_error_state( \
-               mode text PRIMARY KEY, sqlstate text NOT NULL)",
-        )
-        .expect("create H3 error-state observation table");
-        for (mode, enabled) in [("native", "off"), ("accelerated", "on")] {
-            if mode == "accelerated" {
-                crate::gpu::reset_gpu_exec_count();
-            }
-            Spi::run(&format!(
-                "SET pg_accel.enabled = {enabled}; \
-                 DO $h3_error$ \
-                 BEGIN \
-                   PERFORM mismatch.parent, mismatch.row_count \
-                   FROM ({mismatch_query}) AS mismatch; \
-                   INSERT INTO _h3_parent_error_state \
-                   VALUES ('{mode}', 'no_error'); \
-                 EXCEPTION WHEN OTHERS THEN \
-                   INSERT INTO _h3_parent_error_state \
-                   VALUES ('{mode}', SQLSTATE); \
-                 END \
-                 $h3_error$"
-            ))
-            .unwrap_or_else(|_| panic!("capture {mode} H3 resolution-mismatch SQLSTATE"));
-        }
+        crate::gpu::reset_gpu_exec_count();
+        Spi::run(&format!(
+            "DO $h3_error$ \
+             BEGIN \
+               PERFORM mismatch.parent, mismatch.row_count \
+               FROM ({mismatch_query}) AS mismatch; \
+               INSERT INTO _h3_parent_error_state \
+               VALUES ('accelerated', 'no_error'); \
+             EXCEPTION WHEN OTHERS THEN \
+               INSERT INTO _h3_parent_error_state \
+               VALUES ('accelerated', SQLSTATE); \
+             END \
+             $h3_error$"
+        ))
+        .expect("capture accelerated H3 resolution-mismatch SQLSTATE");
         crate::gpu::assert_gpu_executed(1);
         let native_sqlstate = Spi::get_one::<String>(
             "SELECT sqlstate FROM _h3_parent_error_state WHERE mode = 'native'",
@@ -2338,47 +2360,43 @@ mod tests {
              ANALYZE _h3_parent_all_null",
         )
         .expect("create all-NULL H3 fixture");
+        let all_null_query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
+                                     count(*) AS row_count \
+                              FROM _h3_parent_all_null GROUP BY 1";
+        Spi::run("SET pg_accel.enabled = off").expect("disable H3 all-NULL acceleration");
+        let all_null_native = read_grouped_results(all_null_query);
+        Spi::run("SET pg_accel.enabled = on").expect("enable H3 all-NULL acceleration");
         let all_null_pinned = Spi::get_one::<i64>(
             "SELECT pg_accel_pin('_h3_parent_all_null'::regclass, ARRAY['cell'])",
         )
         .expect("all-NULL H3 fixture pin should succeed")
         .expect("all-NULL H3 fixture pin should return its row count");
         assert_eq!(all_null_pinned, 1_000_000);
-        let all_null_query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
-                                     count(*) AS row_count \
-                              FROM _h3_parent_all_null GROUP BY 1";
-        Spi::run("SET pg_accel.enabled = off").expect("disable H3 all-NULL acceleration");
-        Spi::run(&format!(
-            "CREATE TEMP TABLE _h3_parent_all_null_native AS {all_null_query}"
-        ))
-        .expect("capture native all-NULL H3 grouped count");
-        Spi::run("SET pg_accel.enabled = on").expect("enable H3 all-NULL acceleration");
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT raw_bytes > 0 AND loaded_at IS NOT NULL \
+                 FROM pg_accel_resident_status() \
+                 WHERE relid = '_h3_parent_all_null'::regclass"
+            )
+            .expect("all-NULL H3 fixture resident status should be readable"),
+            Some(true),
+            "all-NULL pin must publish a material resident snapshot"
+        );
         let all_null_plan = explain_text(all_null_query);
         assert!(
             all_null_plan.contains("Custom Scan (GpuAccelAgg)"),
             "all-NULL H3 fixture must retain the selected GPU path:\n{all_null_plan}"
         );
         crate::gpu::reset_gpu_exec_count();
-        Spi::run(&format!(
-            "CREATE TEMP TABLE _h3_parent_all_null_accelerated AS {all_null_query}"
-        ))
-        .expect("capture accelerated all-NULL H3 grouped count");
+        let all_null_accelerated = read_grouped_results(all_null_query);
         crate::gpu::assert_gpu_executed(2);
         assert_eq!(
-            symmetric_difference_count(
-                "_h3_parent_all_null_accelerated",
-                "_h3_parent_all_null_native"
-            ),
-            0,
-            "all-NULL H3 grouped count must match native in both directions"
+            all_null_accelerated, all_null_native,
+            "all-NULL H3 grouped count must match native"
         );
         assert_eq!(
-            Spi::get_one::<i64>(
-                "SELECT row_count FROM _h3_parent_all_null_accelerated \
-                 WHERE parent IS NULL"
-            )
-            .expect("all-NULL H3 output query should succeed"),
-            Some(1_000_000),
+            all_null_accelerated,
+            vec![(None, 1_000_000)],
             "all-NULL H3 input must emit one NULL group containing every row"
         );
 
@@ -2391,40 +2409,41 @@ mod tests {
              DELETE FROM _h3_parent_empty",
         )
         .expect("create empty H3 fixture with retained planner statistics");
+        let empty_query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
+                                  count(*) AS row_count \
+                           FROM _h3_parent_empty GROUP BY 1";
+        Spi::run("SET pg_accel.enabled = off").expect("disable H3 empty acceleration");
+        let empty_native = read_grouped_results(empty_query);
+        Spi::run("SET pg_accel.enabled = on").expect("enable H3 empty acceleration");
         let empty_pinned =
             Spi::get_one::<i64>("SELECT pg_accel_pin('_h3_parent_empty'::regclass, ARRAY['cell'])")
                 .expect("empty H3 fixture pin should succeed")
                 .expect("empty H3 fixture pin should return its row count");
         assert_eq!(empty_pinned, 0);
-        let empty_query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
-                                  count(*) AS row_count \
-                           FROM _h3_parent_empty GROUP BY 1";
-        Spi::run("SET pg_accel.enabled = off").expect("disable H3 empty acceleration");
-        Spi::run(&format!(
-            "CREATE TEMP TABLE _h3_parent_empty_native AS {empty_query}"
-        ))
-        .expect("capture native empty H3 grouped count");
-        Spi::run("SET pg_accel.enabled = on").expect("enable H3 empty acceleration");
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT raw_bytes = 0 AND loaded_at IS NOT NULL \
+                 FROM pg_accel_resident_status() \
+                 WHERE relid = '_h3_parent_empty'::regclass"
+            )
+            .expect("empty H3 fixture resident status should be readable"),
+            Some(true),
+            "empty pin must publish a loaded zero-row resident snapshot"
+        );
         let empty_plan = explain_text(empty_query);
         assert!(
             empty_plan.contains("Custom Scan (GpuAccelAgg)"),
             "stale-cardinality empty H3 fixture must select Custom Scan:\n{empty_plan}"
         );
         crate::gpu::reset_gpu_exec_count();
-        Spi::run(&format!(
-            "CREATE TEMP TABLE _h3_parent_empty_accelerated AS {empty_query}"
-        ))
-        .expect("capture accelerated empty H3 grouped count");
+        let empty_accelerated = read_grouped_results(empty_query);
         crate::gpu::assert_gpu_executed(1);
         assert_eq!(
-            symmetric_difference_count("_h3_parent_empty_accelerated", "_h3_parent_empty_native"),
-            0,
-            "empty H3 grouped count must match native in both directions"
+            empty_accelerated, empty_native,
+            "empty H3 grouped count must match native"
         );
-        assert_eq!(
-            Spi::get_one::<i64>("SELECT count(*) FROM _h3_parent_empty_accelerated")
-                .expect("empty H3 output count should succeed"),
-            Some(0),
+        assert!(
+            empty_accelerated.is_empty(),
             "keyed aggregation over empty H3 input must emit no groups"
         );
 
@@ -2501,15 +2520,9 @@ mod tests {
             .expect("clean up generic H3 prepared query");
         Spi::run(
             "DROP TABLE _h3_parent_groupagg, \
-                        _h3_parent_native, \
-                        _h3_parent_accelerated, \
                         _h3_parent_error_state, \
                         _h3_parent_all_null, \
-                        _h3_parent_all_null_native, \
-                        _h3_parent_all_null_accelerated, \
-                        _h3_parent_empty, \
-                        _h3_parent_empty_native, \
-                        _h3_parent_empty_accelerated; \
+                        _h3_parent_empty; \
              RESET pg_accel.enabled; \
              RESET pg_accel.gpu_enabled; \
              RESET pg_accel.auto_load; \
