@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use pgrx::{pg_sys, prelude::*};
 
+use crate::engine::ffi::syscache;
 use crate::engine::gucs;
 use crate::gpu::ExprDeviceBuffer;
 
@@ -16,6 +17,35 @@ use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::store::{ResidentColumn, ResidentRelation};
 
 const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
+
+/// Raw H3 Datum access is intentionally private. `ColumnBuilder::for_type`
+/// proves the dynamic type before this wrapper is ever requested from SPI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RawH3Datum(u64);
+
+impl FromDatum for RawH3Datum {
+    unsafe fn from_polymorphic_datum(
+        datum: pg_sys::Datum,
+        is_null: bool,
+        _type_oid: pg_sys::Oid,
+    ) -> Option<Self> {
+        (!is_null).then(|| Self(datum.value() as u64))
+    }
+}
+
+impl IntoDatum for RawH3Datum {
+    fn into_datum(self) -> Option<pg_sys::Datum> {
+        Some(pg_sys::Datum::from(self.0))
+    }
+
+    fn type_oid() -> pg_sys::Oid {
+        pg_sys::InvalidOid
+    }
+
+    fn is_compatible_with(_other: pg_sys::Oid) -> bool {
+        true
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ColumnRequest {
@@ -46,6 +76,11 @@ enum StagedColumn {
     I64 {
         type_oid: pg_sys::Oid,
         values: Vec<i64>,
+        nulls: Option<Vec<u8>>,
+    },
+    H3 {
+        type_oid: pg_sys::Oid,
+        values: Vec<u64>,
         nulls: Option<Vec<u8>>,
     },
     F32 {
@@ -88,6 +123,9 @@ impl StagedColumn {
             Self::I64 { values, nulls, .. } => {
                 checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
             }
+            Self::H3 { values, nulls, .. } => {
+                checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
+            }
             Self::F64 { values, nulls, .. } => {
                 checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
             }
@@ -123,6 +161,15 @@ impl StagedColumn {
                 values,
                 nulls,
             } => Ok(ResidentColumn::I64 {
+                type_oid,
+                values: copy_buffer(&values, label)?,
+                nulls: copy_optional_nulls(nulls, label)?,
+            }),
+            Self::H3 {
+                type_oid,
+                values,
+                nulls,
+            } => Ok(ResidentColumn::H3 {
                 type_oid,
                 values: copy_buffer(&values, label)?,
                 nulls: copy_optional_nulls(nulls, label)?,
@@ -248,6 +295,12 @@ enum ColumnBuilder {
         nulls: Vec<u8>,
         saw_null: bool,
     },
+    H3 {
+        type_oid: pg_sys::Oid,
+        values: Vec<u64>,
+        nulls: Vec<u8>,
+        saw_null: bool,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: Vec<f32>,
@@ -264,6 +317,25 @@ enum ColumnBuilder {
         type_oid: pg_sys::Oid,
         values: Vec<Option<String>>,
     },
+}
+
+fn validate_h3_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
+    // SAFETY: residency resolution and load run on the PostgreSQL backend main
+    // thread. Resolving the full identity also revalidates the parent function.
+    let catalog = unsafe { syscache::resolve_h3_catalog() }.map_err(|detail| {
+        format!(
+            "type OID {} is not supported by residency v2; exact extension-owned h3index validation failed: {detail}",
+            u32::from(type_oid)
+        )
+    })?;
+    if catalog.type_oid != type_oid {
+        return Err(format!(
+            "type OID {} is not supported by residency v2; the validated h3index type is OID {}",
+            u32::from(type_oid),
+            u32::from(catalog.type_oid)
+        ));
+    }
+    Ok(())
 }
 
 impl ColumnBuilder {
@@ -303,10 +375,15 @@ impl ColumnBuilder {
                 type_oid,
                 values: Vec::new(),
             }),
-            _ => Err(format!(
-                "type OID {} is not supported by residency v2; supported raw columns are bool, int2/int4, int8, float4, float8, date, timestamp/timestamptz, text/varchar/bpchar",
-                u32::from(type_oid)
-            )),
+            _ => {
+                validate_h3_column_type(type_oid)?;
+                Ok(Self::H3 {
+                    type_oid,
+                    values: Vec::new(),
+                    nulls: Vec::new(),
+                    saw_null: false,
+                })
+            }
         }
     }
 
@@ -324,6 +401,10 @@ impl ColumnBuilder {
                 reserve(nulls.try_reserve(additional))
             }
             Self::I64 { values, nulls, .. } => {
+                reserve(values.try_reserve(additional))?;
+                reserve(nulls.try_reserve(additional))
+            }
+            Self::H3 { values, nulls, .. } => {
                 reserve(values.try_reserve(additional))?;
                 reserve(nulls.try_reserve(additional))
             }
@@ -396,6 +477,19 @@ impl ColumnBuilder {
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
+            Self::H3 {
+                values,
+                nulls,
+                saw_null,
+                ..
+            } => {
+                let value = row
+                    .get::<RawH3Datum>(ordinal)
+                    .map_err(|error| format!("column {ordinal} h3index read failed: {error:?}"))?;
+                values.push(value.map_or(0, |value| value.0));
+                nulls.push(u8::from(value.is_none()));
+                *saw_null |= value.is_none();
+            }
             Self::F32 {
                 values,
                 nulls,
@@ -460,6 +554,16 @@ impl ColumnBuilder {
                 nulls,
                 saw_null,
             } => StagedColumn::I64 {
+                type_oid,
+                values,
+                nulls: saw_null.then_some(nulls),
+            },
+            Self::H3 {
+                type_oid,
+                values,
+                nulls,
+                saw_null,
+            } => StagedColumn::H3 {
                 type_oid,
                 values,
                 nulls: saw_null.then_some(nulls),
@@ -791,10 +895,8 @@ pub(super) fn estimate_device_bytes(
                 8
             }
             _ => {
-                return Err(format!(
-                    "type OID {} is unsupported in resident-byte estimate",
-                    u32::from(request.type_oid)
-                ));
+                validate_h3_column_type(request.type_oid)?;
+                8
             }
         };
         let width = width + u64::from(!not_null.get(&request.attno).copied().unwrap_or(false));
@@ -1132,5 +1234,52 @@ mod tests {
             add_fetched_rows(u64::MAX, 1),
             Err("resident row count exceeds u64")
         );
+    }
+
+    #[test]
+    fn raw_h3_datum_preserves_all_unsigned_bits() {
+        let bits = 0xf123_4567_89ab_cdef_u64;
+        let value = unsafe {
+            <RawH3Datum as pgrx::FromDatum>::from_polymorphic_datum(
+                pg_sys::Datum::from(bits),
+                false,
+                pg_sys::Oid::from(50_001),
+            )
+        };
+        assert_eq!(value, Some(RawH3Datum(bits)));
+        assert_eq!(
+            unsafe {
+                <RawH3Datum as pgrx::FromDatum>::from_polymorphic_datum(
+                    pg_sys::Datum::from(bits),
+                    true,
+                    pg_sys::Oid::from(50_001),
+                )
+            },
+            None
+        );
+    }
+
+    #[test]
+    fn staged_h3_uses_exact_values_plus_null_sidecar_accounting() {
+        let without_nulls = StagedColumn::H3 {
+            type_oid: pg_sys::Oid::from(50_001),
+            values: vec![1, u64::MAX],
+            nulls: None,
+        };
+        assert_eq!(without_nulls.device_bytes(), Ok(16));
+
+        let with_nulls = ColumnBuilder::H3 {
+            type_oid: pg_sys::Oid::from(50_001),
+            values: vec![1, 0],
+            nulls: vec![0, 1],
+            saw_null: true,
+        }
+        .finish()
+        .expect("valid H3 staging");
+        assert_eq!(with_nulls.device_bytes(), Ok(18));
+        match with_nulls {
+            StagedColumn::H3 { nulls, .. } => assert_eq!(nulls, Some(vec![0, 1])),
+            _ => panic!("H3 builder changed staging representation"),
+        }
     }
 }

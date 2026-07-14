@@ -63,6 +63,11 @@ pub enum ResidentColumn {
         values: ExprDeviceBuffer<i64>,
         nulls: Option<ExprDeviceBuffer<u8>>,
     },
+    H3 {
+        type_oid: pg_sys::Oid,
+        values: ExprDeviceBuffer<u64>,
+        nulls: Option<ExprDeviceBuffer<u8>>,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: ExprDeviceBuffer<f32>,
@@ -89,6 +94,7 @@ impl ResidentColumn {
             | Self::Bool { type_oid, .. }
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
+            | Self::H3 { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -102,6 +108,7 @@ impl ResidentColumn {
             Self::Bool { values, .. } => values.len(),
             Self::I32 { values, .. } => values.len(),
             Self::I64 { values, .. } => values.len(),
+            Self::H3 { values, .. } => values.len(),
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -133,6 +140,11 @@ impl ResidentColumn {
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
             ),
             Self::I64 { values, nulls, .. } => checked(
+                values.len(),
+                8,
+                nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
+            ),
+            Self::H3 { values, nulls, .. } => checked(
                 values.len(),
                 8,
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
@@ -184,6 +196,15 @@ impl ResidentColumn {
                 values,
                 nulls,
             } => ResidentColumnView::I64 {
+                type_oid: *type_oid,
+                values,
+                nulls: nulls.as_ref(),
+            },
+            Self::H3 {
+                type_oid,
+                values,
+                nulls,
+            } => ResidentColumnView::H3 {
                 type_oid: *type_oid,
                 values,
                 nulls: nulls.as_ref(),
@@ -242,6 +263,11 @@ pub enum ResidentColumnView<'a> {
         values: &'a ExprDeviceBuffer<i64>,
         nulls: Option<&'a ExprDeviceBuffer<u8>>,
     },
+    H3 {
+        type_oid: pg_sys::Oid,
+        values: &'a ExprDeviceBuffer<u64>,
+        nulls: Option<&'a ExprDeviceBuffer<u8>>,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: &'a ExprDeviceBuffer<f32>,
@@ -268,6 +294,7 @@ impl ResidentColumnView<'_> {
             | Self::Bool { type_oid, .. }
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
+            | Self::H3 { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -281,6 +308,7 @@ impl ResidentColumnView<'_> {
             Self::Bool { values, .. } => values.len(),
             Self::I32 { values, .. } => values.len(),
             Self::I64 { values, .. } => values.len(),
+            Self::H3 { values, .. } => values.len(),
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
