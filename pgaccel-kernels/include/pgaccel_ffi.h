@@ -506,6 +506,94 @@ pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geometry* geoms
                                                    const pgaccel_geometry* geoms_b, size_t count,
                                                    int8_t* results);
 
+/* Resident fp64 spatial ABI. All lane and output pointers are current-context
+ * DEVICE or SHARED_USM allocations. The descriptor itself remains host-owned
+ * for the duration of the synchronous call. Geometry/ring offsets count
+ * coordinate pairs (not scalar doubles or bytes), matching ResidentGeometryData.
+ */
+#define PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION 1u
+
+typedef enum {
+  PGACCEL_RESIDENT_GEOMETRY_POINT = 1,
+  PGACCEL_RESIDENT_GEOMETRY_LINESTRING = 2,
+  PGACCEL_RESIDENT_GEOMETRY_POLYGON = 3,
+} pgaccel_resident_geometry_type;
+
+typedef enum {
+  PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID = 1u << 0,
+} pgaccel_resident_geometry_flags;
+
+typedef struct {
+  uint32_t geom_type;
+  int32_t srid;
+  uint64_t first_ring;
+  uint32_t ring_count;
+  uint32_t flags;
+} pgaccel_resident_geometry_row;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const double* coordinates;       /* [coordinate_pair_count * 2] */
+  const double* bboxes;            /* [row_count * 4] */
+  const uint64_t* geometry_offsets; /* [row_count + 1], coordinate-pair offsets */
+  const uint64_t* ring_offsets;     /* [ring_count], coordinate-pair offsets */
+  const pgaccel_resident_geometry_row* rows; /* [row_count] */
+  const uint8_t* nulls;             /* optional [row_count], canonical 0/1 */
+  size_t row_count;
+  size_t coordinate_pair_count;
+  size_t ring_count;
+} pgaccel_resident_geometry_view;
+
+typedef struct {
+  pgaccel_resident_geometry_view view;
+  size_t first_row;
+  size_t row_stride; /* 1 = aligned column, 0 = one-row constant */
+} pgaccel_resident_geometry_operand;
+
+typedef enum {
+  PGACCEL_SPATIAL_PREDICATE_INTERSECTS = 0,
+  PGACCEL_SPATIAL_PREDICATE_CONTAINS = 1,
+  PGACCEL_SPATIAL_PREDICATE_WITHIN = 2,
+  PGACCEL_SPATIAL_PREDICATE_DWITHIN = 3,
+  PGACCEL_SPATIAL_PREDICATE_DISTANCE = 4,
+} pgaccel_spatial_predicate;
+
+typedef enum {
+  PGACCEL_SPATIAL_DETAIL_NONE = 0,
+  PGACCEL_SPATIAL_DETAIL_CONTRACT = 1,
+  PGACCEL_SPATIAL_DETAIL_GEOMETRY = 2,
+  PGACCEL_SPATIAL_DETAIL_SRID_MISMATCH = 3,
+  PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET = 4,
+} pgaccel_spatial_detail;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  pgaccel_spatial_predicate predicate;
+  uint32_t pad;
+  double distance_threshold; /* finite and >= 0 only for DWithin */
+  size_t count;
+  size_t max_referenced_bytes; /* defensive per-call geometry work cap */
+  pgaccel_resident_geometry_operand left;
+  pgaccel_resident_geometry_operand right;
+  int8_t* predicate_results; /* device [output_capacity], boolean predicates */
+  double* distances;         /* device [output_capacity], Distance only */
+  uint8_t* distance_uncertain; /* device [output_capacity], Distance only */
+  size_t output_capacity;
+} pgaccel_spatial_resident_request;
+
+/* Evaluate one resident column/column or column/constant spatial operation.
+ * Successful boolean rows write exactly {-1,0,+1}; zero is reserved for a
+ * genuine algorithmic exact-recheck case. NULL/empty rows write -1 for filter
+ * semantics and remain distinguishable through the input NULL sidecar.
+ * Distance uses its dedicated fp64 output and uncertainty sidecar. Descriptor,
+ * pointer, geometry-shape, SRID, byte-budget, device, allocation, and runtime
+ * failures are hard non-OK statuses and never synthesize UNCERTAIN rows. */
+pgaccel_status
+pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
+                                 int32_t* detail);
+
 /* Deprecated cross-product ABI retained for link compatibility. Non-empty
  * inputs return PGACCEL_UNSUPPORTED with zero counts and no GPU dispatch.
  * New callers must use pgaccel_spatial_intersects_pairwise. */
