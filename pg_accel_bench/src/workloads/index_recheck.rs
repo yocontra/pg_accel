@@ -14,10 +14,6 @@ impl Workload for IndexRecheck {
              — tests GiST index recheck planning"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_gist_points".to_owned(),

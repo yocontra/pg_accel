@@ -13,10 +13,6 @@ impl Workload for GpuHashaggMedCard {
          at medium cardinality"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_hashagg_med".to_owned(),

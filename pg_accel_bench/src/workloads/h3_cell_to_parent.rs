@@ -23,10 +23,6 @@ impl Workload for H3CellToParent {
          re-baseline performance."
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_h3"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_h3_parent".to_owned(),

@@ -13,10 +13,6 @@ impl Workload for SpatialMultiPred {
          — tests multi-predicate GPU spatial pipeline"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_smp_pts".to_owned(),

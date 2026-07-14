@@ -12,10 +12,6 @@ impl Workload for ExpressionGroupedAgg {
         "GROUP BY product_id with SUM(price * discount) and COUNT -- tests resident expression measures"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_expression_sales".to_owned(),

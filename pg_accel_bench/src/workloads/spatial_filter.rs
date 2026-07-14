@@ -18,10 +18,6 @@ impl Workload for SpatialFilter {
          — tests GpuSpatial single-table filter"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_spatial"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_spatial_pts".to_owned(),

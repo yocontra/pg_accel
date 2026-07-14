@@ -39,10 +39,6 @@ impl Workload for RasterVariant {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_raster"
-    }
-
     fn row_scales(&self) -> &'static [usize] {
         RASTER_DEFAULT_ROW_SCALES
     }

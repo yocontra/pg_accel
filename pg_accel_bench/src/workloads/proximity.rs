@@ -14,10 +14,6 @@ impl Workload for Proximity {
          — tests GpuSpatial proximity"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_locations".to_owned(),

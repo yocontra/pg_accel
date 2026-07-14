@@ -261,10 +261,6 @@ impl Workload for SsbmQ1_1 {
         "SSBM Q1.1: revenue from discounted lineorders filtered by year, discount, quantity"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -532,10 +528,6 @@ impl Workload for SsbmQ1_2 {
         "SSBM Q1.2: revenue from discounted lineorders filtered by yearmonth, discount, quantity"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -564,10 +556,6 @@ impl Workload for SsbmQ1_3 {
 
     fn description(&self) -> &'static str {
         "SSBM Q1.3: revenue from discounted lineorders filtered by week, year, discount, quantity"
-    }
-
-    fn category(&self) -> &'static str {
-        "ssbm"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -604,10 +592,6 @@ impl Workload for SsbmQ2_1 {
         "SSBM Q2.1: revenue by year/brand, filtered by part category and supplier region"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -641,10 +625,6 @@ impl Workload for SsbmQ2_2 {
         "SSBM Q2.2: revenue by year/brand, filtered by brand range and supplier region"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -676,10 +656,6 @@ impl Workload for SsbmQ2_3 {
 
     fn description(&self) -> &'static str {
         "SSBM Q2.3: revenue by year/brand, filtered by exact brand and supplier region"
-    }
-
-    fn category(&self) -> &'static str {
-        "ssbm"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -719,10 +695,6 @@ impl Workload for SsbmQ3_1 {
         "SSBM Q3.1: revenue by customer/supplier nation and year, Asia region"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -754,10 +726,6 @@ impl Workload for SsbmQ3_2 {
 
     fn description(&self) -> &'static str {
         "SSBM Q3.2: revenue by customer/supplier city and year, United States"
-    }
-
-    fn category(&self) -> &'static str {
-        "ssbm"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -793,10 +761,6 @@ impl Workload for SsbmQ3_3 {
         "SSBM Q3.3: revenue by customer/supplier city and year, specific US cities"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -829,10 +793,6 @@ impl Workload for SsbmQ3_4 {
 
     fn description(&self) -> &'static str {
         "SSBM Q3.4: revenue by customer/supplier city and year, specific cities in Dec 1997"
-    }
-
-    fn category(&self) -> &'static str {
-        "ssbm"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -873,10 +833,6 @@ impl Workload for SsbmQ4_1 {
         "SSBM Q4.1: profit by year/nation, America region, MFGR#1 or MFGR#2"
     }
 
-    fn category(&self) -> &'static str {
-        "ssbm"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         ssbm_setup_sql(rows)
     }
@@ -909,10 +865,6 @@ impl Workload for SsbmQ4_2 {
 
     fn description(&self) -> &'static str {
         "SSBM Q4.2: profit by year/nation/category, America region, 1997-1998"
-    }
-
-    fn category(&self) -> &'static str {
-        "ssbm"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -948,10 +900,6 @@ impl Workload for SsbmQ4_3 {
 
     fn description(&self) -> &'static str {
         "SSBM Q4.3: profit by year/city/brand, America/US, MFGR#14 category, 1997-1998"
-    }
-
-    fn category(&self) -> &'static str {
-        "ssbm"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

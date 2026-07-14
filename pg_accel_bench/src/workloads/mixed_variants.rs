@@ -9,7 +9,6 @@ pub struct MixedVariant {
     pub setup_stmts: &'static [&'static str],
     pub query: &'static str,
     pub cleanup_stmts: &'static [&'static str],
-    pub cat: &'static str,
 }
 
 impl Workload for MixedVariant {
@@ -19,10 +18,6 @@ impl Workload for MixedVariant {
 
     fn description(&self) -> &'static str {
         self.description
-    }
-
-    fn category(&self) -> &'static str {
-        self.cat
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -71,7 +66,6 @@ pub const MIXED_MEGAPOLY_AGG: MixedVariant = MixedVariant {
             WHERE ST_Intersects(geom, \
               ST_Buffer(ST_SetSRID(ST_MakePoint(-73.985, 40.748), 4326), 0.15, 125))",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_mixed_mega"],
-    cat: "mixed",
 };
 
 /// Expr filter + grouped aggregation
@@ -98,7 +92,6 @@ pub const MIXED_EXPR_AGG: MixedVariant = MixedVariant {
     query: "SELECT cat, SUM(v1), COUNT(*) FROM bench_mixed_expr \
             WHERE v1 * v2 + v3 > 500.0 GROUP BY cat",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_mixed_expr"],
-    cat: "mixed",
 };
 
 /// Join + aggregation pipeline
@@ -133,7 +126,6 @@ pub const MIXED_JOIN_AGG: MixedVariant = MixedVariant {
         "DROP TABLE IF EXISTS bench_mixed_facts",
         "DROP TABLE IF EXISTS bench_mixed_dims",
     ],
-    cat: "mixed",
 };
 
 /// Spatial megapoly + sort pipeline
@@ -160,5 +152,4 @@ pub const MIXED_SPATIAL_SORT: MixedVariant = MixedVariant {
               ST_Buffer(ST_SetSRID(ST_MakePoint(-73.985, 40.748), 4326), 0.15, 125)) \
             ORDER BY val, id LIMIT 1000",
     cleanup_stmts: &["DROP TABLE IF EXISTS bench_mixed_spsort"],
-    cat: "mixed",
 };

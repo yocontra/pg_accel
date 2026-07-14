@@ -12,10 +12,6 @@ impl Workload for GroupedAggHighCard {
         "GROUP BY user_id with high cardinality — tests hash table scalability"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let user_count = (rows / 5).clamp(1, 100_000);
         vec![

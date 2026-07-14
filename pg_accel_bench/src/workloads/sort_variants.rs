@@ -17,10 +17,6 @@ impl Workload for SortVariant {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_sort"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_sort_var".to_owned(),

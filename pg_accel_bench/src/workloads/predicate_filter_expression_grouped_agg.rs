@@ -12,10 +12,6 @@ impl Workload for PredicateFilterExpressionGroupedAgg {
         "GROUP BY product_id with SUM(price * discount) FILTER (WHERE active) and COUNT FILTER"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_predicate_expression_sales".to_owned(),

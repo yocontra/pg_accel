@@ -16,10 +16,6 @@ impl Workload for HashAggSweep {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_hagg_sweep".to_owned(),

@@ -22,10 +22,6 @@ impl Workload for H3GridDistance {
          h3-pg via `public.h3_grid_distance`."
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_h3"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_h3_dist".to_owned(),

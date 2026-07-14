@@ -24,13 +24,6 @@ impl Workload for VertexSweep {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        // action_items W10 (Reviewer 1 Sin #17): the same `point_in_ring`
-        // kernel was double-counted under `vertex_sweep` and `gpu_spatial`.
-        // Collapse into one honest category — `gpu_spatial`.
-        "gpu_spatial"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_vsweep_pts".to_owned(),

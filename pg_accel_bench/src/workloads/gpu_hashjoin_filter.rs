@@ -13,10 +13,6 @@ impl Workload for GpuHashjoinFilter {
          with filter pushdown"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashjoin"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let dim_count = (rows / 100).max(100);
         vec![

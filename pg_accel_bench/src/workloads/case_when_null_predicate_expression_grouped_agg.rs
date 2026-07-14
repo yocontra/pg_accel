@@ -12,10 +12,6 @@ impl Workload for CaseWhenNullPredicateExpressionGroupedAgg {
         "GROUP BY product_id with SUM(CASE WHEN active AND price IS NOT NULL AND price >= 500.0 THEN price * discount ELSE 0 END) and COUNT(*)"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_case_when_null_predicate_expression_sales".to_owned(),

@@ -14,10 +14,6 @@ impl Workload for SpatialAgg {
          — tests mixed spatial + aggregate"
     }
 
-    fn category(&self) -> &'static str {
-        "mixed"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_spatial_agg".to_owned(),

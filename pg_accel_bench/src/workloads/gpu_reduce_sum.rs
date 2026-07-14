@@ -12,10 +12,6 @@ impl Workload for GpuReduceSum {
         "SUM/AVG/MIN/MAX/COUNT on plain columns — tests GpuReduce with plain-column aggregates"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_reduce"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_reduce".to_owned(),

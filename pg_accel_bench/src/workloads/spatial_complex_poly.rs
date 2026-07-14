@@ -15,10 +15,6 @@ impl Workload for SpatialComplexPoly {
          — tests GPU point-in-ring throughput"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_spatial"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let poly_rows = (rows / 10000).clamp(10, 100);
         vec![

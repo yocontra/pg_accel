@@ -12,10 +12,6 @@ impl Workload for GpuSortTopkWide {
         "ORDER BY sort_key, id LIMIT 1000 on ~120-byte rows — tests GPU top-k sort on wide rows"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_sort"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_sort_topk".to_owned(),

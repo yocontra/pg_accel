@@ -83,10 +83,6 @@ impl Workload for H3Variant {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_h3"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let mut stmts = vec![
             "DROP TABLE IF EXISTS bench_h3_var".to_owned(),

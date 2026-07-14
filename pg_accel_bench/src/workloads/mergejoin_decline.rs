@@ -15,10 +15,6 @@ impl Workload for MergeJoinDecline {
          until a GPU merge-join kernel lands"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let right_rows = rows.max(1);
         vec![

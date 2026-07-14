@@ -26,10 +26,6 @@ impl Workload for SpatialSelectivitySweep {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_spatial"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         // Points near the polygon center: (-73.985, 40.748) ± 0.15
         // Points far from the polygon: wider NYC metro area

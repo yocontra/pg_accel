@@ -12,10 +12,6 @@ impl Workload for TimeseriesSensorRollup {
         "Time-series per-sensor MIN, MAX, AVG over float8 readings"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS sensor_data".to_owned(),

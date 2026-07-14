@@ -12,10 +12,6 @@ impl Workload for GpuExprFilter {
         "WHERE val > 500.0 AND category < 50 — tests GpuExpr template kernel"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_expr"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_expr".to_owned(),

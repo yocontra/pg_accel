@@ -155,7 +155,10 @@ pub trait Workload: Send + Sync {
 
     /// Workload category for `--category` filtering.
     fn category(&self) -> &'static str {
-        "gpu"
+        workload_metadata(self.name())
+            .unwrap_or_else(|| panic!("workload `{}` is missing registry metadata", self.name()))
+            .category
+            .as_str()
     }
 
     /// SQL statements to create and populate benchmark tables.

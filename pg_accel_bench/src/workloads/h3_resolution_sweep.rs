@@ -17,10 +17,6 @@ impl Workload for H3ResolutionSweep {
          Baseline uses h3-pg `h3_lat_lng_to_cell`."
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_h3"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_h3_sweep".to_owned(),

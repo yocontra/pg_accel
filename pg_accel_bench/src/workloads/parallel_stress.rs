@@ -51,10 +51,6 @@ impl Workload for ParallelStress {
         "6-agg combined query on 10M rows with max_parallel_workers_per_gather = 8"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_reduce"
-    }
-
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
         // Fixed 10M-row fixture regardless of --rows to keep the parallel
         // path in the same regime every invocation.
@@ -102,10 +98,6 @@ impl Workload for ParallelStressGrouped {
         "GROUP BY 16 groups on 10M rows with max_parallel_workers_per_gather = 8"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
         bench_f32_10m_setup_sql()
     }
@@ -151,10 +143,6 @@ impl Workload for ParallelStressSort {
         "ORDER BY v LIMIT 100 on 10M rows with max_parallel_workers_per_gather = 8"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_sort"
-    }
-
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
         bench_f32_10m_setup_sql()
     }
@@ -191,10 +179,6 @@ impl Workload for ParallelStressWindow {
 
     fn description(&self) -> &'static str {
         "ROW_NUMBER() OVER (ORDER BY v) LIMIT 100 on 10M rows with 8 workers"
-    }
-
-    fn category(&self) -> &'static str {
-        "gpu_window"
     }
 
     fn setup_sql(&self, _rows: usize) -> Vec<String> {

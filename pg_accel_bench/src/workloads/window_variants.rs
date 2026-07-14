@@ -16,10 +16,6 @@ impl Workload for WindowVariant {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_window"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_win_var".to_owned(),

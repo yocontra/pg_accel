@@ -15,10 +15,6 @@ impl Workload for NumericAggDecline {
          (`numeric_agg_no_gpu_kernel`) until a multi-limb GPU accumulator lands"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_numeric_agg_decline".to_owned(),

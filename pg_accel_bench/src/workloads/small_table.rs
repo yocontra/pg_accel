@@ -19,10 +19,6 @@ impl Workload for SmallTable {
          regression: table too small for batching (1.00x expected)"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
         // Intentionally ignores `rows` parameter — always creates exactly 100 rows
         // to test the "small table" code path.

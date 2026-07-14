@@ -13,10 +13,6 @@ impl Workload for GpuHashjoinLargeBuild {
          with large build side"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashjoin"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_hj_left".to_owned(),

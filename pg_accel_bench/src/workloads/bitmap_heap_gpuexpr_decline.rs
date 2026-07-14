@@ -16,10 +16,6 @@ impl Workload for BitmapHeapGpuExprDecline {
          (`shape_unsupported_predicate`) until generic predicate descriptors are supported"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_bitmap_gpuexpr_decline".to_owned(),

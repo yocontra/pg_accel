@@ -19,10 +19,6 @@ impl Workload for ExprVariant {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_expr"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_expr_var".to_owned(),

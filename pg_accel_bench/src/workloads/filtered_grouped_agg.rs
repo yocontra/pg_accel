@@ -13,10 +13,6 @@ impl Workload for FilteredGroupedAgg {
          WHERE active GROUP BY dept — tests GpuHashAgg with filter"
     }
 
-    fn category(&self) -> &'static str {
-        "mixed"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_employees".to_owned(),

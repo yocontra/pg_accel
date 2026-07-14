@@ -12,10 +12,6 @@ impl Workload for GpuExprNullHeavy {
         "COALESCE on ~30% NULL column — tests GpuExpr NULL handling and COALESCE pushdown"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_expr"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_expr_null".to_owned(),

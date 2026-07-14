@@ -13,10 +13,6 @@ impl Workload for GpuSortMultikey {
          (`sort_multikey_no_gpu_kernel`) until cascaded multi-key GPU sort lands"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_sort"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_sort_multi".to_owned(),

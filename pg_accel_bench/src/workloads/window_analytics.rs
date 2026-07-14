@@ -12,10 +12,6 @@ impl Workload for WindowAnalytics {
         "ROW_NUMBER + deterministic running SUM digest over 1000 user partitions — tests GPU window functions"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_window"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_win_events".to_owned(),

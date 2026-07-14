@@ -13,10 +13,6 @@ impl Workload for SpatialContains {
          — tests GpuSpatial contains predicate"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_sc_pts".to_owned(),

@@ -16,10 +16,6 @@ impl Workload for HashJoinSweep {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashjoin"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_hj_outer".to_owned(),

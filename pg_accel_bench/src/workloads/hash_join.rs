@@ -12,10 +12,6 @@ impl Workload for HashJoin {
         "COUNT(*) over orders x customers equi-join — tests fused GPU hash join count"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashjoin"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         // Scale dimension table: 1K at 100K rows, 10K at 1M, 100K at 10M.
         let customer_count = (rows / 100).clamp(100, 100_000);

@@ -15,10 +15,6 @@ impl Workload for SpatialJoin {
          WHERE ST_Contains(g.geom, p.geom) — tests GpuSpatial"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         // Polygon count scales with data size. ST_MakeEnvelope produces simple
         // 4-vertex rectangles. At 1M points / 1K polygons the GiST index keeps

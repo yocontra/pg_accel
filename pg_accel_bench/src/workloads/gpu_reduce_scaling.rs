@@ -12,10 +12,6 @@ impl Workload for GpuReduceScaling {
         "Single-column SUM(float8) for raw throughput measurement — tests GpuReduce scaling"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_reduce"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_reduce_scale".to_owned(),

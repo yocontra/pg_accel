@@ -14,10 +14,6 @@ impl Workload for GpuNljBetween {
         "events x non-overlapping windows with outer.ts BETWEEN inner.lo AND inner.hi"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_join"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let outer_rows = rows.max(1_000);
         let inner_rows = 1_000usize;

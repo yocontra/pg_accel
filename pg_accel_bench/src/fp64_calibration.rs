@@ -111,10 +111,6 @@ impl Workload for Fp64MultiplierWorkload {
         self.inner.description()
     }
 
-    fn category(&self) -> &'static str {
-        self.inner.category()
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         self.inner.setup_sql(rows)
     }

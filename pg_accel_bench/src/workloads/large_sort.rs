@@ -14,10 +14,6 @@ impl Workload for LargeSort {
         "Top-K ORDER BY sort_key, id on bench_sort_wide — wide-row GPU sort vs PG disk spill"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_sort"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_sort_wide".to_owned(),

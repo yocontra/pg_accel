@@ -22,10 +22,6 @@ impl Workload for SpatialMegaPoly {
         self.description
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_spatial"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_megapoly_pts".to_owned(),

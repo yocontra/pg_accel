@@ -12,10 +12,6 @@ impl Workload for TopkWide {
         "ORDER BY val, id LIMIT 100 on wide rows — regression: tests top-k deferral (1.00x expected)"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_topk_wide".to_owned(),

@@ -12,10 +12,6 @@ impl Workload for CaseWhenInExpressionGroupedAgg {
         "GROUP BY product_id with SUM(CASE WHEN active AND discount IN (0.05, 0.15, 0.25, 0.45) THEN price * discount ELSE 0 END) and COUNT(*)"
     }
 
-    fn category(&self) -> &'static str {
-        "gpu_hashagg"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
             "DROP TABLE IF EXISTS bench_case_when_in_expression_sales".to_owned(),

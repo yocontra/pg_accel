@@ -417,9 +417,6 @@ impl Workload for ReduceF64Sum {
     fn description(&self) -> &'static str {
         "fp64 matrix: SUM(float8) — GPU tree reduction baseline for fp64"
     }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
-    }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         fp64_num_setup(rows)
     }
@@ -442,9 +439,6 @@ impl Workload for ReduceF64MinMax {
     }
     fn description(&self) -> &'static str {
         "fp64 matrix: MIN(float8), MAX(float8) — two-output fp64 reduce"
-    }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
     }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         fp64_num_setup(rows)
@@ -469,9 +463,6 @@ impl Workload for ReduceF64Stats {
     fn description(&self) -> &'static str {
         "fp64 matrix: AVG + STDDEV + VAR(float8) — partial-agg stats path"
     }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
-    }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         fp64_num_setup(rows)
     }
@@ -494,9 +485,6 @@ impl Workload for SortF64Keys {
     }
     fn description(&self) -> &'static str {
         "fp64 matrix: ORDER BY float8 key — native fp64 sort path"
-    }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
     }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         fp64_num_setup(rows)
@@ -522,9 +510,6 @@ impl Workload for HashaggF64Keys {
     }
     fn description(&self) -> &'static str {
         "fp64 matrix: GROUP BY float8 key — fp64 hashagg key path"
-    }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
     }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         // Use a bucketed f64 key so we have a bounded group count.
@@ -557,9 +542,6 @@ impl Workload for HashaggF64Aggs {
     fn description(&self) -> &'static str {
         "fp64 matrix: GROUP BY int key with fp64 SUM/AVG/STDDEV aggregates"
     }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
-    }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let mut stmts = fp64_num_setup(rows);
         stmts.push(format!(
@@ -591,9 +573,6 @@ impl Workload for SpatialFp64Recheck {
     }
     fn description(&self) -> &'static str {
         "fp64 matrix: ST_Contains(polygon, point) with fp64 recheck — spatial fp64 path"
-    }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
     }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![
@@ -641,9 +620,6 @@ impl Workload for H3Fp64Ops {
     }
     fn description(&self) -> &'static str {
         "fp64 matrix: h3_latlng_to_cell(point(lng,lat), 15) — fp64 trig + H3 indexing"
-    }
-    fn category(&self) -> &'static str {
-        "fp64_matrix"
     }
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         vec![

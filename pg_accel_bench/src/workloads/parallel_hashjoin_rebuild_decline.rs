@@ -16,10 +16,6 @@ impl Workload for ParallelHashJoinRebuildDecline {
          (`hashjoin_parallel_inner_rebuild_too_large`) until shared GPU inner state lands"
     }
 
-    fn category(&self) -> &'static str {
-        "regression"
-    }
-
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let outer_rows = rows.max(100_000);
         let match_rows = 20_000usize;
